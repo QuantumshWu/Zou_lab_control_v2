@@ -17,9 +17,9 @@ from zlc_data import (
     DataBlock,
     DatasetRevision,
     DatasetSchema,
+    DomainSpec,
     OwnedSnapshot,
-    PointColumn,
-    PointTable,
+    SCALAR_DOMAIN,
     StreamGenerationId,
     ValueSchema,
 )
@@ -39,20 +39,9 @@ def _output(name: str, revision: int) -> LiveDatasetOutput:
     repeat = AxisSpec(AxisId(f"{name}.repeat"), "repeat", REPEAT, 1, (0,))
     point = AxisSpec(AxisId(f"{name}.point"), "point", SCAN_POINT, 1, (0,))
     schema = DatasetSchema(
-        repeat,
-        PointTable(
-            1,
-            (
-                PointColumn(
-                    point.axis_id,
-                    point.name,
-                    point.role,
-                    PointColumn.NUMERIC,
-                    point.coordinates,
-                ),
-            ),
-        ),
-        None,
+        DomainSpec((1,), (repeat,), ((0,),)),
+        DomainSpec((1,), (point,), ((0,),)),
+        SCALAR_DOMAIN,
         ValueSchema.scalar(np.dtype("float64"), "count"),
     )
     block = DataBlock(

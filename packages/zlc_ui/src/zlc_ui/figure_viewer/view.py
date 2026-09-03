@@ -7,10 +7,12 @@ atomic QWidget mount point for the presenter-owned surface.
 
 from __future__ import annotations
 
+import math
+
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.console.board_view import ConsoleBoardView
-from zlc_ui.console.panel_card_view import PanelCardView
+from zlc_ui.console.panel_card_view import PanelCardView, data_structure_fragments
 from zlc_ui.console.panel_editor_view import PanelEditorView
 from zlc_ui.fluent import (
     ACCENT,
@@ -19,11 +21,11 @@ from zlc_ui.fluent import (
     FluentButton,
     FluentCheckBox,
     FluentComboBox,
+    FluentCycleComboBox,
     FluentFrame,
     FluentGroupBox,
     FluentLabel,
     FluentLineEdit,
-    FluentReadoutEdit,
     FluentScrollArea,
     FluentSectionLabel,
     FluentSettingRow,
@@ -67,32 +69,6 @@ def _matrix_item(values: object, row: int, column: int) -> object:
             return row_value if column == 0 else ""
 
 
-def _grid_header_text(projection: object, section: int) -> str:
-    """Format one sparse-grid address without materializing every header."""
-
-    grid = dict(projection or {})
-    cell_indices = grid.get("cell_indices", ())
-    coordinates = tuple(grid.get("coordinates", ()))
-    labels = tuple(grid.get("labels") or ())
-    values = []
-    for dimension, coordinate_values in enumerate(coordinates):
-        try:
-            coordinate_index = int(cell_indices[section, dimension])
-        except (IndexError, KeyError, TypeError):
-            coordinate_index = int(cell_indices[section][dimension])
-        label_values = labels[dimension] if dimension < len(labels) else None
-        label = (
-            ""
-            if label_values is None
-            else _plain_scalar(label_values[coordinate_index])
-        )
-        values.append(
-            label
-            or _plain_scalar(coordinate_values[coordinate_index])
-        )
-    return f"({', '.join(values)})"
-
-
 class _VirtualTextTableModel(QtCore.QAbstractTableModel):
     """Visible-cell-only editable view over a presenter-owned 2-D projection."""
 
@@ -103,13 +79,11 @@ class _VirtualTextTableModel(QtCore.QAbstractTableModel):
         super().__init__(parent)
         self._shape = (0, 0)
         self._values: object = ()
-        self._column_values: object | None = None
         self._validity: object | None = None
         self._row_headers: object = ()
         self._column_headers: object = ()
-        self._row_header_grid: object | None = None
-        self._column_header_grid: object | None = None
         self._editable = True
+        self._finite_values = False
         self._blank_hint = ""
         self._pending: dict[tuple[int, int], str] = {}
 
@@ -118,19 +92,34 @@ class _VirtualTextTableModel(QtCore.QAbstractTableModel):
         shape = tuple(int(value) for value in tuple(data.get("shape", (0, 0))))
         if len(shape) != 2 or any(value < 0 for value in shape):
             raise ValueError("table projection shape must contain two nonnegative sizes")
-        self.beginResetModel()
+        reset = shape != self._shape
+        if reset:
+            self.beginResetModel()
         self._shape = shape
         self._values = data.get("values", ())
-        self._column_values = data.get("column_values")
         self._validity = data.get("validity")
         self._row_headers = data.get("row_headers", ())
         self._column_headers = data.get("column_headers", ())
-        self._row_header_grid = data.get("row_header_grid")
-        self._column_header_grid = data.get("column_header_grid")
         self._editable = bool(data.get("editable", True))
+        self._finite_values = bool(data.get("finite_values", False))
         self._blank_hint = str(data.get("blank_hint", ""))
         self._pending.clear()
-        self.endResetModel()
+        if reset:
+            self.endResetModel()
+            return
+        if shape[0] and shape[1]:
+            self.dataChanged.emit(
+                self.index(0, 0),
+                self.index(shape[0] - 1, shape[1] - 1),
+                (
+                    QtCore.Qt.DisplayRole,
+                    QtCore.Qt.EditRole,
+                    QtCore.Qt.BackgroundRole,
+                    QtCore.Qt.ToolTipRole,
+                ),
+            )
+        self.headerDataChanged.emit(QtCore.Qt.Horizontal, 0, max(0, shape[1] - 1))
+        self.headerDataChanged.emit(QtCore.Qt.Vertical, 0, max(0, shape[0] - 1))
 
     def rowCount(self, _parent=QtCore.QModelIndex()) -> int:  # noqa: N802
         return self._shape[0]
@@ -146,10 +135,14 @@ class _VirtualTextTableModel(QtCore.QAbstractTableModel):
             _matrix_item(self._validity, row, column)
         ):
             return ""
-        if self._column_values is not None:
-            values = self._column_values[column]  # type: ignore[index]
-            return "" if values is None else _plain_scalar(values[row])
-        return _plain_scalar(_matrix_item(self._values, row, column))
+        value = _matrix_item(self._values, row, column)
+        if self._finite_values:
+            try:
+                if not math.isfinite(float(value)):
+                    return ""
+            except (TypeError, ValueError):
+                return ""
+        return _plain_scalar(value)
 
     def data(self, index, role=QtCore.Qt.DisplayRole):  # noqa: A003
         if not index.isValid():
@@ -172,13 +165,6 @@ class _VirtualTextTableModel(QtCore.QAbstractTableModel):
     def headerData(self, section, orientation, role=QtCore.Qt.DisplayRole):  # noqa: N802
         if role not in (QtCore.Qt.DisplayRole, QtCore.Qt.ToolTipRole):
             return None
-        grid = (
-            self._column_header_grid
-            if orientation == QtCore.Qt.Horizontal
-            else self._row_header_grid
-        )
-        if grid is not None:
-            return _grid_header_text(grid, int(section))
         labels = self._column_headers if orientation == QtCore.Qt.Horizontal else self._row_headers
         try:
             return _plain_scalar(labels[section])  # type: ignore[index]
@@ -192,6 +178,9 @@ class _VirtualTextTableModel(QtCore.QAbstractTableModel):
     def setData(self, index, value, role=QtCore.Qt.EditRole):  # noqa: N802
         if role != QtCore.Qt.EditRole or not index.isValid() or not self._editable:
             return False
+        if str(value) == self._projected_text(index.row(), index.column()):
+            self._pending.pop((index.row(), index.column()), None)
+            return True
         self.set_block_data(index.row(), index.column(), ((str(value),),))
         return True
 
@@ -268,16 +257,35 @@ class _DataEditorView(QtWidgets.QWidget):
         self.setStyleSheet("background: transparent;")
         self._updating = False
         self._selected_axis = ""
+        self._adding_axis = False
+        self._domain_choices: tuple = ()
         self._save_suggested = "figure.npz"
-        self._slice_widgets: dict[
-            str, tuple[QtWidgets.QWidget, FluentSpinBox, FluentReadoutEdit]
+        self._axis_view_widgets: dict[
+            str,
+            tuple[
+                QtWidgets.QWidget,
+                FluentLabel,
+                FluentCycleComboBox,
+            ],
         ] = {}
 
-        root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(window_pad(0.5), window_pad(0.5), window_pad(0.5), window_pad(0.5))
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.editor_scroll = FluentScrollArea(self)
+        self.editor_scroll.setWidgetResizable(True)
+        self.editor_scroll.setMinimumSize(0, 0)
+        content = QtWidgets.QWidget()
+        content.setStyleSheet("background: transparent;")
+        root = QtWidgets.QVBoxLayout(content)
+        root.setContentsMargins(
+            window_pad(0.5), window_pad(0.5), window_pad(0.5), window_pad(0.5)
+        )
         root.setSpacing(window_pad(0.5))
+        self.editor_scroll.setWidget(content)
+        outer.addWidget(self.editor_scroll)
 
         dataset_group = FluentGroupBox("Dataset", self)
+        self.dataset_group = dataset_group
         dataset_layout = QtWidgets.QGridLayout(dataset_group)
         dataset_layout.setContentsMargins(window_pad(0.75), window_pad(0.75), window_pad(0.75), window_pad(0.6))
         dataset_layout.setHorizontalSpacing(window_pad(0.5))
@@ -308,13 +316,12 @@ class _DataEditorView(QtWidgets.QWidget):
 
         body = QtWidgets.QWidget(self)
         body.setStyleSheet("background: transparent;")
-        body_layout = QtWidgets.QHBoxLayout(body)
+        body_layout = QtWidgets.QVBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(window_pad(0.5))
 
         axes_group = FluentGroupBox("Axes", body)
-        axes_group.setMinimumWidth(scaled_px(450, minimum=380))
-        axes_group.setMaximumWidth(scaled_px(560, minimum=460))
+        self.axes_group = axes_group
         axes_layout = QtWidgets.QVBoxLayout(axes_group)
         axes_layout.setContentsMargins(window_pad(0.75), window_pad(0.75), window_pad(0.75), window_pad(0.6))
         axes_layout.setSpacing(window_pad(0.35))
@@ -323,98 +330,79 @@ class _DataEditorView(QtWidgets.QWidget):
         self.axis_combo = FluentComboBox()
         self.axis_combo.setMinimumContentsLength(13)
         axis_choice_row.addWidget(self.axis_combo, 1)
-        self.remove_axis_button = FluentButton("−", color=GREY)
-        self.remove_axis_button.setToolTip("Remove selected axis")
-        self.axis_up_button = FluentButton("↑", color=GREY)
-        self.axis_up_button.setToolTip("Move selected axis up")
-        self.axis_down_button = FluentButton("↓", color=GREY)
-        self.axis_down_button.setToolTip("Move selected axis down")
-        compact = scaled_px(30, minimum=24)
-        for button in (self.remove_axis_button, self.axis_up_button, self.axis_down_button):
-            button.setFixedWidth(compact)
-            axis_choice_row.addWidget(button)
-        axes_layout.addLayout(axis_choice_row)
-        add_axis_row = QtWidgets.QHBoxLayout()
-        add_axis_row.setSpacing(window_pad(0.25))
-        self.add_axis_domain_combo = FluentComboBox()
-        self.add_axis_domain_combo.setMinimumContentsLength(12)
         self.add_axis_button = FluentButton("Add axis", color=ACCENT)
-        add_axis_row.addWidget(self.add_axis_domain_combo, 1)
-        add_axis_row.addWidget(self.add_axis_button)
-        axes_layout.addLayout(add_axis_row)
+        self.add_axis_button.setToolTip("Create a new axis")
+        self.remove_axis_button = FluentButton("Delete", color=GREY)
+        self.remove_axis_button.setToolTip(
+            "Delete selected axis and keep its current Scope slice"
+        )
+        axis_choice_row.addWidget(self.add_axis_button)
+        axis_choice_row.addWidget(self.remove_axis_button)
+        axes_layout.addLayout(axis_choice_row)
         axis_label_width = setting_label_width(
-            (
-                "Domain", "Size", "Name", "Role", "Coord. type", "Unit",
-                "Coord. frame",
-            ),
+            ("Name", "Length", "Unit", "Domain"),
             minimum=68,
         )
-        self.domain_readout = FluentReadoutEdit()
+        self.domain_combo = FluentComboBox()
         self.axis_size_spin = FluentSpinBox()
         self.axis_size_spin.setRange(1, 2_147_483_647)
         self.axis_size_spin.setKeyboardTracking(False)
         self.axis_name_edit = FluentLineEdit()
-        self.role_combo = FluentComboBox()
-        self.value_kind_combo = FluentComboBox()
         self.axis_unit_edit = FluentLineEdit()
-        self.frame_edit = FluentLineEdit()
         self._axis_rows: dict[str, FluentSettingRow] = {}
         axis_form = QtWidgets.QGridLayout()
         axis_form.setContentsMargins(0, 0, 0, 0)
         axis_form.setHorizontalSpacing(window_pad(0.35))
         axis_form.setVerticalSpacing(window_pad(0.25))
         for field, label, control, row_index, column_index in (
-            ("domain", "Domain", self.domain_readout, 0, 0),
-            ("size", "Size", self.axis_size_spin, 0, 1),
-            ("name", "Name", self.axis_name_edit, 1, 0),
-            ("role", "Role", self.role_combo, 1, 1),
-            ("unit", "Unit", self.axis_unit_edit, 2, 0),
-            ("coordinate_frame", "Coord. frame", self.frame_edit, 2, 1),
-            ("value_kind", "Coord. type", self.value_kind_combo, 3, 0),
+            ("name", "Name", self.axis_name_edit, 0, 0),
+            ("size", "Length", self.axis_size_spin, 0, 1),
+            ("unit", "Unit", self.axis_unit_edit, 1, 0),
+            ("domain", "Domain", self.domain_combo, 1, 1),
         ):
             row = FluentSettingRow(label, control, label_width=axis_label_width)
             self._axis_rows[field] = row
             axis_form.addWidget(row, row_index, column_index)
         axes_layout.addLayout(axis_form)
-        coordinate_header = QtWidgets.QHBoxLayout()
-        coordinate_header.setSpacing(window_pad(0.25))
-        coordinate_header.addWidget(FluentSectionLabel("Coordinates"))
-        coordinate_header.addStretch(1)
-        self.insert_coordinate_button = FluentButton("+", color=ACCENT)
-        self.insert_coordinate_button.setToolTip("Insert coordinate")
-        self.remove_coordinate_button = FluentButton("−", color=GREY)
-        self.remove_coordinate_button.setToolTip("Remove selected coordinates")
-        self.coordinate_up_button = FluentButton("↑", color=GREY)
-        self.coordinate_up_button.setToolTip("Move selected coordinate up")
-        self.coordinate_down_button = FluentButton("↓", color=GREY)
-        self.coordinate_down_button.setToolTip("Move selected coordinate down")
-        for button in (
-            self.insert_coordinate_button,
-            self.remove_coordinate_button,
-            self.coordinate_up_button,
-            self.coordinate_down_button,
-        ):
-            button.setFixedWidth(compact)
-            coordinate_header.addWidget(button)
-        axes_layout.addLayout(coordinate_header)
-        self.coordinate_model = _VirtualTextTableModel(self)
-        self.coordinate_table = FluentTableView(self)
-        self.coordinate_table.setModel(self.coordinate_model)
-        self.coordinate_table.horizontalHeader().setStretchLastSection(True)
-        axes_layout.addWidget(self.coordinate_table, 1)
+        axes_layout.addWidget(FluentSectionLabel("Axis values"))
+        self.axis_value_model = _VirtualTextTableModel(self)
+        self.axis_value_table = FluentTableView(self)
+        self.axis_value_table.setModel(self.axis_value_model)
+        self.axis_value_table.setTabKeyNavigation(True)
+        self.axis_value_table.horizontalHeader().setStretchLastSection(False)
+        self.axis_value_table.setMinimumHeight(scaled_px(72, minimum=62))
+        self.axis_value_table.setMaximumHeight(scaled_px(82, minimum=68))
+        axes_layout.addWidget(self.axis_value_table)
+        axis_actions = QtWidgets.QHBoxLayout()
+        self.axis_mode_label = muted_note_label("Edit selected axis")
+        axis_actions.addWidget(self.axis_mode_label, 1)
+        self.apply_axis_button = FluentButton("Apply axis", color=ACCENT)
+        axis_actions.addWidget(self.apply_axis_button)
+        axes_layout.addLayout(axis_actions)
         body_layout.addWidget(axes_group, 0)
 
         data_group = FluentGroupBox("Data", body)
+        self.data_group = data_group
         data_layout = QtWidgets.QVBoxLayout(data_group)
         data_layout.setContentsMargins(window_pad(0.75), window_pad(0.75), window_pad(0.75), window_pad(0.6))
         data_layout.setSpacing(window_pad(0.35))
-        self._slice_holder = QtWidgets.QWidget(data_group)
-        self._slice_holder.setStyleSheet("background: transparent;")
-        self._slice_layout = QtWidgets.QGridLayout(self._slice_holder)
-        self._slice_layout.setContentsMargins(0, 0, 0, 0)
-        self._slice_layout.setHorizontalSpacing(window_pad(0.5))
-        self._slice_layout.setVerticalSpacing(window_pad(0.25))
-        data_layout.addWidget(self._slice_holder)
+        self.structure_label = FluentLabel("")
+        self.structure_label.setTextFormat(QtCore.Qt.RichText)
+        self.structure_label.setWordWrap(True)
+        data_layout.addWidget(self.structure_label)
+        self._axis_view_holder = QtWidgets.QWidget(data_group)
+        self._axis_view_holder.setStyleSheet("background: transparent;")
+        self._axis_view_layout = QtWidgets.QGridLayout(self._axis_view_holder)
+        self._axis_view_layout.setContentsMargins(0, 0, 0, 0)
+        self._axis_view_layout.setHorizontalSpacing(window_pad(0.35))
+        self._axis_view_layout.setVerticalSpacing(window_pad(0.2))
+        data_layout.addWidget(self._axis_view_holder)
+        axes_readout = QtWidgets.QHBoxLayout()
+        self.row_axis_label = FluentLabel("Rows ↓ —")
+        self.column_axis_label = FluentLabel("Columns → —")
+        axes_readout.addWidget(self.row_axis_label, 1)
+        axes_readout.addWidget(self.column_axis_label, 1)
+        data_layout.addLayout(axes_readout)
         component_row = QtWidgets.QHBoxLayout()
         component_row.addWidget(FluentLabel("Table"))
         self.component_combo = FluentComboBox()
@@ -429,7 +417,9 @@ class _DataEditorView(QtWidgets.QWidget):
         self.value_model = _VirtualTextTableModel(self)
         self.value_table = FluentTableView(self)
         self.value_table.setModel(self.value_model)
+        self.value_table.setTabKeyNavigation(True)
         self.value_table.horizontalHeader().setStretchLastSection(True)
+        self.value_table.setMinimumHeight(scaled_px(240, minimum=180))
         data_layout.addWidget(self.value_table, 1)
         self.message_label = muted_note_label("")
         self.message_label.setWordWrap(True)
@@ -441,33 +431,18 @@ class _DataEditorView(QtWidgets.QWidget):
         self.dtype_combo.activated.connect(lambda _index: self._dataset_field("dtype", self.dtype_combo.currentData()))
         self.unit_edit.editingFinished.connect(lambda: self._dataset_field("unit", self.unit_edit.text()))
         self.note_edit.editingFinished.connect(lambda: self._dataset_field("note", self.note_edit.text()))
-        self.axis_combo.activated.connect(lambda _index: self._emit("select_axis", axis_id=self.axis_combo.currentData()))
-        self.add_axis_button.clicked.connect(
-            lambda: self._emit("add_axis", domain=self.add_axis_domain_combo.currentData())
+        self.axis_combo.activated.connect(self._select_axis)
+        self.add_axis_button.clicked.connect(self._begin_add_axis)
+        self.remove_axis_button.clicked.connect(
+            lambda: self._emit("delete_axis", axis_id=self._selected_axis)
         )
-        self.remove_axis_button.clicked.connect(lambda: self._emit("remove_axis", axis_id=self._selected_axis))
-        self.axis_up_button.clicked.connect(lambda: self._emit("move_axis", axis_id=self._selected_axis, delta=-1))
-        self.axis_down_button.clicked.connect(lambda: self._emit("move_axis", axis_id=self._selected_axis, delta=1))
-        self.axis_name_edit.editingFinished.connect(lambda: self._axis_field("name", self.axis_name_edit.text()))
-        self.role_combo.activated.connect(lambda _index: self._axis_field("role", self.role_combo.currentData()))
-        self.axis_size_spin.valueChanged.connect(
-            lambda value: self._axis_field("size", int(value))
-        )
-        self.value_kind_combo.activated.connect(
-            lambda _index: self._axis_field(
-                "value_kind", self.value_kind_combo.currentData()
+        self.apply_axis_button.clicked.connect(self._commit_axis)
+        self.axis_value_model.edits_requested.connect(
+            lambda cells: self._emit(
+                "set_axis_values", axis_id=self._selected_axis, cells=cells
             )
         )
-        self.axis_unit_edit.editingFinished.connect(lambda: self._axis_field("unit", self.axis_unit_edit.text()))
-        self.frame_edit.editingFinished.connect(lambda: self._axis_field("coordinate_frame", self.frame_edit.text()))
-        self.insert_coordinate_button.clicked.connect(self._insert_coordinate)
-        self.remove_coordinate_button.clicked.connect(self._remove_coordinates)
-        self.coordinate_up_button.clicked.connect(lambda: self._move_coordinate(-1))
-        self.coordinate_down_button.clicked.connect(lambda: self._move_coordinate(1))
-        self.coordinate_model.edits_requested.connect(
-            lambda cells: self._emit("set_coordinates", axis_id=self._selected_axis, cells=cells)
-        )
-        self.coordinate_model.rejected.connect(self._show_local_rejection)
+        self.axis_value_model.rejected.connect(self._show_local_rejection)
         self.component_combo.activated.connect(
             lambda _index: self._emit("set_component", component=self.component_combo.currentData())
         )
@@ -494,24 +469,43 @@ class _DataEditorView(QtWidgets.QWidget):
     def _show_local_rejection(self, message: str) -> None:
         self.message_label.setText(str(message))
 
-    def _axis_field(self, field: str, value: object) -> None:
-        if self._selected_axis:
-            self._emit("set_axis_field", axis_id=self._selected_axis, field=str(field), value=value)
+    def _select_axis(self, _index: int) -> None:
+        self._adding_axis = False
+        self._emit("select_axis", axis_id=self.axis_combo.currentData())
 
-    def _coordinate_rows(self) -> tuple[int, ...]:
-        return tuple(sorted({index.row() for index in self.coordinate_table.selectionModel().selectedIndexes()}))
+    def _begin_add_axis(self) -> None:
+        self._adding_axis = True
+        self._selected_axis = ""
+        with signals_blocked(self.axis_combo):
+            self.axis_combo.setCurrentIndex(-1)
+        self.axis_name_edit.clear()
+        self.axis_size_spin.setValue(1)
+        self.axis_unit_edit.clear()
+        self.axis_value_model.set_projection(
+            {"shape": (1, 0), "values": ((),), "row_headers": ("Value",)}
+        )
+        if self.domain_combo.count():
+            self.domain_combo.setCurrentIndex(0)
+        self.axis_mode_label.setText("New axis")
+        self.apply_axis_button.setText("Create axis")
+        self.axis_name_edit.setFocus()
 
-    def _insert_coordinate(self) -> None:
-        rows = self._coordinate_rows()
-        self._emit("insert_coordinate", axis_id=self._selected_axis, after=(rows[-1] if rows else -1))
-
-    def _remove_coordinates(self) -> None:
-        self._emit("remove_coordinates", axis_id=self._selected_axis, indices=self._coordinate_rows())
-
-    def _move_coordinate(self, delta: int) -> None:
-        rows = self._coordinate_rows()
-        if len(rows) == 1:
-            self._emit("move_coordinate", axis_id=self._selected_axis, index=rows[0], delta=int(delta))
+    def _commit_axis(self) -> None:
+        name = self.axis_name_edit.text().strip()
+        if not name:
+            self._show_local_rejection("Axis name cannot be blank")
+            return
+        values = {
+            "name": name,
+            "length": int(self.axis_size_spin.value()),
+            "unit": self.axis_unit_edit.text().strip(),
+            "domain": self.domain_combo.currentData(),
+        }
+        if self._adding_axis:
+            self._adding_axis = False
+            self._emit("add_axis", **values)
+        elif self._selected_axis:
+            self._emit("edit_axis", axis_id=self._selected_axis, **values)
 
     def _save_as(self) -> None:
         path = fluent_save_path(
@@ -523,40 +517,94 @@ class _DataEditorView(QtWidgets.QWidget):
         if path:
             self._emit("save_as", path=path, note=self.note_edit.text())
 
-    def _set_slice_controls(self, rows: object) -> None:
-        while self._slice_layout.count():
-            item = self._slice_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        self._slice_widgets.clear()
-        for position, raw in enumerate(tuple(rows or ())):
-            row = dict(raw)
-            axis_id = str(row.get("axis_id", ""))
-            label = FluentLabel(str(row.get("label", axis_id)))
-            size = max(0, int(row.get("size", 0)))
-            spin = FluentSpinBox()
-            spin.setRange(0, max(0, size - 1))
-            spin.setValue(min(max(0, int(row.get("index", 0))), max(0, size - 1)))
-            spin.setEnabled(size > 1)
-            coordinate = FluentReadoutEdit(str(row.get("current_label", "")))
-            coordinate.setToolTip("Coordinate / label at this slice index")
-            spin.valueChanged.connect(
-                lambda index, aid=axis_id: self._emit(
-                    "set_slice", axis_id=aid, index=int(index)
-                )
+    @staticmethod
+    def _rich_text(value: object) -> str:
+        return (
+            str(value)
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace(" ", "&nbsp;")
+        )
+
+    def _set_structure(self, structure: object) -> None:
+        shape, names = data_structure_fragments(structure)
+
+        def html(fragments: object) -> str:
+            return "".join(
+                self._rich_text(text)
+                if colour is None
+                else f'<span style="color:{colour}">{self._rich_text(text)}</span>'
+                for text, colour in tuple(fragments)
             )
-            pair = QtWidgets.QWidget(self._slice_holder)
-            pair.setStyleSheet("background: transparent;")
-            pair_layout = QtWidgets.QHBoxLayout(pair)
-            pair_layout.setContentsMargins(0, 0, 0, 0)
-            pair_layout.setSpacing(window_pad(0.25))
-            pair_layout.addWidget(label)
-            pair_layout.addWidget(spin)
-            pair_layout.addWidget(coordinate, 1)
-            self._slice_layout.addWidget(pair, position, 0)
-            self._slice_widgets[axis_id] = (pair, spin, coordinate)
-        self._slice_holder.setVisible(bool(self._slice_widgets))
+
+        self.structure_label.setText(
+            html(shape) + "<br>" + html(names)
+        )
+
+    def _axis_view_mode_changed(
+        self, axis_id: str, combo: FluentCycleComboBox
+    ) -> None:
+        if combo.isCycleSelected():
+            self._emit(
+                "set_scope",
+                axis_id=str(axis_id),
+                index=combo.cyclePosition(),
+            )
+        else:
+            self._emit(
+                "set_table_axis",
+                axis_id=str(axis_id),
+                mode=combo.currentData(),
+            )
+
+    def _set_axis_view_controls(self, rows: object) -> None:
+        projected = tuple(dict(raw) for raw in tuple(rows or ()))
+        wanted = {str(row.get("axis_id", "")) for row in projected}
+        for axis_id in tuple(self._axis_view_widgets):
+            if axis_id in wanted:
+                continue
+            widget, *_unused = self._axis_view_widgets.pop(axis_id)
+            self._axis_view_layout.removeWidget(widget)
+            widget.deleteLater()
+        for position, row in enumerate(projected):
+            axis_id = str(row.get("axis_id", ""))
+            controls = self._axis_view_widgets.get(axis_id)
+            if controls is None:
+                holder = QtWidgets.QWidget(self._axis_view_holder)
+                holder.setStyleSheet("background: transparent;")
+                layout = QtWidgets.QHBoxLayout(holder)
+                layout.setContentsMargins(0, 0, 0, 0)
+                layout.setSpacing(window_pad(0.25))
+                label = FluentLabel("")
+                label.setMinimumWidth(scaled_px(150, minimum=110))
+                mode = FluentCycleComboBox()
+                mode.setMinimumContentsLength(9)
+                layout.addWidget(label, 1)
+                layout.addWidget(mode)
+                mode.activated.connect(
+                    lambda _index, aid=axis_id, control=mode: self._axis_view_mode_changed(
+                        aid, control
+                    )
+                )
+                controls = (holder, label, mode)
+                self._axis_view_widgets[axis_id] = controls
+            holder, label, mode = controls
+            self._axis_view_layout.addWidget(holder, position, 0)
+            unit = str(row.get("unit") or "")
+            suffix = f" ({int(row.get('size', 1))})" + (f" [{unit}]" if unit else "")
+            label.setText(str(row.get("name", axis_id)) + suffix)
+            with signals_blocked(mode):
+                mode.clear()
+                mode.addItem("Rows ↓", "rows")
+                mode.addItem("Columns →", "columns")
+                mode.setCycleChoices("Scope", row["scope_choices"])
+                selected_mode = str(row.get("mode", "scope"))
+                if selected_mode == "scope":
+                    mode.setCyclePosition(int(row.get("index", 0)))
+                else:
+                    mode.setCurrentIndex(mode.findData(selected_mode))
+        self._axis_view_holder.setVisible(bool(projected))
 
     def update_projection(self, projection: object) -> None:
         data = dict(projection or {})
@@ -584,44 +632,47 @@ class _DataEditorView(QtWidgets.QWidget):
                 for axis in axes
             )
             _fill_choice_combo(self.axis_combo, axis_rows, selected_axis)
+            if self._adding_axis:
+                self.axis_combo.setCurrentIndex(-1)
             self._selected_axis = selected_axis
-            domain_choices = data.get("domain_choices", ())
-            current_domain = "" if selected is None else str(
-                selected.get("domain_label", selected.get("domain", ""))
-            )
-            self.domain_readout.setText(current_domain)
-            _fill_choice_combo(
-                self.add_axis_domain_combo,
-                domain_choices,
-                data.get("new_axis_domain", "cell"),
-            )
-            role_choices = () if selected is None else selected.get("role_choices", ())
-            _fill_choice_combo(self.role_combo, role_choices, None if selected is None else selected.get("role"))
-            value_kind_choices = (
-                () if selected is None else selected.get("value_kind_choices", ())
-            )
-            _fill_choice_combo(
-                self.value_kind_combo,
-                value_kind_choices,
-                None if selected is None else selected.get("value_kind"),
-            )
-            self._axis_rows["value_kind"].setVisible(
-                bool(selected is not None and selected.get("show_value_kind", False))
-            )
-            self.axis_name_edit.setText("" if selected is None else str(selected.get("name", "")))
-            self.axis_size_spin.setValue(
-                1 if selected is None else max(1, int(selected.get("size", 1)))
-            )
-            self.axis_unit_edit.setText("" if selected is None else str(selected.get("unit", "")))
-            self.frame_edit.setText("" if selected is None else str(selected.get("coordinate_frame", "")))
-            coordinates = dict(data.get("coordinates", {}))
-            self.coordinate_model.set_projection(coordinates)
-            if self.coordinate_model.columnCount() >= 2:
-                self.coordinate_table.setColumnWidth(
-                    0, scaled_px(120, minimum=90)
+            self._domain_choices = tuple(data.get("domain_choices", ()))
+            if not self._adding_axis:
+                _fill_choice_combo(
+                    self.domain_combo,
+                    self._domain_choices,
+                    None if selected is None else selected.get("domain"),
                 )
-            self._set_slice_controls(data.get("slices", ()))
+                self.axis_name_edit.setText(
+                    "" if selected is None else str(selected.get("name", ""))
+                )
+                self.axis_size_spin.setValue(
+                    1 if selected is None else max(1, int(selected.get("size", 1)))
+                )
+                self.axis_unit_edit.setText(
+                    "" if selected is None else str(selected.get("unit", ""))
+                )
+                self.axis_mode_label.setText("Edit selected axis")
+                self.apply_axis_button.setText("Apply axis")
+            self.axis_value_model.set_projection(data.get("axis_values", {}))
             table = dict(data.get("table", {}))
+            self._set_structure(table.get("structure", ()))
+            self._set_axis_view_controls(table.get("axes", ()))
+            row = next(
+                (item for item in tuple(table.get("axes", ())) if dict(item).get("mode") == "rows"),
+                None,
+            )
+            column = next(
+                (item for item in tuple(table.get("axes", ())) if dict(item).get("mode") == "columns"),
+                None,
+            )
+            self.row_axis_label.setText(
+                "Rows ↓ —" if row is None else f"Rows ↓ {dict(row).get('name', '')}"
+            )
+            self.column_axis_label.setText(
+                "Columns → —"
+                if column is None
+                else f"Columns → {dict(column).get('name', '')}"
+            )
             _fill_choice_combo(
                 self.component_combo,
                 table.get("component_choices", ()),
@@ -637,26 +688,15 @@ class _DataEditorView(QtWidgets.QWidget):
             self.discard_button.setEnabled(self._dirty)
             has_axis = selected is not None
             for control in (
-                self.remove_axis_button,
-                self.axis_up_button,
-                self.axis_down_button,
                 self.axis_name_edit,
                 self.axis_size_spin,
-                self.role_combo,
-                self.value_kind_combo,
-                self.frame_edit,
-                self.coordinate_table,
-                self.insert_coordinate_button,
-                self.remove_coordinate_button,
-                self.coordinate_up_button,
-                self.coordinate_down_button,
+                self.axis_unit_edit,
+                self.domain_combo,
+                self.apply_axis_button,
             ):
-                control.setEnabled(has_axis)
-            self.axis_unit_edit.setEnabled(
-                bool(has_axis and selected.get("unit_enabled", True))
-                if selected is not None
-                else False
-            )
+                control.setEnabled(has_axis or self._adding_axis)
+            self.remove_axis_button.setEnabled(has_axis and not self._adding_axis)
+            self.axis_value_table.setEnabled(has_axis and not self._adding_axis)
             self.apply_button.setEnabled(bool(data.get("can_apply", True)))
             self.save_button.setEnabled(bool(data.get("can_save", False)))
         finally:
@@ -675,6 +715,8 @@ class FigureViewerView(QtWidgets.QWidget):
     panel_edit_requested = QtCore.pyqtSignal(str)
     panel_order_committed = QtCore.pyqtSignal(tuple)
     panel_editor_closed = QtCore.pyqtSignal(str)
+    panel_snapshot_refresh_requested = QtCore.pyqtSignal(str)
+    panel_save_figure_requested = QtCore.pyqtSignal(str, str)
     panel_plot_error = QtCore.pyqtSignal(str, str)
     save_image_requested = QtCore.pyqtSignal()
     close_requested = QtCore.pyqtSignal()
@@ -959,10 +1001,18 @@ class FigureViewerView(QtWidgets.QWidget):
         return tuple(self._cards)
 
     def set_panel_selectors_enabled(self, panel_id: str, enabled: bool) -> None:
-        self._cards[str(panel_id)].set_selectors_enabled(bool(enabled))
+        key = str(panel_id)
+        self._cards[key].set_selectors_enabled(bool(enabled))
+        editor = self._editors.get(key)
+        if isinstance(editor, PanelEditorView):
+            editor.set_selectors_enabled(bool(enabled))
 
     def set_panel_mutation_enabled(self, panel_id: str, enabled: bool) -> None:
-        self._cards[str(panel_id)].set_editing_enabled(bool(enabled))
+        key = str(panel_id)
+        self._cards[key].set_editing_enabled(bool(enabled))
+        editor = self._editors.get(key)
+        if isinstance(editor, PanelEditorView):
+            editor.set_mutation_enabled(bool(enabled))
 
     def present_panel_front(self, panel_id: str, front: object) -> bool:
         surface = self._cards[str(panel_id)].surface
@@ -996,6 +1046,10 @@ class FigureViewerView(QtWidgets.QWidget):
         key = str(panel_id)
         existing = self._editors.get(key)
         if existing is not None:
+            incoming = dict(projection)
+            incoming["size_choices"] = self._panel_sizes
+            incoming["interval_choices"] = self._panel_intervals
+            existing.update_projection(incoming)
             self.tabs.setCurrentWidget(existing)
             return
         incoming = dict(projection)
@@ -1004,6 +1058,12 @@ class FigureViewerView(QtWidgets.QWidget):
         editor = PanelEditorView(key, incoming)
         editor.state_changed.connect(
             lambda patch, pid=key: self.panel_state_changed.emit(pid, patch)
+        )
+        editor.snapshot_refresh_requested.connect(
+            lambda _=None, pid=key: self.panel_snapshot_refresh_requested.emit(pid)
+        )
+        editor.save_figure_requested.connect(
+            lambda path, pid=key: self.panel_save_figure_requested.emit(pid, str(path))
         )
         self._editors[key] = editor
         self.tabs.add_closable_tab(editor, str(title), focus=True)
@@ -1127,6 +1187,14 @@ class FigureViewerView(QtWidgets.QWidget):
             self.info_pane.status.show_message(str(text), severity="error")
         else:
             self.info_pane.set_status(str(text))
+
+    def show_status(self, text: str, severity: str) -> None:
+        """Present the same ConsolePresenter status channel as TaskConsole."""
+
+        level = str(severity or "info")
+        if level == "idle":
+            level = "info"
+        self.info_pane.status.show_message(str(text), severity=level)
 
     def set_title(self, text: str) -> None:
         self.setWindowTitle(str(text))

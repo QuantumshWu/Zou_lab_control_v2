@@ -1,7 +1,7 @@
 """What an unauthored plot shows: ONE table, read by every kind.
 
 A dataset's axes are grouped by what they ARE
-(:func:`zlc_plot.data_contract.classify_axes`): R, the repeat axis; H, the
+(:func:`zlc_plot.data_contract.classify_axes`): R, the repeat axes; H, the
 Runtime's shot index; S, the authored scan dimensions, slowest first; E,
 the event sequences inside one cycle (a camera's frames, frame pairs); and
 D, the data each point holds -- a declared picture and the other content
@@ -18,8 +18,6 @@ answer whichever kind is asked:
   heatmap, whatever content the point holds; the outermost is a grid's
   facet.
   A scan dimension nothing claims is reduced, and the fate table says so.
-  Bare point columns with no topology are nested by their rows: the
-  column that changes least often is the outermost.
 * E is a choice of sub-measurement.  A grid gives each event a cell, a
   curve with no scan walks them, and anything else shows the LATEST one:
   the mean of two different frames is not a frame.
@@ -166,8 +164,8 @@ def _densest_cell_kind(families: AxisFamilies) -> PlotKind:
         and not families.live_scan()
         and not families.live_events()
         and families.history is None
-        and families.repeat[1] > 1
-        and families.has_point_columns
+        and families.repeat_size > 1
+        and families.has_point_axes
     ):
         # A scalar measured repeatedly at authored point coordinates is a
         # distribution per point.  A curve would consume that point axis
@@ -226,24 +224,21 @@ def _facet(families: AxisFamilies, plan: _Plan) -> AxisRef | None:
     names its cell, so the grid's meaning does not depend on the count.
     """
 
-    consumed = set(ref.physical_identity for ref in plan.consumed)
+    consumed = set(plan.consumed)
     for ref, _size in families.live_scan():
-        if ref.physical_identity not in consumed:
+        if ref not in consumed:
             return ref
     for ref, _size in families.live_events():
-        if ref.physical_identity not in consumed:
+        if ref not in consumed:
             return ref
     history = _live_history(families)
-    if history is not None and history.physical_identity not in consumed:
+    if history is not None and history not in consumed:
         return history
-    if not families.topology:
-        # Without a scan topology the point column IS the authored cell
-        # identity, at one value as much as at three: a one-frame cycle,
-        # a scalar measured at one authored point.  A scan's degenerate
-        # dimension, by contrast, is invisible.
-        for ref, _size in families.events + families.scan:
-            if ref.physical_identity not in consumed:
-                return ref
+    # An event axis names a sub-measurement even at one coordinate; a scan's
+    # degenerate axis is provenance but does not create a visible grid cell.
+    for ref, _size in families.events:
+        if ref not in consumed:
+            return ref
     return None
 
 
@@ -275,9 +270,6 @@ def _image_plan(families: AxisFamilies) -> _Plan | None:
         history = _live_history(families)
         if history is not None:
             return _Plan(x=history, y=content[0][0])
-        rows = families.live_rows()
-        if rows is not None:
-            return _Plan(x=rows, y=content[0][0])
     return None
 
 
@@ -294,10 +286,10 @@ def _image_spec(
 
 def _curve_plan(families: AxisFamilies, *, facet: AxisRef | None) -> _Plan:
     """A curve walks position: the innermost scan loop, else the events,
-    else the shot history, else its own data, else the bare point rows."""
+    else the shot history, else its own data, else the first Repeat axis."""
 
-    taken = set() if facet is None else {facet.physical_identity}
-    scan = [entry for entry in families.live_scan() if entry[0].physical_identity not in taken]
+    taken = set() if facet is None else {facet}
+    scan = [entry for entry in families.live_scan() if entry[0] not in taken]
     if scan:
         x = scan[-1][0]
         return _Plan(
@@ -305,7 +297,7 @@ def _curve_plan(families: AxisFamilies, *, facet: AxisRef | None) -> _Plan:
             group=_group(families, (x, facet)),
             scan_used=(x,),
         )
-    events = [entry for entry in families.live_events() if entry[0].physical_identity not in taken]
+    events = [entry for entry in families.live_events() if entry[0] not in taken]
     if events:
         x = events[0][0]
         return _Plan(x=x, group=_group(families, (x, facet)), event_used=x)
@@ -314,14 +306,16 @@ def _curve_plan(families: AxisFamilies, *, facet: AxisRef | None) -> _Plan:
         x = data_innermost_first[0][0]
         return _Plan(x=x, group=_group(families, (x, facet)))
     history = _live_history(families)
-    if history is not None and history.physical_identity not in taken:
+    if history is not None and history not in taken:
         return _Plan(x=history)
-    rows = families.live_rows()
-    if rows is not None:
-        return _Plan(x=rows)
     # Nothing has structure: the default x must still be an axis, so the
     # first one there is, degenerate as it may be, is drawn as one point.
-    return _Plan(x=_first_any(families.scan) or _first_any(families.events) or families.first_data_axis() or families.rows_or_none() or families.repeat[0])
+    return _Plan(
+        x=_first_any(families.scan)
+        or _first_any(families.events)
+        or families.first_data_axis()
+        or families.repeat[0][0]
+    )
 
 
 def _curve_spec(
@@ -348,11 +342,11 @@ def _group(
 ) -> AxisRef | None:
     """The one live data axis left over, when its members can be told apart."""
 
-    used = {ref.physical_identity for ref in taken if ref is not None}
+    used = {ref for ref in taken if ref is not None}
     free = [
         entry
         for entry in families.live_data()
-        if entry[0].physical_identity not in used
+        if entry[0] not in used
     ]
     if len(free) == 1 and tellable_apart(free[0][1]):
         return free[0][0]
@@ -364,11 +358,11 @@ def _latest_events(
 ) -> tuple[ScopeTerm, ...]:
     """Every live event axis with no role shows its latest event."""
 
-    used = {ref.physical_identity for ref in consumed if ref is not None}
+    used = {ref for ref in consumed if ref is not None}
     return tuple(
         (ref, LATEST_COORDINATE)
         for ref, _size in families.live_events()
-        if ref.physical_identity not in used
+        if ref not in used
     )
 
 

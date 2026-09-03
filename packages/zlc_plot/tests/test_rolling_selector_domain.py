@@ -15,23 +15,25 @@ from __future__ import annotations
 import numpy as np
 
 from zlc_plot import PlotSession, RollingPlot, SelectorKind
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from data_factory import (
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
+from zlc_data import OwnedSnapshot
 
-
-def _snapshot(revision: int, repeats: int = 5, points: int = 3) -> DatasetSnapshot:
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=repeats),
-        PointTable.from_columns({"x": np.arange(float(points))}),
+def _snapshot(revision: int, repeats: int = 5, points: int = 3) -> OwnedSnapshot:
+    schema = make_dataset_schema(
+        repeat_domain(size=repeats),
+        mapped_domain_from_columns({"x": np.arange(float(points))}),
         dtype=np.float64,
-        generation="rolling-selector-domain",
     )
     values = np.arange(repeats * points, dtype=float).reshape(repeats, points)
-    return DatasetSnapshot(schema, values, revision=revision)
-
+    return make_snapshot(schema, values, revision=revision)
 
 def _session() -> PlotSession:
     return PlotSession(_snapshot(0), RollingPlot())
-
 
 def test_every_sample_of_this_revision_is_drawn_by_the_curve() -> None:
     """They share one shot, and the window always ends on it."""
@@ -45,7 +47,6 @@ def test_every_sample_of_this_revision_is_drawn_by_the_curve() -> None:
     finally:
         session.close()
 
-
 def test_a_range_over_older_shots_selects_nothing_from_this_revision() -> None:
     """The older points are history entries, not samples of this snapshot."""
 
@@ -58,7 +59,6 @@ def test_a_range_over_older_shots_selects_nothing_from_this_revision() -> None:
         assert list(session.selector_data(SelectorKind.X_RANGE).canonical_values) == []
     finally:
         session.close()
-
 
 def test_a_range_covering_the_latest_shot_selects_all_of_it() -> None:
     """Not one point row out of every shot: this shot, whole."""

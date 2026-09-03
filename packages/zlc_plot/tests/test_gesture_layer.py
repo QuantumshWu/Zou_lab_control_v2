@@ -15,8 +15,14 @@ from threading import Event
 import numpy as np
 import pytest
 
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
-from zlc_data import SPATIAL_X, SPATIAL_Y
+from data_factory import (
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
+from zlc_data import OwnedSnapshot, READOUT_EVENT, REPEAT, SITE, SPATIAL_X, SPATIAL_Y
 from zlc_plot import AxisRef, HistogramPlot, ImagePlot, SelectorKind
 from zlc_plot.raster import RasterPlotHost
 from zlc_plot.selectors import NumericRange, RectangleRange, SelectorState
@@ -25,15 +31,15 @@ from zlc_plot.session import PlotSession
 SIZE = 256
 
 
-def _image_snapshot(revision: int = 0) -> DatasetSnapshot:
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"shot": [0.0]}),
-        data_axes=(
-            Axis.create(
+def _image_snapshot(revision: int = 0) -> OwnedSnapshot:
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"shot": [0.0]}),
+        cell_axes=(
+            axis(
                 "sy", values=tuple(float(v) for v in range(SIZE)), role=SPATIAL_Y
             ),
-            Axis.create(
+            axis(
                 "sx", values=tuple(float(v) for v in range(SIZE)), role=SPATIAL_X
             ),
         ),
@@ -44,14 +50,14 @@ def _image_snapshot(revision: int = 0) -> DatasetSnapshot:
         .integers(180, 900, (1, 1, SIZE, SIZE))
         .astype(np.uint16)
     )
-    return DatasetSnapshot(schema, values, revision=revision)
+    return make_snapshot(schema, values, revision=revision)
 
 
 def test_a_move_paints_the_same_pixels_as_a_compose() -> None:
     """The whole licence for the cheap path."""
 
     session = PlotSession(
-        _image_snapshot(), ImagePlot(AxisRef.data("sx"), AxisRef.data("sy")), size="4x4"
+        _image_snapshot(), ImagePlot(AxisRef.cell_data("sx"), AxisRef.cell_data("sy")), size="4x4"
     )
     try:
         renderer = session._renderer
@@ -74,7 +80,7 @@ def test_a_move_reuses_the_gesture_capture_without_composing(monkeypatch) -> Non
     """The cheap path is structural, not a noisy wall-clock ratio."""
 
     session = PlotSession(
-        _image_snapshot(), ImagePlot(AxisRef.data("sx"), AxisRef.data("sy")), size="4x4"
+        _image_snapshot(), ImagePlot(AxisRef.cell_data("sx"), AxisRef.cell_data("sy")), size="4x4"
     )
     try:
         renderer = session._renderer
@@ -103,7 +109,7 @@ def test_a_move_reuses_the_gesture_capture_without_composing(monkeypatch) -> Non
 
 def test_the_gesture_capture_dies_with_anything_that_could_stale_it() -> None:
     session = PlotSession(
-        _image_snapshot(), ImagePlot(AxisRef.data("sx"), AxisRef.data("sy")), size="4x4"
+        _image_snapshot(), ImagePlot(AxisRef.cell_data("sx"), AxisRef.cell_data("sy")), size="4x4"
     )
     try:
         renderer = session._renderer
@@ -133,13 +139,13 @@ def _histogram_host() -> RasterPlotHost:
     samples = np.concatenate(
         [rng.normal(100.0, 9.0, 400), rng.normal(180.0, 13.0, 400)]
     )
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=samples.size),
-        PointTable.from_columns({"site": [0.0]}),
+    schema = make_dataset_schema(
+        repeat_domain(size=samples.size),
+        mapped_domain_from_columns({"site": [0.0]}, roles={"site": SITE}),
         dtype=np.float64,
     )
     return RasterPlotHost.from_plot(
-        DatasetSnapshot(schema, samples.reshape(-1, 1), revision=0),
+        make_snapshot(schema, samples.reshape(-1, 1), revision=0),
         HistogramPlot(),
         size="4x4",
     )
@@ -249,38 +255,29 @@ def test_a_focused_facet_can_be_moved_to_another_cell() -> None:
     cell EXCEPT while one was open, which is precisely when the operator asks.
     """
 
-    from data_factory import PointTopology
     from zlc_plot import CurvePlot, FacetGridPlot
 
     settings = [0.0, 1.0, 2.0]
     points = [0.0, 1.0, 2.0, 3.0]
     rows = [(setting, point) for setting in settings for point in points]
-    table = PointTable.from_columns(
+    table = mapped_domain_from_columns(
         {
             "setting": [row[0] for row in rows],
             "shot": [row[1] for row in rows],
         }
     )
-    topology = PointTopology.from_cartesian(
-        (
-            Axis.create("setting", values=settings),
-            Axis.create("shot", values=points),
-        ),
-        point_table=table,
-    )
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
         table,
-        point_topology=topology,
         dtype=np.float64,
     )
     values = np.asarray(
         [[10.0 * row[0] + row[1] for row in rows]], dtype=np.float64
     )
     host = RasterPlotHost.from_plot(
-        DatasetSnapshot(schema, values, revision=0),
+        make_snapshot(schema, values, revision=0),
         FacetGridPlot(
-            AxisRef.point_dimension("setting"), CurvePlot(AxisRef.point_dimension("shot"))
+            AxisRef.point("setting"), CurvePlot(AxisRef.point("shot"))
         ),
         size="4x4",
     )
@@ -318,7 +315,7 @@ def test_a_gesture_frame_is_composed_under_the_same_style() -> None:
     import logging
 
     session = PlotSession(
-        _image_snapshot(), ImagePlot(AxisRef.data("sx"), AxisRef.data("sy")), size="4x4"
+        _image_snapshot(), ImagePlot(AxisRef.cell_data("sx"), AxisRef.cell_data("sy")), size="4x4"
     )
     messages: list[str] = []
 
@@ -348,18 +345,21 @@ def test_a_gesture_frame_is_composed_under_the_same_style() -> None:
         session.close()
 
 
-def _cycle_snapshot(frames: int = 3, revision: int = 0) -> DatasetSnapshot:
+def _cycle_snapshot(frames: int = 3, revision: int = 0) -> OwnedSnapshot:
     """One camera cycle: its frames are the point rows a grid faces."""
 
     side = 32
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"frame": [float(i) for i in range(frames)]}),
-        data_axes=(
-            Axis.create(
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns(
+            {"frame": [float(i) for i in range(frames)]},
+            roles={"frame": READOUT_EVENT},
+        ),
+        cell_axes=(
+            axis(
                 "sy", values=tuple(float(v) for v in range(side)), role=SPATIAL_Y
             ),
-            Axis.create(
+            axis(
                 "sx", values=tuple(float(v) for v in range(side)), role=SPATIAL_X
             ),
         ),
@@ -370,7 +370,7 @@ def _cycle_snapshot(frames: int = 3, revision: int = 0) -> DatasetSnapshot:
         .integers(180, 900, (1, frames, side, side))
         .astype(np.uint16)
     )
-    return DatasetSnapshot(schema, values, revision=revision)
+    return make_snapshot(schema, values, revision=revision)
 
 
 def _cell_transform(session: PlotSession, index: int):
@@ -403,7 +403,7 @@ def test_an_overview_grid_only_focuses_then_the_focused_cell_accepts_an_area(
         _cycle_snapshot(),
         FacetGridPlot(
             AxisRef.point("frame"),
-            ImagePlot(AxisRef.data("sx"), AxisRef.data("sy")),
+            ImagePlot(AxisRef.cell_data("sx"), AxisRef.cell_data("sy")),
         ),
         size="4x4",
     )

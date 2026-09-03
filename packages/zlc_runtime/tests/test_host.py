@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from zlc_data import AxisSpec, DatasetSchema
+from zlc_data import AxisSpec, DatasetSchema, DomainSpec
 from zlc_runtime.dataset import DatasetCoverage, MonitorCoverage
 from zlc_runtime.dataset_output import DatasetOutputDeclaration, LiveDatasetOutput
 from zlc_runtime.host import LogicNodeObservation, NodeHost
@@ -44,18 +44,24 @@ def _finite_output(
 ) -> LiveDatasetOutput:
     event = _snapshot(declaration.name, origin + 1, value=value)
     schema = event.block.schema
-    repeat = schema.repeat_axis
+    (repeat,) = schema.repeat_domain.axes
     canonical = DatasetSchema(
-        AxisSpec(
-            repeat.axis_id,
-            repeat.name,
-            repeat.role,
-            total,
-            tuple(range(total)),
+        DomainSpec(
+            (total,),
+            (
+                AxisSpec(
+                    repeat.axis_id,
+                    repeat.name,
+                    repeat.role,
+                    total,
+                    tuple(range(total)),
+                ),
+            ),
+            (tuple(range(total)),),
         ),
-        schema.point_table,
-        schema.grid_topology,
-        schema.cell_schema,
+        schema.point_domain,
+        schema.cell_domain,
+        schema.value_schema,
     )
     return LiveDatasetOutput(
         declaration,
@@ -833,7 +839,7 @@ def test_terminal_processor_always_receives_runtime_current_dataset(delivery: st
         def evaluate(self, value: SignalValue):
             seen.append(
                 (
-                    value.snapshot.block.schema.repeat_axis.size,
+                    value.snapshot.block.schema.repeat_domain.size,
                     value.snapshot.block.values[:, 0, 0].tolist(),
                     value.event_record["device_settings"]["camera"][
                         "epoch_ranges"
@@ -901,7 +907,7 @@ def test_exact_processor_receives_each_event_chunk_not_cumulative_history() -> N
         def evaluate(self, value: SignalValue):
             seen.append(
                 (
-                    value.snapshot.block.schema.repeat_axis.size,
+                    value.snapshot.block.schema.repeat_domain.size,
                     float(value.snapshot.block.values[0, 0, 0]),
                     value.cell_origin,
                 )
@@ -1173,7 +1179,7 @@ def test_a_schema_advance_ends_a_processor_cancelled_not_failed() -> None:
     """GenerationSchemaAdvanced says so itself: NOT a fault.
 
     An output that changes shape needs a new generation -- a derivation
-    whose point table grows one row per shot while a window fills, or a
+    whose Point domain grows one row per shot while a window fills, or a
     pulse restart that changes the frame shape.  Landing it as ``failed``
     made the console clear ``following`` for good, so the restart that
     would have granted that new generation never came: occupancy vanished

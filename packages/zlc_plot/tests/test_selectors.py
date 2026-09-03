@@ -18,7 +18,6 @@ from zlc_plot.selectors import (
     _drag_numeric_range,
 )
 
-
 def test_drag_numeric_range_and_clamp_never_escape_bounds() -> None:
     bounds = NumericRange(0.0, 10.0)
     original = NumericRange(2.0, 5.0)
@@ -41,7 +40,6 @@ def test_drag_numeric_range_and_clamp_never_escape_bounds() -> None:
             assert bounds.low <= result.low <= result.high <= bounds.high
             assert result.span >= 0.5 - 1e-12
     assert _clamp_range(NumericRange(-10.0, 20.0), bounds) == bounds
-
 
 def test_new_area_drag_is_sorted_and_controller_revisions_are_monotonic() -> None:
     controller = _SelectorController()
@@ -73,7 +71,6 @@ def test_new_area_drag_is_sorted_and_controller_revisions_are_monotonic() -> Non
     assert candidate is not None
     assert candidate.value.low <= candidate.value.high
 
-
 def test_controller_cancel_restores_committed_and_allows_one_kind_each() -> None:
     controller = _SelectorController()
     area = SelectorState(
@@ -93,7 +90,6 @@ def test_controller_cancel_restores_committed_and_allows_one_kind_each() -> None
     assert controller.candidate_state() is None
     with pytest.raises(KeyError):
         controller.state(SelectorKind.THRESHOLD)
-
 
 def test_backend_neutral_gesture_geometry_has_one_authority() -> None:
     value = NumericRange(2.0, 8.0)
@@ -128,27 +124,31 @@ def test_backend_neutral_gesture_geometry_has_one_authority() -> None:
         image_like=True,
     ) == RectangleRange(NumericRange(1.0, 11.0), NumericRange(-1.0, 9.0))
 
-
 def _float_image_with_holes(height: int = 48, width: int = 48, seed: int = 0):
     """A float image that is NOT a camera: a third of its samples are NaN."""
 
-    from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+    from data_factory import (
+        axis,
+        make_dataset_schema,
+        make_snapshot,
+        mapped_domain_from_columns,
+        repeat_domain,
+    )
+
 
     rng = np.random.default_rng(seed)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"shot": np.asarray([0.0])}),
-        data_axes=(
-            Axis.create("y", values=[float(i) for i in range(height)]),
-            Axis.create("x", values=[float(i) for i in range(width)]),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"shot": np.asarray([0.0])}),
+        cell_axes=(
+            axis("y", values=[float(i) for i in range(height)]),
+            axis("x", values=[float(i) for i in range(width)]),
         ),
         dtype=np.float64,
-        generation="float-image",
     )
     values = rng.normal(0.0, 1.0, (1, 1, height, width))
     values[rng.random(values.shape) < 0.35] = np.nan
-    return DatasetSnapshot(schema, values, 1), values
-
+    return make_snapshot(schema, values, 1), values
 
 def test_validity_is_the_finiteness_answer_for_float_samples() -> None:
     """No consumer may ask ``isfinite`` of the values a second time.
@@ -165,7 +165,7 @@ def test_validity_is_the_finiteness_answer_for_float_samples() -> None:
     from zlc_plot import AxisRef, ImagePlot, PlotSession
 
     snapshot, values = _float_image_with_holes()
-    session = PlotSession(snapshot, ImagePlot(AxisRef.data("x"), AxisRef.data("y")))
+    session = PlotSession(snapshot, ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y")))
     try:
         session.set_size("2x2")
         session.rgba()
@@ -174,12 +174,11 @@ def test_validity_is_the_finiteness_answer_for_float_samples() -> None:
     finally:
         session.close()
 
-
 def test_crosshair_never_lands_on_a_non_finite_sample() -> None:
     from zlc_plot import AxisRef, ImagePlot, PlotSession
 
     snapshot, values = _float_image_with_holes()
-    session = PlotSession(snapshot, ImagePlot(AxisRef.data("x"), AxisRef.data("y")))
+    session = PlotSession(snapshot, ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y")))
     try:
         session.set_size("2x2")
         session.rgba()

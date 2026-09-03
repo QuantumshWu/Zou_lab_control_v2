@@ -11,7 +11,7 @@ import zipfile
 import numpy as np
 import pytest
 
-from zlc_data.axis import AxisId, AxisSpec, REPEAT, SITE, SPATIAL_X
+from zlc_data.axis import AxisId, AxisSpec, REPEAT, SCAN_POINT, SITE, SPATIAL_X
 from zlc_data.figure_archive import (
     FIGURE_SCHEMA,
     read_archive,
@@ -21,9 +21,8 @@ from zlc_data.figure_archive import (
 from zlc_data.io import NPZFormatError, load_npz, save_npz, snapshot_manifest
 from zlc_data.schema import (
     DatasetSchema,
-    GridTopology,
-    PointColumn,
-    PointTable,
+    DomainSpec,
+    SCALAR_DOMAIN,
     ValueSchema,
 )
 from zlc_data.validity import (
@@ -43,12 +42,13 @@ from zlc_data.value import (
 
 def _snapshot(validity=VALID) -> OwnedSnapshot:
     repeat = AxisSpec(AxisId("repeat"), "repeat", REPEAT, 2, (0, 1))
+    point = AxisSpec(AxisId("point"), "point", SCAN_POINT, 2, (0, 1))
     component = AxisSpec(AxisId("component"), "component", SPATIAL_X, 3, (0, 1, 2))
     schema = DatasetSchema(
-        repeat,
-        PointTable(2),
-        None,
-        ValueSchema((component,), ValidityContract.value(), np.dtype("<f4")),
+        DomainSpec((2,), (repeat,), ((0, 1),)),
+        DomainSpec((2,), (point,), ((0, 1),)),
+        DomainSpec((3,), (component,)),
+        ValueSchema(ValidityContract.value(), np.dtype("<f4")),
     )
     block = DataBlock(
         BlockId("io-block"),
@@ -103,18 +103,18 @@ def test_npz_round_trip_preserves_canonical_coordinates_and_display_labels(
         ("shot_dark", "shot_bright"),
         coordinate_labels=("Dark", "Bright"),
     )
-    sites = PointColumn(
+    sites = AxisSpec(
         AxisId("calibration.site"),
         "Site",
         SITE,
-        PointColumn.TEXT,
+        2,
         ("site_0001", "site_0002"),
         coordinate_labels=("1", "2"),
     )
     schema = DatasetSchema(
-        repeat,
-        PointTable(2, (sites,)),
-        None,
+        DomainSpec((2,), (repeat,), ((0, 1),)),
+        DomainSpec((2,), (sites,), ((0, 1),)),
+        SCALAR_DOMAIN,
         ValueSchema.scalar(np.dtype("<f4"), "count"),
     )
     block = DataBlock(
@@ -133,22 +133,23 @@ def test_npz_round_trip_preserves_canonical_coordinates_and_display_labels(
     _write_npz(path, source)
     restored = load_npz(path)
 
-    assert restored.block.schema.repeat_axis.coordinates == ("shot_dark", "shot_bright")
-    assert restored.block.schema.repeat_axis.coordinate_labels == ("Dark", "Bright")
-    restored_sites = restored.block.schema.point_table.column(AxisId("calibration.site"))
-    assert restored_sites.values == ("site_0001", "site_0002")
+    restored_repeat = restored.block.schema.repeat_domain.axis(AxisId("capture.repeat"))
+    assert restored_repeat.coordinates == ("shot_dark", "shot_bright")
+    assert restored_repeat.coordinate_labels == ("Dark", "Bright")
+    restored_sites = restored.block.schema.point_domain.axis(AxisId("calibration.site"))
+    assert restored_sites.coordinates == ("site_0001", "site_0002")
     assert restored_sites.coordinate_labels == ("1", "2")
 
 
 def test_npz_round_trip_preserves_dataset_component_masks(tmp_path: Path):
     repeat = AxisSpec(AxisId("repeat"), "repeat", REPEAT, 2, (0, 1))
+    point = AxisSpec(AxisId("point"), "point", SCAN_POINT, 2, (0, 1))
     component = AxisSpec(AxisId("component"), "component", SPATIAL_X, 3, (0, 1, 2))
     schema = DatasetSchema(
-        repeat,
-        PointTable(2),
-        None,
+        DomainSpec((2,), (repeat,), ((0, 1),)),
+        DomainSpec((2,), (point,), ((0, 1),)),
+        DomainSpec((3,), (component,)),
         ValueSchema(
-            (component,),
             ValidityContract.components(component.axis_id),
             np.dtype("<f4"),
         ),
@@ -177,41 +178,37 @@ def test_npz_round_trip_preserves_dataset_component_masks(tmp_path: Path):
     np.testing.assert_array_equal(restored.block.validity.mask, validity.mask)
 
 
-def test_npz_round_trip_preserves_topology_dimensions_without_point_columns(
+def test_npz_round_trip_preserves_point_domain_axes_and_codes(
     tmp_path: Path,
 ):
     repeat = AxisSpec(AxisId("repeat"), "repeat", REPEAT, 1, (0,))
     component = AxisSpec(AxisId("component"), "component", SPATIAL_X, 3, (0, 1, 2))
-    topology = GridTopology(
-        (AxisId("b.x"),),
-        ((0, 1),),
-        ((0,), (1,)),
-    )
+    b_x = AxisSpec(AxisId("b.x"), "b.x", SCAN_POINT, 2, (0, 1))
+    point_domain = DomainSpec((2,), (b_x,), ((0, 1),))
     schema = DatasetSchema(
-        repeat,
-        PointTable(2),
-        topology,
-        ValueSchema((component,), ValidityContract.value(), np.dtype("<f4")),
+        DomainSpec((1,), (repeat,), ((0,),)),
+        point_domain,
+        DomainSpec((3,), (component,)),
+        ValueSchema(ValidityContract.value(), np.dtype("<f4")),
     )
     block = DataBlock(
-        BlockId("topology-only-io-block"),
+        BlockId("point-domain-io-block"),
         DatasetRevision(0),
         np.arange(6, dtype="<f4").reshape(schema.physical_shape),
         CellValidity(np.array([[True, False]])),
         schema,
     )
     source = OwnedSnapshot(
-        block.ref(StreamGenerationId("topology-only-generation")),
+        block.ref(StreamGenerationId("point-domain-generation")),
         block,
     )
-    path = tmp_path / "topology-only.npz"
+    path = tmp_path / "point-domain.npz"
 
     _write_npz(path, source)
     restored = load_npz(path)
 
     assert restored.block.schema == schema
-    assert restored.block.schema.point_table.columns == ()
-    assert restored.block.schema.grid_topology == topology
+    assert restored.block.schema.point_domain == point_domain
     np.testing.assert_array_equal(restored.block.values, source.block.values)
     np.testing.assert_array_equal(restored.block.validity.mask, source.block.validity.mask)
 

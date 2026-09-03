@@ -1870,8 +1870,8 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
     assert fit_publication is not None
     before_history = session.signal_plane.current_dataset(fit_signal)
     assert all(
-        str(column.coordinate_id) != "zlc_data.primary-index"
-        for column in before_history.block.schema.point_table.columns
+        str(axis.axis_id) != "zlc_data.primary-index"
+        for axis in before_history.block.schema.point_domain.axes
     )
     accepted = main.host._session._accepted_fit
     assert accepted is not None and accepted.selection is not None
@@ -1990,11 +1990,11 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
     frozen = rolling.frozen_data
     assert frozen is not None
     primary = next(
-        column
-        for column in frozen.snapshot.block.schema.point_table.columns
-        if str(column.coordinate_id) == "zlc_data.primary-index"
+        axis
+        for axis in frozen.snapshot.block.schema.point_domain.axes
+        if str(axis.axis_id) == "zlc_data.primary-index"
     )
-    assert tuple(dict.fromkeys(primary.values))
+    assert primary.size > 0
     saved_truth = session.signal_plane.current_dataset(
         fit_signal,
         frozen.publication,
@@ -2082,8 +2082,8 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
     assert lease is not None and lease.closed
     latest_only = session.signal_plane.current_dataset(fit_signal)
     assert all(
-        str(column.coordinate_id) != "zlc_data.primary-index"
-        for column in latest_only.block.schema.point_table.columns
+        str(axis.axis_id) != "zlc_data.primary-index"
+        for axis in latest_only.block.schema.point_domain.axes
     )
 
 
@@ -2226,8 +2226,8 @@ def test_history_transition_is_immediate_and_interactions_follow_indexed_front(
     assert first_roi is not None
     before_panel = session.signal_plane.current_dataset(roi_signal)
     assert all(
-        str(column.coordinate_id) != "zlc_data.primary-index"
-        for column in before_panel.block.schema.point_table.columns
+        str(axis.axis_id) != "zlc_data.primary-index"
+        for axis in before_panel.block.schema.point_domain.axes
     )
 
     histogram = presenter.add_panel(
@@ -2252,8 +2252,8 @@ def test_history_transition_is_immediate_and_interactions_follow_indexed_front(
     )
     retained = session.signal_plane.current_dataset(roi_signal)
     assert all(
-        str(column.coordinate_id) != "zlc_data.primary-index"
-        for column in retained.block.schema.point_table.columns
+        str(axis.axis_id) != "zlc_data.primary-index"
+        for axis in retained.block.schema.point_domain.axes
     )
 
     # Re-committing the Area intentionally replaces the selection-derived
@@ -2389,8 +2389,8 @@ def test_history_transition_is_immediate_and_interactions_follow_indexed_front(
     assert histogram.history_lease is None
     immediate = session.signal_plane.current_dataset(roi_signal)
     assert all(
-        str(column.coordinate_id) != "zlc_data.primary-index"
-        for column in immediate.block.schema.point_table.columns
+        str(axis.axis_id) != "zlc_data.primary-index"
+        for axis in immediate.block.schema.point_domain.axes
     )
     _settle_panel_hosts(
         presenter,
@@ -2405,8 +2405,8 @@ def test_history_transition_is_immediate_and_interactions_follow_indexed_front(
     assert histogram.history_lease is None
     latest = session.signal_plane.current_dataset(roi_signal)
     assert all(
-        str(column.coordinate_id) != "zlc_data.primary-index"
-        for column in latest.block.schema.point_table.columns
+        str(axis.axis_id) != "zlc_data.primary-index"
+        for axis in latest.block.schema.point_domain.axes
     )
     for panel in (histogram, companion):
         accepted_input = _accepted(panel.port, "plot_input")
@@ -2416,8 +2416,8 @@ def test_history_transition_is_immediate_and_interactions_follow_indexed_front(
             accepted_input,
         )
         assert all(
-            str(column.coordinate_id) != "zlc_data.primary-index"
-            for column in accepted_snapshot.block.schema.point_table.columns
+            str(axis.axis_id) != "zlc_data.primary-index"
+            for axis in accepted_snapshot.block.schema.point_domain.axes
         )
     assert all(
         str(entry["label"]) != "source index"
@@ -3781,7 +3781,7 @@ def test_a_running_task_freezes_logic_identity_but_not_panels(
     )
     assert not presenter.update_panel_state(
         preview.panel_id,
-        {"semantic": {"fate:repeat": "reduce"}},
+        {"semantic": {"fate:repeat:locked": "reduce"}},
     )
     assert not presenter.update_panel_state(
         preview.panel_id,
@@ -3946,7 +3946,7 @@ def test_finite_repeat_mount_and_axis_change_never_materialize_on_owner(
     assert event is not None
     assert event.snapshot.block.values.shape[0] == 1
     assert event.canonical_schema is not None
-    assert event.canonical_schema.repeat_axis.size == 30
+    assert event.canonical_schema.repeat_domain.size == 30
     description = next(
         item
         for item in session.signal_plane.describe_signals()
@@ -3989,10 +3989,16 @@ def test_finite_repeat_mount_and_axis_change_never_materialize_on_owner(
     assert np.all(snapshot.expanded_validity()[:1])
     assert not np.any(snapshot.expanded_validity()[1:])
 
+    from zlc_plot import AxisRef
+    from zlc_plot.semantics import fate_field_name
+
+    repeat_key = fate_field_name(
+        AxisRef.repeat(str(event.canonical_schema.repeat_domain.axes[0].axis_id))
+    )
     repeat_row = next(
         field
         for field in binding.parameter_surface["semantic"]
-        if str(field["key"]) == "fate:repeat"
+        if str(field["key"]) == repeat_key
     )
     next_fate = next(
         value
@@ -4003,12 +4009,12 @@ def test_finite_repeat_mount_and_axis_change_never_materialize_on_owner(
     host = binding.host
     assert presenter.update_panel_state(
         binding.panel_id,
-        {"semantic": {"fate:repeat": next_fate}},
+        {"semantic": {repeat_key: next_fate}},
     )
     _settle_panel_hosts(
         presenter,
         lambda: binding.configuration is None
-        and binding.state.semantic.get("fate:repeat") == next_fate,
+        and binding.state.semantic.get(repeat_key) == next_fate,
     )
     assert binding.host is host
     assert binding.display_publication is publication
@@ -4044,10 +4050,9 @@ def test_partial_grid_points_mount_and_reproject_one_canonical_snapshot(
         DataBlock,
         DatasetRevision,
         DatasetSchema,
-        GridTopology,
+        DomainSpec,
         OwnedSnapshot,
-        PointColumn,
-        PointTable,
+        SCALAR_DOMAIN,
         StreamGenerationId,
         ValueSchema,
     )
@@ -4069,48 +4074,32 @@ def test_partial_grid_points_mount_and_reproject_one_canonical_snapshot(
     cell = ValueSchema.scalar(np.dtype("float64"), None)
     x_id = AxisId("grid.x")
     y_id = AxisId("grid.y")
+    x_axis = AxisSpec(x_id, "x", SCAN_POINT, 2, (0.0, 1.0))
+    y_axis = AxisSpec(y_id, "y", SCAN_POINT, 2, (0.0, 1.0))
     canonical = DatasetSchema(
-        repeat,
-        PointTable(
-            4,
-            (
-                PointColumn(
-                    x_id,
-                    "x",
-                    SCAN_POINT,
-                    PointColumn.NUMERIC,
-                    (0.0, 1.0, 0.0, 1.0),
-                ),
-                PointColumn(
-                    y_id,
-                    "y",
-                    SCAN_POINT,
-                    PointColumn.NUMERIC,
-                    (0.0, 0.0, 1.0, 1.0),
-                ),
-            ),
+        DomainSpec((1,), (repeat,), ((0,),)),
+        DomainSpec(
+            (4,),
+            (x_axis, y_axis),
+            ((0, 1, 0, 1), (0, 0, 1, 1)),
         ),
-        GridTopology(
-            (x_id, y_id),
-            ((0.0, 1.0), (0.0, 1.0)),
-            ((0, 0), (1, 0), (0, 1), (1, 1)),
-        ),
+        SCALAR_DOMAIN,
         cell,
     )
     session.signal_plane.begin_generation(node)
 
     def commit_point(index: int, measured: float) -> None:
-        point = PointColumn(
+        point = AxisSpec(
             AxisId("event.point"),
             "point",
             SCAN_POINT,
-            PointColumn.NUMERIC,
+            1,
             (0.0,),
         )
         event_schema = DatasetSchema(
-            repeat,
-            PointTable(1, (point,)),
-            None,
+            DomainSpec((1,), (repeat,), ((0,),)),
+            DomainSpec((1,), (point,), ((0,),)),
+            SCALAR_DOMAIN,
             cell,
         )
         block = DataBlock(
@@ -4141,8 +4130,7 @@ def test_partial_grid_points_mount_and_reproject_one_canonical_snapshot(
     front = session.signal_plane.freeze()
     value = front.value(signal)
     assert value is not None
-    assert value.snapshot.block.schema.grid_topology is None
-    assert value.snapshot.block.schema.point_table.row_count == 1
+    assert value.snapshot.block.schema.point_domain.size == 1
 
     binding = presenter.add_blank_panel("image")
     assert presenter.update_panel_state(binding.panel_id, {"signal": signal})
@@ -4153,7 +4141,7 @@ def test_partial_grid_points_mount_and_reproject_one_canonical_snapshot(
     )
     shown = _accepted(binding.port, "plot_input")
     snapshot = getattr(shown, "snapshot", shown)
-    assert snapshot.block.schema.grid_topology == canonical.grid_topology
+    assert snapshot.block.schema.point_domain == canonical.point_domain
     assert snapshot.block.values.shape == (1, 4, 1)
     validity = snapshot.expanded_validity()
     assert np.all(validity[:, :1])
@@ -4198,7 +4186,7 @@ def test_partial_grid_points_mount_and_reproject_one_canonical_snapshot(
     updated = _accepted(binding.port, "plot_input")
     updated_snapshot = getattr(updated, "snapshot", updated)
     assert binding.host is host
-    assert updated_snapshot.block.schema.grid_topology == canonical.grid_topology
+    assert updated_snapshot.block.schema.point_domain == canonical.point_domain
     assert np.all(updated_snapshot.expanded_validity()[:, :2])
     assert not np.any(updated_snapshot.expanded_validity()[:, 2:])
 
@@ -4870,7 +4858,7 @@ def test_restored_live_selector_answers_displayed_shot_before_plane_latest(
                 and original.host.initial_state[0] is not None
             ),
         )
-        y_axis, x_axis = value.snapshot.block.schema.cell_schema.data_axes
+        y_axis, x_axis = value.snapshot.block.schema.cell_domain.axes
         # A selection names the exact surface it was drawn on, scope
         # included: the image shows the latest frame, and the subject
         # freezes that into the frame coordinate a restore must carry.
@@ -4883,7 +4871,7 @@ def test_restored_live_selector_answers_displayed_shot_before_plane_latest(
                     str(x_axis.axis_id),
                     float(x_axis.coordinate_at(4)),
                     float(x_axis.coordinate_at(10)),
-                    domain="data",
+                    domain="cell_data",
                     coordinate_frame=(
                         None
                         if x_axis.coordinate_frame is None
@@ -4894,7 +4882,7 @@ def test_restored_live_selector_answers_displayed_shot_before_plane_latest(
                     str(y_axis.axis_id),
                     float(y_axis.coordinate_at(3)),
                     float(y_axis.coordinate_at(8)),
-                    domain="data",
+                    domain="cell_data",
                     coordinate_frame=(
                         None
                         if y_axis.coordinate_frame is None
@@ -4906,7 +4894,6 @@ def test_restored_live_selector_answers_displayed_shot_before_plane_latest(
                 FacetCondition(str(ref.axis_id), coordinate, ref.domain.value)
                 for ref, coordinate in subject.scope
             ),
-            repeat_index=subject.repeat_index,
         )
         restored_state = replace(
             original.state,
@@ -5233,8 +5220,7 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
         AxisId,
         AxisSpec,
         DatasetSchema,
-        PointColumn,
-        PointTable,
+        DomainSpec,
         REPEAT,
         ValidityContract,
         ValueSchema,
@@ -5257,26 +5243,29 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
     cells = tuple(np.ndindex(*dimensions))
     repeat_id = AxisId("survival.repeat")
     event_repeat = AxisSpec(repeat_id, "repeat", REPEAT, 1, (0,))
-    # Frame survival publishes its pairs as a READOUT_EVENT point column --
+    # Frame survival publishes its pairs as a READOUT_EVENT Point axis --
     # a choice of sub-measurement, as a camera's frames are -- so the scan
     # folds them in as its outermost dimension, ahead of the plan's axes.
-    pair = PointColumn(
+    pair = AxisSpec(
         AxisId("survival.pair"),
         "pair",
         READOUT_EVENT,
-        PointColumn.NUMERIC,
+        3,
         (0, 1, 2),
         coordinate_labels=("0-1", "0-2", "1-2"),
     )
     site = AxisSpec(AxisId("survival.site"), "site", SITE, 5, tuple(range(5)))
-    cell_schema = ValueSchema(
-        (site,),
+    cell_domain = DomainSpec((site.size,), (site,))
+    value_schema = ValueSchema(
         ValidityContract.components(site.axis_id),
         np.dtype("<f8"),
         "1",
     )
     event_schema = DatasetSchema(
-        event_repeat, PointTable(3, (pair,)), None, cell_schema
+        DomainSpec((1,), (event_repeat,), ((0,),)),
+        DomainSpec((3,), (pair,), ((0, 1, 2),)),
+        cell_domain,
+        value_schema,
     )
     canonical = scan_dataset_schema(
         event_schema,
@@ -5307,8 +5296,8 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
                 declaration,
                 event,
                 DatasetCoverage(
-                    event_schema.point_table.row_count,
-                    canonical.repeat_axis.size * canonical.point_table.row_count,
+                    event_schema.point_domain.size,
+                    canonical.repeat_domain.size * canonical.point_domain.size,
                 ),
                 canonical_schema=canonical,
                 cell_origin=(0, 0),
@@ -5318,12 +5307,12 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
     publication = session.signal_plane.freeze().publication(signal)
     expected = schema_structure(canonical)
     assert expected == (
-        (("repeat", 2),),
+        (("repeat", 1), ("visit", 2)),
         (
-            ("survival.pair", 3),
-            ("scan.field.x", 65),
-            ("scan.field.y", 2),
-            ("scan.field.z", 2),
+            ("pair", 3),
+            ("field.x", 65),
+            ("field.y", 2),
+            ("field.z", 2),
         ),
         (("site", 5),),
     )
@@ -5372,14 +5361,17 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
     map_site = AxisSpec(
         AxisId("map.site"), "site", SITE, 35, tuple(range(35))
     )
-    map_cell_schema = ValueSchema(
-        (map_site,),
+    map_cell_domain = DomainSpec((map_site.size,), (map_site,))
+    map_value_schema = ValueSchema(
         ValidityContract.components(map_site.axis_id),
         np.dtype("<f8"),
         "1",
     )
     map_event_schema = DatasetSchema(
-        event_repeat, PointTable(3, (pair,)), None, map_cell_schema
+        DomainSpec((1,), (event_repeat,), ((0,),)),
+        DomainSpec((3,), (pair,), ((0, 1, 2),)),
+        map_cell_domain,
+        map_value_schema,
     )
     map_canonical = scan_dataset_schema(
         map_event_schema,
@@ -5409,9 +5401,9 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
                 declaration,
                 map_event,
                 DatasetCoverage(
-                    map_event_schema.point_table.row_count,
-                    map_canonical.repeat_axis.size
-                    * map_canonical.point_table.row_count,
+                    map_event_schema.point_domain.size,
+                    map_canonical.repeat_domain.size
+                    * map_canonical.point_domain.size,
                 ),
                 canonical_schema=map_canonical,
                 cell_origin=(0, 0),
@@ -5438,10 +5430,10 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
     from zlc_plot.semantics import fate_field_name
 
     scan_fates = {
-        fate_field_name(AxisRef.point_dimension("scan.field.y")): "y",
-        fate_field_name(AxisRef.point_dimension("scan.field.z")): "x",
-        fate_field_name(AxisRef.point_dimension("survival.pair")): "reduce",
-        fate_field_name(AxisRef.data("map.site")): "reduce",
+        fate_field_name(AxisRef.point("scan.field.y")): "y",
+        fate_field_name(AxisRef.point("scan.field.z")): "x",
+        fate_field_name(AxisRef.point("survival.pair")): "reduce",
+        fate_field_name(AxisRef.cell_data("map.site")): "reduce",
     }
     offered_fates = {
         str(entry["key"]): tuple(
@@ -5469,9 +5461,9 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
             plot_kind="image",
             selector_kind="area",
             ranges=(
-                SelectionRange("map.site", 0.0, 10.0, domain="data"),
+                SelectionRange("map.site", 0.0, 10.0, domain="cell_data"),
                 SelectionRange(
-                    "survival.pair", 0.0, 2.0, domain="point_dimension"
+                    "survival.pair", 0.0, 2.0, domain="point"
                 ),
             ),
         )),
@@ -5487,10 +5479,10 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
         and mapped.accepted_display is not None,
     )
     scan_description = mapped.accepted_display
-    assert scan_description.semantics.x == AxisRef.point_dimension(
+    assert scan_description.semantics.x == AxisRef.point(
         "scan.field.z"
     )
-    assert scan_description.semantics.y == AxisRef.point_dimension(
+    assert scan_description.semantics.y == AxisRef.point(
         "scan.field.y"
     )
     assert all(
@@ -5511,13 +5503,13 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
         == map_canonical.fingerprint
     )
     live_description = _operation_value(mapped.host.describe_display())
-    assert live_description.semantics.facet == AxisRef.point_dimension(
+    assert live_description.semantics.facet == AxisRef.point(
         "scan.field.x"
     )
-    assert live_description.semantics.x == AxisRef.point_dimension(
+    assert live_description.semantics.x == AxisRef.point(
         "scan.field.z"
     )
-    assert live_description.semantics.y == AxisRef.point_dimension(
+    assert live_description.semantics.y == AxisRef.point(
         "scan.field.y"
     )
     assert (

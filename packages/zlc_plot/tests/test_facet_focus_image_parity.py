@@ -21,51 +21,55 @@ import numpy as np
 import pytest
 
 from data_factory import (
-    Axis,
-    DatasetSchema,
-    DatasetSnapshot,
-    PointTable,
-    PointTopology,
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
 )
-from zlc_data import SITE, SPATIAL_X, SPATIAL_Y, ValidityContract, ValueSchema
+from zlc_data import (
+    DatasetSchema,
+    OwnedSnapshot,
+    REPEAT,
+    SITE,
+    SPATIAL_X,
+    SPATIAL_Y,
+    DomainSpec,
+    ValidityContract,
+    ValueSchema,
+)
 from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, ImagePlot, PlotSession
 from zlc_plot._kinds.image import default_spec as image_default
 from zlc_plot.config import DEFAULTS
 from zlc_plot.selectors import CrosshairPoint, NumericRange
 
-
 def _frame_axes() -> tuple:
     return (
-        Axis.create(
+        axis(
             "sy", values=tuple(float(v) for v in range(40)), role=SPATIAL_Y
         ),
-        Axis.create(
+        axis(
             "sx", values=tuple(float(v) for v in range(60)), role=SPATIAL_X
         ),
     )
 
-
-def _frames_scan_snapshot(*, repeats: int = 1) -> DatasetSnapshot:
+def _frames_scan_snapshot(*, repeats: int = 1) -> OwnedSnapshot:
     """(repeats, 3 bias points, y, x) frames under a declared scan topology."""
 
-    table = PointTable.from_columns({"bias": [-1.0, 0.0, 1.0]})
-    outer = Axis.create("bias", values=[-1.0, 0.0, 1.0])
-    topology = PointTopology.from_cartesian((outer,), point_table=table)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=repeats),
+    table = mapped_domain_from_columns({"bias": [-1.0, 0.0, 1.0]})
+    schema = make_dataset_schema(
+        repeat_domain(size=repeats),
         table,
-        data_axes=_frame_axes(),
-        point_topology=topology,
+        cell_axes=_frame_axes(),
         dtype=np.float64,
     )
     frame = np.add.outer(np.arange(40.0), np.arange(60.0))
     values = np.broadcast_to(frame, (repeats, 3, 40, 60)).copy()
     values += np.arange(3.0)[None, :, None, None]
-    return DatasetSnapshot(schema, values, revision=1)
-
+    return make_snapshot(schema, values, revision=1)
 
 def _occupancy_overlay(
-    snapshot: DatasetSnapshot,
+    snapshot: OwnedSnapshot,
     occupied: np.ndarray,
     valid: np.ndarray,
     *,
@@ -74,13 +78,12 @@ def _occupancy_overlay(
     from zlc_plot.primitives import ImagePointOverlay
 
     source = snapshot.block.schema
-    site = Axis.create("site", size=2, role=SITE)
+    site = axis("site", size=2, role=SITE)
     schema = DatasetSchema(
-        source.repeat_axis,
-        source.point_table,
-        source.grid_topology,
+        source.repeat_domain,
+        source.point_domain,
+        DomainSpec((2,), (site,)),
         ValueSchema(
-            (site,),
             ValidityContract.components(site.axis_id),
             np.dtype(np.bool_),
             "1",
@@ -96,7 +99,7 @@ def _occupancy_overlay(
         coordinates=((10.0, 12.0), (30.0, 24.0)),
         revision=1,
         point_ids=("s0", "s1"),
-        status=DatasetSnapshot(
+        status=make_snapshot(
             schema,
             np.asarray(occupied, dtype=np.bool_),
             revision=1,
@@ -104,70 +107,54 @@ def _occupancy_overlay(
         ),
     )
 
-
-def _single_frame_snapshot() -> DatasetSnapshot:
+def _single_frame_snapshot() -> OwnedSnapshot:
     """One point, one frame: the standalone twin of one focused facet cell."""
 
-    table = PointTable.from_columns({"bias": [0.0]})
-    outer = Axis.create("bias", values=[0.0])
-    topology = PointTopology.from_cartesian((outer,), point_table=table)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
+    table = mapped_domain_from_columns({"bias": [0.0]})
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
         table,
-        data_axes=_frame_axes(),
-        point_topology=topology,
+        cell_axes=_frame_axes(),
         dtype=np.float64,
     )
     frame = np.add.outer(np.arange(40.0), np.arange(60.0))
-    return DatasetSnapshot(schema, frame[None, None], revision=1)
+    return make_snapshot(schema, frame[None, None], revision=1)
 
-
-def _grid_frames_snapshot() -> DatasetSnapshot:
-    table = PointTable.from_columns(
+def _grid_frames_snapshot() -> OwnedSnapshot:
+    table = mapped_domain_from_columns(
         {
             "bias": [-1.0, -1.0, 1.0, 1.0],
             "grad": [10.0, 20.0, 10.0, 20.0],
         }
     )
-    topology = PointTopology.from_cartesian(
-        (
-            Axis.create("bias", values=[-1.0, 1.0]),
-            Axis.create("grad", values=[10.0, 20.0]),
-        ),
-        point_table=table,
-    )
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
         table,
-        data_axes=_frame_axes(),
-        point_topology=topology,
+        cell_axes=_frame_axes(),
         dtype=np.float64,
     )
     values = np.zeros((1, 4, 40, 60), dtype=np.float64)
-    return DatasetSnapshot(schema, values, revision=1)
+    return make_snapshot(schema, values, revision=1)
 
-
-def _cycle_frames_on_point_axis_snapshot() -> DatasetSnapshot:
+def _cycle_frames_on_point_axis_snapshot() -> OwnedSnapshot:
     """(1, 3 frame-points, y, x): a camera cycle publishing frames as points."""
 
-    table = PointTable.from_columns({"frame": [0.0, 1.0, 2.0]})
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
+    table = mapped_domain_from_columns({"frame": [0.0, 1.0, 2.0]})
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
         table,
-        data_axes=_frame_axes(),
+        cell_axes=_frame_axes(),
         dtype=np.float64,
     )
     values = np.stack(
         [np.full((40, 60), float(v)) for v in range(3)], axis=0
     )[None]
-    return DatasetSnapshot(schema, values, revision=1)
-
+    return make_snapshot(schema, values, revision=1)
 
 _FACET_SPEC = FacetGridPlot(
-    AxisRef.point_dimension("bias"),
-    ImagePlot(AxisRef.data("sx"), AxisRef.data("sy")),
+    AxisRef.point("bias"),
+    ImagePlot(AxisRef.cell_data("sx"), AxisRef.cell_data("sy")),
 )
-
 
 def test_focused_image_cell_matches_the_standalone_image_surface() -> None:
     standalone = PlotSession(
@@ -255,7 +242,6 @@ def test_focused_image_cell_matches_the_standalone_image_surface() -> None:
         standalone.close()
         facet.close()
 
-
 def test_focused_cell_colour_limit_drag_moves_the_cell_clim() -> None:
     """A driven press/move/release on the focused cell's rail must land.
 
@@ -305,7 +291,6 @@ def test_focused_cell_colour_limit_drag_moves_the_cell_clim() -> None:
     finally:
         session.close()
 
-
 def test_focused_cell_crosshair_keeps_its_value_rail() -> None:
     """The crosshair's sample rail is a fact of the IMAGE, so a cell has it."""
 
@@ -330,7 +315,6 @@ def test_focused_cell_crosshair_keeps_its_value_rail() -> None:
     finally:
         session.close()
 
-
 def test_overview_slots_are_shaped_for_what_the_renderer_draws() -> None:
     """The layout's declared cell aspect IS the aspect the cell is drawn at.
 
@@ -354,7 +338,6 @@ def test_overview_slots_are_shaped_for_what_the_renderer_draws() -> None:
             ), (declared, width, height)
     finally:
         session.close()
-
 
 def test_overview_view_limits_apply_to_every_visible_cell() -> None:
     """An overview shows N views of ONE picture; zooming one is not a view.
@@ -388,7 +371,7 @@ def test_overview_view_limits_apply_to_every_visible_cell() -> None:
     # the image half of this passing while the general rule was still broken.
     curves = PlotSession(
         _frames_scan_snapshot(repeats=3),
-        FacetGridPlot(AxisRef.repeat(), CurvePlot(AxisRef.point_dimension("bias"))),
+        FacetGridPlot(AxisRef.repeat("repeat"), CurvePlot(AxisRef.point("bias"))),
         size="4x4",
     )
     try:
@@ -404,7 +387,6 @@ def test_overview_view_limits_apply_to_every_visible_cell() -> None:
             assert tuple(map(float, axis.get_ylim())) == (10.0, 40.0)
     finally:
         curves.close()
-
 
 def test_facet_image_cells_carry_the_point_overlay() -> None:
     """The site overlay is a fact of the IMAGE, so a grid of images shows it.
@@ -432,7 +414,6 @@ def test_facet_image_cells_carry_the_point_overlay() -> None:
     finally:
         session.close()
 
-
 def test_overview_destroys_the_focused_chrome_again() -> None:
     session = PlotSession(_frames_scan_snapshot(), _FACET_SPEC, size="4x4")
     try:
@@ -456,7 +437,6 @@ def test_overview_destroys_the_focused_chrome_again() -> None:
         ))) < 0.5
     finally:
         session.close()
-
 
 def test_direct_focus_switch_leaves_no_chrome_ghost() -> None:
     """Switching the focus between two cells rebuilds the side chrome.
@@ -498,7 +478,6 @@ def test_direct_focus_switch_leaves_no_chrome_ghost() -> None:
     finally:
         session.close()
 
-
 def test_color_limit_pointer_gates_on_the_cell_spec() -> None:
     """The focused distribution must own the color-limit drag: the gesture
     gate reads the SEMANTIC spec (the cell), not the outer FacetGrid."""
@@ -520,8 +499,8 @@ def test_color_limit_pointer_gates_on_the_cell_spec() -> None:
     curve_facet = PlotSession(
         _frames_scan_snapshot(repeats=3),
         FacetGridPlot(
-            AxisRef.repeat(),
-            CurvePlot(AxisRef.point_dimension("bias")),
+            AxisRef.repeat("repeat"),
+            CurvePlot(AxisRef.point("bias")),
         ),
         size="4x4",
     )
@@ -533,7 +512,6 @@ def test_color_limit_pointer_gates_on_the_cell_spec() -> None:
         )
     finally:
         curve_facet.close()
-
 
 def test_image_admits_scans_of_frames_and_builds() -> None:
     """admits == buildable: the projections image.default_spec admits must
@@ -551,7 +529,6 @@ def test_image_admits_scans_of_frames_and_builds() -> None:
     finally:
         session.close()
 
-
 def test_frames_on_point_axis_cycle_draws_as_a_standalone_image() -> None:
     cycle = _cycle_frames_on_point_axis_snapshot()
     spec = image_default(cycle.block.schema)
@@ -567,7 +544,6 @@ def test_frames_on_point_axis_cycle_draws_as_a_standalone_image() -> None:
     finally:
         session.close()
 
-
 def test_a_scoped_image_draws_the_point_it_shows() -> None:
     """A scoped surface selects the same exact leading cell for its rings."""
 
@@ -580,9 +556,9 @@ def test_a_scoped_image_draws_the_point_it_shows() -> None:
     scoped = PlotSession(
         snapshot,
         ImagePlot(
-            AxisRef.data("sx"),
-            AxisRef.data("sy"),
-            scope=((AxisRef.point_dimension("bias"), 0.0),),
+            AxisRef.cell_data("sx"),
+            AxisRef.cell_data("sy"),
+            scope=((AxisRef.point("bias"), 0.0),),
         ),
         size="4x4",
     )
@@ -626,7 +602,6 @@ def test_a_scoped_image_draws_the_point_it_shows() -> None:
     finally:
         scoped.close()
 
-
 def test_overlay_geometry_refuses_a_reordered_same_count_status_axis() -> None:
     from zlc_plot import (
         image_point_overlay_from_signal,
@@ -641,26 +616,25 @@ def test_overlay_geometry_refuses_a_reordered_same_count_status_axis() -> None:
     )
     status = overlay.status
     assert status is not None
-    status_axis = status.block.schema.cell_schema.data_axes[0]
+    status_axis = status.block.schema.cell_domain.axes[0]
     geometry = image_point_overlay_geometry(
         image,
         overlay.coordinates,
         overlay.point_ids,
         status_axis=status_axis,
     )
-    reversed_axis = Axis.create("site", values=(1, 0), role=SITE)
+    reversed_axis = axis("site", values=(1, 0), role=SITE)
     bad_schema = DatasetSchema(
-        status.block.schema.repeat_axis,
-        status.block.schema.point_table,
-        status.block.schema.grid_topology,
+        status.block.schema.repeat_domain,
+        status.block.schema.point_domain,
+        DomainSpec((2,), (reversed_axis,)),
         ValueSchema(
-            (reversed_axis,),
             ValidityContract.components(reversed_axis.axis_id),
             np.dtype(np.bool_),
             "1",
         ),
     )
-    bad = DatasetSnapshot(
+    bad = make_snapshot(
         bad_schema,
         status.block.values,
         revision=1,
@@ -692,23 +666,22 @@ def test_overlay_geometry_refuses_a_reordered_same_count_status_axis() -> None:
                 revision=1,
             )
 
-
 def test_single_pixel_overlay_axis_never_invents_an_affine_step() -> None:
     from zlc_plot import image_point_overlay_geometry
 
-    y_axis = Axis.create("sy", values=(7.0,), role=SPATIAL_Y)
-    x_axis = Axis.create("sx", values=(5.0,), role=SPATIAL_X)
-    image = DatasetSnapshot(
-        DatasetSchema.create(
-            Axis.create("repeat", size=1),
-            PointTable.from_columns({"point": [0.0]}),
-            data_axes=(y_axis, x_axis),
+    y_axis = axis("sy", values=(7.0,), role=SPATIAL_Y)
+    x_axis = axis("sx", values=(5.0,), role=SPATIAL_X)
+    image = make_snapshot(
+        make_dataset_schema(
+            repeat_domain(size=1),
+            mapped_domain_from_columns({"point": [0.0]}),
+            cell_axes=(y_axis, x_axis),
             dtype=np.float64,
         ),
         np.zeros((1, 1, 1, 1), dtype=np.float64),
         revision=1,
     )
-    status_axis = Axis.create("site", size=1, role=SITE)
+    status_axis = axis("site", size=1, role=SITE)
     with pytest.raises(ValueError, match="single-pixel"):
         image_point_overlay_geometry(
             image,
@@ -717,7 +690,6 @@ def test_single_pixel_overlay_axis_never_invents_an_affine_step() -> None:
             status_axis=status_axis,
             coordinates_are_indices=True,
         )
-
 
 def _drawn_statuses(session: PlotSession, key: str) -> tuple[str, ...]:
     """Which judgement one painted surface's rings actually say."""
@@ -741,7 +713,6 @@ def _drawn_statuses(session: PlotSession, key: str) -> tuple[str, ...]:
         by_colour[tuple(round(float(value), 5) for value in colour)].name
         for colour in collection.get_edgecolors()
     )
-
 
 def test_the_rings_a_surface_draws_are_the_ones_it_pinned_that_axis_to() -> None:
     """Only an exact repeat/point cell owns a site judgement.
@@ -777,26 +748,26 @@ def test_the_rings_a_surface_draws_are_the_ones_it_pinned_that_axis_to() -> None
     cases = (
         (
             "pooling both leading axes has no single-shot judgement",
-            ImagePlot(AxisRef.data("sx"), AxisRef.data("sy")),
+            ImagePlot(AxisRef.cell_data("sx"), AxisRef.cell_data("sy")),
             {"image:points": unknown},
         ),
         (
             "scoping only point still pools repeats",
             ImagePlot(
-                AxisRef.data("sx"),
-                AxisRef.data("sy"),
-                scope=((AxisRef.point_dimension("bias"), 0.0),),
+                AxisRef.cell_data("sx"),
+                AxisRef.cell_data("sy"),
+                scope=((AxisRef.point("bias"), 0.0),),
             ),
             {"image:points": unknown},
         ),
         (
             "scoping repeat and point selects the exact cell",
             ImagePlot(
-                AxisRef.data("sx"),
-                AxisRef.data("sy"),
+                AxisRef.cell_data("sx"),
+                AxisRef.cell_data("sy"),
                 scope=(
-                    (AxisRef.repeat(), 0.0),
-                    (AxisRef.point_dimension("bias"), 1.0),
+                    (AxisRef.repeat("repeat"), 0.0),
+                    (AxisRef.point("bias"), 1.0),
                 ),
             ),
             {"image:points": ("INVALID", "OCCUPIED")},
@@ -804,9 +775,9 @@ def test_the_rings_a_surface_draws_are_the_ones_it_pinned_that_axis_to() -> None
         (
             "point facets with repeat scoped draw each point cell",
             FacetGridPlot(
-                AxisRef.point_dimension("bias"),
-                ImagePlot(AxisRef.data("sx"), AxisRef.data("sy")),
-                scope=((AxisRef.repeat(), 0.0),),
+                AxisRef.point("bias"),
+                ImagePlot(AxisRef.cell_data("sx"), AxisRef.cell_data("sy")),
+                scope=((AxisRef.repeat("repeat"), 0.0),),
             ),
             {
                 "facet:0:points": ("OCCUPIED", "EMPTY"),
@@ -817,9 +788,9 @@ def test_the_rings_a_surface_draws_are_the_ones_it_pinned_that_axis_to() -> None
         (
             "repeat facets with point scoped draw each repeat cell",
             FacetGridPlot(
-                AxisRef.repeat(),
-                ImagePlot(AxisRef.data("sx"), AxisRef.data("sy")),
-                scope=((AxisRef.point_dimension("bias"), -1.0),),
+                AxisRef.repeat("repeat"),
+                ImagePlot(AxisRef.cell_data("sx"), AxisRef.cell_data("sy")),
+                scope=((AxisRef.point("bias"), -1.0),),
             ),
             {
                 "facet:0:points": ("OCCUPIED", "EMPTY"),
@@ -829,11 +800,11 @@ def test_the_rings_a_surface_draws_are_the_ones_it_pinned_that_axis_to() -> None
         (
             "a future invalid canonical cell is not a measured INVALID site",
             ImagePlot(
-                AxisRef.data("sx"),
-                AxisRef.data("sy"),
+                AxisRef.cell_data("sx"),
+                AxisRef.cell_data("sy"),
                 scope=(
-                    (AxisRef.repeat(), 1.0),
-                    (AxisRef.point_dimension("bias"), 1.0),
+                    (AxisRef.repeat("repeat"), 1.0),
+                    (AxisRef.point("bias"), 1.0),
                 ),
             ),
             {"image:points": unknown},
@@ -849,8 +820,7 @@ def test_the_rings_a_surface_draws_are_the_ones_it_pinned_that_axis_to() -> None
         finally:
             session.close()
 
-
-def test_multidimensional_grid_status_requires_every_point_dimension_to_resolve() -> None:
+def test_multidimensional_grid_status_requires_every_point_axis_to_resolve() -> None:
     snapshot = _grid_frames_snapshot()
     overlay = _occupancy_overlay(
         snapshot,
@@ -860,17 +830,17 @@ def test_multidimensional_grid_status_requires_every_point_dimension_to_resolve(
         valid=np.ones((1, 4, 2), dtype=np.bool_),
     )
     exact = FacetGridPlot(
-        AxisRef.point_dimension("bias"),
-        ImagePlot(AxisRef.data("sx"), AxisRef.data("sy")),
+        AxisRef.point("bias"),
+        ImagePlot(AxisRef.cell_data("sx"), AxisRef.cell_data("sy")),
         scope=(
-            (AxisRef.repeat(), 0.0),
-            (AxisRef.point_dimension("grad"), 20.0),
+            (AxisRef.repeat("repeat"), 0.0),
+            (AxisRef.point("grad"), 20.0),
         ),
     )
     pooled = FacetGridPlot(
-        AxisRef.point_dimension("bias"),
-        ImagePlot(AxisRef.data("sx"), AxisRef.data("sy")),
-        scope=((AxisRef.repeat(), 0.0),),
+        AxisRef.point("bias"),
+        ImagePlot(AxisRef.cell_data("sx"), AxisRef.cell_data("sy")),
+        scope=((AxisRef.repeat("repeat"), 0.0),),
     )
     cases = (
         (

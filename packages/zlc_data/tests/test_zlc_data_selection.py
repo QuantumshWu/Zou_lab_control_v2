@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from zlc_data.axis import AxisId, AxisSpec, REPEAT, SITE, SPATIAL_X
-from zlc_data.schema import DatasetSchema, PointColumn, PointTable, ValueSchema
+from zlc_data.schema import DatasetSchema, DomainSpec, SCALAR_DOMAIN, ValueSchema
 from zlc_data.snapshot_projection import axis_catalog, selection_indices, value_selection
 from zlc_data.validity import ValidityContract
 
@@ -63,21 +63,16 @@ def test_a_coordinate_selection_off_an_implicit_axis_is_refused() -> None:
 
 def test_value_selection_resolves_axis_id_and_text_coordinate() -> None:
     site_id = AxisId("measurement.site")
+    repeat = AxisSpec(AxisId("measurement.repeat"), "repeat", REPEAT, 1, (0,))
+    site = AxisSpec(site_id, "site", SITE, 2, ("dark", "bright"))
     schema = DatasetSchema(
-        AxisSpec(AxisId("measurement.repeat"), "repeat", REPEAT, 1, (0,)),
-        PointTable(
-            3,
-            (
-                PointColumn(
-                    site_id,
-                    "site",
-                    SITE,
-                    PointColumn.TEXT,
-                    ("dark", "bright", "dark"),
-                ),
-            ),
+        DomainSpec((1,), (repeat,), ((0,),)),
+        DomainSpec(
+            (3,),
+            (site,),
+            ((0, 1, 0),),
         ),
-        None,
+        SCALAR_DOMAIN,
         ValueSchema.scalar(np.dtype("<f4"), "count"),
     )
 
@@ -88,23 +83,13 @@ def test_value_selection_resolves_axis_id_and_text_coordinate() -> None:
 
 
 def test_value_selection_rejects_non_unique_human_axis_name() -> None:
+    repeat = AxisSpec(AxisId("measurement.repeat"), "shared", REPEAT, 2, (0, 1))
+    x = AxisSpec(AxisId("camera.x"), "shared", SPATIAL_X, 2, (0, 1))
     schema = DatasetSchema(
-        AxisSpec(AxisId("measurement.repeat"), "shared", REPEAT, 2, (0, 1)),
-        PointTable(1),
-        None,
-        ValueSchema(
-            (
-                AxisSpec(
-                    AxisId("camera.x"),
-                    "shared",
-                    SPATIAL_X,
-                    2,
-                    (0, 1),
-                ),
-            ),
-            ValidityContract.value(),
-            np.dtype("<f4"),
-        ),
+        DomainSpec((2,), (repeat,), ((0, 1),)),
+        DomainSpec((1,), (), ()),
+        DomainSpec((2,), (x,)),
+        ValueSchema(ValidityContract.value(), np.dtype("<f4")),
     )
 
     with pytest.raises(ValueError, match="not uniquely present"):
@@ -133,22 +118,19 @@ def test_numeric_coordinate_range_skips_missing_coordinates() -> None:
 
 def test_axis_catalog_preserves_point_coordinate_labels() -> None:
     site_id = AxisId("measurement.site")
+    repeat = AxisSpec(AxisId("measurement.repeat"), "repeat", REPEAT, 1, (0,))
+    site = AxisSpec(
+        site_id,
+        "site",
+        SITE,
+        2,
+        ("site-a", "site-b"),
+        coordinate_labels=("A", "B"),
+    )
     schema = DatasetSchema(
-        AxisSpec(AxisId("measurement.repeat"), "repeat", REPEAT, 1, (0,)),
-        PointTable(
-            2,
-            (
-                PointColumn(
-                    site_id,
-                    "site",
-                    SITE,
-                    PointColumn.TEXT,
-                    ("site-a", "site-b"),
-                    coordinate_labels=("A", "B"),
-                ),
-            ),
-        ),
-        None,
+        DomainSpec((1,), (repeat,), ((0,),)),
+        DomainSpec((2,), (site,), ((0, 1),)),
+        SCALAR_DOMAIN,
         ValueSchema.scalar(np.dtype("<f4"), "count"),
     )
 

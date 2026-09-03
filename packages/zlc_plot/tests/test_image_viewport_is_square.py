@@ -6,35 +6,33 @@ import numpy as np
 import pytest
 
 from data_factory import (
-    Axis,
-    DatasetSchema,
-    DatasetSnapshot,
-    PointTable,
-    PointTopology,
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
 )
+from zlc_data import OwnedSnapshot, REPEAT, SPATIAL_X, SPATIAL_Y
 from zlc_plot import AxisRef, ImagePlot, PlotSession
 from zlc_plot.selectors import NumericRange, RectangleRange
 
-
-def _square_field_snapshot() -> DatasetSnapshot:
+def _square_field_snapshot() -> OwnedSnapshot:
     """Same pitch on both axes in the same unit: a camera frame's shape."""
 
     x = np.arange(64, dtype=float)
     y = np.arange(48, dtype=float)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"sample": [0.0]}),
-        data_axes=(
-            Axis.create("x", values=x, canonical_unit="m"),
-            Axis.create("y", values=y, canonical_unit="m"),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"sample": [0.0]}),
+        cell_axes=(
+            axis("x", values=x, unit="m", role=SPATIAL_X),
+            axis("y", values=y, unit="m", role=SPATIAL_Y),
         ),
         dtype=np.float64,
-        canonical_unit="1",
-        generation="square-viewport",
+        value_unit="1",
     )
     values = np.zeros((1, 1, x.size, y.size), dtype=float)
-    return DatasetSnapshot(schema, values, revision=0)
-
+    return make_snapshot(schema, values, revision=0)
 
 def _samples(session, viewport):
     snapped = session._image_viewport_on_pixel_grid(viewport)
@@ -51,13 +49,12 @@ def _samples(session, viewport):
         assert abs(counts[-1] - round(counts[-1])) < 1e-6, counts
     return counts
 
-
 def test_a_snapped_viewport_is_square_in_cell_units() -> None:
     """Every zoom keeps equal whole-cell spans inside the square frame."""
 
     session = PlotSession(
         _square_field_snapshot(),
-        ImagePlot(AxisRef.data("x"), AxisRef.data("y")),
+        ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y")),
     )
     try:
         for low_x, high_x, low_y, high_y in (
@@ -81,32 +78,26 @@ def test_a_snapped_viewport_is_square_in_cell_units() -> None:
     finally:
         session.close()
 
-
 def test_unequal_scan_steps_still_draw_square_cells_and_keep_the_zoom_box() -> None:
     short = np.linspace(0.0025, 0.0075, 50)
     long = np.linspace(0.01, 0.03, 50)
-    short_axis = Axis.create("short", values=short, canonical_unit="s")
-    long_axis = Axis.create("long", values=long, canonical_unit="s")
-    point_table = PointTable.from_columns(
+    point_domain = mapped_domain_from_columns(
         {
             "short": np.tile(short, long.size),
             "long": np.repeat(long, short.size),
-        }
+        },
+        units={"short": "s", "long": "s"},
     )
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        point_table,
-        point_topology=PointTopology.from_cartesian(
-            (long_axis, short_axis), point_table=point_table
-        ),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        point_domain,
         dtype=np.float64,
-        generation="unequal-scan-step-image",
     )
     session = PlotSession(
-        DatasetSnapshot(schema, np.zeros((1, 2500)), 0),
+        make_snapshot(schema, np.zeros((1, 2500)), 0),
         ImagePlot(
-            AxisRef.point_dimension("short"),
-            AxisRef.point_dimension("long"),
+            AxisRef.point("short"),
+            AxisRef.point("long"),
         ),
     )
     try:
@@ -130,7 +121,6 @@ def test_unequal_scan_steps_still_draw_square_cells_and_keep_the_zoom_box() -> N
     finally:
         session.close()
 
-
 def test_the_snap_still_contains_what_was_asked_for() -> None:
     """Growing to square never loses part of the requested rectangle.
 
@@ -140,7 +130,7 @@ def test_the_snap_still_contains_what_was_asked_for() -> None:
 
     session = PlotSession(
         _square_field_snapshot(),
-        ImagePlot(AxisRef.data("x"), AxisRef.data("y")),
+        ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y")),
     )
     try:
         for low_x, high_x, low_y, high_y in (

@@ -19,13 +19,13 @@ import numpy as np
 import pytest
 
 from data_factory import (
-    Axis,
-    DatasetSchema,
-    DatasetSnapshot,
-    PointTable,
-    PointTopology,
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
 )
-from zlc_data import AxisId
+from zlc_data import REPEAT, SITE
 from zlc_plot import AxisRef, FacetGridPlot, ImagePlot, PlotSession
 from zlc_plot.specs import RenderEffect
 from zlc_plot._height3d_raster import (
@@ -41,25 +41,19 @@ from zlc_plot.selectors import (
 
 MAX_STRESS_RENDER_SECONDS = 0.5
 
-
 def _scan_snapshot(
     side: int = 10, *, repeats: int = 4, revision: int = 1, seed: int = 7
 ):
     rows = side * side
     cells = [(i % side, i // side) for i in range(rows)]
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=repeats),
-        PointTable.from_columns({
+    schema = make_dataset_schema(
+        repeat_domain(size=repeats),
+        mapped_domain_from_columns({
             "ax": np.asarray([float(c[0]) for c in cells]),
             "ay": np.asarray([float(c[1]) for c in cells]),
         }),
-        data_axes=(Axis.create("site", values=[0.0, 1.0]),),
+        cell_axes=(axis("site", values=[0.0, 1.0], role=SITE),),
         dtype=np.float64,
-        point_topology=PointTopology(
-            (AxisId("ax"), AxisId("ay")),
-            (tuple(float(i) for i in range(side)),) * 2,
-            tuple(cells),
-        ),
     )
     rng = np.random.default_rng(seed)
     xx, yy = np.meshgrid(np.arange(side), np.arange(side))
@@ -69,14 +63,12 @@ def _scan_snapshot(
     values = profile.reshape(-1)[None, :, None] + rng.normal(
         scale=0.05, size=(repeats, rows, 2)
     )
-    return DatasetSnapshot(schema, values, revision=revision)
-
+    return make_snapshot(schema, values, revision=revision)
 
 def _flat_table(*rgb: float) -> np.ndarray:
     """One colour for every value -- what a constant colour plane said."""
 
     return np.tile(np.asarray(rgb, dtype=np.float32), (256, 1))
-
 
 def _ramp_table() -> np.ndarray:
     """Grey by value -- what repeating the normalised height said."""
@@ -84,15 +76,13 @@ def _ramp_table() -> np.ndarray:
     grey = np.arange(256, dtype=np.float32) / 256.0
     return np.repeat(grey[:, None], 3, axis=1)
 
-
 def _session(side: int = 10) -> PlotSession:
     session = PlotSession(
         _scan_snapshot(side),
-        ImagePlot(AxisRef.point_dimension("ax"), AxisRef.point_dimension("ay")),
+        ImagePlot(AxisRef.point("ax"), AxisRef.point("ay")),
     )
     session.set_size("2x2")
     return session
-
 
 # --------------------------------------------------------------- kernel
 @pytest.mark.parametrize("azimuth", [-55.0, 40.0, 130.0, 220.0, 305.0])
@@ -112,7 +102,6 @@ def test_pick_inverts_projection_in_every_quadrant(azimuth) -> None:
         x, y = scene.project(a + 0.5, b + 0.5, 0.5)
         picked = scene.pick(x, y)
         assert picked == (row, column), (azimuth, row, column, picked)
-
 
 def test_the_scene_is_an_oblique_view_of_the_same_heatmap() -> None:
     """Tipped nearly flat, the 3D grid must READ as the heatmap.
@@ -156,7 +145,6 @@ def test_the_scene_is_an_oblique_view_of_the_same_heatmap() -> None:
     plain = centres("lower")
     assert plain(0, 0)[1] > plain(3, 0)[1]
 
-
 def test_bars_clip_to_the_value_limits() -> None:
     """A value beyond the colour limits saturates in HEIGHT exactly as it
     saturates in colour: the z axis and the colorbar are one scale."""
@@ -174,7 +162,6 @@ def test_bars_clip_to_the_value_limits() -> None:
     picked = scene.pick(*top_full)
     assert picked == (0, 1)
 
-
 def test_absent_bars_leave_the_floor() -> None:
     # Near-flat neighbours, so the hole shows FLOOR rather than the side
     # face of the bar behind it (which a deep hole correctly reveals).
@@ -189,7 +176,6 @@ def test_absent_bars_leave_the_floor() -> None:
     x, y = scene.project(a + 0.5, b + 0.5, 0.0)
     assert scene.pick(x, y) is None
 
-
 def test_stress_grid_renders_inside_the_guard() -> None:
     rng = np.random.default_rng(1)
     heights = rng.random((96, 128))
@@ -201,12 +187,10 @@ def test_stress_grid_renders_inside_the_guard() -> None:
     )
     assert perf_counter() - start < MAX_STRESS_RENDER_SECONDS
 
-
 def test_camera_clamps_its_angles() -> None:
     camera = HeightBarCamera(azimuth_deg=10.0, elevation_deg=89.0, zoom=99.0)
     assert camera.elevation_deg == 80.0
     assert camera.zoom == 6.0
-
 
 # --------------------------------------------------------------- session
 def test_presentation_roundtrip_is_bit_identical_and_keeps_selectors() -> None:
@@ -234,7 +218,6 @@ def test_presentation_roundtrip_is_bit_identical_and_keeps_selectors() -> None:
     finally:
         session.close()
 
-
 def test_camera_parameters_are_display_state_not_projection() -> None:
     session = _session()
     try:
@@ -248,7 +231,6 @@ def test_camera_parameters_are_display_state_not_projection() -> None:
     finally:
         session.close()
 
-
 def test_live_revision_rerenders_the_scene() -> None:
     session = _session()
     try:
@@ -260,7 +242,6 @@ def test_live_revision_rerenders_the_scene() -> None:
     finally:
         session.close()
 
-
 def _pointer(session, action, axis, fx, fy, **kwargs):
     left, top, right, bottom = axis.bounds
     return session._raster_pointer_event(
@@ -270,7 +251,6 @@ def _pointer(session, action, axis, fx, fy, **kwargs):
         axes_snapshot=axis,
         **kwargs,
     )
-
 
 def test_the_scene_turns_as_one_rigid_object() -> None:
     """A wall stands on the picture's own edge, whichever way it faces.
@@ -342,7 +322,6 @@ def test_the_scene_turns_as_one_rigid_object() -> None:
             assert abs(cell_a - anchor[prefix + "_a"]) <= 1.0
             assert abs(cell_b - anchor[prefix + "_b"]) <= 1.0
 
-
 def test_a_drag_renders_the_resolution_it_leaves_behind() -> None:
     """One resolution, all the way through the gesture.
 
@@ -378,7 +357,6 @@ def test_a_drag_renders_the_resolution_it_leaves_behind() -> None:
     finally:
         session.close()
 
-
 def test_middle_drag_orbits_and_left_drag_is_inert() -> None:
     """The scene keeps the 2D button grammar: MIDDLE navigates the view.
 
@@ -410,7 +388,6 @@ def test_middle_drag_orbits_and_left_drag_is_inert() -> None:
         assert session.selectors == ()
     finally:
         session.close()
-
 
 def test_a_hand_still_holding_the_scene_already_owns_the_view() -> None:
     """The camera has ONE owner, and the moving hand writes to it.
@@ -449,7 +426,6 @@ def test_a_hand_still_holding_the_scene_already_owns_the_view() -> None:
     finally:
         session.close()
 
-
 def test_orbit_holds_the_camera_distance_still() -> None:
     """The scale is azimuth-invariant: an orbit must not breathe.
 
@@ -474,7 +450,6 @@ def test_orbit_holds_the_camera_distance_still() -> None:
         )
         scales.append(scene.scale)
     assert len(set(scales)) == 1, scales
-
 
 def test_color_limit_preview_rerenders_the_scene() -> None:
     """A clim drag previews the 3D scene itself, never a stale heatmap.
@@ -506,7 +481,6 @@ def test_color_limit_preview_rerenders_the_scene() -> None:
         np.testing.assert_array_equal(preview, committed)
     finally:
         session.close()
-
 
 def test_the_artist_is_handed_the_runs_and_nothing_else() -> None:
     """Hidden samples are dropped, and the picture does not change.
@@ -554,7 +528,6 @@ def test_the_artist_is_handed_the_runs_and_nothing_else() -> None:
     finally:
         session.close()
 
-
 def test_a_visible_run_is_handed_over_as_its_two_ends() -> None:
     """The compaction itself, on a line whose holes are known.
 
@@ -580,7 +553,6 @@ def test_a_visible_run_is_handed_over_as_its_two_ends() -> None:
     blank = np.full(4, np.nan)
     empty_x, empty_y = MatplotlibRenderer._height_bars_visible_runs(blank, blank)
     assert empty_x.size == 0 and empty_y.size == 0
-
 
 def test_one_mechanism_draws_every_edge_the_scene_has() -> None:
     """Edges are vector chrome, and that is the only kind there is.
@@ -616,7 +588,6 @@ def test_one_mechanism_draws_every_edge_the_scene_has() -> None:
     assert painted.min() >= darkest_face - 0.02, (
         "the kernel darkened something that is not a face"
     )
-
 
 def test_a_crease_is_stroked_once_and_only_where_the_faces_change() -> None:
     """The rims belong to the picture, so the picture draws them.
@@ -657,7 +628,6 @@ def test_a_crease_is_stroked_once_and_only_where_the_faces_change() -> None:
     assert not (changed & ~reach).any(), (
         "the kernel darkened a pixel that is not beside a crease"
     )
-
 
 def test_a_drag_draws_the_same_rims_as_the_frame_it_leaves() -> None:
     """Turning the scene must not change what its lines ARE.
@@ -700,7 +670,6 @@ def test_a_drag_draws_the_same_rims_as_the_frame_it_leaves() -> None:
     finally:
         session.close()
 
-
 def test_the_bar_count_is_the_data_and_nothing_else() -> None:
     """As many boxes as the heatmap has cells, at every camera and size.
 
@@ -738,7 +707,6 @@ def test_the_bar_count_is_the_data_and_nothing_else() -> None:
     assert drawn(300, 400, 1200, 900, taps=1) == (300, 400)
     # And an ROI that shrinks draws fewer bars, which is the whole point.
     assert drawn(75, 100, 320, 240) == (75, 100)
-
 
 def test_drag_preview_keeps_the_chrome_typography_in_place() -> None:
     """The half-resolution drag preview must not move the scene chrome.
@@ -782,7 +750,6 @@ def test_drag_preview_keeps_the_chrome_typography_in_place() -> None:
     finally:
         session.close()
 
-
 def test_middle_double_click_restores_the_home_camera() -> None:
     session = _session()
     try:
@@ -807,7 +774,6 @@ def test_middle_double_click_restores_the_home_camera() -> None:
         assert float(state["camera_zoom"]) == 1.0
     finally:
         session.close()
-
 
 def test_click_picks_the_bar_as_a_crosshair() -> None:
     session = _session()
@@ -859,31 +825,25 @@ def test_click_picks_the_bar_as_a_crosshair() -> None:
     finally:
         session.close()
 
-
 def test_facet_overview_stays_heatmap_and_focus_honours_the_scene() -> None:
     rows = 100
     cells = [(i % 10, i // 10) for i in range(rows)]
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=4),
-        PointTable.from_columns({
+    schema = make_dataset_schema(
+        repeat_domain(size=4),
+        mapped_domain_from_columns({
             "ax": np.asarray([float(c[0]) for c in cells]),
             "ay": np.asarray([float(c[1]) for c in cells]),
         }),
-        data_axes=(Axis.create("site", values=[0.0, 1.0, 2.0]),),
+        cell_axes=(axis("site", values=[0.0, 1.0, 2.0], role=SITE),),
         dtype=np.float64,
-        point_topology=PointTopology(
-            (AxisId("ax"), AxisId("ay")),
-            (tuple(float(i) for i in range(10)),) * 2,
-            tuple(cells),
-        ),
     )
     rng = np.random.default_rng(0)
     session = PlotSession(
-        DatasetSnapshot(schema, rng.random((4, rows, 3)), revision=1),
+        make_snapshot(schema, rng.random((4, rows, 3)), revision=1),
         FacetGridPlot(
-            AxisRef.data("site"),
+            AxisRef.cell_data("site"),
             ImagePlot(
-                AxisRef.point_dimension("ax"), AxisRef.point_dimension("ay")
+                AxisRef.point("ax"), AxisRef.point("ay")
             ),
         ),
     )
@@ -901,7 +861,6 @@ def test_facet_overview_stays_heatmap_and_focus_honours_the_scene() -> None:
         assert np.abs(focused.astype(int) - overview.astype(int)).max() > 0
     finally:
         session.close()
-
 
 def test_occlusion_is_a_box_test_not_a_centre_depth_proxy() -> None:
     """The exact-occlusion semantics the outline sampler must keep.
@@ -955,7 +914,6 @@ def test_occlusion_is_a_box_test_not_a_centre_depth_proxy() -> None:
     rim = ((max(a0, a1), b0, 0.4), (max(a0, a1), b0 + 1.0, 0.4))
     assert visible_fraction(rim) == 1.0
 
-
 def test_pane_grid_leaves_the_right_wall_open() -> None:
     """The reference (MATLAB) pane-grid construction: every rule sits at
     a TICK position and runs the full display limits.  The limits carry
@@ -965,25 +923,20 @@ def test_pane_grid_leaves_the_right_wall_open() -> None:
     side = 4
     rows = side * side
     cells = [(i % side, i // side) for i in range(rows)]
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({
             "ax": np.asarray([float(c[0]) for c in cells]),
             "ay": np.asarray([float(c[1]) for c in cells]),
         }),
-        data_axes=(Axis.create("site", values=[0.0]),),
+        cell_axes=(axis("site", values=[0.0], role=SITE),),
         dtype=np.float64,
-        point_topology=PointTopology(
-            (AxisId("ax"), AxisId("ay")),
-            (tuple(float(i) for i in range(side)),) * 2,
-            tuple(cells),
-        ),
     )
     # Deterministically tall bars: every floor cell is covered, so the
     # only visible grid geometry is the pane grid under test.
     session = PlotSession(
-        DatasetSnapshot(schema, np.full((1, rows, 1), 0.5), revision=1),
-        ImagePlot(AxisRef.point_dimension("ax"), AxisRef.point_dimension("ay")),
+        make_snapshot(schema, np.full((1, rows, 1), 0.5), revision=1),
+        ImagePlot(AxisRef.point("ax"), AxisRef.point("ay")),
     )
     session.set_size("2x2")
     try:
@@ -1021,7 +974,6 @@ def test_pane_grid_leaves_the_right_wall_open() -> None:
     finally:
         session.close()
 
-
 def test_render_is_deterministic_at_exact_crossing_ties() -> None:
     """The crossing merge must be a permutation BY CONSTRUCTION.
 
@@ -1051,7 +1003,6 @@ def test_render_is_deterministic_at_exact_crossing_ties() -> None:
         del noise
     for frame in frames[1:]:
         np.testing.assert_array_equal(frames[0], frame)
-
 
 def test_the_occlusion_sampler_mirrors_its_reference_bit_for_bit() -> None:
     """The compiled sampler is a SPEED path for the outlines, like the
@@ -1101,7 +1052,6 @@ def test_the_occlusion_sampler_mirrors_its_reference_bit_for_bit() -> None:
     finally:
         session.close()
 
-
 def test_the_rim_stroke_mirrors_its_reference_bit_for_bit() -> None:
     """The creases are pixels now, so the compiled path that draws them is
     held to the numpy one exactly as the materializer and the occlusion
@@ -1133,7 +1083,6 @@ def test_the_rim_stroke_mirrors_its_reference_bit_for_bit() -> None:
             raster._ENGINE = previous
         np.testing.assert_array_equal(frames["numpy"], frames["numba"])
         assert not np.array_equal(frames["numpy"], base), "nothing was drawn"
-
 
 def test_scanline_engine_matches_the_reference_bit_for_bit() -> None:
     """The numba scanline engine is a SPEED path, never a semantics path.
@@ -1196,7 +1145,6 @@ def test_scanline_engine_matches_the_reference_bit_for_bit() -> None:
     finally:
         raster._ENGINE = previous
 
-
 def test_composed_camera_frames_equal_a_full_draw() -> None:
     """The compose fast lane must be invisible: after any run of camera
     commits (buffer reused, background preserved, chrome repainted as
@@ -1218,7 +1166,6 @@ def test_composed_camera_frames_equal_a_full_draw() -> None:
         np.testing.assert_array_equal(composed, full)
     finally:
         session.close()
-
 
 def test_the_orbit_is_continuous_across_quadrant_boundaries() -> None:
     """The fold is a ROTATION: crossing a quadrant boundary must change
@@ -1248,7 +1195,6 @@ def test_the_orbit_is_continuous_across_quadrant_boundaries() -> None:
     for boundary in (90.0, 180.0, 270.0, 360.0):
         jump = step(boundary - 0.1, boundary + 0.1)
         assert jump < 4 * control, (boundary, jump, control)
-
 
 def test_a_display_commit_mid_drag_does_not_undo_the_drag() -> None:
     """A pan or orbit reads the AXES; a colour limit does not move them.
@@ -1280,7 +1226,6 @@ def test_a_display_commit_mid_drag_does_not_undo_the_drag() -> None:
         assert float(session.display_state["camera_azimuth"]) != start
     finally:
         session.close()
-
 
 def test_every_move_of_a_fast_hand_reaches_the_screen() -> None:
     """A gesture lane paces itself by what its own frames cost.
@@ -1323,7 +1268,6 @@ def test_every_move_of_a_fast_hand_reaches_the_screen() -> None:
     finally:
         session.close()
 
-
 def _long_coordinate_session(side: int = 10):
     """A scan whose coordinates are long numbers -- an optical frequency.
 
@@ -1334,27 +1278,23 @@ def _long_coordinate_session(side: int = 10):
     base = 384227900000.0
     coords = tuple(base + index for index in range(side))
     cells = [(i % side, i // side) for i in range(side * side)]
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=4),
-        PointTable.from_columns({
+    schema = make_dataset_schema(
+        repeat_domain(size=4),
+        mapped_domain_from_columns({
             "ax": np.asarray([coords[c[0]] for c in cells]),
             "ay": np.asarray([coords[c[1]] for c in cells]),
         }),
-        data_axes=(Axis.create("site", values=[0.0, 1.0]),),
+        cell_axes=(axis("site", values=[0.0, 1.0], role=SITE),),
         dtype=np.float64,
-        point_topology=PointTopology(
-            (AxisId("ax"), AxisId("ay")), (coords,) * 2, tuple(cells)
-        ),
     )
     rng = np.random.default_rng(7)
     session = PlotSession(
-        DatasetSnapshot(schema, rng.random((4, side * side, 2)), revision=1),
-        ImagePlot(AxisRef.point_dimension("ax"), AxisRef.point_dimension("ay")),
+        make_snapshot(schema, rng.random((4, side * side, 2)), revision=1),
+        ImagePlot(AxisRef.point("ax"), AxisRef.point("ay")),
     )
     session.set_size("2x2")
     session.set_parameter("presentation", "height_bars")
     return session
-
 
 @pytest.mark.parametrize("azimuth", [-55.0, 40.0, 130.0, 220.0])
 def test_a_rotated_scene_never_prints_a_label_across_another(azimuth) -> None:
@@ -1386,7 +1326,6 @@ def test_a_rotated_scene_never_prints_a_label_across_another(azimuth) -> None:
                 )
     finally:
         session.close()
-
 
 def test_the_scene_and_its_labels_share_one_padded_region() -> None:
     """A scene is laid out as a scene: ONE region, for picture and labels.
@@ -1430,7 +1369,6 @@ def test_the_scene_and_its_labels_share_one_padded_region() -> None:
     assert scene.bottom == pytest.approx(1.0 - vertical)
     assert scene.top == pytest.approx(picture.top)
 
-
 def test_scene_labels_are_cut_off_at_the_room_the_scene_owns() -> None:
     """A 3D label goes where the projection puts it, which is not a place
     any layout reserved.  It gets the scene's own room -- out to whatever
@@ -1471,7 +1409,6 @@ def test_scene_labels_are_cut_off_at_the_room_the_scene_owns() -> None:
             )
     finally:
         session.close()
-
 
 def test_a_height_field_keeps_its_scale_when_the_heat_map_would_not() -> None:
     """The z scale is geometry, so tight must not re-rule it every shot.
@@ -1528,7 +1465,6 @@ def test_a_height_field_keeps_its_scale_when_the_heat_map_would_not() -> None:
         assert _relim_retains("normal") is True
     finally:
         session.close()
-
 
 def test_the_warmer_renders_what_production_renders() -> None:
     """A warmup that cannot run is a compile of a signature nothing uses.

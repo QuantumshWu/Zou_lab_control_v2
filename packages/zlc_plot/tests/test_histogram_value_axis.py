@@ -17,18 +17,24 @@ import pytest
 from zlc_plot import FacetGridPlot, HistogramPlot, PlotSession
 from zlc_plot.specs import history_window_requirement
 from zlc_plot.kinds import AxisRef
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from data_factory import (
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
+from zlc_data import OwnedSnapshot, REPEAT, SITE
 
 
-def _snapshot(revision: int, high: float, unit: str | None = None) -> DatasetSnapshot:
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"i": np.arange(20.0)}),
+def _snapshot(revision: int, high: float, unit: str | None = None) -> OwnedSnapshot:
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"i": np.arange(20.0)}),
         dtype=np.float64,
-        canonical_unit=unit,
-        generation="histogram-value-axis",
+        value_unit=unit,
     )
-    return DatasetSnapshot(
+    return make_snapshot(
         schema, np.linspace(0.0, high, 20).reshape(1, 20), revision=revision
     )
 
@@ -116,10 +122,10 @@ def test_a_faceted_histogram_leases_the_history_it_reads() -> None:
     assert history_window_requirement(grid, {"window": 1}) is None
 
 
-def test_naming_one_point_coordinate_collapses_that_coordinate() -> None:
-    """A point coordinate is not a tensor axis.
+def test_naming_one_point_axis_collapses_that_coordinate() -> None:
+    """A point axis is not a tensor axis.
 
-    Every point column resolves to dimension 1 -- the shared point axis --
+    Every Point axis resolves through the shared physical Point carrier --
     so mapping a ref straight to a numpy axis collapsed the WHOLE point
     table for any of them, and the set() made two different columns
     literally the same reduction: on a detuning x power scan, reducing
@@ -129,18 +135,17 @@ def test_naming_one_point_coordinate_collapses_that_coordinate() -> None:
 
     from zlc_plot.data_view import DataView
 
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns(
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns(
             {
                 "detuning": np.asarray([0.0, 1.0, 0.0, 1.0, 0.0, 1.0]),
                 "power": np.asarray([0.0, 0.0, 1.0, 1.0, 2.0, 2.0]),
             }
         ),
         dtype=np.float64,
-        generation="point-coordinate-reduce",
     )
-    snapshot = DatasetSnapshot(schema, np.arange(6.0).reshape(1, 6), revision=1)
+    snapshot = make_snapshot(schema, np.arange(6.0).reshape(1, 6), revision=1)
     view = DataView(snapshot)
 
     by_detuning = view.histogram(bins=4, reduce_axes=(AxisRef.point("detuning"),))
@@ -156,20 +161,19 @@ def test_first_is_the_first_value_and_not_the_largest() -> None:
     from zlc_plot.data_view import DataView
     from zlc_plot.specs import Reduction
 
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=3),
-        PointTable.from_columns({"i": np.asarray([0.0])}),
+    schema = make_dataset_schema(
+        repeat_domain(size=3),
+        mapped_domain_from_columns({"i": np.asarray([0.0])}),
         dtype=np.float64,
-        generation="first-not-max",
     )
     values = np.asarray([[1.0], [10.0], [5.0]])
-    view = DataView(DatasetSnapshot(schema, values, revision=1))
+    view = DataView(make_snapshot(schema, values, revision=1))
     edges = [0.0, 3.0, 8.0, 15.0]
     first = view.histogram(
-        bins=edges, reduce_axes=(AxisRef.repeat(),), aggregation=Reduction.FIRST
+        bins=edges, reduce_axes=(AxisRef.repeat("repeat"),), aggregation=Reduction.FIRST
     )
     largest = view.histogram(
-        bins=edges, reduce_axes=(AxisRef.repeat(),), aggregation=Reduction.MAX
+        bins=edges, reduce_axes=(AxisRef.repeat("repeat"),), aggregation=Reduction.MAX
     )
     assert list(map(int, first.counts)) == [1, 0, 0]
     assert list(map(int, largest.counts)) == [0, 0, 1]
@@ -193,21 +197,20 @@ def test_a_reduced_histogram_is_binned_over_its_own_values() -> None:
     rng = np.random.default_rng(7)
     means = np.linspace(100.0, 105.0, sites)
     values = means[None, :] + rng.normal(0.0, 20.0, (repeats, sites))
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=repeats),
-        PointTable.from_columns({"i": [0.0]}),
-        data_axes=(Axis.create("site", size=sites),),
+    schema = make_dataset_schema(
+        repeat_domain(size=repeats),
+        mapped_domain_from_columns({"i": [0.0]}),
+        cell_axes=(axis("site", size=sites, role=SITE),),
         dtype=np.float64,
-        generation="reduced-domain",
     )
-    snapshot = DatasetSnapshot(
+    snapshot = make_snapshot(
         schema, values.reshape(repeats, 1, sites), revision=1
     )
 
     pooled = PlotSession(snapshot, HistogramPlot())
     reduced = PlotSession(
         snapshot,
-        HistogramPlot(reduced=(AxisRef.repeat(),), reduction=Reduction.MEAN),
+        HistogramPlot(reduced=(AxisRef.repeat("repeat"),), reduction=Reduction.MEAN),
     )
     try:
         for session in (pooled, reduced):

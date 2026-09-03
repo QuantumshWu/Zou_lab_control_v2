@@ -146,7 +146,7 @@ def test_a_calibration_in_photoelectrons_reads_the_same_atoms(tmp_path: Path) ->
     count_schema = OccupancyProcessor(counts.calibration)._output_schemas(
         raw_source.block.schema
     )["counts"]
-    assert count_schema.cell_schema.value_unit == "count"
+    assert count_schema.value_schema.value_unit == "count"
     assert (
         electrons.calibration.site_map.n_sites
         == counts.calibration.site_map.n_sites
@@ -285,7 +285,7 @@ def test_a_live_monitor_publishes_the_effective_camera_unit() -> None:
     counts = np.asarray(counts_snapshot.block.values[0, 0])
     assert counts.dtype == np.uint16
     assert counts.min() == counts.max() == dark
-    assert counts_snapshot.block.schema.cell_schema.value_unit == "count"
+    assert counts_snapshot.block.schema.value_schema.value_unit == "count"
     assert counts_record["parameters"][PHOTOELECTRONS] is False
 
     installation = create_installation("virtual")
@@ -297,7 +297,7 @@ def test_a_live_monitor_publishes_the_effective_camera_unit() -> None:
     electron_snapshot, electron_record = _published(True)
     electrons = np.asarray(electron_snapshot.block.values[0, 0])
     assert electrons.dtype == np.float32
-    assert electron_snapshot.block.schema.cell_schema.value_unit is None
+    assert electron_snapshot.block.schema.value_schema.value_unit is None
     assert electron_record["parameters"][PHOTOELECTRONS] is True
     np.testing.assert_allclose(
         electrons, np.float32((dark - offset) * scale), rtol=1e-6
@@ -307,7 +307,7 @@ def test_a_live_monitor_publishes_the_effective_camera_unit() -> None:
     fallback = np.asarray(fallback_snapshot.block.values[0, 0])
     assert fallback.dtype == np.uint16
     assert fallback.min() == fallback.max() == dark
-    assert fallback_snapshot.block.schema.cell_schema.value_unit == "count"
+    assert fallback_snapshot.block.schema.value_schema.value_unit == "count"
     assert fallback_record["parameters"][PHOTOELECTRONS] is False
 
 
@@ -387,7 +387,7 @@ def test_calibration_preview_and_saved_sample_keep_raw_count_unit(
         run_record=run_record,
         value_unit=point.count_unit,
     )
-    assert preview.snapshot.block.schema.cell_schema.value_unit == "count"
+    assert preview.snapshot.block.schema.value_schema.value_unit == "count"
 
     artifact_run = TaskRun(
         tmp_path,
@@ -407,7 +407,7 @@ def test_calibration_preview_and_saved_sample_keep_raw_count_unit(
     archive = writer.write(0, cycle).with_suffix(".npz")
     info, arrays = read_archive(archive)
     saved = read_dataset(info, arrays, "data")
-    assert saved.block.schema.cell_schema.value_unit == "count"
+    assert saved.block.schema.value_schema.value_unit == "count"
 
 
 def test_saved_samples_and_the_preview_keep_the_unit_they_were_read_in(
@@ -442,7 +442,7 @@ def test_saved_samples_and_the_preview_keep_the_unit_they_were_read_in(
     for path in samples:
         info, arrays = read_archive(path)
         saved = read_dataset(info, arrays, "data")
-        assert saved.block.schema.cell_schema.value_unit is None
+        assert saved.block.schema.value_schema.value_unit is None
         values = np.asarray(saved.block.values)
         assert values.dtype == np.float32, f"{path.name} was re-quantised"
         assert values.min() < 0.0

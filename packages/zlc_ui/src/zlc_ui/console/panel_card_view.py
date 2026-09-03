@@ -89,6 +89,25 @@ def _set_interaction(surface: object | None, enabled: bool) -> None:
         gate(bool(enabled))
 
 
+def data_structure_fragments(structure: object) -> tuple[tuple, tuple]:
+    """The one coloured two-line rendering of a three-domain shape."""
+
+    sizes: list[tuple[str, str | None]] = []
+    names: list[tuple[str, str | None]] = []
+    for index, group in enumerate(tuple(structure or ())):
+        colour = AXIS_GROUP_COLORS[index % len(AXIS_GROUP_COLORS)]
+        if sizes:
+            sizes.append(("x", None))
+            names.append(("x", None))
+        sizes.append(
+            ("(" + "x".join(str(int(size)) for _name, size in group) + ")", colour)
+        )
+        names.append(
+            ("(" + " x ".join(str(name) for name, _size in group) + ")", colour)
+        )
+    return tuple(sizes), tuple(names)
+
+
 class PanelCardView(FluentGroupBox):
     """A titled card with a replaceable QWidget surface."""
 
@@ -513,21 +532,12 @@ class PanelCardView(FluentGroupBox):
 
         structure = tuple(self._parameter_surface.get("data_structure") or ())
         scope = tuple(self._parameter_surface.get("data_scope") or ())
+        shape_sizes, shape_names = data_structure_fragments(structure)
         sizes: list[tuple[str, str | None]] = [(self._caption(), None)]
-        names: list[tuple[str, str | None]] = []
-        for index, group in enumerate(structure):
-            colour = AXIS_GROUP_COLORS[index % len(AXIS_GROUP_COLORS)]
-            if names:
-                sizes.append(("x", None))
-                names.append(("x", None))
-            elif sizes:
-                sizes.append((" ", None))
-            sizes.append(
-                ("(" + "x".join(str(int(size)) for _name, size in group) + ")", colour)
-            )
-            names.append(
-                ("(" + " x ".join(str(name) for name, _size in group) + ")", colour)
-            )
+        if shape_sizes:
+            sizes.append((" ", None))
+            sizes.extend(shape_sizes)
+        names = list(shape_names)
         for label, value in scope:
             axis_colour = next(
                 (

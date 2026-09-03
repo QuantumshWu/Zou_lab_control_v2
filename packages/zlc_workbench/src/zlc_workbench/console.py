@@ -170,7 +170,6 @@ def _same_panel_selection(left: object, right: object) -> bool:
             selection.selector_kind,
             selection.ranges,
             selection.facets,
-            selection.repeat_index,
         )
 
     return signature(left) == signature(right)
@@ -198,14 +197,9 @@ def _panel_interaction_subject_matches(
         scope = tuple(
             (ref, coordinate)
             for ref, coordinate in value.scope
-            if ref.physical_identity != facet.physical_identity
+            if ref != facet
         )
-        repeat_index = (
-            None
-            if str(getattr(facet.domain, "value", facet.domain)) == "repeat"
-            else value.repeat_index
-        )
-        return replace(value, scope=scope, repeat_index=repeat_index)
+        return replace(value, scope=scope)
 
     return without_facet(accepted) == without_facet(subject)
 
@@ -3533,11 +3527,6 @@ class ConsolePresenter:
         producer_node_id = self._direct_producer_node_id(binding.state.signal)
         return {
             "panel_id": binding.panel_id,
-            # FigureViewer reuses the complete Panel editor but its archive
-            # signals are sealed.  The shared editor therefore receives the
-            # mode as data and hides cadence/snapshot/producer controls; the
-            # Figure view does not maintain a second projection vocabulary.
-            "live": not self._panel_only,
             "state": binding.state.document(),
             "parameter_surface": binding.parameter_surface,
             "signal_options": self.signal_groups(),

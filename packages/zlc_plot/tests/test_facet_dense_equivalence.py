@@ -16,49 +16,43 @@ import numpy as np
 import pytest
 
 from data_factory import (
-    Axis,
-    DatasetSchema,
-    DatasetSnapshot,
-    PointTable,
-    PointTopology,
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
 )
-from zlc_data import SPATIAL_X, SPATIAL_Y
+from zlc_data import OwnedSnapshot, REPEAT, SPATIAL_X, SPATIAL_Y
 from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, HistogramPlot, ImagePlot
 from zlc_plot.data_view import DataView
 from zlc_plot.specs import Reduction
 
-
-def _scan_of_frames(repeat: int = 2) -> DatasetSnapshot:
+def _scan_of_frames(repeat: int = 2) -> OwnedSnapshot:
     """A 3x2 Cartesian scan of 4x5 uint16 frames with some invalid cells."""
 
-    outer = Axis.create("bias_x", values=[-1.0, 0.0, 1.0])
-    inner = Axis.create("bias_y", values=[10.0, 20.0])
-    point_table = PointTable.from_columns(
+    point_domain = mapped_domain_from_columns(
         {
             "bias_x": np.repeat([-1.0, 0.0, 1.0], 2),
             "bias_y": np.tile([10.0, 20.0], 3),
         }
     )
-    topology = PointTopology.from_cartesian((outer, inner), point_table=point_table)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=repeat),
-        point_table,
-        data_axes=(
-            Axis.create("sy", values=[0.0, 1.0, 2.0, 3.0], role=SPATIAL_Y),
-            Axis.create("sx", values=[0.0, 1.0, 2.0, 3.0, 4.0], role=SPATIAL_X),
+    schema = make_dataset_schema(
+        repeat_domain(size=repeat),
+        point_domain,
+        cell_axes=(
+            axis("sy", values=[0.0, 1.0, 2.0, 3.0], role=SPATIAL_Y),
+            axis("sx", values=[0.0, 1.0, 2.0, 3.0, 4.0], role=SPATIAL_X),
         ),
-        point_topology=topology,
         dtype=np.uint16,
     )
     rng = np.random.default_rng(5)
-    values = rng.integers(0, 4000, size=schema.shape, dtype=np.uint16)
-    cell_validity = rng.random(schema.shape[:2]) > 0.2
+    values = rng.integers(0, 4000, size=schema.physical_shape, dtype=np.uint16)
+    cell_validity = rng.random(schema.physical_shape[:2]) > 0.2
     cell_validity[0, 0] = True  # at least one valid cell in the first facet
     validity = np.broadcast_to(
-        cell_validity[..., None, None], schema.shape
+        cell_validity[..., None, None], schema.physical_shape
     ).copy()
-    return DatasetSnapshot(schema, values, revision=3, validity=validity)
-
+    return make_snapshot(schema, values, revision=3, validity=validity)
 
 def _assert_facets_equal(dense, generic) -> None:
     assert len(dense.cells) == len(generic.cells)
@@ -105,22 +99,20 @@ def _assert_facets_equal(dense, generic) -> None:
                 np.asarray(right.edges.canonical),
             )
 
-
-_IMAGE_CELL = ImagePlot(AxisRef.data("sx"), AxisRef.data("sy"))
+_IMAGE_CELL = ImagePlot(AxisRef.cell_data("sx"), AxisRef.cell_data("sy"))
 _EDGES = tuple(float(edge) for edge in np.linspace(0.0, 4000.0, 7))
-
 
 @pytest.mark.parametrize(
     "spec,bins",
     [
-        (FacetGridPlot(AxisRef.point_dimension("bias_x"), _IMAGE_CELL), None),
-        (FacetGridPlot(AxisRef.repeat(), _IMAGE_CELL), None),
+        (FacetGridPlot(AxisRef.point("bias_x"), _IMAGE_CELL), None),
+        (FacetGridPlot(AxisRef.repeat("repeat"), _IMAGE_CELL), None),
         (
             FacetGridPlot(
-                AxisRef.point_dimension("bias_x"),
+                AxisRef.point("bias_x"),
                 ImagePlot(
-                    AxisRef.data("sx"),
-                    AxisRef.data("sy"),
+                    AxisRef.cell_data("sx"),
+                    AxisRef.cell_data("sy"),
                     reduction=Reduction.MIN,
                 ),
             ),
@@ -128,10 +120,10 @@ _EDGES = tuple(float(edge) for edge in np.linspace(0.0, 4000.0, 7))
         ),
         (
             FacetGridPlot(
-                AxisRef.point_dimension("bias_y"),
+                AxisRef.point("bias_y"),
                 ImagePlot(
-                    AxisRef.data("sx"),
-                    AxisRef.data("sy"),
+                    AxisRef.cell_data("sx"),
+                    AxisRef.cell_data("sy"),
                     reduction=Reduction.SUM,
                 ),
             ),
@@ -139,14 +131,14 @@ _EDGES = tuple(float(edge) for edge in np.linspace(0.0, 4000.0, 7))
         ),
         (
             FacetGridPlot(
-                AxisRef.point_dimension("bias_x"),
-                CurvePlot(AxisRef.data("sx")),
+                AxisRef.point("bias_x"),
+                CurvePlot(AxisRef.cell_data("sx")),
             ),
             None,
         ),
-        (FacetGridPlot(AxisRef.data("sy"), HistogramPlot()), _EDGES),
+        (FacetGridPlot(AxisRef.cell_data("sy"), HistogramPlot()), _EDGES),
         (
-            FacetGridPlot(AxisRef.point_dimension("bias_x"), HistogramPlot()),
+            FacetGridPlot(AxisRef.point("bias_x"), HistogramPlot()),
             _EDGES,
         ),
     ],
@@ -160,12 +152,11 @@ def test_dense_facet_equals_the_generic_path(spec, bins) -> None:
     generic = view._facet_from_positions(spec, bins, view._all_positions())
     _assert_facets_equal(dense, generic)
 
-
 @pytest.mark.parametrize(
     "spec,bins",
     [
-        (FacetGridPlot(AxisRef.point_dimension("bias_x"), _IMAGE_CELL), None),
-        (FacetGridPlot(AxisRef.data("sy"), HistogramPlot()), _EDGES),
+        (FacetGridPlot(AxisRef.point("bias_x"), _IMAGE_CELL), None),
+        (FacetGridPlot(AxisRef.cell_data("sy"), HistogramPlot()), _EDGES),
     ],
 )
 def test_facet_projection_takes_the_dense_tensor_path(

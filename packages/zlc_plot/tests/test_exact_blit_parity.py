@@ -19,7 +19,14 @@ import pytest
 from zlc_plot import AxisRef, CurvePlot, ImagePlot, PlotSession
 from zlc_plot import rendering as rendering_module
 
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from data_factory import (
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
+from zlc_data import REPEAT, SPATIAL_X, SPATIAL_Y
 
 
 def _assert_full_delta(
@@ -38,15 +45,14 @@ def _assert_full_delta(
 
 def _camera_snapshot(height: int, width: int, revision: int = 1, scale: float = 1.0):
     rng = np.random.default_rng(4)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"shot": np.asarray([0.0])}),
-        data_axes=(
-            Axis.create("y", values=[float(i) for i in range(height)]),
-            Axis.create("x", values=[float(i) for i in range(width)]),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"shot": np.asarray([0.0])}),
+        cell_axes=(
+            axis("y", values=[float(i) for i in range(height)], role=SPATIAL_Y),
+            axis("x", values=[float(i) for i in range(width)], role=SPATIAL_X),
         ),
         dtype=np.uint16,
-        generation="blit-parity",
     )
     yy, xx = np.mgrid[0:height, 0:width]
     blob = 3000.0 * np.exp(
@@ -58,7 +64,7 @@ def _camera_snapshot(height: int, width: int, revision: int = 1, scale: float = 
         0,
         65535,
     ).astype(np.uint16)[None, None]
-    return DatasetSnapshot(schema, values, revision=revision)
+    return make_snapshot(schema, values, revision=revision)
 
 
 def _compose_both_ways(session: PlotSession) -> tuple[np.ndarray, np.ndarray]:
@@ -84,7 +90,7 @@ def test_the_exact_blit_paints_what_the_artist_would(ratio, preset) -> None:
 
     session = PlotSession(
         _camera_snapshot(256, 256),
-        ImagePlot(AxisRef.data("x"), AxisRef.data("y")),
+        ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y")),
         device_pixel_ratio=ratio,
     )
     try:
@@ -107,7 +113,7 @@ def test_the_height_bar_scene_is_copied_exactly(ratio) -> None:
 
     session = PlotSession(
         _camera_snapshot(64, 64),
-        ImagePlot(AxisRef.data("x"), AxisRef.data("y")),
+        ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y")),
         device_pixel_ratio=ratio,
     )
     try:
@@ -125,14 +131,13 @@ def test_native_curve_stays_within_the_full_pixel_delta_budget(ratio) -> None:
     """The native stroke stays within its measured whole-frame envelope."""
 
     rng = np.random.default_rng(2)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=4),
-        PointTable.from_columns({"x": np.arange(64.0)}),
-        generation="blit-parity-curve",
+    schema = make_dataset_schema(
+        repeat_domain(size=4),
+        mapped_domain_from_columns({"x": np.arange(64.0)}),
     )
     values = rng.normal(size=(4, 64))
     session = PlotSession(
-        DatasetSnapshot(schema, values, revision=1),
+        make_snapshot(schema, values, revision=1),
         CurvePlot(AxisRef.point("x")),
         device_pixel_ratio=ratio,
     )
@@ -245,7 +250,7 @@ def test_no_image_front_is_ever_left_to_matplotlib(shape, ratio, presentation) -
     try:
         session = PlotSession(
             _camera_snapshot(height, width),
-            ImagePlot(AxisRef.data("x"), AxisRef.data("y")),
+            ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y")),
             device_pixel_ratio=ratio,
         )
         try:
@@ -278,7 +283,7 @@ def test_a_confined_gesture_composes_what_a_full_draw_would(ratio) -> None:
 
     session = PlotSession(
         _camera_snapshot(48, 64),
-        ImagePlot(AxisRef.data("x"), AxisRef.data("y")),
+        ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y")),
         device_pixel_ratio=ratio,
     )
     try:
@@ -339,7 +344,7 @@ def test_a_confined_pan_composes_what_a_full_draw_would(ratio) -> None:
 
     session = PlotSession(
         _camera_snapshot(48, 64),
-        ImagePlot(AxisRef.data("x"), AxisRef.data("y")),
+        ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y")),
         device_pixel_ratio=ratio,
     )
     try:

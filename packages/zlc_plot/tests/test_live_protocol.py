@@ -7,20 +7,26 @@ import zlib
 import numpy as np
 import pytest
 
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from data_factory import (
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
+from zlc_data import OwnedSnapshot, REPEAT, SPATIAL_X, SPATIAL_Y
 from zlc_plot import AxisRef, CurvePlot, ImagePlot, PlotSession
 from zlc_plot.fit import FitCancelled, FitEngine, RegularImageFitInput
 from zlc_plot.selectors import NumericRange, SelectorKind
 
 
-def _snap(revision: int) -> DatasetSnapshot:
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": [0.0, 1.0, 2.0]}),
+def _snap(revision: int) -> OwnedSnapshot:
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"x": [0.0, 1.0, 2.0]}),
         dtype=np.float64,
-        generation="live-protocol",
     )
-    return DatasetSnapshot(
+    return make_snapshot(
         schema,
         np.array([[1.0, 2.0, 3.0]], dtype=np.float64) + revision,
         revision=revision,
@@ -31,28 +37,26 @@ def _session() -> PlotSession:
     return PlotSession(_snap(0), CurvePlot(AxisRef.point("x")))
 
 
-def _fit_snapshot(model_id: str, revision: int) -> tuple[DatasetSnapshot, object]:
-    generation = f"live-fit-order-{model_id}"
+def _fit_snapshot(model_id: str, revision: int) -> tuple[OwnedSnapshot, object]:
     if model_id == "radial_gaussian_center":
         x = np.linspace(-2.0, 2.0, 25)
         y = np.linspace(-2.0, 2.0, 27)
-        schema = DatasetSchema.create(
-            Axis.create("repeat", size=1),
-            PointTable.from_columns({"sample": [0.0]}),
-            data_axes=(
-                Axis.create("x", values=x, canonical_unit="m"),
-                Axis.create("y", values=y, canonical_unit="m"),
+        schema = make_dataset_schema(
+            repeat_domain(size=1),
+            mapped_domain_from_columns({"sample": [0.0]}),
+            cell_axes=(
+                axis("x", values=x, unit="m", role=SPATIAL_X),
+                axis("y", values=y, unit="m", role=SPATIAL_Y),
             ),
             dtype=np.float64,
-            generation=generation,
         )
         xx, yy = np.meshgrid(x, y)
         values = 0.2 + (2.0 + 0.01 * revision) * np.exp(
             -2.0 * ((xx - 0.25) ** 2 + (yy + 0.35) ** 2) / 0.9**2
         )
         return (
-            DatasetSnapshot(schema, values.T[None, None], revision=revision),
-            ImagePlot(AxisRef.data("x"), AxisRef.data("y")),
+            make_snapshot(schema, values.T[None, None], revision=revision),
+            ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y")),
         )
 
     x = np.linspace(0.0, 8.0, 101)
@@ -62,13 +66,12 @@ def _fit_snapshot(model_id: str, revision: int) -> tuple[DatasetSnapshot, object
     else:
         values = 0.1 + 2.0 * np.exp(-x / 2.2)
     values = values + 0.001 * revision
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": x}),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"x": x}),
         dtype=np.float64,
-        generation=generation,
     )
-    return DatasetSnapshot(schema, values[None], revision=revision), CurvePlot(
+    return make_snapshot(schema, values[None], revision=revision), CurvePlot(
         AxisRef.point("x")
     )
 
@@ -95,15 +98,17 @@ def test_unsuccessful_exact_retry_does_not_invalidate_public_fit_event() -> None
     ).reshape(26, 26)
     x = np.arange(51.0, 77.0)
     y = np.arange(35.0, 61.0)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"sample": [0.0]}),
-        data_axes=(Axis.create("x", values=x), Axis.create("y", values=y)),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"sample": [0.0]}),
+        cell_axes=(
+            axis("x", values=x, role=SPATIAL_X),
+            axis("y", values=y, role=SPATIAL_Y),
+        ),
         dtype=image.dtype,
-        generation="full-resolution-success-retry",
     )
-    snapshot = DatasetSnapshot(schema, image.T[None, None], revision=175)
-    spec = ImagePlot(AxisRef.data("x"), AxisRef.data("y"))
+    snapshot = make_snapshot(schema, image.T[None, None], revision=175)
+    spec = ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y"))
     fit_input = RegularImageFitInput(x, y, image)
     expected = np.asarray(
         (2704.0, 226.6475384850741, 0.9993684055038514, 55.15224030304722,

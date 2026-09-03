@@ -32,41 +32,42 @@ from zlc_plot import (
 )
 from zlc_plot.kinds import AxisRef
 from zlc_plot.selectors import NumericRange, SelectorKind
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
-
+from data_factory import (
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
 
 def _curve_snapshot() -> object:
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=3),
-        PointTable.from_columns({"detuning": np.arange(5.0)}),
+    schema = make_dataset_schema(
+        repeat_domain(size=3),
+        mapped_domain_from_columns({"detuning": np.arange(5.0)}),
         dtype=np.float64,
-        generation="selection-subject",
     )
-    return DatasetSnapshot(schema, np.arange(15.0).reshape(3, 5), revision=0)
-
+    return make_snapshot(schema, np.arange(15.0).reshape(3, 5), revision=0)
 
 def _image_snapshot() -> object:
     columns = np.linspace(0.0, 5.0, 6)
     rows = np.linspace(0.0, 3.0, 4)
     pixel_frame = CoordinateFrameId("camera-pixel")
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"shot": [0.0]}),
-        data_axes=(
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"shot": [0.0]}),
+        cell_axes=(
             replace(
-                Axis.create("column", values=columns),
+                axis("column", values=columns),
                 coordinate_frame=pixel_frame,
             ),
             replace(
-                Axis.create("row", values=rows),
+                axis("row", values=rows),
                 coordinate_frame=pixel_frame,
             ),
         ),
         dtype=np.float64,
-        generation="selection-subject",
     )
-    return DatasetSnapshot(schema, np.arange(6 * 4.0).reshape(1, 1, 6, 4), revision=0)
-
+    return make_snapshot(schema, np.arange(6 * 4.0).reshape(1, 1, 6, 4), revision=0)
 
 def _events(session: PlotSession, apply) -> list:
     events: list = []
@@ -78,19 +79,16 @@ def _events(session: PlotSession, apply) -> list:
     assert events, "no selection event was emitted"
     return events
 
-
 def _subjects(session: PlotSession, apply) -> list:
     return [event.subject for event in _events(session, apply)]
-
 
 def _named_facet_snapshot() -> object:
     detuning = np.tile(np.arange(5.0), 2)
     site = np.repeat((10.0, 20.0), 5)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=3),
-        PointTable.from_columns({"detuning": detuning, "site": site}),
+    schema = make_dataset_schema(
+        repeat_domain(size=3),
+        mapped_domain_from_columns({"detuning": detuning, "site": site}),
         dtype=np.float64,
-        generation="selection-subject-facet",
     )
     return owned_snapshot_from_arrays(
         schema,
@@ -98,7 +96,6 @@ def _named_facet_snapshot() -> object:
         revision=7,
         stream_generation="selection-subject-run",
     )
-
 
 def _threshold_facet_snapshot(*, inserted_cell: bool = False) -> object:
     samples = np.linspace(-3.0, 3.0, 80)
@@ -109,23 +106,21 @@ def _threshold_facet_snapshot(*, inserted_cell: bool = False) -> object:
     )
     sites = (10.0, 20.0, 5.0)
     order = (2, 0, 1) if inserted_cell else (0, 1)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=len(samples)),
-        PointTable.from_columns(
+    schema = make_dataset_schema(
+        repeat_domain(size=len(samples)),
+        mapped_domain_from_columns(
             {
                 "site": tuple(sites[index] for index in order),
                 "region": tuple(100.0 + sites[index] for index in order),
             }
         ),
         dtype=np.float64,
-        generation=f"threshold-target-{int(inserted_cell)}",
     )
-    return DatasetSnapshot(
+    return make_snapshot(
         schema,
         np.column_stack(tuple(columns[index] for index in order)),
         revision=0,
     )
-
 
 def test_selection_subject_strictly_owns_typed_axis_identity() -> None:
     axis = AxisRef.point("site")
@@ -133,13 +128,16 @@ def test_selection_subject_strictly_owns_typed_axis_identity() -> None:
         PlotKind.CURVE,
         axis,
         None,
-        scope=((axis, np.float64(2.0)),),
-        repeat_index=np.int64(1),
+        scope=(
+            (axis, np.float64(2.0)),
+            (AxisRef.repeat("repeat"), np.int64(1)),
+        ),
     )
-    assert subject.scope == ((axis, 2),)
+    assert subject.scope == (
+        (axis, 2),
+        (AxisRef.repeat("repeat"), 1),
+    )
     assert type(subject.scope[0][1]) is int
-    assert subject.repeat_index == 1
-    assert type(subject.repeat_index) is int
 
     with pytest.raises(TypeError, match="plot_kind"):
         SelectionSubject("curve", axis, None)  # type: ignore[arg-type]
@@ -150,16 +148,6 @@ def test_selection_subject_strictly_owns_typed_axis_identity() -> None:
             None,
             x_coordinate_frame="camera-pixel",
         )
-    with pytest.raises(ValueError, match="repeat scope belongs in repeat_index"):
-        SelectionSubject(
-            PlotKind.CURVE,
-            axis,
-            None,
-            scope=((AxisRef.repeat(), 0),),
-        )
-    with pytest.raises(TypeError, match="repeat_index"):
-        SelectionSubject(PlotKind.CURVE, axis, None, repeat_index=True)
-
 
 def test_a_curve_names_the_axis_its_x_bounds_cut() -> None:
     snapshot = _curve_snapshot()
@@ -191,10 +179,9 @@ def test_a_curve_names_the_axis_its_x_bounds_cut() -> None:
     finally:
         session.close()
 
-
 def test_an_image_names_both_axes_its_area_cuts() -> None:
     snapshot = _image_snapshot()
-    spec = ImagePlot(AxisRef.data("column"), AxisRef.data("row"))
+    spec = ImagePlot(AxisRef.cell_data("column"), AxisRef.cell_data("row"))
     session = PlotSession(
         snapshot,
         spec,
@@ -205,14 +192,13 @@ def test_an_image_names_both_axes_its_area_cuts() -> None:
             lambda: session.set_area_selector(NumericRange(1.0, 3.0), NumericRange(0.0, 2.0)),
         )[-1]
         assert subject.plot_kind is PlotKind.IMAGE
-        assert subject.x == AxisRef.data("column")
-        assert subject.y == AxisRef.data("row")
+        assert subject.x == AxisRef.cell_data("column")
+        assert subject.y == AxisRef.cell_data("row")
         assert subject.x_coordinate_frame == "camera-pixel"
         assert subject.y_coordinate_frame == "camera-pixel"
         assert subject == session.describe_display().selection_subject
     finally:
         session.close()
-
 
 def test_a_histogram_reports_no_axis_because_its_bounds_cut_values() -> None:
     """The case that makes re-asking the session wrong instead of merely late.
@@ -241,7 +227,6 @@ def test_a_histogram_reports_no_axis_because_its_bounds_cut_values() -> None:
     finally:
         session.close()
 
-
 def test_rolling_ordinal_is_not_reported_as_an_upstream_axis() -> None:
     snapshot = _curve_snapshot()
     spec = RollingPlot()
@@ -258,7 +243,6 @@ def test_rolling_ordinal_is_not_reported_as_an_upstream_axis() -> None:
     finally:
         session.close()
 
-
 def test_pure_subject_resolves_tagged_latest_scope_to_canonical_identity() -> None:
     snapshot = _named_facet_snapshot()
     site = AxisRef.point("site")
@@ -270,10 +254,8 @@ def test_pure_subject_resolves_tagged_latest_scope_to_canonical_identity() -> No
     try:
         subject = session.describe_display().selection_subject
         assert subject.scope == ((site, 20),)
-        assert subject.repeat_index is None
     finally:
         session.close()
-
 
 def test_focused_facet_identity_is_resolved_inside_panel_scope() -> None:
     snapshot = _threshold_facet_snapshot()
@@ -312,7 +294,6 @@ def test_focused_facet_identity_is_resolved_inside_panel_scope() -> None:
     finally:
         session.close()
 
-
 def test_the_subject_follows_a_semantic_edit_within_one_session() -> None:
     """Which is the whole point: it is resolved per event, not once."""
 
@@ -327,7 +308,6 @@ def test_the_subject_follows_a_semantic_edit_within_one_session() -> None:
         assert session.describe_display().selection_subject == second
     finally:
         session.close()
-
 
 def test_every_selector_kind_carries_a_subject() -> None:
     """Including the ones that cannot be bridged, which must still say so."""
@@ -355,7 +335,7 @@ def test_panel_and_focused_scope_carry_canonical_event_meaning(
     named: bool,
 ) -> None:
     snapshot = _named_facet_snapshot() if named else _curve_snapshot()
-    scope_axis = AxisRef.point("site") if named else AxisRef.repeat()
+    scope_axis = AxisRef.point("site") if named else AxisRef.repeat("repeat")
     scope_value = 20.0 if named else 1.0
     cell = CurvePlot(x=AxisRef.point("detuning"))
     spec = (
@@ -371,10 +351,7 @@ def test_panel_and_focused_scope_carry_canonical_event_meaning(
             session,
             lambda: session.set_x_selector(1.0, 3.0, display=False),
         )[-1]
-        assert event.subject.scope == (
-            ((AxisRef.point("site"), 20.0),) if named else ()
-        )
-        assert event.subject.repeat_index == (None if named else 1)
+        assert event.subject.scope == ((scope_axis, 20 if named else 1),)
         assert session.describe_display().selection_subject == event.subject
         if named and not focused:
             assert event.data_revision == 7
@@ -383,7 +360,6 @@ def test_panel_and_focused_scope_carry_canonical_event_meaning(
             assert event.display_selector.value == NumericRange(1.0, 3.0)
     finally:
         session.close()
-
 
 def test_classifier_threshold_targets_follow_coordinates_when_facets_reorder() -> None:
     spec = FacetGridPlot(AxisRef.point("site"), HistogramPlot())
@@ -408,7 +384,7 @@ def test_classifier_threshold_targets_follow_coordinates_when_facets_reorder() -
         )
         assert target_a["scope"] == (
             {
-                "domain": "point_coordinate",
+                "domain": "point",
                 "axis_id": "site",
                 "coordinate": 10.0,
             },
@@ -455,14 +431,12 @@ def test_classifier_threshold_targets_follow_coordinates_when_facets_reorder() -
     finally:
         restored.close()
 
-
-def test_repeat_facet_threshold_target_uses_the_source_repeat_row() -> None:
+def test_repeat_facet_threshold_target_uses_the_repeat_coordinate() -> None:
     samples = np.linspace(-3.0, 3.0, 80)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=2),
-        PointTable.from_columns({"sample": samples}),
+    schema = make_dataset_schema(
+        repeat_domain(size=2),
+        mapped_domain_from_columns({"sample": samples}),
         dtype=np.float64,
-        generation="repeat-threshold-target",
     )
     values = np.vstack(
         (
@@ -471,8 +445,8 @@ def test_repeat_facet_threshold_target_uses_the_source_repeat_row() -> None:
         )
     )
     session = PlotSession(
-        DatasetSnapshot(schema, values, revision=0),
-        FacetGridPlot(AxisRef.repeat(), HistogramPlot()),
+        make_snapshot(schema, values, revision=0),
+        FacetGridPlot(AxisRef.repeat("repeat"), HistogramPlot()),
     )
     try:
         session.configure(parameters={"threshold_classifier": True})
@@ -481,6 +455,11 @@ def test_repeat_facet_threshold_target_uses_the_source_repeat_row() -> None:
             session,
             lambda: session.set_threshold_selector(0.5, display=False),
         )[-1].classifier_thresholds[0]
-        assert target == {"value": 0.5, "scope": (), "repeat_index": 1}
+        assert target == {
+            "value": 0.5,
+            "scope": (
+                {"domain": "repeat", "axis_id": "repeat", "coordinate": 1},
+            ),
+        }
     finally:
         session.close()

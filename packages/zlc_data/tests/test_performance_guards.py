@@ -4,12 +4,8 @@
 def test_a_schema_catalogues_its_axes_once() -> None:
     """The catalog is a fact about the schema; it is built once.
 
-    Every AxisSpec the catalog builds re-runs canonical_coordinate_scalar
-    over a tuple PointColumn has already canonicalised.  Measured on a
-    200x200 scan that is 26 ms of the 41 ms selection_indices costs, and
-    an operator holding a committed ROI pays it on every publication for
-    a map that cannot change -- the same shape GridTopology.cell_indices
-    rejects by name and caches for.
+    Repeat and Point axes are already canonical and the catalog is cached;
+    a 200x200 scan must not rebuild per-row coordinates on every selection.
     """
 
     import time
@@ -22,29 +18,27 @@ def test_a_schema_catalogues_its_axes_once() -> None:
         AxisId,
         AxisSpec,
         DatasetSchema,
-        PointColumn,
-        PointTable,
+        DomainSpec,
+        SCALAR_DOMAIN,
         ValueSchema,
     )
     from zlc_data.snapshot_projection import axis_catalog
 
     rows = 40_000
+    repeat = AxisSpec(AxisId("scan.repeat"), "repeat", REPEAT, 1, (0,))
+    x = AxisSpec(AxisId("scan.x"), "x", SCAN_POINT, 200)
+    y = AxisSpec(AxisId("scan.y"), "y", SCAN_POINT, 200)
     schema = DatasetSchema(
-        AxisSpec(AxisId("scan.repeat"), "repeat", REPEAT, 1, (0,)),
-        PointTable(
-            rows,
+        DomainSpec((1,), (repeat,), ((0,),)),
+        DomainSpec(
+            (rows,),
+            (x, y),
             (
-                PointColumn(
-                    AxisId("scan.x"), "x", SCAN_POINT, PointColumn.NUMERIC,
-                    tuple(float(index % 200) for index in range(rows)),
-                ),
-                PointColumn(
-                    AxisId("scan.y"), "y", SCAN_POINT, PointColumn.NUMERIC,
-                    tuple(float(index // 200) for index in range(rows)),
-                ),
+                tuple(index % 200 for index in range(rows)),
+                tuple(index // 200 for index in range(rows)),
             ),
         ),
-        None,
+        SCALAR_DOMAIN,
         ValueSchema.scalar(np.dtype("float64"), "count"),
     )
 

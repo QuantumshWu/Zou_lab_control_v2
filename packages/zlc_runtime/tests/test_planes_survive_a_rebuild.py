@@ -29,9 +29,9 @@ from zlc_data import (
     DataBlock,
     DatasetRevision,
     DatasetSchema,
+    DomainSpec,
     OwnedSnapshot,
-    PointColumn,
-    PointTable,
+    SCALAR_DOMAIN,
     StreamGenerationId,
     ValueSchema,
 )
@@ -45,21 +45,12 @@ GENERATION = StreamGenerationId("plane-rebuild")
 
 
 def _schema(name: str) -> DatasetSchema:
+    repeat = AxisSpec(AxisId(f"{name}.repeat"), "repeat", REPEAT, 1, (0,))
+    point = AxisSpec(AxisId(f"{name}.point"), "point", SCAN_POINT, 1, (0,))
     return DatasetSchema(
-        AxisSpec(AxisId(f"{name}.repeat"), "repeat", REPEAT, 1, (0,)),
-        PointTable(
-            1,
-            (
-                PointColumn(
-                    AxisId(f"{name}.point"),
-                    "point",
-                    SCAN_POINT,
-                    PointColumn.NUMERIC,
-                    (0,),
-                ),
-            ),
-        ),
-        None,
+        DomainSpec((1,), (repeat,), ((0,),)),
+        DomainSpec((1,), (point,), ((0,),)),
+        SCALAR_DOMAIN,
         ValueSchema.scalar(np.dtype("float64"), "count"),
     )
 
@@ -166,10 +157,14 @@ def test_the_exact_run_keeps_the_error_of_every_chunk() -> None:
 
     chunk_schema = _schema("run")
     run_schema = DatasetSchema(
-        AxisSpec(AxisId("run.repeat"), "repeat", REPEAT, 2, (0, 1)),
-        chunk_schema.point_table,
-        None,
-        chunk_schema.cell_schema,
+        DomainSpec(
+            (2,),
+            (AxisSpec(AxisId("run.repeat"), "repeat", REPEAT, 2, (0, 1)),),
+            ((0, 1),),
+        ),
+        chunk_schema.point_domain,
+        chunk_schema.cell_domain,
+        chunk_schema.value_schema,
     )
     chunks = (
         (_shot(chunk_schema, 4.0, 0.1), (0, 0)),

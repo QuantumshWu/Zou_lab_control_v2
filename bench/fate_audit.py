@@ -24,8 +24,17 @@ matplotlib.use("Agg", force=True)
 import numpy as np
 
 from zlc_data import (
-    AxisId, AxisSpec, COMPONENT, DatasetSchema, PRIMARY_INDEX, PointColumn,
-    PointTable, REPEAT, SCAN_POINT, SITE, ValidityContract, ValueSchema,
+    AxisId,
+    AxisSpec,
+    COMPONENT,
+    DatasetSchema,
+    DomainSpec,
+    PRIMARY_INDEX,
+    REPEAT,
+    SCAN_POINT,
+    SITE,
+    ValidityContract,
+    ValueSchema,
 )
 from zlc_plot import PlotKind
 from zlc_plot.semantics import (
@@ -44,50 +53,78 @@ print(provenance())
 print()
 
 
+def mapped_domain(axes, codes):
+    rows = len(codes[0]) if codes else 1
+    return DomainSpec((rows,), tuple(axes), tuple(tuple(code) for code in codes))
+
+
+def dataset(repeat, point, cell_axes, validity, unit="1"):
+    return DatasetSchema(
+        mapped_domain((repeat,), (range(repeat.size),)),
+        point,
+        DomainSpec(tuple(axis.size for axis in cell_axes), tuple(cell_axes)),
+        ValueSchema(validity, np.dtype("<f8"), unit),
+    )
+
+
 def survival_schema():
     repeat = AxisSpec(AxisId("sv.repeat"), "repeat", REPEAT, 4, tuple(range(4)))
     pair = AxisSpec(AxisId("sv.pair"), "pair", COMPONENT, 3,
                     coordinate_labels=("0-1", "0-2", "1-2"))
     site = AxisSpec(AxisId("sv.site"), "site", SITE, 5, tuple(range(5)))
-    cell = ValueSchema((pair, site),
-                       ValidityContract.components(pair.axis_id, site.axis_id),
-                       np.dtype("<f8"), "1")
-    return DatasetSchema(repeat, PointTable(1, ()), None, cell)
+    return dataset(
+        repeat,
+        mapped_domain((), ()),
+        (pair, site),
+        ValidityContract.components(pair.axis_id, site.axis_id),
+    )
 
 
 def camera_schema():
     repeat = AxisSpec(AxisId("cm.repeat"), "repeat", REPEAT, 2, (0, 1))
     ys = AxisSpec(AxisId("cm.spatial-y"), "spatial-y", SITE, 96, tuple(range(96)))
     xs = AxisSpec(AxisId("cm.spatial-x"), "spatial-x", SITE, 128, tuple(range(128)))
-    cell = ValueSchema((ys, xs),
-                       ValidityContract.components(ys.axis_id, xs.axis_id),
-                       np.dtype("<f8"), "1")
-    frame = PointColumn(AxisId("cm.frame"), "frame", SCAN_POINT, PointColumn.NUMERIC,
-                        (0.0, 1.0, 2.0))
-    return DatasetSchema(repeat, PointTable(3, (frame,)), None, cell)
+    frame = AxisSpec(AxisId("cm.frame"), "frame", SCAN_POINT, 3, (0.0, 1.0, 2.0))
+    return dataset(
+        repeat,
+        mapped_domain((frame,), (range(3),)),
+        (ys, xs),
+        ValidityContract.components(ys.axis_id, xs.axis_id),
+    )
 
 
 def scan_schema():
     repeat = AxisSpec(AxisId("sc.repeat"), "repeat", REPEAT, 3, (0, 1, 2))
     site = AxisSpec(AxisId("sc.site"), "site", SITE, 6, tuple(range(6)))
-    cell = ValueSchema((site,), ValidityContract.components(site.axis_id),
-                       np.dtype("<f8"), "1")
-    fx = PointColumn(AxisId("sc.field.x"), "field.x", SCAN_POINT,
-                     PointColumn.NUMERIC, tuple(float(v) for v in range(5)) * 4)
-    fy = PointColumn(AxisId("sc.field.y"), "field.y", SCAN_POINT,
-                     PointColumn.NUMERIC,
-                     tuple(float(v) for v in range(4) for _ in range(5)))
-    return DatasetSchema(repeat, PointTable(20, (fx, fy)), None, cell)
+    fx = AxisSpec(AxisId("sc.field.x"), "field.x", SCAN_POINT, 5,
+                  tuple(float(v) for v in range(5)))
+    fy = AxisSpec(AxisId("sc.field.y"), "field.y", SCAN_POINT, 4,
+                  tuple(float(v) for v in range(4)))
+    return dataset(
+        repeat,
+        mapped_domain(
+            (fx, fy),
+            (
+                tuple(v for _y in range(4) for v in range(5)),
+                tuple(v for v in range(4) for _x in range(5)),
+            ),
+        ),
+        (site,),
+        ValidityContract.components(site.axis_id),
+    )
 
 
 def indexed_schema():
     repeat = AxisSpec(AxisId("oc.repeat"), "repeat", REPEAT, 1, (0,))
     site = AxisSpec(AxisId("oc.site"), "site", SITE, 4, tuple(range(4)))
-    cell = ValueSchema((site,), ValidityContract.components(site.axis_id),
-                       np.dtype("<f8"), "1")
-    shots = PointColumn(AxisId("zlc_data.primary-index"), "source index",
-                        PRIMARY_INDEX, PointColumn.NUMERIC, tuple(range(6)))
-    return DatasetSchema(repeat, PointTable(6, (shots,)), None, cell)
+    shots = AxisSpec(AxisId("zlc_data.primary-index"), "source index",
+                     PRIMARY_INDEX, 6, tuple(range(6)))
+    return dataset(
+        repeat,
+        mapped_domain((shots,), (range(6),)),
+        (site,),
+        ValidityContract.components(site.axis_id),
+    )
 
 
 SCHEMAS = {
@@ -104,7 +141,7 @@ def fate_table(schema, spec):
 
 
 def _short(name):
-    return name.replace("fate:", "").replace("point_coordinate:", "").replace("data:", "")
+    return name.replace("fate:", "").replace("point:", "").replace("data:", "")
 
 
 def show(value):

@@ -6,7 +6,14 @@ from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, PlotSession
 from zlc_plot._fit_projection import FitScope
 from zlc_plot.fit import FacetFitBatchResult, FitEngine
 from zlc_plot.selectors import NumericRange
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from data_factory import (
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
+from zlc_data import OwnedSnapshot, REPEAT
 
 
 def _facet_snapshot(
@@ -15,17 +22,16 @@ def _facet_snapshot(
     scale: float = 1.0,
     noisy: bool = False,
     facet_unit: str | None = None,
-) -> DatasetSnapshot:
+) -> OwnedSnapshot:
     x = np.linspace(-3.0, 3.0, 20)
     facets = np.repeat([0.0, 1.0], 10)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns(
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns(
             {"x": x, "facet": facets},
             units=None if facet_unit is None else {"facet": facet_unit},
         ),
         dtype=np.float64,
-        generation="facet-live-fit",
     )
     values = (2.0 * np.exp(-0.5 * ((x - 0.2) / 1.0) ** 2) + 0.2)[None, :]
     if noisy:
@@ -33,7 +39,7 @@ def _facet_snapshot(
             0.04 * np.sin(np.arange(x.size, dtype=float) * 1.17)
             + 0.025 * np.cos(np.arange(x.size, dtype=float) * 0.37)
         )[None, :]
-    return DatasetSnapshot(schema, values * scale, revision=revision)
+    return make_snapshot(schema, values * scale, revision=revision)
 
 
 def _spec() -> FacetGridPlot:

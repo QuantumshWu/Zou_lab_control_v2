@@ -26,6 +26,10 @@
 - Figure NPZ唯一writer现按member做有界1MiB可压缩性probe：结构化/平滑数据继续Deflate，低收益大camera数组使用标准ZIP Stored。20×1200×1920 uint16 noise的Panel Save实测`4.23s→0.73s`，archive阶段`3.63s→0.18s`；92.16MB原始数据原压至79.12MB，现为92.16MB，明确以13MB换约3.45s。平滑1200×1920 float32仍Deflate为2.98MB、总时约0.33s。
 - Plot axis/semantic identity已收口为`AxisRef(domain, axis_id)`稳定key；scope只接受tagged
   latest或tagged typed coordinate value，不再让display label或裸文本控制字进入truth。
+- Dataset三组结构现统一为同级`DomainSpec(shape, axes, axis_codes)`：Repeat/Point使用
+  explicit row codes，Cell-data使用不物化pixel codes的dense implicit stride；`ValueSchema`
+  只保留dtype/unit/validity。旧的平行row-coordinate/topology与Plot双身份路径整体删除；
+  scan、history、selection、fit与Figure只读取同一axis domain/code truth。
 - Fate Setting不再预跑candidate render/layout feasibility：所有axis始终列出plot kind声明的全部roles；
   64-cell等容量限制只在真实replace/layout transaction执行。旧semantic probe、cache和kind validate
   wrapper已删除，schema vocabulary不再随size、DPR或renderer可用性改变。
@@ -124,11 +128,33 @@
 - Panel Save只是公共Figure API的adapter，不再维护第二套writer或restore grammar。
 - FigureViewer把archive typed Dataset发布为sealed Runtime signals，默认panel从archive exact recipe恢复，且不按shape推断plot kind；保存spec的`kind + cell_kind`在Panel创建前经同一个catalog identity owner解析，semantic vocabulary随后才投影。Add Panel只建立空的fixed-kind `panel-N`，Signal/ROI/Fit派生及后续compose全部走与TaskConsole相同的ConsolePresenter、SelectionBridge和Plot host，不再保留static panel owner。静态host在Bridge订阅前已有accepted fit时，Fit subscription只replay该immutable FitEvent，不重复solve/render；因此ROI与Fit参数都继续发布给后续Panel。
 - FigureViewer与TaskConsole Live/Frozen使用同一个accepted PlotSpec、parameter、selector/
-  viewport capability contract；Viewer semantic edit同样只在host accept后更新surface，文件选择默认定位workspace当天data目录。
+  viewport capability contract以及完整Panel Edit：Frozen snapshot/Refresh、Interaction、
+  Direct producer、Save figure均走同一ConsolePresenter owner；`panel_only`不再隐藏Panel能力。
+  Viewer semantic edit同样只在host accept后更新surface，文件选择默认定位workspace当天data目录。
 - `board.commit`首次接受Panel host后在同一owner turn幂等挂载Selection/Fit Bridge；真实Qt首个drag/release已验证可立即发布ROI，不等待下一display beat。
-- FigureViewer新增同页Data authoring：New/Edit打开Fluent可关闭Data tab；虚拟table按当前二维slice读取并支持整块复制粘贴，blank写入validity而不把空字符串冒充numeric value；大leading axis用index spin＋当前coordinate readout而不展开choice；axis size、增删/排序与coordinate移动必须一次同步values/validity/sigma。Apply构造canonical `OwnedSnapshot`并通过现有sealed Viewer producer发布，自动交给普通Panel，但未Save前仍是unsaved working copy；Save Figure As成功后才清该状态，并继续调用公共Figure writer。已有archive的lineage/device事实只读保留，manual-create/edit从真实publication追加系统provenance，纯manual数据不伪造device。
+- FigureViewer同页Data authoring固定为Dataset、Axes、Data三个全宽Fluent frame。Axes只提供
+  Add/Edit/Delete与name/length/unit/domain（Repeat/Point/Cell-data）及typed coordinate values；
+  axis values使用一行横向virtual table与自身scroll，
+  不编辑role/fate、coordinate labels/frame或axis顺序，也不保留独立Coordinates/Label表。
+  Data显示与Panel title相同的三domain shape/axis摘要，显式选择Rows与Columns axes；其行列header
+  只读显示对应axis values，其他axes用Setting式Scope按真实coordinate value选择。虚拟
+  table按当前二维slice读取、支持整块复制粘贴，并让Tab/Shift+Tab连续进入相邻cell、方向键
+  在非编辑态移动current cell；两张table的row/column数量只改变内部scroll range。普通cell
+  修改不得reset model或复制整个slice；blank写入validity而不把空字符串冒充numeric value。
+  axis length一次同步resize values/validity/sigma。Apply构造canonical `OwnedSnapshot`并通过
+  现有sealed Viewer producer发布，自动交给普通Panel，但未Save前仍是unsaved working copy；
+  Save Figure As成功后才清该状态，并继续调用公共Figure writer。已有archive的lineage/device
+  事实只读保留，manual-create/edit从真实publication追加系统provenance，纯manual数据不伪造device。
+- Manual Axis Delete直接保留当前Scope coordinate的slice并删除该axis；允许最后一个Repeat axis
+  退化为单row无具名axis domain。同domain的name/unit/length编辑保留原role/labels/frame，只有
+  显式换domain才换成该domain的generic role。
+- Existing Figure只改data或axis metadata时原样保留Repeat/Point carrier与`axis_codes`；只有
+  Add/Delete、跨domain移动或length改变才把受影响domain明确重建成dense authored map，不能把
+  sparse/serpentine scan在普通Apply时静默膨胀成Cartesian product。
 - Plot共享手势现要求Area press只arm：无move时0 candidate、0 selection callback、0 overlay render；首个真实held move才启动preview。Qt double-click的首个press/release和Notebook explicit double均不得生成Area，已有Area空白click清除语义保留但不再通过degenerate draft实现。
-- Numeric axis继续由SmartOffset/locator防重叠；显式coordinate labels恢复为全部忠实ticks，不做renderer端抽稀。Manual Data editor不得把partial label输入静默补成完整label轴；只在all-empty或all-specified时形成canonical Dataset labels。
+- Numeric axis继续由SmartOffset/locator防重叠；既有Dataset的显式coordinate labels全部忠实
+  保存与显示，不做renderer端抽稀。Manual Data editor允许编辑axis coordinate values但不提供
+  labels authoring，因而不再维护partial-label草稿或补全规则。
 - SLM Feedback camera preview第一轮后停更的根因是`holds_live_revision`只识别裸`OwnedSnapshot`，带site overlay的`ImageFrame`把第二generation的revision 10误判为旧run的`10<=10`并cancel。现统一解包snapshot；真实两轮Camera Measurement→Panel从generation A前进至B、同host复用、无busy/error，Plot/Workbench seam各有回归。
 - Lineage保存root、event nodes和direct parent IDs；Viewer验证引用、reachability和cycle后
   投影为tree。
@@ -196,7 +222,7 @@
 - 紧凑Science Context当前证据：SLM Editor完整文件`22 passed`；strict Context与Feedback candidate/Stop/failure边界`10 passed`；最终三条直接边界`3 passed`。X15213全尺寸体积、Pattern/composite逐元素roundtrip和8-bit phase-code roundtrip均来自当前worktree；未运行100-shot。
 - 固定nearest清理运行standalone/facet artist、Workbench parameter surface及Fluent Setting/Edit四个聚焦用例，结果`4 passed`。
 - Device Control当前回归：Workbench完整`425 passed`；Runtime完整加Figure grammar `112 passed`；adapter/camera/scan受影响组`53 passed`；Device Control Qt、风险revision、refresh close guard、in-flight latest-only和demo直接证据均通过。Atom完整回归同时暴露并修复Temperature sibling event record、Feedback输出声明和三条terminal/Stop残余；100-shot virtual Feedback仍为既有`34/35`上限，未用放宽断言冒充通过。
-- FigureViewer此前以formal launcher和`zlc_ui.capture_window`在真实Windows屏幕完成四条1152×653验收：current archive默认Image Monitor、点击Add panel新增Curve、从Setting点击Edit进入共享Fluent `PanelEditorView`、以及多层Flow展开树；四次均保持shared 90% window尺寸和固定左栏。右侧复用TaskConsole `ConsoleBoardView + PanelCardView`并置于白色work surface，支持每panel切saved dataset、alternate plot kind、Setting/remove/order与closable Edit；static Edit只保留Panel/Semantic/Display/Fit。用户当前重新裁决Info readout必须统一multiline并按实际visual layout紧包；旧的无换行单行分支会cutoff长内容且不能作为phantom inner-scroll的替代修复。固定Plot kind从Setting删除，动态Signal keyed-choice在reconcile写值前更新choice domain。
+- FigureViewer此前以formal launcher和`zlc_ui.capture_window`在真实Windows屏幕完成四条1152×653验收：current archive默认Image Monitor、点击Add panel新增Curve、从Setting点击Edit进入共享Fluent `PanelEditorView`、以及多层Flow展开树；四次均保持shared 90% window尺寸和固定左栏。右侧复用TaskConsole `ConsoleBoardView + PanelCardView`并置于白色work surface，支持每panel切saved dataset、alternate plot kind、Setting/remove/order与closable Edit；Panel Edit现与TaskConsole完整共用Frozen snapshot/Refresh、Interaction、Direct producer和Save figure。用户当前重新裁决Info readout必须统一multiline并按实际visual layout紧包；旧的无换行单行分支会cutoff长内容且不能作为phantom inner-scroll的替代修复。固定Plot kind从Setting删除，动态Signal keyed-choice在reconcile写值前更新choice domain。
 - FigureViewer Info readout当前根修：旧实现以单行控件掩盖multiline少算Qt block高度的问题，长无换行值因此cutoff，而multiline内部仍保留`maximum=1`的phantom scroll。InfoPane现统一复用`FluentReadoutMultiline`，唯一高度owner逐block读取`QTextLayout`实际像素并加document/widget margins；未设cap时horizontal/vertical range均为0，短值、显式两行和长无换行值实测为26/45/349 px且原文逐字符不变。现有UI用例扩展后相关文件`12 passed`；formal `capture_window`以1152×653真实FigureViewer重开Camera Figure，左栏一行readout保持紧凑。
 - FigureViewer Logic/Devices/Flow当前根修：archive内部`event-N`只作parent引用，Logic页以真实Logic identity显示递归去除device字段后的run参数；Devices页用run record的stable role→instance映射解释run/event snapshots，按实际device聚合并给每项保留Logic、sequence与scope，缺映射/identity/device key一律拒绝而不猜。Flow原位删除QTree owner，Workbench只投影唯一Logic/Device nodes和causal/device edges；Qt以layered+barycentric布局、独立edge ports与long-edge lane绘制，典型100 nodes同步构建约6.5 ms，3-device、diamond、真实DFS汇合及10-node长链均无edge穿node，长链horizontal range为0。Calibration/Temperature normal与partial report、SLM candidate/report、Seamless/Stepped/Temperature live均保存实际用到的device facts；Feedback pre-shot只记录SLM，post-shot冻结同candidate三设备，failure rollback不改变已存candidate provenance；Stepped tunable以完整scan values及逐点readback等值contract记录，不复制event history。聚焦回归`67 passed`，另Console Logic`34 passed`；formal Windows real-screen capture为1152×653、DPR 3、3-device Flow无横向scroll且节点/箭头无重叠。
 - 公共Panel Setting现复用master的page-local `FluentOverlayFrame` owner，并以固定identity（`Setting · panel-N`）作为可拖header，不读取可编辑title/signal/structure；右上角紧凑`×`只隐藏Setting。TaskConsole与FigureViewer因复用PanelCard同时获得该行为，Panel删除仍是card header的受保护命令。

@@ -1,8 +1,11 @@
 # zlc_data
 
 `zlc_data` owns the immutable scientific data model used by ZLC: typed axes,
-point metadata, value schema, validity, snapshots, selections, projection, and
-strict dataset/figure codecs.
+Repeat/Point/Cell-data `DomainSpec` mappings, value schema, validity, snapshots,
+selections, projection, and strict dataset/figure codecs. All three domains
+own logical axes through the same contract. Repeat and Point use axis-major
+codes over one flat carrier; Cell-data uses implicit dense dimensions, so an
+image never materializes a pixel-sized coordinate plane.
 
 It does not own runtime generations, plotting, Qt, devices, workspace paths,
 or experiment policy. The installed product is the repository-root ZLC

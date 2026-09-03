@@ -10,22 +10,27 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from data_factory import (
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
+from zlc_data import OwnedSnapshot, REPEAT
 from zlc_plot.data_view import DataView
 from zlc_plot.kinds import AxisRef
 from zlc_plot.specs import Reduction
 
 
-def _snapshot(values: np.ndarray, *, x: list[float], repeats: int) -> DatasetSnapshot:
-    point_table = PointTable.from_columns({"x": x})
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=repeats),
-        point_table,
-        data_axes=(),
+def _snapshot(values: np.ndarray, *, x: list[float], repeats: int) -> OwnedSnapshot:
+    point_domain = mapped_domain_from_columns({"x": x})
+    schema = make_dataset_schema(
+        repeat_domain(size=repeats),
+        point_domain,
         dtype=np.float64,
-        generation="uncertainty-test",
     )
-    return DatasetSnapshot(schema, values.reshape(schema.shape), revision=0)
+    return make_snapshot(schema, values.reshape(schema.physical_shape), revision=0)
 
 
 def _expected_sem(samples: np.ndarray) -> float:
@@ -66,21 +71,20 @@ def test_dense_and_generic_paths_agree_on_sem() -> None:
 
     rng = np.random.default_rng(3)
     repeats = 12
-    scan = Axis.create("scan", values=[10.0, 20.0, 30.0])
-    point_table = PointTable.from_columns({"x": [0.0, 1.0]})
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=repeats),
-        point_table,
-        data_axes=(scan,),
+    scan = axis("scan", values=[10.0, 20.0, 30.0])
+    point_domain = mapped_domain_from_columns({"x": [0.0, 1.0]})
+    schema = make_dataset_schema(
+        repeat_domain(size=repeats),
+        point_domain,
+        cell_axes=(scan,),
         dtype=np.float64,
-        generation="uncertainty-test",
     )
-    values = rng.normal(size=schema.shape)
-    snapshot = DatasetSnapshot(schema, values, revision=0)
+    values = rng.normal(size=schema.physical_shape)
+    snapshot = make_snapshot(schema, values, revision=0)
     view = DataView(snapshot)
-    dense = view.curve(AxisRef.data("scan"), uncertainty=True).series[0]
+    dense = view.curve(AxisRef.cell_data("scan"), uncertainty=True).series[0]
     generic = view.curve(
-        AxisRef.data("scan"), group_by=(), aggregation=Reduction.MEAN,
+        AxisRef.cell_data("scan"), group_by=(), aggregation=Reduction.MEAN,
         uncertainty=True,
     )
     # Force the generic path via a grouped projection over a single-value

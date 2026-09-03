@@ -9,6 +9,7 @@ measurement history, so only an explicitly authored grid may facet it.
 from __future__ import annotations
 
 import numpy as np
+from zlc_data import READOUT_EVENT, REPEAT, SITE
 
 from zlc_plot._kinds.facet_grid import default_spec as facet_default
 from zlc_plot._kinds.image import default_spec as image_default
@@ -16,27 +17,27 @@ from zlc_plot.data_contract import classify_axes
 from zlc_plot.kinds import AxisRef
 from zlc_plot.specs import CurvePlot, FacetGridPlot, ImagePlot, Reduction
 
-from data_factory import Axis, DatasetSchema, PointTable, PointTopology
+from data_factory import (
+    axis,
+    make_dataset_schema,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
 
 
-def _scan_schema(dim_sizes: dict[str, int], *, repeats: int = 1, data_axes=()):
+def _scan_schema(dim_sizes: dict[str, int], *, repeats: int = 1, cell_axes=()):
     """One Cartesian scan dataset: named dimensions, optional cell axes."""
 
-    dims = tuple(
-        Axis.create(name, values=list(range(size)))
-        for name, size in dim_sizes.items()
-    )
     rows = list(np.ndindex(*(size for size in dim_sizes.values())))
     columns = {
         name: [row[index] for row in rows]
         for index, name in enumerate(dim_sizes)
     }
-    table = PointTable.from_columns(columns)
-    return DatasetSchema.create(
-        Axis.create("repeat", size=repeats),
+    table = mapped_domain_from_columns(columns)
+    return make_dataset_schema(
+        repeat_domain(size=repeats),
         table,
-        data_axes=tuple(data_axes),
-        point_topology=PointTopology.from_cartesian(dims, point_table=table),
+        cell_axes=tuple(cell_axes),
     )
 
 
@@ -44,8 +45,8 @@ def _frame_axes(height: int = 4, width: int = 6):
     from zlc_data import SPATIAL_X, SPATIAL_Y
 
     return (
-        Axis.create("y", size=height, role=SPATIAL_Y),
-        Axis.create("x", size=width, role=SPATIAL_X),
+        axis("y", size=height, role=SPATIAL_Y),
+        axis("x", size=width, role=SPATIAL_X),
     )
 
 
@@ -65,11 +66,11 @@ def test_a_scalar_multi_dimension_scan_cells_its_two_innermost_dims() -> None:
 
     spec = facet_default(_scan_schema({"a": 3, "b": 4, "c": 5}))
     assert isinstance(spec, FacetGridPlot)
-    assert spec.facet == AxisRef.point_dimension("a")
+    assert spec.facet == AxisRef.point("a")
     cell = spec.cell
     assert isinstance(cell, ImagePlot)
-    assert cell.x == AxisRef.point_dimension("c")
-    assert cell.y == AxisRef.point_dimension("b")
+    assert cell.x == AxisRef.point("c")
+    assert cell.y == AxisRef.point("b")
     assert cell.reduction is Reduction.MEAN
 
 
@@ -88,8 +89,8 @@ def test_a_two_dimension_heatmap_does_not_automatically_facet_repeat() -> None:
         assert isinstance(spec.cell, ImagePlot)
         image = image_default(schema)
         assert isinstance(image, ImagePlot)
-        assert image.x == AxisRef.point_dimension("b")
-        assert image.y == AxisRef.point_dimension("a")
+        assert image.x == AxisRef.point("b")
+        assert image.y == AxisRef.point("a")
 
 
 def test_repeats_reduce_into_the_heatmap_when_an_outer_dimension_exists() -> None:
@@ -97,16 +98,16 @@ def test_repeats_reduce_into_the_heatmap_when_an_outer_dimension_exists() -> Non
 
     spec = facet_default(_scan_schema({"a": 3, "b": 4, "c": 5}, repeats=6))
     assert isinstance(spec, FacetGridPlot)
-    assert spec.facet == AxisRef.point_dimension("a")
+    assert spec.facet == AxisRef.point("a")
     assert isinstance(spec.cell, ImagePlot)
 
 
 def test_a_degenerate_data_axis_still_counts_as_a_scalar_point() -> None:
     """A degenerate cell axis does not justify faceting repeat."""
 
-    pairs = (Axis.create("pair", size=1),)
+    pairs = (axis("pair", size=1),)
     spec = facet_default(
-        _scan_schema({"a": 3, "b": 4}, repeats=5, data_axes=pairs)
+        _scan_schema({"a": 3, "b": 4}, repeats=5, cell_axes=pairs)
     )
     assert isinstance(spec, FacetGridPlot)
     assert spec.facet is None
@@ -123,39 +124,39 @@ def test_frame_cells_facet_the_scan_and_leave_repeats_to_the_reduction() -> None
     """
 
     frames_with_repeats = _scan_schema(
-        {"a": 3}, repeats=4, data_axes=_frame_axes()
+        {"a": 3}, repeats=4, cell_axes=_frame_axes()
     )
     spec = facet_default(frames_with_repeats)
     assert isinstance(spec, FacetGridPlot)
-    assert spec.facet == AxisRef.point_dimension("a")
+    assert spec.facet == AxisRef.point("a")
     assert isinstance(spec.cell, ImagePlot)
-    assert spec.cell.x == AxisRef.data("x")
-    assert spec.cell.y == AxisRef.data("y")
+    assert spec.cell.x == AxisRef.cell_data("x")
+    assert spec.cell.y == AxisRef.cell_data("y")
 
     frames_scanned = _scan_schema(
-        {"a": 1, "b": 3}, data_axes=_frame_axes()
+        {"a": 1, "b": 3}, cell_axes=_frame_axes()
     )
     spec = facet_default(frames_scanned)
     assert isinstance(spec, FacetGridPlot)
     # The degenerate "a" is invisible: the LIVE dimension facets the frames.
-    assert spec.facet == AxisRef.point_dimension("b")
+    assert spec.facet == AxisRef.point("b")
 
     # A grid has ONE facet axis, so a multidimensional scan defaults to its
     # outermost real axis.  The flattened row ordinal is not a fourth axis;
     # the remaining dimensions stay explicit in the fate table and reduce
     # until the operator assigns them differently.
     frames_scanned_twice = _scan_schema(
-        {"a": 2, "b": 3}, repeats=4, data_axes=_frame_axes()
+        {"a": 2, "b": 3}, repeats=4, cell_axes=_frame_axes()
     )
     spec = facet_default(frames_scanned_twice)
     assert isinstance(spec, FacetGridPlot)
-    assert spec.facet == AxisRef.point_dimension("a")
+    assert spec.facet == AxisRef.point("a")
     assert isinstance(spec.cell, ImagePlot)
 
     # With nothing else live, repeat is still history rather than an automatic
     # layout axis.
     frames_repeated_only = _scan_schema(
-        {"a": 1}, repeats=4, data_axes=_frame_axes()
+        {"a": 1}, repeats=4, cell_axes=_frame_axes()
     )
     spec = facet_default(frames_repeated_only)
     assert isinstance(spec, FacetGridPlot)
@@ -172,32 +173,36 @@ def test_a_camera_cycle_facets_its_frames_from_the_point_axis() -> None:
     structure, not the shot count, is what the acquisition authored.
     """
 
-    frames = PointTable.from_columns({"frame": [0, 1]})
-    single = DatasetSchema.create(
-        Axis.create("repeat", size=1),
+    frames = mapped_domain_from_columns(
+        {"frame": [0, 1]}, roles={"frame": READOUT_EVENT}
+    )
+    single = make_dataset_schema(
+        repeat_domain(size=1),
         frames,
-        data_axes=_frame_axes(),
+        cell_axes=_frame_axes(),
     )
     spec = facet_default(single)
     assert isinstance(spec, FacetGridPlot)
     assert spec.facet == AxisRef.point("frame")
     assert isinstance(spec.cell, ImagePlot)
-    assert spec.cell.x == AxisRef.data("x")
-    assert spec.cell.y == AxisRef.data("y")
+    assert spec.cell.x == AxisRef.cell_data("x")
+    assert spec.cell.y == AxisRef.cell_data("y")
 
-    with_cycles = DatasetSchema.create(
-        Axis.create("repeat", size=30),
+    with_cycles = make_dataset_schema(
+        repeat_domain(size=30),
         frames,
-        data_axes=_frame_axes(),
+        cell_axes=_frame_axes(),
     )
     spec = facet_default(with_cycles)
     assert isinstance(spec, FacetGridPlot)
     assert spec.facet == AxisRef.point("frame")
 
-    one_frame = DatasetSchema.create(
-        Axis.create("repeat", size=30),
-        PointTable.from_columns({"frame": [0]}),
-        data_axes=_frame_axes(),
+    one_frame = make_dataset_schema(
+        repeat_domain(size=30),
+        mapped_domain_from_columns(
+            {"frame": [0]}, roles={"frame": READOUT_EVENT}
+        ),
+        cell_axes=_frame_axes(),
     )
     spec = facet_default(one_frame)
     assert isinstance(spec, FacetGridPlot)
@@ -215,26 +220,26 @@ def test_a_site_resolved_scan_spends_position_before_content() -> None:
 
     from zlc_plot import PlotKind, fitting_spec
 
-    sites = (Axis.create("site", size=7),)
-    schema = _scan_schema({"a": 3, "b": 4}, data_axes=sites)
+    sites = (axis("site", size=7, role=SITE),)
+    schema = _scan_schema({"a": 3, "b": 4}, cell_axes=sites)
     spec = facet_default(schema)
     assert isinstance(spec, FacetGridPlot)
     assert spec.facet is None
     cell = spec.cell
     assert isinstance(cell, ImagePlot)
-    assert cell.x == AxisRef.point_dimension("b")
-    assert cell.y == AxisRef.point_dimension("a")
+    assert cell.x == AxisRef.point("b")
+    assert cell.y == AxisRef.point("a")
     curves = fitting_spec(schema, PlotKind.FACET_GRID, cell=PlotKind.CURVE)
-    assert curves.facet == AxisRef.point_dimension("a")
-    assert curves.cell.x == AxisRef.point_dimension("b")
-    assert curves.cell.group == AxisRef.data("site")
+    assert curves.facet == AxisRef.point("a")
+    assert curves.cell.x == AxisRef.point("b")
+    assert curves.cell.group == AxisRef.cell_data("site")
 
 
 def test_the_image_kind_ignores_degenerate_grid_dimensions() -> None:
     """A one-value dimension must not become a one-pixel-thick grid image."""
 
-    schema = _scan_schema({"a": 1, "b": 3}, data_axes=_frame_axes())
+    schema = _scan_schema({"a": 1, "b": 3}, cell_axes=_frame_axes())
     image = image_default(schema)
     assert isinstance(image, ImagePlot)
-    assert image.x == AxisRef.data("x")
-    assert image.y == AxisRef.data("y")
+    assert image.x == AxisRef.cell_data("x")
+    assert image.y == AxisRef.cell_data("y")

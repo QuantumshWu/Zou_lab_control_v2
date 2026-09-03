@@ -2,30 +2,33 @@ from __future__ import annotations
 
 import numpy as np
 
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
-from zlc_plot import AxisRef, CurvePlot, DEFAULT_UNITS, PlotSession, SelectorKind, resolve_unit
+from data_factory import (
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
 
+from zlc_plot import AxisRef, CurvePlot, DEFAULT_UNITS, PlotSession, SelectorKind, resolve_unit
 
 def _session() -> PlotSession:
     x = np.linspace(0.0, 3.0, 61)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": x}, units={"x": "m"}),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"x": x}, units={"x": "m"}),
         dtype=np.float64,
-        canonical_unit="V",
-        generation="unit-test",
+        value_unit="V",
     )
     model = PlotSession(
-        DatasetSnapshot(schema, np.zeros((1, x.size), dtype=np.float64), 0),
+        make_snapshot(schema, np.zeros((1, x.size), dtype=np.float64), 0),
         CurvePlot(AxisRef.point("x")),
     )
     values = model._fit_engine.registry.get("gaussian_offset").evaluate(
         (x,),
         (2.0, 0.1, 0.4, 1.5),
     )
-    model.update_data(DatasetSnapshot(schema, values.reshape(1, -1), 1))
+    model.update_data(make_snapshot(schema, values.reshape(1, -1), 1))
     return model
-
 
 def test_selector_round_trip_and_fit_parameters_follow_display_units() -> None:
     session = _session()
@@ -77,7 +80,6 @@ def test_selector_round_trip_and_fit_parameters_follow_display_units() -> None:
         release()
         session.close()
 
-
 def test_unit_choice_symbols_are_unique_but_alias_input_resolution_is_unchanged() -> None:
     symbols = DEFAULT_UNITS.canonical_symbols()
     resolved = [resolve_unit(symbol) for symbol in symbols]
@@ -86,7 +88,6 @@ def test_unit_choice_symbols_are_unique_but_alias_input_resolution_is_unchanged(
     assert resolve_unit("us") is resolve_unit("µs") is resolve_unit("μs")
     assert resolve_unit("deg") is resolve_unit("°")
     assert resolve_unit("pixel").dimension == "pixel"
-
 
 def test_display_unit_choices_do_not_repeat_aliases() -> None:
     session = _session()

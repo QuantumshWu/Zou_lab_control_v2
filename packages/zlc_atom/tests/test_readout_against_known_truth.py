@@ -416,9 +416,10 @@ def test_target_registration_keeps_a_never_loaded_site_as_unresolved(
     saved = result.calibration.save(tmp_path / "generic-calibration.json")
     calibration = type(result.calibration).load(saved)
     assert calibration.site_map.n_sites == 8
-    rows, columns, registered = _support(
+    rows, columns, registered, source_index = _support(
         target,
         calibration,
+        calibration.select_model(),
         science_context_path=context_path,
         command_receipt=receipt,
     )
@@ -427,3 +428,4 @@ def test_target_registration_keeps_a_never_loaded_site_as_unresolved(
         registered.centers_xy[missing], camera_centers[missing], atol=0.1
     )
     assert (rows[missing], columns[missing]) == (10, 9)
+    assert source_index[missing] == -1

@@ -154,11 +154,19 @@ def _regenerated(
         # A DIFFERENT geometry: only a run whose schema fingerprint moved
         # replaces the panel host; a same-geometry run updates in place.
         block = snapshot.block
+        repeat_domain = block.schema.repeat_domain
+        repeat_axis = repeat_domain.axes[0]
         schema = replace(
             block.schema,
-            repeat_axis=replace(
-                block.schema.repeat_axis,
-                name=str(block.schema.repeat_axis.name) + "-r",
+            repeat_domain=replace(
+                repeat_domain,
+                axes=(
+                    replace(
+                        repeat_axis,
+                        name=str(repeat_axis.name) + "-r",
+                    ),
+                    *repeat_domain.axes[1:],
+                ),
             ),
         )
         snapshot = replace(
@@ -187,11 +195,11 @@ def _regenerated(
 def _camera_image_spec(plot, value, *, labels=None):
     axes = {
         str(axis.name): str(axis.axis_id)
-        for axis in value.snapshot.block.schema.cell_schema.data_axes
+        for axis in value.snapshot.block.schema.cell_domain.axes
     }
     return plot.ImagePlot(
-        plot.AxisRef.data(axes["spatial-x"]),
-        plot.AxisRef.data(axes["spatial-y"]),
+        plot.AxisRef.cell_data(axes["spatial-x"]),
+        plot.AxisRef.cell_data(axes["spatial-y"]),
         labels=plot.PlotLabels() if labels is None else labels,
     )
 

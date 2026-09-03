@@ -18,8 +18,7 @@ from zlc_data import (
     AxisId,
     AxisSpec,
     DatasetSchema,
-    PointColumn,
-    PointTable,
+    DomainSpec,
     READOUT_EVENT,
     REPEAT,
     SITE,
@@ -42,23 +41,19 @@ def _occupied_snapshot(
 ):
     cycles, frames, sites = occupied.shape
     site_axis = AxisSpec(AxisId("occupancy.site"), "site", SITE, sites)
+    repeat_domain = AxisSpec(AxisId("camera.cycle"), "cycle", REPEAT, cycles)
+    frame_axis = AxisSpec(
+        AxisId("camera.frames.frame"),
+        "frame",
+        READOUT_EVENT,
+        frames,
+        tuple(range(frames)),
+    )
     schema = DatasetSchema(
-        AxisSpec(AxisId("camera.cycle"), "cycle", REPEAT, cycles),
-        PointTable(
-            frames,
-            (
-                PointColumn(
-                    AxisId("camera.frames.frame"),
-                    "frame",
-                    READOUT_EVENT,
-                    PointColumn.NUMERIC,
-                    tuple(range(frames)),
-                ),
-            ),
-        ),
-        None,
+        DomainSpec((cycles,), (repeat_domain,), (tuple(range(cycles)),)),
+        DomainSpec((frames,), (frame_axis,), (tuple(range(frames)),)),
+        DomainSpec((site_axis.size,), (site_axis,)),
         ValueSchema(
-            (site_axis,),
             ValidityContract.components(site_axis.axis_id),
             np.dtype("?"),
             "1",
@@ -124,9 +119,8 @@ def test_occupancy_agreement_filters_sampled_counts_and_allows_one_frame_noop() 
     occupied_schema = occupied.block.schema
     counts_schema = replace(
         occupied_schema,
-        cell_schema=ValueSchema(
-            occupied_schema.cell_schema.data_axes,
-            occupied_schema.cell_schema.validity_contract,
+        value_schema=ValueSchema(
+            occupied_schema.value_schema.validity_contract,
             np.dtype("<f8"),
             "count",
         ),
@@ -165,13 +159,13 @@ def test_occupancy_agreement_filters_sampled_counts_and_allows_one_frame_noop() 
         consistent_counts.block.values[:, 0, :2], [[11.0, 22.0]]
     )
     assert np.isnan(consistent_counts.block.values[:, 0, 2:]).all()
-    assert consistent_counts.block.schema.point_table.columns[0].values == (1,)
+    assert consistent_counts.block.schema.point_domain.axes[0].coordinates == (1,)
 
     one_frame_occupied = _occupied_snapshot(occupied_values[:, :1, :], occupied_valid[:, :1, :])
     one_frame_counts = owned_snapshot_from_arrays(
         replace(
             one_frame_occupied.block.schema,
-            cell_schema=counts_schema.cell_schema,
+            value_schema=counts_schema.value_schema,
         ),
         count_values[:, :1, :],
         one_frame_occupied.block.revision,
@@ -221,13 +215,13 @@ def test_pair_axis_carries_one_label_per_pair() -> None:
         _occupied_snapshot(occupied)
     )
     schema = survival.block.schema
-    assert schema.point_table.row_count == 3
-    (pair_column,) = schema.point_table.columns
-    assert pair_column.coordinate_id == AxisId("fs.pair")
-    assert pair_column.role == READOUT_EVENT
-    assert pair_column.values == (0, 1, 2)
-    assert pair_column.coordinate_labels == ("0-1", "0-2", "1-2")
-    (site_axis,) = schema.cell_schema.data_axes
+    assert schema.point_domain.size == 3
+    (pair_axis,) = schema.point_domain.axes
+    assert pair_axis.axis_id == AxisId("fs.pair")
+    assert pair_axis.role == READOUT_EVENT
+    assert pair_axis.coordinates == (0, 1, 2)
+    assert pair_axis.coordinate_labels == ("0-1", "0-2", "1-2")
+    (site_axis,) = schema.cell_domain.axes
     assert site_axis.axis_id == AxisId("occupancy.site")
 
 
@@ -239,12 +233,11 @@ def test_single_frame_and_wrong_shapes_are_refused() -> None:
     float_schema = non_boolean.block.schema
     float_snapshot = owned_snapshot_from_arrays(
         DatasetSchema(
-            float_schema.repeat_axis,
-            float_schema.point_table,
-            None,
+            float_schema.repeat_domain,
+            float_schema.point_domain,
+            float_schema.cell_domain,
             ValueSchema(
-                float_schema.cell_schema.data_axes,
-                float_schema.cell_schema.validity_contract,
+                float_schema.value_schema.validity_contract,
                 np.dtype("<f8"),
                 "1",
             ),
@@ -263,15 +256,13 @@ def test_connecting_judged_frames_names_the_right_signal() -> None:
 
     frames = _occupied_snapshot(np.zeros((2, 2, 3), dtype=bool))
     schema = frames.block.schema
+    y_axis = AxisSpec(AxisId("cam.y"), "y", SPATIAL_Y, 4)
+    x_axis = AxisSpec(AxisId("cam.x"), "x", SPATIAL_X, 5)
     pixel_schema = DatasetSchema(
-        schema.repeat_axis,
-        schema.point_table,
-        None,
+        schema.repeat_domain,
+        schema.point_domain,
+        DomainSpec((y_axis.size, x_axis.size), (y_axis, x_axis)),
         ValueSchema(
-            (
-                AxisSpec(AxisId("cam.y"), "y", SPATIAL_Y, 4),
-                AxisSpec(AxisId("cam.x"), "x", SPATIAL_X, 5),
-            ),
             ValidityContract.components(AxisId("cam.y")),
             np.dtype("<u2"),
             "1",
@@ -299,8 +290,8 @@ def test_evaluate_translates_exact_coverage_by_whole_cycles() -> None:
     survival = outputs["survival"]
     assert survival.coverage == DatasetCoverage(2 * 3, 5 * 3)  # cycles x pairs
     assert survival.cell_origin == (1, 0)
-    assert survival.canonical_schema.point_table.row_count == 3
-    assert survival.canonical_schema.repeat_axis.size == 5
+    assert survival.canonical_schema.point_domain.size == 3
+    assert survival.canonical_schema.repeat_domain.size == 5
 
 
 def test_evaluate_refuses_partial_cycle_coverage() -> None:
@@ -560,12 +551,12 @@ def test_live_monitor_chain_camera_occupancy_survival() -> None:
         pairs = len(_forward_pairs(CALIBRATION_FRAMES_PER_CYCLE))
         assert values.shape == (cycles, pairs, 1)
         schema = survival_value.snapshot.block.schema
-        pair_column = next(
-            column
-            for column in schema.point_table.columns
-            if column.role == READOUT_EVENT
+        pair_axis = next(
+            axis
+            for axis in schema.point_domain.axes
+            if axis.role == READOUT_EVENT
         )
-        assert pair_column.coordinate_labels == ("0-1", "0-2", "1-2")
+        assert pair_axis.coordinate_labels == ("0-1", "0-2", "1-2")
         coverage = survival_value.coverage
         assert coverage.total_cells == cycles * pairs
 
@@ -587,12 +578,12 @@ def test_live_monitor_chain_camera_occupancy_survival() -> None:
                 if publication is None:
                     return None
                 snapshot = plane.current_dataset(survival_key, publication)
-                columns = snapshot.block.schema.point_table.columns
+                axes = snapshot.block.schema.point_domain.axes
                 has_index = any(
-                    column.coordinate_id == PRIMARY_INDEX_AXIS_ID
-                    for column in columns
+                    axis.axis_id == PRIMARY_INDEX_AXIS_ID
+                    for axis in axes
                 )
-                rows = snapshot.block.schema.point_table.row_count
+                rows = snapshot.block.schema.point_domain.size
                 return snapshot if has_index and rows >= 2 else None
 
             def _diagnose():
@@ -600,9 +591,9 @@ def test_live_monitor_chain_camera_occupancy_survival() -> None:
                 if publication is None:
                     return "no publication"
                 snapshot = plane.current_dataset(survival_key, publication)
-                columns = tuple(
-                    str(column.coordinate_id)
-                    for column in snapshot.block.schema.point_table.columns
+                axes = tuple(
+                    str(axis.axis_id)
+                    for axis in snapshot.block.schema.point_domain.axes
                 )
                 def _seq(name):
                     pub = plane.latest_publication(name)
@@ -610,8 +601,8 @@ def test_live_monitor_chain_camera_occupancy_survival() -> None:
 
                 return (
                     f"seq={publication.event_ref.sequence} "
-                    f"rows={snapshot.block.schema.point_table.row_count} "
-                    f"columns={columns} "
+                    f"rows={snapshot.block.schema.point_domain.size} "
+                    f"axes={axes} "
                     f"chain: frames={_seq(frames_key)} "
                     f"occupied={_seq(occupied_key)} "
                     f"survival={_seq(survival_key)} "
@@ -625,7 +616,7 @@ def test_live_monitor_chain_camera_occupancy_survival() -> None:
                 )
             except AssertionError as error:
                 raise AssertionError(f"{error}; state: {_diagnose()}") from None
-            assert indexed.block.schema.point_table.row_count >= 2
+            assert indexed.block.schema.point_domain.size >= 2
         finally:
             lease.close()
     finally:

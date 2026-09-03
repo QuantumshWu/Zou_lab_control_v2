@@ -189,32 +189,30 @@ def _require_distinct_axes(
     roles: tuple[tuple[str, AxisRef | None], ...],
     scope: tuple[ScopeTerm, ...],
 ) -> None:
-    used: dict[tuple[object, str | None], str] = {}
+    used: dict[AxisRef, str] = {}
     for name, axis in roles:
         if axis is None:
             continue
-        identity = axis.physical_identity
-        previous = used.get(identity)
+        previous = used.get(axis)
         if previous is not None:
             raise ValueError(
                 f"one physical axis cannot be both {previous} and {name}"
             )
-        used[identity] = name
+        used[axis] = name
     for axis, _coordinate in scope:
-        identity = axis.physical_identity
-        previous = used.get(identity)
+        previous = used.get(axis)
         if previous is not None:
             raise ValueError(
                 f"one physical axis cannot be both {previous} and scope"
             )
-        used[identity] = "scope"
+        used[axis] = "scope"
 
 
 def _validated_scope(value: object) -> tuple[ScopeTerm, ...]:
     if not isinstance(value, tuple):
         raise TypeError("scope must be a tuple of (AxisRef, value) pairs")
     terms: list[ScopeTerm] = []
-    seen: set[tuple[object, str | None]] = set()
+    seen: set[AxisRef] = set()
     for term in value:
         if not isinstance(term, tuple) or len(term) != 2:
             raise TypeError("each scope term must be an (AxisRef, value) pair")
@@ -226,10 +224,9 @@ def _validated_scope(value: object) -> tuple[ScopeTerm, ...]:
             if coordinate is LATEST_COORDINATE
             else canonical_coordinate_scalar(coordinate, "scope coordinate")
         )
-        identity = axis.physical_identity
-        if identity in seen:
+        if axis in seen:
             raise ValueError(f"axis {axis!r} is scoped twice")
-        seen.add(identity)
+        seen.add(axis)
         terms.append((axis, coordinate))
     return tuple(terms)
 
@@ -306,12 +303,11 @@ class HistogramPlot:
         reduced = tuple(self.reduced)
         if any(not isinstance(ref, AxisRef) for ref in reduced):
             raise TypeError("HistogramPlot.reduced must contain AxisRef values")
-        identities = [ref.physical_identity for ref in reduced]
-        if len(set(identities)) != len(identities):
+        if len(set(reduced)) != len(reduced):
             raise ValueError("HistogramPlot.reduced must name distinct axes")
         scope = _validated_scope(self.scope)
-        pinned = {term[0].physical_identity for term in scope}
-        if pinned & set(identities):
+        pinned = {term[0] for term in scope}
+        if pinned & set(reduced):
             raise ValueError("an axis cannot be both reduced and pinned")
         object.__setattr__(self, "reduced", reduced)
         object.__setattr__(self, "scope", scope)

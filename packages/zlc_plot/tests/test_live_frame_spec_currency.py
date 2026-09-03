@@ -21,43 +21,35 @@ import numpy as np
 import pytest
 
 from data_factory import (
-    Axis,
-    DatasetSchema,
-    DatasetSnapshot,
-    PointTable,
-    PointTopology,
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
 )
-from zlc_data import AxisId
+from zlc_data import REPEAT, SITE
 from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, PlotSession
-
 
 def _snapshot(revision: int):
     rows = [(i % 4, i // 4) for i in range(12)]
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=2),
-        PointTable.from_columns({
+    schema = make_dataset_schema(
+        repeat_domain(size=2),
+        mapped_domain_from_columns({
             "ax": np.asarray([float(r[0]) for r in rows]),
             "ay": np.asarray([float(r[1]) for r in rows]),
         }),
-        data_axes=(Axis.create("site", values=[0.0, 1.0, 2.0]),),
+        cell_axes=(axis("site", values=[0.0, 1.0, 2.0], role=SITE),),
         dtype=np.float64,
-        generation="spec-currency",
-        point_topology=PointTopology(
-            (AxisId("ax"), AxisId("ay")),
-            ((0.0, 1.0, 2.0, 3.0), (0.0, 1.0, 2.0)),
-            tuple(rows),
-        ),
     )
     rng = np.random.default_rng(revision)
-    return DatasetSnapshot(
+    return make_snapshot(
         schema, rng.normal(size=(2, len(rows), 3)), revision=revision
     )
-
 
 def test_a_frame_prepared_under_the_old_spec_is_refused() -> None:
     session = PlotSession(
         _snapshot(1),
-        FacetGridPlot(AxisRef.data("site"), CurvePlot(AxisRef.point("ax"))),
+        FacetGridPlot(AxisRef.cell_data("site"), CurvePlot(AxisRef.point("ax"))),
     )
     try:
         # A frame is prepared while the operator is still looking at the
@@ -66,7 +58,7 @@ def test_a_frame_prepared_under_the_old_spec_is_refused() -> None:
 
         # Then they hand x to another axis: a NEW spec, and with it a new
         # projection and payload.
-        session.apply_semantic("fate:point_dimension:ay", "x")
+        session.apply_semantic("fate:point:ay", "x")
         current_spec = session.spec
 
         # The in-flight frame must not land its old-spec payload here.
@@ -79,13 +71,12 @@ def test_a_frame_prepared_under_the_old_spec_is_refused() -> None:
     finally:
         session.close()
 
-
 def test_a_frame_prepared_under_the_current_spec_still_commits() -> None:
     """The refusal is about the SPEC, not about live frames."""
 
     session = PlotSession(
         _snapshot(1),
-        FacetGridPlot(AxisRef.data("site"), CurvePlot(AxisRef.point("ax"))),
+        FacetGridPlot(AxisRef.cell_data("site"), CurvePlot(AxisRef.point("ax"))),
     )
     try:
         prepared = session.prepare_live_frame(_snapshot(2)).result(timeout=20)

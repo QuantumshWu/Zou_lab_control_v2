@@ -7,16 +7,15 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
+from ._arrays import immutable_array
 from .axis import (
     PRIMARY_INDEX,
-    SCAN_POINT,
     AxisId,
     AxisSpec,
     LATEST_COORDINATE,
     canonical_coordinate_scalar,
-    point_ordinal_axis,
 )
-from .schema import DatasetSchema, GridTopology, PointColumn, PointTable, ValueSchema
+from .schema import DatasetSchema, DomainSpec
 from .selection import (
     IndexSelection,
     Selection,
@@ -64,12 +63,12 @@ _NOT_INDEXED = object()
 
 @dataclass(frozen=True, eq=False)
 class IndexedHistoryLayout:
-    """The one reading of a Runtime indexed history's point table.
+    """The one reading of a Runtime indexed history's Point domain.
 
     Its rows are ``shots x event rows``: the primary-index column holds each
     shot's relative offset (oldest first, the latest is 0) repeated once per
-    event row, and every other column -- and the topology -- repeats the
-    event's own rows under each shot.  That structure is derived here ONCE
+    event row, and every other point-axis code repeats the event's own rows
+    under each shot. That structure is derived here ONCE
     per schema and read by every consumer: the plot's window mask and shot
     codes, the compatibility gate that lets a sliding window keep its host,
     and the title's shot count.  None of them walks the rows again -- the
@@ -82,14 +81,18 @@ class IndexedHistoryLayout:
     cells: np.ndarray
     #: Event rows under every shot.
     inner_count: int
-    #: What does not change as the window slides -- the repeat axis, the
-    #: cell schema, the event's own point columns and topology -- and so
+    #: What does not change as the window slides -- the Repeat, Cell and
+    #: value contracts plus the event's own Point domain -- and so
     #: what two windows of one history must share.
     event: tuple[object, ...]
 
     def __post_init__(self) -> None:
-        cells = np.asarray(self.cells, dtype=np.int64)
-        cells.setflags(write=False)
+        source = np.asarray(self.cells, dtype=np.int64)
+        cells = immutable_array(
+            source,
+            dtype=np.dtype("<i8"),
+            shape=source.shape,
+        )
         object.__setattr__(self, "cells", cells)
 
     @property
@@ -119,8 +122,8 @@ def indexed_history_layout(schema: DatasetSchema) -> IndexedHistoryLayout | None
 
     A schema that names the primary index but breaks its contract -- a
     non-integer or unordered offset, a latest offset other than 0, shots of
-    unequal size, an event column or topology that does not repeat under
-    every shot -- is a producer error and is refused, not read leniently.
+    unequal size, or event-axis codes that do not repeat under every shot --
+    is a producer error and is refused, not read leniently.
     """
 
     if not isinstance(schema, DatasetSchema):
@@ -128,9 +131,9 @@ def indexed_history_layout(schema: DatasetSchema) -> IndexedHistoryLayout | None
     cached = schema._indexed_layout
     if cached is not None:
         return None if cached is _NOT_INDEXED else cached
-    columns = tuple(schema.point_table.columns)
+    point_domain = schema.point_domain
     primary = next(
-        (column for column in columns if column.coordinate_id == PRIMARY_INDEX_AXIS_ID),
+        (axis for axis in point_domain.axes if axis.axis_id == PRIMARY_INDEX_AXIS_ID),
         None,
     )
     if primary is None:
@@ -138,7 +141,9 @@ def indexed_history_layout(schema: DatasetSchema) -> IndexedHistoryLayout | None
         return None
     if primary.role != PRIMARY_INDEX:
         raise ValueError("the primary-index coordinate must carry the primary-index role")
-    offsets = np.asarray(primary.values)
+    offsets = np.asarray(
+        tuple(primary.coordinate_at(index) for index in range(primary.size))
+    )
     if (
         offsets.ndim != 1
         or offsets.size == 0
@@ -147,79 +152,46 @@ def indexed_history_layout(schema: DatasetSchema) -> IndexedHistoryLayout | None
         raise ValueError("primary-index coordinates must be integer relative offsets")
     offsets = offsets.astype(np.int64, copy=False)
     steps = np.diff(offsets)
-    if np.any(steps < 0):
+    if np.any(steps <= 0):
         raise ValueError("primary-index offsets must form ordered cells")
-    starts = np.concatenate(([0], np.flatnonzero(steps > 0) + 1))
-    cells = offsets[starts]
+    cells = offsets
     if int(cells[-1]) != 0:
         raise ValueError("relative primary-index coordinates must end at latest offset 0")
-    counts = np.diff(np.concatenate((starts, [offsets.size])))
+    primary_codes = point_domain.codes(PRIMARY_INDEX_AXIS_ID)
+    code_steps = np.diff(primary_codes)
+    if (
+        int(primary_codes[0]) != 0
+        or int(primary_codes[-1]) != primary.size - 1
+        or bool(np.any((code_steps != 0) & (code_steps != 1)))
+    ):
+        raise ValueError("primary-index rows must form ordered contiguous cells")
+    starts = np.concatenate(([0], np.flatnonzero(code_steps > 0) + 1))
+    if not np.array_equal(primary_codes[starts], np.arange(primary.size)):
+        raise ValueError("primary-index rows must cover every retained cell")
+    counts = np.diff(np.concatenate((starts, [point_domain.size])))
     inner_count = int(counts[0])
     if np.any(counts != inner_count):
         raise ValueError("every shot of an indexed history holds the same event rows")
     shots = int(cells.size)
-
-    def repeats_under_every_shot(entries: tuple[object, ...]) -> bool:
-        plane = np.empty(len(entries), dtype=object)
-        plane[:] = entries
-        plane = plane.reshape(shots, inner_count)
-        return shots == 1 or bool(np.all(plane[1:] == plane[0]))
-
-    event_columns: list[tuple[object, ...]] = []
-    for column in columns:
-        if column is primary:
-            continue
-        values = tuple(column.values)
-        labels = column.coordinate_labels
-        if not repeats_under_every_shot(values) or (
-            labels is not None and not repeats_under_every_shot(tuple(labels))
-        ):
+    event_axes = tuple(axis for axis in point_domain.axes if axis is not primary)
+    event_codes: list[tuple[int, ...]] = []
+    for axis in event_axes:
+        codes = point_domain.codes(axis.axis_id).reshape(shots, inner_count)
+        if shots > 1 and bool(np.any(codes[1:] != codes[0])):
             raise ValueError(
-                "an indexed history repeats the event's point columns under every shot"
+                "an indexed history repeats the event's Point domain under every shot"
             )
-        event_columns.append(
-            (
-                column.coordinate_id,
-                column.name,
-                column.role,
-                column.value_kind,
-                values[:inner_count],
-                column.unit,
-                column.coordinate_frame,
-                None if labels is None else tuple(labels[:inner_count]),
-            )
-        )
-
-    topology = schema.grid_topology
-    topology_event: object = None
-    if topology is not None:
-        if (
-            not topology.dimension_ids
-            or topology.dimension_ids[0] != PRIMARY_INDEX_AXIS_ID
-            or tuple(topology.coordinate_domains[0]) != tuple(cells.tolist())
-        ):
-            raise ValueError("an indexed history's topology leads with its shot index")
-        mapping = np.asarray(topology.row_to_cell, dtype=np.int64).reshape(
-            shots, inner_count, -1
-        )
-        if np.any(mapping[:, :, 0] != np.arange(shots, dtype=np.int64)[:, None]) or (
-            shots > 1 and np.any(mapping[1:, :, 1:] != mapping[0, :, 1:])
-        ):
-            raise ValueError(
-                "an indexed history repeats the event's topology under every shot"
-            )
-        topology_event = (
-            topology.dimension_ids[1:],
-            topology.coordinate_domains[1:],
-            tuple(tuple(int(index) for index in cell) for cell in mapping[0, :, 1:]),
-            None
-            if topology.coordinate_labels is None
-            else topology.coordinate_labels[1:],
-        )
+        event_codes.append(tuple(codes[0].tolist()))
+    event_domain = DomainSpec((inner_count,), event_axes, tuple(event_codes))
     layout = IndexedHistoryLayout(
         cells,
         inner_count,
-        (schema.repeat_axis, schema.cell_schema, tuple(event_columns), topology_event),
+        (
+            schema.repeat_domain,
+            schema.cell_domain,
+            schema.value_schema,
+            event_domain,
+        ),
     )
     object.__setattr__(schema, "_indexed_layout", layout)
     return layout
@@ -302,78 +274,39 @@ def axis_catalog(
 
     Four columns: the label, the axis id, the axis, and which of the three
     physical dimensions the label restricts -- ``"repeat"``, ``"point"`` or
-    ``"data"``.  Both the human name and the id text are listed, because a
+    ``"cell_data"``.  Both the human name and the id text are listed, because a
     selection is authored against whichever the operator had in front of them.
 
-    A grid-topology dimension is a point-row quantity whether or not a matching
-    PointColumn spells its per-row values out: the topology itself is the
-    declaration.  A scan-heatmap cell plots exactly these dimensions, so a box
-    drawn on one names them -- and before they were catalogued here, every such
-    box died as "not uniquely present".
+    Repeat and Point axes already own their logical coordinate domains. Their
+    physical-row mapping remains in the corresponding ``DomainSpec`` codes.
     """
 
     cached = schema._axis_catalog
     if cached is not None:
         return cached
     catalog: list[tuple[str, AxisId, AxisSpec, str]] = []
-    repeat_axis = schema.repeat_axis
-    catalog.append((repeat_axis.name, repeat_axis.axis_id, repeat_axis, "repeat"))
-    catalog.append(
-        (repeat_axis.axis_id.value, repeat_axis.axis_id, repeat_axis, "repeat")
-    )
-    for column in schema.point_table.columns:
-        axis = AxisSpec(
-            column.coordinate_id,
-            column.name,
-            column.role,
-            schema.point_table.row_count,
-            column.values,
-            column.unit,
-            column.coordinate_frame,
-            coordinate_labels=column.coordinate_labels,
-        )
+    for axis in schema.repeat_domain.axes:
         catalog.extend(
             (
-                (column.name, column.coordinate_id, axis, "point"),
-                (column.coordinate_id.value, column.coordinate_id, axis, "point"),
+                (axis.name, axis.axis_id, axis, "repeat"),
+                (axis.axis_id.value, axis.axis_id, axis, "repeat"),
             )
         )
-    topology = schema.grid_topology
-    if topology is not None:
-        column_ids = {column.coordinate_id for column in schema.point_table.columns}
-        for position, dimension_id in enumerate(topology.dimension_ids):
-            if dimension_id in column_ids:
-                continue  # the matching column above already catalogs it
-            domain = topology.coordinate_domains[position]
-            labels = (
-                None
-                if topology.coordinate_labels is None
-                else topology.coordinate_labels[position]
-            )
-            axis = AxisSpec(
-                dimension_id,
-                dimension_id.value,
-                SCAN_POINT,
-                schema.point_table.row_count,
-                tuple(domain[cell[position]] for cell in topology.row_to_cell),
-                coordinate_labels=None
-                if labels is None
-                else tuple(labels[cell[position]] for cell in topology.row_to_cell),
-            )
-            catalog.append((dimension_id.value, dimension_id, axis, "point"))
-    for axis in schema.cell_schema.data_axes:
+    for axis in schema.point_domain.axes:
         catalog.extend(
             (
-                (axis.name, axis.axis_id, axis, "data"),
-                (axis.axis_id.value, axis.axis_id, axis, "data"),
+                (axis.name, axis.axis_id, axis, "point"),
+                (axis.axis_id.value, axis.axis_id, axis, "point"),
             )
         )
-    # ONCE PER SCHEMA.  Every AxisSpec above re-runs
-    # canonical_coordinate_scalar over a tuple PointColumn already
-    # canonicalised -- 26 ms of the 41 ms selection_indices costs on a
-    # 200x200 scan, and a committed ROI pays it on every publication for
-    # a catalog that cannot change.  Cached exactly as the fingerprint
-    # and the topology's cell indices are.
+    for axis in schema.cell_domain.axes:
+        catalog.extend(
+            (
+                (axis.name, axis.axis_id, axis, "cell_data"),
+                (axis.axis_id.value, axis.axis_id, axis, "cell_data"),
+            )
+        )
+    # ONCE PER SCHEMA: the axes and their physical codes cannot change.
     answer = tuple(catalog)
     object.__setattr__(schema, "_axis_catalog", answer)
     return answer
@@ -399,47 +332,47 @@ def selection_indices(
     catalog = {
         axis_id: (axis, kind) for _label, axis_id, axis, kind in axis_catalog(schema)
     }
-    point_ordinal = point_ordinal_axis(schema.point_table.row_count)
-    catalog[point_ordinal.axis_id] = (point_ordinal, "point")
     terms = {term.axis_id: term for term in selection.terms}
+    for axis_id in terms:
+        if axis_id not in catalog:
+            raise ValueError(f"selection axis {axis_id} is absent from source schema")
 
-    def indices_for(axis_id: AxisId, default_size: int) -> range | tuple[int, ...]:
+    def logical_indices(axis_id: AxisId) -> range | tuple[int, ...]:
         selected = terms.get(axis_id)
-        if selected is None:
-            return range(default_size)
         axis, _kind = catalog[axis_id]
+        if selected is None:
+            return range(axis.size)
         resolved, _removes_axis = resolve_selection_indices(axis, selected)
         if not len(resolved):
             raise ValueError(f"selection for axis {axis_id} is empty")
         return resolved
 
-    repeat = indices_for(schema.repeat_axis.axis_id, schema.repeat_axis.size)
-    points_set = set(range(schema.point_table.row_count))
-    # Every "point"-kind catalog axis masks point ROWS: the table's own columns
-    # and the grid-topology dimensions catalogued for them.  Restricting this
-    # to declared columns silently ignored a term on a column-less dimension.
-    point_ids = {
-        axis_id for axis_id, (_axis, kind) in catalog.items() if kind == "point"
-    }
-    for axis_id in point_ids:
-        if axis_id in terms:
-            axis, _kind = catalog[axis_id]
-            resolved, _removes_axis = resolve_selection_indices(axis, terms[axis_id])
-            points_set.intersection_update(resolved)
-    ordered = sorted(points_set)
-    if not ordered:
-        raise ValueError("selection removed every source point row")
-    points = (
-        range(ordered[0], ordered[-1] + 1)
-        if ordered[-1] - ordered[0] + 1 == len(ordered)
-        else tuple(ordered)
-    )
+    def physical_rows(domain: DomainSpec) -> range | tuple[int, ...]:
+        selected_axes = tuple(axis for axis in domain.axes if axis.axis_id in terms)
+        if not selected_axes:
+            return range(domain.size)
+        keep = np.ones(domain.size, dtype=np.bool_)
+        for axis in selected_axes:
+            logical = logical_indices(axis.axis_id)
+            codes = domain.codes(axis.axis_id)
+            if isinstance(logical, range) and logical.step == 1:
+                keep &= (codes >= logical.start) & (codes < logical.stop)
+            else:
+                keep &= np.isin(codes, np.asarray(logical, dtype=np.int64))
+        rows = np.flatnonzero(keep)
+        if rows.size == 0:
+            raise ValueError("selection removed every source domain row")
+        start = int(rows[0])
+        stop = int(rows[-1]) + 1
+        if stop - start == rows.size:
+            return range(start, stop)
+        return tuple(int(row) for row in rows)
+
+    repeat = physical_rows(schema.repeat_domain)
+    points = physical_rows(schema.point_domain)
     data: dict[AxisId, range | tuple[int, ...]] = {}
-    for axis in schema.cell_schema.data_axes:
-        data[axis.axis_id] = indices_for(axis.axis_id, axis.size)
-    for axis_id in terms:
-        if axis_id not in catalog:
-            raise ValueError(f"selection axis {axis_id} is absent from source schema")
+    for axis in schema.cell_domain.axes:
+        data[axis.axis_id] = logical_indices(axis.axis_id)
     return repeat, points, data
 
 
@@ -473,28 +406,36 @@ def _subset_axis(axis: AxisSpec, indices: range | tuple[int, ...]) -> AxisSpec:
     )
 
 
-def _subset_point_table(
-    point_table: PointTable,
+def _subset_mapped_domain(
+    domain: DomainSpec,
     indices: range | tuple[int, ...],
-) -> PointTable:
-    return PointTable(
-        len(indices),
-        tuple(
-            PointColumn(
-                column.coordinate_id,
-                column.name,
-                column.role,
-                column.value_kind,
-                tuple(column.values[index] for index in indices),
-                column.unit,
-                column.coordinate_frame,
-                None
-                if column.coordinate_labels is None
-                else tuple(column.coordinate_labels[index] for index in indices),
+) -> DomainSpec:
+    if domain.axis_codes is None:
+        raise ValueError("physical-row restriction requires an explicitly mapped domain")
+    if _keeps_everything(indices, domain.size):
+        return domain
+    axes: list[AxisSpec] = []
+    axis_codes: list[tuple[int, ...]] = []
+    for axis in domain.axes:
+        selected = take_indices(domain.codes(axis.axis_id), indices, axis=0)
+        used = np.unique(selected)
+        used_indices = tuple(used.tolist())
+        if used.size and int(used[-1]) - int(used[0]) + 1 == used.size:
+            axis_indices: range | tuple[int, ...] = range(
+                int(used[0]), int(used[-1]) + 1
             )
-            for column in point_table.columns
-        ),
-    )
+        else:
+            axis_indices = used_indices
+        axes.append(
+            axis
+            if len(used_indices) == axis.size
+            and all(index == code for index, code in enumerate(used_indices))
+            else _subset_axis(axis, axis_indices)
+        )
+        remap = np.empty(axis.size, dtype=np.int64)
+        remap[used] = np.arange(used.size, dtype=np.int64)
+        axis_codes.append(tuple(remap[selected].tolist()))
+    return DomainSpec((len(indices),), tuple(axes), tuple(axis_codes))
 
 
 def _keeps_everything(indices: range | tuple[int, ...], size: int) -> bool:
@@ -511,29 +452,22 @@ def restricted_schema(
 ) -> DatasetSchema:
     """The schema of what survives -- the source's axes, cropped, not dropped."""
 
-    repeat_axis = _subset_axis(schema.repeat_axis, repeat_indices)
-    point_table = _subset_point_table(schema.point_table, point_indices)
+    repeat_domain = _subset_mapped_domain(schema.repeat_domain, repeat_indices)
+    point_domain = _subset_mapped_domain(schema.point_domain, point_indices)
     cell_axes = tuple(
         _subset_axis(axis, data_indices[axis.axis_id])
-        for axis in schema.cell_schema.data_axes
+        for axis in schema.cell_domain.axes
     )
-    cell_schema = ValueSchema(
+    cell_domain = DomainSpec(
+        tuple(axis.size for axis in cell_axes),
         cell_axes,
-        schema.cell_schema.validity_contract,
-        schema.cell_schema.dtype,
-        schema.cell_schema.value_unit,
     )
-    grid_topology = schema.grid_topology
-    if grid_topology is not None and not _keeps_everything(
-        point_indices, schema.point_table.row_count
-    ):
-        grid_topology = GridTopology(
-            grid_topology.dimension_ids,
-            grid_topology.coordinate_domains,
-            tuple(grid_topology.row_to_cell[index] for index in point_indices),
-            coordinate_labels=grid_topology.coordinate_labels,
-        )
-    return DatasetSchema(repeat_axis, point_table, grid_topology, cell_schema)
+    return DatasetSchema(
+        repeat_domain,
+        point_domain,
+        cell_domain,
+        schema.value_schema,
+    )
 
 
 def restricted_values(
@@ -547,7 +481,7 @@ def restricted_values(
 
     result = take_indices(values, repeat_indices, axis=0)
     result = take_indices(result, point_indices, axis=1)
-    for position, axis in enumerate(schema.cell_schema.data_axes):
+    for position, axis in enumerate(schema.cell_domain.axes):
         result = take_indices(result, data_indices[axis.axis_id], axis=2 + position)
     return result
 
@@ -566,13 +500,6 @@ def value_selection(
     """
 
     catalog = list(axis_catalog(schema))
-    ordinal = point_ordinal_axis(schema.point_table.row_count)
-    catalog.extend(
-        (
-            (ordinal.axis_id.value, ordinal.axis_id, ordinal, "point"),
-            (ordinal.name, ordinal.axis_id, ordinal, "point"),
-        )
-    )
     resolved: list[object] = []
     for label, value in terms.items():
         if not isinstance(label, (str, AxisId)):

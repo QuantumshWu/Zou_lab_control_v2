@@ -13,8 +13,8 @@ from zlc_data import (
     AxisRoleId,
     AxisSpec,
     CoordinateFrameId,
+    DomainSpec,
     OwnedSnapshot,
-    PointColumn,
     READOUT_EVENT,
     SPATIAL_X,
     SPATIAL_Y,
@@ -47,8 +47,8 @@ _CAMERA_FRAME_CONTRACT = "camera.frames"
 #: the POINT axis -- (repeat cycles) x (frame points) x (y, x) -- because a
 #: frame is a point of the acquisition, not structure inside a pixel plane:
 #: that is what lets a grid facet the frames side by side and lets a scan
-#: nest them into its own point table.  The column's role is READOUT_EVENT,
-#: the point-domain role the data model reserves for exactly this.
+#: compose them with scan axes in the same Point domain. The frame axis role
+#: is READOUT_EVENT.
 CAMERA_FRAMES_OUTPUT = DatasetOutputDeclaration("frames", _CAMERA_FRAME_CONTRACT)
 
 #: How often a capture comes back to see whether it has been asked to stop.
@@ -69,14 +69,14 @@ CAMERA_FRAMES_OUTPUT = DatasetOutputDeclaration("frames", _CAMERA_FRAME_CONTRACT
 _CANCEL_RESPONSE_SECONDS = 0.05
 
 
-def _frame_point_column(producer: str, frames: int) -> PointColumn:
-    """The frame-index point column one cycle publishes."""
+def _frame_point_axis(producer: str, frames: int) -> AxisSpec:
+    """The frame axis one cycle publishes in its Point domain."""
 
-    return PointColumn(
+    return AxisSpec(
         AxisId(f"{producer}.frames.frame"),
         "frame",
         READOUT_EVENT,
-        PointColumn.NUMERIC,
+        int(frames),
         tuple(range(int(frames))),
     )
 
@@ -118,7 +118,7 @@ def _pixel_axes(
     shape_yx: tuple[int, int],
     *,
     producer: str,
-):
+) -> tuple[AxisSpec | AxisRoleId, AxisSpec | AxisRoleId]:
     """The sensor pixels a frame covers, as its two spatial axes.
 
     A frame is a crop of a sensor, and the numbers that mean anything about it
@@ -129,23 +129,23 @@ def _pixel_axes(
     else the moment the ROI moved, which is exactly what a region does when it
     is used to set the ROI.
 
-    The frame axis is a point column, so the cell is (y, x): those are the two
+    The frame axis belongs to Point, so the cell is (y, x): those are the two
     cell axes the dataset will generate, in that order.
     """
 
     if point is None:
-        return None
+        return (SPATIAL_Y, SPATIAL_X)
     origin_y, origin_x = (int(value) for value in point.roi_origin_yx)
     step_y, step_x = (int(value) for value in getattr(point, "binning_yx", (1, 1)))
     height, width = (int(value) for value in shape_yx)
-    return {
-        SPATIAL_Y: _sensor_pixel_axis(
+    return (
+        _sensor_pixel_axis(
             producer, 0, SPATIAL_Y, origin_y, max(1, step_y), height
         ),
-        SPATIAL_X: _sensor_pixel_axis(
+        _sensor_pixel_axis(
             producer, 1, SPATIAL_X, origin_x, max(1, step_x), width
         ),
-    }
+    )
 
 
 def frames_snapshot(
@@ -181,13 +181,12 @@ def frames_snapshot(
         ),
         producer=producer,
         signal=CAMERA_FRAMES_OUTPUT.name,
-        roles=(READOUT_EVENT, SPATIAL_Y, SPATIAL_X),
-        axis_specs=_pixel_axes(
+        point_axes=(_frame_point_axis(producer, len(frames[0])),),
+        cell_axes=_pixel_axes(
             working_point,
             np.asarray(frames[0][0].image).shape,
             producer=producer,
         ),
-        point_columns={READOUT_EVENT: _frame_point_column(producer, len(frames[0]))},
         value_unit=value_unit,
         generation=str(getattr(generation, "value", generation)),
         revision=int(revision),
@@ -209,11 +208,14 @@ def _finite_cycle_output(
         working_point=node.actual_working_point,
         value_unit=node.frame_value_unit,
     )
+    event_schema = event.block.schema
+    (repeat_axis,) = event_schema.repeat_domain.axes
     canonical = replace(
-        event.block.schema,
-        repeat_axis=replace(
-            event.block.schema.repeat_axis,
-            size=node.repeat,
+        event_schema,
+        repeat_domain=DomainSpec(
+            (node.repeat,),
+            (replace(repeat_axis, size=node.repeat),),
+            (tuple(range(node.repeat)),),
         ),
     )
     frames = node.frames_per_cycle

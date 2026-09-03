@@ -15,7 +15,7 @@ from .validation import (
 
 from ._arrays import immutable_array
 from .axis import AxisId, AxisSpec, REPEAT
-from .schema import DatasetSchema, GridTopology, PointTable, ValueSchema
+from .schema import DatasetSchema, DomainSpec, ValueSchema
 from .validity import (
     INVALID,
     VALID,
@@ -104,7 +104,7 @@ class DataBlock:
         _validate_dataset_validity(self.validity, self.schema)
         array = immutable_array(
             self.values,
-            dtype=self.schema.cell_schema.dtype,
+            dtype=self.schema.value_schema.dtype,
             shape=self.schema.physical_shape,
         )
         object.__setattr__(self, "values", array)
@@ -200,10 +200,10 @@ def owned_snapshot_from_arrays(
     values: object | None = None,
     revision: DatasetRevision | int | None = None,
     *,
-    cell_schema: ValueSchema | None = None,
-    repeat_axis: AxisSpec | None = None,
-    point_table: PointTable | None = None,
-    grid_topology: GridTopology | None = None,
+    value_schema: ValueSchema | None = None,
+    repeat_domain: DomainSpec | None = None,
+    point_domain: DomainSpec | None = None,
+    cell_domain: DomainSpec | None = None,
     validity: object | None = None,
     sigma: object | None = None,
     block_id: BlockId | str | None = None,
@@ -212,9 +212,9 @@ def owned_snapshot_from_arrays(
     """Build one immutable :class:`OwnedSnapshot` from ordinary arrays.
 
     Pass a complete ``DatasetSchema`` as ``schema`` or pass a ``ValueSchema``
-    with the dataset carrier axes via ``repeat_axis``, ``point_table``, and
-    optionally ``grid_topology``.  A dense validity array is compacted under
-    the schema's declared validity contract before the DataBlock is created.
+    with all three domains via ``repeat_domain``, ``point_domain`` and
+    ``cell_domain``. A dense validity array is compacted under the schema's
+    declared contract before the DataBlock is created.
 
     ``sigma`` is the uncertainty OF THESE SAMPLES -- one per value -- for a
     producer whose samples carry their own, a fitted parameter being the
@@ -231,38 +231,39 @@ def owned_snapshot_from_arrays(
     if isinstance(schema, DatasetSchema):
         if any(
             item is not None
-            for item in (cell_schema, repeat_axis, point_table, grid_topology)
+            for item in (value_schema, repeat_domain, point_domain, cell_domain)
         ):
             raise TypeError(
-                "schema cannot be combined with cell_schema or dataset axes"
+                "schema cannot be combined with value_schema or dataset domains"
             )
         resolved_schema = schema
     else:
         if schema is not None:
             if not isinstance(schema, ValueSchema):
                 raise TypeError("schema must be DatasetSchema or ValueSchema")
-            if cell_schema is not None:
-                raise TypeError("schema and cell_schema are mutually exclusive")
-            cell_schema = schema
-        if not isinstance(cell_schema, ValueSchema):
-            raise TypeError("cell_schema must be ValueSchema when schema is absent")
-        if repeat_axis is None:
-            repeat_axis = AxisSpec(
+            if value_schema is not None:
+                raise TypeError("schema and value_schema are mutually exclusive")
+            value_schema = schema
+        if not isinstance(value_schema, ValueSchema):
+            raise TypeError("value_schema must be ValueSchema when schema is absent")
+        if not isinstance(cell_domain, DomainSpec):
+            raise TypeError("cell_domain must be DomainSpec when schema is absent")
+        if repeat_domain is None:
+            repeat = AxisSpec(
                 AxisId("snapshot.repeat"),
                 "snapshot.repeat",
                 REPEAT,
                 1,
                 (0,),
             )
-        if point_table is None:
-            point_table = PointTable(
-                1 if grid_topology is None else len(grid_topology.row_to_cell)
-            )
+            repeat_domain = DomainSpec((1,), (repeat,), ((0,),))
+        if point_domain is None:
+            point_domain = DomainSpec((1,), (), ())
         resolved_schema = DatasetSchema(
-            repeat_axis,
-            point_table,
-            grid_topology,
-            cell_schema,
+            repeat_domain,
+            point_domain,
+            cell_domain,
+            value_schema,
         )
 
     normalized_revision = (
@@ -315,17 +316,17 @@ def expand_dataset_validity(
     validity: Valid | Invalid | CellValidity | DatasetComponentValidity,
     schema: DatasetSchema,
 ) -> np.ndarray:
-    """Return validity aligned to ``(R, P, *data_shape)`` by named axes."""
+    """Return validity aligned to ``(R, P, *cell_shape)`` by named axes."""
 
     _validate_dataset_validity(validity, schema)
     if isinstance(validity, (Valid, Invalid)):
         return np.broadcast_to(isinstance(validity, Valid), schema.physical_shape)
     if isinstance(validity, CellValidity):
-        shape = validity.mask.shape + (1,) * len(schema.cell_schema.data_axes)
+        shape = validity.mask.shape + (1,) * len(schema.cell_domain.axes)
         return np.broadcast_to(validity.mask.reshape(shape), schema.physical_shape)
-    positions = _axis_positions(validity.axis_ids, schema.cell_schema)
-    broadcast_shape = [schema.repeat_axis.size, schema.point_table.row_count]
-    broadcast_shape.extend([1] * len(schema.cell_schema.data_axes))
+    positions = _axis_positions(validity.axis_ids, schema.cell_domain)
+    broadcast_shape = [schema.repeat_domain.size, schema.point_domain.size]
+    broadcast_shape.extend([1] * len(schema.cell_domain.axes))
     for mask_index, axis_position in enumerate(positions):
         broadcast_shape[2 + axis_position] = validity.mask.shape[2 + mask_index]
     return np.broadcast_to(validity.mask.reshape(tuple(broadcast_shape)), schema.physical_shape)
@@ -347,13 +348,13 @@ def compact_dataset_validity(
     if not bool(np.any(array)):
         return INVALID
     component_ids = (
-        schema.cell_schema.validity_contract.component_axis_ids
-        if schema.cell_schema.validity_contract.mode is ValidityMode.COMPONENTS
+        schema.value_schema.validity_contract.component_axis_ids
+        if schema.value_schema.validity_contract.mode is ValidityMode.COMPONENTS
         else ()
     )
     compact = array
-    for position in range(len(schema.cell_schema.data_axes) - 1, -1, -1):
-        axis = schema.cell_schema.data_axes[position]
+    for position in range(len(schema.cell_domain.axes) - 1, -1, -1):
+        axis = schema.cell_domain.axes[position]
         if axis.axis_id in component_ids:
             continue
         array_axis = 2 + position
@@ -371,34 +372,35 @@ def compact_dataset_validity(
     return CellValidity(compact)
 
 
-def _axis_positions(axis_ids: tuple[AxisId, ...], schema: ValueSchema) -> tuple[int, ...]:
-    available = tuple(axis.axis_id for axis in schema.data_axes)
+def _axis_positions(axis_ids: tuple[AxisId, ...], domain: DomainSpec) -> tuple[int, ...]:
+    available = tuple(axis.axis_id for axis in domain.axes)
     try:
         positions = tuple(available.index(axis_id) for axis_id in axis_ids)
     except ValueError as exc:
-        raise ValueError("validity axis is absent from ValueSchema") from exc
+        raise ValueError("validity axis is absent from the Cell domain") from exc
     if positions != tuple(sorted(positions)):
-        raise ValueError("validity axes must follow ValueSchema data-axis order")
+        raise ValueError("validity axes must follow Cell-domain axis order")
     return positions
 
 
 def _validate_component_axes(
     validity: DatasetComponentValidity,
-    schema: ValueSchema,
+    domain: DomainSpec,
+    value_schema: ValueSchema,
 ) -> tuple[int, ...]:
-    if schema.validity_contract.mode is not ValidityMode.COMPONENTS:
+    if value_schema.validity_contract.mode is not ValidityMode.COMPONENTS:
         raise ValueError("component validity is forbidden by VALUE validity contract")
-    declared = schema.validity_contract.component_axis_ids
+    declared = value_schema.validity_contract.component_axis_ids
     if any(axis_id not in declared for axis_id in validity.axis_ids):
         raise ValueError("component validity uses an axis absent from the schema contract")
-    return _axis_positions(validity.axis_ids, schema)
+    return _axis_positions(validity.axis_ids, domain)
 
 
 def _validate_dataset_validity(
     validity: Valid | Invalid | CellValidity | DatasetComponentValidity,
     schema: DatasetSchema,
 ) -> None:
-    leading = (schema.repeat_axis.size, schema.point_table.row_count)
+    leading = (schema.repeat_domain.size, schema.point_domain.size)
     if isinstance(validity, (Valid, Invalid)):
         return
     if isinstance(validity, CellValidity):
@@ -409,8 +411,10 @@ def _validate_dataset_validity(
         return
     if not isinstance(validity, DatasetComponentValidity):
         raise TypeError("DataBlock validity has an unsupported type")
-    positions = _validate_component_axes(validity, schema.cell_schema)
-    expected = leading + tuple(schema.cell_schema.data_axes[index].size for index in positions)
+    positions = _validate_component_axes(
+        validity, schema.cell_domain, schema.value_schema
+    )
+    expected = leading + tuple(schema.cell_domain.axes[index].size for index in positions)
     if validity.mask.shape != expected:
         raise ValueError(
             f"component validity shape {validity.mask.shape} does not match named axes {expected}"

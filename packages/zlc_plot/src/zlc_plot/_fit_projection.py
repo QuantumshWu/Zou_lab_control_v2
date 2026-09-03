@@ -538,10 +538,10 @@ class FitProjection:
                 (self._value_quantity(),)
                 if self._is_histogram_plot()
                 else (
-                    (self._coordinate(self._x_ref()),)
+                    (self._x_quantity(),)
                     if model.independent_arity == 1
                     else (
-                        self._coordinate(self._x_ref()),
+                        self._x_quantity(),
                         self._coordinate(self._y_axis_ref()),
                     )
                 )
@@ -601,7 +601,7 @@ class FitProjection:
             resolved = resolve_axis(schema, ref)
             terms[resolved.axis_id] = value
             identity.append(
-                (ref.domain.value, str(ref.axis_id or ""), value)
+                (ref.domain.value, ref.axis_id, value)
             )
         digest = ",".join(
             f"{domain}:{axis_id}={value!r}"
@@ -785,7 +785,7 @@ class FitProjection:
         return CurveData(
             revision=history.revision,
             generation=history.generation,
-            x_ref=AxisRef.point_rows(),
+            x_ref=None,
             group_by=(() if self._spec.group is None else (self._spec.group,)),
             series=tuple(series),
         )
@@ -1028,15 +1028,8 @@ class FitProjection:
     def _x_sample_canonical(self) -> np.ndarray:
         """Where each sample sits on the x axis, in that axis's own space.
 
-        ONE OWNER.  The range selector, the area filter and the crosshair
-        each need it, and each derived it from ``_x_ref()`` -- which for a
-        rolling plot is a PLACEHOLDER, a token standing in where the
-        generic code needs an AxisRef shape.  Reading that token's
-        coordinates handed back point-row ORDINALS (0..P-1) to be compared
-        against shot OFFSETS (-(N-1)..0): ordinal 0 was the only value the
-        two domains shared, so point rows 1..P-1 could never be selected,
-        every surviving crosshair candidate reported the same x, and a
-        range over the older shots came back with row 0 of every shot.
+        ONE OWNER.  Rolling's x is a plot-owned shot-offset quantity, not a
+        Dataset axis and therefore never receives a synthetic AxisRef.
         """
 
         if isinstance(self._spec, RollingPlot):
@@ -1095,9 +1088,7 @@ class FitProjection:
             y_values = np.full(samples.shape, target.y, dtype=float)
         else:
             x_values = (
-                self._coordinate_values_to_display(
-                    self._x_sample_canonical(), self._x_ref()
-                )
+                np.asarray(self._x_sample_canonical(), dtype=float)
                 if isinstance(self._spec, RollingPlot)
                 else np.asarray(self._coordinate(self._x_ref()).display, dtype=float)
             )
@@ -1717,7 +1708,7 @@ class FitProjection:
             return (
                 self._value_quantity()
                 if self._is_histogram_plot()
-                else self._coordinate(self._x_ref())
+                else self._x_quantity()
             )
         if relation is UnitRelation.AXIS_1:
             return self._coordinate(self._y_axis_ref())
@@ -2211,18 +2202,29 @@ class FitProjection:
 
     def _x_ref(self) -> AxisRef:
         semantic = self._semantic_spec()
-        if isinstance(semantic, RollingPlot):
-            # Rolling history owns its ordinal x coordinate; this private
-            # placeholder is used only where the generic unit/selector code
-            # requires an AxisRef-shaped token.
-            return AxisRef.point_rows()
         ref = getattr(semantic, "x", None)
         if not isinstance(ref, AxisRef):
             raise TypeError("this plot has no coordinate x axis")
         return ref
 
+    def _rolling_x_quantity(self) -> Any:
+        payload = self._focused_payload()
+        series = tuple(getattr(payload, "series", ()))
+        if not series:
+            raise TypeError("rolling x coordinate requires a visible series")
+        return series[0].x
+
+    def _x_quantity(self) -> Any:
+        if isinstance(self._semantic_spec(), RollingPlot):
+            return self._rolling_x_quantity()
+        return self._coordinate(self._x_ref())
+
     def _x_selector_source(self) -> AxisRef | Any:
-        return self._value_quantity() if self._is_histogram_plot() else self._x_ref()
+        if self._is_histogram_plot():
+            return self._value_quantity()
+        if isinstance(self._semantic_spec(), RollingPlot):
+            return self._rolling_x_quantity()
+        return self._x_ref()
 
     def _y_axis_ref(self) -> AxisRef:
         semantic = self._semantic_spec()
@@ -2264,11 +2266,6 @@ class FitProjection:
     def _display_range_to_canonical(
         self, value: NumericRange, source: AxisRef | Any
     ) -> NumericRange:
-        if isinstance(self._spec, RollingPlot) and source == self._x_ref():
-            # The rolling shot axis is a plain ordinal: canonical and display
-            # coincide, and its placeholder x ref must never be routed through
-            # coordinate unit conversion.
-            return NumericRange(*sorted((float(value.low), float(value.high))))
         quantity = self._coordinate(source) if isinstance(source, AxisRef) else source
         return NumericRange(
             self._display_scalar_to_canonical(value.low, quantity),
@@ -2278,8 +2275,6 @@ class FitProjection:
     def _canonical_range_to_display(
         self, value: NumericRange, source: AxisRef | Any
     ) -> NumericRange:
-        if isinstance(self._spec, RollingPlot) and source == self._x_ref():
-            return NumericRange(*sorted((float(value.low), float(value.high))))
         quantity = self._coordinate(source) if isinstance(source, AxisRef) else source
         return NumericRange(
             self._canonical_scalar_to_display(value.low, quantity),
@@ -2320,8 +2315,6 @@ class FitProjection:
     def _coordinate_values_to_display(
         self, values: np.ndarray, ref: AxisRef
     ) -> np.ndarray:
-        if isinstance(self._spec, RollingPlot) and ref == self._x_ref():
-            return np.asarray(values, dtype=float)
         return self._convert_coordinate_array_to_display(
             values, self._coordinate(ref)
         )

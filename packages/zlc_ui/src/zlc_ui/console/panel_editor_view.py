@@ -316,23 +316,16 @@ class PanelEditorView(QtWidgets.QWidget):
                 ),
             )
         )
-        live = bool(incoming.get("live", True))
-        self.snapshot_group.setVisible(live)
-        self.interaction_group.setVisible(live)
-        self.producer_group.setVisible(live)
-        self.save_group.setVisible(live)
-        if live:
-            fields.append(interval_form_field(
-                incoming.get("interval_choices"),
-                state["interval_ms"],
-            ))
+        fields.append(interval_form_field(
+            incoming.get("interval_choices"),
+            state["interval_ms"],
+        ))
         values: dict[str, object] = {
             "title": state["title"],
             "signal": state["signal"],
             "size": state["size"],
         }
-        if live:
-            values["interval_ms"] = state["interval_ms"]
+        values["interval_ms"] = state["interval_ms"]
         if paints_images:
             values["overlay_signal"] = state["overlay_signal"]
         self._science_locked = bool(
@@ -389,7 +382,7 @@ class PanelEditorView(QtWidgets.QWidget):
             if producer_node_id
             else "This signal has no editable direct producer."
         )
-        self.open_producer_button.setEnabled(live and bool(producer_node_id))
+        self.open_producer_button.setEnabled(bool(producer_node_id))
         self.set_mutation_enabled(self._mutation_enabled)
 
     def set_surface(self, widget: QtWidgets.QWidget | None) -> None:
@@ -543,7 +536,7 @@ class PanelEditorView(QtWidgets.QWidget):
 
     def _open_producer(self) -> None:
         node_id = str(self._projection.get("producer_node_id") or "")
-        if node_id and bool(self._projection.get("live", True)):
+        if node_id:
             self.producer_edit_requested.emit(node_id)
 
     @staticmethod
@@ -552,11 +545,12 @@ class PanelEditorView(QtWidgets.QWidget):
         if snapshot is None:
             return "No frozen snapshot is displayed."
         pieces = [f"Signal: {str(projection.get('frozen_signal') or '(unknown)')}"]
-        revision = getattr(snapshot, "revision", None)
+        ref = getattr(snapshot, "ref", None)
+        revision = getattr(getattr(ref, "revision", None), "value", None)
         if revision is not None:
             pieces.append(f"revision {revision}")
-        data = getattr(snapshot, "data", None)
-        shape = getattr(data, "shape", None)
+        block = getattr(snapshot, "block", None)
+        shape = getattr(getattr(block, "values", None), "shape", None)
         if shape is not None:
             pieces.append(f"shape {tuple(shape)}")
         if stale:

@@ -31,10 +31,10 @@ from zlc_data import (
     DataBlock,
     DatasetRevision,
     DatasetSchema,
+    DomainSpec,
     OwnedSnapshot,
-    PointColumn,
-    PointTable,
     StreamGenerationId,
+    SCALAR_DOMAIN,
     ValueSchema,
 )
 from zlc_data.figure_archive import read_archive, write_figure_archive
@@ -44,20 +44,17 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"figure bytes"
 
 def _schema() -> DatasetSchema:
     return DatasetSchema(
-        AxisSpec(AxisId("t.repeat"), "repeat", REPEAT, 1, (0,)),
-        PointTable(
-            4,
-            (
-                PointColumn(
-                    AxisId("t.point"),
-                    "point",
-                    SCAN_POINT,
-                    PointColumn.NUMERIC,
-                    (0, 1, 2, 3),
-                ),
-            ),
+        DomainSpec(
+            (1,),
+            (AxisSpec(AxisId("t.repeat"), "repeat", REPEAT, 1, (0,)),),
+            ((0,),),
         ),
-        None,
+        DomainSpec(
+            (4,),
+            (AxisSpec(AxisId("t.point"), "point", SCAN_POINT, 4),),
+            ((0, 1, 2, 3),),
+        ),
+        SCALAR_DOMAIN,
         ValueSchema.scalar(np.dtype("float64"), "count"),
     )
 

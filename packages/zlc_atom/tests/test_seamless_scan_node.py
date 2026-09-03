@@ -64,6 +64,13 @@ BIAS_X_PORT = PULSE_PARAM_FAMILY + "da_bias_x"
 AUTHORED_SETTLE_SECONDS = 0.37
 
 
+def _point_axis_values(schema, name: str) -> tuple[object, ...]:
+    axis = next(axis for axis in schema.point_domain.axes if axis.name == name)
+    return tuple(
+        axis.coordinate_at(code) for code in schema.point_domain.codes(axis.axis_id)
+    )
+
+
 def _scan_host(node: object, plane: SignalDataPlane) -> NodeHost:
     return NodeHost(
         node,
@@ -374,12 +381,7 @@ def test_the_table_is_the_plan_and_the_shots_ride_the_bracket(monkeypatch) -> No
     assert played != requested, "this case must exercise visible tick quantization"
 
     schema = canonical[0].canonical_schema
-    coordinate = next(
-        column
-        for column in schema.point_table.columns
-        if column.name == "da_bias_x"
-    )
-    assert coordinate.values == pytest.approx(played)
+    assert _point_axis_values(schema, "da_bias_x") == pytest.approx(played)
     run_record = canonical[0].run_record
     assert run_record["slot_tick_scales"] == [2]
     assert run_record["named_devices"] == {"sequencer": "sequencer"}
@@ -800,17 +802,14 @@ def test_a_manual_axis_is_the_outer_loop_and_its_answers_are_the_axis() -> None:
     assert len(bench.scan_tables) == 3, "the inner table is written per fire"
 
     schema = value.block.schema
-    power = next(
-        column for column in schema.point_table.columns
-        if column.name == "power"
-    )
-    bias = next(
-        column for column in schema.point_table.columns
-        if column.name == "da_bias_x"
-    )
+    power = next(axis for axis in schema.point_domain.axes if axis.name == "power")
     # Outermost first: power advances slowest, exactly as the plan reads.
-    assert power.values == pytest.approx((1.5, 1.5, 2.5, 2.5, 4.0, 4.0))
-    assert bias.values == pytest.approx((-256.0, 256.0) * 3)
+    assert _point_axis_values(schema, "power") == pytest.approx(
+        (1.5, 1.5, 2.5, 2.5, 4.0, 4.0)
+    )
+    assert _point_axis_values(schema, "da_bias_x") == pytest.approx(
+        (-256.0, 256.0) * 3
+    )
     assert power.unit is None, "a manual axis carries a name, not a unit"
 
     # Every point captured, in played order: publication k lands on row k.
@@ -844,8 +843,8 @@ def test_repeats_walk_the_whole_plan_again_and_stop_again() -> None:
     assert stops == pytest.approx([1.0, 2.0, 1.0, 2.0])
 
     schema = value.block.schema
-    assert schema.repeat_axis.size == 2, "a walk is a visit, not a new point"
-    assert schema.point_table.row_count == 4
+    assert schema.repeat_domain.size == 2, "a walk is a visit, not a new point"
+    assert schema.point_domain.size == 4
     block = np.asarray(value.block.values, dtype=float)
     # Walk 0 played publications 0-3, walk 1 played 4-7, both over the same
     # four points.
@@ -1053,11 +1052,11 @@ def test_a_device_axis_is_the_outer_loop_and_the_device_is_verified() -> None:
 
     schema = value.block.schema
     frequency = next(
-        column
-        for column in schema.point_table.columns
-        if column.name == "rf.frequency_hz"
+        axis
+        for axis in schema.point_domain.axes
+        if axis.name == "rf.frequency_hz"
     )
-    assert frequency.values == pytest.approx(
+    assert _point_axis_values(schema, "rf.frequency_hz") == pytest.approx(
         (1e9, 1e9, 1.5e9, 1.5e9, 2e9, 2e9)
     )
     assert frequency.unit == "Hz", "a device axis publishes its knob's unit"

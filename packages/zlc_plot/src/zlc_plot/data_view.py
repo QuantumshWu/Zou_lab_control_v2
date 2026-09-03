@@ -1,9 +1,8 @@
 """Plot-neutral projections of immutable ``(R, P, *D)`` datasets.
 
-The data producer is the only authority for point topology.  In particular,
-``AxisRef.point_dimension(...)`` resolves only through an explicit
-``GridTopology``; repeated values in a ``PointTable`` are never promoted to a
-tensor dimension here.
+Repeat and Point axes arrive as declared logical domains plus row codes.  The
+projection layer consumes that one authority directly and never reconstructs
+topology from values.
 """
 
 from __future__ import annotations
@@ -48,7 +47,7 @@ from .data_contract import (
     snapshot_values,
 )
 
-from .kinds import AxisDomain, AxisRef, PlotKind
+from .kinds import AxisRef, PlotKind
 from .specs import (
     CurvePlot,
     FacetGridPlot,
@@ -69,10 +68,6 @@ class AxisResolutionError(DataViewError):
     """A requested :class:`AxisRef` is not declared by the dataset."""
 
 
-class TopologyRequiredError(AxisResolutionError):
-    """A point-dimension request has no producer-declared topology."""
-
-
 @dataclass(frozen=True, slots=True)
 class SelectionSubject:
     """Exact upstream quantities cut by one accepted plot projection."""
@@ -83,7 +78,6 @@ class SelectionSubject:
     x_coordinate_frame: str | None = None
     y_coordinate_frame: str | None = None
     scope: tuple[tuple[AxisRef, CoordinateScalar], ...] = ()
-    repeat_index: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.plot_kind, PlotKind):
@@ -118,10 +112,6 @@ class SelectionSubject:
             ref, coordinate = term
             if not isinstance(ref, AxisRef):
                 raise TypeError("selection subject scope axis must be AxisRef")
-            if ref.domain is AxisDomain.REPEAT:
-                raise ValueError(
-                    "selection subject repeat scope belongs in repeat_index"
-                )
             normalized_scope.append(
                 (
                     ref,
@@ -131,21 +121,7 @@ class SelectionSubject:
                     ),
                 )
             )
-        repeat_index = self.repeat_index
-        if repeat_index is not None:
-            if isinstance(repeat_index, bool) or not isinstance(
-                repeat_index, Integral
-            ):
-                raise TypeError(
-                    "selection subject repeat_index must be an integer or None"
-                )
-            repeat_index = int(repeat_index)
-            if repeat_index < 0:
-                raise ValueError(
-                    "selection subject repeat_index cannot be negative"
-                )
         object.__setattr__(self, "scope", tuple(normalized_scope))
-        object.__setattr__(self, "repeat_index", repeat_index)
 
 
 def _readonly(values: ArrayLike, *, dtype: Any | None = None) -> NDArray[Any]:
@@ -441,13 +417,15 @@ class CurveSeries:
 class CurveData:
     revision: int
     generation: str
-    x_ref: AxisRef
+    x_ref: AxisRef | None
     group_by: tuple[AxisRef, ...]
     series: tuple[CurveSeries, ...]
 
     def __post_init__(self) -> None:
         group_by = tuple(self.group_by)
         series = tuple(self.series)
+        if self.x_ref is not None and not isinstance(self.x_ref, AxisRef):
+            raise TypeError("x_ref must be an AxisRef or None")
         if any(not isinstance(ref, AxisRef) for ref in group_by):
             raise TypeError("group_by must contain AxisRef objects")
         if any(not isinstance(item, CurveSeries) for item in series):
@@ -566,10 +544,6 @@ class _ProjectedAxis:
     coordinate_labels: tuple[str, ...] | None
 
     @property
-    def declared_domain(self) -> bool:
-        return self.contract.declared_domain
-
-    @property
     def dimension(self) -> int:
         return self.contract.dimension
 
@@ -629,7 +603,7 @@ class _ReductionBuckets:
     axes: tuple[int, ...]
     strides: tuple[int, ...]
     extents: tuple[int, ...]
-    point_groups: NDArray[np.int64] | None
+    carrier_groups: tuple[tuple[int, NDArray[np.int64]], ...]
 
     def axis_index(self, axis: int) -> NDArray[np.int64]:
         """Which index along ``axis`` each bucket number stands for."""
@@ -637,6 +611,12 @@ class _ReductionBuckets:
         position = self.axes.index(int(axis))
         numbers = np.arange(self.count, dtype=np.int64)
         return (numbers // self.strides[position]) % self.extents[position]
+
+    def groups_for_axis(self, axis: int) -> NDArray[np.int64] | None:
+        for dimension, codes in self.carrier_groups:
+            if dimension == int(axis):
+                return codes
+        return None
 
 
 @dataclass(frozen=True)
@@ -739,10 +719,7 @@ class DataView:
         self._unit_registry = registry
         self._unit_registry_revision = registry.revision
         self._axis_cache: dict[AxisRef, _ProjectedAxis] = {}
-        self._flat_cache: dict[
-            AxisRef,
-            tuple[NDArray[Any], NDArray[np.int64]],
-        ] = {}
+        self._flat_cache: dict[AxisRef, NDArray[np.int64]] = {}
         self._pooled_cache: NDArray[Any] | None = None
         self._positions_cache: NDArray[np.int64] | None = None
         self._facet_histogram_cache: tuple[object, "_FacetHistogramPlan"] | None = None
@@ -754,13 +731,10 @@ class DataView:
         )
         self._history_mask_cache: dict[int, NDArray[np.bool_]] = {}
         #: Whole-dataset domains carried from the PREVIOUS revision's view.
-        #: A domain is a fact about the coordinate plane alone -- np.unique
-        #: over a million-point x column costs ~60 ms and its input rarely
-        #: changes between live revisions -- so each entry keeps the exact
-        #: coordinate array it was derived from and is reused only after an
-        #: equality check against the current one (~1 ms for the same
-        #: million points).  Display-unit context must match exactly.
-        self._domain_carry: dict[AxisRef, tuple[NDArray[Any], _Domain]] = {}
+        #: A schema fingerprint includes axis domains and codes, so an exact
+        #: fingerprint/unit match proves this small derived domain remains
+        #: valid without comparing a full coordinate plane.
+        self._domain_carry: dict[AxisRef, _Domain] = {}
         if (
             inherit_domains_from is not None
             and isinstance(inherit_domains_from, DataView)
@@ -771,9 +745,7 @@ class DataView:
             == self._unit_registry_revision
         ):
             # Resolved declared axes are immutable schema/unit facts, not
-            # revision data.  Rebuilding a two-million-coordinate repeat axis
-            # converted its stored tuple, allocated an identity index, gathered
-            # the same coordinates and froze two copies on every live frame.
+            # revision data.
             # Carry the small cache under the same exact context gate as the
             # domains; copy the dict so either view may still resolve another
             # axis without mutating its sibling.
@@ -808,36 +780,12 @@ class DataView:
     def coordinate(self, ref: AxisRef) -> CoordinateArray:
         return self._resolve(ref).coordinate
 
-    @staticmethod
-    def _coordinate_index(
-        schema: DatasetSchema,
-        ref: AxisRef,
-        coordinate: CoordinateScalar,
-    ) -> int:
-        """Resolve one unique source ordinal without materializing a sample plane."""
-
-        found: int | None = None
-        for index, candidate in enumerate(resolve_axis(schema, ref).coordinates):
-            if candidate != coordinate:
-                continue
-            if found is not None:
-                found = -1
-                break
-            found = index
-        if found is None or found < 0:
-            raise ValueError(
-                f"selection subject {ref!r} coordinate {coordinate!r} "
-                "is not uniquely present"
-            )
-        return found
-
     def selection_subject(
         self,
         spec: PlotSpec,
         payload: CurveData | ImageData | HistogramData | FacetData,
         *,
         facet_index: int | None = None,
-        source_schema: DatasetSchema | None = None,
     ) -> SelectionSubject:
         """Interaction identity of this already accepted view and payload.
 
@@ -909,11 +857,7 @@ class DataView:
             if y_ref is None
             else self._resolve(y_ref).contract.coordinate_frame
         )
-        original = self._schema if source_schema is None else source_schema
-        if not isinstance(original, DatasetSchema):
-            raise TypeError("source_schema must be DatasetSchema or None")
         scope: list[tuple[AxisRef, CoordinateScalar]] = []
-        repeat_index: int | None = None
         for ref, authored in getattr(spec, "scope", ()):
             coordinate = (
                 canonical_coordinate_scalar(
@@ -926,10 +870,7 @@ class DataView:
                     "selection subject scope coordinate",
                 )
             )
-            if ref.domain is AxisDomain.REPEAT:
-                repeat_index = self._coordinate_index(original, ref, coordinate)
-            else:
-                scope.append((ref, coordinate))
+            scope.append((ref, coordinate))
 
         if facet_index is not None:
             if isinstance(facet_index, bool) or not isinstance(
@@ -946,12 +887,7 @@ class DataView:
                     payload.cells[selected_index].facet_value_canonical,
                     "selection subject facet coordinate",
                 )
-                if spec.facet.domain is AxisDomain.REPEAT:
-                    repeat_index = self._coordinate_index(
-                        original, spec.facet, coordinate
-                    )
-                else:
-                    scope.append((spec.facet, coordinate))
+                scope.append((spec.facet, coordinate))
 
         return SelectionSubject(
             semantic.kind,
@@ -960,7 +896,6 @@ class DataView:
             x_frame,
             y_frame,
             tuple(scope),
-            repeat_index,
         )
 
     def validate_curve(
@@ -1366,56 +1301,56 @@ class DataView:
         fold by x-coordinate -- thousands of entries where the generic
         path built codes, gathers and buckets for millions.
 
-        Coverage: x determined by the point ROW (a scan column or topology
-        dimension); groups over DATA axes or the repeat axis.  Everything
-        else -- FIRST (whose result depends on the exact sample order the
-        pre-reduction destroys), complex values (np.sum(where=) rejects
-        them), point-domain groups, undeclared shapes -- keeps the generic
-        path, whose outputs this path must match series for series (the
-        oracle tests hold both to that).
+        Coverage: x determined by one mapped Repeat/Point carrier; groups over
+        other one-to-one carrier/data axes.  Everything else -- FIRST (whose
+        result depends on exact sample order), complex values, or irregular
+        group mappings -- keeps the shared axis-code path.
         """
 
-        point_domains = (
-            AxisDomain.POINT_COORDINATE,
-            AxisDomain.POINT_DIMENSION,
+        x_dimension = int(self._resolve(x).dimension)
+        carrier_groups = tuple(
+            group
+            for group in groups
+            if int(self._resolve(group).dimension) == x_dimension
         )
-        point_groups = tuple(group for group in groups if group.domain in point_domains)
-        tensor_groups = tuple(group for group in groups if group not in point_groups)
-        row_refs = (*point_groups, x)
+        tensor_groups = tuple(group for group in groups if group not in carrier_groups)
+        row_refs = (*carrier_groups, x)
         planes = self._factored_planes(
             row_refs, tensor_groups, aggregation, uncertainty
         )
         if planes is None:
             return None
-        if point_groups:
-            point_sizes = planes.row_sizes[:-1]
+        if carrier_groups:
+            carrier_sizes = planes.row_sizes[:-1]
             nx = planes.row_sizes[-1]
             tensor_sizes = planes.group_sizes
-            shape = (*point_sizes, nx, *tensor_sizes)
+            shape = (*carrier_sizes, nx, *tensor_sizes)
 
             def columns(array: NDArray[Any]) -> NDArray[Any]:
-                moved = np.moveaxis(np.asarray(array).reshape(shape), len(point_sizes), 0)
-                internal = (*point_groups, *tensor_groups)
+                moved = np.moveaxis(
+                    np.asarray(array).reshape(shape), len(carrier_sizes), 0
+                )
+                internal = (*carrier_groups, *tensor_groups)
                 permutation = [0] + [
                     1 + internal.index(group) for group in groups
                 ]
                 return np.transpose(moved, permutation).reshape(nx, -1)
 
             presence = np.moveaxis(
-                planes.row_presence.reshape((*point_sizes, nx)),
-                len(point_sizes),
+                planes.row_presence.reshape((*carrier_sizes, nx)),
+                len(carrier_sizes),
                 0,
             )
             presence = np.broadcast_to(
-                presence.reshape((nx, *point_sizes, *([1] * len(tensor_sizes)))),
-                (nx, *point_sizes, *tensor_sizes),
+                presence.reshape((nx, *carrier_sizes, *([1] * len(tensor_sizes)))),
+                (nx, *carrier_sizes, *tensor_sizes),
             )
-            internal = (*point_groups, *tensor_groups)
+            internal = (*carrier_groups, *tensor_groups)
             permutation = [0] + [1 + internal.index(group) for group in groups]
             used = np.transpose(presence, permutation).reshape(nx, -1)
             domain_by_group = {
                 group: domain
-                for group, domain in zip(point_groups, planes.row_domains[:-1])
+                for group, domain in zip(carrier_groups, planes.row_domains[:-1])
             }
             domain_by_group.update(zip(tensor_groups, planes.group_domains))
             group_domains = tuple(domain_by_group[group] for group in groups)
@@ -1597,9 +1532,8 @@ class DataView:
         if not isinstance(cell, CurvePlot):
             return None
         cell_groups = () if cell.group is None else (cell.group,)
-        row_facet = spec.facet.domain in (
-            AxisDomain.POINT_COORDINATE,
-            AxisDomain.POINT_DIMENSION,
+        row_facet = int(self._resolve(spec.facet).dimension) == int(
+            self._resolve(cell.x).dimension
         )
         if row_facet:
             planes = self._factored_planes(
@@ -1608,19 +1542,13 @@ class DataView:
                 cell.reduction,
                 uncertainty,
             )
-        elif spec.facet.domain in (
-            AxisDomain.DATA,
-            AxisDomain.REPEAT,
-            AxisDomain.POINT_ROW,
-        ):
+        else:
             planes = self._factored_planes(
                 (cell.x,),
                 (spec.facet, *cell_groups),
                 cell.reduction,
                 uncertainty,
             )
-        else:
-            return None
         if planes is None:
             combined = self._curve_from_axes(
                 cell.x,
@@ -1793,24 +1721,18 @@ class DataView:
         pixel for pixel to the generic facet.
         """
 
-        row_facet = spec.facet.domain in (
-            AxisDomain.POINT_COORDINATE,
-            AxisDomain.POINT_DIMENSION,
-        )
+        facet_dimension = int(self._resolve(spec.facet).dimension)
+        row_facet = facet_dimension == int(
+            self._resolve(cell.x).dimension
+        ) == int(self._resolve(cell.y).dimension)
         if row_facet:
             planes = self._factored_planes(
                 (spec.facet, cell.y, cell.x), (), cell.reduction, False
             )
-        elif spec.facet.domain in (
-            AxisDomain.DATA,
-            AxisDomain.REPEAT,
-            AxisDomain.POINT_ROW,
-        ):
+        else:
             planes = self._factored_planes(
                 (cell.y, cell.x), (spec.facet,), cell.reduction, False
             )
-        else:
-            return None
         if planes is None:
             domains, z, counts, presence = self._aggregate_axes(
                 (spec.facet, cell.y, cell.x), cell.reduction
@@ -1922,42 +1844,38 @@ class DataView:
         values = self._samples.value.canonical
         if values.dtype.kind == "c":
             return None
-        if not row_refs or any(
-            ref.domain
-            not in (
-                AxisDomain.POINT_COORDINATE,
-                AxisDomain.POINT_DIMENSION,
-            )
-            for ref in row_refs
-        ):
+        if not row_refs:
             return None
         x = row_refs[-1]
         try:
             x_resolved = self._resolve(x)
+            row_resolved = tuple(self._resolve(ref) for ref in row_refs)
             group_resolved = tuple(self._resolve(ref) for ref in groups)
         except AxisResolutionError:
             return None
         shape = values.shape
-        data_size = 1
-        for size in shape[2:]:
-            data_size *= int(size)
+        row_dimension = int(x_resolved.dimension)
+        if any(int(resolved.dimension) != row_dimension for resolved in row_resolved):
+            return None
+        strides = []
+        acc = 1
+        for size in reversed(shape):
+            strides.insert(0, acc)
+            acc *= int(size)
         kept_dims: list[int] = []
         for ref, resolved in zip(groups, group_resolved):
-            if ref.domain is AxisDomain.REPEAT:
-                dimension = 0
-            elif ref.domain is AxisDomain.DATA:
-                dimension = int(resolved.dimension)
-            else:
-                return None
-            if dimension in kept_dims:
+            dimension = int(resolved.dimension)
+            if dimension == row_dimension or dimension in kept_dims:
                 return None
             kept_dims.append(dimension)
 
         # One representative element per row / per group coordinate puts
         # the existing domain machinery (used-set compression, labels,
         # units) to work on arrays the size of the AXIS, not the dataset.
-        rows = int(shape[1])
-        row_representatives = np.arange(rows, dtype=np.int64) * data_size
+        rows = int(shape[row_dimension])
+        row_representatives = (
+            np.arange(rows, dtype=np.int64) * strides[row_dimension]
+        )
         row_domains = tuple(
             self._domain(ref, row_representatives) for ref in row_refs
         )
@@ -1987,11 +1905,6 @@ class DataView:
             )
             > 0
         )
-        strides = []
-        acc = 1
-        for size in reversed(shape):
-            strides.insert(0, acc)
-            acc *= int(size)
         group_domains = []
         group_orders = []
         for ref, resolved, dimension in zip(groups, group_resolved, kept_dims):
@@ -2018,7 +1931,7 @@ class DataView:
         reduce_axes = tuple(
             axis
             for axis in range(values.ndim)
-            if axis != 1 and axis not in kept_dims
+            if axis != row_dimension and axis not in kept_dims
         )
         # Sums accumulate in float64 exactly as the generic kernel's
         # bincount does, so a uint8 camera frame cannot wrap either way.
@@ -2035,7 +1948,7 @@ class DataView:
             kept_shape = tuple(
                 int(shape[axis])
                 for axis in range(values.ndim)
-                if axis == 1 or axis in kept_dims
+                if axis == row_dimension or axis in kept_dims
             )
             counts_pg = np.full(kept_shape, reduced, dtype=np.int64)
         else:
@@ -2072,8 +1985,8 @@ class DataView:
         # The reductions keep the surviving dims in ORIGINAL tensor order
         # (the repeat dim precedes the rows dim when it is grouped); the
         # fold and the series walk both speak (rows, *groups-as-given).
-        remaining = sorted([1, *kept_dims])
-        permutation = [remaining.index(1)] + [
+        remaining = sorted([row_dimension, *kept_dims])
+        permutation = [remaining.index(row_dimension)] + [
             remaining.index(dimension) for dimension in kept_dims
         ]
         def to_groups_order(plane: NDArray[Any]) -> NDArray[Any]:
@@ -2145,7 +2058,7 @@ class DataView:
             output = "".join(
                 letters[axis]
                 for axis in range(values.ndim)
-                if axis == 1 or axis in kept_dims
+                if axis == row_dimension or axis in kept_dims
             )
 
             def mean_of_squares(plane: Any, offset: float) -> Any:
@@ -2440,15 +2353,6 @@ class DataView:
         # coordinates, so that requirement belongs to the admission decision.
         _require_real_numeric(self._resolve(x).coordinate.canonical, x)
         _require_real_numeric(self._resolve(y).coordinate.canonical, y)
-        point_domains = {x.domain, y.domain}
-        if point_domains <= {
-            AxisDomain.POINT_ROW,
-            AxisDomain.POINT_COORDINATE,
-        }:
-            raise DataViewError(
-                "Image requires two declared GridTopology dimensions when both "
-                "axes come from ordinary point rows/coordinates"
-            )
 
     def image(
         self,
@@ -2475,12 +2379,10 @@ class DataView:
     ) -> ImageData | None:
         """Project two declared dense data axes without cell-wise grouping.
 
-        This path is deliberately narrow.  Point coordinates/topology and
-        facet subsets use the generic grouping algorithm.  For two data axes,
-        however, the immutable dataset shape already proves
-        a regular dense tensor.  Moving those axes to ``(y, x)`` and reducing
-        every remaining dimension is exactly the same operation as grouping
-        every flattened sample by its two declared data-axis indices.
+        This path is deliberately narrow.  Any pair of axes that each maps
+        one-to-one onto a distinct physical tensor dimension can use it;
+        mapped Repeat/Point grids otherwise continue through the shared
+        factored or axis-code kernels.
         """
 
         projected = self._dense_tensor_projection((y, x), aggregation)
@@ -2817,16 +2719,13 @@ class DataView:
     def _reduction_plan(
         self, refs: Sequence[AxisRef]
     ) -> tuple[tuple[int, ...], tuple[AxisRef, ...]]:
-        """What a reduction names: whole tensor axes, and point coordinates.
+        """What a reduction names: dense axes and mapped-domain axes.
 
-        A POINT COORDINATE IS NOT A TENSOR AXIS.  Every point column and
-        every topology dimension resolves to dimension 1 -- the shared point
-        axis -- so mapping a ref straight to a numpy axis collapsed the WHOLE
-        point table for any of them, and a set() of dimensions made two
-        different columns literally the same reduction: on a detuning x power
-        scan, reducing detuning and reducing power were two fate rows
-        producing one byte-identical answer, neither of them the one the row
-        named.
+        Any domain may carry several logical axes over one physical dimension.
+        Reducing one such axis preserves the combinations of its siblings;
+        treating its physical dimension as a whole would silently reduce every
+        sibling too.  A sole axis owns its physical dimension and takes the
+        direct NumPy reduction path.
 
         Said once here because it is asked from two directions: a whole
         tensor (a standalone histogram) and a set of sample positions (one
@@ -2836,32 +2735,58 @@ class DataView:
         coordinates: list[AxisRef] = []
         dimensions: set[int] = set()
         for ref in refs:
-            if ref.domain in (
-                AxisDomain.POINT_COORDINATE,
-                AxisDomain.POINT_DIMENSION,
-            ):
-                coordinates.append(ref)
+            resolved = self._resolve(ref).contract
+            local_dimension = resolved.domain.physical_dimension(resolved.axis_id)
+            siblings = tuple(
+                axis
+                for axis in resolved.domain.axes
+                if resolved.domain.physical_dimension(axis.axis_id)
+                == local_dimension
+            )
+            if len(siblings) == 1:
+                dimensions.add(int(resolved.dimension))
             else:
-                dimensions.add(int(self._resolve(ref).dimension))
-        if 1 in dimensions:
-            # The point axis goes whole, so naming one of its coordinates
-            # adds nothing to what is already being collapsed.
-            coordinates = []
+                coordinates.append(ref)
         return tuple(sorted(dimensions)), tuple(coordinates)
 
-    def _point_group_codes(
-        self, coordinates: Sequence[AxisRef]
+    def _carrier_group_codes(
+        self, dimension: int, coordinates: Sequence[AxisRef]
     ) -> tuple[NDArray[np.int64], int]:
-        """One group code per POINT ROW, from the coordinates NOT named."""
+        """One compact group code per carrier row after named axes collapse."""
 
-        named = {self._resolve(ref).contract.axis_id for ref in coordinates}
-        table = self._schema.point_table
-        kept = tuple(
-            column
-            for column in table.columns
-            if column.coordinate_id not in named
+        resolved_coordinates = tuple(
+            self._resolve(ref).contract
+            for ref in coordinates
+            if int(self._resolve(ref).dimension) == dimension
         )
-        return _point_row_codes(kept, table.row_count)
+        if not resolved_coordinates:
+            raise ValueError("carrier group requires a mapped axis")
+        domain = resolved_coordinates[0].domain
+        if any(resolved.domain is not domain for resolved in resolved_coordinates):
+            raise ValueError("one physical dimension cannot span two domains")
+        local_dimension = domain.physical_dimension(
+            resolved_coordinates[0].axis_id
+        )
+        named = {
+            resolved.axis_id for resolved in resolved_coordinates
+        }
+        kept = tuple(
+            axis
+            for axis in domain.axes
+            if axis.axis_id not in named
+            and domain.physical_dimension(axis.axis_id) == local_dimension
+        )
+        if not kept:
+            return np.zeros(domain.size, dtype=np.int64), 1
+        combined = np.zeros(domain.size, dtype=np.int64)
+        span = 1
+        for axis in kept:
+            combined = combined * int(axis.size) + domain.codes(axis.axis_id)
+            span *= int(axis.size)
+        used = np.flatnonzero(np.bincount(combined, minlength=span))
+        remap = np.full(span, -1, dtype=np.int64)
+        remap[used] = np.arange(used.size, dtype=np.int64)
+        return remap[combined], int(used.size)
 
     def _reduction_buckets(
         self,
@@ -2886,14 +2811,17 @@ class DataView:
 
         shape = tuple(self._samples.value.canonical.shape) if shape is None else shape
         collapse = set(int(axis) for axis in dimensions)
-        point_codes: NDArray[np.int64] | None = None
-        point_count = 0
-        if coordinates:
-            point_codes, point_count = self._point_group_codes(coordinates)
+        grouped: dict[int, tuple[NDArray[np.int64], int]] = {}
+        for dimension in sorted(
+            {int(self._resolve(ref).dimension) for ref in coordinates}
+        ):
+            grouped[dimension] = self._carrier_group_codes(
+                dimension, coordinates
+            )
 
         def extent(axis: int) -> int:
-            if axis == 1 and point_codes is not None:
-                return point_count
+            if axis in grouped:
+                return grouped[axis][1]
             return int(shape[axis])
 
         keep_axes = [axis for axis in range(len(shape)) if axis not in collapse]
@@ -2911,17 +2839,15 @@ class DataView:
                 axes=tuple(keep_axes),
                 strides=tuple(strides[axis] for axis in keep_axes),
                 extents=out_shape,
-                point_groups=point_codes,
+                carrier_groups=tuple(
+                    (axis, codes) for axis, (codes, _count) in grouped.items()
+                ),
             )
 
         index = np.indices(shape, sparse=True)
         bucket = np.zeros(shape, dtype=np.int64)
         for axis in keep_axes:
-            place = (
-                point_codes[index[1]]
-                if axis == 1 and point_codes is not None
-                else index[axis]
-            )
+            place = grouped[axis][0][index[axis]] if axis in grouped else index[axis]
             # In place: each kept axis otherwise allocated a whole
             # sample-sized plane to add one term to.
             bucket += place * strides[axis]
@@ -3377,7 +3303,7 @@ class DataView:
         """Reduce a regular repeat history once, not once per repeat.
 
         Runtime remains the only history owner; this is only a projection of
-        its immutable Dataset.  A DATA group is one retained tensor axis.
+        its immutable Dataset.  A one-to-one group is one retained tensor axis.
         Anything whose group/domain cannot be proven one-to-one returns None
         and keeps the generic position path above.
         """
@@ -3394,8 +3320,6 @@ class DataView:
                 return np.asarray(plane).reshape(repeats, 1, -1)
 
         else:
-            if group.domain is not AxisDomain.DATA:
-                return None
             resolved = self._resolve(group)
             dimension = int(resolved.dimension)
             if dimension <= 0 or dimension >= values.ndim:
@@ -3702,14 +3626,17 @@ class DataView:
                 flat_values, usable, codes, buckets.count, cell.reduction
             )
             present = np.asarray(counts) > 0
-            if facet_axis == 1 and buckets.point_groups is not None:
-                # The kept point axis stands for GROUPS of rows, and every row
-                # in a group shares the facet coordinate -- it is not the one
-                # being reduced -- so any row of the group names its cell.
+            carrier_groups = buckets.groups_for_axis(facet_axis)
+            if carrier_groups is not None:
+                # The kept carrier axis stands for groups of physical rows,
+                # and every row in one group shares this surviving facet
+                # coordinate, so any row of the group names its cell.
                 grouped = np.full(
-                    int(buckets.extents[buckets.axes.index(1)]), -1, dtype=np.int64
+                    int(buckets.extents[buckets.axes.index(facet_axis)]),
+                    -1,
+                    dtype=np.int64,
                 )
-                grouped[buckets.point_groups] = axis_codes
+                grouped[carrier_groups] = axis_codes
                 axis_codes = grouped
             bucket_facet = axis_codes[buckets.axis_index(facet_axis)]
             pools = tuple(
@@ -3877,10 +3804,7 @@ class DataView:
         elif isinstance(cell, HistogramPlot):
             for ref in cell.reduced:
                 self._resolve(ref)
-            if spec.facet is not None and any(
-                ref.physical_identity == spec.facet.physical_identity
-                for ref in cell.reduced
-            ):
+            if spec.facet is not None and spec.facet in cell.reduced:
                 # An axis cannot both name the cells and be averaged away
                 # inside them: the cells would have nothing to be told apart
                 # by.  The fate table gives an axis ONE fate, so this cannot
@@ -3897,33 +3821,19 @@ class DataView:
     def facet_cell_count(self, spec: FacetGridPlot) -> int:
         """Return the facet domain size without building any cell.
 
-        A DECLARED all-finite facet domain has a known size from axis-sized
-        arrays alone: repeat, point-row and data domains use every declared
-        index by construction, and a grid dimension's used indices come off
-        the topology's row-to-cell map.  Counting used to materialize
-        ``np.arange`` over every ELEMENT (~20M on a camera facet) plus full
-        flat coordinate copies just to size a declared domain; the element
-        pass remains only for the undeclared/non-finite fallback (point
-        coordinates, NaN declared coordinates).
+        The used set comes from one code per physical carrier row, never one
+        coordinate per dataset element.  This remains O(R), O(P), or O(Di)
+        regardless of the cell payload size.
         """
 
         if spec.facet is None:
             return 1
         resolved = self._resolve(spec.facet)
-        if (
-            self._samples.value.canonical.size
-            and resolved.declared_domain
-            and bool(_finite_coordinate(resolved.domain_canonical).all())
-        ):
-            if spec.facet.domain is AxisDomain.POINT_DIMENSION:
-                topology = self._schema.grid_topology
-                assert topology is not None  # _resolve proved the topology
-                position = resolved.contract.topology_position
-                assert position is not None
-                return len({cell[position] for cell in topology.row_to_cell})
-            return int(resolved.domain_canonical.size)
-        positions = self._all_positions()
-        return self._domain(spec.facet, positions).size
+        dimension = int(resolved.contract.dimension)
+        size = int(self._samples.value.canonical.shape[dimension])
+        stride = math.prod(self._samples.value.canonical.shape[dimension + 1 :])
+        representatives = np.arange(size, dtype=np.int64) * stride
+        return self._domain(spec.facet, representatives).size
 
     def facet(
         self,
@@ -4101,20 +4011,9 @@ class DataView:
             return None
         values = self._samples.value.canonical
         valid_mask = self._samples.valid_mask if validity is None else validity
-        if facet.domain is AxisDomain.REPEAT:
-            slice_axis = 0
-        elif facet.domain in (
-            AxisDomain.POINT_ROW,
-            AxisDomain.POINT_COORDINATE,
-            AxisDomain.POINT_DIMENSION,
-        ):
-            slice_axis = 1
-        elif facet.domain is AxisDomain.DATA:
-            try:
-                slice_axis = int(self._resolve(facet).dimension)
-            except AxisResolutionError:
-                return None
-        else:
+        try:
+            slice_axis = int(self._resolve(facet).dimension)
+        except AxisResolutionError:
             return None
 
         # One representative element per candidate slice puts the existing
@@ -4272,90 +4171,61 @@ class DataView:
         if whole:
             carried = self._domain_carry.get(ref)
             if carried is not None:
-                coords, domain = carried
-                current = np.asarray(self._resolve(ref).coordinate.canonical).reshape(-1)
-                if coords.shape == current.shape and np.array_equal(
-                    coords, current
-                ):
-                    return domain
+                return carried
         resolved = self._resolve(ref)
         # ``CoordinateArray`` keeps broadcast tensor views for renderers.
-        # Grouping is flat and hot, so the one materialization lives in this
-        # cache and every domain call reuses the immutable planes.
+        # Grouping only needs the producer's small integer axis codes, not a
+        # second full copy of the coordinate plane.
         cached_flat = self._flat_cache.get(ref)
         sparse = (
             cached_flat is None
             and positions.size < resolved.coordinate.canonical.size
         )
         if cached_flat is None and not sparse:
-            cached_flat = (
-                _readonly(np.array(resolved.coordinate.canonical, copy=True).reshape(-1)),
-                _readonly(
-                    np.array(
-                        resolved.coordinate.indices,
-                        dtype=np.int64,
-                        copy=True,
-                    ).reshape(-1)
-                ),
+            cached_flat = _readonly(
+                np.array(
+                    resolved.coordinate.indices,
+                    dtype=np.int64,
+                    copy=True,
+                ).reshape(-1)
             )
             self._flat_cache[ref] = cached_flat
         if sparse:
-            selected = np.asarray(resolved.coordinate.canonical).flat[positions]
             selected_indices = np.asarray(resolved.coordinate.indices).flat[
                 positions
             ]
         else:
             assert cached_flat is not None
-            canonical, indices_flat = cached_flat
-            selected = canonical[positions]
-            selected_indices = indices_flat[positions]
-        # A declared, all-finite domain (checked once, at domain size) makes
+            selected_indices = cached_flat[positions]
+        # An all-finite declared domain (checked once, at domain size) makes
         # every element's coordinate valid by construction, so the
         # per-element canonical gather and isfinite pass -- two full-size
         # temporaries per axis, millions of elements on a camera facet --
         # carry no information.  Codes then come straight off the index plane.
         valid_local: NDArray[np.int64] | None = None
-        if resolved.declared_domain and bool(
-            _finite_coordinate(resolved.domain_canonical).all()
-        ):
+        domain_valid = _finite_coordinate(resolved.domain_canonical)
+        if bool(domain_valid.all()):
             declared = selected_indices
         else:
-            coordinate_valid = _finite_coordinate(selected)
+            coordinate_valid = domain_valid[selected_indices]
             valid_local = np.flatnonzero(coordinate_valid)
             if valid_local.size == 0:
                 codes = np.full(positions.shape, -1, dtype=np.int64)
                 codes.setflags(write=False)
                 empty = _readonly(np.empty(0))
                 return _Domain(empty, empty, codes, tuple)
-            declared = (
-                selected_indices[valid_local]
-                if resolved.declared_domain
-                else None
-            )
-        if declared is not None:
-            # The domain is DECLARED, so its size is known and small; a
-            # bincount + remap finds the used indices in one O(N) pass where
-            # np.unique paid a full sort of one value per element.
-            used_indices = np.flatnonzero(
-                np.bincount(declared, minlength=resolved.domain_canonical.size)
-            )
-            remap = np.full(resolved.domain_canonical.size, -1, dtype=np.int64)
-            remap[used_indices] = np.arange(used_indices.size, dtype=np.int64)
-            inverse = remap[declared]
-            canonical_values = resolved.domain_canonical[used_indices]
-            display_values = resolved.domain_display[used_indices]
-        else:
-            used_indices = None
-            canonical_values, first_local, inverse = np.unique(
-                selected[valid_local], return_index=True, return_inverse=True
-            )
-            # A distinct value's label is read off the first row that
-            # carries it: the labels are one per coordinate entry, and that
-            # row names the entry, so no walk over every entry is needed.
-            label_indices = selected_indices[valid_local][first_local]
-            display_values = resolved.coordinate.canonical_unit.convert_value_to(
-                canonical_values, resolved.coordinate.display_unit
-            )
+            declared = selected_indices[valid_local]
+        # The domain is declared, so its size is axis-sized; a bincount +
+        # remap finds the used indices in O(carrier rows), with no coordinate
+        # sorting or value-derived identity.
+        used_indices = np.flatnonzero(
+            np.bincount(declared, minlength=resolved.domain_canonical.size)
+        )
+        remap = np.full(resolved.domain_canonical.size, -1, dtype=np.int64)
+        remap[used_indices] = np.arange(used_indices.size, dtype=np.int64)
+        inverse = remap[declared]
+        canonical_values = resolved.domain_canonical[used_indices]
+        display_values = resolved.domain_display[used_indices]
         if valid_local is None:
             codes = inverse
         else:
@@ -4364,28 +4234,17 @@ class DataView:
         codes.setflags(write=False)
 
         def build_values() -> tuple[AxisValue, ...]:
-            if used_indices is not None:
-                indices: tuple[int | None, ...] = tuple(
-                    int(index) for index in used_indices
+            indices: tuple[int | None, ...] = tuple(
+                int(index) for index in used_indices
+            )
+            coordinate_labels = (
+                (None,) * len(indices)
+                if resolved.coordinate_labels is None
+                else tuple(
+                    resolved.coordinate_labels[int(index)]
+                    for index in used_indices
                 )
-                coordinate_labels = (
-                    (None,) * len(indices)
-                    if resolved.coordinate_labels is None
-                    else tuple(
-                        resolved.coordinate_labels[int(index)]
-                        for index in used_indices
-                    )
-                )
-            else:
-                indices = (None,) * int(canonical_values.size)
-                coordinate_labels = (
-                    (None,) * int(canonical_values.size)
-                    if resolved.coordinate_labels is None
-                    else tuple(
-                        resolved.coordinate_labels[int(index)]
-                        for index in label_indices
-                    )
-                )
+            )
             return tuple(
                 AxisValue(
                     ref=ref,
@@ -4415,10 +4274,7 @@ class DataView:
             build_values,
         )
         if whole:
-            self._domain_carry[ref] = (
-                np.asarray(resolved.coordinate.canonical).reshape(-1),
-                domain,
-            )
+            self._domain_carry[ref] = domain
         return domain
 
     def _resolve(self, ref: AxisRef) -> _ProjectedAxis:
@@ -4431,14 +4287,6 @@ class DataView:
         try:
             contract = resolve_axis(schema, ref)
         except KeyError as exc:
-            if (
-                ref.domain is AxisDomain.POINT_DIMENSION
-                and schema.grid_topology is None
-            ):
-                raise TopologyRequiredError(
-                    f"point dimension {ref.axis_id!r} requires "
-                    "producer-declared GridTopology"
-                ) from exc
             raise AxisResolutionError(
                 f"dataset has no exact {ref.domain.value} axis {ref.axis_id!r}"
             ) from exc
@@ -5380,32 +5228,6 @@ def _leading_along_axes(
     return np.where(present, taken, 0.0), present
 
 
-def _point_row_codes(
-    columns: Sequence[Any],
-    row_count: int,
-) -> tuple[NDArray[np.int64], int]:
-    """One small-int group code per point row, from the columns given.
-
-    With no columns left every row is one group: naming every coordinate
-    is naming the point axis.
-    """
-
-    if not columns:
-        return np.zeros(int(row_count), dtype=np.int64), 1
-    combined = np.zeros(int(row_count), dtype=np.int64)
-    span = 1
-    for column in columns:
-        # Codes per column rather than one np.unique over the stacked rows:
-        # a column may be TEXT, and object arrays have no row-wise unique.
-        _distinct, local = np.unique(
-            np.asarray(column.values), return_inverse=True
-        )
-        combined = combined + np.asarray(local, dtype=np.int64) * span
-        span *= int(_distinct.size)
-    distinct, codes = np.unique(combined, return_inverse=True)
-    return np.asarray(codes, dtype=np.int64), int(distinct.size)
-
-
 def _history_window(window: object) -> int:
     if isinstance(window, bool) or not isinstance(window, Integral):
         raise TypeError("history window must be an integer")
@@ -5559,5 +5381,4 @@ __all__ = [
     "SelectionSubject",
     "QuantityArray",
     "SampleProjection",
-    "TopologyRequiredError",
 ]

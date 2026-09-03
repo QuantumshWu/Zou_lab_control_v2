@@ -8,20 +8,22 @@ other frontends can render without knowing individual plot classes.
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, TypeAlias
 
 from ._kinds import HANDLERS, default_spec, handler_for
-from .data_contract import resolve_axis, rows_are_named
+from .data_contract import resolve_axis
 from zlc_data import (
     LATEST_COORDINATE,
     CoordinateScalar,
     CoordinateSelector,
+    AxisSpec,
     DatasetSchema,
     canonical_coordinate_scalar,
 )
-from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID, indexed_history_layout
+from zlc_data.axis import SCALAR
+from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
 from .kinds import AxisDomain, AxisRef, PlotKind
 from .layout import DEFAULT_LAYOUT, PlotLayoutConfig
 from .session_policy import merge_labels
@@ -55,6 +57,12 @@ class SemanticCycleChoices(Sequence[SemanticChoice]):
     coordinates: Sequence[object]
     labels: tuple[str, ...] | None = None
     include_latest: bool = False
+    unit: str = ""
+    locate: Callable[[object], int | None] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         coordinates = self.coordinates
@@ -72,6 +80,10 @@ class SemanticCycleChoices(Sequence[SemanticChoice]):
             object.__setattr__(self, "labels", labels)
         if not isinstance(self.include_latest, bool):
             raise TypeError("include_latest must be bool")
+        if not isinstance(self.unit, str):
+            raise TypeError("scope unit must be text")
+        if not callable(self.locate):
+            raise TypeError("scope choices require a direct coordinate locator")
 
     def __len__(self) -> int:
         return len(self.coordinates) + int(self.include_latest)
@@ -99,6 +111,8 @@ class SemanticCycleChoices(Sequence[SemanticChoice]):
             if isinstance(coordinate, (int, float))
             else str(coordinate)
         )
+        if self.unit:
+            label = f"{label} {self.unit}"
         return scope_fate(coordinate), label
 
     def contains_value(self, value: object) -> bool:
@@ -109,10 +123,8 @@ class SemanticCycleChoices(Sequence[SemanticChoice]):
         coordinate = scope_coordinate_from_fate(value)
         if coordinate is LATEST_COORDINATE:
             return self.include_latest
-        return any(
-            canonical_coordinate_scalar(item, "scope coordinate") == coordinate
-            for item in self.coordinates
-        )
+        assert self.locate is not None
+        return self.locate(coordinate) is not None
 
 
 def _unique_values(values: Iterable[object]) -> tuple[object, ...]:
@@ -264,39 +276,25 @@ class SemanticDescription:
 
 
 def axis_choices_for_schema(schema: DatasetSchema) -> tuple[AxisRef, ...]:
-    """Return every declared axis reference, one identity per physical axis.
-
-    A point column that is also a declared topology dimension is the same
-    physical axis under two names; on a Cartesian grid both group points
-    identically, so only the dimension identity is offered — listing both
-    made every axis dropdown show duplicates.  The point-row ordinal is the
-    same case for the whole point domain: it is the NAME OF LAST RESORT for
-    the rows, offered only when nothing the producer declared already names
-    them.
-    """
+    """Return every producer-declared information axis, exactly once."""
 
     if not isinstance(schema, DatasetSchema):
         raise TypeError("schema must be DatasetSchema")
-    dimension_names = (
-        {str(axis_id) for axis_id in schema.grid_topology.dimension_ids}
-        if schema.grid_topology is not None
-        else set()
-    )
-    refs: list[AxisRef] = [AxisRef.repeat()]
-    if not rows_are_named(schema):
-        refs.append(AxisRef.point_rows())
-    refs.extend(
-        AxisRef.point(str(axis.coordinate_id))
-        for axis in schema.point_table.columns
-        if str(axis.coordinate_id) not in dimension_names
-    )
-    if schema.grid_topology is not None:
-        refs.extend(
-            AxisRef.point_dimension(str(axis_id))
-            for axis_id in schema.grid_topology.dimension_ids
+    return (
+        tuple(
+            AxisRef.repeat(str(axis.axis_id))
+            for axis in schema.repeat_domain.axes
         )
-    refs.extend(AxisRef.data(str(axis.axis_id)) for axis in schema.cell_schema.data_axes)
-    return tuple(dict.fromkeys(refs))
+        + tuple(
+            AxisRef.point(str(axis.axis_id))
+            for axis in schema.point_domain.axes
+        )
+        + tuple(
+            AxisRef.cell_data(str(axis.axis_id))
+            for axis in schema.cell_domain.axes
+            if axis.role != SCALAR
+        )
+    )
 
 
 def axis_size(schema: DatasetSchema, ref: AxisRef) -> int:
@@ -319,6 +317,24 @@ def axis_size(schema: DatasetSchema, ref: AxisRef) -> int:
 SchemaStructure: TypeAlias = tuple[tuple[tuple[str, int], ...], ...]
 
 
+def axis_structure(
+    repeat_axes: Sequence[AxisSpec],
+    point_axes: Sequence[AxisSpec],
+    cell_axes: Sequence[AxisSpec],
+) -> SchemaStructure:
+    """The shared three-domain shape projection for schemas and drafts."""
+
+    groups = (
+        tuple(repeat_axes),
+        tuple(point_axes),
+        tuple(axis for axis in tuple(cell_axes) if axis.role != SCALAR),
+    )
+    return tuple(
+        tuple((str(axis.name), int(axis.size)) for axis in axes)
+        for axes in groups
+    )
+
+
 def schema_structure(schema: DatasetSchema) -> SchemaStructure:
     """The dataset's declared shape, as named axes with their sizes.
 
@@ -327,68 +343,17 @@ def schema_structure(schema: DatasetSchema) -> SchemaStructure:
     same tuple, so a frontend can put the names and the numbers on separate
     lines without inventing a second vocabulary for either.
 
-    Degenerate axes (size one) stay in: a shape is provenance, and "which
-    axes does this dataset have" is not the same question as "which axes
-    have structure to draw", which is inference's and is answered elsewhere.
+    Authored degenerate axes (size one) stay in because they are provenance.
+    The canonical SCALAR axis is different: it is only the physical carrier
+    for one value and is automatically consumed, never presented as data.
     """
 
     if not isinstance(schema, DatasetSchema):
         raise TypeError("schema must be DatasetSchema")
-    repeats = ((str(schema.repeat_axis.name), int(schema.repeat_axis.size)),)
-    if schema.grid_topology is not None and schema.grid_topology.dimension_ids:
-        points = [
-            (str(axis_id), int(len(domain)))
-            for axis_id, domain in zip(
-                schema.grid_topology.dimension_ids,
-                schema.grid_topology.coordinate_domains,
-                strict=True,
-            )
-        ]
-    else:
-        columns = tuple(schema.point_table.columns)
-        rows = int(schema.point_table.row_count)
-        # The Runtime's indexed history materializes shots INTO the point
-        # table (rows = shots x event points).  Fusing that into one
-        # "point N" invents a geometry the event never had; the shot
-        # index is its own bracket entry and the residue is the event's.
-        points = []
-        layout = indexed_history_layout(schema)
-        if layout is not None:
-            shot_column = schema.point_table.column(PRIMARY_INDEX_AXIS_ID)
-            points.append((str(shot_column.name), layout.shot_count))
-            columns = tuple(
-                column for column in columns if column is not shot_column
-            )
-            rows = layout.inner_count
-        # Without topology, every point column is a coordinate over the SAME
-        # physical row dimension.  Printing one ``row_count`` per column turns
-        # 100 rows carrying (x, y) into a fictional 100×100 geometry.
-        if columns:
-            points.append(
-                (
-                    str(columns[0].name) if len(columns) == 1 else "point",
-                    rows,
-                )
-            )
-    # Exactly three brackets: (repeat) x (points) x (cell payload).  A cell
-    # axis carrying a point-domain EVENT role -- the frame axis a producer
-    # declares without a point column -- is still a fact about WHEN within one
-    # point, so it joins the points bracket after the scan dimensions.  Every
-    # remaining data axis belongs to the one atomic cell payload: pair x site,
-    # model x site, and spatial-y x spatial-x are all one third bracket.
-    from zlc_data import READOUT_EVENT
-
-    data: list[tuple[str, int]] = []
-    for axis in schema.cell_schema.data_axes:
-        entry = (str(axis.name), int(axis.size))
-        if axis.role == READOUT_EVENT:
-            points.append(entry)
-        else:
-            data.append(entry)
-    return tuple(
-        group
-        for group in (repeats, tuple(points), tuple(data))
-        if group
+    return axis_structure(
+        schema.repeat_domain.axes,
+        schema.point_domain.axes,
+        schema.cell_domain.axes,
     )
 
 
@@ -409,8 +374,8 @@ def schema_summary(schema: DatasetSchema) -> str:
         # dimensions are one sweep.
         parts.append(text if len(group) == 1 else f"({text})")
     value = "value"
-    if schema.cell_schema.value_unit not in {None, "", "1", "arb"}:
-        value = f"{value} ({schema.cell_schema.value_unit})"
+    if schema.value_schema.value_unit not in {None, "", "1", "arb"}:
+        value = f"{value} ({schema.value_schema.value_unit})"
     return " × ".join(parts) + f" → {value}"
 
 
@@ -509,10 +474,7 @@ def fate_field_name(ref: AxisRef) -> str:
 
     if not isinstance(ref, AxisRef):
         raise TypeError("fate field axis must be AxisRef")
-    suffix = ref.domain.value
-    if ref.axis_id is not None:
-        suffix += f":{ref.axis_id}"
-    return f"{FATE_PREFIX}{suffix}"
+    return f"{FATE_PREFIX}{ref.domain.value}:{ref.axis_id}"
 
 
 def _with_reduced(spec: PlotSpec, reduced: tuple[AxisRef, ...]) -> PlotSpec:
@@ -589,10 +551,7 @@ def _fate_of(spec: PlotSpec, ref: AxisRef) -> object:
         return scope_fate(scope[ref])
     # A kind whose default is POOL can still be told to collapse one axis
     # under its reduction; the axis says so itself.
-    if any(
-        entry.physical_identity == ref.physical_identity
-        for entry in getattr(semantic, "reduced", ())
-    ):
+    if ref in getattr(semantic, "reduced", ()):
         return FATE_REDUCE
     return _default_fate(spec)
 
@@ -612,12 +571,7 @@ def _role_holder(spec: PlotSpec, role: str) -> AxisRef | None:
 def _is_primary_index_axis(schema: DatasetSchema, ref: AxisRef) -> bool:
     """Whether this fate row is the Runtime's materialized shot index."""
 
-    return any(
-        column.coordinate_id == PRIMARY_INDEX_AXIS_ID
-        and AxisRef.point(column.coordinate_id.value).physical_identity
-        == ref.physical_identity
-        for column in schema.point_table.columns
-    )
+    return ref == AxisRef.point(PRIMARY_INDEX_AXIS_ID.value)
 
 
 def _fate_row_axes(
@@ -629,13 +583,12 @@ def _fate_row_axes(
 
     axes = axis_choices_for_schema(schema) if offered_axes is None else offered_axes
     used_axes = _axes_used_by(spec)
-    preferred = {axis.physical_identity: axis for axis in used_axes}
-    listed: dict[tuple[str, str | None], AxisRef] = {}
+    preferred = {axis: axis for axis in used_axes}
+    listed: dict[AxisRef, AxisRef] = {}
     for offered in axes:
-        identity = offered.physical_identity
-        listed.setdefault(identity, preferred.pop(identity, offered))
+        listed.setdefault(offered, preferred.pop(offered, offered))
     for used in used_axes:
-        listed.setdefault(used.physical_identity, used)
+        listed.setdefault(used, used)
     return tuple(listed.values())
 
 
@@ -650,35 +603,11 @@ def _scope_coordinates(
     resolved = resolve_axis(schema, ref)
     if resolved.size < 2 and not include_latest:
         return None
-    coordinates = resolved.coordinates
-    labels = resolved.coordinate_labels
-    if ref.domain is AxisDomain.POINT_COORDINATE:
-        # Point columns may repeat one logical coordinate over many source
-        # rows.  Scope selects that coordinate, not an occurrence of it, so
-        # retain the first label exactly once.  Dense declared axes and the
-        # Runtime primary index are already coordinate domains and remain
-        # zero-copy, including large camera axes.
-        unique: dict[
-            tuple[type, CoordinateScalar], tuple[CoordinateScalar, str | None]
-        ] = {}
-        for index, raw in enumerate(coordinates):
-            coordinate = canonical_coordinate_scalar(raw, "scope coordinate")
-            key = (type(coordinate), coordinate)
-            if key not in unique:
-                unique[key] = (
-                    coordinate,
-                    None if labels is None else labels[index],
-                )
-        coordinates = tuple(value for value, _label in unique.values())
-        labels = (
-            None
-            if labels is None
-            else tuple(label for _value, label in unique.values())
-        )
     return SemanticCycleChoices(
-        coordinates,
-        labels,
+        resolved.coordinates,
+        resolved.coordinate_labels,
         bool(include_latest),
+        locate=resolved.coordinate_position,
     )
 
 
@@ -703,12 +632,7 @@ def axis_admits_scope(
     coordinate = scope_coordinate_from_fate(value)
     if coordinate is LATEST_COORDINATE:
         return resolve_axis(schema, ref).size > 0
-    resolved = resolve_axis(schema, ref)
-    label = resolved.label
-    return any(
-        canonical_coordinate_scalar(item, f"{label} coordinate") == coordinate
-        for item in resolved.coordinates
-    )
+    return resolve_axis(schema, ref).coordinate_position(coordinate) is not None
 
 
 def _kind_label(kind: PlotKind) -> str:
@@ -855,7 +779,7 @@ def composed_spec(
             raise KeyError(name) from error
         fate_values[axis] = value
         for scoped in tuple(scope):
-            if scoped.physical_identity == axis.physical_identity:
+            if scoped == axis:
                 scope.pop(scoped)
 
     role_targets: dict[str, AxisRef] = {}
@@ -867,9 +791,7 @@ def composed_spec(
             role: _role_holder(candidate, role) for role in declared_roles
         }
         desired_roles = dict(current_roles)
-        edited_identities = {
-            axis.physical_identity for axis in fate_values
-        }
+        edited_axes = set(fate_values)
 
         for axis, value in fate_values.items():
             if is_scope_fate(value):
@@ -892,13 +814,12 @@ def composed_spec(
                     # collapsed or pooled, so the tuple is composed here and
                     # applied to the kind that carries it.
                     reduced_axes = {
-                        entry.physical_identity: entry
-                        for entry in semantic_spec(candidate).reduced
+                        entry: entry for entry in semantic_spec(candidate).reduced
                     }
                     if value == FATE_REDUCE:
-                        reduced_axes[axis.physical_identity] = axis
+                        reduced_axes[axis] = axis
                     else:
-                        reduced_axes.pop(axis.physical_identity, None)
+                        reduced_axes.pop(axis, None)
                     candidate = _with_reduced(
                         candidate, tuple(reduced_axes.values())
                     )
@@ -911,7 +832,7 @@ def composed_spec(
                 previous_target = role_targets.get(role)
                 if (
                     previous_target is not None
-                    and previous_target.physical_identity != axis.physical_identity
+                    and previous_target != axis
                 ):
                     raise ValueError(
                         f"fate {role!r} is assigned to more than one axis"
@@ -925,7 +846,7 @@ def composed_spec(
         for role, holder in tuple(desired_roles.items()):
             if (
                 isinstance(holder, AxisRef)
-                and holder.physical_identity in edited_identities
+                and holder in edited_axes
             ):
                 desired_roles[role] = None
 
@@ -934,7 +855,7 @@ def composed_spec(
                 if (
                     other != role
                     and isinstance(holder, AxisRef)
-                    and holder.physical_identity == axis.physical_identity
+                    and holder == axis
                 ):
                     desired_roles[other] = None
             desired_roles[role] = axis
@@ -948,7 +869,7 @@ def composed_spec(
                     name
                     for name, holder in current_roles.items()
                     if isinstance(holder, AxisRef)
-                    and holder.physical_identity == axis.physical_identity
+                    and holder == axis
                 ),
                 None,
             )
@@ -958,7 +879,7 @@ def composed_spec(
                 and previous_role != role
                 and previous_role not in role_targets
                 and displaced is not None
-                and displaced.physical_identity not in edited_identities
+                and displaced not in edited_axes
             ):
                 desired_roles[previous_role] = displaced
 
@@ -984,7 +905,7 @@ def composed_spec(
         before_roles = dict(_scope_terms(candidate))
         for target in role_targets.values():
             for scoped in tuple(before_roles):
-                if scoped.physical_identity == target.physical_identity:
+                if scoped == target:
                     before_roles.pop(scoped)
         terms = tuple(before_roles.items())
         if terms != tuple(_scope_terms(candidate).items()):
@@ -1001,8 +922,8 @@ def composed_spec(
         """
 
         pinned = dict(scope)
-        role_identities = {
-            axis.physical_identity
+        role_axes = {
+            axis
             for axis in (
                 getattr(semantic_spec(candidate), name, None)
                 for name in ("x", "y", "group")
@@ -1011,9 +932,9 @@ def composed_spec(
         }
         facet = getattr(candidate, "facet", None)
         if isinstance(facet, AxisRef):
-            role_identities.add(facet.physical_identity)
+            role_axes.add(facet)
         for axis in tuple(pinned):
-            if axis.physical_identity in role_identities:
+            if axis in role_axes:
                 pinned.pop(axis)
         terms = tuple(pinned.items())
         if terms != tuple(_scope_terms(candidate).items()):
@@ -1207,14 +1128,9 @@ def describe_semantics(
     default_label = "pooled" if default_fate == FATE_POOL else "reduced"
     roles = tuple(role for role in ROLE_FATES if role in declared)
     # Every axis the offering lists, AND every axis this specification is
-    # already using.  The two differ exactly when a spec names something the
-    # offering no longer would -- a facet over the point rows of a topology,
-    # say -- and then a table built from the offering alone does not merely
-    # omit that row: it reports the axis as reduced while the panel gives
-    # every row its own cell, and fate() raises for the spec's own facet.
-    #
-    # Deduplicated by physical source: a same-id PointColumn and topology
-    # dimension are two coordinate views of one point axis, hence one row.
+    # already using.  Under the canonical domain contract these normally
+    # coincide; retaining a used axis also keeps an explicitly authored stale
+    # spec diagnosable until its replacement transaction settles.
     for ref in _fate_row_axes(schema, spec, axes):
         label = _axis_label(schema, ref)
         name = fate_field_name(ref)
@@ -1295,6 +1211,7 @@ __all__ = [
     "SemanticDescription",
     "SemanticField",
     "axis_choices_for_schema",
+    "axis_structure",
     "axis_size",
     "describe_semantics",
     "fate_field_name",

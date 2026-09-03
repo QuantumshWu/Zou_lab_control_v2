@@ -1,6 +1,6 @@
 # API guide
 
-当前文档中的`(R, P, *data_dim)`数据对象来自同一产品的角色轴`zlc_data`层。
+当前文档中的`(R, P, *cell_shape)`数据对象来自同一产品的domain-axis `zlc_data`层。
 `zlc_plot`只消费`zlc_data.OwnedSnapshot`，不建立第二份数据模型。常用类型和构造器由稳定的顶层`zlc_plot` facade公开。模型注册、参数 schema、
 底层 raster mapping 等扩展接口分别由 `zlc_plot.fit`、`zlc_plot.parameters`、
 `zlc_plot.raster`、`zlc_plot.ui` 和 `zlc_plot.layout` 公开，不重复平铺到顶层。
@@ -21,7 +21,7 @@ individually catchable optional-runtime exceptions exported at the top level.
 ```python
 import numpy as np
 from zlc_data import (
-    AxisId, AxisSpec, DatasetSchema, GridTopology, PointColumn, PointTable,
+    AxisId, AxisSpec, DatasetSchema, DomainSpec,
     REPEAT, SCAN_POINT, COMPONENT, ValidityContract, ValueSchema,
     owned_snapshot_from_arrays,
 )
@@ -30,19 +30,26 @@ x = np.linspace(-2.0e-3, 2.0e-3, 41)
 y = np.linspace(-1.5e-3, 1.5e-3, 25)
 x_rows = np.tile(x, y.size)
 y_rows = np.repeat(y, x.size)
-points = PointTable(1025, (
-    PointColumn(AxisId("x"), "x", SCAN_POINT, PointColumn.NUMERIC, tuple(x_rows), "V"),
-    PointColumn(AxisId("y"), "y", SCAN_POINT, PointColumn.NUMERIC, tuple(y_rows), "V"),
-))
-topology = GridTopology(
-    (AxisId("y"), AxisId("x")), (tuple(y), tuple(x)), tuple(np.ndindex(y.size, x.size)),
+point_x = AxisSpec(AxisId("x"), "x", SCAN_POINT, x.size, tuple(x), "V")
+point_y = AxisSpec(AxisId("y"), "y", SCAN_POINT, y.size, tuple(y), "V")
+points = DomainSpec(
+    (x_rows.size,),
+    (point_y, point_x),
+    (
+        tuple(np.repeat(np.arange(y.size), x.size)),
+        tuple(np.tile(np.arange(x.size), y.size)),
+    ),
 )
+repeat_axis = AxisSpec(
+    AxisId("repeat"), "repeat", REPEAT, 8, tuple(range(8))
+)
+repeats = DomainSpec((8,), (repeat_axis,), (tuple(range(8)),))
 site = AxisSpec(AxisId("site"), "site", COMPONENT, 4, (0, 1, 2, 3))
 schema = DatasetSchema(
-    AxisSpec(AxisId("repeat"), "repeat", REPEAT, 8, tuple(range(8))),
+    repeats,
     points,
-    topology,
-    ValueSchema((site,), ValidityContract.value(), np.dtype("float64"), "V"),
+    DomainSpec((4,), (site,)),
+    ValueSchema(ValidityContract.value(), np.dtype("float64"), "V"),
 )
 profile = (
     0.35e-3
@@ -59,7 +66,8 @@ next_snapshot = owned_snapshot_from_arrays(schema=schema, values=values + 0.01e-
 assert snapshot.block.values.shape == (8, 1025, 4)
 ```
 
-GridTopology is optional. Supply it only when the producer owns an explicit row-to-cell mapping.
+`DomainSpec` is the only coordinate/mapping owner; there is no parallel grid
+topology object.
 
 ## Convenience constructors
 
@@ -69,11 +77,11 @@ GridTopology is optional. Supply it only when the producer owns an explicit row-
 ```python
 from zlc_plot import AxisRef, curve, histogram, image, rolling
 
-curve_session = curve(snapshot, AxisRef.point_dimension("x"), size="2x2")
+curve_session = curve(snapshot, AxisRef.point("x"), size="2x2")
 image_session = image(
     snapshot,
-    AxisRef.point_dimension("x"),
-    AxisRef.point_dimension("y"),
+    AxisRef.point("x"),
+    AxisRef.point("y"),
 )
 histogram_session = histogram(snapshot, bins=80)
 rolling_session = rolling(snapshot, window=64, side_distribution=True)
@@ -87,8 +95,8 @@ reduction 上它不起作用。窗口未填满时它就是「至今为止的均�
 更靠后时，runtime 的历史保留量按 `trailing` 计。
 
 `curve(...)`、`image(...)` 与 `rolling(...)` 都通过 `reduction=` 暴露与各自
-typed specification 相同的 reduction 选择；需要 topology dimension 时传入显式
-`AxisRef.point_dimension(...)`，字符串只表示 PointTable coordinate。
+typed specification 相同的 reduction 选择；字符串简写只表示具名Point axis，
+其它domain使用显式`AxisRef`。
 
 需要组合 FacetGrid、自定义 reduction 或长期保存 plot specification 的代码，使用下面的
 typed spec 接口。两种入口共享同一套 parameter schema、selector、fit、live 和 backend
@@ -103,22 +111,20 @@ from zlc_plot import (
     PulseTimelinePlot, RollingPlot,
 )
 
-scan_x = AxisRef.point_dimension("x")
+scan_x = AxisRef.point("x")
 curve = CurvePlot(scan_x)
-image = ImagePlot(AxisRef.point_dimension("x"), AxisRef.point_dimension("y"))
+image = ImagePlot(AxisRef.point("x"), AxisRef.point("y"))
 histogram = HistogramPlot()
 rolling = RollingPlot()
-grid = FacetGridPlot(AxisRef.data("site"), CurvePlot(scan_x))
+grid = FacetGridPlot(AxisRef.cell_data("site"), CurvePlot(scan_x))
 pulse = PulseTimelinePlot()
 ```
 
 Axis references are explicit:
 
-- `AxisRef.repeat()`
-- `AxisRef.point_rows()`
-- `AxisRef.point("column")`
-- `AxisRef.point_dimension("topology_dimension")`
-- `AxisRef.data("data_axis")`
+- `AxisRef.repeat("repeat_axis")`
+- `AxisRef.point("point_axis")`
+- `AxisRef.cell_data("cell_axis")`
 
 FacetGrid accepts a required `facet_rows` source and an optional `facet_cols`
 source, producing a row-major two-dimensional grid of homogeneous
@@ -137,7 +143,7 @@ for an ordered `zlc_plot.fit.FacetFitBatchResult`.
 ## Image point overlays and PulseTimeline inputs
 
 Coordinate annotations are an independently revisioned overlay on an ordinary
-Image. They do not replace the Image's `(R, P, *data_dim)` snapshot:
+Image. They do not replace the Image's `(R, P, *cell_shape)` snapshot:
 
 ```python
 import numpy as np
@@ -179,7 +185,7 @@ coordinate, and status-axis document returned by
 validates and constructs the layer with
 `image_point_overlay_from_signal(geometry, status, image, revision=...)`.
 Status values express EMPTY/OCCUPIED and Dataset validity expresses INVALID.
-The status Dataset must share the image's repeat/point topology and have one
+The status Dataset must share the image's Repeat/Point domains and have one
 complete trailing point axis. The renderer applies the Image/FacetGrid
 PlotSpec scope and facet to those leading axes; it draws a judgement only for
 one exact repeat/point cell, while a pooled surface remains UNKNOWN rather
@@ -715,7 +721,7 @@ from zlc_plot import (
 app = ensure_qt5_application()
 plot_host = RasterPlotHost.from_plot(
     snapshot,
-    CurvePlot(AxisRef.point_dimension("x")),
+    CurvePlot(AxisRef.point("x")),
     size="2x2",
 )
 widget = Qt5PlotWidget(plot_host)

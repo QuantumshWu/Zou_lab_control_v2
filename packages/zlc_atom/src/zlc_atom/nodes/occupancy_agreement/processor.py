@@ -8,8 +8,8 @@ from dataclasses import replace
 import numpy as np
 from zlc_data import (
     DatasetSchema,
+    DomainSpec,
     OwnedSnapshot,
-    PointTable,
     SITE,
     ValidityContract,
     ValueSchema,
@@ -93,20 +93,18 @@ class OccupancyAgreementProcessor:
         count_schema = counts.snapshot.block.schema
         occupied_schema = occupied.snapshot.block.schema
         if (
-            count_schema.repeat_axis != occupied_schema.repeat_axis
-            or count_schema.point_table != occupied_schema.point_table
-            or count_schema.grid_topology != occupied_schema.grid_topology
-            or count_schema.cell_schema.data_axes
-            != occupied_schema.cell_schema.data_axes
+            count_schema.repeat_domain != occupied_schema.repeat_domain
+            or count_schema.point_domain != occupied_schema.point_domain
+            or count_schema.cell_domain != occupied_schema.cell_domain
             or counts.shape != occupied.shape
         ):
             raise ValueError("occupancy counts and verdicts do not share one geometry")
-        axes = count_schema.cell_schema.data_axes
+        axes = count_schema.cell_domain.axes
         if len(axes) != 1 or axes[0].role is not SITE:
             raise ValueError("occupancy agreement requires one complete site axis")
-        if count_schema.cell_schema.dtype.kind not in "iuf":
+        if count_schema.value_schema.dtype.kind not in "iuf":
             raise TypeError("occupancy counts must be real numeric values")
-        if occupied_schema.cell_schema.dtype != np.dtype("?"):
+        if occupied_schema.value_schema.dtype != np.dtype("?"):
             raise TypeError("occupancy verdicts must be boolean values")
         canonical_counts = counts.canonical_schema
         canonical_occupied = occupied.canonical_schema
@@ -116,12 +114,12 @@ class OccupancyAgreementProcessor:
                 canonical_counts is not None
                 and canonical_occupied is not None
                 and (
-                    canonical_counts.repeat_axis != canonical_occupied.repeat_axis
-                    or canonical_counts.point_table != canonical_occupied.point_table
-                    or canonical_counts.grid_topology
-                    != canonical_occupied.grid_topology
-                    or canonical_counts.cell_schema.data_axes
-                    != canonical_occupied.cell_schema.data_axes
+                    canonical_counts.repeat_domain
+                    != canonical_occupied.repeat_domain
+                    or canonical_counts.point_domain
+                    != canonical_occupied.point_domain
+                    or canonical_counts.cell_domain
+                    != canonical_occupied.cell_domain
                 )
             )
         )
@@ -142,7 +140,7 @@ class OccupancyAgreementProcessor:
             self.counts_frame,
             self.second_occupancy_frame,
         )
-        frames = schema.point_table.row_count
+        frames = schema.point_domain.size
         if any(index >= frames for index in selected):
             raise ValueError(
                 "occupancy agreement frame indices "
@@ -153,36 +151,43 @@ class OccupancyAgreementProcessor:
 
     def _output_schemas(self, source: DatasetSchema) -> dict[str, DatasetSchema]:
         _first, counts_frame, _second = self._selected_frames(source)
-        point_table = PointTable(
-            1,
-            tuple(
+        point_axes = []
+        for axis in source.point_domain.axes:
+            code = source.point_domain.codes(axis.axis_id)[counts_frame]
+            point_axes.append(
                 replace(
-                    column,
-                    values=(column.values[counts_frame],),
+                    axis,
+                    size=1,
+                    coordinates=(axis.coordinate_at(code),),
+                    index_origin=0,
                     coordinate_labels=(
                         None
-                        if column.coordinate_labels is None
-                        else (column.coordinate_labels[counts_frame],)
+                        if axis.coordinate_labels is None
+                        else (axis.coordinate_labels[code],)
                     ),
                 )
-                for column in source.point_table.columns
-            ),
+            )
+        point_domain = DomainSpec(
+            (1,),
+            tuple(point_axes),
+            tuple((0,) for _axis in point_axes),
         )
-        site_axis = source.cell_schema.data_axes[0]
+        site_axis = source.cell_domain.axes[0]
+        cell_domain = DomainSpec((site_axis.size,), (site_axis,))
         validity = ValidityContract.components(site_axis.axis_id)
 
         def schema(dtype: np.dtype, unit: str | None) -> DatasetSchema:
             return DatasetSchema(
-                source.repeat_axis,
-                point_table,
-                None,
-                ValueSchema((site_axis,), validity, dtype, unit),
+                source.repeat_domain,
+                point_domain,
+                cell_domain,
+                ValueSchema(validity, dtype, unit),
             )
 
         return {
             "consistent_counts": schema(
-                source.cell_schema.dtype,
-                source.cell_schema.value_unit,
+                source.value_schema.dtype,
+                source.value_schema.value_unit,
             ),
             "consistent_occupied": schema(np.dtype("?"), "1"),
         }
@@ -239,8 +244,8 @@ class OccupancyAgreementProcessor:
         counts, occupied = self._inputs(inputs)
         artifacts = self._snapshots(counts, occupied)
         source_schema = counts.schema
-        frames = source_schema.point_table.row_count
-        cycles = source_schema.repeat_axis.size
+        frames = source_schema.point_domain.size
+        cycles = source_schema.repeat_domain.size
         run_record = {
             "node": self.instance_id,
             "parameters": {

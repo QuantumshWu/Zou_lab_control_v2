@@ -2716,6 +2716,33 @@ class FluentCycleComboBox(FluentComboBox):
             self.currentTextChanged.emit(self.currentText())
             self.update()
 
+    def setCyclePosition(self, position: int) -> None:  # noqa: N802 - Qt API name
+        """Select one lazy sub-domain position without scanning its values."""
+
+        choices = self._cycle_choices
+        selected = int(position)
+        if choices is None:
+            raise RuntimeError("cycle choices are not configured")
+        if not 0 <= selected < len(choices):
+            raise IndexError("cycle position is outside the configured choices")
+        changed_value = selected != self._cycle_position
+        self._cycle_position = selected
+        changed_row = self.currentIndex() != self._cycle_row
+        super().setCurrentIndex(self._cycle_row)
+        if changed_value and not changed_row:
+            self.currentTextChanged.emit(self.currentText())
+            self.update()
+
+    def cyclePosition(self) -> int:  # noqa: N802 - Qt API name
+        """Return the selected lazy-domain position without reverse lookup."""
+
+        if self._cycle_choices is None or self._cycle_position < 0:
+            raise RuntimeError("cycle choices are not selected")
+        return self._cycle_position
+
+    def isCycleSelected(self) -> bool:  # noqa: N802 - Qt API name
+        return self.currentIndex() == self._cycle_row and self._cycle_position >= 0
+
     def setCurrentIndex(self, index: int) -> None:  # noqa: N802 - Qt API name
         selected = int(index)
         if selected == self._cycle_row and self._cycle_position < 0:
@@ -4108,6 +4135,14 @@ class FluentTableView(QtWidgets.QTableView):
         self.setCornerButtonEnabled(False)
         self.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectItems)
+        # Model dimensions never participate in page/window size hints.  A
+        # million-cell scientific table is still one viewport with its own
+        # scrollbars, not a million-row request to the surrounding layout.
+        self.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.AdjustIgnored)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Expanding,
+        )
         self.setEditTriggers(
             QtWidgets.QAbstractItemView.DoubleClicked
             | QtWidgets.QAbstractItemView.EditKeyPressed

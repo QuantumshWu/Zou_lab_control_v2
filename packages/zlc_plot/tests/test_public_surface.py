@@ -3,7 +3,15 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from data_factory import (
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
+
+from zlc_data import OwnedSnapshot
 from zlc_plot import (
     AxisRef,
     CurvePlot,
@@ -13,37 +21,37 @@ from zlc_plot import (
     PlotSession,
     RollingPlot,
     RasterPlotHost,
+    curve,
 )
 from zlc_plot.fit import FacetFitBatchResult
 from zlc_plot.primitives import ImageFrame, ImagePointOverlay, PointStatus
 
-
-def _snapshot(*, revision: int = 0, repeats: int = 1) -> DatasetSnapshot:
+def _snapshot(*, revision: int = 0, repeats: int = 1) -> OwnedSnapshot:
     x = np.arange(6, dtype=np.float64)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=repeats),
-        PointTable.from_columns({"x": x, "facet": np.repeat([0.0, 1.0], 3)}),
+    schema = make_dataset_schema(
+        repeat_domain(size=repeats),
+        mapped_domain_from_columns({"x": x, "facet": np.repeat([0.0, 1.0], 3)}),
         dtype=np.float64,
-        generation="public-surface",
     )
     values = np.tile(x, (repeats, 1))
-    return DatasetSnapshot(schema, values, revision=revision)
+    return make_snapshot(schema, values, revision=revision)
 
-
-def _image_snapshot() -> DatasetSnapshot:
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"sample": np.array([0.0])}),
-        data_axes=(
-            Axis.create("row", size=2),
-            Axis.create("column", size=3),
+def _image_snapshot() -> OwnedSnapshot:
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"sample": np.array([0.0])}),
+        cell_axes=(
+            axis("row", size=2),
+            axis("column", size=3),
         ),
         dtype=np.float64,
-        generation="public-surface-image",
     )
     values = np.arange(6, dtype=np.float64).reshape(1, 1, 2, 3)
-    return DatasetSnapshot(schema, values, revision=0)
+    return make_snapshot(schema, values, revision=0)
 
+def test_convenience_api_requires_an_explicit_axis_domain() -> None:
+    with pytest.raises(TypeError, match="explicit AxisRef"):
+        curve(_snapshot(), "x")  # type: ignore[arg-type]
 
 def test_session_replace_spec_reuses_the_existing_surface() -> None:
     session = PlotSession(_snapshot(), CurvePlot(AxisRef.point("x")))
@@ -56,10 +64,9 @@ def test_session_replace_spec_reuses_the_existing_surface() -> None:
     finally:
         session.close()
 
-
 def test_image_overlay_is_explicit_data_not_a_display_mode() -> None:
     snapshot = _image_snapshot()
-    spec = ImagePlot(AxisRef.data("column"), AxisRef.data("row"))
+    spec = ImagePlot(AxisRef.cell_data("column"), AxisRef.cell_data("row"))
     session = PlotSession(snapshot, spec)
     curve = PlotSession(_snapshot(), CurvePlot(AxisRef.point("x")))
     try:
@@ -76,7 +83,6 @@ def test_image_overlay_is_explicit_data_not_a_display_mode() -> None:
     finally:
         curve.close()
         session.close()
-
 
 def test_image_frame_new_generation_may_restart_the_same_revision() -> None:
     """ImageFrame wrapping must not hide the Dataset generation from live flow."""
@@ -99,7 +105,7 @@ def test_image_frame_new_generation_may_restart_the_same_revision() -> None:
         stream_generation="image-run-b",
     )
     overlay = ImagePointOverlay(0, np.empty((0, 2), dtype=float))
-    spec = ImagePlot(AxisRef.data("column"), AxisRef.data("row"))
+    spec = ImagePlot(AxisRef.cell_data("column"), AxisRef.cell_data("row"))
     host = RasterPlotHost.from_plot(ImageFrame(first, overlay), spec)
     try:
         host.wait_for_front(timeout=10)
@@ -110,7 +116,6 @@ def test_image_frame_new_generation_may_restart_the_same_revision() -> None:
         assert host.front.identity.data_revision == 10
     finally:
         host.close(timeout=10)
-
 
 def test_image_site_numbers_use_their_ring_status_style() -> None:
     """A small ordinal must remain visually attached to its status ring."""
@@ -131,7 +136,7 @@ def test_image_site_numbers_use_their_ring_status_style() -> None:
     )
     session = PlotSession(
         ImageFrame(snapshot, overlay),
-        ImagePlot(AxisRef.data("column"), AxisRef.data("row")),
+        ImagePlot(AxisRef.cell_data("column"), AxisRef.cell_data("row")),
         parameters={"show_point_labels": True},
     )
     try:
@@ -177,7 +182,6 @@ def test_image_site_numbers_use_their_ring_status_style() -> None:
     finally:
         session.close()
 
-
 def test_session_rolling_history_seeds_per_repeat_then_grows_one_sample_per_revision() -> None:
     rolling = PlotSession(_snapshot(repeats=3), RollingPlot())
     try:
@@ -194,7 +198,6 @@ def test_session_rolling_history_seeds_per_repeat_then_grows_one_sample_per_revi
         assert payload.series[0].x.canonical.size == 3
     finally:
         rolling.close()
-
 
 def test_session_fit_all_facets_returns_one_result_per_painted_cell() -> None:
     spec = FacetGridPlot(

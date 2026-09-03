@@ -1099,7 +1099,7 @@ surface = {
     'semantic': ({
         'key': 'x', 'label': 'X axis', 'kind': 'choice', 'value': 'sensor_x',
         'allow_none': False,
-        'choices': (('Sensor X', 'sensor_x'), ('Point row', 'point_row')),
+        'choices': (('Sensor X', 'sensor_x'), ('Point axis', 'point')),
         'minimum': None, 'maximum': None, 'step': None,
     },),
     'display': (
@@ -1563,7 +1563,7 @@ editor.save_format.setCurrentIndex(editor.save_format.findData('svg'))
 editor.save_button.click()
 app.processEvents()
 assert ('state', 'panel-1', {'interval_ms': 800}) in events
-assert ('state', 'panel-1', {'semantic': {'x': 'point_row'}}) in events
+assert ('state', 'panel-1', {'semantic': {'x': 'point'}}) in events
 assert ('state', 'panel-1', {
     'fit': {'model': 'anisotropic_gaussian_center'}
 }) in events

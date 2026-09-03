@@ -14,19 +14,23 @@ from zlc_data import PRIMARY_INDEX
 from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
 from zlc_plot import AxisRef, PlotSession, Reduction, RollingPlot
 from zlc_plot.data_view import DataView
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from data_factory import (
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
+from zlc_data import OwnedSnapshot
 
-
-def _snapshot(revision: int, repeats: int = 6) -> DatasetSnapshot:
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=repeats),
-        PointTable.from_columns({"x": np.arange(4.0)}),
+def _snapshot(revision: int, repeats: int = 6) -> OwnedSnapshot:
+    schema = make_dataset_schema(
+        repeat_domain(size=repeats),
+        mapped_domain_from_columns({"x": np.arange(4.0)}),
         dtype=np.float64,
-        generation="rolling-shot-axis",
     )
     values = np.arange(repeats * 4.0).reshape(repeats, 4) + float(revision)
-    return DatasetSnapshot(schema, values, revision=revision)
-
+    return make_snapshot(schema, values, revision=revision)
 
 def test_seeded_history_ends_at_zero_and_counts_back() -> None:
     session = PlotSession(_snapshot(0), RollingPlot())
@@ -40,7 +44,6 @@ def test_seeded_history_ends_at_zero_and_counts_back() -> None:
     finally:
         session.close()
 
-
 def test_nonindexed_revisions_replace_instead_of_extending_the_shot_axis() -> None:
     session = PlotSession(_snapshot(0), RollingPlot())
     try:
@@ -50,7 +53,6 @@ def test_nonindexed_revisions_replace_instead_of_extending_the_shot_axis() -> No
         np.testing.assert_array_equal(x, np.arange(-5.0, 1.0))
     finally:
         session.close()
-
 
 def test_area_selector_display_coordinates_are_identity() -> None:
     """Display selector coordinates pass through unchanged on the shot axis.
@@ -78,7 +80,6 @@ def test_area_selector_display_coordinates_are_identity() -> None:
     finally:
         session.close()
 
-
 def test_a_full_window_holds_the_same_coordinates_as_it_slides() -> None:
     window = 100
     total = window + 8
@@ -95,7 +96,6 @@ def test_a_full_window_holds_the_same_coordinates_as_it_slides() -> None:
         np.testing.assert_array_equal(x, np.arange(1.0 - x.size, 1.0))
     finally:
         session.close()
-
 
 def test_shot_axis_frames_the_full_window_from_the_first_revision() -> None:
     """The axis spans exactly ``window`` shots and then stands still.
@@ -115,7 +115,6 @@ def test_shot_axis_frames_the_full_window_from_the_first_revision() -> None:
         assert tuple(map(float, axes.get_xlim())) == (-19.0, 0.0)
     finally:
         session.close()
-
 
 def test_window_selects_display_without_truncating_retention() -> None:
     """The window is a view, not a destructive cap on measured history.
@@ -138,7 +137,6 @@ def test_window_selects_display_without_truncating_retention() -> None:
     finally:
         session.close()
 
-
 def test_replace_spec_keeps_history_for_an_equivalent_rolling_spec() -> None:
     """A form submit that keeps group and reduction keeps the trace.
 
@@ -158,31 +156,29 @@ def test_replace_spec_keeps_history_for_an_equivalent_rolling_spec() -> None:
     finally:
         session.close()
 
-
 def test_primary_index_history_keeps_source_order_holes_and_site_groups() -> None:
     source = [-2, -2, 0, 0]
-    indexed_schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns(
+    indexed_schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns(
             {"source index": source, "category": [0.0, 1.0, 0.0, 1.0]},
             ids={"source index": str(PRIMARY_INDEX_AXIS_ID)},
             roles={"source index": PRIMARY_INDEX},
         ),
-        data_axes=(Axis.create("site", values=[0.0, 1.0, 2.0]),),
+        cell_axes=(axis("site", values=[0.0, 1.0, 2.0]),),
         dtype=np.float64,
-        generation="rolling-indexed-vectorized",
     )
     indexed_values = np.arange(12.0).reshape(1, 4, 3)
     indexed_valid = np.ones(indexed_values.shape, dtype=np.bool_)
     indexed_valid[:, :2] = False
-    snapshot = DatasetSnapshot(
+    snapshot = make_snapshot(
         indexed_schema,
         indexed_values,
         revision=9,
         validity=indexed_valid,
     )
     history = DataView(snapshot).rolling_history(
-        group=AxisRef.data("site"), aggregation=Reduction.MEAN
+        group=AxisRef.cell_data("site"), aggregation=Reduction.MEAN
     )
     assert tuple(sample.source_index for sample in history) == (-2, 0)
     assert all(sample.revision == 9 for sample in history)

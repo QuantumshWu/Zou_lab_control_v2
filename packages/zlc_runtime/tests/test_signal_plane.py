@@ -23,10 +23,9 @@ from zlc_data import (
     DataBlock,
     DatasetRevision,
     DatasetSchema,
-    GridTopology,
+    DomainSpec,
     OwnedSnapshot,
-    PointColumn,
-    PointTable,
+    SCALAR_DOMAIN,
     StreamGenerationId,
     ValidityContract,
     ValueSchema,
@@ -38,17 +37,17 @@ from zlc_runtime.plane import SignalDataPlane
 
 def _event(name: str, value: float) -> OwnedSnapshot:
     repeat = AxisSpec(AxisId(f"{name}.repeat"), "repeat", REPEAT, 1, (0,))
-    point = PointColumn(
+    point = AxisSpec(
         AxisId(f"{name}.point"),
         "point",
         SCAN_POINT,
-        PointColumn.NUMERIC,
+        1,
         (0,),
     )
     schema = DatasetSchema(
-        repeat,
-        PointTable(1, (point,)),
-        None,
+        DomainSpec((1,), (repeat,), ((0,),)),
+        DomainSpec((1,), (point,), ((0,),)),
+        SCALAR_DOMAIN,
         ValueSchema.scalar(np.dtype("float64"), "count"),
     )
     block = DataBlock(
@@ -73,17 +72,24 @@ def _finite(
 ) -> LiveDatasetOutput:
     event = _event(declaration.name, value)
     schema = event.block.schema
+    (repeat,) = schema.repeat_domain.axes
     canonical = DatasetSchema(
-        AxisSpec(
-            schema.repeat_axis.axis_id,
-            schema.repeat_axis.name,
-            schema.repeat_axis.role,
-            total,
-            tuple(range(total)),
+        DomainSpec(
+            (total,),
+            (
+                AxisSpec(
+                    repeat.axis_id,
+                    repeat.name,
+                    repeat.role,
+                    total,
+                    tuple(range(total)),
+                ),
+            ),
+            (tuple(range(total)),),
         ),
-        schema.point_table,
-        schema.grid_topology,
-        schema.cell_schema,
+        schema.point_domain,
+        schema.cell_domain,
+        schema.value_schema,
     )
     return LiveDatasetOutput(
         declaration,
@@ -124,11 +130,10 @@ def _large_latest(
         200_000,
     )
     schema = DatasetSchema(
-        scalar.block.schema.repeat_axis,
-        scalar.block.schema.point_table,
-        None,
+        scalar.block.schema.repeat_domain,
+        scalar.block.schema.point_domain,
+        DomainSpec((data_axis.size,), (data_axis,)),
         ValueSchema(
-            (data_axis,),
             ValidityContract.value(),
             np.dtype("float64"),
             "count",
@@ -263,8 +268,8 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
         before_demand = plane.current_dataset("indexed-derived/value")
         assert before_demand.block.values.item() == 22.0
         assert all(
-            str(column.coordinate_id) != "zlc_data.primary-index"
-            for column in before_demand.block.schema.point_table.columns
+            str(axis.axis_id) != "zlc_data.primary-index"
+            for axis in before_demand.block.schema.point_domain.axes
         )
         assert plane.supports_indexed_history("indexed-derived/value")
         history = plane.acquire_indexed_history("indexed-derived/value", 4)
@@ -295,11 +300,11 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
             "indexed-derived/value",
             publication,
         )
-        source_index = snapshot.block.schema.point_table.column(
+        source_index = snapshot.block.schema.point_domain.axis(
             AxisId("zlc_data.primary-index")
         )
         assert source_index.role == PRIMARY_INDEX
-        assert source_index.values == (-2, -1, 0)
+        assert source_index.coordinates == (-2, -1, 0)
         np.testing.assert_allclose(
             snapshot.block.values.reshape(-1),
             (22.0, 0.0, 44.0),
@@ -354,8 +359,8 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
         assert latest.block.values.shape == (1, 1, 1)
         assert latest.block.values.item() == 555.0
         assert all(
-            str(column.coordinate_id) != "zlc_data.primary-index"
-            for column in latest.block.schema.point_table.columns
+            str(axis.axis_id) != "zlc_data.primary-index"
+            for axis in latest.block.schema.point_domain.axes
         )
         small_history = plane.acquire_indexed_history("indexed-derived/value", 2)
         cached_view = plane.current_dataset("indexed-derived/value", new_publication)
@@ -369,9 +374,9 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
         trimmed, trimmed_record = plane.current_dataset_view(
             "indexed-derived/value"
         )
-        assert trimmed.block.schema.point_table.column(
+        assert trimmed.block.schema.point_domain.axis(
             AxisId("zlc_data.primary-index")
-        ).values == (-1, 0)
+        ).coordinates == (-1, 0)
         assert trimmed_record["device_settings"]["camera"]["epoch_ranges"] == (
             (5, 5),
         )
@@ -385,8 +390,8 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
         released = plane.current_dataset("indexed-derived/value")
         assert released.block.values.item() == 55.0
         assert all(
-            str(column.coordinate_id) != "zlc_data.primary-index"
-            for column in released.block.schema.point_table.columns
+            str(axis.axis_id) != "zlc_data.primary-index"
+            for axis in released.block.schema.point_domain.axes
         )
         assert len(wakes) == 8  # four source and four atomic derived publications
     finally:
@@ -457,10 +462,10 @@ def test_indexed_history_retains_only_the_requested_window() -> None:
                     100,
                 )
         snapshot = plane.current_dataset("bounded-derived/value")
-        primary = snapshot.block.schema.point_table.column(
+        primary = snapshot.block.schema.point_domain.axis(
             AxisId("zlc_data.primary-index")
         )
-        assert primary.values == tuple(range(-99, 1))
+        assert primary.coordinates == tuple(range(-99, 1))
     finally:
         if history is not None:
             history.close()
@@ -479,32 +484,17 @@ def _finite_grid_point(
     x_id = AxisId(f"{declaration.name}.grid-x")
     y_id = AxisId(f"{declaration.name}.grid-y")
     canonical = DatasetSchema(
-        schema.repeat_axis,
-        PointTable(
-            4,
+        schema.repeat_domain,
+        DomainSpec(
+            (4,),
             (
-                PointColumn(
-                    x_id,
-                    "x",
-                    SCAN_POINT,
-                    PointColumn.NUMERIC,
-                    (0.0, 1.0, 0.0, 1.0),
-                ),
-                PointColumn(
-                    y_id,
-                    "y",
-                    SCAN_POINT,
-                    PointColumn.NUMERIC,
-                    (0.0, 0.0, 1.0, 1.0),
-                ),
+                AxisSpec(x_id, "x", SCAN_POINT, 2, (0.0, 1.0)),
+                AxisSpec(y_id, "y", SCAN_POINT, 2, (0.0, 1.0)),
             ),
+            ((0, 1, 0, 1), (0, 0, 1, 1)),
         ),
-        GridTopology(
-            (x_id, y_id),
-            ((0.0, 1.0), (0.0, 1.0)),
-            ((0, 0), (1, 0), (0, 1), (1, 1)),
-        ),
-        schema.cell_schema,
+        schema.cell_domain,
+        schema.value_schema,
     )
     return LiveDatasetOutput(
         declaration,
@@ -732,8 +722,7 @@ def test_finite_signal_reports_full_point_grid_geometry_while_cells_arrive() -> 
         description = plane.describe_signals()[0]
         assert description.shape == (1, 4, 1)
         first = plane.current_dataset(description.name)
-        assert first.block.schema.grid_topology is not None
-        assert first.block.schema.grid_topology.logical_shape == (2, 2)
+        assert first.block.schema.point_domain.logical_shape == (2, 2)
         assert first.expanded_validity()[0, :, 0].tolist() == [
             True,
             False,

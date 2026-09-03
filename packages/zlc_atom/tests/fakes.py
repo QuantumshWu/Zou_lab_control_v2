@@ -10,8 +10,8 @@ from typing import Any
 import numpy as np
 from zlc_data import (
     AxisId,
+    AxisSpec,
     OwnedSnapshot,
-    PointColumn,
     READOUT_EVENT,
     SPATIAL_X,
     SPATIAL_Y,
@@ -59,16 +59,16 @@ def camera_cycle_snapshot(
         images,
         producer=producer,
         signal=signal,
-        roles=(READOUT_EVENT, SPATIAL_Y, SPATIAL_X),
-        point_columns={
-            READOUT_EVENT: PointColumn(
+        point_axes=(
+            AxisSpec(
                 AxisId(f"{producer}.{signal}.frame"),
                 "frame",
                 READOUT_EVENT,
-                PointColumn.NUMERIC,
+                int(images.shape[1]),
                 tuple(range(int(images.shape[1]))),
-            )
-        },
+            ),
+        ),
+        cell_axes=(SPATIAL_Y, SPATIAL_X),
         generation=generation,
         revision=revision,
     )

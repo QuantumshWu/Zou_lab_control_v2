@@ -5,28 +5,30 @@ from io import BytesIO
 import numpy as np
 import pytest
 
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from data_factory import (
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
+
+from zlc_data import OwnedSnapshot
 from zlc_data import NPZFormatError, load_npz, save_npz
 
-
-def _snapshot() -> DatasetSnapshot:
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=2),
-        PointTable.from_columns({"x": [0.0, 1.0]}),
+def _snapshot() -> OwnedSnapshot:
+    schema = make_dataset_schema(
+        repeat_domain(size=2),
+        mapped_domain_from_columns({"x": [0.0, 1.0]}),
         dtype=np.float32,
-        generation="io-test",
-        metadata={"source": "unit"},
     )
     values = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
     validity = np.array([[True, False], [True, True]], dtype=np.bool_)
-    return DatasetSnapshot(schema, values, revision=12, validity=validity, metadata={"frame": 3})
+    return make_snapshot(schema, values, revision=12, validity=validity)
 
-
-def _encoded(snapshot: DatasetSnapshot) -> bytes:
+def _encoded(snapshot: OwnedSnapshot) -> bytes:
     stream = BytesIO()
     save_npz(stream, snapshot)
     return stream.getvalue()
-
 
 def test_npz_round_trip_preserves_snapshot_and_encoding() -> None:
     snapshot = _snapshot()
@@ -41,13 +43,11 @@ def test_npz_round_trip_preserves_snapshot_and_encoding() -> None:
     assert restored.block.values.dtype == np.dtype(np.float32)
     assert restored.expanded_validity().dtype == np.dtype(np.bool_)
 
-
 def test_npz_missing_manifest_is_rejected() -> None:
     stream = BytesIO()
     np.savez_compressed(stream, **{"snapshot.values": np.zeros(1, dtype=np.float32)})
     with pytest.raises(NPZFormatError, match="manifest"):
         load_npz(BytesIO(stream.getvalue()))
-
 
 def test_npz_extra_member_is_rejected() -> None:
     encoded = _encoded(_snapshot())

@@ -10,43 +10,45 @@ from __future__ import annotations
 
 import numpy as np
 
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from data_factory import (
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
+
 
 from zlc_plot import AxisRef, PlotSession, RollingPlot
 from zlc_plot.rendering import MatplotlibRenderer
 
-
 def _session(window: int = 100) -> PlotSession:
     rng = np.random.default_rng(3)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=20),
-        PointTable.from_columns({"site": np.arange(8.0)}),
-        generation="rolling-owner",
+    schema = make_dataset_schema(
+        repeat_domain(size=20),
+        mapped_domain_from_columns({"site": np.arange(8.0)}),
     )
     session = PlotSession(
-        DatasetSnapshot(schema, rng.normal(size=(20, 8)), revision=1),
+        make_snapshot(schema, rng.normal(size=(20, 8)), revision=1),
         RollingPlot(),
         device_pixel_ratio=2.0,
     )
     session.set_parameters({"window": window})
     return session
 
-
 #: The same numbers every revision.  These tests are about chrome that does
 #: not change; new random values would move the y limits legitimately, and a
 #: moving axis is a chrome change nobody should try to cache away.
 _VALUES = np.random.default_rng(4).normal(size=(20, 8))
-
 
 def _feed(session: PlotSession, revisions: int, *, start: list[int]) -> None:
     schema = session._projection.data.block.schema
     for _ in range(revisions):
         start[0] += 1
         session.update_data(
-            DatasetSnapshot(schema, _VALUES, revision=start[0])
+            make_snapshot(schema, _VALUES, revision=start[0])
         )
         session.rgba()
-
 
 def test_the_shot_axis_is_written_once_per_revision(monkeypatch) -> None:
     """One owner means one write; two owners meant two, and back again."""
@@ -72,7 +74,6 @@ def test_the_shot_axis_is_written_once_per_revision(monkeypatch) -> None:
     finally:
         session.close()
 
-
 def test_a_static_rolling_panel_reuses_its_chrome_background(monkeypatch) -> None:
     """The picture is not changing, so the background must not be rebuilt.
 
@@ -97,7 +98,6 @@ def test_a_static_rolling_panel_reuses_its_chrome_background(monkeypatch) -> Non
         assert draws == [], f"{len(draws)} full rebuilds for a static panel"
     finally:
         session.close()
-
 
 def test_churn_counts_invalidation_not_a_missing_background() -> None:
     """The escape hatch must not be a one-way door.

@@ -47,10 +47,9 @@ from zlc_data import (
     DataBlock,
     DatasetRevision,
     DatasetSchema as RawSchema,
-    GridTopology,
+    DomainSpec,
     OwnedSnapshot,
-    PointColumn,
-    PointTable as RawPointTable,
+    SCALAR_DOMAIN,
     StreamGenerationId,
     ValueSchema,
 )
@@ -126,12 +125,12 @@ def image_panel(frames):
 
     plot = pytest.importorskip("zlc_plot")
     _signal, snapshot = frames
-    axes = {axis.role: axis for axis in snapshot.block.schema.cell_schema.data_axes}
+    axes = {axis.role: axis for axis in snapshot.block.schema.cell_domain.axes}
     host = plot.RasterPlotHost.from_plot(
         snapshot,
         plot.ImagePlot(
-            plot.AxisRef.data(str(axes[SPATIAL_X].axis_id)),
-            plot.AxisRef.data(str(axes[SPATIAL_Y].axis_id)),
+            plot.AxisRef.cell_data(str(axes[SPATIAL_X].axis_id)),
+            plot.AxisRef.cell_data(str(axes[SPATIAL_Y].axis_id)),
         ),
     )
     try:
@@ -199,7 +198,7 @@ def test_a_committed_box_publishes_a_signal_cut_from_the_drawn_axes(
     session, frames, image_panel
 ) -> None:
     signal, snapshot = frames
-    axes = {axis.role: axis for axis in snapshot.block.schema.cell_schema.data_axes}
+    axes = {axis.role: axis for axis in snapshot.block.schema.cell_domain.axes}
     routed: list[tuple[object, object, object]] = []
     bridge, source = attach_selection_bridge(
         session.signal_plane,
@@ -551,29 +550,33 @@ def _heatmap_snapshot(repeats: int = 2) -> OwnedSnapshot:
     repeat = AxisSpec(
         AxisId("repeat"), "repeat", REPEAT, repeats, tuple(range(repeats))
     )
-    bias = PointColumn(
+    bias = AxisSpec(
         AxisId("bias_x"),
         "bias_x",
         SCAN_POINT,
-        PointColumn.NUMERIC,
-        (-1.0, -1.0, -1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0),
+        3,
+        (-1.0, 0.0, 1.0),
     )
-    grad = PointColumn(
+    grad = AxisSpec(
         AxisId("grad"),
         "grad",
         SCAN_POINT,
-        PointColumn.NUMERIC,
-        (10.0, 20.0, 30.0, 10.0, 20.0, 30.0, 10.0, 20.0, 30.0),
-    )
-    topology = GridTopology(
-        (AxisId("bias_x"), AxisId("grad")),
-        ((-1.0, 0.0, 1.0), (10.0, 20.0, 30.0)),
-        tuple((i, j) for i in range(3) for j in range(3)),
+        3,
+        (10.0, 20.0, 30.0),
     )
     schema = RawSchema(
-        repeat,
-        RawPointTable(9, (bias, grad)),
-        topology,
+        DomainSpec(
+            (repeats,), (repeat,), (tuple(range(repeats)),)
+        ),
+        DomainSpec(
+            (9,),
+            (bias, grad),
+            (
+                (0, 0, 0, 1, 1, 1, 2, 2, 2),
+                (0, 1, 2, 0, 1, 2, 0, 1, 2),
+            ),
+        ),
+        SCALAR_DOMAIN,
         ValueSchema.scalar(np.dtype("float64"), None),
     )
     values = np.arange(repeats * 9, dtype=np.float64).reshape(repeats, 9, 1)
@@ -593,17 +596,19 @@ def _curve_scan_snapshot(repeats: int = 2) -> OwnedSnapshot:
     repeat = AxisSpec(
         AxisId("repeat"), "repeat", REPEAT, repeats, tuple(range(repeats))
     )
-    detuning = PointColumn(
+    detuning = AxisSpec(
         AxisId("detuning"),
         "detuning",
         SCAN_POINT,
-        PointColumn.NUMERIC,
+        5,
         (0.0, 1.0, 2.0, 3.0, 4.0),
     )
     schema = RawSchema(
-        repeat,
-        RawPointTable(5, (detuning,)),
-        None,
+        DomainSpec(
+            (repeats,), (repeat,), (tuple(range(repeats)),)
+        ),
+        DomainSpec((5,), (detuning,), ((0, 1, 2, 3, 4),)),
+        SCALAR_DOMAIN,
         ValueSchema.scalar(np.dtype("float64"), None),
     )
     values = np.arange(repeats * 5, dtype=np.float64).reshape(repeats, 5, 1)
@@ -620,8 +625,8 @@ def _curve_scan_snapshot(repeats: int = 2) -> OwnedSnapshot:
 def _plane_for(snapshot: OwnedSnapshot, front_signals: set[str]):
     declaration = DatasetOutputDeclaration("frame", "test.camera.frame")
     total = (
-        snapshot.block.schema.repeat_axis.size
-        * snapshot.block.schema.point_table.row_count
+        snapshot.block.schema.repeat_domain.size
+        * snapshot.block.schema.point_domain.size
     )
     source_node = _Source(declaration)
     output = LiveDatasetOutput(
@@ -642,12 +647,11 @@ def _plane_for(snapshot: OwnedSnapshot, front_signals: set[str]):
 @pytest.mark.parametrize(
     ("domain", "axis"),
     (
-        ("repeat", ""),
-        ("point_row", ""),
-        ("point_coordinate", "detuning"),
-        ("point_dimension", "detuning"),
-        ("data", "detuning"),
+        ("repeat", "repeat"),
+        ("point", "detuning"),
+        ("cell_data", "detuning"),
         ("value", ""),
+        ("shot", ""),
     ),
 )
 def test_panel_selection_roundtrip_keeps_every_axis_domain(domain, axis) -> None:
@@ -716,7 +720,7 @@ def test_a_box_on_a_focused_scan_heatmap_cell_publishes_the_focused_subgrid() ->
     """The headline chain: heatmap facet cell -> gesture -> derived signal.
 
     This deliberately authored repeat facet contains scan-heatmap image cells
-    whose axes are grid-topology DIMENSIONS.  Every
+    whose axes are named Point-domain axes. Every
     committed box on one used to die silently in the bridge with 'image area
     axes must be source data axes' -- nothing published, nothing said.  And
     the focused cell's identity used to be dropped, so the cut spanned every
@@ -731,7 +735,7 @@ def test_a_box_on_a_focused_scan_heatmap_cell_publishes_the_focused_subgrid() ->
     values = snapshot.block.values
     cell = image_default_spec(schema)
     assert isinstance(cell, plot.ImagePlot), cell
-    spec = plot.FacetGridPlot(plot.AxisRef.repeat(), cell)
+    spec = plot.FacetGridPlot(plot.AxisRef.repeat("repeat"), cell)
 
     plane, source_node, snapshot = _plane_for(
         snapshot, {"@logic/panel-1/roi_frame", "@logic/panel-1/roi_mean"}
@@ -755,30 +759,34 @@ def test_a_box_on_a_focused_scan_heatmap_cell_publishes_the_focused_subgrid() ->
         assert bridge.last_error is None, bridge.last_error
         assert seen
         selection = seen[-1].state
-        # The focused cell crosses structurally: repeat row 1, no named axis.
-        assert selection.repeat_index == 1
-        assert selection.facets == ()
+        assert tuple(
+            (item.axis, item.value, item.domain) for item in selection.facets
+        ) == (("repeat", 1, "repeat"),)
 
         # The derived data equals the slice the committed ranges + focused
         # repeat select from the source, computed independently here.
         columns = {
-            column.name: column.values for column in schema.point_table.columns
+            axis.name: tuple(
+                axis.coordinate_at(int(code))
+                for code in schema.point_domain.codes(axis.axis_id)
+            )
+            for axis in schema.point_domain.axes
         }
         rows = [
             row
-            for row in range(schema.point_table.row_count)
+            for row in range(schema.point_domain.size)
             if all(
                 entry.lower <= columns[entry.axis][row] <= entry.upper
                 for entry in selection.ranges
             )
         ]
-        assert 1 <= len(rows) < schema.point_table.row_count, rows
+        assert 1 <= len(rows) < schema.point_domain.size, rows
         expected = values[1:2][:, rows]
 
         roi_frame = _wait_published(plane, "@logic/panel-1/roi_frame")
         roi_mean = _wait_published(plane, "@logic/panel-1/roi_mean")
         np.testing.assert_array_equal(roi_frame.snapshot.block.values, expected)
-        assert roi_frame.snapshot.block.schema.repeat_axis.size == 1
+        assert roi_frame.snapshot.block.schema.repeat_domain.size == 1
         # roi_mean is ONE value per (repeat, point): the reduction consumes the
         # image axes and nothing else.  A square cell makes the same fractional
         # drag cover several scan points, so the comparison must be per point --
@@ -826,7 +834,7 @@ def test_an_area_on_a_plain_curve_panel_derives_an_x_range() -> None:
         assert state.plot_kind == "curve"
         assert state.selector_kind == "x_range"
         assert [entry.axis for entry in state.ranges] == ["detuning"]
-        assert state.facets == () and state.repeat_index is None
+        assert state.facets == ()
     finally:
         source.close()
         host.close()
@@ -840,23 +848,21 @@ def test_public_selection_event_carries_repeat_and_named_panel_scope() -> None:
             _curve_scan_snapshot(repeats=3),
             plot.CurvePlot(
                 plot.AxisRef.point("detuning"),
-                scope=((plot.AxisRef.repeat(), 1.0),),
+                scope=((plot.AxisRef.repeat("repeat"), 1.0),),
             ),
-            (),
-            1,
+            (("repeat", 1.0, "repeat"),),
         ),
         (
             _heatmap_snapshot(),
             plot.CurvePlot(
-                plot.AxisRef.point_dimension("bias_x"),
-                scope=((plot.AxisRef.point_dimension("grad"), 20.0),),
+                plot.AxisRef.point("bias_x"),
+                scope=((plot.AxisRef.point("grad"), 20.0),),
             ),
-            (("grad", 20.0, "point_dimension"),),
-            None,
+            (("grad", 20.0, "point"),),
         ),
     )
 
-    for snapshot, spec, expected_facets, expected_repeat in cases:
+    for snapshot, spec, expected_facets in cases:
         host = plot.RasterPlotHost.from_plot(snapshot, spec)
         public_host = SimpleNamespace(subscribe_selection=host.subscribe_selection)
         source = PlotSelectionSource(public_host)
@@ -871,7 +877,6 @@ def test_public_selection_event_carries_repeat_and_named_panel_scope() -> None:
             assert tuple(
                 (item.axis, item.value, item.domain) for item in state.facets
             ) == expected_facets
-            assert state.repeat_index == expected_repeat
             assert panel_selection_matches_subject(
                 state, committed[-1].subject
             )
@@ -883,7 +888,7 @@ def test_public_selection_event_carries_repeat_and_named_panel_scope() -> None:
                         type(facet)(
                             facet.axis,
                             facet.value,
-                            "point_coordinate",
+                                "cell_data",
                         ),
                     ),
                 )
@@ -895,15 +900,14 @@ def test_public_selection_event_carries_repeat_and_named_panel_scope() -> None:
             host.close()
 
 
-def test_structural_curve_axes_select_the_source_rows_without_a_fake_name() -> None:
-    """Repeat and point-row axes are structural, not unnamed failures."""
+def test_declared_curve_axes_select_their_physical_domain_rows() -> None:
 
     plot = pytest.importorskip("zlc_plot")
     snapshot = _curve_scan_snapshot(repeats=4)
     values = snapshot.block.values
     cases = (
-        (plot.AxisRef.repeat(), "repeat", values[1:3, :, :]),
-        (plot.AxisRef.point_rows(), "point_row", values[:, 1:3, :]),
+        (plot.AxisRef.repeat("repeat"), "repeat", values[1:3, :, :]),
+        (plot.AxisRef.point("detuning"), "point", values[:, 1:3, :]),
     )
 
     for axis, domain, expected in cases:
@@ -990,7 +994,8 @@ def test_an_area_on_a_focused_curve_facet_cell_carries_the_cell() -> None:
 
     snapshot = _curve_scan_snapshot()
     spec = plot.FacetGridPlot(
-        plot.AxisRef.repeat(), plot.CurvePlot(x=plot.AxisRef.point("detuning"))
+        plot.AxisRef.repeat("repeat"),
+        plot.CurvePlot(x=plot.AxisRef.point("detuning")),
     )
     host = plot.RasterPlotHost.from_plot(snapshot, spec, size="4x4")
     public_host = SimpleNamespace(
@@ -1010,7 +1015,7 @@ def test_an_area_on_a_focused_curve_facet_cell_carries_the_cell() -> None:
         front, transform = _focused_cell_front(host, 1)
         assert len(focused) == 1
         assert focused[0][0] == 1
-        assert focused[0][1].repeat_index == 1
+        assert focused[0][1].scope == ((plot.AxisRef.repeat("repeat"), 1),)
         assert focused[0][2:] == ("curve-generation", 1)
         _gesture_area(host, front, transform)
         assert source.last_error is None, source.last_error
@@ -1018,8 +1023,9 @@ def test_an_area_on_a_focused_curve_facet_cell_carries_the_cell() -> None:
         state = committed[-1].state
         assert state.selector_kind == "x_range"
         assert [entry.axis for entry in state.ranges] == ["detuning"]
-        assert state.repeat_index == 1
-        assert state.facets == ()
+        assert tuple(
+            (item.axis, item.value, item.domain) for item in state.facets
+        ) == (("repeat", 1, "repeat"),)
         assert panel_plot_selectors(state, facet_index=1)[0].facet_index == 1
 
         host.configure(facet_focus=0).result(timeout=15)
@@ -1027,7 +1033,7 @@ def test_an_area_on_a_focused_curve_facet_cell_carries_the_cell() -> None:
         host.show_facet_overview().result(timeout=15)
         assert len(focused) == 2
         assert focused[-1][0] is None
-        assert focused[-1][1].repeat_index is None
+        assert focused[-1][1].scope == ()
         assert focused[-1][2:] == ("curve-generation", 1)
     finally:
         source.close()
@@ -1039,7 +1045,7 @@ def test_a_box_on_a_focused_frame_cell_derives_only_that_frame(
 ) -> None:
     """Frames on the point axis: the focused frame's identity crosses.
 
-    A camera cycle publishes its frames as POINT rows with a 'frame' column,
+    A camera cycle publishes its frames as a named Point-domain axis,
     and its auto default facets those frames side by side.  A box drawn on
     one focused frame must derive that frame's region only -- the frame is a
     named point coordinate, so unlike a repeat facet it crosses as a facet
@@ -1051,9 +1057,9 @@ def test_a_box_on_a_focused_frame_cell_derives_only_that_frame(
 
     signal, snapshot = frames
     schema = snapshot.block.schema
-    assert schema.point_table.row_count == CAMERA_WINDOWS
-    frame_column = schema.point_table.columns[0]
-    assert frame_column.name == "frame"
+    assert schema.point_domain.size == CAMERA_WINDOWS
+    frame_axis = schema.point_domain.axes[0]
+    assert frame_axis.name == "frame"
     spec = facet_default_spec(schema)
     assert spec is not None and isinstance(spec.cell, plot.ImagePlot), spec
 
@@ -1076,9 +1082,8 @@ def test_a_box_on_a_focused_frame_cell_derives_only_that_frame(
         assert bridge.last_error is None, bridge.last_error
         assert seen
         selection = seen[-1].state
-        assert selection.repeat_index is None
         assert [facet.axis for facet in selection.facets] == [
-            frame_column.coordinate_id.value
+            frame_axis.axis_id.value
         ]
         assert selection.facets[0].value == 1.0
 
@@ -1086,11 +1091,9 @@ def test_a_box_on_a_focused_frame_cell_derives_only_that_frame(
             session.signal_plane, "@logic/panel-1/roi_frame"
         )
         derived = roi_frame.snapshot.block
-        assert derived.schema.point_table.row_count == 1
-        derived_column = derived.schema.point_table.column(
-            frame_column.coordinate_id
-        )
-        assert tuple(derived_column.values) == (frame_column.values[1],)
+        assert derived.schema.point_domain.size == 1
+        derived_axis = derived.schema.point_domain.axis(frame_axis.axis_id)
+        assert derived_axis.coordinates == (frame_axis.coordinate_at(1),)
 
         # The derived pixels are the same crop of frame 1, located through
         # the derived axes' own origins.
@@ -1098,14 +1101,14 @@ def test_a_box_on_a_focused_frame_cell_derives_only_that_frame(
             axis.index_origin
             if axis.coordinates is None
             else int(axis.coordinates[0])
-            for axis in derived.schema.cell_schema.data_axes
+            for axis in derived.schema.cell_domain.axes
         )
         sizes = tuple(
-            axis.size for axis in derived.schema.cell_schema.data_axes
+            axis.size for axis in derived.schema.cell_domain.axes
         )
         assert all(
             0 < size < full.size
-            for size, full in zip(sizes, schema.cell_schema.data_axes)
+            for size, full in zip(sizes, schema.cell_domain.axes)
         )
         window = tuple(
             slice(start, start + size) for start, size in zip(starts, sizes)

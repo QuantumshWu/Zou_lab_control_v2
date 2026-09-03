@@ -3,7 +3,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from data_factory import (
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
+from zlc_data import OwnedSnapshot, REPEAT
 from zlc_plot import DEFAULTS, AxisRef, CurvePlot, HistogramPlot
 from zlc_plot._fit_projection import FitProjection, FitScope, ProjectionContext
 from zlc_plot.selectors import NumericRange, RectangleRange, SelectorKind, SelectorSnapshot, SelectorState
@@ -12,14 +19,13 @@ from zlc_plot.state import DisplayStateStore
 from zlc_plot.fit import FitEngine
 
 
-def _snapshot() -> DatasetSnapshot:
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": np.arange(5, dtype=np.float64)}),
+def _snapshot() -> OwnedSnapshot:
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"x": np.arange(5, dtype=np.float64)}),
         dtype=np.float64,
-        generation="fit-selection-test",
     )
-    return DatasetSnapshot(schema, np.arange(5, dtype=np.float64).reshape(1, 5), revision=3)
+    return make_snapshot(schema, np.arange(5, dtype=np.float64).reshape(1, 5), revision=3)
 
 
 def _projection(spec, *, selectors=(), viewport=None) -> FitProjection:

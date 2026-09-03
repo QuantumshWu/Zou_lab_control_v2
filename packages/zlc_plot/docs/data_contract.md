@@ -9,42 +9,47 @@ validity and history.
 
 ## Role-axis snapshots
 
-Construct a dataset with `AxisSpec`/`PointColumn`, `PointTable`, an optional
-`GridTopology`, and a `ValueSchema`:
+Construct a dataset from three `DomainSpec` values and one `ValueSchema`.
+Repeat and Point are flat physical carriers whose axis-major codes map every
+row to each logical coordinate; Cell-data is a dense domain whose axes map
+directly to tensor dimensions:
 
 ```python
 import numpy as np
 from zlc_data import (
-    AxisId, AxisSpec, DatasetSchema, PointColumn, PointTable,
+    AxisId, AxisSpec, DatasetSchema, DomainSpec,
     REPEAT, SCAN_POINT, COMPONENT, ValidityContract, ValueSchema,
     owned_snapshot_from_arrays,
 )
 
-repeat = AxisSpec(AxisId("repeat"), "repeat", REPEAT, 2, (0, 1))
-point = PointColumn(
-    AxisId("scan"), "scan", SCAN_POINT, PointColumn.NUMERIC,
-    (-1.0, 0.0, 1.0), "V",
-)
+repeat_axis = AxisSpec(AxisId("repeat"), "repeat", REPEAT, 2, (0, 1))
+repeat = DomainSpec((2,), (repeat_axis,), ((0, 1),))
+scan = AxisSpec(AxisId("scan"), "scan", SCAN_POINT, 3, (-1.0, 0.0, 1.0), "V")
+point = DomainSpec((3,), (scan,), ((0, 1, 2),))
 value_axis = AxisSpec(AxisId("value"), "value", COMPONENT, 1, (0,))
-cell = ValueSchema(
-    (value_axis,), ValidityContract.value(), np.dtype("float64"), "V",
-)
-schema = DatasetSchema(repeat, PointTable(3, (point,)), None, cell)
+cell = DomainSpec((1,), (value_axis,))
+value = ValueSchema(ValidityContract.value(), np.dtype("float64"), "V")
+schema = DatasetSchema(repeat, point, cell, value)
 snapshot = owned_snapshot_from_arrays(
     schema=schema, values=np.zeros((2, 3, 1)), revision=0,
 )
 ```
 
-The physical geometry is `schema.physical_shape == (R, P, *data_dim)`; the
-scalar carrier is an explicit trailing size-one data axis.  `OwnedSnapshot`
+The physical geometry is `schema.physical_shape == (R, P, *cell_shape)`.
+One scalar value still has a canonical trailing size-one Cell carrier, but
+that representation axis is automatically consumed and never appears in
+Plot fate/title vocabulary. `OwnedSnapshot`
 stores immutable arrays, a schema fingerprint, block id, stream generation and
 monotonic revision.  Validity is a typed data-layer contract and can be
 materialized as a dense physical mask with `snapshot.expanded_validity()`.
 
-`GridTopology` is producer-authored.  Its dimension ids and coordinate domains
-may be absent from `PointTable`; `zlc_plot` never infers a Cartesian grid from
-repeated column values.  Use `AxisRef.point_dimension("b_x")` only when the
-producer declared that topology dimension.
+Each logical axis is declared exactly once. `DomainSpec.codes(axis_id)` returns
+only the one-dimensional code vector along that axis's physical carrier:
+length `R` or `P` for mapped Repeat/Point domains, and an implicit identity of
+length `Di` for a dense Cell axis. Plot projection broadcasts these small
+vectors by stride and never materializes a full coordinate plane merely to
+recover geometry. Axis references are correspondingly just
+`AxisRef.repeat(id)`, `AxisRef.point(id)`, or `AxisRef.cell_data(id)`.
 
 ## Units are presentation-owned
 

@@ -115,9 +115,8 @@ def test_the_temperature_task_publishes_release_recapture_survival(
         for preview in descriptors["temperature"].node_previews
     ] == [("survival", "curve")]
     assert dict(descriptors["temperature"].node_previews[0].semantic) == {
-        "fate:point_coordinate:temperature.t_off": "x",
-        "fate:repeat": "reduce",
-        "fate:data:calibration.site": "reduce",
+        "fate:point:temperature.t_off": "x",
+        "fate:cell_data:calibration.site": "reduce",
         "reduction": "mean",
     }
     sequencer = installation.device("sequencer")
@@ -217,18 +216,18 @@ def test_the_temperature_task_publishes_release_recapture_survival(
             task_console_fitting_spec(schema, preview.plot_kind, ""),
             preview.semantic,
         )
-        assert schema.repeat_axis.size == REPEATS
-        assert schema.point_table.row_count == len(T_OFF_MS)
-        column = schema.point_table.columns[0]
-        assert column.name == "t_off"
-        assert column.unit == "ms"
-        assert tuple(column.values) == T_OFF_MS
+        assert schema.repeat_domain.size == REPEATS
+        assert schema.point_domain.size == len(T_OFF_MS)
+        axis = schema.point_domain.axes[0]
+        assert axis.name == "t_off"
+        assert axis.unit == "ms"
+        assert axis.coordinates == T_OFF_MS
         site_axes = tuple(
-            axis for axis in schema.cell_schema.data_axes if axis.role == SITE
+            axis for axis in schema.cell_domain.axes if axis.role == SITE
         )
         assert len(site_axes) == 1, (
             "survival must keep the site axis, so a per-site answer stays "
-            f"readable; the cell axes are {schema.cell_schema.data_axes}"
+            f"readable; the cell axes are {schema.cell_domain.axes}"
         )
         assert site_axes[0].size == calibration.value.n_sites
 

@@ -27,8 +27,6 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
-from itertools import product
-from math import prod
 from pathlib import Path
 import re
 from typing import Any
@@ -64,25 +62,9 @@ _MANUAL_DTYPES = tuple(
         "complex128",
     )
 )
-_MANUAL_ROLE_CHOICES = (
-    "primary-index",
-    "scan-point",
-    "readout-event",
-    "spatial-x",
-    "spatial-y",
-    "spectral",
-    "histogram-bin",
-    "site",
-    "component",
-    "scalar",
-)
-_POINT_ROWS = "zlc_data.point-ordinal"
-
-
-def _axis_coordinates(axis: object) -> object:
-    if axis.coordinates is not None:
-        return axis.coordinates
-    return range(int(axis.index_origin), int(axis.index_origin) + int(axis.size))
+# The manual editor works on one dense logical tensor.  Repeat and Point are
+# flattened only at the Dataset boundary; keeping them expanded here makes
+# every axis obey the same Add/Edit/Delete and Rows/Columns/Scope rules.
 
 
 def _manual_version() -> str:
@@ -92,6 +74,164 @@ def _manual_version() -> str:
         return "unknown"
 
 
+def _axis_coordinates(axis: object) -> object:
+    if axis.coordinates is not None:
+        return tuple(axis.coordinates)
+    return range(int(axis.index_origin), int(axis.index_origin) + int(axis.size))
+
+
+def _parse_axis_value(text: object) -> object:
+    from zlc_data import canonical_coordinate_scalar
+
+    token = str(text).strip()
+    if not token:
+        raise ValueError("axis values cannot be blank")
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in {"'", '"'}:
+        value: object = token[1:-1]
+    elif re.fullmatch(r"[+-]?\d+", token):
+        value = int(token)
+    else:
+        try:
+            value = float(token)
+        except ValueError:
+            value = token
+    return canonical_coordinate_scalar(value, "axis value")
+
+
+def _resized_coordinates(axis: object | None, length: int) -> tuple[object, ...] | None:
+    if axis is None or axis.coordinates is None:
+        return None
+    wanted = int(length)
+    values = list(axis.coordinates[:wanted])
+    occupied = set(values)
+    while len(values) < wanted:
+        if values and all(type(value) in (int, float) for value in values):
+            step = values[-1] - values[-2] if len(values) >= 2 else 1
+            candidate: object = values[-1] + step
+            while candidate in occupied:
+                candidate = candidate + 1
+        else:
+            serial = len(values)
+            candidate = f"{axis.name}-{serial}"
+            while candidate in occupied:
+                serial += 1
+                candidate = f"{axis.name}-{serial}"
+        values.append(candidate)
+        occupied.add(candidate)
+    return tuple(values)
+
+
+def _mapped_domain(axes: tuple[object, ...]) -> object:
+    from zlc_data import DomainSpec
+
+    if not axes:
+        return DomainSpec((1,), (), ())
+    shape = tuple(int(axis.size) for axis in axes)
+    size = int(np.prod(shape, dtype=np.int64))
+    codes = np.indices(shape, dtype=np.int64).reshape((len(shape), size))
+    return DomainSpec(
+        (size,), axes, tuple(codes[position] for position in range(len(shape)))
+    )
+
+
+def _edited_mapped_domain(axes: tuple[object, ...], source: object) -> object:
+    """Keep an existing carrier map until the operator changes its topology.
+
+    Editing data, coordinates, names or units does not turn a sparse/serpentine
+    acquisition into a Cartesian product.  Add/Delete, moving an axis between
+    domains, or changing an axis length does change the topology and therefore
+    intentionally starts a new dense authored map.
+    """
+
+    signature = tuple((axis.axis_id, int(axis.size)) for axis in axes)
+    source_signature = tuple(
+        (axis.axis_id, int(axis.size)) for axis in source.axes
+    )
+    if signature != source_signature:
+        return _mapped_domain(axes)
+    from zlc_data import DomainSpec
+
+    return DomainSpec(tuple(source.shape), axes, source.axis_codes)
+
+
+def _domain_flat_rows(domain: object) -> np.ndarray:
+    if not domain.axes:
+        return np.zeros(int(domain.size), dtype=np.intp)
+    result = np.ravel_multi_index(
+        tuple(domain.codes(axis.axis_id) for axis in domain.axes),
+        domain.logical_shape,
+    )
+    if np.unique(result).size != result.size:
+        raise ValueError("manual editing requires unique logical rows in each Dataset domain")
+    return np.asarray(result, dtype=np.intp)
+
+
+def _expand_snapshot_for_edit(snapshot: object) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    from zlc_data import expand_snapshot_validity
+
+    schema = snapshot.block.schema
+    repeat_shape = tuple(int(axis.size) for axis in schema.repeat_domain.axes)
+    point_shape = tuple(int(axis.size) for axis in schema.point_domain.axes)
+    cell_shape = tuple(schema.cell_domain.shape)
+    dense_shape = (*repeat_shape, *point_shape, *cell_shape)
+    repeat_size = int(np.prod(repeat_shape, dtype=np.int64)) if repeat_shape else 1
+    point_size = int(np.prod(point_shape, dtype=np.int64)) if point_shape else 1
+    values = np.zeros(dense_shape, dtype=schema.value_schema.dtype)
+    validity = np.zeros(dense_shape, dtype=np.bool_)
+    source_values = np.asarray(snapshot.block.values)
+    source_validity = np.asarray(expand_snapshot_validity(snapshot), dtype=np.bool_)
+    target_values = values.reshape((repeat_size, point_size, *cell_shape))
+    target_validity = validity.reshape((repeat_size, point_size, *cell_shape))
+    repeat_rows = _domain_flat_rows(schema.repeat_domain)
+    point_rows = _domain_flat_rows(schema.point_domain)
+    target_values[repeat_rows[:, None], point_rows[None, :]] = source_values
+    target_validity[repeat_rows[:, None], point_rows[None, :]] = source_validity
+    sigma = None
+    if snapshot.block.sigma is not None:
+        sigma = np.full(dense_shape, np.nan, dtype=np.float64)
+        sigma.reshape((repeat_size, point_size, *cell_shape))[
+            repeat_rows[:, None], point_rows[None, :]
+        ] = np.asarray(snapshot.block.sigma, dtype=np.float64)
+    return values, validity, sigma
+
+
+def _visible_axes(draft: Mapping[str, object]) -> tuple[object, ...]:
+    return tuple(
+        axis
+        for axis in (
+            *tuple(draft["repeat_axes"]),
+            *tuple(draft["point_axes"]),
+            *tuple(draft["cell_axes"]),
+        )
+        if str(axis.role) != "scalar"
+    )
+
+
+def _storage_axes(draft: Mapping[str, object]) -> tuple[object, ...]:
+    return (
+        *tuple(draft["repeat_axes"]),
+        *tuple(draft["point_axes"]),
+        *tuple(draft["cell_axes"]),
+    )
+
+
+def _normalize_table_axes(draft: dict[str, object]) -> None:
+    ids = tuple(str(axis.axis_id) for axis in _visible_axes(draft))
+    row = str(draft.get("row_axis") or "")
+    column = str(draft.get("column_axis") or "")
+    if row not in ids:
+        row = ids[-2] if len(ids) >= 2 else ids[0] if ids else ""
+    if column not in ids or column == row:
+        column = ids[-1] if len(ids) >= 2 and ids[-1] != row else ""
+    draft["row_axis"] = row
+    draft["column_axis"] = column
+    scopes = dict(draft.get("scopes", {}))
+    for axis in _visible_axes(draft):
+        axis_id = str(axis.axis_id)
+        scopes[axis_id] = min(max(0, int(scopes.get(axis_id, 0))), int(axis.size) - 1)
+    draft["scopes"] = {key: value for key, value in scopes.items() if key in ids}
+
+
 def _new_manual_snapshot() -> object:
     """A useful Curve Dataset, not an empty shape the operator must repair."""
 
@@ -99,42 +239,26 @@ def _new_manual_snapshot() -> object:
         AxisId,
         AxisSpec,
         DatasetSchema,
-        GridTopology,
-        PointColumn,
-        PointTable,
+        DomainSpec,
         REPEAT,
         SCAN_POINT,
+        SCALAR_DOMAIN,
         ValueSchema,
         owned_snapshot_from_arrays,
     )
 
     count = 16
-    x_id = AxisId("manual.x")
-    x_coordinates = tuple(range(count))
+    repeat = AxisSpec(AxisId("manual.repeat"), "repeat", REPEAT, 1, (0,))
+    x = AxisSpec(AxisId("manual.x"), "x", SCAN_POINT, count, tuple(range(count)))
     schema = DatasetSchema(
-        AxisSpec(AxisId("manual.repeat"), "repeat", REPEAT, 1, (0,)),
-        PointTable(
-            count,
-            (
-                PointColumn(
-                    x_id,
-                    "x",
-                    SCAN_POINT,
-                    PointColumn.NUMERIC,
-                    x_coordinates,
-                ),
-            ),
-        ),
-        GridTopology(
-            (x_id,),
-            (x_coordinates,),
-            tuple((index,) for index in range(count)),
-        ),
+        DomainSpec((1,), (repeat,), ((0,),)),
+        DomainSpec((count,), (x,), (tuple(range(count)),)),
+        SCALAR_DOMAIN,
         ValueSchema.scalar(np.dtype("<f8")),
     )
     return owned_snapshot_from_arrays(
         schema,
-        np.zeros(schema.physical_shape, dtype=schema.cell_schema.dtype),
+        np.zeros(schema.physical_shape, dtype=schema.value_schema.dtype),
         0,
         validity=np.ones(schema.physical_shape, dtype=np.bool_),
     )
@@ -155,31 +279,23 @@ def _draft_from_snapshot(
     described: object | None,
     overlay: object | None,
 ) -> dict[str, object]:
-    from zlc_data import expand_snapshot_validity
-
     schema = snapshot.block.schema
-    selected_axis = (
-        str(schema.grid_topology.dimension_ids[0])
-        if schema.grid_topology is not None
-        else str(schema.point_table.columns[0].coordinate_id)
-        if schema.point_table.columns
-        else str(
-            next(
-                (
-                    axis.axis_id
-                    for axis in schema.cell_schema.data_axes
-                    if str(axis.role) != "scalar"
-                ),
-                schema.repeat_axis.axis_id,
-            )
+    values, validity, sigma = _expand_snapshot_for_edit(snapshot)
+    axes = tuple(
+        axis
+        for axis in (
+            *schema.point_domain.axes,
+            *schema.cell_domain.axes,
+            *schema.repeat_domain.axes,
         )
+        if str(axis.role) != "scalar"
     )
-    draft = {
+    draft: dict[str, object] = {
         "editor_id": str(editor_id),
         "name": str(name),
         "initial_name": str(name),
-        "dtype": schema.cell_schema.dtype,
-        "unit": schema.cell_schema.value_unit,
+        "dtype": schema.value_schema.dtype,
+        "unit": schema.value_schema.value_unit,
         "note": str(note),
         "initial_note": str(note),
         "source_text": str(source_text),
@@ -188,25 +304,22 @@ def _draft_from_snapshot(
         "source_lineage": deepcopy(dict(source_lineage)),
         "source_document": deepcopy(dict(source_document)),
         "source_snapshot": snapshot,
+        "source_repeat_domain": schema.repeat_domain,
+        "source_point_domain": schema.point_domain,
         "source_overlay": overlay,
         "recipe": None if recipe is None else dict(recipe),
         "described": described,
-        "repeat_axis": schema.repeat_axis,
-        "point_columns": list(schema.point_table.columns),
-        "grid_topology": schema.grid_topology,
-        "cell_axes": list(schema.cell_schema.data_axes),
-        "validity_contract": schema.cell_schema.validity_contract,
-        "values": np.array(snapshot.block.values, copy=True),
-        "validity": np.array(expand_snapshot_validity(snapshot), dtype=np.bool_, copy=True),
-        "sigma": (
-            None
-            if snapshot.block.sigma is None
-            else np.array(snapshot.block.sigma, dtype=np.float64, copy=True)
-        ),
-        "selected_axis": selected_axis,
-        "slices": {},
-        "grid_lookup": None,
-        "grid_layout": None,
+        "repeat_axes": list(schema.repeat_domain.axes),
+        "point_axes": list(schema.point_domain.axes),
+        "cell_axes": list(schema.cell_domain.axes),
+        "validity_contract": schema.value_schema.validity_contract,
+        "values": values,
+        "validity": validity,
+        "sigma": sigma,
+        "selected_axis": "" if not axes else str(axes[0].axis_id),
+        "row_axis": "",
+        "column_axis": "",
+        "scopes": {},
         "component": "values",
         "modified": source_path is None,
         "unsaved": False,
@@ -221,726 +334,518 @@ def _draft_from_snapshot(
         "panel_id": "",
         "save_ready": False,
     }
-    draft["coordinate_label_drafts"] = {}
+    _normalize_table_axes(draft)
     return draft
 
 
 def _draft_schema(draft: Mapping[str, object]) -> object:
-    """Build the one canonical schema represented by a mutable editor draft."""
+    from zlc_data import DatasetSchema, DomainSpec, ValidityContract, ValueSchema
 
-    from zlc_data import DatasetSchema, PointTable, ValidityContract, ValueSchema
-
-    _require_complete_coordinate_labels(draft, "applying this Dataset")
-    axes = tuple(draft["cell_axes"])
-    validity = np.asarray(draft["validity"], dtype=np.bool_)
+    repeat_axes = tuple(draft["repeat_axes"])
+    point_axes = tuple(draft["point_axes"])
+    cell_axes = tuple(draft["cell_axes"])
+    repeat_domain = _edited_mapped_domain(
+        repeat_axes, draft["source_repeat_domain"]
+    )
+    point_domain = _edited_mapped_domain(
+        point_axes, draft["source_point_domain"]
+    )
+    cell_domain = DomainSpec(
+        tuple(int(axis.size) for axis in cell_axes), cell_axes
+    )
+    validity = _pack_manual_array(
+        draft,
+        np.asarray(draft["validity"], dtype=np.bool_),
+        repeat_domain=repeat_domain,
+        point_domain=point_domain,
+    )
     previous = draft["validity_contract"]
-    if len(axes) == 1 and str(axes[0].role) == "scalar":
+    if len(cell_axes) == 1 and str(cell_axes[0].role) == "scalar":
         contract = ValidityContract.value()
     else:
         required = {
             axis_id
             for axis_id in tuple(previous.component_axis_ids)
-            if any(axis.axis_id == axis_id for axis in axes)
+            if any(axis.axis_id == axis_id for axis in cell_axes)
         }
-        for offset, axis in enumerate(axes):
-            array_axis = 2 + offset
+        # A materialized Dataset always has one Repeat carrier dimension and
+        # one Point carrier dimension before the dense Cell-data dimensions,
+        # regardless of how many logical axes either mapped carrier declares.
+        cell_offset = 2
+        for offset, axis in enumerate(cell_axes):
+            array_axis = cell_offset + offset
             first = np.take(validity, 0, axis=array_axis)
             if not np.array_equal(
                 validity,
-                np.broadcast_to(
-                    np.expand_dims(first, axis=array_axis), validity.shape
-                ),
+                np.broadcast_to(np.expand_dims(first, axis=array_axis), validity.shape),
             ):
                 required.add(axis.axis_id)
-        ordered = tuple(axis.axis_id for axis in axes if axis.axis_id in required)
-        contract = (
-            ValidityContract.components(*ordered)
-            if ordered
-            else ValidityContract.value()
-        )
-    cell_schema = ValueSchema(
-        axes,
-        contract,
-        np.dtype(draft["dtype"]),
-        None if draft["unit"] is None else str(draft["unit"]),
-    )
+        ordered = tuple(axis.axis_id for axis in cell_axes if axis.axis_id in required)
+        contract = ValidityContract.components(*ordered) if ordered else ValidityContract.value()
     return DatasetSchema(
-        draft["repeat_axis"],
-        PointTable(int(np.asarray(draft["values"]).shape[1]), tuple(draft["point_columns"])),
-        draft["grid_topology"],
-        cell_schema,
+        repeat_domain,
+        point_domain,
+        cell_domain,
+        ValueSchema(
+            contract,
+            np.dtype(draft["dtype"]),
+            None if draft["unit"] is None else str(draft["unit"]),
+        ),
     )
+
+
+def _pack_manual_array(
+    draft: Mapping[str, object],
+    array: np.ndarray,
+    *,
+    repeat_domain: object,
+    point_domain: object,
+) -> np.ndarray:
+    """Project the editor's logical tensor back onto the Dataset carriers."""
+
+    repeat_axes = tuple(draft["repeat_axes"])
+    point_axes = tuple(draft["point_axes"])
+    cell_shape = tuple(int(axis.size) for axis in tuple(draft["cell_axes"]))
+    repeat_size = (
+        int(np.prod(tuple(int(axis.size) for axis in repeat_axes), dtype=np.int64))
+        if repeat_axes
+        else 1
+    )
+    point_size = (
+        int(np.prod(tuple(int(axis.size) for axis in point_axes), dtype=np.int64))
+        if point_axes
+        else 1
+    )
+    logical = np.asarray(array).reshape((repeat_size, point_size, *cell_shape))
+    repeat_rows = _domain_flat_rows(repeat_domain)
+    point_rows = _domain_flat_rows(point_domain)
+    return np.asarray(logical[repeat_rows[:, None], point_rows[None, :]])
+
+
+def _logical_shape(draft: Mapping[str, object]) -> tuple[int, ...]:
+    return tuple(int(axis.size) for axis in _storage_axes(draft))
+
+
+def _validate_draft_arrays(draft: Mapping[str, object]) -> None:
+    """Cheap per-interaction validation; schema/codes are built only on Apply."""
+
+    shape = _logical_shape(draft)
+    values = np.asarray(draft["values"])
+    validity = np.asarray(draft["validity"])
+    if values.shape != shape or values.dtype != np.dtype(draft["dtype"]):
+        raise ValueError("data values differ from the authored Dataset shape or dtype")
+    if validity.dtype != np.dtype(np.bool_) or validity.shape != shape:
+        raise ValueError("data validity must be one bool for every value")
+    sigma = draft["sigma"]
+    if sigma is not None:
+        sigma = np.asarray(sigma)
+        if sigma.dtype != np.dtype(np.float64) or sigma.shape != shape:
+            raise ValueError("data sigma must be float64 with the Dataset shape")
 
 
 def _manual_snapshot(draft: Mapping[str, object]) -> object:
     from zlc_data import owned_snapshot_from_arrays
 
+    _validate_draft_arrays(draft)
+    if draft["sigma"] is not None:
+        sigma_values = np.asarray(draft["sigma"], dtype=np.float64)
+        if bool(np.any(np.isfinite(sigma_values) & (sigma_values < 0.0))):
+            raise ValueError("sample sigma must be non-negative")
     schema = _draft_schema(draft)
+    sigma = draft["sigma"]
+    values = _pack_manual_array(
+        draft,
+        np.asarray(draft["values"]),
+        repeat_domain=schema.repeat_domain,
+        point_domain=schema.point_domain,
+    )
+    validity = _pack_manual_array(
+        draft,
+        np.asarray(draft["validity"], dtype=np.bool_),
+        repeat_domain=schema.repeat_domain,
+        point_domain=schema.point_domain,
+    )
+    packed_sigma = (
+        None
+        if sigma is None
+        else _pack_manual_array(
+            draft,
+            np.asarray(sigma, dtype=np.float64),
+            repeat_domain=schema.repeat_domain,
+            point_domain=schema.point_domain,
+        )
+    )
     return owned_snapshot_from_arrays(
         schema,
-        np.asarray(draft["values"]),
+        values,
         0,
-        validity=np.asarray(draft["validity"], dtype=np.bool_),
-        sigma=draft["sigma"],
+        validity=validity,
+        sigma=packed_sigma,
     )
 
 
-def _validate_draft_arrays(draft: Mapping[str, object]) -> object:
-    schema = _draft_schema(draft)
-    values = np.asarray(draft["values"])
-    validity = np.asarray(draft["validity"])
-    if values.shape != schema.physical_shape or values.dtype != schema.cell_schema.dtype:
-        raise ValueError("data values differ from the authored Dataset shape or dtype")
-    if validity.dtype != np.dtype(np.bool_) or validity.shape != schema.physical_shape:
-        raise ValueError("data validity must be one bool for every value")
-    sigma = draft["sigma"]
-    if sigma is not None:
-        sigma = np.asarray(sigma)
-        if sigma.dtype != np.dtype(np.float64) or sigma.shape != schema.physical_shape:
-            raise ValueError("data sigma must be float64 with the Dataset shape")
-        finite = np.isfinite(sigma)
-        if bool(np.any(finite & (sigma < 0.0))):
-            raise ValueError("sample sigma must be non-negative")
-    return schema
-
-
 def _axis_id_set(draft: Mapping[str, object]) -> set[str]:
-    topology = draft["grid_topology"]
-    return {
-        str(draft["repeat_axis"].axis_id),
-        *(str(column.coordinate_id) for column in draft["point_columns"]),
-        *(str(axis.axis_id) for axis in draft["cell_axes"]),
-        *(
-            ()
-            if topology is None
-            else (str(axis_id) for axis_id in topology.dimension_ids)
-        ),
-    }
+    return {str(axis.axis_id) for axis in _storage_axes(draft)}
 
 
 def _new_axis_id(draft: Mapping[str, object], stem: str) -> object:
     from zlc_data import AxisId
 
-    existing = _axis_id_set(draft)
+    base = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(stem).strip()).strip(".-") or "axis"
+    occupied = _axis_id_set(draft)
     serial = 1
-    while f"manual.{stem}.{serial}" in existing:
+    while True:
+        candidate = f"manual.{base}" if serial == 1 else f"manual.{base}.{serial}"
+        if candidate not in occupied:
+            return AxisId(candidate)
         serial += 1
-    return AxisId(f"manual.{stem}.{serial}")
-
-
-def _point_column(draft: Mapping[str, object], axis_id: str) -> tuple[int, object] | None:
-    for index, column in enumerate(draft["point_columns"]):
-        if str(column.coordinate_id) == str(axis_id):
-            return index, column
-    return None
-
-
-def _grid_position(draft: Mapping[str, object], axis_id: str) -> int | None:
-    topology = draft["grid_topology"]
-    if topology is None:
-        return None
-    for index, candidate in enumerate(topology.dimension_ids):
-        if str(candidate) == str(axis_id):
-            return index
-    return None
-
-
-def _grid_value_kind(draft: Mapping[str, object], axis_id: str) -> str:
-    found = _point_column(draft, axis_id)
-    if found is not None:
-        return str(found[1].value_kind)
-    position = _grid_position(draft, axis_id)
-    if position is None:
-        raise KeyError(axis_id)
-    domain = draft["grid_topology"].coordinate_domains[position]
-    return (
-        "NUMERIC"
-        if all(type(value) in (int, float) for value in domain)
-        else "TEXT"
-    )
-
-
-def _draft_axes(draft: Mapping[str, object]) -> tuple[dict[str, object], ...]:
-    from zlc_data import AxisRoleId, SCAN_POINT, point_domain_admits
-
-    topology = draft["grid_topology"]
-    grid_ids = set() if topology is None else set(topology.dimension_ids)
-
-    def roles(domain: str, current: object) -> tuple[tuple[str, str], ...]:
-        if domain == "repeat":
-            return (("repeat", "Repeat"),)
-        values = list(_MANUAL_ROLE_CHOICES)
-        selected = str(current)
-        if selected not in values and selected != "repeat":
-            values.append(selected)
-        if domain in {"point", "grid"}:
-            values = [
-                value
-                for value in values
-                if point_domain_admits(AxisRoleId(value))
-            ]
-        elif domain == "cell":
-            values = [
-                value
-                for value in values
-                if value not in {"primary-index", "scalar"}
-            ]
-        return tuple((value, value.replace("-", " ").title()) for value in values)
-
-    def entry(
-        *,
-        axis_id: object,
-        domain: str,
-        name: str,
-        role: object,
-        unit: object,
-        frame: object,
-        value_kind: str = "",
-    ) -> dict[str, object]:
-        return {
-            "id": str(axis_id),
-            "domain": domain,
-            "domain_label": {
-                "repeat": "Repeat",
-                "point": "Point",
-                "grid": "Grid",
-                "cell": "Cell",
-            }[domain],
-            "name": str(name),
-            "size": len(_axis_values(draft, str(axis_id))),
-            "role": str(role),
-            "unit": "" if unit is None else str(unit),
-            "coordinate_frame": "" if frame is None else str(frame),
-            "role_choices": roles(domain, role),
-            "value_kind": str(value_kind),
-            "value_kind_choices": (
-                (("NUMERIC", "Numeric"), ("TEXT", "Text"))
-                if domain in {"point", "grid"}
-                else ()
-            ),
-            "show_value_kind": domain in {"point", "grid"},
-            "unit_enabled": domain not in {"point", "grid"} or value_kind == "NUMERIC",
-        }
-
-    repeat = draft["repeat_axis"]
-    result = [
-        entry(
-            axis_id=repeat.axis_id,
-            domain="repeat",
-            name=repeat.name,
-            role=repeat.role,
-            unit=repeat.unit,
-            frame=repeat.coordinate_frame,
-        )
-    ]
-    if topology is not None:
-        for position, axis_id in enumerate(topology.dimension_ids):
-            found = _point_column(draft, str(axis_id))
-            column = None if found is None else found[1]
-            result.append(
-                entry(
-                    axis_id=axis_id,
-                    domain="grid",
-                    name=str(axis_id) if column is None else column.name,
-                    role=SCAN_POINT if column is None else column.role,
-                    unit=None if column is None else column.unit,
-                    frame=None if column is None else column.coordinate_frame,
-                    value_kind=_grid_value_kind(draft, str(axis_id)),
-                )
-            )
-    for column in draft["point_columns"]:
-        if column.coordinate_id in grid_ids:
-            continue
-        result.append(
-            entry(
-                axis_id=column.coordinate_id,
-                domain="point",
-                name=column.name,
-                role=column.role,
-                unit=column.unit,
-                frame=column.coordinate_frame,
-                value_kind=column.value_kind,
-            )
-        )
-    for axis in draft["cell_axes"]:
-        if str(axis.role) == "scalar":
-            continue
-        result.append(
-            entry(
-                axis_id=axis.axis_id,
-                domain="cell",
-                name=axis.name,
-                role=axis.role,
-                unit=axis.unit,
-                frame=axis.coordinate_frame,
-            )
-        )
-    return tuple(result)
 
 
 def _axis_location(draft: Mapping[str, object], axis_id: str) -> tuple[str, int, object]:
-    if str(draft["repeat_axis"].axis_id) == str(axis_id):
-        return "repeat", 0, draft["repeat_axis"]
-    grid = _grid_position(draft, axis_id)
-    if grid is not None:
-        return "grid", grid, draft["grid_topology"]
-    point = _point_column(draft, axis_id)
-    if point is not None:
-        return "point", point[0], point[1]
-    for index, axis in enumerate(draft["cell_axes"]):
-        if str(axis.axis_id) == str(axis_id):
-            return "cell", index, axis
+    for domain, key in (
+        ("repeat", "repeat_axes"),
+        ("point", "point_axes"),
+        ("cell_data", "cell_axes"),
+    ):
+        for position, axis in enumerate(tuple(draft[key])):
+            if str(axis.axis_id) == str(axis_id) and str(axis.role) != "scalar":
+                return domain, position, axis
     raise KeyError(f"unknown Dataset axis {axis_id!r}")
 
 
-def _axis_values(draft: Mapping[str, object], axis_id: str) -> object:
-    domain, position, value = _axis_location(draft, axis_id)
-    if domain == "grid":
-        return value.coordinate_domains[position]
-    if domain == "point":
-        return value.values
-    return _axis_coordinates(value)
+def _domain_key(domain: str) -> str:
+    selected = str(domain)
+    if selected not in {"repeat", "point", "cell_data"}:
+        raise ValueError(f"unknown Dataset domain {selected!r}")
+    return {"repeat": "repeat_axes", "point": "point_axes", "cell_data": "cell_axes"}[selected]
 
 
-def _axis_labels(draft: Mapping[str, object], axis_id: str) -> tuple[str, ...] | None:
-    domain, position, value = _axis_location(draft, axis_id)
-    if domain == "grid":
-        labels = value.coordinate_labels
-        return None if labels is None else labels[position]
-    return value.coordinate_labels
+def _domain_role(domain: str) -> object:
+    from zlc_data import COMPONENT, REPEAT, SCAN_POINT
+
+    return {"repeat": REPEAT, "point": SCAN_POINT, "cell_data": COMPONENT}[str(domain)]
 
 
-def _coordinate_label_texts(
-    draft: Mapping[str, object], axis_id: str
-) -> tuple[str, ...] | None:
-    saved = draft.get("coordinate_label_drafts", {})
-    if str(axis_id) in saved:
-        return saved[str(axis_id)]
-    return _axis_labels(draft, axis_id)
+def _axis_spec(
+    axis_id: object,
+    name: str,
+    length: int,
+    unit: str,
+    domain: str,
+    *,
+    previous: object | None = None,
+    preserve_role: bool = False,
+) -> object:
+    from zlc_data import AxisSpec
 
-
-def _partial_coordinate_label_axes(
-    draft: Mapping[str, object],
-) -> tuple[str, ...]:
-    partial = set(draft.get("coordinate_label_drafts", {}))
-    if not partial:
-        return ()
-    return tuple(
-        f"{axis['name']} ({axis['id']})"
-        for axis in _draft_axes(draft)
-        if str(axis["id"]) in partial
+    coordinates = _resized_coordinates(previous, length)
+    same_coordinates = previous is not None and int(previous.size) == int(length)
+    return AxisSpec(
+        axis_id,
+        str(name).strip(),
+        previous.role if preserve_role and previous is not None else _domain_role(domain),
+        int(length),
+        coordinates,
+        str(unit).strip() or None,
+        None if previous is None else previous.coordinate_frame,
+        0,
+        previous.coordinate_labels if same_coordinates else None,
     )
 
 
-def _require_complete_coordinate_labels(
-    draft: Mapping[str, object], action: str
-) -> None:
-    partial = _partial_coordinate_label_axes(draft)
-    if partial:
-        raise ValueError(
-            f"Coordinate labels for {', '.join(partial)} are incomplete; "
-            f"fill every label or clear them all before {action}"
-        )
-
-
-def _array_insert(array: np.ndarray, axis: int, index: int, fill: object) -> np.ndarray:
-    shape = list(array.shape)
-    shape[axis] = 1
-    addition = np.full(tuple(shape), fill, dtype=array.dtype)
-    before = [slice(None)] * array.ndim
-    after = [slice(None)] * array.ndim
-    before[axis] = slice(0, index)
-    after[axis] = slice(index, None)
-    return np.concatenate((array[tuple(before)], addition, array[tuple(after)]), axis=axis)
-
-
-def _insert_storage(draft: dict[str, object], axis: int, index: int) -> None:
-    draft["values"] = _array_insert(np.asarray(draft["values"]), axis, index, 0)
-    draft["validity"] = _array_insert(
-        np.asarray(draft["validity"], dtype=np.bool_), axis, index, False
-    )
-    if draft["sigma"] is not None:
-        draft["sigma"] = _array_insert(
-            np.asarray(draft["sigma"], dtype=np.float64), axis, index, np.nan
-        )
-
-
-def _grow_storage(draft: dict[str, object], axis: int, count: int) -> None:
-    if count <= 0:
+def _resize_storage_axis(draft: dict[str, object], dimension: int, size: int) -> None:
+    old_size = np.asarray(draft["values"]).shape[int(dimension)]
+    new_size = int(size)
+    if old_size == new_size:
         return
-    for key, fill, dtype in (
-        ("values", 0, np.asarray(draft["values"]).dtype),
-        ("validity", False, np.dtype(np.bool_)),
-        ("sigma", np.nan, np.dtype(np.float64)),
-    ):
-        if draft[key] is None:
-            continue
-        array = np.asarray(draft[key], dtype=dtype)
-        shape = list(array.shape)
-        shape[axis] = int(count)
-        draft[key] = np.concatenate(
-            (array, np.full(tuple(shape), fill, dtype=dtype)), axis=axis
-        )
-
-
-def _delete_storage(draft: dict[str, object], axis: int, indices: object) -> None:
-    selected = tuple(sorted({int(index) for index in tuple(indices)}))
-    draft["values"] = np.delete(np.asarray(draft["values"]), selected, axis=axis)
-    draft["validity"] = np.delete(
-        np.asarray(draft["validity"], dtype=np.bool_), selected, axis=axis
-    )
+    target_shape = list(np.asarray(draft["values"]).shape)
+    target_shape[int(dimension)] = new_size
+    common = min(old_size, new_size)
+    source_index = [slice(None)] * len(target_shape)
+    source_index[int(dimension)] = slice(0, common)
+    target_index = tuple(source_index)
+    values = np.zeros(target_shape, dtype=np.dtype(draft["dtype"]))
+    validity = np.zeros(target_shape, dtype=np.bool_)
+    values[target_index] = np.asarray(draft["values"])[target_index]
+    validity[target_index] = np.asarray(draft["validity"])[target_index]
+    sigma = None
     if draft["sigma"] is not None:
-        draft["sigma"] = np.delete(
-            np.asarray(draft["sigma"], dtype=np.float64), selected, axis=axis
-        )
+        sigma = np.full(target_shape, np.nan, dtype=np.float64)
+        sigma[target_index] = np.asarray(draft["sigma"])[target_index]
+    draft["values"], draft["validity"], draft["sigma"] = values, validity, sigma
 
 
-def _reorder_storage(draft: dict[str, object], axis: int, order: object) -> None:
-    selected = np.asarray(tuple(int(index) for index in tuple(order)), dtype=np.intp)
-    draft["values"] = np.take(np.asarray(draft["values"]), selected, axis=axis)
+def _insert_storage_axis(draft: dict[str, object], dimension: int, size: int) -> None:
+    shape = list(np.asarray(draft["values"]).shape)
+    shape.insert(int(dimension), int(size))
+    values = np.zeros(shape, dtype=np.dtype(draft["dtype"]))
+    validity = np.zeros(shape, dtype=np.bool_)
+    target = [slice(None)] * len(shape)
+    target[int(dimension)] = 0
+    values[tuple(target)] = np.asarray(draft["values"])
+    validity[tuple(target)] = np.asarray(draft["validity"])
+    sigma = None
+    if draft["sigma"] is not None:
+        sigma = np.full(shape, np.nan, dtype=np.float64)
+        sigma[tuple(target)] = np.asarray(draft["sigma"])
+    draft["values"], draft["validity"], draft["sigma"] = values, validity, sigma
+
+
+def _take_storage_axis(
+    draft: dict[str, object], dimension: int, index: int = 0
+) -> None:
+    draft["values"] = np.take(
+        np.asarray(draft["values"]), int(index), axis=int(dimension)
+    )
     draft["validity"] = np.take(
-        np.asarray(draft["validity"], dtype=np.bool_), selected, axis=axis
+        np.asarray(draft["validity"]), int(index), axis=int(dimension)
     )
     if draft["sigma"] is not None:
         draft["sigma"] = np.take(
-            np.asarray(draft["sigma"], dtype=np.float64), selected, axis=axis
+            np.asarray(draft["sigma"]), int(index), axis=int(dimension)
         )
 
 
-def _new_coordinate(values: tuple[object, ...], *, numeric: bool) -> object:
-    numeric_values = [value for value in values if type(value) in (int, float)]
-    if numeric:
-        candidate: object = 0 if not numeric_values else max(numeric_values) + 1
-        while candidate in values:
-            candidate = int(candidate) + 1
-        return candidate
-    serial = len(values) + 1
-    candidate = f"coordinate-{serial}"
-    while candidate in values:
-        serial += 1
-        candidate = f"coordinate-{serial}"
-    return candidate
-
-
-def _extend_coordinates(
-    values: tuple[object, ...], count: int, *, numeric: bool
-) -> tuple[object, ...]:
-    result = list(values)
-    occupied = set(result)
-    if numeric:
-        numeric_values = [value for value in result if type(value) in (int, float)]
-        candidate: object = 0 if not numeric_values else max(numeric_values) + 1
-        for _index in range(int(count)):
-            while candidate in occupied:
-                candidate = int(candidate) + 1
-            result.append(candidate)
-            occupied.add(candidate)
-            candidate = int(candidate) + 1
+def _add_axis(
+    draft: dict[str, object],
+    *,
+    name: str,
+    length: int,
+    unit: str,
+    domain: str,
+) -> str:
+    key = _domain_key(domain)
+    axis = _axis_spec(_new_axis_id(draft, name), name, int(length), unit, domain)
+    axes = list(draft[key])
+    if key == "cell_axes" and len(axes) == 1 and str(axes[0].role) == "scalar":
+        axes[0] = axis
+        draft[key] = axes
+        _resize_storage_axis(draft, len(tuple(draft["repeat_axes"])) + len(tuple(draft["point_axes"])), int(length))
     else:
-        serial = len(result) + 1
-        for _index in range(int(count)):
-            candidate = f"coordinate-{serial}"
-            while candidate in occupied:
-                serial += 1
-                candidate = f"coordinate-{serial}"
-            result.append(candidate)
-            occupied.add(candidate)
-            serial += 1
-    return tuple(result)
+        insertion = {
+            "repeat_axes": len(tuple(draft["repeat_axes"])),
+            "point_axes": len(tuple(draft["repeat_axes"])) + len(tuple(draft["point_axes"])),
+            "cell_axes": len(_storage_axes(draft)),
+        }[key]
+        _insert_storage_axis(draft, insertion, int(length))
+        axes.append(axis)
+        draft[key] = axes
+    draft["selected_axis"] = str(axis.axis_id)
+    _normalize_table_axes(draft)
+    return str(axis.axis_id)
 
 
-def _parse_coordinate(text: object, *, numeric: bool, allow_none: bool) -> object:
-    value = str(text).strip()
-    if not value:
-        if allow_none:
-            return None
-        raise ValueError("axis coordinates cannot be blank")
-    if not numeric:
-        return value
-    if re.fullmatch(r"[+-]?\d+", value):
-        return int(value)
-    try:
-        number = float(value)
-    except ValueError as error:
-        raise ValueError(f"{value!r} is not a numeric coordinate") from error
-    if not np.isfinite(number):
-        raise ValueError("coordinates must be finite")
-    return int(number) if number.is_integer() else number
+def _edit_axis(
+    draft: dict[str, object],
+    axis_id: str,
+    *,
+    name: str,
+    length: int,
+    unit: str,
+    domain: str,
+) -> bool:
+    from zlc_data.axis import SCALAR_AXIS
+
+    old_domain, position, previous = _axis_location(draft, axis_id)
+    target_domain = str(domain)
+    _domain_key(target_domain)
+    replacement = _axis_spec(
+        previous.axis_id,
+        name,
+        int(length),
+        unit,
+        target_domain,
+        previous=previous,
+        preserve_role=old_domain == target_domain,
+    )
+    old_storage = list(_storage_axes(draft))
+    old_dimension = next(
+        index for index, axis in enumerate(old_storage) if str(axis.axis_id) == axis_id
+    )
+    _resize_storage_axis(draft, old_dimension, int(length))
+    if old_domain == target_domain:
+        key = _domain_key(old_domain)
+        axes = list(draft[key])
+        axes[position] = replacement
+        draft[key] = axes
+        _normalize_table_axes(draft)
+        return replacement != previous
+    old_key = _domain_key(old_domain)
+    target_key = _domain_key(target_domain)
+    old_axes = list(draft[old_key])
+    old_axes.pop(position)
+    draft[old_key] = old_axes
+    storage_ids = [str(axis.axis_id) for axis in old_storage]
+    if old_key == "cell_axes" and not old_axes:
+        draft[old_key] = [SCALAR_AXIS]
+    target_axes = list(draft[target_key])
+    if target_key == "cell_axes" and len(target_axes) == 1 and str(target_axes[0].role) == "scalar":
+        scalar_dimension = storage_ids.index(str(target_axes[0].axis_id))
+        _take_storage_axis(draft, scalar_dimension)
+        storage_ids.pop(scalar_dimension)
+        target_axes = []
+    target_axes.append(replacement)
+    draft[target_key] = target_axes
+
+    desired = [str(axis.axis_id) for axis in _storage_axes(draft) if str(axis.role) != "scalar"]
+    order = [storage_ids.index(axis_id_value) for axis_id_value in desired]
+    for key in ("values", "validity", "sigma"):
+        if draft[key] is not None:
+            draft[key] = np.transpose(np.asarray(draft[key]), order)
+    if any(str(axis.role) == "scalar" for axis in tuple(draft["cell_axes"])):
+        _insert_storage_axis(draft, len(desired), 1)
+    _normalize_table_axes(draft)
+    return True
 
 
-def _axis_spec_replacing(axis: object, **changes: object) -> object:
-    from zlc_data import AxisSpec, CoordinateFrameId
+def _delete_axis(draft: dict[str, object], axis_id: str) -> None:
+    from zlc_data.axis import SCALAR_AXIS
 
-    coordinates = changes.pop("coordinates", axis.coordinates)
-    frame = changes.pop("coordinate_frame", axis.coordinate_frame)
-    return AxisSpec(
+    domain, position, axis = _axis_location(draft, axis_id)
+    storage = list(_storage_axes(draft))
+    dimension = next(index for index, item in enumerate(storage) if str(item.axis_id) == axis_id)
+    key = _domain_key(domain)
+    axes = list(draft[key])
+    axes.pop(position)
+    draft[key] = axes
+    kept_index = min(
+        max(0, int(dict(draft.get("scopes", {})).get(axis_id, 0))),
+        int(axis.size) - 1,
+    )
+    if domain == "cell_data" and not axes:
+        draft[key] = [SCALAR_AXIS]
+        _take_storage_axis(draft, dimension, kept_index)
+        _insert_storage_axis(draft, len(_storage_axes(draft)) - 1, 1)
+    else:
+        _take_storage_axis(draft, dimension, kept_index)
+    visible = _visible_axes(draft)
+    draft["selected_axis"] = "" if not visible else str(visible[0].axis_id)
+    draft["message"] = (
+        f"Deleted {axis.name}; kept coordinate {axis.coordinate_at(kept_index)!r}"
+    )
+    _normalize_table_axes(draft)
+
+
+def _set_axis_values(
+    draft: dict[str, object], axis_id: str, cells: object
+) -> bool:
+    domain, position, axis = _axis_location(draft, axis_id)
+    values = list(_axis_coordinates(axis))
+    replacements = []
+    for row, column, text in tuple(cells):
+        index = int(column)
+        if int(row) != 0 or not 0 <= index < int(axis.size):
+            raise IndexError("axis value edit lies outside the selected axis")
+        replacements.append((index, _parse_axis_value(text)))
+    if not replacements:
+        return False
+    changed = False
+    for index, value in replacements:
+        changed = changed or values[index] != value
+        values[index] = value
+    if len(set(values)) != len(values):
+        raise ValueError("axis values must be unique")
+    if not changed:
+        return False
+    from zlc_data import AxisSpec
+
+    replacement = AxisSpec(
         axis.axis_id,
-        str(changes.pop("name", axis.name)),
-        changes.pop("role", axis.role),
-        int(changes.pop("size", axis.size)),
-        coordinates,
-        changes.pop("unit", axis.unit),
-        (
-            None
-            if frame in (None, "")
-            else frame
-            if isinstance(frame, CoordinateFrameId)
-            else CoordinateFrameId(str(frame))
-        ),
-        int(changes.pop("index_origin", 0 if coordinates is not None else axis.index_origin)),
-        changes.pop("coordinate_labels", axis.coordinate_labels),
+        axis.name,
+        axis.role,
+        axis.size,
+        tuple(values),
+        axis.unit,
+        axis.coordinate_frame,
+        0,
+        axis.coordinate_labels,
     )
+    key = _domain_key(domain)
+    axes = list(draft[key])
+    axes[position] = replacement
+    draft[key] = axes
+    return True
 
 
-def _point_column_replacing(column: object, **changes: object) -> object:
-    from zlc_data import CoordinateFrameId, PointColumn
-
-    frame = changes.pop("coordinate_frame", column.coordinate_frame)
-    values = tuple(changes.pop("values", column.values))
-    labels = changes.pop("coordinate_labels", column.coordinate_labels)
-    return PointColumn(
-        column.coordinate_id,
-        str(changes.pop("name", column.name)),
-        changes.pop("role", column.role),
-        str(changes.pop("value_kind", column.value_kind)),
-        values,
-        changes.pop("unit", column.unit),
-        (
-            None
-            if frame in (None, "")
-            else frame
-            if isinstance(frame, CoordinateFrameId)
-            else CoordinateFrameId(str(frame))
-        ),
-        labels,
-    )
-
-
-def _logical_dimensions(draft: Mapping[str, object]) -> tuple[dict[str, object], ...]:
-    """Meaningful table dimensions; Point storage is replaced by Grid topology."""
-
-    repeat = draft["repeat_axis"]
-    result = []
-    if int(repeat.size) > 1:
-        result.append(
-            {
-                "axis_id": str(repeat.axis_id),
-                "label": repeat.name,
-                "position": 0,
-                "kind": "repeat",
-                "coordinates": _axis_coordinates(repeat),
-                "labels": repeat.coordinate_labels,
-            }
-        )
-    topology = draft["grid_topology"]
-    complete = topology is not None and len(topology.row_to_cell) == prod(topology.logical_shape)
-    if topology is None or not complete:
-        rows = int(np.asarray(draft["values"]).shape[1])
-        if rows > 1:
-            columns = tuple(draft["point_columns"])
-            coordinate_source = columns[0] if len(columns) == 1 else None
-            result.append(
-                {
-                    "axis_id": _POINT_ROWS,
-                    "label": "point",
-                    "position": 1,
-                    "kind": "point",
-                    "coordinates": (
-                        range(rows)
-                        if coordinate_source is None
-                        else coordinate_source.values
-                    ),
-                    "labels": (
-                        None
-                        if coordinate_source is None
-                        else coordinate_source.coordinate_labels
-                    ),
-                }
-            )
-        cell_offset = 2
+def _set_table_axis(draft: dict[str, object], axis_id: str, mode: str) -> None:
+    _axis_location(draft, axis_id)
+    selected = str(mode)
+    if selected not in {"rows", "columns", "scope"}:
+        raise ValueError(f"unknown table axis mode {selected!r}")
+    row = str(draft.get("row_axis") or "")
+    column = str(draft.get("column_axis") or "")
+    if selected == "rows":
+        if axis_id == column:
+            column = row if row and row != axis_id else ""
+        row = axis_id
+    elif selected == "columns":
+        if axis_id == row:
+            row = column if column and column != axis_id else ""
+        column = axis_id
     else:
-        for index, (axis_id, coordinates) in enumerate(
-            zip(topology.dimension_ids, topology.coordinate_domains, strict=True)
-        ):
-            if len(coordinates) <= 1:
-                continue
-            found = _point_column(draft, str(axis_id))
-            column = None if found is None else found[1]
-            labels = (
-                None
-                if topology.coordinate_labels is None
-                else topology.coordinate_labels[index]
-            )
-            result.append(
-                {
-                    "axis_id": str(axis_id),
-                    "label": str(axis_id) if column is None else column.name,
-                    "position": 1 + index,
-                    "kind": "grid",
-                    "grid_position": index,
-                    "coordinates": coordinates,
-                    "labels": labels,
-                }
-            )
-        cell_offset = 1 + len(topology.dimension_ids)
-    axes = tuple(draft["cell_axes"])
-    for index, axis in enumerate(axes):
-        if str(axis.role) == "scalar" or int(axis.size) <= 1:
-            continue
-        result.append(
-            {
-                "axis_id": str(axis.axis_id),
-                "label": axis.name,
-                "position": cell_offset + index,
-                "kind": "cell",
-                "cell_position": index,
-                "coordinates": _axis_coordinates(axis),
-                "labels": axis.coordinate_labels,
-            }
-        )
+        if row == axis_id:
+            row = ""
+        if column == axis_id:
+            column = ""
+    draft["row_axis"], draft["column_axis"] = row, column
+    _normalize_table_axes(draft)
+
+
+def _table_index(draft: Mapping[str, object], row: int, column: int) -> tuple[int, ...]:
+    row_axis = str(draft.get("row_axis") or "")
+    column_axis = str(draft.get("column_axis") or "")
+    scopes = dict(draft.get("scopes", {}))
+    result = []
+    for axis in _storage_axes(draft):
+        axis_id = str(axis.axis_id)
+        if str(axis.role) == "scalar":
+            value = 0
+        elif axis_id == row_axis:
+            value = int(row)
+        elif axis_id == column_axis:
+            value = int(column)
+        else:
+            value = int(scopes.get(axis_id, 0))
+        if not 0 <= value < int(axis.size):
+            raise IndexError("data edit lies outside the selected Dataset slice")
+        result.append(value)
     return tuple(result)
 
 
-def _grid_layout(draft: Mapping[str, object]) -> tuple[bool, bool]:
-    topology = draft["grid_topology"]
-    cached = draft.get("grid_layout")
-    if isinstance(cached, tuple) and len(cached) == 3 and cached[0] is topology:
-        return bool(cached[1]), bool(cached[2])
-    if topology is None or len(topology.row_to_cell) != prod(topology.logical_shape):
-        result = (False, False)
-    else:
-        flat = np.ravel_multi_index(
-            tuple(topology.cell_indices[:, index] for index in range(len(topology.logical_shape))),
-            topology.logical_shape,
-        )
-        result = (
-            True,
-            bool(np.array_equal(flat, np.arange(len(flat), dtype=flat.dtype))),
-        )
-    if isinstance(draft, dict):
-        draft["grid_layout"] = (topology, *result)
-    return result
+def _table_projection(draft: dict[str, object]) -> dict[str, object]:
+    from zlc_plot.semantics import SemanticCycleChoices, axis_structure
 
-
-def _grid_lookup(draft: Mapping[str, object]) -> np.ndarray | None:
-    topology = draft["grid_topology"]
-    if topology is None:
-        return None
-    complete, _canonical = _grid_layout(draft)
-    if not complete:
-        return None
-    cached = draft.get("grid_lookup")
-    if isinstance(cached, tuple) and len(cached) == 2 and cached[0] is topology:
-        return cached[1]
-    lookup = np.full(topology.logical_shape, -1, dtype=np.intp)
-    cells = topology.cell_indices
-    lookup[tuple(cells[:, index] for index in range(cells.shape[1]))] = np.arange(
-        cells.shape[0], dtype=np.intp
-    )
-    lookup.setflags(write=False)
-    if isinstance(draft, dict):
-        draft["grid_lookup"] = (topology, lookup)
-    return lookup
-
-
-def _table_address(
-    draft: Mapping[str, object],
-) -> tuple[
-    tuple[object, ...],
-    tuple[dict[str, object], ...],
-    tuple[dict[str, object], ...],
-]:
-    dimensions = _logical_dimensions(draft)
-    shown = dimensions[-2:]
-    sliced = dimensions[:-2]
-    selected_slices = dict(draft["slices"])
-
-    def selected_index(axis_id: str, default: int = 0) -> object:
-        for dimension in shown:
-            if str(dimension["axis_id"]) == str(axis_id):
-                return slice(None)
-        return int(selected_slices.get(str(axis_id), default))
-
-    repeat = draft["repeat_axis"]
-    repeat_index = selected_index(str(repeat.axis_id)) if int(repeat.size) > 1 else 0
-    topology = draft["grid_topology"]
-    complete, _canonical = _grid_layout(draft)
-    if topology is None or not complete:
-        point_size = int(np.asarray(draft["values"]).shape[1])
-        point_index = selected_index(_POINT_ROWS) if point_size > 1 else 0
-    else:
-        grid_indices = tuple(
-            selected_index(str(axis_id)) if len(domain) > 1 else 0
-            for axis_id, domain in zip(
-                topology.dimension_ids, topology.coordinate_domains, strict=True
-            )
-        )
-        lookup = _grid_lookup(draft)
-        assert lookup is not None
-        point_index = lookup[grid_indices]
-    cell_indices = tuple(
-        selected_index(str(axis.axis_id)) if int(axis.size) > 1 else 0
-        for axis in draft["cell_axes"]
-    )
-    return (
-        (repeat_index, point_index, *cell_indices),
-        shown,
-        sliced,
-    )
-
-
-def _table_projection(
-    draft: Mapping[str, object],
-) -> tuple[dict[str, object], tuple[dict[str, object], ...]]:
-    complete, canonical = _grid_layout(draft)
-    topology = draft["grid_topology"]
-    if complete and canonical and topology is not None:
-        dimensions = _logical_dimensions(draft)
-        shown = dimensions[-2:]
-        sliced = dimensions[:-2]
-        selected_slices = dict(draft["slices"])
-        logical_shape = (
-            int(draft["repeat_axis"].size),
-            *topology.logical_shape,
-            *(int(axis.size) for axis in draft["cell_axes"]),
-        )
-        indexer: list[object] = [0] * len(logical_shape)
-        for dimension in dimensions:
-            indexer[int(dimension["position"])] = (
-                slice(None)
-                if dimension in shown
-                else int(selected_slices.get(str(dimension["axis_id"]), 0))
-            )
-        address = tuple(indexer)
-        value_source = np.asarray(draft["values"]).reshape(logical_shape)
-        validity_source = np.asarray(draft["validity"], dtype=np.bool_).reshape(logical_shape)
-        sigma_source = (
-            None
-            if draft["sigma"] is None
-            else np.asarray(draft["sigma"], dtype=np.float64).reshape(logical_shape)
-        )
-    else:
-        address, shown, sliced = _table_address(draft)
-        value_source = np.asarray(draft["values"])
-        validity_source = np.asarray(draft["validity"], dtype=np.bool_)
-        sigma_source = (
-            None
-            if draft["sigma"] is None
-            else np.asarray(draft["sigma"], dtype=np.float64)
-        )
+    _normalize_table_axes(draft)
+    row_axis = str(draft.get("row_axis") or "")
+    column_axis = str(draft.get("column_axis") or "")
+    scopes = dict(draft.get("scopes", {}))
+    storage = _storage_axes(draft)
+    indexer: list[object] = []
+    remaining: list[str] = []
+    for axis in storage:
+        axis_id = str(axis.axis_id)
+        if axis_id in {row_axis, column_axis}:
+            indexer.append(slice(None))
+            remaining.append(axis_id)
+        else:
+            indexer.append(0 if str(axis.role) == "scalar" else int(scopes.get(axis_id, 0)))
     component = str(draft["component"])
-    validity_plane = validity_source[address]
+    validity_source = np.asarray(draft["validity"], dtype=np.bool_)
     if component == "validity":
-        values = np.asarray(validity_plane)
+        values = validity_source[tuple(indexer)]
         table_validity = None
-    elif component == "sigma" and sigma_source is not None:
-        values = sigma_source[address]
-        table_validity = validity_plane & np.isfinite(values)
+    elif component == "sigma" and draft["sigma"] is not None:
+        values = np.asarray(draft["sigma"], dtype=np.float64)[tuple(indexer)]
+        table_validity = validity_source[tuple(indexer)]
     else:
         component = "values"
-        values = value_source[address]
-        table_validity = validity_plane
+        values = np.asarray(draft["values"])[tuple(indexer)]
+        table_validity = validity_source[tuple(indexer)]
     values = np.asarray(values)
+    if remaining == [column_axis, row_axis]:
+        values = values.T
+        if table_validity is not None:
+            table_validity = np.asarray(table_validity).T
     if values.ndim == 0:
         values = values.reshape((1, 1))
     elif values.ndim == 1:
@@ -949,119 +854,91 @@ def _table_projection(
             table_validity = np.asarray(table_validity).reshape(values.shape)
     elif values.ndim != 2:
         raise RuntimeError("manual data table did not reduce to two dimensions")
-    def headers(dimension: Mapping[str, object]) -> object:
-        return (
-            dimension["coordinates"]
-            if dimension["labels"] is None
-            else dimension["labels"]
-        )
-
-    rows = headers(shown[0]) if shown else ("Value",)
-    columns = headers(shown[1]) if len(shown) == 2 else ("Value",)
-    slice_rows = []
-    selected_slices = dict(draft["slices"])
-    for dimension in sliced:
-        coordinates = dimension["coordinates"]
-        index = max(0, min(int(selected_slices.get(dimension["axis_id"], 0)), len(coordinates) - 1))
-        labels = dimension["labels"]
-        current_label = (
-            str(labels[index])
-            if labels is not None
-            else str(coordinates[index])
-        )
-        slice_rows.append(
+    by_id = {str(axis.axis_id): axis for axis in _visible_axes(draft)}
+    row_headers = _axis_coordinates(by_id[row_axis]) if row_axis else ("Value",)
+    column_headers = _axis_coordinates(by_id[column_axis]) if column_axis else ("Value",)
+    axis_rows = []
+    for axis in _visible_axes(draft):
+        axis_id = str(axis.axis_id)
+        mode = "rows" if axis_id == row_axis else "columns" if axis_id == column_axis else "scope"
+        index = min(max(0, int(scopes.get(axis_id, 0))), int(axis.size) - 1)
+        axis_rows.append(
             {
-                "axis_id": dimension["axis_id"],
-                "label": dimension["label"],
-                "size": len(coordinates),
+                "axis_id": axis_id,
+                "name": axis.name,
+                "size": int(axis.size),
+                "unit": axis.unit,
+                "mode": mode,
                 "index": index,
-                "current_label": current_label,
+                "scope_choices": SemanticCycleChoices(
+                    _axis_coordinates(axis),
+                    unit=axis.unit or "",
+                    locate=axis.coordinate_position,
+                ),
             }
         )
     choices = [("values", "Values"), ("validity", "Validity")]
     if draft["sigma"] is not None:
         choices.append(("sigma", "Sigma"))
-    grid_headers = None
-    topology = draft["grid_topology"]
-    complete, _canonical = _grid_layout(draft)
-    if topology is not None and not complete:
-        grid_headers = {
-            "cell_indices": topology.cell_indices,
-            "coordinates": topology.coordinate_domains,
-            "labels": topology.coordinate_labels,
-        }
-    table = {
+    structure = axis_structure(
+        draft["repeat_axes"],
+        draft["point_axes"],
+        draft["cell_axes"],
+    )
+    return {
         "component": component,
         "component_choices": tuple(choices),
         "sigma_enabled": draft["sigma"] is not None,
         "shape": tuple(values.shape),
         "values": values,
         "validity": table_validity,
+        "finite_values": component == "sigma",
         "blank_help": {
             "values": "Blank deletes this sample and marks it invalid",
             "validity": "Blank means False",
             "sigma": "Blank means no stated sigma",
         }[component],
-        "row_headers": rows,
-        "column_headers": columns,
+        "row_headers": row_headers,
+        "column_headers": column_headers,
         "editable": True,
+        "structure": structure,
+        "axes": tuple(axis_rows),
     }
-    for shown_index, dimension in enumerate(shown):
-        if dimension["axis_id"] == _POINT_ROWS and grid_headers is not None:
-            table["row_header_grid" if shown_index == 0 else "column_header_grid"] = grid_headers
-    return (
-        table,
-        tuple(slice_rows),
-    )
 
 
-def _table_index(draft: Mapping[str, object], row: int, column: int) -> tuple[int, ...]:
-    dimensions = _logical_dimensions(draft)
-    shown = dimensions[-2:]
-    selected_slices = dict(draft["slices"])
-    def selected_index(axis_id: str) -> int:
-        for shown_index, dimension in enumerate(shown):
-            if str(dimension["axis_id"]) == str(axis_id):
-                return int(row if shown_index == 0 else column)
-        return int(selected_slices.get(str(axis_id), 0))
-
-    repeat_axis = draft["repeat_axis"]
-    repeat = selected_index(str(repeat_axis.axis_id)) if int(repeat_axis.size) > 1 else 0
-    topology = draft["grid_topology"]
-    complete, canonical = _grid_layout(draft)
-    if topology is None or not complete:
-        point = (
-            selected_index(_POINT_ROWS)
-            if int(np.asarray(draft["values"]).shape[1]) > 1
-            else 0
-        )
-    else:
-        grid = tuple(
-            selected_index(str(axis_id)) if len(domain) > 1 else 0
-            for axis_id, domain in zip(
-                topology.dimension_ids, topology.coordinate_domains, strict=True
+def _draft_axes(draft: Mapping[str, object]) -> tuple[dict[str, object], ...]:
+    labels = {"repeat": "Repeat", "point": "Point", "cell_data": "Cell data"}
+    result = []
+    for domain, key in (
+        ("repeat", "repeat_axes"),
+        ("point", "point_axes"),
+        ("cell_data", "cell_axes"),
+    ):
+        for axis in tuple(draft[key]):
+            if str(axis.role) == "scalar":
+                continue
+            result.append(
+                {
+                    "id": str(axis.axis_id),
+                    "name": axis.name,
+                    "size": int(axis.size),
+                    "unit": "" if axis.unit is None else str(axis.unit),
+                    "domain": domain,
+                    "domain_label": labels[domain],
+                }
             )
-        )
-        if canonical:
-            point = int(np.ravel_multi_index(grid, topology.logical_shape))
-        else:
-            lookup = _grid_lookup(draft)
-            assert lookup is not None
-            point = int(lookup[grid])
-    result = [repeat, point]
-    for axis in draft["cell_axes"]:
-        result.append(selected_index(str(axis.axis_id)) if int(axis.size) > 1 else 0)
     return tuple(result)
 
 
-def _data_projection(draft: Mapping[str, object]) -> dict[str, object]:
+def _data_projection(draft: dict[str, object]) -> dict[str, object]:
     axes = _draft_axes(draft)
-    selected = str(draft["selected_axis"])
-    if not any(str(axis["id"]) == selected for axis in axes):
+    selected = str(draft.get("selected_axis") or "")
+    if not axes:
+        selected = ""
+        draft["selected_axis"] = ""
+    elif not any(str(axis["id"]) == selected for axis in axes):
         selected = str(axes[0]["id"])
-    coordinates = _axis_values(draft, selected)
-    coordinate_labels = _coordinate_label_texts(draft, selected)
-    table, slices = _table_projection(draft)
+        draft["selected_axis"] = selected
     can_apply = True
     validation_message = ""
     try:
@@ -1069,11 +946,12 @@ def _data_projection(draft: Mapping[str, object]) -> dict[str, object]:
     except (TypeError, ValueError) as error:
         can_apply = False
         validation_message = str(error)
-    message = str(draft.get("message") or validation_message)
     source_path = draft["source_path"]
-    suggested = (
-        f"{re.sub(r'[^A-Za-z0-9_.-]+', '-', str(draft['name'])).strip('.-') or 'figure'}.npz"
-    )
+    suggested = f"{re.sub(r'[^A-Za-z0-9_.-]+', '-', str(draft['name'])).strip('.-') or 'figure'}.npz"
+    coordinates = ()
+    if selected:
+        _domain, _position, selected_axis = _axis_location(draft, selected)
+        coordinates = _axis_coordinates(selected_axis)
     return {
         "dataset": {
             "name": str(draft["name"]),
@@ -1081,1083 +959,40 @@ def _data_projection(draft: Mapping[str, object]) -> dict[str, object]:
             "unit": "" if draft["unit"] is None else str(draft["unit"]),
             "note": str(draft["note"]),
             "source": str(draft["source_text"]),
-            "dtype_choices": tuple(
-                (value, np.dtype(value).name) for value in _MANUAL_DTYPES
-            ),
+            "dtype_choices": tuple((value, np.dtype(value).name) for value in _MANUAL_DTYPES),
         },
         "domain_choices": (
-            ("repeat", "Repeat", False),
-            ("point", "Point column", True),
-            ("grid", "Grid dimension", True),
-            ("cell", "Cell data", True),
+            ("repeat", "Repeat"),
+            ("point", "Point"),
+            ("cell_data", "Cell data"),
         ),
-        "new_axis_domain": "cell",
         "axes": axes,
         "selected_axis": selected,
-        "coordinates": {
-            "shape": (len(coordinates), 2),
-            "column_values": (coordinates, coordinate_labels),
-            "row_headers": range(len(coordinates)),
-            "column_headers": ("Coordinate", "Label"),
+        "axis_values": {
+            "shape": (1, len(coordinates)),
+            "values": (coordinates,),
+            "row_headers": ("Value",),
+            "column_headers": range(len(coordinates)),
             "editable": True,
+            "blank_hint": "Axis values cannot be blank",
         },
-        "slices": slices,
-        "table": table,
+        "table": _table_projection(draft),
         "dirty": bool(draft["modified"] or draft["unsaved"]),
         "can_apply": can_apply,
         "can_save": bool(draft["save_ready"] and not draft["modified"]),
-        "save_suggested": str(
-            (Path(source_path).parent / suggested) if source_path is not None else suggested
-        ),
-        "message": message,
+        "save_suggested": str((Path(source_path).parent / suggested) if source_path is not None else suggested),
+        "message": str(draft.get("message") or validation_message),
     }
-
-
-def _sequence_insert(values: tuple, index: int, value: object) -> tuple:
-    return (*values[:index], value, *values[index:])
-
-
-def _labels_for_values(column: object, values: tuple[object, ...]) -> tuple[str, ...] | None:
-    if column.coordinate_labels is None:
-        return None
-    known: dict[object, str] = {}
-    for value, label in zip(column.values, column.coordinate_labels, strict=True):
-        known.setdefault(value, label)
-    return tuple(
-        known.get(value, "missing" if value is None else str(value))
-        for value in values
-    )
-
-
-def _topology_replacing(
-    topology: object,
-    *,
-    dimension_ids: object | None = None,
-    coordinate_domains: object | None = None,
-    row_to_cell: object | None = None,
-    coordinate_labels: object = ...,
-) -> object:
-    from zlc_data import GridTopology
-
-    labels = topology.coordinate_labels if coordinate_labels is ... else coordinate_labels
-    return GridTopology(
-        tuple(topology.dimension_ids if dimension_ids is None else dimension_ids),
-        tuple(topology.coordinate_domains if coordinate_domains is None else coordinate_domains),
-        tuple(topology.row_to_cell if row_to_cell is None else row_to_cell),
-        labels,
-    )
-
-
-def _replace_point_columns_for_rows(
-    draft: dict[str, object],
-    order: tuple[int, ...],
-) -> None:
-    columns = []
-    for column in draft["point_columns"]:
-        values = tuple(column.values[index] for index in order)
-        labels = (
-            None
-            if column.coordinate_labels is None
-            else tuple(column.coordinate_labels[index] for index in order)
-        )
-        columns.append(
-            _point_column_replacing(
-                column,
-                values=values,
-                coordinate_labels=labels,
-            )
-        )
-    draft["point_columns"] = columns
-
-
-def _append_point_storage(draft: dict[str, object], count: int) -> None:
-    if count <= 0:
-        return
-    values = np.asarray(draft["values"])
-    shape = list(values.shape)
-    shape[1] = int(count)
-    draft["values"] = np.concatenate(
-        (values, np.zeros(tuple(shape), dtype=values.dtype)), axis=1
-    )
-    validity = np.asarray(draft["validity"], dtype=np.bool_)
-    draft["validity"] = np.concatenate(
-        (validity, np.zeros(tuple(shape), dtype=np.bool_)), axis=1
-    )
-    if draft["sigma"] is not None:
-        sigma = np.asarray(draft["sigma"], dtype=np.float64)
-        draft["sigma"] = np.concatenate(
-            (sigma, np.full(tuple(shape), np.nan, dtype=np.float64)), axis=1
-        )
-
-
-def _set_coordinate_cells(
-    draft: dict[str, object],
-    axis_id: str,
-    cells: object,
-) -> bool:
-    domain, position, selected = _axis_location(draft, axis_id)
-    values = list(_axis_values(draft, axis_id))
-    original_values = tuple(values)
-    original_label_texts = _coordinate_label_texts(draft, axis_id)
-    if domain in {"point", "grid"}:
-        value_kind = (
-            selected.value_kind
-            if domain == "point"
-            else _grid_value_kind(draft, axis_id)
-        )
-        numeric = value_kind == "NUMERIC"
-    else:
-        numeric = all(type(value) in (int, float) for value in values)
-    updates = []
-    for row, column, text in tuple(cells):
-        row = int(row)
-        column = int(column)
-        if column not in (0, 1) or not 0 <= row < len(values):
-            raise IndexError("coordinate edit lies outside the selected axis")
-        updates.append((row, column, text))
-    edited_labels = None
-    if any(column == 1 for _row, column, _text in updates):
-        edited_labels = (
-            [""] * len(values)
-            if original_label_texts is None
-            else list(original_label_texts)
-        )
-    for row, column, text in updates:
-        if column == 0:
-            values[row] = _parse_coordinate(
-                text,
-                numeric=numeric,
-                allow_none=domain == "point",
-            )
-        else:
-            assert edited_labels is not None
-            edited_labels[row] = str(text).strip()
-    resolved = tuple(values)
-    label_texts = (
-        original_label_texts
-        if edited_labels is None
-        else tuple(edited_labels) if any(edited_labels) else None
-    )
-    resolved_labels = label_texts if label_texts is not None and all(label_texts) else None
-    if resolved_labels is not None:
-        by_value: dict[object, str] = {}
-        for value, label in zip(resolved, resolved_labels, strict=True):
-            previous = by_value.setdefault(value, label)
-            if previous != label:
-                raise ValueError("equal coordinates must share one display label")
-    if resolved == original_values and label_texts == original_label_texts:
-        return False
-    if domain == "repeat":
-        draft["repeat_axis"] = _axis_spec_replacing(
-            selected,
-            coordinates=resolved,
-            coordinate_labels=resolved_labels,
-            index_origin=0,
-        )
-    elif domain == "cell":
-        axes = list(draft["cell_axes"])
-        axes[position] = _axis_spec_replacing(
-            selected,
-            coordinates=resolved,
-            coordinate_labels=resolved_labels,
-            index_origin=0,
-        )
-        draft["cell_axes"] = axes
-    elif domain == "point":
-        columns = list(draft["point_columns"])
-        columns[position] = _point_column_replacing(
-            selected,
-            values=resolved,
-            coordinate_labels=resolved_labels,
-        )
-        draft["point_columns"] = columns
-    else:
-        topology = selected
-        if any(value is None for value in resolved) or len(set(resolved)) != len(resolved):
-            raise ValueError("grid coordinates must be non-empty and unique")
-        domains = list(topology.coordinate_domains)
-        domains[position] = resolved
-        topology_labels = topology.coordinate_labels
-        if topology_labels is None and resolved_labels is not None:
-            topology_labels = tuple(
-                resolved_labels if dim == position else None
-                for dim in range(len(topology.dimension_ids))
-            )
-        elif topology_labels is not None:
-            topology_labels = tuple(
-                resolved_labels if dim == position else item
-                for dim, item in enumerate(topology_labels)
-            )
-        draft["grid_topology"] = _topology_replacing(
-            topology,
-            coordinate_domains=domains,
-            coordinate_labels=topology_labels,
-        )
-        found = _point_column(draft, axis_id)
-        if found is not None:
-            column_index, column = found
-            mapped = tuple(resolved[cell[position]] for cell in topology.row_to_cell)
-            mapped_labels = (
-                None
-                if resolved_labels is None
-                else tuple(resolved_labels[cell[position]] for cell in topology.row_to_cell)
-            )
-            columns = list(draft["point_columns"])
-            columns[column_index] = _point_column_replacing(
-                column,
-                values=mapped,
-                coordinate_labels=mapped_labels,
-            )
-            draft["point_columns"] = columns
-    if label_texts is not None and not all(label_texts):
-        draft["coordinate_label_drafts"][str(axis_id)] = label_texts
-    else:
-        draft["coordinate_label_drafts"].pop(str(axis_id), None)
-    return True
-
-
-def _insert_coordinate(draft: dict[str, object], axis_id: str, after: int) -> None:
-    from zlc_data import GridTopology
-
-    domain, position, selected = _axis_location(draft, axis_id)
-    old_values = tuple(_axis_values(draft, axis_id))
-    index = max(0, min(int(after) + 1, len(old_values)))
-    numeric = (
-        selected.value_kind == "NUMERIC"
-        if domain == "point"
-        else _grid_value_kind(draft, axis_id) == "NUMERIC"
-        if domain == "grid"
-        else all(type(value) in (int, float) for value in old_values)
-    )
-    added = _new_coordinate(old_values, numeric=numeric)
-    new_values = _sequence_insert(old_values, index, added)
-    labels = _axis_labels(draft, axis_id)
-    new_labels = (
-        None
-        if labels is None
-        else _sequence_insert(labels, index, str(added))
-    )
-    if domain in {"repeat", "cell"}:
-        storage_axis = 0 if domain == "repeat" else 2 + position
-        _insert_storage(draft, storage_axis, index)
-        replacement = _axis_spec_replacing(
-            selected,
-            size=len(new_values),
-            coordinates=new_values,
-            coordinate_labels=new_labels,
-            index_origin=0,
-        )
-        if domain == "repeat":
-            draft["repeat_axis"] = replacement
-        else:
-            axes = list(draft["cell_axes"])
-            axes[position] = replacement
-            draft["cell_axes"] = axes
-        return
-    if domain == "point":
-        if draft["grid_topology"] is not None:
-            raise ValueError(
-                "add grid cells through a Grid dimension, not an unrelated point column"
-            )
-        if len(tuple(draft["point_columns"])) != 1:
-            raise ValueError(
-                "a new point row is ambiguous while several point columns exist"
-            )
-        _insert_storage(draft, 1, index)
-        columns = []
-        for column_index, column in enumerate(draft["point_columns"]):
-            value = added if column_index == position else None
-            values = _sequence_insert(tuple(column.values), index, value)
-            column_labels = column.coordinate_labels
-            column_labels = (
-                None
-                if column_labels is None
-                else _sequence_insert(
-                    tuple(column_labels),
-                    index,
-                    "missing" if value is None else str(value),
-                )
-            )
-            columns.append(
-                _point_column_replacing(
-                    column,
-                    values=values,
-                    coordinate_labels=column_labels,
-                )
-            )
-        draft["point_columns"] = columns
-        return
-
-    topology = selected
-    if len(topology.row_to_cell) != prod(topology.logical_shape):
-        raise ValueError(
-            "a Grid coordinate can be inserted only when the existing grid is complete"
-        )
-    topology_ids = set(topology.dimension_ids)
-    if any(
-        column.coordinate_id not in topology_ids
-        for column in draft["point_columns"]
-    ):
-        raise ValueError(
-            "a Grid coordinate cannot invent values for unrelated point columns"
-        )
-    domains = list(topology.coordinate_domains)
-    domains[position] = new_values
-    shifted = tuple(
-        tuple(
-            value + 1 if dim == position and value >= index else value
-            for dim, value in enumerate(cell)
-        )
-        for cell in topology.row_to_cell
-    )
-    ranges = [range(len(domain_values)) for domain_values in domains]
-    additions = []
-    for rest in product(*(values for dim, values in enumerate(ranges) if dim != position)):
-        cell = []
-        iterator = iter(rest)
-        for dim in range(len(domains)):
-            cell.append(index if dim == position else next(iterator))
-        candidate = tuple(cell)
-        if candidate not in shifted:
-            additions.append(candidate)
-    mapping = (*shifted, *additions)
-    topology_labels = topology.coordinate_labels
-    if topology_labels is not None:
-        edited_labels = list(topology_labels)
-        selected_labels = edited_labels[position]
-        if selected_labels is not None:
-            edited_labels[position] = _sequence_insert(
-                tuple(selected_labels), index, str(added)
-            )
-        topology_labels = tuple(edited_labels)
-    replacement = GridTopology(
-        topology.dimension_ids,
-        tuple(domains),
-        mapping,
-        topology_labels,
-    )
-    _append_point_storage(draft, len(additions))
-    columns = []
-    topology_ids = tuple(replacement.dimension_ids)
-    for column in draft["point_columns"]:
-        if column.coordinate_id in topology_ids:
-            dim = topology_ids.index(column.coordinate_id)
-            values = tuple(
-                replacement.coordinate_domains[dim][cell[dim]] for cell in mapping
-            )
-            domain_labels = (
-                None
-                if replacement.coordinate_labels is None
-                else replacement.coordinate_labels[dim]
-            )
-            column_labels = (
-                None
-                if domain_labels is None
-                else tuple(domain_labels[cell[dim]] for cell in mapping)
-            )
-        else:
-            values = (*tuple(column.values), *(None for _ in additions))
-            column_labels = _labels_for_values(column, values)
-        columns.append(
-            _point_column_replacing(
-                column,
-                values=values,
-                coordinate_labels=column_labels,
-            )
-        )
-    draft["point_columns"] = columns
-    draft["grid_topology"] = replacement
-    draft["message"] = f"Added {len(additions)} physical point row(s) for the new Grid coordinate"
-
-
-def _remove_coordinates(
-    draft: dict[str, object], axis_id: str, indices: object
-) -> bool:
-    selected_indices = tuple(sorted({int(value) for value in tuple(indices)}))
-    values = _axis_values(draft, axis_id)
-    if not selected_indices:
-        return False
-    if selected_indices[0] < 0 or selected_indices[-1] >= len(values):
-        raise IndexError("coordinate removal lies outside the selected axis")
-    if len(selected_indices) >= len(values):
-        raise ValueError("a Dataset axis must retain at least one coordinate")
-    domain, position, selected = _axis_location(draft, axis_id)
-    keep = tuple(index for index in range(len(values)) if index not in selected_indices)
-    remaining = tuple(values[index] for index in keep)
-    labels = _axis_labels(draft, axis_id)
-    remaining_labels = None if labels is None else tuple(labels[index] for index in keep)
-    if domain in {"repeat", "cell"}:
-        storage_axis = 0 if domain == "repeat" else 2 + position
-        _delete_storage(draft, storage_axis, selected_indices)
-        replacement = _axis_spec_replacing(
-            selected,
-            size=len(remaining),
-            coordinates=remaining,
-            coordinate_labels=remaining_labels,
-            index_origin=0,
-        )
-        if domain == "repeat":
-            draft["repeat_axis"] = replacement
-        else:
-            axes = list(draft["cell_axes"])
-            axes[position] = replacement
-            draft["cell_axes"] = axes
-        return True
-    if domain == "point":
-        row_keep = tuple(
-            index for index in range(len(values)) if index not in selected_indices
-        )
-        _delete_storage(draft, 1, selected_indices)
-        _replace_point_columns_for_rows(draft, row_keep)
-        topology = draft["grid_topology"]
-        if topology is not None:
-            draft["grid_topology"] = _topology_replacing(
-                topology,
-                row_to_cell=tuple(topology.row_to_cell[index] for index in row_keep),
-            )
-        return True
-
-    topology = selected
-    removed = set(selected_indices)
-    row_keep = tuple(
-        row
-        for row, cell in enumerate(topology.row_to_cell)
-        if cell[position] not in removed
-    )
-    if not row_keep:
-        raise ValueError("removing those grid coordinates would remove every point row")
-    rank_map = {
-        old: new for new, old in enumerate(index for index in range(len(values)) if index not in removed)
-    }
-    mapping = tuple(
-        tuple(
-            rank_map[value] if dim == position else value
-            for dim, value in enumerate(topology.row_to_cell[row])
-        )
-        for row in row_keep
-    )
-    domains = list(topology.coordinate_domains)
-    domains[position] = remaining
-    topology_labels = topology.coordinate_labels
-    if topology_labels is not None:
-        edited = list(topology_labels)
-        if edited[position] is not None:
-            edited[position] = remaining_labels
-        topology_labels = tuple(edited)
-    _delete_storage(
-        draft,
-        1,
-        tuple(row for row in range(len(topology.row_to_cell)) if row not in row_keep),
-    )
-    _replace_point_columns_for_rows(draft, row_keep)
-    draft["grid_topology"] = _topology_replacing(
-        topology,
-        coordinate_domains=domains,
-        row_to_cell=mapping,
-        coordinate_labels=topology_labels,
-    )
-    return True
-
-
-def _move_coordinate(
-    draft: dict[str, object], axis_id: str, index: int, delta: int
-) -> bool:
-    values = _axis_values(draft, axis_id)
-    index = int(index)
-    destination = index + int(delta)
-    if not (0 <= index < len(values) and 0 <= destination < len(values)):
-        return False
-    order = list(range(len(values)))
-    moved = order.pop(index)
-    order.insert(destination, moved)
-    order_tuple = tuple(order)
-    reordered = tuple(values[position] for position in order_tuple)
-    labels = _axis_labels(draft, axis_id)
-    reordered_labels = None if labels is None else tuple(labels[position] for position in order_tuple)
-    domain, position, selected = _axis_location(draft, axis_id)
-    if domain in {"repeat", "cell"}:
-        storage_axis = 0 if domain == "repeat" else 2 + position
-        _reorder_storage(draft, storage_axis, order_tuple)
-        replacement = _axis_spec_replacing(
-            selected,
-            coordinates=reordered,
-            coordinate_labels=reordered_labels,
-            index_origin=0,
-        )
-        if domain == "repeat":
-            draft["repeat_axis"] = replacement
-        else:
-            axes = list(draft["cell_axes"])
-            axes[position] = replacement
-            draft["cell_axes"] = axes
-        return True
-    if domain == "point":
-        _reorder_storage(draft, 1, order_tuple)
-        _replace_point_columns_for_rows(draft, order_tuple)
-        topology = draft["grid_topology"]
-        if topology is not None:
-            draft["grid_topology"] = _topology_replacing(
-                topology,
-                row_to_cell=tuple(topology.row_to_cell[row] for row in order_tuple),
-            )
-        return True
-    topology = selected
-    inverse = {old: new for new, old in enumerate(order_tuple)}
-    mapping = tuple(
-        tuple(
-            inverse[value] if dim == position else value
-            for dim, value in enumerate(cell)
-        )
-        for cell in topology.row_to_cell
-    )
-    domains = list(topology.coordinate_domains)
-    domains[position] = reordered
-    topology_labels = topology.coordinate_labels
-    if topology_labels is not None:
-        edited = list(topology_labels)
-        if edited[position] is not None:
-            edited[position] = reordered_labels
-        topology_labels = tuple(edited)
-    draft["grid_topology"] = _topology_replacing(
-        topology,
-        coordinate_domains=domains,
-        row_to_cell=mapping,
-        coordinate_labels=topology_labels,
-    )
-    return True
-
-
-def _add_axis(draft: dict[str, object], domain: str) -> str:
-    from zlc_data import (
-        AxisSpec,
-        COMPONENT,
-        GridTopology,
-        PointColumn,
-        SCAN_POINT,
-    )
-
-    selected = str(domain)
-    rows = int(np.asarray(draft["values"]).shape[1])
-    if selected == "point":
-        axis_id = _new_axis_id(draft, "point")
-        columns = list(draft["point_columns"])
-        columns.append(
-            PointColumn(
-                axis_id,
-                f"point {len(columns) + 1}",
-                SCAN_POINT,
-                PointColumn.NUMERIC,
-                tuple(range(rows)),
-            )
-        )
-        draft["point_columns"] = columns
-    elif selected == "grid":
-        axis_id = _new_axis_id(draft, "grid")
-        topology = draft["grid_topology"]
-        if topology is None:
-            coordinates = tuple(range(rows))
-            topology = GridTopology(
-                (axis_id,),
-                (coordinates,),
-                tuple((index,) for index in range(rows)),
-            )
-            column_values = coordinates
-        else:
-            topology = GridTopology(
-                (*topology.dimension_ids, axis_id),
-                (*topology.coordinate_domains, (0,)),
-                tuple((*cell, 0) for cell in topology.row_to_cell),
-                (
-                    None
-                    if topology.coordinate_labels is None
-                    else (*topology.coordinate_labels, None)
-                ),
-            )
-            column_values = (0,) * rows
-        draft["grid_topology"] = topology
-        columns = list(draft["point_columns"])
-        columns.append(
-            PointColumn(
-                axis_id,
-                f"grid {len(topology.dimension_ids)}",
-                SCAN_POINT,
-                PointColumn.NUMERIC,
-                column_values,
-            )
-        )
-        draft["point_columns"] = columns
-    elif selected == "cell":
-        axis_id = _new_axis_id(draft, "component")
-        new_axis = AxisSpec(axis_id, "component", COMPONENT, 1, (0,))
-        axes = list(draft["cell_axes"])
-        if len(axes) == 1 and str(axes[0].role) == "scalar":
-            axes = [new_axis]
-        else:
-            axes.append(new_axis)
-            draft["values"] = np.expand_dims(np.asarray(draft["values"]), -1)
-            draft["validity"] = np.expand_dims(
-                np.asarray(draft["validity"], dtype=np.bool_), -1
-            )
-            if draft["sigma"] is not None:
-                draft["sigma"] = np.expand_dims(
-                    np.asarray(draft["sigma"], dtype=np.float64), -1
-                )
-        draft["cell_axes"] = axes
-    else:
-        raise ValueError(f"cannot add a {selected!r} Dataset axis")
-    draft["selected_axis"] = str(axis_id)
-    return str(axis_id)
-
-
-def _remove_axis(draft: dict[str, object], axis_id: str) -> None:
-    from zlc_data.axis import SCALAR_AXIS
-
-    domain, position, selected = _axis_location(draft, axis_id)
-    if domain == "repeat":
-        raise ValueError("the Dataset repeat axis cannot be removed")
-    if domain == "point":
-        columns = list(draft["point_columns"])
-        columns.pop(position)
-        draft["point_columns"] = columns
-    elif domain == "grid":
-        topology = selected
-        ids = list(topology.dimension_ids)
-        ids.pop(position)
-        if not ids:
-            draft["grid_topology"] = None
-        else:
-            domains = list(topology.coordinate_domains)
-            domains.pop(position)
-            mapping = tuple(
-                tuple(value for dim, value in enumerate(cell) if dim != position)
-                for cell in topology.row_to_cell
-            )
-            if len(set(mapping)) != len(mapping):
-                raise ValueError(
-                    "remove point rows that would overlap before removing this Grid dimension"
-                )
-            labels = topology.coordinate_labels
-            if labels is not None:
-                labels = tuple(value for dim, value in enumerate(labels) if dim != position)
-            draft["grid_topology"] = _topology_replacing(
-                topology,
-                dimension_ids=ids,
-                coordinate_domains=domains,
-                row_to_cell=mapping,
-                coordinate_labels=labels,
-            )
-        found = _point_column(draft, axis_id)
-        if found is not None:
-            columns = list(draft["point_columns"])
-            columns.pop(found[0])
-            draft["point_columns"] = columns
-    else:
-        axes = list(draft["cell_axes"])
-        axis = axes[position]
-        if str(axis.role) == "scalar":
-            raise ValueError("the scalar carrier cannot be removed")
-        if int(axis.size) != 1:
-            raise ValueError("remove all but one coordinate before removing a Cell axis")
-        axes.pop(position)
-        if axes:
-            draft["values"] = np.squeeze(np.asarray(draft["values"]), axis=2 + position)
-            draft["validity"] = np.squeeze(
-                np.asarray(draft["validity"], dtype=np.bool_), axis=2 + position
-            )
-            if draft["sigma"] is not None:
-                draft["sigma"] = np.squeeze(
-                    np.asarray(draft["sigma"], dtype=np.float64), axis=2 + position
-                )
-        else:
-            axes = [SCALAR_AXIS]
-        draft["cell_axes"] = axes
-    draft["selected_axis"] = str(draft["repeat_axis"].axis_id)
-
-
-def _move_axis(draft: dict[str, object], axis_id: str, delta: int) -> bool:
-    domain, position, selected = _axis_location(draft, axis_id)
-    destination = position + int(delta)
-    if domain == "repeat":
-        return False
-    if domain == "point":
-        columns = list(draft["point_columns"])
-        topology = draft["grid_topology"]
-        grid_ids = set() if topology is None else set(topology.dimension_ids)
-        ordinary = [index for index, column in enumerate(columns) if column.coordinate_id not in grid_ids]
-        ordinal = ordinary.index(position)
-        target_ordinal = ordinal + int(delta)
-        if not 0 <= target_ordinal < len(ordinary):
-            return False
-        target = ordinary[target_ordinal]
-        item = columns.pop(position)
-        columns.insert(target, item)
-        draft["point_columns"] = columns
-        return True
-    if domain == "grid":
-        topology = selected
-        if not 0 <= destination < len(topology.dimension_ids):
-            return False
-        order = list(range(len(topology.dimension_ids)))
-        moved = order.pop(position)
-        order.insert(destination, moved)
-        labels = topology.coordinate_labels
-        draft["grid_topology"] = _topology_replacing(
-            topology,
-            dimension_ids=tuple(topology.dimension_ids[index] for index in order),
-            coordinate_domains=tuple(topology.coordinate_domains[index] for index in order),
-            row_to_cell=tuple(tuple(cell[index] for index in order) for cell in topology.row_to_cell),
-            coordinate_labels=(
-                None if labels is None else tuple(labels[index] for index in order)
-            ),
-        )
-        return True
-    axes = list(draft["cell_axes"])
-    if not 0 <= destination < len(axes):
-        return False
-    item = axes.pop(position)
-    axes.insert(destination, item)
-    draft["cell_axes"] = axes
-    for key in ("values", "validity", "sigma"):
-        if draft[key] is not None:
-            draft[key] = np.moveaxis(
-                np.asarray(draft[key]), 2 + position, 2 + destination
-            ).copy()
-    return True
-
-
-def _resize_axis(draft: dict[str, object], axis_id: str, size: object) -> bool:
-    from zlc_data import GridTopology
-
-    wanted = int(size)
-    if isinstance(size, bool) or wanted < 1:
-        raise ValueError("axis size must be a positive integer")
-    domain, position, selected = _axis_location(draft, axis_id)
-    current_values = tuple(_axis_values(draft, axis_id))
-    current = len(current_values)
-    if wanted == current:
-        return False
-    if domain == "point":
-        if draft["grid_topology"] is not None or len(tuple(draft["point_columns"])) != 1:
-            raise ValueError(
-                "Point row count can be resized only for one column without Grid topology"
-            )
-    if domain == "grid":
-        topology = selected
-        complete, _canonical = _grid_layout(draft)
-        topology_ids = set(topology.dimension_ids)
-        if not complete or any(
-            column.coordinate_id not in topology_ids
-            for column in draft["point_columns"]
-        ):
-            raise ValueError(
-                "Grid size can change only for a complete grid without unrelated point columns"
-            )
-    numeric = (
-        selected.value_kind == "NUMERIC"
-        if domain == "point"
-        else _grid_value_kind(draft, axis_id) == "NUMERIC"
-        if domain == "grid"
-        else all(type(value) in (int, float) for value in current_values)
-    )
-    labels = _axis_labels(draft, axis_id)
-    if wanted < current:
-        if domain == "grid":
-            return _remove_coordinates(draft, axis_id, range(wanted, current))
-        remove = tuple(range(wanted, current))
-        storage_axis = 0 if domain == "repeat" else 1 if domain == "point" else 2 + position
-        _delete_storage(draft, storage_axis, remove)
-        values = current_values[:wanted]
-        resized_labels = None if labels is None else labels[:wanted]
-    else:
-        added = wanted - current
-        values = _extend_coordinates(current_values, added, numeric=numeric)
-        resized_labels = (
-            None
-            if labels is None
-            else (*labels, *(str(value) for value in values[current:]))
-        )
-        if domain == "grid":
-            topology = selected
-            domains = list(topology.coordinate_domains)
-            domains[position] = values
-            ranges = [range(len(domain_values)) for domain_values in domains]
-            additions = []
-            for chosen in range(current, wanted):
-                for rest in product(
-                    *(values_range for dim, values_range in enumerate(ranges) if dim != position)
-                ):
-                    cell = []
-                    iterator = iter(rest)
-                    for dim in range(len(domains)):
-                        cell.append(chosen if dim == position else next(iterator))
-                    additions.append(tuple(cell))
-            mapping = (*topology.row_to_cell, *additions)
-            topology_labels = topology.coordinate_labels
-            if topology_labels is not None:
-                edited = list(topology_labels)
-                if edited[position] is not None:
-                    edited[position] = resized_labels
-                topology_labels = tuple(edited)
-            replacement = GridTopology(
-                topology.dimension_ids,
-                tuple(domains),
-                mapping,
-                topology_labels,
-            )
-            _append_point_storage(draft, len(additions))
-            columns = []
-            for column in draft["point_columns"]:
-                dim = replacement.dimension_ids.index(column.coordinate_id)
-                column_values = tuple(
-                    replacement.coordinate_domains[dim][cell[dim]] for cell in mapping
-                )
-                domain_labels = (
-                    None
-                    if replacement.coordinate_labels is None
-                    else replacement.coordinate_labels[dim]
-                )
-                column_labels = (
-                    None
-                    if domain_labels is None
-                    else tuple(domain_labels[cell[dim]] for cell in mapping)
-                )
-                columns.append(
-                    _point_column_replacing(
-                        column,
-                        values=column_values,
-                        coordinate_labels=column_labels,
-                    )
-                )
-            draft["point_columns"] = columns
-            draft["grid_topology"] = replacement
-            draft["message"] = (
-                f"Resized Grid axis to {wanted}; added {len(additions)} physical point row(s)"
-            )
-            return True
-        storage_axis = 0 if domain == "repeat" else 1 if domain == "point" else 2 + position
-        _grow_storage(draft, storage_axis, added)
-
-    if domain == "repeat":
-        draft["repeat_axis"] = _axis_spec_replacing(
-            selected,
-            size=wanted,
-            coordinates=values,
-            coordinate_labels=resized_labels,
-            index_origin=0,
-        )
-    elif domain == "point":
-        columns = list(draft["point_columns"])
-        columns[position] = _point_column_replacing(
-            selected,
-            values=values,
-            coordinate_labels=resized_labels,
-        )
-        draft["point_columns"] = columns
-    else:
-        axes = list(draft["cell_axes"])
-        axes[position] = _axis_spec_replacing(
-            selected,
-            size=wanted,
-            coordinates=values,
-            coordinate_labels=resized_labels,
-            index_origin=0,
-        )
-        draft["cell_axes"] = axes
-    return True
-
-
-def _set_axis_field(
-    draft: dict[str, object], axis_id: str, field: str, value: object
-) -> bool:
-    from zlc_data import AxisRoleId, PointColumn, SCAN_POINT, point_domain_admits
-
-    domain, position, selected = _axis_location(draft, axis_id)
-    field = str(field)
-    if field not in {"name", "role", "unit", "coordinate_frame", "value_kind", "size"}:
-        raise ValueError(f"unknown axis field {field!r}")
-    if field == "size":
-        return _resize_axis(draft, axis_id, value)
-    if field == "value_kind":
-        if domain not in {"point", "grid"}:
-            raise ValueError("only Point/Grid coordinates have a value kind")
-        kind = str(value)
-        if kind not in {"NUMERIC", "TEXT"}:
-            raise ValueError("coordinate type must be Numeric or Text")
-        current_kind = (
-            selected.value_kind
-            if domain == "point"
-            else _grid_value_kind(draft, axis_id)
-        )
-        if kind == current_kind:
-            return False
-        values = _axis_values(draft, axis_id)
-        converted = tuple(
-            None
-            if item is None
-            else _parse_coordinate(
-                item,
-                numeric=kind == "NUMERIC",
-                allow_none=domain == "point",
-            )
-            for item in values
-        )
-        if domain == "grid" and len(set(converted)) != len(converted):
-            raise ValueError("coordinate type conversion would merge Grid coordinates")
-        if domain == "point":
-            columns = list(draft["point_columns"])
-            columns[position] = _point_column_replacing(
-                selected,
-                value_kind=kind,
-                values=converted,
-                unit=None if kind == "TEXT" else selected.unit,
-                coordinate_labels=selected.coordinate_labels,
-            )
-            draft["point_columns"] = columns
-        else:
-            topology = selected
-            domains = list(topology.coordinate_domains)
-            domains[position] = converted
-            draft["grid_topology"] = _topology_replacing(
-                topology,
-                coordinate_domains=domains,
-            )
-            found = _point_column(draft, axis_id)
-            if found is not None:
-                column_index, column = found
-                mapped = tuple(converted[cell[position]] for cell in topology.row_to_cell)
-                domain_labels = (
-                    None
-                    if topology.coordinate_labels is None
-                    else topology.coordinate_labels[position]
-                )
-                mapped_labels = (
-                    None
-                    if domain_labels is None
-                    else tuple(
-                        domain_labels[cell[position]] for cell in topology.row_to_cell
-                    )
-                )
-                columns = list(draft["point_columns"])
-                columns[column_index] = _point_column_replacing(
-                    column,
-                    value_kind=kind,
-                    values=mapped,
-                    unit=None if kind == "TEXT" else column.unit,
-                    coordinate_labels=mapped_labels,
-                )
-                draft["point_columns"] = columns
-        return True
-    if field == "name":
-        normalized: object = str(value).strip()
-        if not normalized:
-            raise ValueError("axis name cannot be blank")
-    elif field == "role":
-        normalized = AxisRoleId(str(value))
-        if domain == "repeat" and str(normalized) != "repeat":
-            raise ValueError("the Dataset repeat role cannot change")
-        if domain in {"point", "grid"} and not point_domain_admits(normalized):
-            raise ValueError("that role is not valid in the point/grid domain")
-    else:
-        text = str(value).strip()
-        normalized = None if not text else text
-        if field == "unit" and domain in {"point", "grid"} and (
-            (
-                selected.value_kind
-                if domain == "point"
-                else _grid_value_kind(draft, axis_id)
-            )
-            == "TEXT"
-        ):
-            if normalized is not None:
-                raise ValueError("Text coordinates cannot declare a unit")
-    found = _point_column(draft, axis_id) if domain == "grid" else None
-    metadata = found[1] if found is not None else selected
-    current = (
-        str(axis_id)
-        if domain == "grid" and found is None and field == "name"
-        else "scan-point"
-        if domain == "grid" and found is None and field == "role"
-        else None
-        if domain == "grid" and found is None and field in {"unit", "coordinate_frame"}
-        else getattr(metadata, field)
-    )
-    if normalized == current or str(normalized) == str(current):
-        return False
-    if domain in {"repeat", "cell"}:
-        replacement = _axis_spec_replacing(selected, **{field: normalized})
-        if domain == "repeat":
-            draft["repeat_axis"] = replacement
-        else:
-            axes = list(draft["cell_axes"])
-            axes[position] = replacement
-            draft["cell_axes"] = axes
-        return True
-    found = _point_column(draft, axis_id)
-    if found is None:
-        topology = selected
-        values = tuple(
-            topology.coordinate_domains[position][cell[position]]
-            for cell in topology.row_to_cell
-        )
-        column = PointColumn(
-            topology.dimension_ids[position],
-            str(topology.dimension_ids[position]),
-            SCAN_POINT,
-            (
-                PointColumn.NUMERIC
-                if all(type(item) in (int, float) for item in values)
-                else PointColumn.TEXT
-            ),
-            values,
-        )
-        columns = list(draft["point_columns"])
-        columns.append(column)
-        draft["point_columns"] = columns
-        found = (len(columns) - 1, column)
-    column_index, column = found
-    columns = list(draft["point_columns"])
-    columns[column_index] = _point_column_replacing(
-        column,
-        **{field: normalized},
-    )
-    draft["point_columns"] = columns
-    return True
 
 
 def _set_dtype(draft: dict[str, object], value: object) -> bool:
-    selected = np.dtype(str(value)).newbyteorder("<")
+    selected = np.dtype(value)
     if selected.str not in _MANUAL_DTYPES:
-        raise ValueError(f"unsupported manual data type {selected}")
-    if selected == np.dtype(draft["dtype"]):
-        return False
+        raise ValueError(f"unsupported manual data type {selected.name!r}")
     current = np.asarray(draft["values"])
+    if current.dtype == selected:
+        return False
     valid = np.asarray(draft["validity"], dtype=np.bool_)
-    if bool(np.any(~valid)):
-        current = np.array(current, copy=True)
-        current[~valid] = 0
-    selected_values = current[valid]
-    real = np.real(selected_values)
-    imaginary = np.imag(selected_values)
-    if selected.kind != "c" and bool(np.any(imaginary != 0)):
-        raise ValueError("that data type cannot represent complex values")
-    if selected.kind == "b" and bool(
-        np.any((real != 0) & (real != 1))
-    ):
-        raise ValueError("boolean data can represent only 0 and 1 exactly")
-    if selected.kind in "iu":
-        limits = np.iinfo(selected)
-        if bool(
-            np.any(~np.isfinite(real))
-            or np.any(real != np.floor(real))
-            or np.any(real < limits.min)
-            or np.any(real > limits.max)
-        ):
-            raise ValueError(f"existing values lie outside exact {selected.name} values")
-    if selected.kind == "f":
-        limits = np.finfo(selected)
-        finite = np.isfinite(real)
-        if bool(np.any(np.abs(real[finite]) > limits.max)):
-            raise ValueError(f"existing values lie outside {selected.name} range")
     converted = current.astype(selected)
     if bool(np.any(valid)):
         restored = converted.astype(current.dtype)
@@ -2183,9 +1018,7 @@ def _parse_value(text: object, dtype: np.dtype) -> object:
         raise ValueError(f"{value!r} is not a {dtype.name} value") from error
 
 
-def _set_table_cells(
-    draft: dict[str, object], component: str, cells: object
-) -> bool:
+def _set_table_cells(draft: dict[str, object], component: str, cells: object) -> bool:
     selected = str(component)
     if selected not in {"values", "validity", "sigma"}:
         raise ValueError(f"unknown data table {selected!r}")
@@ -2194,23 +1027,15 @@ def _set_table_cells(
     parsed = []
     for row, column, text in tuple(cells):
         index = _table_index(draft, int(row), int(column))
-        if any(
-            value < 0 or value >= size
-            for value, size in zip(index, np.asarray(draft["values"]).shape, strict=True)
-        ):
-            raise IndexError("data edit lies outside the visible table")
         raw = str(text).strip()
         if selected == "values":
             value = None if not raw else _parse_value(raw, np.dtype(draft["dtype"]))
         elif selected == "validity":
             value = False if not raw else bool(_parse_value(raw, np.dtype("?")))
         else:
-            if not raw:
-                value = np.nan
-            else:
-                value = float(raw)
-                if value < 0.0:
-                    raise ValueError("sample sigma must be non-negative")
+            value = np.nan if not raw else float(raw)
+            if value < 0.0:
+                raise ValueError("sample sigma must be non-negative")
         parsed.append((index, value))
     changed = False
     for index, value in parsed:
@@ -2219,10 +1044,8 @@ def _set_table_cells(
                 changed = changed or bool(
                     np.asarray(draft["validity"])[index]
                     or np.asarray(draft["values"])[index] != 0
-                    or (
-                        draft["sigma"] is not None
-                        and not np.isnan(np.asarray(draft["sigma"])[index])
-                    )
+                    or draft["sigma"] is not None
+                    and not np.isnan(np.asarray(draft["sigma"])[index])
                 )
                 np.asarray(draft["values"])[index] = 0
                 np.asarray(draft["validity"])[index] = False
@@ -2240,15 +1063,11 @@ def _set_table_cells(
             np.asarray(draft["validity"])[index] = value
         else:
             previous = np.asarray(draft["sigma"])[index]
-            changed = changed or bool(
-                not (
-                    np.isnan(previous)
-                    and np.isnan(value)
-                    or previous == value
-                )
+            changed = changed or not (
+                np.isnan(previous) and np.isnan(value) or previous == value
             )
             np.asarray(draft["sigma"])[index] = value
-    return changed
+    return bool(changed)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2332,6 +1151,7 @@ class _ArchiveDatasetProducer:
             AxisId,
             AxisSpec,
             DatasetSchema,
+            DomainSpec,
             SITE,
             ValidityContract,
             ValueSchema,
@@ -2354,11 +1174,10 @@ class _ArchiveDatasetProducer:
             coordinates=tuple(range(1, count + 1)),
         )
         schema = DatasetSchema(
-            image.block.schema.repeat_axis,
-            image.block.schema.point_table,
-            image.block.schema.grid_topology,
+            image.block.schema.repeat_domain,
+            image.block.schema.point_domain,
+            DomainSpec((count,), (site_axis,)),
             ValueSchema(
-                (site_axis,),
                 ValidityContract.components(site_axis.axis_id),
                 np.dtype("?"),
                 "1",
@@ -2410,7 +1229,7 @@ class _ArchiveDatasetProducer:
             status_axis = (
                 None
                 if status is None
-                else status.block.schema.cell_schema.data_axes[0]
+                else status.block.schema.cell_domain.axes[0]
             )
             if status_axis is not None:
                 point_ids = tuple(
@@ -2439,10 +1258,10 @@ class _ArchiveDatasetProducer:
                 self.dataset_output_declarations[0],
                 snapshot,
                 MonitorCoverage(
-                    snapshot.block.schema.repeat_axis.size
-                    * snapshot.block.schema.point_table.row_count,
-                    snapshot.block.schema.repeat_axis.size
-                    * snapshot.block.schema.point_table.row_count,
+                    snapshot.block.schema.repeat_domain.size
+                    * snapshot.block.schema.point_domain.size,
+                    snapshot.block.schema.repeat_domain.size
+                    * snapshot.block.schema.point_domain.size,
                 ),
                 run_record,
             )
@@ -2453,10 +1272,10 @@ class _ArchiveDatasetProducer:
                 self.dataset_output_declarations[1],
                 status,
                 MonitorCoverage(
-                    status.block.schema.repeat_axis.size
-                    * status.block.schema.point_table.row_count,
-                    status.block.schema.repeat_axis.size
-                    * status.block.schema.point_table.row_count,
+                    status.block.schema.repeat_domain.size
+                    * status.block.schema.point_domain.size,
+                    status.block.schema.repeat_domain.size
+                    * status.block.schema.point_domain.size,
                 ),
                 run_record,
             )
@@ -2514,10 +1333,9 @@ def _manual_plot_input(draft: Mapping[str, object], snapshot: object) -> object:
     old = source.block.schema
     new = snapshot.block.schema
     compatible = bool(
-        old.repeat_axis == new.repeat_axis
-        and old.point_table == new.point_table
-        and old.grid_topology == new.grid_topology
-        and old.cell_schema.data_axes == new.cell_schema.data_axes
+        old.repeat_domain == new.repeat_domain
+        and old.point_domain == new.point_domain
+        and old.cell_domain == new.cell_domain
     )
     return ImageFrame(snapshot, overlay) if compatible else snapshot
 
@@ -3387,6 +2205,7 @@ class FigureViewerPresenter:
 
     def _accept_runtime_archive(self, result: object) -> None:
         from .panel_catalog import task_console_panel_identity_for_spec
+        from .panel_save import _IMPORTED_LINEAGE_KEY
 
         resolved, description, loaded, serial, source_lineage, source_document = result
         panel_presenter = self._panel_presenter
@@ -3403,6 +2222,11 @@ class FigureViewerPresenter:
                     key,
                     plot_input,
                     resolved,
+                    run_record=(
+                        {_IMPORTED_LINEAGE_KEY: deepcopy(dict(source_lineage))}
+                        if isinstance(source_lineage.get("root"), str)
+                        else None
+                    ),
                 )
                 producers.append(producer)
                 publication = producer.publish(plane)
@@ -3740,18 +2564,6 @@ class FigureViewerPresenter:
             operation = str(command.pop("op"))
             draft["message"] = ""
             marks_dirty = True
-            if operation in {
-                "insert_coordinate",
-                "remove_coordinates",
-                "move_coordinate",
-                "remove_axis",
-            } or (
-                operation == "set_axis_field"
-                and str(command.get("field")) == "size"
-            ):
-                _require_complete_coordinate_labels(
-                    draft, "changing coordinate structure"
-                )
             if operation == "set_dataset_field":
                 field = str(command["field"])
                 value = command.get("value")
@@ -3779,51 +2591,40 @@ class FigureViewerPresenter:
                 draft["selected_axis"] = str(command["axis_id"])
                 marks_dirty = False
             elif operation == "add_axis":
-                _add_axis(draft, str(command["domain"]))
-            elif operation == "remove_axis":
-                _remove_axis(draft, str(command["axis_id"]))
-            elif operation == "move_axis":
-                marks_dirty = _move_axis(
-                    draft, str(command["axis_id"]), int(command["delta"])
+                _add_axis(
+                    draft,
+                    name=str(command["name"]),
+                    length=int(command["length"]),
+                    unit=str(command.get("unit") or ""),
+                    domain=str(command["domain"]),
                 )
-            elif operation == "set_axis_field":
-                marks_dirty = _set_axis_field(
+            elif operation == "edit_axis":
+                marks_dirty = _edit_axis(
                     draft,
                     str(command["axis_id"]),
-                    str(command["field"]),
-                    command.get("value"),
+                    name=str(command["name"]),
+                    length=int(command["length"]),
+                    unit=str(command.get("unit") or ""),
+                    domain=str(command["domain"]),
                 )
-            elif operation == "insert_coordinate":
-                _insert_coordinate(draft, str(command["axis_id"]), int(command["after"]))
-            elif operation == "remove_coordinates":
-                marks_dirty = _remove_coordinates(
-                    draft, str(command["axis_id"]), command["indices"]
-                )
-            elif operation == "move_coordinate":
-                marks_dirty = _move_coordinate(
-                    draft,
-                    str(command["axis_id"]),
-                    int(command["index"]),
-                    int(command["delta"]),
-                )
-            elif operation == "set_coordinates":
-                marks_dirty = _set_coordinate_cells(
+            elif operation == "delete_axis":
+                _delete_axis(draft, str(command["axis_id"]))
+            elif operation == "set_axis_values":
+                marks_dirty = _set_axis_values(
                     draft, str(command["axis_id"]), command["cells"]
                 )
-            elif operation == "set_slice":
-                axis_id = str(command["axis_id"])
-                index = int(command["index"])
-                dimension = next(
-                    (
-                        item
-                        for item in _logical_dimensions(draft)
-                        if str(item["axis_id"]) == axis_id
-                    ),
-                    None,
+            elif operation == "set_table_axis":
+                _set_table_axis(
+                    draft, str(command["axis_id"]), str(command["mode"])
                 )
-                if dimension is None or not 0 <= index < len(dimension["coordinates"]):
-                    raise IndexError("slice index lies outside its Dataset axis")
-                draft["slices"][axis_id] = index
+                marks_dirty = False
+            elif operation == "set_scope":
+                axis_id = str(command["axis_id"])
+                _domain, _position, axis = _axis_location(draft, axis_id)
+                index = int(command["index"])
+                if not 0 <= index < int(axis.size):
+                    raise IndexError("scope position lies outside its Dataset axis")
+                draft["scopes"][axis_id] = index
                 marks_dirty = False
             elif operation == "set_component":
                 component = str(command["component"])

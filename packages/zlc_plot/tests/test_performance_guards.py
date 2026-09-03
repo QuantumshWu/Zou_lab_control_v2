@@ -6,12 +6,15 @@ from time import perf_counter
 import numpy as np
 
 from data_factory import (
-    Axis,
-    DatasetSchema,
-    DatasetSnapshot,
-    PointTable,
-    PointTopology,
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
 )
+
+from zlc_data import OwnedSnapshot
+
 import zlc_plot._fit_projection as fit_projection_module
 import zlc_plot.data_view as data_view_module
 from zlc_plot import (
@@ -26,27 +29,23 @@ from zlc_plot import (
 )
 from zlc_plot.data_view import DataView
 
-
 # These are intentionally named guards rather than hidden timing literals.
 # They catch accidental full-tensor copies while leaving enough room for a
 # shared CI worker's normal variance.
 MAX_REPLACE_SPEC_SECONDS = 8.0
 MAX_ROLLING_20_FRAME_SECONDS = 8.0
 
-
-def _scan_snapshot(*, revision: int = 0, repeats: int = 5, points: int = 120, sites: int = 30) -> DatasetSnapshot:
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=repeats),
-        PointTable.from_columns({"scan": np.linspace(0.0, 1.0, points)}),
-        data_axes=(Axis.create("site", size=sites),),
+def _scan_snapshot(*, revision: int = 0, repeats: int = 5, points: int = 120, sites: int = 30) -> OwnedSnapshot:
+    schema = make_dataset_schema(
+        repeat_domain(size=repeats),
+        mapped_domain_from_columns({"scan": np.linspace(0.0, 1.0, points)}),
+        cell_axes=(axis("site", size=sites),),
         dtype=np.float64,
-        generation="projection-performance-guard",
     )
     values = np.sin(np.linspace(0.0, 8.0, points))[None, :, None]
     values = np.broadcast_to(values, (repeats, points, sites)).copy()
     values += np.arange(repeats, dtype=float)[:, None, None] * 0.01
-    return DatasetSnapshot(schema, values, revision=revision)
-
+    return make_snapshot(schema, values, revision=revision)
 
 def _large_dense_snapshot(
     height: int,
@@ -57,16 +56,15 @@ def _large_dense_snapshot(
     column_ramp: bool = False,
     invalid_first_point: bool = False,
     revision: int = 0,
-) -> DatasetSnapshot:
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"batch": np.arange(points, dtype=float)}),
-        data_axes=(
-            Axis.create("row", values=np.arange(height, dtype=float)),
-            Axis.create("column", values=np.arange(width, dtype=float)),
+) -> OwnedSnapshot:
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"batch": np.arange(points, dtype=float)}),
+        cell_axes=(
+            axis("row", values=np.arange(height, dtype=float)),
+            axis("column", values=np.arange(width, dtype=float)),
         ),
         dtype=dtype,
-        generation=f"large-dense-{height}x{width}x{points}",
     )
     if column_ramp:
         column = np.arange(width, dtype=dtype)
@@ -80,33 +78,32 @@ def _large_dense_snapshot(
     if invalid_first_point:
         validity = np.ones(values.shape, dtype=np.bool_)
         validity[:, 0] = False
-    return DatasetSnapshot(schema, values, revision=revision, validity=validity)
-
+    return make_snapshot(schema, values, revision=revision, validity=validity)
 
 def test_replace_spec_and_rolling_projection_have_bounded_cost() -> None:
     snapshot = _scan_snapshot()
     session = PlotSession(
         snapshot,
-        CurvePlot(AxisRef.point("scan"), group=AxisRef.data("site")),
+        CurvePlot(AxisRef.point("scan"), group=AxisRef.cell_data("site")),
     )
     try:
         timings: dict[str, float] = {}
         start = perf_counter()
         session.replace_spec(
-            CurvePlot(AxisRef.point("scan"), group=AxisRef.repeat())
+            CurvePlot(AxisRef.point("scan"), group=AxisRef.repeat("repeat"))
         )
         timings["group_to_repeat"] = perf_counter() - start
 
         start = perf_counter()
         session.replace_spec(
-            CurvePlot(AxisRef.point("scan"), group=AxisRef.data("site"))
+            CurvePlot(AxisRef.point("scan"), group=AxisRef.cell_data("site"))
         )
         timings["group_to_site"] = perf_counter() - start
 
         start = perf_counter()
         session.replace_spec(
             FacetGridPlot(
-                AxisRef.data("site"),
+                AxisRef.cell_data("site"),
                 CurvePlot(AxisRef.point("scan")),
             )
         )
@@ -117,7 +114,7 @@ def test_replace_spec_and_rolling_projection_have_bounded_cost() -> None:
 
     rolling = PlotSession(
         snapshot,
-        RollingPlot(group=AxisRef.data("site")),
+        RollingPlot(group=AxisRef.cell_data("site")),
     )
     try:
         start = perf_counter()
@@ -128,7 +125,6 @@ def test_replace_spec_and_rolling_projection_have_bounded_cost() -> None:
     finally:
         rolling.close()
 
-
 def test_facet_cell_count_never_materializes_a_declared_domain(monkeypatch) -> None:
     """Counting a DECLARED facet domain reads axis-sized arrays only.
 
@@ -136,29 +132,24 @@ def test_facet_cell_count_never_materializes_a_declared_domain(monkeypatch) -> N
     (about 20 million for one 9x1200x1920 camera facet) plus full flat
     coordinate copies just to COUNT a declared domain -- measured as 2.63 s
     of a 3.1 s semantic sweep.  The declared paths must answer without one
-    element pass; only the undeclared point-coordinate fallback may still
+    element pass; only the undeclared point-axis fallback may still
     walk elements.
     """
 
     bias = [float(v) for v in range(9)]
-    table = PointTable.from_columns({"bias": bias})
-    topology = PointTopology.from_cartesian(
-        (Axis.create("bias", values=bias),), point_table=table
-    )
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=3),
+    table = mapped_domain_from_columns({"bias": bias})
+    schema = make_dataset_schema(
+        repeat_domain(size=3),
         table,
-        data_axes=(
-            Axis.create("sy", values=tuple(float(v) for v in range(120))),
-            Axis.create("sx", values=tuple(float(v) for v in range(160))),
+        cell_axes=(
+            axis("sy", values=tuple(float(v) for v in range(120))),
+            axis("sx", values=tuple(float(v) for v in range(160))),
         ),
-        point_topology=topology,
         dtype=np.uint8,
-        generation="facet-count-guard",
     )
     values = np.zeros((3, 9, 120, 160), dtype=np.uint8)
-    view = DataView(DatasetSnapshot(schema, values, revision=0))
-    cell = ImagePlot(AxisRef.data("sx"), AxisRef.data("sy"))
+    view = DataView(make_snapshot(schema, values, revision=0))
+    cell = ImagePlot(AxisRef.cell_data("sx"), AxisRef.cell_data("sy"))
 
     element_passes: list[object] = []
     original = DataView._all_positions
@@ -171,47 +162,37 @@ def test_facet_cell_count_never_materializes_a_declared_domain(monkeypatch) -> N
     monkeypatch.setattr(DataView, "_all_positions", spy)
 
     assert view.facet_cell_count(
-        FacetGridPlot(AxisRef.point_dimension("bias"), cell)
+        FacetGridPlot(AxisRef.point("bias"), cell)
     ) == 9
-    assert view.facet_cell_count(FacetGridPlot(AxisRef.repeat(), cell)) == 3
-    curve_cell = CurvePlot(AxisRef.point_dimension("bias"))
+    assert view.facet_cell_count(FacetGridPlot(AxisRef.repeat("repeat"), cell)) == 3
+    curve_cell = CurvePlot(AxisRef.point("bias"))
     assert (
-        view.facet_cell_count(FacetGridPlot(AxisRef.data("sy"), curve_cell))
+        view.facet_cell_count(FacetGridPlot(AxisRef.cell_data("sy"), curve_cell))
         == 120
     )
     assert element_passes == []
 
-    # The undeclared point-coordinate fallback keeps the exact generic
-    # count -- and is the only path allowed to walk elements.
-    assert view.facet_cell_count(FacetGridPlot(AxisRef.point("bias"), cell)) == 9
-    assert element_passes
-
-
 def test_flat_planes_materialize_lazily_and_exactly_once() -> None:
-    """Grouping flattens a broadcast coordinate on first use, then reuses it.
+    """Grouping flattens only broadcast axis codes, then reuses them.
 
     Axis resolution itself must NOT materialize the full-shape planes: the
-    dense image path never groups, and eagerly copying two full-size planes
+    dense image path never groups, and eagerly copying full coordinate planes
     per resolved axis once cost ~150 ms per 2048^2 live frame.
     """
 
     snapshot = _scan_snapshot(points=80, sites=12)
     view = DataView(snapshot)
-    ref = AxisRef.data("site")
+    ref = AxisRef.cell_data("site")
     view._resolve(ref)
     assert view._flat_cache == {}
     positions = np.arange(snapshot.block.values.size, dtype=np.int64)
     view._domain(ref, positions)
-    canonical, indices = view._flat_cache[ref]
-    assert canonical.ndim == 1
+    indices = view._flat_cache[ref]
     assert indices.ndim == 1
-    assert canonical.flags.owndata
+    assert indices.flags.owndata
     for _ in range(12):
         view._domain(ref, positions)
-    cached_canonical, cached_indices = view._flat_cache[ref]
-    assert cached_canonical is canonical
-    assert cached_indices is indices
-
+    assert view._flat_cache[ref] is indices
 
 def test_full_dense_image_keeps_native_values_and_boolean_validity(
     monkeypatch,
@@ -228,8 +209,8 @@ def test_full_dense_image_keeps_native_values_and_boolean_validity(
     tracemalloc.start()
     tracemalloc.reset_peak()
     payload = view.image(
-        AxisRef.data("column"),
-        AxisRef.data("row"),
+        AxisRef.cell_data("column"),
+        AxisRef.cell_data("row"),
     )
     _current, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
@@ -240,7 +221,6 @@ def test_full_dense_image_keeps_native_values_and_boolean_validity(
     assert not payload.valid.flags.owndata
     assert peak < 32 << 20
 
-
 def test_large_contiguous_facet_cells_are_views_with_bounded_peak(
     monkeypatch,
 ) -> None:
@@ -250,7 +230,7 @@ def test_large_contiguous_facet_cells_are_views_with_bounded_peak(
     view = DataView(snapshot)
     spec = FacetGridPlot(
         AxisRef.point("batch"),
-        ImagePlot(AxisRef.data("column"), AxisRef.data("row")),
+        ImagePlot(AxisRef.cell_data("column"), AxisRef.cell_data("row")),
     )
     shares: list[bool] = []
     histogram_inputs: list[tuple[bool, bool]] = []
@@ -314,7 +294,6 @@ def test_large_contiguous_facet_cells_are_views_with_bounded_peak(
     assert all(not cell.payload.valid.flags.owndata for cell in payload.cells)
     assert peak < 64 << 20
 
-
 def test_large_integer_histogram_uses_one_native_uniform_count(
     monkeypatch,
 ) -> None:
@@ -324,7 +303,7 @@ def test_large_integer_histogram_uses_one_native_uniform_count(
         (2048, 2048, np.uint16, 32, 48 << 20),
         (1200, 1920, np.uint8, 16, 32 << 20),
     )
-    expected: list[tuple[DatasetSnapshot, np.ndarray, np.ndarray, int]] = []
+    expected: list[tuple[make_snapshot, np.ndarray, np.ndarray, int]] = []
     for height, width, dtype, step, peak_limit in cases:
         invalid_first = np.dtype(dtype) == np.dtype(np.uint8)
         snapshot = _large_dense_snapshot(
@@ -370,7 +349,6 @@ def test_large_integer_histogram_uses_one_native_uniform_count(
         np.testing.assert_array_equal(payload.counts, counts)
         assert bincount_calls == index
         assert peak < peak_limit
-
 
 def test_large_integer_histogram_domain_uses_native_statistics(
     monkeypatch,
@@ -418,10 +396,9 @@ def test_large_integer_histogram_domain_uses_native_statistics(
             tracemalloc.stop()
         session.close()
 
-
 def test_extreme_uint64_histogram_falls_back_without_overflow() -> None:
     template = _large_dense_snapshot(1, 1, dtype=np.uint64)
-    snapshot = DatasetSnapshot(
+    snapshot = make_snapshot(
         template.block.schema,
         np.asarray([[[[2**63 + 7]]]], dtype=np.uint64),
         revision=0,
@@ -430,7 +407,6 @@ def test_extreme_uint64_histogram_falls_back_without_overflow() -> None:
     payload = DataView(snapshot).histogram(bins=(-0.5, 0.5))
     np.testing.assert_array_equal(payload.edges.canonical, (-0.5, 0.5))
     np.testing.assert_array_equal(payload.counts, (0,))
-
 
 def test_large_ungrouped_rolling_reuses_its_exact_valid_pool(
     monkeypatch,

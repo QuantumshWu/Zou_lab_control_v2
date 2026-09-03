@@ -313,9 +313,6 @@ def panel_selection_document(selection: SelectionState | None) -> dict[str, Any]
             }
             for item in selection.facets
         ],
-        "repeat_index": (
-            None if selection.repeat_index is None else int(selection.repeat_index)
-        ),
     }
 
 
@@ -324,9 +321,7 @@ def panel_selection_from_document(document: Mapping[str, Any]) -> SelectionState
 
     if not document:
         return None
-    expected = {
-        "plot_kind", "selector_kind", "drawn", "ranges", "facets", "repeat_index",
-    }
+    expected = {"plot_kind", "selector_kind", "drawn", "ranges", "facets"}
     if set(document) != expected:
         raise ValueError("panel selector fields do not match the current grammar")
     raw_ranges = document["ranges"]
@@ -387,7 +382,6 @@ def panel_selection_from_document(document: Mapping[str, Any]) -> SelectionState
             )
             for item in raw_facets
         ),
-        repeat_index=document["repeat_index"],
     )
 
 
@@ -480,7 +474,7 @@ def panel_selection_matches_subject(
             dummy,
             dummy if selection.selector_kind == "area" else None,
         )
-        expected_facets, expected_repeat = _subject_scope(subject)
+        expected_facets = _subject_scope(subject)
         return bool(
             tuple(
                 (item.domain, item.axis, item.coordinate_frame)
@@ -490,7 +484,6 @@ def panel_selection_matches_subject(
                 (item.domain, item.axis, item.coordinate_frame)
                 for item in expected
             )
-            and selection.repeat_index == expected_repeat
         )
     try:
         if selection.selector_kind == "x_range":
@@ -511,7 +504,7 @@ def panel_selection_matches_subject(
             )
         else:
             return False
-        expected_facets, expected_repeat = _subject_scope(subject)
+        expected_facets = _subject_scope(subject)
     except _Unbridgeable:
         return False
 
@@ -531,7 +524,6 @@ def panel_selection_matches_subject(
         == tuple(map(range_identity, expected_ranges))
         and len(actual_facets) == len(selection.facets)
         and actual_facets == wanted_facets
-        and selection.repeat_index == expected_repeat
     )
 
 
@@ -946,13 +938,12 @@ class PlotSelectionSource:
                 if selector_kind == "area"
                 else _rolling_ranges(selector_kind, selector.value)
             )
-            facets, repeat_index = _subject_scope(subject)
+            facets = _subject_scope(subject)
             return SelectionState(
                 plot_kind=plot_kind,
                 selector_kind=selector_kind,
                 ranges=ranges,
                 facets=facets,
-                repeat_index=repeat_index,
                 revision=int(selector.revision),
             )
         drawn: DrawnRegion | None = None
@@ -1008,13 +999,12 @@ class PlotSelectionSource:
                     subject.x_coordinate_frame,
                 ),
             )
-        facets, repeat_index = _subject_scope(subject)
+        facets = _subject_scope(subject)
         return SelectionState(
             plot_kind=plot_kind,
             selector_kind=selector_kind,
             ranges=ranges,
             facets=facets,
-            repeat_index=repeat_index,
             revision=int(selector.revision),
             drawn=drawn,
         )
@@ -1134,14 +1124,6 @@ def _range(
             "nothing to select on"
         )
     domain = _name_of(getattr(axis, "domain", ""))
-    if domain in {"repeat", "point_row"}:
-        return SelectionRange(
-            axis="",
-            lower=float(bounds.low),
-            upper=float(bounds.high),
-            coordinate_frame=coordinate_frame,
-            domain=domain,
-        )
     name = getattr(axis, "axis_id", None)
     if not isinstance(name, str) or not name:
         raise _Unbridgeable(f"the {role} axis of this plot has no upstream name")
@@ -1156,22 +1138,20 @@ def _range(
 
 def _subject_scope(
     subject: object,
-) -> tuple[tuple[FacetCondition, ...], int | None]:
+) -> tuple[FacetCondition, ...]:
     """Canonical panel/facet scope frozen into one plot event."""
 
     conditions: list[FacetCondition] = []
     for ref, value in subject.scope:
         domain = _name_of(ref.domain)
-        axis_name = "" if ref.axis_id is None else ref.axis_id
-        if domain != "point_row" and (
-            not isinstance(axis_name, str) or not axis_name
-        ):
+        axis_name = ref.axis_id
+        if not isinstance(axis_name, str) or not axis_name:
             raise _Unbridgeable(
                 f"a {domain} scoped axis has no upstream name, so the "
                 "selection cannot be carried"
             )
         conditions.append(FacetCondition(axis_name, value, domain))
-    return tuple(conditions), subject.repeat_index
+    return tuple(conditions)
 
 
 def _fit_value(event: object) -> FitEventValue:
@@ -1244,7 +1224,7 @@ def _batch_fit_value(batch: object, source_generation: str) -> FitEventValue:
         },
         success=success,
         sample_axis_domain=str(batch.facet.domain.value),
-        sample_axis_id=str(batch.facet.axis_id or ""),
+        sample_axis_id=batch.facet.axis_id,
         sample_axis_name=str(batch.sample_axis_name),
         sample_coordinates=np.asarray(coordinates, dtype=np.float64).reshape(-1),
         sample_unit=str(batch.sample_unit),

@@ -9,9 +9,10 @@ from types import MappingProxyType
 
 import numpy as np
 from zlc_data import (
+    AxisSpec,
     DatasetSchema,
+    DomainSpec,
     OwnedSnapshot,
-    PointColumn,
     SPATIAL_X,
     SPATIAL_Y,
     ValidityContract,
@@ -109,7 +110,7 @@ class OccupancyProcessor:
             raise ValueError("producer must be non-empty")
         self.source_signal = None if source_signal is None else str(source_signal).strip()
 
-    def _source_point_column(self, snapshot: OwnedSnapshot) -> PointColumn:
+    def _source_point_axis(self, snapshot: OwnedSnapshot) -> AxisSpec:
         """Read the parent's declared cycle: cell axes are (y, x), points vary.
 
         Read, never sniffed.  This used to branch on ``ndim`` and on whether
@@ -119,7 +120,7 @@ class OccupancyProcessor:
         """
 
         schema = snapshot.block.schema
-        axes = schema.cell_schema.data_axes
+        axes = schema.cell_domain.axes
         if tuple(axis.role for axis in axes) != (SPATIAL_Y, SPATIAL_X):
             raise ValueError(
                 "occupancy frames must declare exactly SPATIAL_Y, SPATIAL_X cell axes"
@@ -131,13 +132,13 @@ class OccupancyProcessor:
                 f"frame shape {observed} differs from the crop this readout "
                 f"is placed against {expected}"
             )
-        columns = schema.point_table.columns
-        if len(columns) != 1:
+        point_axes = schema.point_domain.axes
+        if len(point_axes) != 1:
             raise ValueError(
-                "occupancy inherits its parent's point column and the source "
-                f"declares {len(columns)}"
+                "occupancy inherits its parent's frame axis and the source "
+                f"declares {len(point_axes)} Point axes"
             )
-        return columns[0]
+        return point_axes[0]
 
     @property
     def readout(self) -> TrapCalibration:
@@ -250,26 +251,27 @@ class OccupancyProcessor:
     ) -> dict[str, DatasetSchema]:
         site_axis = self.readout.site_map.site_axis
 
-        def with_cell(cell: ValueSchema) -> DatasetSchema:
+        site_domain = DomainSpec((site_axis.size,), (site_axis,))
+
+        def with_value(value: ValueSchema) -> DatasetSchema:
             return DatasetSchema(
-                source.repeat_axis,
-                source.point_table,
-                source.grid_topology,
-                cell,
+                source.repeat_domain,
+                source.point_domain,
+                site_domain,
+                value,
             )
 
         site_validity = ValidityContract.components(site_axis.axis_id)
         return {
-            "counts": with_cell(
+            "counts": with_value(
                 ValueSchema(
-                    (site_axis,),
                     site_validity,
                     np.dtype("<f8"),
-                    source.cell_schema.value_unit,
+                    source.value_schema.value_unit,
                 )
             ),
-            "occupied": with_cell(
-                ValueSchema((site_axis,), site_validity, np.dtype("?"), "1")
+            "occupied": with_value(
+                ValueSchema(site_validity, np.dtype("?"), "1")
             ),
         }
 
@@ -293,7 +295,7 @@ class OccupancyProcessor:
 
         if not isinstance(frames, OwnedSnapshot):
             raise TypeError("occupancy process requires zlc_data.OwnedSnapshot")
-        self._source_point_column(frames)
+        self._source_point_axis(frames)
         images = np.asarray(frames.block.values)
         repeats, points = images.shape[:2]
         n_sites = self.readout.n_sites
@@ -366,7 +368,7 @@ class OccupancyProcessor:
         }
         event_schema = source.snapshot.block.schema
         event_cells = (
-            event_schema.repeat_axis.size * event_schema.point_table.row_count
+            event_schema.repeat_domain.size * event_schema.point_domain.size
         )
         exact = isinstance(source.coverage, DatasetCoverage)
         if exact:
@@ -415,7 +417,7 @@ class OccupancyProcessor:
         # MEASURED on and a run that had moved its ROI was refused before the
         # translation it needed had been computed.
         self._validate_source_run_record(signal_value)
-        self._source_point_column(snapshot)
+        self._source_point_axis(snapshot)
         result = self.process(snapshot)
         return self._live_outputs(
             result,

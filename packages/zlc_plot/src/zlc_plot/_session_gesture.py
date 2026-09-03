@@ -781,13 +781,17 @@ class GestureSessionMixin:
                 float(event.y),
             ) == gesture.origin_px:
                 return
-            draft = gesture.state if gesture.handle is DragHandle.NEW else None
             self._selector_controller.pointer_down(
                 gesture.kind,
                 gesture.origin.x,
                 gesture.origin.y,
                 handle=gesture.handle,
-                draft=draft,
+                # The visible selector snapshot is the gesture authority.
+                # Classifier thresholds are derived from fit state and need
+                # not be duplicated in the controller's committed mapping;
+                # starting from the captured state handles both derived and
+                # ordinary selectors through the same path.
+                draft=gesture.state,
             )
             gesture.started = True
             self._renderer.begin_selector_gesture(

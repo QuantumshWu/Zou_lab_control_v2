@@ -198,8 +198,7 @@ LOGIC_NODE = LogicNodeDescriptor(
             "curve",
             semantic={
                 fate_field_name(AxisRef.point("temperature.t_off")): "x",
-                fate_field_name(AxisRef.repeat()): "reduce",
-                fate_field_name(AxisRef.data("calibration.site")): "reduce",
+                fate_field_name(AxisRef.cell_data("calibration.site")): "reduce",
                 "reduction": Reduction.MEAN,
             },
         ),

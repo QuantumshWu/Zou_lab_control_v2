@@ -192,7 +192,6 @@ LOGIC_NODE = LogicNodeDescriptor(
             CAMERA_FRAMES_OUTPUT,
             "image",
             semantic={
-                fate_field_name(AxisRef.repeat()): "reduce",
                 "reduction": Reduction.MEAN,
             },
             producer="camera",
@@ -203,7 +202,7 @@ LOGIC_NODE = LogicNodeDescriptor(
             "curve",
             semantic={
                 fate_field_name(AxisRef.point("slm_feedback.candidate")): "x",
-                fate_field_name(AxisRef.data("calibration.site")): "group",
+                fate_field_name(AxisRef.cell_data("calibration.site")): "group",
             },
         ),
         NodePreviewSpec(
@@ -211,7 +210,7 @@ LOGIC_NODE = LogicNodeDescriptor(
             "curve",
             semantic={
                 fate_field_name(AxisRef.point("slm_feedback.candidate")): "x",
-                fate_field_name(AxisRef.data("calibration.site")): "group",
+                fate_field_name(AxisRef.cell_data("calibration.site")): "group",
             },
         ),
     ),

@@ -127,7 +127,8 @@ def test_repeat_zero_monitor_replaces_latest_only_with_a_complete_camera_cycle()
 def test_repeated_freezes_share_one_schema_and_retain_the_frame_bytes() -> None:
     """A live monitor freezes at up to 10 Hz; the schema is a configuration fact.
 
-    One DatasetSchema instance per (producer, signal, roles, shape, dtype)
+    One DatasetSchema instance per ordered Point/Cell axis declaration and
+    array shape/dtype
     keeps schema identity stable, so the per-instance fingerprint cache and
     every downstream schema-fingerprint consumer hit instead of re-hashing per
     freeze -- and the bytes-backed camera frame is retained as a view rather
@@ -142,11 +143,11 @@ def test_repeated_freezes_share_one_schema_and_retain_the_frame_bytes() -> None:
     view = np.asarray(record.image)[None, ...]
     first = snapshot_from_array(
         view, producer="cam", signal="frames",
-        roles=(SPATIAL_Y, SPATIAL_X), generation="g", revision=1,
+        cell_axes=(SPATIAL_Y, SPATIAL_X), generation="g", revision=1,
     )
     second = snapshot_from_array(
         view, producer="cam", signal="frames",
-        roles=(SPATIAL_Y, SPATIAL_X), generation="g", revision=2,
+        cell_axes=(SPATIAL_Y, SPATIAL_X), generation="g", revision=2,
     )
     assert first.block.schema is second.block.schema
     assert first.ref.schema_fingerprint == second.ref.schema_fingerprint
@@ -158,10 +159,48 @@ def test_repeated_freezes_share_one_schema_and_retain_the_frame_bytes() -> None:
     # Another shape (a reconfigure) is another configuration: another schema.
     other = snapshot_from_array(
         np.zeros((1, 6, 9), dtype="<u2"), producer="cam", signal="frames",
-        roles=(SPATIAL_Y, SPATIAL_X), generation="g", revision=3,
+        cell_axes=(SPATIAL_Y, SPATIAL_X), generation="g", revision=3,
     )
     assert other.block.schema is not first.block.schema
     assert other.ref.schema_fingerprint != first.ref.schema_fingerprint
+
+
+def test_snapshot_array_axes_are_positional_and_allow_repeated_roles() -> None:
+    from zlc_data import AxisId, AxisSpec, SCAN_POINT, SITE
+
+    slow = AxisSpec(AxisId("scan.slow"), "slow", SCAN_POINT, 2, (10, 20))
+    fast = AxisSpec(AxisId("scan.fast"), "fast", SCAN_POINT, 3, (1, 2, 3))
+    left = AxisSpec(AxisId("cell.left"), "left", SITE, 2)
+    right = AxisSpec(AxisId("cell.right"), "right", SITE, 4)
+    values = np.arange(1 * 2 * 3 * 2 * 4).reshape(1, 2, 3, 2, 4)
+
+    snapshot = snapshot_from_array(
+        values,
+        producer="ordered",
+        signal="values",
+        point_axes=(slow, fast),
+        cell_axes=(left, right),
+        generation="g",
+        revision=1,
+    )
+
+    schema = snapshot.block.schema
+    assert schema.point_domain.axes == (slow, fast)
+    assert schema.cell_domain.axes == (left, right)
+    assert tuple(schema.point_domain.codes(slow.axis_id)) == (0, 0, 0, 1, 1, 1)
+    assert tuple(schema.point_domain.codes(fast.axis_id)) == (0, 1, 2, 0, 1, 2)
+    assert snapshot.block.values.shape == (1, 6, 2, 4)
+    np.testing.assert_array_equal(snapshot.block.values, values.reshape(1, 6, 2, 4))
+
+    with pytest.raises(TypeError, match="ordered sequence"):
+        snapshot_from_array(
+            np.zeros((1, 2)),
+            producer="ordered",
+            signal="old-mapping",
+            point_axes={SCAN_POINT: slow},  # type: ignore[arg-type]
+            generation="g",
+            revision=1,
+        )
 
 
 def test_direct_monitor_disarms_when_empty_generation_retire_fails() -> None:

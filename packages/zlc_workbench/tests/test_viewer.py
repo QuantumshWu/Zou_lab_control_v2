@@ -40,6 +40,7 @@ from zlc_data import (
     AxisId,
     AxisSpec,
     DatasetSchema,
+    DomainSpec,
     SITE,
     ValidityContract,
     ValueSchema,
@@ -49,7 +50,6 @@ from zlc_plot import AxisRef, NumericRange, SelectorKind
 from zlc_plot.primitives import ImageFrame, ImagePointOverlay
 from zlc_plot.selectors import RectangleRange, SelectorState
 from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, write_ordinary_pulse
-
 
 def _frozen_surface(
     state: PanelState,
@@ -84,7 +84,6 @@ def _frozen_surface(
         {} if overlay is None else overlay,
     )
 
-
 @pytest.mark.parametrize("cell_kind", ("curve", "image", "histogram"))
 def test_saved_panel_state_keeps_every_public_facet_cell_kind(cell_kind) -> None:
     state = PanelState(
@@ -101,11 +100,9 @@ def test_saved_panel_state_keeps_every_public_facet_cell_kind(cell_kind) -> None
 
     assert restored == state
 
-
 def test_panel_state_rejects_incomplete_or_historical_documents() -> None:
     with pytest.raises(ValueError, match="panel state fields differ"):
         PanelState.from_document({"signal": "frame", "site_overlay": "off"})
-
 
 class _Signal:
     def __init__(self) -> None:
@@ -117,7 +114,6 @@ class _Signal:
     def emit(self, *args) -> None:
         for listener in list(self._listeners):
             listener(*args)
-
 
 class _ViewerView:
     """The viewer HANDLE's contract, with Qt taken out."""
@@ -134,6 +130,9 @@ class _ViewerView:
         self.panel_edit_requested = _Signal()
         self.panel_order_committed = _Signal()
         self.panel_editor_closed = _Signal()
+        self.panel_snapshot_refresh_requested = _Signal()
+        self.panel_save_figure_requested = _Signal()
+        self.panel_plot_error = _Signal()
         self.save_image_requested = _Signal()
         self.close_requested = _Signal()
         self.tabs: tuple = ()
@@ -163,12 +162,15 @@ class _ViewerView:
         self.panel_sizes = tuple(str(value) for value in sizes)
         self.panel_default_size = str(default_size)
 
-    def set_panel_kinds(self, kinds, _default="") -> None:
+    def set_panel_kinds(self, kinds: object, default_kind: str = "") -> None:
+        del default_kind
         self.panel_kinds = tuple(kinds)
 
-    def set_panel_intervals(self, intervals, default) -> None:
+    def set_panel_intervals(
+        self, intervals: object, default_interval: int
+    ) -> None:
         self.panel_intervals = tuple(intervals)
-        self.panel_default_interval = int(default)
+        self.panel_default_interval = int(default_interval)
 
     def set_grid_cell_kinds(self, kinds) -> None:
         self.grid_cell_kinds = tuple(kinds)
@@ -207,14 +209,15 @@ class _ViewerView:
     def set_panel_order(self, order) -> None:
         self.panel_order = tuple(order)
 
-    def set_panel_signal_choices(self, panel_id, groups, **values) -> None:
+    def set_panel_signal_choices(self, panel_id: str, *args, **kwargs) -> None:
+        groups = args[0]
         self.panels[str(panel_id)].update(
             signal_groups=tuple(groups),
-            **values,
+            **kwargs,
         )
 
-    def set_panel_publishers(self, _publishers) -> None:
-        pass
+    def set_panel_publishers(self, publishers: object) -> None:
+        del publishers
 
     def panel_ids(self) -> tuple[str, ...]:
         return tuple(self.panels)
@@ -225,7 +228,8 @@ class _ViewerView:
     def set_panel_mutation_enabled(self, panel_id, enabled) -> None:
         self.panels[str(panel_id)]["mutation_enabled"] = bool(enabled)
 
-    def present_panel_front(self, _panel_id, _front) -> bool:
+    def present_panel_front(self, panel_id: str, front: object) -> bool:
+        del panel_id, front
         return True
 
     def set_panel_projection(self, panel_id, state, surface) -> None:
@@ -238,12 +242,14 @@ class _ViewerView:
         self.panels[str(panel_id)]["host"] = host
         self.surface = host
 
-    def open_panel_editor(self, panel_id, editor, *, title="") -> None:
+    def open_panel_editor(
+        self, panel_id: str, projection: Any, *, title: str = ""
+    ) -> None:
         del title
-        self.editors[str(panel_id)] = editor
+        self.editors[str(panel_id)] = projection
 
-    def show_panel_editor(self, _panel_id, _host) -> None:
-        pass
+    def show_panel_editor(self, panel_id: str, host: Any | None) -> None:
+        del panel_id, host
 
     def focus_panel_editor(self, panel_id) -> bool:
         return str(panel_id) in self.editors
@@ -270,6 +276,8 @@ class _ViewerView:
     def set_status(self, text: str, *, error: bool = False) -> None:
         self.status.append((str(text), bool(error)))
 
+    def show_status(self, text: str, severity: str) -> None:
+        self.status.append((str(text), str(severity) == "error"))
 
 def _wait_until(predicate, *, timeout: float = 10.0) -> None:
     from zlc_ui.qt import ensure_qt_app
@@ -281,7 +289,6 @@ def _wait_until(predicate, *, timeout: float = 10.0) -> None:
         time.sleep(0.005)
     assert predicate(), "timed out waiting for the FigureViewer owner turn"
 
-
 def _display_description(plot_input, recipe):
     import zlc_plot
 
@@ -290,7 +297,6 @@ def _display_description(plot_input, recipe):
         return probe.describe_display().result().value
     finally:
         probe.close(timeout=10)
-
 
 def _built_presenter(view) -> FigureViewerPresenter:
     from zlc_workbench.apps.figure_viewer import build
@@ -306,10 +312,8 @@ def _built_presenter(view) -> FigureViewerPresenter:
         request_close=lambda: None,
     )
 
-
 def _close_presenter(presenter: FigureViewerPresenter) -> None:
     _wait_until(presenter.close)
-
 
 def _active_record(presenter: FigureViewerPresenter) -> dict[str, object]:
     record = presenter.panels[presenter._active_panel_id]
@@ -321,7 +325,6 @@ def _active_record(presenter: FigureViewerPresenter) -> dict[str, object]:
             None if record.accepted_surface is None else record.accepted_surface.plot_input
         ),
     }
-
 
 def _formal_viewer_window(saved, monkeypatch, host_factory):
     pytest.importorskip("PyQt5")
@@ -345,7 +348,6 @@ def _formal_viewer_window(saved, monkeypatch, host_factory):
     timer.timeout.connect(lambda: owner_turns.append(True))
     timer.start()
     return application, QtCore, window, owner_turns, timer
-
 
 @pytest.fixture
 def saved(tmp_path):
@@ -382,7 +384,6 @@ def saved(tmp_path):
     finally:
         session.close()
 
-
 @pytest.fixture
 def presenter():
     view = _ViewerView()
@@ -391,7 +392,6 @@ def presenter():
         yield presenter
     finally:
         _close_presenter(presenter)
-
 
 def test_a_saved_dataset_comes_back_with_its_axes(saved) -> None:
     """The point of recording identity: what returns is the dataset, not numbers.
@@ -409,10 +409,9 @@ def test_a_saved_dataset_comes_back_with_its_axes(saved) -> None:
     )
     assert restored.block.schema == original.block.schema
     assert restored.ref.revision == original.ref.revision
-    assert [axis.axis_id.value for axis in restored.block.schema.cell_schema.data_axes] == [
-        axis.axis_id.value for axis in original.block.schema.cell_schema.data_axes
+    assert [axis.axis_id.value for axis in restored.block.schema.cell_domain.axes] == [
+        axis.axis_id.value for axis in original.block.schema.cell_domain.axes
     ]
-
 
 def test_manual_data_uses_runtime_panel_and_the_one_figure_writer(tmp_path) -> None:
     view = _ViewerView()
@@ -421,85 +420,93 @@ def test_manual_data_uses_runtime_panel_and_the_one_figure_writer(tmp_path) -> N
         view.new_data_requested.emit()
         editor_id, draft = next(iter(presenter._data_drafts.items()))
         axis_id = "manual.x"
-        view.data_editor_intent.emit(
-            editor_id,
-            {
-                "op": "set_coordinates",
-                "axis_id": axis_id,
-                "cells": ((8, 1, "midpoint"),),
-            },
-        )
         projection = view.data_editors[editor_id]["projection"]
-        label_texts = projection["coordinates"]["column_values"][1]
-        assert label_texts[8] == "midpoint"
-        assert all(not label for index, label in enumerate(label_texts) if index != 8)
-        assert not projection["can_apply"]
-        assert "incomplete" in projection["message"]
-        assert draft["grid_topology"].coordinate_labels is None
-        assert draft["point_columns"][0].coordinate_labels is None
+        assert tuple(axis["domain"] for axis in projection["axes"]) == (
+            "repeat",
+            "point",
+        )
+        assert projection["axis_values"]["shape"] == (1, 16)
 
         view.data_editor_intent.emit(
             editor_id,
-            {"op": "apply_preview", "note": "must not apply partial labels"},
+            {
+                "op": "set_axis_values",
+                "axis_id": axis_id,
+                "cells": ((0, 8, "8.5"),),
+            },
         )
-        assert draft["publication"] is None
         view.data_editor_intent.emit(
             editor_id,
-            {"op": "insert_coordinate", "axis_id": axis_id, "after": 8},
+            {
+                "op": "edit_axis",
+                "axis_id": axis_id,
+                "name": "detuning",
+                "length": 16,
+                "unit": "MHz",
+                "domain": "point",
+            },
         )
-        assert len(draft["grid_topology"].coordinate_domains[0]) == 16
-        assert "fill every label or clear them all" in view.data_editors[editor_id][
-            "projection"
-        ]["message"]
+        view.data_editor_intent.emit(
+            editor_id,
+            {
+                "op": "add_axis",
+                "name": "shot",
+                "length": 2,
+                "unit": "",
+                "domain": "repeat",
+            },
+        )
+        shot_id = str(draft["selected_axis"])
+        view.data_editor_intent.emit(
+            editor_id,
+            {
+                "op": "set_axis_values",
+                "axis_id": shot_id,
+                "cells": ((0, 0, "10"), (0, 1, "20")),
+            },
+        )
+        view.data_editor_intent.emit(
+            editor_id,
+            {"op": "set_scope", "axis_id": shot_id, "index": 1},
+        )
+        assert draft["scopes"][shot_id] == 1
+        view.data_editor_intent.emit(
+            editor_id,
+            {
+                "op": "add_axis",
+                "name": "temporary",
+                "length": 4,
+                "unit": "",
+                "domain": "cell_data",
+            },
+        )
+        temporary = str(draft["selected_axis"])
+        view.data_editor_intent.emit(
+            editor_id,
+            {"op": "delete_axis", "axis_id": temporary},
+        )
+        assert all(axis.name != "temporary" for axis in draft["cell_axes"])
+        assert "kept coordinate 0" in str(draft["message"])
+        view.data_editor_intent.emit(
+            editor_id,
+            {"op": "set_table_axis", "axis_id": shot_id, "mode": "rows"},
+        )
+        view.data_editor_intent.emit(
+            editor_id,
+            {"op": "set_table_axis", "axis_id": axis_id, "mode": "columns"},
+        )
+        projection = view.data_editors[editor_id]["projection"]
+        assert projection["table"]["shape"] == (2, 16)
+        assert tuple(
+            (axis["name"], axis["mode"]) for axis in projection["table"]["axes"]
+        ) == (("repeat", "scope"), ("shot", "rows"), ("detuning", "columns"))
 
         view.data_editor_intent.emit(
             editor_id,
             {
                 "op": "set_cells",
                 "component": "values",
-                "cells": ((3, 0, "7.25"),),
-            },
-        )
-        labels = tuple(
-            "midpoint" if index == 8 else f"x={index}" for index in range(16)
-        )
-        view.data_editor_intent.emit(
-            editor_id,
-            {
-                "op": "set_coordinates",
-                "axis_id": axis_id,
-                "cells": tuple(
-                    (index, 1, label)
-                    for index, label in enumerate(labels)
-                    if index != 8
-                ),
-            },
-        )
-        projection = view.data_editors[editor_id]["projection"]
-        assert projection["can_apply"]
-        assert draft["grid_topology"].coordinate_labels == (labels,)
-        assert draft["point_columns"][0].coordinate_labels == labels
-
-        view.data_editor_intent.emit(
-            editor_id,
-            {
-                "op": "set_coordinates",
-                "axis_id": axis_id,
-                "cells": tuple((index, 1, "") for index in range(16)),
-            },
-        )
-        projection = view.data_editors[editor_id]["projection"]
-        assert projection["can_apply"]
-        assert draft["grid_topology"].coordinate_labels is None
-        assert draft["point_columns"][0].coordinate_labels is None
-        view.data_editor_intent.emit(
-            editor_id,
-            {
-                "op": "set_coordinates",
-                "axis_id": axis_id,
-                "cells": tuple(
-                    (index, 1, label) for index, label in enumerate(labels)
-                ),
+                "cells": ((0, 3, "7.25"),),
             },
         )
         view.data_editor_intent.emit(
@@ -510,8 +517,7 @@ def test_manual_data_uses_runtime_panel_and_the_one_figure_writer(tmp_path) -> N
             lambda: (
                 presenter.beat()
                 or (
-                    presenter.panels[str(draft["panel_id"])].frozen_data
-                    is not None
+                    presenter.panels[str(draft["panel_id"])].frozen_data is not None
                     and presenter.panels[
                         str(draft["panel_id"])
                     ].frozen_data.publication
@@ -533,15 +539,196 @@ def test_manual_data_uses_runtime_panel_and_the_one_figure_writer(tmp_path) -> N
 
         info, arrays = read_archive(target)
         restored = read_dataset(info, arrays, "data")
-        assert restored.block.values.reshape(-1)[3] == 7.25
-        assert restored.block.schema.grid_topology.coordinate_labels == (labels,)
-        assert restored.block.schema.point_table.columns[0].coordinate_labels == labels
+        assert restored.block.values.shape == (2, 16, 1)
+        assert restored.block.values[0, 3, 0] == 7.25
+        assert restored.block.schema.repeat_domain.axes[-1].coordinates == (10, 20)
+        assert restored.block.schema.point_domain.axes[0].name == "detuning"
+        assert restored.block.schema.point_domain.axes[0].coordinates[8] == 8.5
         lineage = info["sections"]["lineage"]
         assert lineage["root"] == "manual-1"
         assert lineage["nodes"][0]["record"]["operation"] == "manual-create"
     finally:
         _close_presenter(presenter)
 
+def test_manual_axis_metadata_edit_preserves_its_existing_scientific_role(saved) -> None:
+    import zlc_workbench.viewer as viewer_module
+
+    _path, snapshot = saved
+    draft = viewer_module._draft_from_snapshot(
+        snapshot,
+        editor_id="role-check",
+        name="camera",
+        note="",
+        source_text="camera",
+        source_path=None,
+        source_dataset="data",
+        source_lineage={"root": None, "nodes": [], "device_settings": []},
+        source_document={},
+        recipe=None,
+        described=None,
+        overlay=None,
+    )
+    axis = next(
+        item for item in draft["cell_axes"] if str(item.role) == "spatial-x"
+    )
+    viewer_module._edit_axis(
+        draft,
+        str(axis.axis_id),
+        name="camera x",
+        length=axis.size,
+        unit="pixel",
+        domain="cell_data",
+    )
+    edited = next(
+        item for item in draft["cell_axes"] if item.axis_id == axis.axis_id
+    )
+    assert edited.role == axis.role
+    repeat_id = str(draft["repeat_axes"][0].axis_id)
+    viewer_module._delete_axis(draft, repeat_id)
+    restored = viewer_module._manual_snapshot(draft)
+    assert restored.block.schema.repeat_domain.axes == ()
+    assert restored.block.schema.repeat_domain.shape == (1,)
+
+def test_manual_interaction_projection_does_not_rebuild_domains(monkeypatch) -> None:
+    import zlc_workbench.viewer as viewer_module
+
+    snapshot = viewer_module._new_manual_snapshot()
+    draft = viewer_module._draft_from_snapshot(
+        snapshot,
+        editor_id="projection-check",
+        name="manual",
+        note="",
+        source_text="manual",
+        source_path=None,
+        source_dataset="",
+        source_lineage={"root": None, "nodes": [], "device_settings": []},
+        source_document={},
+        recipe=None,
+        described=None,
+        overlay=None,
+    )
+    point = draft["point_axes"][0]
+    draft["point_axes"][0] = AxisSpec(
+        point.axis_id, point.name, point.role, point.size
+    )
+    monkeypatch.setattr(
+        viewer_module,
+        "_mapped_domain",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("ordinary editor projection rebuilt Domain codes")
+        ),
+    )
+    projection = viewer_module._data_projection(draft)
+    assert isinstance(projection["axis_values"]["values"][0], range)
+
+def test_manual_value_edit_preserves_a_sparse_serpentine_domain() -> None:
+    import zlc_workbench.viewer as viewer_module
+    from zlc_data import REPEAT, SCALAR_DOMAIN, SCAN_POINT
+
+    repeat = AxisSpec(AxisId("manual.shot"), "shot", REPEAT, 2, (10, 20))
+    scan_x = AxisSpec(AxisId("manual.x"), "x", SCAN_POINT, 3, (0, 1, 2))
+    scan_y = AxisSpec(AxisId("manual.y"), "y", SCAN_POINT, 2, (5, 6))
+    repeat_domain = DomainSpec((2,), (repeat,), ((0, 1),))
+    point_domain = DomainSpec(
+        (4,),
+        (scan_x, scan_y),
+        ((0, 1, 2, 1), (0, 0, 0, 1)),
+    )
+    schema = DatasetSchema(
+        repeat_domain,
+        point_domain,
+        SCALAR_DOMAIN,
+        ValueSchema.scalar(np.dtype("<f8")),
+    )
+    source_values = np.arange(8, dtype=np.float64).reshape((2, 4, 1))
+    snapshot = owned_snapshot_from_arrays(schema, source_values, 0)
+    draft = viewer_module._draft_from_snapshot(
+        snapshot,
+        editor_id="mapped-edit",
+        name="mapped",
+        note="",
+        source_text="mapped",
+        source_path=None,
+        source_dataset="data",
+        source_lineage={"root": None, "nodes": [], "device_settings": []},
+        source_document={},
+        recipe=None,
+        described=None,
+        overlay=None,
+    )
+
+    # Rename and change coordinates without changing the carrier topology.
+    viewer_module._edit_axis(
+        draft,
+        str(scan_x.axis_id),
+        name="detuning",
+        length=scan_x.size,
+        unit="MHz",
+        domain="point",
+    )
+    draft["values"][1, 1, 1, 0] = 123.0
+    restored = viewer_module._manual_snapshot(draft)
+
+    assert restored.block.schema.repeat_domain.shape == repeat_domain.shape
+    assert restored.block.schema.repeat_domain.axis_codes == repeat_domain.axis_codes
+    assert restored.block.schema.point_domain.shape == point_domain.shape
+    assert restored.block.schema.point_domain.axis_codes == point_domain.axis_codes
+    assert restored.block.schema.point_domain.axes[0].name == "detuning"
+    assert restored.block.values.shape == source_values.shape
+    expected = source_values.copy()
+    expected[1, 3, 0] = 123.0
+    np.testing.assert_array_equal(restored.block.values, expected)
+
+def test_existing_archive_manual_edit_saves_reopens_and_keeps_lineage(
+    saved, tmp_path
+) -> None:
+    path, original = saved
+    view = _ViewerView()
+    presenter = _built_presenter(view)
+    try:
+        presenter.open(str(path))
+        _wait_until(lambda: not presenter._busy)
+        view.edit_data_requested.emit("archive:data")
+        editor_id, draft = next(iter(presenter._data_drafts.items()))
+        view.data_editor_intent.emit(
+            editor_id,
+            {
+                "op": "set_cells",
+                "component": "values",
+                "cells": ((0, 0, "123"),),
+            },
+        )
+        view.data_editor_intent.emit(
+            editor_id,
+            {"op": "apply_preview", "note": "existing data correction"},
+        )
+        _wait_until(
+            lambda: (
+                presenter.beat()
+                or draft["publication"] is not None
+                and presenter.panels[str(draft["panel_id"])].frozen_data is not None
+            )
+        )
+        target = tmp_path / "edited-existing.npz"
+        view.data_editor_intent.emit(
+            editor_id,
+            {
+                "op": "save_as",
+                "path": str(target),
+                "note": "existing data correction",
+            },
+        )
+        _wait_until(lambda: target.is_file() and not presenter._busy)
+        info, arrays = read_archive(target)
+        restored = read_dataset(info, arrays, "data")
+        assert restored.block.values.shape == original.block.values.shape
+        assert restored.block.values.reshape(-1)[0] == 123
+        assert restored.block.schema == original.block.schema
+        lineage = info["sections"]["lineage"]
+        assert lineage["nodes"][-1]["record"]["operation"] == "manual-edit"
+        assert lineage["nodes"][-1]["parents"] == ["event-1"]
+    finally:
+        _close_presenter(presenter)
 
 def test_the_description_reports_only_facts_saved_in_the_archive(saved) -> None:
     path, _snapshot = saved
@@ -596,7 +783,6 @@ def test_the_description_reports_only_facts_saved_in_the_archive(saved) -> None:
         "calibration", "camera", "sequencer"
     ]
     assert len(task.flow["edges"]) == 2
-
 
 def test_the_flow_projection_is_the_saved_exact_node_edge_graph(saved) -> None:
     path, _snapshot = saved
@@ -664,7 +850,6 @@ def test_the_flow_projection_is_the_saved_exact_node_edge_graph(saved) -> None:
     camera_snapshots = dict(diamond_devices)["camera"]["snapshots"]
     assert [item["scope"] for item in camera_snapshots] == ["run", "event"]
 
-
 def test_the_raw_tab_is_the_typed_document_not_a_node_probe(saved) -> None:
     """Every projected tab is a reading; this is the document itself."""
 
@@ -677,8 +862,7 @@ def test_the_raw_tab_is_the_typed_document_not_a_node_probe(saved) -> None:
     # The dataset manifest is part of the document too, however verbose.
     assert any(label.startswith("dataset.data.") for label in labels)
 
-
-def test_opening_shows_the_figure_and_its_record(presenter, saved) -> None:
+def test_opening_shows_the_figure_and_its_record(presenter, saved, tmp_path) -> None:
     path, _snapshot = saved
     presenter.view.path_committed.emit(str(path))
     _wait_until(lambda: not presenter._busy)
@@ -709,7 +893,16 @@ def test_opening_shows_the_figure_and_its_record(presenter, saved) -> None:
     presenter.view.panel_edit_requested.emit(panel_id)
     editor = presenter.view.editors[panel_id]
     assert editor["state"]["signal"] == "@figure/1/data"
-    assert editor["live"] is False
+    assert "live" not in editor
+    assert editor["frozen_snapshot"] is not None
+    assert editor["save_directory"]
+    copied_image = tmp_path / "viewer-copy.png"
+    copied = copied_image.with_suffix(".npz")
+    presenter.view.panel_save_figure_requested.emit(panel_id, str(copied_image))
+    _wait_until(lambda: copied.is_file())
+    original_info, _original_arrays = read_archive(path)
+    copied_info, _copied_arrays = read_archive(copied)
+    assert copied_info["sections"]["lineage"] == original_info["sections"]["lineage"]
     boolean = next(
         field
         for field in presenter.panels[panel_id].parameter_surface["display"]
@@ -738,7 +931,6 @@ def test_opening_shows_the_figure_and_its_record(presenter, saved) -> None:
     presenter.view.panel_remove_requested.emit(added)
     assert tuple(presenter.panels) == (panel_id,)
 
-
 def test_a_file_that_cannot_be_read_is_answered_not_raised(presenter, tmp_path) -> None:
     """An operator types paths.  Most of what they type is not an archive."""
 
@@ -750,7 +942,6 @@ def test_a_file_that_cannot_be_read_is_answered_not_raised(presenter, tmp_path) 
     assert presenter.description is None
     assert presenter.view.status[-1][1] is True
     assert "notes.txt" in presenter.view.status[-1][0]
-
 
 def test_formal_window_slow_failed_open_keeps_turning_and_retains_the_last_figure(
     saved,
@@ -810,7 +1001,6 @@ def test_formal_window_slow_failed_open_keeps_turning_and_retains_the_last_figur
         window.close()
         _wait_until(lambda: not window.is_visible())
 
-
 def test_formal_window_waits_for_guarded_host_work_without_blocking_or_hiding(
     saved,
     monkeypatch,
@@ -866,7 +1056,6 @@ def test_formal_window_waits_for_guarded_host_work_without_blocking_or_hiding(
             window.close()
             _wait_until(lambda: not window.is_visible())
 
-
 def test_the_projection_needs_no_session_and_no_qt() -> None:
     """It answers in a notebook too, which is where most reading happens."""
 
@@ -881,7 +1070,6 @@ def test_the_projection_needs_no_session_and_no_qt() -> None:
         if isinstance(node, ast.ImportFrom) and node.module
     }
     assert not any(name.startswith(("PyQt5", "zlc_atom")) for name in imported), imported
-
 
 def test_saving_an_image_works_however_the_archive_was_spelled(presenter, saved) -> None:
     """A relative Open spelling still establishes one absolute archive home."""
@@ -908,7 +1096,6 @@ def test_saving_an_image_works_however_the_archive_was_spelled(presenter, saved)
     assert Path(written).is_file()
     assert written.parent == path.parent
 
-
 def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
     saved,
     tmp_path,
@@ -934,11 +1121,10 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
     source_schema = snapshot.block.schema
     site_axis = AxisSpec(AxisId("site"), "site", SITE, 2, (0, 1))
     status_schema = DatasetSchema(
-        source_schema.repeat_axis,
-        source_schema.point_table,
-        source_schema.grid_topology,
+        source_schema.repeat_domain,
+        source_schema.point_domain,
+        DomainSpec((2,), (site_axis,)),
         ValueSchema(
-            (site_axis,),
             ValidityContract.value(),
             np.dtype(np.bool_),
             "1",
@@ -1124,21 +1310,27 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
     finally:
         _close_presenter(real_presenter)
 
-
 def test_panel_save_thresholds_and_viewport_reopen_in_canonical_units(tmp_path) -> None:
     """Saved V thresholds and the exact view reopen without display-unit drift."""
 
-    from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+    from data_factory import (
+        axis,
+        make_dataset_schema,
+        make_snapshot,
+        mapped_domain_from_columns,
+        repeat_domain,
+    )
+
+    from zlc_data import DatasetSchema
     samples = np.linspace(-3.0, 3.0, 80)
     values = np.column_stack((samples - 1.0, samples + 1.0))
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=len(samples)),
-        PointTable.from_columns({"site": (0.0, 1.0)}),
+    schema = make_dataset_schema(
+        repeat_domain(size=len(samples)),
+        mapped_domain_from_columns({"site": (0.0, 1.0)}),
         dtype=np.float64,
-        canonical_unit="V",
-        generation="annotation-unit-roundtrip",
+        value_unit="V",
     )
-    snapshot = DatasetSnapshot(schema, values, revision=0)
+    snapshot = make_snapshot(schema, values, revision=0)
     state = PanelState(
         signal="report/distribution",
         kind="facet_grid",
@@ -1146,30 +1338,28 @@ def test_panel_save_thresholds_and_viewport_reopen_in_canonical_units(tmp_path) 
         size="4x4",
         interval_ms=400,
         title="unit report",
-        semantic={"fate:point_coordinate:site": "facet"},
+        semantic={"fate:point:site": "facet"},
         display={"value_display_unit": "mV", "threshold_classifier": True},
         classifier_thresholds=(
             {
                 "value": 1.0,
                 "scope": (
                     {
-                        "domain": "point_coordinate",
+                        "domain": "point",
                         "axis_id": "site",
                         "coordinate": 0,
                     },
                 ),
-                "repeat_index": None,
             },
             {
                 "value": 2.0,
                 "scope": (
                     {
-                        "domain": "point_coordinate",
+                        "domain": "point",
                         "axis_id": "site",
                         "coordinate": 1,
                     },
                 ),
-                "repeat_index": None,
             },
         ),
     )
@@ -1221,23 +1411,28 @@ def test_panel_save_thresholds_and_viewport_reopen_in_canonical_units(tmp_path) 
     finally:
         _close_presenter(presenter)
 
-
 def test_viewer_reenabling_facet_fit_solves_every_cell(tmp_path) -> None:
-    from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+    from data_factory import (
+        axis,
+        make_dataset_schema,
+        make_snapshot,
+        mapped_domain_from_columns,
+        repeat_domain,
+    )
+    from zlc_data import DatasetSchema
     from zlc_plot.fit import FacetFitBatchResult
 
     x = np.linspace(-3.0, 3.0, 40)
     facets = np.repeat((0.0, 1.0), 20)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": x, "facet": facets}),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"x": x, "facet": facets}),
         dtype=np.float64,
-        generation="viewer-facet-fit",
     )
     values = (
         2.0 * np.exp(-0.5 * ((x - 0.15) / 0.9) ** 2) + 0.2
     )[None, :]
-    snapshot = DatasetSnapshot(schema, values, revision=0)
+    snapshot = make_snapshot(schema, values, revision=0)
     state = PanelState(
         signal="saved/facet-curve",
         kind="facet_grid",
@@ -1246,8 +1441,8 @@ def test_viewer_reenabling_facet_fit_solves_every_cell(tmp_path) -> None:
         interval_ms=400,
         title="facet curve",
         semantic={
-            "fate:point_coordinate:facet": "facet",
-            "fate:point_coordinate:x": "x",
+            "fate:point:facet": "facet",
+            "fate:point:x": "x",
             "fate:repeat": "reduce",
             "reduction": "mean",
         },
@@ -1300,28 +1495,34 @@ def test_viewer_reenabling_facet_fit_solves_every_cell(tmp_path) -> None:
     finally:
         _close_presenter(presenter)
 
-
 def test_viewer_restores_facet_cell_kind_before_its_semantic_vocabulary(
     tmp_path,
 ) -> None:
     """A saved Histogram vocabulary must not be applied to an inferred Image."""
 
-    from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+    from data_factory import (
+        axis,
+        make_dataset_schema,
+        make_snapshot,
+        mapped_domain_from_columns,
+        repeat_domain,
+    )
+
+    from zlc_data import DatasetSchema
     from zlc_plot import HistogramPlot
 
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=8),
-        PointTable.from_columns({"source_index": (0.0, 1.0)}),
-        data_axes=(
-            Axis.create("frame", size=3),
-            Axis.create("site", size=4),
+    schema = make_dataset_schema(
+        repeat_domain(size=8),
+        mapped_domain_from_columns({"source_index": (0.0, 1.0)}),
+        cell_axes=(
+            axis("frame", size=3),
+            axis("site", size=4),
         ),
         dtype=np.float64,
-        generation="viewer-histogram-cell-identity",
     )
-    snapshot = DatasetSnapshot(
+    snapshot = make_snapshot(
         schema,
-        np.arange(np.prod(schema.shape), dtype=np.float64).reshape(schema.shape),
+        np.arange(np.prod(schema.physical_shape), dtype=np.float64).reshape(schema.physical_shape),
         revision=0,
     )
     state = PanelState(
@@ -1332,10 +1533,10 @@ def test_viewer_restores_facet_cell_kind_before_its_semantic_vocabulary(
         interval_ms=400,
         title="site histograms",
         semantic={
-            "fate:repeat": "pool",
-            "fate:point_coordinate:source_index": "pool",
-            "fate:data:frame": ["scope-value", 1],
-            "fate:data:site": "facet",
+            "fate:repeat:repeat": "pool",
+            "fate:point:source_index": "pool",
+            "fate:cell_data:frame": ["scope-value", 1],
+            "fate:cell_data:site": "facet",
             "reduction": "mean",
         },
     )
@@ -1360,20 +1561,19 @@ def test_viewer_restores_facet_cell_kind_before_its_semantic_vocabulary(
         assert active["state"].cell_kind == "histogram"
         described = active["host"].describe_display().result().value
         assert isinstance(described.spec.cell, HistogramPlot)
-        assert described.semantics.values["fate:repeat"] == "pool"
+        assert described.semantics.values["fate:repeat:repeat"] == "pool"
         assert (
             described.semantics.values[
-                "fate:point_coordinate:source_index"
+                "fate:point:source_index"
             ]
             == "pool"
         )
-        assert described.semantics.values["fate:data:frame"] == (
+        assert described.semantics.values["fate:cell_data:frame"] == (
             "scope-value",
             1,
         )
     finally:
         _close_presenter(presenter)
-
 
 def test_panel_save_reports_that_the_archive_survived_an_image_failure(
     saved,
@@ -1410,7 +1610,6 @@ def test_panel_save_reports_that_the_archive_survived_an_image_failure(
     archive = tmp_path / "failed-image.npz"
     assert archive.exists()
     assert str(archive) in str(failure.value)
-
 
 def test_panel_save_does_not_render_when_the_archive_fails(
     saved,

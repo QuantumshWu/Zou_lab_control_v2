@@ -53,7 +53,9 @@ _DEFAULT_PLOT_SIZE = "2x2"
 def _snapshot(values: np.ndarray, signal: str, revision: int):
     return snapshot_from_array(
         values[None], producer="slm_editor", signal=signal,
-        roles=(SPATIAL_Y, SPATIAL_X), generation="control", revision=revision,
+        cell_axes=(SPATIAL_Y, SPATIAL_X),
+        generation="control",
+        revision=revision,
     )
 
 
@@ -62,8 +64,8 @@ def _host(values: np.ndarray, signal: str, title: str) -> RasterPlotHost:
     return RasterPlotHost.from_plot(
         _snapshot(values, signal, 0),
         ImagePlot(
-            AxisRef.data(f"{prefix}.1.spatial-x"),
-            AxisRef.data(f"{prefix}.0.spatial-y"),
+            AxisRef.cell_data(f"{prefix}.1.spatial-x"),
+            AxisRef.cell_data(f"{prefix}.0.spatial-y"),
             labels=PlotLabels(title=title, x="x", y="y"),
         ),
         # One plot occupies half of the Editor row.  ``2x2`` is the standing

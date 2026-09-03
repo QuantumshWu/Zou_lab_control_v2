@@ -23,13 +23,11 @@ from zlc_data import (
     AxisId,
     AxisSpec,
     DatasetSchema,
-    GridTopology,
+    DomainSpec,
     OwnedSnapshot,
-    PointColumn,
-    PointTable,
     expand_snapshot_validity,
-    point_ordinal_axis,
 )
+from zlc_data.axis import SCALAR
 
 from .kinds import AxisDomain, AxisRef
 from .units import DEFAULT_UNITS, Unit, UnitRegistry, resolve_unit
@@ -90,11 +88,11 @@ def schema_shape(schema: DatasetSchema) -> tuple[int, ...]:
 
 
 def schema_repeat_count(schema: DatasetSchema) -> int:
-    return int(schema.repeat_axis.size)
+    return int(schema.repeat_domain.size)
 
 
 def schema_value_unit(schema: DatasetSchema, registry: UnitRegistry) -> Unit:
-    return resolve_unit(schema.cell_schema.value_unit or "1", registry)
+    return resolve_unit(schema.value_schema.value_unit or "1", registry)
 
 
 def image_axes(schema: DatasetSchema) -> tuple[Any, Any] | None:
@@ -114,7 +112,7 @@ def image_axes(schema: DatasetSchema) -> tuple[Any, Any] | None:
 
     if not isinstance(schema, DatasetSchema):
         return None
-    axes = tuple(schema.cell_schema.data_axes)
+    axes = tuple(schema.cell_domain.axes)
     by_role = {axis.role: axis for axis in axes}
     x_axis, y_axis = by_role.get(SPATIAL_X), by_role.get(SPATIAL_Y)
     if x_axis is not None and y_axis is not None:
@@ -128,28 +126,6 @@ def image_axes(schema: DatasetSchema) -> tuple[Any, Any] | None:
     return significant[-1], significant[-2]
 
 
-def rows_are_named(schema: DatasetSchema) -> bool:
-    """Whether something the producer declared identifies each point row.
-
-    A declared topology does (the rows are its grid, in order), and so does
-    any point column whose values are distinct -- a camera cycle's frame
-    number, a scan's swept parameter.  When one of those exists, the rows ARE
-    it, and offering a generic ordinal beside it puts the same axis in the
-    table twice: an operator saw "point row (3)" and "frame (3)" and had to
-    guess which of the two was the frames.
-    """
-
-    if not isinstance(schema, DatasetSchema):
-        raise TypeError("schema must be zlc_data.DatasetSchema")
-    if schema.grid_topology is not None:
-        return True
-    for column in schema.point_table.columns:
-        values = tuple(column.values)
-        if values and len(set(values)) == len(values):
-            return True
-    return False
-
-
 #: One axis reference with the number of distinct positions it spans.
 AxisEntry = tuple[AxisRef, int]
 
@@ -160,35 +136,29 @@ class AxisFamilies:
 
     The grouping is by declared role and place, never by name:
 
-    ``repeat``   the repeat axis (R).
+    ``repeat``   the axes carried by the physical repeat rows (R).
     ``history``  the Runtime's shot index (a PRIMARY_INDEX point axis).
     ``scan``     authored scan dimensions (SCAN_POINT), slowest first.
     ``events``   event sequences inside one cycle (READOUT_EVENT: frames,
-                 frame pairs), and any topology dimension no column names.
+                 frame pairs).
     ``picture``  the two cell axes that ARE an image, as (x, y), when the
                  dataset declares one (:func:`image_axes`).
-    ``content``  every other content axis -- sites, components, a point
-                 column of sites -- slowest first, point axes first.
+    ``content``  every other content axis -- sites and components -- slowest
+                 first, point axes first.
     ``data``     ``content`` and the picture together, in declaration order.
-    ``rows``     the bare point-row ordinal, when nothing names the rows.
-
-    ``topology`` says whether the points are a declared grid; a plot's
-    defaults treat an unscanned cycle's point column as its authored cell
-    identity even at one value, and a scan's degenerate dimension as
-    invisible, which is why the two are told apart here rather than by
-    every reader.
+    ``repeat_size`` and ``has_point_axes`` retain the two physical-domain
+    facts needed by default inference without inventing synthetic row axes.
     """
 
-    repeat: AxisEntry
+    repeat: tuple[AxisEntry, ...]
+    repeat_size: int
     history: AxisEntry | None
     scan: tuple[AxisEntry, ...]
     events: tuple[AxisEntry, ...]
     picture: tuple[AxisEntry, AxisEntry] | None
     content: tuple[AxisEntry, ...]
     data: tuple[AxisEntry, ...]
-    rows: AxisEntry | None
-    topology: bool
-    has_point_columns: bool
+    has_point_axes: bool
 
     def live_scan(self) -> tuple[AxisEntry, ...]:
         return tuple(entry for entry in self.scan if entry[1] > 1)
@@ -202,70 +172,29 @@ class AxisFamilies:
     def live_data(self) -> tuple[AxisEntry, ...]:
         return tuple(entry for entry in self.data if entry[1] > 1)
 
-    def live_rows(self) -> AxisRef | None:
-        return None if self.rows is None or self.rows[1] <= 1 else self.rows[0]
-
     def first_data_axis(self) -> AxisRef | None:
         return self.data[0][0] if self.data else None
-
-    def rows_or_none(self) -> AxisRef | None:
-        return None if self.rows is None else self.rows[0]
-
-
-def _value_changes(column: PointColumn) -> int:
-    """How many times a column's value changes from one row to the next."""
-
-    values = tuple(column.values)
-    return sum(1 for before, after in zip(values, values[1:]) if before != after)
 
 
 def classify_axes(schema: DatasetSchema) -> AxisFamilies:
     """Group a dataset's axes into :class:`AxisFamilies`.
 
-    A topology dimension takes the role of the point column that shares its
-    id -- a scan axis is a SCAN_POINT column, a cycle's frames a
-    READOUT_EVENT column -- and a dimension no column names (the anonymous
-    source-point fallback) is an event sequence.  A point column that is
-    not a dimension is classified the same way by its own role.
+    Each logical axis is already declared exactly once by its physical
+    domain.  Classification therefore reads role and declaration order; it
+    never reconstructs axes from repeated row values or a parallel topology.
     """
 
     if not isinstance(schema, DatasetSchema):
         raise TypeError("schema must be zlc_data.DatasetSchema")
-    columns = tuple(schema.point_table.columns)
-    role_of = {str(column.coordinate_id): column.role for column in columns}
-    entries: list[tuple[AxisRef, int, object]] = []
-    topology = schema.grid_topology
-    dimension_ids: set[str] = set()
-    if topology is not None:
-        for dimension, size in zip(topology.dimension_ids, topology.logical_shape):
-            dimension_ids.add(str(dimension))
-            entries.append(
-                (
-                    AxisRef.point_dimension(str(dimension)),
-                    int(size),
-                    role_of.get(str(dimension)),
-                )
-            )
-    bare = [
-        column
-        for column in columns
-        if str(column.coordinate_id) not in dimension_ids
-    ]
-    # A topology says which dimension is outermost.  Bare columns say so
-    # with their rows: the column whose value changes least often down the
-    # table is the slowest loop, so it comes first.  At a tie the LATER
-    # declared column is taken as the slower, which leaves the first
-    # declared as the sweep a curve walks.
-    for _index, column in sorted(
-        enumerate(bare), key=lambda item: (_value_changes(item[1]), -item[0])
-    ):
-        entries.append(
-            (
-                AxisRef.point(str(column.coordinate_id)),
-                len(set(column.values)),
-                column.role,
-            )
-        )
+    repeat = tuple(
+        (AxisRef.repeat(str(axis.axis_id)), int(axis.size))
+        for axis in schema.repeat_domain.axes
+    )
+    point_axes = tuple(schema.point_domain.axes)
+    entries = tuple(
+        (AxisRef.point(str(axis.axis_id)), int(axis.size), axis.role)
+        for axis in point_axes
+    )
     history: AxisEntry | None = None
     scan: list[AxisEntry] = []
     events: list[AxisEntry] = []
@@ -285,35 +214,30 @@ def classify_axes(schema: DatasetSchema) -> AxisFamilies:
     if pair is not None:
         x_axis, y_axis = pair
         picture = (
-            (AxisRef.data(str(x_axis.axis_id)), int(x_axis.size)),
-            (AxisRef.data(str(y_axis.axis_id)), int(y_axis.size)),
+            (AxisRef.cell_data(str(x_axis.axis_id)), int(x_axis.size)),
+            (AxisRef.cell_data(str(y_axis.axis_id)), int(y_axis.size)),
         )
     picture_ids = (
         set() if pair is None else {str(axis.axis_id) for axis in pair}
     )
     cell_axes = tuple(
-        (AxisRef.data(str(axis.axis_id)), int(axis.size))
-        for axis in schema.cell_schema.data_axes
+        (AxisRef.cell_data(str(axis.axis_id)), int(axis.size))
+        for axis in schema.cell_domain.axes
+        if axis.role != SCALAR
     )
     content = tuple(point_content) + tuple(
         entry for entry in cell_axes if entry[0].axis_id not in picture_ids
     )
-    rows = (
-        None
-        if rows_are_named(schema)
-        else (AxisRef.point_rows(), int(schema.point_table.row_count))
-    )
     return AxisFamilies(
-        repeat=(AxisRef.repeat(), int(schema.repeat_axis.size)),
+        repeat=repeat,
+        repeat_size=int(schema.repeat_domain.size),
         history=history,
         scan=tuple(scan),
         events=tuple(events),
         picture=picture,
         content=content,
         data=tuple(point_content) + cell_axes,
-        rows=rows,
-        topology=topology is not None,
-        has_point_columns=bool(columns),
+        has_point_axes=bool(point_axes),
     )
 
 
@@ -353,11 +277,10 @@ class ResolvedAxis:
     size: int
     coordinates: Sequence[Any]
     dimension: int
+    domain: DomainSpec
     unit_annotation: str | None = None
     coordinate_frame: str | None = None
     coordinate_labels: tuple[str, ...] | None = None
-    declared_domain: bool = True
-    topology_position: int | None = None
 
     @property
     def label(self) -> str:
@@ -371,25 +294,19 @@ class ResolvedAxis:
 
         if not isinstance(schema, DatasetSchema):
             raise TypeError("schema must be zlc_data.DatasetSchema")
-        if self.topology_position is None:
-            return np.arange(self.size, dtype=np.int64)
-        topology = schema.grid_topology
-        if topology is None:
-            raise KeyError(self.axis_id)
-        # One column of the topology's own cached index array: the walk
-        # over every row's tuple was the single largest cost of a dense
-        # scan's revision.
-        return np.ascontiguousarray(
-            topology.cell_indices[:, self.topology_position]
-        )
+        return self.domain.codes(self.axis_id)
+
+    def coordinate_position(self, coordinate: object) -> int | None:
+        """Resolve one coordinate through the producer's immutable axis."""
+
+        return self.domain.axis(self.axis_id).coordinate_position(coordinate)
 
 
 def resolve_axis(schema: DatasetSchema, ref: AxisRef) -> ResolvedAxis:
     """Resolve an exact :class:`AxisRef` against one schema.
 
-    Human labels never participate.  Point coordinates and topology
-    dimensions may share an ``AxisId`` as two views of the same physical point
-    domain, but callers must choose the exact domain they intend.
+    Human labels never participate.  Every axis belongs to exactly one of the
+    Repeat, Point or Cell-data domains and therefore has one plot identity.
     """
 
     if not isinstance(schema, DatasetSchema):
@@ -397,7 +314,11 @@ def resolve_axis(schema: DatasetSchema, ref: AxisRef) -> ResolvedAxis:
     if not isinstance(ref, AxisRef):
         raise TypeError("ref must be AxisRef")
 
-    def dense_axis(axis: AxisSpec, dimension: int) -> ResolvedAxis:
+    def domain_axis(
+        domain: DomainSpec,
+        axis: AxisSpec,
+        dimension_offset: int,
+    ) -> ResolvedAxis:
         coordinates: Sequence[Any] = (
             axis.coordinates
             if axis.coordinates is not None
@@ -408,7 +329,8 @@ def resolve_axis(schema: DatasetSchema, ref: AxisRef) -> ResolvedAxis:
             axis.name,
             int(axis.size),
             coordinates,
-            dimension,
+            dimension_offset + domain.physical_dimension(axis.axis_id),
+            domain,
             axis.unit,
             None
             if axis.coordinate_frame is None
@@ -416,74 +338,16 @@ def resolve_axis(schema: DatasetSchema, ref: AxisRef) -> ResolvedAxis:
             axis.coordinate_labels,
         )
 
-    if ref.domain is AxisDomain.REPEAT:
-        return dense_axis(schema.repeat_axis, 0)
-    if ref.domain is AxisDomain.POINT_ROW:
-        return dense_axis(point_ordinal_axis(schema.point_table.row_count), 1)
-    assert ref.axis_id is not None
     axis_id = AxisId(ref.axis_id)
-    if ref.domain is AxisDomain.POINT_COORDINATE:
-        column = schema.point_table.column(axis_id)
-        return ResolvedAxis(
-            column.coordinate_id,
-            column.name,
-            len(column.values),
-            column.values,
-            1,
-            column.unit,
-            None
-            if column.coordinate_frame is None
-            else str(column.coordinate_frame),
-            column.coordinate_labels,
-            declared_domain=False,
-        )
-    if ref.domain is AxisDomain.POINT_DIMENSION:
-        topology = schema.grid_topology
-        if topology is None:
-            raise KeyError(axis_id)
-        try:
-            position = topology.dimension_ids.index(axis_id)
-        except ValueError as error:
-            raise KeyError(axis_id) from error
-        name = str(axis_id)
-        unit: str | None = None
-        frame: str | None = None
-        # The labels are the domain's own: a cropped view keeps every domain
-        # coordinate but only the surviving rows, so joining them through
-        # the matching column's rows lost the labels of every row cropped.
-        labels = (
-            None
-            if topology.coordinate_labels is None
-            else topology.coordinate_labels[position]
-        )
-        try:
-            column = schema.point_table.column(axis_id)
-        except KeyError:
-            pass
-        else:
-            name = column.name
-            unit = column.unit
-            frame = (
-                None
-                if column.coordinate_frame is None
-                else str(column.coordinate_frame)
-            )
-        return ResolvedAxis(
-            axis_id,
-            name,
-            len(topology.coordinate_domains[position]),
-            topology.coordinate_domains[position],
-            1,
-            unit,
-            frame,
-            labels,
-            topology_position=position,
-        )
-    if ref.domain is AxisDomain.DATA:
-        for position, axis in enumerate(schema.cell_schema.data_axes):
-            if axis.axis_id == axis_id:
-                return dense_axis(axis, 2 + position)
-        raise KeyError(axis_id)
+    offset = 0
+    for domain_name, domain in (
+        (AxisDomain.REPEAT, schema.repeat_domain),
+        (AxisDomain.POINT, schema.point_domain),
+        (AxisDomain.CELL_DATA, schema.cell_domain),
+    ):
+        if ref.domain is domain_name:
+            return domain_axis(domain, domain.axis(axis_id), offset)
+        offset += len(domain.shape)
     raise KeyError(ref)
 
 
@@ -495,16 +359,13 @@ __all__ = [
     "AxisSpec",
     "DEFAULT_UNITS",
     "DatasetSchema",
-    "GridTopology",
+    "DomainSpec",
     "OwnedSnapshot",
-    "PointColumn",
-    "PointTable",
     "Unit",
     "UnitRegistry",
     "classify_axes",
     "image_axes",
     "resolve_unit",
-    "rows_are_named",
     "resolve_axis",
     "schema_equal",
     "schema_repeat_count",

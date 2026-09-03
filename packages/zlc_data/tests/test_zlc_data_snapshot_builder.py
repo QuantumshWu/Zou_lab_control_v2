@@ -12,8 +12,8 @@ from zlc_data import (
     DataBlock,
     DatasetRevision,
     DatasetSchema,
+    DomainSpec,
     OwnedSnapshot,
-    PointTable,
     REPEAT,
     SPATIAL_X,
     StreamGenerationId,
@@ -40,10 +40,14 @@ def _schema(*, component_validity: bool) -> DatasetSchema:
         else ValidityContract.value()
     )
     return DatasetSchema(
-        repeat,
-        PointTable(2),
-        None,
-        ValueSchema((component,), contract, np.dtype("<f4")),
+        DomainSpec((2,), (repeat,), ((0, 1),)),
+        DomainSpec(
+            (2,),
+            (AxisSpec(AxisId("point"), "point", SPATIAL_X, 2, (0, 1)),),
+            ((0, 1),),
+        ),
+        DomainSpec((3,), (component,)),
+        ValueSchema(contract, np.dtype("<f4")),
     )
 
 
@@ -96,14 +100,15 @@ def test_direct_constructor_matches_explicit_runtime_construction():
     assert isinstance(direct.block.validity, type(runtime.block.validity))
 
 
-def test_cell_schema_and_axes_form_constructs_a_single_carrier():
+def test_value_schema_and_domains_form_constructs_a_single_carrier():
     schema = _schema(component_validity=False)
     snapshot = owned_snapshot_from_arrays(
-        schema.cell_schema,
+        schema.value_schema,
         np.ones(schema.physical_shape, dtype="<f4"),
         3,
-        repeat_axis=schema.repeat_axis,
-        point_table=schema.point_table,
+        repeat_domain=schema.repeat_domain,
+        point_domain=schema.point_domain,
+        cell_domain=schema.cell_domain,
         block_id="cell-schema-block",
         stream_generation="cell-schema-generation",
     )

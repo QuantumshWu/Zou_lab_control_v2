@@ -25,12 +25,10 @@ if TYPE_CHECKING:
     from .notebook import NotebookView
 
 
-def _axis(value: AxisRef | str) -> AxisRef:
-    if isinstance(value, AxisRef):
-        return value
-    if isinstance(value, str):
-        return AxisRef.point(value)
-    raise TypeError("axis must be AxisRef or a PointTable column name")
+def _axis(value: AxisRef) -> AxisRef:
+    if not isinstance(value, AxisRef):
+        raise TypeError("axis must be an explicit AxisRef")
+    return value
 
 
 def _with_parameter_alias(
@@ -60,9 +58,9 @@ def _with_parameter_alias(
 
 def curve(
     data: OwnedSnapshot,
-    x: AxisRef | str,
+    x: AxisRef,
     *,
-    group: AxisRef | str | None = None,
+    group: AxisRef | None = None,
     reduction: Reduction = Reduction.MEAN,
     uncertainty: bool | None = None,
     labels: PlotLabels | None = None,
@@ -70,7 +68,7 @@ def curve(
     parameters: Mapping[str, object] | None = None,
     **session_options: Any,
 ) -> PlotSession:
-    """Create a Curve session; text axes mean explicit PointTable columns."""
+    """Create a Curve session from explicit producer-domain axis identities."""
 
     values = _with_parameter_alias(
         parameters, "uncertainty", uncertainty, alias="uncertainty"
@@ -110,8 +108,8 @@ def histogram(
 
 def image(
     data: OwnedSnapshot | ImageFrame,
-    x: AxisRef | str,
-    y: AxisRef | str,
+    x: AxisRef,
+    y: AxisRef,
     *,
     reduction: Reduction = Reduction.MEAN,
     overlay: ImagePointOverlay | None = None,
@@ -138,7 +136,7 @@ def image(
 def rolling(
     data: OwnedSnapshot,
     *,
-    group: AxisRef | str | None = None,
+    group: AxisRef | None = None,
     reduction: Reduction = Reduction.MEAN,
     trailing: int | None = None,
     side_distribution: bool | None = None,
@@ -173,7 +171,7 @@ def rolling(
 
 def facet_grid(
     data: OwnedSnapshot,
-    facet: AxisRef | str,
+    facet: AxisRef,
     cell: CurvePlot | ImagePlot | HistogramPlot,
     *,
     labels: PlotLabels | None = None,

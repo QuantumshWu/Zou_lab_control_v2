@@ -240,15 +240,15 @@ def _source_index_size(bench: ConsoleBench, signal: str) -> int:
     from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
 
     snapshot = bench.session.signal_plane.current_dataset(signal)
-    column = next(
+    axis = next(
         (
             item
-            for item in snapshot.block.schema.point_table.columns
-            if item.coordinate_id == PRIMARY_INDEX_AXIS_ID
+            for item in snapshot.block.schema.point_domain.axes
+            if item.axis_id == PRIMARY_INDEX_AXIS_ID
         ),
         None,
     )
-    return 0 if column is None else len(set(column.values))
+    return 0 if axis is None else axis.size
 
 
 def _revision(bench: ConsoleBench, signal: str) -> int | None:

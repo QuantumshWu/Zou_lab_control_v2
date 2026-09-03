@@ -22,10 +22,9 @@ from zlc_data import (
     DataBlock,
     DatasetRevision,
     DatasetSchema,
-    GridTopology,
+    DomainSpec,
     OwnedSnapshot,
-    PointColumn,
-    PointTable,
+    SCALAR_DOMAIN,
     StreamGenerationId,
     ValidityContract,
     ValueSchema,
@@ -113,7 +112,7 @@ def _snapshot(
         np.asarray(values, dtype=np.float64),
         CellValidity(
             np.ones(
-                (schema.repeat_axis.size, schema.point_table.row_count),
+                (schema.repeat_domain.size, schema.point_domain.size),
                 dtype=np.bool_,
             )
         ),
@@ -134,8 +133,8 @@ def _source_setup(
         "frame": LiveDatasetOutput(
             declaration,
             _snapshot("frame", 1, schema, values),
-            MonitorCoverage(schema.repeat_axis.size * schema.point_table.row_count,
-                            schema.repeat_axis.size * schema.point_table.row_count),
+            MonitorCoverage(schema.repeat_domain.size * schema.point_domain.size,
+                            schema.repeat_domain.size * schema.point_domain.size),
         )
     }
     source = _Source(declaration)
@@ -187,12 +186,12 @@ def _finite_source_setup(
 ):
     declaration = DatasetOutputDeclaration("frame", "test.camera.frame")
     total = (
-        canonical_schema.repeat_axis.size
-        * canonical_schema.point_table.row_count
+        canonical_schema.repeat_domain.size
+        * canonical_schema.point_domain.size
     )
     event_cells = (
-        event_schema.repeat_axis.size
-        * event_schema.point_table.row_count
+        event_schema.repeat_domain.size
+        * event_schema.point_domain.size
     )
     state = {
         "frame": LiveDatasetOutput(
@@ -226,7 +225,7 @@ def _seal_source(
     plane.retire(source)
     plane.begin_generation(source)
     schema = output.snapshot.block.schema
-    cells = schema.repeat_axis.size * schema.point_table.row_count
+    cells = schema.repeat_domain.size * schema.point_domain.size
     plane.commit_live(
         source,
         {
@@ -248,39 +247,53 @@ def _image_schema() -> DatasetSchema:
     x = AxisSpec(AxisId("x"), "x", SPATIAL_X, 4, (-1.0, 0.0, 1.0, 2.0))
     y = AxisSpec(AxisId("y"), "y", SPATIAL_Y, 3, (10.0, 20.0, 30.0))
     return DatasetSchema(
-        repeat,
-        PointTable(1),
-        None,
-        ValueSchema((x, y), ValidityContract.value(), np.dtype("float64"), "counts"),
+        DomainSpec((1,), (repeat,), ((0,),)),
+        DomainSpec((1,), (), ()),
+        DomainSpec((x.size, y.size), (x, y)),
+        ValueSchema(ValidityContract.value(), np.dtype("float64"), "counts"),
     )
 
 
 def _curve_schema(with_facet: bool = False) -> DatasetSchema:
     repeat = AxisSpec(AxisId("repeat"), "repeat", REPEAT, 1, (0,))
-    columns = [
-        PointColumn(
+    axes = [
+        AxisSpec(
             AxisId("x"),
             "x",
             SCAN_POINT,
-            PointColumn.NUMERIC,
+            5,
             (0.0, 1.0, 2.0, 3.0, 4.0),
         )
     ]
+    codes = [tuple(range(5))]
     if with_facet:
-        columns.append(
-            PointColumn(
+        axes.append(
+            AxisSpec(
                 AxisId("facet"),
                 "facet",
                 SCAN_POINT,
-                PointColumn.NUMERIC,
-                (0.0, 0.0, 1.0, 1.0, 1.0),
+                2,
+                (0.0, 1.0),
             )
         )
+        codes.append((0, 0, 1, 1, 1))
     return DatasetSchema(
-        repeat,
-        PointTable(5, tuple(columns)),
-        None,
+        DomainSpec((1,), (repeat,), ((0,),)),
+        DomainSpec((5,), tuple(axes), tuple(codes)),
+        SCALAR_DOMAIN,
         ValueSchema.scalar(np.dtype("float64"), "counts"),
+    )
+
+
+def _with_repeat_size(schema: DatasetSchema, size: int) -> DatasetSchema:
+    (axis,) = schema.repeat_domain.axes
+    return replace(
+        schema,
+        repeat_domain=DomainSpec(
+            (size,),
+            (replace(axis, size=size, coordinates=tuple(range(size))),),
+            (tuple(range(size)),),
+        ),
     )
 
 
@@ -332,8 +345,8 @@ def test_image_area_materializes_closed_roi_and_mean_with_lineage() -> None:
         "image",
         "area",
         (
-            SelectionRange("x", 0.0, 1.0, domain="data"),
-            SelectionRange("y", 20.0, 30.0, domain="data"),
+            SelectionRange("x", 0.0, 1.0, domain="cell_data"),
+            SelectionRange("y", 20.0, 30.0, domain="cell_data"),
         ),
         revision=1,
     )
@@ -381,8 +394,8 @@ def test_image_area_catalog_statistics_and_publication_choice_share_one_owner() 
         "image",
         "area",
         (
-            SelectionRange("x", -1.0, 2.0, domain="data"),
-            SelectionRange("y", 10.0, 30.0, domain="data"),
+            SelectionRange("x", -1.0, 2.0, domain="cell_data"),
+            SelectionRange("y", 10.0, 30.0, domain="cell_data"),
         ),
         revision=1,
     )
@@ -401,7 +414,7 @@ def test_image_area_catalog_statistics_and_publication_choice_share_one_owner() 
             value = front.value(f"@logic/image/{name}")
             assert value is not None
             assert float(value.snapshot.block.values.reshape(-1)[0]) == scalar
-            assert value.snapshot.block.schema.cell_schema.value_unit == "counts"
+            assert value.snapshot.block.schema.value_schema.value_unit == "counts"
 
         bridge.configure_outputs({name: name == "roi_max" for name in derived})
         front = plane.freeze()
@@ -430,8 +443,8 @@ def test_selection_commit_republishes_same_source_and_source_revision_follows() 
         "image",
         "area",
         (
-            SelectionRange("x", -1.0, 0.0, domain="data"),
-            SelectionRange("y", 10.0, 20.0, domain="data"),
+            SelectionRange("x", -1.0, 0.0, domain="cell_data"),
+            SelectionRange("y", 10.0, 20.0, domain="cell_data"),
         ),
         revision=1,
     )
@@ -439,8 +452,8 @@ def test_selection_commit_republishes_same_source_and_source_revision_follows() 
         "image",
         "area",
         (
-            SelectionRange("x", 1.0, 2.0, domain="data"),
-            SelectionRange("y", 20.0, 30.0, domain="data"),
+            SelectionRange("x", 1.0, 2.0, domain="cell_data"),
+            SelectionRange("y", 20.0, 30.0, domain="cell_data"),
         ),
         revision=2,
     )
@@ -496,8 +509,8 @@ def test_close_does_not_wait_for_selection_materialization_or_publish_stale(
         "image",
         "area",
         (
-            SelectionRange("x", 0.0, 1.0, domain="data"),
-            SelectionRange("y", 20.0, 30.0, domain="data"),
+            SelectionRange("x", 0.0, 1.0, domain="cell_data"),
+            SelectionRange("y", 20.0, 30.0, domain="cell_data"),
         ),
         revision=1,
     )
@@ -568,14 +581,7 @@ def test_close_does_not_wait_for_selection_materialization_or_publish_stale(
 
 def test_selection_derives_from_the_canonical_repeat_prefix_not_the_event_chunk() -> None:
     event_schema = _image_schema()
-    canonical_schema = replace(
-        event_schema,
-        repeat_axis=replace(
-            event_schema.repeat_axis,
-            size=3,
-            coordinates=(0, 1, 2),
-        ),
-    )
+    canonical_schema = _with_repeat_size(event_schema, 3)
     first = np.arange(12, dtype=np.float64).reshape(1, 1, 4, 3)
     plane, source, state, _initial = _finite_source_setup(
         canonical_schema,
@@ -597,8 +603,8 @@ def test_selection_derives_from_the_canonical_repeat_prefix_not_the_event_chunk(
         "image",
         "area",
         (
-            SelectionRange("x", -1.0, 2.0, domain="data"),
-            SelectionRange("y", 10.0, 30.0, domain="data"),
+            SelectionRange("x", -1.0, 2.0, domain="cell_data"),
+            SelectionRange("y", 10.0, 30.0, domain="cell_data"),
         ),
         revision=1,
     )
@@ -640,14 +646,7 @@ def test_restored_selection_starts_on_displayed_prefix_then_catches_live_latest(
     """A restored panel answers for its screen before following newer data."""
 
     event_schema = _image_schema()
-    canonical_schema = replace(
-        event_schema,
-        repeat_axis=replace(
-            event_schema.repeat_axis,
-            size=3,
-            coordinates=(0, 1, 2),
-        ),
-    )
+    canonical_schema = _with_repeat_size(event_schema, 3)
     first = np.full(event_schema.physical_shape, 1.0)
     plane, source, state, initial = _finite_source_setup(
         canonical_schema,
@@ -683,8 +682,8 @@ def test_restored_selection_starts_on_displayed_prefix_then_catches_live_latest(
         "image",
         "area",
         (
-            SelectionRange("x", -1.0, 2.0, domain="data"),
-            SelectionRange("y", 10.0, 30.0, domain="data"),
+            SelectionRange("x", -1.0, 2.0, domain="cell_data"),
+            SelectionRange("y", 10.0, 30.0, domain="cell_data"),
         ),
         revision=1,
     )
@@ -748,14 +747,7 @@ def test_delayed_selection_of_publication_n_never_reads_publication_n_plus_one(
     monkeypatch,
 ) -> None:
     event_schema = _image_schema()
-    canonical_schema = replace(
-        event_schema,
-        repeat_axis=replace(
-            event_schema.repeat_axis,
-            size=3,
-            coordinates=(0, 1, 2),
-        ),
-    )
+    canonical_schema = _with_repeat_size(event_schema, 3)
     first = np.full(event_schema.physical_shape, 1.0)
     plane, source, state, _initial = _finite_source_setup(
         canonical_schema,
@@ -777,8 +769,8 @@ def test_delayed_selection_of_publication_n_never_reads_publication_n_plus_one(
         "image",
         "area",
         (
-            SelectionRange("x", -1.0, 2.0, domain="data"),
-            SelectionRange("y", 10.0, 30.0, domain="data"),
+            SelectionRange("x", -1.0, 2.0, domain="cell_data"),
+            SelectionRange("y", 10.0, 30.0, domain="cell_data"),
         ),
         revision=1,
     )
@@ -855,8 +847,8 @@ def test_curve_range_and_facet_condition_select_point_rows_inclusive() -> None:
     selection = SelectionState(
         "curve",
         "x_range",
-        (SelectionRange("x", 0.0, 3.0, domain="point_coordinate"),),
-        (FacetCondition("facet", 1.0, "point_coordinate"),),
+        (SelectionRange("x", 0.0, 3.0, domain="point"),),
+        (FacetCondition("facet", 1.0, "point"),),
         revision=1,
     )
     try:
@@ -871,8 +863,14 @@ def test_curve_range_and_facet_condition_select_point_rows_inclusive() -> None:
             np.asarray([[[10.0], [20.0]]]),
         )
         derived = value.snapshot.block.schema
-        assert derived.point_table.row_count == 2
-        assert {column.name: column.values for column in derived.point_table.columns} == {
+        assert derived.point_domain.size == 2
+        assert {
+            axis.name: tuple(
+                axis.coordinate_at(code)
+                for code in derived.point_domain.codes(axis.axis_id)
+            )
+            for axis in derived.point_domain.axes
+        } == {
             "x": (2.0, 3.0),
             "facet": (1.0, 1.0),
         }
@@ -1013,7 +1011,7 @@ def test_a_fitted_parameter_is_published_carrying_its_own_error() -> None:
             SelectionState(
                 "curve",
                 "x_range",
-                (SelectionRange("x", 0.0, 1.0, domain="point_coordinate"),),
+                (SelectionRange("x", 0.0, 1.0, domain="point"),),
                 revision=1,
             ),
         )
@@ -1060,9 +1058,9 @@ def _batch_fit_event(
             "width": np.asarray([0.05, np.nan, 0.07]),
         },
         success=np.asarray([True, False, True]),
-        sample_axis_domain="point_row",
-        sample_axis_id="",
-        sample_axis_name="facet",
+        sample_axis_domain="point",
+        sample_axis_id="x",
+        sample_axis_name="x",
         sample_coordinates=coordinates,
         sample_unit=unit,
         sample_labels=labels,
@@ -1158,12 +1156,12 @@ def test_fit_event_batch_publishes_vectors_with_units_validity_and_lineage() -> 
             equal_nan=True,
         )
         assert front.value("@logic/batch/center_err") is None
-        assert center.snapshot.block.schema.cell_schema.value_unit == "pixel"
-        assert width.snapshot.block.schema.cell_schema.value_unit is None
-        column = center.snapshot.block.schema.point_table.columns[0]
-        assert column.name == "facet"
-        assert column.values == (10.0, 20.0, 35.0)
-        assert column.unit == "V"
+        assert center.snapshot.block.schema.value_schema.value_unit == "pixel"
+        assert width.snapshot.block.schema.value_schema.value_unit is None
+        axis = center.snapshot.block.schema.point_domain.axes[0]
+        assert axis.name == "x"
+        assert axis.coordinates == (10.0, 20.0, 35.0)
+        assert axis.unit == "V"
 
         for name in ("center", "width"):
             signal = front.value(f"@logic/batch/{name}")
@@ -1196,13 +1194,10 @@ def test_fit_event_batch_text_samples_use_numeric_indices_and_preserve_labels() 
         front = plane.freeze()
         value = front.value("@logic/text/center")
         assert value is not None
-        column = value.snapshot.block.schema.point_table.columns[0]
-        assert column.values == (0.0, 1.0, 2.0)
-        assert column.unit is None
-        label_column = value.snapshot.block.schema.point_table.columns[1]
-        assert label_column.name == "facet_label"
-        assert label_column.value_kind == PointColumn.TEXT
-        assert label_column.values == ("red", "green", "blue")
+        axis = value.snapshot.block.schema.point_domain.axes[0]
+        assert axis.coordinates == (0.0, 1.0, 2.0)
+        assert axis.unit is None
+        assert axis.coordinate_labels == ("red", "green", "blue")
     finally:
         _close(bridge, plane, source)
 
@@ -1219,9 +1214,9 @@ def _single_cell_facet_event(
         parameter_values={"center": np.asarray([4.0])},
         parameter_errors={"center": np.asarray([0.25])},
         success=np.asarray([True]),
-        sample_axis_domain="point_row",
-        sample_axis_id="",
-        sample_axis_name="facet",
+        sample_axis_domain="point",
+        sample_axis_id="x",
+        sample_axis_name="x",
         sample_coordinates=np.asarray([42.0]),
         sample_unit="V",
         sample_labels=None,
@@ -1252,8 +1247,9 @@ def test_single_cell_facet_is_a_valid_vector_fit() -> None:
         front = plane.freeze()
         value = front.value("@logic/one/center")
         assert value is not None
-        assert value.snapshot.block.schema.point_table.columns[0].name == "facet"
-        assert value.snapshot.block.schema.point_table.columns[0].values == (42.0,)
+        axis = value.snapshot.block.schema.point_domain.axes[0]
+        assert axis.name == "x"
+        assert axis.coordinates == (42.0,)
         assert float(value.snapshot.block.values.reshape(-1)[0]) == 4.0
         assert float(
             np.asarray(value.snapshot.block.sigma).reshape(-1)[0]
@@ -1483,7 +1479,7 @@ def test_added_and_updated_selection_events_do_not_publish() -> None:
     state = SelectionState(
         "curve",
         "x_range",
-        (SelectionRange("x", 1.0, 3.0, domain="point_coordinate"),),
+        (SelectionRange("x", 1.0, 3.0, domain="point"),),
         revision=1,
     )
     try:
@@ -1493,7 +1489,7 @@ def test_added_and_updated_selection_events_do_not_publish() -> None:
             SelectionState(
                 "curve",
                 "x_range",
-                (SelectionRange("x", 0.0, 4.0, domain="point_coordinate"),),
+                (SelectionRange("x", 0.0, 4.0, domain="point"),),
                 revision=2,
             ),
         )
@@ -1513,7 +1509,7 @@ def test_removed_selection_retires_derived_signals_and_unknown_axis_is_loud() ->
     selection = SelectionState(
         "curve",
         "x_range",
-        (SelectionRange("x", 1.0, 3.0, domain="point_coordinate"),),
+        (SelectionRange("x", 1.0, 3.0, domain="point"),),
         revision=1,
     )
     try:
@@ -1533,7 +1529,7 @@ def test_removed_selection_retires_derived_signals_and_unknown_axis_is_loud() ->
                             "missing",
                             0.0,
                             1.0,
-                            domain="point_coordinate",
+                            domain="point",
                         ),
                     ),
                     revision=2,
@@ -1572,8 +1568,8 @@ def test_a_box_on_a_finished_run_is_answered_once() -> None:
                 "image",
                 "area",
                 (
-                    SelectionRange("x", 0.0, 1.0, domain="data"),
-                    SelectionRange("y", 20.0, 30.0, domain="data"),
+                    SelectionRange("x", 0.0, 1.0, domain="cell_data"),
+                    SelectionRange("y", 20.0, 30.0, domain="cell_data"),
                 ),
                 revision=1,
             ),
@@ -1617,8 +1613,8 @@ def test_a_second_box_on_a_finished_run_replaces_the_first() -> None:
                     "image",
                     "area",
                     (
-                        SelectionRange("x", 0.0, upper, domain="data"),
-                        SelectionRange("y", 20.0, 30.0, domain="data"),
+                        SelectionRange("x", 0.0, upper, domain="cell_data"),
+                        SelectionRange("y", 20.0, 30.0, domain="cell_data"),
                     ),
                     revision=revision,
                 ),
@@ -1665,8 +1661,8 @@ def test_the_plane_can_say_who_is_producing_what() -> None:
                 "image",
                 "area",
                 (
-                    SelectionRange("x", 0.0, 1.0, domain="data"),
-                    SelectionRange("y", 20.0, 30.0, domain="data"),
+                    SelectionRange("x", 0.0, 1.0, domain="cell_data"),
+                    SelectionRange("y", 20.0, 30.0, domain="cell_data"),
                 ),
                 revision=1,
             ),
@@ -1692,8 +1688,8 @@ def test_the_plane_can_say_who_is_producing_what() -> None:
                 "image",
                 "area",
                 (
-                    SelectionRange("x", 0.0, 2.0, domain="data"),
-                    SelectionRange("y", 20.0, 30.0, domain="data"),
+                    SelectionRange("x", 0.0, 2.0, domain="cell_data"),
+                    SelectionRange("y", 20.0, 30.0, domain="cell_data"),
                 ),
                 revision=2,
             ),
@@ -1718,11 +1714,8 @@ def test_a_contiguous_roi_is_a_view_not_four_gathers() -> None:
     values = np.zeros((1, 1, 120, 160), dtype=np.uint16)
 
     class _Schema:
-        class repeat_axis:
-            axis_id = "r"
-
-        class cell_schema:
-            data_axes = ()
+        class cell_domain:
+            axes = ()
 
     taken = restricted_values(values, _Schema, range(0, 1), range(0, 1), {})
 
@@ -1730,39 +1723,29 @@ def test_a_contiguous_roi_is_a_view_not_four_gathers() -> None:
     assert taken.shape == (1, 1, 120, 160)
 
 
-def _heatmap_schema(repeats: int = 2, *, with_columns: bool = True) -> DatasetSchema:
+def _heatmap_schema(repeats: int = 2) -> DatasetSchema:
     """A 3x3 scan grid: 9 point rows over dimensions (bias_x, grad)."""
 
     repeat = AxisSpec(
         AxisId("repeat"), "repeat", REPEAT, repeats, tuple(range(repeats))
     )
-    columns: tuple[PointColumn, ...] = ()
-    if with_columns:
-        columns = (
-            PointColumn(
-                AxisId("bias_x"),
-                "bias_x",
-                SCAN_POINT,
-                PointColumn.NUMERIC,
-                (-1.0, -1.0, -1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0),
-            ),
-            PointColumn(
-                AxisId("grad"),
-                "grad",
-                SCAN_POINT,
-                PointColumn.NUMERIC,
-                (10.0, 20.0, 30.0, 10.0, 20.0, 30.0, 10.0, 20.0, 30.0),
-            ),
-        )
-    topology = GridTopology(
-        (AxisId("bias_x"), AxisId("grad")),
-        ((-1.0, 0.0, 1.0), (10.0, 20.0, 30.0)),
-        tuple((i, j) for i in range(3) for j in range(3)),
+    bias_x = AxisSpec(
+        AxisId("bias_x"), "bias_x", SCAN_POINT, 3, (-1.0, 0.0, 1.0)
+    )
+    grad = AxisSpec(
+        AxisId("grad"), "grad", SCAN_POINT, 3, (10.0, 20.0, 30.0)
     )
     return DatasetSchema(
-        repeat,
-        PointTable(9, columns),
-        topology,
+        DomainSpec((repeats,), (repeat,), (tuple(range(repeats)),)),
+        DomainSpec(
+            (9,),
+            (bias_x, grad),
+            (
+                (0, 0, 0, 1, 1, 1, 2, 2, 2),
+                (0, 1, 2, 0, 1, 2, 0, 1, 2),
+            ),
+        ),
+        SCALAR_DOMAIN,
         ValueSchema.scalar(np.dtype("float64"), None),
     )
 
@@ -1770,10 +1753,10 @@ def _heatmap_schema(repeats: int = 2, *, with_columns: bool = True) -> DatasetSc
 def test_selection_derives_from_incremental_scan_points_in_the_canonical_grid() -> None:
     canonical_schema = _heatmap_schema(repeats=1)
     event_schema = DatasetSchema(
-        canonical_schema.repeat_axis,
-        PointTable(1),
-        None,
-        canonical_schema.cell_schema,
+        canonical_schema.repeat_domain,
+        DomainSpec((1,), (), ()),
+        canonical_schema.cell_domain,
+        canonical_schema.value_schema,
     )
     plane, source, state, _initial = _finite_source_setup(
         canonical_schema,
@@ -1795,8 +1778,8 @@ def test_selection_derives_from_incremental_scan_points_in_the_canonical_grid() 
         "image",
         "area",
         (
-            SelectionRange("grad", 10.0, 30.0, domain="point_dimension"),
-            SelectionRange("bias_x", -1.0, 1.0, domain="point_dimension"),
+            SelectionRange("grad", 10.0, 30.0, domain="point"),
+            SelectionRange("bias_x", -1.0, 1.0, domain="point"),
         ),
         revision=1,
     )
@@ -1805,7 +1788,7 @@ def test_selection_derives_from_incremental_scan_points_in_the_canonical_grid() 
         first = plane.freeze().value(signal)
         assert first is not None, bridge.last_error
         assert first.snapshot.block.values.shape == (1, 9, 1)
-        assert first.snapshot.block.schema.grid_topology == canonical_schema.grid_topology
+        assert first.snapshot.block.schema.point_domain == canonical_schema.point_domain
         np.testing.assert_array_equal(
             first.snapshot.expanded_validity()[..., 0],
             np.asarray([[True, False, False, False, False, False, False, False, False]]),
@@ -1840,7 +1823,7 @@ def test_selection_derives_from_incremental_scan_points_in_the_canonical_grid() 
 def test_image_area_over_grid_dimensions_cuts_the_point_rows() -> None:
     """A box on a scan heatmap selects the sub-grid, not an exception.
 
-    The heatmap cell's axes are grid-topology DIMENSIONS -- point-row
+    The heatmap cell's axes are Point-domain axes -- physical point-row
     quantities -- and the bridge used to refuse them with 'image area axes
     must be source data axes', so every committed box on a scan heatmap
     silently derived nothing.
@@ -1863,10 +1846,10 @@ def test_image_area_over_grid_dimensions_cuts_the_point_rows() -> None:
                 "area",
                 (
                     SelectionRange(
-                        "grad", 15.0, 25.0, domain="point_dimension"
+                        "grad", 15.0, 25.0, domain="point"
                     ),
                     SelectionRange(
-                        "bias_x", -0.5, 1.5, domain="point_dimension"
+                        "bias_x", -0.5, 1.5, domain="point"
                     ),
                 ),
                 revision=1,
@@ -1882,26 +1865,19 @@ def test_image_area_over_grid_dimensions_cuts_the_point_rows() -> None:
             roi_frame.snapshot.block.values, values[:, (4, 7)]
         )
         derived_schema = roi_frame.snapshot.block.schema
-        assert derived_schema.point_table.row_count == 2
-        assert derived_schema.grid_topology is not None
-        assert len(derived_schema.grid_topology.row_to_cell) == 2
+        assert derived_schema.point_domain.size == 2
         # The sub-grid keeps both surviving scan points and both repeats; a
         # cell here is already scalar, so the mean consumes nothing.
         np.testing.assert_array_equal(
             roi_mean.snapshot.block.values, values[:, (4, 7)]
         )
-        assert roi_mean.snapshot.block.schema.point_table == derived_schema.point_table
+        assert roi_mean.snapshot.block.schema.point_domain == derived_schema.point_domain
     finally:
         _close(bridge, plane, source)
 
 
-def test_repeat_index_narrows_a_grid_cut_to_the_focused_repeat() -> None:
-    """The repeat restriction is structural: row k of dimension 0, no name.
-
-    The repeat axis is never name-addressed anywhere -- it is identified by
-    its role and position -- so a focused repeat facet crosses the bridge as
-    ``repeat_index`` and the derived data is exactly the k-th repeat slice.
-    """
+def test_repeat_domain_condition_narrows_a_grid_cut_to_the_focused_repeat() -> None:
+    """A focused repeat is selected by the same named-axis path as Point."""
 
     schema = _heatmap_schema()
     values = np.arange(18, dtype=np.float64).reshape(2, 9, 1)
@@ -1920,13 +1896,13 @@ def test_repeat_index_narrows_a_grid_cut_to_the_focused_repeat() -> None:
                 "area",
                 (
                     SelectionRange(
-                        "grad", 15.0, 25.0, domain="point_dimension"
+                        "grad", 15.0, 25.0, domain="point"
                     ),
                     SelectionRange(
-                        "bias_x", -0.5, 0.5, domain="point_dimension"
+                        "bias_x", -0.5, 0.5, domain="point"
                     ),
                 ),
-                repeat_index=1,
+                (FacetCondition("repeat", 1.0, "repeat"),),
                 revision=1,
             ),
         )
@@ -1938,64 +1914,9 @@ def test_repeat_index_narrows_a_grid_cut_to_the_focused_repeat() -> None:
         np.testing.assert_array_equal(
             roi_frame.snapshot.block.values, values[1:2, 4:5]
         )
-        assert roi_frame.snapshot.block.schema.repeat_axis.size == 1
+        assert roi_frame.snapshot.block.schema.repeat_domain.size == 1
         assert float(roi_mean.snapshot.block.values.reshape(-1)[0]) == 13.0
 
-        # A row the source does not have fails loudly, not as an empty cut.
-        with pytest.raises(IndexError):
-            events.emit_selection(
-                SelectionChange.COMMITTED,
-                SelectionState(
-                    "image",
-                    "area",
-                    (
-                    SelectionRange(
-                        "grad", 15.0, 25.0, domain="point_dimension"
-                    ),
-                    SelectionRange(
-                        "bias_x", -0.5, 0.5, domain="point_dimension"
-                    ),
-                    ),
-                    repeat_index=7,
-                    revision=2,
-                ),
-            )
-    finally:
-        _close(bridge, plane, source)
-
-
-def test_grid_dimensions_resolve_without_matching_point_columns() -> None:
-    """The topology itself declares the dimensions; columns are optional."""
-
-    schema = _heatmap_schema(with_columns=False)
-    values = np.arange(18, dtype=np.float64).reshape(2, 9, 1)
-    plane, source, _slot, _state, _initial = _source_setup(schema, values)
-    events = _Events()
-    plane.set_front_signals({"camera/frame", "@logic/bare/roi_mean"})
-    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="bare")
-    bridge.start()
-    try:
-        events.emit_selection(
-            SelectionChange.COMMITTED,
-            SelectionState(
-                "image",
-                "area",
-                (
-                    SelectionRange(
-                        "grad", 15.0, 25.0, domain="point_dimension"
-                    ),
-                    SelectionRange(
-                        "bias_x", -0.5, 1.5, domain="point_dimension"
-                    ),
-                ),
-                revision=1,
-            ),
-        )
-        roi_mean = plane.freeze().value("@logic/bare/roi_mean")
-        assert roi_mean is not None, bridge.last_error
-        np.testing.assert_array_equal(
-            roi_mean.snapshot.block.values, values[:, (4, 7)]
-        )
     finally:
         _close(bridge, plane, source)
 
@@ -2006,20 +1927,20 @@ def _frames_on_point_axis_schema(cycles: int = 2, frames: int = 3) -> DatasetSch
     repeat = AxisSpec(
         AxisId("cycle"), "cycle", REPEAT, cycles, tuple(range(cycles))
     )
-    frame = PointColumn(
+    frame = AxisSpec(
         AxisId("frame"),
         "frame",
         READOUT_EVENT,
-        PointColumn.NUMERIC,
+        frames,
         tuple(float(index) for index in range(frames)),
     )
     y = AxisSpec(AxisId("y"), "y", SPATIAL_Y, 4, (0.0, 1.0, 2.0, 3.0))
     x = AxisSpec(AxisId("x"), "x", SPATIAL_X, 5, (0.0, 1.0, 2.0, 3.0, 4.0))
     return DatasetSchema(
-        repeat,
-        PointTable(frames, (frame,)),
-        None,
-        ValueSchema((y, x), ValidityContract.value(), np.dtype("float64"), "counts"),
+        DomainSpec((cycles,), (repeat,), (tuple(range(cycles)),)),
+        DomainSpec((frames,), (frame,), (tuple(range(frames)),)),
+        DomainSpec((y.size, x.size), (y, x)),
+        ValueSchema(ValidityContract.value(), np.dtype("float64"), "counts"),
     )
 
 
@@ -2027,7 +1948,7 @@ def test_frames_on_point_axis_keep_deriving_and_facet_by_frame() -> None:
     """Point rows represent frames.
 
     An image cell over the DATA spatial axes must still cut spatially, keep
-    every frame row, and a facet condition on the 'frame' point column must
+    every frame row, and a facet condition on the 'frame' Point axis must
     select exactly one frame's rows.
     """
 
@@ -2047,8 +1968,8 @@ def test_frames_on_point_axis_keep_deriving_and_facet_by_frame() -> None:
                 "image",
                 "area",
                 (
-                    SelectionRange("x", 1.0, 3.0, domain="data"),
-                    SelectionRange("y", 1.0, 2.0, domain="data"),
+                    SelectionRange("x", 1.0, 3.0, domain="cell_data"),
+                    SelectionRange("y", 1.0, 2.0, domain="cell_data"),
                 ),
                 revision=1,
             ),
@@ -2058,7 +1979,7 @@ def test_frames_on_point_axis_keep_deriving_and_facet_by_frame() -> None:
         np.testing.assert_array_equal(
             roi_frame.snapshot.block.values, values[:, :, 1:3, 1:4]
         )
-        assert roi_frame.snapshot.block.schema.point_table.row_count == 3
+        assert roi_frame.snapshot.block.schema.point_domain.size == 3
 
         events.emit_selection(
             SelectionChange.COMMITTED,
@@ -2066,10 +1987,10 @@ def test_frames_on_point_axis_keep_deriving_and_facet_by_frame() -> None:
                 "image",
                 "area",
                 (
-                    SelectionRange("x", 1.0, 3.0, domain="data"),
-                    SelectionRange("y", 1.0, 2.0, domain="data"),
+                    SelectionRange("x", 1.0, 3.0, domain="cell_data"),
+                    SelectionRange("y", 1.0, 2.0, domain="cell_data"),
                 ),
-                (FacetCondition("frame", 1.0, "point_coordinate"),),
+                (FacetCondition("frame", 1.0, "point"),),
                 revision=2,
             ),
         )
@@ -2078,9 +1999,9 @@ def test_frames_on_point_axis_keep_deriving_and_facet_by_frame() -> None:
         np.testing.assert_array_equal(
             focused.snapshot.block.values, values[:, 1:2, 1:3, 1:4]
         )
-        column = focused.snapshot.block.schema.point_table.columns[0]
-        assert column.name == "frame"
-        assert column.values == (1.0,)
+        axis = focused.snapshot.block.schema.point_domain.axes[0]
+        assert axis.name == "frame"
+        assert axis.coordinates == (1.0,)
     finally:
         _close(bridge, plane, source)
 
@@ -2110,8 +2031,8 @@ def test_roi_mean_keeps_one_value_per_frame_point() -> None:
                 "image",
                 "area",
                 (
-                    SelectionRange("x", 1.0, 3.0, domain="data"),
-                    SelectionRange("y", 1.0, 2.0, domain="data"),
+                    SelectionRange("x", 1.0, 3.0, domain="cell_data"),
+                    SelectionRange("y", 1.0, 2.0, domain="cell_data"),
                 ),
                 revision=1,
             ),
@@ -2132,15 +2053,14 @@ def test_roi_mean_keeps_one_value_per_frame_point() -> None:
 
         mean_schema = roi_mean.snapshot.block.schema
         frame_schema = roi_frame.snapshot.block.schema
-        # The point column is the PARENT's frame column, not a fresh axis.
-        assert mean_schema.point_table == frame_schema.point_table
-        (column,) = mean_schema.point_table.columns
-        assert column.name == "frame"
-        assert column.role == READOUT_EVENT
-        assert column.values == (0.0, 1.0, 2.0)
-        assert mean_schema.repeat_axis == frame_schema.repeat_axis
-        assert mean_schema.cell_schema.is_scalar
-        assert mean_schema.cell_schema.value_unit == "counts"
+        assert mean_schema.point_domain == frame_schema.point_domain
+        (axis,) = mean_schema.point_domain.axes
+        assert axis.name == "frame"
+        assert axis.role == READOUT_EVENT
+        assert axis.coordinates == (0.0, 1.0, 2.0)
+        assert mean_schema.repeat_domain == frame_schema.repeat_domain
+        assert mean_schema.cell_domain == SCALAR_DOMAIN
+        assert mean_schema.value_schema.value_unit == "counts"
     finally:
         _close(bridge, plane, source)
 
@@ -2165,8 +2085,8 @@ def test_roi_mean_invalidity_is_per_point_not_pooled() -> None:
                 "image",
                 "area",
                 (
-                    SelectionRange("x", 1.0, 3.0, domain="data"),
-                    SelectionRange("y", 1.0, 2.0, domain="data"),
+                    SelectionRange("x", 1.0, 3.0, domain="cell_data"),
+                    SelectionRange("y", 1.0, 2.0, domain="cell_data"),
                 ),
                 revision=1,
             ),
@@ -2192,8 +2112,8 @@ def _frame_faceted_fit(
     batch_revision: int = 1,
 ) -> FitEventValue:
     count = int(sample_coordinates.size)
-    sample_domain = "repeat" if sample_axis_name == "cycle" else "point_coordinate"
-    sample_axis_id = "" if sample_domain == "repeat" else sample_axis_name
+    sample_domain = "repeat" if sample_axis_name == "cycle" else "point"
+    sample_axis_id = sample_axis_name
     return FitEventValue(
         parameter_names=("center",),
         parameter_units={"center": "pixel"},
@@ -2240,16 +2160,16 @@ def test_a_faceted_fit_takes_its_sample_role_from_the_axis_it_was_cut_along() ->
         )
         value = plane.freeze().value("@logic/perframe/center")
         assert value is not None, bridge.last_error
-        (column,) = value.snapshot.block.schema.point_table.columns
-        assert column.name == "frame"
-        assert column.role == READOUT_EVENT
+        (axis,) = value.snapshot.block.schema.point_domain.axes
+        assert axis.name == "frame"
+        assert axis.role == READOUT_EVENT
         assert value.snapshot.block.values.shape == (1, 3, 1)
     finally:
         _close(bridge, plane, source)
 
 
-def test_a_scan_faceted_fit_still_publishes_a_scan_point_column() -> None:
-    """The scan case is inherited from the parent column, not hardcoded."""
+def test_a_scan_faceted_fit_still_publishes_a_scan_point_axis() -> None:
+    """The scan case is inherited from the parent axis, not hardcoded."""
 
     schema = _curve_schema()
     values = np.zeros((1, 5, 1), dtype=np.float64)
@@ -2272,9 +2192,9 @@ def test_a_scan_faceted_fit_still_publishes_a_scan_point_column() -> None:
         )
         value = plane.freeze().value("@logic/perscan/center")
         assert value is not None, bridge.last_error
-        (column,) = value.snapshot.block.schema.point_table.columns
-        assert column.name == "x"
-        assert column.role == SCAN_POINT
+        (axis,) = value.snapshot.block.schema.point_domain.axes
+        assert axis.name == "x"
+        assert axis.role == SCAN_POINT
     finally:
         _close(bridge, plane, source)
 
@@ -2308,11 +2228,12 @@ def test_a_repeat_faceted_fit_keeps_the_repeat_identity() -> None:
         value = plane.freeze().value("@logic/percycle/center")
         assert value is not None, bridge.last_error
         fit_schema = value.snapshot.block.schema
-        assert fit_schema.repeat_axis.axis_id == AxisId("cycle")
-        assert fit_schema.repeat_axis.size == 2
-        assert fit_schema.repeat_axis.coordinates == (0, 1)
-        assert fit_schema.point_table.row_count == 1
-        assert fit_schema.point_table.columns == ()
+        (axis,) = fit_schema.repeat_domain.axes
+        assert axis.axis_id == AxisId("cycle")
+        assert axis.size == 2
+        assert axis.coordinates == (0.0, 1.0)
+        assert fit_schema.point_domain.size == 1
+        assert fit_schema.point_domain.axes == ()
         assert value.snapshot.block.values.shape == (2, 1, 1)
         np.testing.assert_array_equal(
             value.snapshot.block.values.reshape(-1), np.asarray([0.0, 1.0])
@@ -2321,32 +2242,37 @@ def test_a_repeat_faceted_fit_keeps_the_repeat_identity() -> None:
         _close(bridge, plane, source)
 
 
-def test_a_mixed_kind_image_area_is_refused_loudly() -> None:
-    """One data axis plus one point axis is no image surface anywhere."""
+def test_an_image_area_can_cut_point_and_cell_axes_together() -> None:
+    """Every named domain axis enters the same selection projection."""
 
     schema = _frames_on_point_axis_schema()
     values = np.arange(120, dtype=np.float64).reshape(2, 3, 4, 5)
     plane, source, _slot, _state, _initial = _source_setup(schema, values)
     events = _Events()
-    plane.set_front_signals({"camera/frame", "@logic/mixed/roi_mean"})
+    plane.set_front_signals({"camera/frame", "@logic/mixed/roi_frame"})
     bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="mixed")
     bridge.start()
     try:
-        with pytest.raises(ValueError, match="both be"):
-            events.emit_selection(
-                SelectionChange.COMMITTED,
-                SelectionState(
-                    "image",
-                    "area",
-                    (
-                        SelectionRange("x", 1.0, 3.0, domain="data"),
-                        SelectionRange(
-                            "frame", 0.0, 1.0, domain="point_coordinate"
-                        ),
+        events.emit_selection(
+            SelectionChange.COMMITTED,
+            SelectionState(
+                "image",
+                "area",
+                (
+                    SelectionRange("x", 1.0, 3.0, domain="cell_data"),
+                    SelectionRange(
+                        "frame", 0.0, 1.0, domain="point"
                     ),
-                    revision=1,
                 ),
-            )
+                revision=1,
+            ),
+        )
+        result = plane.freeze().value("@logic/mixed/roi_frame")
+        assert result is not None, bridge.last_error
+        np.testing.assert_array_equal(
+            result.snapshot.block.values,
+            values[:, :2, :, 1:4],
+        )
     finally:
         _close(bridge, plane, source)
 
@@ -2359,20 +2285,24 @@ def test_an_implicit_axis_cropped_to_a_run_stays_implicit() -> None:
     from zlc_data import SPATIAL_X
     from zlc_data.snapshot_projection import restricted_schema
     from zlc_data.axis import AxisId, AxisSpec
-    from zlc_data.schema import DatasetSchema, PointTable, ValueSchema
+    from zlc_data.schema import DatasetSchema, DomainSpec, ValueSchema
     from zlc_data.validity import ValidityContract
 
     axis = AxisSpec(AxisId("cam.x"), "x", SPATIAL_X, 1920)
     schema = DatasetSchema(
-        AxisSpec(AxisId("r"), "repeat", REPEAT, 1),
-        PointTable(1),
-        None,
-        ValueSchema((axis,), ValidityContract.value(), np.dtype("uint16")),
+        DomainSpec(
+            (1,),
+            (AxisSpec(AxisId("r"), "repeat", REPEAT, 1),),
+            ((0,),),
+        ),
+        DomainSpec((1,), (), ()),
+        DomainSpec((axis.size,), (axis,)),
+        ValueSchema(ValidityContract.value(), np.dtype("uint16")),
     )
 
     cropped = restricted_schema(
         schema, range(1), range(1), {axis.axis_id: range(400, 912)}
-    ).cell_schema.data_axes[0]
+    ).cell_domain.axes[0]
 
     assert cropped.coordinates is None
     assert cropped.size == 512
@@ -2571,8 +2501,8 @@ def test_a_box_drawn_on_a_retired_run_answers_instead_of_raising() -> None:
                 "image",
                 "area",
                 (
-                    SelectionRange("x", 0.0, 1.0, domain="data"),
-                    SelectionRange("y", 20.0, 30.0, domain="data"),
+                    SelectionRange("x", 0.0, 1.0, domain="cell_data"),
+                    SelectionRange("y", 20.0, 30.0, domain="cell_data"),
                 ),
                 revision=1,
             ),
@@ -2595,24 +2525,25 @@ def _component_schema() -> DatasetSchema:
         coordinate_labels=("0-1", "0-2", "1-2"),
     )
     site = AxisSpec(AxisId("site"), "site", SITE, 2, (0, 1))
-    cell = ValueSchema(
-        (pair, site),
+    value_schema = ValueSchema(
         ValidityContract.components(pair.axis_id, site.axis_id),
         np.dtype("float64"),
         "1",
     )
-    return DatasetSchema(repeat, PointTable(4), None, cell)
+    point = AxisSpec(AxisId("point"), "point", SCAN_POINT, 4)
+    return DatasetSchema(
+        DomainSpec((1,), (repeat,), ((0,),)),
+        DomainSpec((4,), (point,), (tuple(range(4)),)),
+        DomainSpec((pair.size, site.size), (pair, site)),
+        value_schema,
+    )
 
 
 def test_a_fit_faceted_over_a_component_axis_publishes() -> None:
     """A grid may be faceted over ANY axis; the fit must survive that.
 
-    The sample column inherits the faceted axis's ROLE, but the point-row
-    domain admits a narrower vocabulary than the axis vocabulary as a
-    whole -- a component, like a repeat or the implicit scalar, is not an
-    independent variable.  Inheriting one raised "point column role is
-    outside the point-domain role set" from inside the fit, where an
-    operator reads it as the fit being broken.
+    The sample axis inherits the faceted axis's role even when that axis came
+    from the dense Cell domain.
     """
 
     schema = _component_schema()
@@ -2628,7 +2559,7 @@ def test_a_fit_faceted_over_a_component_axis_publishes() -> None:
     try:
         event = replace(
             _batch_fit_event(plane, source_revision=1),
-            sample_axis_domain="data",
+            sample_axis_domain="cell_data",
             sample_axis_id="pair",
             sample_axis_name="pair",
             sample_labels=("0-1", "0-2", "1-2"),
@@ -2639,10 +2570,9 @@ def test_a_fit_faceted_over_a_component_axis_publishes() -> None:
         assert bridge.last_error is None, bridge.last_error
         published = plane.freeze().value("@logic/fit/center")
         assert published is not None
-        column = published.snapshot.block.schema.point_table.columns[0]
-        assert column.name == "pair"
-        # No role to inherit: the point ordinal's own role stands in.
-        assert column.role == SCAN_POINT
+        axis = published.snapshot.block.schema.point_domain.axes[0]
+        assert axis.name == "pair"
+        assert axis.role == COMPONENT
     finally:
         _close(bridge, plane, source)
 
@@ -2727,8 +2657,8 @@ def test_a_box_that_names_no_sample_is_a_condition_that_clears() -> None:
             "image",
             "area",
             (
-                SelectionRange("x", x_low, x_high, domain="data"),
-                SelectionRange("y", 20.0, 30.0, domain="data"),
+                SelectionRange("x", x_low, x_high, domain="cell_data"),
+                SelectionRange("y", 20.0, 30.0, domain="cell_data"),
             ),
             revision=revision,
         )
@@ -2839,8 +2769,8 @@ def test_a_selection_on_a_stopped_run_still_derives() -> None:
                 "image",
                 "area",
                 (
-                    SelectionRange("x", 0.0, 1.0, domain="data"),
-                    SelectionRange("y", 20.0, 30.0, domain="data"),
+                    SelectionRange("x", 0.0, 1.0, domain="cell_data"),
+                    SelectionRange("y", 20.0, 30.0, domain="cell_data"),
                 ),
                 revision=1,
             ),

@@ -159,9 +159,9 @@ def test_camera_descriptor_maps_image_area_to_sensor_roi_draft() -> None:
                 "camera_measurement.frames.2.spatial-x",
                 1.2,
                 5.8,
-                domain="data",
+                domain="cell_data",
             ),
-            SelectionRange("spatial-y", -3.2, 6.0, domain="data"),
+            SelectionRange("spatial-y", -3.2, 6.0, domain="cell_data"),
         ),
     )
 
@@ -213,7 +213,7 @@ def test_camera_descriptor_maps_image_area_to_sensor_roi_draft() -> None:
             plot_kind="image",
             selector_kind="x_range",
             ranges=(
-                SelectionRange("spatial-x", 1.0, 3.0, domain="data"),
+                SelectionRange("spatial-x", 1.0, 3.0, domain="cell_data"),
             ),
         ),
         draft=draft,
@@ -282,12 +282,12 @@ def test_a_node_host_runs_a_camera_measurement_to_completion() -> None:
         # One signal for the whole cycle: the frames ARE the point rows.
         schema = value.snapshot.block.schema
         assert tuple(
-            axis.role for axis in schema.cell_schema.data_axes
+            axis.role for axis in schema.cell_domain.axes
         ) == (SPATIAL_Y, SPATIAL_X)
-        frame_column = schema.point_table.columns[0]
-        assert frame_column.name == "frame"
-        assert frame_column.role == READOUT_EVENT
-        assert frame_column.values == tuple(range(windows))
+        frame_axis = schema.point_domain.axes[0]
+        assert frame_axis.name == "frame"
+        assert frame_axis.role == READOUT_EVENT
+        assert frame_axis.coordinates == tuple(range(windows))
         frames = np.asarray(value.snapshot.block.values)
         assert frames.shape[:2] == (1, windows)
         record = publication.run_record

@@ -246,15 +246,12 @@ immutable zlc_data.OwnedSnapshot
 
 The primary live camera-cycle contract is
 `(R=1, P=frames_per_cycle, camera_y, camera_x)`.  The frame identity is one
-`READOUT_EVENT` point column; both spatial axes are declared dense `data_dim`
-axes and the `ImagePlot` refers to them with `AxisRef.data(...)`. Every public
+`READOUT_EVENT` Point axis; both spatial axes are declared in the dense Cell-data
+axes and the `ImagePlot` refers to them with `AxisRef.cell_data(...)`. Every public
 live camera cycle keeps that fixed event geometry. A capable derived output
 materializes a bounded ordinary Dataset over its source primary index only
 while a real window consumer holds a lease; before that it retains latest only.
 The Surface host never retains a FIFO of full camera frames.
-
-The comparison also covered flattened `P=H*W` plus `GridTopology`, but that is
-not the recommended camera representation.
 
 The producer freezes a new immutable `uint16` snapshot for every revision.  It
 publishes faster than the presentation cadence, waits for the final revision,
@@ -351,7 +348,7 @@ physical pixels in its current axes box.
 
 `DataView.image` therefore keeps two exact paths:
 
-- regular `AxisRef.data` images reduce `R`, `P`, and other data dimensions in
+- regular `AxisRef.cell_data` images reduce `R`, `P`, and other data dimensions in
   vectorized NumPy operations;
 - the common camera geometry `(R=1, P=1, y, x)` retains a read-only view of the
   producer's native image dtype and the snapshot validity plane.  It does not
@@ -367,9 +364,9 @@ colormap and color-limit edits reuse the same scalar raster.  Resetting the
 viewport restores the full source extent; selectors and fits never read the
 decimated raster.
 
-The general PointTable/GridTopology projection remains authoritative for
-irregular coordinates, masks and facet subsets.  No topology is inferred from
-repeated PointTable values.
+Mapped Point axis codes remain authoritative for irregular coordinates, masks
+and facet subsets; dense Cell axes retain their stride-based tensor path. Plot
+never infers geometry from repeated coordinate values.
 
 ## Measured results
 
@@ -502,17 +499,6 @@ projection and complete-update measurements are recorded below; the former
 10–25 ms blanket projection estimate is no longer current.
 Custom Image models stay on the general coordinate-expansion solver path unless
 they provide a specialization.
-
-## GridTopology comparison
-
-The 1024² flattened comparison used `(R=1, P=1,048,576)` with explicit
-`GridTopology`.  It still took 2.606 / 2.610 s p50/p95 to project because that
-representation correctly remains on the general grouping path.  Reusing the
-same immutable schema object makes ingress validation constant-time:
-`publish()` measured 0.169 / 0.194 ms p50/p95.  Snapshot freezing still took
-46.52 / 66.43 ms and projection took 2.657 / 2.665 s. This remains evidence
-that camera pixels belong in dense data axes rather than flattened point rows;
-the old cadence harness's promotion counts are not a current queue contract.
 
 ## Large-component projection matrix (2026-08-21)
 

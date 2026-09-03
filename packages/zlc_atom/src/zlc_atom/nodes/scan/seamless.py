@@ -483,7 +483,7 @@ class SeamlessScanMeasurement:
         ``on_point`` is how a Task reads a point AS it lands: release-recapture
         judges each cycle against the calibration the moment the camera hands
         it over, which is the only place the cycle still exists as one cycle --
-        the finished scan dataset has folded the frames into its point table.
+        the finished scan dataset has composed those frames into its Point domain.
         What it returns, if anything, is published beside the frames.
         """
 

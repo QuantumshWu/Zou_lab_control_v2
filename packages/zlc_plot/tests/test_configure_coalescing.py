@@ -14,20 +14,26 @@ from threading import Event
 
 import numpy as np
 
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from data_factory import (
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
+from zlc_data import OwnedSnapshot, REPEAT
 from zlc_plot import AxisRef, CurvePlot
 from zlc_plot.raster import RasterPlotHost
 from zlc_plot.selectors import NumericRange, RectangleRange
 
 
-def _snapshot() -> DatasetSnapshot:
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": [0.0, 1.0, 2.0]}),
+def _snapshot() -> OwnedSnapshot:
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"x": [0.0, 1.0, 2.0]}),
         dtype=np.float64,
-        generation="configure-coalescing",
     )
-    return DatasetSnapshot(schema, np.array([[1.0, 2.0, 3.0]]), revision=0)
+    return make_snapshot(schema, np.array([[1.0, 2.0, 3.0]]), revision=0)
 
 
 def test_a_later_configure_carries_the_queued_one_forward() -> None:

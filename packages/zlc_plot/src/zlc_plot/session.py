@@ -3949,7 +3949,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             facet_index=(
                 self._facet_focus_index if state is None else state.facet_index
             ),
-            source_schema=snapshot_schema(data),
         )
 
     def _classifier_threshold_target_for_index(

@@ -17,7 +17,6 @@ from zlc_data import (
     SPATIAL_Y,
     AxisId,
     AxisSpec,
-    PointColumn,
 )
 from zlc_data.snapshot_projection import (
     restricted_values,
@@ -1841,7 +1840,7 @@ class SlmFeedbackTask:
             canonical[None],
             producer=self.instance_id,
             signal=CANDIDATE_PHASE_OUTPUT.name,
-            roles=(SPATIAL_Y, SPATIAL_X),
+            cell_axes=(SPATIAL_Y, SPATIAL_X),
             value_unit="rad",
             generation=generation,
             revision=publication_revision,
@@ -1869,24 +1868,23 @@ class SlmFeedbackTask:
                     [np.nan if value is None else value for value in item[field]],
                     dtype=float,
                 )
-        point_columns = {
-            SCAN_POINT: PointColumn(
+        point_axes = (
+            AxisSpec(
                 coordinate_id,
                 "candidate",
                 SCAN_POINT,
-                PointColumn.NUMERIC,
+                self._candidate_capacity,
                 tuple(
                     float(index)
                     for index in range(1, self._candidate_capacity + 1)
                 ),
-            )
-        }
+            ),
+        )
         history_event = snapshot_from_array(
             curve[None],
             producer=self.instance_id,
             signal=UNIFORMITY_HISTORY_OUTPUT.name,
-            roles=(SCAN_POINT,),
-            point_columns=point_columns,
+            point_axes=point_axes,
             generation=generation,
             revision=publication_revision,
             validity=np.isfinite(curve)[None],
@@ -1895,8 +1893,7 @@ class SlmFeedbackTask:
             observable_curve[None],
             producer=self.instance_id,
             signal=OBSERVABLE_UNIFORMITY_HISTORY_OUTPUT.name,
-            roles=(SCAN_POINT,),
-            point_columns=point_columns,
+            point_axes=point_axes,
             generation=generation,
             revision=publication_revision,
             validity=np.isfinite(observable_curve)[None],
@@ -1906,9 +1903,8 @@ class SlmFeedbackTask:
             site_signal[None],
             producer=self.instance_id,
             signal=SITE_SIGNAL_HISTORY_OUTPUT.name,
-            roles=(SCAN_POINT, SITE),
-            axis_specs={SITE: site_axis},
-            point_columns=point_columns,
+            point_axes=point_axes,
+            cell_axes=(site_axis,),
             generation=generation,
             revision=publication_revision,
             validity=np.isfinite(site_signal)[None],
@@ -1917,9 +1913,8 @@ class SlmFeedbackTask:
             target_share[None],
             producer=self.instance_id,
             signal=TARGET_SHARE_HISTORY_OUTPUT.name,
-            roles=(SCAN_POINT, SITE),
-            axis_specs={SITE: site_axis},
-            point_columns=point_columns,
+            point_axes=point_axes,
+            cell_axes=(site_axis,),
             generation=generation,
             revision=publication_revision,
             validity=np.isfinite(target_share)[None],
@@ -2510,18 +2505,14 @@ class SlmFeedbackTask:
             values.T[None],
             producer=self.instance_id,
             signal=f"candidate_{candidate:04d}_site_histogram_figure",
-            roles=(SITE, COMPONENT),
-            axis_specs={
-                SITE: site_axis,
-                COMPONENT: shot_axis,
-            },
+            cell_axes=(site_axis, shot_axis),
             generation=generation,
             revision=candidate,
             validity=np.isfinite(values.T)[None],
         )
         kind = str(measurement.get("candidate_kind", "candidate"))
         return snapshot, FacetGridPlot(
-            AxisRef.data(str(site_axis.axis_id)),
+            AxisRef.cell_data(str(site_axis.axis_id)),
             HistogramPlot(
                 labels=PlotLabels(
                     title=f"Candidate {candidate} ({kind}) site histograms and fits",
@@ -2592,11 +2583,11 @@ class SlmFeedbackTask:
         if not isinstance(selected_device_record, Mapping):
             raise RuntimeError("selected feedback candidate lost its device snapshot")
         candidate_id = AxisId("slm_feedback.candidate")
-        candidate_column = PointColumn(
+        candidate_axis = AxisSpec(
             candidate_id,
             "candidate",
             SCAN_POINT,
-            PointColumn.NUMERIC,
+            count,
             tuple(range(1, count + 1)),
         )
         site_axis = self._registered_site_map.site_axis
@@ -2613,9 +2604,8 @@ class SlmFeedbackTask:
                 values[None],
                 producer=self.instance_id,
                 signal=signal,
-                roles=(SCAN_POINT, SITE),
-                axis_specs={SITE: site_axis},
-                point_columns={SCAN_POINT: candidate_column},
+                point_axes=(candidate_axis,),
+                cell_axes=(site_axis,),
                 generation=generation,
                 revision=count,
                 validity=np.isfinite(values)[None],
@@ -2649,9 +2639,8 @@ class SlmFeedbackTask:
             uniformity[None],
             producer=self.instance_id,
             signal="uniformity_figure",
-            roles=(SCAN_POINT, COMPONENT),
-            axis_specs={COMPONENT: uniformity_axis},
-            point_columns={SCAN_POINT: candidate_column},
+            point_axes=(candidate_axis,),
+            cell_axes=(uniformity_axis,),
             generation=generation,
             revision=count,
             validity=np.isfinite(uniformity)[None],
@@ -2663,7 +2652,7 @@ class SlmFeedbackTask:
             snapshot=uniformity_snapshot,
             spec=CurvePlot(
                 AxisRef.point(str(candidate_id)),
-                group=AxisRef.data(str(uniformity_axis.axis_id)),
+                group=AxisRef.cell_data(str(uniformity_axis.axis_id)),
                 labels=PlotLabels(
                     title="SLM feedback uniformity",
                     x="candidate",
@@ -2682,7 +2671,7 @@ class SlmFeedbackTask:
             ),
             spec=CurvePlot(
                 AxisRef.point(str(candidate_id)),
-                group=AxisRef.data(str(site_axis.axis_id)),
+                group=AxisRef.cell_data(str(site_axis.axis_id)),
                 labels=PlotLabels(
                     title="Per-site bright-dark evolution",
                     x="candidate",
@@ -2699,7 +2688,7 @@ class SlmFeedbackTask:
             snapshot=site_history_snapshot("control_weight", "weight_figure"),
             spec=CurvePlot(
                 AxisRef.point(str(candidate_id)),
-                group=AxisRef.data(str(site_axis.axis_id)),
+                group=AxisRef.cell_data(str(site_axis.axis_id)),
                 labels=PlotLabels(
                     title="Per-site target weight evolution",
                     x="candidate",
@@ -2720,8 +2709,7 @@ class SlmFeedbackTask:
             selected_samples.T[None],
             producer=self.instance_id,
             signal="selected_histogram_figure",
-            roles=(SITE, COMPONENT),
-            axis_specs={SITE: site_axis, COMPONENT: shot_axis},
+            cell_axes=(site_axis, shot_axis),
             generation=generation,
             revision=count,
         )
@@ -2731,7 +2719,7 @@ class SlmFeedbackTask:
             "selected_site_histograms",
             snapshot=histogram_snapshot,
             spec=FacetGridPlot(
-                AxisRef.data(str(site_axis.axis_id)),
+                AxisRef.cell_data(str(site_axis.axis_id)),
                 HistogramPlot(
                     labels=PlotLabels(
                         title="Selected candidate site distributions",
@@ -2746,11 +2734,11 @@ class SlmFeedbackTask:
 
         selected_number = int(selected["candidate"])
         comparison_id = AxisId("slm_feedback.comparison")
-        comparison_column = PointColumn(
+        comparison_axis = AxisSpec(
             comparison_id,
             "state",
             SCAN_POINT,
-            PointColumn.NUMERIC,
+            2,
             (0, selected_number),
             coordinate_labels=("initial", f"selected {selected_number}"),
         )
@@ -2783,9 +2771,8 @@ class SlmFeedbackTask:
                     np.stack((first, second), axis=0)[None],
                     producer=self.instance_id,
                     signal=f"{name}_comparison_figure",
-                    roles=(SCAN_POINT, SPATIAL_Y, SPATIAL_X),
-                    axis_specs={SPATIAL_Y: y_axis, SPATIAL_X: x_axis},
-                    point_columns={SCAN_POINT: comparison_column},
+                    point_axes=(comparison_axis,),
+                    cell_axes=(y_axis, x_axis),
                     value_unit=unit,
                     generation=generation,
                     revision=count,
@@ -2826,8 +2813,8 @@ class SlmFeedbackTask:
             spec=FacetGridPlot(
                 AxisRef.point(str(comparison_id)),
                 ImagePlot(
-                    AxisRef.data(str(image_x.axis_id)),
-                    AxisRef.data(str(image_y.axis_id)),
+                    AxisRef.cell_data(str(image_x.axis_id)),
+                    AxisRef.cell_data(str(image_y.axis_id)),
                 ),
                 labels=PlotLabels(title="Initial and selected camera mean"),
             ),
@@ -2845,8 +2832,8 @@ class SlmFeedbackTask:
             spec=FacetGridPlot(
                 AxisRef.point(str(comparison_id)),
                 ImagePlot(
-                    AxisRef.data(str(phase_x.axis_id)),
-                    AxisRef.data(str(phase_y.axis_id)),
+                    AxisRef.cell_data(str(phase_x.axis_id)),
+                    AxisRef.cell_data(str(phase_y.axis_id)),
                 ),
                 labels=PlotLabels(title="Initial and selected SLM phase"),
             ),

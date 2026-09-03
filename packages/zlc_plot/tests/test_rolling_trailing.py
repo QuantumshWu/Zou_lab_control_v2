@@ -14,34 +14,37 @@ matplotlib.use("Agg", force=True)
 import numpy as np
 from matplotlib.collections import LineCollection
 
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from data_factory import (
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
+
+from zlc_data import DatasetSchema, OwnedSnapshot
 from zlc_plot import AxisRef, PlotSession, RollingPlot
 from zlc_plot.specs import Reduction
 
 import pytest
 
-
 def _schema(sites: int, repeats: int = 1) -> DatasetSchema:
-    return DatasetSchema.create(
-        Axis.create("repeat", size=repeats),
-        PointTable.from_columns({"site": np.arange(sites, dtype=np.int64)}),
-        data_axes=(),
+    return make_dataset_schema(
+        repeat_domain(size=repeats),
+        mapped_domain_from_columns({"site": np.arange(sites, dtype=np.int64)}),
+        cell_axes=(),
         dtype=np.float64,
-        generation="rolling-trailing",
     )
 
-
-def _shot(schema: DatasetSchema, occupied: np.ndarray, revision: int) -> DatasetSnapshot:
-    return DatasetSnapshot(
+def _shot(schema: DatasetSchema, occupied: np.ndarray, revision: int) -> OwnedSnapshot:
+    return make_snapshot(
         schema, occupied.reshape(1, -1).astype(np.float64), revision=revision
     )
 
-
-def _shots(occupied: np.ndarray, revision: int = 0) -> DatasetSnapshot:
+def _shots(occupied: np.ndarray, revision: int = 0) -> OwnedSnapshot:
     values = np.asarray(occupied, dtype=np.float64)
     schema = _schema(values.shape[1], values.shape[0])
-    return DatasetSnapshot(schema, values, revision=revision)
-
+    return make_snapshot(schema, values, revision=revision)
 
 def _trailing_mean(shots: np.ndarray, span: int) -> np.ndarray:
     """The mean of every sample in the last ``span`` shots, shot by shot."""
@@ -52,7 +55,6 @@ def _trailing_mean(shots: np.ndarray, span: int) -> np.ndarray:
             for index in range(len(shots))
         ]
     )
-
 
 def test_a_trailing_point_is_the_mean_of_the_last_n_shots() -> None:
     """Feed 0/1 occupancy shot by shot; each drawn point must equal the
@@ -78,7 +80,6 @@ def test_a_trailing_point_is_the_mean_of_the_last_n_shots() -> None:
     finally:
         session.close()
 
-
 def test_a_span_longer_than_the_run_is_the_running_mean() -> None:
     """The window fills from empty, so a trailing mean nobody has enough
     shots for yet IS the mean of everything so far -- the trace settles
@@ -103,7 +104,6 @@ def test_a_span_longer_than_the_run_is_the_running_mean() -> None:
     finally:
         session.close()
 
-
 def test_the_default_span_of_one_is_each_shot_itself() -> None:
     """The default must not quietly redraw anybody's panel: one shot per
     point, exactly the trace drawn before this parameter existed."""
@@ -121,7 +121,6 @@ def test_the_default_span_of_one_is_each_shot_itself() -> None:
         )
     finally:
         session.close()
-
 
 def test_window_frames_the_view_without_changing_the_numbers() -> None:
     sites = 4
@@ -144,7 +143,6 @@ def test_window_frames_the_view_without_changing_the_numbers() -> None:
             session.close()
 
     assert last_value(5) == last_value(None)
-
 
 def test_the_trailing_band_renders(tmp_path) -> None:
     sites = 6
@@ -171,7 +169,6 @@ def test_the_trailing_band_renders(tmp_path) -> None:
     finally:
         session.close()
 
-
 def test_trailing_is_inert_on_a_non_mean_reduction() -> None:
     """It reads the pooled moments, weighting each shot by how many
     samples it pooled.  That is the mean's arithmetic and nobody else's --
@@ -195,7 +192,6 @@ def test_trailing_is_inert_on_a_non_mean_reduction() -> None:
         assert series.sem is None
     finally:
         session.close()
-
 
 def test_plain_rolling_uncertainty_is_each_shot_pooled_error() -> None:
     """The survival-panel shape: uncertainty WITHOUT trailing draws each
@@ -232,7 +228,6 @@ def test_plain_rolling_uncertainty_is_each_shot_pooled_error() -> None:
     finally:
         session.close()
 
-
 def test_structure_keeps_repeat_point_and_cell_brackets() -> None:
     """Three brackets: (repeat) x (points) x (data).
 
@@ -244,14 +239,14 @@ def test_structure_keeps_repeat_point_and_cell_brackets() -> None:
 
     from zlc_data import (
         COMPONENT,
-        GridTopology,
+        DomainSpec,
         READOUT_EVENT,
         SITE,
         AxisId,
         AxisSpec,
         DatasetSchema as Schema,
-        PointTable,
         REPEAT,
+        SCALAR_DOMAIN,
         SPATIAL_X,
         SPATIAL_Y,
         ValidityContract,
@@ -261,11 +256,14 @@ def test_structure_keeps_repeat_point_and_cell_brackets() -> None:
 
     def _schema_for(axes):
         return Schema(
-            AxisSpec(AxisId("cycle"), "cycle", REPEAT, 1),
-            PointTable(1, ()),
-            None,
+            DomainSpec(
+                (1,),
+                (AxisSpec(AxisId("cycle"), "cycle", REPEAT, 1),),
+                ((0,),),
+            ),
+            DomainSpec((1,), (), ()),
+            DomainSpec(tuple(axis.size for axis in axes), axes),
             ValueSchema(
-                axes,
                 ValidityContract.components(axes[0].axis_id),
                 np.dtype("<f8"),
                 "1",
@@ -281,22 +279,37 @@ def test_structure_keeps_repeat_point_and_cell_brackets() -> None:
     groups = schema_structure(categorical)
     assert tuple(tuple(name for name, _size in group) for group in groups) == (
         ("cycle",),
+        (),
         ("pair", "site"),
     )
 
     scanned = Schema(
-        AxisSpec(AxisId("cycle"), "cycle", REPEAT, 20),
-        PointTable(8, ()),
-        GridTopology(
-            (AxisId("ax"), AxisId("ay"), AxisId("az")),
-            ((0.0, 1.0), (0.0, 1.0), (0.0, 1.0)),
-            tuple((i % 2, (i // 2) % 2, i // 4) for i in range(8)),
+        DomainSpec(
+            (20,),
+            (AxisSpec(AxisId("cycle"), "cycle", REPEAT, 20),),
+            (tuple(range(20)),),
         ),
-        ValueSchema(
+        DomainSpec(
+            (8,),
+            tuple(
+                AxisSpec(AxisId(name), name, COMPONENT, 2, (0.0, 1.0))
+                for name in ("ax", "ay", "az")
+            ),
+            tuple(
+                tuple(cell[position] for cell in tuple(
+                    (i % 2, (i // 2) % 2, i // 4) for i in range(8)
+                ))
+                for position in range(3)
+            ),
+        ),
+        DomainSpec(
+            (3, 34),
             (
                 AxisSpec(AxisId("cm.frame"), "frame", READOUT_EVENT, 3),
                 AxisSpec(AxisId("occ.site"), "site", SITE, 34),
             ),
+        ),
+        ValueSchema(
             ValidityContract.components(AxisId("occ.site")),
             np.dtype("<f8"),
             "1",
@@ -305,8 +318,8 @@ def test_structure_keeps_repeat_point_and_cell_brackets() -> None:
     groups = schema_structure(scanned)
     assert tuple(tuple(name for name, _size in group) for group in groups) == (
         ("cycle",),
-        ("ax", "ay", "az", "frame"),
-        ("site",),
+        ("ax", "ay", "az"),
+        ("frame", "site"),
     )
 
     picture = _schema_for(
@@ -318,9 +331,9 @@ def test_structure_keeps_repeat_point_and_cell_brackets() -> None:
     groups = schema_structure(picture)
     assert tuple(tuple(name for name, _size in group) for group in groups) == (
         ("cycle",),
+        (),
         ("y", "x"),
     )
-
 
 def test_labelled_axis_ticks_by_name() -> None:
     """A pair/model axis ticks by its declared names -- the same names the
@@ -332,7 +345,7 @@ def test_labelled_axis_ticks_by_name() -> None:
         AxisId,
         AxisSpec,
         DatasetSchema as Schema,
-        PointTable,
+        DomainSpec,
         REPEAT,
         ValidityContract,
         ValueSchema,
@@ -346,11 +359,14 @@ def test_labelled_axis_ticks_by_name() -> None:
     )
     site = AxisSpec(AxisId("occ.site"), "site", SITE, 5)
     schema = Schema(
-        AxisSpec(AxisId("cycle"), "cycle", REPEAT, 8),
-        PointTable(1, ()),
-        None,
+        DomainSpec(
+            (8,),
+            (AxisSpec(AxisId("cycle"), "cycle", REPEAT, 8),),
+            (tuple(range(8)),),
+        ),
+        DomainSpec((1,), (), ()),
+        DomainSpec((3, 5), (pair, site)),
         ValueSchema(
-            (pair, site),
             ValidityContract.components(pair.axis_id, site.axis_id),
             np.dtype("<f8"),
             "1",
@@ -362,7 +378,7 @@ def test_labelled_axis_ticks_by_name() -> None:
     )
     session = PlotSession(
         snapshot,
-        CurvePlot(AxisRef.data("fs.pair")),
+        CurvePlot(AxisRef.cell_data("fs.pair")),
         parameters={"uncertainty": True},
     )
     try:

@@ -8,7 +8,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 import pytest
 
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from data_factory import (
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
+
 from test_facet_live_fit import _facet_snapshot, _spec as facet_spec
 from zlc_plot import (
     AxisRef,
@@ -18,7 +25,6 @@ from zlc_plot import (
     ensure_qt5_application,
 )
 from zlc_plot.raster import RasterPlotHost
-
 
 @pytest.mark.gui
 def test_bound_plot_controls_never_wait_for_the_raster_worker() -> None:
@@ -33,14 +39,13 @@ def test_bound_plot_controls_never_wait_for_the_raster_worker() -> None:
     except Exception as error:  # pragma: no cover - environment-dependent
         pytest.skip(f"Qt5 offscreen unavailable: {error}")
 
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": (0.0, 1.0)}),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"x": (0.0, 1.0)}),
         dtype=np.float64,
-        generation="qt-controls-test",
     )
     host = RasterPlotHost.from_plot(
-        DatasetSnapshot(schema, np.asarray([[0.0, 1.0]]), 0),
+        make_snapshot(schema, np.asarray([[0.0, 1.0]]), 0),
         CurvePlot(AxisRef.point("x")),
     )
 
@@ -84,7 +89,6 @@ def test_bound_plot_controls_never_wait_for_the_raster_worker() -> None:
             controls.close()
         host.close(timeout=10)
 
-
 @pytest.mark.gui
 def test_qt_widget_receives_front_and_commits_area_drag() -> None:
     try:
@@ -100,19 +104,18 @@ def test_qt_widget_receives_front_and_commits_area_drag() -> None:
     # choice, so on one series the hover is now correctly inert and would
     # prove nothing.
     columns = np.linspace(0.0, 1.0, 20)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns(
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns(
             {
                 "x": np.tile(columns, 2),
                 "series": np.repeat((0.0, 1.0), columns.size),
             }
         ),
         dtype=np.float64,
-        generation="qt-widget-test",
     )
     values = np.concatenate((columns, columns + 0.35)).reshape(1, -1)
-    snapshot = DatasetSnapshot(schema, values, 0)
+    snapshot = make_snapshot(schema, values, 0)
     host = RasterPlotHost.from_plot(
         snapshot,
         CurvePlot(AxisRef.point("x"), group=AxisRef.point("series")),
@@ -195,7 +198,6 @@ def test_qt_widget_receives_front_and_commits_area_drag() -> None:
             widget.close_adapter()
         host.close(timeout=10)
 
-
 @pytest.mark.gui
 def test_staged_widget_accepts_its_exact_current_front_idempotently() -> None:
     try:
@@ -203,13 +205,12 @@ def test_staged_widget_accepts_its_exact_current_front_idempotently() -> None:
     except Exception as error:  # pragma: no cover - environment-dependent
         pytest.skip(f"Qt5 offscreen unavailable: {error}")
 
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": (0.0, 1.0, 2.0)}),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"x": (0.0, 1.0, 2.0)}),
         dtype=np.float64,
-        generation="qt-idempotent-present",
     )
-    snapshot = DatasetSnapshot(schema, np.asarray([[1.0, 2.0, 3.0]]), 0)
+    snapshot = make_snapshot(schema, np.asarray([[1.0, 2.0, 3.0]]), 0)
     host = RasterPlotHost.from_plot(snapshot, CurvePlot(AxisRef.point("x")))
     widget = None
     try:
@@ -231,7 +232,6 @@ def test_staged_widget_accepts_its_exact_current_front_idempotently() -> None:
             widget.close_adapter()
         host.close(timeout=10)
 
-
 @pytest.mark.gui
 def test_qt_double_click_focus_repaints_a_static_facet_host() -> None:
     """The focus-rendered front supersedes the in-flight gesture's surface.
@@ -252,35 +252,36 @@ def test_qt_double_click_focus_repaints_a_static_facet_host() -> None:
         pytest.skip(f"Qt5 offscreen unavailable: {error}")
 
     from zlc_data import SPATIAL_X, SPATIAL_Y
-    from data_factory import PointTopology
+    from data_factory import (
+        axis,
+        make_dataset_schema,
+        make_snapshot,
+        mapped_domain_from_columns,
+        repeat_domain,
+    )
     from zlc_plot import ImagePlot
 
-    table = PointTable.from_columns({"bias": [-1.0, 0.0, 1.0]})
-    topology = PointTopology.from_cartesian(
-        (Axis.create("bias", values=[-1.0, 0.0, 1.0]),), point_table=table
-    )
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
+    table = mapped_domain_from_columns({"bias": [-1.0, 0.0, 1.0]})
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
         table,
-        data_axes=(
-            Axis.create(
+        cell_axes=(
+            axis(
                 "sy", values=tuple(float(v) for v in range(40)), role=SPATIAL_Y
             ),
-            Axis.create(
+            axis(
                 "sx", values=tuple(float(v) for v in range(60)), role=SPATIAL_X
             ),
         ),
-        point_topology=topology,
         dtype=np.float64,
-        generation="qt-focus-test",
     )
     frame = np.add.outer(np.arange(40.0), np.arange(60.0))
     values = np.stack([frame + 50.0 * index for index in range(3)])[None]
     host = RasterPlotHost.from_plot(
-        DatasetSnapshot(schema, values, 1),
+        make_snapshot(schema, values, 1),
         FacetGridPlot(
-            AxisRef.point_dimension("bias"),
-            ImagePlot(AxisRef.data("sx"), AxisRef.data("sy")),
+            AxisRef.point("bias"),
+            ImagePlot(AxisRef.cell_data("sx"), AxisRef.cell_data("sy")),
         ),
         size="4x4",
     )
@@ -327,7 +328,6 @@ def test_qt_double_click_focus_repaints_a_static_facet_host() -> None:
             widget.close_adapter()
         host.close(timeout=10)
 
-
 def test_qt_raster_host_accepts_facet_grid_spec() -> None:
     spec = facet_spec()
     assert isinstance(spec, FacetGridPlot)
@@ -338,7 +338,6 @@ def test_qt_raster_host_accepts_facet_grid_spec() -> None:
         assert len(front.interaction.axes) >= 2
     finally:
         host.close(timeout=10)
-
 
 @pytest.mark.gui
 def test_the_widget_asks_the_screen_before_it_subscribes() -> None:
@@ -363,16 +362,15 @@ def test_the_widget_asks_the_screen_before_it_subscribes() -> None:
     except Exception as error:  # pragma: no cover - environment-dependent
         pytest.skip(f"Qt5 offscreen unavailable: {error}")
 
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": (0.0, 1.0, 2.0)}),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"x": (0.0, 1.0, 2.0)}),
         dtype=np.float64,
-        generation="qt-dpr-test",
     )
 
     def build_host():
         return RasterPlotHost.from_plot(
-            DatasetSnapshot(schema, np.asarray([[0.0, 1.0, 2.0]]), 0),
+            make_snapshot(schema, np.asarray([[0.0, 1.0, 2.0]]), 0),
             CurvePlot(AxisRef.point("x")),
             size="2x2",
         )
@@ -425,7 +423,6 @@ def test_the_widget_asks_the_screen_before_it_subscribes() -> None:
         observer.current_ratio = original
         host.close(timeout=30)
 
-
 def test_a_bare_hover_is_not_a_hand_but_every_part_of_a_drag_is() -> None:
     """The arbiter's bargain is the hand's pixels for the camera's.
 
@@ -456,7 +453,6 @@ def test_a_bare_hover_is_not_a_hand_but_every_part_of_a_drag_is() -> None:
     assert _is_a_hand("scroll", False) is True
     assert _is_a_hand("key", False) is True
     assert _is_a_hand("cancel", False) is True
-
 
 @pytest.mark.gui
 def test_a_drag_stays_a_hand_from_press_to_release() -> None:
@@ -490,13 +486,12 @@ def test_a_drag_stays_a_hand_from_press_to_release() -> None:
         )
         app.processEvents()
 
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": np.linspace(0.0, 1.0, 20)}),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"x": np.linspace(0.0, 1.0, 20)}),
         dtype=np.float64,
-        generation="hand-classification",
     )
-    snapshot = DatasetSnapshot(schema, np.linspace(0.0, 1.0, 20).reshape(1, -1), 0)
+    snapshot = make_snapshot(schema, np.linspace(0.0, 1.0, 20).reshape(1, -1), 0)
     host = RasterPlotHost.from_plot(snapshot, CurvePlot(AxisRef.point("x")))
     widget = None
     seen: list[tuple[str, object]] = []

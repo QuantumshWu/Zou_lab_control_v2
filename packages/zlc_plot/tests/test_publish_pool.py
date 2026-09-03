@@ -11,26 +11,29 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from data_factory import (
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
+
 
 from zlc_plot import AxisRef, CurvePlot, PlotSession
 from zlc_plot.raster import RasterBuffer
 from zlc_plot.rendering import PublishBufferPool
 
-
 def _session() -> PlotSession:
     rng = np.random.default_rng(1)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=4),
-        PointTable.from_columns({"x": np.arange(48.0)}),
-        generation="publish-pool",
+    schema = make_dataset_schema(
+        repeat_domain(size=4),
+        mapped_domain_from_columns({"x": np.arange(48.0)}),
     )
     return PlotSession(
-        DatasetSnapshot(schema, rng.normal(size=(4, 48)), revision=1),
+        make_snapshot(schema, rng.normal(size=(4, 48)), revision=1),
         CurvePlot(AxisRef.point("x")),
         device_pixel_ratio=2.0,
     )
-
 
 def test_a_released_buffer_is_the_one_reissued() -> None:
     """Steady state stops allocating: the same storage comes back around."""
@@ -45,7 +48,6 @@ def test_a_released_buffer_is_the_one_reissued() -> None:
     again_writable, again_published = pool.take(1024)
     assert again_writable.obj is block
 
-
 def test_a_held_buffer_is_never_reissued() -> None:
     """The failure mode of a holder is a fresh allocation, not shared pixels."""
 
@@ -59,7 +61,6 @@ def test_a_held_buffer_is_never_reissued() -> None:
         del writable
     assert len({id(block) for block in blocks}) == len(blocks)
 
-
 def test_a_size_change_drops_the_pooled_buffers() -> None:
     """A resized surface must not be served a buffer of the old size."""
 
@@ -70,7 +71,6 @@ def test_a_size_change_drops_the_pooled_buffers() -> None:
     other_writable, other_published = pool.take(2048)
     assert other_published.nbytes == 2048
     assert not pool._free
-
 
 def test_a_published_front_cannot_be_written() -> None:
     """The guarantee to a holder is unchanged: these bytes are immutable."""
@@ -88,7 +88,6 @@ def test_a_published_front_cannot_be_written() -> None:
     finally:
         session.close()
 
-
 def test_a_front_kept_across_frames_keeps_its_own_pixels() -> None:
     """The whole point, end to end: an old front does not become a new one."""
 
@@ -103,7 +102,7 @@ def test_a_front_kept_across_frames_keeps_its_own_pixels() -> None:
         first = np.array(kept, copy=True)
         for revision in range(2, 8):
             session.update_data(
-                DatasetSnapshot(
+                make_snapshot(
                     schema, rng.normal(size=(4, 48)) * revision, revision=revision
                 )
             )

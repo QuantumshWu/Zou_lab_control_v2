@@ -280,7 +280,7 @@ Occupancy plugin. The concrete Temperature Task reuses the occupied values and
 their expanded validity for its authored before/trap-off/after cycles: only a
 valid, initially occupied pair is a survival trial. It publishes the binary
 per-site `survival` dataset only, with the frame pairs as a `READOUT_EVENT`
-point column of the cycle (one row per pair, the sites in the cell): a scan
+Point-domain axis of the cycle (one row per pair, the sites in Cell-data): a scan
 folds them in as an event dimension ahead of its own axes, and the default
 plots treat them as they treat camera frames -- a grid faces them, anything
 else shows the latest pair. Its declared preview and artifact both pool
