@@ -8,7 +8,14 @@ _PACKAGE_DIR = Path(__file__).resolve().parent
 if _PACKAGE_DIR.name != "zlc_pulse" or __package__ != "zlc_pulse":
     raise ImportError(f"unexpected zlc_pulse installation path: {_PACKAGE_DIR}")
 
-from .codec import PULSE_TREE_FORMAT, sequence_from_tree, sequence_to_tree
+from .codec import (
+    API_VALUES_FORMAT,
+    PULSE_TREE_FORMAT,
+    api_values_from_tree,
+    api_values_to_tree,
+    sequence_from_tree,
+    sequence_to_tree,
+)
 from .model import (
     ANALOG_MODE_CHOICES,
     MINIMUM_REPEAT_COUNT,  # noqa: E402
@@ -30,6 +37,8 @@ from .model import (
 )
 from .compile import compile_sequence  # noqa: E402
 from .binding import (  # noqa: E402
+    apply_api_values,
+    authored_api_entries,
     authored_api_values,
     convert_time,
     pulse_field_value,
@@ -75,6 +84,7 @@ __all__ = [
     "PulseFieldRef",
     "OutputDelay",
     "MINIMUM_REPEAT_COUNT",
+    "API_VALUES_FORMAT",
     "PULSE_TREE_FORMAT",
     "sequence_from_tree",
     "sequence_to_tree",
@@ -94,6 +104,10 @@ __all__ = [
     "align_to_grid",
     "cycle_binding_kind",
     "resolve_scan_point",
+    "api_values_from_tree",
+    "api_values_to_tree",
+    "apply_api_values",
+    "authored_api_entries",
     "authored_api_values",
     "convert_time",
     "resolve_api_parameters",
