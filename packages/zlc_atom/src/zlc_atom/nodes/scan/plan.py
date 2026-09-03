@@ -39,6 +39,8 @@ from zlc_pulse import (
 )
 from zlc_pulse.codec import parse_pulse_tree_json, sequence_from_document_tree
 
+from zlc_atom.pulse_values import apply_current_api_values
+
 from zlc_atom.authoring import TunableField
 from zlc_atom.nodes._framework.descriptor import (
     SelectionMapping,
@@ -403,9 +405,13 @@ def bind_plan(
 
 def _template_sequence(path: str | Path) -> PulseSequence:
     source = Path(path).expanduser().resolve()
-    return sequence_from_document_tree(
+    sequence = sequence_from_document_tree(
         parse_pulse_tree_json(source.read_text(encoding="utf-8"))
     )
+    # The pulse as the apparatus is set today: whatever the workspace's
+    # current set of API values says, applied before anything reads what the
+    # slots hold.  A scan plan still overrides what it scans.
+    return apply_current_api_values(sequence, source)
 
 
 def slots_from_plan(

@@ -135,6 +135,33 @@ def replace_pulse_field(
     return replace(sequence, periods=tuple(periods))
 
 
+def field_label(sequence: PulseSequence, reference: PulseFieldRef) -> str:
+    """One physical field, said the way it reads on the pulse.
+
+    A binding is identified by ``(kind, period_id, port)``, none of which an
+    operator chose to read: the period may carry a name and the port a label
+    from the board manifest, and those are what is on screen.  Every surface
+    that lists bindings prints this, so a parameter is the same words in the
+    editor, in a node form and in an error.
+    """
+
+    _check_inputs(sequence, reference)
+    if reference.kind == FIELD_DELAY:
+        return f"{_port_text(sequence, reference.port)} delay"
+    period = sequence.period_by_id.get(str(reference.period_id))
+    period_text = (
+        str(reference.period_id) if period is None else (period.name or period.period_id)
+    )
+    if reference.kind == FIELD_DURATION:
+        return f"{period_text} duration"
+    return f"{period_text} · {_port_text(sequence, reference.port)}"
+
+
+def _port_text(sequence: PulseSequence, port: str | None) -> str:
+    spec = sequence.target.by_key.get(str(port))
+    return str(port) if spec is None else (spec.label or spec.key)
+
+
 def authored_api_entries(sequence: PulseSequence) -> dict[str, tuple[float, str]]:
     """Every API parameter as ``(value, unit)``, both the pulse's own.
 
@@ -303,6 +330,7 @@ __all__ = [
     "authored_api_entries",
     "authored_api_values",
     "convert_time",
+    "field_label",
     "pulse_field_value",
     "replace_pulse_field",
     "resolve_api_parameters",
