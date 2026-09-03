@@ -40,8 +40,13 @@ from zlc_ui.fluent import (
     FluentSpinBox,
 )
 
+from zlc_pulse import authored_api_entries, field_label
+
 from .plan import (
     MANUAL_PARAM_FAMILY,
+    PULSE_PARAM_FAMILY,
+    api_overrides_from_authored,
+    api_overrides_to_authored,
     ScanAxis,
     ScanPlan,
     hardware_scan_ports_for,
@@ -256,7 +261,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
     """The ``plan`` field, authored as axes rather than typed as JSON."""
 
     draft_changed = QtCore.pyqtSignal(object)
-    managed_fields = ("plan",)
+    managed_fields = ("plan", "api_values")
 
     def __init__(
         self,
@@ -303,10 +308,27 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self.summary.setWordWrap(True)
         column.addWidget(self.summary)
 
+        # The pulse's API slots, set once for this run.  They are not axes:
+        # nothing sweeps them, they are the numbers the pulse holds while the
+        # table plays.  A slot the plan DOES scan is left out -- the table
+        # already says what it plays, and two places saying it is one too many.
+        self.values_title = QtWidgets.QLabel("API values")
+        self.values_title.setStyleSheet("font-weight: 600;")
+        column.addWidget(self.values_title)
+        self.values_grid = QtWidgets.QGridLayout()
+        self.values_grid.setContentsMargins(0, 0, 0, 0)
+        column.addLayout(self.values_grid)
+        self.values_note = QtWidgets.QLabel("")
+        self.values_note.setWordWrap(True)
+        column.addWidget(self.values_note)
+
         self._ports: tuple = ()
         self._rows: list[_AxisRow] = []
         self._loading = False
         self._plan_text = ""
+        self._values_text = ""
+        self._authored: dict[str, tuple[float, str]] = {}
+        self._value_rows: dict[str, QtWidgets.QWidget] = {}
         self.add_button.clicked.connect(self._add_axis)
         self.add_manual_button.clicked.connect(self._add_manual_axis)
         # Whether a hand can be waited for is a fact about the NODE, known
@@ -342,6 +364,8 @@ class ScanPlanEditor(QtWidgets.QWidget):
         values = projection.get("form_values") or {}
         plan_text = str(values.get("plan") or "") if isinstance(values, Mapping) else ""
 
+        values_text = str(values.get("api_values") or "") if isinstance(values, Mapping) else ""
+
         ports_changed = tuple(ports) != self._ports
         if ports_changed:
             self._ports = tuple(ports)
@@ -350,6 +374,105 @@ class ScanPlanEditor(QtWidgets.QWidget):
             self._rebuild_rows(plan_text)
         self.add_button.setEnabled(bool(self._ports))
         self._refresh_summary()
+        self._values_text = values_text
+        self._rebuild_values(sequence)
+
+    # ---------------------------------------------------------- API values
+
+    def _scanned_parameters(self) -> set[str]:
+        plan = self._current_plan()
+        if plan is None:
+            return set()
+        return {
+            axis.port[len(PULSE_PARAM_FAMILY):]
+            for axis in plan.axes
+            if axis.port.startswith(PULSE_PARAM_FAMILY)
+        }
+
+    def _rebuild_values(self, sequence: object) -> None:
+        """One box per API slot this run sets but does not sweep."""
+
+        parameters = tuple(getattr(sequence, "api_parameters", ()) or ())
+        scanned = self._scanned_parameters()
+        offered = tuple(
+            parameter
+            for parameter in parameters
+            if parameter.parameter_id not in scanned
+        )
+        self._authored = authored_api_entries(sequence) if parameters else {}
+        overrides = self._current_overrides()
+
+        self._loading = True
+        try:
+            while self.values_grid.count():
+                item = self.values_grid.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.setParent(None)
+                    widget.deleteLater()
+            self._value_rows = {}
+            for row, parameter in enumerate(offered):
+                name = parameter.parameter_id
+                authored, unit = self._authored[name]
+                label = QtWidgets.QLabel(field_label(sequence, parameter.field_ref))
+                label.setToolTip(name)
+                box = FluentDoubleSpinBox()
+                box.setDecimals(0 if unit == "value" else 6)
+                box.setRange(-1e12, 1e12)
+                box.setValue(float(overrides.get(name, authored)))
+                box.valueChanged.connect(self._emit_values)
+                self.values_grid.addWidget(label, row, 0)
+                self.values_grid.addWidget(box, row, 1)
+                self.values_grid.addWidget(QtWidgets.QLabel(unit), row, 2)
+                self._value_rows[name] = box
+        finally:
+            self._loading = False
+        shown = bool(offered)
+        self.values_title.setVisible(shown)
+        self.values_note.setVisible(shown)
+        self._refresh_values_note(scanned & set(self._authored))
+
+    def _current_overrides(self) -> dict[str, float]:
+        try:
+            return api_overrides_from_authored(self._values_text)
+        except ValueError:
+            return {}
+
+    def _emit_values(self) -> None:
+        """Only what this run sets differently is written down.
+
+        A box left at the value the pulse carries is not an override: the
+        pulse's own number is already the workspace's current one, and
+        freezing a copy of it here would quietly outrank the next
+        recalibration.
+        """
+
+        if self._loading:
+            return
+        overrides = {
+            name: box.value()
+            for name, box in self._value_rows.items()
+            if box.value() != self._authored[name][0]
+        }
+        self._values_text = api_overrides_to_authored(overrides)
+        self.draft_changed.emit({"values": {"api_values": self._values_text}})
+        self._refresh_values_note(set())
+
+    def _refresh_values_note(self, scanned: set[str]) -> None:
+        parts = []
+        overridden = sum(
+            1
+            for name, box in self._value_rows.items()
+            if box.value() != self._authored[name][0]
+        )
+        if self._value_rows:
+            parts.append(
+                f"{overridden} of {len(self._value_rows)} set for this run; "
+                "the rest run what the pulse carries."
+            )
+        if scanned:
+            parts.append(f"swept by the plan: {', '.join(sorted(scanned))}.")
+        self.values_note.setText("  ".join(parts))
 
     def set_mutation_enabled(self, enabled: bool) -> None:
         self.setEnabled(bool(enabled))

@@ -36,6 +36,8 @@ from zlc_atom.nodes.scan import (
     ScanPlan,
     bind_plan,
     hardware_scan_ports_for,
+    api_overrides_from_authored,
+    apply_api_overrides,
     plan_from_authored,
     scan_ports_for_devices,
     split_outer_axes,
@@ -63,6 +65,15 @@ SEAMLESS_SCAN_SCHEMA = AuthoringSchema(
             "Scan plan",
             "",
             required=True,
+        ),
+        # The pulse's API slots, set once for this run.  Only what differs
+        # from the pulse is written here, so a recalibration that lands in
+        # the workspace's current set is not outranked by a stale copy.
+        AuthoringField(
+            "api_values",
+            "text",
+            "API values",
+            "",
         ),
         # Repeats and shots both land on the dataset's repeat axis (size
         # repeats x shots): shots play inside one point as the pulse's
@@ -102,6 +113,7 @@ def _build(
     source_signal: str,
     pulse_resource: ResolvedWorkspaceResource,
     plan: object,
+    api_values: object = "",
     tunable_devices: object = None,
     repeats: int = 1,
     shots_per_point: int = 1,
@@ -113,7 +125,12 @@ def _build(
         or not isinstance(pulse_resource.value, PulseSequence)
     ):
         raise TypeError("pulse_resource must be a resolved scan template")
-    sequence = pulse_resource.value
+    # This run's own API values over whatever the pulse carries, before
+    # anything reads what its slots hold.  The plan still overrides the
+    # ones it sweeps.
+    sequence = apply_api_overrides(
+        pulse_resource.value, api_overrides_from_authored(api_values)
+    )
     parsed = plan_from_authored(plan)
     # An operator's axis binds to no port at all: the run stops and asks
     # for it.  A device axis binds to an installed knob the HOST moves

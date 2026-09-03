@@ -33,6 +33,7 @@ import numpy as np
 from dataclasses import replace
 
 from zlc_pulse import (
+    apply_api_values,
     PulseSequence,
     api_parameter_columns_for,
     scan_columns_for,
@@ -516,6 +517,75 @@ SEAMLESS_PULSE_RESOURCE = WorkspaceResourceSpec(
     load_seamless_template,
     argument_name="pulse_resource",
 )
+
+
+def api_overrides_from_authored(payload: object) -> dict[str, float]:
+    """One run's API parameter values, from the authored ``api_values`` text.
+
+    ``name = number`` a line, in the unit the pulse declares for that name --
+    the same one the form prints beside the box.  Only what this run sets
+    differently is written down: a parameter left alone keeps whatever the
+    pulse carries, which is where the workspace's current set of values has
+    already landed.
+    """
+
+    text = "" if payload is None else str(payload)
+    overrides: dict[str, float] = {}
+    for number, raw in enumerate(text.splitlines(), start=1):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        name, separator, value = line.partition("=")
+        name = name.strip()
+        if not separator or not name:
+            raise ValueError(
+                f"API value line {number} must read 'name = number': {raw.strip()!r}"
+            )
+        try:
+            overrides[name] = float(value.strip())
+        except ValueError:
+            raise ValueError(
+                f"API value {name!r} is not a number: {value.strip()!r}"
+            ) from None
+    return overrides
+
+
+def apply_api_overrides(
+    sequence: PulseSequence, overrides: Mapping[str, float]
+) -> PulseSequence:
+    """The pulse with this run's API values written into its fields.
+
+    Each number is read in the unit the pulse declares for that name, which
+    is the unit the form printed beside the box.  The declarations survive,
+    so a plan that scans one of these still overrides it per point.  A name
+    the pulse does not declare is refused: it is a form written against a
+    different pulse, and running the nominal value instead is the silence
+    this whole path exists to end.
+    """
+
+    declared = {
+        parameter.parameter_id: parameter.unit
+        for parameter in sequence.api_parameters
+    }
+    unknown = tuple(sorted(name for name in overrides if name not in declared))
+    if unknown:
+        raise ValueError(
+            f"this pulse declares no API parameter(s) {', '.join(unknown)}"
+        )
+    if not overrides:
+        return sequence
+    applied, _ids, _absent = apply_api_values(
+        sequence,
+        {name: (float(value), declared[name]) for name, value in overrides.items()},
+    )
+    return applied
+
+
+def api_overrides_to_authored(overrides: Mapping[str, float]) -> str:
+    """The text behind one mapping of API parameter values."""
+
+    lines = [f"{name} = {value:g}" for name, value in overrides.items()]
+    return "\n".join(lines)
 
 
 def plan_from_authored(payload: object) -> ScanPlan:

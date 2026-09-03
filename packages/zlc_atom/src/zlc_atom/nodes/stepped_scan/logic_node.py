@@ -29,6 +29,8 @@ from zlc_atom.nodes.scan import (
     SCAN_PULSE_CONTRACT,
     STEPPED_PULSE_RESOURCE,
     bind_plan,
+    api_overrides_from_authored,
+    apply_api_overrides,
     plan_from_authored,
     scan_ports_for,
     scan_ports_for_devices,
@@ -59,6 +61,15 @@ STEPPED_SCAN_SCHEMA = AuthoringSchema(
             "Scan plan",
             "",
             required=True,
+        ),
+        # The pulse's API slots, set once for this run.  Only what differs
+        # from the pulse is written here, so a recalibration that lands in
+        # the workspace's current set is not outranked by a stale copy.
+        AuthoringField(
+            "api_values",
+            "text",
+            "API values",
+            "",
         ),
         # Repeats and shots both land on the dataset's repeat axis (size
         # repeats x shots): complete adjacent trials of one point versus
@@ -121,6 +132,7 @@ def _build(
     source_signal: str,
     pulse_resource: ResolvedWorkspaceResource,
     plan: object,
+    api_values: object = "",
     repeats: int = 1,
     shots_per_point: int = 1,
     settle_seconds: float = DEFAULT_SETTLE_SECONDS,
@@ -134,7 +146,11 @@ def _build(
         or not isinstance(pulse_resource.value, PulseSequence)
     ):
         raise TypeError("pulse_resource must be a resolved scan template")
-    sequence = pulse_resource.value
+    # This run's own API values over whatever the pulse carries; the plan
+    # still overrides the ones it sweeps.
+    sequence = apply_api_overrides(
+        pulse_resource.value, api_overrides_from_authored(api_values)
+    )
     parsed = plan_from_authored(plan)
     # One vocabulary, two projectors: the pulse offers its API parameters,
     # the bench's tunable devices offer their runtime knobs.  Binding sees
