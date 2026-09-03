@@ -51,7 +51,7 @@ def _commit_area(host) -> None:
 
     start, end = point(0.25, 0.25), point(0.75, 0.75)
     for action, location in (("press", start), ("move", end), ("release", end)):
-        host._pointer_event(
+        host.pointer_event(
             action,
             location[0],
             location[1],

@@ -75,7 +75,13 @@ def open_experiment(workspace=None, template=None):
     return space, session
 
 
-def build_panel_host(plot_input, state, *, device_pixel_ratio: float = 1.0):
+def build_panel_host(
+    plot_input,
+    state,
+    *,
+    build_host,
+    device_pixel_ratio: float = 1.0,
+):
     """One panel host from one panel state: THE mount path for every card.
 
     Module-level on purpose -- the presenter tests mount through this exact
@@ -89,9 +95,11 @@ def build_panel_host(plot_input, state, *, device_pixel_ratio: float = 1.0):
     host and never survive as compatibility state.
     """
 
-    import zlc_plot as plot
     from ..panel_catalog import task_console_fitting_spec
     from ..panel_state import project_panel_state
+
+    if not callable(build_host):
+        raise TypeError("build_host must be callable")
 
     snapshot = getattr(plot_input, "snapshot", plot_input)
     spec = task_console_fitting_spec(
@@ -108,7 +116,7 @@ def build_panel_host(plot_input, state, *, device_pixel_ratio: float = 1.0):
             f"{state.signal!r} cannot be drawn: {projection.vacancy}"
         )
     spec, parameters = projection.spec, projection.parameters
-    return plot.build_figure_host(
+    return build_host(
         plot_input,
         spec,
         size=state.size,
@@ -127,7 +135,7 @@ def build_console(session, *, window_ratio=None, request_close=None):
 
     from zlc_ui import open_task_console
 
-    from ..board import attach_qt_owner_turn, attach_qt_worker
+    from ..board import attach_qt_owner_turn
     from ..console import ConsolePresenter
     from ..panel_catalog import task_console_fitting_spec
 
@@ -149,14 +157,48 @@ def build_console(session, *, window_ratio=None, request_close=None):
         window_ratio=window_ratio,
         plot_surface=_panel_surface,
     )
-    def _build_panel_host(plot_input, state):
+    monitor_render = plot.RenderProcess("zlc-monitor-render")
+    try:
+        editor_render = plot.RenderProcess("zlc-edit-save-render")
+    except BaseException:
+        monitor_render.release(timeout=30.0)
+        view.close()
+        raise
+
+    render_release_started = False
+    monitor_shutdown = editor_shutdown = False
+
+    def _close_render_processes() -> bool:
+        nonlocal render_release_started, monitor_shutdown, editor_shutdown
+        if not render_release_started:
+            monitor_shutdown = not monitor_render.release(timeout=0.0)
+            editor_shutdown = not editor_render.release(timeout=0.0)
+            render_release_started = True
+        monitor_closed = (
+            monitor_render.close(timeout=0.0) if monitor_shutdown else True
+        )
+        editor_closed = (
+            editor_render.close(timeout=0.0) if editor_shutdown else True
+        )
+        return bool(monitor_closed and editor_closed)
+
+    def _build_monitor_host(plot_input, state):
         return build_panel_host(
             plot_input,
             state,
+            build_host=monitor_render.build_host,
             # The handle is a thread-safe snapshot of the window's current
             # screen scale.  Host replacement runs on the projection lane, so
             # it must not touch Qt here; it must also not retain the scale of
             # the screen on which the console originally opened.
+            device_pixel_ratio=float(view.device_pixel_ratio()),
+        )
+
+    def _build_editor_host(plot_input, state):
+        return build_panel_host(
+            plot_input,
+            state,
+            build_host=editor_render.build_host,
             device_pixel_ratio=float(view.device_pixel_ratio()),
         )
 
@@ -166,8 +208,6 @@ def build_console(session, *, window_ratio=None, request_close=None):
         return task_console_fitting_spec(
             snapshot.block.schema, kind, cell_kind
         )
-
-    run_save, close_save_worker = attach_qt_worker("zlc-panel-save")
 
     def _review_points(host, overlay, request):
         point_ids = tuple(overlay.point_ids or ())
@@ -215,17 +255,26 @@ def build_console(session, *, window_ratio=None, request_close=None):
         presenter = ConsolePresenter(
             session,
             view,
-            make_host=_build_panel_host,
+            make_monitor_host=_build_monitor_host,
+            make_editor_host=_build_editor_host,
+            build_figure_host=editor_render.build_host,
+            save_figure_artifact=editor_render.save_figure_artifact,
+            close_render_processes=_close_render_processes,
             spec_for=_spec_for,
-            open_saved=lambda start: _open_saved_figure(view, start),
+            open_saved=lambda start: _open_saved_figure(
+                view,
+                start,
+                monitor_render=monitor_render,
+                editor_render=editor_render,
+            ),
             request_close=view.close_later if request_close is None else request_close,
-            run_off_thread=run_save,
-            close_worker=close_save_worker,
             review_points=_review_points,
             manual_axis=_manual_axis,
         )
     except BaseException:
-        close_save_worker()
+        monitor_render.release(timeout=30.0)
+        editor_render.release(timeout=30.0)
+        view.close()
         raise
     # Completion-driven presentation: a finished render's wake hops to the GUI
     # thread and commits immediately, instead of waiting for the next beat.
@@ -1297,7 +1346,13 @@ def create_window(
     return window
 
 
-def _open_saved_figure(parent: object, start: str) -> object | None:
+def _open_saved_figure(
+    parent: object,
+    start: str,
+    *,
+    monitor_render: object,
+    editor_render: object,
+) -> object | None:
     """Open one saved figure in its own window, over today's data folder.
 
     The console does not become a viewer; it asks for one.  What a saved figure
@@ -1315,7 +1370,11 @@ def _open_saved_figure(parent: object, start: str) -> object | None:
     # The viewer's own public entry, not a second assembly of it: one window
     # definition means the console cannot open a viewer that differs from the
     # one the viewer's launcher opens.
-    return create_viewer_window(path=path).presenter
+    return create_viewer_window(
+        path=path,
+        monitor_render=monitor_render,
+        editor_render=editor_render,
+    ).presenter
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1352,7 +1411,20 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         finally:
             if presenter is not None:
-                presenter.close()
+                # The GUI normally advances this non-blocking close through
+                # its owner turns.  --check has no event loop after return,
+                # so it must finish the same lifecycle here or the two
+                # non-daemon render processes keep the command alive.
+                import time
+
+                deadline = time.monotonic() + 30.0
+                while not presenter.close() and time.monotonic() < deadline:
+                    presenter.beat()
+                    time.sleep(0.005)
+                if not presenter.close():
+                    raise RuntimeError(
+                        "TaskConsole render processes did not close"
+                    )
             session.close()
 
     try:

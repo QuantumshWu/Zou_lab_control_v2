@@ -155,7 +155,7 @@ def test_the_threshold_follows_the_pointer_and_commits_on_release() -> None:
 
         def pointer(action: str, x: float) -> object:
             current = host.front or front
-            return host._pointer_event(
+            return host.pointer_event(
                 action,
                 x,
                 0.5,

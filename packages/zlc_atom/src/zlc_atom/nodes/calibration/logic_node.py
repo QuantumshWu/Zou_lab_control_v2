@@ -211,6 +211,8 @@ def _build(
     sequencer_key: str,
     pulse_resource: ResolvedWorkspaceResource,
     signal_plane: object,
+    build_figure_host: object = None,
+    save_figure_artifact: object = None,
     **values: object,
 ) -> CalibrationTask:
     authored = CALIBRATION_SCHEMA.project_values(values)
@@ -252,6 +254,8 @@ def _build(
         pulse_sequence=pulse_resource.value,
         pulse_path=pulse_resource.path,
         signal_plane=signal_plane,
+        build_figure_host=build_figure_host,
+        save_figure_artifact=save_figure_artifact,
     )
 
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 from concurrent.futures import CancelledError, Future
 from threading import Event
 from pathlib import Path
+import gc
+import os
 import time
 
 import numpy as np
@@ -33,6 +35,7 @@ from zlc_plot.fit import (
     FitCancelled,
     FitDeadlineExceeded,
     FitEngine,
+    FitResult,
 )
 from zlc_plot.raster import RasterBuffer, RasterPlotHost
 from zlc_plot.rendering import MatplotlibRenderer
@@ -209,6 +212,211 @@ def test_equal_device_pixel_ratio_reuses_the_current_front() -> None:
         host.close(timeout=10)
 
 
+def test_render_process_preserves_host_front_events_and_pixel_leases(
+    tmp_path: Path,
+) -> None:
+    """The process boundary is invisible to one ordinary raster consumer."""
+
+    from zlc_plot import RenderProcess
+
+    snapshots = _fit_curve_series("render-process-contract", offset=0.1)
+    snapshot = snapshots(0, center=0.2)
+    local = RasterPlotHost.from_plot(
+        snapshot,
+        CurvePlot(AxisRef.point("x")),
+    )
+    service = RenderProcess("raster-contract-test")
+    remote = None
+    release_selection = None
+    release_fit = None
+    try:
+        expected = local.wait_for_front(timeout=10).buffer.as_rgba(copy=True)
+        assert service.pid is not None and service.pid != os.getpid()
+        service.retain()
+        assert service.release(timeout=0.0) is True
+        assert service.alive
+
+        remote = service.build_host(
+            snapshot,
+            CurvePlot(AxisRef.point("x")),
+        )
+        first = remote.wait_for_front(timeout=30)
+        assert remote.process_pid == service.pid
+        assert remote.process_name == service.name
+        np.testing.assert_array_equal(first.buffer.as_rgba(), expected)
+
+        # One accepted sequence is one frontend object and one shared-memory
+        # lease, even though it is observed through the callback, host and
+        # operation-completion surfaces.
+        fronts = []
+        stop_fronts = remote.subscribe_front(fronts.append)
+        changed = remote.set_parameter("title", "Remote title").result(timeout=30)
+        assert fronts[-1] is changed.front
+        assert changed.front is remote.front
+        configured = remote.configure(
+            parameter_updates={"title": "Remote title"}
+        ).result(timeout=30)
+        initial_metadata, initial_error = remote.initial_state
+        assert initial_error is None
+        assert initial_metadata is not None
+        assert initial_metadata[0].display_state == configured.value.display_state
+
+        # Keep only a derived ndarray view of the old shared front.  Producing
+        # more same-sized fronts must not let the child recycle its block while
+        # that view remains alive.
+        retained = first.buffer.as_rgba()
+        retained_pixels = retained.copy()
+        del first
+        gc.collect()
+        current = snapshot
+        for revision in range(1, 6):
+            current = snapshots(revision, center=0.2 + 0.02 * revision)
+            remote.update_data(current).result(timeout=30)
+        np.testing.assert_array_equal(retained, retained_pixels)
+        assert len(service._input_tokens) == 1
+        assert tuple(service._input_refcounts.values()) == (1,)
+
+        selections = []
+        release_selection = remote.subscribe_selection(
+            selections.append
+        ).result(timeout=30).value
+        selected = remote.set_crosshair_selector(
+            1.0,
+            2.0,
+            display=False,
+        ).result(timeout=30)
+        assert selections
+        assert selections[-1].selector == selected.value
+        assert selections[-1].data_revision == selected.front.identity.data_revision
+        release_selection().result(timeout=30)
+        release_selection = None
+        stop_fronts()
+
+        fit_events = []
+        fit_event_ready = Event()
+
+        def observe_fit(event: object) -> None:
+            fit_events.append(event)
+            fit_event_ready.set()
+
+        release_fit = remote.subscribe_fit(
+            observe_fit,
+            replay_current=False,
+        ).result(timeout=30).value
+        fitted = remote.fit("gaussian_offset", live=True).result(timeout=30)
+        assert isinstance(fitted.value, FitResult)
+        assert fitted.value.source_revision == current.ref.revision.value
+        assert fitted.front is remote.front
+        assert fit_event_ready.wait(2.0)
+        assert len(fit_events) == 1
+        assert fit_events[0].source_generation == str(
+            current.ref.stream_generation.value
+        )
+        assert fit_events[0].result.source_revision == current.ref.revision.value
+        assert not hasattr(fit_events[0].result, "fitted_values")
+        release_fit().result(timeout=30)
+        release_fit = None
+
+        description = remote.describe_display().result(timeout=30).value
+        selected_front = remote.front
+        front_image = service.save_front(
+            tmp_path / "remote-front.png",
+            selected_front,
+        ).result(timeout=30)
+        from PIL import Image
+
+        with Image.open(front_image) as opened:
+            np.testing.assert_array_equal(
+                np.asarray(opened.convert("RGBA")),
+                selected_front.buffer.as_rgba(),
+            )
+
+        saving = service.save_figure_artifact(
+            tmp_path / "remote-panel",
+            plot_input=current,
+            spec=description.spec,
+            parameters=description.display_state.values,
+            size=description.size,
+            viewport=description.viewport,
+            classifier_thresholds=description.classifier_thresholds,
+            facet_focus=description.facet_focus,
+            fit=description.fit,
+            selectors=description.selectors,
+            host=remote,
+        )
+        changed_after_save = remote.set_parameter("title", "after save")
+        image, archive = saving.result(timeout=30)
+        changed_after_save.result(timeout=30)
+        assert image.is_file() and archive.is_file()
+        from zlc_data.figure_archive import read_archive
+        from zlc_plot import read_figure_plot
+
+        saved_info, saved_arrays = read_archive(archive)
+        _saved_input, saved_recipe = read_figure_plot(
+            saved_info, saved_arrays, "data"
+        )
+        assert saved_recipe["parameters"]["title"] == "Remote title"
+
+        assert remote.close(timeout=30)
+        assert remote.closing
+        assert service._input_tokens == {}
+        assert service._input_refcounts == {}
+        remote = None
+    finally:
+        if release_fit is not None:
+            release_fit().result(timeout=30)
+        if release_selection is not None:
+            release_selection().result(timeout=30)
+        if remote is not None:
+            remote.close(timeout=30)
+        local.close(timeout=10)
+        assert service.close(timeout=30)
+
+
+def test_render_process_restarts_after_child_failure_without_reusing_old_pixels() -> None:
+    """A dead renderer is replaceable while its last complete Front remains valid."""
+
+    from zlc_plot import RenderProcess
+
+    snapshot = _snapshot()
+    spec = CurvePlot(AxisRef.point("x"))
+    service = RenderProcess("raster-restart-test")
+    first_host = replacement = None
+    try:
+        first_host = service.build_host(snapshot, spec)
+        first = first_host.wait_for_front(timeout=30)
+        retained = first.buffer.as_rgba()
+        retained_pixels = retained.copy()
+        first_pid = service.pid
+
+        service._process.terminate()
+        service._process.join(timeout=10)
+        deadline = time.monotonic() + 10.0
+        while (
+            first_host.startup_failure is None
+            or not service._reader_stopped.is_set()
+        ) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert first_host.startup_failure is not None
+        assert first_host.service_failure is True
+        assert service._reader_stopped.is_set()
+
+        replacement = service.build_host(snapshot, spec)
+        replacement.wait_for_front(timeout=30)
+        assert service.pid != first_pid
+        for index in range(5):
+            replacement.set_parameter(
+                "title", f"replacement {index}"
+            ).result(timeout=30)
+        np.testing.assert_array_equal(retained, retained_pixels)
+    finally:
+        if replacement is not None:
+            replacement.close(timeout=30)
+        if first_host is not None:
+            first_host.close(timeout=30)
+        assert service.close(timeout=30)
+
+
 def test_close_cancels_queued_tasks() -> None:
     host = RasterPlotHost.from_plot(_snapshot(), CurvePlot(AxisRef.point("x")))
     gate = Event()
@@ -264,7 +472,7 @@ def test_press_lands_on_the_painted_transform_it_carries() -> None:
         assert updated.value.limits != before.limits
         assert latest.identity.sequence > stale.identity.sequence
 
-        state = host._pointer_event(
+        state = host.pointer_event(
             "press",
             0.45,
             0.45,
@@ -274,7 +482,7 @@ def test_press_lands_on_the_painted_transform_it_carries() -> None:
             interaction=stale.interaction,
         ).result(timeout=10)
         assert state is not None
-        host._pointer_event("cancel", 0.45, 0.45, button=1).result(timeout=10)
+        host.pointer_event("cancel", 0.45, 0.45, button=1).result(timeout=10)
     finally:
         host.close(timeout=10)
 
@@ -304,7 +512,7 @@ def test_press_accepts_a_live_revision_that_held_the_geometry_still() -> None:
         assert latest is not None
         assert latest.identity.data_revision != stale.identity.data_revision
 
-        state = host._pointer_event(
+        state = host.pointer_event(
             "press",
             0.45,
             0.45,
@@ -314,7 +522,7 @@ def test_press_accepts_a_live_revision_that_held_the_geometry_still() -> None:
             interaction=stale.interaction,
         ).result(timeout=10)
         assert state is not None
-        host._pointer_event(
+        host.pointer_event(
             "cancel",
             0.45,
             0.45,
@@ -1515,7 +1723,7 @@ def test_press_ignores_the_crosshair_marker_in_the_painted_interaction() -> None
         assert latest is not None
         assert latest.interaction.selectors != stale.interaction.selectors
 
-        state = host._pointer_event(
+        state = host.pointer_event(
             "press",
             0.45,
             0.45,
@@ -1525,7 +1733,7 @@ def test_press_ignores_the_crosshair_marker_in_the_painted_interaction() -> None
             interaction=stale.interaction,
         ).result(timeout=10)
         assert state is not None
-        host._pointer_event("cancel", 0.45, 0.45, button=2).result(timeout=10)
+        host.pointer_event("cancel", 0.45, 0.45, button=2).result(timeout=10)
     finally:
         host.close(timeout=10)
 
@@ -1551,7 +1759,7 @@ def test_scroll_is_self_relative_and_needs_no_front_currency() -> None:
         assert latest is not None
         assert latest.identity != stale.identity
 
-        state = host._pointer_event(
+        state = host.pointer_event(
             "scroll",
             0.45,
             0.45,

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections import deque
 from contextlib import contextmanager
+import ctypes
 from dataclasses import dataclass
 from functools import lru_cache
 import hashlib
@@ -1460,29 +1461,15 @@ def _fraction_landing_on(target: float, scale: float, base: float) -> float:
     return base
 
 
-class _PooledStore:
-    """One recycled block of bytes, with an identity a weak reference can hold.
+def _pooled_store(block: bytearray) -> object:
+    """A weak-referenceable buffer owner supported by Python 3.11+.
 
-    A ``bytearray`` cannot be weak-referenced, and ``np.frombuffer`` does
-    not retain the memoryview it was handed -- it retains a fresh view over
-    that view's OBJECT.  So the object a derived array keeps alive has to be
-    this wrapper, and the pool's release point has to be this wrapper's
-    death.  Getting that backwards recycles a buffer under a live array,
-    which is exactly what ``test_publish_pool`` reproduces.
+    ``ctypes.from_buffer`` keeps the owner identity through memoryview/NumPy
+    derivations.  The finalizer can still retain only the underlying
+    bytearray for recycling, so it never keeps its own trigger alive.
     """
 
-    __slots__ = ("_bytes", "__weakref__")
-
-    def __init__(self, block: bytearray) -> None:
-        self._bytes = block
-
-    def __buffer__(self, flags: int) -> memoryview:
-        # Always read-only: the writer holds its own view, taken from the
-        # pool, and nothing handed to a consumer may be written.
-        return memoryview(self._bytes).toreadonly()
-
-    def __len__(self) -> int:
-        return len(self._bytes)
+    return (ctypes.c_ubyte * len(block)).from_buffer(block)
 
 
 class PublishBufferPool:
@@ -1525,8 +1512,8 @@ class PublishBufferPool:
             block = self._free.popleft()
         except IndexError:
             block = bytearray(nbytes)
-        store = _PooledStore(block)
-        published = memoryview(store)
+        store = _pooled_store(block)
+        published = memoryview(store).toreadonly()
         # ``atexit`` is an attribute of the finalizer, not an argument to the
         # callback: returning a block to a pool during shutdown helps nobody.
         # The callback holds the BLOCK, never the wrapper -- holding the

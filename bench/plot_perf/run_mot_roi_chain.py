@@ -21,7 +21,7 @@ import time
 
 import numpy as np
 
-from . import guards, probe
+from . import guards
 from .common import Pointer, axis_center, provenance, stats, write_result
 from .run_console import ConsoleBench, render_cost
 
@@ -76,7 +76,21 @@ def _assign_roles(bench: ConsoleBench, panel, assignments: dict[str, str]) -> di
 
 
 def _image_payload(bench: ConsoleBench, panel):
-    payload = bench.renderer(panel)._last_payload
+    from zlc_plot.data_view import DataView
+    from zlc_plot.specs import FacetGridPlot, ImagePlot
+
+    surface = panel.accepted_surface
+    if surface is None:
+        raise guards.HarnessError("Camera AutoPlot has no accepted data")
+    snapshot = getattr(surface.plot_input, "snapshot", surface.plot_input)
+    spec = surface.description.spec
+    view = DataView(snapshot)
+    if isinstance(spec, FacetGridPlot):
+        payload = view.facet(spec)
+    elif isinstance(spec, ImagePlot):
+        payload = view.image(spec.x, spec.y, aggregation=spec.reduction)
+    else:
+        raise guards.HarnessError("Camera AutoPlot is not an Image plot")
     cells = tuple(getattr(payload, "cells", ()))
     if cells:
         payload = getattr(cells[0], "payload", cells[0])
@@ -95,13 +109,12 @@ def _image_transform(bench: ConsoleBench, panel):
         for axis in front.interaction.axes
         if axis.role in {"main", "facet_cell"}
     ]
-    session = panel.host._session
-    active = bench.renderer(panel).primary_axes
-    matched = [
-        transform
-        for transform in candidates
-        if session._axis_for_transform(transform) is active
-    ]
+    focus = front.interaction.facet_focus_index
+    matched = (
+        [item for item in candidates if item.cell_index == focus]
+        if focus is not None
+        else candidates
+    )
     if len(matched) != 1:
         raise guards.HarnessError(
             "Camera AutoPlot has no unique primary image transform: "
@@ -111,7 +124,9 @@ def _image_transform(bench: ConsoleBench, panel):
 
 
 def _focus_autoplot_cell(bench: ConsoleBench, panel) -> None:
-    if panel.host._session.facet_focus_index is not None:
+    surface = bench.surface(panel)
+    current = None if surface is None else surface.presented_front
+    if current is not None and current.interaction.facet_focus_index is not None:
         return
     from PyQt5 import QtCore, QtGui
 
@@ -122,8 +137,7 @@ def _focus_autoplot_cell(bench: ConsoleBench, panel) -> None:
     pointer.dclick(*axis_center(transform))
     bench._until(
         lambda: (
-            panel.host._session.facet_focus_index is not None
-            and panel.state.focused_cell is not None
+            panel.state.focused_cell is not None
             and bench.surface(panel) is not None
             and bench.surface(panel).presented_front is not None
             and bench.surface(panel).presented_front.interaction.facet_focus_index
@@ -265,6 +279,7 @@ class CausalTimeline:
         self._bench = bench
         self._lock = threading.Lock()
         self._events: dict[object, dict[str, dict[str, float]]] = {}
+        self._bindings = []
 
     def _key(self, publication) -> object:
         roots = self._bench.session.signal_plane.publication_roots(publication)
@@ -272,6 +287,9 @@ class CausalTimeline:
 
     def attach(self, panel, label: str) -> None:
         port = panel.port
+        missing = object()
+        previous_prepare = getattr(port, "__dict__", {}).get("prepare", missing)
+        previous_accept = getattr(port, "__dict__", {}).get("accept", missing)
         original_prepare = port.prepare
         original_accept = port.accept
 
@@ -297,6 +315,23 @@ class CausalTimeline:
 
         port.prepare = prepare
         port.accept = accept
+        self._bindings.append(
+            (port, missing, previous_prepare, previous_accept)
+        )
+
+    def close(self) -> None:
+        """Restore every port method so the bench retains no accepted Front."""
+
+        for port, missing, prepare, accept in reversed(self._bindings):
+            if prepare is missing:
+                del port.prepare
+            else:
+                port.prepare = prepare
+            if accept is missing:
+                del port.accept
+            else:
+                port.accept = accept
+        self._bindings.clear()
 
     def reset(self) -> None:
         with self._lock:
@@ -545,15 +580,28 @@ def run(
             "fit",
             model=fit_model,
         )
-        bench._until(
-            lambda: (
-                grid.host is not None
-                and grid.host._session.last_fit is not None
-                and len(tuple(getattr(grid.host._session.last_fit, "results", ()))) == 40
-            ),
-            f"40-cell {fit_model} fit",
-            timeout=60.0,
-        )
+        fit_events = []
+        fit_release = grid.host.subscribe_fit(
+            fit_events.append,
+            replay_current=True,
+        ).result(timeout=60.0).value
+        try:
+            bench._until(
+                lambda: bool(
+                    fit_events
+                    and fit_events[-1] is not None
+                    and len(
+                        tuple(
+                            getattr(fit_events[-1].result, "results", ())
+                        )
+                    )
+                    == 40
+                ),
+                f"40-cell {fit_model} fit",
+                timeout=60.0,
+            )
+        finally:
+            fit_release().result(timeout=60.0)
 
         curve = bench.add_panel_on(roi_signal, "curve", size="2x2")
         bench._labels[curve.panel_id] = labels[3]
@@ -567,6 +615,50 @@ def run(
         guards.require_panels(bench.presenter, 4)
         guards.require_distinct_labels(bench.label(panel) for panel in panels)
         bench._pump(4.0)
+        process_ids = {
+            "B": os.getpid(),
+            "A": int(grid.host.process_pid),
+            "C": int(
+                getattr(bench.presenter._save_figure_artifact, "__self__").pid
+            ),
+        }
+        memory_samples = {name: [] for name in process_ids}
+        total_memory_samples = []
+        cpu_start = {}
+        memory_stop = threading.Event()
+        try:
+            import psutil
+
+            processes = {
+                name: psutil.Process(pid) for name, pid in process_ids.items()
+            }
+            cpu_start = {
+                name: sum(process.cpu_times()[:2])
+                for name, process in processes.items()
+            }
+
+            def sample_processes() -> None:
+                while not memory_stop.wait(0.02):
+                    total = 0
+                    for name, process in processes.items():
+                        try:
+                            rss = int(process.memory_info().rss)
+                            memory_samples[name].append(rss)
+                            total += rss
+                        except psutil.Error:
+                            continue
+                    if total:
+                        total_memory_samples.append(total)
+
+            memory_thread = threading.Thread(
+                target=sample_processes,
+                name="zlc-bench-process-memory",
+                daemon=True,
+            )
+            memory_thread.start()
+        except (ImportError, OSError):
+            processes = {}
+            memory_thread = None
         payload.update(
             roi=roi,
             history_edit=history_edit,
@@ -601,6 +693,7 @@ def run(
         )
         baseline["source_rate"] = baseline_finish(baseline["window_s"])
         baseline["causal_timeline"] = timeline.summary(labels)
+        timeline.close()
         payload["baseline_uninstrumented"] = baseline
 
         instrumented = {}
@@ -622,11 +715,58 @@ def run(
         )
         measured["source_rate"] = main_finish(measured["window_s"])
         measured["causal_timeline"] = timeline.summary(labels)
+        timeline.close()
         frames = {row["panel"]: row["frames"] for row in measured["panels"]}
         measured["render_cost"] = render_cost(measured["seams"], frames)
         measured["stage_summary"] = _stage_summary(
             measured["seams"], labels, frames
         )
+        memory_stop.set()
+        if memory_thread is not None:
+            memory_thread.join(timeout=2.0)
+        process_memory = {}
+        for name, process in processes.items():
+            samples = memory_samples[name]
+            try:
+                cpu_end = sum(process.cpu_times()[:2])
+            except psutil.Error:
+                cpu_end = cpu_start.get(name, 0.0)
+            process_memory[name] = {
+                "pid": process_ids[name],
+                "rss_start_mib": (
+                    None if not samples else round(samples[0] / 2**20, 2)
+                ),
+                "rss_end_mib": (
+                    None if not samples else round(samples[-1] / 2**20, 2)
+                ),
+                "rss_peak_mib": (
+                    None if not samples else round(max(samples) / 2**20, 2)
+                ),
+                "cpu_percent_of_one_core": round(
+                    max(0.0, cpu_end - cpu_start.get(name, cpu_end))
+                    / max(1.0e-9, baseline["window_s"] + measured["window_s"])
+                    * 100.0,
+                    1,
+                ),
+            }
+        process_memory["total"] = {
+            "rss_start_mib": (
+                None
+                if not total_memory_samples
+                else round(total_memory_samples[0] / 2**20, 2)
+            ),
+            "rss_end_mib": (
+                None
+                if not total_memory_samples
+                else round(total_memory_samples[-1] / 2**20, 2)
+            ),
+            "rss_peak_mib": (
+                None
+                if not total_memory_samples
+                else round(max(total_memory_samples) / 2**20, 2)
+            ),
+        }
+        payload["process_memory"] = process_memory
         payload["instrumented_bindings"] = instrumented
         payload["measured"] = measured
         payload["problems"] = [
@@ -674,6 +814,23 @@ def _print(payload: dict) -> None:
             print(
                 "    %-22s %8.2f wall  %8.2f cpu  (%d calls)"
                 % (stage, row["wall_ms_per_call"], row["cpu_ms_per_call"], row["calls"])
+            )
+    if payload.get("process_memory"):
+        print("\nprocess RSS/CPU:")
+        for name, row in payload["process_memory"].items():
+            if name == "total":
+                print("  total RSS start/end/peak: %(rss_start_mib)s/%(rss_end_mib)s/%(rss_peak_mib)s MiB" % row)
+                continue
+            print(
+                "  %s pid=%s RSS %s/%s/%s MiB CPU %.1f%% of one core"
+                % (
+                    name,
+                    row["pid"],
+                    row["rss_start_mib"],
+                    row["rss_end_mib"],
+                    row["rss_peak_mib"],
+                    row["cpu_percent_of_one_core"],
+                )
             )
     if payload["problems"]:
         print("\nconsole problems:")

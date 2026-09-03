@@ -15,13 +15,19 @@ import math
 import threading
 from typing import Any, Iterator, Mapping, TypeAlias
 
-from ._image_raster import ImageFrontPolicy
 from ._validation import finite_real, text as _text
 from .assets import HELVETICA_LIGHT_FAMILY
 
 
 RcScalar: TypeAlias = str | int | float | bool | None
 RcValue: TypeAlias = RcScalar | tuple[str, ...] | tuple[float, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ImageFrontPolicy:
+    """Bounded-work policy for one scalar image front."""
+
+    minimum_reduction_ratio: float = 1.25
 
 
 def _finite(value: object, field: str, *, positive: bool = False) -> float:

@@ -28,7 +28,7 @@ from zlc_workbench.panel_state import project_panel_state
 from zlc_workbench.session import ExperimentSession
 from zlc_workbench.viewer import describe_archive
 
-from test_console_presenter import _ConsoleView, _Signal, _one_shot
+from test_console_presenter import _ConsoleView, _Signal, _async_writer, _one_shot
 from pulse_fixtures import write_ordinary_pulse
 
 
@@ -109,7 +109,11 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
     presenter = ConsolePresenter(
         session,
         view,
-        make_host=make_host,
+        make_monitor_host=make_host,
+        make_editor_host=make_host,
+        build_figure_host=plot.build_figure_host,
+        save_figure_artifact=_async_writer(plot.save_figure_artifact),
+        close_render_processes=lambda: True,
         spec_for=spec_for,
     )
     try:

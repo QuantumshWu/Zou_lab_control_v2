@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -370,12 +370,18 @@ def build_figure_host(
     parameters: Mapping[str, object],
     size: str,
     device_pixel_ratio: float = 1.0,
+    build_host: Callable[..., object] | None = None,
 ) -> object:
     """The shared TaskConsole/FigureViewer raster-host construction path."""
 
-    from .raster import RasterPlotHost
+    if build_host is None:
+        from .raster import RasterPlotHost
 
-    return RasterPlotHost.from_plot(
+        build_host = RasterPlotHost.from_plot
+    if not callable(build_host):
+        raise TypeError("build_host must be callable")
+
+    return build_host(
         plot_input,
         spec,
         size=size,
@@ -389,6 +395,7 @@ def open_figure_host(
     recipe: Mapping[str, object],
     *,
     device_pixel_ratio: float = 1.0,
+    build_host: Callable[..., object] | None = None,
 ) -> object:
     """Build and configure the one raster host described by a decoded recipe."""
 
@@ -403,6 +410,7 @@ def open_figure_host(
         size=entry["size"],
         parameters=entry["parameters"],
         device_pixel_ratio=device_pixel_ratio,
+        build_host=build_host,
     )
     try:
         pending = host.configure(
@@ -421,14 +429,14 @@ def open_figure_host(
     return host
 
 
-def save_figure_artifact(
+def _prepare_figure_artifact(
     base_path: str | Path, *, plot_input: object, spec: object,
     parameters: Mapping[str, object], size: str, viewport: RectangleRange | None = None,
     classifier_thresholds: object = (), facet_focus: int | None = None,
     fit: Mapping[str, object] | None = None, lineage: Mapping[str, object] | None = None,
     selectors: object = (),
     source: Mapping[str, object] | None = None,
-) -> tuple[Path, Path]:
+) -> tuple[OwnedSnapshot, Path, object]:
     selected = Path(base_path).expanduser().resolve()
     image_path = selected if selected.suffix else selected.with_suffix(".png")
     if image_path.suffix.lower() not in {".png", ".pdf", ".svg"}:
@@ -439,23 +447,7 @@ def save_figure_artifact(
     if not isinstance(snapshot, OwnedSnapshot):
         raise TypeError("data-backed figure requires an OwnedSnapshot")
     overlay_arrays, overlay = _overlay_payload(plot_input, "data.overlay")
-    host = build_figure_host(
-        plot_input,
-        spec,
-        parameters=parameters,
-        size=size,
-    )
-    try:
-        configured = host.configure(
-            viewport=viewport,
-            classifier_thresholds=classifier_thresholds,
-            facet_focus=facet_focus,
-            selectors=selectors,
-            fit={} if fit is None else fit,
-            fit_live=False,
-        )
-        operation = configured.result() if hasattr(configured, "result") else configured
-        description = operation.value
+    def write(description: object, save_image: object) -> tuple[Path, Path]:
         recipe = encode_plot_recipe(
             description.spec,
             parameters=description.display_state.values,
@@ -467,23 +459,19 @@ def save_figure_artifact(
             selectors=description.selectors,
             overlay=overlay,
         )
-    except BaseException:
-        host.close()
-        raise
-    source_document = dict(source or {})
-    title = getattr(getattr(description.spec, "labels", None), "title", None)
-    if title is not None:
-        source_document.setdefault("title", title)
-    sections = {
-        "plot": {"data": recipe},
-        "lineage": _plain(
-            {"root": None, "nodes": [], "device_settings": []}
-            if not lineage
-            else lineage
-        ),
-        "source": _plain(source_document),
-    }
-    try:
+        source_document = dict(source or {})
+        title = getattr(getattr(description.spec, "labels", None), "title", None)
+        if title is not None:
+            source_document.setdefault("title", title)
+        sections = {
+            "plot": {"data": recipe},
+            "lineage": _plain(
+                {"root": None, "nodes": [], "device_settings": []}
+                if not lineage
+                else lineage
+            ),
+            "source": _plain(source_document),
+        }
         atomic_write_file(
             archive_path,
             lambda stream: write_figure_archive(
@@ -494,17 +482,167 @@ def save_figure_artifact(
             ),
         )
         try:
-            saved = host.save(image_path)
-            if hasattr(saved, "result"):
-                saved.result()
+            save_image()
         except Exception as error:
             raise RuntimeError(
                 f"figure archive {archive_path} was saved, but image "
                 f"rendering failed: {error}"
             ) from error
+        return image_path, archive_path
+
+    return snapshot, image_path, write
+
+
+def _submit_figure_artifact(
+    host: object,
+    base_path: str | Path,
+    *,
+    plot_input: object,
+    spec: object,
+    parameters: Mapping[str, object],
+    size: str,
+    viewport: RectangleRange | None = None,
+    classifier_thresholds: object = (),
+    facet_focus: int | None = None,
+    fit: Mapping[str, object] | None = None,
+    lineage: Mapping[str, object] | None = None,
+    selectors: object = (),
+    source: Mapping[str, object] | None = None,
+) -> object:
+    """Queue one exact archive/export transaction on an existing Host.
+
+    Queueing happens synchronously in the caller's command turn.  The actual
+    archive and image work remains on the Host worker, so a later Refresh can
+    neither overtake Save nor change the state between recipe capture and
+    export.
+    """
+
+    snapshot, _image_path, write = _prepare_figure_artifact(
+        base_path,
+        plot_input=plot_input,
+        spec=spec,
+        parameters=parameters,
+        size=size,
+        viewport=viewport,
+        classifier_thresholds=classifier_thresholds,
+        facet_focus=facet_focus,
+        fit=fit,
+        lineage=lineage,
+        selectors=selectors,
+        source=source,
+    )
+    dispatch = getattr(host, "dispatch_control", None)
+    require_session = getattr(host, "_require_session", None)
+    if not callable(dispatch) or not callable(require_session):
+        raise TypeError("existing save host must be a local RasterPlotHost")
+
+    expected_fit = {} if fit is None else dict(fit)
+    expected_thresholds = tuple(classifier_thresholds)
+    expected_selectors = tuple(selectors)
+    expected_overlay_revision = (
+        int(plot_input.overlay.revision)
+        if isinstance(plot_input, ImageFrame)
+        else None
+    )
+
+    def save_settled() -> tuple[Path, Path]:
+        session = require_session()
+        description = session.describe_display()
+        same_recipe = (
+            description.spec == spec
+            and description.size == size
+            and dict(description.display_state.values) == dict(parameters)
+            and description.viewport == viewport
+            and tuple(description.classifier_thresholds) == expected_thresholds
+            and description.facet_focus == facet_focus
+            and dict(description.fit) == expected_fit
+            and tuple(description.selectors) == expected_selectors
+        )
+        if not same_recipe:
+            raise RuntimeError("settled save host differs from the frozen recipe")
+        generation = getattr(snapshot.ref.stream_generation, "value", None)
+        revision = getattr(snapshot.ref.revision, "value", None)
+        if (
+            session.data_generation != generation
+            or session.data_revision != revision
+            or session.image_overlay_revision != expected_overlay_revision
+        ):
+            raise RuntimeError("settled save host differs from the frozen data")
+        return write(
+            description,
+            lambda: session.save(_image_path),
+        )
+
+    return dispatch(save_settled)
+
+
+def save_figure_artifact(
+    base_path: str | Path, *, plot_input: object, spec: object,
+    parameters: Mapping[str, object], size: str, viewport: RectangleRange | None = None,
+    classifier_thresholds: object = (), facet_focus: int | None = None,
+    fit: Mapping[str, object] | None = None, lineage: Mapping[str, object] | None = None,
+    selectors: object = (),
+    source: Mapping[str, object] | None = None,
+    host: object | None = None,
+) -> tuple[Path, Path]:
+
+    if host is not None:
+        pending = _submit_figure_artifact(
+            host,
+            base_path,
+            plot_input=plot_input,
+            spec=spec,
+            parameters=parameters,
+            size=size,
+            viewport=viewport,
+            classifier_thresholds=classifier_thresholds,
+            facet_focus=facet_focus,
+            fit=fit,
+            lineage=lineage,
+            selectors=selectors,
+            source=source,
+        )
+        operation = pending.result() if hasattr(pending, "result") else pending
+        return operation.value
+
+    snapshot, image_path, write = _prepare_figure_artifact(
+        base_path,
+        plot_input=plot_input,
+        spec=spec,
+        parameters=parameters,
+        size=size,
+        viewport=viewport,
+        classifier_thresholds=classifier_thresholds,
+        facet_focus=facet_focus,
+        fit=fit,
+        lineage=lineage,
+        selectors=selectors,
+        source=source,
+    )
+
+    owned_host = build_figure_host(
+        plot_input,
+        spec,
+        parameters=parameters,
+        size=size,
+    )
+    try:
+        configured = owned_host.configure(
+            viewport=viewport,
+            classifier_thresholds=classifier_thresholds,
+            facet_focus=facet_focus,
+            selectors=selectors,
+            fit={} if fit is None else fit,
+            fit_live=False,
+        )
+        operation = configured.result() if hasattr(configured, "result") else configured
+        description = operation.value
+        return write(
+            description,
+            lambda: owned_host.save(image_path).result(),
+        )
     finally:
-        host.close()
-    return image_path, archive_path
+        owned_host.close()
 
 
 __all__ = [

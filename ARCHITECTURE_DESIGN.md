@@ -175,6 +175,25 @@ Node new chunk
   Viewport identity还包含Dataset schema fingerprint、accepted spec、display coordinate units和
   focused cell；相同shape但不同axis roles绝不共享数值范围。Live configure接受的新viewport
   必须写回此identity，Frozen/Edit/Viewer只能重放仍匹配的范围。
+- TaskConsole与FigureViewer的显示执行固定为三个进程、一个Plot真相源：B是Qt主进程并继续拥有
+  Runtime、Logic、device client、PanelState、SelectionBridge、LiveBoard与same-shot accept；A只承载
+  全部Monitor card的`RasterPlotHost -> PlotSession -> DataView/Fit/Render/Compose`；C承载Panel Edit、
+  point review与Figure archive/export。A和C运行同一个render-service实现，内部仍实例化同一个
+  `RasterPlotHost`，不得复制live/editor/export renderer，也不得在A/C失败时退回B进程内渲染。
+  Edit的Qt表单和A/C输出的QImage-only frontend始终留在B；B只提交异步命令、接收完整Front和
+  observation，任何Qt slot都不得同步等待IPC。同一application只创建一对A/C；TaskConsole与其
+  打开的FigureViewer各持一个显式owner lease，任一窗口先关闭都不得终止另一窗口仍在使用的服务，
+  最后一个owner才关闭进程。独立FigureViewer则拥有自己的一对A/C。
+- Domain Task仍在B决定并写非Figure科学NPZ/JSON、选择artifact路径并向TaskRun登记完成文件；
+  TaskArtifactContext不拥有Plot。Calibration、Temperature与SLM Feedback的Figure archive/render/export
+  由composition显式注入同一个C服务执行，Task worker只等待该Future，不得在B隐式构造本地Plot host。
+- B向一个render service提交同一`DatasetRevisionRef`只建立一份transport value，由该service内
+  全部Panel共享；不得按Panel重复发送或让Runtime感知Plot transport。A/C向B发布的RGBA使用
+  有生命周期的共享buffer lease，只有B中最后一个Front/QImage/ndarray引用释放后才可复用。
+  operation completion只引用同一host已经发布的front sequence，不得再次复制像素；进程断开时
+  所有pending Future明确失败，B保留最后一张完整Front，并由现有Panel lifecycle从accepted
+  PanelState与最新publication启动新service generation并原子替换surface。旧generation的共享
+  Front可继续读取，其lease identity不得与新generation碰撞。
 - ImagePlot及FacetGrid的image cell统一使用`nearest`像素呈现；interpolation不是Parameter、PanelState、Figure recipe或UI字段，任何Logic/Task不得另行设置。
 - Image/Heatmap的主显示框始终是固定正方形，layout、首帧、zoom、pan、Single/Facet/Focus切换均不得改变它；每个离散data point同时是正方形screen cell。规则grid以x/y cell pitch的唯一比例把canonical坐标归一为lattice geometry：canonical scan step只控制tick、selector、overlay与fit的坐标映射，不控制cell长宽。非方阵数据在square frame内居中letterbox，数据extent本身不被改写；zoom按两轴相同whole-cell span在固定square box内修改viewport，不得重新layout。50×50 scan必须完整填满square frame，即使两个scan轴步长不同。
 - Single与Facet的规则tensor数据都先由同一个retained-axis projection一次归约，再只把结果包装成各自payload；不得为某个plot kind另建Facet数值kernel。Single、Facet overview和Focus的每个cell必须经过同一个kind preparation/render owner；Focus只选择同一个accepted cell并换layout/viewport，不重新解释数据、fit或annotation。Facet overview及steady Curve/Image/Fit/SEM保留native raster快路，但native与Agg只允许消费同一份prepared cell state；native拒绝必须整帧回到已准备好的公共draw path或保留上一完整front，不得出现partial/blank cells，也不得靠一次pointer materialization才能恢复。
@@ -183,7 +202,12 @@ Node new chunk
 - 未声明coordinate labels的数值轴由共享SmartOffset/locator按空间决定ticks；一旦Dataset显式声明完整coordinate labels，每个label都必须在对应tick原样显示，不得为避免重叠静默抽稀、改写或省略。标签密度、Panel尺寸与zoom是operator明确authoring后的取舍。
 - Color-limit drag的每个accepted move是一个原子preview transaction：先更新candidate与native/Agg共享clim authority，再compose一次并发布该front；不得先发布旧颜色front，再在独立cadence分支recolor，release只负责提交最终DisplayState而不是第一次显示颜色变化。
 - 同一shot的Surface仍原子accept；staging只把active-fit surface排在display-only sibling之前，使更深依赖链先启动，不改变panel cadence、cohort membership或accept顺序。
-- Panel本身已经并行：Numba/OpenMP保留本机logical-CPU容量，但每个Raster/analysis worker默认只启用4-thread team并在空闲时sleep；大量互不重叠的Facet raster lanes可在本次kernel内临时扩到8并立即恢复。operator显式环境设置仍优先。不得把整个进程pool缩成4让Panel互相轮候，不得让每个same-shot Panel各自索取全部logical CPUs，也不得用全局render/fit锁把独立Panel重新串行化。
+- A内的Panel仍各自保留现有Raster/analysis worker、latest-only admission与串行Host状态机；它们
+  共享A的一把Python GIL，所以该拓扑保证UI/Runtime与Save/Edit隔离，而不冒充Panel间Python
+  绘制已经进程并行。A/C各自的Numba/OpenMP pool保留本机logical-CPU容量，但每个Raster/
+  analysis worker默认只启用4-thread team并在空闲时sleep；大量互不重叠的Facet raster lanes
+  可在本次kernel内临时扩到8并立即恢复。A与C的并发native team总预算不得超过本机容量，B不再
+  初始化Plot kernel pool。operator显式环境设置仍优先；不得用跨host render/fit锁重新串行化A。
 - RegularImage live batch即使具有完整warm seed也必须保留cold proxy竞争，再以选出的seed做full refinement；warm不能跳过cold证据、成为不可恢复的authority。
 - Title/layout等非plot变化不得re-fit。
 - 删除重复configure/clear/replay与多front handoff。

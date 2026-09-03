@@ -509,6 +509,14 @@ class ConsoleBench:
         instance, so watching them is safe where watching a class is not.
         """
 
+        # A process-isolated Host deliberately exposes no PlotSession or
+        # renderer to B.  Child internals cannot be monkeypatched from this
+        # process; the pipeline probe below still measures the exact B-side
+        # route and Qt accept while causal prepare-to-accept measures the
+        # complete A round trip.
+        if not hasattr(panel.host, "_session"):
+            return []
+
         # Four panels reporting under one class name is the class-level tap
         # again, one level up: _native_draw fired 85 times across a layout
         # and there was no way to say whose frames those were.
@@ -559,11 +567,9 @@ class ConsoleBench:
         label = self.label(panel)
         port = panel.port
         host = panel.host
-        session = host._session
         widget = self.surface(panel)
         if port is None or widget is None:
             raise guards.HarnessError(f"{label} has no live port/widget to instrument")
-
         bound = {
             "port": probe.watch(
                 port,
@@ -578,6 +584,22 @@ class ConsoleBench:
                 "_present",
                 prefix=f"PanelPort[{label}]",
             ),
+            "qt": probe.watch(
+                widget,
+                "present_front",
+                "_install_front",
+                prefix=f"QtWidget[{label}]",
+            ),
+        }
+        # The process proxy intentionally has no child PlotSession.  Keep the
+        # valid B-side port/Qt measurements above; the causal timeline is the
+        # authority for the complete IPC round trip.  Only a local comparison
+        # host admits the internal stage taps below.
+        if not hasattr(host, "_session"):
+            return bound
+
+        session = host._session
+        bound.update({
             "host": probe.watch(
                 host,
                 "update_data",
@@ -611,20 +633,35 @@ class ConsoleBench:
                 "fit_batch",
                 prefix=f"FitEngine[{label}]",
             ),
-            "qt": probe.watch(
-                widget,
-                "present_front",
-                "_install_front",
-                prefix=f"QtWidget[{label}]",
-            ),
-        }
+        })
         return bound
 
     def density(self, panel) -> dict:
-        renderer = self.renderer(panel)
-        if self.allow_low_density:
-            return guards.display_density(renderer)
-        return guards.require_real_density(renderer)
+        if hasattr(panel.host, "_session"):
+            renderer = self.renderer(panel)
+            if self.allow_low_density:
+                return guards.display_density(renderer)
+            return guards.require_real_density(renderer)
+        surface = self.surface(panel)
+        front = None if surface is None else surface.presented_front
+        if front is None:
+            raise guards.HarnessError(
+                f"{self.label(panel)} has no presented density"
+            )
+        width, height = front.buffer.width, front.buffer.height
+        facts = {
+            "figure_px": (int(width), int(height)),
+            "device_pixel_ratio": float(front.device_pixel_ratio),
+            "dpi": float(front.logical_dpi * front.device_pixel_ratio),
+            "megapixels": round(float(width * height) / 1e6, 2),
+        }
+        if not self.allow_low_density and facts["device_pixel_ratio"] < 2.0:
+            raise guards.HarnessError(
+                "device pixel ratio %s: this is an offscreen or low-density "
+                "surface (%s px)"
+                % (facts["device_pixel_ratio"], facts["figure_px"])
+            )
+        return facts
 
     def live(self, panel, seconds: float = 8.0) -> dict:
         """Time live frames with the producer and the beat as the product runs them."""

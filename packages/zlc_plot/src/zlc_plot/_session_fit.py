@@ -1740,10 +1740,14 @@ class FitSessionMixin:
                 presentations.append(presentation)
 
         def finalize_presentation() -> None:
-            for resolution in resolutions:
-                self._resolve_fit_completion(resolution)
             for presentation in presentations:
                 self._notify_fit(presentation.event)
+            # The public fit Future is the acknowledgement that this accepted
+            # fit and all of its observer-visible consequences are complete.
+            # Resolving it first let a cross-process caller observe success
+            # before the already-accepted FitEvent had even been emitted.
+            for resolution in resolutions:
+                self._resolve_fit_completion(resolution)
 
         def abort_presentation() -> None:
             for presentation in reversed(presentations):

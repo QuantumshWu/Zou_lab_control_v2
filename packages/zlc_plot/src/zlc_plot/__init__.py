@@ -75,6 +75,7 @@ _EXPORTS = {
     "recommended_pulse_preset": ("zlc_plot.layout", "recommended_pulse_preset"),
     "image_axes": ("zlc_plot.data_contract", "image_axes"),
     "RasterPlotHost": ("zlc_plot.raster", "RasterPlotHost"),
+    "RenderProcess": ("zlc_plot.render_process", "RenderProcess"),
     "NumericRange": ("zlc_plot.selectors", "NumericRange"),
     "SelectorKind": ("zlc_plot.selectors", "SelectorKind"),
     "normalize_classifier_threshold_targets": (
@@ -200,6 +201,7 @@ __all__ = [
     "edit_plot_display",
     "Qt5PlotWidget",
     "RasterPlotHost",
+    "RenderProcess",
     "Reduction",
     "RollingPlot",
     "SelectionChange",

@@ -8,9 +8,6 @@ import numpy as np
 from PyQt5 import QtCore, QtWidgets
 
 from .primitives import ImagePointOverlay, PointStatus
-from .raster import RasterPlotHost
-
-
 class _ImagePointReviewInteraction(QtCore.QObject):
     """Map clicks/rectangles to stable point ids and update the plot overlay."""
 
@@ -19,11 +16,11 @@ class _ImagePointReviewInteraction(QtCore.QObject):
 
     def __init__(
         self,
-        host: RasterPlotHost,
+        host: object,
         overlay: ImagePointOverlay,
         surface: QtWidgets.QWidget,
     ) -> None:
-        if not isinstance(host, RasterPlotHost):
+        if not callable(getattr(host, "update_image_overlay", None)):
             raise TypeError("point review requires a RasterPlotHost")
         if not isinstance(overlay, ImagePointOverlay) or overlay.point_ids is None:
             raise TypeError("point review requires an overlay with stable point ids")
@@ -175,7 +172,7 @@ class ImagePointReviewSurface(QtWidgets.QWidget):
 
     def __init__(
         self,
-        host: RasterPlotHost,
+        host: object,
         overlay: ImagePointOverlay,
         parent=None,
     ) -> None:

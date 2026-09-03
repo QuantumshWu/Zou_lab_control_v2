@@ -16,6 +16,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -189,6 +190,9 @@ def test_formal_console_panel_state_and_histogram_edits_are_atomic(workspace) ->
         first_sequence = binding.host.front.identity.sequence
         assert first_sequence == 1
         assert binding.host.front.device_pixel_ratio == view.device_pixel_ratio()
+        monitor_pid = binding.host.process_pid
+        assert monitor_pid is not None and monitor_pid != os.getpid()
+        assert binding.host.process_name == "zlc-monitor-render"
 
         view.panel_state_changed.emit(panel_id, {"title": "Card title only"})
         settle(lambda: binding.state.title == "Card title only")
@@ -206,6 +210,33 @@ def test_formal_console_panel_state_and_histogram_edits_are_atomic(workspace) ->
             lambda: histogram.host is not None
             and bool(histogram.parameter_surface.get("display"))
         )
+        assert histogram.host.process_pid == monitor_pid
+        assert histogram.host.process_name == "zlc-monitor-render"
+
+        # A process failure keeps both last complete cards visible, then the
+        # ordinary replacement lifecycle remounts every Monitor host in one
+        # fresh A generation.  The old shared pixels remain valid throughout.
+        old_facet_host = binding.host
+        old_histogram_host = histogram.host
+        retained = old_histogram_host.front.buffer.as_rgba()
+        retained_pixels = retained.copy()
+        monitor_service = old_histogram_host._process
+        monitor_service._process.terminate()
+        monitor_service._process.join(timeout=10)
+        settle(
+            lambda: binding.host is not old_facet_host
+            and histogram.host is not old_histogram_host
+            and binding.host is not None
+            and histogram.host is not None
+            and binding.host.front is not None
+            and histogram.host.front is not None
+        )
+        monitor_pid = histogram.host.process_pid
+        assert monitor_pid is not None
+        assert binding.host.process_pid == monitor_pid
+        assert old_histogram_host.process_pid != monitor_pid
+        np.testing.assert_array_equal(retained, retained_pixels)
+
         view.panel_edit_requested.emit(histogram_id)
         settle(
             lambda: histogram.editor_open
@@ -216,6 +247,20 @@ def test_formal_console_panel_state_and_histogram_edits_are_atomic(workspace) ->
         assert (
             histogram.editor_host.front.device_pixel_ratio
             == view.device_pixel_ratio()
+        )
+        editor_pid = histogram.editor_host.process_pid
+        assert editor_pid is not None and editor_pid != os.getpid()
+        assert editor_pid != monitor_pid
+        assert histogram.editor_host.process_name == "zlc-edit-save-render"
+        save_owner = getattr(presenter._save_figure_artifact, "__self__", None)
+        assert save_owner is not None and save_owner.pid == editor_pid
+
+        saved = workspace / "render-process-route"
+        assert presenter.save_panel_figure(histogram_id, str(saved))
+        settle(
+            lambda: histogram_id not in presenter._saving_panels
+            and saved.with_suffix(".png").is_file()
+            and saved.with_suffix(".npz").is_file()
         )
 
         for patch in (
@@ -243,7 +288,30 @@ def test_formal_console_panel_state_and_histogram_edits_are_atomic(workspace) ->
             assert not histogram.reported_condition
     finally:
         if presenter is not None:
-            presenter.close()
+            render_processes = {
+                getattr(host, "_process", None)
+                for item in presenter.panels.values()
+                for host in (item.host, item.editor_host)
+                if host is not None
+            }
+            save_process = getattr(
+                getattr(presenter, "_save_figure_artifact", None),
+                "__self__",
+                None,
+            )
+            if save_process is not None:
+                render_processes.add(save_process)
+            render_processes.discard(None)
+            deadline = time.monotonic() + 30.0
+            while not presenter.close() and time.monotonic() < deadline:
+                presenter.beat()
+                application.processEvents()
+                time.sleep(0.005)
+            closed = presenter.close()
+            if not closed:
+                for process in render_processes:
+                    process.close(timeout=10.0)
+            assert closed, "TaskConsole render processes did not close"
         if view is not None:
             view.close()
             application.processEvents()
@@ -523,21 +591,19 @@ def test_formal_panel_save_keeps_qt_live_and_close_waits_for_archive_and_render(
     workspace,
     monkeypatch,
 ) -> None:
+    from concurrent.futures import Future
     from dataclasses import replace
-    from threading import Event
-    from types import SimpleNamespace
 
     import numpy as np
-    from PyQt5 import QtCore, QtTest
+    from PyQt5 import QtCore
     from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+    from zlc_plot import build_figure_host
     from zlc_ui.qt import ensure_qt_app
     from zlc_workbench.apps.task_console import build_panel_host, create_window
     from zlc_workbench.panel_state import (
         PanelFrozenData,
         panel_state_from_description,
     )
-    import zlc_workbench.panel_save as panel_save_module
-    import zlc_plot.figure_artifact as figure_module
 
     application = ensure_qt_app(["panel-save-worker"])
     window = create_window(
@@ -566,7 +632,11 @@ def test_formal_panel_save_keeps_qt_live_and_close_waits_for_archive_and_render(
         binding.state,
         signal="formal/save",
     )
-    frozen_host = build_panel_host(snapshot, binding.state)
+    frozen_host = build_panel_host(
+        snapshot,
+        binding.state,
+        build_host=build_figure_host,
+    )
     try:
         description = frozen_host.configure(
             fit=binding.state.fit,
@@ -582,40 +652,16 @@ def test_formal_panel_save_keeps_qt_live_and_close_waits_for_archive_and_render(
         frozen_target,
         description,
     )
-    writer_started = Event()
-    writer_release = Event()
-    configure_started = Event()
-    configure_release = Event()
-    save_started = Event()
-    save_release = Event()
     target = workspace / "formal-save.png"
     archive = target.with_suffix(".npz")
-    real_write = figure_module.atomic_write_file
+    save_pending = Future()
+    save_requests: list[tuple[object, dict[str, object]]] = []
 
-    def gated_write(*args, **kwargs):
-        writer_started.set()
-        assert writer_release.wait(5.0)
-        return real_write(*args, **kwargs)
+    def submit_save(path, **payload):
+        save_requests.append((path, dict(payload)))
+        return save_pending
 
-    monkeypatch.setattr(figure_module, "atomic_write_file", gated_write)
-
-    def configure(**configuration):
-        assert configuration["fit"] == {}
-        configure_started.set()
-        assert configure_release.wait(5.0)
-        return SimpleNamespace(value=description)
-
-    def save(path):
-        assert archive.exists(), "render started before archive commit"
-        save_started.set()
-        assert save_release.wait(5.0)
-        Path(path).write_bytes(b"png")
-
-    monkeypatch.setattr(figure_module, "build_figure_host", lambda *_args, **_kwargs: SimpleNamespace(
-        configure=configure,
-        save=save,
-        close=lambda: None,
-    ))
+    monkeypatch.setattr(presenter, "_save_figure_artifact", submit_save)
     turns: list[bool] = []
     heartbeat = QtCore.QTimer()
     heartbeat.setInterval(5)
@@ -624,7 +670,10 @@ def test_formal_panel_save_keeps_qt_live_and_close_waits_for_archive_and_render(
     try:
         assert presenter.save_panel_figure(binding.panel_id, str(target)) is True
         assert presenter.save_panel_figure(binding.panel_id, str(target)) is False
-        assert configure_started.wait(2.0)
+        assert len(save_requests) == 1
+        assert save_requests[0][0] == str(target)
+        assert save_requests[0][1]["plot_input"] is snapshot
+        assert save_requests[0][1]["host"] is None
         window.close()
         assert window.is_visible(), "pending Panel Save was reported closed"
         _wait_qt(
@@ -634,21 +683,16 @@ def test_formal_panel_save_keeps_qt_live_and_close_waits_for_archive_and_render(
         )
         assert beats, "the Console lifecycle beat stopped during Panel Save"
 
-        configure_release.set()
-        assert writer_started.wait(2.0)
+        archive.write_bytes(b"archive")
+        target.write_bytes(b"png")
+        save_pending.set_result((target, archive))
         assert window.is_visible()
-        writer_release.set()
-        assert save_started.wait(2.0)
-        assert archive.exists()
-        assert window.is_visible()
-        save_release.set()
         _wait_qt(application, lambda: not window.is_visible())
         assert target.read_bytes() == b"png"
     finally:
         heartbeat.stop()
-        writer_release.set()
-        configure_release.set()
-        save_release.set()
+        if not save_pending.done():
+            save_pending.cancel()
         if window.is_visible():
             window.close()
             _wait_qt(application, lambda: not window.is_visible())

@@ -167,7 +167,16 @@
 - CameraFrameRecord在adapter边界冻结settings session/epoch；Pylon无法证明live tune前后buffer边界时首个read batch明确携带old+new，Virtual在trigger时冻结。Runtime使用event-varying record并保持generation-stable run record，finite/scan/indexed保留范围合并为压缩epoch ranges。
 - Figure lineage当前grammar包含每个event record及只解析实际引用epoch的device settings；FigureViewer Device tab读取同一事实。无active Logic的调整不写历史，完整参数状态不复制到每frame。
 
+### 2.6 Plot三进程边界
+
+- TaskConsole/FigureViewer采用固定B/A/C拓扑：B拥有Qt、Runtime、Logic、device通信、PanelState、SelectionBridge与same-shot accept；单一A拥有全部Monitor的DataView/Fit/Render/Compose；单一C拥有Panel Edit、point review、Panel/FigureViewer Save以及Calibration/Temperature/SLM Feedback的Figure render/export。A/C复用同一`RasterPlotHost/PlotSession`，正式Workbench没有B进程内Plot fallback。
+- 同一application只有一对A/C；TaskConsole打开的FigureViewer共享并分别持有owner lease，最后窗口关闭才shutdown。A/C崩溃由现有Panel replacement lifecycle恢复，旧完整Front继续可读，不能把partial frame或latest publication伪装成旧surface。
+- B→A/C的同一Dataset revision每service只传一次并按host/pending引用计数；A/C→B的RGBA使用只读shared-memory lease，QImage不复制像素。父子消息统一使用owned `send_bytes(pickle.dumps)`/`pickle.loads(recv_bytes())`，避开Python3.13 `Connection.send`临时BytesIO export生命周期错误。
+- Domain Task仍在B决定科学数据、路径及非Figure NPZ/JSON并register artifact；只把Figure执行能力由composition注入C。direct/notebook显式使用本地Plot，不把TaskArtifactContext或Runtime变成Plot owner。
+
 ## 3. 当前验证状态
+
+- 当前三进程worktree正式证据：process Host/selector/Fit/Fit-event/C Save、共享RGBA与input refcount通过；TaskConsole实际A崩溃自动remount通过；FigureViewer全文件`21 passed`，actual A/C archive/open/edit/Save image及TaskConsole/Viewer两种关闭顺序均通过且所有PID退出；三类Domain Task的existing artifact用例`3 passed`，注入Future writer等待`3/3`。最终owned-wire的15次2M Image stress与DPR3完整Edit/Refresh/C Save均0 BufferError/SharedMemory/resource-tracker warning。最终代码真实DPR3四Panel critical P50/P90/max为`142.80/161.93/188.31 → 89.34/100.30/103.65 ms`，零stall；Grid Save总等待`3895.1→843.8 ms`、GUI最长轮`366.1→6.9 ms`。完整表与内存代价见`packages/zlc_plot/docs/performance.md`。
 
 ### 3.1 Fresh wheel与installed lanes
 

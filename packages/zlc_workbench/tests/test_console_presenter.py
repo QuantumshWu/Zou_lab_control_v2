@@ -46,6 +46,18 @@ def _completed_surface_update() -> object:
     return SimpleNamespace(future=future)
 
 
+def _async_writer(writer):
+    def submit(*args, **kwargs):
+        future = Future()
+        try:
+            future.set_result(writer(*args, **kwargs))
+        except BaseException as error:
+            future.set_exception(error)
+        return future
+
+    return submit
+
+
 def _operation_value(operation):
     resolved = operation.result() if hasattr(operation, "result") else operation
     return getattr(resolved, "value", resolved)
@@ -488,7 +500,7 @@ def session(tmp_path):
 
 @pytest.fixture
 def presenter(session):
-    pytest.importorskip("zlc_plot")
+    plot = pytest.importorskip("zlc_plot")
     # The REAL mount path, not a copy of it.  The copy this fixture used to
     # carry drifted from the app exactly once -- and that once was a shipped
     # bug the suite could not see.
@@ -497,10 +509,21 @@ def presenter(session):
     def spec_for(snapshot, kind="", cell_kind=""):
         return task_console_fitting_spec(snapshot.block.schema, kind, cell_kind)
 
+    def make_host(plot_input, state):
+        return build_panel_host(
+            plot_input,
+            state,
+            build_host=plot.build_figure_host,
+        )
+
     presenter = ConsolePresenter(
         session,
         _ConsoleView(),
-        make_host=build_panel_host,
+        make_monitor_host=make_host,
+        make_editor_host=make_host,
+        build_figure_host=plot.build_figure_host,
+        save_figure_artifact=_async_writer(plot.save_figure_artifact),
+        close_render_processes=lambda: True,
         spec_for=spec_for,
     )
     try:
@@ -585,7 +608,7 @@ def test_camera_restart_drains_the_old_generation_before_replacement(
         panel.state,
     ) is not None
     configured_selectors: list[tuple[object, ...]] = []
-    make_plot_host = presenter._make_host
+    make_plot_host = presenter._make_monitor_host
 
     def recording_host(plot_input, state):
         host = make_plot_host(plot_input, state)
@@ -599,7 +622,7 @@ def test_camera_restart_drains_the_old_generation_before_replacement(
         monkeypatch.setattr(host, "configure", record_configuration)
         return host
 
-    monkeypatch.setattr(presenter, "_make_host", recording_host)
+    monkeypatch.setattr(presenter, "_make_monitor_host", recording_host)
 
     # Hold the board's sole projection worker, then put one old-generation
     # publication behind it.  This makes the real race deterministic: the
@@ -699,7 +722,7 @@ def _commit_area(
         bottom + upper_fraction * (top - bottom),
     )
     for action, point in (("press", start), ("move", end), ("release", end)):
-        host._pointer_event(
+        host.pointer_event(
             action,
             point[0],
             point[1],
@@ -2686,19 +2709,30 @@ def test_show_panel_mounts_after_the_async_canonical_front_is_ready(
 ) -> None:
     """The card remains ready until its canonical host can be accepted."""
 
-    pytest.importorskip("zlc_plot")
+    plot = pytest.importorskip("zlc_plot")
     from zlc_workbench.apps.task_console import build_panel_host
 
     def spec_for(snapshot, kind="", cell_kind=""):
         return task_console_fitting_spec(snapshot.block.schema, kind, cell_kind)
 
     def ready_host(plot_input, state):
-        host = build_panel_host(plot_input, state)
+        host = build_panel_host(
+            plot_input,
+            state,
+            build_host=plot.build_figure_host,
+        )
         host.wait_for_front(10.0)
         return host
 
     presenter = ConsolePresenter(
-        session, _ConsoleView(), make_host=ready_host, spec_for=spec_for
+        session,
+        _ConsoleView(),
+        make_monitor_host=ready_host,
+        make_editor_host=ready_host,
+        build_figure_host=plot.build_figure_host,
+        save_figure_artifact=_async_writer(plot.save_figure_artifact),
+        close_render_processes=lambda: True,
+        spec_for=spec_for,
     )
     try:
         node, snapshot = _one_shot(session)
@@ -5709,7 +5743,7 @@ def test_a_gesture_survives_a_shot_landing_mid_drag(presenter, session) -> None:
     left, top, right, bottom = axes.bounds
     cx, cy = (left + right) / 2, (top + bottom) / 2
 
-    host._pointer_event(
+    host.pointer_event(
         "press", cx, cy, button=2,
         identity=front.identity, axes=axes, interaction=front.interaction,
     ).result(timeout=10)
@@ -5720,11 +5754,11 @@ def test_a_gesture_survives_a_shot_landing_mid_drag(presenter, session) -> None:
         time.sleep(0.005)
 
     assert panel.host is host, "the shot retired the host mid-gesture"
-    moved = host._pointer_event(
+    moved = host.pointer_event(
         "move", cx + 40.0, cy + 20.0, button=2
     ).result(timeout=10)
     assert moved is not None
-    host._pointer_event(
+    host.pointer_event(
         "release", cx + 40.0, cy + 20.0, button=2
     ).result(timeout=10)
     for _ in range(40):
@@ -5986,13 +6020,13 @@ def test_a_replacement_host_mounts_the_view_the_operator_just_committed(
     )
 
     seen: list[object] = []
-    original = presenter._make_host
+    original = presenter._make_monitor_host
 
     def spy(plot_input, state):
         seen.append(state)
         return original(plot_input, state)
 
-    presenter._make_host = spy
+    presenter._make_monitor_host = spy
     surface = panel.accepted_surface
     assert surface is not None
     host, _operation = presenter._stage_panel_host(
@@ -6010,7 +6044,7 @@ def test_a_replacement_host_mounts_the_view_the_operator_just_committed(
             "the replacement mounted a view the operator had already left"
         )
     finally:
-        presenter._make_host = original
+        presenter._make_monitor_host = original
         presenter._retire_plot_host(host)
 
 
@@ -6029,6 +6063,8 @@ def test_the_console_answers_the_manual_axis_question_the_engine_asks(
     from zlc_runtime import OperatorInputRequest
     from zlc_workbench.apps.task_console import build_panel_host
     from zlc_workbench.logic import LogicBinding
+
+    plot = pytest.importorskip("zlc_plot")
 
     class _Host:
         def __init__(self, request):
@@ -6058,7 +6094,19 @@ def test_the_console_answers_the_manual_axis_question_the_engine_asks(
     presenter = ConsolePresenter(
         session,
         view,
-        make_host=build_panel_host,
+        make_monitor_host=lambda plot_input, state: build_panel_host(
+            plot_input,
+            state,
+            build_host=plot.build_figure_host,
+        ),
+        make_editor_host=lambda plot_input, state: build_panel_host(
+            plot_input,
+            state,
+            build_host=plot.build_figure_host,
+        ),
+        build_figure_host=plot.build_figure_host,
+        save_figure_artifact=_async_writer(plot.save_figure_artifact),
+        close_render_processes=lambda: True,
         spec_for=lambda s, kind="", cell_kind="": task_console_fitting_spec(
             s.block.schema, kind, cell_kind
         ),

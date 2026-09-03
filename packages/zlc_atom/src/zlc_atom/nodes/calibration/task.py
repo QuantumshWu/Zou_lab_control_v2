@@ -298,13 +298,17 @@ class SampleWriter:
         generation: object,
         photoelectrons: bool,
         artifact_context: object,
+        build_figure_host: object = None,
     ) -> None:
+        if build_figure_host is not None and not callable(build_figure_host):
+            raise TypeError("build_figure_host must be callable or None")
         self.folder = Path(folder)
         durable_makedirs(self.folder)
         self._point = working_point
         self._run_record = dict(run_record)
         self._generation = generation
         self._artifact_context = artifact_context
+        self._build_figure_host = build_figure_host
         self._value_unit = (
             None if photoelectrons else working_point.count_unit
         )
@@ -396,7 +400,11 @@ class SampleWriter:
             info, arrays = read_archive(archive_path)
             plot_input, recipe = read_figure_plot(info, arrays, "data")
             image_path, _archive_path = self._paths(index)
-            plot = open_figure_host(plot_input, recipe)
+            plot = open_figure_host(
+                plot_input,
+                recipe,
+                build_host=self._build_figure_host,
+            )
             try:
                 saved = plot.save(image_path)
                 if hasattr(saved, "result"):
@@ -618,7 +626,12 @@ class CalibrationRunResult:
         )
 
 
-def _save_report(result: CalibrationRunResult, artifact_context: object) -> Path:
+def _save_report(
+    result: CalibrationRunResult,
+    artifact_context: object,
+    *,
+    save_figure_artifact: object = None,
+) -> Path:
     """Everything a calibration leaves for a person: the numbers and the pictures.
 
     The numbers first.  A run that fails to draw -- a backend that cannot
@@ -646,7 +659,12 @@ def _save_report(result: CalibrationRunResult, artifact_context: object) -> Path
         role="summary",
     )
     figure_root = run_root / "figures"
-    _save_report_images(result, figure_root, artifact_context)
+    _save_report_images(
+        result,
+        figure_root,
+        artifact_context,
+        save_figure_artifact=save_figure_artifact,
+    )
     return figure_root
 
 
@@ -654,6 +672,8 @@ def _save_report_images(
     result: CalibrationRunResult,
     figure_root: Path,
     artifact_context: object,
+    *,
+    save_figure_artifact: object = None,
 ) -> Path:
     """Render the SiteMap and each readout model directly through zlc_plot."""
 
@@ -666,8 +686,12 @@ def _save_report_images(
         ImagePlot,
         PlotLabels,
         PointStatus,
-        save_figure_artifact,
     )
+    writer = save_figure_artifact
+    if writer is None:
+        from zlc_plot import save_figure_artifact as writer
+    if not callable(writer):
+        raise TypeError("save_figure_artifact must be callable or None")
 
     def save(
         stem: str,
@@ -679,7 +703,7 @@ def _save_report_images(
     ) -> None:
         base_path = figure_root / stem
         try:
-            preview_path, figure_path = save_figure_artifact(
+            written = writer(
                 base_path,
                 plot_input=plot_input,
                 spec=spec,
@@ -692,6 +716,9 @@ def _save_report_images(
                     "run_record": dict(result.run_record),
                 },
             )
+            if hasattr(written, "result"):
+                written = written.result()
+            preview_path, figure_path = written
         except BaseException:
             figure_path = base_path.with_suffix(".npz")
             if figure_path.is_file():
@@ -1104,6 +1131,8 @@ class CalibrationTask:
         pulse_sequence: PulseSequence,
         pulse_path: str | Path,
         signal_plane: object,
+        build_figure_host: object = None,
+        save_figure_artifact: object = None,
     ) -> None:
         if not isinstance(camera, CameraAdapter):
             raise TypeError("camera must implement CameraAdapter")
@@ -1114,6 +1143,10 @@ class CalibrationTask:
             raise TypeError("request must be CalibrationRequest")
         if not isinstance(pulse_sequence, PulseSequence):
             raise TypeError("pulse_sequence must be PulseSequence")
+        if build_figure_host is not None and not callable(build_figure_host):
+            raise TypeError("build_figure_host must be callable or None")
+        if save_figure_artifact is not None and not callable(save_figure_artifact):
+            raise TypeError("save_figure_artifact must be callable or None")
         self.camera = camera
         self.sequencer = sequencer
         self._request = request
@@ -1122,6 +1155,8 @@ class CalibrationTask:
         if signal_plane is None:
             raise TypeError("signal_plane must be supplied by the runtime owner")
         self.signal_plane = signal_plane
+        self._build_figure_host = build_figure_host
+        self._save_figure_artifact = save_figure_artifact
         self._actual_working_point: CameraWorkingPoint | None = None
         self._result: CalibrationRunResult | None = None
         self._site_review_record: dict[str, object] | None = None
@@ -1365,6 +1400,7 @@ class CalibrationTask:
                             ),
                             photoelectrons=photoelectrons,
                             artifact_context=artifact_context,
+                            build_figure_host=self._build_figure_host,
                         )
                     writer.write(len(cycles) - 1, cycle)
                 if context is not None:
@@ -1841,7 +1877,11 @@ class CalibrationTask:
             self._partial_result = result
             if context is not None:
                 context.report_progress("Saving calibration report")
-            _save_report(result, artifact_context)
+            _save_report(
+                result,
+                artifact_context,
+                save_figure_artifact=self._save_figure_artifact,
+            )
             self._result = result
             if context is not None:
                 # What it found, not just that it finished: the operator's
@@ -1869,7 +1909,11 @@ class CalibrationTask:
     ) -> None:
         result = self._partial_result
         if result is not None:
-            _save_report(result, context)
+            _save_report(
+                result,
+                context,
+                save_figure_artifact=self._save_figure_artifact,
+            )
             return
         if self._partial_cycles_completed < 1:
             return
@@ -1892,12 +1936,14 @@ class CalibrationTask:
             FacetGridPlot,
             ImagePlot,
             PlotLabels,
-            save_figure_artifact,
         )
+        writer = self._save_figure_artifact
+        if writer is None:
+            from zlc_plot import save_figure_artifact as writer
 
         base = run_folder / "figures" / "partial_capture"
         try:
-            preview_path, figure_path = save_figure_artifact(
+            written = writer(
                 base,
                 plot_input=snapshot,
                 spec=FacetGridPlot(
@@ -1922,6 +1968,9 @@ class CalibrationTask:
                     ),
                 },
             )
+            if hasattr(written, "result"):
+                written = written.result()
+            preview_path, figure_path = written
         except BaseException:
             figure_path = base.with_suffix(".npz")
             if figure_path.is_file():

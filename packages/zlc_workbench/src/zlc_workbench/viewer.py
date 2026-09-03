@@ -3265,6 +3265,9 @@ class FigureViewerPresenter:
         request_close: Callable[[], None],
         panel_presenter: object,
         signal_plane: object,
+        build_figure_host: Callable[..., object],
+        save_figure_artifact: Callable[..., object],
+        save_front: Callable[..., object],
     ) -> None:
         self.view = view
         self._run_off_thread = run_off_thread
@@ -3272,6 +3275,15 @@ class FigureViewerPresenter:
         self._request_close = request_close
         self._panel_presenter = panel_presenter
         self._signal_plane = signal_plane
+        if not callable(build_figure_host):
+            raise TypeError("build_figure_host must be callable")
+        if not callable(save_figure_artifact):
+            raise TypeError("save_figure_artifact must be callable")
+        if not callable(save_front):
+            raise TypeError("save_front must be callable")
+        self._build_figure_host = build_figure_host
+        self._save_figure_artifact = save_figure_artifact
+        self._save_front = save_front
         self._archive_producers: tuple[_ArchiveDatasetProducer, ...] = ()
         self._archive_data: dict[str, dict[str, object]] = {}
         self._data_drafts: dict[str, dict[str, object]] = {}
@@ -3342,6 +3354,7 @@ class FigureViewerPresenter:
             return
         requested = Path(path)
         serial = self._archive_serial + 1
+        device_pixel_ratio = float(self.view.device_pixel_ratio())
 
         def prepare() -> object:
             import zlc_plot
@@ -3360,7 +3373,8 @@ class FigureViewerPresenter:
                     host = zlc_plot.open_figure_host(
                         plot_input,
                         recipe,
-                        device_pixel_ratio=float(self.view.device_pixel_ratio()),
+                        device_pixel_ratio=device_pixel_ratio,
+                        build_host=self._build_figure_host,
                     )
                     try:
                         described = self._await(host.describe_display())
@@ -3609,6 +3623,7 @@ class FigureViewerPresenter:
         if source["described"] is not None:
             self._open_archive_data_draft(key)
             return
+        device_pixel_ratio = float(self.view.device_pixel_ratio())
 
         def describe() -> object:
             import zlc_plot
@@ -3621,7 +3636,8 @@ class FigureViewerPresenter:
             host = zlc_plot.open_figure_host(
                 plot_input,
                 source["recipe"],
-                device_pixel_ratio=float(self.view.device_pixel_ratio()),
+                device_pixel_ratio=device_pixel_ratio,
+                build_host=self._build_figure_host,
             )
             try:
                 result = self._await(host.describe_display())
@@ -4007,26 +4023,39 @@ class FigureViewerPresenter:
         manual_frozen = replace(frozen, lineage=draft["lineage"])
         source = deepcopy(dict(draft["source_document"]))
         saved_publication = draft["publication"]
+        editor_host = (
+            binding.editor_host
+            if binding.editor_host is not None
+            and binding.editor_configuration is None
+            and getattr(binding.editor_host, "startup_failure", None) is None
+            and not bool(getattr(binding.editor_host, "closing", False))
+            else None
+        )
 
         def write() -> object:
-            return save_panel_figure(
-                image_path,
-                state=state,
-                frozen=manual_frozen,
-                source=source,
+            return self._await(
+                save_panel_figure(
+                    image_path,
+                    state=state,
+                    frozen=manual_frozen,
+                    writer=self._save_figure_artifact,
+                    source=source,
+                    host=editor_host,
+                )
             )
 
         def saved(written: object) -> None:
+            image, archive = written
             current = draft["publication"] is saved_publication
             if current:
                 draft["unsaved"] = False
             draft["message"] = (
-                f"Saved {written.archive.name}"
+                f"Saved {archive.name}"
                 if current
-                else f"Saved older preview to {written.archive.name}; current data is not saved"
+                else f"Saved older preview to {archive.name}; current data is not saved"
             )
             self.view.set_status(
-                f"saved {written.archive.name} and {written.image.name}"
+                f"saved {archive.name} and {image.name}"
             )
             if bool(getattr(self.view, "has_data_editor", lambda _key: False)(str(draft["editor_id"]))):
                 self.view.update_data_editor(
@@ -4151,17 +4180,16 @@ class FigureViewerPresenter:
         if binding is None or self.path is None or binding.host is None:
             self.view.set_status("there is no figure to save", error=True)
             return
-        host = binding.host
-        save = getattr(host, "save", None)
-        if not callable(save):
-            self.view.set_status("this figure cannot save itself", error=True)
+        front = binding.host.front
+        if front is None:
+            self.view.set_status("this figure has no complete image yet", error=True)
             return
         path = self.path
         dataset = binding.state.signal.rsplit("/", 1)[-1]
 
         def write_image() -> object:
             def write(temporary: Path) -> None:
-                self._await(host.save(temporary))
+                self._await(self._save_front(temporary, front))
 
             return unique_path(
                 path.parent,

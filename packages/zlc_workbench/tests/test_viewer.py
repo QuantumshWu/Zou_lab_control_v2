@@ -45,7 +45,13 @@ from zlc_data import (
     ValueSchema,
     owned_snapshot_from_arrays,
 )
-from zlc_plot import AxisRef, NumericRange, SelectorKind
+from zlc_plot import (
+    AxisRef,
+    NumericRange,
+    SelectorKind,
+    build_figure_host,
+    save_figure_artifact,
+)
 from zlc_plot.primitives import ImageFrame, ImagePointOverlay
 from zlc_plot.selectors import RectangleRange, SelectorState
 from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, write_ordinary_pulse
@@ -61,7 +67,11 @@ def _frozen_surface(
     viewport: RectangleRange | None = None,
     selectors: object = (),
 ) -> PanelFrozenData:
-    host = build_panel_host(plot_input, state)
+    host = build_panel_host(
+        plot_input,
+        state,
+        build_host=build_figure_host,
+    )
     try:
         operation = host.configure(
             viewport=viewport,
@@ -296,14 +306,29 @@ def _built_presenter(view) -> FigureViewerPresenter:
     from zlc_workbench.apps.figure_viewer import build
     from zlc_workbench.board import attach_qt_worker
     from zlc_ui.qt import ensure_qt_app
+    from test_console_presenter import _async_writer
 
     ensure_qt_app(["test-built-figure-viewer"])
     run_off_thread, close_worker = attach_qt_worker("test-built-figure-viewer")
+    monitor_render = SimpleNamespace(build_host=build_figure_host)
+
+    def save_front(path, front):
+        front.buffer.save(path)
+        return Path(path)
+
+    editor_render = SimpleNamespace(
+        build_host=build_figure_host,
+        save_figure_artifact=_async_writer(save_figure_artifact),
+        save_front=_async_writer(save_front),
+    )
     return build(
         view,
         run_off_thread=run_off_thread,
         close_worker=close_worker,
         request_close=lambda: None,
+        monitor_render=monitor_render,
+        editor_render=editor_render,
+        close_render_processes=lambda: True,
     )
 
 
@@ -323,22 +348,29 @@ def _active_record(presenter: FigureViewerPresenter) -> dict[str, object]:
     }
 
 
-def _formal_viewer_window(saved, monkeypatch, host_factory):
+def _formal_viewer_window(saved, _monkeypatch, host_factory):
     pytest.importorskip("PyQt5")
     from PyQt5 import QtCore, QtWidgets
     from zlc_ui.qt import ensure_qt_app
     from zlc_workbench.apps.figure_viewer import create_window
-    import zlc_plot
 
     application = ensure_qt_app(["formal-figure-viewer"])
     host = host_factory(application, QtCore, QtWidgets)
-    monkeypatch.setattr(
-        zlc_plot.RasterPlotHost,
-        "from_plot",
-        staticmethod(lambda *_args, **_kwargs: host),
+    render = SimpleNamespace(
+        build_host=lambda *_args, **_kwargs: host,
+        save_figure_artifact=lambda *_args, **_kwargs: None,
+        save_front=lambda *_args, **_kwargs: None,
+        retain=lambda: None,
+        release=lambda *, timeout=0.0: True,
+        close=lambda *, timeout=0.0: True,
     )
     path, _snapshot = saved
-    window = create_window(path=path, window_ratio=0.25)
+    window = create_window(
+        path=path,
+        window_ratio=0.25,
+        monitor_render=render,
+        editor_render=render,
+    )
     owner_turns: list[bool] = []
     timer = QtCore.QTimer()
     timer.setInterval(10)
@@ -375,10 +407,13 @@ def saved(tmp_path):
             publication=result.publication,
             lineage=capture_run_chain(session.signal_plane, result.publication),
         )
-        written = save_panel_figure(
-            tmp_path / "run.png", state=state, frozen=frozen,
+        _image, archive = save_panel_figure(
+            tmp_path / "run.png",
+            state=state,
+            frozen=frozen,
+            writer=save_figure_artifact,
         )
-        yield written.archive, snapshot
+        yield archive, snapshot
     finally:
         session.close()
 
@@ -815,7 +850,8 @@ def test_formal_window_waits_for_guarded_host_work_without_blocking_or_hiding(
     saved,
     monkeypatch,
 ) -> None:
-    from threading import Event
+    from concurrent.futures import Future
+    from threading import Event, Thread
 
     configured = Event()
     release_configure = Event()
@@ -825,20 +861,39 @@ def test_formal_window_waits_for_guarded_host_work_without_blocking_or_hiding(
     def host_factory(application, QtCore, QtWidgets):
         surface = QtWidgets.QLabel("guarded figure")
 
-        def wait_off_owner(started: Event, release: Event):
-            def result(*_args, **_kwargs):
-                assert QtCore.QThread.currentThread() != application.thread()
-                started.set()
-                assert release.wait(5.0), "test never released guarded host work"
-                return None
+        class GuardedHost:
+            host_id = "guarded-host"
+            startup_failure = None
 
-            return SimpleNamespace(result=result)
+            def configure(self, **_kwargs):
+                future = Future()
 
-        return SimpleNamespace(
-            configure=lambda **_kwargs: wait_off_owner(configured, release_configure),
-            qt_widget=lambda: surface,
-            close=lambda: wait_off_owner(closing, release_close).result(),
-        )
+                def work() -> None:
+                    try:
+                        assert QtCore.QThread.currentThread() != application.thread()
+                        configured.set()
+                        assert release_configure.wait(5.0), (
+                            "test never released guarded host work"
+                        )
+                    except BaseException as error:
+                        if not future.done():
+                            future.set_exception(error)
+                    else:
+                        if not future.done():
+                            future.set_result(None)
+
+                Thread(target=work, daemon=True).start()
+                return future
+
+            def qt_widget(self):
+                return surface
+
+            def close(self, *, timeout=0.0):
+                assert timeout == 0.0
+                closing.set()
+                return release_close.is_set()
+
+        return GuardedHost()
 
     application, _QtCore, window, owner_turns, timer = _formal_viewer_window(
         saved, monkeypatch, host_factory
@@ -847,7 +902,7 @@ def test_formal_window_waits_for_guarded_host_work_without_blocking_or_hiding(
         _wait_until(configured.is_set)
         _wait_until(lambda: len(owner_turns) >= 3)
         assert window.is_visible()
-        assert window.presenter.description is None
+        assert not window.presenter.panels
 
         window.close()
         application.processEvents()
@@ -975,12 +1030,13 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         ),
     )
 
-    written = save_panel_figure(
+    _image, archive = save_panel_figure(
         tmp_path / "panel",
         state=state,
         frozen=frozen,
+        writer=save_figure_artifact,
     )
-    with np.load(written.archive, allow_pickle=False) as payload:
+    with np.load(archive, allow_pickle=False) as payload:
         assert "data.overlay.coordinates" in payload.files
         assert "data.overlay.status" in payload.files
 
@@ -988,7 +1044,7 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
     real_view.dpr = 1.75
     real_presenter = _built_presenter(real_view)
     try:
-        real_presenter.open(str(written.archive))
+        real_presenter.open(str(archive))
         _wait_until(lambda: not real_presenter._busy)
         assert real_presenter.description is not None, real_view.status
         _wait_until(
@@ -1183,16 +1239,17 @@ def test_panel_save_thresholds_and_viewport_reopen_in_canonical_units(tmp_path) 
         viewport=viewport,
     )
 
-    written = save_panel_figure(
+    _image, archive = save_panel_figure(
         tmp_path / "unit-report",
         state=state,
         frozen=frozen,
+        writer=save_figure_artifact,
     )
 
     view = _ViewerView()
     presenter = _built_presenter(view)
     try:
-        presenter.open(str(written.archive))
+        presenter.open(str(archive))
         _wait_until(lambda: not presenter._busy)
         assert presenter.description is not None, view.status
         _wait_until(
@@ -1254,15 +1311,16 @@ def test_viewer_reenabling_facet_fit_solves_every_cell(tmp_path) -> None:
         fit={"model": "gaussian_offset", "fit_all_facets": True},
     )
     frozen = _frozen_surface(state, snapshot)
-    written = save_panel_figure(
+    _image, archive = save_panel_figure(
         tmp_path / "facet-fit",
         state=state,
         frozen=frozen,
+        writer=save_figure_artifact,
     )
     view = _ViewerView()
     presenter = _built_presenter(view)
     try:
-        presenter.open(str(written.archive))
+        presenter.open(str(archive))
         _wait_until(lambda: not presenter._busy)
         _wait_until(
             lambda: (
@@ -1339,15 +1397,16 @@ def test_viewer_restores_facet_cell_kind_before_its_semantic_vocabulary(
             "reduction": "mean",
         },
     )
-    written = save_panel_figure(
+    _image, archive = save_panel_figure(
         tmp_path / "site-histograms",
         state=state,
         frozen=_frozen_surface(state, snapshot),
+        writer=save_figure_artifact,
     )
     view = _ViewerView()
     presenter = _built_presenter(view)
     try:
-        presenter.open(str(written.archive))
+        presenter.open(str(archive))
         _wait_until(lambda: not presenter._busy)
         assert presenter.description is not None, view.status
         _wait_until(
@@ -1405,6 +1464,7 @@ def test_panel_save_reports_that_the_archive_survived_an_image_failure(
             tmp_path / "failed-image",
             state=state,
             frozen=frozen,
+            writer=figure_module.save_figure_artifact,
         )
 
     archive = tmp_path / "failed-image.npz"
@@ -1432,6 +1492,7 @@ def test_panel_save_does_not_render_when_the_archive_fails(
             tmp_path / "failed-archive",
             state=state,
             frozen=frozen,
+            writer=figure_module.save_figure_artifact,
         )
 
     assert not (tmp_path / "failed-archive.png").exists()

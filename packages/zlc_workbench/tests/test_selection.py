@@ -162,7 +162,7 @@ def _draw_area(host, *, span: tuple[float, float, float, float] = (0.3, 0.3, 0.7
     start = _at(span[0], span[1])
     end = _at(span[2], span[3])
     for action, point in (("press", start), ("move", end), ("release", end)):
-        host._pointer_event(
+        host.pointer_event(
             action,
             point[0],
             point[1],
@@ -678,7 +678,7 @@ def _gesture_area(host, front, transform, *, span=(0.25, 0.25, 0.75, 0.75)) -> N
     start = _at(span[0], span[1])
     end = _at(span[2], span[3])
     for action, point in (("press", start), ("move", end), ("release", end)):
-        host._pointer_event(
+        host.pointer_event(
             action,
             point[0],
             point[1],

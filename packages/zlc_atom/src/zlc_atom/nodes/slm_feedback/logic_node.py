@@ -128,6 +128,7 @@ def _build(
     calibration: ResolvedArtifact,
     science_context: ResolvedArtifact,
     pulse_resource: ResolvedWorkspaceResource,
+    save_figure_artifact: object = None,
     **values: object,
 ) -> SlmFeedbackTask:
     authored = SLM_FEEDBACK_SCHEMA.project_values(values)
@@ -162,6 +163,7 @@ def _build(
         feedback_gain=float(authored["feedback_gain"]),
         maximum_weight_change=float(authored["maximum_weight_change"]),
         max_updates=int(authored["max_updates"]),
+        save_figure_artifact=save_figure_artifact,
     )
 
 

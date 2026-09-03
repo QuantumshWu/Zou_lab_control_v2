@@ -128,13 +128,6 @@ __all__ = ["ConsolePresenter", "PanelBinding", "PanelState"]
 _UNCHANGED = object()
 
 
-def _run_inline(work, deliver, failed) -> None:
-    try:
-        deliver(work())
-    except BaseException as error:
-        failed(error)
-
-
 def _refused_expression(binding: "PanelBinding") -> str:
     """What the operator typed into the Parameters box and the model refused.
 
@@ -452,12 +445,14 @@ class ConsolePresenter:
         session: object,
         view: object,
         *,
-        make_host: Callable[[object, PanelState], Any],
+        make_monitor_host: Callable[[object, PanelState], Any],
+        make_editor_host: Callable[[object, PanelState], Any],
+        build_figure_host: Callable[..., object] | None = None,
+        save_figure_artifact: Callable[..., object],
+        close_render_processes: Callable[[], bool],
         spec_for: Callable[[object, str, str], Any] | None = None,
         open_saved: Callable[[str], object] | None = None,
         request_close: Callable[[], None] | None = None,
-        run_off_thread: Callable[..., None] | None = None,
-        close_worker: Callable[[], bool] | None = None,
         panel_only: bool = False,
         review_points: Callable[[Any, ImagePointOverlay, OperatorInputRequest], object]
         | None = None,
@@ -465,19 +460,31 @@ class ConsolePresenter:
     ) -> None:
         if request_close is not None and not callable(request_close):
             raise TypeError("request_close must be callable or None")
-        if run_off_thread is not None and not callable(run_off_thread):
-            raise TypeError("run_off_thread must be callable or None")
-        if close_worker is not None and not callable(close_worker):
-            raise TypeError("close_worker must be callable or None")
+        if not callable(make_monitor_host):
+            raise TypeError("make_monitor_host must be callable")
+        if not callable(make_editor_host):
+            raise TypeError("make_editor_host must be callable")
+        if type(panel_only) is not bool:
+            raise TypeError("panel_only must be bool")
+        if build_figure_host is None and not panel_only:
+            raise TypeError("a Logic-capable console requires build_figure_host")
+        if build_figure_host is not None and not callable(build_figure_host):
+            raise TypeError("build_figure_host must be callable or None")
+        if not callable(save_figure_artifact):
+            raise TypeError("save_figure_artifact must be callable")
+        if not callable(close_render_processes):
+            raise TypeError("close_render_processes must be callable")
         if review_points is not None and not callable(review_points):
             raise TypeError("review_points must be callable or None")
         if manual_axis is not None and not callable(manual_axis):
             raise TypeError("manual_axis must be callable or None")
-        if type(panel_only) is not bool:
-            raise TypeError("panel_only must be bool")
         self.session = session
         self.view = view
-        self._make_host = make_host
+        self._make_monitor_host = make_monitor_host
+        self._make_editor_host = make_editor_host
+        self._build_figure_host = build_figure_host
+        self._save_figure_artifact = save_figure_artifact
+        self._close_render_processes = close_render_processes
         # What kinds of panel exist, and whether one dataset admits one.  Both
         # belong to the plotting package; this only asks.
         self._spec_probe = spec_for
@@ -485,8 +492,6 @@ class ConsolePresenter:
         # so the console asks for it rather than growing one.
         self._open_saved = open_saved
         self._request_close = request_close
-        self._run_off_thread = _run_inline if run_off_thread is None else run_off_thread
-        self._close_worker = (lambda: True) if close_worker is None else close_worker
         self._review_points = review_points
         self._manual_axis = manual_axis
         self._panel_only = panel_only
@@ -2010,7 +2015,7 @@ class ConsolePresenter:
                 focused_cell=current.focused_cell,
             )
 
-        host = self._make_host(plot_input, state)
+        host = self._make_monitor_host(plot_input, state)
         try:
             operation = self._match_host_to_panel(
                 binding,
@@ -3221,6 +3226,25 @@ class ConsolePresenter:
             host = binding.host
             configuration_entry = binding.configuration
             if (
+                configuration_entry is None
+                and host is not None
+                and bool(getattr(host, "service_failure", False))
+            ):
+                # A render-service crash leaves the last complete Front on
+                # screen.  Re-submit the unchanged authored target through
+                # the ordinary replacement transaction; its factory restarts
+                # A, and the old surface stays visible until the replacement
+                # is fully accepted.
+                self.update_panel_state(binding.panel_id, {})
+                continue
+            if (
+                binding.editor_open
+                and binding.editor_configuration is None
+                and binding.editor_host is not None
+                and bool(getattr(binding.editor_host, "service_failure", False))
+            ):
+                self._remount_panel_editor(binding)
+            if (
                 configuration_entry is not None
                 and configuration_entry[0] == "retarget"
             ):
@@ -3747,7 +3771,7 @@ class ConsolePresenter:
         if frozen is None:
             raise RuntimeError(f"{binding.panel_id} has no frozen plot input")
         plot_input = frozen.plot_input
-        host = self._make_host(plot_input, binding.state)
+        host = self._make_editor_host(plot_input, binding.state)
 
         if not callable(getattr(self.view, "show_panel_editor", None)):
             self._retire_plot_host(host)
@@ -4005,7 +4029,7 @@ class ConsolePresenter:
         return True
 
     def save_panel_figure(self, panel_id: str, selected: str) -> bool:
-        """Submit one exact frozen Panel Save without blocking the owner."""
+        """Submit one exact frozen Panel Save to the Edit/Save process."""
 
         key = str(panel_id)
         binding = self.panels.get(key)
@@ -4036,45 +4060,64 @@ class ConsolePresenter:
         selected = str(selected).strip()
         if not selected:
             return False
+        host = (
+            binding.editor_host
+            if binding.editor_host is not None
+            and binding.editor_configuration is None
+            and getattr(binding.editor_host, "startup_failure", None) is None
+            and not bool(getattr(binding.editor_host, "closing", False))
+            else None
+        )
 
-        # Everything below is frozen on the owner turn.  The worker never
-        # reads the live binding again, so Refresh/Edit cannot change a save
-        # that is already archive-first in flight.
+        # Everything below is frozen on the owner turn.  C owns both the
+        # settled Editor host and the archive/export work.  When no Edit
+        # surface is open, C builds and closes the temporary host there; Save
+        # has never required opening Edit first, and process isolation must not
+        # change that product behaviour.  Neither path executes Plot in B.
         state = binding.state
-        def work() -> object:
-            return _save_panel_figure(
+        title = state.title
+        self._saving_panels.add(key)
+        self._report(f"saving {title}", severity="task")
+        try:
+            pending = _save_panel_figure(
                 selected,
                 state=state,
                 frozen=frozen,
+                writer=self._save_figure_artifact,
+                host=host,
             )
-
-        title = state.title
-
-        def finished(written: object) -> None:
-            self._saving_panels.discard(key)
-            self._report(
-                f"panel saved to {written.image.name} and {written.archive.name}",
-                severity="task",
-            )
-            if self._closing and self._request_close is not None:
-                self._request_close()
-
-        def failed(error: BaseException) -> None:
+            add_done = getattr(pending, "add_done_callback", None)
+            if not callable(add_done):
+                raise TypeError("Edit/Save process must return a Future")
+        except BaseException as error:
             self._saving_panels.discard(key)
             self._report(
                 f"cannot save {title}: {_error_text(error)}",
                 severity="error",
             )
-            if self._closing and self._request_close is not None:
-                self._request_close()
-
-        self._saving_panels.add(key)
-        self._report(f"saving {title}", severity="task")
-        try:
-            self._run_off_thread(work, finished, failed)
-        except BaseException as error:
-            failed(error)
             return False
+
+        def completed(future: object) -> None:
+            def settle() -> None:
+                self._saving_panels.discard(key)
+                try:
+                    image, archive = future.result()
+                except BaseException as error:
+                    self._report(
+                        f"cannot save {title}: {_error_text(error)}",
+                        severity="error",
+                    )
+                else:
+                    self._report(
+                        f"panel saved to {image.name} and {archive.name}",
+                        severity="task",
+                    )
+                if self._closing and self._request_close is not None:
+                    self._request_close()
+
+            self._enqueue_panel_interaction(settle)
+
+        add_done(completed)
         return True
 
     def _paints_image_surfaces(
@@ -6063,7 +6106,7 @@ class ConsolePresenter:
             interval_ms=self._default_interval_ms,
             title=request.title,
         )
-        review_host = self._make_host(ImageFrame(snapshot, overlay), state)
+        review_host = self._make_editor_host(ImageFrame(snapshot, overlay), state)
         try:
             reviewer = self._review_points
             if reviewer is None:
@@ -7236,7 +7279,11 @@ class ConsolePresenter:
     def _logic_extras(self) -> dict[str, Any]:
         """Facts a START can bind beyond its devices and the signal plane."""
 
-        return self._bench_offer_extras()
+        extras = self._bench_offer_extras()
+        extras["save_figure_artifact"] = self._save_figure_artifact
+        if self._build_figure_host is not None:
+            extras["build_figure_host"] = self._build_figure_host
+        return extras
 
     def _artifact_results(
         self,
@@ -7369,8 +7416,10 @@ class ConsolePresenter:
             and board_closed
             and not self._saving_panels
         )
-        worker_closed = self._close_worker() if owners_ready else False
-        ready = owners_ready and worker_closed
+        render_processes_closed = (
+            self._close_render_processes() if owners_ready else False
+        )
+        ready = owners_ready and render_processes_closed
         if ready:
             self._closed = True
             if self._request_close is not None and not self._close_retry_sent:
@@ -7392,8 +7441,8 @@ class ConsolePresenter:
                 waiting.append(f"{len(self._retired_plot_hosts)} plot worker(s)")
             if self._saving_panels:
                 waiting.append(f"{len(self._saving_panels)} panel save(s)")
-            elif owners_ready and not worker_closed:
-                waiting.append("panel-save worker")
+            elif owners_ready and not render_processes_closed:
+                waiting.append("render processes")
             self._report(
                 "console close is still waiting for " + ", ".join(waiting),
                 severity="error",

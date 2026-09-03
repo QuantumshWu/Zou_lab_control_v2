@@ -38,7 +38,6 @@ from zlc_plot import (
     PlotLabels,
     PointStatus,
     image_point_overlay_geometry,
-    save_figure_artifact,
 )
 from zlc_runtime import DatasetOutputDeclaration, LiveDatasetOutput, MonitorCoverage
 
@@ -1478,6 +1477,7 @@ class SlmFeedbackTask:
         feedback_gain: float,
         maximum_weight_change: float,
         max_updates: int,
+        save_figure_artifact: object = None,
     ) -> None:
         if not isinstance(slm, SlmAdapter):
             raise TypeError("slm must implement SlmAdapter")
@@ -1485,8 +1485,11 @@ class SlmFeedbackTask:
             raise TypeError("feedback requires TrapCalibration and PulseSequence")
         if not isinstance(science_context, Mapping):
             raise TypeError("science_context must be a loaded Science Context mapping")
+        if save_figure_artifact is not None and not callable(save_figure_artifact):
+            raise TypeError("save_figure_artifact must be callable or None")
         if science_context.get("objective_kind") != "spots":
             raise ValueError("SLM feedback Science Context must use the spots objective")
+        self._save_figure_artifact = save_figure_artifact
         context_target = science_context.get("target_intensity")
         if context_target is None:
             raise ValueError("Science Context has no frozen Target")
@@ -2446,7 +2449,10 @@ class SlmFeedbackTask:
         registered_name = str(name if artifact_name is None else artifact_name)
         base = paths["figures"] / f"{name}.png"
         try:
-            image, archive = save_figure_artifact(
+            writer = self._save_figure_artifact
+            if writer is None:
+                from zlc_plot import save_figure_artifact as writer
+            written = writer(
                 base,
                 plot_input=snapshot,
                 spec=spec,
@@ -2464,6 +2470,9 @@ class SlmFeedbackTask:
                     },
                 },
             )
+            if hasattr(written, "result"):
+                written = written.result()
+            image, archive = written
         except BaseException:
             archive = base.with_suffix(".npz")
             if archive.is_file():

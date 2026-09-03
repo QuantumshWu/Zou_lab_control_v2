@@ -860,3 +860,89 @@ The solve is within 3 ms of the Gaussian's; the rest of `fit_total` is
 forty overlays through the kernel at widths of tens of photons, where a
 bin's window is hundreds of nodes.  The lattice round measured 22.3 / 13.9
 here.
+
+## Process-isolated Monitor, Edit and Figure export (2026-09-03)
+
+The product now has one application-owned pair of plotting processes.  B, the
+Qt/Runtime/device process, retains PanelState, SelectionBridge, the live board
+and same-shot acceptance.  A owns every Monitor `RasterPlotHost`, including
+DataView projection, display fit, render and compose.  C owns Panel Edit,
+point review and every Workbench or domain-Task Figure render/export.  A and C
+run the unchanged `RasterPlotHost`/`PlotSession` truth; B has no local plotting
+fallback.  A FigureViewer opened by TaskConsole retains the same A/C pair, and
+the last of the two windows to close owns shutdown.
+
+Dataset revisions cross once per service through protocol-5 out-of-band
+shared transport and are reference-counted across all hosts.  Front RGBA lives
+in child-owned shared blocks; B maps it read-only and wraps it in QImage without
+a pixel copy.  A UUID lease prevents an old process generation from releasing
+a new generation's block.  Python 3.13's `Connection.send()` was found by
+tracemalloc to finalize its temporary `BytesIO` while a pipe write still held
+`getbuffer()`; the final protocol therefore uses owned
+`send_bytes(pickle.dumps(...))` / `pickle.loads(recv_bytes())` in both
+directions.  Repeated full workflows then produced no BufferError,
+SharedMemory or resource-tracker warning.
+
+Real-screen steady comparison: Windows, DPR 3, four 2x2 panels, 40-shot MOT
+ROI history, Curve-cell Facet with Gaussian fit.  The before window sampled 33
+complete roots over 5 s with a 36x502 ROI; the final-code window sampled 22
+over 3 s with a 36x495 ROI to limit visible benchmark time.  Both use the same
+MOT source, 0.1 s exposure, authored 40x500 ROI target, fit and panel layout.
+
+| measure | one process before | A/B/C after | change |
+|---|---:|---:|---:|
+| four-panel critical P50 | 142.80 ms | 89.34 ms | -37.4% |
+| critical P90 | 161.93 ms | 100.30 ms | -38.1% |
+| critical maximum | 188.31 ms | 103.65 ms | -45.0% |
+| source and coherent display rate | 6.80/s | 7.67/s | +12.8% |
+| B-process CPU, same benchmark sampler | 177% of one core | 73.4% | -58.5% |
+| steady total RSS | 1146.8 MiB | 1312.9 MiB | +14.5% |
+
+The final display gap itself was 129.4/144.4/158.9 ms P50/P90/max because
+the virtual source delivered only 7.67 revisions/s.  That is source cadence,
+not 129 ms of render work: the publication-to-four-front critical path above
+is the measured render-chain latency.  There were zero two-beat stalls.
+
+The matching real-screen Edit benchmark used the same DPR, panels, history and
+data.  It was captured immediately before replacing Python 3.13's unsafe
+`Connection.send` implementation with the final owned-message wire; the final
+wire then repeated the complete action sequence offscreen at DPR 3 with zero
+failure or lifecycle warning, but those offscreen wall times are not mixed
+into this real-screen table.  `total` is the synchronous Qt trigger plus the
+asynchronous settle; the GUI maximum is the longest event-loop turn after the
+trigger, so the trigger is shown separately rather than hidden inside it.
+
+| action | before trigger + settle = total | after trigger + settle = total | total change | GUI maximum before -> after |
+|---|---:|---:|---:|---:|
+| Grid Edit | 285.7 + 1918.3 = 2204.0 ms | 187.7 + 1495.5 = 1683.2 ms | -23.6% | 648.8 -> 65.9 ms |
+| Grid Refresh | 18.1 + 1287.3 = 1305.4 ms | 13.8 + 538.7 = 552.5 ms | -57.7% | 117.6 -> 7.7 ms |
+| Grid Save | 0.8 + 3894.3 = 3895.1 ms | 0.4 + 843.4 = 843.8 ms | -78.3% | 366.1 -> 6.9 ms |
+| Histogram Edit | 250.7 + 231.1 = 481.8 ms | 182.8 + 87.2 = 270.0 ms | -44.0% | 172.3 -> 53.2 ms |
+| Histogram Refresh | 13.1 + 81.8 = 94.9 ms | 15.9 + 32.6 = 48.5 ms | -48.9% | 29.4 -> 18.3 ms |
+| Histogram Save | 0.2 + 241.0 = 241.2 ms | 0.4 + 110.8 = 111.2 ms | -53.9% | 8.9 -> 12.3 ms |
+
+Scrolling is not render work and did not improve: Grid median step was
+15.6 -> 16.6 ms, with one 114 ms Qt/OS tail versus 48.4 ms before.  This is
+kept in the result rather than attributed to process isolation.
+
+The same final owned-bytes protocol was measured separately with two 1200x1920,
+DPR-3 Image hosts: update P50/P90/max is 27.93/30.43/35.85 ms versus
+17.97/20.24/22.44 ms in-process.  The safe process boundary therefore costs
+about 10 ms P50 in that large-image case.  A stayed at
+262.64 -> 263.23 MiB from revision 5 to 20,
+with exactly one retained input token, and returned to zero tokens on close.
+An isolated active pair measured B 56.5 MiB, A 263.2 MiB and C 229.3 MiB;
+duplicating Matplotlib/Numba state is the principal memory price.  In the full
+final real-screen run B/A/C ended at 499.7/669.2/144.1 MiB and had a
+simultaneously sampled total peak of 1499.4 MiB.  Total CPU was about 252.8%
+of one core (B 73.4%, A 179.4%, C idle), versus 177% before: isolation removes
+GIL interference from B, but sustains more source revisions and does not claim
+to reduce aggregate compute.
+
+The split removes UI/Runtime and export GIL contention; it does not make the
+four Monitor hosts process-parallel with one another.  They intentionally
+share A's Python GIL, so the remaining critical path is still the slowest
+Monitor's projection + fit + render plus process transport.  Aggregate CPU can
+rise because A now runs concurrently with B and sustains a higher source rate.
+Cold first use also remains visible: one ordered cold/hot sample was about
+1.99 s for A and 0.53 s for C; it is not reported as a steady median.

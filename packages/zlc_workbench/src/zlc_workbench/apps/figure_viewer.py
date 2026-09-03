@@ -38,6 +38,9 @@ def build(
     run_off_thread,
     close_worker,
     request_close,
+    monitor_render,
+    editor_render,
+    close_render_processes,
 ) -> object:
     """Wire one viewer window, so a host embedding it does not repeat this."""
 
@@ -74,12 +77,23 @@ def build(
         resolve_device_setting_records=lambda _records: (),
     )
 
-    def make_host(plot_input, state):
+    def make_monitor_host(plot_input, state):
         from .task_console import build_panel_host
 
         return build_panel_host(
             plot_input,
             state,
+            build_host=monitor_render.build_host,
+            device_pixel_ratio=float(view.device_pixel_ratio()),
+        )
+
+    def make_editor_host(plot_input, state):
+        from .task_console import build_panel_host
+
+        return build_panel_host(
+            plot_input,
+            state,
+            build_host=editor_render.build_host,
             device_pixel_ratio=float(view.device_pixel_ratio()),
         )
 
@@ -93,10 +107,11 @@ def build(
     panels = ConsolePresenter(
         session,
         view,
-        make_host=make_host,
+        make_monitor_host=make_monitor_host,
+        make_editor_host=make_editor_host,
+        save_figure_artifact=editor_render.save_figure_artifact,
+        close_render_processes=close_render_processes,
         spec_for=spec_for,
-        run_off_thread=run_off_thread,
-        close_worker=lambda: True,
         panel_only=True,
     )
 
@@ -107,6 +122,9 @@ def build(
         request_close=request_close,
         panel_presenter=panels,
         signal_plane=plane,
+        build_figure_host=editor_render.build_host,
+        save_figure_artifact=editor_render.save_figure_artifact,
+        save_front=editor_render.save_front,
     )
 
 
@@ -115,6 +133,8 @@ def create_window(
     path=None,
     workspace=None,
     window_ratio: float | None = None,
+    monitor_render=None,
+    editor_render=None,
 ):
     """Open the viewer the way a human does, and return its window.
 
@@ -126,6 +146,7 @@ def create_window(
     from types import SimpleNamespace
 
     from zlc_durable import day_folder
+    import zlc_plot as plot
     from zlc_ui import open_figure_viewer
     from zlc_workbench.board import (
         attach_qt,
@@ -146,12 +167,63 @@ def create_window(
         today=today,
     )
 
+    if (monitor_render is None) != (editor_render is None):
+        raise ValueError(
+            "monitor_render and editor_render must be supplied together"
+        )
+    owns_render_processes = monitor_render is None
+    if owns_render_processes:
+        monitor_render = plot.RenderProcess("zlc-monitor-render")
+        try:
+            editor_render = plot.RenderProcess("zlc-edit-save-render")
+        except BaseException:
+            monitor_render.release(timeout=30.0)
+            raise
+
+    assert monitor_render is not None and editor_render is not None
+    if not owns_render_processes:
+        monitor_render.retain()
+        try:
+            editor_render.retain()
+        except BaseException:
+            monitor_render.release(timeout=0.0)
+            raise
+
+    render_release_started = False
+    monitor_shutdown = editor_shutdown = False
+
+    def close_render_processes() -> bool:
+        nonlocal render_release_started, monitor_shutdown, editor_shutdown
+        if not render_release_started:
+            monitor_shutdown = not monitor_render.release(timeout=0.0)
+            editor_shutdown = not editor_render.release(timeout=0.0)
+            render_release_started = True
+        monitor_closed = (
+            monitor_render.close(timeout=0.0) if monitor_shutdown else True
+        )
+        editor_closed = (
+            editor_render.close(timeout=0.0) if editor_shutdown else True
+        )
+        return bool(monitor_closed and editor_closed)
+
+    def abandon_render_processes() -> None:
+        if close_render_processes():
+            return
+        if monitor_shutdown:
+            monitor_render.close(timeout=30.0)
+        if editor_shutdown:
+            editor_render.close(timeout=30.0)
+
     # One call, one handle: this layer never names a widget class.
-    window = open_figure_viewer(
-        title="FigureViewer@Zou lab",
-        window_ratio=window_ratio,
-        path_base_dir=str(today),
-    )
+    try:
+        window = open_figure_viewer(
+            title="FigureViewer@Zou lab",
+            window_ratio=window_ratio,
+            path_base_dir=str(today),
+        )
+    except BaseException:
+        abandon_render_processes()
+        raise
     run_off_thread, close_worker = attach_qt_worker("zlc-figure-viewer")
     try:
         window.presenter = build(
@@ -160,9 +232,13 @@ def create_window(
             run_off_thread=run_off_thread,
             close_worker=close_worker,
             request_close=window.close_later,
+            monitor_render=monitor_render,
+            editor_render=editor_render,
+            close_render_processes=close_render_processes,
         )
     except BaseException:
         close_worker()
+        abandon_render_processes()
         window.close()
         raise
     window.set_close_guard(window.presenter.close)

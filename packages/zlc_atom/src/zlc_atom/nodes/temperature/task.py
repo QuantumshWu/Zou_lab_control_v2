@@ -129,6 +129,7 @@ class TemperatureTask:
         repeats: int,
         exposure_seconds: float | None = None,
         model_kind: ReadoutModelKind | None,
+        save_figure_artifact: object = None,
     ) -> None:
         if not isinstance(calibration, TrapCalibration):
             raise TypeError("calibration must be TrapCalibration")
@@ -136,6 +137,8 @@ class TemperatureTask:
             raise TypeError("sequence must be PulseSequence")
         if not isinstance(plan, ScanPlan):
             raise TypeError("plan must be ScanPlan")
+        if save_figure_artifact is not None and not callable(save_figure_artifact):
+            raise TypeError("save_figure_artifact must be callable or None")
         release_port = PULSE_PARAM_FAMILY + T_OFF_PARAMETER
         if len(plan.axes) != 1 or plan.axes[0].port != release_port:
             played = tuple(axis.port for axis in plan.axes)
@@ -155,6 +158,7 @@ class TemperatureTask:
         self._devices = {"camera": str(camera_key), "sequencer": str(sequencer_key)}
         self._calibration = calibration
         self._calibration_path = Path(calibration_path).expanduser().resolve()
+        self._save_figure_artifact = save_figure_artifact
         self._model = calibration.select_model(model_kind)
         self._port = ports[0]
         self._t_off = plan.axes[0].values
@@ -217,6 +221,15 @@ class TemperatureTask:
             producer=self.instance_id,
         )
         self._written = 0
+
+    def _write_figure(self, base_path: Path, **arguments: object) -> tuple[Path, Path]:
+        writer = self._save_figure_artifact
+        if writer is None:
+            from zlc_plot import save_figure_artifact as writer
+        written = writer(base_path, **arguments)
+        if hasattr(written, "result"):
+            written = written.result()
+        return written
 
     @property
     def dataset_output_declarations(self) -> tuple[DatasetOutputDeclaration, ...]:
@@ -428,11 +441,11 @@ class TemperatureTask:
         context.register_artifact(
             "temperature_partial_summary", summary_path, role="summary"
         )
-        from zlc_plot import AxisRef, CurvePlot, PlotLabels, save_figure_artifact
+        from zlc_plot import AxisRef, CurvePlot, PlotLabels
 
         figure_base = context.run_directory / "figures" / "survival"
         try:
-            preview_path, figure_path = save_figure_artifact(
+            preview_path, figure_path = self._write_figure(
                 figure_base,
                 plot_input=survival,
                 spec=CurvePlot(
@@ -547,11 +560,11 @@ class TemperatureTask:
             "temperature_summary_text", summary_text_path, role="summary"
         )
 
-        from zlc_plot import AxisRef, CurvePlot, PlotLabels, save_figure_artifact
+        from zlc_plot import AxisRef, CurvePlot, PlotLabels
 
         figure_base = context.run_directory / "figures" / "survival"
         try:
-            preview_path, figure_path = save_figure_artifact(
+            preview_path, figure_path = self._write_figure(
                 figure_base,
                 plot_input=survival,
                 spec=CurvePlot(

@@ -2,23 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from zlc_plot import save_figure_artifact
 from .panel_state import PanelFrozenData, PanelState
 
 
-__all__ = ["PanelFigureFiles", "capture_run_chain", "save_panel_figure"]
-
-
-@dataclass(frozen=True, slots=True)
-class PanelFigureFiles:
-    image: Path
-    archive: Path
+__all__ = ["capture_run_chain", "save_panel_figure"]
 
 
 def _plain(value: Any) -> Any:
@@ -113,12 +105,22 @@ def save_panel_figure(
     *,
     state: PanelState,
     frozen: PanelFrozenData,
+    writer: Callable[..., object],
     source: Mapping[str, object] | None = None,
-) -> PanelFigureFiles:
-    """Adapt one frozen panel to the shared archive-first Figure writer."""
+    host: object | None = None,
+) -> object:
+    """Submit one frozen panel through the caller's Figure writer.
+
+    This module owns the Workbench-to-Figure payload projection.  The writer
+    owns execution: TaskConsole and FigureViewer pass the dedicated Edit/Save
+    render process here, so this adapter never imports or constructs a local
+    plotting host.
+    """
 
     if state.signal != frozen.signal:
         raise ValueError("Panel Save target differs from its frozen surface")
+    if not callable(writer):
+        raise TypeError("Panel Save writer must be callable")
     description = frozen.description
     source_document = dict(source or {})
     source_document.pop("overlay_signal", None)
@@ -129,7 +131,7 @@ def save_panel_figure(
             **dict(frozen.overlay),
         }
     )
-    image, archive = save_figure_artifact(
+    return writer(
         base_path,
         plot_input=frozen.plot_input,
         spec=description.spec,
@@ -142,5 +144,5 @@ def save_panel_figure(
         selectors=description.selectors,
         lineage=frozen.lineage,
         source=source_document,
+        host=host,
     )
-    return PanelFigureFiles(image, archive)

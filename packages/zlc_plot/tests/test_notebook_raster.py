@@ -157,7 +157,7 @@ def test_session_mutation_republishes_front_and_keeps_pointer_compatible() -> No
 
         assert front is not None
         axis = front.interaction.axes[0]
-        operation = host._pointer_event(
+        operation = host.pointer_event(
             "scroll",
             0.5,
             0.5,
@@ -208,7 +208,7 @@ def test_middle_double_click_zooms_to_area_selection_then_resets() -> None:
         )
         front = settled_front(host, initial)
         axis = front.interaction.axes[0]
-        host._pointer_event(
+        host.pointer_event(
             "press",
             0.5,
             0.5,
@@ -226,7 +226,7 @@ def test_middle_double_click_zooms_to_area_selection_then_resets() -> None:
         zoomed = host.front
         session.remove_selector(SelectorKind.AREA)
         front = settled_front(host, zoomed)
-        host._pointer_event(
+        host.pointer_event(
             "press",
             0.5,
             0.5,
@@ -264,7 +264,7 @@ def test_pulse_selectors_paint_in_source_units_and_fit_catalogue_is_empty() -> N
         assert session.fit_models == ()
         front = host.wait_for_front(timeout=5.0)
         axis = front.interaction.axes[0]
-        host._pointer_event(
+        host.pointer_event(
             "press",
             0.5,
             0.5,
@@ -273,7 +273,7 @@ def test_pulse_selectors_paint_in_source_units_and_fit_catalogue_is_empty() -> N
             axes=axis,
             interaction=front.interaction,
         ).result(timeout=5.0)
-        released = host._pointer_event(
+        released = host.pointer_event(
             "release",
             0.5,
             0.5,
@@ -486,7 +486,7 @@ def test_raster_pointer_motion_bakes_candidate_into_published_fronts() -> None:
     try:
         front = host.wait_for_front(timeout=5.0)
         axis = front.interaction.axes[0]
-        pressed = host._pointer_event(
+        pressed = host.pointer_event(
             "press",
             0.4,
             0.4,
@@ -498,7 +498,7 @@ def test_raster_pointer_motion_bakes_candidate_into_published_fronts() -> None:
         assert pressed.front is front
         assert pressed.value.candidate is None
         assert not pressed.value.publish_front
-        moved = host._pointer_event(
+        moved = host.pointer_event(
             "move",
             0.7,
             0.7,
@@ -508,7 +508,7 @@ def test_raster_pointer_motion_bakes_candidate_into_published_fronts() -> None:
         ).result()
         assert moved.front.identity.sequence > front.identity.sequence
         assert not hasattr(moved.value, "scene")
-        committed = host._pointer_event(
+        committed = host.pointer_event(
             "release",
             0.7,
             0.7,
@@ -544,7 +544,7 @@ def test_an_unmoved_area_press_or_double_click_never_becomes_a_gesture() -> None
         axis = front.interaction.axes[0]
 
         def pointer(action, x, y, *, double=False):
-            return host._pointer_event(
+            return host.pointer_event(
                 action,
                 x,
                 y,
@@ -579,7 +579,7 @@ def test_an_unmoved_area_press_or_double_click_never_becomes_a_gesture() -> None
         before = session.selectors
         events.clear()
 
-        pressed = host._pointer_event(
+        pressed = host.pointer_event(
             "press",
             nx,
             ny,
@@ -588,7 +588,7 @@ def test_an_unmoved_area_press_or_double_click_never_becomes_a_gesture() -> None
             axes=area_axis,
             interaction=area_front.interaction,
         ).result(timeout=5.0)
-        released = host._pointer_event(
+        released = host.pointer_event(
             "release",
             nx,
             ny,
@@ -603,7 +603,7 @@ def test_an_unmoved_area_press_or_double_click_never_becomes_a_gesture() -> None
         assert events == []
 
         blank_x, blank_y = area_axis.display_to_normalized(8.0, 8.0)
-        host._pointer_event(
+        host.pointer_event(
             "press",
             blank_x,
             blank_y,
@@ -612,7 +612,7 @@ def test_an_unmoved_area_press_or_double_click_never_becomes_a_gesture() -> None
             axes=area_axis,
             interaction=area_front.interaction,
         ).result(timeout=5.0)
-        host._pointer_event(
+        host.pointer_event(
             "release",
             blank_x,
             blank_y,
@@ -635,7 +635,7 @@ def test_fit_area_pointer_sequence_never_promotes_a_blank_front() -> None:
         front = host.wait_for_front(timeout=5.0)
         axis = front.interaction.axes[0]
         operations = [
-            host._pointer_event(
+            host.pointer_event(
                 "press",
                 0.32,
                 0.35,
@@ -644,7 +644,7 @@ def test_fit_area_pointer_sequence_never_promotes_a_blank_front() -> None:
                 axes=axis,
                 interaction=front.interaction,
             ),
-            host._pointer_event(
+            host.pointer_event(
                 "move",
                 0.72,
                 0.75,
@@ -652,7 +652,7 @@ def test_fit_area_pointer_sequence_never_promotes_a_blank_front() -> None:
                 identity=front.identity,
                 axes=axis,
             ),
-            host._pointer_event(
+            host.pointer_event(
                 "release",
                 0.72,
                 0.75,

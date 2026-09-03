@@ -15,18 +15,7 @@ from typing import Any
 import numpy as np
 
 from . import _raster_kernels as kernels
-
-
-@dataclass(frozen=True, slots=True)
-class ImageFrontPolicy:
-    """Bounded-work policy for one scalar image front.
-
-    Area reduction is worthwhile only when a source dimension materially
-    oversamples its physical output dimension.  Smaller differences stay in
-    the source dtype and are resolved once by Matplotlib's scalar-data stage.
-    """
-
-    minimum_reduction_ratio: float = 1.25
+from . import style
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,7 +204,7 @@ def prepare_image_front(
     x_limits: tuple[float, float],
     y_limits: tuple[float, float],
     display_pixel_shape: tuple[int, int],
-    policy: ImageFrontPolicy,
+    policy: style.ImageFrontPolicy,
 ) -> PreparedImageFront:
     """Crop and, when policy requires it, reduce one regular scalar image.
 
@@ -226,7 +215,7 @@ def prepare_image_front(
     front is promoted to a floating area mean.
     """
 
-    if not isinstance(policy, ImageFrontPolicy):
+    if not isinstance(policy, style.ImageFrontPolicy):
         raise TypeError("policy must be ImageFrontPolicy")
     source = np.asarray(values)
     if source.ndim != 2 or min(source.shape) < 1:
@@ -373,7 +362,7 @@ class ImageFrontStore:
         x_limits: tuple[float, float],
         y_limits: tuple[float, float],
         display_pixel_shape: tuple[int, int],
-        policy: ImageFrontPolicy,
+        policy: style.ImageFrontPolicy,
         revision_token: tuple,
     ) -> PreparedImageFront:
         front_key = (
@@ -404,7 +393,6 @@ class ImageFrontStore:
 
 
 __all__ = [
-    "ImageFrontPolicy",
     "ImageFrontStore",
     "PreparedImageFront",
     "prepare_image_front",

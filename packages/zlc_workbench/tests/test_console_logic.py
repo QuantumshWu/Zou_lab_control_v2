@@ -33,7 +33,13 @@ from zlc_workbench.logic import (
 from zlc_workbench.panel_catalog import task_console_fitting_spec
 from zlc_workbench.session import ExperimentSession
 
-from test_console_presenter import _CardView, _ConsoleView, _Signal, _one_shot
+from test_console_presenter import (
+    _CardView,
+    _ConsoleView,
+    _Signal,
+    _async_writer,
+    _one_shot,
+)
 from pulse_fixtures import PULSE_NAME, ordinary_imaging_sequence, write_ordinary_pulse
 
 
@@ -74,21 +80,26 @@ def session(tmp_path):
 @pytest.fixture
 def presenter(session):
     plot = pytest.importorskip("zlc_plot")
+    from zlc_workbench.apps.task_console import build_panel_host
 
     def spec_for(snapshot, kind="", cell_kind=""):
         return task_console_fitting_spec(snapshot.block.schema, kind, cell_kind)
 
-    def make_host(initial, _signal, kind="", cell_kind=""):
-        # The same rule the real composition root uses.  A double that builds
-        # its hosts a different way is a double that stops being evidence.
-        return plot.RasterPlotHost.from_plot(
-            initial, spec_for(initial, kind, cell_kind)
+    def make_host(plot_input, state):
+        return build_panel_host(
+            plot_input,
+            state,
+            build_host=plot.build_figure_host,
         )
 
     presenter = ConsolePresenter(
         session,
         _ConsoleView(),
-        make_host=make_host,
+        make_monitor_host=make_host,
+        make_editor_host=make_host,
+        build_figure_host=plot.build_figure_host,
+        save_figure_artifact=_async_writer(plot.save_figure_artifact),
+        close_render_processes=lambda: True,
         spec_for=spec_for,
     )
     try:
@@ -368,6 +379,27 @@ def test_a_build_is_handed_only_what_it_asks_for(session) -> None:
 
     assert set(arguments) >= {"camera", "signal_plane", "repeat"}
     assert arguments["repeat"] == 2
+
+    figure_writer = lambda *_args, **_kwargs: None
+
+    def task_build(*, camera, signal_plane, save_figure_artifact):
+        return camera, signal_plane, save_figure_artifact
+
+    task_descriptor = replace(descriptor, build=task_build)
+    task_arguments = build_arguments(
+        task_descriptor,
+        signal_plane=session.signal_plane,
+        finalization=finalization,
+        extras={
+            "save_figure_artifact": figure_writer,
+            "unrequested_bench_fact": object(),
+        },
+    )
+    assert task_arguments == {
+        "camera": session.camera,
+        "signal_plane": session.signal_plane,
+        "save_figure_artifact": figure_writer,
+    }
     with pytest.raises(ValueError, match="extras collide"):
         build_arguments(
             descriptor,

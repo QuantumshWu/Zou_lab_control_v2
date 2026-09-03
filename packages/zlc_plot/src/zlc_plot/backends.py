@@ -14,23 +14,15 @@ import math
 import os
 import sys
 import threading
-from typing import TYPE_CHECKING, Any, Callable
+from typing import Any, Callable
 
 from ._axis_transform import AxisTransform
 from ._selector_scene import (
     ColorLimitCandidate,
-    SceneKind,
 )
 from .assets import HELVETICA_LIGHT_FAMILY, helvetica_light_path
-from .raster import (
-    RasterFront,
-    RasterPlotHost,
-)
+from .front import RasterFront
 from .selectors import SelectorState
-
-if TYPE_CHECKING:
-    from .session import PlotSession
-
 
 class BackendUnavailableError(RuntimeError):
     """An explicitly requested optional frontend is not installed/configured."""
@@ -522,16 +514,18 @@ def _qt5_plot_widget_class() -> type[Any]:
 
         def __init__(
             self,
-            host: RasterPlotHost,
+            host: object,
             parent: object | None = None,
             *,
             auto_present: bool = True,
         ) -> None:
-            if not isinstance(host, RasterPlotHost):
-                raise TypeError(
-                    "Qt5PlotWidget requires a RasterPlotHost constructed from "
-                    "a worker-side session factory"
-                )
+            required = (
+                "subscribe_front",
+                "set_device_pixel_ratio",
+                "pointer_event",
+            )
+            if any(not callable(getattr(host, name, None)) for name in required):
+                raise TypeError("Qt5PlotWidget requires a raster plot host")
             if not isinstance(auto_present, bool):
                 raise TypeError("auto_present must be a boolean")
             ensure_qt5_application()
@@ -624,7 +618,7 @@ def _qt5_plot_widget_class() -> type[Any]:
                 raise
 
         @property
-        def host(self) -> RasterPlotHost:
+        def host(self) -> object:
             return self._host
 
         @property
@@ -1151,7 +1145,7 @@ def _qt5_plot_widget_class() -> type[Any]:
             if action == "press":
                 self._gesture_front = source_front
                 self._gesture_axes = source_axes
-            future = self._host._pointer_event(
+            future = self._host.pointer_event(
                 action,
                 x,
                 y,
@@ -1219,7 +1213,7 @@ def _qt5_plot_widget_class() -> type[Any]:
                 self._clear_interaction()
                 if active and self._host_is_open():
                     self._track(
-                        self._host._pointer_event(
+                        self._host.pointer_event(
                             "cancel",
                             0.0,
                             0.0,
@@ -1450,7 +1444,7 @@ def _qt5_plot_widget_class() -> type[Any]:
             self._clear_interaction()
             if (active or force) and self._host_is_open():
                 self._track(
-                    self._host._pointer_event(
+                    self._host.pointer_event(
                         "cancel",
                         0.0,
                         0.0,
@@ -1481,6 +1475,5 @@ def __dir__() -> list[str]:
 __all__ = [
     "BackendUnavailableError",
     "Qt5PlotWidget",
-    "RasterPlotHost",
     "ensure_qt5_application",
 ]

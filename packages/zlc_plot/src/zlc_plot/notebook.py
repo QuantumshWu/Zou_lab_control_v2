@@ -15,17 +15,22 @@ import json
 import math
 import struct
 import threading
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 from ._axis_transform import AxisTransform
 from .backends import BackendUnavailableError
-from .raster import RasterFront, RasterOperation, RasterPlotHost
+from .front import RasterFront, RasterOperation
+from .raster import RasterPlotHost
 from .selectors import (
     CrosshairPoint,
     NumericRange,
     RectangleRange,
     SelectorState,
 )
+
+if TYPE_CHECKING:
+    from .session import PlotSession
+    from .specs import PlotSpec
 
 
 def _axis_to_dict(axis: AxisTransform) -> dict[str, object]:
@@ -557,7 +562,7 @@ class NotebookView:
         axes = self._gesture_axes if action in {"move", "release"} else self._axis_for(front, x, y)
         identity = front.identity if action != "cancel" else None
         interaction = front.interaction if action == "press" else None
-        future = self._host._pointer_event(
+        future = self._host.pointer_event(
             action,
             x,
             y,
