@@ -27,6 +27,10 @@ class FigureViewerHandle(QtCore.QObject):
 
     # -- what the operator asks for --------------------------------------
     path_committed = QtCore.pyqtSignal(str)
+    new_data_requested = QtCore.pyqtSignal()
+    edit_data_requested = QtCore.pyqtSignal(str)
+    data_editor_intent = QtCore.pyqtSignal(str, object)
+    data_editor_closed = QtCore.pyqtSignal(str)
     add_panel_requested = QtCore.pyqtSignal(str)
     panel_state_changed = QtCore.pyqtSignal(str, object)
     panel_remove_requested = QtCore.pyqtSignal(str)
@@ -46,6 +50,10 @@ class FigureViewerHandle(QtCore.QObject):
         if native_window is not None:
             native_window.screenChanged.connect(self._screen_changed)
         view.path_committed.connect(self.path_committed)
+        view.new_data_requested.connect(self.new_data_requested)
+        view.edit_data_requested.connect(self.edit_data_requested)
+        view.data_editor_intent.connect(self.data_editor_intent)
+        view.data_editor_closed.connect(self.data_editor_closed)
         view.add_panel_requested.connect(self.add_panel_requested)
         view.panel_state_changed.connect(self.panel_state_changed)
         view.panel_remove_requested.connect(self.panel_remove_requested)
@@ -122,6 +130,36 @@ class FigureViewerHandle(QtCore.QObject):
 
     def set_panel_sizes(self, sizes: object, default_size: str) -> None:
         self._view.set_panel_sizes(sizes, default_size)
+
+    def set_editable_data_choices(
+        self, choices: object, *, current: str = ""
+    ) -> None:
+        self._view.set_editable_data_choices(choices, current=current)
+
+    def open_data_editor(
+        self,
+        editor_id: str,
+        projection: object,
+        *,
+        title: str = "",
+    ) -> None:
+        self._view.open_data_editor(
+            editor_id,
+            projection,
+            str(title or f"Data · {editor_id}"),
+        )
+
+    def close_data_editor(self, editor_id: str) -> bool:
+        return self._view.close_data_editor(editor_id)
+
+    def update_data_editor(self, editor_id: str, projection: object) -> bool:
+        return self._view.update_data_editor(editor_id, projection)
+
+    def has_data_editor(self, editor_id: str) -> bool:
+        return self._view.has_data_editor(editor_id)
+
+    def focus_data_editor(self, editor_id: str) -> bool:
+        return self._view.focus_data_editor(editor_id)
 
     def set_panel_kinds(self, kinds: object, default_kind: str = "") -> None:
         self._view.set_panel_kinds(kinds, default_kind)

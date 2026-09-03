@@ -124,6 +124,10 @@ class _ViewerView:
 
     def __init__(self) -> None:
         self.path_committed = _Signal()
+        self.new_data_requested = _Signal()
+        self.edit_data_requested = _Signal()
+        self.data_editor_intent = _Signal()
+        self.data_editor_closed = _Signal()
         self.add_panel_requested = _Signal()
         self.panel_state_changed = _Signal()
         self.panel_remove_requested = _Signal()
@@ -145,6 +149,8 @@ class _ViewerView:
         self.grid_cell_kinds: tuple = ()
         self.panels: dict[str, dict] = {}
         self.editors: dict[str, object] = {}
+        self.data_editors: dict[str, object] = {}
+        self.editable_data: tuple = ()
         self.dpr = 1.0
 
     def device_pixel_ratio(self) -> float:
@@ -166,6 +172,31 @@ class _ViewerView:
 
     def set_grid_cell_kinds(self, kinds) -> None:
         self.grid_cell_kinds = tuple(kinds)
+
+    def set_editable_data_choices(self, choices, *, current="") -> None:
+        self.editable_data = tuple(choices)
+        self.current_editable_data = str(current)
+
+    def open_data_editor(self, editor_id, projection, *, title="") -> None:
+        self.data_editors[str(editor_id)] = {
+            "projection": projection,
+            "title": str(title),
+        }
+
+    def update_data_editor(self, editor_id, projection) -> bool:
+        if str(editor_id) not in self.data_editors:
+            return False
+        self.data_editors[str(editor_id)]["projection"] = projection
+        return True
+
+    def close_data_editor(self, editor_id) -> bool:
+        return self.data_editors.pop(str(editor_id), None) is not None
+
+    def focus_data_editor(self, editor_id) -> bool:
+        return str(editor_id) in self.data_editors
+
+    def has_data_editor(self, editor_id) -> bool:
+        return str(editor_id) in self.data_editors
 
     def add_panel(self, panel_id, title) -> None:
         self.panels[str(panel_id)] = {"title": str(title)}
@@ -381,6 +412,135 @@ def test_a_saved_dataset_comes_back_with_its_axes(saved) -> None:
     assert [axis.axis_id.value for axis in restored.block.schema.cell_schema.data_axes] == [
         axis.axis_id.value for axis in original.block.schema.cell_schema.data_axes
     ]
+
+
+def test_manual_data_uses_runtime_panel_and_the_one_figure_writer(tmp_path) -> None:
+    view = _ViewerView()
+    presenter = _built_presenter(view)
+    try:
+        view.new_data_requested.emit()
+        editor_id, draft = next(iter(presenter._data_drafts.items()))
+        axis_id = "manual.x"
+        view.data_editor_intent.emit(
+            editor_id,
+            {
+                "op": "set_coordinates",
+                "axis_id": axis_id,
+                "cells": ((8, 1, "midpoint"),),
+            },
+        )
+        projection = view.data_editors[editor_id]["projection"]
+        label_texts = projection["coordinates"]["column_values"][1]
+        assert label_texts[8] == "midpoint"
+        assert all(not label for index, label in enumerate(label_texts) if index != 8)
+        assert not projection["can_apply"]
+        assert "incomplete" in projection["message"]
+        assert draft["grid_topology"].coordinate_labels is None
+        assert draft["point_columns"][0].coordinate_labels is None
+
+        view.data_editor_intent.emit(
+            editor_id,
+            {"op": "apply_preview", "note": "must not apply partial labels"},
+        )
+        assert draft["publication"] is None
+        view.data_editor_intent.emit(
+            editor_id,
+            {"op": "insert_coordinate", "axis_id": axis_id, "after": 8},
+        )
+        assert len(draft["grid_topology"].coordinate_domains[0]) == 16
+        assert "fill every label or clear them all" in view.data_editors[editor_id][
+            "projection"
+        ]["message"]
+
+        view.data_editor_intent.emit(
+            editor_id,
+            {
+                "op": "set_cells",
+                "component": "values",
+                "cells": ((3, 0, "7.25"),),
+            },
+        )
+        labels = tuple(
+            "midpoint" if index == 8 else f"x={index}" for index in range(16)
+        )
+        view.data_editor_intent.emit(
+            editor_id,
+            {
+                "op": "set_coordinates",
+                "axis_id": axis_id,
+                "cells": tuple(
+                    (index, 1, label)
+                    for index, label in enumerate(labels)
+                    if index != 8
+                ),
+            },
+        )
+        projection = view.data_editors[editor_id]["projection"]
+        assert projection["can_apply"]
+        assert draft["grid_topology"].coordinate_labels == (labels,)
+        assert draft["point_columns"][0].coordinate_labels == labels
+
+        view.data_editor_intent.emit(
+            editor_id,
+            {
+                "op": "set_coordinates",
+                "axis_id": axis_id,
+                "cells": tuple((index, 1, "") for index in range(16)),
+            },
+        )
+        projection = view.data_editors[editor_id]["projection"]
+        assert projection["can_apply"]
+        assert draft["grid_topology"].coordinate_labels is None
+        assert draft["point_columns"][0].coordinate_labels is None
+        view.data_editor_intent.emit(
+            editor_id,
+            {
+                "op": "set_coordinates",
+                "axis_id": axis_id,
+                "cells": tuple(
+                    (index, 1, label) for index, label in enumerate(labels)
+                ),
+            },
+        )
+        view.data_editor_intent.emit(
+            editor_id,
+            {"op": "apply_preview", "note": "manual Figure check"},
+        )
+        _wait_until(
+            lambda: (
+                presenter.beat()
+                or (
+                    presenter.panels[str(draft["panel_id"])].frozen_data
+                    is not None
+                    and presenter.panels[
+                        str(draft["panel_id"])
+                    ].frozen_data.publication
+                    is draft["publication"]
+                )
+            )
+        )
+
+        target = tmp_path / "manual-data.npz"
+        view.data_editor_intent.emit(
+            editor_id,
+            {
+                "op": "save_as",
+                "path": str(target),
+                "note": "manual Figure check",
+            },
+        )
+        _wait_until(lambda: target.is_file() and not presenter._busy)
+
+        info, arrays = read_archive(target)
+        restored = read_dataset(info, arrays, "data")
+        assert restored.block.values.reshape(-1)[3] == 7.25
+        assert restored.block.schema.grid_topology.coordinate_labels == (labels,)
+        assert restored.block.schema.point_table.columns[0].coordinate_labels == labels
+        lineage = info["sections"]["lineage"]
+        assert lineage["root"] == "manual-1"
+        assert lineage["nodes"][0]["record"]["operation"] == "manual-create"
+    finally:
+        _close_presenter(presenter)
 
 
 def test_the_description_reports_only_facts_saved_in_the_archive(saved) -> None:

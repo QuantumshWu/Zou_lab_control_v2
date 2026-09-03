@@ -167,6 +167,239 @@ assert [console.tabs.tabText(i) for i in range(console.tabs.count())] == ['Monit
     )
 
 
+def test_manual_data_editor_is_virtual_and_emits_plain_intents() -> None:
+    _run_qt(
+        """
+from PyQt5 import QtCore, QtTest, QtWidgets
+import zlc_ui.figure_viewer.view as viewer_module
+from zlc_ui.figure_viewer import FigureViewerView
+from zlc_ui.qt import ensure_qt_app
+app = ensure_qt_app(['manual-data-editor'])
+
+class LazyMatrix:
+    def __init__(self, rows, columns):
+        self.shape = (rows, columns)
+        self.reads = 0
+    def __getitem__(self, index):
+        self.reads += 1
+        row, column = index
+        return row * 1000 + column
+
+class LazyLabels:
+    def __init__(self, size):
+        self.size = size
+        self.reads = 0
+    def __len__(self):
+        return self.size
+    def __getitem__(self, index):
+        self.reads += 1
+        return '' if index % 2 else f'row-{index}'
+
+class LazyGridIndices:
+    def __init__(self, rows, rank):
+        self.shape = (rows, rank)
+        self.reads = 0
+    def __getitem__(self, index):
+        self.reads += 1
+        row, dimension = index
+        return (row // 10, row % 10)[dimension]
+
+values = LazyMatrix(100_000, 1_000)
+validity = LazyMatrix(100_000, 1_000)
+coordinate_labels = LazyLabels(100_000)
+row_grid_indices = LazyGridIndices(100_000, 2)
+projection = {
+    'dataset': {
+        'name': 'manual image', 'dtype': 'float64', 'unit': 'count',
+        'dtype_choices': (('float64', 'Float 64'), ('uint16', 'Unsigned 16')),
+        'note': '', 'source': 'New manual Dataset',
+    },
+    'domain_choices': (
+        ('repeat', 'Repeat'), ('point', 'Point / Grid'), ('cell', 'Cell'),
+    ),
+    'axes': (
+        {
+            'id': 'spatial-y', 'domain': 'cell', 'domain_label': 'Cell',
+            'name': 'spatial-y', 'size': 100_000,
+            'role': 'spatial-y', 'unit': 'pixel',
+            'coordinate_frame': 'camera',
+            'role_choices': (('spatial-y', 'Spatial Y'), ('data', 'Data')),
+        },
+        {
+            'id': 'spatial-x', 'domain': 'cell', 'domain_label': 'Cell',
+            'name': 'spatial-x', 'size': 1_000,
+            'role': 'spatial-x', 'unit': 'pixel',
+            'coordinate_frame': 'camera',
+            'role_choices': (('spatial-x', 'Spatial X'), ('data', 'Data')),
+        },
+        {
+            'id': 'scan', 'domain': 'point', 'domain_label': 'Point / Grid',
+            'name': 'detuning', 'size': 1_000, 'role': 'scan', 'unit': '',
+            'coordinate_frame': '', 'value_kind': 'TEXT',
+            'value_kind_choices': (('NUMERIC', 'Numeric'), ('TEXT', 'Text')),
+            'show_value_kind': True, 'unit_enabled': False,
+            'role_choices': (('scan', 'Scan'),),
+        },
+    ),
+    'selected_axis': 'spatial-y',
+    'coordinates': {
+        'shape': (100_000, 2),
+        'column_values': (range(100_000), coordinate_labels),
+        'row_headers': range(100_000),
+        'column_headers': ('Coordinate', 'Label'),
+    },
+    'slices': (
+        {'axis_id': 'repeat', 'label': 'Repeat', 'size': 2_000_000,
+         'index': 0, 'current_label': '0 · first'},
+    ),
+    'table': {
+        'component': 'value',
+        'component_choices': (
+            ('value', 'Value'), ('validity', 'Validity'), ('sigma', 'Sigma', False),
+        ),
+        'sigma_enabled': False,
+        'blank_help': 'Blank removes the value · Ctrl+C / Ctrl+V supported',
+        'blank_hint': 'No value',
+        'shape': values.shape, 'values': values, 'validity': validity,
+        'row_header_grid': {
+            'cell_indices': row_grid_indices,
+            'coordinates': (range(10_000), range(900, 910)),
+            'labels': (coordinate_labels, None),
+        },
+        'column_header_grid': {
+            'cell_indices': tuple((index,) for index in range(1_000)),
+            'coordinates': (range(1_000),),
+            'labels': None,
+        },
+    },
+    'dirty': True, 'can_apply': True, 'can_save': True,
+    'save_suggested': 'manual-image.npz', 'message': '',
+}
+
+view = FigureViewerView(); view.set_panel_sizes(('2x2',), '2x2')
+created = []; edited = []; intents = []; data_closed = []; panel_closed = []
+view.new_data_requested.connect(lambda: created.append(True))
+view.edit_data_requested.connect(edited.append)
+view.data_editor_intent.connect(lambda editor_id, intent: intents.append((editor_id, intent)))
+view.data_editor_closed.connect(data_closed.append)
+view.panel_editor_closed.connect(panel_closed.append)
+view.set_editable_data_choices((('dataset/image', 'Image data'),), current='dataset/image')
+QtTest.QTest.mouseClick(view.new_data_button, QtCore.Qt.LeftButton)
+QtTest.QTest.mouseClick(view.edit_data_button, QtCore.Qt.LeftButton)
+assert created == [True] and edited == ['dataset/image']
+
+view.open_data_editor('manual-1', projection, 'Data · manual image')
+editor = view._data_editors['manual-1']
+view.resize(1500, 850); view.show(); app.processEvents()
+assert view.tabs.currentWidget() is editor
+assert view.tabs.tabText(view.tabs.indexOf(editor)).endswith(' *')
+renamed_projection = dict(projection)
+renamed_projection['dataset'] = {
+    **projection['dataset'], 'name': 'renamed manual image',
+}
+assert view.update_data_editor('manual-1', renamed_projection)
+assert view.tabs.tabText(view.tabs.indexOf(editor)) == 'Data · renamed manual image *'
+assert editor.discard_button.isEnabled()
+assert editor.value_model.rowCount() == 100_000
+assert editor.value_model.columnCount() == 1_000
+assert values.reads < 500, values.reads
+assert coordinate_labels.reads < 5_000, coordinate_labels.reads
+assert row_grid_indices.reads < 5_000, row_grid_indices.reads
+assert editor.value_table.indexWidget(editor.value_model.index(0, 0)) is None
+assert editor.value_model.headerData(20, QtCore.Qt.Vertical) == '(row-2, 900)'
+assert editor.value_model.headerData(
+    20, QtCore.Qt.Vertical, QtCore.Qt.ToolTipRole
+) == '(row-2, 900)'
+assert editor.value_model.headerData(3, QtCore.Qt.Horizontal) == '(3)'
+assert editor.value_table.verticalHeader().minimumWidth() >= 46
+slice_spin = editor._slice_widgets['repeat'][1]
+assert slice_spin.maximum() == 1_999_999
+slice_spin.setValue(1)
+assert intents[-1] == (
+    'manual-1', {'op': 'set_slice', 'axis_id': 'repeat', 'index': 1}
+)
+
+# A blank is passed through as pending text; the UI does not guess a dtype or validity.
+editor.value_model.setData(editor.value_model.index(0, 0), '', QtCore.Qt.EditRole)
+assert intents[-1] == (
+    'manual-1',
+    {'op': 'set_cells', 'component': 'value', 'cells': ((0, 0, ''),)},
+)
+
+editor.coordinate_model.setData(
+    editor.coordinate_model.index(1, 1), '', QtCore.Qt.EditRole
+)
+assert intents[-1] == (
+    'manual-1',
+    {'op': 'set_coordinates', 'axis_id': 'spatial-y',
+     'cells': ((1, 1, ''),)},
+)
+
+# One rectangular paste is one presenter intent, even for a large virtual table.
+editor.value_table.setCurrentIndex(editor.value_model.index(2, 3))
+QtWidgets.QApplication.clipboard().setText('1\\t\\n3\\t4')
+editor.value_table.paste_clipboard()
+assert intents[-1] == (
+    'manual-1',
+    {'op': 'set_cells', 'component': 'value',
+     'cells': ((2, 3, '1'), (2, 4, ''), (3, 3, '3'), (3, 4, '4'))},
+)
+
+before_overflow = len(intents)
+editor.value_table.setCurrentIndex(editor.value_model.index(99_999, 999))
+QtWidgets.QApplication.clipboard().setText('1\\t2')
+editor.value_table.paste_clipboard()
+assert len(intents) == before_overflow
+assert editor.message_label.text() == 'Paste exceeds the current table; resize axes first'
+
+QtTest.QTest.mouseClick(editor.discard_button, QtCore.Qt.LeftButton)
+assert intents[-1] == ('manual-1', {'op': 'discard'})
+
+# Save intent carries the operator's chosen target and optional note.
+editor.note_edit.setText('corrected camera background')
+viewer_module.fluent_save_path = lambda *_args, **_kwargs: 'D:/data/manual-edited.npz'
+QtTest.QTest.mouseClick(editor.save_button, QtCore.Qt.LeftButton)
+assert intents[-1] == (
+    'manual-1',
+    {'op': 'save_as', 'path': 'D:/data/manual-edited.npz',
+     'note': 'corrected camera background'},
+)
+
+# Point/Grid coordinate kind is explicit; TEXT does not leave a fake unit editable.
+point_projection = dict(projection)
+point_projection['selected_axis'] = 'scan'
+editor.update_projection(point_projection)
+assert editor._axis_rows['value_kind'].isVisible()
+assert editor.value_kind_combo.currentData() == 'TEXT'
+assert not editor.axis_unit_edit.isEnabled()
+before_size_edit = len(intents)
+size_line = editor.axis_size_spin.lineEdit()
+size_line.setFocus(); size_line.selectAll()
+QtTest.QTest.keyClicks(size_line, '1200'); app.processEvents()
+assert len(intents) == before_size_edit
+QtTest.QTest.keyClick(size_line, QtCore.Qt.Key_Return); app.processEvents()
+assert intents[before_size_edit:] == [(
+    'manual-1',
+    {'op': 'set_axis_field', 'axis_id': 'scan',
+     'field': 'size', 'value': 1_200},
+)]
+numeric = editor.value_kind_combo.findData('NUMERIC')
+editor.value_kind_combo.setCurrentIndex(numeric)
+editor.value_kind_combo.activated.emit(numeric)
+assert intents[-1] == (
+    'manual-1',
+    {'op': 'set_axis_field', 'axis_id': 'scan',
+     'field': 'value_kind', 'value': 'NUMERIC'},
+)
+
+# A Data tab close is not misrouted as a Panel editor close.
+view.tabs.tab_close_requested.emit(editor)
+assert data_closed == ['manual-1'] and panel_closed == []
+view.close(); app.processEvents()
+"""
+    )
+
+
 def test_figure_viewer_demo_smoke() -> None:
     environment = dict(os.environ)
     environment["QT_QPA_PLATFORM"] = "offscreen"

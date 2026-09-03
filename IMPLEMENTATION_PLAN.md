@@ -126,6 +126,9 @@
 - FigureViewer与TaskConsole Live/Frozen使用同一个accepted PlotSpec、parameter、selector/
   viewport capability contract；Viewer semantic edit同样只在host accept后更新surface，文件选择默认定位workspace当天data目录。
 - `board.commit`首次接受Panel host后在同一owner turn幂等挂载Selection/Fit Bridge；真实Qt首个drag/release已验证可立即发布ROI，不等待下一display beat。
+- FigureViewer新增同页Data authoring：New/Edit打开Fluent可关闭Data tab；虚拟table按当前二维slice读取并支持整块复制粘贴，blank写入validity而不把空字符串冒充numeric value；大leading axis用index spin＋当前coordinate readout而不展开choice；axis size、增删/排序与coordinate移动必须一次同步values/validity/sigma。Apply构造canonical `OwnedSnapshot`并通过现有sealed Viewer producer发布，自动交给普通Panel，但未Save前仍是unsaved working copy；Save Figure As成功后才清该状态，并继续调用公共Figure writer。已有archive的lineage/device事实只读保留，manual-create/edit从真实publication追加系统provenance，纯manual数据不伪造device。
+- Plot共享手势现要求Area press只arm：无move时0 candidate、0 selection callback、0 overlay render；首个真实held move才启动preview。Qt double-click的首个press/release和Notebook explicit double均不得生成Area，已有Area空白click清除语义保留但不再通过degenerate draft实现。
+- Numeric axis继续由SmartOffset/locator防重叠；显式coordinate labels恢复为全部忠实ticks，不做renderer端抽稀。Manual Data editor不得把partial label输入静默补成完整label轴；只在all-empty或all-specified时形成canonical Dataset labels。
 - SLM Feedback camera preview第一轮后停更的根因是`holds_live_revision`只识别裸`OwnedSnapshot`，带site overlay的`ImageFrame`把第二generation的revision 10误判为旧run的`10<=10`并cancel。现统一解包snapshot；真实两轮Camera Measurement→Panel从generation A前进至B、同host复用、无busy/error，Plot/Workbench seam各有回归。
 - Lineage保存root、event nodes和direct parent IDs；Viewer验证引用、reachability和cycle后
   投影为tree。
