@@ -225,7 +225,7 @@ def test_holding_a_scan_point_leaves_no_scan_on_the_board() -> None:
         scanned = board.applied()
         assert scanned is not None and len(scanned.rows) == 5
 
-        assert presenter._hold(0) is True, presenter.view.warnings
+        assert presenter.hold_scan_point() is True, presenter.view.warnings
         held = board.applied()
         assert held is not None
         assert held.rows == ()

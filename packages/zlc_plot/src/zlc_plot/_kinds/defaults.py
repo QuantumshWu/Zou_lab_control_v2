@@ -203,7 +203,7 @@ def _grid(families: AxisFamilies, cell_kind: PlotKind | None) -> FacetGridPlot |
     if len(live_scan) >= 2:
         facet: AxisRef | None = live_scan[0][0]
     elif live_scan:
-        facet = _first_live(families.live_events()) or _live_history(families)
+        facet = _first_live(families.live_events()) or _facetable_history(families)
         if facet is None:
             facet = _first_any(families.events)
     else:
@@ -223,41 +223,27 @@ def _facet(families: AxisFamilies, plan: _Plan) -> AxisRef | None:
     with none of those, an event axis of one: a one-frame cycle still
     names its cell, so the grid's meaning does not depend on the count.
 
-    An axis the layout cannot lay out is not a candidate.  The shot history
-    is as long as the panel's window, so a grid over a thousand-shot window
-    used to DEFAULT to a thousand cells: the surface then refused the only
-    spec the panel had, the host never started, and the panel sat there with
-    a refusal and no picture before the operator had chosen anything.  A
-    default has to be drawable; choosing a facet nobody asked for and that
-    cannot be drawn is worse than facing nothing.
+    A structural axis over capacity is offered and the surface refuses it:
+    a sixty-five point scan drawn as sixty-four cells would be the wrong
+    picture, and the refusal names the two ways out.  The shot history is
+    the exception, because its size is the panel's window rather than the
+    data's -- see :func:`_facetable_history`.
     """
 
-    from ..layout import DEFAULT_LAYOUT
-
-    capacity = int(DEFAULT_LAYOUT.facet_max_cells)
     consumed = set(plan.consumed)
-
-    def offered(ref: AxisRef, size: object) -> bool:
-        return ref not in consumed and int(size) <= capacity
-
-    for ref, size in families.live_scan():
-        if offered(ref, size):
+    for ref, _size in families.live_scan():
+        if ref not in consumed:
             return ref
-    for ref, size in families.live_events():
-        if offered(ref, size):
+    for ref, _size in families.live_events():
+        if ref not in consumed:
             return ref
-    history = families.history
-    if (
-        history is not None
-        and int(history[1]) > 1
-        and history[0] not in consumed
-        and int(history[1]) <= capacity
-    ):
-        return history[0]
+    history = _facetable_history(families)
+    if history is not None and history not in consumed:
+        return history
     # An event axis names a sub-measurement even at one coordinate; a scan's
     # degenerate axis is provenance but does not create a visible grid cell.
-    for ref, size in families.events:
-        if offered(ref, size):
+    for ref, _size in families.events:
+        if ref not in consumed:
             return ref
     return None
 
@@ -397,3 +383,21 @@ def _first_any(entries: tuple[_Entry, ...]) -> AxisRef | None:
 def _live_history(families: AxisFamilies) -> AxisRef | None:
     history = families.history
     return None if history is None or history[1] <= 1 else history[0]
+
+
+def _facetable_history(families: AxisFamilies) -> AxisRef | None:
+    """The shot history, when the layout can lay that many cells out.
+
+    The single answer to "may this window be the grid's facet".  A window
+    over capacity is not refused here, it is simply not the facet: the
+    grid then pools the window into one cell, which is a picture, and the
+    operator who wants a cell per shot narrows the window.
+    """
+
+    from ..layout import DEFAULT_LAYOUT
+
+    history = _live_history(families)
+    if history is None:
+        return None
+    size = int(families.history[1])
+    return history if size <= int(DEFAULT_LAYOUT.facet_max_cells) else None

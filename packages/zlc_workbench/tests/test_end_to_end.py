@@ -237,13 +237,24 @@ def test_workspace_world_profile_is_relative_typed_and_contained(
             (str(outside), ValueError, "must be relative"),
             (f"../{outside.name}", ValueError, "escapes its root"),
             (123, TypeError, "must be text"),
-            (None, TypeError, "must be text"),
         ):
             with pytest.raises(error_type, match=message):
                 ExperimentSession.from_config(
                     tmp_path,
                     _world_profile_config(profile),
                 )
+        # A vacancy is not a type error: one spelling of "no value" per type
+        # family means an absent text and an authored None are the same
+        # thing, and the world that opens is simply the unprofiled one.
+        vacant_root = tmp_path / "vacant"
+        vacant_root.mkdir()
+        vacant = ExperimentSession.from_config(
+            vacant_root, _world_profile_config(None)
+        )
+        try:
+            assert vacant.installation_config.simulation["world_profile"] is None
+        finally:
+            vacant.close()
         link = tmp_path / "simulation-world.json"
         native_resolve = Path.resolve
 

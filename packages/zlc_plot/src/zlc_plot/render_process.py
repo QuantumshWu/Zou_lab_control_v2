@@ -908,7 +908,15 @@ class RenderProcess:
             target=_render_process_main,
             args=(child, self.name),
             name=f"zlc-render-{self.name}",
-            daemon=False,
+            # A renderer must never outlive the process it draws for.  Held
+            # non-daemonic, multiprocessing's own exit hook JOINS it, so any
+            # exit that skips close() -- an exception on the way out, a
+            # crash -- hung forever in atexit with the pixels already gone
+            # and nothing left to draw.  Daemonic, the same hook terminates
+            # it.  An orderly close still shuts its save worker down and
+            # waits for it; what this flag decides is only what happens
+            # when nobody closed anything.
+            daemon=True,
         )
         try:
             process.start()
@@ -2450,13 +2458,18 @@ def _render_process_main(connection: Connection, name: str) -> None:
         schemas.clear()
         fronts.close()
         # Flush what is still queued before the pipe goes: a refusal already
-        # handed to the writer is the operator's only word about why.
-        outbox.put(_STOP_WRITER)
-        writer.join(timeout=30.0)
+        # handed to the writer is the operator's only word about why, and the
+        # farewell is the parent reader's clean end.  Both go THROUGH the
+        # writer, so the farewell is queued before the sentinel that retires
+        # it -- put after, it lands in a queue nothing drains and the parent
+        # ends on EOF, which it records as a failure of a process that in
+        # fact stopped exactly as asked.
         try:
             send(("stopped",))
         except Exception:
             pass
+        outbox.put(_STOP_WRITER)
+        writer.join(timeout=30.0)
         connection.close()
 
 

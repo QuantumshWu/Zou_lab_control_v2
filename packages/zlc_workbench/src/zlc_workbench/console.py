@@ -3149,7 +3149,13 @@ class ConsolePresenter:
         except Exception as error:
             # The form is the repair surface.  Keep the schema's exact field
             # domain visible, but keep the refusal loud; never pretend the
-            # default spec was the accepted view.
+            # default spec was the accepted view.  The refusal IS the reason
+            # the fate the operator picked is not on screen -- "needs 323
+            # cells, which exceeds the fixed layout capacity of 64; pin an
+            # axis or change a fate" names the way out -- and it was being
+            # dropped here, so the form redrew unchanged and the pick simply
+            # looked like it had not registered.
+            semantic_reason = str(error)
             resolved = spec
             try:
                 description = describe_semantics(schema, resolved)

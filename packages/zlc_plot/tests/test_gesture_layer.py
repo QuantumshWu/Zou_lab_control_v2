@@ -187,7 +187,10 @@ def test_the_threshold_follows_the_pointer_and_commits_on_release() -> None:
         assert [front.identity.sequence for front in fronts] == sorted(
             {front.identity.sequence for front in fronts}
         )
-        assert len({front.buffer.pixels for front in fronts}) == len(fronts)
+        # One distinct image per accepted front.  A front's pixels are a
+        # memoryview over its own shared block, and a memoryview of this
+        # format cannot go in a set, so compare the bytes they carry.
+        assert len({bytes(front.buffer.pixels) for front in fronts}) == len(fronts)
 
         pointer("release", 0.47 + 0.03 * 5)
         committed = host.selector_state(SelectorKind.THRESHOLD, display=False).result(
