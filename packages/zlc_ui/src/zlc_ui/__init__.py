@@ -45,6 +45,7 @@ _EXPORTS = {
     "PeriodVM": ("zlc_ui.pulse.models", "PeriodVM"),
     "PortRowVM": ("zlc_ui.pulse.models", "PortRowVM"),
     "RepeatVM": ("zlc_ui.pulse.models", "RepeatVM"),
+    "BindingRecord": ("zlc_ui.pulse.models", "BindingRecord"),
     "ScanPageRecord": ("zlc_ui.pulse.models", "ScanPageRecord"),
     "ScheduleVM": ("zlc_ui.pulse.models", "ScheduleVM"),
     "TargetPortRecord": ("zlc_ui.pulse.models", "TargetPortRecord"),

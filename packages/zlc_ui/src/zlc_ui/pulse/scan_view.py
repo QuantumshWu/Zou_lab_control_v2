@@ -6,11 +6,12 @@ from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
     ACCENT, GREEN, GREY, ORANGE, RED, YELLOW, FluentButton, FluentCodeEdit,
-    FluentSpinBox, FluentFrame, FluentGroupBox, FluentLabel, signals_blocked,
+    FluentSpinBox, FluentFrame, FluentGroupBox, FluentLabel, FluentLineEdit,
+    signals_blocked,
 )
 
 from ._layout import px, row_height
-from .models import ScanPageRecord
+from .models import BindingRecord, ScanPageRecord  # noqa: F401
 
 
 class PulseScanView(QtWidgets.QWidget):
@@ -23,6 +24,8 @@ class PulseScanView(QtWidgets.QWidget):
     run_requested = QtCore.pyqtSignal()
     save_array_requested = QtCore.pyqtSignal()
     progress_refresh_requested = QtCore.pyqtSignal()
+    #: ``(old id, new id)`` -- the NAME a plan and a saved value set use.
+    binding_renamed = QtCore.pyqtSignal(str, str)
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -39,6 +42,14 @@ class PulseScanView(QtWidgets.QWidget):
         self.scan_slots_label = FluentLabel("")
         self.scan_slots_label.setWordWrap(True)
         info_layout.addWidget(self.scan_slots_label)
+        # The ids themselves, editable.  A binding gets its name minted from
+        # the period it sits in -- ``dac_load_da_bias_x`` -- which is fine
+        # until a saved set of values has to name the same slot in another
+        # pulse.  The field does not move; only what everything else calls it.
+        self.bindings_grid = QtWidgets.QGridLayout()
+        self.bindings_grid.setContentsMargins(0, px(4, minimum=2), 0, 0)
+        info_layout.addLayout(self.bindings_grid)
+        self._binding_edits: dict[str, FluentLineEdit] = {}
 
         run_row = QtWidgets.QHBoxLayout()
         run_row.setContentsMargins(0, 0, 0, 0)
@@ -164,6 +175,7 @@ class PulseScanView(QtWidgets.QWidget):
         if not isinstance(record, ScanPageRecord):
             raise TypeError("record must be ScanPageRecord")
         self.set_slots_text(record.slots_text)
+        self.set_bindings(record.bindings)
         self.set_scan_table_text(record.table_text)
         self.set_repeats(record.repeats)
         self.set_progress_text(record.progress_text)
@@ -176,6 +188,31 @@ class PulseScanView(QtWidgets.QWidget):
 
     def set_slots_text(self, text: str) -> None:
         self.scan_slots_label.setText(str(text))
+
+    def set_bindings(self, bindings) -> None:
+        while self.bindings_grid.count():
+            item = self.bindings_grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        self._binding_edits = {}
+        for row, record in enumerate(tuple(bindings)):
+            edit = FluentLineEdit(str(record.binding_id))
+            edit.setToolTip(
+                "The name a scan plan, a saved value set and a run record use"
+            )
+            edit.editingFinished.connect(
+                lambda edit=edit, was=str(record.binding_id): (
+                    self.binding_renamed.emit(was, edit.text().strip())
+                    if edit.text().strip() and edit.text().strip() != was
+                    else None
+                )
+            )
+            self.bindings_grid.addWidget(FluentLabel(str(record.label)), row, 0)
+            self.bindings_grid.addWidget(edit, row, 1)
+            self.bindings_grid.addWidget(FluentLabel(str(record.kind)), row, 2)
+            self._binding_edits[str(record.binding_id)] = edit
 
     def set_progress_text(self, text: str) -> None:
         self.scan_progress_label.setText(str(text))

@@ -27,23 +27,19 @@ from zlc_data import (
     DatasetRevisionRef,
     DatasetSchema,
     EmptySelection,
+    DomainSpec,
     OwnedSnapshot,
-    PointColumn,
-    point_domain_admits,
-    PointTable,
     REPEAT,
-    SCAN_POINT,
+    SCALAR_DOMAIN,
     Selection,
     ValidityContract,
     ValueSchema,
     compact_dataset_validity,
     expand_dataset_validity,
     materialize_derived_dataset,
-    point_ordinal_axis,
 )
 from zlc_data import SelectionChange
 from zlc_data.snapshot_projection import (
-    axis_catalog,
     restricted_schema,
     restricted_values,
     selection_indices,
@@ -434,9 +430,8 @@ def _nonnegative_integer(value: object, field: str) -> int:
 class SelectionRange:
     """One canonical closed coordinate range over an upstream axis.
 
-    Named producer axes carry ``axis``.  Repeat and point-row axes are
-    structural, so ``domain`` tells the bridge which source-schema axis the
-    same bounds describe without inventing a fake name.
+    ``domain`` and ``axis`` together name one logical Dataset axis.  Repeat,
+    Point and Cell-data all use the same identity-bearing path.
     """
 
     axis: str
@@ -449,10 +444,8 @@ class SelectionRange:
         domain = canonical_text(self.domain, "selection domain")
         if domain not in {
             "repeat",
-            "point_row",
-            "point_coordinate",
-            "point_dimension",
-            "data",
+            "point",
+            "cell_data",
             # Two bounds name no Dataset axis: the measured VALUE, and
             # the session's own SHOT ordinal -- the rolling history's x,
             # which counts publications rather than rows of any one of
@@ -468,10 +461,10 @@ class SelectionRange:
         if not isinstance(self.axis, str):
             raise TypeError("selection axis must be text")
         axis = self.axis.strip()
-        if domain in {"point_coordinate", "point_dimension", "data"}:
+        if domain in {"repeat", "point", "cell_data"}:
             axis = canonical_text(axis, "selection axis")
         elif axis:
-            raise ValueError("a structural selection range cannot carry an axis name")
+            raise ValueError("value and shot ranges cannot carry an axis name")
         lower = _finite(self.lower, "selection lower")
         upper = _finite(self.upper, "selection upper")
         if lower > upper:
@@ -496,21 +489,11 @@ class FacetCondition:
 
     def __post_init__(self) -> None:
         domain = canonical_text(self.domain, "facet domain")
-        if domain not in {
-            "point_row",
-            "point_coordinate",
-            "point_dimension",
-            "data",
-        }:
+        if domain not in {"repeat", "point", "cell_data"}:
             raise ValueError("facet domain must be an exact Dataset axis domain")
         if not isinstance(self.axis, str):
             raise TypeError("facet axis must be text")
-        axis = self.axis.strip()
-        if domain == "point_row":
-            if axis:
-                raise ValueError("a point-row facet cannot carry an AxisId")
-        else:
-            axis = canonical_text(axis, "facet axis")
+        axis = canonical_text(self.axis.strip(), "facet axis")
         value = self.value
         if isinstance(value, bool):
             raise TypeError("facet value must not be bool")
@@ -576,20 +559,12 @@ class DrawnRegion:
 
 @dataclass(frozen=True, slots=True)
 class SelectionState:
-    """Pure numeric selector state supplied by a plot adapter.
-
-    ``repeat_index`` restricts the repeat axis STRUCTURALLY: the repeat axis
-    is never name-addressed anywhere -- it is the first tensor dimension,
-    identified by its role, deliberately anonymous on the plot side -- so a
-    focused repeat facet crosses the bridge as a plain row index rather than
-    as a named-axis condition.
-    """
+    """Pure numeric selector state supplied by a plot adapter."""
 
     plot_kind: str
     selector_kind: str
     ranges: tuple[SelectionRange, ...]
     facets: tuple[FacetCondition, ...] = ()
-    repeat_index: int | None = None
     revision: int = 0
     #: What the hand drew, when that differs from what is derived.  The
     #: runtime never reads it; the panel's two surfaces do.
@@ -611,26 +586,12 @@ class SelectionState:
         facets = tuple(self.facets)
         if any(not isinstance(item, FacetCondition) for item in facets):
             raise TypeError("selection facets must contain FacetCondition values")
-        if len({
-            (
-                "point"
-                if item.domain in {"point_coordinate", "point_dimension"}
-                else item.domain,
-                item.axis,
-            )
-            for item in facets
-        }) != len(facets):
+        if len({(item.domain, item.axis) for item in facets}) != len(facets):
             raise ValueError("selection facet axes must be unique")
-        repeat_index = self.repeat_index
-        if repeat_index is not None:
-            repeat_index = _nonnegative_integer(
-                repeat_index, "selection repeat_index"
-            )
         object.__setattr__(self, "plot_kind", plot_kind)
         object.__setattr__(self, "selector_kind", selector_kind)
         object.__setattr__(self, "ranges", ranges)
         object.__setattr__(self, "facets", facets)
-        object.__setattr__(self, "repeat_index", repeat_index)
         if self.drawn is not None and not isinstance(self.drawn, DrawnRegion):
             raise TypeError("selection drawn must be a DrawnRegion or None")
         object.__setattr__(
@@ -784,21 +745,16 @@ class FitEventValue:
         )
         domains = {
             "repeat",
-            "point_row",
-            "point_coordinate",
-            "point_dimension",
-            "data",
+            "point",
+            "cell_data",
         }
         is_batch = bool(sample_axis_name)
         if is_batch and sample_axis_domain not in domains:
             raise ValueError("a batch fit must declare its exact sample axis domain")
         if not is_batch and (sample_axis_domain or sample_axis_id):
             raise ValueError("a scalar fit must not declare a sample axis identity")
-        if sample_axis_domain in {"repeat", "point_row"}:
-            if sample_axis_id:
-                raise ValueError("a structural sample axis cannot carry an AxisId")
-        elif sample_axis_domain and not sample_axis_id:
-            raise ValueError("this sample axis domain requires an exact AxisId")
+        if sample_axis_domain and not sample_axis_id:
+            raise ValueError("a sample axis requires an exact AxisId")
         sample_coordinates = _immutable_float_vector(
             self.sample_coordinates,
             "fit sample_coordinates",
@@ -2044,48 +2000,21 @@ class SelectionBridge:
     ) -> tuple[AxisId, AxisSpec, str]:
         """Resolve one exact Dataset axis domain without consulting a label."""
 
-        if domain == "repeat":
-            if axis_id:
-                raise ValueError("a repeat axis cannot carry an AxisId")
-            axis = schema.repeat_axis
-            return axis.axis_id, axis, "repeat"
-        if domain == "point_row":
-            if axis_id:
-                raise ValueError("a point-row axis cannot carry an AxisId")
-            axis = point_ordinal_axis(schema.point_table.row_count)
-            return axis.axis_id, axis, "point"
-
         wanted = AxisId(canonical_text(axis_id, "selection axis id"))
-        topology = schema.grid_topology
-        present = {
-            "point_coordinate": any(
-                column.coordinate_id == wanted
-                for column in schema.point_table.columns
-            ),
-            "point_dimension": bool(
-                topology is not None and wanted in topology.dimension_ids
-            ),
-            "data": any(
-                axis.axis_id == wanted for axis in schema.cell_schema.data_axes
-            ),
-        }
-        if domain not in present:
+        if domain == "repeat":
+            axes = schema.repeat_domain.axes
+        elif domain == "point":
+            axes = schema.point_domain.axes
+        elif domain == "cell_data":
+            axes = schema.cell_domain.axes
+        else:
             raise ValueError(f"unsupported selection axis domain {domain!r}")
-        if not present[domain]:
+        matches = tuple(axis for axis in axes if axis.axis_id == wanted)
+        if len(matches) != 1:
             raise ValueError(
                 f"{domain} AxisId {axis_id!r} is not present in the source snapshot"
             )
-        expected_kind = "data" if domain == "data" else "point"
-        matches = {
-            (catalog_id, axis, kind)
-            for _label, catalog_id, axis, kind in axis_catalog(schema)
-            if catalog_id == wanted and kind == expected_kind
-        }
-        if len(matches) != 1:
-            raise ValueError(
-                f"{domain} AxisId {axis_id!r} is not uniquely present in the source snapshot"
-            )
-        return next(iter(matches))
+        return wanted, matches[0], domain
 
     def _faceted_axis(
         self,
@@ -2101,10 +2030,6 @@ class SelectionBridge:
         """
 
         if not sample_axis_domain:
-            return None
-        if sample_axis_domain == "repeat":
-            return schema.repeat_axis, "repeat"
-        if sample_axis_domain == "point_row":
             return None
         _axis_id, axis, kind = self._resolve_axis(
             schema,
@@ -2148,23 +2073,6 @@ class SelectionBridge:
             if state.selector_kind != "area" or len(axis_ranges) != 2:
                 raise ValueError("image SelectionBridge requires a two-axis area")
             first, second = axis_ranges
-            def axis_kind(value: SelectionRange) -> str:
-                _axis_id, _axis, kind = self._resolve_axis(
-                    schema,
-                    value.domain,
-                    value.axis,
-                )
-                return kind
-
-            # An image has two axes in one domain: either two point quantities
-            # (a scan heatmap) or two tensor quantities (repeat/data).  Mixing
-            # point rows with a tensor axis cannot describe a rectangular
-            # source surface.
-            first_kind, second_kind = axis_kind(first), axis_kind(second)
-            if (first_kind == "point") != (second_kind == "point"):
-                raise ValueError(
-                    "image area axes must both be point axes or both be tensor axes"
-                )
             terms = [range_term(first), range_term(second)]
         else:
             terms = [range_term(item) for item in axis_ranges]
@@ -2175,9 +2083,9 @@ class SelectionBridge:
                 facet.axis,
             )
             if isinstance(facet.value, str):
-                if kind != "point" or axis.coordinates is None:
+                if axis.coordinates is None:
                     raise ValueError(
-                        f"text facet {facet.axis!r} is not an indexed point axis"
+                        f"text facet {facet.axis!r} has no explicit coordinates"
                     )
                 indices = tuple(
                     index
@@ -2208,18 +2116,9 @@ class SelectionBridge:
             # mean "every row", and a contiguous range indexes as a slice.
             terms.append(
                 IndexRangeSelection(
-                    schema.repeat_axis.axis_id, 0, schema.repeat_axis.size
-                )
-            )
-        if state.repeat_index is not None:
-            # Structural, not named: the repeat axis is identified by its
-            # role and position in the schema, so the restriction is a plain
-            # logical row interval on that axis.
-            terms.append(
-                IndexRangeSelection(
-                    schema.repeat_axis.axis_id,
-                    state.repeat_index,
-                    state.repeat_index + 1,
+                    schema.repeat_domain.axes[0].axis_id,
+                    0,
+                    schema.repeat_domain.axes[0].size,
                 )
             )
         return Selection(tuple(terms))
@@ -2255,7 +2154,7 @@ class SelectionBridge:
         reduction actually CONSUMES disappear.  A box on an image consumes the
         two image DATA axes and nothing else, so ``roi_mean`` is one value per
         (repeat, point) on the same derived schema ``roi_frame`` carries, the
-        parent's point columns intact.  Pooling the point axis into a single
+        parent's Point domain intact.  Pooling Point into a single
         scalar instead would silently average a cycle's physically distinct
         frames, which are different POINTS -- different moments of the pulse.
         """
@@ -2296,26 +2195,25 @@ class SelectionBridge:
             data_indices,
         )
         if value_band is not None:
-            cell = derived_schema.cell_schema
+            value_schema = derived_schema.value_schema
             # The canonical scalar carrier has no components to vary over --
             # its value-level validity IS per cell -- and declaring one is
             # refused by ValueSchema itself.
-            if cell != ValueSchema.scalar(cell.dtype, cell.value_unit):
+            if derived_schema.cell_domain != SCALAR_DOMAIN:
                 # A band decides cell by cell, so the derived signal's
                 # validity varies along every axis its values do.  Carrying
                 # the source's coarser contract forward would be a claim
                 # the data no longer supports.
                 derived_schema = DatasetSchema(
-                    derived_schema.repeat_axis,
-                    derived_schema.point_table,
-                    derived_schema.grid_topology,
+                    derived_schema.repeat_domain,
+                    derived_schema.point_domain,
+                    derived_schema.cell_domain,
                     ValueSchema(
-                        cell.data_axes,
                         ValidityContract.components(
-                            *(axis.axis_id for axis in cell.data_axes)
+                            *(axis.axis_id for axis in derived_schema.cell_domain.axes)
                         ),
-                        cell.dtype,
-                        cell.value_unit,
+                        value_schema.dtype,
+                        value_schema.value_unit,
                     ),
                 )
         catalog = (
@@ -2342,7 +2240,7 @@ class SelectionBridge:
                     schema,
                 ),
             )
-            total = derived_schema.repeat_axis.size * derived_schema.point_table.row_count
+            total = derived_schema.repeat_domain.size * derived_schema.point_domain.size
             output[name] = LiveDatasetOutput(
                 DatasetOutputDeclaration(
                     name,
@@ -2360,15 +2258,15 @@ class SelectionBridge:
             scalar_outputs,
         )
         scalar_schema = DatasetSchema(
-            derived_schema.repeat_axis,
-            derived_schema.point_table,
-            derived_schema.grid_topology,
+            derived_schema.repeat_domain,
+            derived_schema.point_domain,
+            SCALAR_DOMAIN,
             ValueSchema.scalar(
                 np.dtype("float64"),
-                source_schema.cell_schema.value_unit,
+                source_schema.value_schema.value_unit,
             ),
         )
-        total = scalar_schema.repeat_axis.size * scalar_schema.point_table.row_count
+        total = scalar_schema.repeat_domain.size * scalar_schema.point_domain.size
         for name in scalar_outputs:
             answer, validity = statistics[name]
             derived = materialize_derived_dataset(
@@ -2410,11 +2308,7 @@ class SelectionBridge:
             event.sample_axis_id,
         )
         if faceted is not None and faceted[1] == "repeat":
-            # The fit was faceted over the REPEAT axis, so its samples ARE
-            # repeats: same conditions measured again.  They keep the parent's
-            # repeat identity instead of being restated as point rows -- a
-            # point row is an independent variable, which a repeat is not.
-            schema_repeat = replace(
+            sample_axis = replace(
                 faceted[0],
                 size=sample_count,
                 coordinates=tuple(
@@ -2424,58 +2318,39 @@ class SelectionBridge:
                 index_origin=0,
                 coordinate_labels=event.sample_labels,
             )
-            schema_point_table = PointTable(1)
-        else:
-            # Every other faceted axis is a point axis on the fit's own table,
-            # and it carries the ROLE of the axis it was faceted over: a
-            # frame-faceted fit is a READOUT_EVENT column, a scan-faceted fit
-            # a SCAN_POINT one.  An axis the parent does not declare (the
-            # scalar fit, a point-row ordinal facet) has no role to inherit
-            # and takes the point ordinal's own role -- and so does an axis
-            # whose role the point domain does not admit.  A grid may be
-            # faceted over ANY axis, including a component or the implicit
-            # scalar, and re-stating one of those as a point column raised
-            # "point column role is outside the point-domain role set" from
-            # inside the fit, where an operator reads it as the fit being
-            # broken.  Inheriting a role means inheriting one this domain
-            # can carry; where it cannot, there is no role to inherit.
-            sample_name = event.sample_axis_name or "sample"
-            sample_axis_id = event.sample_axis_id or sample_name
-            sample_role = (
-                faceted[0].role
-                if faceted is not None and point_domain_admits(faceted[0].role)
-                else SCAN_POINT
+            repeat_domain = DomainSpec(
+                (sample_count,),
+                (sample_axis,),
+                (tuple(range(sample_count)),),
             )
-            point_columns = [
-                PointColumn(
-                    AxisId(sample_axis_id),
-                    sample_name,
-                    sample_role,
-                    PointColumn.NUMERIC,
-                    tuple(float(value) for value in event.sample_coordinates),
-                    event.sample_unit or None,
-                )
-            ]
-            if event.sample_labels is not None:
-                label_name = f"{sample_name}_label"
-                point_columns.append(
-                    PointColumn(
-                        AxisId(label_name),
-                        label_name,
-                        sample_role,
-                        PointColumn.TEXT,
-                        tuple(event.sample_labels),
-                    )
-                )
-            schema_repeat = AxisSpec(
+            point_domain = DomainSpec((1,), (), ())
+        else:
+            repeat_axis = AxisSpec(
                 AxisId("fit.repeat"),
                 "repeat",
                 REPEAT,
                 1,
                 (0,),
             )
-            schema_point_table = PointTable(sample_count, tuple(point_columns))
-        cell_shape = (schema_repeat.size, schema_point_table.row_count)
+            repeat_domain = DomainSpec((1,), (repeat_axis,), ((0,),))
+            if faceted is None:
+                point_domain = DomainSpec((1,), (), ())
+            else:
+                sample_axis = AxisSpec(
+                    AxisId(event.sample_axis_id),
+                    event.sample_axis_name,
+                    faceted[0].role,
+                    sample_count,
+                    tuple(float(value) for value in event.sample_coordinates),
+                    event.sample_unit or None,
+                    coordinate_labels=event.sample_labels,
+                )
+                point_domain = DomainSpec(
+                    (sample_count,),
+                    (sample_axis,),
+                    (tuple(range(sample_count)),),
+                )
+        cell_shape = (repeat_domain.size, point_domain.size)
         value_validity = CellValidity(event.success.reshape(cell_shape))
         fit_source_ref = DatasetRevisionRef(
             source.ref.block_id,
@@ -2489,9 +2364,9 @@ class SelectionBridge:
         for parameter in event.parameter_names:
             unit = event.parameter_units[parameter] or None
             schema = DatasetSchema(
-                schema_repeat,
-                schema_point_table,
-                None,
+                repeat_domain,
+                point_domain,
+                SCALAR_DOMAIN,
                 ValueSchema.scalar(np.dtype("float64"), unit),
             )
             if parameter not in enabled:

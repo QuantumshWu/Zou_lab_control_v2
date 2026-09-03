@@ -129,12 +129,12 @@ def _specs(feeds: dict) -> dict:
 
     camera_schema = feeds["camera"][0].block.schema
     roi_schema = feeds["roi_history"][0].block.schema
-    frame_ref = AxisRef.point(str(camera_schema.point_table.columns[0].coordinate_id))
+    frame_ref = AxisRef.point(str(camera_schema.point_domain.axes[0].axis_id))
     camera_y, camera_x = (
-        AxisRef.data(str(axis.axis_id)) for axis in camera_schema.cell_schema.data_axes
+        AxisRef.cell_data(str(axis.axis_id)) for axis in camera_schema.cell_domain.axes
     )
     roi_y, roi_x = (
-        AxisRef.data(str(axis.axis_id)) for axis in roi_schema.cell_schema.data_axes
+        AxisRef.cell_data(str(axis.axis_id)) for axis in roi_schema.cell_domain.axes
     )
     source = AxisRef.point(str(PRIMARY_INDEX_AXIS_ID))
     camera_image = ImagePlot(camera_x, camera_y)

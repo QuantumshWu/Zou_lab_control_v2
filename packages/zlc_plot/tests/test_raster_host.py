@@ -11,12 +11,15 @@ import numpy as np
 import pytest
 
 from data_factory import (
-    Axis,
-    DatasetSchema,
-    DatasetSnapshot,
-    PointTable,
-    PointTopology,
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
 )
+
+from zlc_data import OwnedSnapshot
+
 from test_facet_live_fit import _facet_snapshot, _spec as facet_spec
 from zlc_plot import (
     AxisRef,
@@ -43,18 +46,15 @@ from zlc_plot._axis_transform import canvas_physical_size
 from zlc_plot.selectors import CrosshairPoint, NumericRange, SelectorState
 from zlc_plot.ui import ControlKind
 
-
-def _snapshot() -> DatasetSnapshot:
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": [0.0, 1.0, 2.0]}),
+def _snapshot() -> OwnedSnapshot:
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"x": [0.0, 1.0, 2.0]}),
         dtype=np.float64,
-        generation="raster-host-test",
     )
-    return DatasetSnapshot(schema, np.array([[1.0, 2.0, 3.0]]), revision=0)
+    return make_snapshot(schema, np.array([[1.0, 2.0, 3.0]]), revision=0)
 
-
-def _site_distribution_snapshot() -> DatasetSnapshot:
+def _site_distribution_snapshot() -> OwnedSnapshot:
     samples = np.linspace(-3.0, 3.0, 80)
     values = np.column_stack(
         (
@@ -62,31 +62,27 @@ def _site_distribution_snapshot() -> DatasetSnapshot:
             np.where(samples < 0.0, samples - 1.0, samples + 3.0),
         )
     )
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=values.shape[0]),
-        PointTable.from_columns({"site": (0.0, 1.0)}),
+    schema = make_dataset_schema(
+        repeat_domain(size=values.shape[0]),
+        mapped_domain_from_columns({"site": (0.0, 1.0)}),
         dtype=np.float64,
-        generation="raster-site-distribution",
     )
-    return DatasetSnapshot(schema, values, revision=0)
-
+    return make_snapshot(schema, values, revision=0)
 
 def _fit_curve_series(generation: str, *, offset: float = 0.0):
     x = np.linspace(-4.0, 4.0, 81)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": x}),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"x": x}),
         dtype=np.float64,
-        generation=generation,
     )
 
-    def snapshot(revision: int, center: float | None = None) -> DatasetSnapshot:
+    def snapshot(revision: int, center: float | None = None) -> OwnedSnapshot:
         selected = revision * 0.05 if center is None else center
         values = 2.0 * np.exp(-0.5 * ((x - selected) / 0.9) ** 2) + offset
-        return DatasetSnapshot(schema, values.reshape(1, -1), revision=revision)
+        return make_snapshot(schema, values.reshape(1, -1), revision=revision)
 
     return snapshot
-
 
 @pytest.fixture
 def blocked_fit_host(monkeypatch):
@@ -135,7 +131,6 @@ def blocked_fit_host(monkeypatch):
         release.set()
         host.close(timeout=10)
 
-
 def test_host_coalesces_same_key_and_front_sequences_advance() -> None:
     host = RasterPlotHost.from_plot(_snapshot(), CurvePlot(AxisRef.point("x")))
     gate = Event()
@@ -162,7 +157,6 @@ def test_host_coalesces_same_key_and_front_sequences_advance() -> None:
     finally:
         gate.set()
         host.close(timeout=10)
-
 
 def test_initial_front_precedes_a_startup_noop_configuration() -> None:
     snapshot = _snapshot()
@@ -193,7 +187,6 @@ def test_initial_front_precedes_a_startup_noop_configuration() -> None:
     finally:
         release_factory.set()
         host.close(timeout=10)
-
 
 def test_equal_device_pixel_ratio_reuses_the_current_front() -> None:
     host = RasterPlotHost.from_plot(
@@ -439,7 +432,6 @@ def test_close_cancels_queued_tasks() -> None:
         gate.set()
         host.close(timeout=10)
 
-
 def test_press_lands_on_the_painted_transform_it_carries() -> None:
     """The front a press arrives with IS what the operator saw.
 
@@ -452,14 +444,13 @@ def test_press_lands_on_the_painted_transform_it_carries() -> None:
     as the frontend ran one front behind.
     """
 
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": [0.0, 1.0, 2.0]}),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"x": [0.0, 1.0, 2.0]}),
         dtype=np.float64,
-        generation="raster-press-race",
     )
-    first_data = DatasetSnapshot(schema, np.array([[1.0, 2.0, 3.0]]), revision=0)
-    next_data = DatasetSnapshot(schema, np.array([[2.0, 3.0, 4.0]]), revision=1)
+    first_data = make_snapshot(schema, np.array([[1.0, 2.0, 3.0]]), revision=0)
+    next_data = make_snapshot(schema, np.array([[2.0, 3.0, 4.0]]), revision=1)
     host = RasterPlotHost.from_plot(first_data, CurvePlot(AxisRef.point("x")))
     try:
         stale = host.wait_for_front(timeout=10)
@@ -486,7 +477,6 @@ def test_press_lands_on_the_painted_transform_it_carries() -> None:
     finally:
         host.close(timeout=10)
 
-
 def test_press_accepts_a_live_revision_that_held_the_geometry_still() -> None:
     """A live frame that moves no limits must not reject the press.
 
@@ -496,14 +486,13 @@ def test_press_accepts_a_live_revision_that_held_the_geometry_still() -> None:
     it made selectors and camera gestures unusable during live runs.
     """
 
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": [0.0, 1.0, 2.0]}),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"x": [0.0, 1.0, 2.0]}),
         dtype=np.float64,
-        generation="raster-press-live-hold",
     )
-    first_data = DatasetSnapshot(schema, np.array([[1.0, 2.0, 3.0]]), revision=0)
-    same_data = DatasetSnapshot(schema, np.array([[1.0, 2.0, 3.0]]), revision=1)
+    first_data = make_snapshot(schema, np.array([[1.0, 2.0, 3.0]]), revision=0)
+    same_data = make_snapshot(schema, np.array([[1.0, 2.0, 3.0]]), revision=1)
     host = RasterPlotHost.from_plot(first_data, CurvePlot(AxisRef.point("x")))
     try:
         stale = host.wait_for_front(timeout=10)
@@ -531,7 +520,6 @@ def test_press_accepts_a_live_revision_that_held_the_geometry_still() -> None:
     finally:
         host.close(timeout=10)
 
-
 def test_host_facet_live_fit_promotes_one_batch_front_and_future() -> None:
     """Facet analysis must publish through the same source-revision contract."""
 
@@ -547,7 +535,6 @@ def test_host_facet_live_fit_promotes_one_batch_front_and_future() -> None:
         assert host.front is operation.front
     finally:
         host.close(timeout=10)
-
 
 def test_fit_switches_a_native_curve_to_source_scatter_without_a_pointer() -> None:
     snapshots = _fit_curve_series("native-fit-source-scatter", offset=0.1)
@@ -572,24 +559,19 @@ def test_fit_switches_a_native_curve_to_source_scatter_without_a_pointer() -> No
     finally:
         session.close()
 
-
 def test_partial_grouped_scan_keeps_lines_and_isolated_points_visible() -> None:
-    short = Axis.create("short", values=np.linspace(0.0, 1.0, 8))
-    long = Axis.create("long", values=(10.0, 20.0, 30.0))
-    point_table = PointTable.from_columns(
+    short = axis("short", values=np.linspace(0.0, 1.0, 8))
+    long = axis("long", values=(10.0, 20.0, 30.0))
+    point_domain = mapped_domain_from_columns(
         {
             "short": np.tile(short.coordinates, 3),
             "long": np.repeat(long.coordinates, 8),
         }
     )
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=2),
-        point_table,
-        point_topology=PointTopology.from_cartesian(
-            (long, short), point_table=point_table
-        ),
+    schema = make_dataset_schema(
+        repeat_domain(size=2),
+        point_domain,
         dtype=np.float64,
-        generation="partial-grouped-scan",
     )
     x = np.tile(np.asarray(short.coordinates), 3)
     values = np.stack((np.sin(x), np.sin(x) + 0.05))
@@ -597,10 +579,10 @@ def test_partial_grouped_scan_keeps_lines_and_isolated_points_visible() -> None:
     valid[:, :8] = True
     valid[:, 8] = True
     session = PlotSession(
-        DatasetSnapshot(schema, values, 0, validity=valid),
+        make_snapshot(schema, values, 0, validity=valid),
         CurvePlot(
-            AxisRef.point_dimension("short"),
-            group=AxisRef.point_dimension("long"),
+            AxisRef.point("short"),
+            group=AxisRef.point("long"),
         ),
     )
     try:
@@ -615,7 +597,6 @@ def test_partial_grouped_scan_keeps_lines_and_isolated_points_visible() -> None:
         assert np.asarray(isolated.get_markevery()).size == 1
     finally:
         session.close()
-
 
 def test_native_curve_refusal_materializes_the_complete_public_scene(
     monkeypatch,
@@ -637,7 +618,6 @@ def test_native_curve_refusal_materializes_the_complete_public_scene(
         assert entries and all(line.get_visible() for line, _identity, _label in entries)
     finally:
         session.close()
-
 
 def test_live_fit_keeps_only_the_latest_successor_while_active(
     blocked_fit_host,
@@ -701,7 +681,6 @@ def test_live_fit_keeps_only_the_latest_successor_while_active(
     finally:
         release_first.set()
         host.close(timeout=10)
-
 
 def test_active_fit_times_out_without_a_successor_and_recovers(
     monkeypatch,
@@ -775,7 +754,6 @@ def test_active_fit_times_out_without_a_successor_and_recovers(
         if release_subscription is not None:
             release_subscription().result(timeout=10)
 
-
 def test_solver_failure_is_loud_for_that_revision_and_the_tail_continues(
     blocked_fit_host,
 ) -> None:
@@ -823,7 +801,6 @@ def test_solver_failure_is_loud_for_that_revision_and_the_tail_continues(
         if release_subscription is not None:
             release_subscription().result(timeout=10)
 
-
 def test_a_regular_bimodal_fit_does_not_create_a_threshold_classifier() -> None:
     host = RasterPlotHost.from_plot(
         _site_distribution_snapshot(),
@@ -837,7 +814,6 @@ def test_a_regular_bimodal_fit_does_not_create_a_threshold_classifier() -> None:
             host.selector_state(SelectorKind.THRESHOLD).result(timeout=10)
     finally:
         host.close(timeout=10)
-
 
 def test_threshold_classifier_is_independent_and_covers_every_facet() -> None:
     """The Distribution switch owns its fit, threshold, and compact cell text."""
@@ -895,12 +871,11 @@ def test_threshold_classifier_is_independent_and_covers_every_facet() -> None:
                     "value": weighted_crossing,
                     "scope": (
                         {
-                            "domain": "point_coordinate",
+                            "domain": "point",
                             "axis_id": "site",
                             "coordinate": 0,
                         },
                     ),
-                    "repeat_index": None,
                     "gaussian_components": {
                         "left_mean": 0.0,
                         "left_sigma": 1.0,
@@ -914,12 +889,11 @@ def test_threshold_classifier_is_independent_and_covers_every_facet() -> None:
                     "value": 0.75,
                     "scope": (
                         {
-                            "domain": "point_coordinate",
+                            "domain": "point",
                             "axis_id": "site",
                             "coordinate": 1,
                         },
                     ),
-                    "repeat_index": None,
                     "gaussian_components": None,
                 },
             ),
@@ -948,7 +922,6 @@ def test_threshold_classifier_is_independent_and_covers_every_facet() -> None:
         assert session._classifier_results[1] is None
     finally:
         host.close(timeout=10)
-
 
 def test_one_complete_configuration_is_differenced_by_the_plot_owner() -> None:
     """An embedder states the desired plot; it does not choose the render path."""
@@ -993,7 +966,6 @@ def test_one_complete_configuration_is_differenced_by_the_plot_owner() -> None:
         assert automatic.front.identity.sequence == unchanged.front.identity.sequence + 1
     finally:
         host.close(timeout=10)
-
 
 def test_complete_configuration_fits_clears_and_noops_as_one_front(
     monkeypatch,
@@ -1086,7 +1058,6 @@ def test_complete_configuration_fits_clears_and_noops_as_one_front(
     finally:
         host.close(timeout=10)
 
-
 @pytest.mark.parametrize(
     ("invalid_target", "error", "match", "solver_failure"),
     (
@@ -1143,7 +1114,6 @@ def test_complete_configuration_rejects_a_late_target_without_partial_state(
         assert host.front is initial
     finally:
         host.close(timeout=10)
-
 
 @pytest.mark.parametrize(
     ("fit_target", "semantic"),
@@ -1213,7 +1183,6 @@ def test_failed_final_configuration_does_not_retire_the_previous_fit_authority(
             release_subscription().result(timeout=10)
         host.close(timeout=10)
 
-
 def test_a_host_that_could_not_start_says_why_not_that_it_is_closing() -> None:
     """The refusal must carry the reason, not the symptom.
 
@@ -1243,7 +1212,6 @@ def test_a_host_that_could_not_start_says_why_not_that_it_is_closing() -> None:
         assert "failed to start" in str(again.value), str(again.value)
     finally:
         host.close()
-
 
 def test_host_save_preserves_existing_file_when_renderer_fails_after_partial_write(
     tmp_path: Path,
@@ -1292,7 +1260,6 @@ def test_host_save_preserves_existing_file_when_renderer_fails_after_partial_wri
     finally:
         host.close(timeout=10)
 
-
 def test_raster_buffer_save_preserves_existing_file_when_replace_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1316,7 +1283,6 @@ def test_raster_buffer_save_preserves_existing_file_when_replace_fails(
 
     assert target.read_bytes() == original
     assert tuple(tmp_path.iterdir()) == (target,)
-
 
 def test_envelope_preserves_column_extremes_and_gaps() -> None:
     """The envelope is the drawing's contract: extremes and gaps survive."""
@@ -1342,7 +1308,6 @@ def test_envelope_preserves_column_extremes_and_gaps() -> None:
     gap_zone = (out_x >= x[20_000]) & (out_x <= x[20_399])
     assert bool(np.any(~np.isfinite(out_y[gap_zone])))
 
-
 def test_envelope_declines_sparse_windows() -> None:
     from zlc_plot.rendering import _envelope_decimated
 
@@ -1355,25 +1320,23 @@ def test_envelope_declines_sparse_windows() -> None:
     assert _envelope_decimated(dense_x, dense_y, (0.5, 0.5005), 256) is None
     assert _envelope_decimated(dense_x, dense_y, (0.0, 1.0), 256) is not None
 
-
 def test_dense_curve_hands_display_resolution_polyline_to_the_artist() -> None:
     n = 300_000
     x = np.linspace(0.0, 1.0, n)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": x}),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"x": x}),
         dtype=np.float64,
-        generation="envelope-host",
     )
     values = np.sin(x * 20.0).reshape(1, -1)
     host = RasterPlotHost.from_plot(
-        DatasetSnapshot(schema, values, revision=0),
+        make_snapshot(schema, values, revision=0),
         CurvePlot(AxisRef.point("x")),
     )
     try:
         host.wait_for_front(timeout=30)
         host.update_data(
-            DatasetSnapshot(schema, values + 0.001, revision=1)
+            make_snapshot(schema, values + 0.001, revision=1)
         ).result(timeout=60)
         renderer = host._session._renderer
         renderer._materialize_prepared_curve()
@@ -1393,21 +1356,19 @@ def test_dense_curve_hands_display_resolution_polyline_to_the_artist() -> None:
     finally:
         host.close(timeout=30)
 
-
 def test_curve_series_inspector_is_stable_sticky_and_redraw_bounded(
     monkeypatch, tmp_path,
 ) -> None:
     candidate = np.tile(np.arange(7.0), 2)
     site = np.repeat((17.0, 23.0), 7)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"candidate": candidate, "site": site}),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"candidate": candidate, "site": site}),
         dtype=np.float64,
-        generation="series-inspector",
     )
     values = np.concatenate((1.0 + np.arange(7.0), 11.0 + np.arange(7.0)))[None]
     session = PlotSession(
-        DatasetSnapshot(schema, values, 0),
+        make_snapshot(schema, values, 0),
         CurvePlot(AxisRef.point("candidate"), group=AxisRef.point("site")),
     )
     try:
@@ -1485,7 +1446,7 @@ def test_curve_series_inspector_is_stable_sticky_and_redraw_bounded(
         assert observed == [(0.8, 0.8)]
         assert renderer._series_locked is not None
 
-        session.update_data(DatasetSnapshot(schema, values + 0.25, 1))
+        session.update_data(make_snapshot(schema, values + 0.25, 1))
         assert {line.get_label(): line.get_color() for line in lines} == colors
 
         pointer("key", 0.0, 0.0, key="escape")
@@ -1493,7 +1454,7 @@ def test_curve_series_inspector_is_stable_sticky_and_redraw_bounded(
         validity[0, :7] = False
         validity[0, 2] = True
         session.update_data(
-            DatasetSnapshot(
+            make_snapshot(
                 schema,
                 values + 0.25,
                 2,
@@ -1515,18 +1476,16 @@ def test_curve_series_inspector_is_stable_sticky_and_redraw_bounded(
     finally:
         session.close()
 
-
 def test_curve_series_picker_never_uses_raw_dense_line_on_deep_zoom() -> None:
     count = 200_000
     x = np.linspace(0.0, 1.0, count)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": x}),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"x": x}),
         dtype=np.float64,
-        generation="series-inspector-dense",
     )
     session = PlotSession(
-        DatasetSnapshot(schema, np.sin(x)[None], 0),
+        make_snapshot(schema, np.sin(x)[None], 0),
         CurvePlot(AxisRef.point("x")),
     )
     try:
@@ -1543,19 +1502,17 @@ def test_curve_series_picker_never_uses_raw_dense_line_on_deep_zoom() -> None:
     finally:
         session.close()
 
-
 def test_locked_curve_wheel_steps_canonical_series_without_zoom() -> None:
     candidate = np.tile(np.arange(7.0), 2)
     site = np.repeat((17.0, 23.0), 7)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"candidate": candidate, "site": site}),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"candidate": candidate, "site": site}),
         dtype=np.float64,
-        generation="series-wheel",
     )
     values = np.concatenate((1.0 + np.arange(7.0), 11.0 + np.arange(7.0)))[None]
     session = PlotSession(
-        DatasetSnapshot(schema, values, 0),
+        make_snapshot(schema, values, 0),
         CurvePlot(AxisRef.point("candidate"), group=AxisRef.point("site")),
     )
     try:
@@ -1603,24 +1560,22 @@ def test_locked_curve_wheel_steps_canonical_series_without_zoom() -> None:
     finally:
         session.close()
 
-
 def test_locked_rolling_wheel_steps_group_series_without_zoom() -> None:
     repeats = 8
     sites = 3
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=repeats),
-        PointTable.from_columns({"sample": (0.0,)}),
-        data_axes=(Axis.create("site", size=sites),),
+    schema = make_dataset_schema(
+        repeat_domain(size=repeats),
+        mapped_domain_from_columns({"sample": (0.0,)}),
+        cell_axes=(axis("site", size=sites),),
         dtype=np.float64,
-        generation="rolling-series-wheel",
     )
     values = (
         np.arange(repeats, dtype=float)[:, None, None]
         + 10.0 * np.arange(sites, dtype=float)[None, None, :]
     )
     session = PlotSession(
-        DatasetSnapshot(schema, values, 0),
-        RollingPlot(group=AxisRef.data("site")),
+        make_snapshot(schema, values, 0),
+        RollingPlot(group=AxisRef.cell_data("site")),
     )
     try:
         renderer = session._renderer
@@ -1659,7 +1614,6 @@ def test_locked_rolling_wheel_steps_group_series_without_zoom() -> None:
         ) == original_limits
     finally:
         session.close()
-
 
 def test_axis_resolution_grabs_what_is_visible() -> None:
     """Nearest-axis pointer resolution within the selector handle radius.
@@ -1700,7 +1654,6 @@ def test_axis_resolution_grabs_what_is_visible() -> None:
     assert _axis_at_normalized(front, 0.75, 0.05, tolerance_px=10.0) is None
     assert _axis_at_normalized(front, 0.75, 0.099, tolerance_px=0.0) is None
 
-
 def test_press_ignores_the_crosshair_marker_in_the_painted_interaction() -> None:
     """A pick republishes a front carrying its crosshair; the NEXT press
     arrives with the previous front for as long as the frontend lags one
@@ -1708,13 +1661,12 @@ def test_press_ignores_the_crosshair_marker_in_the_painted_interaction() -> None
     part of press currency -- rejecting on it froze every orbit that
     followed a pick."""
 
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": [0.0, 1.0, 2.0]}),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"x": [0.0, 1.0, 2.0]}),
         dtype=np.float64,
-        generation="raster-press-marker",
     )
-    data = DatasetSnapshot(schema, np.array([[1.0, 2.0, 3.0]]), revision=0)
+    data = make_snapshot(schema, np.array([[1.0, 2.0, 3.0]]), revision=0)
     host = RasterPlotHost.from_plot(data, CurvePlot(AxisRef.point("x")))
     try:
         stale = host.wait_for_front(timeout=10)
@@ -1737,20 +1689,18 @@ def test_press_ignores_the_crosshair_marker_in_the_painted_interaction() -> None
     finally:
         host.close(timeout=10)
 
-
 def test_scroll_is_self_relative_and_needs_no_front_currency() -> None:
     """A 3D wheel tick commits the camera and bumps the display revision;
     the frontend is one front behind for a beat, and demanding identity
     currency on the NEXT tick bounced continuous zooming.  A scroll is
     self-relative view navigation: it rides whatever front it saw."""
 
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": [0.0, 1.0, 2.0]}),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"x": [0.0, 1.0, 2.0]}),
         dtype=np.float64,
-        generation="raster-scroll-currency",
     )
-    data = DatasetSnapshot(schema, np.array([[1.0, 2.0, 3.0]]), revision=0)
+    data = make_snapshot(schema, np.array([[1.0, 2.0, 3.0]]), revision=0)
     host = RasterPlotHost.from_plot(data, CurvePlot(AxisRef.point("x")))
     try:
         stale = host.wait_for_front(timeout=10)
@@ -1770,7 +1720,6 @@ def test_scroll_is_self_relative_and_needs_no_front_currency() -> None:
         assert state is not None
     finally:
         host.close(timeout=10)
-
 
 def test_a_moving_hand_stands_down_every_speculative_frame() -> None:
     """One machine: the drag wins while it moves, on every surface.
@@ -1836,7 +1785,6 @@ def test_a_moving_hand_stands_down_every_speculative_frame() -> None:
         hand.close(timeout=10)
         other.close(timeout=10)
 
-
 def test_yielded_frames_are_never_lost_only_deferred() -> None:
     """Standing down costs freshness, nothing else.
 
@@ -1857,7 +1805,7 @@ def test_yielded_frames_are_never_lost_only_deferred() -> None:
         _HANDS.grip(hand.host_id)
         pending = [
             other.update_data(
-                DatasetSnapshot(
+                make_snapshot(
                     schema, np.array([[float(revision), 2.0, 3.0]]), revision=revision
                 )
             )
@@ -1876,7 +1824,6 @@ def test_yielded_frames_are_never_lost_only_deferred() -> None:
         hand.close(timeout=10)
         other.close(timeout=10)
 
-
 def test_a_revision_the_session_already_holds_is_nothing_to_do() -> None:
     """Handing the same data twice is a no-op, not a fault on the card.
 
@@ -1894,17 +1841,16 @@ def test_a_revision_the_session_already_holds_is_nothing_to_do() -> None:
     host = RasterPlotHost.from_plot(_snapshot(), CurvePlot(AxisRef.point("x")))
     try:
         host.wait_for_front(10.0)
-        schema = DatasetSchema.create(
-            Axis.create("repeat", size=1),
-            PointTable.from_columns({"x": [0.0, 1.0, 2.0]}),
+        schema = make_dataset_schema(
+            repeat_domain(size=1),
+            mapped_domain_from_columns({"x": [0.0, 1.0, 2.0]}),
             dtype=np.float64,
-            generation="raster-host-test",
         )
-        fresh = DatasetSnapshot(schema, np.array([[2.0, 3.0, 4.0]]), revision=1)
+        fresh = make_snapshot(schema, np.array([[2.0, 3.0, 4.0]]), revision=1)
         host.update_data(fresh).result(10.0)
 
         repeated = host.update_data(
-            DatasetSnapshot(schema, np.array([[9.0, 9.0, 9.0]]), revision=1)
+            make_snapshot(schema, np.array([[9.0, 9.0, 9.0]]), revision=1)
         )
         try:
             repeated.result(10.0)
@@ -1918,7 +1864,6 @@ def test_a_revision_the_session_already_holds_is_nothing_to_do() -> None:
     finally:
         host.close(timeout=10.0)
 
-
 def _click_series(renderer, axes, px, py):
     """One ordinary click, as the pointer path delivers it."""
 
@@ -1926,7 +1871,6 @@ def _click_series(renderer, axes, px, py):
     return renderer.series_focus(
         "release", axes, px, py, hit_radius=10.0, click_radius=4.0
     )
-
 
 def test_one_series_is_not_a_choice() -> None:
     """A lone line has nothing to choose between, so it does not respond.
@@ -1936,14 +1880,13 @@ def test_one_series_is_not_a_choice() -> None:
     """
 
     x = np.linspace(0.0, 1.0, 64)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": x}),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"x": x}),
         dtype=np.float64,
-        generation="single-series",
     )
     session = PlotSession(
-        DatasetSnapshot(schema, np.sin(x)[None], 0),
+        make_snapshot(schema, np.sin(x)[None], 0),
         CurvePlot(AxisRef.point("x")),
     )
     try:
@@ -1962,7 +1905,6 @@ def test_one_series_is_not_a_choice() -> None:
     finally:
         session.close()
 
-
 def test_a_grid_overview_does_not_choose_series() -> None:
     """The overview is a chooser of CELLS; its only gesture enters one.
 
@@ -1976,17 +1918,16 @@ def test_a_grid_overview_does_not_choose_series() -> None:
     candidate = np.tile(np.arange(8.0), 6)
     cell = np.repeat(np.arange(3.0), 16)
     series = np.tile(np.repeat((0.0, 1.0), 8), 3)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns(
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns(
             {"candidate": candidate, "cell": cell, "series": series}
         ),
         dtype=np.float64,
-        generation="grid-series",
     )
     values = np.sin(candidate + 3.0 * series)[None]
     session = PlotSession(
-        DatasetSnapshot(schema, values, 0),
+        make_snapshot(schema, values, 0),
         FacetGridPlot(
             AxisRef.point("cell"),
             CurvePlot(AxisRef.point("candidate"), group=AxisRef.point("series")),
@@ -2022,7 +1963,6 @@ def test_a_grid_overview_does_not_choose_series() -> None:
     finally:
         session.close()
 
-
 def test_a_dollar_sign_in_a_name_cannot_take_the_frame_down() -> None:
     """Producer and operator text is a NAME, never mathtext.
 
@@ -2037,11 +1977,10 @@ def test_a_dollar_sign_in_a_name_cannot_take_the_frame_down() -> None:
     """
 
     x = np.linspace(0.0, 1.0, 32)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=2),
-        PointTable.from_columns({"x": x}),
+    schema = make_dataset_schema(
+        repeat_domain(size=2),
+        mapped_domain_from_columns({"x": x}),
         dtype=np.float64,
-        generation="dollar-label",
     )
     values = np.sin(x)[None] * np.ones((2, 1))
     for label in (
@@ -2051,7 +1990,7 @@ def test_a_dollar_sign_in_a_name_cannot_take_the_frame_down() -> None:
         "$a_b_c$",
     ):
         session = PlotSession(
-            DatasetSnapshot(schema, values, 1),
+            make_snapshot(schema, values, 1),
             CurvePlot(
                 AxisRef.point("x"),
                 labels=PlotLabels(value=label, title=label, y=label),
@@ -2062,7 +2001,6 @@ def test_a_dollar_sign_in_a_name_cannot_take_the_frame_down() -> None:
             session.rgba()
         finally:
             session.close()
-
 
 def test_a_formula_that_cannot_be_drawn_is_shown_as_characters() -> None:
     """Mathtext is decoration; it may not cost the plot.

@@ -1,8 +1,7 @@
 """Saved fates survive a signal's legal schema-representation changes.
 
-The Runtime's indexed history injects a source-index point column into a
-signal's schema, and its arrival or departure changes which fate rows the
-vocabulary offers -- the synthetic point-row ordinal among them.  A panel
+The Runtime's indexed history adds a source-index Point-domain axis, and its
+arrival or departure changes which fate rows the vocabulary offers. A panel
 saves its whole fate table under one representation and replays it under
 the other, so a fate naming an axis the current representation does not
 offer must be dropped as "nothing to say", never raised as a typo.
@@ -17,11 +16,10 @@ from zlc_data import (
     AxisId,
     AxisSpec,
     DatasetSchema,
+    DomainSpec,
     PRIMARY_INDEX,
-    PointColumn,
-    PointTable,
     REPEAT,
-    ValidityContract,
+    SCALAR_DOMAIN,
     ValueSchema,
 )
 from zlc_plot import PlotKind
@@ -30,25 +28,36 @@ from zlc_workbench.panel_catalog import task_console_fitting_spec
 from zlc_workbench.panel_state import PanelState, project_panel_state
 
 
-def _schema(point_table: PointTable) -> DatasetSchema:
+def _schema(point_domain: DomainSpec) -> DatasetSchema:
     repeat = AxisSpec(AxisId("sig.repeat"), "repeat", REPEAT, 1, (0,))
     values = ValueSchema.scalar(np.dtype("<f8"), "1")
-    return DatasetSchema(repeat, point_table, None, values)
+    return DatasetSchema(
+        DomainSpec((1,), (repeat,), ((0,),)),
+        point_domain,
+        SCALAR_DOMAIN,
+        values,
+    )
 
 
 def _event_schema() -> DatasetSchema:
-    return _schema(PointTable(1, ()))
+    return _schema(DomainSpec((1,), (), ()))
 
 
 def _indexed_schema(shots: int) -> DatasetSchema:
-    column = PointColumn(
+    axis = AxisSpec(
         AxisId("zlc_data.primary-index"),
         "source index",
         PRIMARY_INDEX,
-        PointColumn.NUMERIC,
+        shots,
         tuple(range(1 - shots, 1)),
     )
-    return _schema(PointTable(shots, (column,)))
+    return _schema(
+        DomainSpec(
+            (shots,),
+            (axis,),
+            (tuple(range(shots)),),
+        )
+    )
 
 
 def _fate_names(schema: DatasetSchema) -> set[str]:

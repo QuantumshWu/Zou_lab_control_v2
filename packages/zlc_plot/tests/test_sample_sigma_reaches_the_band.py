@@ -21,7 +21,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from data_factory import (
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
+
+from zlc_data import DatasetSchema, OwnedSnapshot
 from zlc_plot import AxisRef, CurvePlot, PlotSession, RollingPlot
 from zlc_plot.data_view import DataView
 from zlc_plot.specs import Reduction
@@ -30,30 +37,26 @@ POINTS = 6
 AMPLITUDES = np.array([3.0, 3.4, 3.9, 4.1, 3.7, 3.2])
 ERRORS = np.array([0.11, 0.09, 0.14, 0.08, 0.12, 0.10])
 
-
 def _schema(repeats: int = 1) -> DatasetSchema:
-    return DatasetSchema.create(
-        Axis.create("repeat", size=repeats),
-        PointTable.from_columns({"x": np.arange(POINTS, dtype=np.int64)}),
-        data_axes=(),
+    return make_dataset_schema(
+        repeat_domain(size=repeats),
+        mapped_domain_from_columns({"x": np.arange(POINTS, dtype=np.int64)}),
+        cell_axes=(),
         dtype=np.float64,
-        generation="sample-sigma",
     )
 
-
-def _one_fit_per_point(*, with_sigma: bool) -> DatasetSnapshot:
+def _one_fit_per_point(*, with_sigma: bool) -> OwnedSnapshot:
     """One fitted amplitude per x, each carrying its own error."""
 
     schema = _schema()
-    return DatasetSnapshot(
+    return make_snapshot(
         schema,
         AMPLITUDES.reshape(1, POINTS),
         revision=0,
         sigma=ERRORS.reshape(1, POINTS) if with_sigma else None,
     )
 
-
-def _curve_sem(snapshot: DatasetSnapshot) -> np.ndarray:
+def _curve_sem(snapshot: OwnedSnapshot) -> np.ndarray:
     session = PlotSession(
         snapshot,
         CurvePlot(AxisRef.point("x")),
@@ -66,13 +69,11 @@ def _curve_sem(snapshot: DatasetSnapshot) -> np.ndarray:
     finally:
         session.close()
 
-
 def test_one_fit_per_point_draws_its_own_error() -> None:
     """The band over a bucket of one is that sample's stated error."""
 
     sem = _curve_sem(_one_fit_per_point(with_sigma=True))
     assert np.allclose(sem, ERRORS, rtol=0, atol=0)
-
 
 def test_without_a_stated_error_a_bucket_of_one_still_has_no_band() -> None:
     """The sigma is what produces it -- not some default that hides a NaN.
@@ -84,7 +85,6 @@ def test_without_a_stated_error_a_bucket_of_one_still_has_no_band() -> None:
 
     sem = _curve_sem(_one_fit_per_point(with_sigma=False))
     assert np.all(np.isnan(sem))
-
 
 def test_a_scatter_of_several_ignores_the_stated_errors() -> None:
     """Two or more samples: the band is the scatter, sigma or no sigma.
@@ -99,8 +99,8 @@ def test_a_scatter_of_several_ignores_the_stated_errors() -> None:
     rng = np.random.default_rng(20260828)
     values = AMPLITUDES[None, :] + rng.normal(0.0, 0.3, size=(repeats, POINTS))
     schema = _schema(repeats)
-    bare = DatasetSnapshot(schema, values, revision=0)
-    stated = DatasetSnapshot(
+    bare = make_snapshot(schema, values, revision=0)
+    stated = make_snapshot(
         schema,
         values,
         revision=0,
@@ -112,19 +112,17 @@ def test_a_scatter_of_several_ignores_the_stated_errors() -> None:
     assert np.allclose(_curve_sem(bare), expected, rtol=1e-12)
     assert np.allclose(_curve_sem(stated), expected, rtol=1e-12)
 
-
 def test_a_rolling_shot_of_one_fit_carries_its_error() -> None:
     """One fit per shot: each drawn point's band is that fit's error."""
 
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": np.arange(1, dtype=np.int64)}),
-        data_axes=(),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"x": np.arange(1, dtype=np.int64)}),
+        cell_axes=(),
         dtype=np.float64,
-        generation="sample-sigma-rolling",
     )
     for amplitude, error in zip(AMPLITUDES, ERRORS):
-        snapshot = DatasetSnapshot(
+        snapshot = make_snapshot(
             schema,
             np.asarray([[amplitude]]),
             revision=0,
@@ -137,21 +135,19 @@ def test_a_rolling_shot_of_one_fit_carries_its_error() -> None:
         assert history[0].sem is not None
         assert float(history[0].sem[0]) == pytest.approx(error, rel=0, abs=0)
 
-
 def test_a_grouped_rolling_shot_carries_the_error_of_each_group() -> None:
     """Per-site rolling: one sample per site per shot, each with its own."""
 
     sites = 4
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"site": np.arange(sites, dtype=np.int64)}),
-        data_axes=(),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"site": np.arange(sites, dtype=np.int64)}),
+        cell_axes=(),
         dtype=np.float64,
-        generation="sample-sigma-sites",
     )
     values = np.asarray([[1.0, 2.0, 3.0, 4.0]])
     errors = np.asarray([[0.10, 0.20, 0.30, 0.40]])
-    view = DataView(DatasetSnapshot(schema, values, revision=0, sigma=errors))
+    view = DataView(make_snapshot(schema, values, revision=0, sigma=errors))
     history = view.rolling_history(
         group=AxisRef.point("site"),
         aggregation=Reduction.MEAN,
@@ -160,19 +156,17 @@ def test_a_grouped_rolling_shot_carries_the_error_of_each_group() -> None:
     assert len(history) == 1
     assert np.allclose(np.asarray(history[0].sem, dtype=float), errors[0])
 
-
 def test_the_whole_revision_pooled_uses_its_one_samples_error() -> None:
     """The ungrouped whole-revision reduction takes the same route."""
 
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": np.arange(1, dtype=np.int64)}),
-        data_axes=(),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"x": np.arange(1, dtype=np.int64)}),
+        cell_axes=(),
         dtype=np.float64,
-        generation="sample-sigma-pooled",
     )
     view = DataView(
-        DatasetSnapshot(
+        make_snapshot(
             schema,
             np.asarray([[7.5]]),
             revision=0,

@@ -3,31 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, ClassVar
+from math import prod
+from typing import Any
 
 import numpy as np
-from .validation import canonical_text, nonnegative_integer, positive_integer
+from .validation import canonical_text, positive_integer
 
-from ._arrays import canonical_dtype
+from ._arrays import canonical_dtype, immutable_array
 from .axis import (
-    _POINT_ORDINAL_AXIS_ID,
-    HISTOGRAM_BIN,
-    READOUT_EVENT,
-    PRIMARY_INDEX,
-    SCAN_POINT,
-    SITE,
-    SPATIAL_X,
-    SPATIAL_Y,
-    SPECTRAL,
     AxisId,
-    AxisRoleId,
     AxisSpec,
-    CoordinateFrameId,
-    CoordinateScalar,
     REPEAT,
     SCALAR,
     SCALAR_AXIS,
-    canonical_coordinate_scalar,
 )
 from .validity import ValidityContract, ValidityMode
 
@@ -48,322 +36,121 @@ def _ordered_subset(candidate: tuple[AxisId, ...], available: tuple[AxisId, ...]
     return positions == sorted(positions)
 
 
-_POINT_ROLES = frozenset(
-    {
-        PRIMARY_INDEX,
-        SCAN_POINT,
-        READOUT_EVENT,
-        SPATIAL_X,
-        SPATIAL_Y,
-        SPECTRAL,
-        HISTOGRAM_BIN,
-        SITE,
-    }
-)
+@dataclass(frozen=True)
+class DomainSpec:
+    """One physical domain and its logical named axes.
 
-
-def point_domain_admits(role: AxisRoleId) -> bool:
-    """Whether the point-row domain can carry a column in this role.
-
-    The vocabulary is narrower than the axis vocabulary as a whole -- a
-    repeat is not an independent variable, and neither is a component or
-    the implicit scalar -- so a caller RE-STATING an axis as a point
-    column has to ask before it inherits that axis's role.  Asking here
-    keeps one list; the alternative was every such caller carrying its
-    own copy of it.
+    Repeat and Point use explicit, axis-major ``axis_codes`` over their flat
+    carrier. Cell-data leaves ``axis_codes`` as ``None``: each axis then maps
+    by position to one dense physical dimension. Dense codes are only the
+    corresponding one-dimensional identity, never a broadcast pixel plane.
     """
 
-    return isinstance(role, AxisRoleId) and role in _POINT_ROLES
-
-
-@dataclass(frozen=True)
-class PointColumn:
-    """One correlated metadata column over the shared point-row domain."""
-
-    coordinate_id: AxisId
-    name: str
-    role: AxisRoleId
-    value_kind: str
-    values: tuple[CoordinateScalar, ...]
-    unit: str | None = None
-    coordinate_frame: CoordinateFrameId | None = None
-    coordinate_labels: tuple[str, ...] | None = None
-
-    NUMERIC: ClassVar[str] = "NUMERIC"
-    TEXT: ClassVar[str] = "TEXT"
+    shape: tuple[int, ...]
+    axes: tuple[AxisSpec, ...] = ()
+    axis_codes: tuple[tuple[int, ...], ...] | None = None
+    _codes: Any = field(init=False, repr=False, compare=False, default=None)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.coordinate_id, AxisId):
-            raise TypeError("coordinate_id must be AxisId")
-        canonical_text(self.name, "point column name")
-        if not isinstance(self.role, AxisRoleId) or self.role not in _POINT_ROLES:
-            raise ValueError("point column role is outside the point-domain role set")
-        if self.value_kind not in {self.NUMERIC, self.TEXT}:
-            raise ValueError("point column value_kind must be NUMERIC or TEXT")
-        if (
-            self.value_kind == self.NUMERIC
-            and isinstance(self.values, np.ndarray)
-            and self.values.ndim == 1
-            and issubclass(self.values.dtype.type, np.integer)
-        ):
-            # The dtype IS the proof: a one-dimensional integer array can
-            # hold nothing but plain finite integers, which are their own
-            # canonical form and are NUMERIC by definition -- so the
-            # per-value canonical walk below would re-prove 
-            # element by element what one dtype check already settled.  A
-            # materialized indexed history states its primary column for
-            # count x rows coordinates this way on every retained shot.
-            values = tuple(self.values.tolist())
-            if not values:
-                raise ValueError("point column values must be non-empty")
-        else:
-            values = tuple(
-                canonical_coordinate_scalar(value, "point coordinate")
-                for value in self.values
-            )
-            if not values:
-                raise ValueError("point column values must be non-empty")
-            if self.value_kind == self.NUMERIC:
-                if any(
-                    value is not None and not isinstance(value, (int, float))
-                    for value in values
-                ):
-                    raise TypeError(
-                        "NUMERIC point columns accept only numbers or None"
-                    )
-        if self.value_kind != self.NUMERIC:
-            if any(value is not None and not isinstance(value, str) for value in values):
-                raise TypeError("TEXT point columns accept only text or None")
-            if self.unit is not None:
-                raise ValueError("TEXT point columns cannot declare a unit")
-        object.__setattr__(self, "values", values)
-        if self.unit is not None:
-            canonical_text(self.unit, "point column unit")
-        if self.coordinate_frame is not None and not isinstance(
-            self.coordinate_frame, CoordinateFrameId
-        ):
-            raise TypeError("coordinate_frame must be CoordinateFrameId or None")
-        if self.coordinate_labels is not None:
-            labels = tuple(
-                canonical_text(label, "point coordinate label")
-                for label in self.coordinate_labels
-            )
-            if len(labels) != len(values):
+        shape = tuple(
+            positive_integer(size, "domain dimension size") for size in self.shape
+        )
+        if not shape:
+            raise ValueError("domain shape must contain at least one dimension")
+        axes = tuple(self.axes)
+        if any(not isinstance(axis, AxisSpec) for axis in axes):
+            raise TypeError("domain axes must contain AxisSpec values")
+        _unique_axis_ids(axes, context="domain")
+        for axis in axes:
+            if axis.coordinates is not None:
+                if any(value is None for value in axis.coordinates):
+                    raise ValueError("domain axis coordinates cannot be missing")
+                if len(set(axis.coordinates)) != axis.size:
+                    raise ValueError("domain axis coordinates must be unique")
+
+        authored_codes = self.axis_codes
+        normalized_codes: tuple[tuple[int, ...], ...] | None
+        cached_codes: list[np.ndarray] = []
+        if authored_codes is None:
+            if len(axes) != len(shape) or any(
+                axis.size != size for axis, size in zip(axes, shape, strict=True)
+            ):
                 raise ValueError(
-                    "point coordinate_labels length must match point values"
+                    "a dense domain needs one same-sized axis per physical dimension"
                 )
-            labels_by_value: dict[CoordinateScalar, str] = {}
-            for value, label in zip(values, labels, strict=True):
-                previous = labels_by_value.setdefault(value, label)
-                if previous != label:
-                    raise ValueError(
-                        "equal point coordinates must share one display label"
+            normalized_codes = None
+            for axis in axes:
+                codes = immutable_array(
+                    np.arange(axis.size, dtype=np.int64),
+                    dtype=np.dtype("<i8"),
+                    shape=(axis.size,),
+                )
+                cached_codes.append(codes)
+        else:
+            authored_codes = tuple(authored_codes)
+            if len(shape) != 1:
+                raise ValueError("an explicitly mapped domain must have one physical dimension")
+            if len(authored_codes) != len(axes):
+                raise ValueError("axis_codes must contain one vector per axis")
+            carrier_size = prod(shape)
+            normalized: list[tuple[int, ...]] = []
+            for axis, entries in zip(axes, authored_codes, strict=True):
+                array = np.asarray(entries)
+                if array.ndim != 1 or array.size != carrier_size:
+                    raise ValueError("each axis code vector must match domain size")
+                if not issubclass(array.dtype.type, np.integer):
+                    raise TypeError("axis codes must be integers")
+                codes = np.asarray(array, dtype=np.int64)
+                if bool(np.any(codes < 0)) or bool(np.any(codes >= axis.size)):
+                    raise ValueError("axis code is outside its coordinate domain")
+                canonical = tuple(codes.tolist())
+                cached_codes.append(
+                    immutable_array(
+                        codes,
+                        dtype=np.dtype("<i8"),
+                        shape=(carrier_size,),
                     )
-            object.__setattr__(self, "coordinate_labels", labels)
+                )
+                normalized.append(canonical)
+            normalized_codes = tuple(normalized)
+            if not axes and carrier_size != 1:
+                raise ValueError("a mapped domain with multiple rows needs a named axis")
 
-    def replicated(self, times: int) -> PointColumn:
-        """This canonical column repeated whole, without re-proving it.
+        object.__setattr__(self, "shape", shape)
+        object.__setattr__(self, "axes", axes)
+        object.__setattr__(self, "axis_codes", normalized_codes)
+        object.__setattr__(self, "_codes", tuple(cached_codes))
 
-        Replication cannot break any law ``__post_init__`` checks one
-        value at a time: the values are already canonical, the value kind
-        already holds for every one of them, and repeating (value, label)
-        pairs cannot make equal coordinates disagree on a label.  So the
-        per-element walk is skipped -- a materialized indexed history
-        builds its event columns this way for every retained shot, and
-        the walk was most of the cost of materializing one.
-        """
-
-        times = positive_integer(times, "replication count")
-        if times == 1:
-            return self
-        column = object.__new__(PointColumn)
-        object.__setattr__(column, "coordinate_id", self.coordinate_id)
-        object.__setattr__(column, "name", self.name)
-        object.__setattr__(column, "role", self.role)
-        object.__setattr__(column, "value_kind", self.value_kind)
-        object.__setattr__(column, "values", self.values * times)
-        object.__setattr__(column, "unit", self.unit)
-        object.__setattr__(column, "coordinate_frame", self.coordinate_frame)
-        object.__setattr__(
-            column,
-            "coordinate_labels",
-            None
-            if self.coordinate_labels is None
-            else self.coordinate_labels * times,
-        )
-        return column
-
-
-@dataclass(frozen=True)
-class PointTable:
-    """The authored ordered point rows shared by every repeat of a Dataset."""
-
-    row_count: int
-    columns: tuple[PointColumn, ...] = ()
-
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "row_count",
-            positive_integer(self.row_count, "point row_count"),
-        )
-        columns = tuple(self.columns)
-        if any(not isinstance(column, PointColumn) for column in columns):
-            raise TypeError("columns must contain PointColumn values")
-        ids = tuple(column.coordinate_id for column in columns)
-        if len(set(ids)) != len(ids):
-            raise ValueError("point coordinate ids must be unique")
-        if any(len(column.values) != self.row_count for column in columns):
-            raise ValueError("every point column must contain exactly row_count values")
-        object.__setattr__(self, "columns", columns)
-
-    def column(self, coordinate_id: AxisId) -> PointColumn:
-        if not isinstance(coordinate_id, AxisId):
-            raise TypeError("coordinate_id must be AxisId")
-        for column in self.columns:
-            if column.coordinate_id == coordinate_id:
-                return column
-        raise KeyError(coordinate_id)
-
-
-@dataclass(frozen=True)
-class GridTopology:
-    """Explicit producer-owned mapping from point rows to logical grid cells.
-
-    A topology dimension may be declared only here; a matching PointColumn is
-    optional metadata, not part of the topology's completeness requirement.
-    """
-
-    dimension_ids: tuple[AxisId, ...]
-    coordinate_domains: tuple[tuple[CoordinateScalar, ...], ...]
-    row_to_cell: tuple[tuple[int, ...], ...]
-    #: One label per domain coordinate, per dimension; None for a dimension
-    #: whose coordinates are their own labels.  Labels live WITH the domain:
-    #: a cropped view keeps every domain coordinate but only the surviving
-    #: rows, and a label joined through a point column's rows vanished with
-    #: them.  A matching column repeats them per row and must agree.
-    coordinate_labels: tuple[tuple[str, ...] | None, ...] | None = None
-    #: Cached on first request, like the schema digest beside it.
-    _cell_indices: Any = field(init=False, repr=False, compare=False, default=None)
-
-    def __post_init__(self) -> None:
-        dimensions = tuple(self.dimension_ids)
-        if not dimensions or any(not isinstance(item, AxisId) for item in dimensions):
-            raise TypeError("dimension_ids must contain at least one AxisId")
-        if len(set(dimensions)) != len(dimensions):
-            raise ValueError("grid dimension ids must be unique")
-        domains = tuple(
-            tuple(
-                canonical_coordinate_scalar(value, "grid coordinate")
-                for value in domain
-            )
-            for domain in self.coordinate_domains
-        )
-        if len(domains) != len(dimensions):
-            raise ValueError("grid domains must match dimension_ids")
-        if any(not domain for domain in domains):
-            raise ValueError("grid coordinate domains must be non-empty")
-        if any(any(value is None for value in domain) for domain in domains):
-            raise ValueError("grid coordinate domains cannot contain missing values")
-        if any(len(set(domain)) != len(domain) for domain in domains):
-            raise ValueError("grid coordinate domains must contain unique values")
-        mapping: list[tuple[int, ...]] = []
-        for cell in self.row_to_cell:
-            normalized = tuple(
-                nonnegative_integer(index, "grid cell index") for index in cell
-            )
-            if len(normalized) != len(dimensions):
-                raise ValueError("grid cell rank must match dimension_ids")
-            if any(index >= len(domain) for index, domain in zip(normalized, domains)):
-                raise ValueError("grid cell index is outside its coordinate domain")
-            mapping.append(normalized)
-        if not mapping:
-            raise ValueError("row_to_cell must be non-empty")
-        if len(set(mapping)) != len(mapping):
-            raise ValueError("row_to_cell must be injective")
-        labels = self.coordinate_labels
-        if labels is not None:
-            labels = tuple(
-                None if entry is None else tuple(entry) for entry in labels
-            )
-            if len(labels) != len(dimensions):
-                raise ValueError("grid coordinate_labels must match dimension_ids")
-            for entry, domain in zip(labels, domains, strict=True):
-                if entry is None:
-                    continue
-                if len(entry) != len(domain) or any(
-                    not isinstance(label, str) for label in entry
-                ):
-                    raise ValueError(
-                        "grid coordinate labels must name every domain coordinate"
-                    )
-            if all(entry is None for entry in labels):
-                labels = None
-        object.__setattr__(self, "dimension_ids", dimensions)
-        object.__setattr__(self, "coordinate_domains", domains)
-        object.__setattr__(self, "row_to_cell", tuple(mapping))
-        object.__setattr__(self, "coordinate_labels", labels)
-        object.__setattr__(self, "_cell_indices", None)
+    @property
+    def size(self) -> int:
+        return prod(self.shape)
 
     @property
     def logical_shape(self) -> tuple[int, ...]:
-        return tuple(len(domain) for domain in self.coordinate_domains)
+        return tuple(axis.size for axis in self.axes)
 
-    @property
-    def cell_indices(self) -> np.ndarray:
-        """``(rows, rank)`` int64 cell indices, computed once, on request.
+    def axis(self, axis_id: AxisId) -> AxisSpec:
+        if not isinstance(axis_id, AxisId):
+            raise TypeError("axis_id must be AxisId")
+        for axis in self.axes:
+            if axis.axis_id == axis_id:
+                return axis
+        raise KeyError(axis_id)
 
-        The tuple-of-tuples is the record; every consumer that wants one
-        DIMENSION of it wants a column of numbers, and walking the tuples
-        per revision is a Python loop over every point row -- twelve
-        milliseconds a frame on a 200x200 scan, paid again on the next
-        frame for a map that cannot change.  The array is immutable and
-        shared, exactly like the fingerprint cached beside it.
-        """
+    def codes(self, axis_id: AxisId) -> np.ndarray:
+        """Readonly one-dimensional codes along the axis's physical dimension."""
 
-        cached = self._cell_indices
-        if cached is None:
-            cached = np.asarray(self.row_to_cell, dtype=np.int64)
-            cached.setflags(write=False)
-            object.__setattr__(self, "_cell_indices", cached)
-        return cached
+        axis = self.axis(axis_id)
+        return self._codes[self.axes.index(axis)]
+
+    def physical_dimension(self, axis_id: AxisId) -> int:
+        """The domain-local physical dimension carrying one logical axis."""
+
+        axis = self.axis(axis_id)
+        return self.axes.index(axis) if self.axis_codes is None else 0
 
 
-def _validate_grid_topology(point_table: PointTable, topology: GridTopology) -> None:
-    if len(topology.row_to_cell) != point_table.row_count:
-        raise ValueError("GridTopology must map every PointTable row")
-    columns = {column.coordinate_id: column for column in point_table.columns}
-    for position, dimension_id in enumerate(topology.dimension_ids):
-        column = columns.get(dimension_id)
-        if column is None:
-            continue
-        domain = topology.coordinate_domains[position]
-        if any(
-            column.values[ordinal] != domain[cell[position]]
-            for ordinal, cell in enumerate(topology.row_to_cell)
-        ):
-            raise ValueError(
-                "GridTopology cell values must match their PointTable columns"
-            )
-        if column.coordinate_labels is None:
-            continue
-        labels = (
-            None
-            if topology.coordinate_labels is None
-            else topology.coordinate_labels[position]
-        )
-        if labels is None:
-            raise ValueError(
-                "a labelled PointColumn on a GridTopology dimension needs the "
-                "topology to declare the same labels per coordinate"
-            )
-        if any(
-            column.coordinate_labels[ordinal] != labels[cell[position]]
-            for ordinal, cell in enumerate(topology.row_to_cell)
-        ):
-            raise ValueError(
-                "GridTopology coordinate labels must match their PointTable columns"
-            )
+SCALAR_DOMAIN = DomainSpec((1,), (SCALAR_AXIS,))
 
 
 #: Why a schema has a digest at all, so this is not re-litigated.
@@ -384,7 +171,6 @@ def _validate_grid_topology(point_table: PointTable, topology: GridTopology) -> 
 
 @dataclass(frozen=True)
 class ValueSchema:
-    data_axes: tuple[AxisSpec, ...]
     validity_contract: ValidityContract
     dtype: np.dtype
     value_unit: str | None = None
@@ -393,42 +179,12 @@ class ValueSchema:
     _fingerprint: str | None = field(init=False, repr=False, compare=False, default=None)
 
     def __post_init__(self) -> None:
-        axes = tuple(self.data_axes)
-        if any(not isinstance(axis, AxisSpec) for axis in axes):
-            raise TypeError("data_axes must contain AxisSpec values")
-        if not axes:
-            raise ValueError(
-                "data_axes must be non-empty; use ValueSchema.scalar() for a scalar value"
-            )
-        scalar_axes = tuple(axis for axis in axes if axis.role == SCALAR)
-        if scalar_axes and axes != (SCALAR_AXIS,):
-            raise ValueError(
-                "the canonical scalar carrier must be the sole data axis"
-            )
-        _unique_axis_ids(axes, context="data")
-        object.__setattr__(self, "data_axes", axes)
         if not isinstance(self.validity_contract, ValidityContract):
             raise TypeError("validity_contract must be ValidityContract")
-        if scalar_axes and self.validity_contract.mode is not ValidityMode.VALUE:
-            raise ValueError("the scalar carrier uses value-level validity")
         object.__setattr__(self, "dtype", canonical_dtype(self.dtype))
         if self.value_unit is not None:
             canonical_text(self.value_unit, "value_unit")
-        available = tuple(axis.axis_id for axis in axes)
-        declared = self.validity_contract.component_axis_ids
-        if self.validity_contract.mode is ValidityMode.COMPONENTS and not _ordered_subset(
-            declared, available
-        ):
-            raise ValueError("validity component axes must be an ordered subset of data axes")
         object.__setattr__(self, "_fingerprint", None)
-
-    @property
-    def data_shape(self) -> tuple[int, ...]:
-        return tuple(axis.size for axis in self.data_axes)
-
-    @property
-    def is_scalar(self) -> bool:
-        return self.data_axes == (SCALAR_AXIS,)
 
     @classmethod
     def scalar(
@@ -437,7 +193,6 @@ class ValueSchema:
         value_unit: str | None = None,
     ) -> "ValueSchema":
         return cls(
-            (SCALAR_AXIS,),
             ValidityContract.value(),
             dtype,
             value_unit,
@@ -453,19 +208,13 @@ class ValueSchema:
             object.__setattr__(self, "_fingerprint", value_schema_fingerprint(self))
         return self._fingerprint
 
-    def axis(self, axis_id: AxisId) -> AxisSpec:
-        for axis in self.data_axes:
-            if axis.axis_id == axis_id:
-                return axis
-        raise KeyError(axis_id)
-
 
 @dataclass(frozen=True)
 class DatasetSchema:
-    repeat_axis: AxisSpec
-    point_table: PointTable
-    grid_topology: GridTopology | None
-    cell_schema: ValueSchema
+    repeat_domain: DomainSpec
+    point_domain: DomainSpec
+    cell_domain: DomainSpec
+    value_schema: ValueSchema
     #: Cached on first request.  Computed eagerly it cost 23 us per schema,
     #: paid by every intermediate schema construction that never names it.
     _fingerprint: str | None = field(init=False, repr=False, compare=False, default=None)
@@ -473,9 +222,7 @@ class DatasetSchema:
         init=False, repr=False, compare=False, default=None
     )
     #: Cached on first request, like the fingerprint beside it.  Building
-    #: it re-validates every point coordinate the PointColumn already
-    #: canonicalised: 26 ms on a 200x200 scan, and a committed ROI rebuilds
-    #: it twice per publication for a map that cannot change.
+    #: it walks stable axis metadata that cannot change with a publication.
     _axis_catalog: tuple | None = field(
         init=False, repr=False, compare=False, default=None
     )
@@ -487,37 +234,46 @@ class DatasetSchema:
     _indexed_layout: Any = field(init=False, repr=False, compare=False, default=None)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.repeat_axis, AxisSpec) or self.repeat_axis.role != REPEAT:
-            raise ValueError("repeat_axis must be an AxisSpec with role 'repeat'")
-        if not isinstance(self.point_table, PointTable):
-            raise TypeError("point_table must be PointTable")
-        if self.grid_topology is not None and not isinstance(
-            self.grid_topology, GridTopology
+        if not isinstance(self.repeat_domain, DomainSpec):
+            raise TypeError("repeat_domain must be DomainSpec")
+        if self.repeat_domain.axis_codes is None or len(self.repeat_domain.shape) != 1:
+            raise ValueError("repeat_domain must be an explicitly mapped flat domain")
+        if any(axis.role != REPEAT for axis in self.repeat_domain.axes):
+            raise ValueError("repeat-domain axes must carry the repeat role")
+        if not isinstance(self.point_domain, DomainSpec):
+            raise TypeError("point_domain must be DomainSpec")
+        if self.point_domain.axis_codes is None or len(self.point_domain.shape) != 1:
+            raise ValueError("point_domain must be an explicitly mapped flat domain")
+        if any(axis.role == REPEAT for axis in self.point_domain.axes):
+            raise ValueError("repeat-role axes belong only to the Repeat domain")
+        if not isinstance(self.cell_domain, DomainSpec):
+            raise TypeError("cell_domain must be DomainSpec")
+        if self.cell_domain.axis_codes is not None:
+            raise ValueError("cell_domain must use dense implicit axis mapping")
+        if any(axis.role == REPEAT for axis in self.cell_domain.axes):
+            raise ValueError("REPEAT role belongs only to the Repeat domain")
+        scalar_axes = tuple(axis for axis in self.cell_domain.axes if axis.role == SCALAR)
+        if scalar_axes and self.cell_domain != SCALAR_DOMAIN:
+            raise ValueError("the canonical scalar domain must be the whole Cell domain")
+        if not isinstance(self.value_schema, ValueSchema):
+            raise TypeError("value_schema must be ValueSchema")
+        if scalar_axes and self.value_schema.validity_contract.mode is not ValidityMode.VALUE:
+            raise ValueError("the scalar carrier uses value-level validity")
+        available = tuple(axis.axis_id for axis in self.cell_domain.axes)
+        declared = self.value_schema.validity_contract.component_axis_ids
+        if self.value_schema.validity_contract.mode is ValidityMode.COMPONENTS and not _ordered_subset(
+            declared, available
         ):
-            raise TypeError("grid_topology must be GridTopology or None")
-        if not isinstance(self.cell_schema, ValueSchema):
-            raise TypeError("cell_schema must be ValueSchema")
-        if any(axis.role == REPEAT for axis in self.cell_schema.data_axes):
-            raise ValueError("REPEAT role belongs only to DatasetSchema.repeat_axis")
-        all_ids = (
-            self.repeat_axis.axis_id,
-            *(column.coordinate_id for column in self.point_table.columns),
-            *(axis.axis_id for axis in self.cell_schema.data_axes),
-        )
-        topology_ids = () if self.grid_topology is None else self.grid_topology.dimension_ids
-        if _POINT_ORDINAL_AXIS_ID in (*all_ids, *topology_ids):
             raise ValueError(
-                "dataset axis ids cannot use the reserved point-ordinal identity"
+                "validity component axes must be an ordered subset of Cell axes"
             )
+        all_ids = (
+            *(axis.axis_id for axis in self.repeat_domain.axes),
+            *(axis.axis_id for axis in self.point_domain.axes),
+            *(axis.axis_id for axis in self.cell_domain.axes),
+        )
         if len(set(all_ids)) != len(all_ids):
-            raise ValueError("dataset tensor and point coordinate ids must be unique")
-        if set(topology_ids) & {
-            self.repeat_axis.axis_id,
-            *(axis.axis_id for axis in self.cell_schema.data_axes),
-        }:
-            raise ValueError("grid topology dimension ids must be distinct from dataset tensor ids")
-        if self.grid_topology is not None:
-            _validate_grid_topology(self.point_table, self.grid_topology)
+            raise ValueError("dataset axis ids must be unique across all domains")
         object.__setattr__(self, "_fingerprint", None)
         object.__setattr__(self, "_structure_fingerprint", None)
         object.__setattr__(self, "_axis_catalog", None)
@@ -526,9 +282,9 @@ class DatasetSchema:
     @property
     def physical_shape(self) -> tuple[int, ...]:
         return (
-            self.repeat_axis.size,
-            self.point_table.row_count,
-            *self.cell_schema.data_shape,
+            *self.repeat_domain.shape,
+            *self.point_domain.shape,
+            *self.cell_domain.shape,
         )
 
     @property

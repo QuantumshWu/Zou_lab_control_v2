@@ -25,12 +25,12 @@ from zlc_plot.selectors import (
 @pytest.mark.parametrize(
     "spec",
     (
-        CurvePlot(AxisRef.point("x"), group=AxisRef.data("component")),
-        ImagePlot(AxisRef.data("x"), AxisRef.data("y")),
+        CurvePlot(AxisRef.point("x"), group=AxisRef.cell_data("component")),
+        ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y")),
         HistogramPlot(labels=PlotLabels(title="distribution")),
-        RollingPlot(group=AxisRef.data("site")),
+        RollingPlot(group=AxisRef.cell_data("site")),
         FacetGridPlot(
-            AxisRef.data("site"),
+            AxisRef.cell_data("site"),
             HistogramPlot(labels=PlotLabels(x="signal", y="count")),
         ),
     ),

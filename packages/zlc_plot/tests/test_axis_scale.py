@@ -24,7 +24,14 @@ from threading import Barrier
 import numpy as np
 import pytest
 
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from data_factory import (
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
+from zlc_data import REPEAT, SITE
 from zlc_plot import HistogramPlot, PlotSession
 from zlc_plot._axis_scale import LINEAR, LOG, axis_space, axis_value, midpoint
 from zlc_plot._axis_transform import AxisTransform
@@ -81,16 +88,15 @@ def test_pixel_and_data_round_trip_under_every_scale() -> None:
 
 
 def _histogram_session() -> PlotSession:
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"shot": np.asarray([0.0])}),
-        data_axes=(Axis.create("site", values=[float(i) for i in range(64)]),),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"shot": np.asarray([0.0])}),
+        cell_axes=(axis("site", values=[float(i) for i in range(64)], role=SITE),),
         dtype=np.float64,
-        generation="axis-scale",
     )
     rng = np.random.default_rng(5)
     values = rng.poisson(6.0, size=(1, 1, 64)).astype(np.float64)
-    session = PlotSession(DatasetSnapshot(schema, values, 0), HistogramPlot())
+    session = PlotSession(make_snapshot(schema, values, 0), HistogramPlot())
     session.set_size("2x2")
     return session
 

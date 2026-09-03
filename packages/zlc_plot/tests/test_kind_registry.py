@@ -14,52 +14,48 @@ from zlc_plot.specs import (
     RollingPlot,
 )
 from zlc_plot import AxisRef
-from data_factory import Axis, DatasetSchema, PointTable, PointTopology
+from data_factory import (
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
+from zlc_data import DatasetSchema, REPEAT, SPATIAL_X, SPATIAL_Y
 
 
 def _schema_families() -> tuple[DatasetSchema, ...]:
-    point = PointTable.from_columns({"x": np.arange(4.0)})
-    topology_points = PointTable.from_columns(
+    point = mapped_domain_from_columns({"x": np.arange(4.0)})
+    topology_points = mapped_domain_from_columns(
         {
             "x": np.repeat(np.arange(2.0), 3),
             "y": np.tile(np.arange(3.0), 2),
         }
     )
-    topology = PointTopology.from_cartesian(
-        (
-            Axis.create("x", values=np.arange(2.0)),
-            Axis.create("y", values=np.arange(3.0)),
-        ),
-        point_table=topology_points,
-    )
     return (
-        DatasetSchema.create(
-            Axis.create("repeat", size=2), point, generation="kind-default-point"
+        make_dataset_schema(
+            repeat_domain(size=2), point
         ),
-        DatasetSchema.create(
-            Axis.create("repeat", size=2),
+        make_dataset_schema(
+            repeat_domain(size=2),
             topology_points,
-            point_topology=topology,
-            generation="kind-default-topology",
         ),
-        DatasetSchema.create(
-            Axis.create("repeat", size=2),
-            PointTable.from_columns({"sample": np.array([0.0])}),
-            data_axes=(
-                Axis.create("row", size=3),
-                Axis.create("column", size=4),
+        make_dataset_schema(
+            repeat_domain(size=2),
+            mapped_domain_from_columns({"sample": np.array([0.0])}),
+            cell_axes=(
+                axis("row", size=3, role=SPATIAL_Y),
+                axis("column", size=4, role=SPATIAL_X),
             ),
-            generation="kind-default-dense-image",
         ),
         # A column an operator reads as "site" that a resolver finds under a
         # different id.  Every other family here has the two equal, which is
         # why "looked it up by the wrong one" was invisible for so long.
-        DatasetSchema.create(
-            Axis.create("repeat", size=2),
-            PointTable.from_columns(
+        make_dataset_schema(
+            repeat_domain(size=2),
+            mapped_domain_from_columns(
                 {"site": np.arange(6.0)}, ids={"site": "readout.site"}
             ),
-            generation="kind-default-renamed-point",
         ),
     )
 
@@ -140,15 +136,15 @@ def test_default_specs_put_the_innermost_scan_loop_on_x() -> None:
     facet = next(h for h in HANDLERS if h.kind is PlotKind.FACET_GRID)
 
     inferred_curve = curve.default_spec(topology_schema)
-    assert inferred_curve.x == AxisRef.point_dimension("y")
+    assert inferred_curve.x == AxisRef.point("y")
 
     inferred_image = image.default_spec(topology_schema)
-    assert inferred_image.x == AxisRef.point_dimension("y")
-    assert inferred_image.y == AxisRef.point_dimension("x")
+    assert inferred_image.x == AxisRef.point("y")
+    assert inferred_image.y == AxisRef.point("x")
 
     dense_image = image.default_spec(dense_schema)
-    assert dense_image.x == AxisRef.data("column")
-    assert dense_image.y == AxisRef.data("row")
+    assert dense_image.x == AxisRef.cell_data("column")
+    assert dense_image.y == AxisRef.cell_data("row")
 
     # FacetGrid on a scalar two-dimension scan has no automatic facet left:
     # the heatmap consumes both scan dimensions, while repeat is acquisition
@@ -162,24 +158,15 @@ def test_default_specs_put_the_innermost_scan_loop_on_x() -> None:
 def test_repeat_is_not_an_automatic_facet_but_remains_explicitly_valid() -> None:
     """A default never guesses repeat; an authored repeat facet still works."""
 
-    points = PointTable.from_columns(
+    points = mapped_domain_from_columns(
         {
             "x": np.repeat(np.arange(2.0), 3),
             "y": np.tile(np.arange(3.0), 2),
         }
     )
-    topology = PointTopology.from_cartesian(
-        (
-            Axis.create("x", values=np.arange(2.0)),
-            Axis.create("y", values=np.arange(3.0)),
-        ),
-        point_table=points,
-    )
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
         points,
-        point_topology=topology,
-        generation="facet-default-no-repeat",
     )
     facet = next(h for h in HANDLERS if h.kind is PlotKind.FACET_GRID)
     image = next(h for h in HANDLERS if h.kind is PlotKind.IMAGE)
@@ -189,31 +176,28 @@ def test_repeat_is_not_an_automatic_facet_but_remains_explicitly_valid() -> None
     assert isinstance(inferred, FacetGridPlot)
     assert inferred.facet is None
     heatmap = image.default_spec(schema)
-    assert heatmap.x == AxisRef.point_dimension("y")
-    assert heatmap.y == AxisRef.point_dimension("x")
-    explicit = FacetGridPlot(AxisRef.repeat(), heatmap)
+    assert heatmap.x == AxisRef.point("y")
+    assert heatmap.y == AxisRef.point("x")
+    explicit = FacetGridPlot(AxisRef.repeat("repeat"), heatmap)
     from zlc_plot.data_view import DataView
-    from data_factory import DatasetSnapshot
-
     DataView(
-        DatasetSnapshot(schema, np.zeros(schema.shape, dtype=np.float64), revision=0)
+        make_snapshot(schema, np.zeros(schema.physical_shape, dtype=np.float64), revision=0)
     ).validate_facet(explicit)
 
-    # A flat point table with a single repeat has nothing to face either: the
+    # A flat Point domain with a single repeat has nothing to face either: the
     # curve IS the picture, and the grid asked for holds it in one cell.
-    flat = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": np.arange(4.0)}),
-        generation="facet-default-flat",
+    flat = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"x": np.arange(4.0)}),
     )
     assert facet.admits(flat)
     inferred_flat = facet.default_spec(flat)
     assert isinstance(inferred_flat, FacetGridPlot)
     assert inferred_flat.facet is None
     assert isinstance(inferred_flat.cell, CurvePlot)
-    explicit_flat = FacetGridPlot(AxisRef.repeat(), curve.default_spec(flat))
+    explicit_flat = FacetGridPlot(AxisRef.repeat("repeat"), curve.default_spec(flat))
     DataView(
-        DatasetSnapshot(flat, np.zeros(flat.shape, dtype=np.float64), revision=0)
+        make_snapshot(flat, np.zeros(flat.physical_shape, dtype=np.float64), revision=0)
     ).validate_facet(explicit_flat)
 
 
@@ -230,7 +214,6 @@ def test_a_default_spec_names_axes_the_data_view_can_actually_resolve() -> None:
     about the axis.
     """
 
-    from data_factory import DatasetSnapshot
     from zlc_plot.data_view import DataView
 
     unresolved = []
@@ -239,8 +222,8 @@ def test_a_default_spec_names_axes_the_data_view_can_actually_resolve() -> None:
             spec = handler.default_spec(schema)
             if spec is None:
                 continue
-            snapshot = DatasetSnapshot(
-                schema, np.zeros(schema.shape, dtype=np.float64), revision=0
+            snapshot = make_snapshot(
+                schema, np.zeros(schema.physical_shape, dtype=np.float64), revision=0
             )
             view = DataView(snapshot)
             # The axes the kind itself says its spec names, resolved the way

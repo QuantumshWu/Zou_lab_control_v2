@@ -726,6 +726,7 @@ class _PathHandler(_StaticHandler):
             caption=f"Choose {field.label}",
             file_filter=field.file_filter,
             base_dir=field.base_dir,
+            refreshable=field.refreshable,
         )
         picker.setToolTip(field.description)
         _connect_change(picker.changed, on_change)
@@ -822,7 +823,7 @@ def _widget_family(field: FormFieldProps) -> str:
     if field.kind == "axis_range":
         return f"axis-range:{field.minimum}:{field.maximum}"
     if field.kind == "path":
-        return f"path:{field.path_mode}:{field.file_filter}:{field.base_dir}"
+        return f"path:{field.path_mode}:{field.file_filter}:{field.base_dir}:{field.refreshable}"
     if field.kind == "keyed_choice":
         return "keyed-choice"
     raise ValueError(f"unsupported form field kind: {field.kind!r}")
@@ -906,6 +907,14 @@ class FluentParameterForm(QtWidgets.QWidget):
     """Thin exact-key form built from one ordered :class:`FormSpec`."""
 
     changed = QtCore.pyqtSignal(str)
+    #: One field asked for its file to be re-read.  The form knows only which
+    #: key; what re-reading means belongs to whoever owns the file.
+    refresh_requested = QtCore.pyqtSignal(str)
+
+    def _connect_refresh(self, key: str, widget: QtWidgets.QWidget) -> None:
+        signal = getattr(widget, "refresh_requested", None)
+        if signal is not None:
+            signal.connect(lambda key=key: self.refresh_requested.emit(key))
 
     @staticmethod
     def _dependency_map(spec: FormSpec) -> dict[str, list[str]]:
@@ -965,6 +974,7 @@ class FluentParameterForm(QtWidgets.QWidget):
                 self._runtime,
             )
             widget.setEnabled(not field.unavailable)
+            self._connect_refresh(field.key, widget)
             self._widgets[field.key] = widget
             self._handlers[field.key] = handler
             row, automatic = self._make_row(field, widget, label_width)
@@ -1345,6 +1355,7 @@ class FluentParameterForm(QtWidgets.QWidget):
                 self._runtime,
             )
             widget.setEnabled(not field.unavailable)
+            self._connect_refresh(field.key, widget)
             row, automatic = self._make_row(field, widget, label_width)
             replacements[field.key] = widget, row, automatic
 

@@ -95,8 +95,15 @@ class InfoPane(QtWidgets.QWidget):
             caption=str(path_caption),
             file_filter=str(file_filter),
             base_dir=str(path_base_dir),
+            refreshable=True,
         )
         self.path_edit.selected.connect(self.path_committed.emit)
+        # Refresh is "open this same path again": the file was written or
+        # edited elsewhere, and re-picking it in the dialog is the only thing
+        # the operator could do about it.
+        self.path_edit.refresh_requested.connect(
+            lambda: self.path_committed.emit(self.path_edit.text())
+        )
         self.path_edit.edit.editingFinished.connect(self._commit_path_draft)
         header.addWidget(self.path_edit, 1)
         layout.addWidget(header_frame)

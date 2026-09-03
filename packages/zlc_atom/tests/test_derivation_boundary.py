@@ -51,7 +51,14 @@ from zlc_plot import (
     image_point_overlay_geometry,
     image_point_overlay_from_signal,
 )
-from zlc_data import AxisId, AxisSpec, DatasetSchema, SITE, owned_snapshot_from_arrays
+from zlc_data import (
+    AxisId,
+    AxisSpec,
+    DatasetSchema,
+    DomainSpec,
+    SITE,
+    owned_snapshot_from_arrays,
+)
 from zlc_runtime import DatasetCoverage, LiveDatasetOutput, MonitorCoverage
 from zlc_runtime.host import NodeHost
 from zlc_runtime.plane import SignalDataPlane
@@ -189,17 +196,18 @@ def test_occupancy_classifies_only_event_cells_and_runtime_owns_full_history(
     assert processor.dataset_output_declarations is OCCUPANCY_OUTPUTS
     assert OCCUPANCY_LOGIC_NODE.outputs is OCCUPANCY_OUTPUTS
     event_schema = source.snapshot.block.schema
+    (repeat_domain,) = event_schema.repeat_domain.axes
     canonical_schema = DatasetSchema(
-        replace(
-            event_schema.repeat_axis,
-            size=3,
-            coordinates=(0, 1, 2),
+        DomainSpec(
+            (3,),
+            (replace(repeat_domain, size=3, coordinates=(0, 1, 2)),),
+            ((0, 1, 2),),
         ),
-        event_schema.point_table,
-        event_schema.grid_topology,
-        event_schema.cell_schema,
+        event_schema.point_domain,
+        event_schema.cell_domain,
+        event_schema.value_schema,
     )
-    event_cells = event_schema.repeat_axis.size * event_schema.point_table.row_count
+    event_cells = event_schema.repeat_domain.size * event_schema.point_domain.size
     coverage = DatasetCoverage(event_cells, 3 * event_cells)
     source_event = replace(
         source,
@@ -210,8 +218,8 @@ def test_occupancy_classifies_only_event_cells_and_runtime_owns_full_history(
     outputs = processor.evaluate(source_event)
     for name in ("counts", "occupied", "frame_judged"):
         output = outputs[name]
-        assert output.snapshot.block.schema.repeat_axis.size == 1
-        assert output.canonical_schema.repeat_axis.size == 3
+        assert output.snapshot.block.schema.repeat_domain.size == 1
+        assert output.canonical_schema.repeat_domain.size == 3
         assert output.cell_origin == (0, 0)
         assert output.coverage == coverage
     assert outputs["frame_judged"].snapshot is source.snapshot
@@ -250,8 +258,8 @@ def test_occupancy_classifies_only_event_cells_and_runtime_owns_full_history(
     assert invalid["frame_judged"].snapshot.block.values.shape[:2] == (1, windows)
     assert invalid["occupied"].snapshot.block.values.shape == (1, windows, 1)
     assert tuple(
-        column.name
-        for column in invalid["occupied"].snapshot.block.schema.point_table.columns
+        axis.name
+        for axis in invalid["occupied"].snapshot.block.schema.point_domain.axes
     ) == ("frame",)
     overlay = image_point_overlay_from_signal(
         invalid["occupied"].run_record[IMAGE_POINT_OVERLAY_GEOMETRY_RECORD],
@@ -506,17 +514,17 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
 
         from zlc_data import READOUT_EVENT, SITE
 
-        # Every derived signal INHERITS the camera's point column, object for
+        # Every derived signal inherits the camera's Point domain, object for
         # object: the frames it judged are the points it reports over.
-        (parent_column,) = source.schema.point_table.columns
-        assert parent_column.role is READOUT_EVENT
+        (parent_axis,) = source.schema.point_domain.axes
+        assert parent_axis.role is READOUT_EVENT
         for name in ("counts", "occupied", "frame_judged"):
             value = publication.value(f"@logic/occupancy/{name}")
-            assert value.schema.point_table.columns == (parent_column,), name
+            assert value.schema.point_domain == source.schema.point_domain, name
         # SITE is CELL data, carried by the calibration's one site axis.
         for name in ("counts", "occupied"):
             value = publication.value(f"@logic/occupancy/{name}")
-            (site_axis,) = value.schema.cell_schema.data_axes
+            (site_axis,) = value.schema.cell_domain.axes
             assert site_axis == calibration.site_map.site_axis, name
             assert site_axis.role is SITE
             assert site_axis.coordinates == (1,)

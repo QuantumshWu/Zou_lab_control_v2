@@ -135,6 +135,105 @@ def replace_pulse_field(
     return replace(sequence, periods=tuple(periods))
 
 
+def prune_orphaned_bindings(
+    sequence: PulseSequence,
+) -> tuple[PulseSequence, tuple[str, ...]]:
+    """Drop every binding whose field the pulse no longer has, and name them.
+
+    A binding is a statement ABOUT a field, so it cannot outlive one.  A DAC
+    field exists only while its period carries a step on that port, and the
+    gestures that take a step away -- clearing a port, choosing Hold -- used
+    to leave the binding behind.  Every reader then raised on a pulse that
+    looked fine on screen: reading the value of a field that is not there.
+
+    Durations and delays are never orphaned this way (a period always has a
+    duration, and a missing delay reads as zero), and the model already
+    refuses a binding whose period is gone, so this is the DAC case.
+    """
+
+    if not isinstance(sequence, PulseSequence):
+        raise TypeError("sequence must be PulseSequence")
+
+    def held(reference: PulseFieldRef) -> bool:
+        if reference.kind != FIELD_DAC:
+            return True
+        period = sequence.period_by_id.get(str(reference.period_id))
+        return period is not None and any(
+            step.port == reference.port for step in period.analog_steps
+        )
+
+    slots = tuple(slot for slot in sequence.slots if held(slot.field_ref))
+    parameters = tuple(
+        parameter
+        for parameter in sequence.api_parameters
+        if held(parameter.field_ref)
+    )
+    dropped = tuple(
+        [slot.slot_id for slot in sequence.slots if not held(slot.field_ref)]
+        + [
+            parameter.parameter_id
+            for parameter in sequence.api_parameters
+            if not held(parameter.field_ref)
+        ]
+    )
+    if not dropped:
+        return sequence, ()
+    return replace(sequence, slots=slots, api_parameters=parameters), dropped
+
+
+def field_label(sequence: PulseSequence, reference: PulseFieldRef) -> str:
+    """One physical field, said the way it reads on the pulse.
+
+    A binding is identified by ``(kind, period_id, port)``, none of which an
+    operator chose to read: the period may carry a name and the port a label
+    from the board manifest, and those are what is on screen.  Every surface
+    that lists bindings prints this, so a parameter is the same words in the
+    editor, in a node form and in an error.
+    """
+
+    _check_inputs(sequence, reference)
+    if reference.kind == FIELD_DELAY:
+        return f"{_port_text(sequence, reference.port)} delay"
+    period = sequence.period_by_id.get(str(reference.period_id))
+    period_text = (
+        str(reference.period_id) if period is None else (period.name or period.period_id)
+    )
+    if reference.kind == FIELD_DURATION:
+        return f"{period_text} duration"
+    return f"{period_text} · {_port_text(sequence, reference.port)}"
+
+
+def _port_text(sequence: PulseSequence, port: str | None) -> str:
+    spec = sequence.target.by_key.get(str(port))
+    return str(port) if spec is None else (spec.label or spec.key)
+
+
+def authored_api_entries(sequence: PulseSequence) -> dict[str, tuple[float, str]]:
+    """Every API parameter as ``(value, unit)``, both the pulse's own.
+
+    A value alone cannot be saved or handed to another pulse: a duration is
+    only a number beside the unit its author chose.
+    """
+
+    if not isinstance(sequence, PulseSequence):
+        raise TypeError("sequence must be PulseSequence")
+    entries: dict[str, tuple[float, str]] = {}
+    for parameter in sequence.api_parameters:
+        try:
+            value = pulse_field_value(
+                sequence, parameter.field_ref, parameter.unit
+            )
+        except ValueError as error:
+            # Say WHICH binding has no field.  "period 'load' has no DAC step
+            # on port 'da_dipole'" is true and unactionable on its own; the
+            # operator needs the name they can see on the Scan page.
+            raise ValueError(
+                f"API parameter {parameter.parameter_id!r} has no field: {error}"
+            ) from None
+        entries[parameter.parameter_id] = (float(value), parameter.unit)
+    return entries
+
+
 def authored_api_values(sequence: PulseSequence) -> dict[str, float]:
     """Every API parameter at the value the pulse itself carries.
 
@@ -143,14 +242,63 @@ def authored_api_values(sequence: PulseSequence) -> dict[str, float]:
     numbers standing for the rest.
     """
 
+    return {
+        parameter_id: value
+        for parameter_id, (value, _unit) in authored_api_entries(sequence).items()
+    }
+
+
+def apply_api_values(
+    sequence: PulseSequence,
+    entries: Mapping[str, tuple[int | float, str]],
+) -> tuple[PulseSequence, tuple[str, ...], tuple[str, ...]]:
+    """Overwrite the authored value of every API parameter the set names.
+
+    Returns the sequence, the ids applied and the ids the set named that this
+    pulse does not declare.  The intersection is applied rather than the whole
+    set demanded: one saved set of bias values is meant to be carried across
+    several pulses, most of which declare only some of it, so an id this pulse
+    has never heard of is reported and skipped.  An id this pulse declares and
+    the set omits keeps the number the operator already authored.
+
+    The declarations themselves survive: this changes what the API slots hold,
+    not whether they exist.  Baking them away is :func:`resolve_api_parameters`.
+    """
+
     if not isinstance(sequence, PulseSequence):
         raise TypeError("sequence must be PulseSequence")
-    return {
-        parameter.parameter_id: pulse_field_value(
-            sequence, parameter.field_ref, parameter.unit
-        )
-        for parameter in sequence.api_parameters
+    if not isinstance(entries, Mapping):
+        raise TypeError("API values must be a mapping")
+    declared = {
+        parameter.parameter_id: parameter for parameter in sequence.api_parameters
     }
+    result = sequence
+    applied: list[str] = []
+    unknown: list[str] = []
+    for parameter_id, entry in entries.items():
+        parameter = declared.get(str(parameter_id))
+        if parameter is None:
+            unknown.append(str(parameter_id))
+            continue
+        number, unit = entry
+        if parameter.unit == "value" or unit == "value":
+            if parameter.unit != unit:
+                raise ValueError(
+                    f"API value {parameter_id!r} is in {unit!r} where the pulse "
+                    f"declares {parameter.unit!r}"
+                )
+            authored = float(number)
+        else:
+            authored = convert_time(number, unit, parameter.unit)
+        result = replace_pulse_field(
+            result,
+            parameter.field_ref,
+            authored,
+            parameter.unit,
+            field_name=parameter.parameter_id,
+        )
+        applied.append(parameter.parameter_id)
+    return result, tuple(applied), tuple(unknown)
 
 
 def resolve_api_parameters(
@@ -232,8 +380,12 @@ def _number_for(value: float) -> int | float:
 
 
 __all__ = [
+    "apply_api_values",
+    "authored_api_entries",
     "authored_api_values",
     "convert_time",
+    "field_label",
+    "prune_orphaned_bindings",
     "pulse_field_value",
     "replace_pulse_field",
     "resolve_api_parameters",

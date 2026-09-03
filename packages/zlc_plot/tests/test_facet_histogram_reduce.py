@@ -25,9 +25,8 @@ from zlc_data import (
     DataBlock,
     DatasetRevision,
     DatasetSchema,
+    DomainSpec,
     OwnedSnapshot,
-    PointColumn,
-    PointTable,
     REPEAT,
     SCAN_POINT,
     SITE,
@@ -44,22 +43,27 @@ _REPEATS, _ROWS, _SITES = 4, 2, 3
 
 def _view(values: np.ndarray | None = None) -> DataView:
     schema = DatasetSchema(
-        AxisSpec(AxisId("t.repeat"), "repeat", REPEAT, _REPEATS, tuple(range(_REPEATS))),
-        PointTable(
-            _ROWS,
-            (
-                PointColumn(
+        DomainSpec(
+            (_REPEATS,),
+            (AxisSpec(AxisId("repeat"), "repeat", REPEAT, _REPEATS, tuple(range(_REPEATS))),),
+            (tuple(range(_REPEATS)),),
+        ),
+        DomainSpec(
+            (_ROWS,),
+            (AxisSpec(
                     AxisId("p.frame"),
                     "frame",
                     SCAN_POINT,
-                    PointColumn.NUMERIC,
+                    _ROWS,
                     tuple(float(row) for row in range(_ROWS)),
-                ),
-            ),
+                ),),
+            (tuple(range(_ROWS)),),
         ),
-        None,
-        ValueSchema(
+        DomainSpec(
+            (_SITES,),
             (AxisSpec(AxisId("v.site"), "site", SITE, _SITES, tuple(range(_SITES))),),
+        ),
+        ValueSchema(
             ValidityContract.value(),
             np.dtype("float64"),
             "count",
@@ -96,7 +100,7 @@ def test_each_cell_bins_its_own_means_over_the_reduced_axis() -> None:
         _REPEATS, _ROWS, _SITES
     )
     view = _view(values)
-    grid = _grid(reduced=(AxisRef.repeat(),), reduction=Reduction.MEAN)
+    grid = _grid(reduced=(AxisRef.repeat("repeat"),), reduction=Reduction.MEAN)
 
     expected = values.mean(axis=0)  # one mean per (row, site)
     for row, pool in enumerate(_pools(view, grid)):
@@ -115,7 +119,7 @@ def test_reducing_a_data_axis_leaves_one_value_per_shot_and_row() -> None:
         _REPEATS, _ROWS, _SITES
     )
     view = _view(values)
-    grid = _grid(reduced=(AxisRef.data("v.site"),), reduction=Reduction.MEAN)
+    grid = _grid(reduced=(AxisRef.cell_data("v.site"),), reduction=Reduction.MEAN)
     for row, pool in enumerate(_pools(view, grid)):
         np.testing.assert_allclose(pool, np.sort(values[:, row, :].mean(axis=1)))
 
@@ -127,7 +131,7 @@ def test_the_shared_domain_covers_what_the_cells_bin() -> None:
     means = np.linspace(100.0, 105.0, _ROWS * _SITES).reshape(_ROWS, _SITES)
     values = means[None, :, :] + rng.normal(0.0, 20.0, (_REPEATS, _ROWS, _SITES))
     view = _view(values)
-    grid = _grid(reduced=(AxisRef.repeat(),), reduction=Reduction.MEAN)
+    grid = _grid(reduced=(AxisRef.repeat("repeat"),), reduction=Reduction.MEAN)
 
     pool, valid = view.facet_histogram_pool(grid)
     assert valid.all()
@@ -152,9 +156,9 @@ def test_a_facet_axis_cannot_also_be_reduced() -> None:
     with pytest.raises(DataViewError, match="cannot also be reduced"):
         view.validate_facet(
             FacetGridPlot(
-                facet=AxisRef.repeat(),
+                facet=AxisRef.repeat("repeat"),
                 cell=HistogramPlot(
-                    reduced=(AxisRef.repeat(),), reduction=Reduction.MEAN
+                    reduced=(AxisRef.repeat("repeat"),), reduction=Reduction.MEAN
                 ),
             )
         )
@@ -184,7 +188,7 @@ def test_a_window_and_a_reduction_compose() -> None:
         _REPEATS, _ROWS, _SITES
     )
     view = _view(values)
-    grid = _grid(reduced=(AxisRef.repeat(),), reduction=Reduction.MEAN)
+    grid = _grid(reduced=(AxisRef.repeat("repeat"),), reduction=Reduction.MEAN)
     plan = view._facet_histogram_plan(grid, 2)
     expected = values[-2:].mean(axis=0)
     for row, pool in enumerate(plan.pools):
@@ -197,7 +201,7 @@ def test_the_grid_and_the_single_panel_reduce_the_same_way() -> None:
     rng = np.random.default_rng(5)
     values = rng.normal(50.0, 5.0, (_REPEATS, _ROWS, _SITES))
     view = _view(values)
-    refs = (AxisRef.repeat(),)
+    refs = (AxisRef.repeat("repeat"),)
 
     whole, whole_valid = view.histogram_pool(
         reduce_axes=refs, aggregation=Reduction.MEAN
@@ -215,23 +219,32 @@ def _two_column_view(values: np.ndarray) -> DataView:
 
     rows = values.shape[1]
     schema = DatasetSchema(
-        AxisSpec(AxisId("t.repeat"), "repeat", REPEAT, values.shape[0], tuple(range(values.shape[0]))),
-        PointTable(
-            rows,
+        DomainSpec(
+            (values.shape[0],),
+            (AxisSpec(AxisId("repeat"), "repeat", REPEAT, values.shape[0], tuple(range(values.shape[0]))),),
+            (tuple(range(values.shape[0])),),
+        ),
+        DomainSpec(
+            (rows,),
             (
-                PointColumn(
-                    AxisId("p.frame"), "frame", SCAN_POINT, PointColumn.NUMERIC,
-                    tuple(float(row % 2) for row in range(rows)),
+                AxisSpec(
+                    AxisId("p.frame"), "frame", SCAN_POINT, 2, (0.0, 1.0),
                 ),
-                PointColumn(
-                    AxisId("p.detuning"), "detuning", SCAN_POINT, PointColumn.NUMERIC,
-                    tuple(float(row // 2) for row in range(rows)),
+                AxisSpec(
+                    AxisId("p.detuning"), "detuning", SCAN_POINT,
+                    rows // 2, tuple(float(index) for index in range(rows // 2)),
                 ),
             ),
+            (
+                tuple(row % 2 for row in range(rows)),
+                tuple(row // 2 for row in range(rows)),
+            ),
         ),
-        None,
-        ValueSchema(
+        DomainSpec(
+            (values.shape[2],),
             (AxisSpec(AxisId("v.site"), "site", SITE, values.shape[2], tuple(range(values.shape[2]))),),
+        ),
+        ValueSchema(
             ValidityContract.value(),
             np.dtype("float64"),
             "count",
@@ -248,7 +261,7 @@ def _two_column_view(values: np.ndarray) -> DataView:
     return DataView(OwnedSnapshot(block.ref(StreamGenerationId("g")), block))
 
 
-def test_a_reduced_point_coordinate_groups_the_rows_inside_each_cell() -> None:
+def test_a_reduced_point_axis_groups_the_rows_inside_each_cell() -> None:
     """The path a whole tensor axis does not take.
 
     Reducing "detuning" while facetting by "frame" cannot be a ufunc over an
@@ -284,13 +297,13 @@ def test_both_reduction_routes_agree_on_a_reduction_they_share() -> None:
     repeats, rows, sites = 4, 6, 2
     values = np.arange(repeats * rows * sites, dtype=float).reshape(repeats, rows, sites)
     view = _two_column_view(values)
-    refs = (AxisRef.repeat(),)
+    refs = (AxisRef.repeat("repeat"),)
 
     # The route the plan takes: a ufunc over the array axis.
     valid = np.ones(values.shape, dtype=bool)
     quick, present = view._collapse_axes(values, valid, refs, Reduction.MEAN)
 
-    # The route a point-coordinate reduction is forced to take, on the same
+    # The route a point-axis reduction is forced to take, on the same
     # reduction: one bucket identity per sample, scattered.
     dimensions, coordinates = view._reduction_plan(refs)
     buckets = view._reduction_buckets(dimensions, coordinates)

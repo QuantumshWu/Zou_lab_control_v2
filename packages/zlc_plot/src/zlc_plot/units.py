@@ -68,19 +68,36 @@ class Unit:
         object.__setattr__(self, "inverse_dimension", inverse_dimension)
 
     @property
-    def is_canonical(self) -> bool:
+    def is_base(self) -> bool:
+        """Whether this is its dimension's base unit (seconds, not microseconds).
+
+        The BASE is the unit system's reference, and only that.  It is not
+        the "canonical" unit: canonical, everywhere in this library, is the
+        unit a dataset is written in, and a dataset written in microseconds
+        is canonical in microseconds.  These used to share the word, and a
+        conversion to the dataset's unit was written as a conversion to the
+        base -- exact for metres and volts, a million times off for a
+        microsecond axis.
+        """
+
         return self.scale == 1.0 and self.offset == 0.0
 
     def compatible_with(self, other: Unit) -> bool:
         return self.dimension == other.dimension
 
-    def to_canonical(self, values: ArrayLike) -> NDArray[np.generic]:
+    def to_base(self, values: ArrayLike) -> NDArray[np.generic]:
+        """Values in this unit, in the dimension's base unit."""
+
         return np.asarray(values) * self.scale + self.offset
 
-    def from_canonical(self, values: ArrayLike) -> NDArray[np.generic]:
+    def from_base(self, values: ArrayLike) -> NDArray[np.generic]:
+        """Values in the dimension's base unit, in this unit."""
+
         return (np.asarray(values) - self.offset) / self.scale
 
     def convert_value_to(self, values: ArrayLike, target: Unit) -> NDArray[np.generic]:
+        """Values in this unit, in ``target`` -- the one conversion callers use."""
+
         if not self.compatible_with(target):
             raise UnitError(
                 f"incompatible units: {self.symbol!r} ({self.dimension}) and "
@@ -88,7 +105,7 @@ class Unit:
             )
         if self == target:
             return np.asarray(values)
-        return target.from_canonical(self.to_canonical(values))
+        return target.from_base(self.to_base(values))
 
 
 UnitLike = str | Unit
@@ -104,7 +121,7 @@ class UnitRegistry:
 
     def __init__(self, units: Iterable[Unit] = ()) -> None:
         self._units: dict[str, Unit] = {}
-        self._canonical: dict[str, Unit] = {}
+        self._base_units: dict[str, Unit] = {}
         self._lock = RLock()
         self._revision = 0
         for unit in units:
@@ -125,29 +142,29 @@ class UnitRegistry:
             collisions = [name for name in names if name in self._units]
             if collisions and not replace:
                 raise UnitError(f"unit name already registered: {collisions[0]!r}")
-            existing_canonical = self._canonical.get(unit.dimension)
-            if unit.is_canonical and existing_canonical not in (None, unit):
+            existing_base = self._base_units.get(unit.dimension)
+            if unit.is_base and existing_base not in (None, unit):
                 if not replace:
                     raise UnitError(
-                        f"dimension {unit.dimension!r} already has canonical unit "
-                        f"{existing_canonical.symbol!r}"
+                        f"dimension {unit.dimension!r} already has base unit "
+                        f"{existing_base.symbol!r}"
                     )
                 collisions.extend(
                     name for name, registered in self._units.items()
-                    if registered == existing_canonical
+                    if registered == existing_base
                 )
             if replace and collisions:
                 displaced = {self._units[name] for name in collisions if name in self._units}
                 for name, registered in tuple(self._units.items()):
                     if registered in displaced:
                         del self._units[name]
-                for dimension, canonical in tuple(self._canonical.items()):
-                    if canonical in displaced:
-                        del self._canonical[dimension]
+                for dimension, base in tuple(self._base_units.items()):
+                    if base in displaced:
+                        del self._base_units[dimension]
             for name in names:
                 self._units[name] = unit
-            if unit.is_canonical:
-                self._canonical[unit.dimension] = unit
+            if unit.is_base:
+                self._base_units[unit.dimension] = unit
             self._revision += 1
         return unit
 
@@ -162,22 +179,24 @@ class UnitRegistry:
             except KeyError as exc:
                 raise UnitError(f"unknown unit {unit!r}") from exc
 
-    def canonical_for(self, unit_or_dimension: UnitLike) -> Unit:
+    def base_for(self, unit_or_dimension: UnitLike) -> Unit:
+        """The base unit of a unit's or a dimension's dimension."""
+
         if isinstance(unit_or_dimension, Unit):
-            if unit_or_dimension.is_canonical:
+            if unit_or_dimension.is_base:
                 return unit_or_dimension
             dimension = unit_or_dimension.dimension
         else:
             with self._lock:
-                if unit_or_dimension in self._canonical:
+                if unit_or_dimension in self._base_units:
                     dimension = unit_or_dimension
                 else:
                     dimension = self.resolve(unit_or_dimension).dimension
         with self._lock:
             try:
-                return self._canonical[dimension]
+                return self._base_units[dimension]
             except KeyError as exc:
-                raise UnitError(f"dimension {dimension!r} has no canonical unit") from exc
+                raise UnitError(f"dimension {dimension!r} has no base unit") from exc
 
     def compatible(self, left: UnitLike, right: UnitLike) -> bool:
         return self.resolve(left).compatible_with(self.resolve(right))
@@ -211,14 +230,14 @@ class UnitRegistry:
         """Return every accepted input spelling, including aliases.
 
         This is an input/parsing surface.  User-facing choice lists must use
-        :meth:`canonical_symbols` so aliases cannot create duplicate choices.
+        :meth:`distinct_symbols` so aliases cannot create duplicate choices.
         """
 
         with self._lock:
             return tuple(sorted(self._units))
 
-    def canonical_symbols(self) -> tuple[str, ...]:
-        """Return one canonical symbol for every distinct registered unit."""
+    def distinct_symbols(self) -> tuple[str, ...]:
+        """One symbol -- the unit's own, not an alias -- per distinct registered unit."""
 
         with self._lock:
             units = {unit for unit in self._units.values()}

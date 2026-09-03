@@ -16,25 +16,28 @@ import gc
 
 import numpy as np
 
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from data_factory import (
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
+
+from zlc_data import OwnedSnapshot
 from zlc_plot import AxisRef, CurvePlot, PlotSession
 
-
-def _snapshot(revision: int = 0) -> DatasetSnapshot:
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": [0.0, 1.0, 2.0]}),
+def _snapshot(revision: int = 0) -> OwnedSnapshot:
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"x": [0.0, 1.0, 2.0]}),
         dtype=np.float64,
-        generation="renderer-caches",
     )
-    return DatasetSnapshot(
+    return make_snapshot(
         schema, np.array([[1.0, 2.0, 3.0]]) + revision, revision=revision
     )
 
-
 def _renderer(session: PlotSession):
     return session._renderer
-
 
 def test_a_settled_opacity_does_not_keep_its_plane_alive() -> None:
     session = PlotSession(_snapshot(), CurvePlot(AxisRef.point("x")))
@@ -52,7 +55,6 @@ def test_a_settled_opacity_does_not_keep_its_plane_alive() -> None:
         )
     finally:
         session.close()
-
 
 def test_relayout_forgets_the_boxes_of_the_axes_it_drops() -> None:
     """Five caches keyed by an address that relayout is about to free."""

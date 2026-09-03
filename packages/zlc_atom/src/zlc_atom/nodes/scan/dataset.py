@@ -10,16 +10,12 @@ where each later event belongs.  Runtime owns the chunks, invalid future cells,
 current materialization and terminal seal; this module never copies full scan
 history.
 
-REPEATS AND SHOTS SHARE THE REPEAT AXIS.  ``shots_per_point`` runs S complete
-adjacent trials of one point; ``repeats`` walks the WHOLE plan R more times.
-Physically different -- adjacent trials see the same drift, sweeps see it
-move -- but structurally the same fact: the same conditions, again.  That
-fact already has a home, the dataset's repeat
-axis, so both land there (size R x S x the source's own repeats, sweeps
-slowest) and every repeat-aware projection -- mean, facet-by-repeat,
-per-shot rolling -- applies without knowing the scan existed.  The
-acquisition ORDER carries the physical difference, and the run record
-states both counts.
+REPEATS AND SHOTS ARE REPEAT-DOMAIN FACTS. ``shots_per_point`` runs adjacent
+trials of one point; ``repeats`` walks the whole plan again. The writer is
+given their already-authored product as ``visits``, so it records exactly one
+visit axis rather than guessing a decomposition it was not given. Source
+repeat axes remain separate logical axes in the same domain, and the run
+record retains the authored repeat/shot counts.
 
 The dataset's axes ARE the plan's axes, carrying each port's name and unit.
 That identity is what makes a saved scan self-describing, and it is the hook
@@ -30,15 +26,11 @@ everything later hangs from: a box drawn on the plot's x axis is a range of
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
-
 from zlc_data import (
     AxisId,
     AxisSpec,
     DatasetSchema,
-    GridTopology,
-    PointColumn,
-    PointTable,
+    DomainSpec,
     REPEAT,
     SCAN_POINT,
 )
@@ -78,8 +70,8 @@ def scan_dataset_schema(
 
     ``rows`` carries one coordinate row per PLAN POINT; ``axes`` carries one
     ``(name, unit)`` per column of those rows.  ``visits`` is how many times
-    every point is captured (repeats x shots); it multiplies the repeat
-    axis, which is where "the same conditions, again" already lives.  The
+    every point is captured (repeats x shots); it adds one visit axis to the
+    Repeat domain, where "the same conditions, again" already lives. The
     source's own axes (repeat, source points, data axes) are preserved
     underneath, so a capture that was itself an image stays an image at
     every scan point.
@@ -94,33 +86,12 @@ def scan_dataset_schema(
     if visits < 1:
         raise ValueError("every plan point is visited at least once")
 
-    source_points = source_schema.point_table.row_count
-    point_columns = []
-    for column in source_schema.point_table.columns:
-        labels = (
-            None
-            if column.coordinate_labels is None
-            else tuple(
-                label for _row in rows for label in column.coordinate_labels
-            )
-        )
-        point_columns.append(
-            replace(
-                column,
-                values=tuple(value for _row in rows for value in column.values),
-                coordinate_labels=labels,
-            )
-        )
+    source_points = source_schema.point_domain.size
 
     occupied_axis_ids = {
-        source_schema.repeat_axis.axis_id,
-        *(column.coordinate_id for column in source_schema.point_table.columns),
-        *(axis.axis_id for axis in source_schema.cell_schema.data_axes),
-        *(
-            ()
-            if source_schema.grid_topology is None
-            else source_schema.grid_topology.dimension_ids
-        ),
+        *(axis.axis_id for axis in source_schema.repeat_domain.axes),
+        *(axis.axis_id for axis in source_schema.point_domain.axes),
+        *(axis.axis_id for axis in source_schema.cell_domain.axes),
     }
 
     def free_axis_id(base: str) -> AxisId:
@@ -141,96 +112,72 @@ def scan_dataset_schema(
         axis_ids.append(axis_id)
         axis_domains.append(domain)
         per_axis_indices.append(indices)
-        point_columns.append(
-            PointColumn(
-                axis_id,
-                str(name),
-                SCAN_POINT,
-                PointColumn.NUMERIC,
-                tuple(
-                    row[index] for row in rows for _point in range(source_points)
-                ),
-                # None is how a dataset spells "no unit"; the plot treats it
-                # the same way.  An empty string is neither layer's spelling.
-                unit=str(unit) if unit else None,
-            )
+    scan_axes = tuple(
+        AxisSpec(
+            axis_id,
+            str(name),
+            SCAN_POINT,
+            len(domain),
+            domain,
+            # None is how a dataset spells "no unit"; the plot treats it
+            # the same way.  An empty string is neither layer's spelling.
+            unit=str(unit) if unit else None,
         )
+        for axis_id, domain, (name, unit) in zip(
+            axis_ids, axis_domains, axes, strict=True
+        )
+    )
     scan_cells = tuple(
         tuple(indices[row_index] for indices in per_axis_indices)
         for row_index in range(len(rows))
     )
 
-    source_topology = source_schema.grid_topology
-    if source_topology is None and source_points == 1:
-        source_ids: tuple[AxisId, ...] = ()
-        source_domains: tuple[tuple[object, ...], ...] = ()
-        source_labels: tuple[tuple[str, ...] | None, ...] = ()
-        source_cells: tuple[tuple[int, ...], ...] = ((),)
-    elif source_topology is None:
-        # The source's point axis keeps its IDENTITY as a scan dimension --
-        # a camera cycle's frames stay "frame", exactly as the plan's axes
-        # share their AxisId between point column and topology dimension.
-        # A source whose single column cannot be a coordinate domain
-        # (repeated or missing values) gets the anonymous fallback.
-        column = (
-            source_schema.point_table.columns[0]
-            if len(source_schema.point_table.columns) == 1
-            else None
-        )
-        values = None if column is None else tuple(column.values)
-        if (
-            values is not None
-            and len(set(values)) == len(values)
-            and all(value is not None for value in values)
-        ):
-            source_ids = (column.coordinate_id,)
-            source_domains = (values,)
-            # Distinct values in row order ARE the domain, so the column's
-            # per-row labels are the domain's per-coordinate labels.
-            source_labels = (column.coordinate_labels,)
-        else:
-            source_ids = (free_axis_id("scan.source_point"),)
-            source_domains = (tuple(range(source_points)),)
-            source_labels = (None,)
-        source_cells = tuple((index,) for index in range(source_points))
+    point_domain = DomainSpec(
+        (len(rows) * source_points,),
+        (*source_schema.point_domain.axes, *scan_axes),
+        (
+            *(
+                codes * len(rows)
+                for codes in source_schema.point_domain.axis_codes
+            ),
+            *(
+                tuple(
+                    scan_cells[scan_row][axis_position]
+                    for scan_row in range(len(rows))
+                    for _source_point in range(source_points)
+                )
+                for axis_position in range(len(scan_axes))
+            ),
+        ),
+    )
+    source_repeat = source_schema.repeat_domain
+    if visits == 1:
+        repeat_domain = source_repeat
     else:
-        source_ids = source_topology.dimension_ids
-        source_domains = source_topology.coordinate_domains
-        source_labels = (
-            (None,) * len(source_ids)
-            if source_topology.coordinate_labels is None
-            else source_topology.coordinate_labels
-        )
-        source_cells = source_topology.row_to_cell
-
-    row_to_cell = tuple(
-        source_cells[source_point] + scan_cells[scan_point]
-        for scan_point in range(len(rows))
-        for source_point in range(source_points)
-    )
-    topology = GridTopology(
-        (*source_ids, *axis_ids),
-        (*source_domains, *axis_domains),
-        row_to_cell,
-        coordinate_labels=(*source_labels, *((None,) * len(axis_ids))),
-    )
-    source_repeat = source_schema.repeat_axis
-    repeat_axis = (
-        source_repeat
-        if visits == 1
-        else AxisSpec(
-            source_repeat.axis_id,
-            source_repeat.name,
+        visit_axis = AxisSpec(
+            free_axis_id("scan.visit"),
+            "visit",
             REPEAT,
-            visits * source_repeat.size,
-            tuple(range(visits * source_repeat.size)),
+            visits,
+            tuple(range(visits)),
         )
-    )
+        repeat_domain = DomainSpec(
+            (visits * source_repeat.size,),
+            (*source_repeat.axes, visit_axis),
+            (
+                *(codes * visits for codes in source_repeat.axis_codes),
+                tuple(
+                    visit
+                    for visit in range(visits)
+                    for _source_repeat in range(source_repeat.size)
+                ),
+            ),
+        )
     return DatasetSchema(
-        repeat_axis,
-        PointTable(len(rows) * source_points, tuple(point_columns)),
-        topology,
-        source_schema.cell_schema,
+        repeat_domain,
+        point_domain,
+        source_schema.cell_domain,
+        source_schema.value_schema,
     )
 
 
@@ -321,8 +268,8 @@ class ScanDatasetWriter:
         self._schema = scan_dataset_schema(
             source_schema, self._rows, self._axes, visits=self._visits
         )
-        self._source_points = source_schema.point_table.row_count
-        self._source_repeats = source_schema.repeat_axis.size
+        self._source_points = source_schema.point_domain.size
+        self._source_repeats = source_schema.repeat_domain.size
 
 
 __all__ = [

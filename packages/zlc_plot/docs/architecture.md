@@ -12,8 +12,8 @@
 
 | Concern | Owner |
 | --- | --- |
-| `(R, P, *data_dim)` geometry, dtype, validity | `zlc-data` role-axis schema and `OwnedSnapshot` |
-| PointTable rows and optional GridTopology | data producer + `zlc-data` validation |
+| `(R, P, *cell_shape)` geometry, dtype, validity | `zlc-data` domain schema and `OwnedSnapshot` |
+| Repeat/Point row codes and dense Cell axes | data producer + `zlc-data` validation |
 | Canonical unit annotations | `zlc-data`; display conversion is `zlc_plot.units` |
 | NPZ save/load | `zlc_data.save_npz` / `zlc_data.load_npz` |
 | Plot kind, axes roles, reduction, facet choice | `zlc_plot` specifications |
@@ -47,24 +47,28 @@ application / acquisition
 
 The data contract never imports Matplotlib or Qt. `zlc_plot` never imports device or Logic modules.
 
-## Data geometry and point topology
+## Data geometry and domains
 
 Every scientific snapshot has fixed shape:
 
 ```text
-(R, P, *data_dim)
+(R, P, *cell_shape)
 ```
 
-- `R` is the repeat axis.
-- `P` is the ordered PointTable row axis.
-- `data_dim` contains dense per-point axes such as camera coordinates or site.
+- `R` is the flat physical carrier of the Repeat domain.
+- `P` is the flat physical carrier of the Point domain.
+- `cell_shape` is the dense Cell-data domain, such as camera coordinates or site.
 
-PointTable columns are row attributes; repeated/unique values do not prove a Cartesian scan. When a producer knows that rows represent, for example, `b_x × b_y × b_z`, it attaches a `GridTopology` containing dimension domains and `row_to_cell`. `zlc_plot` consumes that declaration but never reconstructs it heuristically.
+All three domains directly own their logical `AxisSpec` values. Repeat and
+Point also own one small code vector per axis, mapping each physical row to
+its coordinate domain; Cell axes map positionally to dense tensor dimensions.
+This is the only geometry truth. Plot never reconstructs a grid from repeated
+values and never maintains a second coordinate/topology representation.
 
-FacetGrid may facet along repeat, point rows, a PointTable coordinate, a declared GridTopology dimension, or a data axis. `facet_rows` and optional
+FacetGrid may facet along any declared Repeat, Point or Cell-data axis. `facet_rows` and optional
 `facet_cols` form an explicit row-major grid; every cell in one FacetGrid uses
-the same cell kind. A point-coordinate grouping without GridTopology remains
-a group-by operation, not a claim of Cartesian geometry.
+the same cell kind. Sparse, partial and arrival-ordered Point layouts remain
+explicit in their axis codes rather than being inferred by Plot.
 
 ## Six formal plot kinds
 

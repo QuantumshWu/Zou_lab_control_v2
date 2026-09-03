@@ -128,8 +128,8 @@ def test_the_authority_is_what_every_owner_delegates_to() -> None:
     from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, ImagePlot
     from zlc_plot.specs import semantic_spec
 
-    cell = ImagePlot(AxisRef.data("x"), AxisRef.data("y"))
-    grid = FacetGridPlot(AxisRef.repeat(), cell)
-    curve = CurvePlot(AxisRef.point_rows())
+    cell = ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y"))
+    grid = FacetGridPlot(AxisRef.repeat("repeat"), cell)
+    curve = CurvePlot(AxisRef.point("x"))
     assert semantic_spec(grid) is cell
     assert semantic_spec(curve) is curve

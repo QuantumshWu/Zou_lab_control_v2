@@ -1099,7 +1099,7 @@ surface = {
     'semantic': ({
         'key': 'x', 'label': 'X axis', 'kind': 'choice', 'value': 'sensor_x',
         'allow_none': False,
-        'choices': (('Sensor X', 'sensor_x'), ('Point row', 'point_row')),
+        'choices': (('Sensor X', 'sensor_x'), ('Point axis', 'point')),
         'minimum': None, 'maximum': None, 'step': None,
     },),
     'display': (
@@ -1563,7 +1563,7 @@ editor.save_format.setCurrentIndex(editor.save_format.findData('svg'))
 editor.save_button.click()
 app.processEvents()
 assert ('state', 'panel-1', {'interval_ms': 800}) in events
-assert ('state', 'panel-1', {'semantic': {'x': 'point_row'}}) in events
+assert ('state', 'panel-1', {'semantic': {'x': 'point'}}) in events
 assert ('state', 'panel-1', {
     'fit': {'model': 'anisotropic_gaussian_center'}
 }) in events
@@ -2463,5 +2463,59 @@ QtTest.QTest.mouseRelease(card, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, far)
 app.processEvents()
 assert len(drops) == 1, 'a real drag did not drop the card: %r' % (drops,)
 print('ok')
+"""
+    )
+
+
+def test_panel_editor_body_is_opaque_so_scrolling_blits() -> None:
+    """The Edit page's scrolled body must be a widget Qt cannot see through.
+
+    A scrolled widget Qt can see through is repainted whole on every step
+    of the wheel -- the plot surface's full frame, 10 ms at three device
+    pixels per point, forty times a scroll -- where an opaque one is moved
+    by blitting the backing store and only the exposed strip is painted.
+    Qt decides by ``WA_OpaquePaintEvent`` (or an auto-filled opaque brush,
+    which a stylesheet background switches off); the stylesheet that paints
+    the colour is not consulted, so the promise is made explicitly and the
+    painted pixels must honour it.
+    """
+    _run_qt(
+        """
+from PyQt5 import QtCore, QtGui, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import BG
+from zlc_ui.console import panel_editor_view as editor_module
+app = ensure_qt_app(['test'])
+owner = QtWidgets.QWidget()
+state = {
+    'signal': '@logic/cm/frames', 'kind': 'image', 'cell_kind': '',
+    'size': '2x2', 'interval_ms': 100, 'title': 'Card', 'semantic': {},
+    'display': {}, 'fit': {}, 'overlay_signal': '',
+}
+editor = editor_module.PanelEditorView('panel-1', {
+    'panel_id': 'panel-1', 'state': state,
+    'signal_options': (('camera', (('frames', '@logic/cm/frames'),)),),
+    'overlay_signal_options': (),
+    'interval_choices': (100, 200, 400, 800),
+    'size_choices': ('1x2', '2x2', '1x4'),
+    'parameter_surface': {'semantic': (), 'display': (), 'fit': (), 'paints_images': True},
+    'save_directory': '.', 'frozen_signal': state['signal'],
+    'frozen_publication': None, 'frozen_snapshot': None,
+    'stale': False, 'producer_node_id': '',
+}, owner)
+body = editor.scroll.widget()
+assert body is not None
+assert body.testAttribute(QtCore.Qt.WA_OpaquePaintEvent), 'the scrolled body must promise an opaque paint'
+assert not body.testAttribute(QtCore.Qt.WA_TranslucentBackground)
+editor.resize(900, 700)
+editor.show()
+app.processEvents()
+picture = body.grab().toImage()
+for x, y in ((1, 1), (picture.width() - 2, picture.height() - 2)):
+    colour = QtGui.QColor(picture.pixel(x, y))
+    assert colour.alpha() == 255 and colour.name().upper() == BG.upper(), (x, y, colour.name(), BG)
+editor.deleteLater()
+app.processEvents()
+print('opaque body ok')
 """
     )

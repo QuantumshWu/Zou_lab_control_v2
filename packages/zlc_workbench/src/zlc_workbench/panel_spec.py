@@ -13,7 +13,7 @@ __all__ = ["fitting_panel_spec"]
 def _dense_series_x(schema: object, spec: object) -> object:
     """Land a defaulted series x on an axis that can actually carry a series.
 
-    A camera frame's point table has one row, and the library's curve default
+    A camera frame's Point domain may have one row, and the library's curve default
     walks the point domain -- so "1D vector on a camera signal" opened as one
     invisible point.  The size authority is ``zlc_plot.semantics.axis_size``
     (the same one the semantic editor's choices use), and the re-point goes

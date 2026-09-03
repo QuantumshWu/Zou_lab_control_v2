@@ -125,7 +125,7 @@ class SelectorState:
             object.__setattr__(self, "value", float(self.value))
 
 
-_THRESHOLD_TARGET_REQUIRED_FIELDS = {"value", "scope", "repeat_index"}
+_THRESHOLD_TARGET_REQUIRED_FIELDS = {"value", "scope"}
 _THRESHOLD_TARGET_OPTIONAL_FIELDS = {"gaussian_components"}
 _THRESHOLD_SCOPE_FIELDS = {"domain", "axis_id", "coordinate"}
 _GAUSSIAN_COMPONENT_FIELDS = {
@@ -199,7 +199,7 @@ def _classifier_threshold_key(target: Mapping[str, object]) -> tuple[object, ...
         )
         for item in target["scope"]
     )
-    return scope, target["repeat_index"]
+    return scope
 
 
 def normalize_classifier_threshold_targets(
@@ -232,7 +232,7 @@ def normalize_classifier_threshold_targets(
         if isinstance(scope, (str, bytes)) or not isinstance(scope, Sequence):
             raise TypeError("classifier threshold scope must be a sequence")
         normalized_scope: list[Mapping[str, object]] = []
-        scoped_axes: set[tuple[str, str | None]] = set()
+        scoped_axes: set[tuple[str, str]] = set()
         for item in scope:
             if not isinstance(item, Mapping):
                 raise TypeError("classifier threshold scope entries must be objects")
@@ -240,11 +240,9 @@ def normalize_classifier_threshold_targets(
                 raise ValueError("classifier threshold scope fields differ")
             domain = AxisDomain(str(item["domain"]))
             axis_id = item["axis_id"]
-            if axis_id is not None and not isinstance(axis_id, str):
-                raise TypeError("classifier threshold scope axis_id must be text or null")
+            if not isinstance(axis_id, str):
+                raise TypeError("classifier threshold scope axis_id must be text")
             ref = AxisRef(domain, axis_id)
-            if ref.domain is AxisDomain.REPEAT:
-                raise ValueError("repeat scope belongs in repeat_index")
             axis_key = (ref.domain.value, ref.axis_id)
             if axis_key in scoped_axes:
                 raise ValueError("classifier threshold scope repeats an axis")
@@ -259,21 +257,13 @@ def normalize_classifier_threshold_targets(
         normalized_scope.sort(
             key=lambda item: (
                 str(item["domain"]),
-                "" if item["axis_id"] is None else str(item["axis_id"]),
+                str(item["axis_id"]),
                 repr(_threshold_coordinate_key(item["coordinate"])),
             )
-        )
-        repeat_index = target["repeat_index"]
-        repeat_index = integer(
-            repeat_index,
-            "classifier threshold repeat_index",
-            minimum=0,
-            optional=True,
         )
         record_values: dict[str, object] = {
             "value": threshold,
             "scope": tuple(normalized_scope),
-            "repeat_index": repeat_index,
         }
         if "gaussian_components" in target:
             record_values["gaussian_components"] = _gaussian_components(
@@ -304,7 +294,6 @@ def _classifier_threshold_target_from_subject(
             }
             for ref, coordinate in scope
         ),
-        "repeat_index": subject.repeat_index,
     }
     return normalize_classifier_threshold_targets((record,))[0]
 

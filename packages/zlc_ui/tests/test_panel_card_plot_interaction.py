@@ -12,12 +12,10 @@ from pathlib import Path
 import subprocess
 import sys
 
-
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 REPO_ROOT = ROOT.parents[1]
 PLOT_TESTS = REPO_ROOT / "packages" / "zlc_plot" / "tests"
-
 
 def _run_qt(code: str) -> None:
     environment = dict(os.environ)
@@ -42,7 +40,6 @@ def _run_qt(code: str) -> None:
     )
     assert completed.returncode == 0, completed.stderr or completed.stdout
 
-
 _PROLOGUE = """
 import time
 
@@ -50,7 +47,17 @@ import zou_lab_control
 print(zou_lab_control.__file__)
 import numpy as np
 from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from data_factory import (
+    axis,
+    cartesian_domain,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+    snapshot_validity,
+    snapshot_values,
+)
+from zlc_data import DatasetSchema, OwnedSnapshot
 from zlc_plot import (
     AxisRef,
     CurvePlot,
@@ -65,7 +72,6 @@ PanelCardView = tested_module.PanelCardView
 
 app = ensure_qt5_application([])
 
-
 def wait_until(condition, timeout=15.0, message="condition did not settle"):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -74,7 +80,6 @@ def wait_until(condition, timeout=15.0, message="condition did not settle"):
             return
         time.sleep(0.005)
     raise AssertionError(message)
-
 
 def mounted_card(host):
     widget = Qt5PlotWidget(host)
@@ -88,7 +93,6 @@ def mounted_card(host):
     )
     return card, widget
 
-
 def axes_center(widget, axes):
     left, top, right, bottom = axes.bounds
     return QtCore.QPoint(
@@ -96,14 +100,11 @@ def axes_center(widget, axes):
         int((top + bottom) / 2.0 * widget.height()),
     )
 
-
 def committed_selectors(host):
     return tuple(host.selectors().result(timeout=10).value)
 
-
 def viewport(host):
     return host.describe_display().result(timeout=10).value.viewport
-
 
 def send_wheel(widget, steps):
     center = widget.rect().center()
@@ -120,7 +121,6 @@ def send_wheel(widget, steps):
     QtWidgets.QApplication.sendEvent(widget, wheel)
 """
 
-
 def test_selectors_off_blocks_double_click_facet_focus() -> None:
     """Off means the plot cannot focus a facet cell."""
 
@@ -129,14 +129,13 @@ def test_selectors_off_blocks_double_click_facet_focus() -> None:
         + """
 x = np.linspace(-3.0, 3.0, 20)
 facets = np.repeat([0.0, 1.0], 10)
-schema = DatasetSchema.create(
-    Axis.create('repeat', size=1),
-    PointTable.from_columns({'x': x, 'facet': facets}),
+schema = make_dataset_schema(
+    repeat_domain(size=1),
+    mapped_domain_from_columns({'x': x, 'facet': facets}),
     dtype=np.float64,
-    generation='card-facet-focus',
 )
 values = (2.0 * np.exp(-0.5 * ((x - 0.2) / 1.0) ** 2) + 0.2)[None, :]
-snapshot = DatasetSnapshot(schema, values, 0)
+snapshot = make_snapshot(schema, values, 0)
 spec = FacetGridPlot(AxisRef.point('facet'), CurvePlot(AxisRef.point('x')))
 host = RasterPlotHost.from_plot(snapshot, spec)
 card = widget = None
@@ -167,7 +166,6 @@ finally:
 """
     )
 
-
 def test_selectors_off_blocks_area_pan_and_zoom_until_enabled() -> None:
     """Off blocks every plot gesture; On enables the same real Qt stream."""
 
@@ -175,13 +173,12 @@ def test_selectors_off_blocks_area_pan_and_zoom_until_enabled() -> None:
         _PROLOGUE
         + """
 x = np.linspace(0.0, 1.0, 20)
-schema = DatasetSchema.create(
-    Axis.create('repeat', size=1),
-    PointTable.from_columns({'x': x}),
+schema = make_dataset_schema(
+    repeat_domain(size=1),
+    mapped_domain_from_columns({'x': x}),
     dtype=np.float64,
-    generation='card-selector-gate',
 )
-snapshot = DatasetSnapshot(schema, x[None, :], 0)
+snapshot = make_snapshot(schema, x[None, :], 0)
 host = RasterPlotHost.from_plot(snapshot, CurvePlot(AxisRef.point('x')))
 card = widget = None
 try:
@@ -247,7 +244,6 @@ finally:
 """
     )
 
-
 def test_a_mounted_surfaces_error_report_reaches_the_handle() -> None:
     """errorOccurred on a mounted panel widget lands on the console seam."""
 
@@ -262,7 +258,6 @@ from zlc_ui.qt import ensure_qt_app
 
 app = ensure_qt_app(['panel-plot-error'])
 
-
 class _PlotSurface(QtWidgets.QWidget):
     errorOccurred = QtCore.pyqtSignal(str)
 
@@ -273,14 +268,12 @@ class _PlotSurface(QtWidgets.QWidget):
     def set_interaction_enabled(self, enabled):
         self.interaction = bool(enabled)
 
-
 class _Host:
     def __init__(self):
         self.widget = _PlotSurface()
 
     def qt_widget(self):
         return self.widget
-
 
 view = TaskConsoleView()
 handle = TaskConsoleHandle(None, view)
@@ -312,7 +305,6 @@ assert events == [
 """
     )
 
-
 def test_a_cards_size_is_its_picture_plus_its_chrome_whatever_it_says() -> None:
     """The strip may not decide how big a card is.
 
@@ -328,12 +320,12 @@ def test_a_cards_size_is_its_picture_plus_its_chrome_whatever_it_says() -> None:
     _run_qt(
         _PROLOGUE
         + """
-schema = DatasetSchema.create(
-    Axis.create('repeat', size=1),
-    PointTable.from_columns({'x': [0.0, 1.0, 2.0, 3.0]}),
+schema = make_dataset_schema(
+    repeat_domain(size=1),
+    mapped_domain_from_columns({'x': [0.0, 1.0, 2.0, 3.0]}),
     dtype=np.float64,
 )
-snapshot = DatasetSnapshot(schema, np.arange(4.0).reshape(1, 4), revision=0)
+snapshot = make_snapshot(schema, np.arange(4.0).reshape(1, 4), revision=0)
 host = RasterPlotHost.from_plot(snapshot, CurvePlot(AxisRef.point('x')), size='2x2')
 card, widget = mounted_card(host)
 projection = {
@@ -350,7 +342,7 @@ surface = {
     ),
     'data_scope': (),
     'semantic': tuple({
-        'key': f'fate:{name}', 'label': name, 'kind': 'choice',
+        'key': f'fate:point:{name}', 'label': name, 'kind': 'choice',
         'value': 'reduce', 'allow_none': False,
         'choices': (('Reduce', 'reduce'), ('Facet', 'facet')),
     } for name in ('field.x', 'field.y', 'field.z')),
@@ -381,9 +373,9 @@ assert '<br>' in card._title_label.text()
 assert '(20)x(10x10x10)x(3x35)' in card._title_label.toolTip()
 form_keys = set(card._form_spec().keys)
 assert {
-    'semantic__fate:field.x',
-    'semantic__fate:field.y',
-    'semantic__fate:field.z',
+    'semantic__fate:point:field.x',
+    'semantic__fate:point:field.y',
+    'semantic__fate:point:field.z',
 } <= form_keys
 # A reason why a section has nothing to offer is a MESSAGE, and the form
 # declares controls.  It used to be declared here as a field, which is how
@@ -442,7 +434,6 @@ host.close(timeout=10)
 """
     )
 
-
 def test_a_card_takes_the_new_presets_room_the_moment_it_is_picked() -> None:
     """A preset is a size the plotting package already knows.
 
@@ -461,12 +452,12 @@ def test_a_card_takes_the_new_presets_room_the_moment_it_is_picked() -> None:
         + """
 from zlc_ui.board import panel_display_size
 
-schema = DatasetSchema.create(
-    Axis.create('repeat', size=1),
-    PointTable.from_columns({'x': [0.0, 1.0, 2.0, 3.0]}),
+schema = make_dataset_schema(
+    repeat_domain(size=1),
+    mapped_domain_from_columns({'x': [0.0, 1.0, 2.0, 3.0]}),
     dtype=np.float64,
 )
-snapshot = DatasetSnapshot(schema, np.arange(4.0).reshape(1, 4), revision=0)
+snapshot = make_snapshot(schema, np.arange(4.0).reshape(1, 4), revision=0)
 host = RasterPlotHost.from_plot(snapshot, CurvePlot(AxisRef.point('x')), size='2x2')
 card, widget = mounted_card(host)
 card.set_interval_choices((100,), 100)
@@ -475,7 +466,6 @@ band = card._title_band
 pad = tested_module.scaled_px(2) + tested_module.CARD_PAD
 packed = []
 card.geometry_changed.connect(lambda: packed.append(card.size()))
-
 
 def framed(size):
     # Whatever this context can say a preset's picture measures: with the
@@ -487,7 +477,6 @@ def framed(size):
         card.width() == planned[0] + 2 * tested_module.CARD_PAD
         and card.height() == planned[1] + band.height() + pad
     )
-
 
 for size in ('4x4', '2x2'):
     packed.clear()

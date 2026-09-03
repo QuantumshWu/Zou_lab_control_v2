@@ -3,35 +3,41 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from data_factory import (
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
+from zlc_data import DatasetSchema, OwnedSnapshot, REPEAT, SPATIAL_X, SPATIAL_Y
 from zlc_plot import AxisRef, FacetGridPlot, ImagePlot, PlotSession
 
 
-def _image_snapshot(*, x_unit: str = "m", y_unit: str = "m") -> DatasetSnapshot:
+def _image_snapshot(*, x_unit: str = "m", y_unit: str = "m") -> OwnedSnapshot:
     x = np.linspace(-2.0, 2.0, 21)
     y = np.linspace(-3.0, 3.0, 25)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"sample": [0.0]}),
-        data_axes=(
-            Axis.create("x", values=x, canonical_unit=x_unit),
-            Axis.create("y", values=y, canonical_unit=y_unit),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"sample": [0.0]}),
+        cell_axes=(
+            axis("x", values=x, unit=x_unit, role=SPATIAL_X),
+            axis("y", values=y, unit=y_unit, role=SPATIAL_Y),
         ),
         dtype=np.float64,
-        canonical_unit="1",
-        generation=f"image-fit-{x_unit}-{y_unit}",
+        value_unit="1",
     )
     xx, yy = np.meshgrid(x, y)
     values = 0.4 + 2.0 * np.exp(
         -((xx - 0.35) ** 2 / 0.7**2 + (yy + 0.8) ** 2 / 1.1**2)
     )
-    return DatasetSnapshot(schema, values.T[None, None, :, :], revision=0)
+    return make_snapshot(schema, values.T[None, None, :, :], revision=0)
 
 
 def _image_session(*, x_unit: str = "m", y_unit: str = "m") -> PlotSession:
     return PlotSession(
         _image_snapshot(x_unit=x_unit, y_unit=y_unit),
-        ImagePlot(AxisRef.data("x"), AxisRef.data("y")),
+        ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y")),
     )
 
 
@@ -93,8 +99,8 @@ def test_image_fit_ring_uses_the_occupied_point_ring_style(faceted: bool) -> Non
 
     from matplotlib.colors import to_rgba
 
-    cell = ImagePlot(AxisRef.data("x"), AxisRef.data("y"))
-    spec = FacetGridPlot(AxisRef.repeat(), cell) if faceted else cell
+    cell = ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y"))
+    spec = FacetGridPlot(AxisRef.repeat("repeat"), cell) if faceted else cell
     session = PlotSession(_image_snapshot(), spec)
     try:
         result = session.fit("radial_gaussian_center", live=False)
@@ -155,7 +161,7 @@ def test_image_display_unit_change_preserves_canonical_pixel_geometry() -> None:
         before_array = np.asarray(image.get_array()).copy()
         assert axes.get_aspect() == pytest.approx(0.8)
 
-        session.set_axis_unit(AxisRef.data("x"), "cm")
+        session.set_axis_unit(AxisRef.cell_data("x"), "cm")
 
         image = session._renderer._artists["image"]
         after_bbox = tuple(float(value) for value in axes.bbox.bounds)
@@ -209,22 +215,19 @@ def test_the_schema_says_which_axes_are_the_image() -> None:
 
     import numpy as np
 
-    from zlc_data import READOUT_EVENT, SPATIAL_X, SPATIAL_Y
+    from zlc_data import READOUT_EVENT
     from zlc_plot._kinds.image import HANDLER
 
-    from data_factory import Axis, DatasetSchema, PointTable
-
     def _schema(events: int, height: int, width: int) -> DatasetSchema:
-        return DatasetSchema.create(
-            Axis.create("repeat", size=1),
-            PointTable.from_columns({"sample": [0.0]}),
-            data_axes=(
-                Axis.create("event", size=events, role=READOUT_EVENT),
-                Axis.create("y", size=height, role=SPATIAL_Y),
-                Axis.create("x", size=width, role=SPATIAL_X),
+        return make_dataset_schema(
+            repeat_domain(size=1),
+            mapped_domain_from_columns({"sample": [0.0]}),
+            cell_axes=(
+                axis("event", size=events, role=READOUT_EVENT),
+                axis("y", size=height, role=SPATIAL_Y),
+                axis("x", size=width, role=SPATIAL_X),
             ),
             dtype=np.float64,
-            generation="image-roles",
         )
 
     for events, height, width in ((1, 60, 80), (2, 60, 80), (1, 1, 80)):

@@ -19,18 +19,25 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 import pytest
 
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from data_factory import (
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
+from zlc_data import DatasetSchema, OwnedSnapshot, REPEAT, SITE
 from zlc_plot import AxisRef, CurvePlot, Qt5PlotWidget, RollingPlot
 from zlc_plot.raster import RasterPlotHost
 
 
 def _schema(sites: int) -> DatasetSchema:
-    return DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"site": np.arange(sites, dtype=np.int64)}),
-        data_axes=(),
+    return make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns(
+            {"site": np.arange(sites, dtype=np.int64)}, roles={"site": SITE}
+        ),
         dtype=np.float64,
-        generation="live-drag",
     )
 
 
@@ -54,11 +61,11 @@ def test_a_live_panel_keeps_presenting_while_a_selector_is_dragged(
     rng = np.random.default_rng(4)
     scale = [1.0]
 
-    def shot(revision: int) -> DatasetSnapshot:
+    def shot(revision: int) -> OwnedSnapshot:
         # Growing values, so an autoscaled curve's limits MOVE with the data
         # exactly as a rolling trace's shot axis does.
         scale[0] *= 1.6
-        return DatasetSnapshot(
+        return make_snapshot(
             schema, rng.random((1, sites)) * scale[0], revision=revision
         )
 
@@ -134,27 +141,31 @@ def _sliding_history(_first_shot: int, rows: int = 5):
     from zlc_data import (
         AxisId,
         AxisSpec,
-        PointColumn,
+        DomainSpec,
         PRIMARY_INDEX,
         REPEAT,
+        SCALAR_DOMAIN,
         ValueSchema,
     )
     from zlc_data import DatasetSchema as RoleDatasetSchema
-    from zlc_data import PointTable as RolePointTable
     from zlc_data.value import owned_snapshot_from_arrays
 
-    column = PointColumn(
+    axis = AxisSpec(
         AxisId("zlc_data.primary-index"), "source index", PRIMARY_INDEX,
-        PointColumn.NUMERIC,
+        rows,
         tuple(float(index - rows + 1) for index in range(rows)),
     )
     schema = RoleDatasetSchema(
-        AxisSpec(AxisId("repeat"), "repeat", REPEAT, 1, (0,)),
-        RolePointTable(rows, (column,)),
-        None,
+        DomainSpec(
+            (1,),
+            (AxisSpec(AxisId("repeat"), "repeat", REPEAT, 1, (0,)),),
+            ((0,),),
+        ),
+        DomainSpec((rows,), (axis,), (tuple(range(rows)),)),
+        SCALAR_DOMAIN,
         ValueSchema.scalar(np.dtype("float64"), "1"),
     )
-    return schema, column
+    return schema, axis
 
 
 @pytest.mark.gui

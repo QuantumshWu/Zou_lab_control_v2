@@ -1,238 +1,194 @@
-"""Small role-axis fixtures used by the offscreen plotting suite.
+"""Concise constructors for real :mod:`zlc_data` test objects.
 
-The production package never imports this module.  Keeping construction here
-lets each test exercise the real ``zlc_data`` objects without recreating a
-second data model in ``zlc_plot``.
+These functions add no compatibility vocabulary: callers provide axis roles,
+domains, units and value metadata explicitly, and every result is the actual
+production ``AxisSpec``, ``DomainSpec``, ``DatasetSchema`` or
+``OwnedSnapshot`` type.
 """
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 import numpy as np
 from zlc_data import (
     AxisId,
     AxisSpec,
     COMPONENT,
-    DatasetSchema as RoleDatasetSchema,
-    GridTopology,
+    DatasetSchema,
+    DomainSpec,
     OwnedSnapshot,
-    PointColumn,
-    PointTable as RolePointTable,
     REPEAT,
     SCAN_POINT,
-    SITE,
+    SCALAR_DOMAIN,
     ValueSchema,
     ValidityContract,
     owned_snapshot_from_arrays,
 )
 
 
-class Axis:
-    """Test-only ergonomic constructor that returns a real ``AxisSpec``."""
+def axis(
+    name: str,
+    *,
+    role: object = COMPONENT,
+    size: int | None = None,
+    values: Sequence[object] | np.ndarray | None = None,
+    unit: str | None = None,
+) -> AxisSpec:
+    """Return one production axis; its role is never inferred from its name."""
 
-    @staticmethod
-    def create(
-        name: str,
-        *,
-        size: int | None = None,
-        values: Any | None = None,
-        canonical_unit: str | None = None,
-        label: str | None = None,
-        role: object | None = None,
-        **_: object,
-    ) -> AxisSpec:
-        del label
-        if values is not None:
-            coordinates = tuple(np.asarray(values).tolist())
-            selected_size = len(coordinates)
-        else:
-            selected_size = 1 if size is None else int(size)
-            coordinates = None
-        # A declared role is honoured.  It used to fall into **_ and every
-        # axis came out COMPONENT, so no test could express what a real
-        # producer publishes -- which is how a role-blind image projection
-        # stayed green.
-        if role is None:
-            role = REPEAT if name == "repeat" else COMPONENT
-        return AxisSpec(
-            AxisId(name),
-            name,
-            role,
-            selected_size,
-            coordinates,
-            canonical_unit,
-        )
+    if values is None:
+        selected_size = 1 if size is None else int(size)
+        coordinates = None
+    else:
+        coordinates = tuple(np.asarray(values).tolist())
+        selected_size = len(coordinates)
+        if size is not None and int(size) != selected_size:
+            raise ValueError("axis size differs from its coordinate count")
+    return AxisSpec(
+        AxisId(name),
+        name,
+        role,
+        selected_size,
+        coordinates,
+        unit,
+    )
 
 
-class PointTable:
-    @staticmethod
-    def from_columns(
-        columns: Mapping[str, Any],
-        *,
-        units: Mapping[str, str] | None = None,
-        ids: Mapping[str, str] | None = None,
-        roles: Mapping[str, Any] | None = None,
-        **_: object,
-    ) -> RolePointTable:
-        """Build a point table; ``ids`` gives a column an id unlike its name.
+def repeat_domain(
+    *,
+    name: str = "repeat",
+    size: int | None = None,
+    values: Sequence[object] | np.ndarray | None = None,
+    unit: str | None = None,
+) -> DomainSpec:
+    """Return a one-axis production Repeat domain."""
 
-        A real producer names a column for a reader and identifies it for a
-        resolver, and the two need not match.  This factory used to force them
-        equal, which made every "looked it up by the wrong one" bug untestable
-        here -- and one shipped: a kind's default spec named its x axis by
-        display name while the resolver looks up by coordinate id.
-
-        A column of strings becomes a real TEXT column, because
-        ``PointColumn`` has always had that kind and a projection asked to
-        plot one must refuse -- which is untestable while the factory can
-        only build numbers.
-
-        ``roles`` declares what a column IS: a camera cycle's frame index is
-        a ``READOUT_EVENT`` point, not a scan point, and a test that cannot
-        say so cannot stand in for the producer it claims to model.
-        """
-        values = {
-            str(name): _column_values(column) for name, column in columns.items()
-        }
-        if not values:
-            raise ValueError("tests require at least one point column")
-        row_count = len(next(iter(values.values())))
-        unit_map = {} if units is None else dict(units)
-        role_map = {} if roles is None else dict(roles)
-        return RolePointTable(
-            row_count,
-            tuple(
-                PointColumn(
-                    AxisId((ids or {}).get(name, name)),
-                    name,
-                    role_map.get(
-                        name,
-                        SITE
-                        if (ids or {}).get(name, name) == "site"
-                        else SCAN_POINT,
-                    ),
-                    PointColumn.TEXT
-                    if all(isinstance(item, str) for item in column)
-                    else PointColumn.NUMERIC,
-                    tuple(column),
-                    None
-                    if all(isinstance(item, str) for item in column)
-                    else unit_map.get(name),
-                )
-                for name, column in values.items()
-            ),
-        )
+    item = axis(name, role=REPEAT, size=size, values=values, unit=unit)
+    return DomainSpec(
+        (int(item.size),),
+        (item,),
+        (tuple(range(int(item.size))),),
+    )
 
 
-def _column_values(column: Any) -> tuple[Any, ...]:
-    items = tuple(column)
-    if items and all(isinstance(item, str) for item in items):
-        return items
-    return tuple(np.asarray(column).tolist())
+def mapped_domain_from_columns(
+    columns: Mapping[str, Sequence[object] | np.ndarray],
+    *,
+    units: Mapping[str, str] | None = None,
+    ids: Mapping[str, str] | None = None,
+    roles: Mapping[str, object] | None = None,
+    default_role: object = SCAN_POINT,
+) -> DomainSpec:
+    """Build a mapped production domain from per-row logical coordinates."""
 
-
-class PointTopology(GridTopology):
-    @property
-    def shape(self) -> tuple[int, ...]:
-        return self.logical_shape
-
-    @staticmethod
-    def from_cartesian(
-        dimensions: tuple[AxisSpec, ...] | list[AxisSpec],
-        *,
-        point_table: RolePointTable | None = None,
-    ) -> GridTopology:
-        dims = tuple(dimensions)
-        domains = tuple(tuple(axis.coordinates or range(axis.size)) for axis in dims)
-        mapping = tuple(np.ndindex(*(len(domain) for domain in domains)))
-        if point_table is not None and len(mapping) != point_table.row_count:
-            raise ValueError("cartesian topology does not match point row count")
-        return PointTopology(
-            tuple(axis.axis_id for axis in dims),
-            domains,
-            mapping,
-        )
-
-
-class DatasetSchema(RoleDatasetSchema):
-    @property
-    def shape(self) -> tuple[int, ...]:
-        return self.physical_shape
-
-    @property
-    def ndim(self) -> int:
-        return len(self.physical_shape)
-
-    @property
-    def R(self) -> int:
-        return self.repeat_axis.size
-
-    @property
-    def P(self) -> int:
-        return self.point_table.row_count
-
-    @property
-    def dtype(self) -> np.dtype:
-        return self.cell_schema.dtype
-
-    @staticmethod
-    def create(
-        repeat_axis: AxisSpec,
-        point_table: RolePointTable,
-        *,
-        data_axes: tuple[AxisSpec, ...] = (),
-        point_topology: GridTopology | None = None,
-        dtype: Any = np.float64,
-        canonical_unit: str | None = None,
-        **_: object,
-    ) -> RoleDatasetSchema:
-        if not data_axes:
-            value_schema = ValueSchema.scalar(np.dtype(dtype), canonical_unit)
-        else:
-            value_schema = ValueSchema(
-                tuple(data_axes),
-                ValidityContract.value(),
-                np.dtype(dtype),
-                canonical_unit,
+    values = {
+        str(name): tuple(np.asarray(column).tolist())
+        for name, column in columns.items()
+    }
+    if not values:
+        raise ValueError("a mapped test domain needs at least one axis")
+    row_count = len(next(iter(values.values())))
+    if any(len(column) != row_count for column in values.values()):
+        raise ValueError("mapped axis row coordinates must have equal lengths")
+    unit_map = {} if units is None else dict(units)
+    id_map = {} if ids is None else dict(ids)
+    role_map = {} if roles is None else dict(roles)
+    names = set(values)
+    for field, mapping in (("unit", unit_map), ("id", id_map), ("role", role_map)):
+        unknown = set(mapping) - names
+        if unknown:
+            raise ValueError(
+                f"mapped domain {field} names unknown axes: {sorted(unknown)}"
             )
-        return DatasetSchema(
-            repeat_axis,
-            point_table,
-            point_topology,
-            value_schema,
+    axes = []
+    codes = []
+    for name, column in values.items():
+        domain, inverse = np.unique(np.asarray(column), return_inverse=True)
+        axis_id = id_map.get(name, name)
+        axes.append(
+            AxisSpec(
+                AxisId(axis_id),
+                name,
+                role_map.get(name, default_role),
+                int(domain.size),
+                tuple(domain.tolist()),
+                None if domain.dtype.kind in "OUS" else unit_map.get(name),
+            )
         )
+        codes.append(tuple(int(value) for value in inverse))
+    return DomainSpec((row_count,), tuple(axes), tuple(codes))
 
 
-def DatasetSnapshot(
-    schema: RoleDatasetSchema,
+def cartesian_domain(axes: Sequence[AxisSpec]) -> DomainSpec:
+    """Flatten one Cartesian set of production axes into a mapped domain."""
+
+    selected = tuple(axes)
+    shape = tuple(int(item.size) for item in selected)
+    rows = tuple(np.ndindex(*shape))
+    return DomainSpec(
+        (int(np.prod(shape, dtype=np.int64)),),
+        selected,
+        tuple(
+            tuple(int(row[position]) for row in rows)
+            for position in range(len(selected))
+        ),
+    )
+
+
+def make_dataset_schema(
+    repeat_domain: DomainSpec,
+    point_domain: DomainSpec,
+    *,
+    cell_axes: Sequence[AxisSpec] = (),
+    dtype: Any = np.float64,
+    value_unit: str | None = None,
+) -> DatasetSchema:
+    """Compose the four production schema owners without legacy properties."""
+
+    cells = tuple(cell_axes)
+    if cells:
+        cell_domain = DomainSpec(tuple(int(item.size) for item in cells), cells)
+        value_schema = ValueSchema(
+            ValidityContract.value(),
+            np.dtype(dtype),
+            value_unit,
+        )
+    else:
+        cell_domain = SCALAR_DOMAIN
+        value_schema = ValueSchema.scalar(np.dtype(dtype), value_unit)
+    return DatasetSchema(
+        repeat_domain,
+        point_domain,
+        cell_domain,
+        value_schema,
+    )
+
+
+def make_snapshot(
+    schema: DatasetSchema,
     values: Any,
     revision: int,
     *,
     validity: Any | None = None,
     sigma: Any | None = None,
-    metadata: object | None = None,
 ) -> OwnedSnapshot:
-    del metadata
+    """Build one production snapshot, accepting scalar values without the carrier."""
+
     array = np.asarray(values)
     physical_shape = schema.physical_shape
 
-    def as_cells(plane: Any) -> Any:
-        """A scalar-cell plane given without its trailing axis gets one."""
-
+    def with_scalar_carrier(plane: Any) -> Any:
         if plane is None:
             return None
         dense = np.asarray(plane)
-        if dense.shape == physical_shape[:-1]:
-            return dense[..., None]
-        return dense
+        return dense[..., None] if dense.shape == physical_shape[:-1] else dense
 
-    if schema.cell_schema.is_scalar and array.shape == physical_shape[:-1]:
+    if schema.cell_domain == SCALAR_DOMAIN and array.shape == physical_shape[:-1]:
         array = array[..., None]
-        if validity is not None:
-            validity = as_cells(validity)
-        if sigma is not None:
-            sigma = as_cells(sigma)
+        validity = with_scalar_carrier(validity)
+        sigma = with_scalar_carrier(sigma)
     return owned_snapshot_from_arrays(
         schema=schema,
         values=array,
@@ -251,11 +207,12 @@ def snapshot_validity(snapshot: OwnedSnapshot) -> np.ndarray:
 
 
 __all__ = [
-    "Axis",
-    "DatasetSchema",
-    "DatasetSnapshot",
-    "PointTable",
-    "PointTopology",
+    "axis",
+    "cartesian_domain",
+    "make_dataset_schema",
+    "make_snapshot",
+    "mapped_domain_from_columns",
+    "repeat_domain",
     "snapshot_validity",
     "snapshot_values",
 ]

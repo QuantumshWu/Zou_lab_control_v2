@@ -19,7 +19,6 @@ import matplotlib.pyplot as plt
 import zlc_plot.ticks as ticks_module
 from zlc_plot.ticks import SmartOffsetLocator, apply_smart_ticks
 
-
 #: Ranges this bench actually produces.  Each is (name, low, high).
 RANGES = (
     ("an absolute shot number late in a run", 1234500.0, 1234600.0),
@@ -36,12 +35,10 @@ RANGES = (
 #: to take its common part out.
 LONGEST_LABEL = 6
 
-
 #: What the caller is about to draw these labels at.  The policy prices its
 #: candidates against exactly this, and may shrink it when two labels can no
 #: longer clear each other.
 LABEL_PT = 6.5
-
 
 def _drawn(low: float, high: float, *, surface: str, inches: float):
     figure = plt.figure(figsize=(inches, inches * 0.75), dpi=100)
@@ -52,10 +49,8 @@ def _drawn(low: float, high: float, *, surface: str, inches: float):
     figure.canvas.draw()
     return figure, axes
 
-
 def _labels(axis) -> list[str]:
     return [text.get_text() for text in axis.get_ticklabels() if text.get_text()]
-
 
 @pytest.mark.parametrize("name,low,high", RANGES)
 @pytest.mark.parametrize("surface,inches", (("panel", 6.0), ("cell", 1.2)))
@@ -75,7 +70,6 @@ def test_no_axis_prints_a_label_longer_than_its_own_range_needs(
     finally:
         plt.close(figure)
 
-
 def test_a_y_axis_far_from_zero_takes_the_offset_too() -> None:
     """The regression itself: the width question is not asked of y."""
 
@@ -86,7 +80,6 @@ def test_a_y_axis_far_from_zero_takes_the_offset_too() -> None:
     finally:
         plt.close(figure)
 
-
 def test_labels_that_are_already_short_keep_their_coordinates() -> None:
     """An offset is a cost: it is paid only where it buys something."""
 
@@ -96,7 +89,6 @@ def test_labels_that_are_already_short_keep_their_coordinates() -> None:
         assert _labels(axes.yaxis)[0] == "5180"
     finally:
         plt.close(figure)
-
 
 def test_a_scale_and_an_offset_stay_two_statements() -> None:
     """Run together, "x1e4+3.84e11" reads as arithmetic that means nothing."""
@@ -110,7 +102,6 @@ def test_a_scale_and_an_offset_stay_two_statements() -> None:
         assert " " in text or "\n" in text, text
     finally:
         plt.close(figure)
-
 
 @pytest.mark.parametrize("surface,inches", (("panel", 6.0), ("cell", 1.2)))
 def test_the_offset_is_written_in_the_figures_own_corners(
@@ -146,7 +137,6 @@ def test_the_offset_is_written_in_the_figures_own_corners(
     finally:
         plt.close(figure)
 
-
 def test_a_caller_says_where_it_draws_and_how_big_never_how_many() -> None:
     """The two facts a caller owns, and the one it does not.
 
@@ -166,7 +156,6 @@ def test_a_caller_says_where_it_draws_and_how_big_never_how_many() -> None:
             apply_smart_ticks(axes, "diagonal", label_pt=LABEL_PT)
     finally:
         plt.close(figure)
-
 
 def test_identical_tick_input_reuses_layout_but_range_and_extent_do_not(
     monkeypatch,
@@ -201,7 +190,6 @@ def test_identical_tick_input_reuses_layout_but_range_and_extent_do_not(
     finally:
         plt.close(figure)
 
-
 def test_a_settled_fine_unit_is_rejected_before_a_large_range_is_enumerated(
     monkeypatch,
 ) -> None:
@@ -223,7 +211,6 @@ def test_a_settled_fine_unit_is_rejected_before_a_large_range_is_enumerated(
     assert 2 <= len(values) <= locator.max_ticks
     assert values == fresh.tick_values(0.0, 4_200_000.0)
 
-
 def _rendered_labels(renderer):
     """Every label a real render drew, with the box it drew it in."""
 
@@ -243,7 +230,6 @@ def _rendered_labels(renderer):
                 ]
                 if drawn:
                     yield f"{role}:{index}:{name}", name, drawn
-
 
 @pytest.mark.parametrize("preset", ("2x2", "8x8"))
 @pytest.mark.parametrize("shape", ((83, 60), (2048, 2048)))
@@ -265,26 +251,33 @@ def test_no_two_tick_labels_come_closer_than_one_digit(
 
     import numpy as np
 
-    from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+    from data_factory import (
+        axis,
+        make_dataset_schema,
+        make_snapshot,
+        mapped_domain_from_columns,
+        repeat_domain,
+    )
+
     from zlc_plot import AxisRef, FacetGridPlot, ImagePlot
     from zlc_plot.session import PlotSession
     from zlc_plot.ticks import MIN_TICK_LABEL_PT, _label_size_pt
 
     height, width = shape
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"frame": [float(i) for i in range(frames)]}),
-        data_axes=(
-            Axis.create("spatial-y", size=height),
-            Axis.create("spatial-x", size=width),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"frame": [float(i) for i in range(frames)]}),
+        cell_axes=(
+            axis("spatial-y", size=height),
+            axis("spatial-x", size=width),
         ),
         dtype=np.float32,
     )
     values = np.zeros((1, frames, height, width), dtype=np.float32)
     values[..., ::7] = 1.0
-    cell = ImagePlot(AxisRef.data("spatial-x"), AxisRef.data("spatial-y"))
+    cell = ImagePlot(AxisRef.cell_data("spatial-x"), AxisRef.cell_data("spatial-y"))
     spec = cell if frames == 1 else FacetGridPlot(AxisRef.point("frame"), cell)
-    session = PlotSession(DatasetSnapshot(schema, values, 0), spec, size=preset)
+    session = PlotSession(make_snapshot(schema, values, 0), spec, size=preset)
     try:
         session.rgba()
         renderer = session._renderer
@@ -331,7 +324,6 @@ def test_no_two_tick_labels_come_closer_than_one_digit(
         assert all(count <= 2 for count in rails), rails
     finally:
         session.close()
-
 
 @pytest.mark.parametrize("name,low,high", RANGES)
 @pytest.mark.parametrize(

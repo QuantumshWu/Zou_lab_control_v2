@@ -1386,7 +1386,7 @@ class FacetFitBatchResult:
         if not numeric_values:
             sample_unit = ""
         if not axis_name:
-            axis_name = self.facet.axis_id or self.facet.domain.value
+            axis_name = self.facet.axis_id
         object.__setattr__(self, "sample_axis_name", axis_name)
         object.__setattr__(self, "sample_coordinates", _readonly(coordinates))
         object.__setattr__(self, "sample_unit", sample_unit)

@@ -1036,9 +1036,16 @@ def _qt5_plot_widget_class() -> type[Any]:
         def paintEvent(self, event: object) -> None:
             painter = modules.QtGui.QPainter(self)
             try:
-                painter.fillRect(self.rect(), modules.QtGui.QColor("white"))
                 prepared = self._prepared_image
-                if prepared is not None:
+                if prepared is None:
+                    # Nothing to show yet: the opaque paint contract still
+                    # owes Qt every pixel of the exposed region.
+                    painter.fillRect(self.rect(), modules.QtGui.QColor("white"))
+                else:
+                    # The frame covers the whole widget; a white fill under
+                    # it was a second full-surface pass (4 ms of a 10 ms
+                    # paint at three device pixels per point) on every
+                    # exposure, including each step of a scroll.
                     image = prepared[1]
                     painter.drawImage(
                         QtCore.QRectF(self.rect()),

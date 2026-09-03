@@ -1425,13 +1425,22 @@ class FluentPathEdit(QtWidgets.QWidget):
     opens a folder chooser; ``mode="file"`` an open-file chooser filtered by
     ``file_filter``.  Quacks like a line edit (``text`` / ``setText`` /
     ``setPlaceholderText`` / ``setToolTip``) and emits ``changed(str)`` so a form can
-    treat it exactly like a ``FluentLineEdit``."""
+    treat it exactly like a ``FluentLineEdit``.
+
+    ``refreshable=True`` adds a Refresh button that emits ``refresh_requested``
+    without changing the path.  A file field points at something that is edited
+    elsewhere -- a pulse in the Pulse Editor, a calibration a run has just
+    written -- and the only way to re-read it was to pick the same file again
+    through the dialog, or to touch some other field so the whole draft
+    re-finalized.  Both worked by accident; this says it."""
 
     changed = QtCore.pyqtSignal(str)
     selected = QtCore.pyqtSignal(str)
+    refresh_requested = QtCore.pyqtSignal()
 
     def __init__(self, text: str = "", *, mode: str = "file", caption: str = "Choose",
-                 file_filter: str = "All files (*)", base_dir: str = "", parent=None):
+                 file_filter: str = "All files (*)", base_dir: str = "",
+                 refreshable: bool = False, parent=None):
         super().__init__(parent)
         self._mode = "dir" if str(mode) == "dir" else "file"
         self._caption = str(caption)
@@ -1456,8 +1465,16 @@ class FluentPathEdit(QtWidgets.QWidget):
         self.browse.setFixedWidth(
             fluent_text_width(self.browse.fontMetrics(), "Browse…") + scaled_px(22, minimum=16))
         self.browse.clicked.connect(self._browse)
+        self.refresh = FluentButton("Refresh", color=GREY)
+        self.refresh.setFixedWidth(
+            fluent_text_width(self.refresh.fontMetrics(), "Refresh") + scaled_px(22, minimum=16))
+        self.refresh.setToolTip("Re-read this file from disk")
+        self.refresh.clicked.connect(self.refresh_requested)
+        self.refresh.setVisible(bool(refreshable))
+        self.refresh.setEnabled(bool(refreshable))
         row.addWidget(self.edit, 1)
         row.addWidget(self.browse, 0)
+        row.addWidget(self.refresh, 0)
 
     def _browse(self) -> None:
         start = self._dialog_start()
@@ -2715,6 +2732,33 @@ class FluentCycleComboBox(FluentComboBox):
         if changed_value and not changed_row:
             self.currentTextChanged.emit(self.currentText())
             self.update()
+
+    def setCyclePosition(self, position: int) -> None:  # noqa: N802 - Qt API name
+        """Select one lazy sub-domain position without scanning its values."""
+
+        choices = self._cycle_choices
+        selected = int(position)
+        if choices is None:
+            raise RuntimeError("cycle choices are not configured")
+        if not 0 <= selected < len(choices):
+            raise IndexError("cycle position is outside the configured choices")
+        changed_value = selected != self._cycle_position
+        self._cycle_position = selected
+        changed_row = self.currentIndex() != self._cycle_row
+        super().setCurrentIndex(self._cycle_row)
+        if changed_value and not changed_row:
+            self.currentTextChanged.emit(self.currentText())
+            self.update()
+
+    def cyclePosition(self) -> int:  # noqa: N802 - Qt API name
+        """Return the selected lazy-domain position without reverse lookup."""
+
+        if self._cycle_choices is None or self._cycle_position < 0:
+            raise RuntimeError("cycle choices are not selected")
+        return self._cycle_position
+
+    def isCycleSelected(self) -> bool:  # noqa: N802 - Qt API name
+        return self.currentIndex() == self._cycle_row and self._cycle_position >= 0
 
     def setCurrentIndex(self, index: int) -> None:  # noqa: N802 - Qt API name
         selected = int(index)
@@ -4016,6 +4060,47 @@ class FluentCheckBox(QtWidgets.QCheckBox):
         )
 
 
+class FluentPageBody(QtWidgets.QWidget):
+    """A scrolled page body that paints the page colour and tells Qt so.
+
+    The scrolled content used to be transparent, showing the same colour
+    through from the page.  A scrolled widget Qt can see through is
+    repainted whole on every step of the wheel -- an Edit page's plot
+    surface, a 10 ms frame at three device pixels per point, forty times a
+    scroll -- where one Qt knows to be opaque is moved by blitting the
+    backing store and only the exposed strip is painted.  Qt learns opacity
+    from ``WA_OpaquePaintEvent``, which also stops it painting any styled
+    background, so this widget paints the page colour itself.
+    """
+
+    _REASSERT = (
+        QtCore.QEvent.ParentChange,
+        QtCore.QEvent.StyleChange,
+        QtCore.QEvent.Polish,
+    )
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._promise_opaque()
+
+    def _promise_opaque(self) -> None:
+        self.setAttribute(QtCore.Qt.WA_OpaquePaintEvent, True)
+        self.setAttribute(QtCore.Qt.WA_StyledBackground, False)
+
+    def event(self, event) -> bool:
+        # QScrollArea.setWidget and stylesheet polish both reset the
+        # attribute; the promise outlives them.
+        handled = super().event(event)
+        if event.type() in self._REASSERT:
+            self._promise_opaque()
+        return handled
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt API
+        painter = QtGui.QPainter(self)
+        painter.fillRect(event.rect(), QtGui.QColor(BG))
+        painter.end()
+
+
 class FluentScrollArea(QtWidgets.QScrollArea):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -4108,6 +4193,14 @@ class FluentTableView(QtWidgets.QTableView):
         self.setCornerButtonEnabled(False)
         self.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectItems)
+        # Model dimensions never participate in page/window size hints.  A
+        # million-cell scientific table is still one viewport with its own
+        # scrollbars, not a million-row request to the surrounding layout.
+        self.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.AdjustIgnored)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Expanding,
+        )
         self.setEditTriggers(
             QtWidgets.QAbstractItemView.DoubleClicked
             | QtWidgets.QAbstractItemView.EditKeyPressed

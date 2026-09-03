@@ -22,46 +22,34 @@ from zlc_plot import (
 )
 from zlc_plot._kinds import default_spec
 from data_factory import (
-    Axis,
-    DatasetSchema,
-    DatasetSnapshot,
-    PointTable,
-    PointTopology,
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
 )
+from zlc_data import OwnedSnapshot
 from zlc_plot.kinds import PlotKind
 from zlc_plot.specs import Reduction
 
-
-def _flat_snapshot() -> DatasetSnapshot:
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=3),
-        PointTable.from_columns({"scan": np.linspace(0.0, 1.0, 5)}),
+def _flat_snapshot() -> OwnedSnapshot:
+    schema = make_dataset_schema(
+        repeat_domain(size=3),
+        mapped_domain_from_columns({"scan": np.linspace(0.0, 1.0, 5)}),
         dtype=np.float64,
-        generation="feasibility-flat",
     )
-    return DatasetSnapshot(schema, np.arange(15.0).reshape(3, 5), revision=0)
+    return make_snapshot(schema, np.arange(15.0).reshape(3, 5), revision=0)
 
-
-def _grid_snapshot() -> DatasetSnapshot:
+def _grid_snapshot() -> OwnedSnapshot:
     row = np.repeat(np.arange(10.0), 10)
     col = np.tile(np.arange(10.0), 10)
-    points = PointTable.from_columns({"row": row, "col": col})
-    topology = PointTopology.from_cartesian(
-        (
-            Axis.create("row", values=np.arange(10.0)),
-            Axis.create("col", values=np.arange(10.0)),
-        ),
-        point_table=points,
-    )
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
+    points = mapped_domain_from_columns({"row": row, "col": col})
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
         points,
-        point_topology=topology,
         dtype=np.float64,
-        generation="feasibility-grid",
     )
-    return DatasetSnapshot(schema, np.arange(100.0)[None, :], revision=0)
-
+    return make_snapshot(schema, np.arange(100.0)[None, :], revision=0)
 
 def _field_candidates(field, description):
     """Yield (choice value, candidate field value) pairs excluding current."""
@@ -71,17 +59,16 @@ def _field_candidates(field, description):
             continue
         yield value, value
 
-
 @pytest.mark.parametrize(
     "make_snapshot, spec",
     [
         (_flat_snapshot, CurvePlot(AxisRef.point("scan"))),
-        (_grid_snapshot, CurvePlot(AxisRef.point_dimension("col"))),
+        (_grid_snapshot, CurvePlot(AxisRef.point("col"))),
         (
             _grid_snapshot,
             FacetGridPlot(
-                AxisRef.point_dimension("row"),
-                CurvePlot(AxisRef.point_dimension("col")),
+                AxisRef.point("row"),
+                CurvePlot(AxisRef.point("col")),
             ),
         ),
     ],
@@ -117,44 +104,31 @@ def test_every_offered_option_succeeds(
             finally:
                 probe.close()
 
-
 def test_axis_identities_are_deduplicated() -> None:
-    """A point column that doubles as a topology dimension appears once.
-
-    The grid's row/col columns are the same physical axes as its topology
-    dimensions; listing both identities made every axis dropdown show
-    duplicate entries.
-    """
+    """Each axis in the producer's Point domain appears exactly once."""
 
     snapshot = _grid_snapshot()
-    session = PlotSession(snapshot, CurvePlot(AxisRef.point_dimension("col")))
+    session = PlotSession(snapshot, CurvePlot(AxisRef.point("col")))
     try:
         description = session.describe_semantics()
-        assert AxisRef.point("row") not in description.axis_choices
-        assert AxisRef.point("col") not in description.axis_choices
-        assert AxisRef.point_dimension("row") in description.axis_choices
+        assert description.axis_choices.count(AxisRef.point("row")) == 1
+        assert description.axis_choices.count(AxisRef.point("col")) == 1
         labels = [description.field(name).label for _axis, name in description.fate_rows]
         assert len(labels) == len(set(labels))
     finally:
         session.close()
 
-
-def test_the_row_ordinal_is_the_name_of_last_resort() -> None:
-    """It is offered only when nothing declared already names the rows.
-
-    A declared topology names them (they are its grid, in order) and so does
-    any point column whose values are distinct.  Listed beside such a column
-    it is the same axis twice: an operator saw "point (3)" and "frame (3)"
-    and had to guess which of the two was the frames.
-    """
+def test_only_declared_point_axes_are_offered() -> None:
 
     registry_default = default_spec
 
     snapshot = _grid_snapshot()
-    session = PlotSession(snapshot, CurvePlot(AxisRef.point_dimension("col")))
+    session = PlotSession(snapshot, CurvePlot(AxisRef.point("col")))
     try:
         description = session.describe_semantics()
-        assert AxisRef.point_rows() not in description.axis_choices
+        assert set(
+            ref for ref in description.axis_choices if ref.domain.value == "point"
+        ) == {AxisRef.point("row"), AxisRef.point("col")}
     finally:
         session.close()
     # The histogram default has no axis declaration at all: it pools the box.
@@ -168,10 +142,11 @@ def test_the_row_ordinal_is_the_name_of_last_resort() -> None:
     try:
         choices = flat_session.describe_semantics().axis_choices
         assert AxisRef.point("scan") in choices
-        assert AxisRef.point_rows() not in choices
+        assert tuple(ref for ref in choices if ref.domain.value == "point") == (
+            AxisRef.point("scan"),
+        )
     finally:
         flat_session.close()
-
 
 def test_curve_x_repeat_is_offered_and_draws() -> None:
     """Every offered option must work, including a degenerate axis.
@@ -182,16 +157,16 @@ def test_curve_x_repeat_is_offered_and_draws() -> None:
     """
 
     snapshot = _grid_snapshot()
-    session = PlotSession(snapshot, CurvePlot(AxisRef.point_dimension("col")))
+    session = PlotSession(snapshot, CurvePlot(AxisRef.point("col")))
     try:
         offering = session.describe_semantics().axes_offering("x")
-        assert AxisRef.repeat() in offering
-        assert AxisRef.point_dimension("row") in offering
+        assert AxisRef.repeat("repeat") in offering
+        assert AxisRef.point("row") in offering
         session.replace_spec(
             updated_spec(
                 snapshot.block.schema,
                 session.spec,
-                fate_field_name(AxisRef.repeat()),
+                fate_field_name(AxisRef.repeat("repeat")),
                 "x",
             )
         )
@@ -199,17 +174,16 @@ def test_curve_x_repeat_is_offered_and_draws() -> None:
     finally:
         session.close()
 
-
 def test_facet_vocabulary_does_not_predict_layout_capacity() -> None:
     """Every axis offers facet; the actual layout still enforces its cap."""
 
-    points = PointTable.from_columns(
+    points = mapped_domain_from_columns(
         {"big": np.arange(400.0), "few": np.arange(400.0) % 7}
     )
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1), points, dtype=np.float64
+    schema = make_dataset_schema(
+        repeat_domain(size=1), points, dtype=np.float64
     )
-    snapshot = DatasetSnapshot(
+    snapshot = make_snapshot(
         schema, np.arange(400.0)[None, :, None], revision=0
     )
     session = PlotSession(
@@ -218,7 +192,7 @@ def test_facet_vocabulary_does_not_predict_layout_capacity() -> None:
     )
     try:
         offering = session.describe_semantics().axes_offering("facet")
-        assert AxisRef.repeat() in offering
+        assert AxisRef.repeat("repeat") in offering
         assert AxisRef.point("big") in offering
         assert AxisRef.point("few") in offering
         candidate = updated_spec(
@@ -232,7 +206,6 @@ def test_facet_vocabulary_does_not_predict_layout_capacity() -> None:
     finally:
         session.close()
 
-
 def test_user_can_reach_a_single_mean_line_on_grouped_data() -> None:
     """The acceptance chain that used to be locked: on a dataset with a dense
     data axis every group option except the current one was rejected, so a
@@ -240,32 +213,31 @@ def test_user_can_reach_a_single_mean_line_on_grouped_data() -> None:
     collapses the dense axis under the declared reduction."""
 
     rng = np.random.default_rng(7)
-    site = Axis.create("site", size=3)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=5),
-        PointTable.from_columns({"scan": np.linspace(0.0, 1.0, 8)}),
-        data_axes=(site,),
+    site = axis("site", size=3)
+    schema = make_dataset_schema(
+        repeat_domain(size=5),
+        mapped_domain_from_columns({"scan": np.linspace(0.0, 1.0, 8)}),
+        cell_axes=(site,),
         dtype=np.float64,
-        generation="single-line-chain",
     )
     values = rng.gamma(2.0, 2.0, size=(5, 8, 3))  # spread: mean != min
-    snapshot = DatasetSnapshot(schema, values, revision=0)
-    spec = CurvePlot(AxisRef.point("scan"), group=AxisRef.data("site"))
+    snapshot = make_snapshot(schema, values, revision=0)
+    spec = CurvePlot(AxisRef.point("scan"), group=AxisRef.cell_data("site"))
     session = PlotSession(snapshot, spec)
     try:
         description = session.describe_semantics()
         # Ungrouping is saying what the axis becomes INSTEAD, and regrouping
         # is a real option again.
         assert "reduce" in description.field(
-            dict(description.fate_rows)[AxisRef.data("site")]
+            dict(description.fate_rows)[AxisRef.cell_data("site")]
         ).choice_values
-        assert AxisRef.repeat() in description.axes_offering("group")
+        assert AxisRef.repeat("repeat") in description.axes_offering("group")
 
         session.replace_spec(
             updated_spec(
                 schema,
                 spec,
-                dict(description.fate_rows)[AxisRef.data("site")],
+                dict(description.fate_rows)[AxisRef.cell_data("site")],
                 "reduce",
             )
         )
@@ -289,14 +261,13 @@ def test_user_can_reach_a_single_mean_line_on_grouped_data() -> None:
     finally:
         session.close()
 
-
 def test_describing_semantics_never_builds_a_payload(monkeypatch) -> None:
     """Vocabulary projection reads schema/spec only; it never aggregates."""
 
     from zlc_plot._fit_projection import FitProjection
 
     snapshot = _grid_snapshot()
-    session = PlotSession(snapshot, CurvePlot(AxisRef.point_dimension("col")))
+    session = PlotSession(snapshot, CurvePlot(AxisRef.point("col")))
     try:
         calls: list[object] = []
         original = FitProjection._build_payload_from_view
@@ -311,12 +282,11 @@ def test_describing_semantics_never_builds_a_payload(monkeypatch) -> None:
     finally:
         session.close()
 
-
 def test_updated_spec_is_the_single_composition_authority() -> None:
     schema = _grid_snapshot().block.schema
     facet = FacetGridPlot(
-        AxisRef.point_dimension("row"),
-        CurvePlot(AxisRef.point_dimension("col")),
+        AxisRef.point("row"),
+        CurvePlot(AxisRef.point("col")),
     )
 
     switched = updated_spec(schema, facet, "kind", PlotKind.CURVE)
@@ -330,10 +300,10 @@ def test_updated_spec_is_the_single_composition_authority() -> None:
         updated_spec(schema, facet, "x", AxisRef.point("row"))
 
     description = describe_semantics(schema, facet)
-    repeat_fate = dict(description.fate_rows)[AxisRef.repeat()]
+    repeat_fate = dict(description.fate_rows)[AxisRef.repeat("repeat")]
     assert "facet" in description.field(repeat_fate).choice_values
     facet_edit = updated_spec(schema, facet, repeat_fate, "facet")
-    assert facet_edit.facet == AxisRef.repeat()
+    assert facet_edit.facet == AxisRef.repeat("repeat")
     assert facet_edit.cell == facet.cell
 
     with pytest.raises(KeyError):

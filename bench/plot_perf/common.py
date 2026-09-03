@@ -20,7 +20,6 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
-
 def bootstrap() -> None:
     """Put this worktree's packages first.  It does NOT choose a platform.
 
@@ -39,20 +38,19 @@ def bootstrap() -> None:
     if tests not in sys.path:
         sys.path.insert(0, tests)
 
-
 bootstrap()
 
 import numpy as np  # noqa: E402
 
-from data_factory import (  # noqa: E402
-    Axis,
-    DatasetSchema,
-    DatasetSnapshot,
-    PointTable,
-    PointTopology,
+from data_factory import (
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
 )
-from zlc_data import AxisId  # noqa: E402
 
+from zlc_data import DatasetSchema, OwnedSnapshot
 
 # ---------------------------------------------------------------- datasets
 class SnapshotFeed:
@@ -83,11 +81,10 @@ class SnapshotFeed:
     def size(self) -> int:
         return int(np.prod(self._buffers[0].shape))
 
-    def next(self) -> DatasetSnapshot:
+    def next(self) -> OwnedSnapshot:
         self._revision += 1
         buffer = self._buffers[self._revision % len(self._buffers)]
-        return DatasetSnapshot(self.schema, buffer, revision=self._revision)
-
+        return make_snapshot(self.schema, buffer, revision=self._revision)
 
 def lattice_feed(
     *,
@@ -121,20 +118,14 @@ def lattice_feed(
         name: np.asarray([float(cell[j]) for cell in cells])
         for j, name in enumerate(names)
     }
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=repeats),
-        PointTable.from_columns(columns),
-        data_axes=(
-            Axis.create("frame", values=[float(i) for i in range(frames)]),
-            Axis.create("site", values=[float(i) for i in range(sites)]),
+    schema = make_dataset_schema(
+        repeat_domain(size=repeats),
+        mapped_domain_from_columns(columns),
+        cell_axes=(
+            axis("frame", values=[float(i) for i in range(frames)]),
+            axis("site", values=[float(i) for i in range(sites)]),
         ),
         dtype=np.float64,
-        generation="bench",
-        point_topology=PointTopology(
-            tuple(AxisId(name) for name in names),
-            tuple(tuple(float(v) for v in range(size)) for size in dims),
-            tuple(cells),
-        ),
     )
     # Gaussian structure along BOTH leading scan dimensions, so a curve
     # over ax has shape AND a facet's per-cell curves over ay have their
@@ -154,22 +145,20 @@ def lattice_feed(
     ]
     return SnapshotFeed(schema, stack)
 
-
 def camera_feed(
     *, height: int = 2048, width: int = 2048, buffers: int = 3, seed: int = 1
 ) -> SnapshotFeed:
     """A camera-monitor-shaped dense image: (1, 1, H, W) uint16 frames."""
 
     rng = np.random.default_rng(seed)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"shot": np.asarray([0.0])}),
-        data_axes=(
-            Axis.create("y", values=[float(i) for i in range(height)]),
-            Axis.create("x", values=[float(i) for i in range(width)]),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"shot": np.asarray([0.0])}),
+        cell_axes=(
+            axis("y", values=[float(i) for i in range(height)]),
+            axis("x", values=[float(i) for i in range(width)]),
         ),
         dtype=np.uint16,
-        generation="bench-camera",
     )
     yy, xx = np.mgrid[0:height, 0:width]
     blob = 3000.0 * np.exp(
@@ -186,14 +175,12 @@ def camera_feed(
     ]
     return SnapshotFeed(schema, stack)
 
-
 # ------------------------------------------------------------ Qt plumbing
 #: The size every layer benchmarks at.  2x2 is the size panels are
 #: actually worked in; 4x4 is a stress case and reports a cost no
 #: operator pays all day.  One constant so the three layers cannot
 #: drift into comparing different pictures.
 SIZE_PRESET = "2x2"
-
 
 def provenance() -> str:
     """Which tree these numbers came from, in the numbers' own output.
@@ -212,7 +199,6 @@ def provenance() -> str:
         lines.append(f"{module.__name__:<10}{module.__file__}")
     return "\n".join(lines)
 
-
 def qt_env():
     """Import Qt lazily so session-layer runs never touch it."""
 
@@ -223,13 +209,11 @@ def qt_env():
 
     return app, QtCore, QtGui, QtWidgets
 
-
 def pump(app, seconds: float) -> None:
     deadline = time.perf_counter() + seconds
     while time.perf_counter() < deadline:
         app.processEvents()
         time.sleep(0.0005)
-
 
 def pump_until(app, predicate, timeout: float) -> bool:
     deadline = time.perf_counter() + timeout
@@ -239,7 +223,6 @@ def pump_until(app, predicate, timeout: float) -> bool:
             return True
         time.sleep(0.0005)
     return bool(predicate())
-
 
 class Presented:
     """Counts widget-presented fronts (the pixels the user actually sees)."""
@@ -272,7 +255,6 @@ class Presented:
                 return time.perf_counter() - start
             time.sleep(0.0003)
         return None
-
 
 class Pointer:
     """Real QMouseEvents in widget-logical coordinates."""
@@ -358,18 +340,15 @@ class Pointer:
         )
         self._app.sendEvent(self._widget, event)
 
-
 def axis_by_role(front, role: str, cell: int | None = None):
     for item in front.interaction.axes:
         if item.role == role and (cell is None or item.cell_index == cell):
             return item
     return None
 
-
 def axis_center(transform) -> tuple[float, float]:
     left, top, right, bottom = transform.bounds
     return (left + right) / 2.0, (top + bottom) / 2.0
-
 
 def stats(samples: list[float]) -> dict:
     """Median, tail and worst -- always the tail.
@@ -391,7 +370,6 @@ def stats(samples: list[float]) -> dict:
         "max_ms": round(float(array.max()) * 1e3, 2),
         "best_ms": round(float(array.min()) * 1e3, 2),
     }
-
 
 def write_result(payload: dict, label: str) -> pathlib.Path:
     out = ROOT / "bench" / "results"

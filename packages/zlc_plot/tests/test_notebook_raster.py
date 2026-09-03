@@ -8,7 +8,14 @@ from threading import Event
 
 import numpy as np
 
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from data_factory import (
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
+
 from test_facet_live_fit import _facet_snapshot, _spec as facet_spec
 from zlc_plot import (
     AxisRef,
@@ -28,20 +35,17 @@ from zlc_plot.notebook import (
     NotebookView,
 )
 
-
 def _session() -> PlotSession:
     x = np.arange(10.0)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": x}),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"x": x}),
         dtype=np.float64,
-        generation="notebook-raster",
     )
     return PlotSession(
-        DatasetSnapshot(schema, x.reshape(1, -1), revision=0),
+        make_snapshot(schema, x.reshape(1, -1), revision=0),
         CurvePlot(AxisRef.point("x")),
     )
-
 
 def test_front_selector_state_json_preserves_display_geometry_for_browser_preview() -> None:
     state = SelectorState(
@@ -55,7 +59,6 @@ def test_front_selector_state_json_preserves_display_geometry_for_browser_previe
         "facet_index": 2,
     }
 
-
 def test_notebook_front_packet_accepts_jupyter_dataview_buffers() -> None:
     """The browser adapter must decode one complete DataView frame packet."""
 
@@ -66,7 +69,6 @@ def test_notebook_front_packet_accepts_jupyter_dataview_buffers() -> None:
     assert "change:frame_packet" in _WIDGET_ESM
     assert "_decodeFrame" in _WIDGET_ESM
     assert "define(" not in _WIDGET_ESM
-
 
 def test_notebook_widget_uses_anywidget_registry_not_a_stale_matplotlib_module() -> None:
     """A saved notebook must resolve the current AnyWidget view class.
@@ -86,7 +88,6 @@ def test_notebook_widget_uses_anywidget_registry_not_a_stale_matplotlib_module()
     assert widget._view_name == "AnyView"
     assert "zlc_plot_raster" not in _WIDGET_ESM
     assert "MPLCanvasView" not in _WIDGET_ESM
-
 
 def test_widget_esm_is_a_pure_frame_blitter_and_input_normalizer() -> None:
     """The kernel renders everything; the browser never paints geometry.
@@ -122,7 +123,6 @@ def test_widget_esm_is_a_pure_frame_blitter_and_input_normalizer() -> None:
     # blurry and then jump once the environment report round-trips.
     assert "_acceptFrame" in _WIDGET_ESM
     assert "_graceDeadline" in _WIDGET_ESM
-
 
 def test_session_mutation_republishes_front_and_keeps_pointer_compatible() -> None:
     """Every external setter publishes changed pixels through the host front."""
@@ -172,7 +172,6 @@ def test_session_mutation_republishes_front_and_keeps_pointer_compatible() -> No
         unsubscribe()
         host.close(timeout=5.0)
 
-
 def test_notebook_host_presents_facet_grid_front() -> None:
     """The notebook transport uses the same multi-axis host path as GUI."""
 
@@ -185,7 +184,6 @@ def test_notebook_host_presents_facet_grid_front() -> None:
         assert len(front.interaction.axes) >= 2
     finally:
         host.close(timeout=5.0)
-
 
 def test_middle_double_click_zooms_to_area_selection_then_resets() -> None:
     """Double middle-click zooms to the committed range; without one it homes."""
@@ -239,7 +237,6 @@ def test_middle_double_click_zooms_to_area_selection_then_resets() -> None:
         assert session.viewport is None
     finally:
         host.close(timeout=5.0)
-
 
 def test_pulse_selectors_paint_in_source_units_and_fit_catalogue_is_empty() -> None:
     """Pulse paints selectors in its axes' source-time space, factor once."""
@@ -296,7 +293,6 @@ def test_pulse_selectors_paint_in_source_units_and_fit_catalogue_is_empty() -> N
         host.close(timeout=5.0)
         session.close()
 
-
 def test_environment_message_rescales_raster_to_reported_pixel_ratio() -> None:
     """The browser's pixel-density report must drive the kernel raster size."""
 
@@ -329,7 +325,6 @@ def test_environment_message_rescales_raster_to_reported_pixel_ratio() -> None:
     finally:
         view.close()
 
-
 def test_environment_ratio_is_remembered_for_later_views(monkeypatch) -> None:
     """A new view adopts the last reported density for its first front."""
 
@@ -356,7 +351,6 @@ def test_environment_ratio_is_remembered_for_later_views(monkeypatch) -> None:
     finally:
         adopter.close()
 
-
 def test_snapshot_display_data_encodes_front_as_png_at_logical_size() -> None:
     host = RasterPlotHost.from_session(_session())
     try:
@@ -371,7 +365,6 @@ def test_snapshot_display_data_encodes_front_as_png_at_logical_size() -> None:
         assert "text/plain" in data
     finally:
         host.close(timeout=5.0)
-
 
 def test_display_publishes_widget_view_with_png_fallback_through_display_id(
     monkeypatch,
@@ -422,7 +415,6 @@ def test_display_publishes_widget_view_with_png_fallback_through_display_id(
     assert "application/vnd.jupyter.widget-view+json" not in final_data
     assert base64.b64decode(final_data["image/png"]).startswith(b"\x89PNG\r\n\x1a\n")
 
-
 def test_display_without_running_shell_keeps_compact_widget_repr(
     monkeypatch, capsys
 ) -> None:
@@ -440,7 +432,6 @@ def test_display_without_running_shell_keeps_compact_widget_repr(
     finally:
         view.close()
     assert "image/png" not in capsys.readouterr().out
-
 
 def test_close_replaces_widget_output_with_final_frame_png() -> None:
     """A closed view must leave the last frame in the cell, not a blank output."""
@@ -470,7 +461,6 @@ def test_close_replaces_widget_output_with_final_frame_png() -> None:
     }
     view.close()
     assert len(handle.calls) == 1
-
 
 def test_raster_pointer_motion_bakes_candidate_into_published_fronts() -> None:
     """Every frontend blits fronts; one renderer draws transient candidates.
@@ -522,7 +512,6 @@ def test_raster_pointer_motion_bakes_candidate_into_published_fronts() -> None:
         )
     finally:
         host.close(timeout=5.0)
-
 
 def test_an_unmoved_area_press_or_double_click_never_becomes_a_gesture() -> None:
     """Press only arms Area; motion is the sole edge that starts it.
@@ -625,7 +614,6 @@ def test_an_unmoved_area_press_or_double_click_never_becomes_a_gesture() -> None
     finally:
         unsubscribe()
         host.close(timeout=5.0)
-
 
 def test_fit_area_pointer_sequence_never_promotes_a_blank_front() -> None:
     session = _session()

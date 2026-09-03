@@ -13,6 +13,7 @@ from .models import (
     PeriodVM,
     PortRowVM,
     RepeatVM,
+    BindingRecord,
     ScanPageRecord,
     ScheduleVM, TargetPortRecord, TargetWidthRule,
 )

@@ -1893,8 +1893,8 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
     assert fit_publication is not None
     before_history = session.signal_plane.current_dataset(fit_signal)
     assert all(
-        str(column.coordinate_id) != "zlc_data.primary-index"
-        for column in before_history.block.schema.point_table.columns
+        str(axis.axis_id) != "zlc_data.primary-index"
+        for axis in before_history.block.schema.point_domain.axes
     )
     accepted = main.host._session._accepted_fit
     assert accepted is not None and accepted.selection is not None
@@ -2013,11 +2013,11 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
     frozen = rolling.frozen_data
     assert frozen is not None
     primary = next(
-        column
-        for column in frozen.snapshot.block.schema.point_table.columns
-        if str(column.coordinate_id) == "zlc_data.primary-index"
+        axis
+        for axis in frozen.snapshot.block.schema.point_domain.axes
+        if str(axis.axis_id) == "zlc_data.primary-index"
     )
-    assert tuple(dict.fromkeys(primary.values))
+    assert primary.size > 0
     saved_truth = session.signal_plane.current_dataset(
         fit_signal,
         frozen.publication,
@@ -2105,8 +2105,8 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
     assert lease is not None and lease.closed
     latest_only = session.signal_plane.current_dataset(fit_signal)
     assert all(
-        str(column.coordinate_id) != "zlc_data.primary-index"
-        for column in latest_only.block.schema.point_table.columns
+        str(axis.axis_id) != "zlc_data.primary-index"
+        for axis in latest_only.block.schema.point_domain.axes
     )
 
 
@@ -2249,8 +2249,8 @@ def test_history_transition_is_immediate_and_interactions_follow_indexed_front(
     assert first_roi is not None
     before_panel = session.signal_plane.current_dataset(roi_signal)
     assert all(
-        str(column.coordinate_id) != "zlc_data.primary-index"
-        for column in before_panel.block.schema.point_table.columns
+        str(axis.axis_id) != "zlc_data.primary-index"
+        for axis in before_panel.block.schema.point_domain.axes
     )
 
     histogram = presenter.add_panel(
@@ -2275,8 +2275,8 @@ def test_history_transition_is_immediate_and_interactions_follow_indexed_front(
     )
     retained = session.signal_plane.current_dataset(roi_signal)
     assert all(
-        str(column.coordinate_id) != "zlc_data.primary-index"
-        for column in retained.block.schema.point_table.columns
+        str(axis.axis_id) != "zlc_data.primary-index"
+        for axis in retained.block.schema.point_domain.axes
     )
 
     # Re-committing the Area intentionally replaces the selection-derived
@@ -2337,6 +2337,27 @@ def test_history_transition_is_immediate_and_interactions_follow_indexed_front(
         ),
     )
     assert histogram.port.last_error is None
+
+    # Resizing one live indexed representation in either direction is one
+    # completed authored edit.  This is distinct from releasing history at
+    # window=1: the same lease and port remain, while the represented rows
+    # shrink and then grow again.
+    for window in (40, 100):
+        assert presenter.update_panel_state(
+            histogram.panel_id,
+            {"display": {"window": window}},
+        )
+        _settle_panel_hosts(
+            presenter,
+            lambda window=window: (
+                histogram.configuration is None
+                and histogram.port.presentation_current
+                and histogram.state.display["window"] == window
+                and histogram.history_lease is not None
+                and histogram.history_lease.window == window
+            ),
+        )
+        assert histogram.port.last_error is None
 
     # History is signal-global but never owned by an ordinary Image.  It may
     # consume the current indexed representation while Histogram is alive;
@@ -2412,8 +2433,8 @@ def test_history_transition_is_immediate_and_interactions_follow_indexed_front(
     assert histogram.history_lease is None
     immediate = session.signal_plane.current_dataset(roi_signal)
     assert all(
-        str(column.coordinate_id) != "zlc_data.primary-index"
-        for column in immediate.block.schema.point_table.columns
+        str(axis.axis_id) != "zlc_data.primary-index"
+        for axis in immediate.block.schema.point_domain.axes
     )
     _settle_panel_hosts(
         presenter,
@@ -2428,8 +2449,8 @@ def test_history_transition_is_immediate_and_interactions_follow_indexed_front(
     assert histogram.history_lease is None
     latest = session.signal_plane.current_dataset(roi_signal)
     assert all(
-        str(column.coordinate_id) != "zlc_data.primary-index"
-        for column in latest.block.schema.point_table.columns
+        str(axis.axis_id) != "zlc_data.primary-index"
+        for axis in latest.block.schema.point_domain.axes
     )
     for panel in (histogram, companion):
         accepted_input = _accepted(panel.port, "plot_input")
@@ -2439,8 +2460,8 @@ def test_history_transition_is_immediate_and_interactions_follow_indexed_front(
             accepted_input,
         )
         assert all(
-            str(column.coordinate_id) != "zlc_data.primary-index"
-            for column in accepted_snapshot.block.schema.point_table.columns
+            str(axis.axis_id) != "zlc_data.primary-index"
+            for axis in accepted_snapshot.block.schema.point_domain.axes
         )
     assert all(
         str(entry["label"]) != "source index"
@@ -3815,7 +3836,7 @@ def test_a_running_task_freezes_logic_identity_but_not_panels(
     )
     assert not presenter.update_panel_state(
         preview.panel_id,
-        {"semantic": {"fate:repeat": "reduce"}},
+        {"semantic": {"fate:repeat:locked": "reduce"}},
     )
     assert not presenter.update_panel_state(
         preview.panel_id,
@@ -3980,7 +4001,7 @@ def test_finite_repeat_mount_and_axis_change_never_materialize_on_owner(
     assert event is not None
     assert event.snapshot.block.values.shape[0] == 1
     assert event.canonical_schema is not None
-    assert event.canonical_schema.repeat_axis.size == 30
+    assert event.canonical_schema.repeat_domain.size == 30
     description = next(
         item
         for item in session.signal_plane.describe_signals()
@@ -4023,10 +4044,16 @@ def test_finite_repeat_mount_and_axis_change_never_materialize_on_owner(
     assert np.all(snapshot.expanded_validity()[:1])
     assert not np.any(snapshot.expanded_validity()[1:])
 
+    from zlc_plot import AxisRef
+    from zlc_plot.semantics import fate_field_name
+
+    repeat_key = fate_field_name(
+        AxisRef.repeat(str(event.canonical_schema.repeat_domain.axes[0].axis_id))
+    )
     repeat_row = next(
         field
         for field in binding.parameter_surface["semantic"]
-        if str(field["key"]) == "fate:repeat"
+        if str(field["key"]) == repeat_key
     )
     next_fate = next(
         value
@@ -4037,12 +4064,12 @@ def test_finite_repeat_mount_and_axis_change_never_materialize_on_owner(
     host = binding.host
     assert presenter.update_panel_state(
         binding.panel_id,
-        {"semantic": {"fate:repeat": next_fate}},
+        {"semantic": {repeat_key: next_fate}},
     )
     _settle_panel_hosts(
         presenter,
         lambda: binding.configuration is None
-        and binding.state.semantic.get("fate:repeat") == next_fate,
+        and binding.state.semantic.get(repeat_key) == next_fate,
     )
     assert binding.host is host
     assert binding.display_publication is publication
@@ -4078,10 +4105,9 @@ def test_partial_grid_points_mount_and_reproject_one_canonical_snapshot(
         DataBlock,
         DatasetRevision,
         DatasetSchema,
-        GridTopology,
+        DomainSpec,
         OwnedSnapshot,
-        PointColumn,
-        PointTable,
+        SCALAR_DOMAIN,
         StreamGenerationId,
         ValueSchema,
     )
@@ -4103,48 +4129,32 @@ def test_partial_grid_points_mount_and_reproject_one_canonical_snapshot(
     cell = ValueSchema.scalar(np.dtype("float64"), None)
     x_id = AxisId("grid.x")
     y_id = AxisId("grid.y")
+    x_axis = AxisSpec(x_id, "x", SCAN_POINT, 2, (0.0, 1.0))
+    y_axis = AxisSpec(y_id, "y", SCAN_POINT, 2, (0.0, 1.0))
     canonical = DatasetSchema(
-        repeat,
-        PointTable(
-            4,
-            (
-                PointColumn(
-                    x_id,
-                    "x",
-                    SCAN_POINT,
-                    PointColumn.NUMERIC,
-                    (0.0, 1.0, 0.0, 1.0),
-                ),
-                PointColumn(
-                    y_id,
-                    "y",
-                    SCAN_POINT,
-                    PointColumn.NUMERIC,
-                    (0.0, 0.0, 1.0, 1.0),
-                ),
-            ),
+        DomainSpec((1,), (repeat,), ((0,),)),
+        DomainSpec(
+            (4,),
+            (x_axis, y_axis),
+            ((0, 1, 0, 1), (0, 0, 1, 1)),
         ),
-        GridTopology(
-            (x_id, y_id),
-            ((0.0, 1.0), (0.0, 1.0)),
-            ((0, 0), (1, 0), (0, 1), (1, 1)),
-        ),
+        SCALAR_DOMAIN,
         cell,
     )
     session.signal_plane.begin_generation(node)
 
     def commit_point(index: int, measured: float) -> None:
-        point = PointColumn(
+        point = AxisSpec(
             AxisId("event.point"),
             "point",
             SCAN_POINT,
-            PointColumn.NUMERIC,
+            1,
             (0.0,),
         )
         event_schema = DatasetSchema(
-            repeat,
-            PointTable(1, (point,)),
-            None,
+            DomainSpec((1,), (repeat,), ((0,),)),
+            DomainSpec((1,), (point,), ((0,),)),
+            SCALAR_DOMAIN,
             cell,
         )
         block = DataBlock(
@@ -4175,8 +4185,7 @@ def test_partial_grid_points_mount_and_reproject_one_canonical_snapshot(
     front = session.signal_plane.freeze()
     value = front.value(signal)
     assert value is not None
-    assert value.snapshot.block.schema.grid_topology is None
-    assert value.snapshot.block.schema.point_table.row_count == 1
+    assert value.snapshot.block.schema.point_domain.size == 1
 
     binding = presenter.add_blank_panel("image")
     assert presenter.update_panel_state(binding.panel_id, {"signal": signal})
@@ -4187,7 +4196,7 @@ def test_partial_grid_points_mount_and_reproject_one_canonical_snapshot(
     )
     shown = _accepted(binding.port, "plot_input")
     snapshot = getattr(shown, "snapshot", shown)
-    assert snapshot.block.schema.grid_topology == canonical.grid_topology
+    assert snapshot.block.schema.point_domain == canonical.point_domain
     assert snapshot.block.values.shape == (1, 4, 1)
     validity = snapshot.expanded_validity()
     assert np.all(validity[:, :1])
@@ -4232,7 +4241,7 @@ def test_partial_grid_points_mount_and_reproject_one_canonical_snapshot(
     updated = _accepted(binding.port, "plot_input")
     updated_snapshot = getattr(updated, "snapshot", updated)
     assert binding.host is host
-    assert updated_snapshot.block.schema.grid_topology == canonical.grid_topology
+    assert updated_snapshot.block.schema.point_domain == canonical.point_domain
     assert np.all(updated_snapshot.expanded_validity()[:, :2])
     assert not np.any(updated_snapshot.expanded_validity()[:, 2:])
 
@@ -4904,7 +4913,7 @@ def test_restored_live_selector_answers_displayed_shot_before_plane_latest(
                 and original.host.initial_state[0] is not None
             ),
         )
-        y_axis, x_axis = value.snapshot.block.schema.cell_schema.data_axes
+        y_axis, x_axis = value.snapshot.block.schema.cell_domain.axes
         # A selection names the exact surface it was drawn on, scope
         # included: the image shows the latest frame, and the subject
         # freezes that into the frame coordinate a restore must carry.
@@ -4917,7 +4926,7 @@ def test_restored_live_selector_answers_displayed_shot_before_plane_latest(
                     str(x_axis.axis_id),
                     float(x_axis.coordinate_at(4)),
                     float(x_axis.coordinate_at(10)),
-                    domain="data",
+                    domain="cell_data",
                     coordinate_frame=(
                         None
                         if x_axis.coordinate_frame is None
@@ -4928,7 +4937,7 @@ def test_restored_live_selector_answers_displayed_shot_before_plane_latest(
                     str(y_axis.axis_id),
                     float(y_axis.coordinate_at(3)),
                     float(y_axis.coordinate_at(8)),
-                    domain="data",
+                    domain="cell_data",
                     coordinate_frame=(
                         None
                         if y_axis.coordinate_frame is None
@@ -4940,7 +4949,6 @@ def test_restored_live_selector_answers_displayed_shot_before_plane_latest(
                 FacetCondition(str(ref.axis_id), coordinate, ref.domain.value)
                 for ref, coordinate in subject.scope
             ),
-            repeat_index=subject.repeat_index,
         )
         restored_state = replace(
             original.state,
@@ -5267,8 +5275,7 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
         AxisId,
         AxisSpec,
         DatasetSchema,
-        PointColumn,
-        PointTable,
+        DomainSpec,
         REPEAT,
         ValidityContract,
         ValueSchema,
@@ -5291,26 +5298,29 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
     cells = tuple(np.ndindex(*dimensions))
     repeat_id = AxisId("survival.repeat")
     event_repeat = AxisSpec(repeat_id, "repeat", REPEAT, 1, (0,))
-    # Frame survival publishes its pairs as a READOUT_EVENT point column --
+    # Frame survival publishes its pairs as a READOUT_EVENT Point axis --
     # a choice of sub-measurement, as a camera's frames are -- so the scan
     # folds them in as its outermost dimension, ahead of the plan's axes.
-    pair = PointColumn(
+    pair = AxisSpec(
         AxisId("survival.pair"),
         "pair",
         READOUT_EVENT,
-        PointColumn.NUMERIC,
+        3,
         (0, 1, 2),
         coordinate_labels=("0-1", "0-2", "1-2"),
     )
     site = AxisSpec(AxisId("survival.site"), "site", SITE, 5, tuple(range(5)))
-    cell_schema = ValueSchema(
-        (site,),
+    cell_domain = DomainSpec((site.size,), (site,))
+    value_schema = ValueSchema(
         ValidityContract.components(site.axis_id),
         np.dtype("<f8"),
         "1",
     )
     event_schema = DatasetSchema(
-        event_repeat, PointTable(3, (pair,)), None, cell_schema
+        DomainSpec((1,), (event_repeat,), ((0,),)),
+        DomainSpec((3,), (pair,), ((0, 1, 2),)),
+        cell_domain,
+        value_schema,
     )
     canonical = scan_dataset_schema(
         event_schema,
@@ -5341,8 +5351,8 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
                 declaration,
                 event,
                 DatasetCoverage(
-                    event_schema.point_table.row_count,
-                    canonical.repeat_axis.size * canonical.point_table.row_count,
+                    event_schema.point_domain.size,
+                    canonical.repeat_domain.size * canonical.point_domain.size,
                 ),
                 canonical_schema=canonical,
                 cell_origin=(0, 0),
@@ -5352,12 +5362,12 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
     publication = session.signal_plane.freeze().publication(signal)
     expected = schema_structure(canonical)
     assert expected == (
-        (("repeat", 2),),
+        (("repeat", 1), ("visit", 2)),
         (
-            ("survival.pair", 3),
-            ("scan.field.x", 65),
-            ("scan.field.y", 2),
-            ("scan.field.z", 2),
+            ("pair", 3),
+            ("field.x", 65),
+            ("field.y", 2),
+            ("field.z", 2),
         ),
         (("site", 5),),
     )
@@ -5406,14 +5416,17 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
     map_site = AxisSpec(
         AxisId("map.site"), "site", SITE, 35, tuple(range(35))
     )
-    map_cell_schema = ValueSchema(
-        (map_site,),
+    map_cell_domain = DomainSpec((map_site.size,), (map_site,))
+    map_value_schema = ValueSchema(
         ValidityContract.components(map_site.axis_id),
         np.dtype("<f8"),
         "1",
     )
     map_event_schema = DatasetSchema(
-        event_repeat, PointTable(3, (pair,)), None, map_cell_schema
+        DomainSpec((1,), (event_repeat,), ((0,),)),
+        DomainSpec((3,), (pair,), ((0, 1, 2),)),
+        map_cell_domain,
+        map_value_schema,
     )
     map_canonical = scan_dataset_schema(
         map_event_schema,
@@ -5443,9 +5456,9 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
                 declaration,
                 map_event,
                 DatasetCoverage(
-                    map_event_schema.point_table.row_count,
-                    map_canonical.repeat_axis.size
-                    * map_canonical.point_table.row_count,
+                    map_event_schema.point_domain.size,
+                    map_canonical.repeat_domain.size
+                    * map_canonical.point_domain.size,
                 ),
                 canonical_schema=map_canonical,
                 cell_origin=(0, 0),
@@ -5472,10 +5485,10 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
     from zlc_plot.semantics import fate_field_name
 
     scan_fates = {
-        fate_field_name(AxisRef.point_dimension("scan.field.y")): "y",
-        fate_field_name(AxisRef.point_dimension("scan.field.z")): "x",
-        fate_field_name(AxisRef.point_dimension("survival.pair")): "reduce",
-        fate_field_name(AxisRef.data("map.site")): "reduce",
+        fate_field_name(AxisRef.point("scan.field.y")): "y",
+        fate_field_name(AxisRef.point("scan.field.z")): "x",
+        fate_field_name(AxisRef.point("survival.pair")): "reduce",
+        fate_field_name(AxisRef.cell_data("map.site")): "reduce",
     }
     offered_fates = {
         str(entry["key"]): tuple(
@@ -5503,9 +5516,9 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
             plot_kind="image",
             selector_kind="area",
             ranges=(
-                SelectionRange("map.site", 0.0, 10.0, domain="data"),
+                SelectionRange("map.site", 0.0, 10.0, domain="cell_data"),
                 SelectionRange(
-                    "survival.pair", 0.0, 2.0, domain="point_dimension"
+                    "survival.pair", 0.0, 2.0, domain="point"
                 ),
             ),
         )),
@@ -5521,10 +5534,10 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
         and mapped.accepted_display is not None,
     )
     scan_description = mapped.accepted_display
-    assert scan_description.semantics.x == AxisRef.point_dimension(
+    assert scan_description.semantics.x == AxisRef.point(
         "scan.field.z"
     )
-    assert scan_description.semantics.y == AxisRef.point_dimension(
+    assert scan_description.semantics.y == AxisRef.point(
         "scan.field.y"
     )
     assert all(
@@ -5545,13 +5558,13 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
         == map_canonical.fingerprint
     )
     live_description = _operation_value(mapped.host.describe_display())
-    assert live_description.semantics.facet == AxisRef.point_dimension(
+    assert live_description.semantics.facet == AxisRef.point(
         "scan.field.x"
     )
-    assert live_description.semantics.x == AxisRef.point_dimension(
+    assert live_description.semantics.x == AxisRef.point(
         "scan.field.z"
     )
-    assert live_description.semantics.y == AxisRef.point_dimension(
+    assert live_description.semantics.y == AxisRef.point(
         "scan.field.y"
     )
     assert (
@@ -5656,6 +5669,59 @@ def test_display_state_synchronizes_both_panel_surfaces(
     panel.host.set_parameters({"color_max": 150.0}).result(timeout=10)
     assert beat(lambda: edit_display().get("color_max") == 150.0)
     assert panel.state.display.get("color_max") == 150.0
+
+    # A host acknowledgement is asynchronous with the owner turn.  Once the
+    # Workbench has authored 175, a delayed acknowledgement of the previous
+    # 150 target is not a new operator edit; after 175 is reached, a genuine
+    # subsequent host edit remains authoritative.
+    from zlc_plot.state import DisplayState
+
+    host_key = panel.host.host_id
+    host_display = _operation_value(panel.host.describe_display()).display_state
+    revision = max(
+        host_display.revision,
+        panel.display_sync_revisions.get(host_key, 0),
+    )
+    panel.state = replace(
+        panel.state,
+        display={**dict(panel.state.display), "color_max": 175.0},
+    )
+    presenter._stage_panel_display_target(
+        panel, panel.host, {"color_max": 175.0}
+    )
+    values = dict(host_display.values)
+    presenter._settle_panel_display(
+        panel.panel_id,
+        panel.host,
+        DisplayState(
+            revision=revision + 1,
+            values={**values, "color_max": 150.0},
+            changed_names=frozenset({"color_max"}),
+            effects=host_display.effects,
+        ),
+    )
+    assert panel.state.display["color_max"] == 175.0
+    presenter._settle_panel_display(
+        panel.panel_id,
+        panel.host,
+        DisplayState(
+            revision=revision + 2,
+            values={**values, "color_max": 175.0},
+            changed_names=frozenset({"color_max"}),
+            effects=host_display.effects,
+        ),
+    )
+    presenter._settle_panel_display(
+        panel.panel_id,
+        panel.host,
+        DisplayState(
+            revision=revision + 3,
+            values={**values, "color_max": 160.0},
+            changed_names=frozenset({"color_max"}),
+            effects=host_display.effects,
+        ),
+    )
+    assert panel.state.display["color_max"] == 160.0
 
 
 def test_the_operator_viewport_survives_a_same_geometry_run(
@@ -6317,3 +6383,388 @@ def test_an_unbound_refused_value_keeps_the_kind_vocabulary(
     surface = presenter._unbound_panel_parameters(poisoned)
     assert _setting_field_sets(surface)["display"] == clean["display"]
     assert surface["display_unavailable"]
+
+
+def test_opening_edit_names_todays_folder_without_making_it(
+    presenter, session
+) -> None:
+    """Every Edit projection used to create the day folder and flush its
+    directory entry to disk -- on the GUI thread, once per publication while
+    the tab was open.  Naming is a question; making it is the save's job."""
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(node.signal_key("frames"), snapshot, kind="image")
+    _settle_panel_hosts(presenter, lambda: binding.host is not None)
+    assert presenter.edit_panel(binding.panel_id)
+    projection = presenter.panel_editor_projection(binding.panel_id)
+    named = Path(projection["save_directory"])
+    assert named == session.day_folder_path()
+    assert not named.exists(), "naming the folder made it"
+    assert session.day_folder() == named and named.is_dir()
+
+
+def test_refresh_advances_the_editors_own_host(presenter, session) -> None:
+    """Refresh shows the newer freeze on the host Edit already has.
+
+    It used to build a second host over the whole frozen history -- a
+    session, a projection, a fit and a first paint -- for a picture the card
+    had just drawn incrementally.  The editor host takes the data through
+    the live pair and keeps its artists; only a moved target replaces it.
+    """
+
+    node, snap = _one_shot(session)
+    panel = presenter.add_panel(node.signal_key("frames"), snap, kind="image")
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.host is not None and panel.accepted_surface is not None,
+    )
+    assert presenter.edit_panel(panel.panel_id)
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.editor_host is not None
+        and panel.editor_configuration is None
+        and panel.frozen_data is not None
+        and panel.frozen_data.description is not None,
+    )
+    host = panel.editor_host
+    opened = panel.frozen_data
+    _one_shot(session, producer="cm")
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.accepted_surface is not None
+        and panel.accepted_surface.publication is not opened.publication,
+    )
+    card = panel.accepted_surface
+    assert presenter.refresh_panel_snapshot(panel.panel_id) is True
+    assert panel.frozen_data is not opened
+    assert panel.frozen_data.publication is card.publication
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.editor_configuration is None
+        and panel.frozen_data.description is not opened.description,
+    )
+    assert panel.editor_host is host, "Refresh rebuilt the editor host"
+    assert not host.closing, "settling the advanced host retired it"
+    shown = getattr(card.plot_input, "snapshot", card.plot_input)
+    assert panel.frozen_data.snapshot.ref == shown.ref
+    assert panel.editor_selections is not None
+    assert not [
+        text for severity, text in presenter.view.status if severity == "error"
+    ]
+
+
+def test_refreshes_in_flight_supersede_on_the_same_host(
+    presenter, session
+) -> None:
+    """A second Refresh before the first has painted supersedes it silently.
+
+    With a live source every owed presentation arrives while the previous
+    adoption is still on its way.  The host retains only the latest waiting
+    frame and cancels the rest -- flow control, which must neither rebuild
+    the surface nor surface as a panel error.
+    """
+
+    node, snap = _one_shot(session)
+    panel = presenter.add_panel(node.signal_key("frames"), snap, kind="image")
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.host is not None and panel.accepted_surface is not None,
+    )
+    assert presenter.edit_panel(panel.panel_id)
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.editor_host is not None
+        and panel.editor_configuration is None
+        and panel.frozen_data is not None
+        and panel.frozen_data.description is not None,
+    )
+    host = panel.editor_host
+    opened = panel.frozen_data
+    for _ in range(2):
+        before = panel.frozen_data.publication
+        _one_shot(session, producer="cm")
+        _settle_panel_hosts(
+            presenter,
+            lambda: panel.accepted_surface is not None
+            and panel.accepted_surface.publication is not before,
+        )
+        assert presenter.refresh_panel_snapshot(panel.panel_id) is True
+    latest = panel.accepted_surface
+    assert panel.frozen_data.publication is latest.publication
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.editor_configuration is None
+        and panel.frozen_data.description is not opened.description,
+    )
+    assert panel.editor_host is host and not host.closing
+    assert panel.frozen_data.publication is latest.publication
+    assert not [
+        text for severity, text in presenter.view.status if severity == "error"
+    ]
+
+
+def test_save_renders_through_the_settled_editor_host(
+    presenter, session, tmp_path, monkeypatch
+) -> None:
+    """Save Fig draws the export on the Edit surface it already has.
+
+    A fresh host per save cost a session, a projection, a fit and a first
+    paint over the frozen history before the one draw the file needed.
+    """
+
+    import zlc_plot.figure_artifact as artifact
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(node.signal_key("frames"), snapshot, kind="image")
+    assert presenter.edit_panel(binding.panel_id)
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.editor_host is not None
+        and binding.editor_configuration is None
+        and not binding.frozen_configuration_incompatible,
+    )
+    host = binding.editor_host
+
+    def refused(*_args, **_kwargs):
+        raise AssertionError("Save built a second host beside the settled editor")
+
+    monkeypatch.setattr(artifact, "build_figure_host", refused)
+    target = tmp_path / "through-editor.png"
+    assert presenter.save_panel_figure(binding.panel_id, str(target)) is True
+    _wait_for_panel_save(presenter, target)
+    assert target.with_suffix(".npz").exists()
+    assert binding.editor_host is host and not host.closing, (
+        "the editor's host must survive the save it rendered"
+    )
+
+
+def test_an_editor_hosts_finished_operation_wakes_the_owner(
+    presenter, session
+) -> None:
+    """Edit's pending configuration and its in-place freeze both wake the owner.
+
+    Only the live host used to ask for the wake when its configuration
+    finished.  The editor's settle -- mount, gesture subscription, clearing
+    the pending entry -- is owner work too, and without the wake it waited
+    for the next shot or display beat, once per hop of opening Edit and of
+    Refresh.
+    """
+
+    import time
+
+    node, snap = _one_shot(session)
+    panel = presenter.add_panel(node.signal_key("frames"), snap, kind="image")
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.host is not None and panel.accepted_surface is not None,
+    )
+    assert presenter.edit_panel(panel.panel_id)
+    entry = panel.editor_configuration
+    assert entry is not None
+    presenter.board.wake.take()
+    deadline = time.monotonic() + 10.0
+    while not entry[1].done() and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert entry[1].done()
+    assert presenter.board.wake.take(), "Edit's finished configuration did not wake the owner"
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.editor_host is not None
+        and panel.editor_configuration is None
+        and panel.frozen_data is not None
+        and panel.frozen_data.description is not None,
+    )
+    before = panel.frozen_data.publication
+    _one_shot(session, producer="cm")
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.accepted_surface is not None
+        and panel.accepted_surface.publication is not before,
+    )
+    assert presenter.refresh_panel_snapshot(panel.panel_id) is True
+    entry = panel.editor_configuration
+    assert entry is not None and entry[0] is panel.editor_host
+    presenter.board.wake.take()
+    deadline = time.monotonic() + 10.0
+    while not entry[1].done() and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert entry[1].done()
+    assert presenter.board.wake.take(), "the in-place freeze did not wake the owner"
+
+
+def test_opening_edit_under_a_newer_shot_stages_one_host(
+    presenter, session, monkeypatch
+) -> None:
+    """A shot pending when Edit opens does not build a second host: the
+    staged host takes the newer freeze through its data pipeline, queued
+    behind its own configuration.
+
+    Under a live source this was every Edit-open: Refresh at open found a
+    newer publication pending, the owed presentation adopted it, and the
+    first host -- still building its session -- was retired before it ran
+    a single operation, and a second was staged in its place.
+    """
+
+    import time
+
+    from zlc_plot.session import PlotSession
+
+    node, snap = _one_shot(session)
+    panel = presenter.add_panel(node.signal_key("frames"), snap, kind="image")
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.host is not None and panel.accepted_surface is not None,
+    )
+    built: list[object] = []
+    original_make = presenter._make_editor_host
+
+    def counting(plot_input, state):
+        host = original_make(plot_input, state)
+        built.append(host)
+        return host
+
+    monkeypatch.setattr(presenter, "_make_editor_host", counting)
+    # The staged host's session build is held, so its worker runs nothing
+    # -- not even its configuration -- until the newer shot is adopted.
+    hold_until = [0.0]
+    original_init = PlotSession.__init__
+
+    def slow_init(self, *args, **kwargs):
+        time.sleep(max(0.0, hold_until[0] - time.monotonic()))
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(PlotSession, "__init__", slow_init)
+    # A shot published but not yet presented: Refresh at open finds it
+    # pending and asks for the owed presentation.
+    _one_shot(session, producer="cm")
+    hold_until[0] = time.monotonic() + 1.5
+    assert presenter.edit_panel(panel.panel_id)
+    assert len(built) == 1
+    staged = built[0]
+    assert panel.editor_host is None and panel.editor_configuration[0] is staged
+    assert panel.refresh_requested, "the pending shot was not owed to Edit"
+    opened = panel.frozen_data
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and panel.frozen_data is opened:
+        presenter.beat()
+        time.sleep(0.005)
+    assert panel.frozen_data is not opened, "the newer shot was not adopted"
+    assert panel.frozen_data.publication is panel.accepted_surface.publication
+    assert len(built) == 1, "a second host was built for the newer freeze"
+    assert panel.editor_configuration is not None
+    assert panel.editor_configuration[0] is staged
+    hold_until[0] = 0.0
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.editor_host is not None and panel.editor_configuration is None,
+    )
+    assert panel.editor_host is staged and not staged.closing
+    assert panel.frozen_data.publication is panel.accepted_surface.publication
+    assert not [
+        text for severity, text in presenter.view.status if severity == "error"
+    ]
+
+
+def test_a_region_drawn_on_a_scan_axis_in_microseconds_is_the_region_the_hand_drew(
+    presenter, session
+) -> None:
+    """The stored region is in the column's own unit, so the runtime finds it.
+
+    A seamless scan writes its duration column in microseconds.  The box
+    drawn on that curve used to be converted to the unit system's BASE
+    (seconds) on its way into the panel: a million times too small, so the
+    runtime's coordinate selection found no scan point inside it, the card
+    reported "coordinate selection is empty on axis scan.t", and the box
+    drawn back from the stored value had no width.  Every selector on
+    metres and volts passed because those are base units.
+    """
+
+    from zlc_atom.nodes.scan.dataset import scan_dataset_schema
+    from zlc_data import (
+        READOUT_EVENT,
+        REPEAT,
+        SITE,
+        AxisId,
+        AxisSpec,
+        DatasetSchema,
+        DomainSpec,
+        ValidityContract,
+        ValueSchema,
+        owned_snapshot_from_arrays,
+    )
+    from zlc_runtime import DatasetCoverage, DatasetOutputDeclaration, LiveDatasetOutput
+
+    points, sites = 40, 5
+    pair = AxisSpec(
+        AxisId("survival.pair"), "pair", READOUT_EVENT, 1, (0,),
+        coordinate_labels=("0-1",),
+    )
+    site = AxisSpec(AxisId("survival.site"), "site", SITE, sites, tuple(range(sites)))
+    event_schema = DatasetSchema(
+        DomainSpec(
+            (1,),
+            (AxisSpec(AxisId("survival.repeat"), "repeat", REPEAT, 1, (0,)),),
+            ((0,),),
+        ),
+        DomainSpec((1,), (pair,), ((0,),)),
+        DomainSpec((sites,), (site,)),
+        ValueSchema(
+            ValidityContract.components(site.axis_id), np.dtype("<f8"), "1"
+        ),
+    )
+    durations = np.arange(points) * 0.5
+    canonical = scan_dataset_schema(
+        event_schema, [(float(value),) for value in durations], (("t", "us"),), visits=1
+    )
+    values = np.zeros(canonical.physical_shape)
+    values[0, :, :] = (0.5 + 0.4 * np.sin(durations / 3.0))[:, None]
+    declaration = DatasetOutputDeclaration("survival", "frame_survival.survival")
+    node = SimpleNamespace(
+        instance_id="scan-us",
+        dataset_output_declarations=(declaration,),
+        signal_key=lambda name: f"scan-us/{name}",
+    )
+    plane = session.signal_plane
+    plane.begin_generation(node)
+    total = canonical.repeat_domain.size * canonical.point_domain.size
+    snapshot = owned_snapshot_from_arrays(canonical, values, 1, stream_generation="scan-us")
+    plane.commit_live(
+        node,
+        {
+            "survival": LiveDatasetOutput(
+                declaration, snapshot, DatasetCoverage(total, total),
+                canonical_schema=canonical, cell_origin=(0, 0),
+            )
+        },
+    )
+    binding = presenter.add_panel(
+        "scan-us/survival",
+        snapshot,
+        kind="curve",
+        initial_publication=plane.freeze().publication("scan-us/survival"),
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.host is not None
+        and binding.accepted_display is not None
+        and bool(presenter.view.presented_fronts),
+    )
+    assert str(binding.accepted_display.spec.x.axis_id) == "scan.t"
+
+    _commit_area(binding.host)
+    _settle_panel_hosts(presenter, lambda: binding.state.selector is not None)
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and binding.bridge is None:
+        presenter.beat()
+        time.sleep(0.005)
+    for _ in range(40):
+        presenter.beat()
+        time.sleep(0.01)
+
+    (drawn,) = binding.state.selector["ranges"]
+    assert drawn["axis"] == "scan.t"
+    # A quarter to three quarters of the 0..19.5 us axis, in microseconds.
+    assert 3.0 < drawn["lower"] < 7.0 and 12.0 < drawn["upper"] < 17.0
+    status, marked = presenter.view._cards[binding.panel_id].status
+    assert not marked and "empty" not in status, status
+    assert binding.port is None or binding.port.last_error is None

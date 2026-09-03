@@ -16,26 +16,30 @@ from __future__ import annotations
 
 import numpy as np
 
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
-from zlc_plot import AxisRef, CurvePlot, PlotSession
+from data_factory import (
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
 
+from zlc_data import OwnedSnapshot
+from zlc_plot import AxisRef, CurvePlot, PlotSession
 
 def _resonance_snapshot(
     *, centre: float, scatter: float, repeats: int = 8, points: int = 5
-) -> DatasetSnapshot:
+) -> OwnedSnapshot:
     """A scan whose y is a big number with a small spread."""
 
     rng = np.random.default_rng(20260828)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=repeats),
-        PointTable.from_columns({"x": list(range(points))}),
+    schema = make_dataset_schema(
+        repeat_domain(size=repeats),
+        mapped_domain_from_columns({"x": list(range(points))}),
         dtype=np.float64,
-        canonical_unit="Hz",
-        generation="sem-conditioning",
+        value_unit="Hz",
     )
     values = centre + rng.normal(0.0, scatter, size=(repeats, points))
-    return DatasetSnapshot(schema, values, revision=0), values
-
+    return make_snapshot(schema, values, revision=0), values
 
 def _drawn_sem(centre: float, scatter: float):
     snapshot, values = _resonance_snapshot(centre=centre, scatter=scatter)
@@ -51,7 +55,6 @@ def _drawn_sem(centre: float, scatter: float):
     finally:
         session.close()
 
-
 def test_a_large_offset_does_not_eat_the_spread() -> None:
     """The sem of a GHz-scale value with a kHz spread is the kHz spread."""
 
@@ -61,7 +64,6 @@ def test_a_large_offset_does_not_eat_the_spread() -> None:
     wanted = values.std(axis=0, ddof=1) / np.sqrt(values.shape[0])
     assert np.all(np.isfinite(sem)), sem
     np.testing.assert_allclose(sem, wanted, rtol=1e-9)
-
 
 def test_the_answer_does_not_depend_on_where_zero_is() -> None:
     """Translation invariance, which the arithmetic must not break.
@@ -75,7 +77,6 @@ def test_the_answer_does_not_depend_on_where_zero_is() -> None:
     near, _ = _drawn_sem(1.0e3, scatter)
     far, _ = _drawn_sem(6.834e9, scatter)
     np.testing.assert_allclose(near, far, rtol=1e-9)
-
 
 def test_the_mean_of_samples_that_carry_their_own_error() -> None:
     """The scatter already contains the errors; the sigma fills its silence.

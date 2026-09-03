@@ -101,8 +101,8 @@ class LiveDatasetOutput:
                     "a finite Dataset event requires canonical placement"
                 )
             total = (
-                self.snapshot.block.schema.repeat_axis.size
-                * self.snapshot.block.schema.point_table.row_count
+                self.snapshot.block.schema.repeat_domain.size
+                * self.snapshot.block.schema.point_domain.size
             )
             if self.coverage.total_cells != total:
                 raise ValueError(
@@ -125,20 +125,23 @@ class LiveDatasetOutput:
             raise ValueError("cell_origin must contain two non-negative integers")
         object.__setattr__(self, "cell_origin", origin)
         canonical_total = (
-            self.canonical_schema.repeat_axis.size
-            * self.canonical_schema.point_table.row_count
+            self.canonical_schema.repeat_domain.size
+            * self.canonical_schema.point_domain.size
         )
         if self.coverage.total_cells != canonical_total:
             raise ValueError("finite coverage differs from canonical Dataset geometry")
         event_schema = self.snapshot.block.schema
-        if event_schema.cell_schema != self.canonical_schema.cell_schema:
-            raise ValueError("event cell schema differs from canonical Dataset schema")
+        if (
+            event_schema.cell_domain != self.canonical_schema.cell_domain
+            or event_schema.value_schema != self.canonical_schema.value_schema
+        ):
+            raise ValueError("event cell/value schema differs from canonical Dataset schema")
         repeat_origin, point_origin = origin
         if (
-            repeat_origin + event_schema.repeat_axis.size
-            > self.canonical_schema.repeat_axis.size
-            or point_origin + event_schema.point_table.row_count
-            > self.canonical_schema.point_table.row_count
+            repeat_origin + event_schema.repeat_domain.size
+            > self.canonical_schema.repeat_domain.size
+            or point_origin + event_schema.point_domain.size
+            > self.canonical_schema.point_domain.size
         ):
             raise ValueError("event placement lies outside canonical Dataset geometry")
 

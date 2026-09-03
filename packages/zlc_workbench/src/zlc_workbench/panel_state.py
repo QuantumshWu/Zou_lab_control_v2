@@ -567,9 +567,8 @@ def project_panel_state(
             if key.startswith(FATE_PREFIX):
                 # A fate names an AXIS.  The same signal legally changes
                 # its schema representation -- the Runtime's indexed
-                # history injects a source-index point column, and its
-                # arrival or departure adds and removes fate rows (the
-                # synthetic point-row ordinal among them).  A saved fate
+                # history adds a source-index axis to the Point domain, and
+                # its arrival or departure adds and removes that fate row. A saved fate
                 # for an axis the current representation does not offer
                 # is not a typo (the editor authors these names); it is a
                 # statement about an axis that is not here to have a

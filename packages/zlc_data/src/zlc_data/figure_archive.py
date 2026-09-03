@@ -39,6 +39,11 @@ _ROOT_KEYS = {"schema", "name", "members", "sections"}
 # metadata/arrays stay compressed because their bounded cost is negligible.
 _COMPRESSION_PROBE_BYTES = 1 << 20
 _COMPRESSION_MIN_SAVINGS = 0.20
+#: Deflate level for members worth deflating.  Camera history is sensor
+#: noise over structure: on a thousand-shot ROI stack zlib's default level
+#: took 2-3 s for 7.3 MB where level 1 took 0.2 s for 7.9 MB, and a Save
+#: is waited for.  The 8 % is not worth ten times the wait.
+_DEFLATE_LEVEL = 1
 
 
 def _jsonable(value: Any, path: str = "metadata") -> Any:
@@ -154,6 +159,9 @@ def _write_npz_members(
         for key, array in members.items():
             member = zipfile.ZipInfo(f"{key}.npy")
             member.compress_type = _member_compression(array)
+            # Per member: the archive-level default is not applied to a
+            # ZipInfo handed to ``open``.
+            member.compress_level = _DEFLATE_LEVEL
             with archive.open(member, mode="w", force_zip64=True) as target:
                 write_array(target, array, allow_pickle=False)
 

@@ -19,18 +19,22 @@ from .common import bootstrap, stats, write_result
 
 bootstrap()
 
-
 def _curve_feed():
-    from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+    from data_factory import (
+        axis,
+        make_dataset_schema,
+        make_snapshot,
+        mapped_domain_from_columns,
+        repeat_domain,
+    )
 
     x = np.linspace(-6.0, 6.0, 2000)
     rng = np.random.default_rng(7)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=8),
-        PointTable.from_columns({"x": x}),
-        data_axes=(),
+    schema = make_dataset_schema(
+        repeat_domain(size=8),
+        mapped_domain_from_columns({"x": x}),
+        cell_axes=(),
         dtype=np.float64,
-        generation="fit-sweep-curve",
     )
 
     def snapshot(revision: int):
@@ -40,27 +44,31 @@ def _curve_feed():
             + 0.35 * np.sin(3.0 * x) * np.exp(-0.2 * np.abs(x))
         )
         values = base + rng.normal(0.0, 0.12, (8, x.size))
-        return DatasetSnapshot(schema, values, revision=revision)
+        return make_snapshot(schema, values, revision=revision)
 
     return snapshot
 
-
 def _histogram_feed():
-    from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+    from data_factory import (
+        axis,
+        make_dataset_schema,
+        make_snapshot,
+        mapped_domain_from_columns,
+        repeat_domain,
+    )
 
     rng = np.random.default_rng(11)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=64),
-        PointTable.from_columns({"sample": np.arange(512, dtype=np.int64)}),
-        data_axes=(),
+    schema = make_dataset_schema(
+        repeat_domain(size=64),
+        mapped_domain_from_columns({"sample": np.arange(512, dtype=np.int64)}),
+        cell_axes=(),
         dtype=np.float64,
-        generation="fit-sweep-histogram",
     )
 
     def snapshot(revision: int):
         low = rng.normal(8.0, 2.0, (64, 256))
         high = rng.normal(30.0, 4.0, (64, 256))
-        return DatasetSnapshot(
+        return make_snapshot(
             schema,
             np.concatenate((low, high), axis=1),
             revision=revision,
@@ -68,29 +76,32 @@ def _histogram_feed():
 
     return snapshot
 
-
 def _image_feed():
-    from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+    from data_factory import (
+        axis,
+        make_dataset_schema,
+        make_snapshot,
+        mapped_domain_from_columns,
+        repeat_domain,
+    )
 
     rng = np.random.default_rng(23)
     yy, xx = np.mgrid[0:96, 0:128]
     spot = 40.0 * np.exp(
         -0.5 * (((xx - 70.0) / 9.0) ** 2 + ((yy - 44.0) / 6.0) ** 2)
     )
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"point": [0.0]}),
-        data_axes=(Axis.create("y", size=96), Axis.create("x", size=128)),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"point": [0.0]}),
+        cell_axes=(axis("y", size=96), axis("x", size=128)),
         dtype=np.float64,
-        generation="fit-sweep-image",
     )
 
     def snapshot(revision: int):
         frame = spot + 3.0 + rng.normal(0.0, 0.6, spot.shape)
-        return DatasetSnapshot(schema, frame[None, None], revision=revision)
+        return make_snapshot(schema, frame[None, None], revision=revision)
 
     return snapshot
-
 
 def _session(kind: str):
     from zlc_plot import (
@@ -111,14 +122,13 @@ def _session(kind: str):
     else:
         feed = _image_feed()
         spec = ImagePlot(
-            AxisRef.data("x"),
-            AxisRef.data("y"),
+            AxisRef.cell_data("x"),
+            AxisRef.cell_data("y"),
             labels=PlotLabels("i", "x", "y"),
         )
     session = PlotSession(feed(1), spec)
     session.set_size("2x2")
     return session, feed
-
 
 def run(rounds: int) -> dict:
     payload: dict = {}
@@ -173,7 +183,6 @@ def run(rounds: int) -> dict:
             session.close()
     return payload
 
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rounds", type=int, default=8)
@@ -181,7 +190,6 @@ def main() -> int:
     payload = run(arguments.rounds)
     print("wrote", write_result(payload, "fit-model-sweep"))
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

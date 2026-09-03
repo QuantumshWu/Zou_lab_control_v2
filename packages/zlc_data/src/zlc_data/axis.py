@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
@@ -35,10 +35,9 @@ def canonical_coordinate_scalar(value: Any, field: str = "coordinate") -> Coordi
 
     # Exact-type identities first: a plain int, str, or None IS its own
     # canonical form (bool is excluded because type(True) is bool, never
-    # int).  This function runs once per coordinate of every constructed
-    # point column -- a materialized indexed history calls it hundreds of
-    # thousands of times per shot -- and the generic path below spends
-    # most of that in abc instance checks re-proving these identities.
+    # int). Large logical coordinate domains call this once per coordinate,
+    # so the generic path below must not spend most of its time re-proving
+    # these exact-type identities.
     kind = type(value)
     if kind is int or kind is str or value is None:
         return value
@@ -100,39 +99,6 @@ SITE = AxisRoleId("site")
 COMPONENT = AxisRoleId("component")
 SCALAR = AxisRoleId("scalar")
 
-_POINT_ORDINAL_AXIS_ID = AxisId("zlc_data.point-ordinal")
-
-
-def point_ordinal_axis(
-    size: int,
-    coordinates: tuple[int, ...] | None = None,
-) -> "AxisSpec":
-    """Return the sole Axis metadata for authored point-row ordinals."""
-
-    normalized_size = positive_integer(size, "point ordinal axis size")
-    if coordinates is None:
-        return AxisSpec(
-            _POINT_ORDINAL_AXIS_ID,
-            "point",
-            SCAN_POINT,
-            normalized_size,
-        )
-    normalized = tuple(
-        nonnegative_integer(value, "point ordinal") for value in coordinates
-    )
-    if len(normalized) != normalized_size:
-        raise ValueError("point ordinal coordinates must match axis size")
-    if tuple(sorted(set(normalized))) != normalized:
-        raise ValueError("point ordinal coordinates must be unique and increasing")
-    return AxisSpec(
-        _POINT_ORDINAL_AXIS_ID,
-        "point",
-        SCAN_POINT,
-        normalized_size,
-        normalized,
-    )
-
-
 @dataclass(frozen=True)
 class AxisSpec:
     axis_id: AxisId
@@ -144,6 +110,12 @@ class AxisSpec:
     coordinate_frame: CoordinateFrameId | None = None
     index_origin: int = 0
     coordinate_labels: tuple[str, ...] | None = None
+    _coordinate_positions: Any = field(
+        init=False,
+        repr=False,
+        compare=False,
+        default=None,
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.axis_id, AxisId):
@@ -187,6 +159,7 @@ class AxisSpec:
                     "axis coordinate_labels length must match axis size"
                 )
             object.__setattr__(self, "coordinate_labels", labels)
+        object.__setattr__(self, "_coordinate_positions", None)
 
     def coordinate_at(self, index: int) -> Any:
         normalized = integer(index, "axis index")
@@ -200,6 +173,31 @@ class AxisSpec:
         if self.coordinates is None:
             return self.index_origin + index
         return self.coordinates[index]
+
+    def coordinate_position(self, coordinate: object) -> int | None:
+        """Return one coordinate's logical position without scanning the axis.
+
+        An implicit integer axis is arithmetic.  An explicit immutable axis
+        builds its hash lookup once and shares it with every semantic/UI
+        projection that refers to this ``AxisSpec``.
+        """
+
+        try:
+            value = canonical_coordinate_scalar(coordinate, "axis coordinate")
+        except (TypeError, ValueError):
+            return None
+        if self.coordinates is None:
+            if type(value) is not int:
+                return None
+            position = value - self.index_origin
+            return position if 0 <= position < self.size else None
+        positions = self._coordinate_positions
+        if positions is None:
+            positions = {
+                item: position for position, item in enumerate(self.coordinates)
+            }
+            object.__setattr__(self, "_coordinate_positions", positions)
+        return positions.get(value)
 
 
 # A scalar still occupies one physical trailing data item.  This stable carrier

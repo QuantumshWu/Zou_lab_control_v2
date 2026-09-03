@@ -10,17 +10,27 @@ from __future__ import annotations
 import numpy as np
 
 from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, PlotLabels, updated_spec
-from data_factory import Axis, DatasetSchema, PointTable
+from data_factory import (
+    axis,
+    make_dataset_schema,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
+from zlc_data import DatasetSchema, REPEAT
 from zlc_plot.kinds import PlotKind
 from zlc_plot.session_policy import merge_labels
 
 
 def _schema() -> DatasetSchema:
-    return DatasetSchema.create(
-        Axis.create("repeat", size=4),
-        PointTable.from_columns({"time": np.linspace(0.0, 1.0, 6)}),
+    return make_dataset_schema(
+        repeat_domain(size=4),
+        mapped_domain_from_columns(
+            {
+                "time": np.linspace(0.0, 1.0, 6),
+                "sample": np.arange(6.0),
+            }
+        ),
         dtype=np.float64,
-        generation="label-carry",
     )
 
 
@@ -42,7 +52,7 @@ def test_kind_switch_moves_value_label_and_drops_axis_label() -> None:
 
 
 def test_x_change_drops_only_the_x_label() -> None:
-    edited = updated_spec(_schema(), _CURVE, "x", AxisRef.point_rows())
+    edited = updated_spec(_schema(), _CURVE, "x", AxisRef.point("sample"))
     assert edited.labels.x is None
     assert edited.labels.y == "Signal (mV)"
     assert edited.labels.title == "Loading curve"
@@ -69,11 +79,11 @@ def test_round_trip_through_rolling_keeps_value_label_only() -> None:
 
 def test_facet_cell_edit_carries_by_cell_roles() -> None:
     facet = FacetGridPlot(
-        AxisRef.repeat(),
+        AxisRef.repeat("repeat"),
         CurvePlot(AxisRef.point("time")),
         labels=PlotLabels("Grid", "Time (ms)", "Signal (mV)"),
     )
-    edited = updated_spec(_schema(), facet, "x", AxisRef.point_rows())
+    edited = updated_spec(_schema(), facet, "x", AxisRef.point("sample"))
     assert edited.labels.title == "Grid"
     assert edited.labels.x is None
     assert edited.labels.y == "Signal (mV)"

@@ -23,9 +23,8 @@ from zlc_data.axis import (
 from zlc_data.codec import dataset_schema_from_tree, dataset_schema_to_tree
 from zlc_data.schema import (
     DatasetSchema,
-    GridTopology,
-    PointColumn,
-    PointTable,
+    DomainSpec,
+    SCALAR_DOMAIN,
     ValueSchema,
 )
 from zlc_data.validity import (
@@ -46,46 +45,39 @@ def axis(name: str, role, size: int) -> AxisSpec:
     return AxisSpec(AxisId(name), name, role, size, tuple(range(size)))
 
 
-def image_schema(*, component_validity: bool = False) -> ValueSchema:
+def domain(axis: AxisSpec) -> DomainSpec:
+    return DomainSpec(
+        (axis.size,), (axis,), (tuple(range(axis.size)),)
+    )
+
+
+def image_schema(
+    *, component_validity: bool = False
+) -> tuple[DomainSpec, ValueSchema]:
     y = axis("camera.image.y", SPATIAL_Y, 3)
     x = axis("camera.image.x", SPATIAL_X, 4)
     contract = ValidityContract.components(y.axis_id, x.axis_id) if component_validity else ValidityContract.value()
-    return ValueSchema((y, x), contract, np.dtype(np.uint16), value_unit="count")
+    return (
+        DomainSpec((y.size, x.size), (y, x)),
+        ValueSchema(contract, np.dtype(np.uint16), value_unit="count"),
+    )
 
 
 def dataset_schema(*, explicit: bool = False, component_validity: bool = False) -> DatasetSchema:
     repeat = axis("capture.repeat", REPEAT, 2)
     detuning = axis("scan.detuning", SCAN_POINT, 3)
     point_values = (2, 0) if explicit else (0, 1, 2)
-    point_table = PointTable(
-        len(point_values),
-        (
-            PointColumn(
-                detuning.axis_id,
-                detuning.name,
-                detuning.role,
-                PointColumn.NUMERIC,
-                point_values,
-            ),
-        ),
-    )
-    topology = GridTopology(
-        (detuning.axis_id,),
-        ((0, 1, 2),),
-        tuple((value,) for value in point_values),
-    )
     return DatasetSchema(
-        repeat,
-        point_table,
-        topology,
-        image_schema(component_validity=component_validity),
+        domain(repeat),
+        DomainSpec((len(point_values),), (detuning,), (point_values,)),
+        *image_schema(component_validity=component_validity),
     )
 
 
 def test_scalar_has_the_canonical_length_one_carrier_axis():
     scalar_schema = ValueSchema.scalar(np.dtype(np.float64), "count")
-    assert scalar_schema.is_scalar
-    assert scalar_schema.data_shape == (1,)
+    assert scalar_schema.validity_contract == ValidityContract.value()
+    assert SCALAR_DOMAIN.shape == (1,)
 
 
 def test_intrinsically_immutable_strided_views_cross_value_and_dataset_without_copy():
@@ -98,14 +90,15 @@ def test_intrinsically_immutable_strided_views_cross_value_and_dataset_without_c
     transposed = frozen.T
     y = axis("camera.transposed.y", SPATIAL_Y, 4)
     x = axis("camera.transposed.x", SPATIAL_X, 3)
-    value_schema = ValueSchema(
-        (y, x),
-        ValidityContract.value(),
-        np.dtype("<u2"),
-        "count",
-    )
+    cell_domain = DomainSpec((y.size, x.size), (y, x))
+    value_schema = ValueSchema(ValidityContract.value(), np.dtype("<u2"), "count")
     repeat = axis("camera.transposed.repeat", REPEAT, 1)
-    schema = DatasetSchema(repeat, PointTable(1), None, value_schema)
+    schema = DatasetSchema(
+        domain(repeat),
+        DomainSpec((1,), (), ()),
+        cell_domain,
+        value_schema,
+    )
     block = DataBlock(
         BlockId("immutable-transpose"),
         DatasetRevision(0),
@@ -125,25 +118,17 @@ def test_intrinsically_immutable_strided_views_cross_value_and_dataset_without_c
 def test_dataset_rejects_duplicate_axis_identity_across_axis_families():
     repeat = axis("same", REPEAT, 1)
     point = axis("same", SCAN_POINT, 1)
-    point_table = PointTable(
-        1,
-        (
-            PointColumn(
-                point.axis_id,
-                point.name,
-                point.role,
-                PointColumn.NUMERIC,
-                (0,),
-            ),
-        ),
-    )
     with pytest.raises(ValueError, match="unique"):
-        DatasetSchema(repeat, point_table, None, image_schema())
+        DatasetSchema(
+            domain(repeat),
+            DomainSpec((1,), (point,), ((0,),)),
+            *image_schema(),
+        )
 
 
 def test_dataset_component_validity_includes_repeat_and_physical_point_rows():
     schema = dataset_schema(component_validity=True)
-    site_like_x = schema.cell_schema.data_axes[1]
+    site_like_x = schema.cell_domain.axes[1]
     validity = DatasetComponentValidity(
         (site_like_x.axis_id,),
         np.ones((2, 3, 4), dtype=bool),
@@ -185,8 +170,16 @@ def test_datablock_owns_intrinsically_immutable_bytes():
 def test_dataset_ref_carries_complete_identity():
     schema = dataset_schema(explicit=True)
     restored = dataset_schema_from_tree(dataset_schema_to_tree(schema))
-    assert restored.point_table == schema.point_table
-    assert restored.grid_topology == schema.grid_topology
+    assert restored.repeat_domain == schema.repeat_domain
+    assert restored.point_domain == schema.point_domain
+    for codes in (
+        restored.repeat_domain.codes(restored.repeat_domain.axes[0].axis_id),
+        restored.point_domain.codes(restored.point_domain.axes[0].axis_id),
+        restored.cell_domain.codes(restored.cell_domain.axes[0].axis_id),
+    ):
+        assert is_intrinsically_immutable_array(codes)
+        with pytest.raises(ValueError):
+            codes.setflags(write=True)
     block = DataBlock(
         BlockId("sparse-capture"),
         DatasetRevision(3),
@@ -200,108 +193,117 @@ def test_dataset_ref_carries_complete_identity():
     assert ref.schema_fingerprint == schema.fingerprint
 
 
-def test_grid_topology_can_own_dimensions_without_point_columns():
+def test_point_domain_owns_multiple_axes_and_their_only_row_mapping():
     repeat = axis("capture.repeat", REPEAT, 1)
-    topology = GridTopology(
-        (AxisId("b.x"), AxisId("b.y")),
-        ((0, 1), (10, 20)),
-        ((0, 0), (1, 0), (0, 1), (1, 1)),
+    b_x = AxisSpec(AxisId("b.x"), "b.x", SCAN_POINT, 2, (0, 1))
+    b_y = AxisSpec(AxisId("b.y"), "b.y", SCAN_POINT, 2, (10, 20))
+    point_domain = DomainSpec(
+        (4,),
+        (b_x, b_y),
+        ((0, 1, 0, 1), (0, 0, 1, 1)),
     )
     schema = DatasetSchema(
-        repeat,
-        PointTable(4),
-        topology,
-        image_schema(),
+        domain(repeat),
+        point_domain,
+        *image_schema(),
     )
 
     restored = dataset_schema_from_tree(dataset_schema_to_tree(schema))
 
-    assert schema.point_table.columns == ()
     assert restored == schema
-    assert restored.grid_topology == topology
+    np.testing.assert_array_equal(restored.point_domain.codes(b_x.axis_id), (0, 1, 0, 1))
+    assert not restored.point_domain.codes(b_x.axis_id).flags.writeable
+    assert restored.point_domain.physical_dimension(b_x.axis_id) == 0
+    y_axis, x_axis = restored.cell_domain.axes
+    assert restored.cell_domain.physical_dimension(y_axis.axis_id) == 0
+    assert restored.cell_domain.physical_dimension(x_axis.axis_id) == 1
+    assert restored.cell_domain.codes(x_axis.axis_id).shape == (x_axis.size,)
+    assert not restored.cell_domain.codes(x_axis.axis_id).flags.writeable
 
 
-def test_grid_topology_checks_a_matching_point_column_but_allows_absent_ones():
+def test_repeat_domain_can_name_multiple_axes_over_one_physical_carrier():
+    repeat = axis("capture.repeat", REPEAT, 2)
+    shot = axis("capture.shot-per-point", REPEAT, 3)
+    schema = DatasetSchema(
+        DomainSpec(
+            (6,),
+            (repeat, shot),
+            ((0, 0, 0, 1, 1, 1), (0, 1, 2, 0, 1, 2)),
+        ),
+        DomainSpec((1,), (), ()),
+        *image_schema(),
+    )
+
+    assert schema.physical_shape[:2] == (6, 1)
+    np.testing.assert_array_equal(
+        schema.repeat_domain.codes(shot.axis_id), (0, 1, 2, 0, 1, 2)
+    )
+
+
+def test_domain_rejects_ambiguous_axis_coordinates_and_out_of_range_codes():
     repeat = axis("capture.repeat", REPEAT, 1)
-    b_x = AxisId("b.x")
-    b_y = AxisId("b.y")
-    topology = GridTopology(
-        (b_x, b_y),
-        ((0, 1), (10, 20)),
-        ((0, 0), (1, 0), (0, 1), (1, 1)),
-    )
-    consistent = PointTable(
-        4,
-        (
-            PointColumn(
-                b_x,
-                "b.x",
-                SCAN_POINT,
-                PointColumn.NUMERIC,
-                (0, 1, 0, 1),
-            ),
-        ),
-    )
-    DatasetSchema(repeat, consistent, topology, image_schema())
-
-    inconsistent = PointTable(
-        4,
-        (
-            PointColumn(
-                b_x,
-                "b.x",
-                SCAN_POINT,
-                PointColumn.NUMERIC,
-                (0, 99, 0, 1),
-            ),
-        ),
-    )
-    with pytest.raises(ValueError, match="match their PointTable columns"):
-        DatasetSchema(repeat, inconsistent, topology, image_schema())
+    b_x = AxisSpec(AxisId("b.x"), "b.x", SCAN_POINT, 2, (0, 1))
+    repeated = DomainSpec((2,), (b_x,), ((0, 0),))
+    assert repeated.axis_codes == ((0, 0),)
+    with pytest.raises(ValueError, match="outside"):
+        DomainSpec((2,), (b_x,), ((0, 2),))
+    ambiguous = AxisSpec(AxisId("ambiguous"), "ambiguous", SCAN_POINT, 2, (1, 1))
+    with pytest.raises(ValueError, match="coordinates must be unique"):
+        DomainSpec((2,), (ambiguous,), ((0, 1),))
+    with pytest.raises(ValueError, match="named axis"):
+        DatasetSchema(
+            domain(repeat),
+            DomainSpec((2,), (), ()),
+            *image_schema(),
+        )
 
 
 def test_dataset_schema_tree_matches_the_independent_current_grammar():
     schema = dataset_schema()
     literal = {
         "schema": "zlc_data.DatasetSchema",
-        "repeat_axis": {
-            "schema": "zlc_data.AxisSpec",
-            "axis_id": "capture.repeat",
-            "name": "capture.repeat",
-            "role": "repeat",
-            "size": 2,
-            "coordinates": [0, 1],
-                "unit": None,
-                "coordinate_frame": None,
-                "index_origin": 0,
-                "coordinate_labels": None,
-        },
-        "point_table": {
-            "schema": "zlc_data.PointTable",
-            "row_count": 3,
-            "columns": [
+        "repeat_domain": {
+            "schema": "zlc_data.DomainSpec",
+            "shape": [2],
+            "axes": [
                 {
-                    "schema": "zlc_data.PointColumn",
-                    "coordinate_id": "scan.detuning",
-                    "name": "scan.detuning",
-                    "role": "scan-point",
-                    "value_kind": "NUMERIC",
-                    "values": [0, 1, 2],
-                        "unit": None,
-                        "coordinate_frame": None,
-                        "coordinate_labels": None,
+                    "schema": "zlc_data.AxisSpec",
+                    "axis_id": "capture.repeat",
+                    "name": "capture.repeat",
+                    "role": "repeat",
+                    "size": 2,
+                    "coordinates": [0, 1],
+                    "unit": None,
+                    "coordinate_frame": None,
+                    "index_origin": 0,
+                    "coordinate_labels": None,
                 }
             ],
+            "axis_codes": [[0, 1]],
         },
-        "grid_topology": {
-            "schema": "zlc_data.GridTopology",
-            "dimension_ids": ["scan.detuning"],
-            "coordinate_domains": [[0, 1, 2]],
-            "row_to_cell": [[0], [1], [2]],
+        "point_domain": {
+            "schema": "zlc_data.DomainSpec",
+            "shape": [3],
+            "axes": [
+                {
+                    "schema": "zlc_data.AxisSpec",
+                    "axis_id": "scan.detuning",
+                    "name": "scan.detuning",
+                    "role": "scan-point",
+                    "size": 3,
+                    "coordinates": [0, 1, 2],
+                    "unit": None,
+                    "coordinate_frame": None,
+                    "index_origin": 0,
+                    "coordinate_labels": None,
+                }
+            ],
+            "axis_codes": [[0, 1, 2]],
         },
-        "cell_schema": {
-            "schema": "zlc_data.ValueSchema",
-            "data_axes": [
+        "cell_domain": {
+            "schema": "zlc_data.DomainSpec",
+            "shape": [3, 4],
+            "axes": [
                 {
                     "schema": "zlc_data.AxisSpec",
                     "axis_id": "camera.image.y",
@@ -327,6 +329,10 @@ def test_dataset_schema_tree_matches_the_independent_current_grammar():
                         "coordinate_labels": None,
                 },
             ],
+            "axis_codes": None,
+        },
+        "value_schema": {
+            "schema": "zlc_data.ValueSchema",
             "validity_contract": {"mode": "VALUE", "component_axis_ids": []},
             "dtype": "<u2",
             "value_unit": "count",
@@ -343,7 +349,7 @@ def test_dataset_schema_tree_matches_the_independent_current_grammar():
         dataset_schema_from_tree(malformed)
 
 
-def test_schema_fingerprint_covers_point_rows_topology_and_component_validity():
+def test_schema_fingerprint_covers_index_codes_and_component_validity():
     sparse = dataset_schema(explicit=True, component_validity=True)
     dense = dataset_schema(explicit=False, component_validity=True)
     value_only = dataset_schema(explicit=True, component_validity=False)
@@ -360,7 +366,7 @@ def test_schema_fingerprint_normalizes_dtype_endianness():
 def test_immutable_schema_fingerprints_are_computed_once(monkeypatch):
     schema = dataset_schema()
     dataset_fingerprint = schema.fingerprint
-    value_fingerprint = schema.cell_schema.fingerprint
+    value_fingerprint = schema.value_schema.fingerprint
     import zlc_data.codec as codec
 
     def forbidden(*_args, **_kwargs):
@@ -369,7 +375,7 @@ def test_immutable_schema_fingerprints_are_computed_once(monkeypatch):
     monkeypatch.setattr(codec, "dataset_schema_fingerprint", forbidden)
     monkeypatch.setattr(codec, "value_schema_fingerprint", forbidden)
     assert schema.fingerprint == dataset_fingerprint
-    assert schema.cell_schema.fingerprint == value_fingerprint
+    assert schema.value_schema.fingerprint == value_fingerprint
 
 
 def test_value_schema_rejects_non_numeric_payload_dtypes():
@@ -402,22 +408,16 @@ def test_numeric_coordinates_have_one_python_and_fingerprint_identity():
     assert all(type(value) is int for value in negative_zero.coordinates)
 
     repeat = axis("repeat", REPEAT, 1)
-    left_column = PointColumn(
-        negative_zero.axis_id,
-        negative_zero.name,
-        negative_zero.role,
-        PointColumn.NUMERIC,
-        negative_zero.coordinates,
+    left = DatasetSchema(
+        domain(repeat),
+        DomainSpec((2,), (negative_zero,), ((0, 1),)),
+        *image_schema(),
     )
-    right_column = PointColumn(
-        integers.axis_id,
-        integers.name,
-        integers.role,
-        PointColumn.NUMERIC,
-        integers.coordinates,
+    right = DatasetSchema(
+        domain(repeat),
+        DomainSpec((2,), (integers,), ((0, 1),)),
+        *image_schema(),
     )
-    left = DatasetSchema(repeat, PointTable(2, (left_column,)), None, image_schema())
-    right = DatasetSchema(repeat, PointTable(2, (right_column,)), None, image_schema())
     assert left == right
     assert left.fingerprint == right.fingerprint
 
@@ -431,23 +431,21 @@ def test_numeric_coordinates_have_one_python_and_fingerprint_identity():
 
 def test_repeat_role_has_exactly_one_structural_owner():
     repeat = axis("repeat", REPEAT, 1)
-    with pytest.raises(ValueError, match="point-domain"):
-        PointColumn(
-            AxisId("counterfeit.point"),
-            "counterfeit.point",
-            REPEAT,
-            PointColumn.NUMERIC,
-            (0, 1),
+    counterfeit_point = axis("counterfeit.point", REPEAT, 2)
+    with pytest.raises(ValueError, match="Repeat domain"):
+        DatasetSchema(
+            domain(repeat),
+            domain(counterfeit_point),
+            *image_schema(),
         )
 
     counterfeit_data = axis("counterfeit.data", REPEAT, 2)
     with pytest.raises(ValueError, match="only"):
         DatasetSchema(
-            repeat,
-            PointTable(1),
-            None,
+            domain(repeat),
+            DomainSpec((1,), (), ()),
+            DomainSpec((2,), (counterfeit_data,)),
             ValueSchema(
-                (counterfeit_data,),
                 ValidityContract.value(),
                 np.dtype(np.float64),
             ),

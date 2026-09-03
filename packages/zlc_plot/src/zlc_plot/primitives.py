@@ -65,7 +65,7 @@ IMAGE_POINT_OVERLAY_GEOMETRY_RECORD = "image_point_overlay_geometry"
 
 
 def _image_axes(snapshot: OwnedSnapshot) -> tuple[object, object]:
-    axes = tuple(snapshot.block.schema.cell_schema.data_axes)
+    axes = tuple(snapshot.block.schema.cell_domain.axes)
     if len(axes) != 2 or tuple(axis.role for axis in axes) != (
         SPATIAL_Y,
         SPATIAL_X,
@@ -202,12 +202,11 @@ def _validated_overlay_geometry(
     image_schema = image.block.schema
     status_schema = status.block.schema
     if (
-        status_schema.repeat_axis != image_schema.repeat_axis
-        or status_schema.point_table != image_schema.point_table
-        or status_schema.grid_topology != image_schema.grid_topology
+        status_schema.repeat_domain != image_schema.repeat_domain
+        or status_schema.point_domain != image_schema.point_domain
     ):
         raise ValueError("image overlay status leading geometry differs from image")
-    status_axes = tuple(status_schema.cell_schema.data_axes)
+    status_axes = tuple(status_schema.cell_domain.axes)
     if len(status_axes) != 1:
         raise ValueError("image overlay status must declare one trailing axis")
     status_axis = status_axes[0]
@@ -317,7 +316,7 @@ class ImagePointOverlay:
     ) -> None:
         if not isinstance(snapshot, OwnedSnapshot):
             raise TypeError("overlay status must be an OwnedSnapshot")
-        axes = tuple(snapshot.block.schema.cell_schema.data_axes)
+        axes = tuple(snapshot.block.schema.cell_domain.axes)
         if len(axes) != 1 or int(axes[0].size) != count:
             raise ValueError(
                 f"overlay status must declare one complete point axis of {count} items"
@@ -362,8 +361,8 @@ class ImagePointOverlay:
             selection = value_selection(schema, terms)
             repeats, points, _data = selection_indices(schema, selection)
         else:
-            repeats = range(schema.repeat_axis.size)
-            points = range(schema.point_table.row_count)
+            repeats = range(schema.repeat_domain.size)
+            points = range(schema.point_domain.size)
         repeat_indices = tuple(repeats)
         point_indices = tuple(points)
         if len(repeat_indices) != 1 or len(point_indices) != 1:
@@ -400,7 +399,7 @@ class ImagePointOverlay:
     ) -> AxisId | None:
         if not isinstance(ref, AxisRef):
             raise TypeError("overlay scope/facet axes must be AxisRef values")
-        if ref.domain is AxisDomain.DATA:
+        if ref.domain is AxisDomain.CELL_DATA:
             return None
         try:
             return resolve_axis(schema, ref).axis_id

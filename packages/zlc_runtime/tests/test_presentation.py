@@ -16,8 +16,9 @@ from zlc_data import (
     DataBlock,
     DatasetRevision,
     DatasetSchema,
+    DomainSpec,
     OwnedSnapshot,
-    PointTable,
+    SCALAR_DOMAIN,
     StreamGenerationId,
     ValueSchema,
 )
@@ -34,7 +35,12 @@ from zlc_runtime.streams import EventRef, StreamId
 
 def _front(name: str = "camera/frame", sequence: int = 1) -> SignalFront:
     repeat = AxisSpec(AxisId(f"{name}.repeat"), "repeat", REPEAT, 1, (0,))
-    schema = DatasetSchema(repeat, PointTable(1), None, ValueSchema.scalar(np.dtype("<f8")))
+    schema = DatasetSchema(
+        DomainSpec((1,), (repeat,), ((0,),)),
+        DomainSpec((1,), (), ()),
+        SCALAR_DOMAIN,
+        ValueSchema.scalar(np.dtype("<f8")),
+    )
     block = DataBlock(
         BlockId(f"{name}-{sequence}"),
         DatasetRevision(sequence),

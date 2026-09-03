@@ -39,9 +39,8 @@ from zlc_data import (
     AxisId,
     AxisSpec,
     DatasetSchema,
+    DomainSpec,
     OwnedSnapshot,
-    PointColumn,
-    PointTable,
     ValidityContract,
     ValueSchema,
     owned_snapshot_from_arrays,
@@ -94,16 +93,16 @@ class FrameSurvivalProcessor:
 
     # -- schema -------------------------------------------------------------
 
-    def _source_axes(self, schema: DatasetSchema) -> tuple[PointColumn, object]:
-        """The judged-occupancy shape: one frame point column, one site axis."""
+    def _source_axes(self, schema: DatasetSchema) -> tuple[AxisSpec, object]:
+        """The judged-occupancy shape: one frame Point axis, one site axis."""
 
-        columns = schema.point_table.columns
-        if len(columns) != 1:
+        point_axes = schema.point_domain.axes
+        if len(point_axes) != 1:
             raise ValueError(
-                "frame survival consumes a single frame point column and the "
-                f"source declares {len(columns)}"
+                "frame survival consumes a single frame Point axis and the "
+                f"source declares {len(point_axes)}"
             )
-        cell_axes = schema.cell_schema.data_axes
+        cell_axes = schema.cell_domain.axes
         if len(cell_axes) != 1:
             # The most natural wrong pick: occupancy's frame_judged output
             # (the judged EVIDENCE frames, cells = y, x pixels) instead of
@@ -115,35 +114,36 @@ class FrameSurvivalProcessor:
                 "(occupancy's 'frame_judged' is the judged evidence, not the "
                 "judgement)"
             )
-        if schema.cell_schema.dtype != np.dtype("?"):
+        if schema.value_schema.dtype != np.dtype("?"):
             raise ValueError(
                 "frame survival consumes boolean verdicts -- select the "
                 "occupancy processor's 'occupied' signal, not "
-                f"'counts' ({schema.cell_schema.dtype})"
+                f"'counts' ({schema.value_schema.dtype})"
             )
-        frames = schema.point_table.row_count
+        frames = schema.point_domain.size
         if frames < 2:
             raise ValueError(
                 "frame survival needs at least two frames per cycle and the "
                 f"source carries {frames}"
             )
-        return columns[0], cell_axes[0]
+        return point_axes[0], cell_axes[0]
 
     def _output_schema(self, source: DatasetSchema) -> DatasetSchema:
-        frame_column, site_axis = self._source_axes(source)
-        pairs = _forward_pairs(source.point_table.row_count)
+        frame_axis, site_axis = self._source_axes(source)
+        pairs = _forward_pairs(source.point_domain.size)
         # Labels carry the SOURCE frame coordinates, whatever numbering the
         # camera declared: the pair identity an operator reads is the one
         # the frame axis already showed them.
         frame_names = tuple(
             "?" if value is None else f"{value:g}"
-            for value in frame_column.values
+            for code in source.point_domain.codes(frame_axis.axis_id)
+            for value in (frame_axis.coordinate_at(code),)
         )
-        pair_column = PointColumn(
+        pair_axis = AxisSpec(
             AxisId(f"{self.instance_id}.pair"),
             "pair",
             READOUT_EVENT,
-            PointColumn.NUMERIC,
+            len(pairs),
             tuple(range(len(pairs))),
             coordinate_labels=tuple(
                 f"{frame_names[condition]}-{frame_names[value]}"
@@ -154,11 +154,14 @@ class FrameSurvivalProcessor:
         # source's own rows (its frames) do not exist here; any topology
         # the source carried described those rows, so none is carried.
         return DatasetSchema(
-            source.repeat_axis,
-            PointTable(len(pairs), (pair_column,)),
-            None,
+            source.repeat_domain,
+            DomainSpec(
+                (len(pairs),),
+                (pair_axis,),
+                (tuple(range(len(pairs))),),
+            ),
+            DomainSpec((site_axis.size,), (site_axis,)),
             ValueSchema(
-                (site_axis,),
                 ValidityContract.components(site_axis.axis_id),
                 np.dtype("<f8"),
                 "1",
@@ -170,7 +173,7 @@ class FrameSurvivalProcessor:
     def _pair(self, occupied: OwnedSnapshot) -> OwnedSnapshot:
         schema = occupied.block.schema
         self._source_axes(schema)
-        pairs = _forward_pairs(schema.point_table.row_count)
+        pairs = _forward_pairs(schema.point_domain.size)
         values = np.asarray(occupied.block.values, dtype=bool)
         valid = np.asarray(occupied.expanded_validity(), dtype=bool)
         cycles, _frames, sites = values.shape
@@ -205,7 +208,7 @@ class FrameSurvivalProcessor:
         snapshot = signal_value.snapshot
         survival = self._pair(snapshot)
         source_schema = snapshot.block.schema
-        frames = source_schema.point_table.row_count
+        frames = source_schema.point_domain.size
         pair_count = len(_forward_pairs(frames))
         run_record = {
             "node": self.instance_id,
@@ -242,7 +245,7 @@ class FrameSurvivalProcessor:
             )
             origin = (signal_value.cell_origin[0], 0)
         elif signal_value.coverage is None:
-            cycles = source_schema.repeat_axis.size
+            cycles = source_schema.repeat_domain.size
             canonical = self._output_schema(source_schema)
             coverage = DatasetCoverage(cycles * pair_count, cycles * pair_count)
             origin = (0, 0)
@@ -251,7 +254,7 @@ class FrameSurvivalProcessor:
             # output counts (cycles x pairs), and the runtime checks the
             # ledger against the snapshot actually published.
             canonical = None
-            cycles = survival.block.schema.repeat_axis.size
+            cycles = survival.block.schema.repeat_domain.size
             monitor = signal_value.coverage
             coverage = MonitorCoverage(
                 min(cycles, monitor.written_cells // frames) * pair_count,

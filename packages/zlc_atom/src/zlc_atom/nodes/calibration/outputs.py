@@ -8,10 +8,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 from zlc_data import (
     AxisId,
-    AxisRoleId,
     AxisSpec,
     CoordinateFrameId,
-    PointColumn,
     READOUT_EVENT,
     SPATIAL_X,
     SPATIAL_Y,
@@ -50,13 +48,13 @@ SITE_REVIEW_DECLARATION = DatasetOutputDeclaration(
 _PREVIEW_FRAMES = 3
 
 
-def _image_axis_specs(
+def _image_axes(
     frame_shape: tuple[int, int],
     coordinate_frame: str | CoordinateFrameId,
     *,
     origin_yx: tuple[int, int] = (0, 0),
     binning_yx: tuple[int, int] = (1, 1),
-) -> dict[AxisRoleId, AxisSpec]:
+) -> tuple[AxisSpec, AxisSpec]:
     """One image schema for Calibration live and FINAL publications.
 
     The pictures a calibration shows are crops of the same sensor the camera
@@ -74,8 +72,8 @@ def _image_axis_specs(
         if isinstance(coordinate_frame, CoordinateFrameId)
         else CoordinateFrameId(str(coordinate_frame))
     )
-    return {
-        SPATIAL_Y: AxisSpec(
+    return (
+        AxisSpec(
             AxisId("calibration.image.y"),
             "y",
             SPATIAL_Y,
@@ -84,7 +82,7 @@ def _image_axis_specs(
             unit="pixel",
             coordinate_frame=frame,
         ),
-        SPATIAL_X: AxisSpec(
+        AxisSpec(
             AxisId("calibration.image.x"),
             "x",
             SPATIAL_X,
@@ -93,7 +91,7 @@ def _image_axis_specs(
             unit="pixel",
             coordinate_frame=frame,
         ),
-    }
+    )
 
 
 def site_map_image_overlay(
@@ -148,14 +146,14 @@ def _generation_text(value: object) -> str:
     return text
 
 
-def _frame_point_column(frames: int) -> PointColumn:
-    """The frame-index point column one calibration cycle publishes."""
+def _frame_point_axis(frames: int) -> AxisSpec:
+    """The frame axis one calibration cycle publishes in its Point domain."""
 
-    return PointColumn(
+    return AxisSpec(
         AxisId("calibration.capture_preview.frame"),
         "frame",
         READOUT_EVENT,
-        PointColumn.NUMERIC,
+        int(frames),
         tuple(range(int(frames))),
     )
 
@@ -174,16 +172,15 @@ def _with_component_validity(
     """
 
     source = snapshot.block
-    cell = source.schema.cell_schema
+    value_schema = source.schema.value_schema
     schema = DatasetSchema(
-        source.schema.repeat_axis,
-        source.schema.point_table,
-        source.schema.grid_topology,
+        source.schema.repeat_domain,
+        source.schema.point_domain,
+        source.schema.cell_domain,
         ValueSchema(
-            cell.data_axes,
             ValidityContract.components(*axis_ids),
-            cell.dtype,
-            cell.value_unit,
+            value_schema.dtype,
+            value_schema.value_unit,
         ),
     )
     block = source.replacing(
@@ -197,22 +194,20 @@ def _snapshot(
     values: object,
     *,
     signal: str,
-    roles: Sequence[AxisRoleId],
     generation: object,
     revision: int,
     validity_axis_ids: tuple[AxisId, ...] | None = None,
     validity_mask: object | None = None,
-    axis_specs: Mapping[AxisRoleId, AxisSpec] | None = None,
-    point_columns: Mapping[AxisRoleId, PointColumn] | None = None,
+    point_axes: Sequence[AxisSpec] = (),
+    cell_axes: Sequence[AxisSpec] = (),
     value_unit: str | None = None,
 ) -> OwnedSnapshot:
     snapshot = snapshot_from_array(
         values,
         producer="calibration",
         signal=signal,
-        roles=roles,
-        axis_specs=axis_specs,
-        point_columns=point_columns,
+        point_axes=point_axes,
+        cell_axes=cell_axes,
         value_unit=value_unit,
         generation=_generation_text(generation),
         revision=revision,
@@ -275,14 +270,13 @@ def cycle_snapshot(
     return _snapshot(
         _cycle_array(cycle, frame_shape)[None, ...],
         signal=CAPTURE_PREVIEW_DECLARATION.name,
-        roles=(READOUT_EVENT, SPATIAL_Y, SPATIAL_X),
-        axis_specs=_image_axis_specs(
+        point_axes=(_frame_point_axis(_PREVIEW_FRAMES),),
+        cell_axes=_image_axes(
             frame_shape,
             "sensor_pixel_xy",
             origin_yx=origin_yx,
             binning_yx=binning_yx,
         ),
-        point_columns={READOUT_EVENT: _frame_point_column(_PREVIEW_FRAMES)},
         value_unit=value_unit,
         generation=generation,
         revision=revision,
@@ -344,8 +338,7 @@ def site_review_output(
     snapshot = _snapshot(
         values[np.newaxis, ...],
         signal=SITE_REVIEW_DECLARATION.name,
-        roles=(SPATIAL_Y, SPATIAL_X),
-        axis_specs=_image_axis_specs(
+        cell_axes=_image_axes(
             tuple(values.shape),
             "sensor_pixel_xy",
             origin_yx=origin_yx,

@@ -31,13 +31,13 @@ from weakref import WeakKeyDictionary
 import numpy as np
 from zlc_data import (
     PRIMARY_INDEX,
+    AxisSpec,
     BlockId,
     DatasetRevision,
     DatasetSchema,
-    GridTopology,
+    DomainSpec,
+    IndexedWindow,
     OwnedSnapshot,
-    PointColumn,
-    PointTable,
     StreamGenerationId,
     owned_snapshot_from_arrays,
 )
@@ -235,27 +235,26 @@ class SignalValue:
         return tuple(self.values.shape)
 
     @property
-    def cell_schema(self):
-        """The per-cell value schema -- where dtype / unit / data axes live.
+    def value_schema(self):
+        """The per-value metadata carried by this Dataset.
 
-        A DatasetSchema describes the DATASET (repeat axis, point axes, layout);
-        what a cell actually holds is its ``cell_schema``.  Reading through it
-        keeps every consumer on the description the producer declared.
+        Cell axes belong to ``schema.cell_domain``; dtype, unit and validity
+        belong to this one value schema.
         """
 
-        return self.schema.cell_schema
+        return self.schema.value_schema
 
     @property
     def dtype(self):
-        return self.cell_schema.dtype
+        return self.value_schema.dtype
 
     @property
     def unit(self) -> str | None:
-        return self.cell_schema.value_unit
+        return self.value_schema.value_unit
 
     @property
     def axes(self) -> tuple:
-        return tuple(self.cell_schema.data_axes)
+        return tuple(self.schema.cell_domain.axes)
 
 @dataclass(frozen=True, slots=True)
 class SignalDescription:
@@ -649,47 +648,37 @@ def _indexed_schema(
     event_schema: DatasetSchema,
     indices: tuple[int, ...],
 ) -> DatasetSchema:
-    point_count = event_schema.point_table.row_count
+    point_count = event_schema.point_domain.size
     if any(
-        column.coordinate_id == PRIMARY_INDEX_AXIS_ID
-        for column in event_schema.point_table.columns
+        axis.axis_id == PRIMARY_INDEX_AXIS_ID
+        for axis in event_schema.point_domain.axes
     ):
         raise ValueError("processor event schema uses the reserved primary-index axis")
-    primary = PointColumn(
+    primary = AxisSpec(
         PRIMARY_INDEX_AXIS_ID,
         "source index",
         PRIMARY_INDEX,
-        PointColumn.NUMERIC,
-        # An integer ndarray is PointColumn's dtype-proof construction
-        # path: no per-element canonical walk over count x rows values.
-        np.repeat(np.asarray(indices, dtype=np.int64), point_count),
+        len(indices),
+        indices,
     )
-    columns = [primary]
-    for column in event_schema.point_table.columns:
-        # The event column is already canonical; whole-column replication
-        # keeps it so without re-proving 175k values one at a time.
-        columns.append(column.replicated(len(indices)))
-    topology = event_schema.grid_topology
-    if topology is not None:
-        topology = GridTopology(
-            (PRIMARY_INDEX_AXIS_ID, *topology.dimension_ids),
-            (indices, *topology.coordinate_domains),
-            tuple(
-                (index_position, *cell)
-                for index_position in range(len(indices))
-                for cell in topology.row_to_cell
-            ),
-            coordinate_labels=(
-                None
-                if topology.coordinate_labels is None
-                else (None, *topology.coordinate_labels)
-            ),
-        )
+    retained_count = len(indices)
+    primary_codes = tuple(
+        index
+        for index in range(retained_count)
+        for _point in range(point_count)
+    )
+    event_codes = tuple(
+        code * retained_count for code in event_schema.point_domain.axis_codes
+    )
     return DatasetSchema(
-        event_schema.repeat_axis,
-        PointTable(point_count * len(indices), tuple(columns)),
-        topology,
-        event_schema.cell_schema,
+        event_schema.repeat_domain,
+        DomainSpec(
+            (point_count * retained_count,),
+            (primary, *event_schema.point_domain.axes),
+            (primary_codes, *event_codes),
+        ),
+        event_schema.cell_domain,
+        event_schema.value_schema,
     )
 
 
@@ -704,8 +693,8 @@ def _materialize_indexed_dataset(
         schema = _indexed_schema(
             event_schema, tuple(range(start - latest_index, 1))
         )
-    point_count = event_schema.point_table.row_count
-    trailing = (slice(None),) * len(event_schema.cell_schema.data_axes)
+    point_count = event_schema.point_domain.size
+    trailing = (slice(None),) * len(event_schema.cell_domain.axes)
 
     def placements():
         for primary_index, snapshot in materialization.appended:
@@ -725,13 +714,13 @@ def _materialize_indexed_dataset(
     if basis is None:
         values, validity, sigma = _assembled_planes(
             schema.physical_shape,
-            event_schema.cell_schema.dtype,
+            event_schema.value_schema.dtype,
             placements(),
         )
     else:
         values, validity, sigma = _rolled_planes(
             schema.physical_shape,
-            event_schema.cell_schema.dtype,
+            event_schema.value_schema.dtype,
             basis,
             start,
             point_count,
@@ -746,6 +735,7 @@ def _materialize_indexed_dataset(
         sigma=sigma,
         block_id=BlockId(f"{materialization.signal_name}.indexed"),
         stream_generation=materialization.generation,
+        window=IndexedWindow(start, latest_index, materialization.stable_since),
     )
 
 
@@ -845,7 +835,7 @@ class _IndexedHistory:
     """One indexed signal's retained events, plus its steady-state reuse.
 
     At a deep window the naive materialization was O(window) PER SHOT in
-    three separate ways -- the indexed schema retupled every point column
+    three separate ways -- the indexed schema rebuilt every point-row mapping
     across the whole window, the planes were reassembled event by event,
     and every retained event record was re-merged -- turning a 5000-deep
     35-site occupancy history into ~300 ms on the one presentation
@@ -889,6 +879,11 @@ class _IndexedMaterialization:
     basis: _MaterializedIndexed | None
     record: Mapping[str, object]
     raw_record: Mapping[str, object]
+    #: The history's ``replaced_at`` at this materialization: the last
+    #: sequence at which a retained shot was overwritten.  Stamped on the
+    #: block so a consumer carrying work from an earlier revision knows
+    #: whether the shots the two share are still the same shots.
+    stable_since: int = -1
 
 
 def _validate_indexed_event(
@@ -1042,6 +1037,7 @@ def _indexed_materialization_input(
         basis,
         _freeze_run_record(raw_record),
         raw_record,
+        stable_since=history.replaced_at,
     )
 
 
@@ -1382,7 +1378,7 @@ class GenerationSchemaAdvanced(ValueError):
     shape.  But shape can change for reasons that are nobody's mistake.  A
     panel pooling a window of shots hands its own derivation a source that
     GROWS one shot per publication while the window fills, so the derived
-    point table gains a row every time.
+    Point carrier gains a row every time.
 
     The answer is the same one a re-drawn region gets: a different
     derivation publishes into a different generation.  Only the owner of
@@ -1928,20 +1924,20 @@ class SignalDataPlane:
             for chunk, origin in chunks:
                 repeat_origin, point_origin = origin
                 chunk_schema = chunk.block.schema
-                repeat_stop = repeat_origin + chunk_schema.repeat_axis.size
-                point_stop = point_origin + chunk_schema.point_table.row_count
+                repeat_stop = repeat_origin + chunk_schema.repeat_domain.size
+                point_stop = point_origin + chunk_schema.point_domain.size
                 yield (
                     (
                         slice(repeat_origin, repeat_stop),
                         slice(point_origin, point_stop),
-                        *(slice(None) for _axis in schema.cell_schema.data_axes),
+                        *(slice(None) for _axis in schema.cell_domain.axes),
                     ),
                     chunk,
                 )
 
         values, validity, sigma = _assembled_planes(
             schema.physical_shape,
-            schema.cell_schema.dtype,
+            schema.value_schema.dtype,
             placements(),
         )
         return owned_snapshot_from_arrays(
@@ -2016,8 +2012,8 @@ class SignalDataPlane:
                 if isinstance(output.coverage, MonitorCoverage):
                     schema = output.snapshot.block.schema
                     total = (
-                        schema.repeat_axis.size
-                        * schema.point_table.row_count
+                        schema.repeat_domain.size
+                        * schema.point_domain.size
                     )
                     selected[name] = LiveDatasetOutput(
                         output.declaration,
@@ -2207,8 +2203,8 @@ class SignalDataPlane:
                     if mask is None:
                         mask = np.zeros(
                             (
-                                schema.repeat_axis.size,
-                                schema.point_table.row_count,
+                                schema.repeat_domain.size,
+                                schema.point_domain.size,
                             ),
                             dtype=np.bool_,
                         )
@@ -2217,11 +2213,11 @@ class SignalDataPlane:
                     target = (
                         slice(
                             repeat_origin,
-                            repeat_origin + event_schema.repeat_axis.size,
+                            repeat_origin + event_schema.repeat_domain.size,
                         ),
                         slice(
                             point_origin,
-                            point_origin + event_schema.point_table.row_count,
+                            point_origin + event_schema.point_domain.size,
                         ),
                     )
                     if bool(np.any(mask[target])):
@@ -2236,8 +2232,8 @@ class SignalDataPlane:
                         if previous is None
                         else previous.coverage.written_cells
                     ) + (
-                        + event_schema.repeat_axis.size
-                        * event_schema.point_table.row_count
+                        + event_schema.repeat_domain.size
+                        * event_schema.point_domain.size
                     )
                     if output.coverage.written_cells != written:
                         raise ValueError(

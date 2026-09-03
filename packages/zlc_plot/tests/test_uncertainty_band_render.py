@@ -9,25 +9,29 @@ matplotlib.use("Agg", force=True)
 import numpy as np
 from matplotlib.collections import LineCollection
 
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from data_factory import (
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
+
+from zlc_data import DatasetSchema, OwnedSnapshot
 from zlc_plot import AxisRef, CurvePlot, PlotLabels, PlotSession
 
-
 def _schema(repeats: int) -> DatasetSchema:
-    return DatasetSchema.create(
-        Axis.create("repeat", size=repeats),
-        PointTable.from_columns({"x": [0.0, 1.0, 2.0, 3.0]}),
-        data_axes=(),
+    return make_dataset_schema(
+        repeat_domain(size=repeats),
+        mapped_domain_from_columns({"x": [0.0, 1.0, 2.0, 3.0]}),
+        cell_axes=(),
         dtype=np.float64,
-        generation="uncertainty-band",
     )
 
-
-def _snapshot(repeats: int, revision: int, scale: float) -> DatasetSnapshot:
+def _snapshot(repeats: int, revision: int, scale: float) -> OwnedSnapshot:
     rng = np.random.default_rng(revision)
     values = 0.5 + scale * rng.standard_normal((repeats, 4))
-    return DatasetSnapshot(_schema(repeats), values, revision=revision)
-
+    return make_snapshot(_schema(repeats), values, revision=revision)
 
 def _bands(session: PlotSession) -> list[PolyCollection]:
     session._renderer._materialize_prepared_curve()
@@ -37,7 +41,6 @@ def _bands(session: PlotSession) -> list[PolyCollection]:
         for artist in axes.collections
         if isinstance(artist, LineCollection)
     ]
-
 
 def test_uncertainty_curve_draws_a_band_and_covers_it_in_ylim() -> None:
     session = PlotSession(
@@ -59,7 +62,6 @@ def test_uncertainty_curve_draws_a_band_and_covers_it_in_ylim() -> None:
     finally:
         session.close()
 
-
 def test_band_shrinks_as_shots_accumulate() -> None:
     """More repeats, tighter sem: the live convergence the band exists for."""
 
@@ -77,7 +79,6 @@ def test_band_shrinks_as_shots_accumulate() -> None:
             session.close()
 
     assert band_height(160) < band_height(10) / 2.5
-
 
 def test_no_band_when_it_is_switched_off() -> None:
     """The band is on by default, so absence is now something ASKED for.
@@ -100,7 +101,6 @@ def test_no_band_when_it_is_switched_off() -> None:
     finally:
         session.close()
 
-
 def test_focus_dims_the_other_series_bars_with_their_lines() -> None:
     """The bars are part of the series: a locked focus dims the other
     series' bars to near-nothing and restores them on release."""
@@ -109,18 +109,24 @@ def test_focus_dims_the_other_series_bars_with_their_lines() -> None:
 
     rng = np.random.default_rng(3)
     values = 0.5 + 0.2 * rng.standard_normal((24, 4, 2))
-    from data_factory import Axis as FAxis, DatasetSchema as FSchema, PointTable as FTable
-    schema = FSchema.create(
-        FAxis.create("repeat", size=24),
-        FTable.from_columns({"x": [0.0, 1.0, 2.0, 3.0]}),
-        data_axes=(FAxis.create("site", values=[0.0, 1.0]),),
-        dtype=np.float64,
-        generation="focus-bars",
+    from data_factory import (
+        axis,
+        make_dataset_schema,
+        make_snapshot,
+        mapped_domain_from_columns,
+        repeat_domain,
     )
-    snapshot = DatasetSnapshot(schema, values, revision=1)
+    from zlc_data import DatasetSchema, OwnedSnapshot
+    schema = make_dataset_schema(
+        repeat_domain(size=24),
+        mapped_domain_from_columns({"x": [0.0, 1.0, 2.0, 3.0]}),
+        cell_axes=(axis("site", values=[0.0, 1.0]),),
+        dtype=np.float64,
+    )
+    snapshot = make_snapshot(schema, values, revision=1)
     session = PlotSession(
         snapshot,
-        CurvePlot(AxisRef.point("x"), group=AxisRef.data("site")),
+        CurvePlot(AxisRef.point("x"), group=AxisRef.cell_data("site")),
         parameters={"uncertainty": True},
     )
     try:
@@ -152,7 +158,6 @@ def test_focus_dims_the_other_series_bars_with_their_lines() -> None:
             assert all(a.get_alpha() == token for a in artists)
     finally:
         session.close()
-
 
 def test_error_bars_live_in_the_dynamic_layer_with_their_lines() -> None:
     """Focus changes must land in the SAME composed frame as the line's.
@@ -186,7 +191,6 @@ def test_error_bars_live_in_the_dynamic_layer_with_their_lines() -> None:
         )
     finally:
         session.close()
-
 
 def test_hover_hit_tests_reuse_the_transformed_polyline() -> None:
     """One transform per view, not one per motion event.
@@ -227,7 +231,6 @@ def test_hover_hit_tests_reuse_the_transformed_polyline() -> None:
         )
     finally:
         session.close()
-
 
 def test_a_revision_moves_the_bars_it_does_not_rebuild_them() -> None:
     """The bars a revision draws are last revision's artists, with new data.
@@ -274,14 +277,13 @@ def test_a_revision_moves_the_bars_it_does_not_rebuild_them() -> None:
         # The same numbers twice, under the two revisions the session
         # requires: one drawing must be the other, bit for bit.
         settled = 0.5 + np.random.default_rng(99).standard_normal((6, 4))
-        session.update_data(DatasetSnapshot(_schema(6), settled, revision=6))
+        session.update_data(make_snapshot(_schema(6), settled, revision=6))
         once = np.array(session.rgba(), copy=True)
-        session.update_data(DatasetSnapshot(_schema(6), settled, revision=7))
+        session.update_data(make_snapshot(_schema(6), settled, revision=7))
         twice = np.array(session.rgba(), copy=True)
         assert np.array_equal(once, twice)
     finally:
         session.close()
-
 
 def test_a_band_of_no_width_draws_no_bar() -> None:
     """Zero is not an uncertainty; it is a tick mark that lies.
@@ -293,7 +295,7 @@ def test_a_band_of_no_width_draws_no_bar() -> None:
 
     identical = np.tile(np.asarray([1.0, 2.0, 3.0, 4.0]), (6, 1))
     session = PlotSession(
-        DatasetSnapshot(_schema(6), identical, revision=1),
+        make_snapshot(_schema(6), identical, revision=1),
         CurvePlot(AxisRef.point("x"), labels=PlotLabels("band", "x", "y")),
         parameters={"uncertainty": True},
     )
@@ -302,7 +304,6 @@ def test_a_band_of_no_width_draws_no_bar() -> None:
         assert _bands(session) == []
     finally:
         session.close()
-
 
 def test_export_draws_the_data_a_native_scene_was_hiding() -> None:
     """A saved figure must contain the data, not just axes and chrome.
@@ -341,5 +342,80 @@ def test_export_draws_the_data_a_native_scene_was_hiding() -> None:
             line.get_visible() and np.asarray(line.get_xdata()).size
             for line in lines
         ), "export must draw from materialized artists, not a hidden scene"
+    finally:
+        session.close()
+
+
+def test_bars_are_built_directly_on_their_shared_buffer() -> None:
+    """The bar artists are built directly; their segments live in one buffer.
+
+    ``axes.errorbar`` cost masked-array copies of every bound, a Path per
+    segment, three ``plot`` calls with their transform trees, a datalim
+    update and a container to remove again -- per cell per build, most
+    of a second on a 40-cell grid's first paint.  A grid strokes its cells natively and paints these artists when
+    the scene materializes -- an export, a hit test -- which is where
+    the cost sat and where the contract is pinned: no container, a vertical segment per point in the buffer the
+    native stroke reads, two caps on the bounds, matplotlib's own Paths
+    following the buffer whenever it or an export asks, and a same-size
+    revision writing the buffer in place.
+    """
+
+    import io
+
+    from matplotlib.lines import Line2D
+    from zlc_plot import FacetGridPlot
+
+    rng = np.random.default_rng(5)
+    schema = make_dataset_schema(
+        repeat_domain(size=24),
+        mapped_domain_from_columns({"x": [0.0, 1.0, 2.0, 3.0]}),
+        cell_axes=(axis("site", values=[0.0, 1.0]),),
+        dtype=np.float64,
+    )
+
+    def shot(revision: int, scale: float) -> OwnedSnapshot:
+        values = 0.5 + scale * rng.standard_normal((24, 4, 2))
+        return make_snapshot(schema, values, revision=revision)
+
+    session = PlotSession(
+        shot(1, 0.2),
+        FacetGridPlot(AxisRef.cell_data("site"), CurvePlot(AxisRef.point("x"))),
+        parameters={"uncertainty": True},
+    )
+    try:
+        renderer = session._renderer
+        renderer.draw()
+        renderer._materialize_prepared_curve()
+        assert not any(axes.containers for axes in renderer.figure.axes), (
+            "the bars must not be an ErrorbarContainer"
+        )
+        groups = [
+            group
+            for bars in renderer._series_bars.values()
+            for group in bars.values()
+        ]
+        assert len(groups) == 2, "one bar group per cell"
+        capped = renderer.style.render.uncertainty_bar_capsize_pt > 0
+        for group in groups:
+            collection = group[-1]
+            buffer = collection._zlc_segment_buffer
+            assert isinstance(buffer, np.ndarray) and buffer.shape == (4, 2, 2)
+            assert np.all(buffer[:, 0, 0] == buffer[:, 1, 0]), "a bar is vertical"
+            assert np.all(buffer[:, 0, 1] <= buffer[:, 1, 1])
+            caps = group[:-1]
+            assert len(caps) == (2 if capped else 0)
+            assert all(isinstance(cap, Line2D) for cap in caps)
+            for cap, edge in zip(caps, (buffer[:, 0, 1], buffer[:, 1, 1])):
+                assert np.array_equal(np.asarray(cap.get_ydata()), edge)
+            assert np.array_equal(np.asarray(collection.get_segments()), buffer)
+        collection = groups[0][-1]
+        buffer = collection._zlc_segment_buffer
+        renderer.save(io.BytesIO(), format="png")
+        assert len(collection.get_paths()) == 4
+        session.update_data(shot(2, 0.4))
+        renderer.draw()
+        renderer._materialize_prepared_curve()
+        assert collection._zlc_segment_buffer is buffer, "same size: same buffer"
+        assert np.array_equal(np.asarray(collection.get_segments()), buffer)
     finally:
         session.close()

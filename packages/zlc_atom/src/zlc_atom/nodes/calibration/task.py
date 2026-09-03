@@ -67,7 +67,7 @@ from .outputs import (
     cycle_snapshot,
     site_map_image_overlay,
     site_review_output,
-    _image_axis_specs,
+    _image_axes,
     _snapshot,
 )
 
@@ -350,8 +350,8 @@ class SampleWriter:
             FacetGridPlot(
                 AxisRef.point("calibration.capture_preview.frame"),
                 ImagePlot(
-                    AxisRef.data("calibration.image.x"),
-                    AxisRef.data("calibration.image.y"),
+                    AxisRef.cell_data("calibration.image.x"),
+                    AxisRef.cell_data("calibration.image.y"),
                 ),
                 labels=PlotLabels(
                     title=f"calibration {SAVED_SAMPLE_STEM}_{int(index):04d}"
@@ -757,8 +757,7 @@ def _save_report_images(
     site_map_snapshot = _snapshot(
         np.asarray(result.report["reference_average"], dtype="<f8")[np.newaxis, ...],
         signal="site_map",
-        roles=(SPATIAL_Y, SPATIAL_X),
-        axis_specs=_image_axis_specs(
+        cell_axes=_image_axes(
             calibration.frame_contract.image_shape,
             "sensor_pixel_xy",
             origin_yx=origin_yx,
@@ -780,8 +779,8 @@ def _save_report_images(
         "site_map",
         ImageFrame(site_map_snapshot, overlay),
         ImagePlot(
-            AxisRef.data("calibration.image.x"),
-            AxisRef.data("calibration.image.y"),
+            AxisRef.cell_data("calibration.image.x"),
+            AxisRef.cell_data("calibration.image.y"),
             labels=PlotLabels(
                 title="Site map", x="x (pixel)", y="y (pixel)"
             ),
@@ -815,8 +814,8 @@ def _save_report_images(
             "site_review",
             ImageFrame(site_map_snapshot, review_overlay),
             ImagePlot(
-                AxisRef.data("calibration.image.x"),
-                AxisRef.data("calibration.image.y"),
+                AxisRef.cell_data("calibration.image.x"),
+                AxisRef.cell_data("calibration.image.y"),
                 labels=PlotLabels(
                     title="Reviewed detected sites",
                     x="x (pixel)",
@@ -827,8 +826,7 @@ def _save_report_images(
 
     # ONE declaration of site identity, owned by the SiteMap that measured it.
     # A site array is one image resampled onto the trap lattice: cell data, not
-    # a scan.  This replaces both a TEXT site point column (unplottable) and the
-    # numeric "site ordinal" point column invented to work around it.
+    # a scan.
     site_axis = site_map.site_axis
     site_axis_id = site_axis.axis_id
     labels_valid = np.asarray(result.report["labels_valid"], dtype=bool)
@@ -864,8 +862,7 @@ def _save_report_images(
         snapshot = _snapshot(
             values,
             signal=stem,
-            roles=(SITE, COMPONENT),
-            axis_specs={SITE: site_axis, COMPONENT: model_axis},
+            cell_axes=(site_axis, model_axis),
             generation=generation,
             revision=revision,
             validity_axis_ids=(site_axis_id, model_axis.axis_id),
@@ -875,8 +872,8 @@ def _save_report_images(
             stem,
             snapshot,
             CurvePlot(
-                AxisRef.data("calibration.site"),
-                group=AxisRef.data("calibration.model"),
+                AxisRef.cell_data("calibration.site"),
+                group=AxisRef.cell_data("calibration.model"),
                 labels=PlotLabels(title=title, x="Site", y="Fidelity"),
             ),
         )
@@ -906,8 +903,7 @@ def _save_report_images(
         samples = _snapshot(
             short_signals,
             signal=f"{model.kind.value}_readout_samples",
-            roles=(SITE,),
-            axis_specs={SITE: site_axis},
+            cell_axes=(site_axis,),
             generation=generation,
             revision=revision,
             validity_axis_ids=(site_axis_id,),
@@ -917,7 +913,7 @@ def _save_report_images(
                 & site_valid[np.newaxis, :]
             )[:, np.newaxis, :],
         )
-        site_ref = AxisRef.data("calibration.site")
+        site_ref = AxisRef.cell_data("calibration.site")
         gaussian_fields = tuple(
             np.asarray(model_report[name], dtype=float)
             for name in (
@@ -958,7 +954,6 @@ def _save_report_images(
                             "coordinate": site_axis.coordinate_at(index),
                         },
                     ),
-                    "repeat_index": None,
                     "gaussian_components": components,
                 }
             )
@@ -967,7 +962,7 @@ def _save_report_images(
             model.kind.value,
             samples,
             FacetGridPlot(
-                AxisRef.data("calibration.site"),
+                AxisRef.cell_data("calibration.site"),
                 HistogramPlot(labels=PlotLabels(x="Readout signal", y="Count")),
                 labels=PlotLabels(title=title),
             ),
@@ -986,10 +981,9 @@ def _save_report_images(
     psf_snapshot = _snapshot(
         psf_kernels[np.newaxis, ...],
         signal="psf_kernels",
-        roles=(SITE, SPATIAL_Y, SPATIAL_X),
-        axis_specs={
-            SITE: site_axis,
-            SPATIAL_Y: AxisSpec(
+        cell_axes=(
+            site_axis,
+            AxisSpec(
                 AxisId("calibration.psf.y"),
                 "y",
                 SPATIAL_Y,
@@ -999,7 +993,7 @@ def _save_report_images(
                 ),
                 unit="pixel",
             ),
-            SPATIAL_X: AxisSpec(
+            AxisSpec(
                 AxisId("calibration.psf.x"),
                 "x",
                 SPATIAL_X,
@@ -1009,7 +1003,7 @@ def _save_report_images(
                 ),
                 unit="pixel",
             ),
-        },
+        ),
         generation=generation,
         revision=revision,
         validity_axis_ids=(site_axis_id,),
@@ -1019,10 +1013,10 @@ def _save_report_images(
         "psf_kernels",
         psf_snapshot,
         FacetGridPlot(
-            AxisRef.data("calibration.site"),
+            AxisRef.cell_data("calibration.site"),
             ImagePlot(
-                AxisRef.data("calibration.psf.x"),
-                AxisRef.data("calibration.psf.y"),
+                AxisRef.cell_data("calibration.psf.x"),
+                AxisRef.cell_data("calibration.psf.y"),
                 labels=PlotLabels(
                     x="x (pixel)", y="y (pixel)", value="Weight"
                 ),
@@ -1949,8 +1943,8 @@ class CalibrationTask:
                 spec=FacetGridPlot(
                     AxisRef.point("calibration.capture_preview.frame"),
                     ImagePlot(
-                        AxisRef.data("calibration.image.x"),
-                        AxisRef.data("calibration.image.y"),
+                        AxisRef.cell_data("calibration.image.x"),
+                        AxisRef.cell_data("calibration.image.y"),
                     ),
                     labels=PlotLabels(title="Partial calibration capture"),
                 ),

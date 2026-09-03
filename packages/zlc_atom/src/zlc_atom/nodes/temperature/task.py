@@ -40,7 +40,14 @@ from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
-from zlc_data import SCAN_POINT, SITE, AxisId, OwnedSnapshot, PointColumn, PointTable
+from zlc_data import (
+    SCAN_POINT,
+    SITE,
+    AxisId,
+    AxisSpec,
+    DomainSpec,
+    OwnedSnapshot,
+)
 from zlc_data.figure_archive import FIGURE_SCHEMA
 from zlc_durable import atomic_write_text, durable_makedirs, write_readable_json
 from zlc_pulse import TIME_UNIT_TO_NS, PulseSequence
@@ -249,7 +256,7 @@ class TemperatureTask:
         """One landed cycle: which sites held an atom, and which held it still.
 
         Asked while the cycle is still a cycle.  Once the scan has written it
-        into the dataset, its two frames are two rows of a point table beside
+        into the dataset, its two frames are two Point rows beside
         every other release time, and the pair is no longer addressable.
 
         The answer goes out with that cycle, so the curve an operator started
@@ -273,23 +280,25 @@ class TemperatureTask:
             survival[None, None, :],
             producer=self.instance_id,
             signal=SURVIVAL_OUTPUT.name,
-            roles=(SCAN_POINT, SITE),
-            axis_specs={SITE: self._calibration.site_map.site_axis},
-            point_columns={SCAN_POINT: self._event_point_column()},
+            point_axes=(self._event_point_axis(),),
+            cell_axes=(self._calibration.site_map.site_axis,),
             generation="temperature-event",
             revision=self._written,
             validity=eligible[None, None, :],
         )
         schema = event.block.schema
+        (repeat_axis,) = schema.repeat_domain.axes
         canonical = replace(
             schema,
-            repeat_axis=replace(
-                schema.repeat_axis,
-                size=self._repeats,
+            repeat_domain=DomainSpec(
+                (self._repeats,),
+                (replace(repeat_axis, size=self._repeats),),
+                (tuple(range(self._repeats)),),
             ),
-            point_table=PointTable(
-                len(t_off),
-                (self._point_column(t_off),),
+            point_domain=DomainSpec(
+                (len(t_off),),
+                (self._point_axis(t_off),),
+                (tuple(range(len(t_off))),),
             ),
         )
         return {
@@ -338,35 +347,34 @@ class TemperatureTask:
         }
 
     @staticmethod
-    def _event_point_column() -> PointColumn:
-        return PointColumn(
+    def _event_point_axis() -> AxisSpec:
+        return AxisSpec(
             AxisId("temperature.t_off"),
             T_OFF_PARAMETER,
             SCAN_POINT,
-            PointColumn.NUMERIC,
+            1,
             (0.0,),
         )
 
-    def _point_column(self, values: tuple[float, ...]) -> PointColumn:
+    def _point_axis(self, values: tuple[float, ...]) -> AxisSpec:
         """The release times, as the point axis every output shares."""
 
-        return PointColumn(
+        return AxisSpec(
             AxisId("temperature.t_off"),
             T_OFF_PARAMETER,
             SCAN_POINT,
-            PointColumn.NUMERIC,
+            len(values),
             tuple(float(value) for value in values),
             unit=self._port.unit or None,
         )
 
     @staticmethod
     def _point_values(snapshot: OwnedSnapshot) -> tuple[float, ...]:
-        column = next(
-            column
-            for column in snapshot.block.schema.point_table.columns
-            if column.coordinate_id == AxisId("temperature.t_off")
+        domain = snapshot.block.schema.point_domain
+        axis = domain.axis(AxisId("temperature.t_off"))
+        return tuple(
+            float(axis.coordinate_at(code)) for code in domain.codes(axis.axis_id)
         )
-        return tuple(float(value) for value in column.values)
 
     def _run_record(
         self,

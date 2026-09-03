@@ -17,7 +17,7 @@ import threading
 import numpy as np
 import pytest
 
-from zlc_data import AxisSpec, DatasetSchema
+from zlc_data import AxisSpec, DatasetSchema, DomainSpec
 from zlc_runtime.dataset import DatasetCoverage, MonitorCoverage
 from zlc_runtime.dataset_output import (
     DatasetOutputDeclaration,
@@ -60,18 +60,24 @@ def _commit(
 ) -> LiveDatasetOutput:
     event = snapshot("probe", revision)
     event_schema = event.block.schema
-    repeat = event_schema.repeat_axis
+    (repeat,) = event_schema.repeat_domain.axes
     canonical = DatasetSchema(
-        AxisSpec(
-            repeat.axis_id,
-            repeat.name,
-            repeat.role,
-            total,
-            tuple(range(total)),
+        DomainSpec(
+            (total,),
+            (
+                AxisSpec(
+                    repeat.axis_id,
+                    repeat.name,
+                    repeat.role,
+                    total,
+                    tuple(range(total)),
+                ),
+            ),
+            (tuple(range(total)),),
         ),
-        event_schema.point_table,
-        event_schema.grid_topology,
-        event_schema.cell_schema,
+        event_schema.point_domain,
+        event_schema.cell_domain,
+        event_schema.value_schema,
     )
     return LiveDatasetOutput(
         node.declaration,

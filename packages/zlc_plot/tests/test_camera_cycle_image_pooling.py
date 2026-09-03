@@ -21,7 +21,13 @@ from zlc_plot.data_view import DataView
 from zlc_plot.kinds import AxisRef
 from zlc_plot.specs import ImagePlot, Reduction
 
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from data_factory import (
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
 
 
 CYCLES, FRAMES, HEIGHT, WIDTH = 3, 4, 5, 6
@@ -30,26 +36,25 @@ CYCLES, FRAMES, HEIGHT, WIDTH = 3, 4, 5, 6
 def _camera_cycle():
     """The reference shape, built the way the producer builds it."""
 
-    from zlc_data import READOUT_EVENT, SPATIAL_X, SPATIAL_Y
+    from zlc_data import READOUT_EVENT, REPEAT, SPATIAL_X, SPATIAL_Y
 
-    frames = PointTable.from_columns(
+    frames = mapped_domain_from_columns(
         {"frame": list(range(FRAMES))},
         roles={"frame": READOUT_EVENT},
     )
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=CYCLES),
+    schema = make_dataset_schema(
+        repeat_domain(size=CYCLES),
         frames,
-        data_axes=(
-            Axis.create("y", size=HEIGHT, role=SPATIAL_Y),
-            Axis.create("x", size=WIDTH, role=SPATIAL_X),
+        cell_axes=(
+            axis("y", size=HEIGHT, role=SPATIAL_Y),
+            axis("x", size=WIDTH, role=SPATIAL_X),
         ),
         dtype=np.float64,
-        generation="camera-cycle",
     )
-    assert schema.shape == (CYCLES, FRAMES, HEIGHT, WIDTH)
+    assert schema.physical_shape == (CYCLES, FRAMES, HEIGHT, WIDTH)
     rng = np.random.default_rng(11)
-    values = rng.normal(size=schema.shape)
-    return DatasetSnapshot(schema, values, revision=0), values
+    values = rng.normal(size=schema.physical_shape)
+    return make_snapshot(schema, values, revision=0), values
 
 
 @pytest.mark.parametrize(
@@ -68,9 +73,9 @@ def test_a_camera_cycle_draws_as_one_image_with_its_frames_pooled(
 
     # No refusal: the two named axes are cell data axes, and the cycles and
     # the frame POINTS both pool under the declared reduction.
-    view.validate_image(AxisRef.data("x"), AxisRef.data("y"))
+    view.validate_image(AxisRef.cell_data("x"), AxisRef.cell_data("y"))
     payload = view.image(
-        AxisRef.data("x"), AxisRef.data("y"), aggregation=reduction
+        AxisRef.cell_data("x"), AxisRef.cell_data("y"), aggregation=reduction
     )
 
     assert np.asarray(payload.z.canonical).shape == (HEIGHT, WIDTH)
@@ -83,7 +88,7 @@ def test_the_pooled_cycle_image_actually_renders() -> None:
 
     snapshot, values = _camera_cycle()
     spec = ImagePlot(
-        AxisRef.data("x"), AxisRef.data("y"), reduction=Reduction.MEAN
+        AxisRef.cell_data("x"), AxisRef.cell_data("y"), reduction=Reduction.MEAN
     )
     session = PlotSession(snapshot, spec)
     try:
@@ -99,24 +104,23 @@ def test_the_pooled_cycle_image_actually_renders() -> None:
 def test_one_frame_is_not_a_special_case_of_the_same_rule() -> None:
     """A single-frame cycle takes the identical path, no branch of its own."""
 
-    from zlc_data import READOUT_EVENT, SPATIAL_X, SPATIAL_Y
+    from zlc_data import READOUT_EVENT, REPEAT, SPATIAL_X, SPATIAL_Y
 
-    frames = PointTable.from_columns(
+    frames = mapped_domain_from_columns(
         {"frame": [0]}, roles={"frame": READOUT_EVENT}
     )
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
         frames,
-        data_axes=(
-            Axis.create("y", size=HEIGHT, role=SPATIAL_Y),
-            Axis.create("x", size=WIDTH, role=SPATIAL_X),
+        cell_axes=(
+            axis("y", size=HEIGHT, role=SPATIAL_Y),
+            axis("x", size=WIDTH, role=SPATIAL_X),
         ),
         dtype=np.float64,
-        generation="camera-cycle-single",
     )
-    values = np.arange(HEIGHT * WIDTH, dtype=np.float64).reshape(schema.shape)
-    payload = DataView(DatasetSnapshot(schema, values, revision=0)).image(
-        AxisRef.data("x"), AxisRef.data("y")
+    values = np.arange(HEIGHT * WIDTH, dtype=np.float64).reshape(schema.physical_shape)
+    payload = DataView(make_snapshot(schema, values, revision=0)).image(
+        AxisRef.cell_data("x"), AxisRef.cell_data("y")
     )
     np.testing.assert_allclose(
         np.asarray(payload.z.canonical), values[0, 0]

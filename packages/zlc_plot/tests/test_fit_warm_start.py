@@ -6,7 +6,14 @@ import time
 import numpy as np
 import pytest
 
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from data_factory import (
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
+from zlc_data import OwnedSnapshot, REPEAT, SPATIAL_X, SPATIAL_Y
 from test_facet_live_fit import _facet_snapshot, _spec
 from zlc_plot import (
     AxisRef,
@@ -50,21 +57,20 @@ class _FailOnceFitEngine(_RecordingFitEngine):
         return super().fit(model, coordinates, observations, **kwargs)
 
 
-def _dense_facet_snapshot(*, revision: int = 0, scale: float = 1.0) -> DatasetSnapshot:
+def _dense_facet_snapshot(*, revision: int = 0, scale: float = 1.0) -> OwnedSnapshot:
     x = np.linspace(-3.0, 3.0, 41)
     facet = np.repeat([0.0, 1.0], x.size)
     coordinates = np.tile(x, 2)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": coordinates, "facet": facet}),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"x": coordinates, "facet": facet}),
         dtype=np.float64,
-        generation="fit-warm-dense",
     )
     values = np.tile(
         2.0 * np.exp(-0.5 * ((x - 0.2) / 1.0) ** 2) + 0.2,
         2,
     )
-    return DatasetSnapshot(schema, (values * scale).reshape(1, -1), revision=revision)
+    return make_snapshot(schema, (values * scale).reshape(1, -1), revision=revision)
 
 
 def _dense_spec() -> FacetGridPlot:
@@ -73,7 +79,7 @@ def _dense_spec() -> FacetGridPlot:
 
 def _present_and_wait(
     session: PlotSession,
-    snapshot: DatasetSnapshot,
+    snapshot: OwnedSnapshot,
     revision: int,
 ) -> FitResult | FacetFitBatchResult:
     """Drive one complete data/fit pair through the live protocol.
@@ -155,18 +161,17 @@ def test_live_warm_start_keeps_the_facet_result_within_solver_tolerance() -> Non
         warm_session.close()
 
 
-def _bimodal_snapshot(*, revision: int = 0) -> DatasetSnapshot:
+def _bimodal_snapshot(*, revision: int = 0) -> OwnedSnapshot:
     rng = np.random.default_rng(3 + revision)
     values = np.concatenate(
         (rng.normal(-2.0, 0.6, 150), rng.normal(2.0, 0.7, 150))
     )
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=values.size),
-        PointTable.from_columns({"sample": (0.0,)}),
+    schema = make_dataset_schema(
+        repeat_domain(size=values.size),
+        mapped_domain_from_columns({"sample": (0.0,)}),
         dtype=np.float64,
-        generation="classifier-warm",
     )
-    return DatasetSnapshot(schema, values[:, None], revision=revision)
+    return make_snapshot(schema, values[:, None], revision=revision)
 
 
 def test_threshold_classifier_refresh_warm_starts_from_prior_solution() -> None:
@@ -289,21 +294,20 @@ def _blob_image_snapshot(
     y_unit: str = "m",
     sx: float = 6.0,
     sy: float = 6.0,
-) -> DatasetSnapshot:
+) -> OwnedSnapshot:
     """One 128x96 image frame with Gaussian blobs at (cx, cy, amplitude)."""
 
     x = np.arange(_IMAGE_W, dtype=np.float64)
     y = np.arange(_IMAGE_H, dtype=np.float64)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"sample": [0.0]}),
-        data_axes=(
-            Axis.create("x", values=x, canonical_unit=x_unit),
-            Axis.create("y", values=y, canonical_unit=y_unit),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"sample": [0.0]}),
+        cell_axes=(
+            axis("x", values=x, unit=x_unit, role=SPATIAL_X),
+            axis("y", values=y, unit=y_unit, role=SPATIAL_Y),
         ),
         dtype=np.float64,
-        canonical_unit="1",
-        generation=f"warm-image-{x_unit}-{y_unit}",
+        value_unit="1",
     )
     xx, yy = np.meshgrid(x, y)
     values = np.full(xx.shape, 100.0)
@@ -311,11 +315,11 @@ def _blob_image_snapshot(
         values += amplitude * np.exp(
             -(((xx - cx) ** 2) / sx**2 + ((yy - cy) ** 2) / sy**2)
         )
-    return DatasetSnapshot(schema, values.T[None, None, :, :], revision=revision)
+    return make_snapshot(schema, values.T[None, None, :, :], revision=revision)
 
 
 def _image_spec() -> ImagePlot:
-    return ImagePlot(AxisRef.data("x"), AxisRef.data("y"))
+    return ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y"))
 
 
 @pytest.mark.parametrize(
@@ -366,7 +370,7 @@ def test_live_image_refit_matches_cold_across_occupancy_resamples() -> None:
     sites = ((32.0, 24.0), (96.0, 24.0), (32.0, 72.0), (96.0, 72.0), (64.0, 48.0))
     rng = np.random.default_rng(11)
 
-    def occupancy_frame(revision: int) -> DatasetSnapshot:
+    def occupancy_frame(revision: int) -> OwnedSnapshot:
         occupied = rng.random(len(sites)) < 0.6
         if not occupied.any():
             occupied[int(rng.integers(len(sites)))] = True

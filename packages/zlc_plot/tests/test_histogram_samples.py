@@ -4,23 +4,28 @@ from __future__ import annotations
 
 import numpy as np
 
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
-from zlc_data import PRIMARY_INDEX
+from data_factory import (
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
+from zlc_data import OwnedSnapshot, PRIMARY_INDEX, REPEAT, SITE, SPATIAL_X, SPATIAL_Y
 from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
 from zlc_plot import HistogramPlot, PlotSession
 from zlc_plot.data_view import DataView
 
 
-def _snapshot(revision: int = 0) -> DatasetSnapshot:
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=2),
-        PointTable.from_columns({"point": [0.0, 1.0]}),
-        data_axes=(Axis.create("scan", values=[0.0, 1.0]),),
+def _snapshot(revision: int = 0) -> OwnedSnapshot:
+    schema = make_dataset_schema(
+        repeat_domain(size=2),
+        mapped_domain_from_columns({"point": [0.0, 1.0]}),
+        cell_axes=(axis("scan", values=[0.0, 1.0]),),
         dtype=np.float64,
-        generation="histogram-pool",
     )
-    values = np.arange(8, dtype=np.float64).reshape(schema.shape)
-    return DatasetSnapshot(schema, values, revision=revision)
+    values = np.arange(8, dtype=np.float64).reshape(schema.physical_shape)
+    return make_snapshot(schema, values, revision=revision)
 
 
 def test_histogram_pools_the_whole_box() -> None:
@@ -78,18 +83,17 @@ def test_a_nonindexed_window_never_invents_cross_publication_history() -> None:
 
 
 def test_window_one_selects_latest_relative_index_without_owning_history() -> None:
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns(
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns(
             {"source index": [-1, 0]},
             ids={"source index": str(PRIMARY_INDEX_AXIS_ID)},
             roles={"source index": PRIMARY_INDEX},
         ),
         dtype=np.float64,
-        generation="shared-indexed-histogram",
     )
     session = PlotSession(
-        DatasetSnapshot(schema, np.asarray([[10.0, 20.0]]), revision=0),
+        make_snapshot(schema, np.asarray([[10.0, 20.0]]), revision=0),
         HistogramPlot(),
         parameters={"window": 1, "bin_count": 4},
     )
@@ -111,13 +115,12 @@ def test_representation_toggles_refit_the_count_axis() -> None:
     """
 
     rng = np.random.default_rng(3)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=300),
-        PointTable.from_columns({"x": np.arange(1.0)}),
+    schema = make_dataset_schema(
+        repeat_domain(size=300),
+        mapped_domain_from_columns({"x": np.arange(1.0)}),
         dtype=np.float64,
-        generation="histogram-refit",
     )
-    snapshot = DatasetSnapshot(schema, rng.normal(50, 8, (300, 1)), revision=0)
+    snapshot = make_snapshot(schema, rng.normal(50, 8, (300, 1)), revision=0)
     session = PlotSession(snapshot, HistogramPlot())
     try:
         axes = session._renderer.primary_axes
@@ -151,15 +154,14 @@ def test_representation_toggles_refit_the_count_axis() -> None:
 def test_only_bin_edits_reproject_histogram_samples(monkeypatch) -> None:
     """Density/cumulative transform bins; only a bin edit reprojects samples."""
 
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=512),
-        PointTable.from_columns({"point": [0.0]}),
+    schema = make_dataset_schema(
+        repeat_domain(size=512),
+        mapped_domain_from_columns({"point": [0.0]}),
         dtype=np.float64,
-        generation="histogram-parameter-projection",
     )
     samples = np.linspace(-5.0, 7.0, 512, dtype=np.float64)[:, np.newaxis]
     session = PlotSession(
-        DatasetSnapshot(schema, samples, revision=0),
+        make_snapshot(schema, samples, revision=0),
         HistogramPlot(),
     )
     try:
@@ -212,14 +214,14 @@ def test_an_axis_may_be_collapsed_before_the_values_are_binned() -> None:
     rng = np.random.default_rng(3)
     per_site = np.array([0.2, 0.4, 0.6, 0.8, 1.0])
     values = per_site[None, None, :] + rng.normal(scale=0.02, size=(4, 1, 5))
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=4),
-        PointTable.from_columns({"shot": [0.0]}),
-        data_axes=(Axis.create("site", values=[0.0, 1.0, 2.0, 3.0, 4.0]),),
+    schema = make_dataset_schema(
+        repeat_domain(size=4),
+        mapped_domain_from_columns({"shot": [0.0]}),
+        cell_axes=(axis("site", values=[0.0, 1.0, 2.0, 3.0, 4.0], role=SITE),),
         dtype=np.float64,
     )
     session = PlotSession(
-        DatasetSnapshot(schema, values, revision=1),
+        make_snapshot(schema, values, revision=1),
         HistogramPlot(),
         parameters={"bin_count": 12},
     )
@@ -231,7 +233,7 @@ def test_an_axis_may_be_collapsed_before_the_values_are_binned() -> None:
             updated_spec(
                 schema,
                 session.spec,
-                fate_field_name(AxisRef.repeat()),
+                fate_field_name(AxisRef.repeat("repeat")),
                 "reduce",
             )
         )
@@ -239,7 +241,7 @@ def test_an_axis_may_be_collapsed_before_the_values_are_binned() -> None:
         assert int(np.sum(collapsed.counts)) == 5  # one mean per site
 
         description = describe_semantics(schema, session.spec)
-        repeat_row = description.field(fate_field_name(AxisRef.repeat()))
+        repeat_row = description.field(fate_field_name(AxisRef.repeat("repeat")))
         assert repeat_row.value == "reduce"
         assert "pool" in [value for value, _label in repeat_row.choices]
         assert session.rgba() is not None
@@ -247,25 +249,24 @@ def test_an_axis_may_be_collapsed_before_the_values_are_binned() -> None:
         session.close()
 
 
-def _noisy_camera(revision: int, seed: int) -> DatasetSnapshot:
+def _noisy_camera(revision: int, seed: int) -> OwnedSnapshot:
     """Integer counts with a jittering maximum -- a camera frame's shape."""
 
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"shot": [0.0]}),
-        data_axes=(
-            Axis.create("y", values=[float(i) for i in range(40)]),
-            Axis.create("x", values=[float(i) for i in range(50)]),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"shot": [0.0]}),
+        cell_axes=(
+            axis("y", values=[float(i) for i in range(40)], role=SPATIAL_Y),
+            axis("x", values=[float(i) for i in range(50)], role=SPATIAL_X),
         ),
         dtype=np.uint16,
-        generation="histogram-domain",
     )
     # Poisson counts and nothing else: the maximum of two thousand samples
     # wanders by a count or two between revisions, which is the jitter a
     # camera actually shows and the jitter the domain has to absorb.
     rng = np.random.default_rng(seed)
     values = rng.poisson(6.0, size=(1, 1, 40, 50)).astype(np.uint16)
-    return DatasetSnapshot(schema, values, revision=revision)
+    return make_snapshot(schema, values, revision=revision)
 
 
 def test_a_steady_value_axis_holds_its_bins_across_revisions() -> None:

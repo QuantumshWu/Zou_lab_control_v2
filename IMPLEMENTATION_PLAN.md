@@ -26,6 +26,10 @@
 - Figure NPZ唯一writer现按member做有界1MiB可压缩性probe：结构化/平滑数据继续Deflate，低收益大camera数组使用标准ZIP Stored。20×1200×1920 uint16 noise的Panel Save实测`4.23s→0.73s`，archive阶段`3.63s→0.18s`；92.16MB原始数据原压至79.12MB，现为92.16MB，明确以13MB换约3.45s。平滑1200×1920 float32仍Deflate为2.98MB、总时约0.33s。
 - Plot axis/semantic identity已收口为`AxisRef(domain, axis_id)`稳定key；scope只接受tagged
   latest或tagged typed coordinate value，不再让display label或裸文本控制字进入truth。
+- Dataset三组结构现统一为同级`DomainSpec(shape, axes, axis_codes)`：Repeat/Point使用
+  explicit row codes，Cell-data使用不物化pixel codes的dense implicit stride；`ValueSchema`
+  只保留dtype/unit/validity。旧的平行row-coordinate/topology与Plot双身份路径整体删除；
+  scan、history、selection、fit与Figure只读取同一axis domain/code truth。
 - Fate Setting不再预跑candidate render/layout feasibility：所有axis始终列出plot kind声明的全部roles；
   64-cell等容量限制只在真实replace/layout transaction执行。旧semantic probe、cache和kind validate
   wrapper已删除，schema vocabulary不再随size、DPR或renderer可用性改变。
@@ -124,11 +128,33 @@
 - Panel Save只是公共Figure API的adapter，不再维护第二套writer或restore grammar。
 - FigureViewer把archive typed Dataset发布为sealed Runtime signals，默认panel从archive exact recipe恢复，且不按shape推断plot kind；保存spec的`kind + cell_kind`在Panel创建前经同一个catalog identity owner解析，semantic vocabulary随后才投影。Add Panel只建立空的fixed-kind `panel-N`，Signal/ROI/Fit派生及后续compose全部走与TaskConsole相同的ConsolePresenter、SelectionBridge和Plot host，不再保留static panel owner。静态host在Bridge订阅前已有accepted fit时，Fit subscription只replay该immutable FitEvent，不重复solve/render；因此ROI与Fit参数都继续发布给后续Panel。
 - FigureViewer与TaskConsole Live/Frozen使用同一个accepted PlotSpec、parameter、selector/
-  viewport capability contract；Viewer semantic edit同样只在host accept后更新surface，文件选择默认定位workspace当天data目录。
+  viewport capability contract以及完整Panel Edit：Frozen snapshot/Refresh、Interaction、
+  Direct producer、Save figure均走同一ConsolePresenter owner；`panel_only`不再隐藏Panel能力。
+  Viewer semantic edit同样只在host accept后更新surface，文件选择默认定位workspace当天data目录。
 - `board.commit`首次接受Panel host后在同一owner turn幂等挂载Selection/Fit Bridge；真实Qt首个drag/release已验证可立即发布ROI，不等待下一display beat。
-- FigureViewer新增同页Data authoring：New/Edit打开Fluent可关闭Data tab；虚拟table按当前二维slice读取并支持整块复制粘贴，blank写入validity而不把空字符串冒充numeric value；大leading axis用index spin＋当前coordinate readout而不展开choice；axis size、增删/排序与coordinate移动必须一次同步values/validity/sigma。Apply构造canonical `OwnedSnapshot`并通过现有sealed Viewer producer发布，自动交给普通Panel，但未Save前仍是unsaved working copy；Save Figure As成功后才清该状态，并继续调用公共Figure writer。已有archive的lineage/device事实只读保留，manual-create/edit从真实publication追加系统provenance，纯manual数据不伪造device。
+- FigureViewer同页Data authoring固定为Dataset、Axes、Data三个全宽Fluent frame。Axes只提供
+  Add/Edit/Delete与name/length/unit/domain（Repeat/Point/Cell-data）及typed coordinate values；
+  axis values使用一行横向virtual table与自身scroll，
+  不编辑role/fate、coordinate labels/frame或axis顺序，也不保留独立Coordinates/Label表。
+  Data显示与Panel title相同的三domain shape/axis摘要，显式选择Rows与Columns axes；其行列header
+  只读显示对应axis values，其他axes用Setting式Scope按真实coordinate value选择。虚拟
+  table按当前二维slice读取、支持整块复制粘贴，并让Tab/Shift+Tab连续进入相邻cell、方向键
+  在非编辑态移动current cell；两张table的row/column数量只改变内部scroll range。普通cell
+  修改不得reset model或复制整个slice；blank写入validity而不把空字符串冒充numeric value。
+  axis length一次同步resize values/validity/sigma。Apply构造canonical `OwnedSnapshot`并通过
+  现有sealed Viewer producer发布，自动交给普通Panel，但未Save前仍是unsaved working copy；
+  Save Figure As成功后才清该状态，并继续调用公共Figure writer。已有archive的lineage/device
+  事实只读保留，manual-create/edit从真实publication追加系统provenance，纯manual数据不伪造device。
+- Manual Axis Delete直接保留当前Scope coordinate的slice并删除该axis；允许最后一个Repeat axis
+  退化为单row无具名axis domain。同domain的name/unit/length编辑保留原role/labels/frame，只有
+  显式换domain才换成该domain的generic role。
+- Existing Figure只改data或axis metadata时原样保留Repeat/Point carrier与`axis_codes`；只有
+  Add/Delete、跨domain移动或length改变才把受影响domain明确重建成dense authored map，不能把
+  sparse/serpentine scan在普通Apply时静默膨胀成Cartesian product。
 - Plot共享手势现要求Area press只arm：无move时0 candidate、0 selection callback、0 overlay render；首个真实held move才启动preview。Qt double-click的首个press/release和Notebook explicit double均不得生成Area，已有Area空白click清除语义保留但不再通过degenerate draft实现。
-- Numeric axis继续由SmartOffset/locator防重叠；显式coordinate labels恢复为全部忠实ticks，不做renderer端抽稀。Manual Data editor不得把partial label输入静默补成完整label轴；只在all-empty或all-specified时形成canonical Dataset labels。
+- Numeric axis继续由SmartOffset/locator防重叠；既有Dataset的显式coordinate labels全部忠实
+  保存与显示，不做renderer端抽稀。Manual Data editor允许编辑axis coordinate values但不提供
+  labels authoring，因而不再维护partial-label草稿或补全规则。
 - SLM Feedback camera preview第一轮后停更的根因是`holds_live_revision`只识别裸`OwnedSnapshot`，带site overlay的`ImageFrame`把第二generation的revision 10误判为旧run的`10<=10`并cancel。现统一解包snapshot；真实两轮Camera Measurement→Panel从generation A前进至B、同host复用、无busy/error，Plot/Workbench seam各有回归。
 - Lineage保存root、event nodes和direct parent IDs；Viewer验证引用、reachability和cycle后
   投影为tree。
@@ -198,6 +224,9 @@
   最近一次pre-adaptive controller实测为6个probe candidate、22个总candidate、最佳34/35与ratio 1.1337。
   当前bracket/loading-edge controller在同一virtual lattice（25/35起始可见、4%loading余量）实测：2个probe candidate、20次formal update共23个candidate，第11次formal update起35/35并保持到结束，observable ratio 1.384→1.12；此前版本在32/35停滞，三个site在两个share间乒乓。
 - Histogram的`histogram_poisson_gaussian`/`bimodal_poisson_gaussian`是Γ延拓的连续泊松律（归一化）⊛高斯读噪的密度，A=面积；和其他模型同一条路子，在plot kind给的bin中心与计数上拟合，不看数据来源或单位，没有本模型专属的下限/capability/单位门。编译核：梯形积分、每σ与每个p尺度各十二个节点（节点数随参数变化处模型跳一个积分误差，十二个把它压到1e-9以下，数值差分看不见）、u=0端点Euler–Maclaurin修到O(h⁶)、p表从众数递推填满支撑区、高斯因子两乘递推每64节点重锚一次、质量与均值同表求得、λ<1e-150取零光子高斯；SciPy路径与overlay调用同一核，anchors是mpmath独立求积（1e-6）。核对mpmath：模型高于峰值1e-6处相对误差5e-9，解析雅可比与mpmath求导一致到1e-10；64 bin一次值+雅可比8–58 µs。曾试过按数据bin定网格以保证对参数连续：overlay的细显示网格把节点密度推到所需的40倍、MOT四十cell面板fit_total 124 ms，故改回按σ定。合成Poisson+Gaussian直方图（64 bins、5000样本）恢复：5光子起与格点模型一致，λ与δ和Gaussian的中心/劈裂同精度（30/σ3→29.9±0.09、3.06±0.13；双态60/210 σ3→δ150±0.33、σ 3.15±0.30/3.21±0.95；1000→1000±0.5）；2光子且bin细于一光子时数据带整数comb而本模型画不出（deviance 7.1对格点1.2，σ 0.62对0.3）；λ≲0.5时λ跑低直至零、A与σ吸收峰（0.1/σ0.3→λ 0.0004、σ 0.41；双态0.5/6→λ_L 0.07但δ 5.6±0.14）；16光子bin下σ停在8的半bin下限、Gaussian bimodal拟得更好（0.17对0.90）——用户决定bin选择带来的误差不管。`run_fit_models`（两态8±2/30±4）：single 5.43 ms、bimodal 4.19 ms对Gaussian 2.91/3.50（格点版5.45/3.91）；`run_mot_roi_chain --panel3 histogram`：fit_total 29.8/18.7 ms对Gaussian同场16.4/5.8（格点版22.3/13.9），numeric_fit_batch 14.5对11.9，四面板临界路径106.6对97.0 ms、7.5对7.7 fps，差额是四十个overlay在数十光子宽度下每bin数百节点。用户此前报告的「MOT ROI像素直方图两个fit全错」：single Gaussian的宽坡（中心−35、σ30）是单高斯对「尖峰+长尾」在Poisson deviance下的真最大似然，要拟尖峰须用X-range/Area selector或bimodal Gaussian（尖峰σ1.82+宽尾σ33）；损失函数保留Poisson deviance（bin计数是独立抽样的多项分布，幅度自由时deviance极小点就是多项极大似然，对任何样本分布成立；最小二乘在低计数区有偏）。
+- Pulse的API slot值链已落地（worktree `zlc_v2_pulseslot`，分支`pulse-api-slot`）：`zlc.pulse.api_values`封闭语法+`apply_api_values`取交集覆盖（zlc_pulse）；`zlc_atom/pulse_values.py`拥有`<workspace>/api_values/`的位置与读写；Workspace新增`api_values`属性并seed空集；Pulse Editor打开即套用当前集、On Pulse前重读、Load values/Save values两手势；三个scan节点新增`api_values` text字段与Load values按钮，由scan plan editor的表格编辑（只记与pulse不同的项，被plan扫到的slot不显示，并提示current.json在哪些参数上不同）。三层顺序：authored → 节点表单 → scan table。**用户裁决（09-03）：decoder不得自动套用值集**——第一版让两个pulse decoder各套用一次，等于loader返回的不是它读的那个文件，节点表单里的数字在本节点配置中无从解释、layout.json不足以复现运行；改为只在两处显式手势里套用。
+- 每个读文件内容的表单字段获得Refresh（`FluentPathEdit`单源，`FormFieldProps.refreshable`开关，`folder`字段不给），console侧`refresh_logic_files`复用打开Edit那条重读路径；Figure Viewer的路径条同样可Refresh（等价于重开同一路径）。实测：外部改写pulse后不刷新读到旧值，Refresh后读到新值。
+- 绑定id可在Scan页重命名（slot与api parameter同一命名空间），重复/非identifier/不存在分别拒绝；已推送pulse文件的载入不受影响（codec无白名单，calibration按序号寻址）。顺带修掉scan plan editor的静默改绑：axis指向pulse已不提供的port时保留原port并标注，交给`bind_plan`按名字拒绝，而不是静默选中index 0。
 - Calibration weighted Gaussian/Empirical threshold当前worktree聚焦证据为`11 passed`：已知真值、label-invariance、窄bright＋尾部噪声、Empirical/fallback、Figure archive同模型重放、population-weighted Plot classifier、coordinate roundtrip与warm refresh。另对500组随机Gaussian参数核对解析交点，383组存在两均值间相关根，最大加权log-curve交点误差`3.37e-13`、相对数值最优误差`8.95e-17`。本cut未重跑正式Runtime/Workbench vertical。
 - Calibration site review当前聚焦证据：Runtime精确operator request/response与Stop、saved-frame完整review链及全descriptor virtual Calibration保持通过。正式`zlc task_console --template virtual`science路径以8 samples检测24 sites，排除`site_0000`后最终Calibration为23 sites、terminal移除全部自动preview；`site_review.npz`42,208 bytes、PNG 145,791 bytes，FigureViewer current reader成功重开。此前`parent=None`测试遗漏了真实parent会把frameless QWidget降为child的错误；当前`FluentDialogWindow`以`Qt.Window + WindowModal`保留Fluent顶层身份，真实parent测试核对active modal、确认响应及title-bar关闭，QTimer/TaskConsole同类回调中的nested loop正常退出。`zlc_ui.capture_window`取得精确1152×653 shared-screen capture，Fluent title/body边界为32/32、无native dialog chrome，35-site状态与controls完整显示。
 - SiteMap detector真实red为8帧50%-loading site在0/2/4/6出现：旧实现full-average `702.04σ`仍被split veto漏掉；新实现记录7个相邻变化、最大change `355.67σ`，定位误差0.030 pixel且同一35-site阵列全部找回。20个随机seed覆盖698个至少加载一次的sites，漏检0、spurious 0；完整site-detection `7 passed`，saved-frame review＋Workbench vertical chain `2 passed`。
@@ -205,7 +234,7 @@
 - 紧凑Science Context当前证据：SLM Editor完整文件`22 passed`；strict Context与Feedback candidate/Stop/failure边界`10 passed`；最终三条直接边界`3 passed`。X15213全尺寸体积、Pattern/composite逐元素roundtrip和8-bit phase-code roundtrip均来自当前worktree；未运行100-shot。
 - 固定nearest清理运行standalone/facet artist、Workbench parameter surface及Fluent Setting/Edit四个聚焦用例，结果`4 passed`。
 - Device Control当前回归：Workbench完整`425 passed`；Runtime完整加Figure grammar `112 passed`；adapter/camera/scan受影响组`53 passed`；Device Control Qt、风险revision、refresh close guard、in-flight latest-only和demo直接证据均通过。Atom完整回归同时暴露并修复Temperature sibling event record、Feedback输出声明和三条terminal/Stop残余；100-shot virtual Feedback仍为既有`34/35`上限，未用放宽断言冒充通过。
-- FigureViewer此前以formal launcher和`zlc_ui.capture_window`在真实Windows屏幕完成四条1152×653验收：current archive默认Image Monitor、点击Add panel新增Curve、从Setting点击Edit进入共享Fluent `PanelEditorView`、以及多层Flow展开树；四次均保持shared 90% window尺寸和固定左栏。右侧复用TaskConsole `ConsoleBoardView + PanelCardView`并置于白色work surface，支持每panel切saved dataset、alternate plot kind、Setting/remove/order与closable Edit；static Edit只保留Panel/Semantic/Display/Fit。用户当前重新裁决Info readout必须统一multiline并按实际visual layout紧包；旧的无换行单行分支会cutoff长内容且不能作为phantom inner-scroll的替代修复。固定Plot kind从Setting删除，动态Signal keyed-choice在reconcile写值前更新choice domain。
+- FigureViewer此前以formal launcher和`zlc_ui.capture_window`在真实Windows屏幕完成四条1152×653验收：current archive默认Image Monitor、点击Add panel新增Curve、从Setting点击Edit进入共享Fluent `PanelEditorView`、以及多层Flow展开树；四次均保持shared 90% window尺寸和固定左栏。右侧复用TaskConsole `ConsoleBoardView + PanelCardView`并置于白色work surface，支持每panel切saved dataset、alternate plot kind、Setting/remove/order与closable Edit；Panel Edit现与TaskConsole完整共用Frozen snapshot/Refresh、Interaction、Direct producer和Save figure。用户当前重新裁决Info readout必须统一multiline并按实际visual layout紧包；旧的无换行单行分支会cutoff长内容且不能作为phantom inner-scroll的替代修复。固定Plot kind从Setting删除，动态Signal keyed-choice在reconcile写值前更新choice domain。
 - FigureViewer Info readout当前根修：旧实现以单行控件掩盖multiline少算Qt block高度的问题，长无换行值因此cutoff，而multiline内部仍保留`maximum=1`的phantom scroll。InfoPane现统一复用`FluentReadoutMultiline`，唯一高度owner逐block读取`QTextLayout`实际像素并加document/widget margins；未设cap时horizontal/vertical range均为0，短值、显式两行和长无换行值实测为26/45/349 px且原文逐字符不变。现有UI用例扩展后相关文件`12 passed`；formal `capture_window`以1152×653真实FigureViewer重开Camera Figure，左栏一行readout保持紧凑。
 - FigureViewer Logic/Devices/Flow当前根修：archive内部`event-N`只作parent引用，Logic页以真实Logic identity显示递归去除device字段后的run参数；Devices页用run record的stable role→instance映射解释run/event snapshots，按实际device聚合并给每项保留Logic、sequence与scope，缺映射/identity/device key一律拒绝而不猜。Flow原位删除QTree owner，Workbench只投影唯一Logic/Device nodes和causal/device edges；Qt以layered+barycentric布局、独立edge ports与long-edge lane绘制，典型100 nodes同步构建约6.5 ms，3-device、diamond、真实DFS汇合及10-node长链均无edge穿node，长链horizontal range为0。Calibration/Temperature normal与partial report、SLM candidate/report、Seamless/Stepped/Temperature live均保存实际用到的device facts；Feedback pre-shot只记录SLM，post-shot冻结同candidate三设备，failure rollback不改变已存candidate provenance；Stepped tunable以完整scan values及逐点readback等值contract记录，不复制event history。聚焦回归`67 passed`，另Console Logic`34 passed`；formal Windows real-screen capture为1152×653、DPR 3、3-device Flow无横向scroll且节点/箭头无重叠。
 - 公共Panel Setting现复用master的page-local `FluentOverlayFrame` owner，并以固定identity（`Setting · panel-N`）作为可拖header，不读取可编辑title/signal/structure；右上角紧凑`×`只隐藏Setting。TaskConsole与FigureViewer因复用PanelCard同时获得该行为，Panel删除仍是card header的受保护命令。

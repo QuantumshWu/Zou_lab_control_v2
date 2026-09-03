@@ -93,7 +93,14 @@ def test_a_widget_outliving_its_host_refuses_input_instead_of_raising() -> None:
 
     from PyQt5 import QtCore, QtGui, QtWidgets
 
-    from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+    from data_factory import (
+        axis,
+        make_dataset_schema,
+        make_snapshot,
+        mapped_domain_from_columns,
+        repeat_domain,
+    )
+    from zlc_data import REPEAT, SPATIAL_X, SPATIAL_Y
     from zlc_plot import (
         AxisRef,
         ImagePlot,
@@ -101,22 +108,21 @@ def test_a_widget_outliving_its_host_refuses_input_instead_of_raising() -> None:
         ensure_qt5_application,
     )
 
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"shot": np.asarray([0.0])}),
-        data_axes=(
-            Axis.create("y", values=[float(i) for i in range(24)]),
-            Axis.create("x", values=[float(i) for i in range(32)]),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"shot": np.asarray([0.0])}),
+        cell_axes=(
+            axis("y", values=[float(i) for i in range(24)], role=SPATIAL_Y),
+            axis("x", values=[float(i) for i in range(32)], role=SPATIAL_X),
         ),
         dtype=np.uint8,
-        generation="widget-outlives-host",
     )
     values = np.arange(24 * 32, dtype=np.uint8).reshape(1, 1, 24, 32)
 
     ensure_qt5_application([])
     host = RasterPlotHost.from_plot(
-        DatasetSnapshot(schema, values, revision=1),
-        ImagePlot(AxisRef.data("x"), AxisRef.data("y")),
+        make_snapshot(schema, values, revision=1),
+        ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y")),
     )
     try:
         host.wait_for_front(10.0)
@@ -191,7 +197,14 @@ def test_a_gesture_is_not_cancelled_by_the_fronts_it_causes() -> None:
 
     from PyQt5 import QtCore, QtGui, QtWidgets
 
-    from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+    from data_factory import (
+        axis,
+        make_dataset_schema,
+        make_snapshot,
+        mapped_domain_from_columns,
+        repeat_domain,
+    )
+    from zlc_data import REPEAT, SPATIAL_X, SPATIAL_Y
     from zlc_plot import (
         AxisRef,
         ImagePlot,
@@ -200,20 +213,19 @@ def test_a_gesture_is_not_cancelled_by_the_fronts_it_causes() -> None:
     )
 
     rows, columns = 40, 60
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"shot": np.asarray([0.0])}),
-        data_axes=(
-            Axis.create("y", values=[float(i) for i in range(rows)], unit="pixel"),
-            Axis.create("x", values=[float(i) for i in range(columns)], unit="pixel"),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"shot": np.asarray([0.0])}),
+        cell_axes=(
+            axis("y", values=[float(i) for i in range(rows)], unit="pixel", role=SPATIAL_Y),
+            axis("x", values=[float(i) for i in range(columns)], unit="pixel", role=SPATIAL_X),
         ),
         dtype=np.uint8,
-        generation="orbit-keeps-turning",
     )
 
     def snapshot(revision: int):
         rng = np.random.default_rng(revision)
-        return DatasetSnapshot(
+        return make_snapshot(
             schema,
             rng.integers(0, 255, size=(rows, columns), dtype=np.uint8)[None, None],
             revision=revision,
@@ -226,7 +238,7 @@ def test_a_gesture_is_not_cancelled_by_the_fronts_it_causes() -> None:
     screen = app.primaryScreen()
     host = RasterPlotHost.from_plot(
         snapshot(1),
-        ImagePlot(AxisRef.data("x"), AxisRef.data("y")),
+        ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y")),
         parameters={"presentation": "height_bars"},
         device_pixel_ratio=(
             1.0 if screen is None else float(screen.devicePixelRatio())

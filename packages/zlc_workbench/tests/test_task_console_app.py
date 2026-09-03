@@ -23,7 +23,6 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 
 from pulse_fixtures import PULSE_NAME, write_ordinary_pulse
 
-
 _FORMAL_CONSOLE_EPILOGUE = """
 deadline = time.monotonic() + 20.0
 while not presenter.close():
@@ -39,13 +38,11 @@ application.processEvents()
 session.close()
 """
 
-
 @pytest.fixture
 def workspace(tmp_path) -> Path:
     pulses = tmp_path / "pulses"
     pulses.mkdir()
     return tmp_path
-
 
 def _subprocess_environment() -> dict[str, str]:
     environment = dict(
@@ -60,7 +57,6 @@ def _subprocess_environment() -> dict[str, str]:
             str(REPO_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")
         )
     return environment
-
 
 def _run_script(
     script: str,
@@ -80,7 +76,6 @@ def _run_script(
         timeout=timeout,
     )
 
-
 def _run_app(
     app: str,
     arguments: list[str],
@@ -98,13 +93,11 @@ def _run_app(
     )
     return _run_script(script, cwd=cwd, overrides=overrides)
 
-
 def _run(workspace: Path, *arguments: str) -> subprocess.CompletedProcess:
     return _run_app(
         "task_console",
         ["--workspace", str(workspace), *arguments],
     )
-
 
 def _wait_qt(application, predicate, *, timeout_ms: int = 5000) -> None:
     from PyQt5 import QtCore, QtTest
@@ -115,19 +108,16 @@ def _wait_qt(application, predicate, *, timeout_ms: int = 5000) -> None:
         QtTest.QTest.qWait(5)
     assert predicate(), "timed out waiting for a Qt owner turn"
 
-
 def test_task_console_has_no_second_display_clock_override(workspace) -> None:
     completed = _run(workspace, "--template", "virtual", "--interval-ms", "10")
     assert completed.returncode == 2
     assert "unrecognized arguments: --interval-ms 10" in completed.stderr
-
 
 def test_the_console_assembles_and_beats(workspace) -> None:
     completed = _run(workspace, "--template", "virtual", "--check")
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "console ready" in completed.stdout
     assert "0 panel" in completed.stdout
-
 
 def test_formal_console_panel_state_and_histogram_edits_are_atomic(workspace) -> None:
     """The real card and Edit hosts present each accepted plot state once."""
@@ -317,7 +307,6 @@ def test_formal_console_panel_state_and_histogram_edits_are_atomic(workspace) ->
             application.processEvents()
         session.close()
 
-
 @pytest.mark.parametrize("app_name", ("task_console", "figure_viewer"))
 def test_app_build_installs_the_plot_size_policy(
     app_name,
@@ -370,7 +359,6 @@ def test_app_build_installs_the_plot_size_policy(
         if session is not None:
             session.close()
 
-
 def test_live_board_close_cancels_queued_projection_without_waiting_for_running_work() -> None:
     from threading import Event
     import time
@@ -406,7 +394,6 @@ def test_live_board_close_cancels_queued_projection_without_waiting_for_running_
     release.set()
     running.result(timeout=2.0)
     assert board.close() is True
-
 
 def test_formal_console_close_keeps_qt_turning_until_every_owner_retires(
     workspace,
@@ -530,7 +517,6 @@ def test_formal_console_close_keeps_qt_turning_until_every_owner_retires(
             window.close()
             _wait_qt(application, lambda: not window.is_visible())
 
-
 def test_experiment_flow_closes_its_session_off_the_qt_owner(workspace) -> None:
     from threading import Event, current_thread
 
@@ -586,7 +572,6 @@ def test_experiment_flow_closes_its_session_off_the_qt_owner(workspace) -> None:
         release.set()
         _wait_qt(application, flow.close)
 
-
 def test_formal_panel_save_keeps_qt_live_and_close_waits_for_archive_and_render(
     workspace,
     monkeypatch,
@@ -596,10 +581,16 @@ def test_formal_panel_save_keeps_qt_live_and_close_waits_for_archive_and_render(
 
     import numpy as np
     from PyQt5 import QtCore
-    from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+    from data_factory import (
+        make_dataset_schema,
+        make_snapshot,
+        mapped_domain_from_columns,
+        repeat_domain,
+    )
     from zlc_plot import build_figure_host
     from zlc_ui.qt import ensure_qt_app
     from zlc_workbench.apps.task_console import build_panel_host, create_window
+    from zlc_workbench.panel_save import PanelFigureFiles
     from zlc_workbench.panel_state import (
         PanelFrozenData,
         panel_state_from_description,
@@ -621,13 +612,12 @@ def test_formal_panel_save_keeps_qt_live_and_close_waits_for_archive_and_render(
 
     presenter.poll_logic = counted_poll_logic
     binding = presenter.add_blank_panel("curve")
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": (0.0, 1.0, 2.0)}),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"x": (0.0, 1.0, 2.0)}),
         dtype=np.float64,
-        generation="formal-panel-save",
     )
-    snapshot = DatasetSnapshot(schema, np.asarray([[1.0, 2.0, 3.0]]), revision=0)
+    snapshot = make_snapshot(schema, np.asarray([[1.0, 2.0, 3.0]]), revision=0)
     binding.state = replace(
         binding.state,
         signal="formal/save",
@@ -685,7 +675,7 @@ def test_formal_panel_save_keeps_qt_live_and_close_waits_for_archive_and_render(
 
         archive.write_bytes(b"archive")
         target.write_bytes(b"png")
-        save_pending.set_result((target, archive))
+        save_pending.set_result(PanelFigureFiles(target, archive))
         assert window.is_visible()
         _wait_qt(application, lambda: not window.is_visible())
         assert target.read_bytes() == b"png"
@@ -697,7 +687,6 @@ def test_formal_panel_save_keeps_qt_live_and_close_waits_for_archive_and_render(
             window.close()
             _wait_qt(application, lambda: not window.is_visible())
 
-
 def test_experiment_batch_is_one_task_console_manifest_wrapper() -> None:
     launcher = REPO_ROOT / "bin" / "experiment.bat"
     source = launcher.read_text(encoding="utf-8").lower()
@@ -706,14 +695,12 @@ def test_experiment_batch_is_one_task_console_manifest_wrapper() -> None:
     assert "pulse_editor" not in source and "device_manager" not in source
     assert "start " not in source
 
-
 def test_figure_viewer_batch_is_one_manifest_wrapper() -> None:
     launcher = REPO_ROOT / "bin" / "figure_viewer.bat"
     source = launcher.read_text(encoding="utf-8").lower()
     assert 'set "zlc_command=figure_viewer"' in source
     assert 'call "%~dp0_launch.bat" %*' in source
     assert "start " not in source
-
 
 def test_a_missing_apparatus_says_how_to_start_anyway(workspace) -> None:
     """The first thing a new user hits must tell them what to do."""
@@ -722,12 +709,10 @@ def test_a_missing_apparatus_says_how_to_start_anyway(workspace) -> None:
     assert completed.returncode == 2
     assert "template='virtual'" in completed.stderr
 
-
 def test_the_figure_viewer_starts_without_an_archive() -> None:
     completed = _run_app("figure_viewer", ["--check"])
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "no archive given" in completed.stdout
-
 
 def test_the_pulse_editor_opens_the_pulse_it_is_told_to(workspace) -> None:
     """One reader for pulse files, so the window cannot show a different pulse."""
@@ -749,7 +734,6 @@ def test_the_pulse_editor_opens_the_pulse_it_is_told_to(workspace) -> None:
     assert f"pulse ready: {PULSE_NAME!r}" in completed.stdout
     assert "6 period(s)" in completed.stdout
 
-
 def test_the_pulse_editor_names_the_pulse_it_could_not_find(workspace) -> None:
     completed = _run_app(
         "pulse_editor",
@@ -757,7 +741,6 @@ def test_the_pulse_editor_names_the_pulse_it_could_not_find(workspace) -> None:
     )
     assert completed.returncode == 2
     assert "absent" in completed.stderr
-
 
 def test_a_launcher_started_from_its_own_folder_still_finds_the_experiment(workspace) -> None:
     """The failure a physicist actually hit.
@@ -784,7 +767,6 @@ def test_a_launcher_started_from_its_own_folder_still_finds_the_experiment(works
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert f"workspace: {workspace}" in completed.stdout
 
-
 def test_no_nearby_experiment_uses_the_one_configured_default(tmp_path) -> None:
     """A launch directory never becomes an accidental second workspace."""
 
@@ -801,7 +783,6 @@ def test_no_nearby_experiment_uses_the_one_configured_default(tmp_path) -> None:
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert f"workspace: {configured}" in completed.stdout
 
-
 def test_the_pulse_editor_opens_where_there_is_no_experiment_at_all(tmp_path) -> None:
     """An editor opens before it has a subject; it is not a session."""
 
@@ -817,7 +798,6 @@ def test_the_pulse_editor_opens_where_there_is_no_experiment_at_all(tmp_path) ->
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "editor ready: no pulse open" in completed.stdout
-
 
 def test_task_console_opens_empty_and_adds_only_a_stopped_camera_draft(workspace) -> None:
     """The combined Add Panel control reaches both current endpoints."""
@@ -874,6 +854,7 @@ assert catalog == (
     ('Measurement: Stepped Scan', ('logic', 'stepped_scan')),
     ('Processor: Frame Survival', ('logic', 'frame_survival')),
     ('Processor: Occupancy', ('logic', 'occupancy')),
+    ('Processor: Occupancy Agreement', ('logic', 'occupancy_agreement')),
     ('Task: Calibration', ('logic', 'calibration')),
     ('Task: Slm Feedback', ('logic', 'slm_feedback')),
     ('Task: Temperature', ('logic', 'temperature')),
@@ -902,7 +883,6 @@ print('STOPPED_DRAFT')
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "STOPPED_DRAFT" in completed.stdout
-
 
 def test_task_takeover_and_live_preview_follow_the_real_buttons(workspace) -> None:
     """Start, preview and Stop use the same widgets an operator clicks."""
@@ -989,7 +969,6 @@ print('TASK_TAKEOVER_PREVIEW_OK')
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "TASK_TAKEOVER_PREVIEW_OK" in completed.stdout
-
 
 def test_calibration_terminal_writes_seven_figure_pairs_without_report_panels(
     workspace,
@@ -1134,7 +1113,7 @@ third_artifact_path = Path(
 assert third_artifact_path not in {first_artifact_path, second_artifact_path}
 
 front = presenter.session.signal_plane.freeze()
-assert capture_signal not in front.names()
+assert capture_signal in front.names()
 assert all(
     panel.state.signal == capture_signal
     for panel in presenter.panels.values()
@@ -1161,7 +1140,6 @@ print('CALIBRATION_FILES_WITHOUT_REPORT_UI_OK')
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "CALIBRATION_FILES_WITHOUT_REPORT_UI_OK" in completed.stdout
-
 
 def test_device_controls_open_on_demand_over_the_one_experiment_session(workspace) -> None:
     """Init opens only Console; loaded-card Control owns every device window."""
@@ -1352,7 +1330,6 @@ print('SHARED_EXPERIMENT_FLOW')
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "SHARED_EXPERIMENT_FLOW" in completed.stdout
 
-
 def test_live_device_close_and_reopen_preserve_session_and_unchanged_devices(
     workspace,
 ) -> None:
@@ -1421,7 +1398,6 @@ print('LIVE_DEVICE_RECONCILE_OK')
     completed = _run_script(script, timeout=60)
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "LIVE_DEVICE_RECONCILE_OK" in completed.stdout
-
 
 def test_generic_device_tune_keeps_qt_live_and_refuses_false_close(workspace) -> None:
     script = """import time, threading
@@ -1607,7 +1583,6 @@ print('GENERIC_TUNE_OWNER_OK')
     completed = _run_script(script, timeout=60)
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "GENERIC_TUNE_OWNER_OK" in completed.stdout
-
 
 def test_device_control_risk_unlock_is_field_scoped_and_owner_scoped(
     workspace,

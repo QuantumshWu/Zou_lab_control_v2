@@ -12,9 +12,7 @@ from .validation import canonical_text as _text, exact_mapping as _exact_map
 from .axis import AxisId, AxisRoleId, AxisSpec, CoordinateFrameId
 from .schema import (
     DatasetSchema,
-    GridTopology,
-    PointColumn,
-    PointTable,
+    DomainSpec,
     ValueSchema,
 )
 from .value import BlockId, DatasetRevision, DatasetRevisionRef, StreamGenerationId
@@ -25,9 +23,7 @@ from .validity import (
 
 
 AXIS_SCHEMA = "zlc_data.AxisSpec"
-POINT_COLUMN_SCHEMA = "zlc_data.PointColumn"
-POINT_TABLE_SCHEMA = "zlc_data.PointTable"
-GRID_TOPOLOGY_SCHEMA = "zlc_data.GridTopology"
+DOMAIN_SCHEMA = "zlc_data.DomainSpec"
 VALUE_SCHEMA = "zlc_data.ValueSchema"
 DATASET_SCHEMA = "zlc_data.DatasetSchema"
 DATASET_REVISION_REF_SCHEMA = "zlc_data.DatasetRevisionRef"
@@ -133,150 +129,50 @@ def axis_from_tree(tree: Any) -> AxisSpec:
     return axis
 
 
-def point_column_to_tree(column: PointColumn) -> dict[str, Any]:
-    if not isinstance(column, PointColumn):
-        raise TypeError("column must be PointColumn")
+def domain_to_tree(domain: DomainSpec) -> dict[str, Any]:
+    if not isinstance(domain, DomainSpec):
+        raise TypeError("domain must be DomainSpec")
     return {
-        "schema": POINT_COLUMN_SCHEMA,
-        "coordinate_id": column.coordinate_id.value,
-        "name": column.name,
-        "role": column.role.value,
-        "value_kind": column.value_kind,
-        "values": list(column.values),
-        "unit": column.unit,
-        "coordinate_frame": None
-        if column.coordinate_frame is None
-        else column.coordinate_frame.value,
-        "coordinate_labels": None
-        if column.coordinate_labels is None
-        else list(column.coordinate_labels),
+        "schema": DOMAIN_SCHEMA,
+        "shape": list(domain.shape),
+        "axes": [axis_to_tree(axis) for axis in domain.axes],
+        "axis_codes": None
+        if domain.axis_codes is None
+        else [list(codes) for codes in domain.axis_codes],
     }
 
 
-def point_column_from_tree(tree: Any) -> PointColumn:
+def domain_from_tree(tree: Any) -> DomainSpec:
     data = _exact_map(
         tree,
-        {
-            "schema",
-            "coordinate_id",
-            "name",
-            "role",
-            "value_kind",
-            "values",
-            "unit",
-            "coordinate_frame",
-            "coordinate_labels",
-        },
-        POINT_COLUMN_SCHEMA,
+        {"schema", "shape", "axes", "axis_codes"},
+        DOMAIN_SCHEMA,
     )
-    values = data["values"]
-    if not isinstance(values, list):
-        raise ValueError("PointColumn values must be a list")
-    frame = data["coordinate_frame"]
-    coordinate_labels = data["coordinate_labels"]
-    if coordinate_labels is not None and not isinstance(coordinate_labels, list):
-        raise ValueError("PointColumn coordinate_labels must be a list or null")
-    column = PointColumn(
-        coordinate_id=AxisId(data["coordinate_id"]),
-        name=data["name"],
-        role=AxisRoleId(data["role"]),
-        value_kind=data["value_kind"],
-        values=tuple(values),
-        unit=data["unit"],
-        coordinate_frame=None if frame is None else CoordinateFrameId(frame),
-        coordinate_labels=None
-        if coordinate_labels is None
-        else tuple(coordinate_labels),
-    )
-    if _encode(point_column_to_tree(column)) != _encode(tree):
-        raise ValueError("PointColumn tree is typed but non-canonical")
-    return column
-
-
-def point_table_to_tree(table: PointTable) -> dict[str, Any]:
-    if not isinstance(table, PointTable):
-        raise TypeError("table must be PointTable")
-    return {
-        "schema": POINT_TABLE_SCHEMA,
-        "row_count": table.row_count,
-        "columns": [point_column_to_tree(column) for column in table.columns],
-    }
-
-
-def point_table_from_tree(tree: Any) -> PointTable:
-    data = _exact_map(
-        tree,
-        {"schema", "row_count", "columns"},
-        POINT_TABLE_SCHEMA,
-    )
-    columns = data["columns"]
-    if not isinstance(columns, list):
-        raise ValueError("PointTable columns must be a list")
-    table = PointTable(
-        row_count=data["row_count"],
-        columns=tuple(point_column_from_tree(column) for column in columns),
-    )
-    if _encode(point_table_to_tree(table)) != _encode(tree):
-        raise ValueError("PointTable tree is typed but non-canonical")
-    return table
-
-
-def grid_topology_to_tree(topology: GridTopology) -> dict[str, Any]:
-    if not isinstance(topology, GridTopology):
-        raise TypeError("topology must be GridTopology")
-    tree: dict[str, Any] = {
-        "schema": GRID_TOPOLOGY_SCHEMA,
-        "dimension_ids": [axis_id.value for axis_id in topology.dimension_ids],
-        "coordinate_domains": [list(domain) for domain in topology.coordinate_domains],
-        "row_to_cell": [list(cell) for cell in topology.row_to_cell],
-    }
-    if topology.coordinate_labels is not None:
-        # Emitted only when declared: a topology without labels encodes as
-        # it always has, and every archive already on disk still reads.
-        tree["coordinate_labels"] = [
-            None if labels is None else list(labels)
-            for labels in topology.coordinate_labels
-        ]
-    return tree
-
-
-def grid_topology_from_tree(tree: Any) -> GridTopology:
-    fields = {"schema", "dimension_ids", "coordinate_domains", "row_to_cell"}
-    if isinstance(tree, dict) and "coordinate_labels" in tree:
-        fields.add("coordinate_labels")
-    data = _exact_map(tree, fields, GRID_TOPOLOGY_SCHEMA)
-    dimensions = data["dimension_ids"]
-    domains = data["coordinate_domains"]
-    mapping = data["row_to_cell"]
-    labels = data.get("coordinate_labels")
-    if labels is not None and (
-        not isinstance(labels, list)
-        or any(item is not None and not isinstance(item, list) for item in labels)
+    shape = data["shape"]
+    axes = data["axes"]
+    codes = data["axis_codes"]
+    if not isinstance(shape, list):
+        raise ValueError("DomainSpec shape must be a list")
+    if not isinstance(axes, list):
+        raise ValueError("DomainSpec axes must be a list")
+    if codes is not None and (
+        not isinstance(codes, list)
+        or any(not isinstance(item, list) for item in codes)
     ):
-        raise ValueError("GridTopology coordinate_labels must be lists or null")
-    if not isinstance(dimensions, list):
-        raise ValueError("GridTopology dimension_ids must be a list")
-    if not isinstance(domains, list) or any(not isinstance(item, list) for item in domains):
-        raise ValueError("GridTopology coordinate_domains must be lists")
-    if not isinstance(mapping, list) or any(not isinstance(item, list) for item in mapping):
-        raise ValueError("GridTopology row_to_cell must be a list of lists")
-    topology = GridTopology(
-        dimension_ids=tuple(AxisId(item) for item in dimensions),
-        coordinate_domains=tuple(tuple(item) for item in domains),
-        row_to_cell=tuple(tuple(item) for item in mapping),
-        coordinate_labels=None
-        if labels is None
-        else tuple(None if item is None else tuple(item) for item in labels),
+        raise ValueError("DomainSpec axis_codes must be a list of lists or null")
+    domain = DomainSpec(
+        shape=tuple(shape),
+        axes=tuple(axis_from_tree(axis) for axis in axes),
+        axis_codes=None if codes is None else tuple(tuple(item) for item in codes),
     )
-    if _encode(grid_topology_to_tree(topology)) != _encode(tree):
-        raise ValueError("GridTopology tree is typed but non-canonical")
-    return topology
+    if _encode(domain_to_tree(domain)) != _encode(tree):
+        raise ValueError("DomainSpec tree is typed but non-canonical")
+    return domain
 
 
 def value_schema_to_tree(schema: ValueSchema) -> dict[str, Any]:
     return {
         "schema": VALUE_SCHEMA,
-        "data_axes": [axis_to_tree(axis) for axis in schema.data_axes],
         "validity_contract": {
             "mode": schema.validity_contract.mode.value,
             "component_axis_ids": [
@@ -291,12 +187,9 @@ def value_schema_to_tree(schema: ValueSchema) -> dict[str, Any]:
 def value_schema_from_tree(tree: Any) -> ValueSchema:
     data = _exact_map(
         tree,
-        {"schema", "data_axes", "validity_contract", "dtype", "value_unit"},
+        {"schema", "validity_contract", "dtype", "value_unit"},
         VALUE_SCHEMA,
     )
-    axes = data["data_axes"]
-    if not isinstance(axes, list):
-        raise ValueError("ValueSchema data_axes must be a list")
     validity = data["validity_contract"]
     if not isinstance(validity, dict) or set(validity) != {"mode", "component_axis_ids"}:
         raise ValueError("invalid ValueSchema validity_contract")
@@ -307,7 +200,6 @@ def value_schema_from_tree(tree: Any) -> ValueSchema:
     contract = ValidityContract(mode, tuple(AxisId(item) for item in component_ids))
     unit = data["value_unit"]
     schema = ValueSchema(
-        data_axes=tuple(axis_from_tree(axis) for axis in axes),
         validity_contract=contract,
         dtype=np.dtype(_text(data["dtype"], "dtype")),
         value_unit=unit,
@@ -320,27 +212,24 @@ def value_schema_from_tree(tree: Any) -> ValueSchema:
 def dataset_schema_to_tree(schema: DatasetSchema) -> dict[str, Any]:
     return {
         "schema": DATASET_SCHEMA,
-        "repeat_axis": axis_to_tree(schema.repeat_axis),
-        "point_table": point_table_to_tree(schema.point_table),
-        "grid_topology": None
-        if schema.grid_topology is None
-        else grid_topology_to_tree(schema.grid_topology),
-        "cell_schema": value_schema_to_tree(schema.cell_schema),
+        "repeat_domain": domain_to_tree(schema.repeat_domain),
+        "point_domain": domain_to_tree(schema.point_domain),
+        "cell_domain": domain_to_tree(schema.cell_domain),
+        "value_schema": value_schema_to_tree(schema.value_schema),
     }
 
 
 def dataset_schema_from_tree(tree: Any) -> DatasetSchema:
     data = _exact_map(
         tree,
-        {"schema", "repeat_axis", "point_table", "grid_topology", "cell_schema"},
+        {"schema", "repeat_domain", "point_domain", "cell_domain", "value_schema"},
         DATASET_SCHEMA,
     )
-    topology = data["grid_topology"]
     schema = DatasetSchema(
-        repeat_axis=axis_from_tree(data["repeat_axis"]),
-        point_table=point_table_from_tree(data["point_table"]),
-        grid_topology=None if topology is None else grid_topology_from_tree(topology),
-        cell_schema=value_schema_from_tree(data["cell_schema"]),
+        repeat_domain=domain_from_tree(data["repeat_domain"]),
+        point_domain=domain_from_tree(data["point_domain"]),
+        cell_domain=domain_from_tree(data["cell_domain"]),
+        value_schema=value_schema_from_tree(data["value_schema"]),
     )
     if _encode(dataset_schema_to_tree(schema)) != _encode(tree):
         raise ValueError("DatasetSchema tree is typed but non-canonical")
@@ -356,7 +245,7 @@ def dataset_schema_fingerprint(schema: DatasetSchema) -> str:
 
 
 #: Tree keys holding one entry per coordinate rather than a structural fact.
-_COORDINATE_KEYS = frozenset({"values", "coordinates", "coordinate_labels"})
+_COORDINATE_KEYS = frozenset({"coordinates", "coordinate_labels"})
 
 
 def _structure_only(node: object) -> object:

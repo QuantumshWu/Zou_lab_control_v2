@@ -303,7 +303,7 @@ def test_task_preview_policy_and_typed_output_reference_are_explicit() -> None:
     companion_preview = NodePreviewSpec(
         companion,
         "image",
-        {"fate:point_coordinate:frame": 1},
+        {"fate:point:frame": 1},
         producer="camera",
         overlay=companion_overlay,
     )
@@ -317,7 +317,7 @@ def test_task_preview_policy_and_typed_output_reference_are_explicit() -> None:
     assert companion_task.node_previews[0].overlay is companion_overlay
     with pytest.raises(TypeError):
         companion_task.node_previews[0].semantic[
-            "fate:point_coordinate:frame"
+            "fate:point:frame"
         ] = 2
 
 
@@ -497,14 +497,20 @@ def test_virtual_installation_auto_calibration_path_matches_usage_notebook(
         assert occupancy.counts.shape == expected_shape
         counts_artifact = occupancy.artifacts["counts"]
         assert isinstance(counts_artifact, OwnedSnapshot)
-        assert counts_artifact.block.schema.repeat_axis.role is REPEAT
+        assert all(
+            axis.role is REPEAT
+            for axis in counts_artifact.block.schema.repeat_domain.axes
+        )
         # The point axis is the parent's, verbatim -- not rebuilt, not guessed
         # from the shape.  A one-frame cycle keeps its frame point axis.
-        parent_column = frames.block.schema.point_table.columns[0]
-        assert counts_artifact.block.schema.point_table.columns == (parent_column,)
-        assert parent_column.role is READOUT_EVENT
+        assert (
+            counts_artifact.block.schema.point_domain
+            == frames.block.schema.point_domain
+        )
+        (parent_axis,) = frames.block.schema.point_domain.axes
+        assert parent_axis.role is READOUT_EVENT
         # Sites are CELL data: one image resampled onto the trap lattice.
-        (site_axis,) = counts_artifact.block.schema.cell_schema.data_axes
+        (site_axis,) = counts_artifact.block.schema.cell_domain.axes
         # The occupancy publication carries the calibration's site axis, not one
         # of its own: same id, name, size and 1..n coordinates.  By value rather
         # than by identity, because a schema built from these exact axes is
@@ -548,7 +554,17 @@ def test_every_discovered_node_can_actually_be_driven_by_its_host() -> None:
         assert isinstance(produced, type), (
             f"{descriptor.api_name}'s build must annotate the node class it returns"
         )
-        wanted = "evaluate" if descriptor.kind is NodeKind.PROCESSOR else "execute"
+        wanted = (
+            "evaluate_inputs"
+            if descriptor.kind is NodeKind.PROCESSOR
+            and any(
+                getattr(spec, "sibling_outputs", ())
+                for spec in descriptor.input_specs
+            )
+            else "evaluate"
+            if descriptor.kind is NodeKind.PROCESSOR
+            else "execute"
+        )
         checked.append(descriptor.api_name)
         if not callable(getattr(produced, wanted, None)):
             undriveable.append(f"{descriptor.api_name} has no {wanted}()")

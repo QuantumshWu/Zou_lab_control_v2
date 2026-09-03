@@ -16,25 +16,25 @@ from zlc_plot import (
     Qt5ParameterPanel,
     ensure_qt5_application,
 )
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from data_factory import (
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
 from zlc_plot.semantics import fate_field_name
 
-
 def _session() -> PlotSession:
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=2, label="Repeat"),
-        PointTable.from_columns(
+    schema = make_dataset_schema(
+        repeat_domain(size=2),
+        mapped_domain_from_columns(
             {"scan": np.linspace(0.0, 1.0, 4)},
             units={"scan": "V"},
-            display_units={"scan": "mV"},
-            labels={"scan": "Scan"},
         ),
         dtype=np.float64,
-        generation="semantic-ui-tests",
     )
-    snapshot = DatasetSnapshot(schema, np.arange(8.0).reshape(2, 4), revision=0)
+    snapshot = make_snapshot(schema, np.arange(8.0).reshape(2, 4), revision=0)
     return PlotSession(snapshot, CurvePlot(AxisRef.point("scan")))
-
 
 @pytest.mark.gui
 def test_offscreen_semantic_combos_use_unique_labeled_choices() -> None:
@@ -66,7 +66,6 @@ def test_offscreen_semantic_combos_use_unique_labeled_choices() -> None:
             panel.deleteLater()
         session.close()
 
-
 @pytest.mark.gui
 def test_offscreen_semantic_kind_combo_lists_every_kind_the_data_admits() -> None:
     """The kind combo lists every kind this dataset can host.
@@ -94,13 +93,12 @@ def test_offscreen_semantic_kind_combo_lists_every_kind_the_data_admits() -> Non
             panel.deleteLater()
         session.close()
 
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"scan": np.linspace(0.0, 1.0, 4)}),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"scan": np.linspace(0.0, 1.0, 4)}),
         dtype=np.float64,
-        generation="semantic-ui-no-facet-default",
     )
-    snapshot = DatasetSnapshot(schema, np.arange(4.0).reshape(1, 4), revision=0)
+    snapshot = make_snapshot(schema, np.arange(4.0).reshape(1, 4), revision=0)
     session = PlotSession(snapshot, CurvePlot(AxisRef.point("scan")))
     panel = None
     try:

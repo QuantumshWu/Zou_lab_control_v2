@@ -568,8 +568,7 @@ class SiteMap:
         which site is which.
 
         A site array is CELL data: it is one image resampled onto the trap
-        lattice, and nobody scanned over sites.  So this is an ``AxisSpec``,
-        not a point column.
+        lattice, and nobody scanned over sites. So it belongs to Cell-data.
 
         The coordinates are the ordinals 1..n.  Every projection in zlc_plot
         plots a coordinate as a number, so a text coordinate is refused at

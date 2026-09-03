@@ -75,7 +75,7 @@ def catalog() -> tuple[Case, ...]:
             "curve_tensor_group_2M",
             lattice_2m,
             lambda: CurvePlot(
-                AxisRef.data("frame"), group=AxisRef.data("site")
+                AxisRef.cell_data("frame"), group=AxisRef.cell_data("site")
             ),
             ("hover_series", "click_series", "drag_main"),
             notes="tensor x and tensor group",
@@ -84,8 +84,8 @@ def catalog() -> tuple[Case, ...]:
             "curve_point_group_2M",
             lattice_2m,
             lambda: CurvePlot(
-                AxisRef.point_dimension("ax"),
-                group=AxisRef.point_dimension("ay"),
+                AxisRef.point("ax"),
+                group=AxisRef.point("ay"),
             ),
             ("hover_series", "click_series", "drag_main"),
             notes="two point-topology roles",
@@ -106,7 +106,7 @@ def catalog() -> tuple[Case, ...]:
             "image_heatmap_2M",
             lattice_2m,
             lambda: ImagePlot(
-                AxisRef.point_dimension("ax"), AxisRef.point_dimension("ay")
+                AxisRef.point("ax"), AxisRef.point("ay")
             ),
             ("drag_main", "drag_clim", "click_main", "pan_drag", "wheel_main"),
         ),
@@ -114,7 +114,7 @@ def catalog() -> tuple[Case, ...]:
             "image_mixed_axes_2M",
             lattice_2m,
             lambda: ImagePlot(
-                AxisRef.point_dimension("ax"), AxisRef.data("site")
+                AxisRef.point("ax"), AxisRef.cell_data("site")
             ),
             ("drag_main", "drag_clim", "click_main", "pan_drag", "wheel_main"),
             notes="one point-topology and one tensor image axis",
@@ -122,14 +122,14 @@ def catalog() -> tuple[Case, ...]:
         Case(
             "image_repeat_data_2M",
             lattice_2m,
-            lambda: ImagePlot(AxisRef.data("site"), AxisRef.repeat()),
+            lambda: ImagePlot(AxisRef.cell_data("site"), AxisRef.repeat("repeat")),
             ("drag_main", "drag_clim", "click_main", "pan_drag", "wheel_main"),
             notes="two tensor image axes, including repeat",
         ),
         Case(
             "image_camera_4M",
             camera_feed,
-            lambda: ImagePlot(AxisRef.data("x"), AxisRef.data("y")),
+            lambda: ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y")),
             ("drag_main", "drag_clim", "click_main", "pan_drag", "wheel_main"),
             notes="2048x2048 uint16 dense camera frame",
         ),
@@ -137,7 +137,7 @@ def catalog() -> tuple[Case, ...]:
             "h3d_bars_2M",
             lattice_2m,
             lambda: ImagePlot(
-                AxisRef.point_dimension("ax"), AxisRef.point_dimension("ay")
+                AxisRef.point("ax"), AxisRef.point("ay")
             ),
             ("drag_orbit", "drag_clim", "click_main", "wheel_main"),
             parameters={"presentation": "height_bars"},
@@ -149,7 +149,7 @@ def catalog() -> tuple[Case, ...]:
                 repeats=4, rows=40000, frames=1, sites=1, dims=(200, 200)
             ),
             lambda: ImagePlot(
-                AxisRef.point_dimension("ax"), AxisRef.point_dimension("ay")
+                AxisRef.point("ax"), AxisRef.point("ay")
             ),
             ("drag_orbit",),
             parameters={"presentation": "height_bars"},
@@ -165,7 +165,7 @@ def catalog() -> tuple[Case, ...]:
             "facet_frame3_2M",
             lattice_2m,
             lambda: FacetGridPlot(
-                AxisRef.data("frame"), CurvePlot(AxisRef.point("ax"))
+                AxisRef.cell_data("frame"), CurvePlot(AxisRef.point("ax"))
             ),
             ("hover_series", "dclick_cell"),
         ),
@@ -173,7 +173,7 @@ def catalog() -> tuple[Case, ...]:
             "facet_scan10_2M",
             lattice_2m,
             lambda: FacetGridPlot(
-                AxisRef.point_dimension("ax"), CurvePlot(AxisRef.point("ay"))
+                AxisRef.point("ax"), CurvePlot(AxisRef.point("ay"))
             ),
             ("dclick_cell",),
         ),
@@ -183,7 +183,7 @@ def catalog() -> tuple[Case, ...]:
                 repeats=16, rows=2000, frames=1, sites=64, dims=(10, 10, 20)
             ),
             lambda: FacetGridPlot(
-                AxisRef.data("site"), CurvePlot(AxisRef.point("ax"))
+                AxisRef.cell_data("site"), CurvePlot(AxisRef.point("ax"))
             ),
             ("hover_series", "dclick_cell"),
             notes="64 curve cells",
@@ -192,8 +192,8 @@ def catalog() -> tuple[Case, ...]:
             "facet10_image_2M",
             lattice_2m,
             lambda: FacetGridPlot(
-                AxisRef.point_dimension("ax"),
-                ImagePlot(AxisRef.data("site"), AxisRef.data("frame")),
+                AxisRef.point("ax"),
+                ImagePlot(AxisRef.cell_data("site"), AxisRef.cell_data("frame")),
             ),
             ("dclick_cell",),
             notes="10 image cells (site x frame)",
@@ -204,9 +204,9 @@ def catalog() -> tuple[Case, ...]:
                 repeats=160, rows=100, frames=2, sites=64, dims=(10, 10)
             ),
             lambda: FacetGridPlot(
-                AxisRef.data("site"),
+                AxisRef.cell_data("site"),
                 ImagePlot(
-                    AxisRef.point_dimension("ax"), AxisRef.point_dimension("ay")
+                    AxisRef.point("ax"), AxisRef.point("ay")
                 ),
             ),
             ("dclick_cell",),
@@ -218,7 +218,7 @@ def catalog() -> tuple[Case, ...]:
                 repeats=16, rows=2000, frames=1, sites=64, dims=(10, 10, 20)
             ),
             lambda: FacetGridPlot(
-                AxisRef.data("site"), HistogramPlot()
+                AxisRef.cell_data("site"), HistogramPlot()
             ),
             ("dclick_cell",),
             notes="64 pooled histogram cells",
@@ -227,9 +227,9 @@ def catalog() -> tuple[Case, ...]:
             "facet34_mixed_image_2M",
             lattice_2m,
             lambda: FacetGridPlot(
-                AxisRef.data("site"),
+                AxisRef.cell_data("site"),
                 ImagePlot(
-                    AxisRef.point_dimension("ax"), AxisRef.data("frame")
+                    AxisRef.point("ax"), AxisRef.cell_data("frame")
                 ),
             ),
             ("dclick_cell",),
@@ -247,7 +247,7 @@ def catalog() -> tuple[Case, ...]:
             "fit_facet10_2M",
             lattice_2m,
             lambda: FacetGridPlot(
-                AxisRef.point_dimension("ax"), CurvePlot(AxisRef.point("ay"))
+                AxisRef.point("ax"), CurvePlot(AxisRef.point("ay"))
             ),
             (),
             fit={"model": "gaussian_offset"},

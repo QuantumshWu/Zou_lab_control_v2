@@ -19,6 +19,19 @@ def build_payload(projection: Any, view: Any, state: Any) -> None:
     spec = projection._semantic_spec()
     collapsed = tuple(getattr(spec, "reduced", ()))
     aggregation = getattr(spec, "reduction", None)
+    if not collapsed and view.has_primary_index:
+        # A window of an integer history is binned from its frequency table,
+        # which the view carries from one revision to the next and moves by
+        # the shots that entered and left, instead of recounting the window.
+        frequency = view.window_frequency(window)
+        if frequency is not None:
+            payload = view.histogram_from_frequency(
+                bins=projection._histogram_bins(view, state, frequency=frequency),
+                frequency=frequency,
+            )
+            if payload is not None:
+                projection._payload = payload
+                return
     if window <= 1 and not view.has_primary_index:
         # One shot: the distribution of what was just measured.  No history is
         # consulted, and none is kept for it.

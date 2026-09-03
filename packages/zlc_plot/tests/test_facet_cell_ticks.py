@@ -15,35 +15,31 @@ import numpy as np
 from zlc_plot.ticks import SmartOffsetLocator
 
 from data_factory import (
-    Axis,
-    DatasetSchema,
-    DatasetSnapshot,
-    PointTable,
-    PointTopology,
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
 )
-from zlc_data import SPATIAL_X, SPATIAL_Y
+from zlc_data import OwnedSnapshot, REPEAT, SPATIAL_X, SPATIAL_Y
 from zlc_plot import AxisRef, FacetGridPlot, ImagePlot
 from zlc_plot.session import PlotSession
 
-
-def _frames_snapshot(points: int = 9, *, revision: int = 1) -> DatasetSnapshot:
+def _frames_snapshot(points: int = 9, *, revision: int = 1) -> OwnedSnapshot:
     """(repeat=1, points, y, x) camera frames faceted over a scan dimension."""
 
-    bias = Axis.create("bias", values=[float(v) for v in range(points)])
-    table = PointTable.from_columns({"bias": [float(v) for v in range(points)]})
-    topology = PointTopology.from_cartesian((bias,), point_table=table)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
+    table = mapped_domain_from_columns({"bias": [float(v) for v in range(points)]})
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
         table,
-        data_axes=(
-            Axis.create(
+        cell_axes=(
+            axis(
                 "sy", values=tuple(float(v) for v in range(30)), role=SPATIAL_Y
             ),
-            Axis.create(
+            axis(
                 "sx", values=tuple(float(v) for v in range(40)), role=SPATIAL_X
             ),
         ),
-        point_topology=topology,
         dtype=np.uint8,
     )
     values = (
@@ -51,46 +47,40 @@ def _frames_snapshot(points: int = 9, *, revision: int = 1) -> DatasetSnapshot:
         .integers(0, 255, (1, points, 30, 40))
         .astype(np.uint8)
     )
-    return DatasetSnapshot(schema, values, revision=revision)
-
+    return make_snapshot(schema, values, revision=revision)
 
 _FRAMES_SPEC = FacetGridPlot(
-    AxisRef.point_dimension("bias"),
-    ImagePlot(AxisRef.data("sx"), AxisRef.data("sy")),
+    AxisRef.point("bias"),
+    ImagePlot(AxisRef.cell_data("sx"), AxisRef.cell_data("sy")),
 )
 
-
-def _scalar_scan_snapshot() -> tuple[FacetGridPlot, DatasetSnapshot]:
+def _scalar_scan_snapshot() -> tuple[FacetGridPlot, OwnedSnapshot]:
     """3D scalar scan whose facet holds scan-heatmap (ImagePlot) cells."""
 
     import itertools
 
     a = [0.0, 1.0, 2.0]
     rows = list(itertools.product(a, a, a))
-    table = PointTable.from_columns(
+    table = mapped_domain_from_columns(
         {
             "va": [r[0] for r in rows],
             "vb": [r[1] for r in rows],
             "vc": [r[2] for r in rows],
         }
     )
-    dims = tuple(Axis.create(name, values=a) for name in ("va", "vb", "vc"))
-    topology = PointTopology.from_cartesian(dims, point_table=table)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=2),
+    schema = make_dataset_schema(
+        repeat_domain(size=2),
         table,
-        point_topology=topology,
         dtype=np.float64,
     )
     values = np.random.default_rng(1).normal(size=(2, len(rows)))
     spec = FacetGridPlot(
-        AxisRef.point_dimension("va"),
+        AxisRef.point("va"),
         ImagePlot(
-            AxisRef.point_dimension("vc"), AxisRef.point_dimension("vb")
+            AxisRef.point("vc"), AxisRef.point("vb")
         ),
     )
-    return spec, DatasetSnapshot(schema, values, revision=1)
-
+    return spec, make_snapshot(schema, values, revision=1)
 
 def _visible_cells(session: PlotSession) -> list[tuple[int, object]]:
     renderer = session._renderer
@@ -101,7 +91,6 @@ def _visible_cells(session: PlotSession) -> list[tuple[int, object]]:
         if axis.get_visible()
     ]
 
-
 def _marked_ticks(axis_obj) -> list:
     return [
         tick
@@ -109,14 +98,12 @@ def _marked_ticks(axis_obj) -> list:
         if tick.tick1line.get_visible()
     ]
 
-
 def _labelled_ticks(axis_obj) -> list:
     return [
         tick
         for tick in axis_obj._update_ticks()
         if tick.label1.get_visible() and tick.label1.get_text()
     ]
-
 
 def _assert_shared_marks_boundary_labels(session: PlotSession) -> None:
     renderer = session._renderer
@@ -149,14 +136,12 @@ def _assert_shared_marks_boundary_labels(session: PlotSession) -> None:
     assert len(x_values) == 1
     assert len(y_values) == 1
 
-
 def test_frames_facet_cells_share_tick_marks_and_gate_labels() -> None:
     session = PlotSession(_frames_snapshot(), _FRAMES_SPEC, size="8x8")
     try:
         _assert_shared_marks_boundary_labels(session)
     finally:
         session.close()
-
 
 def test_scan_heatmap_facet_cells_share_tick_marks_and_gate_labels() -> None:
     spec, snapshot = _scalar_scan_snapshot()
@@ -165,7 +150,6 @@ def test_scan_heatmap_facet_cells_share_tick_marks_and_gate_labels() -> None:
         _assert_shared_marks_boundary_labels(session)
     finally:
         session.close()
-
 
 def test_overview_cell_ticks_have_one_owner_across_frames() -> None:
     """A cell's tick configuration is installed ONCE, not once per authority.
@@ -200,7 +184,6 @@ def test_overview_cell_ticks_have_one_owner_across_frames() -> None:
         _assert_shared_marks_boundary_labels(session)
     finally:
         session.close()
-
 
 def test_boundary_label_gating_refires_after_focus_round_trip() -> None:
     """Focus installs its own locators and full labels; the overview pass

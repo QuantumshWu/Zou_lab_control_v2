@@ -29,10 +29,10 @@ from zlc_data import (
     DataBlock,
     DatasetRevision,
     DatasetSchema,
+    DomainSpec,
     OwnedSnapshot,
-    PointColumn,
-    PointTable,
     StreamGenerationId,
+    SCALAR_DOMAIN,
     ValueSchema,
     load_npz,
     save_npz,
@@ -47,20 +47,17 @@ SIGMA = np.asarray([[[0.1], [0.2], [0.3], [0.4]]])
 
 def _schema() -> DatasetSchema:
     return DatasetSchema(
-        AxisSpec(AxisId("t.repeat"), "repeat", REPEAT, 1, (0,)),
-        PointTable(
-            POINTS,
-            (
-                PointColumn(
-                    AxisId("t.point"),
-                    "point",
-                    SCAN_POINT,
-                    PointColumn.NUMERIC,
-                    tuple(range(POINTS)),
-                ),
-            ),
+        DomainSpec(
+            (1,),
+            (AxisSpec(AxisId("t.repeat"), "repeat", REPEAT, 1, (0,)),),
+            ((0,),),
         ),
-        None,
+        DomainSpec(
+            (POINTS,),
+            (AxisSpec(AxisId("t.point"), "point", SCAN_POINT, POINTS),),
+            (tuple(range(POINTS)),),
+        ),
+        SCALAR_DOMAIN,
         ValueSchema.scalar(np.dtype("float64"), "count"),
     )
 

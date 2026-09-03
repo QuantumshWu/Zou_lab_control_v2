@@ -21,7 +21,7 @@ def _camera_frames(*, cycles: int, frames: int):
     """(cycles, F, y, x) exactly as camera_measurement publishes it."""
 
     from zlc_atom.data import snapshot_from_array
-    from zlc_atom.nodes.camera_measurement.measurement import _frame_point_column
+    from zlc_atom.nodes.camera_measurement.measurement import _frame_point_axis
     from zlc_data import READOUT_EVENT
 
     values = np.zeros((cycles, frames, 6, 8), dtype=np.uint16)
@@ -29,8 +29,8 @@ def _camera_frames(*, cycles: int, frames: int):
         values,
         producer="cam",
         signal="frames",
-        roles=(READOUT_EVENT, SPATIAL_Y, SPATIAL_X),
-        point_columns={READOUT_EVENT: _frame_point_column("cam", frames)},
+        point_axes=(_frame_point_axis("cam", frames),),
+        cell_axes=(SPATIAL_Y, SPATIAL_X),
         generation="auto-kind",
         revision=1,
     ).block.schema
@@ -76,14 +76,14 @@ def _occupancy_counts(*, frames: int, sites: int):
     """(repeat, frames, sites) exactly as the occupancy processor publishes."""
 
     from zlc_atom.data import snapshot_from_array
-    from zlc_atom.nodes.camera_measurement.measurement import _frame_point_column
+    from zlc_atom.nodes.camera_measurement.measurement import _frame_point_axis
 
     return snapshot_from_array(
         np.zeros((1, frames, sites), dtype=float),
         producer="occupancy",
         signal="counts",
-        roles=(READOUT_EVENT, SITE),
-        point_columns={READOUT_EVENT: _frame_point_column("cam", frames)},
+        point_axes=(_frame_point_axis("cam", frames),),
+        cell_axes=(SITE,),
         generation="auto-kind",
         revision=1,
     ).block.schema
@@ -93,22 +93,21 @@ def _scan_of_scalars(*, points: int):
     """(repeat, points) -- one number per scanned point, no cell axis."""
 
     from zlc_atom.data import snapshot_from_array
-    from zlc_data import AxisId, PointColumn, SCAN_POINT
+    from zlc_data import AxisId, AxisSpec, SCAN_POINT
 
     return snapshot_from_array(
         np.zeros((2, points), dtype=float),
         producer="scan",
         signal="value",
-        roles=(SCAN_POINT,),
-        point_columns={
-            SCAN_POINT: PointColumn(
+        point_axes=(
+            AxisSpec(
                 AxisId("scan.knob"),
                 "knob",
                 SCAN_POINT,
-                PointColumn.NUMERIC,
+                points,
                 tuple(float(index) for index in range(points)),
-            )
-        },
+            ),
+        ),
         generation="auto-kind",
         revision=1,
     ).block.schema
@@ -164,7 +163,7 @@ def test_the_automatic_kind_is_the_flat_kind_the_data_proves() -> None:
 
     # A judged cycle proves two coordinates as well -- which frame, and which
     # site -- so it is a map, not thirty-five curves three points long.  One
-    # coordinate comes from the point table and one from the cell; a picture
+    # coordinate comes from the Point domain and one from Cell-data; a picture
     # does not care which side of the dataset its axes live on.
     counts = _occupancy_counts(frames=3, sites=35)
     counts_spec = task_console_fitting_spec(counts, "", "")

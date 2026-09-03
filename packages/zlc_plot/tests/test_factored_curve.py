@@ -15,37 +15,31 @@ import numpy as np
 import pytest
 
 from data_factory import (
-    Axis,
-    DatasetSchema,
-    DatasetSnapshot,
-    PointTable,
-    PointTopology,
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
 )
-from zlc_data import AxisId
+from zlc_data import REPEAT, SITE
 from zlc_plot import AxisRef, Reduction
 from zlc_plot.data_view import DataView
-
 
 def _snapshot(*, dtype=np.float64, holes: float = 0.0, seed: int = 0):
     rng = np.random.default_rng(seed)
     R, F, S = 4, 3, 5
     cells = [(i % 6, (i // 6) % 4) for i in range(24)]
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=R),
-        PointTable.from_columns({
+    schema = make_dataset_schema(
+        repeat_domain(size=R),
+        mapped_domain_from_columns({
             "ax": np.asarray([float(c[0]) for c in cells]),
             "ay": np.asarray([float(c[1]) for c in cells]),
         }),
-        data_axes=(
-            Axis.create("frame", values=[0.0, 1.0, 2.0]),
-            Axis.create("site", values=[float(i) for i in range(S)]),
+        cell_axes=(
+            axis("frame", values=[0.0, 1.0, 2.0]),
+            axis("site", values=[float(i) for i in range(S)], role=SITE),
         ),
         dtype=np.dtype(dtype),
-        point_topology=PointTopology(
-            (AxisId("ax"), AxisId("ay")),
-            (tuple(float(i) for i in range(6)), tuple(float(i) for i in range(4))),
-            tuple(cells),
-        ),
     )
     shape = (R, len(cells), F, S)
     if np.dtype(dtype).kind == "u":
@@ -60,8 +54,7 @@ def _snapshot(*, dtype=np.float64, holes: float = 0.0, seed: int = 0):
         validity = np.broadcast_to(
             rng.random(shape[:2] + (1, 1)) > holes, shape
         ).copy()
-    return DatasetSnapshot(schema, values, revision=1, validity=validity)
-
+    return make_snapshot(schema, values, revision=1, validity=validity)
 
 def _assert_same(fast, slow):
     assert fast is not None, "the lattice path refused a configuration it owns"
@@ -93,18 +86,16 @@ def _assert_same(fast, slow):
                 ours.sem, theirs.sem, equal_nan=True, rtol=1e-12, atol=1e-12
             )
 
-
 GROUPINGS = (
     (),
-    (AxisRef.data("site"),),
-    (AxisRef.data("frame"), AxisRef.data("site")),
-    (AxisRef.repeat(),),
-    (AxisRef.repeat(), AxisRef.data("site")),
+    (AxisRef.cell_data("site"),),
+    (AxisRef.cell_data("frame"), AxisRef.cell_data("site")),
+    (AxisRef.repeat("repeat"),),
+    (AxisRef.repeat("repeat"), AxisRef.cell_data("site")),
     (AxisRef.point("ay"),),
-    (AxisRef.point("ay"), AxisRef.data("site")),
-    (AxisRef.data("site"), AxisRef.point("ay")),
+    (AxisRef.point("ay"), AxisRef.cell_data("site")),
+    (AxisRef.cell_data("site"), AxisRef.point("ay")),
 )
-
 
 @pytest.mark.parametrize("holes", [0.0, 0.3, 0.995])
 @pytest.mark.parametrize("dtype", [np.float64, np.uint8])
@@ -124,7 +115,6 @@ def test_every_owned_configuration_matches_the_generic_path(
         )
         _assert_same(fast, slow)
 
-
 def test_uncertainty_matches_including_the_binomial_case() -> None:
     view = DataView(_snapshot(holes=0.2, seed=5))
     x = AxisRef.point("ay")
@@ -134,7 +124,6 @@ def test_uncertainty_matches_including_the_binomial_case() -> None:
             x, view._all_positions(), groups, Reduction.MEAN, True
         )
         _assert_same(fast, slow)
-
 
 @pytest.mark.parametrize("holes", [0.0, 0.3])
 @pytest.mark.parametrize("dtype", [np.float64, np.uint8])
@@ -147,9 +136,9 @@ def test_tensor_x_and_group_axes_match_the_generic_path(
 ) -> None:
     view = DataView(_snapshot(dtype=dtype, holes=holes, seed=7))
     for x, groups in (
-        (AxisRef.data("frame"), (AxisRef.data("site"),)),
-        (AxisRef.data("frame"), (AxisRef.repeat(),)),
-        (AxisRef.repeat(), (AxisRef.data("site"),)),
+        (AxisRef.cell_data("frame"), (AxisRef.cell_data("site"),)),
+        (AxisRef.cell_data("frame"), (AxisRef.repeat("repeat"),)),
+        (AxisRef.repeat("repeat"), (AxisRef.cell_data("site"),)),
     ):
         fast = view._dense_data_curve(x, groups, aggregation)
         slow = view._curve_from_positions(
@@ -157,13 +146,12 @@ def test_tensor_x_and_group_axes_match_the_generic_path(
         )
         _assert_same(fast, slow)
 
-
 def test_tensor_x_and_group_uncertainty_matches() -> None:
     view = DataView(_snapshot(holes=0.2, seed=13))
     for x, groups in (
-        (AxisRef.data("frame"), (AxisRef.data("site"),)),
-        (AxisRef.data("frame"), (AxisRef.repeat(),)),
-        (AxisRef.repeat(), (AxisRef.data("site"),)),
+        (AxisRef.cell_data("frame"), (AxisRef.cell_data("site"),)),
+        (AxisRef.cell_data("frame"), (AxisRef.repeat("repeat"),)),
+        (AxisRef.repeat("repeat"), (AxisRef.cell_data("site"),)),
     ):
         fast = view._dense_data_curve(x, groups, Reduction.MEAN, True)
         slow = view._curve_from_positions(
@@ -171,13 +159,13 @@ def test_tensor_x_and_group_uncertainty_matches() -> None:
         )
         _assert_same(fast, slow)
     fast = view._curve_from_axes(
-        AxisRef.data("frame"),
+        AxisRef.cell_data("frame"),
         (AxisRef.point("ay"),),
         Reduction.MEAN,
         uncertainty=True,
     )
     slow = view._curve_from_positions(
-        AxisRef.data("frame"),
+        AxisRef.cell_data("frame"),
         view._all_positions(),
         (AxisRef.point("ay"),),
         Reduction.MEAN,
@@ -185,23 +173,59 @@ def test_tensor_x_and_group_uncertainty_matches() -> None:
     )
     _assert_same(fast, slow)
 
+def test_mapped_repeat_siblings_keep_factored_uncertainty_on_repeat_dimension() -> None:
+    """Multiple logical Repeat axes share physical dimension zero."""
+
+    from zlc_data import (
+        AxisId,
+        AxisSpec,
+        COMPONENT,
+        DatasetSchema as DataSchema,
+        DomainSpec,
+        REPEAT,
+        ValidityContract,
+        ValueSchema,
+        owned_snapshot_from_arrays,
+    )
+
+    sweep = AxisSpec(AxisId("sweep"), "sweep", REPEAT, 2, (0, 1))
+    shot = AxisSpec(AxisId("shot"), "shot", REPEAT, 3, (0, 1, 2))
+    x = AxisSpec(AxisId("x"), "x", COMPONENT, 4, (0.0, 1.0, 2.0, 3.0))
+    schema = DataSchema(
+        DomainSpec(
+            (6,),
+            (sweep, shot),
+            ((0, 0, 0, 1, 1, 1), (0, 1, 2, 0, 1, 2)),
+        ),
+        DomainSpec((1,), (), ()),
+        DomainSpec((4,), (x,)),
+        ValueSchema(ValidityContract.value(), np.dtype("<f8")),
+    )
+    values = np.arange(24, dtype=np.float64).reshape((6, 1, 4))
+    snapshot = owned_snapshot_from_arrays(
+        schema, values, 1, validity=np.ones(values.shape, dtype=np.bool_)
+    )
+    view = DataView(snapshot)
+    fast = view._factored_curve(
+        AxisRef.repeat("shot"), (), Reduction.MEAN, uncertainty=True
+    )
+    slow = view._curve_from_positions(
+        AxisRef.repeat("shot"), view._all_positions(), (), Reduction.MEAN, True
+    )
+    _assert_same(fast, slow)
 
 def _identity_bucket_snapshot(*, grouped: bool, holes: bool, revision: int = 1):
     repeats = 11
-    data_axes = (
-        (Axis.create("series", values=[0.0, 1.0, 2.0]),)
+    cell_axes = (
+        (axis("series", values=[0.0, 1.0, 2.0]),)
         if grouped
         else ()
     )
-    schema = DatasetSchema.create(
-        Axis.create(
-            "repeat",
-            values=np.arange(repeats, dtype=float) * 0.001,
-            canonical_unit="s",
-        ),
-        PointTable.from_columns({"sample": [0.0]}),
-        data_axes=data_axes,
-        canonical_unit="s",
+    schema = make_dataset_schema(
+        repeat_domain(values=np.arange(repeats, dtype=float) * 0.001, unit='s'),
+        mapped_domain_from_columns({"sample": [0.0]}),
+        cell_axes=cell_axes,
+        value_unit="s",
         dtype=np.float64,
     )
     series = 3 if grouped else 1
@@ -217,7 +241,7 @@ def _identity_bucket_snapshot(*, grouped: bool, holes: bool, revision: int = 1):
         # axis; finite-value holes below still exercise per-series validity.
         validity[2, :] = False
         values[7, series - 1] = np.nan
-    return DatasetSnapshot(
+    return make_snapshot(
         schema,
         values[:, None, :] if grouped else values,
         revision=revision,
@@ -227,7 +251,6 @@ def _identity_bucket_snapshot(*, grouped: bool, holes: bool, revision: int = 1):
             else validity[:, None, :] if grouped else validity
         ),
     )
-
 
 def _assert_curve_arrays_exact(left, right) -> None:
     assert len(left.series) == len(right.series)
@@ -258,7 +281,6 @@ def _assert_curve_arrays_exact(left, right) -> None:
         else:
             np.testing.assert_array_equal(ours.sem, theirs.sem)
 
-
 @pytest.mark.parametrize("grouped", [False, True])
 @pytest.mark.parametrize("holes", [False, True])
 @pytest.mark.parametrize("aggregation", tuple(Reduction))
@@ -267,16 +289,15 @@ def test_identity_tensor_buckets_match_every_array_exactly(
 ) -> None:
     view = DataView(
         _identity_bucket_snapshot(grouped=grouped, holes=holes),
-        axis_display_units={AxisRef.repeat(): "ms"},
+        axis_display_units={AxisRef.repeat("repeat"): "ms"},
         value_display_unit="ms",
     )
-    groups = (AxisRef.data("series"),) if grouped else ()
-    fast = view._dense_data_curve(AxisRef.repeat(), groups, aggregation)
+    groups = (AxisRef.cell_data("series"),) if grouped else ()
+    fast = view._dense_data_curve(AxisRef.repeat("repeat"), groups, aggregation)
     slow = view._curve_from_positions(
-        AxisRef.repeat(), view._all_positions(), groups, aggregation
+        AxisRef.repeat("repeat"), view._all_positions(), groups, aggregation
     )
     _assert_curve_arrays_exact(fast, slow)
-
 
 @pytest.mark.parametrize("grouped", [False, True])
 @pytest.mark.parametrize("holes", [False, True])
@@ -284,36 +305,34 @@ def test_identity_tensor_uncertainty_is_the_same_undefined_single_sample(
     grouped, holes
 ) -> None:
     view = DataView(_identity_bucket_snapshot(grouped=grouped, holes=holes))
-    groups = (AxisRef.data("series"),) if grouped else ()
+    groups = (AxisRef.cell_data("series"),) if grouped else ()
     fast = view._dense_data_curve(
-        AxisRef.repeat(), groups, Reduction.MEAN, uncertainty=True
+        AxisRef.repeat("repeat"), groups, Reduction.MEAN, uncertainty=True
     )
     slow = view._curve_from_positions(
-        AxisRef.repeat(), view._all_positions(), groups, Reduction.MEAN, True
+        AxisRef.repeat("repeat"), view._all_positions(), groups, Reduction.MEAN, True
     )
     _assert_curve_arrays_exact(fast, slow)
-
 
 def test_resolved_axis_cache_crosses_only_the_same_schema_and_unit_context() -> None:
     first = DataView(
         _identity_bucket_snapshot(grouped=True, holes=False, revision=1),
-        axis_display_units={AxisRef.repeat(): "ms"},
+        axis_display_units={AxisRef.repeat("repeat"): "ms"},
     )
-    resolved = first._resolve(AxisRef.repeat())
+    resolved = first._resolve(AxisRef.repeat("repeat"))
     second = DataView(
         _identity_bucket_snapshot(grouped=True, holes=True, revision=2),
-        axis_display_units={AxisRef.repeat(): "ms"},
+        axis_display_units={AxisRef.repeat("repeat"): "ms"},
         inherit_domains_from=first,
     )
-    assert second._resolve(AxisRef.repeat()) is resolved
+    assert second._resolve(AxisRef.repeat("repeat")) is resolved
 
     changed_unit = DataView(
         _identity_bucket_snapshot(grouped=True, holes=False, revision=3),
-        axis_display_units={AxisRef.repeat(): "s"},
+        axis_display_units={AxisRef.repeat("repeat"): "s"},
         inherit_domains_from=second,
     )
-    assert changed_unit._resolve(AxisRef.repeat()) is not resolved
-
+    assert changed_unit._resolve(AxisRef.repeat("repeat")) is not resolved
 
 @pytest.mark.parametrize("holes", [0.0, 0.3])
 @pytest.mark.parametrize(
@@ -325,8 +344,8 @@ def test_exact_axis_aggregation_covers_remaining_curve_roles(
 ) -> None:
     view = DataView(_snapshot(holes=holes, seed=19))
     for x, groups in (
-        (AxisRef.data("frame"), (AxisRef.point("ay"),)),
-        (AxisRef.repeat(), (AxisRef.point("ay"), AxisRef.data("site"))),
+        (AxisRef.cell_data("frame"), (AxisRef.point("ay"),)),
+        (AxisRef.repeat("repeat"), (AxisRef.point("ay"), AxisRef.cell_data("site"))),
     ):
         fast = view._curve_from_axes(x, groups, aggregation)
         slow = view._curve_from_positions(
@@ -334,16 +353,10 @@ def test_exact_axis_aggregation_covers_remaining_curve_roles(
         )
         _assert_same(fast, slow)
 
-
 def test_configurations_the_path_does_not_own_fall_through() -> None:
     view = DataView(_snapshot(seed=3))
     x = AxisRef.point("ax")
     assert view._factored_curve(x, (), Reduction.FIRST) is None
-    assert (
-        view._factored_curve(AxisRef.data("site"), (), Reduction.MEAN)
-        is None
-    ), "a data-axis x belongs to the dense path, not this one"
-
 
 def test_the_public_curve_entry_uses_the_lattice_path(monkeypatch) -> None:
     """The fast path must actually serve curve(); a fast path nothing
@@ -359,7 +372,7 @@ def test_the_public_curve_entry_uses_the_lattice_path(monkeypatch) -> None:
         return result
 
     monkeypatch.setattr(DataView, "_factored_curve", spy)
-    view.curve(AxisRef.point("ax"), group_by=(AxisRef.data("site"),))
+    view.curve(AxisRef.point("ax"), group_by=(AxisRef.cell_data("site"),))
     assert calls == [True]
 
     def forbidden(*_args, **_kwargs):
@@ -367,9 +380,8 @@ def test_the_public_curve_entry_uses_the_lattice_path(monkeypatch) -> None:
 
     monkeypatch.setattr(DataView, "_all_positions", forbidden)
     view.curve(
-        AxisRef.data("frame"), group_by=(AxisRef.data("site"),)
+        AxisRef.cell_data("frame"), group_by=(AxisRef.cell_data("site"),)
     )
-
 
 @pytest.mark.parametrize("holes", [0.0, 0.3, 0.995])
 @pytest.mark.parametrize("dtype", [np.float64, np.uint8])
@@ -404,30 +416,28 @@ def test_factored_image_matches_the_generic_path(
         atol=1e-12,
     )
 
-
 def test_factored_image_fall_throughs() -> None:
     view = DataView(_snapshot(seed=21))
     x, y = AxisRef.point("ax"), AxisRef.point("ay")
     assert view._factored_image(x, y, Reduction.FIRST) is None
     assert (
         view._factored_image(
-            AxisRef.data("frame"), AxisRef.data("site"), Reduction.MEAN
+            AxisRef.cell_data("frame"), AxisRef.cell_data("site"), Reduction.MEAN
         )
         is None
     ), "two data axes belong to the dense image path"
 
     tensor = view._dense_data_image(
-        AxisRef.data("site"), AxisRef.repeat(), Reduction.MEAN
+        AxisRef.cell_data("site"), AxisRef.repeat("repeat"), Reduction.MEAN
     )
     assert tensor is not None
     generic = view._image_from_positions(
-        AxisRef.data("site"),
-        AxisRef.repeat(),
+        AxisRef.cell_data("site"),
+        AxisRef.repeat("repeat"),
         view._all_positions(),
         Reduction.MEAN,
     )
     _assert_same_image(tensor, generic)
-
 
 @pytest.mark.parametrize("holes", [0.0, 0.3])
 @pytest.mark.parametrize(
@@ -436,15 +446,14 @@ def test_factored_image_fall_throughs() -> None:
 def test_mixed_point_tensor_images_match_generic(holes, aggregation) -> None:
     view = DataView(_snapshot(holes=holes, seed=23))
     for x, y in (
-        (AxisRef.point_dimension("ax"), AxisRef.data("site")),
-        (AxisRef.data("site"), AxisRef.point_dimension("ay")),
+        (AxisRef.point("ax"), AxisRef.cell_data("site")),
+        (AxisRef.cell_data("site"), AxisRef.point("ay")),
     ):
         fast = view._image_from_axes(x, y, aggregation)
         slow = view._image_from_positions(
             x, y, view._all_positions(), aggregation
         )
         _assert_same_image(fast, slow)
-
 
 @pytest.mark.parametrize("holes", [0.0, 0.3])
 @pytest.mark.parametrize("uncertainty", [False, True])
@@ -455,9 +464,9 @@ def test_factored_facet_matches_the_generic_path(holes, uncertainty) -> None:
 
     view = DataView(_snapshot(holes=holes, seed=29))
     for facet, group in (
-        (AxisRef.data("frame"), None),
-        (AxisRef.data("frame"), AxisRef.data("site")),
-        (AxisRef.repeat(), AxisRef.data("site")),
+        (AxisRef.cell_data("frame"), None),
+        (AxisRef.cell_data("frame"), AxisRef.cell_data("site")),
+        (AxisRef.repeat("repeat"), AxisRef.cell_data("site")),
     ):
         spec = FacetGridPlot(
             facet, CurvePlot(AxisRef.point("ax"), group=group)
@@ -474,7 +483,7 @@ def test_factored_facet_matches_the_generic_path(holes, uncertainty) -> None:
             _assert_same(ours.payload, theirs.payload)
 
     spec = FacetGridPlot(
-        AxisRef.data("site"), CurvePlot(AxisRef.data("frame"))
+        AxisRef.cell_data("site"), CurvePlot(AxisRef.cell_data("frame"))
     )
     fast = view._factored_facet(spec, uncertainty)
     assert fast is not None
@@ -487,18 +496,16 @@ def test_factored_facet_matches_the_generic_path(holes, uncertainty) -> None:
         assert ours.facet_index == theirs.facet_index
         _assert_same(ours.payload, theirs.payload)
 
-
 def test_factored_facet_fall_throughs() -> None:
     from zlc_plot import CurvePlot, FacetGridPlot, HistogramPlot
 
     view = DataView(_snapshot(seed=31))
     assert (
         view._factored_facet(
-            FacetGridPlot(AxisRef.data("frame"), HistogramPlot()), False
+            FacetGridPlot(AxisRef.cell_data("frame"), HistogramPlot()), False
         )
         is None
     ), "histogram cells use the dense tensor-slice path"
-
 
 @pytest.mark.parametrize("holes", [0.0, 0.3])
 @pytest.mark.parametrize("uncertainty", [False, True])
@@ -512,9 +519,9 @@ def test_factored_row_facet_matches_the_generic_path(
     from zlc_plot import CurvePlot, FacetGridPlot
 
     view = DataView(_snapshot(holes=holes, seed=37))
-    for group in (None, AxisRef.data("site")):
+    for group in (None, AxisRef.cell_data("site")):
         spec = FacetGridPlot(
-            AxisRef.point_dimension("ax"),
+            AxisRef.point("ax"),
             CurvePlot(AxisRef.point("ay"), group=group),
         )
         fast = view._factored_facet(spec, uncertainty)
@@ -529,9 +536,9 @@ def test_factored_row_facet_matches_the_generic_path(
             _assert_same(ours.payload, theirs.payload)
 
     spec = FacetGridPlot(
-        AxisRef.point_dimension("ax"),
+        AxisRef.point("ax"),
         CurvePlot(
-            AxisRef.data("frame"), group=AxisRef.point("ay")
+            AxisRef.cell_data("frame"), group=AxisRef.point("ay")
         ),
     )
     fast = view._factored_facet(spec, uncertainty)
@@ -544,7 +551,6 @@ def test_factored_row_facet_matches_the_generic_path(
         assert ours.label == theirs.label
         assert ours.facet_index == theirs.facet_index
         _assert_same(ours.payload, theirs.payload)
-
 
 def _assert_same_image(ours, theirs) -> None:
     np.testing.assert_array_equal(
@@ -562,7 +568,6 @@ def _assert_same_image(ours, theirs) -> None:
         atol=1e-12,
     )
 
-
 @pytest.mark.parametrize("holes", [0.0, 0.3])
 @pytest.mark.parametrize(
     "aggregation", (Reduction.MEAN, Reduction.SUM, Reduction.MIN)
@@ -577,17 +582,17 @@ def test_factored_facet_image_cells_match_the_generic_path(
     view = DataView(_snapshot(holes=holes, seed=41))
     for cell in (
         ImagePlot(
-            AxisRef.point_dimension("ax"),
-            AxisRef.point_dimension("ay"),
+            AxisRef.point("ax"),
+            AxisRef.point("ay"),
             reduction=aggregation,
         ),
         ImagePlot(
-            AxisRef.point_dimension("ax"),
-            AxisRef.data("frame"),
+            AxisRef.point("ax"),
+            AxisRef.cell_data("frame"),
             reduction=aggregation,
         ),
     ):
-        spec = FacetGridPlot(AxisRef.data("site"), cell)
+        spec = FacetGridPlot(AxisRef.cell_data("site"), cell)
         fast = view._factored_facet(spec, False)
         assert fast is not None
         slow = view._facet_from_positions(
@@ -598,7 +603,6 @@ def test_factored_facet_image_cells_match_the_generic_path(
             assert ours.label == theirs.label
             assert ours.facet_index == theirs.facet_index
             _assert_same_image(ours.payload, theirs.payload)
-
 
 def test_factored_row_facet_image_cells_compress_to_their_used_sets() -> None:
     """A scan-dimension facet of heatmap cells over a HOLED topology: each
@@ -611,32 +615,27 @@ def test_factored_row_facet_image_cells_compress_to_their_used_sets() -> None:
     combos = [(i, j, k) for k in range(2) for j in range(3) for i in range(4)]
     cells = [c for c in combos if not (c[2] == 1 and c[0] == 3)]
     rows = len(cells)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=5),
-        PointTable.from_columns({
+    schema = make_dataset_schema(
+        repeat_domain(size=5),
+        mapped_domain_from_columns({
             "ax": np.asarray([float(c[0]) for c in cells]),
             "ay": np.asarray([float(c[1]) for c in cells]),
             "az": np.asarray([float(c[2]) for c in cells]),
         }),
-        data_axes=(Axis.create("site", values=[0.0, 1.0, 2.0]),),
+        cell_axes=(axis("site", values=[0.0, 1.0, 2.0], role=SITE),),
         dtype=np.float64,
-        point_topology=PointTopology(
-            (AxisId("ax"), AxisId("ay"), AxisId("az")),
-            ((0.0, 1.0, 2.0, 3.0), (0.0, 1.0, 2.0), (0.0, 1.0)),
-            tuple(cells),
-        ),
     )
     shape = (5, rows, 3)
     validity = np.broadcast_to(
         rng.random(shape[:2] + (1,)) > 0.2, shape
     ).copy()
     view = DataView(
-        DatasetSnapshot(schema, rng.normal(size=shape), 1, validity=validity)
+        make_snapshot(schema, rng.normal(size=shape), 1, validity=validity)
     )
     spec = FacetGridPlot(
-        AxisRef.point_dimension("az"),
+        AxisRef.point("az"),
         ImagePlot(
-            AxisRef.point_dimension("ax"), AxisRef.point_dimension("ay")
+            AxisRef.point("ax"), AxisRef.point("ay")
         ),
     )
     fast = view._factored_facet(spec, False)

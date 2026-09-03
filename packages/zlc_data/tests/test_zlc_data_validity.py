@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from zlc_data.axis import AxisId, AxisSpec, REPEAT, SPATIAL_X
-from zlc_data.schema import DatasetSchema, PointTable, ValueSchema
+from zlc_data.axis import AxisId, AxisSpec, REPEAT, SCAN_POINT, SPATIAL_X
+from zlc_data.schema import DatasetSchema, DomainSpec, ValueSchema
 from zlc_data.validity import DatasetComponentValidity, ValidityContract
 from zlc_data.value import (
     DataBlock,
@@ -22,12 +22,17 @@ def _axis(name: str, role, size: int) -> AxisSpec:
 def test_dataset_component_validity_expands_over_repeat_and_point_carriers():
     repeat = _axis("repeat", REPEAT, 2)
     component = _axis("component", SPATIAL_X, 3)
-    cell_schema = ValueSchema(
-        (component,),
+    value_schema = ValueSchema(
         ValidityContract.components(component.axis_id),
         np.dtype(np.float64),
     )
-    schema = DatasetSchema(repeat, PointTable(2), None, cell_schema)
+    point = _axis("point", SCAN_POINT, 2)
+    schema = DatasetSchema(
+        DomainSpec((2,), (repeat,), ((0, 1),)),
+        DomainSpec((2,), (point,), ((0, 1),)),
+        DomainSpec((3,), (component,)),
+        value_schema,
+    )
     validity = DatasetComponentValidity(
         (component.axis_id,),
         np.array(

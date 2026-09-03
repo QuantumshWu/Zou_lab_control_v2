@@ -945,7 +945,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             if name not in self._parameter_schema:
                 continue
             compatible = []
-            for symbol in registry.canonical_symbols():
+            for symbol in registry.distinct_symbols():
                 target = resolve_unit(symbol, registry)
                 if source.canonical_unit.compatible_with(target):
                     compatible.append(symbol)
@@ -3949,7 +3949,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             facet_index=(
                 self._facet_focus_index if state is None else state.facet_index
             ),
-            source_schema=snapshot_schema(data),
         )
 
     def _classifier_threshold_target_for_index(

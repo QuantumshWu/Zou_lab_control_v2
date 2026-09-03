@@ -200,7 +200,7 @@ def _image_snapshot(
         AxisId,
         AxisSpec,
         DatasetSchema,
-        PointTable,
+        DomainSpec,
         ValidityContract,
         ValueSchema,
         owned_snapshot_from_arrays,
@@ -213,10 +213,14 @@ def _image_snapshot(
                  tuple(float(index) for index in range(width))),
     )
     schema = DatasetSchema(
-        AxisSpec(AxisId("warm.repeat"), "repeat", REPEAT, 1, (0,)),
-        PointTable(1),
-        None,
-        ValueSchema(axes, ValidityContract.value(), np.dtype(dtype), None),
+        DomainSpec(
+            (1,),
+            (AxisSpec(AxisId("warm.repeat"), "repeat", REPEAT, 1, (0,)),),
+            ((0,),),
+        ),
+        DomainSpec((1,), (), ()),
+        DomainSpec((height, width), axes),
+        ValueSchema(ValidityContract.value(), np.dtype(dtype), None),
     )
     generator = np.random.default_rng(0)
     if np.dtype(dtype).kind in "ui":
@@ -237,29 +241,32 @@ def _series_snapshot(repeats: int, points: int) -> Any:
         AxisId,
         AxisSpec,
         DatasetSchema,
-        PointColumn,
-        PointTable,
+        DomainSpec,
+        SCALAR_DOMAIN,
         ValueSchema,
         owned_snapshot_from_arrays,
     )
 
     coordinates = np.linspace(0.0, 1.0, points)
     schema = DatasetSchema(
-        AxisSpec(AxisId("warm.repeat"), "repeat", REPEAT, repeats,
-                 tuple(range(repeats))),
-        PointTable(
-            points,
-            (
-                PointColumn(
+        DomainSpec(
+            (repeats,),
+            (AxisSpec(AxisId("warm.repeat"), "repeat", REPEAT, repeats,
+                      tuple(range(repeats))),),
+            (tuple(range(repeats)),),
+        ),
+        DomainSpec(
+            (points,),
+            (AxisSpec(
                     AxisId("x"),
                     "x",
                     SCAN_POINT,
-                    PointColumn.NUMERIC,
+                    points,
                     tuple(float(value) for value in coordinates),
-                ),
-            ),
+                ),),
+            (tuple(range(points)),),
         ),
-        None,
+        SCALAR_DOMAIN,
         ValueSchema.scalar(np.dtype(np.float64), None),
     )
     generator = np.random.default_rng(1)
@@ -284,35 +291,44 @@ def _mixed_snapshot(
         AxisId,
         AxisSpec,
         DatasetSchema,
-        PointColumn,
-        PointTable,
+        DomainSpec,
         ValidityContract,
         ValueSchema,
         owned_snapshot_from_arrays,
     )
 
     schema = DatasetSchema(
-        AxisSpec(
-            AxisId("warm.repeat"), "repeat", REPEAT,
-            repeats, tuple(range(repeats)),
+        DomainSpec(
+            (repeats,),
+            (AxisSpec(
+                AxisId("warm.repeat"), "repeat", REPEAT,
+                repeats, tuple(range(repeats)),
+            ),),
+            (tuple(range(repeats)),),
         ),
-        PointTable(
-            points,
+        DomainSpec(
+            (points,),
             (
-                PointColumn(
-                    AxisId("x"), "x", SCAN_POINT, PointColumn.NUMERIC,
-                    tuple(float(index % 4) for index in range(points)),
+                AxisSpec(
+                    AxisId("x"), "x", SCAN_POINT, 4,
+                    tuple(float(index) for index in range(4)),
                 ),
-                PointColumn(
-                    AxisId("group"), "group", SCAN_POINT, PointColumn.NUMERIC,
-                    tuple(float(index // 4) for index in range(points)),
+                AxisSpec(
+                    AxisId("group"), "group", SCAN_POINT, points // 4,
+                    tuple(float(index) for index in range(points // 4)),
                 ),
             ),
+            (
+                tuple(index % 4 for index in range(points)),
+                tuple(index // 4 for index in range(points)),
+            ),
         ),
-        None,
-        ValueSchema(
+        DomainSpec(
+            (sites,),
             (AxisSpec(AxisId("site"), "site", COMPONENT, sites,
                       tuple(float(index) for index in range(sites))),),
+        ),
+        ValueSchema(
             ValidityContract.value(),
             np.dtype(np.float64),
             None,
@@ -394,7 +410,7 @@ def representative_work(*, include_compiled_fit: bool = True) -> None:
         _raster_kernels,
     )
 
-    image = ImagePlot(AxisRef.data("x"), AxisRef.data("y"))
+    image = ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y"))
 
     # EVERY DTYPE A PRODUCER PUBLISHES IS ANOTHER COMPILE.  A camera is
     # unsigned and may be either width; a derived plane is floating and may
@@ -426,13 +442,13 @@ def representative_work(*, include_compiled_fit: bool = True) -> None:
     _render(series, HistogramPlot())
     _render(
         _image_snapshot(24, 32, np.float64),
-        FacetGridPlot(AxisRef.data("y"), HistogramPlot()),
+        FacetGridPlot(AxisRef.cell_data("y"), HistogramPlot()),
     )
     mixed = _mixed_snapshot()
-    _render(mixed, ImagePlot(AxisRef.point("x"), AxisRef.data("site")))
+    _render(mixed, ImagePlot(AxisRef.point("x"), AxisRef.cell_data("site")))
     _render(
         mixed,
-        CurvePlot(AxisRef.data("site"), group=AxisRef.point("group")),
+        CurvePlot(AxisRef.cell_data("site"), group=AxisRef.point("group")),
         {"uncertainty": True},
     )
     # The fused value+count leading reduction exists only for a genuinely
@@ -441,7 +457,7 @@ def representative_work(*, include_compiled_fit: bool = True) -> None:
     # NumPy reference instead of being copied merely to reach the kernel.
     _render(
         _mixed_snapshot(repeats=8, points=1024, sites=8, holes=True),
-        CurvePlot(AxisRef.data("site")),
+        CurvePlot(AxisRef.cell_data("site")),
         {"uncertainty": False},
     )
 

@@ -37,6 +37,8 @@ class FigureViewerHandle(QtCore.QObject):
     panel_edit_requested = QtCore.pyqtSignal(str)
     panel_order_committed = QtCore.pyqtSignal(tuple)
     panel_editor_closed = QtCore.pyqtSignal(str)
+    panel_snapshot_refresh_requested = QtCore.pyqtSignal(str)
+    panel_save_figure_requested = QtCore.pyqtSignal(str, str)
     panel_plot_error = QtCore.pyqtSignal(str, str)
     save_image_requested = QtCore.pyqtSignal()
 
@@ -60,6 +62,10 @@ class FigureViewerHandle(QtCore.QObject):
         view.panel_edit_requested.connect(self.panel_edit_requested)
         view.panel_order_committed.connect(self.panel_order_committed)
         view.panel_editor_closed.connect(self.panel_editor_closed)
+        view.panel_snapshot_refresh_requested.connect(
+            self.panel_snapshot_refresh_requested
+        )
+        view.panel_save_figure_requested.connect(self.panel_save_figure_requested)
         view.panel_plot_error.connect(self.panel_plot_error)
         view.save_image_requested.connect(self.save_image_requested)
         view.close_requested.connect(self.close_requested)
@@ -120,6 +126,9 @@ class FigureViewerHandle(QtCore.QObject):
 
     def set_status(self, text: str, *, error: bool = False) -> None:
         self._view.set_status(text, error=error)
+
+    def show_status(self, text: str, severity: str) -> None:
+        self._view.show_status(text, severity)
 
     def set_archive_info(
         self,

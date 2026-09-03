@@ -594,7 +594,6 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
     )
     camera_preview = descriptor.node_previews[0]
     assert camera_preview.semantic == {
-        "fate:repeat": "reduce",
         "reduction": Reduction.MEAN,
     }
     assert tuple(
@@ -1630,9 +1629,9 @@ def test_uniformity_history_is_one_latest_curve_paired_with_candidate_phase(
             "site_signal_history",
             "target_share_history",
         }
-        column = output.snapshot.block.schema.point_table.columns[0]
-        assert column.name == "candidate"
-        assert tuple(column.values) == (1, 2, 3, 4, 5, 6, 7)
+        axis = output.snapshot.block.schema.point_domain.axes[0]
+        assert axis.name == "candidate"
+        assert axis.coordinates == (1, 2, 3, 4, 5, 6, 7)
         info, _arrays = read_archive(tmp_path / "figures" / "uniformity_history.npz")
         assert set(
             info["sections"]["source"]["run_record"]["device_snapshots"]
@@ -3355,7 +3354,7 @@ def test_measured_plant_slope_sets_the_step_and_proven_uniformity_stops_the_run(
         plot_input, _recipe = read_figure_plot(info, arrays, "data")
         metric_axis = next(
             spec
-            for spec in plot_input.block.schema.cell_schema.data_axes
+            for spec in plot_input.block.schema.cell_domain.axes
             if str(spec.axis_id) == "slm_feedback.uniformity.metric"
         )
         assert metric_axis.coordinate_labels == (

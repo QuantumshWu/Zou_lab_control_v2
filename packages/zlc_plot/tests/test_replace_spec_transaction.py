@@ -13,35 +13,24 @@ import pytest
 
 from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, curve
 from data_factory import (
-    Axis,
-    DatasetSchema,
-    DatasetSnapshot,
-    PointTable,
-    PointTopology,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
 )
 from zlc_plot.kinds import PlotKind
-
 
 def _grid_session():
     row = np.repeat(np.arange(10.0), 10)
     col = np.tile(np.arange(10.0), 10)
-    points = PointTable.from_columns({"row": row, "col": col, "x": np.arange(100.0)})
-    topology = PointTopology.from_cartesian(
-        (
-            Axis.create("row", values=np.arange(10.0)),
-            Axis.create("col", values=np.arange(10.0)),
-        )
-    )
-    schema = DatasetSchema.create(
-        Axis.create("repeat", values=np.arange(1)),
+    points = mapped_domain_from_columns({"row": row, "col": col, "x": np.arange(100.0)})
+    schema = make_dataset_schema(
+        repeat_domain(values=np.arange(1)),
         points,
-        point_topology=topology,
         dtype=np.float64,
-        generation="replace-transaction",
     )
-    snapshot = DatasetSnapshot(schema, np.arange(100.0)[None, :], revision=0)
+    snapshot = make_snapshot(schema, np.arange(100.0)[None, :], revision=0)
     return curve(snapshot, AxisRef.point("x"))
-
 
 def test_layout_rejected_replace_rolls_back_completely() -> None:
     session = _grid_session()
@@ -49,8 +38,8 @@ def test_layout_rejected_replace_rolls_back_completely() -> None:
         baseline = session.rgba()
         # 100 point rows -> 100 cells against the 64-cell capacity.
         oversized = FacetGridPlot(
-            AxisRef.point_rows(),
-            CurvePlot(AxisRef.point("x")),
+            AxisRef.point("x"),
+            CurvePlot(AxisRef.point("col")),
         )
         with pytest.raises(ValueError, match="facet_max_cells"):
             session.replace_spec(oversized)
@@ -67,17 +56,16 @@ def test_layout_rejected_replace_rolls_back_completely() -> None:
         assert after.shape == baseline.shape
 
         accepted = session.replace_spec(
-            FacetGridPlot(AxisRef.point_dimension("row"), CurvePlot(AxisRef.point("x")))
+            FacetGridPlot(AxisRef.point("row"), CurvePlot(AxisRef.point("x")))
         )
         assert accepted.semantics.kind is PlotKind.FACET_GRID
     finally:
         session.close()
 
-
 def test_projection_rejected_replace_is_untouched_precommit(logical_shape) -> None:
     session = _grid_session()
     try:
-        # x names a coordinate the point table does not declare; the
+        # x names a coordinate the Point domain does not declare; the
         # projection layer rejects before any state is touched.  (x=repeat
         # is NOT a rejection any more: an axis this spec does not name pools
         # under the declared reduction, point axis included.)

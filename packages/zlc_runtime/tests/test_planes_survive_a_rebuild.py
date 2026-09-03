@@ -29,9 +29,10 @@ from zlc_data import (
     DataBlock,
     DatasetRevision,
     DatasetSchema,
+    DomainSpec,
+    IndexedWindow,
     OwnedSnapshot,
-    PointColumn,
-    PointTable,
+    SCALAR_DOMAIN,
     StreamGenerationId,
     ValueSchema,
 )
@@ -45,21 +46,12 @@ GENERATION = StreamGenerationId("plane-rebuild")
 
 
 def _schema(name: str) -> DatasetSchema:
+    repeat = AxisSpec(AxisId(f"{name}.repeat"), "repeat", REPEAT, 1, (0,))
+    point = AxisSpec(AxisId(f"{name}.point"), "point", SCAN_POINT, 1, (0,))
     return DatasetSchema(
-        AxisSpec(AxisId(f"{name}.repeat"), "repeat", REPEAT, 1, (0,)),
-        PointTable(
-            1,
-            (
-                PointColumn(
-                    AxisId(f"{name}.point"),
-                    "point",
-                    SCAN_POINT,
-                    PointColumn.NUMERIC,
-                    (0,),
-                ),
-            ),
-        ),
-        None,
+        DomainSpec((1,), (repeat,), ((0,),)),
+        DomainSpec((1,), (point,), ((0,),)),
+        SCALAR_DOMAIN,
         ValueSchema.scalar(np.dtype("float64"), "count"),
     )
 
@@ -166,10 +158,14 @@ def test_the_exact_run_keeps_the_error_of_every_chunk() -> None:
 
     chunk_schema = _schema("run")
     run_schema = DatasetSchema(
-        AxisSpec(AxisId("run.repeat"), "repeat", REPEAT, 2, (0, 1)),
-        chunk_schema.point_table,
-        None,
-        chunk_schema.cell_schema,
+        DomainSpec(
+            (2,),
+            (AxisSpec(AxisId("run.repeat"), "repeat", REPEAT, 2, (0, 1)),),
+            ((0, 1),),
+        ),
+        chunk_schema.point_domain,
+        chunk_schema.cell_domain,
+        chunk_schema.value_schema,
     )
     chunks = (
         (_shot(chunk_schema, 4.0, 0.1), (0, 0)),
@@ -182,3 +178,31 @@ def test_the_exact_run_keeps_the_error_of_every_chunk() -> None:
     np.testing.assert_allclose(
         np.asarray(built.block.sigma).reshape(-1), (0.1, 0.2)
     )
+
+
+def test_an_indexed_materialization_is_stamped_with_its_window() -> None:
+    """Where the block sits in its history, in absolute shot numbers, on the block."""
+
+    schema = _schema("camera")
+    events = tuple(
+        (index, _shot(schema, float(index), None)) for index in range(5, 8)
+    )
+    built = _materialize_indexed_dataset(
+        _IndexedMaterialization(
+            "camera/frame",
+            GENERATION,
+            9,
+            schema,
+            None,
+            events,
+            5,
+            7,
+            None,
+            {},
+            {},
+            stable_since=4,
+        )
+    )
+    assert built.block.window == IndexedWindow(5, 7, 4)
+    assert built.block.revision == DatasetRevision(9)
+

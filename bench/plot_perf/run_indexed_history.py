@@ -37,10 +37,10 @@ def _build_plane(sites: int, *, bimodal: bool = False, site_axis: str = "cell"):
         DataBlock,
         DatasetRevision,
         DatasetSchema,
-        PointColumn,
-        PointTable,
+        DomainSpec,
         READOUT_EVENT,
         REPEAT,
+        SCALAR_DOMAIN,
         SITE,
         StreamGenerationId,
         ValidityContract,
@@ -102,31 +102,36 @@ def _build_plane(sites: int, *, bimodal: bool = False, site_axis: str = "cell"):
             return None
 
     repeat = AxisSpec(AxisId("bench.repeat"), "repeat", REPEAT, 1, (0,))
+    repeat_domain = DomainSpec((1,), (repeat,), ((0,),))
     site_labels = tuple(f"site-{index:02d}" for index in range(sites))
     if site_axis == "point":
         # A site per point row: the shape of a scan's per-site table, and
         # the shape whose history rows multiply by the site count.
-        site_column = PointColumn(
+        site_spec = AxisSpec(
             AxisId("bench.site"),
             "site",
             SITE,
-            PointColumn.NUMERIC,
+            sites,
             tuple(range(sites)),
             coordinate_labels=site_labels,
         )
         event_schema = DatasetSchema(
-            repeat,
-            PointTable(sites, (site_column,)),
-            None,
+            repeat_domain,
+            DomainSpec(
+                (sites,),
+                (site_spec,),
+                (tuple(range(sites)),),
+            ),
+            SCALAR_DOMAIN,
             ValueSchema.scalar(np.dtype(np.float64), "count"),
         )
         counts_shape = (1, sites, 1)
         validity_shape = (1, sites, 1)
     elif site_axis == "cell":
         # The occupancy processor's own geometry: the camera cycle's frame
-        # row stays the point table and the sites are the cell payload.
-        frame_column = PointColumn(
-            AxisId("bench.frame"), "frame", READOUT_EVENT, PointColumn.NUMERIC, (0,)
+        # row stays in the Point domain and the sites are the Cell payload.
+        frame_spec = AxisSpec(
+            AxisId("bench.frame"), "frame", READOUT_EVENT, 1, (0,)
         )
         site_spec = AxisSpec(
             AxisId("bench.site"),
@@ -137,11 +142,10 @@ def _build_plane(sites: int, *, bimodal: bool = False, site_axis: str = "cell"):
             coordinate_labels=site_labels,
         )
         event_schema = DatasetSchema(
-            repeat,
-            PointTable(1, (frame_column,)),
-            None,
+            repeat_domain,
+            DomainSpec((1,), (frame_spec,), ((0,),)),
+            DomainSpec((sites,), (site_spec,)),
             ValueSchema(
-                (site_spec,),
                 ValidityContract.components(AxisId("bench.site")),
                 np.dtype(np.float64),
                 "count",
@@ -151,20 +155,20 @@ def _build_plane(sites: int, *, bimodal: bool = False, site_axis: str = "cell"):
         validity_shape = (1, 1, sites)
     else:
         raise ValueError("site_axis must be 'point' or 'cell'")
-    event_rows = event_schema.point_table.row_count
+    event_rows = event_schema.point_domain.size
 
     def source_event(revision: int):
-        source_point = PointColumn(
+        source_point = AxisSpec(
             AxisId("bench.frame-point"),
             "point",
             SITE,
-            PointColumn.NUMERIC,
+            1,
             (0,),
         )
         schema = DatasetSchema(
-            repeat,
-            PointTable(1, (source_point,)),
-            None,
+            repeat_domain,
+            DomainSpec((1,), (source_point,), ((0,),)),
+            SCALAR_DOMAIN,
             ValueSchema.scalar(np.dtype(np.float64), "count"),
         )
         block = DataBlock(
@@ -274,7 +278,7 @@ def run_plane_layer(
                 sink.append(time.perf_counter() - begin)
             del snapshot
         last = plane.current_dataset(signal)
-        rows = last.block.schema.point_table.row_count
+        rows = last.block.schema.point_domain.size
         event_rows = sites if site_axis == "point" else 1
         assert rows == window * event_rows, (rows, window, event_rows)
     finally:
@@ -304,7 +308,7 @@ def run_session_layer(
     bimodal fit that re-solves every cell on every shot, exactly as the
     console's live fit does.  ``site_axis`` says where the sites live:
     ``cell`` is the occupancy processor's geometry, ``point`` a per-site
-    point table whose history rows multiply by the site count.
+    Point domain whose history rows multiply by the site count.
     """
 
     import matplotlib
@@ -334,7 +338,7 @@ def run_session_layer(
         return plane.current_dataset(signal)
 
     site_ref = (
-        AxisRef.point("bench.site") if site_axis == "point" else AxisRef.data("bench.site")
+        AxisRef.point("bench.site") if site_axis == "point" else AxisRef.cell_data("bench.site")
     )
     if kind == "rolling":
         spec = RollingPlot(

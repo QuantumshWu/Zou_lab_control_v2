@@ -30,27 +30,31 @@ document会被丢弃，不写回source。Notebook依赖惰性加载；普通`imp
 
 ## 创建数据与静态图
 
-所有常规科学数据使用 `(R, P, *data_dim)` shape。下面的例子是两个 repeat、41 个 PointTable rows、没有额外 data dimension：
+所有常规科学数据使用 `(R, P, *cell_shape)` shape。Repeat、Point和
+Cell-data三个domain都直接拥有自己的axes；下面的例子是两个repeat、41个
+Point rows和一个scalar cell：
 
 ```python
 import numpy as np
 
 from zlc_data import (
-    AxisId, AxisSpec, DatasetSchema, PointColumn, PointTable,
+    AxisId, AxisSpec, DatasetSchema, DomainSpec,
     REPEAT, SCAN_POINT, COMPONENT, ValidityContract, ValueSchema,
     owned_snapshot_from_arrays,
 )
 from zlc_plot import AxisRef, PlotLabels, curve
 
 x = np.linspace(-2.0e-3, 2.0e-3, 41)
-points = PointTable(41, (
-    PointColumn(AxisId("scan"), "scan", SCAN_POINT, PointColumn.NUMERIC, tuple(x), "V"),
-))
-repeat = AxisSpec(AxisId("repeat"), "repeat", REPEAT, 2, (0, 1))
+scan = AxisSpec(AxisId("scan"), "scan", SCAN_POINT, 41, tuple(x), "V")
+points = DomainSpec((41,), (scan,), (tuple(range(41)),))
+repeat_axis = AxisSpec(AxisId("repeat"), "repeat", REPEAT, 2, (0, 1))
+repeats = DomainSpec((2,), (repeat_axis,), ((0, 1),))
 value_axis = AxisSpec(AxisId("value"), "value", COMPONENT, 1, (0,))
 schema = DatasetSchema(
-    repeat, points, None,
-    ValueSchema((value_axis,), ValidityContract.value(), np.dtype("float64"), "V"),
+    repeats,
+    points,
+    DomainSpec((1,), (value_axis,)),
+    ValueSchema(ValidityContract.value(), np.dtype("float64"), "V"),
 )
 values = np.stack([
     0.3e-3 + 2.0e-3 * np.exp(-0.5 * (x / 0.6e-3) ** 2),
@@ -258,12 +262,12 @@ Pulse preview 或嵌套 scroll area 可调用 `widget.set_interaction_enabled(Fa
 
 ## Plot kinds 与固定尺寸
 
-公开的六种 plot kind 是 Curve、Image、Histogram、Rolling、FacetGrid 和 PulseTimeline。Rolling 通过 `side_distribution` 参数选择是否显示 side distribution。FacetGrid 可沿 repeat、PointTable row/coordinate、GridTopology dimension 或 `data_dim` 展开；同一个 grid 的 cells 使用同一种 Curve、Image 或 Histogram kind。
+公开的六种 plot kind 是 Curve、Image、Histogram、Rolling、FacetGrid 和 PulseTimeline。Rolling 通过 `side_distribution` 参数选择是否显示 side distribution。FacetGrid 可沿Repeat、Point或Cell-data任一具名axis展开；同一个grid的cells使用同一种Curve、Image或Histogram kind。
 一维 FacetGrid 使用 `facet_display_unit`；二维 rows×columns grid 分别使用
 `facet_row_display_unit` 和 `facet_col_display_unit`，因此两个 facet 轴不会被错误地
 强制共用单位。
 
-未经 authoring 时每种 kind 显示什么，由 `zlc_plot/_kinds/defaults.py` 一张表决定；每个 kind 的 `default_spec`、FacetGrid 的 cell kind 选择和「从当前 plot 要一个 grid」都只是对这张表的读取。表按 `classify_axes` 得到的 axis family 分组，从不按 axis 名字特判：R（repeat）是统计量，只被 reduce 或被 Histogram pool；H（Runtime 的 primary index）除 Rolling 自己走它之外也是统计量，只在其它轴都没有结构时作 curve 最后的 x；S（scan dimension，slowest first）是位置：最内层是 curve 的 x，两层是 heatmap，最外层是 grid 的 facet，无人认领的 scan 轴保持可编辑的 Reduced；E（`READOUT_EVENT` 或未命名的 event point column，如 camera frame、survival pair）是子测量的选择：grid 给每个 event 一个 cell，无 scan 的 curve 沿它走，其它情况显示 Latest scope；D（cell payload）是内容：声明的 picture 或两条 content 轴成 image，剩下的一条 content 在 palette 能分辨时成 group，否则 reduce。size 为 1 的 degenerate 轴是 provenance 不是结构，唯一例外是无 topology 时的 point column（一帧 cycle 仍标识 cell）。`tests/test_default_roles.py` 枚举全表。Limit 类 display 字段（relim 与 x/y/color 范围）声明为 `portable=False`：panel identity 改变时它们随 semantic/fit 一起从新 vocabulary 重新开始，只有外观字段跨 kind 携带。
+未经 authoring 时每种 kind 显示什么，由 `zlc_plot/_kinds/defaults.py` 一张表决定；每个 kind 的 `default_spec`、FacetGrid 的 cell kind 选择和「从当前 plot 要一个 grid」都只是对这张表的读取。表按 `classify_axes` 得到的 axis family 分组，从不按 axis 名字特判：R（repeat）是统计量，只被 reduce 或被 Histogram pool；H（Runtime 的 primary index）除 Rolling 自己走它之外也是统计量，只在其它轴都没有结构时作 curve 最后的 x；S（scan axis，slowest first）是位置：最内层是 curve 的 x，两层是 heatmap，最外层是 grid 的 facet，无人认领的 scan 轴保持可编辑的 Reduced；E（`READOUT_EVENT` Point axis，如 camera frame、survival pair）是子测量的选择：grid 给每个 event 一个 cell，无 scan 的 curve 沿它走，其它情况显示 Latest scope；D（Cell-data payload）是内容：声明的 picture 或两条 content 轴成 image，剩下的一条 content 在 palette 能分辨时成 group，否则 reduce。size为1的axis仍是provenance；其中event axis即使只有一个坐标仍可标识一个cell。`tests/test_default_roles.py`枚举全表。Limit 类 display 字段（relim 与 x/y/color 范围）声明为 `portable=False`：panel identity 改变时它们随 semantic/fit 一起从新 vocabulary 重新开始，只有外观字段跨 kind 携带。
 
 坐标标记不是单独的 plot kind。普通 Image 可叠加独立、可动态更新的
 `ImagePointOverlay`；`coordinates` 是 canonical x/y 的 `N×2` 数组，ID、label

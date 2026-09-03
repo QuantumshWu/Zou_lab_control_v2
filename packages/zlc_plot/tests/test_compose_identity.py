@@ -17,7 +17,14 @@ matplotlib.use("Agg", force=True)
 import numpy as np
 import pytest
 
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from data_factory import (
+    axis,
+    make_dataset_schema,
+    make_snapshot,
+    mapped_domain_from_columns,
+    repeat_domain,
+)
+from zlc_data import OwnedSnapshot, REPEAT, SPATIAL_X, SPATIAL_Y
 
 from zlc_plot import (
     AxisRef,
@@ -36,19 +43,16 @@ from zlc_plot.style import style_context
 
 
 def _image_contract(size: int):
-    repeat = Axis.create("repeat", values=np.array([0], dtype=np.int64))
-    y_axis = Axis.create("camera_y", values=np.arange(size, dtype=np.int32))
-    x_axis = Axis.create("camera_x", values=np.arange(size, dtype=np.int32))
-    points = PointTable.from_columns({"sample": np.array([0], dtype=np.int64)})
-    return DatasetSchema.create(
+    repeat = repeat_domain(values=np.array([0], dtype=np.int64))
+    y_axis = axis("camera_y", values=np.arange(size, dtype=np.int32), role=SPATIAL_Y)
+    x_axis = axis("camera_x", values=np.arange(size, dtype=np.int32), role=SPATIAL_X)
+    points = mapped_domain_from_columns({"sample": np.array([0], dtype=np.int64)})
+    return make_dataset_schema(
         repeat,
         points,
-        data_axes=(y_axis, x_axis),
-        value_label="Counts",
-        canonical_unit="1",
-        display_unit="1",
+        cell_axes=(y_axis, x_axis),
+        value_unit="1",
         dtype=np.uint16,
-        generation="compose-identity",
     )
 
 
@@ -57,7 +61,7 @@ def _snapshot(schema, size: int, scale: float, revision: int, seed: int):
     frame = (
         rng.normal(0.5, 0.15, size=(size, size)).clip(0.01, 1.0) * scale
     ).astype(np.uint16)
-    return DatasetSnapshot(
+    return make_snapshot(
         schema, frame[np.newaxis, np.newaxis, :, :], revision=revision
     )
 
@@ -87,8 +91,8 @@ def test_composed_frame_is_full_draw_exact_across_a_tick_shrink() -> None:
     session = PlotSession(
         _snapshot(schema, size, 40000.0, 1, seed=3),
         ImagePlot(
-            AxisRef.data("camera_x"),
-            AxisRef.data("camera_y"),
+            AxisRef.cell_data("camera_x"),
+            AxisRef.cell_data("camera_y"),
             labels=PlotLabels("compose", "x", "y", value="Counts"),
         ),
     )
@@ -114,8 +118,8 @@ def test_color_limit_preview_composes_without_touching_chrome() -> None:
     session = PlotSession(
         _snapshot(schema, size, 200.0, 1, seed=9),
         ImagePlot(
-            AxisRef.data("camera_x"),
-            AxisRef.data("camera_y"),
+            AxisRef.cell_data("camera_x"),
+            AxisRef.cell_data("camera_y"),
             labels=PlotLabels("preview", "x", "y", value="Counts"),
         ),
     )
@@ -199,8 +203,8 @@ def test_tight_chrome_reuses_one_exact_background_without_residue(
     size = 128
     schema = _image_contract(size)
     spec = ImagePlot(
-        AxisRef.data("camera_x"),
-        AxisRef.data("camera_y"),
+        AxisRef.cell_data("camera_x"),
+        AxisRef.cell_data("camera_y"),
         labels=PlotLabels("tight", "x", "y", value="Counts"),
     )
     session = PlotSession(
@@ -253,7 +257,7 @@ def test_tight_fit_and_area_selector_remain_full_draw_exact(
     coordinate = np.arange(size, dtype=float)
     xx, yy = np.meshgrid(coordinate, coordinate, indexing="ij")
 
-    def fitted_snapshot(revision: int, shift: float) -> DatasetSnapshot:
+    def fitted_snapshot(revision: int, shift: float) -> OwnedSnapshot:
         values = 100.0 + 4000.0 * np.exp(
             -(
                 (xx - (64.0 + shift)) ** 2
@@ -261,7 +265,7 @@ def test_tight_fit_and_area_selector_remain_full_draw_exact(
             )
             / (2.0 * 7.0**2)
         )
-        return DatasetSnapshot(
+        return make_snapshot(
             schema,
             values.astype(np.uint16)[np.newaxis, np.newaxis, :, :],
             revision=revision,
@@ -269,7 +273,7 @@ def test_tight_fit_and_area_selector_remain_full_draw_exact(
 
     session = PlotSession(
         fitted_snapshot(1, 0.0),
-        ImagePlot(AxisRef.data("camera_x"), AxisRef.data("camera_y")),
+        ImagePlot(AxisRef.cell_data("camera_x"), AxisRef.cell_data("camera_y")),
         device_pixel_ratio=device_pixel_ratio,
     )
     try:
@@ -298,7 +302,7 @@ def test_tight_colorbar_updates_its_proxy_once_per_frame(monkeypatch) -> None:
     schema = _image_contract(size)
     session = PlotSession(
         _snapshot(schema, size, 4000.0, 1, seed=31),
-        ImagePlot(AxisRef.data("camera_x"), AxisRef.data("camera_y")),
+        ImagePlot(AxisRef.cell_data("camera_x"), AxisRef.cell_data("camera_y")),
     )
     try:
         draws = 0
@@ -323,48 +327,45 @@ def test_tight_colorbar_updates_its_proxy_once_per_frame(monkeypatch) -> None:
 
 def _generic_kind_pair(kind: str):
     if kind == "facet":
-        schema = DatasetSchema.create(
-            Axis.create("repeat", size=1),
-            PointTable.from_columns({"facet": (0.0, 1.0)}),
-            data_axes=(
-                Axis.create("y", values=np.arange(8.0)),
-                Axis.create("x", values=np.arange(12.0)),
+        schema = make_dataset_schema(
+            repeat_domain(size=1),
+            mapped_domain_from_columns({"facet": (0.0, 1.0)}),
+            cell_axes=(
+                axis("y", values=np.arange(8.0), role=SPATIAL_Y),
+                axis("x", values=np.arange(12.0), role=SPATIAL_X),
             ),
             dtype=np.float64,
-            generation="compose-facet-kinds",
         )
         first = np.arange(192.0).reshape(1, 2, 8, 12)
         second = first[::-1].copy() + 3.0
         return (
-            DatasetSnapshot(schema, first, revision=1),
-            DatasetSnapshot(schema, second, revision=2),
+            make_snapshot(schema, first, revision=1),
+            make_snapshot(schema, second, revision=2),
             FacetGridPlot(
                 AxisRef.point("facet"),
-                ImagePlot(AxisRef.data("x"), AxisRef.data("y")),
+                ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y")),
             ),
         )
     if kind == "rolling":
-        schema = DatasetSchema.create(
-            Axis.create("repeat", size=12),
-            PointTable.from_columns({"sample": (0.0,)}),
+        schema = make_dataset_schema(
+            repeat_domain(size=12),
+            mapped_domain_from_columns({"sample": (0.0,)}),
             dtype=np.float64,
-            generation="compose-rolling-kind",
         )
         first = np.arange(12.0).reshape(12, 1)
         return (
-            DatasetSnapshot(schema, first, revision=1),
-            DatasetSnapshot(schema, first + 1.0, revision=2),
+            make_snapshot(schema, first, revision=1),
+            make_snapshot(schema, first + 1.0, revision=2),
             RollingPlot(),
         )
     points = np.arange(16.0)
-    schema = DatasetSchema.create(
-        Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": points}),
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"x": points}),
         dtype=np.float64,
-        generation=f"compose-{kind}-kind",
     )
-    first = DatasetSnapshot(schema, np.sin(points)[np.newaxis, :], revision=1)
-    second = DatasetSnapshot(
+    first = make_snapshot(schema, np.sin(points)[np.newaxis, :], revision=1)
+    second = make_snapshot(
         schema,
         np.cos(points)[np.newaxis, :],
         revision=2,
@@ -414,8 +415,8 @@ def test_the_side_frames_stay_above_their_own_content() -> None:
     session = PlotSession(
         _snapshot(schema, 96, 30000.0, 1, seed=3),
         ImagePlot(
-            AxisRef.data("camera_x"),
-            AxisRef.data("camera_y"),
+            AxisRef.cell_data("camera_x"),
+            AxisRef.cell_data("camera_y"),
             labels=PlotLabels("frames", "x", "y", value="Counts"),
         ),
     )
@@ -479,8 +480,8 @@ def test_held_side_chrome_is_replayed_and_stays_full_draw_exact() -> None:
     session = PlotSession(
         _snapshot(schema, size, 40000.0, 1, seed=31),
         ImagePlot(
-            AxisRef.data("camera_x"),
-            AxisRef.data("camera_y"),
+            AxisRef.cell_data("camera_x"),
+            AxisRef.cell_data("camera_y"),
             labels=PlotLabels("replay", "x", "y", value="Counts"),
         ),
         parameters={"relim_mode": "normal"},
@@ -512,8 +513,8 @@ def test_moving_colour_scale_is_never_recorded() -> None:
     session = PlotSession(
         _snapshot(schema, size, 40000.0, 1, seed=41),
         ImagePlot(
-            AxisRef.data("camera_x"),
-            AxisRef.data("camera_y"),
+            AxisRef.cell_data("camera_x"),
+            AxisRef.cell_data("camera_y"),
             labels=PlotLabels("tight-replay", "x", "y", value="Counts"),
         ),
         parameters={"relim_mode": "tight"},
@@ -545,8 +546,8 @@ def test_replayed_side_chrome_follows_a_limit_change_exactly() -> None:
     session = PlotSession(
         _snapshot(schema, size, 40000.0, 1, seed=51),
         ImagePlot(
-            AxisRef.data("camera_x"),
-            AxisRef.data("camera_y"),
+            AxisRef.cell_data("camera_x"),
+            AxisRef.cell_data("camera_y"),
             labels=PlotLabels("collapse", "x", "y", value="Counts"),
         ),
         parameters={"relim_mode": "normal"},
@@ -563,17 +564,13 @@ def test_replayed_side_chrome_follows_a_limit_change_exactly() -> None:
 
 
 def _curve_contract(points: int, repeats: int):
-    repeat = Axis.create("repeat", values=np.arange(repeats, dtype=np.int64))
-    table = PointTable.from_columns({"x": np.linspace(-3.0, 3.0, points)})
-    return DatasetSchema.create(
+    repeat = repeat_domain(values=np.arange(repeats, dtype=np.int64))
+    table = mapped_domain_from_columns({"x": np.linspace(-3.0, 3.0, points)})
+    return make_dataset_schema(
         repeat,
         table,
-        data_axes=(),
-        value_label="Counts",
-        canonical_unit="1",
-        display_unit="1",
+        value_unit="1",
         dtype=np.float64,
-        generation="compose-identity-curve",
     )
 
 
@@ -584,7 +581,7 @@ def _curve_snapshot(schema, points: int, repeats: int, revision: int, seed: int)
     # every frame, which is what keeps the chrome background missing.
     peak = 40.0 + 15.0 * np.sin(revision)
     values = peak * np.exp(-0.5 * (x / 0.8) ** 2) + rng.normal(0.0, 1.5, (repeats, points))
-    return DatasetSnapshot(schema, values[..., None], revision=revision)
+    return make_snapshot(schema, values[..., None], revision=revision)
 
 
 def _live_advance(session, snapshot) -> None:
@@ -616,7 +613,7 @@ def test_a_re_fitting_curve_stays_full_draw_exact_frame_after_frame(spec_kind: s
     spec = (
         cell
         if spec_kind == "curve"
-        else FacetGridPlot(AxisRef.repeat(), CurvePlot(AxisRef.point("x")))
+        else FacetGridPlot(AxisRef.repeat("repeat"), CurvePlot(AxisRef.point("x")))
     )
     session = PlotSession(
         _curve_snapshot(schema, points, repeats, 1, seed=61),
@@ -660,7 +657,7 @@ def _bimodal_snapshot(schema, points: int, repeats: int, revision: int, seed: in
         rng.normal(40.0 + revision, 6.0, (repeats, points)),
         rng.normal(8.0, 3.0, (repeats, points)),
     )
-    return DatasetSnapshot(schema, np.clip(values, 0.0, None)[..., None], revision=revision)
+    return make_snapshot(schema, np.clip(values, 0.0, None)[..., None], revision=revision)
 
 
 def test_a_histogram_grid_with_live_cell_fits_stays_full_draw_exact_and_parses_once() -> None:
@@ -673,7 +670,7 @@ def test_a_histogram_grid_with_live_cell_fits_stays_full_draw_exact_and_parses_o
 
     points, repeats = 160, 6
     schema = _curve_contract(points, repeats)
-    spec = FacetGridPlot(AxisRef.repeat(), HistogramPlot())
+    spec = FacetGridPlot(AxisRef.repeat("repeat"), HistogramPlot())
     session = PlotSession(_bimodal_snapshot(schema, points, repeats, 1, seed=71), spec)
     try:
         renderer = session._renderer
