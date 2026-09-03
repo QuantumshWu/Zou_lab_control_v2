@@ -3,16 +3,24 @@ from __future__ import annotations
 import numpy as np
 
 from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
-from zlc_plot import AxisRef, CurvePlot, DEFAULT_UNITS, PlotSession, SelectorKind, resolve_unit
+from zlc_plot import (
+    AxisRef,
+    CurvePlot,
+    DEFAULT_UNITS,
+    NumericRange,
+    PlotSession,
+    SelectorKind,
+    resolve_unit,
+)
 
 
-def _session() -> PlotSession:
+def _session(*, x_unit: str = "m", value_unit: str = "V") -> PlotSession:
     x = np.linspace(0.0, 3.0, 61)
     schema = DatasetSchema.create(
         Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": x}, units={"x": "m"}),
+        PointTable.from_columns({"x": x}, units={"x": x_unit}),
         dtype=np.float64,
-        canonical_unit="V",
+        canonical_unit=value_unit,
         generation="unit-test",
     )
     model = PlotSession(
@@ -79,7 +87,7 @@ def test_selector_round_trip_and_fit_parameters_follow_display_units() -> None:
 
 
 def test_unit_choice_symbols_are_unique_but_alias_input_resolution_is_unchanged() -> None:
-    symbols = DEFAULT_UNITS.canonical_symbols()
+    symbols = DEFAULT_UNITS.distinct_symbols()
     resolved = [resolve_unit(symbol) for symbol in symbols]
     assert len(symbols) == len(set(symbols))
     assert len(resolved) == len(set(resolved))
@@ -95,3 +103,41 @@ def test_display_unit_choices_do_not_repeat_aliases() -> None:
         assert len(choices) == len({resolve_unit(choice) for choice in choices})
     finally:
         session.close()
+
+
+def test_selectors_on_an_axis_not_in_base_units_round_trip_exactly() -> None:
+    """Canonical is the DATASET's unit, whatever the unit system's base is.
+
+    Every selector on metres and volts round-tripped because those are base
+    units, where "to base" and "to the dataset's unit" coincide.  A seamless
+    scan writes its duration column in microseconds: the box drawn on it was
+    stored a million times too small, the runtime found no coordinate inside
+    it, and the box drawn back from the stored value had no width.  Painted
+    values must come back in the column's own unit, and a display unit change
+    must convert between the two units, never through the base alone.
+    """
+
+    session = _session(x_unit="us", value_unit="count")
+    try:
+        session.set_x_selector(0.5, 2.0, display=True)
+        canonical = session.selector_state(SelectorKind.X_RANGE, display=False)
+        assert (canonical.value.low, canonical.value.high) == (0.5, 2.0)
+        assert session.selector_state(SelectorKind.X_RANGE, display=True).value == canonical.value
+
+        session.set_area_selector(NumericRange(1.0, 2.5), NumericRange(3.0, 4.0), display=True)
+        area = session.selector_state(SelectorKind.AREA, display=False)
+        assert (area.value.x.low, area.value.x.high) == (1.0, 2.5)
+        assert (area.value.y.low, area.value.y.high) == (3.0, 4.0)
+
+        session.set_axis_unit(AxisRef.point("x"), "ms")
+        shown = session.selector_state(SelectorKind.AREA, display=True)
+        assert abs(shown.value.x.low - 0.001) < 1e-12 and abs(shown.value.x.high - 0.0025) < 1e-12
+        session.set_area_selector(NumericRange(0.002, 0.003), NumericRange(3.0, 4.0), display=True)
+        moved = session.selector_state(SelectorKind.AREA, display=False)
+        assert abs(moved.value.x.low - 2.0) < 1e-9 and abs(moved.value.x.high - 3.0) < 1e-9
+
+        session.set_viewport(NumericRange(0.001, 0.002), NumericRange(0.0, 1.0))
+        assert abs(session.viewport.x.low - 0.001) < 1e-12
+    finally:
+        session.close()
+

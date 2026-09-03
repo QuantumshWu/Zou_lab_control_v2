@@ -6549,3 +6549,104 @@ def test_opening_edit_under_a_newer_shot_stages_one_host(
     assert not [
         text for severity, text in presenter.view.status if severity == "error"
     ]
+
+
+def test_a_region_drawn_on_a_scan_axis_in_microseconds_is_the_region_the_hand_drew(
+    presenter, session
+) -> None:
+    """The stored region is in the column's own unit, so the runtime finds it.
+
+    A seamless scan writes its duration column in microseconds.  The box
+    drawn on that curve used to be converted to the unit system's BASE
+    (seconds) on its way into the panel: a million times too small, so the
+    runtime's coordinate selection found no scan point inside it, the card
+    reported "coordinate selection is empty on axis scan.t", and the box
+    drawn back from the stored value had no width.  Every selector on
+    metres and volts passed because those are base units.
+    """
+
+    from zlc_atom.nodes.scan.dataset import scan_dataset_schema
+    from zlc_data import (
+        READOUT_EVENT,
+        REPEAT,
+        SITE,
+        AxisId,
+        AxisSpec,
+        DatasetSchema,
+        PointColumn,
+        PointTable,
+        ValidityContract,
+        ValueSchema,
+        owned_snapshot_from_arrays,
+    )
+    from zlc_runtime import DatasetCoverage, DatasetOutputDeclaration, LiveDatasetOutput
+
+    points, sites = 40, 5
+    pair = PointColumn(
+        AxisId("survival.pair"), "pair", READOUT_EVENT, PointColumn.NUMERIC, (0,),
+        coordinate_labels=("0-1",),
+    )
+    site = AxisSpec(AxisId("survival.site"), "site", SITE, sites, tuple(range(sites)))
+    event_schema = DatasetSchema(
+        AxisSpec(AxisId("survival.repeat"), "repeat", REPEAT, 1, (0,)),
+        PointTable(1, (pair,)),
+        None,
+        ValueSchema((site,), ValidityContract.components(site.axis_id), np.dtype("<f8"), "1"),
+    )
+    durations = np.arange(points) * 0.5
+    canonical = scan_dataset_schema(
+        event_schema, [(float(value),) for value in durations], (("t", "us"),), visits=1
+    )
+    values = np.zeros(canonical.physical_shape)
+    values[0, :, :] = (0.5 + 0.4 * np.sin(durations / 3.0))[:, None]
+    declaration = DatasetOutputDeclaration("survival", "frame_survival.survival")
+    node = SimpleNamespace(
+        instance_id="scan-us",
+        dataset_output_declarations=(declaration,),
+        signal_key=lambda name: f"scan-us/{name}",
+    )
+    plane = session.signal_plane
+    plane.begin_generation(node)
+    total = canonical.repeat_axis.size * canonical.point_table.row_count
+    snapshot = owned_snapshot_from_arrays(canonical, values, 1, stream_generation="scan-us")
+    plane.commit_live(
+        node,
+        {
+            "survival": LiveDatasetOutput(
+                declaration, snapshot, DatasetCoverage(total, total),
+                canonical_schema=canonical, cell_origin=(0, 0),
+            )
+        },
+    )
+    binding = presenter.add_panel(
+        "scan-us/survival",
+        snapshot,
+        kind="curve",
+        initial_publication=plane.freeze().publication("scan-us/survival"),
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.host is not None
+        and binding.accepted_display is not None
+        and bool(presenter.view.presented_fronts),
+    )
+    assert str(binding.accepted_display.spec.x.axis_id) == "scan.t"
+
+    _commit_area(binding.host)
+    _settle_panel_hosts(presenter, lambda: binding.state.selector is not None)
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and binding.bridge is None:
+        presenter.beat()
+        time.sleep(0.005)
+    for _ in range(40):
+        presenter.beat()
+        time.sleep(0.01)
+
+    (drawn,) = binding.state.selector["ranges"]
+    assert drawn["axis"] == "scan.t"
+    # A quarter to three quarters of the 0..19.5 us axis, in microseconds.
+    assert 3.0 < drawn["lower"] < 7.0 and 12.0 < drawn["upper"] < 17.0
+    status, marked = presenter.view._cards[binding.panel_id].status
+    assert not marked and "empty" not in status, status
+    assert binding.port is None or binding.port.last_error is None
+
