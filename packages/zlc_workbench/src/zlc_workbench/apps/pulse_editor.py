@@ -391,12 +391,9 @@ def create_bound_window(
         raise
     from ..board import attach_qt
 
-    refresh_timer = attach_qt(
-        lambda: None
-        if window.presenter._device_busy or window.presenter._stop_busy
-        else window.presenter.refresh_run_state(),
-        interval_ms=100,
-    )
+    # The question goes to the device worker; the presenter itself declines
+    # to ask while a command is in progress or an answer is on its way.
+    refresh_timer = attach_qt(window.presenter.ask_run_state, interval_ms=100)
     window._device_control_refresh_timer = refresh_timer
 
     _guard_window_close(

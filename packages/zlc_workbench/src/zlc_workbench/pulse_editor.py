@@ -983,6 +983,11 @@ class PulseEditorPresenter:
         self._device_operation = 0
         self._device_done: Event | None = None
         self._stop_busy = False
+        #: One status question on its way to the board, or none.  A second
+        #: request while it is pending sends nothing; the answer serves both.
+        self._status_in_flight = False
+        #: What to do once the next board answer has been shown.
+        self._status_followups: list[Callable[[], None]] = []
         # How to get one.  Dialling belongs to whoever knows what a "remote
         # server" is on this bench, which is the composition root, not here.
         self._dial = dial
@@ -1106,17 +1111,19 @@ class PulseEditorPresenter:
         view.scan_source_edited.connect(self._guarded(self.edit_scan_source))
         view.feedback_requested.connect(self._guarded(self._warn))
         view.scan_repeats_committed.connect(self._guarded(self.set_scan_repeats))
-        view.scan_hold_requested.connect(self._guarded(self.hold_scan_point))
-        view.scan_step_requested.connect(self._guarded(self.step_scan_point))
+        view.scan_hold_requested.connect(self._guarded(self._hold_from_view))
+        view.scan_step_requested.connect(self._guarded(self._step_from_view))
         view.scan_program_load_requested.connect(self._guarded(self.load_scan_program))
         view.scan_template_requested.connect(self._guarded(self.write_scan_template))
         view.scan_run_requested.connect(self._guarded(self.run_scan_program))
         view.scan_array_save_requested.connect(self._guarded(self.save_scan_array))
-        view.scan_progress_refresh_requested.connect(self._guarded(self.refresh_scan_progress))
-        view.connection_requested.connect(self._guarded(self.connect_to))
+        view.scan_progress_refresh_requested.connect(
+            self._guarded(self._scan_progress_from_view)
+        )
+        view.connection_requested.connect(self._guarded(self._connect_from_view))
         view.fire_requested.connect(self._guarded(self._fire_from_view))
         view.stop_requested.connect(self._guarded(self.stop))
-        view.sync_requested.connect(self._guarded(self.sync_from_sequencer))
+        view.sync_requested.connect(self._guarded(self._sync_from_view))
         view.save_requested.connect(self._guarded(self.save_pulse))
         view.load_requested.connect(self._guarded(self.ask_for_pulse))
         view.preview_include_off_toggled.connect(self._guarded(self._on_include_off))
@@ -1534,36 +1541,30 @@ class PulseEditorPresenter:
         The previous connection is released first.  Two open connections to one
         board is not a state anything downstream can reason about, and the
         second one usually fails in a way that reads as the first one breaking.
+
+        Connected, or failed, before returning: this is what the app calls
+        at start-up and what a notebook calls.  The window's connection
+        control goes through ``_connect_from_view``, which does the same on
+        the device worker -- a socket connect alone may wait its whole
+        timeout -- and changes what this editor is connected to only when
+        that command has delivered.
         """
 
-        mode, endpoint = str(mode), str(endpoint)
-        allowed = {str(choice.value) for choice in self._connection_choices}
-        if mode not in allowed:
-            raise ValueError(f"unknown connection mode {mode!r}")
-        if self._connection_locked:
-            raise RuntimeError("the experiment session owns this connection")
+        request = self._connection_request(mode, endpoint)
+        if request is None:
+            return False
+        mode, endpoint = request
         if mode == CONNECTION_OFFLINE:
             if not self._release_for_connection_change():
                 return False
-            self.connection = (mode, endpoint)
-            self._show_connection("edit only")
-            self._done("disconnected - this editor is now edit only")
-            # Hanging up changes the whole window, not just its status line:
-            # the board's ports are gone, the Target page is authorable again,
-            # and the run buttons have nothing to fire on.
-            self.refresh()
+            self._show_disconnected(mode, endpoint)
             return True
-        if self._dial is None:
-            self._warn("this editor was built without a way to connect")
-            return False
         if not self._release_for_connection_change():
             return False
         try:
             self.sequencer = self._dial(mode, endpoint)
         except Exception as error:
-            self.connection = (CONNECTION_OFFLINE, endpoint)
-            self._show_connection(f"failed: {error}")
-            self._warn(f"cannot connect to {_connection_name(mode, endpoint)}: {error}")
+            self._dial_failed(mode, endpoint, error)
             return False
         self._owns_sequencer = True
         self.connection = (mode, endpoint)
@@ -1580,6 +1581,150 @@ class PulseEditorPresenter:
         if not had_sequence:
             self.start_new_pulse()
         return True
+
+    def _connection_request(self, mode: str, endpoint: str) -> tuple[str, str] | None:
+        """One connection request checked the one way, or None once it was refused."""
+
+        mode, endpoint = str(mode), str(endpoint)
+        allowed = {str(choice.value) for choice in self._connection_choices}
+        if mode not in allowed:
+            raise ValueError(f"unknown connection mode {mode!r}")
+        if self._connection_locked:
+            raise RuntimeError("the experiment session owns this connection")
+        if mode != CONNECTION_OFFLINE and self._dial is None:
+            self._warn("this editor was built without a way to connect")
+            return None
+        return mode, endpoint
+
+    def _connect_from_view(self, mode: str, endpoint: str) -> None:
+        if self._run_device_work is None:
+            self.connect_to(mode, endpoint)
+            return
+        request = self._connection_request(mode, endpoint)
+        if request is not None:
+            self._connect_on_worker(*request)
+
+    def _connect_on_worker(self, mode: str, endpoint: str) -> bool:
+        if not self._device_available():
+            return False
+        previous = self.sequencer if self._owns_sequencer else None
+        holding_lease = self._drive_lease is not None
+        dial = self._dial
+        had_sequence = self.sequence is not None
+
+        def work(_operation: int) -> object:
+            if previous is not None:
+                try:
+                    self._hang_up(previous, holding_lease)
+                except BaseException as error:  # noqa: BLE001 -- delivered
+                    return "release", None, error
+            if mode == CONNECTION_OFFLINE:
+                return "offline", None, None
+            try:
+                sequencer = dial(mode, endpoint)
+            except BaseException as error:  # noqa: BLE001 -- delivered
+                return "dial", None, error
+            describe = getattr(sequencer, "describe", None)
+            if not callable(describe):
+                return "described", (sequencer, None, self._board_state_for(sequencer)), None
+            try:
+                board = describe()
+                state = self._board_state_for(sequencer)
+            except BaseException as error:  # noqa: BLE001 -- delivered
+                try:
+                    self._hang_up(sequencer, False)
+                except BaseException:  # noqa: BLE001 -- the first error is the one to show
+                    pass
+                return "describe", None, error
+            return "described", (sequencer, board, state), None
+
+        def delivered(result: object, failure: BaseException | None) -> None:
+            if failure is not None:
+                self._show_connection(f"failed: {failure}")
+                self._warn(f"cannot connect to {_connection_name(mode, endpoint)}: {failure}")
+                self._render_run_state()
+                return
+            stage, payload, error = result
+            if stage == "release":
+                self._show_connection(f"disconnect failed: {error}")
+                self._warn(f"cannot close the current sequencer connection: {error}")
+                self._render_run_state()
+                return
+            if previous is not None:
+                self._release_drive()
+                self._forget_connection()
+            if stage == "offline":
+                self._show_disconnected(mode, endpoint)
+                return
+            if stage == "dial":
+                self._dial_failed(mode, endpoint, error)
+                self.refresh()
+                return
+            if stage == "describe":
+                self.connection = (CONNECTION_OFFLINE, endpoint)
+                self._describe_failed(error)
+                self.refresh()
+                return
+            sequencer, board, state = payload
+            self.sequencer = sequencer
+            self._owns_sequencer = True
+            self.connection = (mode, endpoint)
+            if board is None:
+                self._adopt_board_state(state)
+                self._show_connection("connected (board did not describe itself)")
+                self.refresh()
+                return
+            self._adopt_described(board, state)
+            if not had_sequence:
+                self.start_new_pulse()
+
+        return self._run_device_command(work, delivered, summary="Connecting...")
+
+    @staticmethod
+    def _hang_up(sequencer: object, holding_lease: bool) -> None:
+        """End one connection on the thread that owns the device conversation.
+
+        A board this editor was driving goes safe first.  A connection that
+        has already ended is not a failure to go safe: the pulse server's own
+        law drives AUTO-SAFE the moment a client disconnects.
+        """
+
+        if holding_lease:
+            safe = getattr(sequencer, "safe", None)
+            if callable(safe):
+                try:
+                    safe()
+                except ConnectionError:
+                    return
+        close = getattr(sequencer, "close", None)
+        if callable(close):
+            close()
+
+    def _forget_connection(self) -> None:
+        """Retire everything the departed board asserted about itself."""
+
+        self.sequencer = None
+        self._owns_sequencer = False
+        self.board = None
+        self.pins = {}
+        self._board_target = None
+        self._board_step_ns = None
+        self._board_state = BoardState()
+        self.revision += 1
+
+    def _show_disconnected(self, mode: str, endpoint: str) -> None:
+        self.connection = (mode, endpoint)
+        self._show_connection("edit only")
+        self._done("disconnected - this editor is now edit only")
+        # Hanging up changes the whole window, not just its status line:
+        # the board's ports are gone, the Target page is authorable again,
+        # and the run buttons have nothing to fire on.
+        self.refresh()
+
+    def _dial_failed(self, mode: str, endpoint: str, error: BaseException) -> None:
+        self.connection = (CONNECTION_OFFLINE, endpoint)
+        self._show_connection(f"failed: {error}")
+        self._warn(f"cannot connect to {_connection_name(mode, endpoint)}: {error}")
 
     def _release_for_connection_change(self) -> bool:
         """Keep the current connection truthful when it refuses to close."""
@@ -1607,35 +1752,34 @@ class PulseEditorPresenter:
         every lane the board still has.
         """
 
-        describe = getattr(self.sequencer, "describe", None)
+        sequencer = self.sequencer
+        describe = getattr(sequencer, "describe", None)
         if not callable(describe):
             self._show_connection("connected (board did not describe itself)")
             return False
         try:
             board = describe()
+            state = self._board_state_for(sequencer)
         except Exception as error:
-            self._show_connection(f"connected, but cannot read the board: {error}")
-            self._warn(f"connected, but the board would not describe itself: {error}")
+            self._describe_failed(error)
             return False
+        return self._adopt_described(board, state)
+
+    def _describe_failed(self, error: BaseException) -> None:
+        self._show_connection(f"connected, but cannot read the board: {error}")
+        self._warn(f"connected, but the board would not describe itself: {error}")
+
+    def _adopt_described(self, board: object, state: BoardState) -> bool:
+        """Install one board description and the state it was read with."""
 
         self.board = board
-        # From the target that owns them.  A description carried the pin map
-        # twice and the wire emptied the nested copy, so reading the top-level
-        # one was reading whichever copy happened to survive.
         self.pins = dict(getattr(board.target, "package_pins", {}) or {})
-        # Adopting a board changes what the editor is showing, so it is a new
-        # revision.  The view refuses two different models under one revision,
-        # and it is right to: a stale card would otherwise be indistinguishable
-        # from a fresh one.
         self.revision += 1
         if self.sequence is None:
             self._apply_board_only(board)
         else:
             self._align_sequence_to(board)
-        # One round trip, here, because attaching is exactly when what the
-        # board is doing is unknown.  After this the answer is kept until
-        # something this editor does to the board could have changed it.
-        self._poll_board()
+        self._adopt_board_state(state)
         where = (
             f"{_connection_name(*self.connection)} - {len(board.target.ports)} ports, "
             f"{len(board.target.raw_lanes)} lanes, "
@@ -1771,17 +1915,7 @@ class PulseEditorPresenter:
             close = getattr(self.sequencer, "close", None)
             if callable(close):
                 close()
-        self.sequencer = None
-        self._owns_sequencer = False
-        self.board = None
-        self.pins = {}
-        self._board_target = None
-        self._board_step_ns = None
-        self._board_state = BoardState()
-        # Losing a board changes what the editor is showing, so it is a new
-        # revision -- the same rule adopting one obeys.  The view refuses two
-        # different models under one revision, and it is right to.
-        self.revision += 1
+        self._forget_connection()
 
     def _retire_drive(self, *, present: bool = True) -> None:
         """Safe and release only a command lease held by this editor."""
@@ -1826,19 +1960,59 @@ class PulseEditorPresenter:
 
         The board keeps the sequence it was handed, so this is a read: what
         comes back is the pulse the hardware will actually play, not this
-        window's idea of it.
+        window's idea of it.  Read and adopted before returning; the window's
+        Sync button reads on the device worker through ``_sync_from_view``.
         """
 
-        if self.sequencer is None:
-            self._warn("this editor is not connected to a sequencer")
+        question = self._applied_question()
+        if question is None:
             return False
-        applied = getattr(self.sequencer, "applied", None)
-        state = applied() if callable(applied) else applied
+        return self._adopt_applied(*question())
+
+    def _sync_from_view(self) -> None:
+        if self._run_device_work is None:
+            self.sync_from_sequencer()
+            return
+        question = self._applied_question()
+        if question is None or not self._device_available():
+            return
+
+        def delivered(result: object, failure: BaseException | None) -> None:
+            if failure is not None:
+                self._warn(f"cannot sync from the board: {failure}")
+                self._render_run_state()
+                return
+            self._adopt_applied(*result)
+
+        self._run_device_command(
+            lambda _operation: question(), delivered, summary="Syncing..."
+        )
+
+    def _applied_question(self) -> Callable[[], tuple[object, BoardState]] | None:
+        """What the board holds and what it is doing, read together on one thread."""
+
+        sequencer = self.sequencer
+        if sequencer is None:
+            self._warn("this editor is not connected to a sequencer")
+            return None
+        applied = getattr(sequencer, "applied", None)
+
+        def question() -> tuple[object, BoardState]:
+            state = applied() if callable(applied) else applied
+            return state, self._board_state_for(sequencer)
+
+        return question
+
+    def _adopt_applied(self, state: object, board_state: BoardState) -> bool:
+        """Make the editor show the program the board reported holding."""
+
         if state is None:
+            self._adopt_board_state(board_state)
             self._warn("the board has no pulse applied yet; there is nothing to sync")
             return False
         source = getattr(state, "source", None)
         if source is None:
+            self._adopt_board_state(board_state)
             self._warn(
                 "the board is holding a compiled program it was given without "
                 "its pulse, so there is nothing an editor can show"
@@ -1847,6 +2021,7 @@ class PulseEditorPresenter:
         wire_rows = tuple(getattr(state, "rows", ()) or ())
         program = getattr(state, "program", None)
         if wire_rows and program is None:
+            self._adopt_board_state(board_state)
             self._warn("the board returned scan rows without their compiled program")
             return False
         authored_rows: tuple[tuple[float, ...], ...] = ()
@@ -1883,7 +2058,7 @@ class PulseEditorPresenter:
         self.refresh()
         # What came back IS what the board holds, so the dot must stop saying
         # the board is playing something older the moment it no longer is.
-        self._poll_board()
+        self._adopt_board_state(board_state)
         self._done(
             f"synced from the board - {len(source.periods)} period(s)"
             + (f", {len(wire_rows)} scan point(s)" if wire_rows else "")
@@ -2046,8 +2221,7 @@ class PulseEditorPresenter:
         if self._run_device_work is None:
             self.fire()
             return
-        if self._device_busy or self._stop_busy:
-            self._warn("a pulse command is already in progress")
+        if not self._device_available():
             return
         if self.sequence is None:
             self._warn("no pulse is open")
@@ -2063,76 +2237,152 @@ class PulseEditorPresenter:
             return
         if not self._acquire_command():
             return
-
         requested_cycles = len(rows) * sweeps if rows and sweeps else None
-        self._device_operation += 1
-        operation = self._device_operation
-        done = Event()
-        self._device_done = done
-        self._device_busy = True
-        self.view.set_summary("Starting...")
-        self._render_run_state()
 
-        def work() -> object:
+        def work(operation: int) -> object:
             program = None
             error: BaseException | None = None
-            touched_device = False
             try:
                 if operation == self._device_operation:
                     program = self.compile(
                         source,
                         slot_tick_scales=slot_tick_scales,
                     )
-                if operation == self._device_operation:
-                    if bool(sequencer.snapshot().get("firing")):
-                        touched_device = True
-                        sequencer.safe()
-                if operation == self._device_operation:
-                    touched_device = True
-                    sequencer.load(program, source=source, rows=rows)
-                if operation == self._device_operation:
-                    sequencer.fire(cycles=requested_cycles)
-                if operation != self._device_operation and touched_device:
-                    sequencer.safe()
-            except BaseException as caught:
+                if program is not None:
+                    error = self._drive_program(
+                        sequencer,
+                        program,
+                        source,
+                        rows=rows,
+                        cycles=requested_cycles,
+                        current=lambda: operation == self._device_operation,
+                    )
+            except BaseException as caught:  # noqa: BLE001 -- delivered, not lost
                 error = caught
-                if touched_device:
-                    try:
-                        sequencer.safe()
-                    except BaseException as safe_error:
-                        error = RuntimeError(f"{caught}; SAFE also failed: {safe_error}")
-            finally:
-                state = self._board_state_for(sequencer)
-                done.set()
-            return program, state, error
+            return program, self._board_state_for(sequencer), error
 
-        def delivered(result: object) -> None:
-            program, state, error = result
+        def delivered(result: object, failure: BaseException | None) -> None:
+            program, state, error = (
+                result if result is not None else (None, self._board_state, failure)
+            )
+            self._board_state = state
+            if error is None:
+                self._finite_drive = requested_cycles is not None
+                self._remember_applied_scan(program, source, rows)
+                self._digest = program.digest
+                self._digest_revision = self.revision
+                self.view.set_summary("Started")
+            else:
+                if not state.firing:
+                    self._release_drive()
+                message = f"firing stopped: {error}"
+                self.view.set_summary(message)
+                self._warn(message)
+            self._render_run_state()
+
+        self._run_device_command(work, delivered, summary="Starting...")
+
+    def _device_available(self) -> bool:
+        if self._device_busy or self._stop_busy:
+            self._warn("a pulse command is already in progress")
+            return False
+        return True
+
+    def _run_device_command(
+        self,
+        work: Callable[[int], object],
+        delivered: Callable[[object, BaseException | None], None],
+        *,
+        summary: str,
+    ) -> bool:
+        """Change the board on the device worker; show the outcome here.
+
+        Every command -- On Pulse, Hold, Step, Sync, Connect -- has the same
+        shape: this thread marks the editor busy so the buttons say so, hands
+        the device work to the worker with the operation number it was
+        started as, and applies what came back only if no later command
+        superseded it.  ``work`` takes that operation number so it can stop
+        touching the device once it is stale; ``delivered`` takes the result
+        and the error, exactly one of them None.  ``_device_done`` is set the
+        moment the device work ends, whichever way, for Stop to wait on.
+        """
+
+        runner = self._run_device_work
+        assert runner is not None
+        self._device_operation += 1
+        operation = self._device_operation
+        done = Event()
+        self._device_done = done
+        self._device_busy = True
+        self.view.set_summary(summary)
+        self._render_run_state()
+
+        def task() -> object:
+            try:
+                return work(operation)
+            finally:
+                done.set()
+
+        def finished(result: object, error: BaseException | None) -> None:
             self._device_done = None
             self._device_busy = False
             if operation == self._device_operation:
-                self._board_state = state
-                if error is None:
-                    self._finite_drive = requested_cycles is not None
-                    self._remember_applied_scan(program, source, rows)
-                    self._digest = program.digest
-                    self._digest_revision = self.revision
-                    self.view.set_summary("Started")
-                else:
-                    if not state.firing:
-                        self._release_drive()
-                    if error is not None:
-                        message = f"firing stopped: {error}"
-                        self.view.set_summary(message)
-                        self._warn(message)
-                self._render_run_state()
+                delivered(result, error)
             self._wake_close_guard()
 
-        def failed(error: BaseException) -> None:
-            done.set()
-            delivered((None, self._board_state, error))
+        return self._submit_work(
+            runner,
+            task,
+            lambda result: finished(result, None),
+            lambda error: finished(None, error),
+        )
 
-        self._submit_work(self._run_device_work, work, delivered, failed)
+    def _drive_program(
+        self,
+        sequencer: object,
+        program: object,
+        source: PulseSequence,
+        *,
+        rows: Sequence[Sequence[int]] = (),
+        cycles: int | None,
+        current: Callable[[], bool],
+        halt_first: bool = False,
+    ) -> BaseException | None:
+        """Stop what is playing, put ``program`` on the board, play it.
+
+        The three device steps every play gesture is made of -- On Pulse,
+        Hold, Step -- in the one order that works, with the one guarantee they
+        share: a board that was touched and could not be handed the whole
+        program is driven safe, not left with half of it.  On Pulse stops the
+        board only when it is playing; Hold and Step (``halt_first``) stop it
+        regardless, because freezing the scan IS the gesture.  ``current``
+        says whether the gesture that asked is still the latest; a superseded
+        one stops touching the device and goes safe.  Runs on whichever
+        thread owns the device conversation; returns the error instead of
+        raising so the board's state can be read afterwards on the same
+        thread.
+        """
+
+        touched = False
+        try:
+            if current() and (halt_first or bool(sequencer.snapshot().get("firing"))):
+                touched = True
+                sequencer.safe()
+            if current():
+                touched = True
+                sequencer.load(program, source=source, rows=rows)
+            if current():
+                sequencer.fire(cycles=cycles)
+            if not current() and touched:
+                sequencer.safe()
+        except BaseException as caught:  # noqa: BLE001 -- returned, not lost
+            if touched:
+                try:
+                    sequencer.safe()
+                except BaseException as safe_error:  # noqa: BLE001
+                    return RuntimeError(f"{caught}; SAFE also failed: {safe_error}")
+            return caught
+        return None
 
     @staticmethod
     def _submit_work(runner, work, delivered, failed) -> bool:
@@ -2420,33 +2670,51 @@ class PulseEditorPresenter:
             self._refresh_scan_page()
 
     def refresh_run_state(self) -> None:
-        """Ask the board again and show the answer.
+        """Ask the board what it is doing and show the answer before returning.
 
         The public name for it, because "what is the board doing" is a question
-        anything may need re-asked -- a window on a timer, a notebook, a test
-        standing in for the operator who walked back to the bench.
+        anything may need re-asked -- a notebook, a test standing in for the
+        operator who walked back to the bench, the app attaching a board at
+        start-up.  It blocks its caller for the board's round trip, which is
+        right for a line in a notebook and wrong for a GUI thread: the window
+        asks through ``ask_run_state`` instead.
         """
 
-        if self._finite_drive and self._drive_lease is not None and self.sequencer is not None:
-            try:
-                report = self.sequencer.wait_done(0)
-            except Exception as error:
-                self._warn(f"finite pulse status failed: {error}")
-            else:
-                if report is not None:
-                    fault = str(getattr(report, "fault", "") or "")
-                    if fault:
-                        self._warn(f"finite pulse stopped: {fault}")
-                    self._release_drive()
-        self._poll_board()
+        sequencer = self.sequencer
+        finite = self._finite_drive and self._drive_lease is not None
+        self._adopt_board_answer(self._board_answer(sequencer, finite))
+
+    def ask_run_state(self, *, then: Callable[[], None] | None = None) -> bool:
+        """Ask the board what it is doing; show the answer when it comes.
+
+        The asking is device I/O: a socket round trip to the pulse server,
+        which answers only once whatever it is doing on the UART lets it.  The
+        window's timer used to make that round trip ON the GUI thread every
+        100 ms, and the experiment machine's main thread spent a third of its
+        time blocked in that socket -- up to a second at a stretch -- while
+        clicks, tabs and paints waited behind it.  With a device worker the
+        question goes there and the answer comes back through the owner turn;
+        without one it is asked here and answered before this returns.
+        ``then`` runs after the answer has been shown.  Returns whether an
+        answer is coming.
+        """
+
+        sequencer = self.sequencer
+        finite = self._finite_drive and self._drive_lease is not None
+        return self._ask_board(
+            lambda: self._board_answer(sequencer, finite),
+            self._adopt_board_answer,
+            then=then,
+        )
 
     def _poll_board(self) -> None:
-        """Go and ask the board, then show what it said.
+        """Ask the board now, on this thread, and show what it said.
 
-        The ONLY path that talks to the sequencer to find out what it is
-        doing, and it is called only after this editor has done something to
-        the board -- loaded, fired, stopped, attached -- or when something
-        explicitly asks for the question to be re-put.
+        The synchronous form, for the paths that already own the device on
+        this thread -- the notebook's fire and load, the safe drive -- where
+        the answer is needed before the next line runs.  The window's timer
+        and every button ask through ``ask_run_state`` instead, so that
+        an answer the board is slow to give never holds the GUI.
 
         It used to be called from every redraw, and every edit redraws, so
         ticking a checkbox or typing a digit made an RPyC round trip to the
@@ -2455,8 +2723,110 @@ class PulseEditorPresenter:
         on screen, and that comparison is local.
         """
 
+        self._adopt_board_state(self.board_state())
+
+    def _ask_board(
+        self,
+        question: Callable[[], object],
+        answered: Callable[[object], None],
+        *,
+        then: Callable[[], None] | None = None,
+    ) -> bool:
+        """Put one question to the board without changing it; apply the answer here.
+
+        THE path a status read takes.  ``question`` runs where the I/O
+        belongs -- the device worker when this editor has one, this thread
+        when it has not -- and ``answered`` runs on the owner with what came
+        back.  One question in flight at a time: a second request while one
+        is pending only adds ``then`` to the answer's follow-ups.  A command
+        in progress makes no request at all -- its own delivery reports the
+        board it left behind -- and an answer that arrives after a command
+        started is dropped, because it describes the board from before.
+        """
+
+        if then is not None:
+            self._status_followups.append(then)
+        runner = self._run_device_work
+        if runner is None or self.sequencer is None:
+            try:
+                answer = question()
+            except Exception as error:
+                self._warn(f"board status failed: {error}")
+                self._run_status_followups()
+                return False
+            answered(answer)
+            self._run_status_followups()
+            return True
+        if self._status_in_flight:
+            return True
+        if self._device_busy or self._stop_busy:
+            self._run_status_followups()
+            return False
+        operation = self._device_operation
+        sequencer = self.sequencer
+        self._status_in_flight = True
+
+        def finished(answer: object, error: BaseException | None) -> None:
+            self._status_in_flight = False
+            if error is not None:
+                self._warn(f"board status failed: {error}")
+            elif operation == self._device_operation and sequencer is self.sequencer:
+                answered(answer)
+            self._run_status_followups()
+
+        return self._submit_work(
+            runner,
+            question,
+            lambda answer: finished(answer, None),
+            lambda error: finished(None, error),
+        )
+
+    def _run_status_followups(self) -> None:
+        followups, self._status_followups = self._status_followups, []
+        for followup in followups:
+            try:
+                followup()
+            except Exception as error:  # noqa: BLE001 -- one follow-up must not eat the rest
+                self._warn(f"internal error after a board answer: {error}")
+
+    def _board_answer(
+        self, sequencer: object, finite: bool
+    ) -> tuple[tuple[str, object] | None, BoardState]:
+        """What the board says it is doing, read in one place on whichever thread asks.
+
+        A finite drive is asked whether it has finished first: ``wait_done(0)``
+        is a poll, and its report -- done, or a fault -- belongs to the same
+        answer as the state, so both arrive together and are shown together.
+        """
+
+        if sequencer is None:
+            return None, BoardState()
+        finite_answer: tuple[str, object] | None = None
+        if finite:
+            try:
+                finite_answer = ("done", sequencer.wait_done(0))
+            except Exception as error:  # noqa: BLE001 -- reported on the owner
+                finite_answer = ("failed", error)
+        return finite_answer, self._board_state_for(sequencer)
+
+    def _adopt_board_answer(self, answer: object) -> None:
+        finite_answer, state = answer
+        if finite_answer is not None:
+            kind, payload = finite_answer
+            if kind == "failed":
+                self._warn(f"finite pulse status failed: {payload}")
+            elif payload is not None:
+                fault = str(getattr(payload, "fault", "") or "")
+                if fault:
+                    self._warn(f"finite pulse stopped: {fault}")
+                self._release_drive()
+        self._adopt_board_state(state)
+
+    def _adopt_board_state(self, state: BoardState) -> None:
+        """Show what the board said, wherever and whenever it was asked."""
+
         was_running = self._board_state.firing
-        self._board_state = self.board_state()
+        self._board_state = state
         self._render_run_state()
         if was_running != self._board_state.firing and self.sequence is not None:
             self._refresh_scan_page()
@@ -2995,8 +3365,7 @@ class PulseEditorPresenter:
         if not self._scan_armed():
             self._warn("there is no scan to hold a point of")
             return False
-        cursor = self._scan_cursor()
-        return self._hold(0 if cursor is None else int(cursor))
+        return self._hold(None, worker=None)
 
     def step_scan_point(self, delta: int) -> bool:
         """Move the held point by one, and keep playing the new one."""
@@ -3005,19 +3374,29 @@ class PulseEditorPresenter:
             self._warn("nothing is held to step")
             return False
         held = 0 if self._held_point is None else self._held_point
-        return self._hold(held + int(delta))
+        return self._hold(held + int(delta), worker=None)
 
-    def _hold(self, point: int) -> bool:
+    def _hold_from_view(self) -> None:
+        self._hold(None, worker=self._run_device_work)
+
+    def _step_from_view(self, delta: int) -> None:
+        held = 0 if self._held_point is None else self._held_point
+        self._hold(held + int(delta), worker=self._run_device_work)
+
+    def _hold(self, point: int | None, *, worker: object) -> bool:
         """Play one scan row, held, until something else is asked for.
 
         The whole gesture in one place, because Hold and either Step are the
         same three things in the same order -- stop, write that row, play it --
         and a version of it that skipped the third was how Hold came to mean
-        "off".
+        "off".  ``None`` holds the row the board is on, which is a question
+        for the board and travels with the command.  With a ``worker`` the
+        command runs there and its outcome is shown when it is delivered;
+        without one it runs here and is shown before this returns.
         """
 
         rows = self._state.scan_rows
-        self._held_point = max(0, min(len(rows) - 1, int(point)))
+        count = len(rows)
         try:
             # A held point is an ORDINARY pulse whose scanned fields carry that
             # row's numbers -- not a scan of length one.  Saying it the other
@@ -3028,33 +3407,107 @@ class PulseEditorPresenter:
             # plain pulse, which is the state the board is designed to hold.
             source = resolve_api_parameters(self.sequence)
             effective_rows, _scales, _wire = self._prepared_scan(source)
-            resolved = resolve_scan_point(source, effective_rows[self._held_point])
-            program = self.compile(resolved)
         except Exception as error:
-            self._scan_progress = f"cannot hold that point: {error}"
-            self._warn(f"cannot hold scan point {self._held_point}: {error}")
-            self._refresh_scan_page()
+            held = self._clamp_scan_point(point, count)
+            self._held_point = held
+            self._hold_failed(held, error)
             return False
+
+        def prepare(held: int) -> tuple[PulseSequence, object]:
+            resolved = resolve_scan_point(source, effective_rows[held])
+            return resolved, self.compile(resolved)
+
         if not self._acquire_command():
             return False
-        if not self._safe_drive(release=False):
+        sequencer = self.sequencer
+        if worker is None:
+            held = self._clamp_scan_point(
+                point if point is not None else self._read_cursor(sequencer), count
+            )
+            self._held_point = held
+            try:
+                resolved, program = prepare(held)
+            except Exception as error:
+                self._hold_failed(held, error)
+                return False
+            error = self._drive_program(
+                sequencer,
+                program,
+                resolved,
+                cycles=None,
+                current=lambda: True,
+                halt_first=True,
+            )
+            self._settle_hold(held, count, self.board_state(), error)
+            return error is None
+        if not self._device_available():
             return False
+
+        def work(operation: int) -> object:
+            held = self._clamp_scan_point(
+                point if point is not None else self._read_cursor(sequencer), count
+            )
+            try:
+                resolved, program = prepare(held)
+            except Exception as error:
+                return held, self._board_state_for(sequencer), error
+            error = self._drive_program(
+                sequencer,
+                program,
+                resolved,
+                cycles=None,
+                current=lambda: operation == self._device_operation,
+                halt_first=True,
+            )
+            return held, self._board_state_for(sequencer), error
+
+        def delivered(result: object, failure: BaseException | None) -> None:
+            held, state, error = (
+                result
+                if result is not None
+                else (self._clamp_scan_point(point, count), self._board_state, failure)
+            )
+            self._held_point = held
+            self._settle_hold(held, count, state, error)
+
+        return self._run_device_command(work, delivered, summary="Holding...")
+
+    @staticmethod
+    def _clamp_scan_point(point: int | None, count: int) -> int:
+        return max(0, min(count - 1, int(0 if point is None else point)))
+
+    @staticmethod
+    def _read_cursor(sequencer: object) -> int | None:
+        """Current board row for the Hold gesture, on the thread that owns the device."""
+
+        cursor = getattr(sequencer, "cursor", None)
+        if not callable(cursor):
+            return None
         try:
-            self.sequencer.load(program, source=resolved)
-            self.sequencer.fire(cycles=None)
-            self._finite_drive = False
-        except Exception as error:
-            self._scan_progress = f"cannot hold that point: {error}"
-            self._warn(f"cannot hold scan point {self._held_point}: {error}")
-            self._safe_drive(release=True)
-            self._refresh_scan_page()
-            return False
-        self._poll_board()
-        self._scan_progress = (
-            f"held at scan point {self._held_point} of {len(rows)}"
-        )
+            return cursor()
+        except Exception:  # noqa: BLE001 -- no cursor is an answer: the first row
+            return None
+
+    def _hold_failed(self, held: int, error: BaseException) -> None:
+        self._scan_progress = f"cannot hold that point: {error}"
+        self._warn(f"cannot hold scan point {held}: {error}")
         self._refresh_scan_page()
-        return True
+
+    def _settle_hold(
+        self, held: int, count: int, state: BoardState, error: BaseException | None
+    ) -> None:
+        """Show what holding a point left the board doing."""
+
+        if error is None:
+            self._finite_drive = False
+            self._scan_progress = f"held at scan point {held} of {count}"
+        else:
+            self._scan_progress = f"cannot hold that point: {error}"
+            self._warn(f"cannot hold scan point {held}: {error}")
+            if not state.firing:
+                self._release_drive()
+        self._adopt_board_state(state)
+        self._refresh_scan_page()
 
     def _take_scan_rows(self, rows: Sequence[Sequence[float]]) -> None:
         """Hold a new table, and tell both pages that show it.
@@ -3088,11 +3541,21 @@ class PulseEditorPresenter:
         )
 
     def refresh_scan_progress(self) -> None:
-        """Where the board is in the table, asked only while the page is visible."""
+        """Where the board is in the table, asked and shown before returning."""
 
         if self.sequencer is None:
             return
         self._poll_board()
+        self._render_scan_progress()
+
+    def _scan_progress_from_view(self) -> None:
+        """The Scan page asking where the board is, answered when the board does."""
+
+        if self.sequencer is None:
+            return
+        self.ask_run_state(then=self._render_scan_progress)
+
+    def _render_scan_progress(self) -> None:
         cursor = self._board_state.cursor
         applied = self._applied_scan
         if not self.running or cursor is None or applied is None:
@@ -3115,18 +3578,6 @@ class PulseEditorPresenter:
         )
         self.view.set_scan_progress_text(self._scan_progress)
 
-    def _scan_cursor(self) -> int | None:
-        """Current board row for the Hold gesture."""
-
-        cursor = getattr(self.sequencer, "cursor", None)
-        if not callable(cursor):
-            return None
-        try:
-            return cursor()
-        except Exception:
-            return None
-
-    # -------------------------------------------------------------- refresh
 
     def _push_schedule(self, vm: ScheduleVM) -> None:
         """Show this model, advancing the revision when it is a different one.

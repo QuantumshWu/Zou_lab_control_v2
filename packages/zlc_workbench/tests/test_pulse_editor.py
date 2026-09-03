@@ -3397,3 +3397,264 @@ def test_a_defective_handler_warns_instead_of_killing_the_editor(sequence) -> No
 
     with _pytest.raises(LookupError):
         presenter.move_period("p0", 1)
+
+
+# ---------------------------------------------------------------------------
+# The device worker: no device conversation the window starts runs on its thread.
+
+
+class _DeviceWorker:
+    """The window's device worker without Qt: work on its own thread, delivery here.
+
+    ``attach_qt_worker`` runs each job on one worker thread and delivers its
+    outcome on the owner's next turn.  This does the same with a queue the
+    test drains, so a test can look at the presenter BETWEEN the request and
+    the delivery -- which is the whole point of the worker: the GUI thread
+    is free in between.
+    """
+
+    def __init__(self) -> None:
+        import queue
+
+        self._outcomes: "queue.Queue" = queue.Queue()
+
+    def __call__(self, work, delivered, failed) -> None:
+        from threading import Thread
+
+        def run() -> None:
+            try:
+                result = work()
+            except BaseException as error:
+                self._outcomes.put(lambda: failed(error))
+            else:
+                self._outcomes.put(lambda: delivered(result))
+
+        Thread(target=run, name="pulse-device-worker", daemon=True).start()
+
+    def deliver_until(self, predicate, seconds: float = 3.0) -> None:
+        """Deliver outcomes on this thread until ``predicate`` holds."""
+
+        import queue
+
+        deadline = time.monotonic() + seconds
+        while not predicate():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                outcome = self._outcomes.get(timeout=min(remaining, 0.05))
+            except queue.Empty:
+                continue
+            outcome()
+        assert predicate(), "the device worker never delivered what was waited for"
+
+
+class _ThreadWatchingSequencer(_Sequencer):
+    """A board that remembers which thread each call came from."""
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.callers: list[tuple[str, str]] = []
+
+    def _note(self, what: str) -> None:
+        from threading import current_thread
+
+        self.callers.append((what, current_thread().name))
+
+    def snapshot(self) -> dict:
+        self._note("snapshot")
+        return super().snapshot()
+
+    def load(self, prog, *, source=None, rows=()) -> None:
+        self._note("load")
+        super().load(prog, source=source, rows=rows)
+
+    def fire(self, *, cycles=1) -> None:
+        self._note("fire")
+        super().fire(cycles=cycles)
+
+    def safe(self):
+        self._note("safe")
+        return super().safe()
+
+    def applied(self):
+        self._note("applied")
+        return super().applied()
+
+    def describe(self):
+        self._note("describe")
+        return super().describe()
+
+    def cursor(self) -> int:
+        self._note("cursor")
+        return 0
+
+    def threads_for(self, what: str) -> set[str]:
+        return {thread for name, thread in self.callers if name == what}
+
+
+def test_the_timer_question_goes_to_the_device_worker(sequence) -> None:
+    """The 100 ms poll never makes the GUI thread wait on the board's socket.
+
+    On the experiment machine that socket answers only when the pulse
+    server is free of its UART transaction, and the main thread spent a
+    third of its time waiting there.  The question is asked on the worker;
+    five requests while one is pending send one question; the answer is
+    shown when it comes.  The public ``refresh_run_state`` still answers
+    before returning, on the caller's thread -- that is a notebook's form.
+    """
+
+    view = _EditorView()
+    board = _ThreadWatchingSequencer(description=_board_description())
+    worker = _DeviceWorker()
+    presenter = PulseEditorPresenter(
+        view, sequence, sequencer=board, run_device_work=worker, run_safe_work=_run_preview_immediately
+    )
+    board.callers.clear()
+    try:
+        for _ in range(5):
+            assert presenter.ask_run_state() is True
+        worker.deliver_until(lambda: not presenter._status_in_flight)
+        assert board.callers == [("snapshot", "pulse-device-worker")]
+        assert presenter._board_state.attached is True
+
+        presenter.refresh_run_state()
+        assert board.callers[-1] == ("snapshot", "MainThread")
+    finally:
+        presenter.close()
+
+
+def test_a_status_answer_from_before_a_command_is_dropped(sequence) -> None:
+    """After On Pulse the board's state comes from the command, not from a question asked before it."""
+
+    from threading import Event
+
+    gate = Event()
+
+    class _SlowAnswer(_ThreadWatchingSequencer):
+        slow = False
+
+        def snapshot(self) -> dict:
+            answer = super().snapshot()
+            if self.slow and not answer["firing"]:
+                # Asked before the shot, answered after it: the answer says
+                # "not firing" about a board that by then is.
+                gate.wait(3.0)
+            return answer
+
+    view = _EditorView()
+    board = _SlowAnswer(description=_board_description())
+    worker = _DeviceWorker()
+    presenter = PulseEditorPresenter(
+        view, sequence, sequencer=board, run_device_work=worker, run_safe_work=_run_preview_immediately
+    )
+    board.slow = True
+    board.callers.clear()
+    try:
+        assert presenter.ask_run_state() is True
+        view.fire_requested.emit()
+        assert presenter._device_busy is True
+        gate.set()
+        worker.deliver_until(
+            lambda: not presenter._device_busy and not presenter._status_in_flight
+        )
+        assert board.events[-2:] == ["load", "fire forever"]
+        assert presenter.running is True, "a stale answer overwrote the command's state"
+        assert view.status_token == "running-synced"
+        assert {thread for _name, thread in board.callers} == {"pulse-device-worker"}
+    finally:
+        board.slow = False
+        presenter.close()
+
+
+def test_connect_hold_step_and_sync_run_on_the_device_worker(sequence) -> None:
+    """Every button that talks to the board talks to it off the GUI thread.
+
+    Connect dials and reads the board on the worker and this editor changes
+    what it is connected to only when that delivers; Hold and Step ask the
+    board where it is, stop it, write the row and play it there; Sync reads
+    what is applied there.  Each shows its outcome when the outcome comes.
+    """
+
+    view = _EditorView()
+    board = _ThreadWatchingSequencer(description=_board_description())
+    worker = _DeviceWorker()
+    presenter = PulseEditorPresenter(
+        view,
+        sequence,
+        dial=lambda _mode, _endpoint: board,
+        run_device_work=worker, run_safe_work=_run_preview_immediately,
+    )
+    try:
+        view.connection_requested.emit("remote", "127.0.0.1:18861")
+        assert presenter.sequencer is None, "the connection was made on the GUI thread"
+        assert presenter._device_busy is True
+        worker.deliver_until(lambda: presenter.sequencer is board)
+        assert board.threads_for("describe") == {"pulse-device-worker"}
+        status = view.schedule_view.connection.status
+        assert "127.0.0.1:18861" in status and "ports" in status
+        assert view.schedule_view.capabilities == (True, True, False)
+
+        period_id = sequence.periods[3].period_id
+        view.duration_committed.emit(period_id, 1.0, "s")
+        view.binding_cycle_requested.emit("duration", period_id, None)
+        _run_scan(
+            view,
+            "import numpy as np\nscan_table = np.array([0.5, 1.0, 1.5]).reshape(-1, 1)\n",
+        )
+        board.events.clear()
+        board.callers.clear()
+        view.scan_hold_requested.emit()
+        assert presenter._device_busy is True
+        assert presenter._held_point is None, "the hold was settled on the GUI thread"
+        worker.deliver_until(lambda: not presenter._device_busy)
+        assert board.events == ["safe", "load", "fire forever"]
+        assert {thread for _name, thread in board.callers} == {"pulse-device-worker"}
+        assert presenter._held_point == 0
+        assert "held at scan point 0" in presenter._scan_progress
+
+        view.scan_step_requested.emit(1)
+        worker.deliver_until(lambda: not presenter._device_busy)
+        assert presenter._held_point == 1
+        assert board.events[-3:] == ["safe", "load", "fire forever"]
+
+        board.callers.clear()
+        view.sync_requested.emit()
+        assert presenter._device_busy is True
+        worker.deliver_until(lambda: not presenter._device_busy)
+        assert board.threads_for("applied") == {"pulse-device-worker"}
+        assert not [text for text in view.warnings if "cannot sync" in text]
+        assert presenter.sequence.period_by_id[period_id].duration == pytest.approx(1.0)
+    finally:
+        presenter.close()
+
+
+def test_a_second_command_while_one_runs_is_refused_not_queued(sequence) -> None:
+    """Two commands on the board at once is not a state the editor allows."""
+
+    from threading import Event
+
+    gate = Event()
+
+    class _SlowLoad(_ThreadWatchingSequencer):
+        def load(self, prog, *, source=None, rows=()) -> None:
+            gate.wait(3.0)
+            super().load(prog, source=source, rows=rows)
+
+    view = _EditorView()
+    board = _SlowLoad(description=_board_description())
+    worker = _DeviceWorker()
+    presenter = PulseEditorPresenter(
+        view, sequence, sequencer=board, run_device_work=worker, run_safe_work=_run_preview_immediately
+    )
+    try:
+        view.fire_requested.emit()
+        view.sync_requested.emit()
+        assert any("already in progress" in text for text in view.warnings)
+        gate.set()
+        worker.deliver_until(lambda: not presenter._device_busy)
+        assert presenter.running is True
+    finally:
+        gate.set()
+        presenter.close()
+

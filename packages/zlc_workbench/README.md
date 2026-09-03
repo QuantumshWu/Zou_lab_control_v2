@@ -175,6 +175,19 @@ Completion callbacks return to the Qt owner and queue the final guarded close;
 timeouts report what is still active but never claim the window or worker is
 closed.
 
+Pulse Editor never talks to the board on the Qt owner.  Its window has one
+serial device worker and one SAFE worker; every conversation a control starts
+-- the 100 ms "what is the board doing" poll, On Pulse, Hold, Step, Sync,
+Connect -- runs on the device worker and is shown when it delivers.  A status
+question is one at a time (a request while one is pending only queues its
+follow-up), is not sent while a command is in progress (the command reports
+the board it left), and an answer from before a command started is dropped.
+On the experiment machine the pulse server answers only between UART
+transactions, and the poll used to hold the GUI thread for that wait.  The
+presenter's public methods (`refresh_run_state`, `connect_to`, `hold_scan_point`,
+`sync_from_sequencer`, ...) still answer before returning: they are what a
+notebook, a test and the app's start-up call.
+
 ## Check the environment first
 
 ```bash
