@@ -2269,9 +2269,20 @@ class FitProjection:
     def _display_scalar_to_canonical(
         self, value: float, source: AxisRef | Any
     ) -> float:
+        """One painted coordinate back in the DATASET's unit.
+
+        The exact inverse of ``_canonical_scalar_to_display``.  It used to
+        convert to the unit system's BASE unit (microseconds to seconds)
+        instead of the dataset's own unit -- the two agree only for a
+        dataset written in base units, so every selector on metres and volts
+        round-tripped while a column in microseconds had every drawn box
+        stored a million times too small.
+        """
+
         quantity = self._coordinate(source) if isinstance(source, AxisRef) else source
-        unit = quantity.display_unit
-        return float(np.asarray(unit.to_canonical([value])).reshape(-1)[0])
+        display = quantity.display_unit
+        canonical = quantity.canonical_unit
+        return float(np.asarray(display.convert_value_to([value], canonical)).reshape(-1)[0])
 
     def _canonical_scalar_to_display(
         self, value: float, source: AxisRef | Any
