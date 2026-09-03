@@ -223,7 +223,7 @@ def test_a_sliding_shot_history_is_not_a_new_geometry_under_a_drag() -> None:
             QtCore.Qt.LeftButton, QtCore.Qt.LeftButton,
         )
         pump(0.3)
-        assert widget._candidate is not None, "the press opened no selector"
+        assert widget._candidate is None, "press rendered an unmoved selector"
 
         for step in range(4):
             host.update_data(shot(step + 1, step + 2)).result(timeout=20)

@@ -57,6 +57,7 @@ class _PointerUpdate:
     role: str | None
     cell_index: int | None
     active_pan: bool
+    armed_selector: bool
     publish_front: bool
 
 

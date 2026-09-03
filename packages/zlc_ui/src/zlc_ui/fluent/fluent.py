@@ -10,7 +10,6 @@ import contextlib
 from collections.abc import Callable, Sequence
 import logging
 import math
-import os
 import re
 import time
 import weakref
@@ -4081,7 +4080,6 @@ class FluentScrollArea(QtWidgets.QScrollArea):
             {fluent_scrollbar_stylesheet("QScrollBar")}
             """
         )
-
     def set_width_bounded_widget(self, widget: QtWidgets.QWidget) -> None:
         """Mount vertical content that must never widen its visible host.
 
@@ -4130,6 +4128,174 @@ class FluentScrollArea(QtWidgets.QScrollArea):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._reserve_scrollbar_gutter()
+
+
+class FluentTableView(QtWidgets.QTableView):
+    """Virtual item view with the same quiet Fluent chrome as the form family.
+
+    The table deliberately owns no model or data interpretation.  A caller can
+    mount any ``QAbstractItemModel`` and retain Qt's virtual, visible-cell-only
+    painting instead of manufacturing one widget per value.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.setShowGrid(True)
+        self.setGridStyle(QtCore.Qt.SolidLine)
+        self.setAlternatingRowColors(True)
+        self.setWordWrap(False)
+        self.setSortingEnabled(False)
+        self.setCornerButtonEnabled(False)
+        self.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectItems)
+        self.setEditTriggers(
+            QtWidgets.QAbstractItemView.DoubleClicked
+            | QtWidgets.QAbstractItemView.EditKeyPressed
+            | QtWidgets.QAbstractItemView.SelectedClicked
+        )
+        self.horizontalHeader().setSectionsMovable(False)
+        self.horizontalHeader().setStretchLastSection(False)
+        self.horizontalHeader().setSectionResizeMode(
+            QtWidgets.QHeaderView.Interactive
+        )
+        self.horizontalHeader().setDefaultSectionSize(scaled_px(80, minimum=64))
+        self.verticalHeader().setSectionsMovable(False)
+        self.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Fixed)
+        self.verticalHeader().setDefaultSectionSize(scaled_px(28, minimum=22))
+        self.verticalHeader().setMinimumWidth(scaled_px(58, minimum=46))
+        self.setStyleSheet(
+            f"""
+            QTableView {{
+                background: white;
+                alternate-background-color: {BG};
+                color: {TEXT};
+                border: 1px solid {DIVIDER};
+                border-radius: {_radius()}px;
+                gridline-color: {DIVIDER};
+                selection-background-color: {ACCENT};
+                selection-color: white;
+                font: {fluent_font_size()}pt "{FONT}";
+                outline: none;
+            }}
+            QTableView::item {{
+                padding: {scaled_px(3, minimum=2)}px {scaled_px(6, minimum=4)}px;
+                border: none;
+            }}
+            QTableView::item:hover:!selected {{ background: {HOVER}; color: white; }}
+            QTableView QLineEdit {{
+                background: white;
+                color: {TEXT};
+                border: {scaled_px(1, minimum=1)}px solid {ACCENT};
+                padding: 0px {scaled_px(4, minimum=2)}px;
+                font: {fluent_font_size()}pt "{FONT}";
+            }}
+            QHeaderView::section {{
+                background: {BG};
+                color: {GREY};
+                border: none;
+                border-right: 1px solid {DIVIDER};
+                border-bottom: 1px solid {DIVIDER};
+                padding: {scaled_px(4, minimum=3)}px {scaled_px(6, minimum=4)}px;
+                font: {fluent_font_size()}pt "{FONT}";
+            }}
+            """
+        )
+        apply_fluent_scrollbars(self)
+
+    def _selected_bounds(self) -> tuple[tuple[QtCore.QModelIndex, ...], int, int, int, int] | None:
+        selected = tuple(self.selectionModel().selectedIndexes())
+        if not selected:
+            current = self.currentIndex()
+            selected = (current,) if current.isValid() else ()
+        if not selected:
+            return None
+        rows = tuple(index.row() for index in selected)
+        columns = tuple(index.column() for index in selected)
+        return selected, min(rows), max(rows), min(columns), max(columns)
+
+    def copy_selection(self) -> None:
+        bounds = self._selected_bounds()
+        if bounds is None:
+            return
+        selected, first_row, last_row, first_column, last_column = bounds
+        chosen = {(index.row(), index.column()): index for index in selected}
+        lines = []
+        for row in range(first_row, last_row + 1):
+            fields = []
+            for column in range(first_column, last_column + 1):
+                index = chosen.get((row, column))
+                value = "" if index is None else index.data(QtCore.Qt.DisplayRole)
+                fields.append("" if value is None else str(value))
+            lines.append("\t".join(fields))
+        QtWidgets.QApplication.clipboard().setText("\n".join(lines))
+
+    def paste_clipboard(self) -> None:
+        model = self.model()
+        if model is None:
+            return
+        start = self.currentIndex()
+        if not start.isValid():
+            bounds = self._selected_bounds()
+            if bounds is None:
+                return
+            _selected, first_row, _last_row, first_column, _last_column = bounds
+            start = model.index(first_row, first_column)
+        text = QtWidgets.QApplication.clipboard().text()
+        lines = text.splitlines()
+        if not lines:
+            lines = [""]
+        cells = tuple(tuple(line.split("\t")) for line in lines)
+        set_block = getattr(model, "set_block_data", None)
+        if callable(set_block):
+            set_block(start.row(), start.column(), cells)
+            return
+        for row_offset, fields in enumerate(cells):
+            for column_offset, value in enumerate(fields):
+                index = model.index(
+                    start.row() + row_offset,
+                    start.column() + column_offset,
+                )
+                if index.isValid():
+                    model.setData(index, value, QtCore.Qt.EditRole)
+
+    def clear_selection(self) -> None:
+        model = self.model()
+        if model is None:
+            return
+        indexes = tuple(self.selectionModel().selectedIndexes())
+        clear = getattr(model, "clear_indices", None)
+        if callable(clear):
+            clear(tuple((index.row(), index.column()) for index in indexes))
+            return
+        for index in indexes:
+            model.setData(index, "", QtCore.Qt.EditRole)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        if event.matches(QtGui.QKeySequence.Copy):
+            self.copy_selection()
+            event.accept()
+            return
+        if event.matches(QtGui.QKeySequence.Paste):
+            self.paste_clipboard()
+            event.accept()
+            return
+        if event.key() in (QtCore.Qt.Key_Delete, QtCore.Qt.Key_Backspace):
+            self.clear_selection()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        menu = _FluentRoundedMenu(self)
+        copy = menu.addAction("Copy")
+        paste = menu.addAction("Paste")
+        clear = menu.addAction("Clear")
+        copy.triggered.connect(self.copy_selection)
+        paste.triggered.connect(self.paste_clipboard)
+        clear.triggered.connect(self.clear_selection)
+        menu.exec_(event.globalPos())
+        event.accept()
 
 
 class LinkedScrollPanes(QtWidgets.QWidget):

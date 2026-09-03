@@ -1238,6 +1238,7 @@ def _qt5_plot_widget_class() -> type[Any]:
             role = state.role
             cell_index = state.cell_index
             active_pan = state.active_pan
+            armed_selector = state.armed_selector
             # THE MOMENT IT CAUGHT, and the only honest moment for it.
             # The button going down says a hand tried; this says the
             # session built a gesture and the drag is live.  Tied to the
@@ -1263,7 +1264,9 @@ def _qt5_plot_widget_class() -> type[Any]:
             ):
                 return
             if candidate is None or role is None:
-                if action in {"release", "cancel", "key"} or not active_pan:
+                if action in {"release", "cancel", "key"} or not (
+                    active_pan or armed_selector
+                ):
                     self._clear_interaction()
                 elif action == "move":
                     # A pan front is already complete when it reaches this
