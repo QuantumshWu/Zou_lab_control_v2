@@ -91,6 +91,7 @@ pyserial==3.5
 pytest==9.0.3
 python-dateutil==2.9.0.post0
 python-json-logger==4.2.0
+PyVISA==1.16.1
 pywin32==312
 pywinpty==3.0.5
 PyYAML==6.0.3

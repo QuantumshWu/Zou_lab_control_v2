@@ -16,6 +16,7 @@ dependencies = [
     "PyQt5==5.15.11",
     "PyQt5-Frameless-Window==0.8.0",
     "pyserial==3.5",
+    "PyVISA==1.16.1",
     "scipy==1.17.1",
 ]
 
