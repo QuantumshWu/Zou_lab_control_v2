@@ -181,6 +181,16 @@ class Dg4000Sighting:
         return fields[1] if len(fields) > 1 else ""
 
 
+def probeable_resources(listed: object) -> tuple[str, ...]:
+    """The listed resources worth opening, in the order VISA gave them."""
+
+    return tuple(
+        name
+        for name in (str(item).strip() for item in listed)
+        if name.upper().startswith(PROBED_RESOURCE_PREFIXES)
+    )
+
+
 def discover_dg4000(
     resources: VisaResources | None = None,
     *,
@@ -206,10 +216,7 @@ def discover_dg4000(
     manager = visa_resources() if resources is None else resources
     milliseconds = max(1, int(float(timeout_seconds) * 1000.0))
     found: list[Dg4000Sighting] = []
-    for resource in manager.list_resources():
-        name = str(resource).strip()
-        if not name.upper().startswith(PROBED_RESOURCE_PREFIXES):
-            continue
+    for name in probeable_resources(manager.list_resources()):
         try:
             session = manager.open_resource(name, open_timeout=milliseconds)
         except Exception:
@@ -299,5 +306,6 @@ __all__ = [
     "VisaScpiLink",
     "discover_dg4000",
     "is_dg4000",
+    "probeable_resources",
     "visa_resources",
 ]

@@ -550,3 +550,34 @@ def test_a_found_instrument_is_offered_as_an_installable_card(monkeypatch) -> No
         if item.type_id == "rf.rigol_dg4000"
     )
     assert rigol.discover is module._discover_rigol
+
+
+def test_nothing_to_ask_is_said_out_loud(monkeypatch) -> None:
+    """"Found nothing" is only an answer if something was asked.
+
+    VISA's list is far blinder than an operator expects: a LAN instrument
+    appears only once it is added in NI MAX, a USB one only once its USB-TMC
+    driver is bound.  A Rigol plugged in and working can simply not be in the
+    list -- and reporting "no Rigol here" about that bench is a lie the
+    operator cannot see through, because the scan looks identical either way.
+    """
+
+    import zlc_atom.devices.rf.device_types as module
+    import zlc_atom.devices.rf.rigol_dg4000 as driver
+
+    serial_only = _VisaBus({"ASRL3::INSTR": "", "ASRL4::INSTR": ""})
+    monkeypatch.setattr(driver, "visa_resources", lambda: serial_only)
+    with pytest.raises(RuntimeError) as caught:
+        module._discover_rigol()
+    message = str(caught.value)
+    assert "VISA lists nothing to ask" in message
+    assert "ASRL3::INSTR" in message, "say what it DID list"
+    assert serial_only.opened == [], "and still open none of them"
+
+    # One probeable address and no Rigol behind it is a real answer: asked,
+    # nothing matched, nothing to say.
+    a_scope = _VisaBus(
+        {"TCPIP0::198.51.100.9::INSTR": "KEYSIGHT,DSOX1204G,CN0,01.20"}
+    )
+    monkeypatch.setattr(driver, "visa_resources", lambda: a_scope)
+    assert module._discover_rigol() == ()

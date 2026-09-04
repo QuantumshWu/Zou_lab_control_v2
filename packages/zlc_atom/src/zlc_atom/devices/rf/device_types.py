@@ -103,7 +103,31 @@ def _discover_rigol() -> tuple[DeviceInstanceConfig, ...]:
     at is the name -- still stable, still that instrument, just longer.
     """
 
-    from zlc_atom.devices.rf.rigol_dg4000 import discover_dg4000
+    from zlc_atom.devices.rf.rigol_dg4000 import (
+        PROBED_RESOURCE_PREFIXES,
+        discover_dg4000,
+        probeable_resources,
+        visa_resources,
+    )
+
+    # "Found nothing" is only an answer if something was asked.  VISA's own
+    # list is far blinder than an operator expects: a LAN instrument appears
+    # only once it has been added in NI MAX, and a USB one only once its
+    # USB-TMC driver is bound -- so a Rigol sitting there, plugged in and
+    # working, can simply not be in the list.  Saying nothing then reports
+    # "no Rigol here" about a bench that has one.
+    manager = visa_resources()
+    listed = tuple(str(name) for name in manager.list_resources())
+    probeable = probeable_resources(listed)
+    if not probeable:
+        raise RuntimeError(
+            "VISA lists nothing to ask: no "
+            f"{' or '.join(PROBED_RESOURCE_PREFIXES)} resource is registered "
+            f"on this machine (it lists: {', '.join(listed) or 'nothing'}). "
+            "A LAN instrument has to be added in NI MAX (or reached by its "
+            "TCPIP address by hand); a USB one needs its USB-TMC driver bound "
+            "before VISA can see it at all."
+        )
 
     def named(sighting) -> str:
         tail = sighting.serial or "".join(
