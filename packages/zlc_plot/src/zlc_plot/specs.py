@@ -16,6 +16,7 @@ from enum import Enum
 from functools import partial
 from typing import ClassVar, get_args, TypeAlias
 
+from zlc_data.units import DEFAULT_UNITS, UnitError, resolve_unit
 from zlc_data import (
     CoordinateScalar,
     CoordinateSelector,
@@ -477,13 +478,20 @@ def _unit_parameter(
 
 
 def _pulse_time_unit(value: object) -> str | None:
+    """One spelling per unit, decided by the registry and nowhere else.
+
+    This normalised ``µs`` to ``us`` while the pulse model normalised ``us``
+    to ``µs``, so the same axis had two names depending on which side of the
+    window asked.
+    """
+
     unit = _unit_text_or_none(value)
     if unit is None:
         return None
-    normalized = unit.lower().replace("μ", "µ")
-    if normalized == "µs":
-        normalized = "us"
-    return normalized
+    try:
+        return resolve_unit(unit).symbol
+    except UnitError:
+        return unit
 
 
 _PULSE_X_UNIT_PARAMETER = ParameterSpec(
@@ -494,7 +502,12 @@ _PULSE_X_UNIT_PARAMETER = ParameterSpec(
     normalizer=_pulse_time_unit,
     allow_none=True,
     label="Time unit",
-    choices=("ns", "us", "ms", "s"),
+    # The dimension's whole ladder.  What a pulse may be AUTHORED in is a
+    # fact about the board (its clock is tens of nanoseconds, a period is
+    # never kiloseconds) and the model enforces it; what a drawing may be
+    # SHOWN in is not the same question, and this layer cannot see that
+    # model anyway.  Copying the range here is how the two drift.
+    choices=DEFAULT_UNITS.display_choices("s"),
 )
 
 

@@ -1171,7 +1171,23 @@ def _histogram_vertices(edges: np.ndarray, counts: np.ndarray) -> np.ndarray:
     return vertices
 
 
-def _compact_engineering(value: float, *, length: int | None = None) -> str:
+def _compact_scientific(value: float, *, length: int | None = None) -> str:
+    """As many significant digits of one number as ``length`` characters allow.
+
+    NOT engineering notation, which is what it was called: it produces %g and
+    falls back to %e, so it prints 1.2e+06 where an engineering form would
+    print 1.2 M.  The name said the opposite of what it did for as long as it
+    existed.
+
+    This is also not :func:`zlc_data.units.format_quantity`, and must not
+    become it.  That one shows a QUANTITY -- every digit the value has, with
+    the unit it is in -- because a box an operator reads a device through may
+    not round.  This one is for a label with a character budget in a crowded
+    plot (a colour-bar end, a fit parameter, a threshold), where fitting is
+    the whole point and the unit is already written elsewhere.  Two jobs, two
+    rules; the mistake would be to give either one the other's.
+    """
+
     if not math.isfinite(float(value)):
         return "nan"
     numeric = float(value)
@@ -1326,14 +1342,14 @@ def _facet_cell_title(cell: Any, fallback: int) -> str:
         if math.isfinite(numeric):
             raw = str(value)
             if raw in title:
-                title = title.replace(raw, _compact_engineering(numeric), 1)
+                title = title.replace(raw, _compact_scientific(numeric), 1)
     return title
 
 
 def _fit_parameter_value_text(parameter: Any) -> str:
     """Format one fitted value for renderer-owned text."""
 
-    return _compact_engineering(float(parameter.value))
+    return _compact_scientific(float(parameter.value))
 
 
 class _FitAnnotationDetail(str, Enum):
@@ -7817,8 +7833,8 @@ class MatplotlibRenderer:
                     label_chars = policy.colorbar_endpoint_label_chars
                     colorbar.set_ticklabels(
                         (
-                            _compact_engineering(vmin, length=label_chars),
-                            _compact_engineering(vmax, length=label_chars),
+                            _compact_scientific(vmin, length=label_chars),
+                            _compact_scientific(vmax, length=label_chars),
                         )
                     )
                 self._artists[state_key] = colorbar_state
@@ -9209,7 +9225,7 @@ class MatplotlibRenderer:
                     (np.sum(weights[:index]) + weights[index] * fraction) / total
                 )
         return (
-            f"th={_compact_engineering(threshold)}\n"
+            f"th={_compact_scientific(threshold)}\n"
             f"L/R={100.0 * left_fraction:.1f}%/"
             f"{100.0 * (1.0 - left_fraction):.1f}%"
         )
@@ -9557,7 +9573,7 @@ class MatplotlibRenderer:
         uncertainty = (
             "n/a"
             if parameter.standard_error is None
-            else _compact_engineering(parameter.standard_error)
+            else _compact_scientific(parameter.standard_error)
         )
         unit = f" {_literal_text(parameter.unit)}" if parameter.unit else ""
         return (

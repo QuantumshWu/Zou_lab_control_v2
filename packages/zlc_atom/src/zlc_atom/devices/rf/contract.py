@@ -174,34 +174,16 @@ class RfSourceBase:
         for channel in names:
             for kind in (FREQUENCY_FIELD, POWER_FIELD, OUTPUT_FIELD):
                 self._routing[channel_field(channel, kind)] = (channel, kind)
-        # Opening enforces only edges the operator actually authored.  A
-        # fresh instrument may idle outside one such policy edge, so it is
-        # moved to the nearest declared edge per channel.  With both edges
-        # absent, opening is read-only.  Output switches are never touched:
-        # policy may move a silent knob, never un-silence one.
-        for channel in names:
-            frequency = float(self._read_frequency(channel))
-            bounded = self._bounded_value(frequency, self._frequency_bounds)
-            if bounded != frequency:
-                self._write_frequency(channel, bounded)
-                _LOG.info(
-                    "OPEN NORMALIZED field=%s from=%r to=%r device=%s",
-                    channel_field(channel, FREQUENCY_FIELD),
-                    frequency,
-                    bounded,
-                    self._identity,
-                )
-            power = float(self._read_power(channel))
-            bounded = self._bounded_value(power, self._power_bounds)
-            if bounded != power:
-                self._write_power(channel, bounded)
-                _LOG.info(
-                    "OPEN NORMALIZED field=%s from=%r to=%r device=%s",
-                    channel_field(channel, POWER_FIELD),
-                    power,
-                    bounded,
-                    self._identity,
-                )
+        # OPENING IS READ-ONLY.  Connecting to an instrument is an act of
+        # observation: whatever it was doing when the operator plugged in
+        # is the experiment's state, and the app has no mandate to edit it
+        # for having been asked to look.  The bench window bounds what may
+        # be COMMANDED -- ``tune`` refuses outside it, and tightening an
+        # edge past a live knob is refused by name rather than dragging the
+        # knob -- so opening had a second, silent answer to the question
+        # the rest of this class answers by refusing.  A knob idling
+        # outside policy is now a reading the panel shows, which is the
+        # only way the operator can find out.
 
     @staticmethod
     def _optional_edge(value: object, *, name: str) -> float | None:
@@ -227,19 +209,6 @@ class RfSourceBase:
         if lower is not None and upper is not None and lower >= upper:
             raise ValueError(f"{name} bounds must be ordered when both are set")
         return lower, upper
-
-    @staticmethod
-    def _bounded_value(
-        value: float,
-        window: tuple[float | None, float | None],
-    ) -> float:
-        low, high = window
-        bounded = value
-        if low is not None:
-            bounded = max(bounded, low)
-        if high is not None:
-            bounded = min(bounded, high)
-        return bounded
 
     # ------------------------------------------------------- transport verbs
     def _write_frequency(self, channel: str, value_hz: float) -> float:
@@ -281,7 +250,12 @@ class RfSourceBase:
                             channel_field(channel, FREQUENCY_FIELD),
                             "float",
                             f"{label}Frequency (Hz)",
-                            frequency,
+                            # A live knob has no draft default: what it is
+                            # right now is ``current``, and repeating the
+                            # reading here would make a knob idling outside
+                            # bench policy unstateable -- the field would
+                            # refuse its own instrument.
+                            None,
                             minimum=frequency_low,
                             maximum=frequency_high,
                             unit="Hz",
@@ -300,7 +274,7 @@ class RfSourceBase:
                             channel_field(channel, POWER_FIELD),
                             "float",
                             f"{label}Power (dBm)",
-                            power,
+                            None,
                             minimum=power_low,
                             maximum=power_high,
                             unit="dBm",

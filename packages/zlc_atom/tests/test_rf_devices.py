@@ -24,8 +24,17 @@ class _ScpiInstrument:
     """A DG4000's worth of SCPI, answered from per-channel register dicts."""
 
     def __init__(self) -> None:
+        # A channel's amplitude UNIT and output LOAD are settings of the
+        # instrument like any other: the driver reads them, and a test
+        # that could not spell them could not tell whether it wrote them.
         self.registers = {
-            channel: {"FREQ": 1000.0, "VOLT": -30.0, "OUT": "OFF"}
+            channel: {
+                "FREQ": 1000.0,
+                "VOLT": -30.0,
+                "OUT": "OFF",
+                "UNIT": "DBM",
+                "LOAD": 50.0,
+            }
             for channel in ("1", "2")
         }
         self.log: list[str] = []
@@ -45,8 +54,15 @@ class _ScpiInstrument:
         registers = self.registers[self._channel(command)]
         if ":FREQUENCY " in upper:
             registers["FREQ"] = float(command.split()[-1])
-        elif ":VOLTAGE " in upper and ":UNIT" not in upper:
+        elif ":VOLTAGE:UNIT " in upper:
+            registers["UNIT"] = command.split()[-1].upper()
+        elif ":VOLTAGE " in upper:
             registers["VOLT"] = float(command.split()[-1])
+        elif ":IMPEDANCE " in upper:
+            tail = command.split()[-1].upper()
+            registers["LOAD"] = (
+                float("inf") if tail.startswith("INF") else float(tail)
+            )
         elif upper.startswith(":OUTPUT"):
             registers["OUT"] = command.split()[-1].upper()
 
@@ -58,8 +74,13 @@ class _ScpiInstrument:
         registers = self.registers[self._channel(command)]
         if ":FREQUENCY?" in upper:
             return f"{registers['FREQ']:.6E}"
+        if ":VOLTAGE:UNIT?" in upper:
+            return registers["UNIT"]
         if ":VOLTAGE?" in upper:
             return f"{registers['VOLT']:.4E}"
+        if ":IMPEDANCE?" in upper:
+            load = registers["LOAD"]
+            return "INF" if load == float("inf") else f"{load:.4E}"
         if upper.startswith(":OUTPUT"):
             return registers["OUT"]
         raise AssertionError(f"unexpected query {command!r}")
@@ -79,12 +100,10 @@ def test_one_instrument_is_one_instance_with_every_channel_s_knobs() -> None:
 
     One DG4162 is one card offering six knobs -- ch1/ch2 each with
     frequency, power and output -- and tuning one channel must not move the
-    other.  DBM is pinned on BOTH channels at open.
+    other.
     """
 
     source, instrument = _rigol()
-    assert ":SOURce1:VOLTage:UNIT DBM" in instrument.log
-    assert ":SOURce2:VOLTage:UNIT DBM" in instrument.log
 
     names = [field.metadata.name for field in source.tunable_fields()]
     assert names == [
@@ -225,6 +244,107 @@ def test_optional_window_is_one_init_and_control_policy() -> None:
         source.tune("frequency_low_hz", 90e6)
 
 
+def test_connecting_reads_the_instrument_and_moves_nothing() -> None:
+    """Plugging in is an act of observation, not of control.
+
+    Whatever the instrument was doing when the operator connected IS the
+    experiment's state.  Opening used to drag a knob that idled outside
+    the authored bench window to the nearest edge -- silently, on both
+    channels, for frequency and power -- which is the same act this class
+    refuses by name when a window is TIGHTENED past a live knob.  A knob
+    outside policy is a reading to show, and the panel is where the
+    operator finds out.
+    """
+
+    instrument = _ScpiInstrument()
+    instrument.registers["1"]["FREQ"] = 90e6      # above the window below
+    instrument.registers["2"]["VOLT"] = 25.0      # above the window below
+    before = {
+        channel: dict(registers)
+        for channel, registers in instrument.registers.items()
+    }
+    source = RigolDg4000RfSource(
+        RigolDg4000Config(
+            resource="TCPIP0::198.51.100.7::INSTR",
+            frequency_low_hz=1e3,
+            frequency_high_hz=80e6,
+            power_low_dbm=-30.0,
+            power_high_dbm=10.0,
+        ),
+        link=instrument,
+    )
+    assert instrument.registers == before, "connecting moved the instrument"
+    assert not any(
+        command.startswith(":SOURce") and " " in command
+        for command in instrument.log
+    ), instrument.log
+
+    values = source.tunable_values()
+    assert values["ch1_frequency_hz"] == 90e6
+    assert values["ch2_power_dbm"] == 25.0
+    by_name = {field.metadata.name: field for field in source.tunable_fields()}
+    assert by_name["ch1_frequency_hz"].current == 90e6
+    assert by_name["ch1_frequency_hz"].metadata.maximum == 80e6
+
+    # Policy still bounds what may be COMMANDED, from outside as much as in.
+    with pytest.raises(ValueError, match="ch1_frequency_hz must lie in"):
+        source.tune("ch1_frequency_hz", 85e6)
+    assert instrument.registers["1"]["FREQ"] == 90e6
+    assert source.tune("ch1_frequency_hz", 50e6) == 50e6
+
+
+def test_a_channel_in_volts_is_converted_through_its_own_load() -> None:
+    """The unit on the front panel is the operator's, so the driver adapts.
+
+    Pinning DBM at open made every later read and write mean dBm by
+    force, at the price of changing a setting nobody asked to change --
+    and on a high-Z channel that pin is not even legal.  The unit is read
+    instead, and volts are converted through the load the channel states
+    it is driving.
+    """
+
+    instrument = _ScpiInstrument()
+    instrument.registers["1"]["UNIT"] = "VPP"
+    instrument.registers["1"]["LOAD"] = 50.0
+    instrument.registers["1"]["VOLT"] = 0.632456   # 0 dBm into 50 ohms
+    source, _instrument = (
+        RigolDg4000RfSource(
+            RigolDg4000Config(resource="TCPIP0::198.51.100.7::INSTR"),
+            link=instrument,
+        ),
+        instrument,
+    )
+    assert instrument.registers["1"]["UNIT"] == "VPP", "opening changed a unit"
+    assert source.tunable_values()["ch1_power_dbm"] == pytest.approx(0.0, abs=1e-3)
+
+    # A written dBm lands as the volts THIS channel is displaying, and the
+    # read-back that follows converts straight back.
+    assert source.tune("ch1_power_dbm", -6.0) == pytest.approx(-6.0, abs=1e-3)
+    assert instrument.registers["1"]["UNIT"] == "VPP"
+    assert instrument.registers["1"]["VOLT"] == pytest.approx(0.3170, abs=1e-3)
+
+    # The other channel is untouched, in its own unit.
+    assert instrument.registers["2"]["UNIT"] == "DBM"
+    assert source.tunable_values()["ch2_power_dbm"] == -30.0
+
+
+def test_volts_into_a_high_z_load_is_named_not_guessed() -> None:
+    """Delivered power is not defined there, so no number is offered."""
+
+    instrument = _ScpiInstrument()
+    instrument.registers["1"]["UNIT"] = "VPP"
+    instrument.registers["1"]["LOAD"] = float("inf")
+    source = RigolDg4000RfSource(
+        RigolDg4000Config(resource="TCPIP0::198.51.100.7::INSTR"),
+        link=instrument,
+    )
+    with pytest.raises(RuntimeError, match="high-Z load"):
+        source.tunable_values()
+    with pytest.raises(RuntimeError, match="high-Z load"):
+        source.tune("ch1_power_dbm", -6.0)
+    assert instrument.registers["1"]["VOLT"] == -30.0, "a refusal wrote nothing"
+
+
 def test_the_lab_brick_speaks_its_own_units_and_refuses_off_grid() -> None:
     source = virtual_rf_source(VaunixLmsConfig(serial=1001))
     # 10 Hz frequency grid, quarter-dB power grid: representable values pass
@@ -256,6 +376,38 @@ def test_a_missing_brick_is_a_named_lookup_error() -> None:
         )
 
 
+def test_the_lab_brick_is_opened_without_being_touched() -> None:
+    """The other driver obeys the same rule, through its own transport.
+
+    Opening reads the brick's frequency, power and switch and writes
+    none of them -- including when the bench window would have preferred
+    different numbers, which is a preference about what may be commanded
+    and not a licence to command it.
+    """
+
+    library = InMemoryLmsLibrary((77,))
+    handle = library.open_device(77)
+    library.set_frequency(handle, 1_000_000_000 // 10)
+    library.set_power(handle, 4 * 4)
+    before = dict(library._registers(handle))
+    library.close_device(handle)
+
+    source = VaunixLmsRfSource(
+        VaunixLmsConfig(
+            serial=77,
+            frequency_low_hz=2e9,
+            power_low_dbm=10.0,
+        ),
+        library=library,
+    )
+    assert dict(library._registers(source._handle)) == before, (
+        "opening the brick moved one of its knobs"
+    )
+    values = source.tunable_values()
+    assert values[FREQUENCY_FIELD] == 1e9
+    assert values[POWER_FIELD] == 4.0
+
+
 def test_every_interaction_narrates_at_the_contract_layer(caplog) -> None:
     """Whoever moves a knob, the instrument's log tells the same story.
 
@@ -272,7 +424,6 @@ def test_every_interaction_narrates_at_the_contract_layer(caplog) -> None:
         with pytest.raises(ValueError):
             source.tune(FREQUENCY_FIELD, 1_000_000_005.0)
     lines = [record.getMessage() for record in caplog.records]
-    assert not any(line.startswith("OPEN NORMALIZED") for line in lines), lines
     assert any(
         line.startswith("TUNE field=frequency_hz value=1000000000.0")
         and line.endswith(f"device={source.identity}")

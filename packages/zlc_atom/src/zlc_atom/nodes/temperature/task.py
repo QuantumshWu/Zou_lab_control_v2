@@ -50,7 +50,7 @@ from zlc_data import (
 )
 from zlc_data.figure_archive import FIGURE_SCHEMA
 from zlc_durable import atomic_write_text, durable_makedirs, write_readable_json
-from zlc_pulse import TIME_UNIT_TO_NS, PulseSequence
+from zlc_pulse import TIME_UNIT_CHOICES, PulseSequence, nanoseconds_per
 from zlc_runtime import (
     DatasetCoverage,
     DatasetOutputDeclaration,
@@ -108,11 +108,11 @@ def _seconds(values: object, unit: str) -> np.ndarray:
     """
 
     try:
-        nanoseconds = float(TIME_UNIT_TO_NS[str(unit)])
-    except KeyError:
+        nanoseconds = float(nanoseconds_per(str(unit)))
+    except ValueError:
         raise ValueError(
             f"the release axis is measured in {unit!r}, which is not a time "
-            f"unit; it must be one of {tuple(TIME_UNIT_TO_NS)}"
+            f"unit; it must be one of {TIME_UNIT_CHOICES}"
         ) from None
     return np.asarray(values, dtype=float) * nanoseconds * 1e-9
 

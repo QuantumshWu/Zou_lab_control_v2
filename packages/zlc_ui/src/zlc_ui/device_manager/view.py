@@ -27,6 +27,8 @@ from zlc_ui.fluent import (
     signals_blocked,
     window_pad,
 )
+from zlc_data.units import UnitError, format_quantity
+
 from zlc_ui.form.form import FormSpec
 from zlc_ui.form.qt_form import FluentParameterForm
 from zlc_ui.console.status_strip import StatusStrip
@@ -172,6 +174,22 @@ class _LiveDeviceCard(FluentFrame):
         # layout does not shuffle every time Remote is toggled.
         self.remote_button.set_color(ACCENT if remote else GREY)
         self.setToolTip(self.instance_id)
+
+
+def _readable_value(value: object, unit: str) -> str:
+    """One device reading, in the same words its editable twin uses.
+
+    Falls back to the plain text for anything that is not a number: a device
+    may report a name, a mode, or a reason it cannot answer, and none of them
+    is improved by being pushed through a number formatter.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return str(value)
+    try:
+        return format_quantity(value, unit or "1")
+    except UnitError:
+        return str(value)
 
 
 class DeviceControlView(QtWidgets.QWidget):
@@ -386,12 +404,20 @@ class DeviceControlView(QtWidgets.QWidget):
             "info": GREY, "idle": GREY, "ready": GREEN,
             "task": ORANGE, "warning": ORANGE, "error": RED,
         }
+        units = {declared.key: declared.unit for declared in spec.fields}
         QtCore.QTimer.singleShot(0, self._align_headings)
         for key in spec.keys:
             field = fields[key]
             current, live, apply, dot, status = self._field_rows[key]
             shown = field.get("current")
-            current.setText("—" if shown is None else str(shown))
+            # The presenter hands over the device's own number; what it is IN
+            # is on the field beside it.  This printed str(value), so a
+            # readback of 120000000.0 Hz reached the operator as
+            # "120000000.0" -- the one column whose whole job is to be read
+            # at a glance, and the hardest thing on the page to read.
+            current.setText(
+                "—" if shown is None else _readable_value(shown, units[key])
+            )
             editor = self.form.widget_for(key)
             self._set_editable(key, bool(field.get("editable", False)))
             with signals_blocked(live):

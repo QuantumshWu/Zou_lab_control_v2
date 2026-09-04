@@ -755,6 +755,68 @@ def test_finite_signal_reports_full_point_grid_geometry_while_cells_arrive() -> 
         plane.close()
 
 
+def test_watching_a_run_grow_costs_the_shot_not_the_run() -> None:
+    """Assembling the view again places what ARRIVED, not everything.
+
+    A canonical Dataset never rewrites a cell it already holds, so the
+    previous assembly answers for every cell in it.  Re-placing all of
+    them anyway made one redraw cost the whole run, which on a long scan
+    is seconds a shot -- the panel falls behind the producer and never
+    catches up, and the cost grows for as long as the run does.
+    """
+
+    from zlc_runtime import plane as plane_module
+
+    declaration = DatasetOutputDeclaration("scan", "test.scan")
+    node = _node("grid-cost", declaration)
+    plane = SignalDataPlane()
+    # Counted on EVERY assembler the plane owns, named or not, so the
+    # measurement is of the work done and not of which function did it.
+    placed: list[int] = []
+    assemblers = {
+        name: getattr(plane_module, name)
+        for name in ("_assembled_planes", "_extended_planes")
+        if hasattr(plane_module, name)
+    }
+
+    def counting(original):
+        def assemble(*arguments):
+            head, tail = arguments[:-1], tuple(arguments[-1])
+            placed.append(len(tail))
+            return original(*head, tail)
+
+        return assemble
+
+    for name, original in assemblers.items():
+        setattr(plane_module, name, counting(original))
+    try:
+        plane.begin_generation(node)
+        for point in range(4):
+            plane.commit_live(
+                node,
+                {
+                    "scan": _finite_grid_point(
+                        declaration,
+                        value=float(point),
+                        point_origin=point,
+                        written=point + 1,
+                    )
+                },
+            )
+            # What a live panel does every beat: ask for the run so far.
+            view = plane.current_dataset("grid-cost/scan")
+            assert view.block.values[0, point, 0] == float(point)
+        assert placed == [1, 1, 1, 1], placed
+        np.testing.assert_allclose(
+            plane.current_dataset("grid-cost/scan").block.values[0, :, 0],
+            (0.0, 1.0, 2.0, 3.0),
+        )
+    finally:
+        for name, original in assemblers.items():
+            setattr(plane_module, name, original)
+        plane.close()
+
+
 def test_monitor_to_finite_generation_changes_from_event_to_authored_shape() -> None:
     declaration = DatasetOutputDeclaration("frame", "test.frame")
     node = _node("restart-shape", declaration)

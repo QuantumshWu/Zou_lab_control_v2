@@ -170,7 +170,17 @@ class _AxisRow(QtWidgets.QWidget):
                 spin.setRange(-1e12, 1e12)
             else:
                 spin.setRange(port.lo, port.hi)
-            spin.setDecimals(4)
+            # The port has said all along what its numbers are in -- a
+            # duration sweeps in the period's own unit -- and these two boxes
+            # were the one place on the row that never repeated it, so a
+            # seamless axis read "from 1 to 40" with nothing saying of what.
+            #
+            # setDecimals(4) went with it.  It did not make the number
+            # readable, it made it four decimals long: an authored 1.00005 us
+            # came back as 1.0 in the box that is supposed to be showing what
+            # will run.  Readability is the formatter's job now, and the
+            # formatter does not round.
+            spin.setDisplayUnit("" if port is None else port.unit)
 
     def _port_changed(self, _index: int) -> None:
         self._custom_values = None

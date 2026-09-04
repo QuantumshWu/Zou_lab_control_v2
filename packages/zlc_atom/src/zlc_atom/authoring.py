@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 import re
 from typing import Any, Callable, Mapping
+
+from zlc_data.units import resolve_unit
 
 
 def _typed_equal(left: object, right: object) -> bool:
@@ -52,10 +54,16 @@ class AuthoringField:
     def __post_init__(self) -> None:
         if not self.name or not self.value_type or not self.label:
             raise ValueError("authoring fields require name, value_type, and label")
-        if self.unit is not None and (
-            not isinstance(self.unit, str) or not self.unit.strip()
-        ):
-            raise ValueError("authoring field unit must be non-empty text or None")
+        if self.unit is not None:
+            if not isinstance(self.unit, str) or not self.unit.strip():
+                raise ValueError("authoring field unit must be non-empty text or None")
+            # HERE, where it is written, and not where it is first drawn.  A
+            # unit nobody had registered used to travel all the way to the
+            # plot before anything noticed: rf.rigol_dg4000 declared dBm, the
+            # plot contract had never heard of it, and the first scan of a
+            # signal generator's power died with "unknown unit 'dBm'" on a
+            # panel, hours from the line that wrote it.
+            resolve_unit(self.unit.strip())
         if self.enabled_when is not None:
             controller, values = self.enabled_when
             if not str(controller).strip():
@@ -123,9 +131,21 @@ class TunableField:
             raise ValueError(
                 "tunable dependency_group must uniquely include its own field"
             )
-        current = AuthoringSchema((self.metadata,)).project_values(
-            {self.metadata.name: self.current}
-        )[self.metadata.name]
+        # A READING IS NOT AN INPUT.  The window says what may be
+        # commanded -- ``tune`` and every draft projection still refuse
+        # outside it -- while ``current`` is what the device answered, and
+        # a device idling outside bench policy is exactly the state its
+        # operator has to be shown.  Judging the reading by the window
+        # made that state unreportable: the field refused its own device,
+        # so a driver's only way to open at all was to move the knob.  The
+        # reading is still projected for TYPE, which is what makes it the
+        # same kind of value the field speaks in.
+        reading = replace(
+            self.metadata, default=None, minimum=None, maximum=None
+        )
+        current = AuthoringSchema((reading,)).project_values(
+            {reading.name: self.current}
+        )[reading.name]
         object.__setattr__(self, "current", current)
         object.__setattr__(self, "dependency_group", group)
 

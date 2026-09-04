@@ -28,6 +28,7 @@ import logging
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from fractions import Fraction
 from functools import wraps as _wraps
 from pathlib import Path
 from weakref import ref as _weak_ref
@@ -46,7 +47,7 @@ from zlc_pulse import (
 )
 from zlc_pulse import (
     TIME_UNIT_CHOICES,
-    TIME_UNIT_TO_NS,
+    nanoseconds_per,
     align_to_grid,
     apply_config_values,
     field_label,
@@ -60,6 +61,7 @@ from zlc_atom.pulse_values import (
     read_config_values,
     write_config_values,
 )
+from zlc_data.units import format_quantity
 from zlc_durable import unique_path
 from zlc_plot import PANEL_SIZE_NAMES
 from zlc_ui import (
@@ -102,23 +104,31 @@ __all__ = [
 #: inside the projection -- from a Qt slot, which ends the process rather than
 #: drawing anything.  Offered shortest first, which is presentation and is all
 #: this line decides.
-_TIME_UNITS = tuple(
-    sorted(TIME_UNIT_CHOICES, key=lambda unit: TIME_UNIT_TO_NS[unit])
-)
+_TIME_UNITS = TIME_UNIT_CHOICES
 
 
 def _nanoseconds(value: float, unit: str) -> float:
-    return float(value) * TIME_UNIT_TO_NS[unit]
+    """A duration in nanoseconds, exact before it is a float.
+
+    ``value * 1e-6`` is not the microsecond count it looks like, and this feeds
+    grid checks and totals where the last digit is the difference between a
+    duration the board accepts and one it refuses.
+    """
+
+    return float(Fraction(str(float(value))) * nanoseconds_per(unit))
 
 
 def _readable(nanoseconds: float) -> str:
-    """One duration in whichever unit reads without exponents."""
+    """One duration, in the scale a person would have written it in.
 
-    for unit in reversed(_TIME_UNITS):
-        scale = TIME_UNIT_TO_NS[unit]
-        if nanoseconds >= scale:
-            return f"{nanoseconds / scale:g} {unit}"
-    return f"{nanoseconds:g} ns"
+    This used to pick a unit by walking the table until one fitted and then
+    print ``%g``, which is a third number formatter with its own idea of how
+    many digits a value has.  There is one now, it knows the whole prefix
+    ladder rather than four rows of it, and what it prints can be typed back.
+    """
+
+    seconds = float(Fraction(str(float(nanoseconds))) / nanoseconds_per("s"))
+    return format_quantity(seconds, "s")
 
 
 # ------------------------------------------------------------------ projection
@@ -540,7 +550,9 @@ def project_schedule(
                 unit=(
                     _delay_of(sequence, port.key)[1] if sequence is not None else "ns"
                 ),
-                unit_quantums=tuple((unit, TIME_UNIT_TO_NS[unit]) for unit in _TIME_UNITS),
+                unit_quantums=tuple(
+                    (unit, float(nanoseconds_per(unit))) for unit in _TIME_UNITS
+                ),
             )
             for port in programmable_ports(target)
             if port.kind in ("digital", "dac")
@@ -679,7 +691,7 @@ def _tick_in(sequence: PulseSequence, unit: str) -> float:
     about how fine an edit may be.
     """
 
-    return float(sequence.time_step_ns) / TIME_UNIT_TO_NS[str(unit)]
+    return float(Fraction(str(float(sequence.time_step_ns))) / nanoseconds_per(str(unit)))
 
 
 def _delay_of(sequence: PulseSequence, port_key: str) -> tuple[float, str]:

@@ -183,15 +183,18 @@ def _ports_from_columns(columns) -> tuple[ScanPort, ...]:
         # The port's unit becomes the dataset axis's unit, and an axis unit is
         # something the plot's registry RESOLVES -- "s", "ms", "" -- not a
         # phrase.  A DAC code is a dimensionless count; the scan column's
-        # "DAC code (0 = 0 V)" is the editor's label for the same fact, and
-        # carrying it as the unit broke the first plot ever drawn over a scan
-        # ("raster plot host failed to start: unknown unit ...").
+        # "DAC code (0 = 0 V)" is the editor's LABEL for this, and carrying a
+        # label as a unit broke the first plot ever drawn over a scan
+        # ("raster plot host failed to start: unknown unit ...").  Blanking it
+        # stopped the crash and told the next reader the axis is
+        # dimensionless, which it is not: it is a count of codes, and the
+        # registry has one now.
         port = PULSE_PARAM_FAMILY + str(column.name)
         ports.append(
             ScanPort(
                 port,
                 port_label(port),
-                "" if column.is_dac else str(column.unit),
+                "code" if column.is_dac else str(column.unit),
                 lo,
                 hi,
                 float(column.lo),

@@ -18,6 +18,8 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from qframelesswindow import FramelessWindow, StandardTitleBar
 
+from zlc_data.units import UnitError, format_quantity, parse_quantity
+
 from ..qt import ensure_qt_app
 
 from .style import (
@@ -151,6 +153,62 @@ def ensure_fluent_scale() -> float:
 
 def scaled_px(value: int | float, *, minimum: int = 1) -> int:
     return max(int(minimum), int(round(float(value) * _FLUENT_SCALE)))
+
+
+def _available_geometry_at(
+    point: QtCore.QPoint, *, widget: QtWidgets.QWidget | None = None
+) -> QtCore.QRect | None:
+    """The usable area of the screen a point falls on, or None if there is none.
+
+    "Where may a floating surface land" is ONE question -- a combo popup, a
+    modal card -- and it had grown two separate walks from a point to a
+    screen to its available geometry.  A third was about to be written for
+    the modal that opens off the edge of the monitor; that is what the
+    copies cost.
+
+    ``widget`` is asked only when the point is on no screen at all: a
+    window dragged past every edge still belongs to one.
+    """
+
+    application = QtWidgets.QApplication.instance()
+    screen_at = getattr(application, "screenAt", None) if application is not None else None
+    screen = screen_at(point) if callable(screen_at) else None
+    if screen is None and widget is not None and hasattr(widget, "screen"):
+        screen = widget.screen()
+    if screen is None and application is not None:
+        screen = application.primaryScreen()
+    return None if screen is None else screen.availableGeometry()
+
+
+def _placed_on_screen(
+    wanted: QtCore.QPoint,
+    size: QtCore.QSize,
+    *,
+    widget: QtWidgets.QWidget | None = None,
+) -> QtCore.QPoint:
+    """``wanted``, moved the least it takes to put the whole window on a screen.
+
+    A platform window manager never opens a window off the monitor.  Every
+    window this project places by hand -- a modal card centred on its
+    parent, a dialog window centred on the window that opened it -- can,
+    because a parent near an edge has its centre near that edge.  Modal is
+    what makes that fatal: nothing else takes a click, so a window past the
+    edge is one nobody can answer or move.
+    """
+
+    available = _available_geometry_at(wanted, widget=widget)
+    if available is None:
+        return wanted
+    return QtCore.QPoint(
+        min(
+            max(wanted.x(), available.left()),
+            max(available.left(), available.right() - size.width() + 1),
+        ),
+        min(
+            max(wanted.y(), available.top()),
+            max(available.top(), available.bottom() - size.height() + 1),
+        ),
+    )
 
 
 def screen_fit_window_size(window_ratio: float) -> QtCore.QSize:
@@ -424,6 +482,15 @@ def signals_blocked(*widgets: QtWidgets.QWidget | None):
 
 
 def format_compact_number(value: float, *, digits: int = 12) -> str:
+    """One snapped number, short enough to sit inside an authored expression.
+
+    Deliberately NOT :func:`zlc_data.units.format_quantity`, which shows every
+    digit a value has because a box an operator reads a device through may not
+    round.  Snapping to a resolution produces 0.30000000000000004 where the
+    author wrote 0.3, and pasting that back into their own scan program is not
+    fidelity, it is noise.  Two jobs, two rules.
+    """
+
     if not math.isfinite(float(value)):
         return str(value)
     text = f"{float(value):.{digits}g}"
@@ -782,12 +849,7 @@ def show_fluent_popup_for_anchor(
             (anchor_top_left.x() + anchor_bottom_right.x()) // 2,
             (anchor_top_left.y() + anchor_bottom_right.y()) // 2,
         )
-        screen = QtWidgets.QApplication.screenAt(anchor_center)
-        if screen is None and hasattr(anchor, "screen"):
-            screen = anchor.screen()
-        if screen is None:
-            screen = QtWidgets.QApplication.primaryScreen()
-        available = None if screen is None else screen.availableGeometry()
+        available = _available_geometry_at(anchor_center, widget=anchor)
     else:
         anchor_top_left = anchor.mapTo(page, QtCore.QPoint(0, 0))
         anchor_bottom_right = anchor.mapTo(
@@ -975,6 +1037,16 @@ class FluentGroupBox(QtWidgets.QGroupBox):
             self._zlc_outline = value
             self.update()
 
+    def outline_colour(self) -> str | None:
+        """Which selection colour this box is wearing, or None for none.
+
+        Readable because "is this the selected one" is a question about what
+        is on screen, and the only other way to ask it is to name the private
+        attribute the painter happens to keep it in.
+        """
+
+        return getattr(self, "_zlc_outline", None)
+
     def paintEvent(self, event) -> None:
         # Paint the white body + a CONTINUOUS rounded border, THEN let Qt draw the grey title pill +
         # text on top (super) -- so the pill covers its segment of the border, never the reverse, and
@@ -1091,6 +1163,7 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         self._res_step: float | None = None
         self._allow_any = True
         self._numeric_bounds: tuple[float | None, float | None, str] = (None, None, "float")
+        self._quantity_unit = ""
         self.setMinimumHeight(scaled_px(30, minimum=22))
         self._apply_style()
         self.setText(str(text))
@@ -1175,6 +1248,27 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         validator.setLocale(QtCore.QLocale.c())
         self.setValidator(validator)
 
+    def set_quantity_validator(
+        self,
+        unit: str,
+        *,
+        bottom: float | None = None,
+        top: float | None = None,
+    ) -> None:
+        """Accept a NUMBER AND A UNIT, and show one back.
+
+        The numeric validator refuses every character that is not part of a
+        number, which is right for a bare count and wrong for a quantity: the
+        unit is half of what the value means, and a field declared in dBm was
+        a field into which dBm could not be typed.  Bounds still hold and
+        still clamp, in the field's own unit, because ``1.05M`` and
+        ``1050000`` are the same number and only one of them looks in range.
+        """
+
+        self._numeric_bounds = (bottom, top, "quantity")
+        self._quantity_unit = str(unit).strip() or "1"
+        self.setValidator(_QuantityValidator(self._quantity_unit, self))
+
     def focusOutEvent(self, event) -> None:  # noqa: N802
         # BEFORE super(), which is what decides whether editingFinished is
         # emitted: an out-of-range entry that is corrected first is acceptable
@@ -1198,8 +1292,12 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         if not text:
             return
         try:
-            value = float(text)
-        except ValueError:
+            value = (
+                parse_quantity(text, self._quantity_unit)
+                if kind == "quantity"
+                else float(text)
+            )
+        except (UnitError, ValueError):
             # Non-numeric text is the validator's business, not this one's, and
             # a field carrying a scan binding ("s2") is deliberately not a
             # number at all.
@@ -1211,6 +1309,9 @@ class FluentLineEdit(QtWidgets.QLineEdit):
             clamped = min(clamped, float(top))
         if clamped == value:
             return
+        if kind == "quantity":
+            self.setText(format_quantity(clamped, self._quantity_unit))
+            return
         self.setText(str(int(clamped)) if kind == "int" else str(clamped))
 
     def _snap_to_resolution(self) -> None:
@@ -1220,6 +1321,30 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         after = align_to_resolution(before, self._res_step, allow_any=self._allow_any)
         if after != before:
             self.setText(after)
+
+
+class _QuantityValidator(QtGui.QValidator):
+    """Anything on its way to a number with a unit is still acceptable.
+
+    Never Invalid: refusing a keystroke means the character never reaches the
+    box, and a person typing ``1.05 MHz`` is holding an unfinished quantity
+    for most of the word.  What cannot be read yet is Intermediate, which Qt
+    lets stand while the field has focus and refuses to commit.
+    """
+
+    def __init__(self, unit: str, parent=None) -> None:
+        super().__init__(parent)
+        self._unit = unit
+
+    def validate(self, text: str, position: int):
+        stripped = text.strip()
+        if not stripped or stripped in ("+", "-", ".", "+.", "-."):
+            return QtGui.QValidator.Intermediate, text, position
+        try:
+            parse_quantity(stripped, self._unit)
+        except (UnitError, ValueError):
+            return QtGui.QValidator.Intermediate, text, position
+        return QtGui.QValidator.Acceptable, text, position
 
 
 class FluentReadoutEdit(FluentLineEdit):
@@ -1707,6 +1832,15 @@ class FluentCardDialog(QtWidgets.QDialog):
     -- which is exactly how the two that did got there.  A subclass builds
     its own contents and renders its own title (a frameless card has no
     title bar to put one in); it inherits the card.
+
+    Taking the frame away takes two things with it, so the card supplies
+    both or it is not a usable modal.  WHERE IT OPENS: a platform frame is
+    placed by the window manager, which never puts one off the screen; a
+    card placed by hand at its parent's centre goes wherever that centre
+    is, and a window near an edge put the whole card past it -- modal, so
+    nothing else would take a click, and no button anyone could reach.
+    HOW IT MOVES: a platform frame has a title bar to drag, and a card has
+    none, so the card itself is the handle.
     """
 
     def __init__(self, parent=None, *, title: str = "") -> None:
@@ -1715,8 +1849,78 @@ class FluentCardDialog(QtWidgets.QDialog):
         self.setModal(True)
         self.setFont(QtGui.QFont(FONT, fluent_font_size()))
         self._radius = float(_radius())
+        self._drag_origin: QtCore.QPoint | None = None
         if title:
             self.setWindowTitle(str(title))
+
+    def exec_(self) -> int:
+        """Place the card where it can be used, then run the modal loop.
+
+        Every card modal goes through here, so none of them can be the one
+        that opens somewhere unreachable.
+        """
+
+        # Before the nested loop starts, not after: what it is about to
+        # paint has to be what is actually still there.
+        retire_pending_widgets()
+        self.adjustSize()
+        self.move(self._opening_position())
+        return super().exec_()
+
+    def _opening_position(self) -> QtCore.QPoint:
+        """Centred on the parent, but ALWAYS on the screen it lands on.
+
+        The centring is what makes a modal feel attached to the window it
+        came from.  The clamp is what keeps that from being fatal: a parent
+        near an edge -- or dragged half off one -- centres the card past
+        the screen, and a modal nobody can click is a window nobody can
+        close.
+        """
+
+        anchor = self.parentWidget()
+        # ``size``, not ``frameGeometry`` -- a frameless window has no frame,
+        # so the two are the same thing once it exists, and before it does
+        # only this one is right (the other is a pixel short in each
+        # direction, which is a pixel off the screen).
+        size = self.size()
+        if anchor is not None:
+            centre = anchor.mapToGlobal(anchor.rect().center())
+            wanted = QtCore.QPoint(
+                centre.x() - size.width() // 2, centre.y() - size.height() // 2
+            )
+        else:
+            wanted = self.pos()
+        return _placed_on_screen(wanted, size, widget=anchor or self)
+
+    # -- the card is its own title bar -----------------------------------
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        """Begin a drag, when nothing in the card wanted the press.
+
+        No widget list decides that: Qt only delivers a press HERE once
+        every child has declined it, so a button still clicks, a text body
+        still selects, and the dead space and the title label -- which
+        decline by nature -- are the handle.
+        """
+
+        if event.button() == QtCore.Qt.LeftButton:
+            self._drag_origin = (
+                event.globalPos() - self.frameGeometry().topLeft()
+            )
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        origin = self._drag_origin
+        if origin is not None and event.buttons() & QtCore.Qt.LeftButton:
+            self.move(event.globalPos() - origin)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        self._drag_origin = None
+        super().mouseReleaseEvent(event)
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         painter = QtGui.QPainter(self)
@@ -1801,26 +2005,11 @@ def retire_pending_widgets() -> None:
         application.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
 
 
-def _exec_centered_dialog(dialog: QtWidgets.QDialog, parent) -> int:
-    # Before the nested loop starts, not after: what it is about to paint has
-    # to be what is actually still there.
-    retire_pending_widgets()
-    dialog.adjustSize()
-    if parent is not None:
-        centre = parent.mapToGlobal(parent.rect().center())
-        dialog.move(
-            centre.x() - dialog.width() // 2,
-            centre.y() - dialog.height() // 2,
-        )
-    return dialog.exec_()
-
-
 def fluent_message(parent, title: str, text: str, *, kind: str = "info") -> None:
     """Show a modal Fluent message dialog (``kind`` = ``"info"`` | ``"warning"``) -- the ONE on-brand
     replacement for ``QMessageBox.information`` / ``.warning`` (no native frame, no stray app icon).
     Centres on ``parent``.  Blocks until the user clicks OK (or presses Escape)."""
-    dlg = _FluentMessageDialog(parent, title, text, kind=kind)
-    _exec_centered_dialog(dlg, parent)
+    _FluentMessageDialog(parent, title, text, kind=kind).exec_()
 
 
 def stamped_file_name(stem: str, extension: str, *, stamp: str | None = None) -> str:
@@ -1883,7 +2072,7 @@ def fluent_confirm(
         confirm_text=confirm_text,
         cancel_text=cancel_text,
     )
-    return _exec_centered_dialog(dlg, parent) == QtWidgets.QDialog.Accepted
+    return dlg.exec_() == QtWidgets.QDialog.Accepted
 
 
 #: Max rows a Fluent drop-down shows before it SCROLLS (the shared fluent scrollbar) -- one source for
@@ -2391,13 +2580,9 @@ class FluentComboBox(QtWidgets.QAbstractButton):
     def _popup_available_geometry(self) -> QtCore.QRect | None:
         """The screen containing the anchor, shared by cap/space/placement."""
 
-        app = QtWidgets.QApplication.instance()
-        center = self.mapToGlobal(self.rect().center())
-        screen_at = getattr(app, "screenAt", None) if app is not None else None
-        screen = screen_at(center) if callable(screen_at) else None
-        if screen is None and hasattr(self, "screen"):
-            screen = self.screen()
-        return screen.availableGeometry() if screen is not None else None
+        return _available_geometry_at(
+            self.mapToGlobal(self.rect().center()), widget=self
+        )
 
     def _popup_width_cap(self) -> int:
         available = self._popup_available_geometry()
@@ -3847,6 +4032,18 @@ class FluentSpinBox(_WheelFocusGuardMixin, QtWidgets.QSpinBox):
         self.lineEdit().setTextMargins(0, 0, 0, 0)
         self.setStyleSheet(fluent_spinbox_stylesheet("QSpinBox"))
 
+    def setDisplayUnit(self, unit: str) -> None:  # noqa: N802 - Qt API name
+        """Name what this whole number counts, beside the number.
+
+        A prefix is not offered and not accepted: these are counts of things
+        -- pixels, shots, windows -- and 1.2 k of a thing that comes in ones
+        is a number nobody meant.  A quantity that does scale is a float
+        field, where the whole ladder is available.
+        """
+
+        symbol = str(unit).strip()
+        self.setSuffix(f" {symbol}" if symbol and symbol != "1" else "")
+
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
         _paint_fluent_spin_buttons(self)
@@ -3996,6 +4193,14 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
     Visual formatting must not become an authority-changing transform.
     """
 
+    #: CLASS attributes, not instance ones.  Qt asks this widget for its text
+    #: from inside setRange and setDecimals, which run in __init__ before any
+    #: assignment could have happened -- and a plain AttributeError raised
+    #: inside a Qt slot does not become a traceback, it ends the process.
+    #: Declared here, there is no instant in which they are missing.
+    _unit = "1"
+    _last_value = 0.0
+
     def __init__(
         self,
         length=5,
@@ -4038,13 +4243,63 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         self.setSingleStep(1)
         self.setDecimals(323)
 
-    def textFromValue(self, value: float) -> str:
-        if self.decimals() == 0:
-            return str(int(value))
-        return repr(float(value))
+    def setDisplayUnit(self, unit: str) -> None:  # noqa: N802 - Qt API name
+        """The unit this box's number is in, and is therefore shown in.
 
-    def valueFromText(self, text: str) -> float:
-        return float(text.strip())
+        Shown AND read: one table drives both, so a box that prints
+        ``120.0000000 MHz`` accepts ``1.05M`` back without anyone writing a
+        second parser that has to agree with the formatter.
+        """
+
+        self._unit = str(unit).strip() or "1"
+        self.lineEdit().setText(self.textFromValue(self.value()))
+
+    def displayUnit(self) -> str:  # noqa: N802 - Qt API name
+        return self._unit
+
+    def textFromValue(self, value: float) -> str:  # noqa: N802 - Qt API
+        # NEVER raises, for the same reason valueFromText does not: Qt calls
+        # this while painting, and an exception out of a Qt slot ends the
+        # process.  A unit this registry has never heard of is a defect to fix
+        # where it was declared, not a reason for the window to die drawing a
+        # number it could otherwise have shown.
+        number = int(value) if self.decimals() == 0 else float(value)
+        self._last_value = float(value)
+        try:
+            return format_quantity(number, self._unit)
+        except UnitError:
+            return f"{number} {self._unit}".strip()
+
+    def valueFromText(self, text: str) -> float:  # noqa: N802 - Qt API
+        # NEVER raises.  Qt calls this from inside its own event handling, and
+        # an exception leaving a Qt slot ends the process instead of the edit.
+        # The fallback may NOT ask the box for its value: value() interprets
+        # the text, which calls back into here, which would ask again -- one
+        # unreadable keystroke and the stack is gone.
+        try:
+            value = float(parse_quantity(text, self._unit))
+        except (UnitError, ValueError):
+            return self._last_value
+        self._last_value = value
+        return value
+
+    def validate(self, text: str, position: int):
+        """Accept while it is being typed; judge when it could be finished.
+
+        Qt's own numeric validator refuses every character that is not part of
+        a number, which is why ``1.05M`` could not be typed at all -- the M was
+        swallowed as the key went down, so the box that showed megahertz was
+        the one box megahertz could not be entered into.
+        """
+
+        stripped = text.strip()
+        if not stripped or stripped in ("+", "-", ".", "+.", "-."):
+            return QtGui.QValidator.Intermediate, text, position
+        try:
+            parse_quantity(stripped, self._unit)
+        except (UnitError, ValueError):
+            return QtGui.QValidator.Intermediate, text, position
+        return QtGui.QValidator.Acceptable, text, position
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -4898,9 +5153,14 @@ class FluentDialogWindow(FluentWindow):
         if anchor is None:
             center_window_on_primary_screen(self, app)
         else:
+            # Centred on the window it came from, and then put on a screen:
+            # a window near an edge centres this one past it, and a modal
+            # nobody can reach is a bench nobody can carry on using.
             frame = self.frameGeometry()
             frame.moveCenter(anchor.window().frameGeometry().center())
-            self.move(frame.topLeft())
+            self.move(
+                _placed_on_screen(frame.topLeft(), self.size(), widget=anchor)
+            )
         retain_window(self)
         loop = QtCore.QEventLoop(self)
         self._dialog_loop = loop

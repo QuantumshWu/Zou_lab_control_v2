@@ -9,16 +9,29 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 
+#: Every snippet starts here.  Without it the subprocess resolves the
+#: layers through whatever the editable install points at -- on this
+#: machine, sibling checkouts of the same package names -- so the suite
+#: silently tested a DIFFERENT zlc_plot than the one beside it.  The
+#: product bootstrap is what puts this checkout's layers on the path,
+#: and it is the same one every launcher uses.
+_BOOTSTRAP = "import zou_lab_control" + chr(10)
+
+
 def _run_qt(code: str) -> None:
     environment = dict(os.environ)
-    environment["PYTHONPATH"] = "" if environment.get("ZLC_TEST_INSTALLED") == "1" else str(SRC)
+    environment["PYTHONPATH"] = (
+        ""
+        if environment.get("ZLC_TEST_INSTALLED") == "1"
+        else os.pathsep.join((str(ROOT.parents[1]), str(SRC)))
+    )
     environment["QT_QPA_PLATFORM"] = "offscreen"
     # Fixed for the child, not inherited: a matplotlib backend chosen by
     # whatever imported it in the parent is how this harness produced access
     # violations at teardown that had nothing to do with the code under test.
     environment["MPLBACKEND"] = "Agg"
     completed = subprocess.run(
-        [sys.executable, "-c", code], cwd=ROOT, env=environment,
+        [sys.executable, "-c", _BOOTSTRAP + code], cwd=ROOT, env=environment,
         capture_output=True, text=True, timeout=30, check=False,
     )
     assert completed.returncode == 0, completed.stderr or completed.stdout
@@ -448,20 +461,20 @@ assert asked == [("add", None), ("remove", "p2")], asked
 # a selected CARD inserts after it, and Remove takes that one
 asked.clear()
 container.period_clicked.emit("p0"); app.processEvents()
-assert container.selection() == ("p0", None)
+assert container.selection() == ("p0", None, None)
 view.add_button.click(); view.remove_button.click()
 assert asked == [("add", "p1"), ("remove", "p0")], asked
 
 # a selected GAP inserts there, and the two selections are exclusive
 asked.clear()
 container.gap_clicked.emit(0); app.processEvents()
-assert container.selection() == (None, 0), container.selection()
+assert container.selection() == (None, None, 0), container.selection()
 view.add_button.click()
 assert asked == [("add", "p0")], asked
 
 # clicking the current selection again clears it
 container.gap_clicked.emit(0); app.processEvents()
-assert container.selection() == (None, None)
+assert container.selection() == (None, None, None)
 
 # a selection naming a period the strip no longer holds cannot survive a rebuild
 container.period_clicked.emit("p1"); app.processEvents()
@@ -471,7 +484,7 @@ view.set_schedule(ScheduleVM(
     summary_text="x", ports=(port,), periods=periods[:1],
 ))
 app.processEvents()
-assert container.selection() == (None, None), container.selection()
+assert container.selection() == (None, None, None), container.selection()
 """
     )
 
@@ -854,6 +867,154 @@ assert tall.verticalScrollBar().maximum() > 0
 panes.close()
 app.processEvents()
 """
+    )
+
+
+def test_a_card_and_a_post_are_one_gesture_with_two_payloads() -> None:
+    """Dragging offers only the gaps that would do something -- for both.
+
+    The bracket post refused an impossible gap while the cursor was still
+    over it: no marker, no drop cursor.  The card accepted every gap, drew
+    the marker in all of them, and then threw away a drop onto the two that
+    mean "where it already is".  Same gesture, opposite answers to the same
+    question, and the half that says yes and does nothing is the worse half.
+    """
+
+    _run_qt(
+        """
+from dataclasses import replace
+from PyQt5 import QtCore, QtGui, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.pulse import BracketVM, PulseScheduleView
+""" + _schedule_source() + r'''
+app = ensure_qt_app(["drag-symmetry"])
+view = PulseScheduleView()
+assert view.set_schedule(replace(vm, revision=3, bracket=BracketVM("p1", "p1", 4)))
+view.show(); app.processEvents()
+strip = view.drag_container
+cards = strip.pulse_cards()
+
+def hover(mime, payload, x):
+    """One dragMoveEvent, and what the strip decided about it."""
+    data = QtCore.QMimeData()
+    data.setData(mime, QtCore.QByteArray(payload.encode("utf-8")))
+    event = QtGui.QDragMoveEvent(
+        QtCore.QPoint(x, 5), QtCore.Qt.MoveAction, data,
+        QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
+    )
+    strip.dragMoveEvent(event)
+    return event.isAccepted(), strip._indicator.isVisible()
+
+on_itself = cards[0].geometry().center().x()
+elsewhere = cards[-1].geometry().right() + 40
+
+card = strip.CARD_MIME
+post = strip.BRACKET_MIME
+
+# A move that would change nothing is refused WHILE dragging, not after.
+assert hover(card, "p1", on_itself) == (False, False)
+assert hover(post, "\0".join(("end", "p1", "p1", "4")), on_itself) == (False, False)
+
+# A move that would do something is offered, and shows where it lands.
+assert hover(card, "p1", elsewhere) == (True, True)
+assert hover(post, "\0".join(("end", "p1", "p1", "4")), elsewhere) == (True, True)
+
+# And what the marker offered is what the drop commits -- for both.
+moves, brackets = [], []
+view.move_period_requested.connect(lambda *payload: moves.append(payload))
+view.bracket_committed.connect(lambda *payload: brackets.append(payload))
+
+def drop(mime, payload, x):
+    data = QtCore.QMimeData()
+    data.setData(mime, QtCore.QByteArray(payload.encode("utf-8")))
+    event = QtGui.QDropEvent(
+        QtCore.QPoint(x, 5), QtCore.Qt.MoveAction, data,
+        QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
+    )
+    strip.dropEvent(event)
+    return event.isAccepted()
+
+assert drop(card, "p1", on_itself) is False and moves == []
+assert drop(post, "\0".join(("end", "p1", "p1", "4")), on_itself) is False
+assert brackets == []
+assert drop(card, "p1", elsewhere) is True and moves == [("p1", None)]
+assert drop(post, "\0".join(("end", "p1", "p1", "4")), elsewhere) is True
+assert brackets == [("p1", "p2", 4)]
+
+view.close(); view.deleteLater()
+app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+app.processEvents()
+app.quit()
+'''
+    )
+
+
+def test_clicking_a_post_marks_it_the_way_clicking_a_card_does() -> None:
+    """A card and a bracket post are the same kind of thing to pick up.
+
+    Clicking a card drew a border round it; clicking a post drew nothing at
+    all, so the two read as different kinds of object when the only real
+    difference between them is what they carry.  BracketPost has been a
+    FluentGroupBox since it was written -- the outline it needed was already
+    on it, and nobody had ever called it.
+    """
+
+    _run_qt(
+        """
+from dataclasses import replace
+from PyQt5 import QtCore, QtGui, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.pulse import BracketPost, BracketVM, PulseScheduleView
+""" + _schedule_source() + r'''
+app = ensure_qt_app(["click-symmetry"])
+view = PulseScheduleView()
+assert view.set_schedule(replace(vm, revision=3, bracket=BracketVM("p1", "p2", 4)))
+view.show(); app.processEvents()
+strip = view.drag_container
+cards = strip.pulse_cards()
+posts = {post.kind: post for post in strip.findChildren(BracketPost)}
+
+def click(widget):
+    for kind in (QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonRelease):
+        QtWidgets.QApplication.sendEvent(widget, QtGui.QMouseEvent(
+            kind, QtCore.QPoint(5, 5), QtCore.Qt.LeftButton,
+            QtCore.Qt.LeftButton, QtCore.Qt.NoModifier))
+    app.processEvents()
+
+def outlined():
+    """Everything currently wearing the selection border."""
+    return {item.period_id for item in cards if item.outline_colour() is not None} | {
+        f"post:{kind}" for kind, post in posts.items()
+        if post.outline_colour() is not None
+    }
+
+click(cards[0])
+assert strip.selection() == ("p1", None, None), strip.selection()
+assert outlined() == {"p1"}, outlined()
+
+# Clicking a post marks the post -- and takes the mark off the card, because
+# at most one thing is what the next edit acts on.
+click(posts["end"])
+assert strip.selection() == (None, "end", None), strip.selection()
+assert outlined() == {"post:end"}, outlined()
+
+# Clicking the marked one again clears it, exactly as a card does.
+click(posts["end"])
+assert strip.selection() == (None, None, None), strip.selection()
+assert outlined() == set(), outlined()
+
+# And the other way round: a post, then a card.
+click(posts["start"])
+assert outlined() == {"post:start"}, outlined()
+click(cards[1])
+assert strip.selection() == ("p2", None, None), strip.selection()
+assert outlined() == {"p2"}, outlined()
+
+view.close(); view.deleteLater()
+app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+app.processEvents()
+app.quit()
+'''
     )
 
 

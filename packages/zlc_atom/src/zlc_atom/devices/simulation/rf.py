@@ -16,11 +16,22 @@ from zlc_atom.devices.rf.vaunix_lms import (
 
 
 class InMemoryLmsLibrary:
-    """The vendor DLL's slice, holding its integers in memory."""
+    """The vendor DLL's slice, holding its integers in memory.
+
+    A brick REMEMBERS.  Its registers survive being closed and opened
+    again, because the instrument on the bench is still emitting whatever
+    it was emitting when the software let go of it -- and a simulation
+    that forgets on open cannot express the one state that matters here:
+    an instrument already set up, which connecting must not disturb.
+    """
 
     def __init__(self, serials: tuple[int, ...] = (1001,)) -> None:
         self._serials = tuple(int(serial) for serial in serials)
-        self._open: dict[int, dict[str, int | bool]] = {}
+        self._registers_by_serial: dict[int, dict[str, int | bool]] = {
+            serial: {"frequency": 0, "power": 0, "rf_on": False}
+            for serial in self._serials
+        }
+        self._open: set[int] = set()
 
     def device_serials(self) -> tuple[int, ...]:
         return self._serials
@@ -29,17 +40,17 @@ class InMemoryLmsLibrary:
         if int(serial) not in self._serials:
             raise LookupError(f"no Vaunix LMS with serial {serial} is attached")
         handle = int(serial)
-        self._open[handle] = {"frequency": 0, "power": 0, "rf_on": False}
+        self._open.add(handle)
         return handle
 
     def _registers(self, handle: int) -> dict:
-        registers = self._open.get(int(handle))
-        if registers is None:
+        key = int(handle)
+        if key not in self._open:
             raise RuntimeError("virtual LMS handle is not open")
-        return registers
+        return self._registers_by_serial[key]
 
     def close_device(self, handle: int) -> None:
-        self._open.pop(int(handle), None)
+        self._open.discard(int(handle))
 
     def set_frequency(self, handle: int, frequency_units: int) -> None:
         self._registers(handle)["frequency"] = int(frequency_units)

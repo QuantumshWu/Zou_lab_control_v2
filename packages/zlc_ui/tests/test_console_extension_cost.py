@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 
@@ -22,7 +23,12 @@ def test_synthetic_card_extension_enters_the_console_card_surface() -> None:
 def test_demo_console_once_echoes_a_view_signal() -> None:
     environment = dict(__import__("os").environ)
     environment["PYTHONPATH"] = (
-        "" if environment.get("ZLC_TEST_INSTALLED") == "1" else str(SRC)
+        ""
+        if environment.get("ZLC_TEST_INSTALLED") == "1"
+        # The repository root too: an example bootstraps through
+        # zou_lab_control so it demonstrates THIS checkout, and the
+        # bootstrap lives there.
+        else os.pathsep.join((str(ROOT.parents[1]), str(SRC)))
     )
     environment["QT_QPA_PLATFORM"] = "offscreen"
     completed = __import__("subprocess").run(
