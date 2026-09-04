@@ -235,7 +235,7 @@ def test_a_node_host_runs_a_camera_measurement_to_completion() -> None:
     try:
         camera = installation.capability("camera.adapter")
         sequencer = installation.device("sequencer")
-        program = build_calibration_pulse(sequencer.describe())
+        program = build_calibration_pulse(sequencer)
         sequencer.load(program)
         windows = CALIBRATION_FRAMES_PER_CYCLE
 
@@ -320,7 +320,7 @@ def test_a_node_host_runs_and_stops_repeat_zero_camera_measurement() -> None:
     try:
         camera = installation.capability("camera.adapter")
         sequencer = installation.device("sequencer")
-        program = build_calibration_pulse(sequencer.describe())
+        program = build_calibration_pulse(sequencer)
         sequencer.load(program)
 
         node = CameraMeasurementNode(
@@ -433,7 +433,7 @@ def test_a_finite_run_shows_its_dataset_filling_and_stops_when_asked() -> None:
     try:
         camera = installation.capability("camera.adapter")
         sequencer = installation.device("sequencer")
-        program = build_calibration_pulse(sequencer.describe())
+        program = build_calibration_pulse(sequencer)
         sequencer.load(program)
         repeats = 4
         windows = CALIBRATION_FRAMES_PER_CYCLE
@@ -601,7 +601,7 @@ def test_stop_partial_is_identical_whether_or_not_ui_freezes() -> None:
         try:
             camera = installation.capability("camera.adapter")
             sequencer = installation.device("sequencer")
-            program = build_calibration_pulse(sequencer.describe())
+            program = build_calibration_pulse(sequencer)
             sequencer.load(program)
             node = CameraMeasurementNode(
                 camera=camera,

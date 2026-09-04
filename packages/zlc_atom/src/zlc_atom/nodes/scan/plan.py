@@ -38,7 +38,7 @@ from zlc_pulse import (
     api_parameter_columns_for,
     scan_columns_for,
 )
-from zlc_pulse.codec import parse_pulse_tree_json, sequence_from_document_tree
+from zlc_pulse.codec import read_pulse_document
 
 from zlc_atom.authoring import TunableField
 from zlc_atom.nodes._framework.descriptor import (
@@ -434,10 +434,8 @@ def bind_plan(
 
 
 def _template_sequence(path: str | Path) -> PulseSequence:
-    source = Path(path).expanduser().resolve()
-    return sequence_from_document_tree(
-        parse_pulse_tree_json(source.read_text(encoding="utf-8"))
-    )
+    sequence, _editor = read_pulse_document(path)
+    return sequence
 
 
 def slots_from_plan(

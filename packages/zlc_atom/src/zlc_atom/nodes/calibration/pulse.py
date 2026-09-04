@@ -9,10 +9,9 @@ from pathlib import Path
 from zlc_pulse import (
     PulseSequence,
     authored_api_values,
-    compile_sequence,
     resolve_api_parameters,
 )
-from zlc_pulse.codec import parse_pulse_tree_json, sequence_from_document_tree
+from zlc_pulse.codec import read_pulse_document
 from zlc_pulse.device import BoardDescription
 
 
@@ -32,9 +31,7 @@ def load_calibration_pulse_template(path: str | Path) -> PulseSequence:
     source = Path(path).expanduser().resolve()
     if source.suffix.lower() != ".json" or not source.is_file():
         raise ValueError("calibration pulse template must be an existing JSON file")
-    sequence = sequence_from_document_tree(
-        parse_pulse_tree_json(source.read_text(encoding="utf-8"))
-    )
+    sequence, _editor = read_pulse_document(source)
     _validate_calibration_sequence(sequence)
     return sequence
 
@@ -76,10 +73,15 @@ def resolve_pulse(
     sequence: PulseSequence,
     *,
     path: str | Path,
-    board: BoardDescription,
+    sequencer: object,
     api_values: Mapping[str, float],
 ) -> ResolvedPulse:
     """Resolve and compile the already-decoded exact workspace resource.
+
+    Compiled BY the sequencer, because a config parameter's number belongs to
+    the board and is baked into the program: the sequence carried away from
+    here is the filled one, so what ``arm_sequencer`` later hands back as
+    ``source=`` describes what the board is actually playing.
 
     ``api_values`` names the parameters this run owns, by the identifiers the
     PULSE declares -- a caller that owns slots addresses them by number and
@@ -93,6 +95,7 @@ def resolve_pulse(
     the operator writes.
     """
 
+    board = sequencer.describe()
     if not isinstance(board, BoardDescription):
         raise TypeError("board must be BoardDescription")
     _validate_calibration_sequence(sequence)
@@ -111,7 +114,9 @@ def resolve_pulse(
         raise ValueError(
             "calibration pulse target is incompatible with the connected board"
         )
-    program = compile_sequence(resolved, board.geometry, board.clock_hz)
+    resolved, program = sequencer.compile_pulse(
+        resolved, board.geometry, board.clock_hz
+    )
     return ResolvedPulse(
         sequence.name,
         source,

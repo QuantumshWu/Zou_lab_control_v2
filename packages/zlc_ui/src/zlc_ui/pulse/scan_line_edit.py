@@ -5,7 +5,8 @@ from __future__ import annotations
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
-    API_VIOLET, API_VIOLET_DARK, BG, EDIT_PADDING_H, FONT, ORANGE, ORANGE_DARK,
+    API_VIOLET, API_VIOLET_DARK, BG, CONFIG_SLATE, CONFIG_SLATE_DARK,
+    EDIT_PADDING_H, FONT, ORANGE, ORANGE_DARK,
     ORANGE_TINT, PADDING_V, PLACEHOLDER, RADIUS, SURFACE, FluentLineEdit, Metrics,
     fluent_font_size, scaled_px,
 )
@@ -17,7 +18,7 @@ class _FluentScanDot(QtWidgets.QAbstractButton):
         self.setCheckable(True)
         self.setCursor(QtCore.Qt.PointingHandCursor)
         self._number: int | None = None
-        self._api = False
+        self._kind: str | None = None
         diameter = Metrics.dot()
         self.setFixedSize(diameter, diameter)
         self.setToolTip(tooltip)
@@ -26,8 +27,14 @@ class _FluentScanDot(QtWidgets.QAbstractButton):
         self._number = None if number is None else int(number)
         self.update()
 
-    def set_api(self, api: bool) -> None:
-        self._api = bool(api)
+    def set_binding(self, kind: str | None) -> None:
+        """Which of the three ways this field is supplied, or none.
+
+        One setter rather than a flag per kind: the three are alternatives,
+        and a pair of booleans can say a thing the model cannot mean.
+        """
+
+        self._kind = None if kind is None else str(kind)
         self.update()
 
     def nextCheckState(self) -> None:  # model owns state
@@ -39,8 +46,8 @@ class _FluentScanDot(QtWidgets.QAbstractButton):
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         center = QtCore.QPointF(self.width() / 2.0, self.height() / 2.0)
         radius = min(self.width(), self.height()) / 2.0 - max(1.0, scaled_px(1))
-        if self.isChecked() or self._api:
-            painter.setBrush(QtGui.QColor(API_VIOLET if self._api else ORANGE))
+        if self._kind is not None:
+            painter.setBrush(QtGui.QColor(_BINDING_FILL[self._kind]))
             painter.setPen(QtCore.Qt.NoPen)
             painter.drawEllipse(center, radius, radius)
             if self._number is not None:
@@ -57,6 +64,16 @@ class _FluentScanDot(QtWidgets.QAbstractButton):
             painter.setPen(QtCore.Qt.NoPen)
             painter.drawEllipse(center, radius * 0.42, radius * 0.42)
         painter.end()
+
+
+#: What each binding paints as.  The board's own orange for a scan column,
+#: the violet a caller writes in for an API parameter, and slate for a config
+#: number, which is nobody's to supply because it is already the pulse's.
+_BINDING_FILL = {
+    "scan": ORANGE,
+    "api": API_VIOLET,
+    "config": CONFIG_SLATE,
+}
 
 
 def _bound_field_style(*, text: str, border: str, fill: str | None) -> str:
@@ -128,8 +145,10 @@ class FluentScanLineEdit(FluentLineEdit):
 
     def set_field_state(self, *, editable: bool, binding: str | None = None, number: int | None = None) -> None:
         normalized = None if binding is None else str(binding).strip().lower()
-        if normalized not in (None, "scan", "api"):
-            raise ValueError("binding must be 'scan', 'api', or None")
+        if normalized is not None and normalized not in _BINDING_FILL:
+            raise ValueError(
+                f"binding must be one of {sorted(_BINDING_FILL)}, or None"
+            )
         if normalized is None and number is not None:
             raise ValueError("an unbound field cannot have a binding number")
         state = (bool(editable), normalized, number)
@@ -137,15 +156,21 @@ class FluentScanLineEdit(FluentLineEdit):
             return
         self._field_state = state
         is_scan = normalized == "scan"
-        is_api = normalized == "api"
-        self._dot.set_api(is_api)
+        self._dot.set_binding(normalized)
+        # A scan column is the one binding whose number this field cannot
+        # hold: the board writes it per point.  An API or config field still
+        # shows -- and edits -- the number it carries.
         self._dot.setChecked(is_scan)
         self._dot.set_number(number if normalized is not None else None)
         self.setReadOnly(is_scan or not state[0])
         if is_scan:
             style = _bound_field_style(text=ORANGE_DARK, border=ORANGE, fill=ORANGE_TINT)
-        elif is_api:
+        elif normalized == "api":
             style = _bound_field_style(text=API_VIOLET_DARK, border=API_VIOLET, fill=None)
+        elif normalized == "config":
+            style = _bound_field_style(
+                text=CONFIG_SLATE_DARK, border=CONFIG_SLATE, fill=None
+            )
         else:
             style = self._base_style if state[0] else _muted_line_style()
         self.setStyleSheet(style)

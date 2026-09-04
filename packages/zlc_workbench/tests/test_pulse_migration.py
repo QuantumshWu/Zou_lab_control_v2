@@ -1,11 +1,16 @@
-"""The one-shot that lets a pulse survive the bracket rename.
+"""The one-shot that lets a pulse survive two grammar changes.
 
 Delete this file together with ``tools/migrate_pulses.py`` and
 ``bin/migrate_pulses.bat`` once every machine holding pulses has run it.
 
 The old shape here is DERIVED by taking a document the product writes today
-and undoing the rename that produced it.  A hand-typed old pulse would only
+and undoing every change that produced it.  A hand-typed old pulse would only
 prove that this tool agrees with whatever the test author remembered.
+
+One function undoes BOTH changes, because the pulses this tool exists for are
+on a build older than either: a workspace that never saw the bracket split has
+not seen the config declaration either, and one run has to carry it the whole
+way.
 """
 
 from __future__ import annotations
@@ -26,11 +31,17 @@ def _current_document() -> dict:
 
 
 def _as_written_before_the_bracket_split(document: dict) -> dict:
-    """The same pulse, in the shape ``663de9b`` renamed away from."""
+    """The same pulse, in the shape a build older than both changes wrote.
+
+    ``663de9b`` renamed ``repeat`` to ``bracket`` and made ``run_repeats``
+    required; the config declaration came after it.  A pulse sitting on an
+    operator's disk predates both.
+    """
 
     older = dict(document)
     older["repeat"] = older.pop("bracket")
     older.pop("run_repeats")
+    older.pop("config_parameters")
     return older
 
 
@@ -52,6 +63,35 @@ def test_a_pulse_from_before_the_rename_opens_again(tmp_path: Path) -> None:
         assert "repeat" in str(error)
     else:  # pragma: no cover - the migration would have nothing to do
         raise AssertionError("the old shape must not read as a current pulse")
+
+    outcome = migrate_file(path)
+
+    assert outcome.verdict == "migrated", outcome.detail
+    assert read_pulse(path) == state_from_tree(current)
+    # Nothing may be invented on the way: a pulse that never named a field as
+    # configured declares none.
+    assert read_pulse(path).sequence.config_parameters == ()
+
+
+def test_a_pulse_that_names_a_config_file_drops_the_name(tmp_path: Path) -> None:
+    """The config path lived in the document for one build, and must not stay.
+
+    Anything saved while it did carries a field today's reader refuses, so
+    the same one-shot has to carry a pulse forward from that shape too --
+    otherwise migrating cures the old wall by walking into a newer one.
+    """
+
+    current = _current_document()
+    interim = dict(current)
+    interim["config_source"] = "calibration/current.json"
+    path = _write(tmp_path / "imaging.json", interim)
+
+    try:
+        read_pulse(path)
+    except ValueError as error:
+        assert "config_source" in str(error)
+    else:  # pragma: no cover - the interim shape would still read
+        raise AssertionError("the interim shape must not read as a current pulse")
 
     outcome = migrate_file(path)
 

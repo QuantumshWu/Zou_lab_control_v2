@@ -35,7 +35,6 @@ from collections.abc import Mapping, Sequence
 
 from zlc_pulse import (
     PulseSequence,
-    compile_sequence,
     pulse_field_value,
     resolve_api_parameters,
 )
@@ -215,7 +214,9 @@ class SteppedScanMeasurement:
                 **tunable_roles,
             },
             "device_snapshots": {
-                "sequencer": sequencer_archive_snapshot(description=board),
+                "sequencer": sequencer_archive_snapshot(
+                    description=board, config=self.sequencer.config_values()
+                ),
                 **tunable_snapshots,
             },
             "pulse": self.sequence.name,
@@ -295,8 +296,12 @@ class SteppedScanMeasurement:
         )
         if resolved.target != board.target:
             raise ValueError("pulse target differs from the connected board")
-        program = compile_sequence(resolved, board.geometry, board.clock_hz)
-        return resolved, program
+        # Filled by the board, then compiled: a config parameter is the
+        # apparatus's calibrated number, baked in at compile.  Both halves come
+        # back because the filled one is what ``load(source=...)`` must carry.
+        return self.sequencer.compile_pulse(
+            resolved, board.geometry, board.clock_hz
+        )
 
     def _collect(
         self,

@@ -14,7 +14,15 @@ that change.  It is a ONE-SHOT: run it once on each machine that holds
 pulses, then delete it -- module, launcher and test in one commit -- exactly
 as the previous migration was removed in ``5d889a7``.
 
-It knows that one rename and nothing else.  A document carrying anything
+A second grammar change followed it: a pulse now declares which of its
+fields are ``config`` parameters -- the same "unknown pulse field(s)" wall
+from the other side.  A short-lived shape between the two also wrote a
+``config_source`` path into the document, before the value set moved onto
+the sequencer where it belongs; a pulse saved then carries a field today's
+reader refuses.  One run takes a pulse written before the bracket split all
+the way to today, from either side.
+
+It knows those changes and nothing else.  A document carrying anything
 else it cannot account for is refused in the reader's own words and left
 byte-for-byte as it was found, because a migration that silently drops what
 it cannot explain turns "will not open" into "opens, and something is
@@ -76,11 +84,46 @@ def _add_the_missing_run_repeats(
     return f"run_repeats = {tree['run_repeats']}"
 
 
+def _declare_no_config_binding(
+    tree: dict[str, Any], before: Mapping[str, Any]
+) -> str | None:
+    """A pulse written before config parameters existed declares none.
+
+    Empty is the honest reconstruction and the only safe one: the document
+    never named a field as configured, so nothing in it is filled from a
+    value set.  Whoever wants one says so in the editor.
+    """
+
+    if "config_parameters" in before:
+        return None
+    tree["config_parameters"] = []
+    return "config_parameters = []"
+
+
+def _drop_the_config_source_field(
+    tree: dict[str, Any], before: Mapping[str, Any]
+) -> str | None:
+    """A pulse no longer names the file its config parameters come from.
+
+    That path lived in the document for one build.  The value set is the
+    sequencer's -- one board, one set of calibrated numbers, shared by every
+    pulse it plays -- so the document says only WHICH fields are config
+    parameters, and a leftover path is a field the reader refuses.
+    """
+
+    if "config_source" not in before:
+        return None
+    tree.pop("config_source")
+    return "dropped config_source"
+
+
 #: In order.  Each reads the document AS FOUND for its condition, so a later
 #: step cannot be misled by an earlier one having already filled a field in.
 STEPS: tuple[Callable[[dict[str, Any], Mapping[str, Any]], "str | None"], ...] = (
     _rename_repeat_to_bracket,
     _add_the_missing_run_repeats,
+    _declare_no_config_binding,
+    _drop_the_config_source_field,
 )
 
 

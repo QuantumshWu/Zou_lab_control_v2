@@ -3322,7 +3322,7 @@ class SlmFeedbackTask:
             pulse = resolve_pulse(
                 self.sequence,
                 path=self.pulse_path,
-                board=self.sequencer.describe(),
+                sequencer=self.sequencer,
                 api_values={},
             )
             _check_cancelled(context)

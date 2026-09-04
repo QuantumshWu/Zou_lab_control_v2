@@ -8,7 +8,14 @@ import math
 from typing import TypeAlias
 
 from zlc_pulse.compile import CompiledProgram
-from zlc_pulse.device import AppliedState, BoardDescription, DoneReport, PulseStreamer, SafeReadback
+from zlc_pulse.device import (
+    AppliedState,
+    BoardDescription,
+    DoneReport,
+    PulseStreamer,
+    SafeReadback,
+)
+from zlc_pulse.wire import StreamerParams
 from zlc_pulse.model import PulseSequence
 from zlc_pulse.remote import RemotePulseStreamer
 
@@ -55,20 +62,35 @@ def sequencer_archive_snapshot(
     *,
     description: BoardDescription | None = None,
     state: Mapping[str, object] | None = None,
+    config: Mapping[str, tuple[float, str]] | None = None,
 ) -> dict[str, object]:
-    """Canonical archive snapshot of proven board facts and/or runtime state."""
+    """Canonical archive snapshot of proven board facts and/or runtime state.
 
-    if description is None and state is None:
-        raise ValueError("a sequencer archive snapshot needs description or state")
+    ``config`` is the calibrated set that was filling config parameters when
+    this ran.  It belongs with the board's own facts, not with the pulse: the
+    file it came from is overwritten by the next calibration, so naming the
+    pulse says nothing about which numbers played.
+    """
+
+    if description is None and state is None and config is None:
+        raise ValueError("a sequencer archive snapshot needs description, state or config")
     result: dict[str, object] = {}
     if description is not None:
         result["description"] = _description_snapshot(description)
+    if config is not None:
+        if not isinstance(config, Mapping):
+            raise TypeError("sequencer config values must be a mapping")
+        result["config"] = {
+            str(parameter_id): [float(value), str(unit)]
+            for parameter_id, (value, unit) in config.items()
+        }
     if state is not None:
         if not isinstance(state, Mapping):
             raise TypeError("sequencer state must be a mapping")
         selected: dict[str, object] = {}
         for name in (
             "opened",
+            "config_source",
             "loaded",
             "firing",
             "run_repeats",
@@ -142,6 +164,33 @@ class SequencerDevice:
 
     def applied(self) -> AppliedState | None:
         return self.streamer.applied()
+
+    def load_config_values(
+        self,
+        entries: Mapping[str, tuple[float, str]],
+        *,
+        source: str = "",
+    ) -> None:
+        self.streamer.load_config_values(entries, source=source)
+
+    def config_values(self) -> dict[str, tuple[float, str]]:
+        return self.streamer.config_values()
+
+    def compile_pulse(
+        self,
+        sequence: PulseSequence,
+        geom: StreamerParams,
+        clock_hz: float,
+        *,
+        slot_tick_scales: Sequence[int] | None = None,
+    ) -> tuple[PulseSequence, CompiledProgram]:
+        return self.streamer.compile_pulse(
+            sequence, geom, clock_hz, slot_tick_scales=slot_tick_scales
+        )
+
+    @property
+    def config_source(self) -> str:
+        return self.streamer.config_source
 
 
 __all__ = ["SequencerDevice", "Streamer", "sequencer_archive_snapshot"]

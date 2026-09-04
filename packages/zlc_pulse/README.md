@@ -30,6 +30,25 @@ metadata. Even a bracket spanning the whole Pulse does not become or alter
 `run_repeats`. The sequence's authored `run_repeats` defaults to `0`; a task
 may explicitly override it for one execution without changing the saved Pulse.
 
+A pulse field's value comes from one of three places, and which one is the
+whole meaning of its binding. A SCAN slot is filled by the board, one value per
+point, out of the hardware's four. An API parameter is a hole a caller fills
+once per run; `compile_sequence` refuses one that is still open. A CONFIG
+parameter is neither: its value IS the field's own number, and the SEQUENCER
+supplies today's. A board is calibrated, not a pulse -- channel delays and DAC
+biases belong to the apparatus and are shared by every pulse it plays -- so the
+value set is loaded onto the device once and `PulseStreamer.compile_pulse` is
+the only way to compile for a board. It writes the held numbers into the
+period, the DAC step or the delay each parameter names and returns BOTH the
+filled sequence and the program, because the filled one is what must be handed
+back as `source=`. A declaration the held set says nothing about is refused
+there, before anything could play it: a stale number played while the run
+record claims it is fresh is the one outcome worse than refusing to run.
+`compile_sequence` itself stays blind to config parameters, so nothing but that
+one door is safe. A field a run needs to vary is an API parameter, which is the
+whole difference between the two, so a field carries at most one binding and
+all three share one id namespace.
+
 The package has no measurement, GUI, or run-planning layer. `applied()` is only
 the device's saved passive echo of the last program, source, rows, and repeat
 counts; it is not trigger scheduling, expected-frame accounting, or

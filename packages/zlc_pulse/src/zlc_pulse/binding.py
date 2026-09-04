@@ -168,6 +168,11 @@ def prune_orphaned_bindings(
         for parameter in sequence.api_parameters
         if held(parameter.field_ref)
     )
+    configured = tuple(
+        parameter
+        for parameter in sequence.config_parameters
+        if held(parameter.field_ref)
+    )
     dropped = tuple(
         [slot.slot_id for slot in sequence.slots if not held(slot.field_ref)]
         + [
@@ -175,10 +180,23 @@ def prune_orphaned_bindings(
             for parameter in sequence.api_parameters
             if not held(parameter.field_ref)
         ]
+        + [
+            parameter.parameter_id
+            for parameter in sequence.config_parameters
+            if not held(parameter.field_ref)
+        ]
     )
     if not dropped:
         return sequence, ()
-    return replace(sequence, slots=slots, api_parameters=parameters), dropped
+    return (
+        replace(
+            sequence,
+            slots=slots,
+            api_parameters=parameters,
+            config_parameters=configured,
+        ),
+        dropped,
+    )
 
 
 def field_label(sequence: PulseSequence, reference: PulseFieldRef) -> str:
@@ -248,6 +266,79 @@ def authored_api_values(sequence: PulseSequence) -> dict[str, float]:
     }
 
 
+def apply_config_values(
+    sequence: PulseSequence,
+    entries: Mapping[str, tuple[int | float, str]],
+) -> tuple[PulseSequence, tuple[str, ...], tuple[str, ...]]:
+    """Overwrite the authored value of every config parameter the set names.
+
+    THE OVERWRITE IS THE STORAGE.  A config parameter keeps no value of its
+    own beside the field: filling one writes the number into the period's
+    duration, the DAC step or the delay it names, so the sequence that comes
+    back and the program compiled from it describe the same pulse -- which is
+    why the filled one, not the authored one, is what a load must carry.
+
+    Returns the sequence, the ids applied, and the ids the set named that this
+    pulse does not declare -- one calibrated set serves every pulse a board
+    plays, most of which declare only part of it.
+    """
+
+    return _apply_named_values(
+        sequence,
+        entries,
+        {
+            parameter.parameter_id: parameter
+            for parameter in _sequence_of(sequence).config_parameters
+        },
+        "config value",
+    )
+
+
+def _sequence_of(sequence: PulseSequence) -> PulseSequence:
+    if not isinstance(sequence, PulseSequence):
+        raise TypeError("sequence must be PulseSequence")
+    return sequence
+
+
+def _apply_named_values(
+    sequence: PulseSequence,
+    entries: Mapping[str, tuple[int | float, str]],
+    declared: Mapping[str, object],
+    label: str,
+) -> tuple[PulseSequence, tuple[str, ...], tuple[str, ...]]:
+    """Write one set of named numbers into the fields their names point at."""
+
+    if not isinstance(entries, Mapping):
+        raise TypeError(f"{label}s must be a mapping")
+    result = sequence
+    applied: list[str] = []
+    unknown: list[str] = []
+    for parameter_id, entry in entries.items():
+        parameter = declared.get(str(parameter_id))
+        if parameter is None:
+            unknown.append(str(parameter_id))
+            continue
+        number, unit = entry
+        if parameter.unit == "value" or unit == "value":
+            if parameter.unit != unit:
+                raise ValueError(
+                    f"{label} {parameter_id!r} is in {unit!r} where the pulse "
+                    f"declares {parameter.unit!r}"
+                )
+            authored = float(number)
+        else:
+            authored = convert_time(number, unit, parameter.unit)
+        result = replace_pulse_field(
+            result,
+            parameter.field_ref,
+            authored,
+            parameter.unit,
+            field_name=parameter.parameter_id,
+        )
+        applied.append(parameter.parameter_id)
+    return result, tuple(applied), tuple(unknown)
+
+
 def apply_api_values(
     sequence: PulseSequence,
     entries: Mapping[str, tuple[int | float, str]],
@@ -265,40 +356,15 @@ def apply_api_values(
     not whether they exist.  Baking them away is :func:`resolve_api_parameters`.
     """
 
-    if not isinstance(sequence, PulseSequence):
-        raise TypeError("sequence must be PulseSequence")
-    if not isinstance(entries, Mapping):
-        raise TypeError("API values must be a mapping")
-    declared = {
-        parameter.parameter_id: parameter for parameter in sequence.api_parameters
-    }
-    result = sequence
-    applied: list[str] = []
-    unknown: list[str] = []
-    for parameter_id, entry in entries.items():
-        parameter = declared.get(str(parameter_id))
-        if parameter is None:
-            unknown.append(str(parameter_id))
-            continue
-        number, unit = entry
-        if parameter.unit == "value" or unit == "value":
-            if parameter.unit != unit:
-                raise ValueError(
-                    f"API value {parameter_id!r} is in {unit!r} where the pulse "
-                    f"declares {parameter.unit!r}"
-                )
-            authored = float(number)
-        else:
-            authored = convert_time(number, unit, parameter.unit)
-        result = replace_pulse_field(
-            result,
-            parameter.field_ref,
-            authored,
-            parameter.unit,
-            field_name=parameter.parameter_id,
-        )
-        applied.append(parameter.parameter_id)
-    return result, tuple(applied), tuple(unknown)
+    return _apply_named_values(
+        sequence,
+        entries,
+        {
+            parameter.parameter_id: parameter
+            for parameter in _sequence_of(sequence).api_parameters
+        },
+        "API value",
+    )
 
 
 def resolve_api_parameters(
@@ -381,6 +447,7 @@ def _number_for(value: float) -> int | float:
 
 __all__ = [
     "apply_api_values",
+    "apply_config_values",
     "authored_api_entries",
     "authored_api_values",
     "convert_time",

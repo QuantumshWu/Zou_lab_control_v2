@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import replace
+from pathlib import Path
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
@@ -105,7 +106,7 @@ class PeriodCard(FluentGroupBox):
         top_layout.addWidget(self._center_label("Duration"))
         self.duration_edit = FluentScanLineEdit(
             "",
-            tooltip="Click the dot to cycle off → Scan → API → off",
+            tooltip="Click the dot to cycle off → Scan → API → Config → off",
         )
         control_width = period_control_width(width)
         self.duration_edit.setFixedWidth(control_width)
@@ -243,7 +244,7 @@ class PeriodCard(FluentGroupBox):
                     tooltip=(
                         f"{port.label}: signed integer {port.lo}..{port.hi} "
                         "(0 = 0 V)\n"
-                        "Click the dot to cycle off → Scan → API → off"
+                        "Click the dot to cycle off → Scan → API → Config → off"
                     ),
                 )
                 edit.set_numeric_validator("int", bottom=port.lo, top=port.hi)
@@ -400,6 +401,7 @@ class ChannelPanel(FluentGroupBox):
     binding_cycle_requested = QtCore.pyqtSignal(str, object, object)
     clear_port_requested = QtCore.pyqtSignal(str)
     scan_array_load_requested = QtCore.pyqtSignal()
+    run_repeats_committed = QtCore.pyqtSignal(int)
 
     def __init__(self, parent=None) -> None:
         super().__init__("Delay / Scan", parent)
@@ -430,8 +432,28 @@ class ChannelPanel(FluentGroupBox):
         self.clock_label.setEnabled(False)
         self.scan_summary_label = FluentLineEdit("")
         self.scan_summary_label.setEnabled(False)
+        # How many times the whole thing plays is a number the PULSE carries,
+        # like its clock and its scan table -- not an action, which is all the
+        # Control group beside it holds.  Reading it directly under the scan
+        # summary says the one sentence they make together: what will be
+        # played, and how many times.
+        self.run_repeats_spin = FluentDoubleSpinBox()
+        self.run_repeats_spin._step_btn.hide()
+        self.run_repeats_spin.setDecimals(0)
+        self.run_repeats_spin.setSingleStep(1.0)
+        self.run_repeats_spin.setRange(0.0, float((1 << 32) - 1))
+        self.run_repeats_spin.setToolTip(
+            "Complete Pulse runs per scan point (or per On Pulse without a "
+            "scan); 0 runs indefinitely"
+        )
+        self.run_repeats_spin.editingFinished.connect(
+            lambda: self.run_repeats_committed.emit(
+                int(self.run_repeats_spin.value())
+            )
+        )
         add_labeled_widget(top_layout, "Clock:", self.clock_label)
         add_labeled_widget(top_layout, "Scan:", self.scan_summary_label)
+        add_labeled_widget(top_layout, "Repeat:", self.run_repeats_spin)
         self.load_array_button = FluentButton("Load Array", color=ACCENT)
         self.load_array_button.clicked.connect(self.scan_array_load_requested)
         top_layout.addWidget(self.load_array_button)
@@ -456,7 +478,7 @@ class ChannelPanel(FluentGroupBox):
             if current is None:
                 edit = FluentScanLineEdit(
                     row.value.text,
-                    tooltip="Click the dot to cycle off → API → off",
+                    tooltip="Click the dot to cycle off → API → Config → off",
                 )
                 edit.setFixedWidth(px(70, minimum=60))
                 combo = FluentComboBox()
@@ -1159,11 +1181,21 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.save_button = FluentButton("Save*", color=YELLOW)
         self.load_button = FluentButton("Load", color=ORANGE)
         self.collapse_button = FluentButton("Collapse", color=GREY)
-        # The API slots hold numbers measured elsewhere -- a bias code, a
-        # MOT duration.  These carry a whole set of them in and out, so a
-        # recalibration is loaded once instead of retyped per pulse.
-        self.load_values_button = FluentButton("Load values", color=ORANGE)
-        self.save_values_button = FluentButton("Save values", color=YELLOW)
+        # The board's calibrated numbers -- a channel delay, a DAC bias --
+        # which it then fills into every pulse it plays.  They belong to the
+        # apparatus, so these carry the whole set on and off the BOARD rather
+        # than editing the document that is open.
+        self.load_values_button = FluentButton("Load config", color=ORANGE)
+        self.save_values_button = FluentButton("Save config", color=YELLOW)
+        self.load_values_button.setToolTip(
+            "Give the connected board a set of calibrated values.  It holds "
+            "them until the next load and fills them into every pulse it "
+            "compiles, including ones fired from outside this window."
+        )
+        self.save_values_button.setToolTip(
+            "Write what the connected board is holding now as a set it can be "
+            "given again."
+        )
         control_buttons = (
             self.run_button, self.stop_button, self.sync_button,
             self.add_button, self.remove_button, self.bracket_button,
@@ -1179,27 +1211,6 @@ class PulseScheduleView(QtWidgets.QWidget):
             controls.setColumnStretch(column, 1)
         control_layout.addStretch(1)
         control_layout.addLayout(controls)
-        run_repeats_row = QtWidgets.QHBoxLayout()
-        run_repeats_row.setContentsMargins(0, 0, 0, 0)
-        run_repeats_row.setSpacing(px(6, minimum=4))
-        run_repeats_row.addWidget(FluentLabel("Run repeats (0 = ∞)"))
-        self.run_repeats_spin = FluentDoubleSpinBox()
-        self.run_repeats_spin._step_btn.hide()
-        self.run_repeats_spin.setDecimals(0)
-        self.run_repeats_spin.setSingleStep(1.0)
-        self.run_repeats_spin.setRange(0.0, float((1 << 32) - 1))
-        self.run_repeats_spin.setFixedHeight(control_height)
-        self.run_repeats_spin.setToolTip(
-            "Complete Pulse runs per scan point (or per On Pulse without a scan); "
-            "0 runs indefinitely"
-        )
-        self.run_repeats_spin.editingFinished.connect(
-            lambda: self.run_repeats_committed.emit(
-                int(self.run_repeats_spin.value())
-            )
-        )
-        run_repeats_row.addWidget(self.run_repeats_spin, 1)
-        control_layout.addLayout(run_repeats_row)
         control_layout.addStretch(1)
         bar.addWidget(control_area, 1)
 
@@ -1225,6 +1236,12 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.connection_status = FluentLineEdit("")
         self.connection_status.setEnabled(False)
         self.connection_status.setFixedHeight(row_height())
+        # Which calibrated set the board is filling config parameters from.
+        # It belongs here rather than beside the pulse's own fields: it is a
+        # fact about the board, and it outlives whatever pulse is open.
+        self.config_source_line = FluentLineEdit("")
+        self.config_source_line.setEnabled(False)
+        self.config_source_line.setFixedHeight(row_height())
         connection_layout.addWidget(self.connection_combo)
         connection_row = QtWidgets.QHBoxLayout()
         connection_row.setContentsMargins(0, 0, 0, 0)
@@ -1233,6 +1250,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         connection_row.addWidget(self.connection_button)
         connection_layout.addLayout(connection_row)
         connection_layout.addWidget(self.connection_status)
+        connection_layout.addWidget(self.config_source_line)
         connection_layout.addStretch(1)
         bar.addWidget(connection_area)
 
@@ -1274,6 +1292,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.channel_panel.binding_cycle_requested.connect(self.binding_cycle_requested)
         self.channel_panel.clear_port_requested.connect(self.clear_port_requested)
         self.channel_panel.scan_array_load_requested.connect(self.scan_array_load_requested)
+        self.channel_panel.run_repeats_committed.connect(self.run_repeats_committed)
         self.drag_container.move_period_requested.connect(self.move_period_requested)
         self.drag_container.bracket_committed.connect(self.bracket_committed)
         self.run_button.clicked.connect(self.run_requested)
@@ -1426,9 +1445,9 @@ class PulseScheduleView(QtWidgets.QWidget):
             vm.bracket,
             minimum_bracket=vm.min_bracket_count,
         )
-        with signals_blocked(self.run_repeats_spin):
-            self.run_repeats_spin.setValue(float(vm.run_repeats))
-        self.run_repeats_spin.setEnabled(bool(vm.periods))
+        with signals_blocked(self.channel_panel.run_repeats_spin):
+            self.channel_panel.run_repeats_spin.setValue(float(vm.run_repeats))
+        self.channel_panel.run_repeats_spin.setEnabled(bool(vm.periods))
         self._rebuild_hidden_ports(vm)
         self.bracket_button.setText(
             "Del Bracket" if vm.bracket is not None else "Add Bracket"
@@ -1535,6 +1554,13 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.connection_button.setEnabled(not vm.locked)
         self._sync_endpoint_enabled()
         self.connection_status.setText(vm.status)
+        held = vm.config_source
+        self.config_source_line.setText(
+            f"Config: {Path(held).name}" if held else "Config: none loaded"
+        )
+        # The whole path, because the box is 252px and a calibration set is
+        # identified by which folder it came from as much as by its name.
+        self.config_source_line.setToolTip(held or "no config values loaded")
         self.connection_status.setToolTip(vm.status)
 
     def _request_connection(self) -> None:

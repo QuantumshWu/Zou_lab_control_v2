@@ -431,7 +431,13 @@ class DeviceManagerPresenter:
         return role
 
     def discover(self) -> bool:
-        """Scan each hardware family without connecting or configuring it."""
+        """Scan each hardware family without installing or configuring it.
+
+        Nothing found here is opened as a device or joins the apparatus.  A
+        family may still have to speak to the bus to answer at all -- a SCPI
+        instrument is only identifiable by being asked -- so "scan" is not
+        free of contact, only free of consequence.
+        """
 
         if self._closed:
             self._report("device manager is closed", severity="error")

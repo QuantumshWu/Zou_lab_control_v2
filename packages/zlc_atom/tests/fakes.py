@@ -209,6 +209,24 @@ class ScriptedScanBench:
     def describe(self) -> object:
         return self._sequencer.describe()
 
+    # The config surface, forwarded like everything else: the sequence a
+    # caller loads must be the one the board filled, or the double proves a
+    # behaviour the product does not have.
+    def load_config_values(self, entries, *, source: str = "") -> None:
+        self._sequencer.load_config_values(entries, source=source)
+
+    def config_values(self) -> dict:
+        return self._sequencer.config_values()
+
+    def compile_pulse(self, sequence, geom, clock_hz, *, slot_tick_scales=None):
+        return self._sequencer.compile_pulse(
+            sequence, geom, clock_hz, slot_tick_scales=slot_tick_scales
+        )
+
+    @property
+    def config_source(self) -> str:
+        return self._sequencer.config_source
+
     def load(
         self,
         prog: object,

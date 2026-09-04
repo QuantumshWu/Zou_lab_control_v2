@@ -1,8 +1,10 @@
 # One resolved dependency surface for Python 3.13 / Windows release evidence.
 # The root wheel supplies product requirements; this file constrains their
 # complete software/virtual runtime, test, and notebook closure without naming
-# the product wheel. Vendor camera/SLM SDK runtimes remain experiment-machine
-# prerequisites in the hardware runbooks.
+# the product wheel. Vendor camera/SLM/RF runtimes remain experiment-machine
+# prerequisites in the hardware runbooks: pip carries PyVISA and its fallback
+# backend, but a USB-TMC instrument still needs its driver bound by NI-VISA
+# or the vendor's own installer, and no PyPI package supplies that.
 anyio==4.14.2
 anywidget==0.11.0
 argon2-cffi==25.1.0
@@ -58,6 +60,7 @@ jupyterlab-widgets==3.0.17
 kiwisolver==1.5.0
 lark==1.3.1
 MarkupSafe==3.0.3
+libusb-package==1.0.30.0
 llvmlite==0.49.0
 matplotlib==3.10.8
 matplotlib-inline==0.2.2
@@ -91,6 +94,9 @@ pyserial==3.5
 pytest==9.0.3
 python-dateutil==2.9.0.post0
 python-json-logger==4.2.0
+PyVISA==1.16.1
+PyVISA-py==0.8.1
+pyusb==1.3.1
 pywin32==312
 pywinpty==3.0.5
 PyYAML==6.0.3

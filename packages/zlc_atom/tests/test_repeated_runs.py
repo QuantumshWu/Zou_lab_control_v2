@@ -52,7 +52,7 @@ def test_the_same_measurement_node_takes_three_shots_in_a_row() -> None:
         assert installation.failures == {}
         camera = installation.capability("camera.adapter")
         sequencer = installation.device("sequencer")
-        program = build_calibration_pulse(sequencer.describe())
+        program = build_calibration_pulse(sequencer)
         sequencer.load(program)
 
         windows = CALIBRATION_FRAMES_PER_CYCLE
@@ -86,7 +86,7 @@ def test_a_measurement_node_publishes_a_new_generation_each_run() -> None:
     try:
         camera = installation.capability("camera.adapter")
         sequencer = installation.device("sequencer")
-        program = build_calibration_pulse(sequencer.describe())
+        program = build_calibration_pulse(sequencer)
         sequencer.load(program)
         windows = CALIBRATION_FRAMES_PER_CYCLE
         node = CameraMeasurementNode(

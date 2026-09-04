@@ -130,6 +130,9 @@ class ConnectionVM:
     endpoint: str
     status: str
     locked: bool = False
+    #: Which calibrated set the connected board is filling config parameters
+    #: from; empty when there is no board or it holds none.
+    config_source: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.choices, tuple):
@@ -147,6 +150,8 @@ class ConnectionVM:
             )
         if not isinstance(self.endpoint, str) or not isinstance(self.status, str):
             raise TypeError("connection endpoint and status must be strings")
+        if not isinstance(self.config_source, str):
+            raise TypeError("connection config_source must be text")
         if not isinstance(self.locked, bool):
             raise TypeError("connection locked must be bool")
 

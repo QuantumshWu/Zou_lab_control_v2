@@ -195,7 +195,7 @@ def test_an_external_gate_shortens_the_light_not_the_integration() -> None:
     pulse = resolve_pulse(
         IMAGING_PULSE_RESOURCE.value,
         path=IMAGING_PULSE_RESOURCE.path,
-        board=sequencer.describe(),
+        sequencer=sequencer,
         api_values={
             "reference_probe_duration_before": 0.1,
             "readout_probe_duration": 0.002,

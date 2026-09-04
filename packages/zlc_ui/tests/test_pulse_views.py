@@ -168,8 +168,8 @@ scan_edit = view._cards["p1"].duration_edit
 api_edit = view._cards["p2"].duration_edit
 delay_edit = view.channel_panel._rows["d0"][0]
 assert scan_edit.dot.isChecked() and scan_edit.dot._number == 1
-assert not api_edit.dot.isChecked() and api_edit.dot._api and api_edit.dot._number == 2
-assert not delay_edit.dot.isChecked() and delay_edit.dot._api and delay_edit.dot._number == 2
+assert not api_edit.dot.isChecked() and api_edit.dot._kind == "api" and api_edit.dot._number == 2
+assert not delay_edit.dot.isChecked() and delay_edit.dot._kind == "api" and delay_edit.dot._number == 2
 assert view.channel_panel.scan_summary_label.text() == "1 slot · 4 pts"
 """
     )
@@ -660,13 +660,13 @@ assert view.set_schedule(bracketed)
 view.show(); app.processEvents()
 
 # The persisted outer count is its own full-range control, including 0=∞.
-assert int(view.run_repeats_spin.maximum()) == (1 << 32) - 1
-assert int(view.run_repeats_spin.value()) == (1 << 32) - 1
-assert view.run_repeats_spin.text() == str((1 << 32) - 1)
+assert int(view.channel_panel.run_repeats_spin.maximum()) == (1 << 32) - 1
+assert int(view.channel_panel.run_repeats_spin.value()) == (1 << 32) - 1
+assert view.channel_panel.run_repeats_spin.text() == str((1 << 32) - 1)
 run_requests = []
 view.run_repeats_committed.connect(run_requests.append)
-view.run_repeats_spin.setValue(0)
-view.run_repeats_spin.editingFinished.emit()
+view.channel_panel.run_repeats_spin.setValue(0)
+view.channel_panel.run_repeats_spin.editingFinished.emit()
 assert run_requests == [0]
 assert view._schedule.run_repeats == (1 << 32) - 1, "the view only proposes"
 
@@ -742,4 +742,116 @@ view.close(); view.deleteLater()
 app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete); app.processEvents()
 app.quit()
 '''
+    )
+
+
+def test_a_config_binding_wears_its_own_colour_and_stays_editable() -> None:
+    """Three owners, three marks, and only the board's one takes the box away.
+
+    A scan column is written per point by the board, so its field is read
+    only.  An API parameter and a config parameter both hold a number the
+    operator can see and type, so theirs are not -- and the config one is
+    slate rather than violet, because nobody supplies it for a run: it is
+    already the pulse's own.
+    """
+
+    _run_qt(
+        """
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import API_VIOLET, CONFIG_SLATE, ORANGE
+from zlc_ui.pulse.scan_line_edit import FluentScanLineEdit
+from zlc_ui.pulse.scan_line_edit import _BINDING_FILL
+
+app = ensure_qt_app(["binding-colours"])
+assert _BINDING_FILL == {"scan": ORANGE, "api": API_VIOLET, "config": CONFIG_SLATE}
+
+edit = FluentScanLineEdit("12")
+edit.set_field_state(editable=True, binding="config", number=3)
+assert edit.dot._kind == "config"
+assert edit.dot._number == 3
+assert not edit.dot.isChecked(), "only a scan column marks the box as the board's"
+assert not edit.isReadOnly(), "a config number is the operator's to read and type"
+assert CONFIG_SLATE in edit.styleSheet()
+
+edit.set_field_state(editable=True, binding="scan", number=1)
+assert edit.isReadOnly() and edit.dot.isChecked()
+
+edit.set_field_state(editable=True, binding=None)
+assert edit.dot._kind is None and not edit.isReadOnly()
+
+try:
+    edit.set_field_state(editable=True, binding="whatever")
+except ValueError as error:
+    assert "scan" in str(error) and "config" in str(error)
+else:
+    raise AssertionError("an unknown binding must be refused")
+
+edit.deleteLater()
+app.processEvents()
+"""
+    )
+
+
+
+def test_linked_panes_never_starve_a_pane_to_line_the_group_up() -> None:
+    """Levelling the columns may not cost a column its rows.
+
+    A pane's ``maximum`` is CLAMPED AT ZERO, so a pane that already fits
+    cannot report how much it fits by.  Recovering its natural reach by
+    subtracting back the padding it was given is therefore only true of a pane
+    that overflows -- for one that does not, the clamp hides the padding and
+    the next round adds it again.  That compounded (8, 45, 111, 206, ...) until
+    the viewport was gone, and the Pulse Editor opened with its period columns
+    blank while the file said six periods.
+
+    So the group levels the one quantity every pane can actually give: the
+    VIEWPORT, down to the shallowest.  The padding is then bounded by the
+    difference it was measured from, and no pane can be shortened past what it
+    had.
+    """
+
+    _run_qt(
+        """
+from PyQt5 import QtCore, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import FluentScrollArea, LinkedScrollPanes
+app = ensure_qt_app(["linked-panes-starve"])
+
+panes = LinkedScrollPanes()
+# The shape that made it diverge: one pane whose content is far SHORTER than
+# its viewport beside one that overflows.  The short pane reports maximum 0
+# however much room it has to spare.
+short, tall = FluentScrollArea(), FluentScrollArea()
+for area, height in ((short, 8), (tall, 900)):
+    body = QtWidgets.QWidget(); body.setFixedHeight(height); body.setFixedWidth(120)
+    area.setWidgetResizable(False); area.setWidget(body)
+    panes.add_pane(area)
+panes.resize(400, 300); panes.show()
+for _ in range(40):
+    app.processEvents()
+
+for name, area in (("short", short), ("tall", tall)):
+    assert area.viewport().height() > 0, (
+        f"the {name} pane was left with no viewport, so it shows nothing"
+    )
+settled = [area.viewportMargins().bottom() for area in (short, tall)]
+for _ in range(20):
+    app.processEvents()
+assert [area.viewportMargins().bottom() for area in (short, tall)] == settled, (
+    "the padding is still moving, so it is feeding itself"
+)
+assert max(settled) <= 300, "no pane may be padded past the group's own height"
+
+# What the levelling is FOR: one value means one row, all the way down.
+heights = {area.viewport().height() for area in (short, tall)}
+assert len(heights) == 1, f"the viewports were not levelled: {heights}"
+
+# And a pane that stops sooner still stops sooner -- that is its content
+# saying so, not something a margin should hide.
+assert short.verticalScrollBar().maximum() == 0
+assert tall.verticalScrollBar().maximum() > 0
+
+panes.close()
+app.processEvents()
+"""
     )

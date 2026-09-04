@@ -137,6 +137,24 @@ class _RecordingSequencer:
         self.events.append(("describe", None))
         return self.sequencer.describe()  # type: ignore[attr-defined]
 
+    # The config surface, forwarded like everything else: the sequence a
+    # caller loads must be the one the board filled, or the double proves a
+    # behaviour the product does not have.
+    def load_config_values(self, entries, *, source: str = "") -> None:
+        self.sequencer.load_config_values(entries, source=source)
+
+    def config_values(self) -> dict:
+        return self.sequencer.config_values()
+
+    def compile_pulse(self, sequence, geom, clock_hz, *, slot_tick_scales=None):
+        return self.sequencer.compile_pulse(
+            sequence, geom, clock_hz, slot_tick_scales=slot_tick_scales
+        )
+
+    @property
+    def config_source(self) -> str:
+        return self.sequencer.config_source
+
     def fire(self, *, run_repeats: int, scan_repeats: int = 1) -> None:
         """Fire, and nothing else.
 
@@ -303,6 +321,7 @@ def test_pulse_resolver_uses_the_project_json_document(
         "periods",
         "slots",
         "api_parameters",
+        "config_parameters",
         "delays",
         "bracket",
         "run_repeats",
@@ -341,15 +360,15 @@ def test_pulse_resolver_uses_the_project_json_document(
         board = sequencer.describe()
         monkeypatch.setattr(
             calibration_pulse_module,
-            "sequence_from_document_tree",
-            lambda _tree: (_ for _ in ()).throw(
-                AssertionError("resolve_pulse decoded its resource a second time")
+            "read_pulse_document",
+            lambda _path: (_ for _ in ()).throw(
+                AssertionError("resolve_pulse read its resource a second time")
             ),
         )
         resolved = resolve_pulse(
             resource.value,
             path=resource.path,
-            board=board,
+            sequencer=sequencer,
             api_values=api_values,
         )
         assert resolved.path == asset.resolve()
@@ -357,7 +376,11 @@ def test_pulse_resolver_uses_the_project_json_document(
         assert resolved.program.clock_hz == board.clock_hz
         assert resolved.program.channels == board.target.raw_lanes
 
-        incompatible_board = BoardDescription(
+        # A board whose pin map is not this pulse's.  It is described by a
+        # SEQUENCER now, because that is what fills the pulse's config
+        # parameters -- so the wrong board has to be one, too.
+        incompatible = _RecordingSequencer(sequencer)
+        incompatible.describe = lambda: BoardDescription(
             target=PulseTarget(
                 raw_lanes=tuple(reversed(board.target.raw_lanes)),
                 ports=board.target.ports,
@@ -369,7 +392,7 @@ def test_pulse_resolver_uses_the_project_json_document(
             resolve_pulse(
                 resource.value,
                 path=resource.path,
-                board=incompatible_board,
+                sequencer=incompatible,
                 api_values=api_values,
             )
 
@@ -403,7 +426,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         pulse = resolve_pulse(
             IMAGING_PULSE_RESOURCE.value,
             path=IMAGING_PULSE_RESOURCE.path,
-            board=sequencer.describe(),
+            sequencer=sequencer,
             api_values={
                 "reference_probe_duration_before": 0.02,
                 "readout_probe_duration": 0.005,

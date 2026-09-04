@@ -7,14 +7,18 @@ file" -- was true and answered a different question.  A pulse is saved as JSON
 beside the module, with that fact owned by the package that owns the model
 rather than re-derived by whoever happens to be writing a file.
 
-Trees only.  Reading and writing files belongs to whoever knows where an
-experiment keeps things, which is not this package.
+Trees only, with one exception that earns itself: :func:`read_pulse_document`,
+which turns one path into the pulse it names.  A pulse is the one document
+this package owns end to end, so the three lines that open it belong here
+rather than copied into every consumer.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 import json
+import os
+from pathlib import Path
 from numbers import Real
 from typing import Any
 
@@ -23,6 +27,7 @@ from .model import (
     MAXIMUM_REPEAT_COUNT,
     OutputDelay,
     PulseApiParameter,
+    PulseConfigParameter,
     PulseBracket,
     PulseFieldRef,
     PulsePeriod,
@@ -37,6 +42,11 @@ from .model import (
 PULSE_TREE_FORMAT = "zlc.pulse"
 #: ...and the same for one saved set of API parameter values.
 API_VALUES_FORMAT = "zlc.pulse.api_values"
+#: ...and for a set of CONFIG parameter values, which is a different kind of
+#: file even though it holds the same shape of numbers: an API set is chosen
+#: for one run, a config set is what a pulse refreshes itself from.  Separate
+#: roots so neither can be handed to the other by mistake.
+CONFIG_VALUES_FORMAT = "zlc.pulse.config_values"
 PULSE_EDITOR_FIELDS = (
     "visible_ports",
     "scan_source",
@@ -124,11 +134,22 @@ def split_pulse_document_tree(
     return sequence_tree, editor
 
 
-def sequence_from_document_tree(tree: Mapping[str, Any]) -> PulseSequence:
-    """Decode the sequence from a complete Pulse Editor or bare pulse document."""
+def read_pulse_document(
+    path: "str | os.PathLike[str]",
+) -> tuple[PulseSequence, Mapping[str, Any]]:
+    """One pulse from disk, and its editor half.
 
-    sequence_tree, _editor = split_pulse_document_tree(tree)
-    return sequence_from_tree(sequence_tree)
+    THE ONE PLACE A PULSE ARRIVES FROM A FILE.  A config parameter's value is
+    the field's own number, so what comes back here is what the pulse was
+    saved holding; the sequencer that will play it fills the config
+    parameters from the value set it holds, at the moment it compiles.
+    """
+
+    source = Path(path).expanduser().resolve()
+    sequence_tree, editor = split_pulse_document_tree(
+        parse_pulse_tree_json(source.read_text(encoding="utf-8"))
+    )
+    return sequence_from_tree(sequence_tree), editor
 
 
 def _object(value: Any, expected: tuple[str, ...], name: str) -> Mapping[str, Any]:
@@ -207,16 +228,11 @@ def sequence_to_tree(sequence: PulseSequence) -> dict[str, Any]:
             for slot in sequence.slots
         ],
         "api_parameters": [
-            {
-                "parameter_id": parameter.parameter_id,
-                "unit": parameter.unit,
-                "field_ref": {
-                    "kind": parameter.field_ref.kind,
-                    "period_id": parameter.field_ref.period_id,
-                    "port": parameter.field_ref.port,
-                },
-            }
-            for parameter in sequence.api_parameters
+            _named_binding_tree(parameter) for parameter in sequence.api_parameters
+        ],
+        "config_parameters": [
+            _named_binding_tree(parameter)
+            for parameter in sequence.config_parameters
         ],
         "delays": [
             {"port": delay.port, "value": delay.value, "unit": delay.unit}
@@ -233,6 +249,45 @@ def sequence_to_tree(sequence: PulseSequence) -> dict[str, Any]:
         ),
         "run_repeats": sequence.run_repeats,
     }
+
+
+def _named_binding_tree(binding: Any) -> dict[str, Any]:
+    """One named field binding -- API or config -- as a tree."""
+
+    return {
+        "parameter_id": binding.parameter_id,
+        "unit": binding.unit,
+        "field_ref": {
+            "kind": binding.field_ref.kind,
+            "period_id": binding.field_ref.period_id,
+            "port": binding.field_ref.port,
+        },
+    }
+
+
+def _named_bindings(items: Any, factory: Any, label: str) -> tuple[Any, ...]:
+    """Rebuild one list of named field bindings through the model's own types."""
+
+    rebuilt = []
+    for item in _array(items, f"pulse {label}s"):
+        binding = _object(item, ("parameter_id", "unit", "field_ref"), f"pulse {label}")
+        field = _object(
+            binding["field_ref"],
+            ("kind", "period_id", "port"),
+            "pulse field reference",
+        )
+        rebuilt.append(
+            factory(
+                parameter_id=binding["parameter_id"],
+                field_ref=PulseFieldRef(
+                    kind=field["kind"],
+                    period_id=field["period_id"],
+                    port=field["port"],
+                ),
+                unit=binding["unit"],
+            )
+        )
+    return tuple(rebuilt)
 
 
 def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
@@ -252,6 +307,7 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
             "periods",
             "slots",
             "api_parameters",
+            "config_parameters",
             "delays",
             "bracket",
             "run_repeats",
@@ -372,36 +428,11 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
             )
         )
     )
-    api_parameters = tuple(
-        PulseApiParameter(
-            parameter_id=parameter["parameter_id"],
-            field_ref=PulseFieldRef(
-                kind=field["kind"],
-                period_id=field["period_id"],
-                port=field["port"],
-            ),
-            unit=parameter["unit"],
-        )
-        for parameter, field in (
-            (
-                parameter,
-                _object(
-                    parameter["field_ref"],
-                    ("kind", "period_id", "port"),
-                    "pulse field reference",
-                ),
-            )
-            for parameter in (
-                _object(
-                    item,
-                    ("parameter_id", "unit", "field_ref"),
-                    "pulse API parameter",
-                )
-                for item in _array(
-                    tree["api_parameters"], "pulse API parameters"
-                )
-            )
-        )
+    api_parameters = _named_bindings(
+        tree["api_parameters"], PulseApiParameter, "API parameter"
+    )
+    config_parameters = _named_bindings(
+        tree["config_parameters"], PulseConfigParameter, "config parameter"
     )
     delays = tuple(
         OutputDelay(delay["port"], delay["value"], delay["unit"])
@@ -429,6 +460,7 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
         periods=periods,
         slots=slots,
         api_parameters=api_parameters,
+        config_parameters=config_parameters,
         delays=delays,
         bracket=bracket,
         run_repeats=tree["run_repeats"],
@@ -449,24 +481,32 @@ def api_values_to_tree(
     itself there, and a reader does not care who that was.
     """
 
+    return {
+        **_named_values_tree(values, "API value"),
+        "format": API_VALUES_FORMAT,
+        "name": str(name),
+        "source": str(source),
+    }
+
+
+def _named_values_tree(
+    values: Mapping[str, tuple[int | float, str]], label: str
+) -> dict[str, Any]:
+    """The ``values`` body both value-set grammars carry."""
+
     if not isinstance(values, Mapping):
-        raise TypeError("API values must be a mapping")
+        raise TypeError(f"{label}s must be a mapping")
     entries: dict[str, Any] = {}
     for parameter_id, entry in values.items():
         number, unit = entry
         if not isinstance(parameter_id, str) or not parameter_id:
-            raise ValueError("API value ids must be non-empty text")
+            raise ValueError(f"{label} ids must be non-empty text")
         if not isinstance(number, Real) or isinstance(number, bool):
-            raise TypeError(f"API value {parameter_id!r} must be a number")
+            raise TypeError(f"{label} {parameter_id!r} must be a number")
         if not isinstance(unit, str) or not unit:
-            raise ValueError(f"API value {parameter_id!r} must carry a unit")
+            raise ValueError(f"{label} {parameter_id!r} must carry a unit")
         entries[parameter_id] = {"value": _plain_number(float(number)), "unit": unit}
-    return {
-        "format": API_VALUES_FORMAT,
-        "name": str(name),
-        "source": str(source),
-        "values": entries,
-    }
+    return {"values": entries}
 
 
 def api_values_from_tree(
@@ -479,30 +519,65 @@ def api_values_from_tree(
     half-applied set of values.
     """
 
-    tree = _object(tree, ("format", "name", "source", "values"), "API values")
-    if tree["format"] != API_VALUES_FORMAT:
-        raise ValueError(
-            f"API values must declare format {API_VALUES_FORMAT!r}"
-        )
+    return _named_values_from_tree(tree, API_VALUES_FORMAT, "API value")
+
+
+def _named_values_from_tree(
+    tree: Mapping[str, Any], declared_format: str, label: str
+) -> tuple[str, str, dict[str, tuple[float, str]]]:
+    """One saved value set, read under a closed grammar."""
+
+    tree = _object(tree, ("format", "name", "source", "values"), f"{label}s")
+    if tree["format"] != declared_format:
+        raise ValueError(f"{label}s must declare format {declared_format!r}")
     for field in ("name", "source"):
         if not isinstance(tree[field], str):
-            raise TypeError(f"API values {field} must be text")
+            raise TypeError(f"{label}s {field} must be text")
     body = tree["values"]
     if not isinstance(body, Mapping):
-        raise TypeError("API values body must be an object")
+        raise TypeError(f"{label}s body must be an object")
     entries: dict[str, tuple[float, str]] = {}
     for parameter_id, entry in body.items():
         if not isinstance(parameter_id, str) or not parameter_id:
-            raise ValueError("API value ids must be non-empty text")
-        entry = _object(entry, ("value", "unit"), f"API value {parameter_id!r}")
+            raise ValueError(f"{label} ids must be non-empty text")
+        entry = _object(entry, ("value", "unit"), f"{label} {parameter_id!r}")
         number = entry["value"]
         if not isinstance(number, Real) or isinstance(number, bool):
-            raise TypeError(f"API value {parameter_id!r} must be a number")
+            raise TypeError(f"{label} {parameter_id!r} must be a number")
         unit = entry["unit"]
         if not isinstance(unit, str) or not unit:
-            raise ValueError(f"API value {parameter_id!r} must carry a unit")
+            raise ValueError(f"{label} {parameter_id!r} must carry a unit")
         entries[parameter_id] = (float(number), unit)
     return tree["name"], tree["source"], entries
+
+
+def config_values_to_tree(
+    values: Mapping[str, tuple[int | float, str]],
+    *,
+    name: str = "",
+    source: str = "hand",
+) -> dict[str, Any]:
+    """One named set of CONFIG parameter values, as a tree a file can hold.
+
+    What a calibration writes and a pulse refreshes itself from.  Same shape
+    as an API set and deliberately not the same root: handing one to the other
+    is a mistake a reader should catch, not carry out.
+    """
+
+    return {
+        **_named_values_tree(values, "config value"),
+        "format": CONFIG_VALUES_FORMAT,
+        "name": str(name),
+        "source": str(source),
+    }
+
+
+def config_values_from_tree(
+    tree: Mapping[str, Any],
+) -> tuple[str, str, dict[str, tuple[float, str]]]:
+    """``(name, source, {parameter_id: (value, unit)})`` from a saved config set."""
+
+    return _named_values_from_tree(tree, CONFIG_VALUES_FORMAT, "config value")
 
 
 def _plain_number(value: float) -> int | float:
@@ -512,12 +587,15 @@ def _plain_number(value: float) -> int | float:
 
 __all__ = [
     "API_VALUES_FORMAT",
+    "CONFIG_VALUES_FORMAT",
     "PULSE_TREE_FORMAT",
     "PULSE_EDITOR_FIELDS",
     "api_values_from_tree",
     "api_values_to_tree",
+    "config_values_from_tree",
+    "config_values_to_tree",
     "parse_pulse_tree_json",
-    "sequence_from_document_tree",
+    "read_pulse_document",
     "sequence_from_tree",
     "sequence_to_tree",
     "split_pulse_document_tree",

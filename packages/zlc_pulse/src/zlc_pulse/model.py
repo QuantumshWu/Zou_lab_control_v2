@@ -30,14 +30,16 @@ FIELD_KINDS = frozenset((FIELD_DURATION, FIELD_DAC, FIELD_DELAY))
 SLOT_KINDS = frozenset((FIELD_DURATION, FIELD_DAC))
 BINDING_SCAN = "scan"
 BINDING_API = "api"
+BINDING_CONFIG = "config"
 #: The legal binding transition for each physical pulse field.  Binding
 #: availability is a pulse-model fact: a delay has no scan-table column, while
-#: durations and DAC values may be supplied by either a scan or the API.
+#: durations and DAC values may be supplied by a scan, by the API, or by the
+#: pulse's own configuration.
 FIELD_BINDING_CYCLES = MappingProxyType(
     {
-        FIELD_DURATION: (None, BINDING_SCAN, BINDING_API),
-        FIELD_DAC: (None, BINDING_SCAN, BINDING_API),
-        FIELD_DELAY: (None, BINDING_API),
+        FIELD_DURATION: (None, BINDING_SCAN, BINDING_API, BINDING_CONFIG),
+        FIELD_DAC: (None, BINDING_SCAN, BINDING_API, BINDING_CONFIG),
+        FIELD_DELAY: (None, BINDING_API, BINDING_CONFIG),
     }
 )
 #: How long one of each unit is, in nanoseconds.  A tick is NOT here: it is
@@ -386,6 +388,27 @@ class PulseSlot:
         return self.field_ref
 
 
+def _name_one_field(binding: object, label: str) -> None:
+    """Validate a named binding onto one physical field, in place.
+
+    Two categories name a field and carry a unit -- the API parameter a caller
+    fills, and the config parameter the pulse fills for itself -- and they are
+    the same declaration under different ownership.  Written once so the two
+    cannot drift on what a legal name or a legal unit is.
+    """
+
+    parameter_id = _identifier(binding.parameter_id, "parameter_id")
+    if not isinstance(binding.field_ref, PulseFieldRef):
+        raise TypeError(f"{label} field_ref must be PulseFieldRef")
+    unit = _unit(binding.unit, f"{label} unit")
+    if binding.field_ref.kind == FIELD_DAC and unit != "value":
+        raise ValueError(f"DAC {label}s use unit 'value'")
+    if binding.field_ref.kind != FIELD_DAC and unit == "value":
+        raise ValueError(f"time {label}s use a time unit")
+    object.__setattr__(binding, "parameter_id", parameter_id)
+    object.__setattr__(binding, "unit", unit)
+
+
 @dataclass(frozen=True)
 class PulseApiParameter:
     """One named run-time input owned by the pulse API, never by a scan table."""
@@ -395,16 +418,31 @@ class PulseApiParameter:
     unit: str
 
     def __post_init__(self) -> None:
-        parameter_id = _identifier(self.parameter_id, "parameter_id")
-        if not isinstance(self.field_ref, PulseFieldRef):
-            raise TypeError("API parameter field_ref must be PulseFieldRef")
-        unit = _unit(self.unit, "API parameter unit")
-        if self.field_ref.kind == FIELD_DAC and unit != "value":
-            raise ValueError("DAC API parameters use unit 'value'")
-        if self.field_ref.kind != FIELD_DAC and unit == "value":
-            raise ValueError("time API parameters use a time unit")
-        object.__setattr__(self, "parameter_id", parameter_id)
-        object.__setattr__(self, "unit", unit)
+        _name_one_field(self, "API parameter")
+
+    @property
+    def field(self) -> PulseFieldRef:
+        return self.field_ref
+
+
+@dataclass(frozen=True)
+class PulseConfigParameter:
+    """One named field the PULSE supplies, refreshed from its config file.
+
+    Not a hole: a config parameter always has a value, because the value is
+    the field's own authored number.  What the declaration adds is a name, so
+    a saved set of calibrated numbers can find the field again, and a reason
+    to refresh it before the pulse plays.  Nothing may override one for a
+    single run -- a field that a run needs to vary is an API parameter, and
+    that is the whole difference between the two.
+    """
+
+    parameter_id: str
+    field_ref: PulseFieldRef
+    unit: str
+
+    def __post_init__(self) -> None:
+        _name_one_field(self, "config parameter")
 
     @property
     def field(self) -> PulseFieldRef:
@@ -518,6 +556,7 @@ class PulseSequence:
     periods: tuple[PulsePeriod, ...]
     slots: tuple[PulseSlot, ...]
     api_parameters: tuple[PulseApiParameter, ...]
+    config_parameters: tuple[PulseConfigParameter, ...]
     delays: tuple[OutputDelay, ...]
     bracket: PulseBracket | None
     run_repeats: int
@@ -535,6 +574,7 @@ class PulseSequence:
         periods: tuple[PulsePeriod, ...] = (),
         slots: tuple[PulseSlot, ...] = (),
         api_parameters: tuple[PulseApiParameter, ...] = (),
+        config_parameters: tuple[PulseConfigParameter, ...] = (),
         delays: tuple[OutputDelay, ...] = (),
         bracket: PulseBracket | None = None,
         run_repeats: int = 0,
@@ -591,16 +631,34 @@ class PulseSequence:
             raise ValueError("API parameter ids must be unique")
         if len({parameter.field_ref for parameter in api_values}) != len(api_values):
             raise ValueError("each physical field can have only one API parameter")
-        all_binding_ids = tuple(slot.slot_id for slot in slot_values) + parameter_ids
+        config_values = tuple(config_parameters)
+        if any(
+            not isinstance(parameter, PulseConfigParameter)
+            for parameter in config_values
+        ):
+            raise TypeError("config_parameters must contain PulseConfigParameter values")
+        config_ids = tuple(parameter.parameter_id for parameter in config_values)
+        if len(config_ids) != len(set(config_ids)):
+            raise ValueError("config parameter ids must be unique")
+        all_binding_ids = (
+            tuple(slot.slot_id for slot in slot_values) + parameter_ids + config_ids
+        )
         if len(all_binding_ids) != len(set(all_binding_ids)):
-            raise ValueError("scan slots and API parameters share one unique id namespace")
-        all_fields = tuple(slot.field_ref for slot in slot_values) + tuple(
-            parameter.field_ref for parameter in api_values
+            raise ValueError(
+                "scan slots, API parameters and config parameters share one "
+                "unique id namespace"
+            )
+        all_fields = (
+            tuple(slot.field_ref for slot in slot_values)
+            + tuple(parameter.field_ref for parameter in api_values)
+            + tuple(parameter.field_ref for parameter in config_values)
         )
         if len(all_fields) != len(set(all_fields)):
-            raise ValueError("a physical field cannot be both scan-bound and API-bound")
+            raise ValueError(
+                "a physical field carries at most one binding: scan, API or config"
+            )
         by_period = {period.period_id: period for period in periods}
-        for binding in (*slot_values, *api_values):
+        for binding in (*slot_values, *api_values, *config_values):
             ref = binding.field_ref
             if ref.kind in (FIELD_DURATION, FIELD_DAC) and ref.period_id not in by_period:
                 raise ValueError(f"binding references missing period {ref.period_id!r}")
@@ -631,6 +689,7 @@ class PulseSequence:
         object.__setattr__(self, "periods", periods)
         object.__setattr__(self, "slots", slot_values)
         object.__setattr__(self, "api_parameters", api_values)
+        object.__setattr__(self, "config_parameters", config_values)
         object.__setattr__(self, "delays", delay_values)
         object.__setattr__(self, "bracket", bracket)
         object.__setattr__(self, "run_repeats", run_repeats)
@@ -682,6 +741,7 @@ class PulseSequence:
 __all__ = [
     "ANALOG_MODES",
     "DAC_OFFSET_BINARY",
+    "BINDING_CONFIG",
     "FIELD_DAC",
     "FIELD_DELAY",
     "FIELD_DURATION",
@@ -691,6 +751,7 @@ __all__ = [
     "OutputDelay",
     "PulseFieldRef",
     "PulseApiParameter",
+    "PulseConfigParameter",
     "PulsePeriod",
     "PulseBracket",
     "PulsePortSpec",

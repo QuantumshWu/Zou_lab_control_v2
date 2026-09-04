@@ -34,6 +34,44 @@ def test_virtual_sequencer_is_the_canonical_sequencer_device() -> None:
     assert isinstance(VirtualSequencer(world=SimulationWorld()), SequencerDevice)
 
 
+def test_the_installed_device_forwards_the_whole_streamer_surface() -> None:
+    """A hand-written forwarder is a list somebody has to remember to extend.
+
+    Every node and the Pulse Editor reach the board through this class, and
+    they are duck-typed: a method the streamer grew and the forwarder did not
+    raises AttributeError inside a Qt slot, which aborts the process with no
+    traceback at all.  So the forwarder is compared to what it forwards.
+    """
+
+    import inspect
+
+    from zlc_pulse import RemotePulseStreamer
+    from zlc_pulse.device import PulseStreamer
+
+    def surface(cls):
+        return {
+            name: member
+            for klass in reversed(cls.__mro__)
+            for name, member in vars(klass).items()
+            if not name.startswith("_")
+        }
+
+    local, remote = surface(PulseStreamer), surface(RemotePulseStreamer)
+    # What a SequencerDevice must forward is what it can be built from: the
+    # surface BOTH streamers offer.  Anything only one of them has (bring-up
+    # helpers on the local host) was never reachable through this class.
+    for name in sorted(set(local) & set(remote)):
+        member = local[name]
+        forwarded = getattr(SequencerDevice, name, None)
+        assert forwarded is not None, f"SequencerDevice does not forward {name!r}"
+        if isinstance(member, property):
+            assert isinstance(forwarded, property), f"{name!r} is not a property"
+            continue
+        assert tuple(inspect.signature(forwarded).parameters) == tuple(
+            inspect.signature(member).parameters
+        ), f"SequencerDevice.{name} does not take what PulseStreamer.{name} takes"
+
+
 def _real_streamer():
     """The real host, talking to a memory-backed register file."""
 
@@ -76,7 +114,7 @@ def _virtual_streamer():
         world=SimulationWorld(SimulationWorldConfig(seed=0))
     )
     streamer.open()
-    program = build_calibration_pulse(streamer.describe())
+    program = build_calibration_pulse(streamer)
     return streamer, program
 
 

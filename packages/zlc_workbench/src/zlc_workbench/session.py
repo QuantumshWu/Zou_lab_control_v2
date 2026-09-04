@@ -170,6 +170,23 @@ def seed_current_api_values(directory: Path) -> None:
         write_api_values(path, {}, name="current")
 
 
+def seed_current_config_values(directory: Path) -> None:
+    """The empty set of config values, present so it can be edited.
+
+    Empty for a harder reason than the API set: a seeded channel delay or DAC
+    bias is a WRONG hardware calibration, applied to every pulse on the bench
+    at once.  A board with no set loaded refuses any pulse that declares a
+    config parameter, which is the failure worth having.
+    """
+
+    from zlc_atom.pulse_values import CURRENT_CONFIG_VALUES, write_config_values
+
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / CURRENT_CONFIG_VALUES
+    if not path.exists():
+        write_config_values(path, {}, name="current")
+
+
 @dataclass(frozen=True)
 class Workspace:
     """Where an experiment's own files live: its pulses and its saved data.
@@ -231,6 +248,20 @@ class Workspace:
         return self.root / API_VALUES_DIRECTORY
 
     @property
+    def config_values(self) -> Path:
+        """Saved sets of the board's calibrated numbers.
+
+        The same idea as :attr:`api_values` one layer down: a channel delay or
+        a DAC bias belongs to the apparatus, so it is loaded onto the
+        SEQUENCER rather than into a pulse, and ``CURRENT_CONFIG_VALUES`` is
+        the one a session picks up by itself when it opens a board.
+        """
+
+        from zlc_atom.pulse_values import CONFIG_VALUES_DIRECTORY
+
+        return self.root / CONFIG_VALUES_DIRECTORY
+
+    @property
     def data(self) -> Path:
         return self.root / "data"
 
@@ -242,6 +273,7 @@ class Workspace:
 
         self.data.mkdir(parents=True, exist_ok=True)
         seed_current_api_values(self.api_values)
+        seed_current_config_values(self.config_values)
         return self
 
     #: Where an experiment lives when nobody has said otherwise.  Overridable,
@@ -411,6 +443,7 @@ class ExperimentSession:
         self._device_setting_records: dict[
             tuple[str, int], dict[str, object]
         ] = {}
+        self._load_current_config_values()
 
     # ---------------------------------------------------------------- devices
 
@@ -848,6 +881,40 @@ class ExperimentSession:
             self.installation = successor
             self._installation_config = target_config
             self._installation_revision += 1
+            # A successor holds NEW device objects, so the calibrated set the
+            # old sequencer was holding did not come with them.  Without this
+            # the bench keeps running after an apparatus edit and every pulse
+            # that declares a config parameter is refused.
+            self._load_current_config_values()
+
+    def _load_current_config_values(self) -> None:
+        """Hand the board the calibration this workspace is running today.
+
+        Loaded ONCE per sequencer, here, because everything that fires a pulse
+        goes through this session's devices: a scan, a calibration, the Pulse
+        Editor bound to this session.  Doing it at each of those instead would
+        be the same three lines in six places, and the one that forgot would
+        play last month's bias without saying so.
+
+        A workspace with no set is silent.  A pulse that needs one is then
+        refused when it compiles, by name, which is the honest failure -- and
+        a pulse that declares none never notices.
+        """
+
+        from zlc_atom.pulse_values import CURRENT_CONFIG_VALUES, read_config_values
+
+        path = self.workspace.config_values / CURRENT_CONFIG_VALUES
+        if not path.is_file():
+            return
+        sequencer = getattr(self.installation, "device", None)
+        if sequencer is None:
+            return
+        try:
+            device = self.installation.device("sequencer")
+        except Exception:
+            return
+        _name, _origin, entries = read_config_values(path)
+        device.load_config_values(entries, source=str(path))
 
     def acquire_device_command(
         self, owner: object, label: str, key: str, device: object,
@@ -866,7 +933,7 @@ class ExperimentSession:
         path = self.workspace.pulse(name)
         if not path.is_file():
             raise FileNotFoundError(f"no pulse named {name!r} in {self.workspace.pulses}")
-        from zlc_pulse import compile_sequence, resolve_api_parameters
+        from zlc_pulse import resolve_api_parameters
 
         state = read_pulse(path)
         # API parameters resolve at their AUTHORED values -- the same thing
@@ -880,7 +947,13 @@ class ExperimentSession:
                 f"pulse target {sequence.target!r} does not match the installed "
                 f"sequencer target {board.target!r}"
             )
-        program = compile_sequence(sequence, board.geometry, board.clock_hz)
+        # Compiled BY the sequencer: a config parameter's number is the
+        # board's, and it is baked into the program.  The filled sequence is
+        # what goes back as ``source=``, and what this session then reports
+        # as the pulse it holds.
+        sequence, program = self.sequencer.compile_pulse(
+            sequence, board.geometry, board.clock_hz
+        )
         lease = self._acquire_pulse_device()
         try:
             self.sequencer.load(program, source=sequence)
