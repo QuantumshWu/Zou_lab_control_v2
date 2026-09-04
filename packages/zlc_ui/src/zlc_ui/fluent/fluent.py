@@ -47,6 +47,8 @@ from .style import (
     RED,
     STEP_WIDTH,
     TEXT,
+    TITLE_ICON_GAP,
+    TITLE_ICON_RATIO,
     TITLE_LEFT_INSET,
     WINDOW_FALLBACK_MIN_PX,
     WINDOW_FALLBACK_PX,
@@ -4672,6 +4674,16 @@ class FluentWindow(FramelessWindow):
         self.setTitleBar(title_bar)
         self._zlc_title_bar = title_bar
         self.setWindowTitle(title)
+        # The product mark, left of the words: a window whose title bar wears a
+        # different face from its taskbar button reads as two programs.
+        self._zlc_icon = QtWidgets.QLabel(title_bar)
+        self._zlc_icon.setObjectName("zlcWindowIcon")
+        self._zlc_icon.setStyleSheet(
+            "QLabel#zlcWindowIcon { background: transparent; }"
+        )
+        self._zlc_icon.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+        self._zlc_icon.setAlignment(QtCore.Qt.AlignCenter)
+        self._zlc_icon.show()
         self._zlc_title = QtWidgets.QLabel(title, title_bar)
         self._zlc_title.setObjectName("zlcWindowTitle")
         self._zlc_title.setStyleSheet(
@@ -4726,7 +4738,29 @@ class FluentWindow(FramelessWindow):
         for child in tb.findChildren(QtWidgets.QAbstractButton):
             if child.isVisible() and child.width() > 0:
                 right = min(right, child.x())
-        lab.setGeometry(x, 0, max(0, right - x - scaled_px(8)), tb.height())
+
+        # The MARK takes the content column and the words follow it, so the
+        # title block still begins where the body below it does.
+        from ..qt import app_icon  # noqa: PLC0415 -- qt.py reads this module
+
+        side = max(1, int(round(tb.height() * TITLE_ICON_RATIO)))
+        # ASK IN LOGICAL PIXELS.  ensure_qt_app turns on AA_UseHighDpiPixmaps,
+        # so QIcon hands back a pixmap already scaled for the screen and
+        # already carrying its device ratio; scaling the request as well made
+        # it twice the label, and a QLabel does not shrink a pixmap -- it clips
+        # it, so the title bar showed the middle of the mark with its corners
+        # cropped away.
+        pixmap = app_icon().pixmap(side, side)
+        if not pixmap.isNull():
+            self._zlc_icon.setPixmap(pixmap)
+        self._zlc_icon.setGeometry(
+            x, max(0, (tb.height() - side) // 2), side, side
+        )
+        self._zlc_icon.setVisible(not pixmap.isNull())
+        self._zlc_icon.raise_()
+
+        words = x + (side + scaled_px(TITLE_ICON_GAP) if not pixmap.isNull() else 0)
+        lab.setGeometry(words, 0, max(0, right - words - scaled_px(8)), tb.height())
         lab.raise_()
 
     def showEvent(self, event):  # noqa: N802 - Qt naming

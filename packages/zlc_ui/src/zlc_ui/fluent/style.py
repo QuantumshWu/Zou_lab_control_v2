@@ -50,6 +50,14 @@ PADDING_H = 1
 EDIT_PADDING_H = 4
 WINDOW_PAD = 14
 TITLE_LEFT_INSET = WINDOW_PAD
+#: The product mark in a window's own title bar, and the air after it.  The
+#: MARK sits on the body's left column, so the title block still begins where
+#: the content below it does; the words follow the mark.  Its size is a
+#: FRACTION OF THE BAR rather than a scaled pixel count: the bar does not take
+#: the Fluent scale, so a scaled mark shrank inside a bar that had not, and a
+#: four-letter wordmark has nothing left to show at twelve pixels.
+TITLE_ICON_RATIO = 0.625
+TITLE_ICON_GAP = 8
 COMBO_WIDTH = 16
 COMBO_TRI_SIZE = 8
 STEP_WIDTH = 6

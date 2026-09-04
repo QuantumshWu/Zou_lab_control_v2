@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import threading
+from pathlib import Path
 from collections.abc import Sequence
 
 from PyQt5 import QtCore, QtGui, QtWidgets
@@ -14,6 +15,7 @@ from .fluent.style import FONT, FONT_SIZE
 
 _QT_ARGV: list[str] | None = None
 _QT_APP: QtWidgets.QApplication | None = None
+_QT_ICON: QtGui.QIcon | None = None
 _QT_LOOP_ENABLED = False
 _KERNEL_WAKE_TIMER: QtCore.QTimer | None = None
 _KERNEL_WAKE_INTERVAL_MS = 50
@@ -166,6 +168,9 @@ def ensure_qt_app(argv: Sequence[str] | None = None) -> QtWidgets.QApplication:
         app.setFont(QtGui.QFont(FONT, _fluent_font_size()))
         _ensure_fluent_scale()
         _QT_APP = app
+        if app.windowIcon().isNull():
+            _claim_taskbar_identity()
+            app.setWindowIcon(app_icon())
         _enable_ipython_qt_loop()
         return app
 
@@ -182,8 +187,55 @@ def ensure_qt_app(argv: Sequence[str] | None = None) -> QtWidgets.QApplication:
     _ensure_offscreen_fluent_fonts(_QT_APP)
     _QT_APP.setFont(QtGui.QFont(FONT, _fluent_font_size()))
     _ensure_fluent_scale()
+    _claim_taskbar_identity()
+    _QT_APP.setWindowIcon(app_icon())
     _enable_ipython_qt_loop()
     return _QT_APP
 
 
-__all__ = ["ensure_qt_app"]
+#: What Windows groups this program's taskbar button under.  Without an
+#: explicit one a python.exe process is grouped -- and iconified -- as Python
+#: itself, however many window icons it sets.
+APP_USER_MODEL_ID = "ZouLab.ZouLabControl.Console.1"
+
+
+def _claim_taskbar_identity() -> None:
+    """Tell the Windows shell this process is its own program.
+
+    setWindowIcon dresses the WINDOW.  The taskbar button is drawn for the
+    application the shell thinks the process is, and for an unmarked
+    interpreter that is Python -- which is why the launchers all sat under the
+    Python icon no matter what the windows wore.
+    """
+
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            APP_USER_MODEL_ID
+        )
+    except Exception:
+        # An older shell, or a sandbox without shell32: the windows still get
+        # their icon, only the grouping stays generic.
+        pass
+
+
+def app_icon() -> QtGui.QIcon:
+    """The product's icon, loaded once.
+
+    One accessor because it has two consumers that must not drift: the
+    QApplication, which is what a taskbar shows, and every FluentWindow's own
+    title bar.  A window wearing a different mark from its taskbar button reads
+    as two programs.
+    """
+
+    global _QT_ICON
+    if _QT_ICON is None:
+        path = Path(__file__).with_name("assets") / "zlc.ico"
+        _QT_ICON = QtGui.QIcon(str(path)) if path.is_file() else QtGui.QIcon()
+    return _QT_ICON
+
+
+__all__ = ["app_icon", "ensure_qt_app"]
