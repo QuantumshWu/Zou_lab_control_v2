@@ -18,6 +18,8 @@ from typing import Any
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+from zlc_data.units import UnitError, format_quantity, parse_quantity
+
 from .form import (
     FormChoice,
     FormFieldProps,
@@ -243,6 +245,7 @@ class _IntHandler(_StaticHandler):
         if spin_range is None:
             raise ValueError("field cannot be represented by FluentSpinBox")
         widget.setRange(*spin_range)
+        widget.setDisplayUnit(field.unit)
 
     def normalize(self, field: FormFieldProps, value: object) -> int | None:
         if value is None:
@@ -381,39 +384,6 @@ class _NumberHandler(_StaticHandler):
         return not widget.text().strip()
 
 
-class _LosslessFloatSpinBox(FluentDoubleSpinBox):
-    """A bounded Fluent spin whose display round-trips the stored IEEE float."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent=parent)
-        # QDoubleSpinBox otherwise rounds its stored value to its display decimals.
-        # The repr formatter below keeps the visible text compact despite this limit.
-        self.setDecimals(323)
-
-    def textFromValue(self, value: float) -> str:  # noqa: N802 - Qt API
-        return repr(float(value))
-
-    def valueFromText(self, text: str) -> float:  # noqa: N802 - Qt API
-        return float(text.strip())
-
-    def validate(self, text: str, position: int):
-        stripped = text.strip()
-        if stripped in {"", "+", "-", ".", "+.", "-.", "e", "E"} or re.fullmatch(
-            r"[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[eE][+-]?)?",
-            stripped,
-        ):
-            if _FLOAT_TEXT.fullmatch(stripped) is None:
-                return QtGui.QValidator.Intermediate, text, position
-        if _FLOAT_TEXT.fullmatch(stripped) is None:
-            return QtGui.QValidator.Invalid, text, position
-        value = float(stripped)
-        if not math.isfinite(value):
-            return QtGui.QValidator.Invalid, text, position
-        if not self.minimum() <= value <= self.maximum():
-            return QtGui.QValidator.Intermediate, text, position
-        return QtGui.QValidator.Acceptable, text, position
-
-
 class _FloatHandler(_StaticHandler):
     @staticmethod
     def _spin_range(field: FormFieldProps) -> tuple[float, float] | None:
@@ -444,6 +414,9 @@ class _FloatHandler(_StaticHandler):
         if spin_range is None:
             raise ValueError("field cannot be represented by FluentDoubleSpinBox")
         widget.setRange(*spin_range)
+        # The field said what its number is IN.  Nothing read it before, so
+        # every box in this project showed a bare repr and refused a prefix.
+        widget.setDisplayUnit(field.unit)
 
     def normalize(self, field: FormFieldProps, value: object) -> float | None:
         if value is None:
@@ -465,7 +438,7 @@ class _FloatHandler(_StaticHandler):
         del context
         spin_range = self._spin_range(field)
         if spin_range is not None:
-            widget = _LosslessFloatSpinBox()
+            widget = FluentDoubleSpinBox()
             self._configure_spin(field, widget)
             self.write(field, widget, value)
             _connect_change(widget.valueChanged, on_change)
@@ -477,11 +450,21 @@ class _FloatHandler(_StaticHandler):
                 if field.blank_allowed
                 else ""
             )
-            widget.set_numeric_validator(
-                "float",
-                bottom=field.minimum,
-                top=field.maximum,
-            )
+            if field.unit and field.unit != "1":
+                # A blank-or-number edit still holds a QUANTITY, and the RF
+                # bounds -- the fields that carry dBm -- are all of them: they
+                # default to None so the instrument's own limit stands.  The
+                # digit-only validator would have refused every unit it was
+                # meant to be written in.
+                widget.set_quantity_validator(
+                    field.unit, bottom=field.minimum, top=field.maximum
+                )
+            else:
+                widget.set_numeric_validator(
+                    "float",
+                    bottom=field.minimum,
+                    top=field.maximum,
+                )
             self.write(field, widget, value)
             _connect_change(widget.textChanged, on_change)
         widget.setToolTip(field.description)
@@ -495,9 +478,11 @@ class _FloatHandler(_StaticHandler):
         text = widget.text().strip()
         if not text:
             return self.normalize(field, None)
-        if _FLOAT_TEXT.fullmatch(text) is None:
-            raise _value_error(field, "value is not a finite decimal number")
-        return self.normalize(field, float(text))
+        try:
+            number = parse_quantity(text, field.unit or "1")
+        except UnitError as error:
+            raise _value_error(field, str(error)) from error
+        return self.normalize(field, number)
 
     def write(self, field, widget, value):
         prepared = self.normalize(field, value)
@@ -506,7 +491,9 @@ class _FloatHandler(_StaticHandler):
                 raise _value_error(field, "numeric spin cannot represent None")
             widget.setValue(prepared)
         else:
-            widget.setText("" if prepared is None else repr(prepared))
+            widget.setText(
+                "" if prepared is None else format_quantity(prepared, field.unit or "1")
+            )
 
     def is_empty(self, field, widget):
         if isinstance(widget, FluentDoubleSpinBox):
@@ -906,7 +893,7 @@ def _reconfigure_widget(
             )
     elif isinstance(widget, FluentSpinBox):
         _IntHandler._configure_spin(field, widget)
-    elif isinstance(widget, _LosslessFloatSpinBox):
+    elif isinstance(widget, FluentDoubleSpinBox):
         _FloatHandler._configure_spin(field, widget)
     elif isinstance(widget, FluentComboBox):
         if old_field.choices != field.choices:

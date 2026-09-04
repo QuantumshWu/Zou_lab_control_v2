@@ -24,6 +24,15 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 
 
+#: Every snippet starts here.  Without it the subprocess resolves the
+#: layers through whatever the editable install points at -- on this
+#: machine, sibling checkouts of the same package names -- so the suite
+#: silently tested a DIFFERENT zlc_plot than the one beside it.  The
+#: product bootstrap is what puts this checkout's layers on the path,
+#: and it is the same one every launcher uses.
+_BOOTSTRAP = "import zou_lab_control" + chr(10)
+
+
 def _run_qt(code: str) -> None:
     environment = dict(os.environ)
     environment["PYTHONPATH"] = (
@@ -32,7 +41,7 @@ def _run_qt(code: str) -> None:
     )
     environment["QT_QPA_PLATFORM"] = "offscreen"
     completed = subprocess.run(
-        [sys.executable, "-c", code],
+        [sys.executable, "-c", _BOOTSTRAP + code],
         cwd=ROOT,
         env=environment,
         capture_output=True,

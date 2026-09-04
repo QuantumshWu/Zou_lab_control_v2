@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+# The product bootstrap, first, exactly as every launcher does it: it is
+# what puts THIS checkout's layers on the path.  Without it a demo run
+# from a source tree imports whichever copy of each layer an editable
+# install happens to point at, and demonstrates that one instead.
+import zou_lab_control  # noqa: F401
+
 from PyQt5 import QtWidgets
 
 

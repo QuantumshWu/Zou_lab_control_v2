@@ -18,6 +18,8 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from qframelesswindow import FramelessWindow, StandardTitleBar
 
+from zlc_data.units import UnitError, format_quantity, parse_quantity
+
 from ..qt import ensure_qt_app
 
 from .style import (
@@ -1091,6 +1093,7 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         self._res_step: float | None = None
         self._allow_any = True
         self._numeric_bounds: tuple[float | None, float | None, str] = (None, None, "float")
+        self._quantity_unit = ""
         self.setMinimumHeight(scaled_px(30, minimum=22))
         self._apply_style()
         self.setText(str(text))
@@ -1175,6 +1178,27 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         validator.setLocale(QtCore.QLocale.c())
         self.setValidator(validator)
 
+    def set_quantity_validator(
+        self,
+        unit: str,
+        *,
+        bottom: float | None = None,
+        top: float | None = None,
+    ) -> None:
+        """Accept a NUMBER AND A UNIT, and show one back.
+
+        The numeric validator refuses every character that is not part of a
+        number, which is right for a bare count and wrong for a quantity: the
+        unit is half of what the value means, and a field declared in dBm was
+        a field into which dBm could not be typed.  Bounds still hold and
+        still clamp, in the field's own unit, because ``1.05M`` and
+        ``1050000`` are the same number and only one of them looks in range.
+        """
+
+        self._numeric_bounds = (bottom, top, "quantity")
+        self._quantity_unit = str(unit).strip() or "1"
+        self.setValidator(_QuantityValidator(self._quantity_unit, self))
+
     def focusOutEvent(self, event) -> None:  # noqa: N802
         # BEFORE super(), which is what decides whether editingFinished is
         # emitted: an out-of-range entry that is corrected first is acceptable
@@ -1198,8 +1222,12 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         if not text:
             return
         try:
-            value = float(text)
-        except ValueError:
+            value = (
+                parse_quantity(text, self._quantity_unit)
+                if kind == "quantity"
+                else float(text)
+            )
+        except (UnitError, ValueError):
             # Non-numeric text is the validator's business, not this one's, and
             # a field carrying a scan binding ("s2") is deliberately not a
             # number at all.
@@ -1211,6 +1239,9 @@ class FluentLineEdit(QtWidgets.QLineEdit):
             clamped = min(clamped, float(top))
         if clamped == value:
             return
+        if kind == "quantity":
+            self.setText(format_quantity(clamped, self._quantity_unit))
+            return
         self.setText(str(int(clamped)) if kind == "int" else str(clamped))
 
     def _snap_to_resolution(self) -> None:
@@ -1220,6 +1251,30 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         after = align_to_resolution(before, self._res_step, allow_any=self._allow_any)
         if after != before:
             self.setText(after)
+
+
+class _QuantityValidator(QtGui.QValidator):
+    """Anything on its way to a number with a unit is still acceptable.
+
+    Never Invalid: refusing a keystroke means the character never reaches the
+    box, and a person typing ``1.05 MHz`` is holding an unfinished quantity
+    for most of the word.  What cannot be read yet is Intermediate, which Qt
+    lets stand while the field has focus and refuses to commit.
+    """
+
+    def __init__(self, unit: str, parent=None) -> None:
+        super().__init__(parent)
+        self._unit = unit
+
+    def validate(self, text: str, position: int):
+        stripped = text.strip()
+        if not stripped or stripped in ("+", "-", ".", "+.", "-."):
+            return QtGui.QValidator.Intermediate, text, position
+        try:
+            parse_quantity(stripped, self._unit)
+        except (UnitError, ValueError):
+            return QtGui.QValidator.Intermediate, text, position
+        return QtGui.QValidator.Acceptable, text, position
 
 
 class FluentReadoutEdit(FluentLineEdit):
@@ -3841,6 +3896,18 @@ class FluentSpinBox(_WheelFocusGuardMixin, QtWidgets.QSpinBox):
         self.lineEdit().setTextMargins(0, 0, 0, 0)
         self.setStyleSheet(fluent_spinbox_stylesheet("QSpinBox"))
 
+    def setDisplayUnit(self, unit: str) -> None:  # noqa: N802 - Qt API name
+        """Name what this whole number counts, beside the number.
+
+        A prefix is not offered and not accepted: these are counts of things
+        -- pixels, shots, windows -- and 1.2 k of a thing that comes in ones
+        is a number nobody meant.  A quantity that does scale is a float
+        field, where the whole ladder is available.
+        """
+
+        symbol = str(unit).strip()
+        self.setSuffix(f" {symbol}" if symbol and symbol != "1" else "")
+
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
         _paint_fluent_spin_buttons(self)
@@ -3990,6 +4057,14 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
     Visual formatting must not become an authority-changing transform.
     """
 
+    #: CLASS attributes, not instance ones.  Qt asks this widget for its text
+    #: from inside setRange and setDecimals, which run in __init__ before any
+    #: assignment could have happened -- and a plain AttributeError raised
+    #: inside a Qt slot does not become a traceback, it ends the process.
+    #: Declared here, there is no instant in which they are missing.
+    _unit = "1"
+    _last_value = 0.0
+
     def __init__(
         self,
         length=5,
@@ -4032,13 +4107,63 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         self.setSingleStep(1)
         self.setDecimals(323)
 
-    def textFromValue(self, value: float) -> str:
-        if self.decimals() == 0:
-            return str(int(value))
-        return repr(float(value))
+    def setDisplayUnit(self, unit: str) -> None:  # noqa: N802 - Qt API name
+        """The unit this box's number is in, and is therefore shown in.
 
-    def valueFromText(self, text: str) -> float:
-        return float(text.strip())
+        Shown AND read: one table drives both, so a box that prints
+        ``120.0000000 MHz`` accepts ``1.05M`` back without anyone writing a
+        second parser that has to agree with the formatter.
+        """
+
+        self._unit = str(unit).strip() or "1"
+        self.lineEdit().setText(self.textFromValue(self.value()))
+
+    def displayUnit(self) -> str:  # noqa: N802 - Qt API name
+        return self._unit
+
+    def textFromValue(self, value: float) -> str:  # noqa: N802 - Qt API
+        # NEVER raises, for the same reason valueFromText does not: Qt calls
+        # this while painting, and an exception out of a Qt slot ends the
+        # process.  A unit this registry has never heard of is a defect to fix
+        # where it was declared, not a reason for the window to die drawing a
+        # number it could otherwise have shown.
+        number = int(value) if self.decimals() == 0 else float(value)
+        self._last_value = float(value)
+        try:
+            return format_quantity(number, self._unit)
+        except UnitError:
+            return f"{number} {self._unit}".strip()
+
+    def valueFromText(self, text: str) -> float:  # noqa: N802 - Qt API
+        # NEVER raises.  Qt calls this from inside its own event handling, and
+        # an exception leaving a Qt slot ends the process instead of the edit.
+        # The fallback may NOT ask the box for its value: value() interprets
+        # the text, which calls back into here, which would ask again -- one
+        # unreadable keystroke and the stack is gone.
+        try:
+            value = float(parse_quantity(text, self._unit))
+        except (UnitError, ValueError):
+            return self._last_value
+        self._last_value = value
+        return value
+
+    def validate(self, text: str, position: int):
+        """Accept while it is being typed; judge when it could be finished.
+
+        Qt's own numeric validator refuses every character that is not part of
+        a number, which is why ``1.05M`` could not be typed at all -- the M was
+        swallowed as the key went down, so the box that showed megahertz was
+        the one box megahertz could not be entered into.
+        """
+
+        stripped = text.strip()
+        if not stripped or stripped in ("+", "-", ".", "+.", "-."):
+            return QtGui.QValidator.Intermediate, text, position
+        try:
+            parse_quantity(stripped, self._unit)
+        except (UnitError, ValueError):
+            return QtGui.QValidator.Intermediate, text, position
+        return QtGui.QValidator.Acceptable, text, position
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)

@@ -9,16 +9,29 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 
+#: Every snippet starts here.  Without it the subprocess resolves the
+#: layers through whatever the editable install points at -- on this
+#: machine, sibling checkouts of the same package names -- so the suite
+#: silently tested a DIFFERENT zlc_plot than the one beside it.  The
+#: product bootstrap is what puts this checkout's layers on the path,
+#: and it is the same one every launcher uses.
+_BOOTSTRAP = "import zou_lab_control" + chr(10)
+
+
 def _run_qt(code: str) -> None:
     environment = dict(os.environ)
-    environment["PYTHONPATH"] = "" if environment.get("ZLC_TEST_INSTALLED") == "1" else str(SRC)
+    environment["PYTHONPATH"] = (
+        ""
+        if environment.get("ZLC_TEST_INSTALLED") == "1"
+        else os.pathsep.join((str(ROOT.parents[1]), str(SRC)))
+    )
     environment["QT_QPA_PLATFORM"] = "offscreen"
     # Fixed for the child, not inherited: a matplotlib backend chosen by
     # whatever imported it in the parent is how this harness produced access
     # violations at teardown that had nothing to do with the code under test.
     environment["MPLBACKEND"] = "Agg"
     completed = subprocess.run(
-        [sys.executable, "-c", code], cwd=ROOT, env=environment,
+        [sys.executable, "-c", _BOOTSTRAP + code], cwd=ROOT, env=environment,
         capture_output=True, text=True, timeout=30, check=False,
     )
     assert completed.returncode == 0, completed.stderr or completed.stdout
