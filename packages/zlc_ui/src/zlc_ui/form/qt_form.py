@@ -552,14 +552,28 @@ class _ChoiceHandler(FormWidgetHandler):
         raise _value_error(field, "value is not one of the typed choices")
 
     @staticmethod
+    def _fill_cycle(field: FormFieldProps, widget: FluentComboBox) -> None:
+        """Install the lazy sub-domain without touching the item list.
+
+        A cycle is a DOMAIN -- every coordinate an axis offers to a Scope
+        pin -- so it grows with the data: one more shot, one more entry.
+        Rebuilding the popup for that closed an open dropdown and ate the
+        click that was already on its way, once per shot, on every panel
+        whose axis was still filling.
+        """
+
+        if field.cycle_choices is None:
+            return
+        if not isinstance(widget, FluentCycleComboBox):
+            raise TypeError("cycle choices require FluentCycleComboBox")
+        widget.setCycleChoices(field.cycle_label, field.cycle_choices)
+
+    @staticmethod
     def _fill(field: FormFieldProps, widget: FluentComboBox) -> None:
         widget.clear()
         for choice in field.choices:
             widget.addItem(choice.label, choice.value)
-        if field.cycle_choices is not None:
-            if not isinstance(widget, FluentCycleComboBox):
-                raise TypeError("cycle choices require FluentCycleComboBox")
-            widget.setCycleChoices(field.cycle_label, field.cycle_choices)
+        _ChoiceHandler._fill_cycle(field, widget)
 
     def build(self, field, value, on_change, context=None):
         del context
@@ -894,13 +908,18 @@ def _reconfigure_widget(
         _IntHandler._configure_spin(field, widget)
     elif isinstance(widget, _LosslessFloatSpinBox):
         _FloatHandler._configure_spin(field, widget)
-    elif isinstance(widget, FluentComboBox) and (
-        old_field.choices != field.choices
-        or old_field.cycle_choices != field.cycle_choices
-        or old_field.cycle_label != field.cycle_label
-    ):
-        _ChoiceHandler._fill(field, widget)
-        widget.setEnabled(not field.unavailable)
+    elif isinstance(widget, FluentComboBox):
+        if old_field.choices != field.choices:
+            _ChoiceHandler._fill(field, widget)
+            widget.setEnabled(not field.unavailable)
+        elif (
+            old_field.cycle_choices != field.cycle_choices
+            or old_field.cycle_label != field.cycle_label
+        ):
+            # The choices the operator picks from are the same; only the
+            # coordinates behind the Scope action moved.
+            _ChoiceHandler._fill_cycle(field, widget)
+            widget.setEnabled(not field.unavailable)
 
 
 class FluentParameterForm(QtWidgets.QWidget):
@@ -1196,10 +1215,14 @@ class FluentParameterForm(QtWidgets.QWidget):
     ) -> bool:
         """Adopt metadata when widgets already show the exact projection."""
 
+        # A cycle's coordinates are DATA -- they lengthen as the axis
+        # fills -- so a form is not a different form for having more of
+        # them.  Compared as structure, every shot refused adoption and
+        # sent the whole form through reconcile.
         metadata = tuple(
             name
             for name in FormFieldProps.__dataclass_fields__
-            if name != "default"
+            if name not in ("default", "cycle_choices")
         )
         if len(spec.fields) != len(self._spec.fields) or any(
             any(
@@ -1226,6 +1249,9 @@ class FluentParameterForm(QtWidgets.QWidget):
                 prepared[field.key],
             ):
                 return False
+        for current, incoming in zip(self._spec.fields, spec.fields, strict=True):
+            if current.cycle_choices != incoming.cycle_choices:
+                _ChoiceHandler._fill_cycle(incoming, self._widgets[incoming.key])
         self._spec = spec
         self._fields = {field.key: field for field in spec.fields}
         self._dependents = self._dependency_map(spec)
