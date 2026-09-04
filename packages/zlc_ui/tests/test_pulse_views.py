@@ -868,3 +868,82 @@ panes.close()
 app.processEvents()
 """
     )
+
+
+def test_a_card_and_a_post_are_one_gesture_with_two_payloads() -> None:
+    """Dragging offers only the gaps that would do something -- for both.
+
+    The bracket post refused an impossible gap while the cursor was still
+    over it: no marker, no drop cursor.  The card accepted every gap, drew
+    the marker in all of them, and then threw away a drop onto the two that
+    mean "where it already is".  Same gesture, opposite answers to the same
+    question, and the half that says yes and does nothing is the worse half.
+    """
+
+    _run_qt(
+        """
+from dataclasses import replace
+from PyQt5 import QtCore, QtGui, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.pulse import BracketVM, PulseScheduleView
+""" + _schedule_source() + r'''
+app = ensure_qt_app(["drag-symmetry"])
+view = PulseScheduleView()
+assert view.set_schedule(replace(vm, revision=3, bracket=BracketVM("p1", "p1", 4)))
+view.show(); app.processEvents()
+strip = view.drag_container
+cards = strip.pulse_cards()
+
+def hover(mime, payload, x):
+    """One dragMoveEvent, and what the strip decided about it."""
+    data = QtCore.QMimeData()
+    data.setData(mime, QtCore.QByteArray(payload.encode("utf-8")))
+    event = QtGui.QDragMoveEvent(
+        QtCore.QPoint(x, 5), QtCore.Qt.MoveAction, data,
+        QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
+    )
+    strip.dragMoveEvent(event)
+    return event.isAccepted(), strip._indicator.isVisible()
+
+on_itself = cards[0].geometry().center().x()
+elsewhere = cards[-1].geometry().right() + 40
+
+card = strip.CARD_MIME
+post = strip.BRACKET_MIME
+
+# A move that would change nothing is refused WHILE dragging, not after.
+assert hover(card, "p1", on_itself) == (False, False)
+assert hover(post, "\0".join(("end", "p1", "p1", "4")), on_itself) == (False, False)
+
+# A move that would do something is offered, and shows where it lands.
+assert hover(card, "p1", elsewhere) == (True, True)
+assert hover(post, "\0".join(("end", "p1", "p1", "4")), elsewhere) == (True, True)
+
+# And what the marker offered is what the drop commits -- for both.
+moves, brackets = [], []
+view.move_period_requested.connect(lambda *payload: moves.append(payload))
+view.bracket_committed.connect(lambda *payload: brackets.append(payload))
+
+def drop(mime, payload, x):
+    data = QtCore.QMimeData()
+    data.setData(mime, QtCore.QByteArray(payload.encode("utf-8")))
+    event = QtGui.QDropEvent(
+        QtCore.QPoint(x, 5), QtCore.Qt.MoveAction, data,
+        QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
+    )
+    strip.dropEvent(event)
+    return event.isAccepted()
+
+assert drop(card, "p1", on_itself) is False and moves == []
+assert drop(post, "\0".join(("end", "p1", "p1", "4")), on_itself) is False
+assert brackets == []
+assert drop(card, "p1", elsewhere) is True and moves == [("p1", None)]
+assert drop(post, "\0".join(("end", "p1", "p1", "4")), elsewhere) is True
+assert brackets == [("p1", "p2", 4)]
+
+view.close(); view.deleteLater()
+app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+app.processEvents()
+app.quit()
+'''
+    )

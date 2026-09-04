@@ -860,12 +860,33 @@ class PulseDragContainer(QtWidgets.QWidget):
         else:
             super().dragEnterEvent(event)
 
+    def _proposal_at(self, data: QtCore.QMimeData, gap: int) -> object | None:
+        """What dropping THIS payload in THIS gap would do, or None for nothing.
+
+        One question, asked by the two events that must never disagree about
+        it.  While the cursor moves it decides whether to offer the gap at
+        all; when the button comes up it decides what to emit.  A card and a
+        post are different payloads and the same gesture, so they differ in
+        the payload and nowhere else.
+        """
+
+        if data.hasFormat(self.BRACKET_MIME):
+            return self._bracket_proposal(data, gap)
+        if data.hasFormat(self.CARD_MIME):
+            return self._card_proposal(data, gap)
+        return None
+
     def dragMoveEvent(self, event):  # noqa: N802 - Qt name
-        """Show where the card would land, while the cursor is still moving.
+        """Offer only the gaps that would actually do something.
 
         Without this the whole gesture was invisible: the drop position was
         decided from where the button happened to come up, with nothing on
         screen to aim at, so a drag that clearly went somewhere did nothing.
+        It arrived for the bracket post alone, and the card kept half of the
+        old problem: it accepted every gap and showed the marker in all of
+        them, including the two that mean "where it already is", and then
+        discarded the drop in silence.  A gesture that says yes and does
+        nothing is worse than one that says no.
         """
 
         if not (
@@ -874,11 +895,10 @@ class PulseDragContainer(QtWidgets.QWidget):
         ):
             return super().dragMoveEvent(event)
         gap = self._gap_at(event.pos().x())
-        if event.mimeData().hasFormat(self.BRACKET_MIME):
-            if self._bracket_proposal(event.mimeData(), gap) is None:
-                event.ignore()
-                self._indicator.hide()
-                return
+        if self._proposal_at(event.mimeData(), gap) is None:
+            event.ignore()
+            self._indicator.hide()
+            return
         event.acceptProposedAction()
         self._show_indicator_at_gap(gap)
 
@@ -887,35 +907,45 @@ class PulseDragContainer(QtWidgets.QWidget):
         super().dragLeaveEvent(event)
 
     def dropEvent(self, event):  # noqa: N802 - Qt name
-        if event.mimeData().hasFormat(self.BRACKET_MIME):
-            gap = self._gap_at(event.pos().x())
-            proposal = self._bracket_proposal(event.mimeData(), gap)
-            self.show_selection(card=self._selected_card, gap=self._selected_gap)
-            if proposal is None:
-                event.ignore()
-                return
-            event.acceptProposedAction()
-            start, end, count = proposal
-            self.bracket_committed.emit(start, end, count)
-            return
-        if not event.mimeData().hasFormat(self.CARD_MIME):
+        """Commit exactly what the marker was offering when the button came up.
+
+        Decide, then accept: accepting first and working out afterwards
+        whether there was anything to do is how a drop came to be accepted
+        and then dropped.
+        """
+
+        data = event.mimeData()
+        if not (data.hasFormat(self.CARD_MIME) or data.hasFormat(self.BRACKET_MIME)):
             return super().dropEvent(event)
-        period_id = bytes(event.mimeData().data(self.CARD_MIME)).decode("utf-8")
-        gap = self._gap_at(event.pos().x())
-        order = [card.period_id for card in self._cards]
-        event.acceptProposedAction()
+        proposal = self._proposal_at(data, self._gap_at(event.pos().x()))
         self.show_selection(card=self._selected_card, gap=self._selected_gap)
-        if period_id not in order:
+        if proposal is None:
+            event.ignore()
             return
-        # The gap just before a card and the gap just after it are both where
-        # that card already is.  Proposing a move to your own place is a
-        # rebuild of the whole board for no change.
+        event.acceptProposedAction()
+        if data.hasFormat(self.BRACKET_MIME):
+            self.bracket_committed.emit(*proposal)
+        else:
+            self.move_period_requested.emit(*proposal)
+
+    def _card_proposal(
+        self, data: QtCore.QMimeData, gap: int
+    ) -> tuple[str, str | None] | None:
+        """Translate a card drop into one proposed move: what, and before what.
+
+        ``None`` where the move would change nothing.  The gap just before a
+        card and the gap just after it are both where that card already is,
+        so proposing either is a rebuild of the whole board for no change.
+        """
+
+        period_id = bytes(data.data(self.CARD_MIME)).decode("utf-8")
+        order = [card.period_id for card in self._cards]
+        if period_id not in order:
+            return None
         here = order.index(period_id)
         if gap in (here, here + 1):
-            return
-        self.move_period_requested.emit(
-            period_id, order[gap] if gap < len(order) else None
-        )
+            return None
+        return period_id, (order[gap] if gap < len(order) else None)
 
     def _bracket_proposal(
         self, data: QtCore.QMimeData, gap: int
