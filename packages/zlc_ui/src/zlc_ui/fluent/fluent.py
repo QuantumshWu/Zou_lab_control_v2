@@ -4744,11 +4744,14 @@ class FluentWindow(FramelessWindow):
         from ..qt import app_icon  # noqa: PLC0415 -- qt.py reads this module
 
         side = max(1, int(round(tb.height() * TITLE_ICON_RATIO)))
-        ratio = float(self.devicePixelRatioF())
-        pixels = max(1, int(round(side * ratio)))
-        pixmap = app_icon().pixmap(pixels, pixels)
+        # ASK IN LOGICAL PIXELS.  ensure_qt_app turns on AA_UseHighDpiPixmaps,
+        # so QIcon hands back a pixmap already scaled for the screen and
+        # already carrying its device ratio; scaling the request as well made
+        # it twice the label, and a QLabel does not shrink a pixmap -- it clips
+        # it, so the title bar showed the middle of the mark with its corners
+        # cropped away.
+        pixmap = app_icon().pixmap(side, side)
         if not pixmap.isNull():
-            pixmap.setDevicePixelRatio(ratio)
             self._zlc_icon.setPixmap(pixmap)
         self._zlc_icon.setGeometry(
             x, max(0, (tb.height() - side) // 2), side, side
