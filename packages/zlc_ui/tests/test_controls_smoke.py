@@ -370,3 +370,44 @@ QtTest.QTest.keyClick(table, QtCore.Qt.Key_Down)
 assert table.currentIndex() == table.model().index(1, 1), table.currentIndex()
 """
     )
+
+
+def test_no_control_becomes_a_desktop_window_while_it_is_built() -> None:
+    """A parentless widget made visible IS a top-level window.
+
+    ``FluentPathEdit`` set its Refresh button visible before the layout
+    adopted it, so on the one GUI that asks for that button a 130x66
+    window titled "python" appeared on the desktop for a frame and
+    vanished when the reparent landed -- measured on a real launch, 170 ms
+    before the application window opened.  Construction is not a moment
+    for anything to be on screen: every child is born with its parent.
+    """
+
+    _run_qt_smoke(
+        """
+from PyQt5 import QtWidgets
+from zlc_ui import ensure_qt_app
+from zlc_ui.fluent import FluentPathEdit
+
+app = ensure_qt_app(['zlc-ui-tests'])
+strays = []
+original = QtWidgets.QWidget.setVisible
+
+def guarded(self, visible):
+    if visible and self.parent() is None:
+        strays.append(type(self).__name__)
+    return original(self, visible)
+
+QtWidgets.QWidget.setVisible = guarded
+try:
+    field = FluentPathEdit('demo.npz', refreshable=True)
+finally:
+    QtWidgets.QWidget.setVisible = original
+
+assert not strays, f'shown before being parented: {strays}'
+assert field.refresh.parent() is field
+assert field.browse.parent() is field
+assert field.edit.parent() is field
+assert field.refresh.isVisible() is False, 'unshown parent, unshown child'
+"""
+    )

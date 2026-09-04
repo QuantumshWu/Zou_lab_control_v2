@@ -1454,19 +1454,26 @@ class FluentPathEdit(QtWidgets.QWidget):
         row = QtWidgets.QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(scaled_px(6, minimum=4))
-        self.edit = FluentLineEdit(str(text))
+        # Every child is born WITH its parent.  A widget that has none is a
+        # top-level WINDOW the moment it is made visible, and this row set
+        # the Refresh button visible before the layout adopted it: on the
+        # one GUI that asks for that button, a 130x66 window titled
+        # "python" flashed on the desktop for a frame before the real
+        # window opened.  Parenting at construction makes the stray window
+        # unreachable rather than short-lived.
+        self.edit = FluentLineEdit(str(text), self)
         # a modest floor so the field + button still fit a narrow form column (the
         # edit grows with the column via the stretch below); never a 150px floor that
         # pushes the Browse button off a narrow Edit tab.
         self.edit.setMinimumWidth(scaled_px(96, minimum=72))
         self.edit.textChanged.connect(lambda t: self.changed.emit(str(t)))
-        self.browse = FluentButton("Browse…", color=GREY)
+        self.browse = FluentButton("Browse…", self, color=GREY)
         # size the button to its OWN label (+ padding) at the live DPR so "Browse…"
         # is never clipped (a fixed 80px clipped it to "owse" at some scales).
         self.browse.setFixedWidth(
             fluent_text_width(self.browse.fontMetrics(), "Browse…") + scaled_px(22, minimum=16))
         self.browse.clicked.connect(self._browse)
-        self.refresh = FluentButton("Refresh", color=GREY)
+        self.refresh = FluentButton("Refresh", self, color=GREY)
         self.refresh.setFixedWidth(
             fluent_text_width(self.refresh.fontMetrics(), "Refresh") + scaled_px(22, minimum=16))
         self.refresh.setToolTip("Re-read this file from disk")
