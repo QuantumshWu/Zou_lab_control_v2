@@ -624,6 +624,13 @@ class _RemoteRasterPlotHost:
         self._lock = RLock()
         self._closing = False
         self._closed = False
+        #: Whether the child has been ASKED to close this host.  Separate from
+        #: ``_closing``, which says the host is on its way out however it got
+        #: there: a service failure sets that, and reading it here meant a
+        #: failed host never sent its ``close-host``, so the acknowledgement
+        #: that is the only thing that sets ``_closed`` could never arrive and
+        #: the console waited on that worker for ever.
+        self._close_requested = False
         self._startup_error: Exception | None = None
         self._service_failure = False
         self._initial_metadata: tuple[object, object] | None = None
@@ -839,7 +846,8 @@ class _RemoteRasterPlotHost:
             if self._closed:
                 self._finish_local_close()
                 return True
-            first = not self._closing
+            first = not self._close_requested
+            self._close_requested = True
             self._closing = True
         if first:
             self._process._close_host(self)
@@ -1246,7 +1254,13 @@ class RenderProcess:
         try:
             self._send(("close-host", host.host_id))
         except Exception as error:
+            # The request never went out, so no acknowledgement is owed and
+            # none is coming: for this host that IS the end.  Recording only a
+            # failure left it un-closable, waiting for an answer nobody was
+            # going to send, and the console cannot finish closing until every
+            # retired host has answered.
             host._failed(error)
+            host._mark_closed()
 
     def _wait_host_closed(self, host_id: str, timeout: float) -> bool:
         with self._lock:
@@ -2236,19 +2250,37 @@ def _render_process_main(connection: Connection, name: str) -> None:
                 subscriptions.pop(subscription_id, None)
 
         def finish() -> None:
+            # Each release owns its own failure, the way the shutdown sweep
+            # already does: a raising release must not cost this host the
+            # close that is the whole point of the thread.
+            stopped = True
             try:
                 if release is not None:
-                    release()
+                    try:
+                        release()
+                    except Exception:
+                        pass
                 for _subscription_id, subscription_release in owned_subscriptions:
-                    subscription_release()
+                    try:
+                        subscription_release()
+                    except Exception:
+                        pass
                 if host is not None:
-                    host.close(timeout=30.0)
+                    stopped = bool(host.close(timeout=30.0))
             finally:
                 with state_lock:
-                    hosts.pop(host_id, None)
+                    # A worker that did NOT stop stays in the table: after the
+                    # pop this is the only handle on it, and the shutdown
+                    # sweep could no longer see the thread it must still join.
+                    if stopped:
+                        hosts.pop(host_id, None)
+                        last_front_sequence.pop(host_id, None)
                     closing_hosts.discard(host_id)
-                    last_front_sequence.pop(host_id, None)
                     closer_threads.discard(thread)
+                # The acknowledgement goes out either way: it is what lets the
+                # console finish closing, and a worker this child is still
+                # holding is this child's problem, not a reason to strand the
+                # operator in a window that will not close.
                 try:
                     send(("host-closed", host_id))
                 except Exception:

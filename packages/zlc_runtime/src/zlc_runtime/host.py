@@ -596,9 +596,15 @@ class NodeHost:
             self._plane_state = False
         elif self._plane_state:
             self._plane_state = False
+        # Seal this host BEFORE the owner hop.  An owner that refuses to
+        # release is its own loud failure and the caller still sees it, but it
+        # must not be able to veto the retirement for ever: shutdown() returns
+        # early once closed, so leaving the flag until after the hop made
+        # every retry re-run the whole thing and raise again -- and a console
+        # that retries once per beat could never finish closing over it.
+        self._closed = True
         if self._owner is not None:
             self._owner.shutdown()
-        self._closed = True
 
     @property
     def generation(self) -> object:

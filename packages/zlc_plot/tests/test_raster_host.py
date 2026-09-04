@@ -2026,3 +2026,57 @@ def test_a_formula_that_cannot_be_drawn_is_shown_as_characters() -> None:
     # A line without dollars is returned untouched and uncopied.
     plain = "logic/camera_measurement/frames = 3"
     assert _drawable_text(plain) == plain
+
+
+def test_a_failed_host_can_still_be_closed_so_a_console_can_finish_closing() -> None:
+    """Reporting a failure must not spend the host's one close request.
+
+    A retired host is drained by the console only when ``close(timeout=0.0)``
+    answers True, and the only thing that can answer it is the child's
+    ``host-closed`` acknowledgement.  ``_closing`` used to gate the single
+    ``close-host`` send AND record "this host is unusable", so a host that had
+    reported a failure -- a create that did not land, a service hiccup -- had
+    already spent the gate: nothing was ever sent, nothing was ever
+    acknowledged, and the console reported "still waiting for 1 plot worker"
+    for the rest of the session.  In one process this could not happen: the
+    local host re-derived the answer from its own worker thread on every call.
+    """
+
+    from zlc_plot import RenderProcess
+
+    snapshot = _snapshot()
+    spec = CurvePlot(AxisRef.point("x"))
+    service = RenderProcess("raster-failed-close-test")
+    try:
+        ordinary = service.build_host(snapshot, spec)
+        ordinary.wait_for_front(timeout=30)
+        # The first zero-timeout call only REQUESTS the close.
+        assert ordinary.close(timeout=0.0) is False
+        assert _drained(ordinary), "an ordinary retired host must drain"
+
+        failed = service.build_host(snapshot, spec)
+        failed.wait_for_front(timeout=30)
+        failed._failed(RuntimeError("a render service hiccup"))
+        assert failed.closing is True
+        assert failed.close(timeout=0.0) is False
+        assert _drained(failed), "a failed retired host must drain too"
+
+        # And asking with a real timeout settles it rather than waiting out
+        # the clock for an answer nobody owes.
+        third = service.build_host(snapshot, spec)
+        third.wait_for_front(timeout=30)
+        third._failed(RuntimeError("another hiccup"))
+        assert third.close(timeout=30.0) is True
+    finally:
+        assert service.close(timeout=30)
+
+
+def _drained(host: object, seconds: float = 30.0) -> bool:
+    """Whether the console's poll would forget this host, as the poll asks."""
+
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if host.close(timeout=0.0):
+            return True
+        time.sleep(0.02)
+    return False

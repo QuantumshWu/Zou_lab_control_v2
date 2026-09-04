@@ -6777,3 +6777,40 @@ def test_a_region_drawn_on_a_scan_axis_in_microseconds_is_the_region_the_hand_dr
     status, marked = presenter.view._cards[binding.panel_id].status
     assert not marked and "empty" not in status, status
     assert binding.port is None or binding.port.last_error is None
+
+
+def test_a_silent_plot_worker_cannot_hold_the_console_open(presenter) -> None:
+    """An operator must always be able to close the window.
+
+    A retired plot host is a REMOTE answer now: the console asks its render
+    child to close the host and waits for the acknowledgement.  Gating the
+    render processes' own shutdown on that answer put the only recovery for a
+    missing answer downstream of the thing it recovers -- the child's reader
+    marks every host closed when it stops, and it does not stop until the
+    process is asked to, and the process was not asked until every host had
+    answered.  One silent host meant a window that never closed, saying
+    "console close is still waiting for 1 plot worker" once and then nothing.
+    """
+
+    class _NeverAnswers:
+        host_id = "never-answers"
+        closing = True
+
+        def close(self, timeout=None):
+            return False
+
+    presenter._retired_plot_hosts.append(_NeverAnswers())
+    deadline = time.monotonic() + presenter.CLOSE_REPORT_SECONDS + 20.0
+    closed = False
+    while time.monotonic() < deadline:
+        closed = presenter.close()
+        if closed:
+            break
+        presenter.beat()
+        time.sleep(0.02)
+    assert closed, "the console must close over a plot worker that never answers"
+    # And the operator was told why it took longer than usual.
+    assert any(
+        "still waiting for" in str(message)
+        for _severity, message in presenter.view.status
+    ), presenter.view.status[-4:]

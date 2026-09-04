@@ -14,7 +14,7 @@ session below it does not know a window exists.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import CancelledError
+from concurrent.futures import CancelledError, TimeoutError as _AnswerTimeout
 from dataclasses import dataclass, field, replace
 from functools import wraps
 from weakref import ref
@@ -431,6 +431,11 @@ class ConsolePresenter:
     """Wires a console view to a running session."""
 
     CLOSE_REPORT_SECONDS = 10.0
+    #: How long a mount may wait for a plot surface to describe itself.  The
+    #: wait is on the board's projection lane, and it is a REPLY FROM ANOTHER
+    #: PROCESS now; unbounded, one silent render child held board.close() open
+    #: for ever, and with it the console's whole close.
+    SURFACE_DESCRIBE_SECONDS = 10.0
 
     def __init__(
         self,
@@ -1756,7 +1761,23 @@ class ConsolePresenter:
                 describe = getattr(host, "describe_display", None)
                 if callable(describe):
                     answer = describe()
-                    answer = answer.result() if hasattr(answer, "result") else answer
+                    if hasattr(answer, "result"):
+                        try:
+                            answer = answer.result(
+                                timeout=self.SURFACE_DESCRIBE_SECONDS
+                            )
+                        except _AnswerTimeout:
+                            # Say it: mounting without the operator's
+                            # interaction is a fact they can see on the
+                            # picture, and a silent one would look like the
+                            # panel simply forgot.
+                            self._report(
+                                f"{panel_state.title}: its plot surface did "
+                                "not describe itself in time, so this mount "
+                                "carries no drawn region or viewport",
+                                severity="warning",
+                            )
+                            answer = None
                     accepted_display = getattr(answer, "value", answer)
             # ONE proof decides whether a stored interaction can be placed:
             # the SELECTION's own vocabulary against the subject it was drawn
@@ -7714,9 +7735,20 @@ class ConsolePresenter:
 
     def _advance_close(self) -> bool:
         board_closed = self.board.close()
+        # A retired plot worker is a REMOTE answer now: the console asks its
+        # render child to close that host and waits for the acknowledgement.
+        # Gating the render processes' own shutdown on that answer put the
+        # only recovery for a MISSING answer downstream of the thing it
+        # recovers -- the child's reader marks every host closed when it
+        # stops, and it does not stop until the process is asked to, and the
+        # process is not asked until every host has answered.  So one silent
+        # host meant a window that never closed.  Once the operator has been
+        # TOLD the close is abnormal, the retired list stops being a gate and
+        # the processes go down; their readers then settle whatever is left.
+        stalled = self._close_wait_reported
         owners_ready = (
             not self.logic
-            and not self._retired_plot_hosts
+            and (stalled or not self._retired_plot_hosts)
             and board_closed
             and not self._saving_panels
         )
