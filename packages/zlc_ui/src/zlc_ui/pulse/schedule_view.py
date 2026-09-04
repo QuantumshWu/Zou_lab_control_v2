@@ -1237,7 +1237,21 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.drag_container.gap_clicked.connect(self._gap_clicked)
         self.timeline_scroll.setWidget(self.drag_container)
         dataset_frame.add_pane(self.timeline_scroll, stretch=1)
-        layout.addWidget(dataset_frame, 1)
+        # THE PAGE OWNS ITS SURFACE.  Preview, Scan and Target each open with
+        # a bordered card and read as one framed white page; Edit mounted its
+        # panes straight onto the tab pane, so the only thing behind the
+        # period cards was Qt's own private stacked widget, painted white by
+        # one CSS rule aimed at its internal object name.  No boundary, no
+        # owner, and one deleted rule away from being grey.  The panes and
+        # their viewports stay transparent and the card gutters live where
+        # they always did, so nothing inside moves: the frame is simply the
+        # surface, and its edge is the page's edge.
+        self.dataset_surface = FluentFrame()
+        surface_layout = QtWidgets.QVBoxLayout(self.dataset_surface)
+        surface_layout.setContentsMargins(gutter, gutter, gutter, gutter)
+        surface_layout.setSpacing(0)
+        surface_layout.addWidget(dataset_frame, 1)
+        layout.addWidget(self.dataset_surface, 1)
         self.dataset_panes = dataset_frame
 
         # Bottom bar: three titled cards.  Control keeps its compact button
