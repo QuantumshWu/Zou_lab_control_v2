@@ -266,7 +266,7 @@ class OccupancyProcessor:
             "counts": with_value(
                 ValueSchema(
                     site_validity,
-                    np.dtype("<f8"),
+                    np.dtype("<f4"),
                     source.value_schema.value_unit,
                 )
             ),
@@ -305,7 +305,13 @@ class OccupancyProcessor:
             source_validity,
             axis=tuple(range(2, source_validity.ndim)),
         ).reshape(-1)
-        counts = np.full((flat.shape[0], n_sites), np.nan, dtype="<f8")
+        # Single precision IS this measurement: a site's signal is a sum of
+        # sensor counts, and 24 bits of mantissa resolve every one of them
+        # exactly up to sixteen million.  It is also the number the verdict
+        # below is read from, so the published count and the published
+        # verdict cannot be derived from two different values of the same
+        # measurement.
+        counts = np.full((flat.shape[0], n_sites), np.nan, dtype="<f4")
         for index in np.flatnonzero(cell_valid):
             counts[index] = self.readout.signals(
                 flat[index],
