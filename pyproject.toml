@@ -117,6 +117,7 @@ namespaces = false
 "zlc_atom.nodes.scan" = ["mot_field_template.json", "temperature_template.json"]
 "zlc_atom.devices.slm" = ["profiles/*.json"]
 zlc_plot = ["assets/*.ttf", "py.typed"]
+zlc_ui = ["assets/*.ico"]
 zlc_pulse = ["py.typed"]
 
 # RTL/XDC/Tcl are product data, not Python modules.  data-files keeps their

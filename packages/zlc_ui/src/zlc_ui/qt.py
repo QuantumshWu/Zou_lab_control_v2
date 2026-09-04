@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import threading
+from pathlib import Path
 from collections.abc import Sequence
 
 from PyQt5 import QtCore, QtGui, QtWidgets
@@ -14,6 +15,7 @@ from .fluent.style import FONT, FONT_SIZE
 
 _QT_ARGV: list[str] | None = None
 _QT_APP: QtWidgets.QApplication | None = None
+_QT_ICON: QtGui.QIcon | None = None
 _QT_LOOP_ENABLED = False
 _KERNEL_WAKE_TIMER: QtCore.QTimer | None = None
 _KERNEL_WAKE_INTERVAL_MS = 50
@@ -166,6 +168,8 @@ def ensure_qt_app(argv: Sequence[str] | None = None) -> QtWidgets.QApplication:
         app.setFont(QtGui.QFont(FONT, _fluent_font_size()))
         _ensure_fluent_scale()
         _QT_APP = app
+        if app.windowIcon().isNull():
+            app.setWindowIcon(app_icon())
         _enable_ipython_qt_loop()
         return app
 
@@ -182,8 +186,25 @@ def ensure_qt_app(argv: Sequence[str] | None = None) -> QtWidgets.QApplication:
     _ensure_offscreen_fluent_fonts(_QT_APP)
     _QT_APP.setFont(QtGui.QFont(FONT, _fluent_font_size()))
     _ensure_fluent_scale()
+    _QT_APP.setWindowIcon(app_icon())
     _enable_ipython_qt_loop()
     return _QT_APP
 
 
-__all__ = ["ensure_qt_app"]
+def app_icon() -> QtGui.QIcon:
+    """The product's icon, loaded once.
+
+    One accessor because it has two consumers that must not drift: the
+    QApplication, which is what a taskbar shows, and every FluentWindow's own
+    title bar.  A window wearing a different mark from its taskbar button reads
+    as two programs.
+    """
+
+    global _QT_ICON
+    if _QT_ICON is None:
+        path = Path(__file__).with_name("assets") / "zlc.ico"
+        _QT_ICON = QtGui.QIcon(str(path)) if path.is_file() else QtGui.QIcon()
+    return _QT_ICON
+
+
+__all__ = ["app_icon", "ensure_qt_app"]
