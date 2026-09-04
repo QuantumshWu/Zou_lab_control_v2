@@ -791,3 +791,67 @@ app.processEvents()
 """
     )
 
+
+
+def test_linked_panes_never_starve_a_pane_to_line_the_group_up() -> None:
+    """Levelling the columns may not cost a column its rows.
+
+    A pane's ``maximum`` is CLAMPED AT ZERO, so a pane that already fits
+    cannot report how much it fits by.  Recovering its natural reach by
+    subtracting back the padding it was given is therefore only true of a pane
+    that overflows -- for one that does not, the clamp hides the padding and
+    the next round adds it again.  That compounded (8, 45, 111, 206, ...) until
+    the viewport was gone, and the Pulse Editor opened with its period columns
+    blank while the file said six periods.
+
+    So the group levels the one quantity every pane can actually give: the
+    VIEWPORT, down to the shallowest.  The padding is then bounded by the
+    difference it was measured from, and no pane can be shortened past what it
+    had.
+    """
+
+    _run_qt(
+        """
+from PyQt5 import QtCore, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import FluentScrollArea, LinkedScrollPanes
+app = ensure_qt_app(["linked-panes-starve"])
+
+panes = LinkedScrollPanes()
+# The shape that made it diverge: one pane whose content is far SHORTER than
+# its viewport beside one that overflows.  The short pane reports maximum 0
+# however much room it has to spare.
+short, tall = FluentScrollArea(), FluentScrollArea()
+for area, height in ((short, 8), (tall, 900)):
+    body = QtWidgets.QWidget(); body.setFixedHeight(height); body.setFixedWidth(120)
+    area.setWidgetResizable(False); area.setWidget(body)
+    panes.add_pane(area)
+panes.resize(400, 300); panes.show()
+for _ in range(40):
+    app.processEvents()
+
+for name, area in (("short", short), ("tall", tall)):
+    assert area.viewport().height() > 0, (
+        f"the {name} pane was left with no viewport, so it shows nothing"
+    )
+settled = [area.viewportMargins().bottom() for area in (short, tall)]
+for _ in range(20):
+    app.processEvents()
+assert [area.viewportMargins().bottom() for area in (short, tall)] == settled, (
+    "the padding is still moving, so it is feeding itself"
+)
+assert max(settled) <= 300, "no pane may be padded past the group's own height"
+
+# What the levelling is FOR: one value means one row, all the way down.
+heights = {area.viewport().height() for area in (short, tall)}
+assert len(heights) == 1, f"the viewports were not levelled: {heights}"
+
+# And a pane that stops sooner still stops sooner -- that is its content
+# saying so, not something a margin should hide.
+assert short.verticalScrollBar().maximum() == 0
+assert tall.verticalScrollBar().maximum() > 0
+
+panes.close()
+app.processEvents()
+"""
+    )
