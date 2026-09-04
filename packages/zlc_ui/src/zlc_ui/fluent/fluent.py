@@ -4027,6 +4027,13 @@ class FluentSpinBox(_WheelFocusGuardMixin, QtWidgets.QSpinBox):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._install_wheel_focus_guard()
+        # A HALF-TYPED NUMBER IS NOT A VALUE.  With keyboard tracking on,
+        # Qt interprets the text on every keystroke: deleting the 1 from
+        # "0.1" leaves "0.", which is read as zero and snapped to this
+        # box's own minimum before the next character can be typed.  The
+        # number is judged when the operator is done with it -- Enter, or
+        # the focus leaving -- which is also when the range applies.
+        self.setKeyboardTracking(False)
         self.setButtonSymbols(QtWidgets.QAbstractSpinBox.PlusMinus)
         self.setMinimumHeight(scaled_px(30, minimum=22))
         # Left-align with zero internal text margins so the text's left inset is
@@ -4215,6 +4222,13 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
     ):
         super().__init__(parent)
         self._install_wheel_focus_guard()
+        # A HALF-TYPED NUMBER IS NOT A VALUE.  With keyboard tracking on,
+        # Qt interprets the text on every keystroke: deleting the 1 from
+        # "0.1" leaves "0.", which is read as zero and snapped to this
+        # box's own minimum before the next character can be typed.  The
+        # number is judged when the operator is done with it -- Enter, or
+        # the focus leaving -- which is also when the range applies.
+        self.setKeyboardTracking(False)
         self.setButtonSymbols(QtWidgets.QAbstractSpinBox.PlusMinus)
         self.setMinimumHeight(scaled_px(30, minimum=22))
         # See FluentSpinBox: left-align + zero text margins for left-padding
@@ -4282,6 +4296,25 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
 
     def shownUnit(self) -> str:  # noqa: N802 - Qt API name
         return self._shown_unit
+
+    def stepBy(self, steps: int) -> None:  # noqa: N802 - Qt API name
+        """One notch is one step OF THE UNIT ON SCREEN.
+
+        The step was always taken in the owner's unit, so a hertz field
+        being read in megahertz moved by one hertz a notch: the wheel
+        turned and the number did not visibly change, while the same wheel
+        on a field whose own unit was the one shown felt normal.  A step
+        belongs to the unit the operator is working in.
+        """
+
+        if self._shown_unit == self._unit:
+            super().stepBy(steps)
+            return
+        try:
+            moved = self._shown_from_value(self.value()) + steps * self.singleStep()
+            self.setValue(self._value_from_shown(moved))
+        except (UnitError, ValueError):
+            super().stepBy(steps)
 
     def _shown_from_value(self, number: float) -> float:
         if self._shown_unit == self._unit:

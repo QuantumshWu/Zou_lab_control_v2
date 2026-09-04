@@ -320,6 +320,14 @@ class ScanPlanEditor(QtWidgets.QWidget):
         manual_axes: bool = False,
     ) -> None:
         super().__init__(parent)
+        #: A wheel or an arrow key moves a value repeatedly; the draft is
+        #: written when it stops moving.  Short enough that letting go and
+        #: reading the note feels immediate, long enough that a turn of the
+        #: wheel is one write.
+        self._values_settled = QtCore.QTimer(self)
+        self._values_settled.setSingleShot(True)
+        self._values_settled.setInterval(150)
+        self._values_settled.timeout.connect(self._emit_values)
         self._device_ports = bool(device_ports)
         self._hardware_slots = bool(hardware_slots)
         # Only a node that can STOP between plays can offer one, so the
@@ -477,7 +485,14 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 box.setDecimals(0 if unit == "value" else 6)
                 box.setRange(-1e12, 1e12)
                 box.setValue(float(overrides.get(name, authored)))
-                box.valueChanged.connect(self._emit_values)
+                # ONE GESTURE, ONE DRAFT.  Every intermediate value used to
+                # be written down, and a written draft is re-projected by
+                # the console that holds it -- so a wheel turned through ten
+                # values paid for ten projections and stuttered a notch at a
+                # time.  What the operator MEANT is where the wheel came to
+                # rest, which is what settling on the last change says.
+                box.valueChanged.connect(self._values_touched)
+                box.editingFinished.connect(self._emit_values)
                 self.values_grid.addWidget(label, row, 0)
                 self.values_grid.addWidget(box, row, 1)
                 self.values_grid.addWidget(QtWidgets.QLabel(unit), row, 2)
@@ -498,6 +513,13 @@ class ScanPlanEditor(QtWidgets.QWidget):
         except ValueError:
             return {}
 
+    def _values_touched(self) -> None:
+        """A value moved; write the draft once the moving stops."""
+
+        if self._loading:
+            return
+        self._values_settled.start()
+
     def _emit_values(self) -> None:
         """Only what this run sets differently is written down.
 
@@ -507,6 +529,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
         recalibration.
         """
 
+        self._values_settled.stop()
         if self._loading:
             return
         overrides = {
