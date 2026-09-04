@@ -42,8 +42,8 @@ from zlc_pulse.wire import CtrlWords, StreamerParams, build_fingerprint, pack_pr
 _BOARD_TARGET = pulse_target_from_xdc()
 
 
-def _sequence(*, slotted: bool = False) -> PulseSequence:
-    from zlc_pulse import PulseSlot
+def _sequence(*, slotted: bool = False, configured: bool = False) -> PulseSequence:
+    from zlc_pulse import PulseConfigParameter, PulseSlot
     from zlc_pulse.model import PulseFieldRef
 
     target = PulseTarget(
@@ -54,6 +54,11 @@ def _sequence(*, slotted: bool = False) -> PulseSequence:
         ),
     )
     slots = (PulseSlot("duration", PulseFieldRef("duration", "p0"), "ns", "p0_time"),) if slotted else ()
+    config_parameters = (
+        (PulseConfigParameter("p1_time", PulseFieldRef("duration", "p1"), "ns"),)
+        if configured
+        else ()
+    )
     return PulseSequence(
         target=target,
         time_step_ns=20,
@@ -62,6 +67,7 @@ def _sequence(*, slotted: bool = False) -> PulseSequence:
             PulsePeriod("p1", 40, "ns", (0, 0, 0)),
         ),
         slots=slots,
+        config_parameters=config_parameters,
     )
 
 
@@ -829,6 +835,34 @@ def test_remote_disconnect_preserves_applied_for_the_next_client(capsys) -> None
             client_b.close()
     assert streamer.applied() is None
     assert "ZLC AUTO-SAFE" in capsys.readouterr().out
+
+
+def test_a_pulse_that_declares_a_config_parameter_survives_the_wire() -> None:
+    """The board must be able to receive every kind of pulse the grammar allows.
+
+    ``load`` ships the source sequence itself, and the decoder matches types by
+    name: a binding the encoder knows nothing about makes the pulse unloadable
+    on a remote board while loading perfectly on a local one, which is the
+    worst possible place for the difference to appear.
+    """
+
+    geom = _sequence_geometry()
+    source = _sequence(configured=True)
+    program = compile_sequence(source, geom, 50e6)
+    transport = MemoryRegisterTransport(geom=geom, auto_done=True)
+    streamer = PulseStreamer(transport, geom, 50e6, target=source.target)
+    with _server(streamer) as server:
+        client = _client(server)
+        try:
+            client.load(program, source=source)
+            state = client.applied()
+            assert state is not None
+            assert state.source == source
+            assert state.source.config_parameters == source.config_parameters
+            rebuilt = compile_sequence(state.source, geom, 50e6)
+            assert pack_program(rebuilt, geom) == pack_program(state.program, geom)
+        finally:
+            client.close()
 
 
 def test_client_that_drops_its_socket_is_not_a_server_error(capsys) -> None:
