@@ -161,20 +161,20 @@ def test_image_display_unit_change_preserves_canonical_pixel_geometry() -> None:
         before_array = np.asarray(image.get_array()).copy()
         assert axes.get_aspect() == pytest.approx(0.8)
 
-        session.set_axis_unit(AxisRef.cell_data("x"), "cm")
+        session.set_axis_unit(AxisRef.cell_data("x"), "mm")
 
         image = session._renderer._artists["image"]
         after_bbox = tuple(float(value) for value in axes.bbox.bounds)
         assert np.allclose(after_bbox, before_bbox, rtol=0.0, atol=1.0e-9)
         assert after_bbox[2] == pytest.approx(after_bbox[3], abs=1.0e-9)
-        assert axes.get_aspect() == pytest.approx(80.0)
+        assert axes.get_aspect() == pytest.approx(800.0)
         np.testing.assert_array_equal(np.asarray(image.get_array()), before_array)
         # The display extent changes by the unit conversion, while the
         # renderer's physical square and prepared image remain invariant.  The
         # RGBA artist fills the square viewport; the prepared extent remains
         # the real data footprint inside that letterboxed view.
         prepared = session._renderer._artists["image:prepared_current"]
-        assert np.isclose(float(prepared.extent[1]), 100.0 * 2.1)
+        assert np.isclose(float(prepared.extent[1]), 1000.0 * 2.1)
         assert tuple(map(float, image.get_extent())) == pytest.approx(
             (*map(float, axes.get_xlim()), *map(float, axes.get_ylim()))
         )

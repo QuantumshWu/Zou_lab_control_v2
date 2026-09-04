@@ -9,14 +9,13 @@ from data_factory import (
     repeat_domain,
 )
 
+from zlc_data.units import DEFAULT_UNITS, resolve_unit
 from zlc_plot import (
     AxisRef,
     CurvePlot,
-    DEFAULT_UNITS,
     NumericRange,
     PlotSession,
     SelectorKind,
-    resolve_unit,
 )
 
 def _session(*, x_unit: str = "m", value_unit: str = "V") -> PlotSession:
@@ -43,15 +42,15 @@ def test_selector_round_trip_and_fit_parameters_follow_display_units() -> None:
     events = []
     release = session.subscribe_fit(events.append)
     try:
-        session.set_axis_unit(AxisRef.point("x"), "cm")
+        session.set_axis_unit(AxisRef.point("x"), "mm")
         session.set_value_unit("mV")
-        session.set_x_selector(100.0, 200.0, display=True)
+        session.set_x_selector(1000.0, 2000.0, display=True)
         canonical = session.selector_state(SelectorKind.X_RANGE, display=False)
         displayed = session.selector_state(SelectorKind.X_RANGE, display=True)
         assert canonical.value.low == 1.0
         assert canonical.value.high == 2.0
-        assert displayed.value.low == 100.0
-        assert displayed.value.high == 200.0
+        assert displayed.value.low == 1000.0
+        assert displayed.value.high == 2000.0
 
         session.fit(
             "gaussian_offset",
@@ -60,15 +59,15 @@ def test_selector_round_trip_and_fit_parameters_follow_display_units() -> None:
         )
         assert events
         parameters = {item.name: item for item in events[-1].display_parameters}
-        assert parameters["center"].unit == "cm"
-        assert abs(parameters["center"].value - 150.0) < 0.1
+        assert parameters["center"].unit == "mm"
+        assert abs(parameters["center"].value - 1500.0) < 1.0
         assert parameters["amplitude"].unit == "mV"
         assert abs(parameters["amplitude"].value - 2000.0) < 0.1
 
         session.configure(
             fit={
                 "model": "gaussian_offset",
-                "expression": "A=2000, x_0=guess(150)",
+                "expression": "A=2000, x_0=guess(1500)",
             },
             fit_live=False,
         )
@@ -76,7 +75,7 @@ def test_selector_round_trip_and_fit_parameters_follow_display_units() -> None:
         assert description.fit["fixed"] == {"amplitude": 2.0}
         assert description.fit["initial"] == {"center": 1.5}
         assert description.fit_expression == (
-            "A=2000.0, x_0=guess(150.0)"
+            "A=2000.0, x_0=guess(1500.0)"
         )
 
         session.set_axis_unit(AxisRef.point("x"), "m")
@@ -93,8 +92,8 @@ def test_unit_choice_symbols_are_unique_but_alias_input_resolution_is_unchanged(
     resolved = [resolve_unit(symbol) for symbol in symbols]
     assert len(symbols) == len(set(symbols))
     assert len(resolved) == len(set(resolved))
-    assert resolve_unit("us") is resolve_unit("µs") is resolve_unit("μs")
-    assert resolve_unit("deg") is resolve_unit("°")
+    assert resolve_unit("us") == resolve_unit("µs") == resolve_unit("μs")
+    assert resolve_unit("deg") == resolve_unit("°")
     assert resolve_unit("pixel").dimension == "pixel"
 
 def test_display_unit_choices_do_not_repeat_aliases() -> None:

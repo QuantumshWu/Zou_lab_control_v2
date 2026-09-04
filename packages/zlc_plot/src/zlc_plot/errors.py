@@ -11,8 +11,4 @@ class RevisionError(ZLCPlotError, ValueError):
     """A live update violates the monotonic revision contract."""
 
 
-class UnitError(ZLCPlotError, ValueError):
-    """A display unit is unknown or incompatible."""
-
-
-__all__ = ["RevisionError", "UnitError", "ZLCPlotError"]
+__all__ = ["RevisionError", "ZLCPlotError"]
