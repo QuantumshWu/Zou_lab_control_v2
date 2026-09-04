@@ -20,7 +20,7 @@ import json
 from pathlib import Path
 
 import pytest
-from zlc_pulse import TIME_UNIT_TO_NS
+from zlc_pulse import nanoseconds_per
 
 from zlc_atom.nodes import calibration_pulse_template_bytes
 from zlc_atom.nodes.calibration.pulse import load_calibration_pulse_template
@@ -32,8 +32,7 @@ def test_the_three_camera_windows_share_one_trigger_cadence() -> None:
     periods = {
         str(period["period_id"]): (
             float(period["duration"])
-            * TIME_UNIT_TO_NS[str(period["unit"])]
-            / TIME_UNIT_TO_NS["s"]
+            * float(nanoseconds_per(str(period["unit"])) / nanoseconds_per("s"))
         )
         for period in tree["periods"]
     }

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import replace
+from fractions import Fraction
 
 from .model import (
     FIELD_DAC,
     FIELD_DELAY,
     FIELD_DURATION,
-    TIME_UNIT_TO_NS,
+    TIME_UNIT_CHOICES,
+    nanoseconds_per,
     OutputDelay,
     PulseFieldRef,
     PulseSequence,
@@ -435,9 +437,13 @@ def convert_time(value: int | float, source_unit: str, target_unit: str) -> floa
     nothing said so.
     """
 
-    if source_unit not in TIME_UNIT_TO_NS or target_unit not in TIME_UNIT_TO_NS:
+    if source_unit not in TIME_UNIT_CHOICES or target_unit not in TIME_UNIT_CHOICES:
         raise ValueError("time fields require time units")
-    return float(value) * TIME_UNIT_TO_NS[source_unit] / TIME_UNIT_TO_NS[target_unit]
+    return float(
+        Fraction(str(float(value)))
+        * nanoseconds_per(source_unit)
+        / nanoseconds_per(target_unit)
+    )
 
 
 def _number_for(value: float) -> int | float:
