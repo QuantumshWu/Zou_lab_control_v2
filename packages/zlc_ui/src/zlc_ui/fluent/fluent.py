@@ -426,6 +426,15 @@ def signals_blocked(*widgets: QtWidgets.QWidget | None):
 
 
 def format_compact_number(value: float, *, digits: int = 12) -> str:
+    """One snapped number, short enough to sit inside an authored expression.
+
+    Deliberately NOT :func:`zlc_data.units.format_quantity`, which shows every
+    digit a value has because a box an operator reads a device through may not
+    round.  Snapping to a resolution produces 0.30000000000000004 where the
+    author wrote 0.3, and pasting that back into their own scan program is not
+    fidelity, it is noise.  Two jobs, two rules.
+    """
+
     if not math.isfinite(float(value)):
         return str(value)
     text = f"{float(value):.{digits}g}"
