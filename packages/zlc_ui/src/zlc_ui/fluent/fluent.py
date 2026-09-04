@@ -4194,8 +4194,12 @@ class FluentScrollArea(QtWidgets.QScrollArea):
             bar = self.verticalScrollBar()
             needed = bar.maximum() > bar.minimum()
             reserved = 0 if needed else bar.sizeHint().width()
-            if self.viewportMargins().right() != reserved:
-                self.setViewportMargins(0, 0, reserved, 0)
+            margins = self.viewportMargins()
+            if margins.right() != reserved:
+                # The RIGHT gutter is this method's business; the bottom is
+                # not.  Zeroing it here undid whatever a linked group had
+                # padded the viewport with to keep its rows in step.
+                self.setViewportMargins(0, 0, reserved, margins.bottom())
         finally:
             self._reserving = False
 
@@ -4490,6 +4494,10 @@ class LinkedScrollPanes(QtWidgets.QWidget):
         self._row = row
         self._panes: list[QtWidgets.QAbstractScrollArea] = []
         self._moving = False
+        self._equalising = False
+        #: What each pane's viewport was padded by to make its reach match the
+        #: group's, keyed by the pane itself.
+        self._padding: dict[int, int] = {}
         self._bar = QtWidgets.QScrollBar(QtCore.Qt.Vertical, self)
         self._bar.setStyleSheet(fluent_scrollbar_stylesheet("QScrollBar"))
         self._bar.setFixedWidth(fluent_scrollbar_thickness())
@@ -4531,7 +4539,48 @@ class LinkedScrollPanes(QtWidgets.QWidget):
         bars = [pane.verticalScrollBar() for pane in self._panes]
         return max(bars, key=lambda bar: bar.maximum(), default=None)
 
+    def _equalise_reach(self) -> None:
+        """Give every pane the same reachable range, so one value means one row.
+
+        A pane's maximum is its content height less its VIEWPORT height, and
+        the viewports in a group are not the same height: a wide timeline gives
+        a strip up to its own horizontal scrollbar and the name column beside
+        it does not, and one column's content can end sooner than its
+        neighbour's.  Driving every pane to one value then parts them exactly
+        at the bottom -- Qt clamps the shallower pane at ITS maximum, so the
+        rows line up the whole way down and step out of line on the last
+        screenful.
+
+        Padding each viewport by what it lacks makes the group bottom out
+        together, whichever of those two reasons it was: the pane that runs out
+        first simply shows blank where its neighbour still has rows, which is
+        what "these columns are one surface" has to mean at the end of it.
+        """
+
+        if self._equalising or not self._panes:
+            return
+        self._equalising = True
+        try:
+            # The reach a pane would have with no padding of ours.
+            natural = [
+                pane.verticalScrollBar().maximum() - self._padding.get(id(pane), 0)
+                for pane in self._panes
+            ]
+            target = max(natural)
+            for pane, reach in zip(self._panes, natural):
+                wanted = max(0, target - reach)
+                if self._padding.get(id(pane), 0) == wanted:
+                    continue
+                self._padding[id(pane)] = wanted
+                margins = pane.viewportMargins()
+                pane.setViewportMargins(
+                    margins.left(), margins.top(), margins.right(), wanted
+                )
+        finally:
+            self._equalising = False
+
     def _reconcile_bar(self, *_range: int) -> None:
+        self._equalise_reach()
         deepest = self._deepest()
         maximum = deepest.maximum() if deepest is not None else 0
         self._bar.setRange(0, maximum)
