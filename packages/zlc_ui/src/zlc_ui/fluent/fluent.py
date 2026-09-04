@@ -4293,7 +4293,58 @@ class FluentTableView(QtWidgets.QTableView):
             return
         if not bool(index.flags() & QtCore.Qt.ItemIsEditable):
             return
-        self.edit(index)
+        super().edit(index)
+
+    def edit(self, index, trigger, event) -> bool:  # noqa: N802 - Qt naming
+        """Open a cell, and watch the editor's keys while it is open.
+
+        The editor's event filter belongs to the DELEGATE, not to the
+        view, so a view that wants a say has to ask for one -- and this
+        is the one place every editor is born, whichever trigger opened
+        it and whichever delegate made it.
+        """
+
+        started = bool(super().edit(index, trigger, event))
+        if started:
+            editor = self.viewport().focusWidget()
+            if editor is not None and editor is not self:
+                editor.installEventFilter(self)
+        return started
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt naming
+        """Walking the grid while a cell is open is part of editing it.
+
+        Qt gives the delegate Tab and Backtab -- commit, step sideways,
+        keep editing -- and nothing else.  Up and Down appeared to work
+        only because a QLineEdit ignores them and the unhandled key
+        reaches the view underneath: an accident that lasts exactly as
+        long as every editor happens to be a plain line edit, and one
+        that no single-row table can even show.  The four directions are
+        one contract, so all four are answered here.
+        """
+
+        if (
+            event.type() == QtCore.QEvent.KeyPress
+            and isinstance(watched, QtWidgets.QWidget)
+            and event.key() in (QtCore.Qt.Key_Up, QtCore.Qt.Key_Down)
+            and not event.modifiers()
+        ):
+            index = self.currentIndex()
+            model = self.model()
+            if index.isValid() and model is not None:
+                step = -1 if event.key() == QtCore.Qt.Key_Up else 1
+                row = index.row() + step
+                if 0 <= row < model.rowCount():
+                    moved = model.index(row, index.column())
+                    self.commitData(watched)
+                    self.closeEditor(
+                        watched, QtWidgets.QAbstractItemDelegate.NoHint
+                    )
+                    self.setCurrentIndex(moved)
+                    if bool(moved.flags() & QtCore.Qt.ItemIsEditable):
+                        super().edit(moved)
+                    return True
+        return super().eventFilter(watched, event)
 
     def _selected_bounds(self) -> tuple[tuple[QtCore.QModelIndex, ...], int, int, int, int] | None:
         selected = tuple(self.selectionModel().selectedIndexes())
