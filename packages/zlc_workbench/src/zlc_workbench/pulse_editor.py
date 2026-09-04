@@ -822,6 +822,15 @@ def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
     # A delay slot is deliberately not drawn: it shifts a channel's edges
     # rather than occupying an interval, and a badge over the whole timeline
     # would say something that is not true of any part of it.
+    #
+    # A CONFIG parameter is not drawn either, and for a reason the drawing
+    # already states: ``SLOT_KINDS`` is ("scan", "api") because a badge says
+    # "somebody writes this field while the pulse runs" -- a table per point,
+    # a host per run.  Nobody writes a config field while the pulse runs: it
+    # is the board's own calibrated number, written onto the sequencer once
+    # and already inside every edge and level drawn here.  Handing one over
+    # anyway raised out of the primitive, so binding a single duration as
+    # config replaced the whole timeline with "cannot draw this pulse".
     regions: list[Any] = []
     segments: list[Any] = []
     stops = {
@@ -831,6 +840,8 @@ def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
     }
     positions = {period.period_id: index for index, period in enumerate(sequence.periods)}
     for (kind, period_id, port_key), (slot_kind, number) in bindings_of(sequence).items():
+        if slot_kind == "config":
+            continue
         if period_id is None or period_id not in positions:
             continue
         start, stop = starts[positions[period_id]], stops[period_id]

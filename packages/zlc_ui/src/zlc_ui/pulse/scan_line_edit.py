@@ -5,7 +5,7 @@ from __future__ import annotations
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
-    API_VIOLET, API_VIOLET_DARK, BG, CONFIG_SLATE, CONFIG_SLATE_DARK,
+    API_VIOLET, API_VIOLET_DARK, BG, CONFIG_GREEN, CONFIG_GREEN_DARK,
     EDIT_PADDING_H, FONT, ORANGE, ORANGE_DARK,
     ORANGE_TINT, PADDING_V, PLACEHOLDER, RADIUS, SURFACE, FluentLineEdit, Metrics,
     fluent_font_size, scaled_px,
@@ -72,7 +72,7 @@ class _FluentScanDot(QtWidgets.QAbstractButton):
 _BINDING_FILL = {
     "scan": ORANGE,
     "api": API_VIOLET,
-    "config": CONFIG_SLATE,
+    "config": CONFIG_GREEN,
 }
 
 
@@ -169,7 +169,7 @@ class FluentScanLineEdit(FluentLineEdit):
             style = _bound_field_style(text=API_VIOLET_DARK, border=API_VIOLET, fill=None)
         elif normalized == "config":
             style = _bound_field_style(
-                text=CONFIG_SLATE_DARK, border=CONFIG_SLATE, fill=None
+                text=CONFIG_GREEN_DARK, border=CONFIG_GREEN, fill=None
             )
         else:
             style = self._base_style if state[0] else _muted_line_style()

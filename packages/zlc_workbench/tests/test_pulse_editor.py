@@ -3137,6 +3137,44 @@ def test_a_bound_field_is_drawn_where_it_happens(presenter, sequence) -> None:
     assert segment.value == 200.0
 
 
+def test_a_config_binding_is_not_drawn_and_does_not_stop_the_drawing(
+    presenter, sequence
+) -> None:
+    """A badge means "somebody writes this field while the pulse runs".
+
+    Nobody writes a config field while the pulse runs -- it is the board's own
+    calibrated number, written onto the sequencer once and already inside
+    every edge and level on the timeline.  ``SLOT_KINDS`` says so, and
+    handing a config binding over anyway raised out of the primitive: binding
+    ONE duration as config replaced the whole preview with "cannot draw this
+    pulse".
+    """
+
+    from zlc_plot.primitives import SLOT_KINDS
+    from zlc_workbench.pulse_editor import timeline_of
+
+    assert "config" not in SLOT_KINDS
+
+    view = presenter.view
+    dac = next(port for port in sequence.target.ports if port.kind == "dac")
+    presenter.set_analog(sequence.periods[1].period_id, dac.key, "edge", 200)
+
+    # One duration swept by a table, and one duration plus one DAC level held
+    # as the board's own numbers.  Three presses is the whole cycle.
+    view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
+    for _ in range(3):
+        view.binding_cycle_requested.emit(
+            "duration", sequence.periods[2].period_id, None
+        )
+        view.binding_cycle_requested.emit("analog", sequence.periods[1].period_id, dac.key)
+    assert len(presenter.sequence.config_parameters) == 2
+
+    data = timeline_of(presenter.sequence, include_off=True)
+    # The scan binding still draws, with the number the form shows beside it.
+    assert [region.kind for region in data.scan_regions] == ["scan"]
+    assert not data.scan_dac_segments
+
+
 
 def test_the_grid_a_field_is_snapped_to_is_in_that_field_s_unit(sequence) -> None:
     """The board's grid is 20 ns.  The box is in milliseconds.

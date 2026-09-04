@@ -2220,7 +2220,13 @@ class FluentComboBox(QtWidgets.QAbstractButton):
             QtCore.QEvent.ApplicationFontChange,
             QtCore.QEvent.StyleChange,
         } and hasattr(self, "_cached_content_width"):
-            self.setMinimumHeight(scaled_px(30, minimum=22))
+            # The floor follows the scale, but it is a FLOOR: an owner that
+            # fixed this combo's height owns it.  Re-applying unconditionally
+            # dropped the minimum back under the owner's number on the first
+            # style polish, so a combo asked for a 26 px row settled at 22 and
+            # every row laid out beside it drifted.
+            if self.minimumHeight() != self.maximumHeight():
+                self.setMinimumHeight(scaled_px(30, minimum=22))
             self._invalidate_content_width()
 
     def event(self, event) -> bool:

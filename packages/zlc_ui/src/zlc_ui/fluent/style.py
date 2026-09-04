@@ -25,10 +25,12 @@ ORANGE_TINT = "#F6E3D4"
 ORANGE_DARK = "#8A4B1F"
 API_VIOLET = "#9B86C9"
 API_VIOLET_DARK = "#5A4A8A"
-#: A config binding is the quietest of the three: its number is simply
-#: part of the pulse, not something a run supplies or a table sweeps.
-CONFIG_SLATE = "#6E6E6E"
-CONFIG_SLATE_DARK = "#3B3B3B"
+#: A config binding is the board's own calibrated number -- a channel delay
+#: or a DAC bias, loaded onto the sequencer rather than supplied per run.
+#: Green, because it reads as "already settled" beside the orange a table
+#: sweeps and the violet a caller writes.
+CONFIG_GREEN = "#7FC2AD"
+CONFIG_GREEN_DARK = "#2F6B58"
 YELLOW = "#E5C85B"
 GREY = "#A2A2A2"
 GRAPHITE = "#808080"

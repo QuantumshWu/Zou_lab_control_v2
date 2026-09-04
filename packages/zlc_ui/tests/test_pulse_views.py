@@ -758,12 +758,12 @@ def test_a_config_binding_wears_its_own_colour_and_stays_editable() -> None:
     _run_qt(
         """
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import API_VIOLET, CONFIG_SLATE, ORANGE
+from zlc_ui.fluent import API_VIOLET, CONFIG_GREEN, ORANGE
 from zlc_ui.pulse.scan_line_edit import FluentScanLineEdit
 from zlc_ui.pulse.scan_line_edit import _BINDING_FILL
 
 app = ensure_qt_app(["binding-colours"])
-assert _BINDING_FILL == {"scan": ORANGE, "api": API_VIOLET, "config": CONFIG_SLATE}
+assert _BINDING_FILL == {"scan": ORANGE, "api": API_VIOLET, "config": CONFIG_GREEN}
 
 edit = FluentScanLineEdit("12")
 edit.set_field_state(editable=True, binding="config", number=3)
@@ -771,7 +771,7 @@ assert edit.dot._kind == "config"
 assert edit.dot._number == 3
 assert not edit.dot.isChecked(), "only a scan column marks the box as the board's"
 assert not edit.isReadOnly(), "a config number is the operator's to read and type"
-assert CONFIG_SLATE in edit.styleSheet()
+assert CONFIG_GREEN in edit.styleSheet()
 
 edit.set_field_state(editable=True, binding="scan", number=1)
 assert edit.isReadOnly() and edit.dot.isChecked()
@@ -854,4 +854,118 @@ assert tall.verticalScrollBar().maximum() > 0
 panes.close()
 app.processEvents()
 """
+    )
+
+
+def test_collapsing_the_left_panels_hands_the_width_to_the_periods() -> None:
+    """A QScrollArea does not shrink-wrap.
+
+    ``AdjustToContents`` computes the area's hint once and caches it, and
+    hiding the widget's children does not clear that cache -- so Collapse hid
+    two panels and the pane stayed its old width, leaving the freed space
+    blank between the stub and period cards that never moved.
+    """
+
+    _run_qt(
+        _schedule_source()
+        + r'''
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.pulse import PulseScheduleView
+
+app = ensure_qt_app(["pulse-collapse-width"])
+view = PulseScheduleView()
+view.set_schedule(vm)
+view.resize(900, 600); view.show()
+for _ in range(40):
+    app.processEvents()
+
+open_width = view.left_scroll.width()
+assert open_width == view.left_body.sizeHint().width(), (
+    "the pane is not the width of the panels it holds"
+)
+open_timeline = view.timeline_scroll.width()
+
+view.collapse_button.click()
+for _ in range(40):
+    app.processEvents()
+
+collapsed_width = view.left_scroll.width()
+assert collapsed_width == view.left_body.sizeHint().width(), (
+    f"the pane kept {collapsed_width} px for panels that want "
+    f"{view.left_body.sizeHint().width()}"
+)
+assert collapsed_width < open_width, "Collapse freed no width at all"
+assert view.timeline_scroll.width() > open_timeline, (
+    "the freed width went nowhere: the periods are no wider than before"
+)
+
+view.collapse_button.click()
+for _ in range(40):
+    app.processEvents()
+assert view.left_scroll.width() == open_width, "Show Left did not give it back"
+
+view.close()
+app.processEvents()
+'''
+    )
+
+
+def test_the_bottom_bar_is_one_table_of_rows_across_three_cards() -> None:
+    """Row two of Control is read beside row two of Connection and Ports.
+
+    They were three private rhythms -- two row heights and two gaps -- so the
+    fourth row of Control sat six pixels below the boxes beside it.
+    """
+
+    _run_qt(
+        r'''
+from PyQt5 import QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.pulse import PulseScheduleView
+
+app = ensure_qt_app(["pulse-bottom-bar"])
+view = PulseScheduleView()
+view.resize(1100, 700); view.show()
+for _ in range(40):
+    app.processEvents()
+
+cards = {}
+for box in view.button_frame.findChildren(QtWidgets.QGroupBox):
+    cards[box.title()] = box
+assert set(cards) == {"Control", "Connection", "Ports"}, sorted(cards)
+
+def rows(card):
+    """The top of every row this card lays out, in the window's frame."""
+
+    found = []
+    for item in (card.layout().itemAt(i) for i in range(card.layout().count())):
+        if item.widget() is not None:
+            found.append(item.widget().mapTo(view, item.widget().rect().topLeft()).y())
+        elif item.layout() is not None:
+            inner = item.layout()
+            if isinstance(inner, QtWidgets.QGridLayout):
+                for row in range(inner.rowCount()):
+                    cell = inner.itemAtPosition(row, 0)
+                    if cell is not None and cell.widget() is not None:
+                        widget = cell.widget()
+                        found.append(widget.mapTo(view, widget.rect().topLeft()).y())
+            else:
+                first = inner.itemAt(0)
+                if first is not None and first.widget() is not None:
+                    widget = first.widget()
+                    found.append(widget.mapTo(view, widget.rect().topLeft()).y())
+    return found
+
+tops = {name: rows(card) for name, card in cards.items()}
+shortest = min(len(value) for value in tops.values())
+assert shortest >= 3, tops
+for index in range(shortest):
+    values = {name: value[index] for name, value in tops.items()}
+    assert len(set(values.values())) == 1, (
+        f"row {index + 1} is at different heights across the bar: {values}"
+    )
+
+view.close()
+app.processEvents()
+'''
     )

@@ -1091,7 +1091,8 @@ class PulseScheduleView(QtWidgets.QWidget):
             QtWidgets.QSizePolicy.Maximum,
             QtWidgets.QSizePolicy.Expanding,
         )
-        left_body = QtWidgets.QWidget()
+        self.left_body = QtWidgets.QWidget()
+        left_body = self.left_body
         left = QtWidgets.QHBoxLayout(left_body)
         left.setSizeConstraint(QtWidgets.QLayout.SetMinimumSize)
         left.setContentsMargins(0, 0, 0, 0)
@@ -1136,6 +1137,7 @@ class PulseScheduleView(QtWidgets.QWidget):
 
         self.left_scroll.setWidget(left_body)
         dataset_frame.add_pane(self.left_scroll)
+        self._settle_left_pane_width()
 
         self.timeline_scroll = FluentScrollArea()
         self.timeline_scroll.setWidgetResizable(False)
@@ -1164,14 +1166,23 @@ class PulseScheduleView(QtWidgets.QWidget):
         bar = QtWidgets.QHBoxLayout(self.button_frame)
         bar.setContentsMargins(gutter, gutter + px(2), gutter, gutter)
         bar.setSpacing(px(10, minimum=8))
+        # The bar is ONE table of rows read across three cards: row 2 of
+        # Control sits beside row 2 of Connection and row 2 of Ports.  So the
+        # row height, the gap between rows and the top inset are single
+        # numbers here rather than three cards' private choices -- they were
+        # three, and by the fourth row Control had drifted six pixels below
+        # the boxes it is read against.
         control_height = px(30, minimum=26)
+        bar_gap = px(6, minimum=4)
+        card_margins = (px(8), px(2), px(8), px(6))
         control_area = FluentGroupBox("Control")
         control_layout = QtWidgets.QVBoxLayout(control_area)
-        control_layout.setContentsMargins(px(8), px(2), px(8), px(6))
-        control_layout.setSpacing(px(4, minimum=3))
+        control_layout.setContentsMargins(*card_margins)
+        control_layout.setSpacing(bar_gap)
         controls = QtWidgets.QGridLayout()
         controls.setContentsMargins(0, 0, 0, 0)
-        controls.setSpacing(px(6, minimum=4))
+        controls.setHorizontalSpacing(bar_gap)
+        controls.setVerticalSpacing(bar_gap)
         self.run_button = FluentButton("On Pulse*", color=GREEN)
         self.stop_button = FluentButton("Stop Pulse", color=RED)
         self.sync_button = FluentButton("Sync", color=ORANGE)
@@ -1209,7 +1220,6 @@ class PulseScheduleView(QtWidgets.QWidget):
             controls.addWidget(button, index // 3, index % 3)
         for column in range(3):
             controls.setColumnStretch(column, 1)
-        control_layout.addStretch(1)
         control_layout.addLayout(controls)
         control_layout.addStretch(1)
         bar.addWidget(control_area, 1)
@@ -1217,8 +1227,8 @@ class PulseScheduleView(QtWidgets.QWidget):
         connection_area = FluentGroupBox("Connection")
         connection_area.setFixedWidth(px(252, minimum=212))
         connection_layout = QtWidgets.QVBoxLayout(connection_area)
-        connection_layout.setContentsMargins(px(8), px(2), px(8), px(6))
-        connection_layout.setSpacing(px(4, minimum=3))
+        connection_layout.setContentsMargins(*card_margins)
+        connection_layout.setSpacing(bar_gap)
         self.connection_combo = FluentComboBox()
         self.connection_combo.setFixedHeight(control_height)
         # The presenter projects the complete endpoint value before the window
@@ -1235,17 +1245,17 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.connection_button.setFixedHeight(control_height)
         self.connection_status = FluentLineEdit("")
         self.connection_status.setEnabled(False)
-        self.connection_status.setFixedHeight(row_height())
+        self.connection_status.setFixedHeight(control_height)
         # Which calibrated set the board is filling config parameters from.
         # It belongs here rather than beside the pulse's own fields: it is a
         # fact about the board, and it outlives whatever pulse is open.
         self.config_source_line = FluentLineEdit("")
         self.config_source_line.setEnabled(False)
-        self.config_source_line.setFixedHeight(row_height())
+        self.config_source_line.setFixedHeight(control_height)
         connection_layout.addWidget(self.connection_combo)
         connection_row = QtWidgets.QHBoxLayout()
         connection_row.setContentsMargins(0, 0, 0, 0)
-        connection_row.setSpacing(px(6, minimum=4))
+        connection_row.setSpacing(bar_gap)
         connection_row.addWidget(self.connection_endpoint, 1)
         connection_row.addWidget(self.connection_button)
         connection_layout.addLayout(connection_row)
@@ -1257,8 +1267,8 @@ class PulseScheduleView(QtWidgets.QWidget):
         ports_area = FluentGroupBox("Ports")
         ports_area.setFixedWidth(px(286, minimum=246))
         ports_layout = QtWidgets.QVBoxLayout(ports_area)
-        ports_layout.setContentsMargins(px(8), px(2), px(8), px(6))
-        ports_layout.setSpacing(px(4, minimum=3))
+        ports_layout.setContentsMargins(*card_margins)
+        ports_layout.setSpacing(bar_gap)
         self.hidden_port_combo = FluentComboBox()
         self.hidden_port_combo.setFixedHeight(control_height)
         self.add_port_button = FluentButton("Add", color=ACCENT)
@@ -1268,11 +1278,11 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.visible_label.setEnabled(False)
         for button in (self.add_port_button, self.hide_off_button, self.show_all_button):
             button.setFixedHeight(control_height)
-        self.visible_label.setFixedHeight(row_height())
+        self.visible_label.setFixedHeight(control_height)
         ports_layout.addWidget(self.hidden_port_combo)
         ports_row = QtWidgets.QHBoxLayout()
         ports_row.setContentsMargins(0, 0, 0, 0)
-        ports_row.setSpacing(px(6, minimum=4))
+        ports_row.setSpacing(bar_gap)
         for button in (self.add_port_button, self.hide_off_button, self.show_all_button):
             button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
             ports_row.addWidget(button, 1)
@@ -1452,6 +1462,10 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.bracket_button.setText(
             "Del Bracket" if vm.bracket is not None else "Add Bracket"
         )
+        # A renamed port or a different set of delay rows changes how wide the
+        # operator columns want to be, and the pane's cached hint is just as
+        # stale for that as it is for Collapse.
+        self._settle_left_pane_width()
 
     def _connect_card(self, card: PeriodCard) -> None:
         card.period_name_committed.connect(self.period_name_committed)
@@ -1748,12 +1762,37 @@ class PulseScheduleView(QtWidgets.QWidget):
         if self._schedule is not None:
             self.visible_ports_committed.emit(tuple(port.key for port in self._schedule.ports))
 
+    def _settle_left_pane_width(self) -> None:
+        """The operator columns are exactly as wide as the columns showing.
+
+        A QScrollArea does NOT shrink-wrap.  ``AdjustToContents`` computes the
+        area's size hint once and caches it, and neither hiding the widget's
+        children, nor a LayoutRequest, nor re-setting ``widgetResizable``
+        clears that cache -- so Collapse hid two 380 px panels and the pane
+        stayed 466 px wide, leaving the freed space blank between an 82 px
+        stub and period cards that never moved.  Collapse bought nothing.
+
+        The width is not the scroll area's to remember: it is the width of the
+        panels inside it.  Capping rather than fixing keeps the pane able to
+        yield when the window is too narrow for both panes, which is the one
+        case where the timeline needs the space more.
+        """
+
+        layout = self.left_body.layout()
+        if layout is not None:
+            # Hidden children invalidate the layout; the hint is only current
+            # once it has been recomputed, and this is read in the same turn
+            # as the change that caused it.
+            layout.activate()
+        self.left_scroll.setMaximumWidth(self.left_body.sizeHint().width())
+
     def _toggle_left_panels(self) -> None:
         visible = self.names_panel_holder.isVisible()
         self.names_panel_holder.setVisible(not visible)
         self.channel_panel_holder.setVisible(not visible)
         self.left_panel_stub_holder.setVisible(visible)
         self.collapse_button.setText("Show Left" if visible else "Collapse")
+        self._settle_left_pane_width()
         self.left_panels_collapsed.emit(visible)
 
     def _show_left_panels(self) -> None:
@@ -1761,6 +1800,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.channel_panel_holder.show()
         self.left_panel_stub_holder.hide()
         self.collapse_button.setText("Collapse")
+        self._settle_left_pane_width()
         self.left_panels_collapsed.emit(False)
 
 
