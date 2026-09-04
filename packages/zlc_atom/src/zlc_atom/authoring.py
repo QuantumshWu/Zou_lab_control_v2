@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 import re
 from typing import Any, Callable, Mapping
@@ -131,9 +131,21 @@ class TunableField:
             raise ValueError(
                 "tunable dependency_group must uniquely include its own field"
             )
-        current = AuthoringSchema((self.metadata,)).project_values(
-            {self.metadata.name: self.current}
-        )[self.metadata.name]
+        # A READING IS NOT AN INPUT.  The window says what may be
+        # commanded -- ``tune`` and every draft projection still refuse
+        # outside it -- while ``current`` is what the device answered, and
+        # a device idling outside bench policy is exactly the state its
+        # operator has to be shown.  Judging the reading by the window
+        # made that state unreportable: the field refused its own device,
+        # so a driver's only way to open at all was to move the knob.  The
+        # reading is still projected for TYPE, which is what makes it the
+        # same kind of value the field speaks in.
+        reading = replace(
+            self.metadata, default=None, minimum=None, maximum=None
+        )
+        current = AuthoringSchema((reading,)).project_values(
+            {reading.name: self.current}
+        )[reading.name]
         object.__setattr__(self, "current", current)
         object.__setattr__(self, "dependency_group", group)
 
