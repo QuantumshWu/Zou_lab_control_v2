@@ -1064,7 +1064,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             # every axis.
             inputs = (
                 spec,
-                snapshot_generation(data) if isinstance(data, OwnedSnapshot) else None,
+                self._projection.data_generation,
                 self._defaults.layout,
             )
             memo = self._semantics_memo
@@ -1151,11 +1151,14 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
 
     @property
     def data_generation(self) -> str | None:
-        """Dataset generation behind the current frame, if the kind uses one."""
+        """Dataset generation behind the current frame, if the kind uses one.
+
+        Asked of the projection, which owns the data: two places deciding what
+        "no generation" means is how one of them came to refuse it.
+        """
 
         with self._lock:
-            data = self._projection.data
-            return snapshot_generation(data) if isinstance(data, OwnedSnapshot) else None
+            return self._projection.data_generation
 
     @property
     def revisions(self) -> SessionRevisions:

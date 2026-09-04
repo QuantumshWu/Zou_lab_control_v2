@@ -22,10 +22,13 @@ about, exactly as the frames it was derived from are: the frames sit on
 the point axis of the occupancy signal, and their pairs sit on the point
 axis here, so the panel structure reads ``(cycles) x (pairs) x (sites)``
 and a grid gives each pair its own cell without anyone naming an axis.
-Each pair's value is the later frame's occupancy as a float and its
-validity is that pair's OWN denominator: the earlier frame loaded AND
-both frames judgeable.  A panel's MEAN projection is therefore exactly
-the pooled survival fraction -- every loaded site is one Bernoulli trial,
+Each pair's value is the later frame's VERDICT -- the same boolean the
+occupancy it came from published -- and its validity is that pair's OWN
+denominator: the earlier frame loaded AND both frames judgeable.  The
+verdict and the denominator are two facts and they are kept apart: a
+float carrying NaN where the denominator already said "no trial" states
+the same thing twice, in eight bytes per bit.  A panel's MEAN projection
+is therefore exactly the pooled survival fraction -- every loaded site is one Bernoulli trial,
 and a shot that loaded three atoms says less than one that loaded thirty.
 The SITE axis is kept: a trap that never keeps its atom is a fact about
 that trap, and averaging it away is how you never find out.
@@ -163,7 +166,7 @@ class FrameSurvivalProcessor:
             DomainSpec((site_axis.size,), (site_axis,)),
             ValueSchema(
                 ValidityContract.components(site_axis.axis_id),
-                np.dtype("<f8"),
+                np.dtype("?"),
                 "1",
             ),
         )
@@ -177,7 +180,7 @@ class FrameSurvivalProcessor:
         values = np.asarray(occupied.block.values, dtype=bool)
         valid = np.asarray(occupied.expanded_validity(), dtype=bool)
         cycles, _frames, sites = values.shape
-        survival = np.full((cycles, len(pairs), sites), np.nan, dtype="<f8")
+        survival = np.zeros((cycles, len(pairs), sites), dtype=bool)
         eligible = np.zeros((cycles, len(pairs), sites), dtype=bool)
         for entry, (condition, value) in enumerate(pairs):
             # Eligible = the earlier frame saw the site loaded AND both
@@ -189,9 +192,10 @@ class FrameSurvivalProcessor:
                 & valid[:, value, :]
             )
             eligible[:, entry, :] = entry_eligible
-            survival[:, entry, :] = np.where(
-                entry_eligible, values[:, value, :].astype("<f8"), np.nan
-            )
+            # False outside the denominator, exactly as the occupancy this
+            # reads publishes its own verdicts: the value of a cell that
+            # ran no trial is not a value, and validity is what says so.
+            survival[:, entry, :] = entry_eligible & values[:, value, :]
         return owned_snapshot_from_arrays(
             self._output_schema(schema),
             survival,

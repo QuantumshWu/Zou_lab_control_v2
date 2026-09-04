@@ -721,6 +721,11 @@ class ExperimentGuiFlow:
                 "desired": desired.get(name, current.get(name)),
                 "editable": editable,
                 "live_apply": bool(live_values.get(name, False)),
+                # CAPABILITY and PERMISSION are two facts.  Collapsed into one
+                # the view could not tell "not allowed just now" from "this
+                # field has no live write at all", so a window limit that can
+                # never be applied live still drew a switch to not press.
+                "live_capable": bool(tunable.live_write),
                 "live_enabled": editable and tunable.live_write,
                 "apply_enabled": (
                     editable

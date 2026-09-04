@@ -4631,9 +4631,9 @@ class LinkedScrollPanes(QtWidgets.QWidget):
         self._panes: list[QtWidgets.QAbstractScrollArea] = []
         self._moving = False
         self._equalising = False
-        #: What each pane's viewport was padded by to make its reach match the
-        #: group's, keyed by the pane itself.
-        self._padding: dict[int, int] = {}
+        #: What each pane's viewport was shortened by to match the group's,
+        #: parallel to ``_panes``.
+        self._padding: list[int] = []
         self._bar = QtWidgets.QScrollBar(QtCore.Qt.Vertical, self)
         self._bar.setStyleSheet(fluent_scrollbar_stylesheet("QScrollBar"))
         self._bar.setFixedWidth(fluent_scrollbar_thickness())
@@ -4658,6 +4658,7 @@ class LinkedScrollPanes(QtWidgets.QWidget):
         # by pointing at the timeline, which is most of the surface.
         pane.viewport().installEventFilter(self)
         self._panes.append(pane)
+        self._padding.append(0)
         # Keep the shared bar last so it sits against the group's right edge.
         self._row.insertWidget(self._row.count() - 1, pane, stretch)
         self._reconcile_bar()
@@ -4676,38 +4677,51 @@ class LinkedScrollPanes(QtWidgets.QWidget):
         return max(bars, key=lambda bar: bar.maximum(), default=None)
 
     def _equalise_reach(self) -> None:
-        """Give every pane the same reachable range, so one value means one row.
+        """Give every pane the same VIEWPORT, so one value means one row.
 
-        A pane's maximum is its content height less its VIEWPORT height, and
-        the viewports in a group are not the same height: a wide timeline gives
-        a strip up to its own horizontal scrollbar and the name column beside
-        it does not, and one column's content can end sooner than its
-        neighbour's.  Driving every pane to one value then parts them exactly
-        at the bottom -- Qt clamps the shallower pane at ITS maximum, so the
-        rows line up the whole way down and step out of line on the last
-        screenful.
+        A pane's maximum is its content height less its viewport height, and
+        the viewports in a group are not the same: a wide timeline gives a
+        strip up to its own horizontal scrollbar and the name column beside it
+        does not.  Driving every pane to one value then parts them exactly at
+        the bottom -- Qt clamps the shallower pane at ITS maximum, so the rows
+        line up the whole way down and step out of line on the last screenful.
 
-        Padding each viewport by what it lacks makes the group bottom out
-        together, whichever of those two reasons it was: the pane that runs out
-        first simply shows blank where its neighbour still has rows, which is
-        what "these columns are one surface" has to mean at the end of it.
+        Equalising the viewports removes the difference at its source, and it
+        is the only quantity here it is safe to equalise.  ``maximum`` is
+        CLAMPED AT ZERO, so a pane that already fits cannot report how much it
+        fits by; recovering its natural reach by subtracting back the padding
+        we gave it is therefore only true of a pane that overflows, and for one
+        that does not the clamp hides the padding and the correction counts it
+        again every round -- 8, 45, 111, 206, ... until the viewport is gone
+        and the column is blank.  Nor is a shorter viewport reach: shrinking
+        the window onto a short pane does raise its maximum, but it does so by
+        hiding the rows it was supposed to keep in step.
+
+        So the viewports are levelled DOWN to the shallowest, which every pane
+        can give, and the padding is bounded by the difference it was measured
+        from.  A pane whose content ends sooner than its neighbour's still
+        stops sooner; that is a fact about its content, not something a margin
+        can or should fix.
         """
 
-        if self._equalising or not self._panes:
+        if self._equalising or len(self._panes) < 2:
             return
+        natural = [
+            pane.viewport().height() + padding
+            for pane, padding in zip(self._panes, self._padding)
+        ]
+        # Nothing to level before the group has been laid out: a viewport with
+        # no height yet is not a measurement of anything.
+        if any(height <= 0 for height in natural):
+            return
+        target = min(natural)
         self._equalising = True
         try:
-            # The reach a pane would have with no padding of ours.
-            natural = [
-                pane.verticalScrollBar().maximum() - self._padding.get(id(pane), 0)
-                for pane in self._panes
-            ]
-            target = max(natural)
-            for pane, reach in zip(self._panes, natural):
-                wanted = max(0, target - reach)
-                if self._padding.get(id(pane), 0) == wanted:
+            for index, (pane, height) in enumerate(zip(self._panes, natural)):
+                wanted = height - target
+                if self._padding[index] == wanted:
                     continue
-                self._padding[id(pane)] = wanted
+                self._padding[index] = wanted
                 margins = pane.viewportMargins()
                 pane.setViewportMargins(
                     margins.left(), margins.top(), margins.right(), wanted

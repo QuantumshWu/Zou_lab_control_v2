@@ -314,7 +314,29 @@ assert control._view.owner_label.text() == 'Owner: Camera Measurement'
 assert 'operator risk acceptance' in control._view.reason_label.text()
 assert control._view.current_heading.text() == 'Current'
 assert control._view.desired_heading.text() == 'Desired'
-assert control._view.live_heading.text() == 'Live apply'
+assert control._view.live_heading.text() == 'Live'
+# The headings and the rows are two layouts pretending to be one table, so
+# every column must be at the same x and the same width in both -- Field,
+# Current and Desired were kept in step by hand while Live, Apply and Status
+# were given round numbers no widget had a reason to match.
+control._window.resize(1000, 400)
+control._window.show()
+for _ in range(4):
+    app.processEvents()
+control._view._align_headings()
+app.processEvents()
+row = next(iter(control._view.form._rows.values()))
+cells = [row.layout().itemAt(i).widget() for i in range(row.layout().count())]
+headings = [
+    control._view.field_heading, control._view.current_heading,
+    control._view.desired_heading, control._view.live_heading,
+    control._view.apply_heading, control._view.status_heading,
+]
+assert len(cells) == len(headings), (len(cells), len(headings))
+for heading, cell in zip(headings, cells):
+    assert (heading.x(), heading.width()) == (cell.x(), cell.width()), (
+        heading.text(), heading.x(), heading.width(), cell.x(), cell.width()
+    )
 control._view.refresh_button.click()
 assert refresh_events == [True]
 QtTest.QTest.mouseClick(control._view.risk_switch, QtCore.Qt.LeftButton)
