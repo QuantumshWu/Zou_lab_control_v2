@@ -5,16 +5,21 @@ is written against a three-verb link so the transport is the ONLY thing a
 test or a virtual bench has to stand in for -- the SCPI vocabulary, the
 read-back discipline and the bound checks are all exercised as shipped.
 
-Frequency is written and read in hertz; power in dBm (the channel's
-amplitude unit is pinned to DBM once at open, so a front-panel change
-cannot silently re-interpret every later write).  ``tune`` returns what the
-instrument reports back, never what was asked -- the scan executor refuses
-any difference, which is how a mistyped bound or a loading-dependent
-amplitude shows up as a named error instead of a wrong dataset column.
+Frequency is written and read in hertz; power in dBm.  The channel's
+amplitude UNIT belongs to the instrument, not to this driver: connecting
+changes nothing, so every read and write asks which unit the channel is
+in and speaks it.  A channel already in dBm costs one extra query and
+nothing else; a channel in volts is converted through its own output
+load, and a channel in volts into a high-Z load -- where delivered power
+is not defined -- is a named refusal rather than a number.  ``tune``
+returns what the instrument reports back, never what was asked, which is
+how a mistyped bound or a loading-dependent amplitude shows up as a named
+error instead of a wrong dataset column.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -122,6 +127,14 @@ class RigolDg4000Config:
 #: ch1 -> :SOURce1/:OUTPut1.  The channel NAMES are field-name prefixes
 #: (ch1_frequency_hz), the numbers are SCPI's.
 _CHANNELS = ("ch1", "ch2")
+#: The three amplitude units a DG4000 channel can be displaying.
+_DBM = "DBM"
+_VRMS = "VRMS"
+_VPP = "VPP"
+#: One milliwatt, the reference the "dB" in dBm is measured from.
+_MILLIWATT = 1e-3
+#: The instrument spells high-Z as this out-of-range ohm count.
+_HIGH_Z_OHMS = 1e6
 
 #: Resource classes the probe will open.  VISA also lists ASRL serial ports,
 #: and on this bench one of them is the pulse streamer's 3 Mbaud UART: opening
@@ -245,10 +258,6 @@ class RigolDg4000RfSource(RfSourceBase):
         identity = self._link.query("*IDN?").strip()
         if not identity:
             raise RuntimeError("the instrument answered *IDN? with nothing")
-        # Pin the amplitude unit once, per channel: every later write and
-        # read of power means dBm, whatever the front panel was showing.
-        for channel in _CHANNELS:
-            self._link.write(f"{self._source(channel)}:VOLTage:UNIT DBM")
         super().__init__(
             identity=identity,
             channels=_CHANNELS,
@@ -272,7 +281,13 @@ class RigolDg4000RfSource(RfSourceBase):
         return self._read_frequency(channel)
 
     def _write_power(self, channel: str, value_dbm: float) -> float:
-        self._link.write(f"{self._source(channel)}:VOLTage {value_dbm:.4f}")
+        unit = self._amplitude_unit(channel)
+        amplitude = (
+            value_dbm
+            if unit == _DBM
+            else self._volts_from_dbm(channel, value_dbm, unit)
+        )
+        self._link.write(f"{self._source(channel)}:VOLTage {amplitude:.6f}")
         return self._read_power(channel)
 
     def _write_output(self, channel: str, enabled: bool) -> bool:
@@ -285,7 +300,76 @@ class RigolDg4000RfSource(RfSourceBase):
         return float(self._link.query(f"{self._source(channel)}:FREQuency?"))
 
     def _read_power(self, channel: str) -> float:
-        return float(self._link.query(f"{self._source(channel)}:VOLTage?"))
+        unit = self._amplitude_unit(channel)
+        amplitude = float(self._link.query(f"{self._source(channel)}:VOLTage?"))
+        if unit == _DBM:
+            return amplitude
+        return self._dbm_from_volts(channel, amplitude, unit)
+
+    # ---------------------------------------------- the channel's own units
+    def _amplitude_unit(self, channel: str) -> str:
+        """Which unit this channel is displaying its amplitude in.
+
+        Asked every time rather than pinned once: the unit is a setting of
+        the instrument, and an operator turning the front-panel knob is
+        entitled to have it stay turned.
+        """
+
+        answer = self._link.query(
+            f"{self._source(channel)}:VOLTage:UNIT?"
+        ).strip().upper()
+        for unit in (_DBM, _VRMS, _VPP):
+            if answer.startswith(unit):
+                return unit
+        raise RuntimeError(
+            f"channel {channel} answered its amplitude unit as {answer!r}, "
+            f"which is none of {_DBM}, {_VRMS} or {_VPP}"
+        )
+
+    def _load_ohms(self, channel: str) -> float:
+        """The load this channel is set to drive, in ohms (inf for high-Z)."""
+
+        answer = self._link.query(
+            f"{self._output(channel)}:IMPedance?"
+        ).strip().upper()
+        if answer.startswith("INF"):
+            return math.inf
+        ohms = float(answer)
+        # The instrument spells high-Z as its own out-of-range number.
+        if not math.isfinite(ohms) or ohms >= _HIGH_Z_OHMS:
+            return math.inf
+        if ohms <= 0.0:
+            raise RuntimeError(
+                f"channel {channel} reports a load of {ohms!r} ohms"
+            )
+        return ohms
+
+    def _delivering_load(self, channel: str, unit: str) -> float:
+        load = self._load_ohms(channel)
+        if math.isinf(load):
+            raise RuntimeError(
+                f"channel {channel} states its amplitude in {unit} into a "
+                "high-Z load, where delivered power is not defined; set the "
+                "channel's output load, or its amplitude unit to dBm"
+            )
+        return load
+
+    def _dbm_from_volts(self, channel: str, amplitude: float, unit: str) -> float:
+        load = self._delivering_load(channel, unit)
+        rms = amplitude if unit == _VRMS else amplitude / (2.0 * math.sqrt(2.0))
+        watts = rms * rms / load
+        if watts <= 0.0:
+            raise RuntimeError(
+                f"channel {channel} reports an amplitude of {amplitude!r} "
+                f"{unit}, which delivers no power to state in dBm"
+            )
+        return 10.0 * math.log10(watts / _MILLIWATT)
+
+    def _volts_from_dbm(self, channel: str, value_dbm: float, unit: str) -> float:
+        load = self._delivering_load(channel, unit)
+        watts = _MILLIWATT * 10.0 ** (value_dbm / 10.0)
+        rms = math.sqrt(watts * load)
+        return rms if unit == _VRMS else rms * 2.0 * math.sqrt(2.0)
 
     def _read_output(self, channel: str) -> bool:
         answer = self._link.query(f"{self._output(channel)}?").strip().upper()
