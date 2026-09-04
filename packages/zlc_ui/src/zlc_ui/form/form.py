@@ -15,6 +15,8 @@ import math
 import re
 from typing import Literal, TypeAlias
 
+from zlc_data.units import resolve_unit
+
 
 FormFieldKind: TypeAlias = Literal[
     "text",
@@ -173,6 +175,12 @@ class FormFieldProps:
     def __post_init__(self) -> None:
         if not isinstance(self.key, str) or not self.key.strip():
             raise ValueError("form field key must be a non-empty string")
+        if self.unit:
+            # A field states what its number is in, and the statement has to
+            # be true HERE: a widget cannot refuse a bad unit later without
+            # raising inside a Qt slot, which ends the process rather than
+            # the edit.  "" stays legal and means a bare number.
+            resolve_unit(self.unit)
         if self.key != self.key.strip():
             raise ValueError("form field key cannot have surrounding whitespace")
         if self.kind not in _FORM_FIELD_KINDS:

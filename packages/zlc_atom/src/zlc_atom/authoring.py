@@ -7,6 +7,8 @@ import math
 import re
 from typing import Any, Callable, Mapping
 
+from zlc_data.units import resolve_unit
+
 
 def _typed_equal(left: object, right: object) -> bool:
     return type(left) is type(right) and bool(left == right)
@@ -52,10 +54,16 @@ class AuthoringField:
     def __post_init__(self) -> None:
         if not self.name or not self.value_type or not self.label:
             raise ValueError("authoring fields require name, value_type, and label")
-        if self.unit is not None and (
-            not isinstance(self.unit, str) or not self.unit.strip()
-        ):
-            raise ValueError("authoring field unit must be non-empty text or None")
+        if self.unit is not None:
+            if not isinstance(self.unit, str) or not self.unit.strip():
+                raise ValueError("authoring field unit must be non-empty text or None")
+            # HERE, where it is written, and not where it is first drawn.  A
+            # unit nobody had registered used to travel all the way to the
+            # plot before anything noticed: rf.rigol_dg4000 declared dBm, the
+            # plot contract had never heard of it, and the first scan of a
+            # signal generator's power died with "unknown unit 'dBm'" on a
+            # panel, hours from the line that wrote it.
+            resolve_unit(self.unit.strip())
         if self.enabled_when is not None:
             controller, values = self.enabled_when
             if not str(controller).strip():
