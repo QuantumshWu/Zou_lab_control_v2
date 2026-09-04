@@ -162,6 +162,11 @@ def _project_field(field: AuthoringField) -> FormFieldProps:
         label=field.label,
         default=display_value(field.default),
         required=bool(field.required),
+        # The unit the OWNER declared, carried the one hop it was being
+        # dropped on.  The widget already formats and parses through the
+        # unit system, so a hertz field that arrived here without its unit
+        # is why a device control read 6834700000.0 instead of 6.8347 GHz.
+        unit=field.unit or "",
         # A defaultless numeric STARTS vacant in a draft, required or not:
         # the widget must be able to hold that vacancy, because completeness
         # is Init's law, not the editor's.  (Text kinds hold "" natively.)
