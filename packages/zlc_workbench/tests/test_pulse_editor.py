@@ -86,7 +86,8 @@ class _ScheduleView:
         "insert_period_requested",
         "move_period_requested",
         "remove_period_requested",
-        "repeat_committed",
+        "bracket_committed",
+        "run_repeats_committed",
         "visible_ports_committed",
         "clear_port_requested",
         "binding_cycle_requested",
@@ -355,7 +356,8 @@ class _EditorView:
         "period_name_committed", "duration_committed", "digital_committed",
         "analog_committed", "delay_committed", "binding_cycle_requested",
         "insert_period_requested", "move_period_requested",
-        "remove_period_requested", "repeat_committed",
+        "remove_period_requested", "bracket_committed",
+        "run_repeats_committed",
         "visible_ports_committed", "clear_port_requested",
         "feedback_requested", "connection_requested", "fire_requested",
         "stop_requested", "sync_requested", "save_requested", "load_requested",
@@ -743,7 +745,7 @@ def test_clear_all_makes_one_safe_blank_without_moving_the_file_baseline(
     assert all(value == 0 for value in blank.periods[0].states)
     assert blank.periods[0].analog_steps == ()
     assert blank.slots == blank.api_parameters == blank.delays == ()
-    assert blank.repeat is None
+    assert blank.bracket is None
     assert presenter._state.scan_source == ""
     assert presenter._state.scan_rows == ()
     assert presenter._state.scan_source_dirty is False
@@ -801,7 +803,7 @@ def test_a_timeline_can_be_drawn_for_a_pulse_with_nothing_high(sequence) -> None
             for period in sequence.periods
         ),
         slots=(),
-        repeat=None,
+        bracket=None,
     )
     data = timeline_of(quiet)
     assert data.channels and not data.blocks
@@ -842,6 +844,8 @@ class _AppliedEcho:
     program: object
     source: object
     rows: tuple
+    run_repeats: int = 1
+    scan_repeats: int = 1
 
 
 class _Sequencer:
@@ -866,7 +870,8 @@ class _Sequencer:
         self.never_done = never_done
         self._digest = ""
         self._firing = False
-        self._cycles: int | None = 1
+        self._run_repeats = 1
+        self._scan_repeats = 1
         self._applied = None
         self.wait_timeouts: list[object] = []
         self.scan_rows: tuple[tuple[int, ...], ...] = ()
@@ -889,12 +894,20 @@ class _Sequencer:
         # back; a double that forgets it answers "nothing applied" forever.
         self._applied = _AppliedEcho(prog, source, self.scan_rows)
 
-    def fire(self, *, cycles: int | None = 1) -> None:
-        self.events.append("fire forever" if cycles is None else "fire")
+    def fire(self, *, run_repeats: int, scan_repeats: int = 1) -> None:
+        self.events.append(
+            "fire forever" if run_repeats == 0 or scan_repeats == 0 else "fire"
+        )
         if self.fail_on_fire:
             raise RuntimeError("board refused the shot")
         self._firing = True
-        self._cycles = cycles
+        self._run_repeats = int(run_repeats)
+        self._scan_repeats = int(scan_repeats)
+        self._applied = replace(
+            self._applied,
+            run_repeats=self._run_repeats,
+            scan_repeats=self._scan_repeats,
+        )
 
     def wait_done(self, timeout=None) -> object | None:
         self.events.append("wait_done")
@@ -915,7 +928,8 @@ class _Sequencer:
             "opened": True,
             "loaded": bool(self._digest),
             "firing": self._firing,
-            "cycles": self._cycles,
+            "run_repeats": self._run_repeats,
+            "scan_repeats": self._scan_repeats,
             "applied_digest": self._digest,
         }
 
@@ -986,13 +1000,13 @@ def test_a_finite_run_is_asked_for_explicitly(sequence) -> None:
     device_use = DeviceUseCoordinator()
     presenter = PulseEditorPresenter(
         view,
-        sequence,
+        replace_sequence(sequence, run_repeats=1),
         sequencer=board,
         device_use=device_use,
     )
     board.events.clear()
     try:
-        assert presenter.fire(cycles=1) is True
+        assert presenter.fire() is True
         assert board.events == ["load", "fire"]
         # Started, not finished: nothing waits for the board any more, so a run
         # that was just asked for is a run that is going.
@@ -1056,9 +1070,13 @@ def test_a_finite_run_does_not_block_on_the_board(sequence) -> None:
 
     view = _EditorView()
     board = _Sequencer(never_done=True)
-    presenter = PulseEditorPresenter(view, sequence, sequencer=board)
+    presenter = PulseEditorPresenter(
+        view,
+        replace_sequence(sequence, run_repeats=1),
+        sequencer=board,
+    )
     try:
-        assert presenter.fire(cycles=1) is True
+        assert presenter.fire() is True
         assert "wait_done" not in board.events, "the GUI thread waited on the board"
         assert board.events.count("fire") == 1
         assert not view.warnings, repr(view.warnings)
@@ -1313,7 +1331,7 @@ def test_an_injected_sequencer_is_not_closed_by_the_editor(sequence) -> None:
         presenter.connect_to("given", "")
     presenter.cycle_binding("duration", sequence.periods[0].period_id, None)
     assert presenter.compile().scan_coeff_frac_bits == 3
-    assert presenter.fire(cycles=None) is True
+    assert presenter.fire() is True
     presenter.close()
     assert board.closed is False
     assert board.events[-1] == "safe"
@@ -1328,7 +1346,7 @@ def test_an_injected_sequencer_is_not_closed_by_the_editor(sequence) -> None:
         sequencer=refusing,
         device_use=retained_use,
     )
-    assert retained.fire(cycles=None) is True
+    assert retained.fire() is True
     with pytest.raises(RuntimeError, match="could not release"):
         retained.close()
     with pytest.raises(RuntimeError, match="PulseGUI"):
@@ -1814,6 +1832,7 @@ def test_open_decodes_the_whole_state_before_replacing_any_of_it(sequence, tmp_p
             {"scan_use_loaded": True},
             {"scan_source_dirty": "false"},
             {"scan_repeats": 1.5},
+            {"scan_repeats": 1 << 32},
             {"scan_rows": ["not a row"]},
             {"visible_ports": "d0"},
         ):
@@ -2691,56 +2710,47 @@ def test_hide_off_keeps_what_the_pulse_drives_and_show_all_brings_it_back(sequen
 def test_a_bracket_repeats_at_least_twice_or_it_is_not_a_bracket(sequence) -> None:
     """Add Bracket silently undid itself.
 
-    The view model carried default_repeat_count=1 and the presenter reads a
+    The view model carried default_bracket_count=1 and the presenter reads a
     count below the domain's minimum as "no repeat" -- correctly, because a
     region that plays its periods once IS the sequence.  So the button
     committed a count-1 region and the presenter cleared it, every time.  The
     minimum is the domain's to state, and now does.
     """
 
-    from zlc_pulse import MINIMUM_REPEAT_COUNT
+    from zlc_pulse import MINIMUM_BRACKET_COUNT
 
     view = _EditorView()
     presenter = PulseEditorPresenter(view, sequence)
     try:
         vm = view.schedule_view.schedule
-        assert vm.default_repeat_count == MINIMUM_REPEAT_COUNT
-        assert vm.min_repeat_count == MINIMUM_REPEAT_COUNT
+        assert vm.default_bracket_count == MINIMUM_BRACKET_COUNT
+        assert vm.min_bracket_count == MINIMUM_BRACKET_COUNT
 
         first, last = vm.periods[0].period_id, vm.periods[-1].period_id
-        presenter.set_repeat(first, last, vm.default_repeat_count)
-        repeat = presenter.sequence.repeat
-        assert repeat is not None and repeat.count == MINIMUM_REPEAT_COUNT
+        presenter.set_bracket(first, last, vm.default_bracket_count)
+        bracket = presenter.sequence.bracket
+        assert bracket is not None and bracket.count == MINIMUM_BRACKET_COUNT
 
-        presenter.set_repeat(None, None, 0)
-        assert presenter.sequence.repeat is None
+        presenter.set_bracket(None, None, 0)
+        assert presenter.sequence.bracket is None
     finally:
         presenter.close()
 
 
-def test_a_repeat_of_one_is_refused_by_the_model_itself(sequence) -> None:
+def test_a_bracket_of_one_is_refused_by_the_model_itself(sequence) -> None:
     """One encoding per pulse: the redundant one cannot be built at all."""
 
     import pytest as _pytest
-    from zlc_pulse import RepeatRegion
+    from zlc_pulse import PulseBracket
 
-    with _pytest.raises(ValueError, match="once is not a repeat"):
-        RepeatRegion(sequence.periods[0].period_id, sequence.periods[-1].period_id, 1)
+    with _pytest.raises(ValueError, match="bracket loops at least"):
+        PulseBracket(sequence.periods[0].period_id, sequence.periods[-1].period_id, 1)
 
 
-def test_the_preview_always_says_what_the_outer_level_repeats(sequence) -> None:
-    """On Pulse is a cycle an experiment holds running.
+def test_preview_keeps_run_repeats_and_bracket_as_separate_markers(sequence) -> None:
+    """Even a full-span bracket cannot replace the complete-Pulse Run loop."""
 
-    So the OUTER level of a pulse repeats forever unless a bracket spans the
-    whole thing and says how many times instead; a bracket over PART repeats
-    that part with the outer level still forever around it.  Neither was drawn.
-    A pulse with no bracket showed no marker at all -- the one thing that is
-    always true of a running pulse was the one thing the preview never said --
-    and a bracketed pulse could not be previewed at all, because the count was
-    handed to a marker field that takes a label and raised TypeError.
-    """
-
-    from zlc_workbench.pulse_editor import FOREVER_NOTATION, timeline_of
+    from zlc_workbench.pulse_editor import RUN_FOREVER_LABEL, timeline_of
 
     view = _EditorView()
     presenter = PulseEditorPresenter(view, sequence)
@@ -2750,25 +2760,30 @@ def test_the_preview_always_says_what_the_outer_level_repeats(sequence) -> None:
         ids = [period.period_id for period in presenter.sequence.periods]
         total = timeline_of(presenter.sequence).total_duration
 
-        # Nothing bracketed: the whole pulse, forever.
+        # Nothing bracketed: the complete Pulse repeats forever.
         plain = timeline_of(presenter.sequence)
-        assert plain.repeat_notation == FOREVER_NOTATION
-        assert [(m.start, m.stop, m.label) for m in plain.repeat_markers] == [
-            (0.0, total, FOREVER_NOTATION)
+        assert [(m.start, m.stop, m.label) for m in plain.loop_markers] == [
+            (0.0, total, RUN_FOREVER_LABEL)
         ]
 
-        # A bracket over everything IS the outer level, so it replaces forever.
-        presenter.set_repeat(ids[0], ids[-1], 3)
+        # A bracket over everything is still the inner loop; both are shown.
+        presenter.set_bracket(ids[0], ids[-1], 3)
         whole = timeline_of(presenter.sequence)
-        assert whole.repeat_notation == "x3"
-        assert [marker.label for marker in whole.repeat_markers] == ["x3"]
+        assert [marker.label for marker in whole.loop_markers] == [
+            "Bracket ×3",
+            RUN_FOREVER_LABEL,
+        ]
+        assert all((marker.start, marker.stop) == (0.0, total) for marker in whole.loop_markers)
 
-        # A bracket over part repeats the part; the outer level is still forever.
-        presenter.set_repeat(ids[1], ids[2], 5)
+        # A finite Run value changes only its marker, not the bracket.
+        presenter.set_bracket(ids[1], ids[2], 5)
+        presenter.set_run_repeats(7)
         part = timeline_of(presenter.sequence)
-        assert part.repeat_notation == FOREVER_NOTATION
-        assert [marker.label for marker in part.repeat_markers] == ["x5", FOREVER_NOTATION]
-        inner, outer = part.repeat_markers
+        assert [marker.label for marker in part.loop_markers] == [
+            "Bracket ×5",
+            "Run ×7",
+        ]
+        inner, outer = part.loop_markers
         assert 0.0 < inner.start and inner.stop < total
         assert (outer.start, outer.stop) == (0.0, total)
     finally:
@@ -2980,6 +2995,8 @@ def test_new_pulse_replaces_the_whole_editor_state_in_one_candidate(
 
         assert presenter.path == ""
         assert presenter.sequence.name == "untitled"
+        assert presenter.sequence.run_repeats == 0
+        assert presenter.sequence.bracket is None
         assert presenter._state.scan_source == ""
         assert presenter._state.scan_rows == ()
         assert presenter._state.scan_source_dirty is False
@@ -2990,7 +3007,7 @@ def test_new_pulse_replaces_the_whole_editor_state_in_one_candidate(
         presenter.close()
 
 
-def test_repeat_regions_never_choose_the_outer_execution_count(sequence) -> None:
+def test_brackets_never_choose_the_outer_execution_count(sequence) -> None:
     """Whole and partial brackets are timeline loops; On Pulse remains continuous."""
 
     view = _EditorView()
@@ -3001,17 +3018,26 @@ def test_repeat_regions_never_choose_the_outer_execution_count(sequence) -> None
         while len(presenter.sequence.periods) < 3:
             presenter.insert_period(None)
         ids = [period.period_id for period in presenter.sequence.periods]
+        view.run_repeats_committed.emit(4)
+        assert presenter.sequence.run_repeats == 4
+        assert view.schedule_view.schedule.run_repeats == 4
 
-        presenter.set_repeat(ids[0], ids[-1], 3)
+        presenter.set_bracket(ids[0], ids[-1], 3)
         assert presenter.fire() is True
-        assert board.events == ["load", "fire forever"], board.events
+        assert board.events == ["load", "fire"], board.events
+        assert (board._run_repeats, board._scan_repeats) == (4, 1)
         assert presenter.compile().loop_count == 3
+        assert view.schedule_view.control_state[1] is True
+        view.run_repeats_committed.emit(5)
+        assert view.schedule_view.control_state[1] is False
+        view.run_repeats_committed.emit(4)
 
         # A bracket over PART has the same outer execution meaning.
         board.events.clear()
-        presenter.set_repeat(ids[1], ids[2], 5)
+        presenter.set_bracket(ids[1], ids[2], 5)
         assert presenter.fire() is True
-        assert board.events == ["safe", "load", "fire forever"], board.events
+        assert board.events == ["safe", "load", "fire"], board.events
+        assert (board._run_repeats, board._scan_repeats) == (4, 1)
     finally:
         presenter.close()
 
@@ -3151,8 +3177,8 @@ def test_hold_and_step_play_the_point_they_hold(presenter, sequence) -> None:
 def test_scan_repeats_reaches_the_wire(presenter, sequence) -> None:
     """It was stored, shown and saved, and read by nothing at all.
 
-    The board streams ONE table, so playing it three times is a table three
-    times as long -- there is no sweep counter down there to set.
+    The board stores one unique table and its independent sweep counter replays
+    that table without duplicating rows in host memory or on the wire.
     """
 
     uploaded: list = []
@@ -3176,21 +3202,24 @@ def test_scan_repeats_reaches_the_wire(presenter, sequence) -> None:
         "import numpy as np\n"
         "scan_table = np.linspace(0.001, 0.2, 7).reshape(-1, 1)\n"
     )
+    assert "stays at the first scan point" in view.scan_view.page.slots_text
 
-    # Zero repeats means until Stop; a positive repeat count is finite.
+    # Both zero counts mean until Stop, without changing either one to 1.
     board.events.clear()
     assert presenter.fire() is True
     assert "fire forever" in board.events, board.events
+    assert (board._run_repeats, board._scan_repeats) == (0, 0)
 
+    view.run_repeats_committed.emit(2)
+    assert "stays at the first scan point" not in view.scan_view.page.slots_text
     view.scan_repeats_committed.emit(3)
     board.events.clear()
     assert presenter.fire() is True
-    # The table ONCE, and how many times to play it.  There is no sweep
-    # register in the RTL, but there is no reason to send the same numbers
-    # three times to say so: which row a point takes is decided when a bank
-    # is refilled.
+    # The table is uploaded once; each point runs the Pulse twice and the
+    # complete table is swept three times, in independent hardware counters.
     assert uploaded[-1] == (7, 1)
-    assert board._cycles == 21, "seven rows, played for three complete sweeps"
+    assert board._run_repeats == 2
+    assert board._scan_repeats == 3
     assert len(board._applied.source.slots) == 1
     assert board._applied.source.api_parameters == ()
     # And a counted number of sweeps is a finite run: wrapping it in the outer
@@ -3202,7 +3231,7 @@ def test_scan_repeats_reaches_the_wire(presenter, sequence) -> None:
     board.events.clear()
     assert presenter.fire() is True
     assert uploaded[-1] == (7, 1)
-    assert board._cycles is None, "zero means until Stop"
+    assert (board._run_repeats, board._scan_repeats) == (2, 0)
     assert "fire forever" in board.events, board.events
 
 
@@ -3239,6 +3268,7 @@ def test_scan_repeats_govern_nothing_when_no_scan_is_left(presenter, sequence) -
     board.events.clear()
     assert presenter.fire() is True
     assert board._applied.rows == ()
+    assert (board._run_repeats, board._scan_repeats) == (0, 1)
     assert "fire forever" in board.events, (
         "with no scan, the pulse's own repeat meaning governs: " + str(board.events)
     )
@@ -3259,11 +3289,11 @@ def test_on_pulse_over_a_running_pulse_stops_it_first(sequence) -> None:
     presenter = PulseEditorPresenter(view, sequence, dial=lambda _m, _e: board)
     try:
         presenter.connect_to("virtual", "")
-        assert presenter.fire(cycles=None) is True
+        assert presenter.fire() is True
         assert presenter.running is True
 
         board.events.clear()
-        assert presenter.fire(cycles=None) is True, "a second On Pulse must work"
+        assert presenter.fire() is True, "a second On Pulse must work"
         assert board.events == ["safe", "load", "fire forever"], board.events
     finally:
         presenter.close()
@@ -3456,6 +3486,7 @@ class _ThreadWatchingSequencer(_Sequencer):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.callers: list[tuple[str, str]] = []
+        self.cursor_value = 0
 
     def _note(self, what: str) -> None:
         from threading import current_thread
@@ -3470,9 +3501,9 @@ class _ThreadWatchingSequencer(_Sequencer):
         self._note("load")
         super().load(prog, source=source, rows=rows)
 
-    def fire(self, *, cycles=1) -> None:
+    def fire(self, *, run_repeats: int, scan_repeats: int = 1) -> None:
         self._note("fire")
-        super().fire(cycles=cycles)
+        super().fire(run_repeats=run_repeats, scan_repeats=scan_repeats)
 
     def safe(self):
         self._note("safe")
@@ -3488,7 +3519,7 @@ class _ThreadWatchingSequencer(_Sequencer):
 
     def cursor(self) -> int:
         self._note("cursor")
-        return 0
+        return self.cursor_value
 
     def threads_for(self, what: str) -> set[str]:
         return {thread for name, thread in self.callers if name == what}
@@ -3603,6 +3634,7 @@ def test_connect_hold_step_and_sync_run_on_the_device_worker(sequence) -> None:
             view,
             "import numpy as np\nscan_table = np.array([0.5, 1.0, 1.5]).reshape(-1, 1)\n",
         )
+        board.cursor_value = 4  # cumulative row visit: sweep 2, table row 1
         board.events.clear()
         board.callers.clear()
         view.scan_hold_requested.emit()
@@ -3611,12 +3643,12 @@ def test_connect_hold_step_and_sync_run_on_the_device_worker(sequence) -> None:
         worker.deliver_until(lambda: not presenter._device_busy)
         assert board.events == ["safe", "load", "fire forever"]
         assert {thread for _name, thread in board.callers} == {"pulse-device-worker"}
-        assert presenter._held_point == 0
-        assert "held at scan point 0" in presenter._scan_progress
+        assert presenter._held_point == 1
+        assert "held at scan point 1" in presenter._scan_progress
 
         view.scan_step_requested.emit(1)
         worker.deliver_until(lambda: not presenter._device_busy)
-        assert presenter._held_point == 1
+        assert presenter._held_point == 2
         assert board.events[-3:] == ["safe", "load", "fire forever"]
 
         board.callers.clear()
@@ -3625,7 +3657,7 @@ def test_connect_hold_step_and_sync_run_on_the_device_worker(sequence) -> None:
         worker.deliver_until(lambda: not presenter._device_busy)
         assert board.threads_for("applied") == {"pulse-device-worker"}
         assert not [text for text in view.warnings if "cannot sync" in text]
-        assert presenter.sequence.period_by_id[period_id].duration == pytest.approx(1.0)
+        assert presenter.sequence.period_by_id[period_id].duration == pytest.approx(1.5)
     finally:
         presenter.close()
 

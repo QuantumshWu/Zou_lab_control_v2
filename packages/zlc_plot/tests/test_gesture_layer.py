@@ -187,7 +187,10 @@ def test_the_threshold_follows_the_pointer_and_commits_on_release() -> None:
         assert [front.identity.sequence for front in fronts] == sorted(
             {front.identity.sequence for front in fronts}
         )
-        assert len({front.buffer.pixels for front in fronts}) == len(fronts)
+        # One distinct image per accepted front.  A front's pixels are a
+        # memoryview over its own shared block, and a memoryview of this
+        # format cannot go in a set, so compare the bytes they carry.
+        assert len({bytes(front.buffer.pixels) for front in fronts}) == len(fronts)
 
         pointer("release", 0.47 + 0.03 * 5)
         committed = host.selector_state(SelectorKind.THRESHOLD, display=False).result(
@@ -460,5 +463,66 @@ def test_an_overview_grid_only_focuses_then_the_focused_cell_accepts_an_area(
         committed = tuple(session.selectors)
         assert [state.facet_index for state in committed] == [cell]
         assert committed[0].kind is SelectorKind.AREA
+    finally:
+        session.close()
+
+
+def test_a_wheel_notch_zooms_the_committed_view_not_the_drawn_one() -> None:
+    """The wheel compounds on what the session HOLDS, not on the last frame.
+
+    Renders lag commitments, and once rendering moved into its own process
+    they lag by whole frames -- so a notch that arrives before the next frame
+    read limits that still showed the step already taken and re-derived it.
+    The operator turned the wheel and the picture kept landing back where it
+    was.  The camera branch of the same handler was anchored on its committed
+    zoom for this exact reason; the viewport branch was not.
+    """
+
+    from zlc_plot import DEFAULTS, CurvePlot
+
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"shot": [0.0, 1.0, 2.0, 3.0]}),
+        dtype=np.float64,
+    )
+    snapshot = make_snapshot(schema, np.arange(4.0).reshape(1, 4), revision=0)
+    session = PlotSession(snapshot, CurvePlot(AxisRef.point("shot")), size="2x2")
+    try:
+        session.rgba()
+        transform = next(
+            item
+            for item in session._raster_axes_snapshot()
+            if item.role == "main"
+        )
+        session.set_viewport(NumericRange(0.0, 100.0), NumericRange(0.0, 10.0))
+        # A frame that has not caught up: the drawn limits are a previous
+        # commitment's, which during a wheel burst is the ordinary state.
+        session._renderer.primary_axes.set_xlim(0.0, 1000.0)
+        factor = float(DEFAULTS.interaction.wheel_zoom_factor)
+
+        session._raster_pointer_event(
+            "scroll",
+            *_inside(transform, 0.5, 0.5),
+            step=1.0,
+            axes_snapshot=transform,
+        )
+        first = session.viewport
+        assert first is not None
+        width = float(first.x.high) - float(first.x.low)
+        assert width == pytest.approx(100.0 * factor, rel=1e-9)
+
+        # And a second notch compounds on the first, whatever the axes say.
+        session._renderer.primary_axes.set_xlim(0.0, 1000.0)
+        session._raster_pointer_event(
+            "scroll",
+            *_inside(transform, 0.5, 0.5),
+            step=1.0,
+            axes_snapshot=transform,
+        )
+        second = session.viewport
+        assert second is not None
+        assert float(second.x.high) - float(second.x.low) == pytest.approx(
+            100.0 * factor * factor, rel=1e-9
+        )
     finally:
         session.close()

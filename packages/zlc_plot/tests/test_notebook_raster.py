@@ -245,13 +245,16 @@ def test_pulse_selectors_paint_in_source_units_and_fit_catalogue_is_empty() -> N
         PlotLabels,
         PulseBlock,
         PulseChannel,
+        PulseLoopMarker,
         PulseTimelineData,
         pulse_timeline,
     )
 
+    loop = PulseLoopMarker(1.0e-6, 8.0e-6, "×4")
     data = PulseTimelineData(
         channels=(PulseChannel("laser", "Laser"),),
         blocks=(PulseBlock("laser", 0.0, 4.0e-6, label="Init"),),
+        loop_markers=(loop,),
         time_unit="s",
         total_duration=10.0e-6,
     )
@@ -259,6 +262,8 @@ def test_pulse_selectors_paint_in_source_units_and_fit_catalogue_is_empty() -> N
     host = RasterPlotHost.from_session(session)
     try:
         assert session.fit_models == ()
+        session.set_x_selector(2.0e-6, 5.0e-6, display=False)
+        assert session.selector_data(SelectorKind.X_RANGE).loop_markers == (loop,)
         front = host.wait_for_front(timeout=5.0)
         axis = front.interaction.axes[0]
         host.pointer_event(

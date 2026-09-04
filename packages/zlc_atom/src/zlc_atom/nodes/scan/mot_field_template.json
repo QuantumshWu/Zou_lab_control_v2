@@ -770,5 +770,6 @@
   }
  ],
  "delays": [],
- "repeat": null
+ "bracket": null,
+ "run_repeats": 0
 }

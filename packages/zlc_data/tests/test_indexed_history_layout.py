@@ -166,3 +166,58 @@ def test_two_windows_of_one_history_are_compatible_and_two_events_are_not() -> N
         VALUE,
     )
     assert not indexed_schemas_compatible(short, plain)
+
+
+def test_a_sliding_history_keeps_the_structure_it_advances_through() -> None:
+    """Deepening and sliding a window is not a new world to a gesture.
+
+    The FULL name is the dataset's identity and must move on every shot: the
+    coordinates really did change.  The STRUCTURE name answers a different
+    question -- what an interaction was measured on -- and a bounded window
+    filling up and then advancing is the same axes throughout.  Reading the
+    full name for that question, or a structure name that still carried the
+    window's DEPTH, threw the operator's zoom away on every shot and rebuilt
+    the panel's host with it.
+    """
+
+    filling = _schema((-2, -1, 0), (0, 1, 2))
+    deeper = _schema((-3, -2, -1, 0), (0, 1, 2, 3))
+    slid = _schema((-3, -2, -1, 0), (0, 1, 2, 3))
+
+    assert filling.fingerprint != deeper.fingerprint
+    assert filling.structure_fingerprint == deeper.structure_fingerprint
+    assert slid.structure_fingerprint == deeper.structure_fingerprint
+
+    # An inner event axis rides the same flat carrier, so its codes lengthen
+    # with the window too, and that is not a change of structure either.
+    inner = _schema(
+        (-1, 0),
+        (0, 0, 1, 1),
+        frame_coordinates=(0, 1),
+        frame_codes=(0, 1, 0, 1),
+    )
+    inner_deeper = _schema(
+        (-2, -1, 0),
+        (0, 0, 1, 1, 2, 2),
+        frame_coordinates=(0, 1),
+        frame_codes=(0, 1, 0, 1, 0, 1),
+    )
+    assert inner.fingerprint != inner_deeper.fingerprint
+    assert inner.structure_fingerprint == inner_deeper.structure_fingerprint
+
+    # And a REAL change of axes still renames the structure: one more frame
+    # per shot is a different world, however the window is doing.
+    three_frames = _schema(
+        (-2, -1, 0),
+        (0, 0, 0, 1, 1, 1, 2, 2, 2),
+        frame_coordinates=(0, 1, 2),
+        frame_codes=(0, 1, 2, 0, 1, 2, 0, 1, 2),
+    )
+    assert inner_deeper.structure_fingerprint != three_frames.structure_fingerprint
+
+    # A plain axis that no history advances keeps its size in the structure.
+    ordinary = _schema((-1, 0), (0, 1), primary_role=READOUT_EVENT)
+    ordinary_deeper = _schema((-2, -1, 0), (0, 1, 2), primary_role=READOUT_EVENT)
+    assert (
+        ordinary.structure_fingerprint != ordinary_deeper.structure_fingerprint
+    )

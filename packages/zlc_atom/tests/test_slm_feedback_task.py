@@ -1844,9 +1844,10 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
             assert not rows
             self.loaded = (program, source)
 
-        def fire(self, *, cycles=1) -> None:
-            self.fires.append(cycles)
-            camera.trigger(int(cycles))
+        def fire(self, *, run_repeats, scan_repeats=1) -> None:
+            assert scan_repeats == 1
+            self.fires.append(run_repeats)
+            camera.trigger(int(run_repeats))
 
         def wait_done(self, timeout=None):
             del timeout
@@ -2032,8 +2033,9 @@ def test_electron_measurement_uses_current_conversion_and_saturation(
         def load(self, program, *, source=None, rows=()):
             return None
 
-        def fire(self, *, cycles=1):
-            self.camera.trigger(int(cycles))
+        def fire(self, *, run_repeats, scan_repeats=1):
+            assert scan_repeats == 1
+            self.camera.trigger(int(run_repeats))
 
         def wait_done(self, timeout=None):
             return SimpleNamespace(fault=None)
@@ -2149,9 +2151,10 @@ def test_measure_keeps_observer_only_faults_repeats_board_faults_and_loads_once(
             self.loads += 1
             self.digest = program.digest
 
-        def fire(self, *, cycles=1) -> None:
-            self.fires.append(cycles)
-            played = int(cycles) if self.trigger_limit is None else self.trigger_limit
+        def fire(self, *, run_repeats, scan_repeats=1) -> None:
+            assert scan_repeats == 1
+            self.fires.append(run_repeats)
+            played = int(run_repeats) if self.trigger_limit is None else self.trigger_limit
             self.trigger_limit = None
             camera.trigger(played)
 

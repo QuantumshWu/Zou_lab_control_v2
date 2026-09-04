@@ -208,7 +208,6 @@ class PaletteConfig:
     data_scatter: str
     pulse_name: str
     pulse_grid: str
-    pulse_repeat_note: str
 
     def __post_init__(self) -> None:
         for field in ("series", "pulse_cycle", "bracket_cycle"):
@@ -232,7 +231,6 @@ class PaletteConfig:
             "data_scatter",
             "pulse_name",
             "pulse_grid",
-            "pulse_repeat_note",
         ):
             object.__setattr__(self, field, _color(getattr(self, field), field))
 
@@ -431,7 +429,6 @@ class PulseStyleConfig:
     dense_min_row_height: float = 0.42
     dense_total_height: float = 6.4
     x_margin_fraction: float = 0.04
-    repeat_right_margin_fraction: float = 0.05
     grid_linewidth: float = 0.35
     trace_linewidth: float = 0.65
     block_label_min_span_fraction: float = 0.09
@@ -452,7 +449,6 @@ class PulseStyleConfig:
     repeat_linewidth: float = 1.05
     repeat_label_x_fraction: float = 0.12
     repeat_label_y_offset: float = 0.055
-    repeat_note_position: tuple[float, float] = (0.995, 1.012)
     ylim_bottom: float = -0.62
     ylim_top_offset: float = -0.38
     repeat_ylim_top_offset: float = 0.78
@@ -495,7 +491,6 @@ class PulseStyleConfig:
             )
         for field in (
             "x_margin_fraction",
-            "repeat_right_margin_fraction",
             "block_label_min_span_fraction",
             "repeat_tick_fraction",
             "repeat_max_foot_fraction",
@@ -538,12 +533,6 @@ class PulseStyleConfig:
         if not dash[1]:
             raise ValueError("analog_zero_dash pattern must not be empty")
         object.__setattr__(self, "analog_zero_dash", dash)
-        note_position = tuple(
-            _finite(item, "repeat_note_position") for item in self.repeat_note_position
-        )
-        if len(note_position) != 2:
-            raise ValueError("repeat_note_position must contain x and y")
-        object.__setattr__(self, "repeat_note_position", note_position)
 
 
 @dataclass(frozen=True, slots=True)
@@ -805,7 +794,6 @@ def build_plot_style() -> PlotStyleConfig:
         data_scatter="lightgrey",
         pulse_name="white",
         pulse_grid="0.88",
-        pulse_repeat_note="0.35",
     )
     artists = ArtistStyleConfig(
         curve=LineToken(

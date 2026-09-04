@@ -72,9 +72,9 @@ STEPPED_SCAN_SCHEMA = AuthoringSchema(
             "",
         ),
         # Repeats and shots both land on the dataset's repeat axis (size
-        # repeats x shots): complete adjacent trials of one point versus
-        # whole-plan sweeps.  Physically different, structurally the same
-        # fact -- the same conditions, again.
+        # repeats x shots): shots override Run repeats for one host-applied
+        # point; repeats walk the whole host-owned plan again. The independent
+        # PulseBracket stays inside every shot.
         AuthoringField(
             "repeats",
             "int",

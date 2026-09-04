@@ -87,7 +87,7 @@ def update_pulse_timeline(
 
     channels = payload.channels
     analog_traces = payload.analog_traces
-    repeat_markers = payload.repeat_markers
+    loop_markers = payload.loop_markers
     scan_dac_segments = payload.scan_dac_segments
     pulse = style.pulse
 
@@ -115,8 +115,6 @@ def update_pulse_timeline(
     margin = max(span * pulse.x_margin_fraction, np.finfo(float).eps * span)
     left_limit = start_min - margin
     right_limit = stop_max + margin
-    if repeat_markers:
-        right_limit += span * pulse.repeat_right_margin_fraction
 
     baseline_y: dict[str, float] = {}
     baselines = _sync_lines(axis, artists, "pulse:baselines", len(channels))
@@ -309,27 +307,30 @@ def update_pulse_timeline(
     left_brackets = _sync_lines(
         axis,
         artists,
-        "pulse:repeat_left",
-        len(repeat_markers),
+        "pulse:loop_left",
+        len(loop_markers),
     )
     right_brackets = _sync_lines(
         axis,
         artists,
-        "pulse:repeat_right",
-        len(repeat_markers),
+        "pulse:loop_right",
+        len(loop_markers),
     )
     bracket_labels = _sync_texts(
         axis,
         artists,
-        "pulse:repeat_labels",
-        len(repeat_markers),
+        "pulse:loop_labels",
+        len(loop_markers),
     )
     home_span = right_limit - left_limit
     tick_base = home_span * pulse.repeat_tick_fraction
-    for index, marker in enumerate(repeat_markers):
+    for index, marker in enumerate(loop_markers):
         start, stop, label_value = marker.start, marker.stop, marker.label
         color = style.palette.bracket_cycle[index % len(style.palette.bracket_cycle)]
-        outer_depth = max(0, len(repeat_markers) - 1 - index)
+        # Callers state nested loops from inner to outer.  Later markers must
+        # therefore grow around earlier ones; reversing this made an internal
+        # Bracket visually surround the complete Run loop.
+        outer_depth = index
         y_low = pulse.repeat_bottom - pulse.repeat_bottom_step * outer_depth
         y_high = row_count + pulse.repeat_top_offset + pulse.repeat_top_step * outer_depth
         tick = min(
@@ -356,12 +357,12 @@ def update_pulse_timeline(
         text = bracket_labels[index]
         text.set_position(
             (
-                stop + tick * pulse.repeat_label_x_fraction,
+                stop - tick * pulse.repeat_label_x_fraction,
                 y_high + pulse.repeat_label_y_offset,
             )
         )
         text.set_text(label_value)
-        text.set_ha("left")
+        text.set_ha("right")
         text.set_va("bottom")
         text.set_alpha(pulse.repeat_alpha)
         text.set_clip_on(True)
@@ -370,31 +371,13 @@ def update_pulse_timeline(
         text.update({"fontsize": style.fonts.pulse_repeat_pt, "color": color})
         text.set_visible(bool(label_value))
 
-    repeat_note = artists.get("pulse:repeat_note")
-    if repeat_note is None:
-        repeat_note = axis.text(*pulse.repeat_note_position, "", transform=axis.transAxes)
-        repeat_note.set_clip_on(True)
-        repeat_note.set_in_layout(False)
-        artists["pulse:repeat_note"] = repeat_note
-    notation = payload.repeat_notation
-    repeat_note.set_text(notation)
-    repeat_note.set_ha("right")
-    repeat_note.set_va("bottom")
-    repeat_note.update(
-        {
-            "fontsize": style.fonts.pulse_repeat_pt,
-            "color": style.palette.pulse_repeat_note,
-        }
-    )
-    repeat_note.set_visible(bool(notation) and not repeat_markers)
-
     axis.set_xlim(left_limit, right_limit)
     top_limit = row_count + pulse.ylim_top_offset
-    if repeat_markers:
+    if loop_markers:
         top_limit = (
             row_count
             + pulse.repeat_ylim_top_offset
-            + pulse.repeat_ylim_top_step * max(0, len(repeat_markers) - 1)
+            + pulse.repeat_ylim_top_step * max(0, len(loop_markers) - 1)
         )
     axis.set_ylim(pulse.ylim_bottom, top_limit)
     axis.set_yticks([row_index[key] for key in row_keys])

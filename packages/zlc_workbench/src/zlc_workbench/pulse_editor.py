@@ -36,12 +36,12 @@ from typing import Any
 
 from zlc_pulse import (
     ANALOG_MODE_CHOICES,
-    MINIMUM_REPEAT_COUNT,
+    MINIMUM_BRACKET_COUNT,
     AnalogStep,
     OutputDelay,
+    PulseBracket,
     PulsePeriod,
     PulseSequence,
-    RepeatRegion,
     cycle_binding_kind,
 )
 from zlc_pulse import (
@@ -76,7 +76,7 @@ from zlc_ui import (
     FieldVM,
     PeriodVM,
     PortRowVM,
-    RepeatVM,
+    BracketVM,
     ScheduleVM,
 )
 
@@ -127,9 +127,8 @@ def _readable(nanoseconds: float) -> str:
 
 #: What an editor holding no sequence shows.  Not an error state: an editor
 #: opens before it has a subject, and its job then is to say how to get one.
-#: How a preview writes "this plays until Stop".  One spelling, because the
-#: outer marker and the summary line must not disagree about it.
-FOREVER_NOTATION = "x∞"
+#: How a preview writes "this scan point plays until Stop".
+RUN_FOREVER_LABEL = "Run ×∞"
 #: What a period with NO step for a DAC means: the output keeps whatever the
 #: period before it left there.  It is a reading of the model, not a mode the
 #: model has -- ANALOG_MODES is edge and ramp -- and the one place both the
@@ -483,7 +482,7 @@ def project_schedule(
         _nanoseconds(period.duration, period.unit)
         for period in (() if sequence is None else sequence.periods)
     )
-    repeat = None if sequence is None else sequence.repeat
+    bracket = None if sequence is None else sequence.bracket
     slots = () if sequence is None else sequence.slots
     return ScheduleVM(
         document_generation=int(generation),
@@ -506,11 +505,16 @@ def project_schedule(
         ports=ports,
         periods=periods,
         analog_mode_choices=ANALOG_MODE_ROWS,
-        repeat=(
+        bracket=(
             None
-            if repeat is None
-            else RepeatVM(repeat.start_period_id, repeat.end_period_id, repeat.count)
+            if bracket is None
+            else BracketVM(
+                bracket.start_period_id,
+                bracket.end_period_id,
+                bracket.count,
+            )
         ),
+        run_repeats=0 if sequence is None else sequence.run_repeats,
         # Every output the board can delay gets a row whether or not a pulse is
         # open, because the row IS the board telling the operator that output
         # can be delayed.  With no pulse the value is the zero a missing delay
@@ -553,11 +557,11 @@ def project_schedule(
         ),
         # From the domain, which is what decides that once is not a repeat.
         # The view model carried 1 for both, so Add Bracket committed a
-        # count-1 region -- which set_repeat reads as "no bracket" and the
+        # count-1 region -- which set_bracket reads as "no bracket" and the
         # button silently undid itself.  zlc_ui may not import zlc_pulse, so
         # the number is carried across by whoever knows both.
-        min_repeat_count=MINIMUM_REPEAT_COUNT,
-        default_repeat_count=MINIMUM_REPEAT_COUNT,
+        min_bracket_count=MINIMUM_BRACKET_COUNT,
+        default_bracket_count=MINIMUM_BRACKET_COUNT,
     )
 
 
@@ -703,7 +707,7 @@ def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
         PulseBlock,
         PulseChannel,
         PulseDacScanSegment,
-        PulseRepeatMarker,
+        PulseLoopMarker,
         PulseScanRegion,
         PulseTimelineData,
     )
@@ -771,26 +775,16 @@ def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
             raise ValueError("this target has no digital port to draw")
         channels.append(PulseChannel(first.key, first.label or first.key))
 
-    # What the pulse actually plays, bracket or no bracket.
-    #
-    # The OUTER level of a pulse repeats forever -- On Pulse is a cycle an
-    # experiment holds running -- unless a bracket spans the whole thing and
-    # says how many times instead.  A bracket over PART of the pulse repeats
-    # that part, and the outer level is still forever around it.  Neither was
-    # drawn: a pulse with no bracket showed nothing, so the one thing that is
-    # always true of a running pulse was the one thing the preview never said.
+    # Bracket and Run are separate physical loops and therefore separate
+    # markers.  Even identical spans remain two statements: the bracket loops
+    # inside the timeline, while Run starts the complete pulse again without
+    # advancing the scan point.
     markers: list[Any] = []
     ids = [period.period_id for period in sequence.periods]
-    spans_everything = bool(
-        sequence.repeat is not None
-        and ids
-        and sequence.repeat.start_period_id == ids[0]
-        and sequence.repeat.end_period_id == ids[-1]
-    )
-    if sequence.repeat is not None:
+    if sequence.bracket is not None:
         try:
-            first = ids.index(sequence.repeat.start_period_id)
-            last = ids.index(sequence.repeat.end_period_id)
+            first = ids.index(sequence.bracket.start_period_id)
+            last = ids.index(sequence.bracket.end_period_id)
         except ValueError:
             first = last = None
         if first is not None and last is not None:
@@ -801,10 +795,17 @@ def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
             # itself raised TypeError inside the primitive, so a bracketed
             # pulse could not be previewed at all.
             markers.append(
-                PulseRepeatMarker(starts[first], stop, f"x{sequence.repeat.count}")
+                PulseLoopMarker(
+                    starts[first], stop, f"Bracket ×{sequence.bracket.count}"
+                )
             )
-    if not spans_everything and total > 0:
-        markers.append(PulseRepeatMarker(0.0, total, FOREVER_NOTATION))
+    run_label = (
+        RUN_FOREVER_LABEL
+        if sequence.run_repeats == 0
+        else f"Run ×{sequence.run_repeats}"
+    )
+    if total > 0:
+        markers.append(PulseLoopMarker(0.0, total, run_label))
 
     # WHICH fields the device writes per point, drawn where they happen.
     #
@@ -855,12 +856,7 @@ def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
         analog_traces=tuple(traces),
         scan_regions=tuple(regions),
         scan_dac_segments=tuple(segments),
-        repeat_markers=tuple(markers),
-        repeat_notation=(
-            f"x{sequence.repeat.count}"
-            if spans_everything
-            else FOREVER_NOTATION
-        ),
+        loop_markers=tuple(markers),
     )
 
 
@@ -894,6 +890,8 @@ class BoardState:
     #: with a round trip, which is how typing in a box came to talk to a
     #: server.
     applied_digest: str = ""
+    run_repeats: int = 1
+    scan_repeats: int = 1
     fault: str = ""
 
 
@@ -1109,7 +1107,8 @@ class PulseEditorPresenter:
         view.insert_period_requested.connect(self._guarded(self.insert_period))
         view.move_period_requested.connect(self._guarded(self.move_period))
         view.remove_period_requested.connect(self._guarded(self.remove_period))
-        view.repeat_committed.connect(self._guarded(self.set_repeat))
+        view.bracket_committed.connect(self._guarded(self.set_bracket))
+        view.run_repeats_committed.connect(self._guarded(self.set_run_repeats))
         view.visible_ports_committed.connect(self._guarded(self.set_visible_ports))
         view.clear_port_requested.connect(self._guarded(self.clear_port))
         # From the button that raises it.  The schedule page also declared a
@@ -1575,24 +1574,36 @@ class PulseEditorPresenter:
         if not periods:
             self._warn("a sequence needs at least one period")
             return
-        repeat = self.sequence.repeat
-        if repeat is not None and period_id in (repeat.start_period_id, repeat.end_period_id):
-            repeat = None
-        self._apply(self._rebuilt(periods=periods, repeat=repeat))
+        bracket = self.sequence.bracket
+        if bracket is not None and period_id in (
+            bracket.start_period_id,
+            bracket.end_period_id,
+        ):
+            bracket = None
+        self._apply(self._rebuilt(periods=periods, bracket=bracket))
 
-    def set_repeat(self, start: object, end: object, count: int) -> None:
+    def set_bracket(self, start: object, end: object, count: int) -> None:
         """Bracket these periods, or clear the bracket.
 
         No start, no end, or a count below the domain's minimum all mean the
-        same thing: there is no repeat region.
+        same thing: there is no bracket.
         """
 
-        if start is None or end is None or int(count) < MINIMUM_REPEAT_COUNT:
-            self._apply(self._rebuilt(repeat=None))
+        if start is None or end is None or int(count) < MINIMUM_BRACKET_COUNT:
+            self._apply(self._rebuilt(bracket=None))
             return
         self._apply(
-            self._rebuilt(repeat=RepeatRegion(str(start), str(end), int(count)))
+            self._rebuilt(
+                bracket=PulseBracket(str(start), str(end), int(count))
+            )
         )
+
+    def set_run_repeats(self, repeats: int) -> None:
+        """Persist complete-Pulse runs per scan point; zero means infinite."""
+
+        if repeats == self.sequence.run_repeats:
+            return
+        self._apply(self._rebuilt(run_repeats=repeats))
 
     def set_visible_ports(self, ports: object) -> None:
         """Which ports have rows.  A VALUE change, so it goes the value way.
@@ -2070,7 +2081,8 @@ class PulseEditorPresenter:
             slots=slots,
             api_parameters=api_parameters,
             delays=delays,
-            repeat=current.repeat,
+            bracket=current.bracket,
+            run_repeats=current.run_repeats,
         )
         state_changes: dict[str, Any] = {"sequence": candidate}
         if len(candidate.slots) != len(current.slots):
@@ -2307,12 +2319,18 @@ class PulseEditorPresenter:
         tuple[int, ...],
     ]:
         source = self._execution_sequence()
-        if self._scan_armed():
+        scan_armed = self._scan_armed()
+        if scan_armed:
             _effective, slot_tick_scales, rows = self._prepared_scan(source)
         else:
             rows = ()
             slot_tick_scales = ()
-        return source, rows, self._state.scan_repeats, slot_tick_scales
+        return (
+            source,
+            rows,
+            self._state.scan_repeats if scan_armed else 1,
+            slot_tick_scales,
+        )
 
     def _prepared_scan(
         self,
@@ -2430,7 +2448,7 @@ class PulseEditorPresenter:
             return
         if not self._acquire_command():
             return
-        requested_cycles = len(rows) * sweeps if rows and sweeps else None
+        finite = bool(source.run_repeats and sweeps)
 
         def work(operation: int) -> object:
             program = None
@@ -2447,7 +2465,8 @@ class PulseEditorPresenter:
                         program,
                         source,
                         rows=rows,
-                        cycles=requested_cycles,
+                        run_repeats=source.run_repeats,
+                        scan_repeats=sweeps,
                         current=lambda: operation == self._device_operation,
                     )
             except BaseException as caught:  # noqa: BLE001 -- delivered, not lost
@@ -2460,7 +2479,7 @@ class PulseEditorPresenter:
             )
             self._board_state = state
             if error is None:
-                self._finite_drive = requested_cycles is not None
+                self._finite_drive = finite
                 self._remember_applied_scan(program, source, rows)
                 self._digest = program.digest
                 self._digest_revision = self.revision
@@ -2537,7 +2556,8 @@ class PulseEditorPresenter:
         source: PulseSequence,
         *,
         rows: Sequence[Sequence[int]] = (),
-        cycles: int | None,
+        run_repeats: int,
+        scan_repeats: int = 1,
         current: Callable[[], bool],
         halt_first: bool = False,
     ) -> BaseException | None:
@@ -2565,7 +2585,10 @@ class PulseEditorPresenter:
                 touched = True
                 sequencer.load(program, source=source, rows=rows)
             if current():
-                sequencer.fire(cycles=cycles)
+                sequencer.fire(
+                    run_repeats=run_repeats,
+                    scan_repeats=scan_repeats,
+                )
             if not current() and touched:
                 sequencer.safe()
         except BaseException as caught:  # noqa: BLE001 -- returned, not lost
@@ -2586,18 +2609,13 @@ class PulseEditorPresenter:
             return False
         return True
 
-    def fire(self, *, cycles: int | None = None) -> bool:
+    def fire(self) -> bool:
         """On Pulse: load what is on screen and run it the way the pulse says.
 
-        A pulse is a cycle, and an experiment holds it running -- the MOT loads
-        for as long as it is on.  Firing once and stopping is a diagnostic, not
-        the normal thing an operator means by On Pulse, so forever is the
-        default.
-
-        A RepeatRegion remains an internal timeline loop and never chooses the
-        outer execution count.  An armed scan is finite by its explicit rows
-        and sweep count; an ordinary On Pulse is forever unless a caller
-        explicitly supplies finite ``cycles``.
+        ``run_repeats`` belongs to the Pulse and repeats the complete timeline
+        at one scan point.  ``scan_repeats`` belongs to the armed table and
+        repeats complete table sweeps.  A bracket remains an internal timeline
+        loop and never chooses either count.
 
         NOTHING here waits for the board.  A run is started and the display
         beat says what the board is doing, which is how the forever path always
@@ -2631,9 +2649,6 @@ class PulseEditorPresenter:
         if self.sequencer is None:
             self._warn("this editor is not connected to a sequencer")
             return False
-        if cycles is not None and (type(cycles) is not int or cycles <= 0):
-            self._warn("cycles must be a positive integer or None")
-            return False
         try:
             prepared = self._prepare_execution()
         except Exception as error:
@@ -2645,12 +2660,12 @@ class PulseEditorPresenter:
             return False
         try:
             self._load_prepared(prepared)
-            _source, _program, rows, sweeps = prepared
-            requested_cycles = cycles
-            if cycles is None and rows and sweeps:
-                requested_cycles = len(rows) * sweeps
-            self.sequencer.fire(cycles=requested_cycles)
-            self._finite_drive = requested_cycles is not None
+            source, _program, _rows, sweeps = prepared
+            self.sequencer.fire(
+                run_repeats=source.run_repeats,
+                scan_repeats=sweeps,
+            )
+            self._finite_drive = bool(source.run_repeats and sweeps)
             self._poll_board()
         except Exception as error:
             self._warn(f"firing stopped: {error}")
@@ -2808,7 +2823,19 @@ class PulseEditorPresenter:
         """
 
         shown = self._shown_digest()
-        return bool(shown and self._board_state.applied_digest == shown)
+        if not shown or self._board_state.applied_digest != shown:
+            return False
+        if not self._board_state.firing:
+            return True
+        try:
+            source = self._execution_sequence()
+        except Exception:
+            return False
+        scan_repeats = self._state.scan_repeats if self._scan_armed() else 1
+        return (
+            self._board_state.run_repeats == source.run_repeats
+            and self._board_state.scan_repeats == scan_repeats
+        )
 
     def board_state(self) -> BoardState:
         """Ask the board what it is doing, in one round trip.
@@ -2837,6 +2864,8 @@ class PulseEditorPresenter:
             loaded=bool(reported.get("loaded")),
             cursor=None if cursor is None else int(cursor),
             applied_digest=str(reported.get("applied_digest") or ""),
+            run_repeats=int(reported.get("run_repeats", 1)),
+            scan_repeats=int(reported.get("scan_repeats", 1)),
         )
 
     def _shown_digest(self) -> str:
@@ -3410,10 +3439,18 @@ class PulseEditorPresenter:
         view.set_scan_page(
             ScanPageRecord(
                 slots_text=(
-                    "No bound fields: click a dot on a duration or DAC value to "
-                    "make it a scan column."
-                    if not columns and not self.sequence.api_parameters
-                    else "Bound fields, and the name everything else calls them by:"
+                    (
+                        "No bound fields: click a dot on a duration or DAC value to "
+                        "make it a scan column."
+                        if not columns and not self.sequence.api_parameters
+                        else "Bound fields, and the name everything else calls them by:"
+                    )
+                    + (
+                        " Run repeats is 0, so On Pulse stays at the first scan "
+                        "point until Stop."
+                        if rows and columns and self.sequence.run_repeats == 0
+                        else ""
+                    )
                 ),
                 bindings=self._binding_records(),
                 table_text=_scan_table_text(rows, columns),
@@ -3669,9 +3706,7 @@ class PulseEditorPresenter:
             return False
         sequencer = self.sequencer
         if worker is None:
-            held = self._clamp_scan_point(
-                point if point is not None else self._read_cursor(sequencer), count
-            )
+            held = self._hold_scan_point(point, count, sequencer)
             self._held_point = held
             try:
                 resolved, program = prepare(held)
@@ -3682,7 +3717,8 @@ class PulseEditorPresenter:
                 sequencer,
                 program,
                 resolved,
-                cycles=None,
+                run_repeats=0,
+                scan_repeats=1,
                 current=lambda: True,
                 halt_first=True,
             )
@@ -3692,9 +3728,7 @@ class PulseEditorPresenter:
             return False
 
         def work(operation: int) -> object:
-            held = self._clamp_scan_point(
-                point if point is not None else self._read_cursor(sequencer), count
-            )
+            held = self._hold_scan_point(point, count, sequencer)
             try:
                 resolved, program = prepare(held)
             except Exception as error:
@@ -3703,7 +3737,8 @@ class PulseEditorPresenter:
                 sequencer,
                 program,
                 resolved,
-                cycles=None,
+                run_repeats=0,
+                scan_repeats=1,
                 current=lambda: operation == self._device_operation,
                 halt_first=True,
             )
@@ -3723,6 +3758,21 @@ class PulseEditorPresenter:
     @staticmethod
     def _clamp_scan_point(point: int | None, count: int) -> int:
         return max(0, min(count - 1, int(0 if point is None else point)))
+
+    def _hold_scan_point(
+        self,
+        point: int | None,
+        count: int,
+        sequencer: object,
+    ) -> int:
+        """Resolve an explicit point or the board's cumulative row cursor."""
+
+        if count < 1:
+            return 0
+        if point is not None:
+            return self._clamp_scan_point(point, count)
+        cursor = self._read_cursor(sequencer)
+        return 0 if cursor is None else int(cursor) % count
 
     @staticmethod
     def _read_cursor(sequencer: object) -> int | None:
@@ -4453,7 +4503,8 @@ def replace_sequence(sequence: PulseSequence, **changes: Any) -> PulseSequence:
         "slots": sequence.slots,
         "api_parameters": sequence.api_parameters,
         "delays": sequence.delays,
-        "repeat": sequence.repeat,
+        "bracket": sequence.bracket,
+        "run_repeats": sequence.run_repeats,
     }
     fields.update(changes)
     return PulseSequence(**fields)

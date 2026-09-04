@@ -109,11 +109,8 @@ def test_target_rows_carry_the_package_pin_of_every_lane(board) -> None:
 def test_on_pulse_runs_the_whole_pulse_until_stop() -> None:
     """On Pulse is a cycle an experiment holds running, not one shot.
 
-    Asked of a real board, not of the source text.  Reading fire() for the
-    explicit outer ``cycles`` passed for as long as that execution was requested
-    spelled that way and said nothing about what the board was told -- so it
-    broke the moment the value stopped being written out longhand, while the
-    behaviour it names was intact.
+    Asked of a real board, not of the source text: the Pulse's persisted
+    ``run_repeats=0`` must reach the independent hardware counter unchanged.
     """
 
     from zlc_pulse import load_streamer_config, pulse_target_from_xdc
@@ -143,7 +140,7 @@ def test_on_pulse_runs_the_whole_pulse_until_stop() -> None:
         assert presenter.fire() is True, presenter.view.warnings
         applied = streamer.applied()
         assert applied is not None, "the board was never told anything"
-        assert applied.cycles is None, (
+        assert applied.run_repeats == 0 and applied.scan_repeats == 1, (
             "On Pulse must ask the board to repeat until Stop"
         )
     finally:
@@ -221,21 +218,24 @@ def test_holding_a_scan_point_leaves_no_scan_on_the_board() -> None:
         )
         presenter.view.scan_run_requested.emit()
         presenter.set_scan_repeats(0)
-        assert presenter.fire(cycles=5) is True
+        presenter.set_run_repeats(5)
+        assert presenter.fire() is True
         scanned = board.applied()
         assert scanned is not None and len(scanned.rows) == 5
+        assert (scanned.run_repeats, scanned.scan_repeats) == (5, 0)
 
-        assert presenter._hold(0) is True, presenter.view.warnings
+        assert presenter.hold_scan_point() is True, presenter.view.warnings
         held = board.applied()
         assert held is not None
         assert held.rows == ()
         assert held.program.slot_count == 0
         assert held.source is not None and held.source.slots == ()
-        assert held.cycles is None
+        assert (held.run_repeats, held.scan_repeats) == (0, 1)
 
         assert presenter.step_scan_point(100) is True, presenter.view.warnings
         stepped = board.applied()
-        assert stepped is not None and stepped.rows == () and stepped.cycles is None
+        assert stepped is not None and stepped.rows == ()
+        assert (stepped.run_repeats, stepped.scan_repeats) == (0, 1)
         assert not presenter.view.warnings, presenter.view.warnings
     finally:
         presenter.stop()

@@ -7,13 +7,15 @@ import numpy as np
 from zlc_pulse import (
     AnalogStep,
     OutputDelay,
+    PulseBracket,
     PulsePeriod,
     PulsePortSpec,
     PulseSequence,
     PulseSlot,
     PulseTarget,
-    RepeatRegion,
     compile_sequence,
+    sequence_from_tree,
+    sequence_to_tree,
 )
 from zlc_pulse.compile import evaluate_affine_tick
 from zlc_pulse.model import PulseFieldRef
@@ -127,10 +129,10 @@ def test_model_rejects_non_binary_states_and_non_dac_value_slots() -> None:
         )
 
 
-def test_a_full_span_repeat_is_only_an_internal_timeline_loop() -> None:
-    """A region's position never decides finite/forever execution policy."""
+def test_a_full_span_bracket_is_only_an_internal_timeline_loop() -> None:
+    """A bracket's position never decides finite/forever run policy."""
 
-    whole = replace(_sequence(), repeat=RepeatRegion("p0", "p2", 3))
+    whole = replace(_sequence(), bracket=PulseBracket("p0", "p2", 3))
     program = compile_sequence(whole, StreamerParams(max_edges=8, bank_size=2), 50e6)
     assert program.loop_start_index == 0
     assert program.loop_count == 3
@@ -139,10 +141,22 @@ def test_a_full_span_repeat_is_only_an_internal_timeline_loop() -> None:
     assert trigger_windows(program, "d1") == ((1, 2), (4, 5), (7, 8))
 
 
-def test_repeat_count_and_scan_slot_domain_are_strict() -> None:
+def test_bracket_count_run_repeats_and_scan_slot_domain_are_strict() -> None:
     for invalid in (True, 1.5, 1, 0, -1, 2**32):
         with np.testing.assert_raises((TypeError, ValueError)):
-            RepeatRegion("p0", "p2", invalid)
+            PulseBracket("p0", "p2", invalid)
+
+    sequence = _sequence()
+    for valid in (0, 1, 2**32 - 1):
+        assert replace(sequence, run_repeats=valid).run_repeats == valid
+    for invalid in (True, 1.5, -1, 2**32):
+        with np.testing.assert_raises((TypeError, ValueError)):
+            replace(sequence, run_repeats=invalid)
+
+    geometry = StreamerParams(max_edges=8, bank_size=2)
+    assert compile_sequence(sequence, geometry, 50e6) == compile_sequence(
+        replace(sequence, run_repeats=7), geometry, 50e6
+    )
 
     with np.testing.assert_raises(ValueError):
         PulseSlot(
@@ -151,6 +165,30 @@ def test_repeat_count_and_scan_slot_domain_are_strict() -> None:
             "ns",
             "d0_delay",
         )
+
+
+def test_pulse_tree_uses_only_bracket_and_run_repeats() -> None:
+    authored = replace(
+        _sequence(),
+        bracket=PulseBracket("p0", "p2", 3),
+        run_repeats=7,
+    )
+    tree = sequence_to_tree(authored)
+
+    assert tree["bracket"] == {
+        "start_period_id": "p0",
+        "end_period_id": "p2",
+        "count": 3,
+    }
+    assert tree["run_repeats"] == 7
+    assert "repeat" not in tree
+    assert not hasattr(authored, "repeat")
+    assert sequence_from_tree(tree) == authored
+
+    obsolete = dict(tree)
+    obsolete["repeat"] = obsolete.pop("bracket")
+    with np.testing.assert_raises_regex(ValueError, "unknown pulse field.*repeat"):
+        sequence_from_tree(obsolete)
 
 
 def test_compile_binds_the_document_clock_and_complete_geometry() -> None:

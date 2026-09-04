@@ -912,13 +912,15 @@ class ExperimentSession:
         if isinstance(shots, bool) or not isinstance(shots, Integral):
             raise TypeError("shots must be an integer")
         count = int(shots)
+        if count < 1:
+            raise ValueError("shots must be at least 1 for a finite execution")
         lease = self._acquire_pulse_device()
         try:
-            self.sequencer.fire(cycles=count)
+            self.sequencer.fire(run_repeats=count, scan_repeats=1)
             report = self.sequencer.wait_done(float(timeout) * count)
             if report is None:
                 raise TimeoutError(
-                    f"{count} pulse cycle(s) did not report done within "
+                    f"{count} Pulse run(s) did not report done within "
                     f"{float(timeout) * count:g}s"
                 )
             if report.fault:

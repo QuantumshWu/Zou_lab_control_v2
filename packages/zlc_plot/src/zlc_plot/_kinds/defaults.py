@@ -203,7 +203,7 @@ def _grid(families: AxisFamilies, cell_kind: PlotKind | None) -> FacetGridPlot |
     if len(live_scan) >= 2:
         facet: AxisRef | None = live_scan[0][0]
     elif live_scan:
-        facet = _first_live(families.live_events()) or _live_history(families)
+        facet = _first_live(families.live_events()) or _facetable_history(families)
         if facet is None:
             facet = _first_any(families.events)
     else:
@@ -222,6 +222,12 @@ def _facet(families: AxisFamilies, plan: _Plan) -> AxisRef | None:
     free dimension, then an event sequence, then the shot history -- and
     with none of those, an event axis of one: a one-frame cycle still
     names its cell, so the grid's meaning does not depend on the count.
+
+    A structural axis over capacity is offered and the surface refuses it:
+    a sixty-five point scan drawn as sixty-four cells would be the wrong
+    picture, and the refusal names the two ways out.  The shot history is
+    the exception, because its size is the panel's window rather than the
+    data's -- see :func:`_facetable_history`.
     """
 
     consumed = set(plan.consumed)
@@ -231,7 +237,7 @@ def _facet(families: AxisFamilies, plan: _Plan) -> AxisRef | None:
     for ref, _size in families.live_events():
         if ref not in consumed:
             return ref
-    history = _live_history(families)
+    history = _facetable_history(families)
     if history is not None and history not in consumed:
         return history
     # An event axis names a sub-measurement even at one coordinate; a scan's
@@ -377,3 +383,21 @@ def _first_any(entries: tuple[_Entry, ...]) -> AxisRef | None:
 def _live_history(families: AxisFamilies) -> AxisRef | None:
     history = families.history
     return None if history is None or history[1] <= 1 else history[0]
+
+
+def _facetable_history(families: AxisFamilies) -> AxisRef | None:
+    """The shot history, when the layout can lay that many cells out.
+
+    The single answer to "may this window be the grid's facet".  A window
+    over capacity is not refused here, it is simply not the facet: the
+    grid then pools the window into one cell, which is a picture, and the
+    operator who wants a cell per shot narrows the window.
+    """
+
+    from ..layout import DEFAULT_LAYOUT
+
+    history = _live_history(families)
+    if history is None:
+        return None
+    size = int(families.history[1])
+    return history if size <= int(DEFAULT_LAYOUT.facet_max_cells) else None

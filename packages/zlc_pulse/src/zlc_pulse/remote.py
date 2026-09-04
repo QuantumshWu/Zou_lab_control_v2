@@ -37,13 +37,13 @@ from .model import (
     AnalogStep,
     OutputDelay,
     PulseApiParameter,
+    PulseBracket,
     PulseFieldRef as _PulseFieldRef,
     PulsePeriod,
     PulsePortSpec,
     PulseSequence,
     PulseSlot,
     PulseTarget,
-    RepeatRegion,
 )
 from .wire import StreamerParams, load_streamer_config
 
@@ -83,13 +83,13 @@ _TREE_TYPES = {
         DoneReport,
         OutputDelay,
         PulseApiParameter,
+        PulseBracket,
         _PulseFieldRef,
         PulsePeriod,
         PulsePortSpec,
         PulseSequence,
         PulseSlot,
         PulseTarget,
-        RepeatRegion,
         SafeReadback,
         StreamerParams,
         _TargetBusDelay,
@@ -985,7 +985,7 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                 expected = (
                     {"program", "source", "rows"}
                     if method == "load"
-                    else {"cycles"}
+                    else {"run_repeats", "scan_repeats"}
                     if method == "fire"
                     else set()
                 )
@@ -1043,16 +1043,25 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                     )
                     result = None
                 elif method == "fire":
-                    cycles = params["cycles"]
-                    if cycles is not None and (
-                        isinstance(cycles, bool) or not isinstance(cycles, int)
+                    run_repeats = params["run_repeats"]
+                    scan_repeats = params["scan_repeats"]
+                    if isinstance(run_repeats, bool) or not isinstance(
+                        run_repeats, int
                     ):
-                        raise TypeError("fire cycles must be an integer or null")
-                    self.streamer.fire(cycles=cycles)
+                        raise TypeError("fire run_repeats must be an integer")
+                    if isinstance(scan_repeats, bool) or not isinstance(
+                        scan_repeats, int
+                    ):
+                        raise TypeError("fire scan_repeats must be an integer")
+                    self.streamer.fire(
+                        run_repeats=run_repeats,
+                        scan_repeats=scan_repeats,
+                    )
                     applied = self.streamer.applied()
                     program = applied.program if applied is not None else None
                     fire_fields = _log_fields(
-                        cycles="FOREVER" if cycles is None else cycles,
+                        run_repeats="INFINITE" if run_repeats == 0 else run_repeats,
+                        scan_repeats="INFINITE" if scan_repeats == 0 else scan_repeats,
                         reloaded_before_fire=self.streamer.snapshot().get("reloaded_before_fire"),
                     )
                     _server_log(
@@ -1103,10 +1112,39 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                     )
                 elif method == "snapshot":
                     result = self.streamer.snapshot()
-                    _server_log_change("SNAPSHOT", client=client, detail=_log_fields(**{key: result.get(key) for key in ("opened", "loaded", "firing", "cycles", "cursor")}))
+                    _server_log_change(
+                        "SNAPSHOT",
+                        client=client,
+                        detail=_log_fields(
+                            **{
+                                key: result.get(key)
+                                for key in (
+                                    "opened",
+                                    "loaded",
+                                    "firing",
+                                    "run_repeats",
+                                    "scan_repeats",
+                                    "cursor",
+                                )
+                            }
+                        ),
+                    )
                 else:
                     result = self.streamer.applied()
-                    _server_log("APPLIED", client=client, detail=_log_fields(present=result is not None, rows=len(result.rows) if result is not None else None, cycles=result.cycles if result is not None else None))
+                    _server_log(
+                        "APPLIED",
+                        client=client,
+                        detail=_log_fields(
+                            present=result is not None,
+                            rows=len(result.rows) if result is not None else None,
+                            run_repeats=(
+                                result.run_repeats if result is not None else None
+                            ),
+                            scan_repeats=(
+                                result.scan_repeats if result is not None else None
+                            ),
+                        ),
+                    )
             except BaseException as exc:
                 with self._client_lock:
                     stale = (
@@ -1295,8 +1333,11 @@ class RemotePulseStreamer:
             },
         )
 
-    def fire(self, *, cycles: int | None = 1) -> None:
-        self._call("fire", {"cycles": cycles})
+    def fire(self, *, run_repeats: int, scan_repeats: int = 1) -> None:
+        self._call(
+            "fire",
+            {"run_repeats": run_repeats, "scan_repeats": scan_repeats},
+        )
 
     def wait_done(self, timeout: float | None = None) -> DoneReport | None:
         """Poll the board until the shot reports done, or the deadline passes.

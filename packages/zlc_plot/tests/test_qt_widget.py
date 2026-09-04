@@ -442,7 +442,7 @@ def test_a_bare_hover_is_not_a_hand_but_every_part_of_a_drag_is() -> None:
 
     from zlc_plot.raster import _is_a_hand
 
-    # The whole vocabulary _pointer_event accepts, so a new action cannot be
+    # The whole vocabulary pointer_event accepts, so a new action cannot be
     # added without deciding this question for it.
     assert _is_a_hand("move", False) is False
     assert _is_a_hand("leave", False) is False
@@ -495,13 +495,13 @@ def test_a_drag_stays_a_hand_from_press_to_release() -> None:
     host = RasterPlotHost.from_plot(snapshot, CurvePlot(AxisRef.point("x")))
     widget = None
     seen: list[tuple[str, object]] = []
-    original = type(host)._pointer_event
+    original = type(host).pointer_event
 
     def watched(self, action, x, y, *, button=None, held=False, **kwargs):
         seen.append((str(action), button, bool(held)))
         return original(self, action, x, y, button=button, held=held, **kwargs)
 
-    type(host)._pointer_event = watched
+    type(host).pointer_event = watched
     try:
         widget = Qt5PlotWidget(host)
         widget.show()
@@ -555,7 +555,7 @@ def test_a_drag_stays_a_hand_from_press_to_release() -> None:
             "part of a drag was not classified as a hand: %s" % (seen,)
         )
     finally:
-        type(host)._pointer_event = original
+        type(host).pointer_event = original
         if widget is not None:
             widget.close_adapter()
         host.close(timeout=10)

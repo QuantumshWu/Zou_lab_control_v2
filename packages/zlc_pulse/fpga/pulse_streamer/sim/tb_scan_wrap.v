@@ -1,15 +1,17 @@
 `timescale 1ns/1ps
-// Real zlc_edge_streamer driven through a MULTI-SWEEP STREAMED scan with a small BANK_SIZE so
+// Real zlc_edge_streamer driven through all three repeat layers and a STREAMED scan with a small BANK_SIZE so
 // K = ceil(N/BANK_SIZE) > 2 (here BANK_SIZE=4, N=10 -> K=3, ODD: the case that used to gap).
 // A behavioral CYCLIC host-refill model feeds chunks 0,1,..,K-1,0,1,.. one-ahead into the
 // alternating ping-pong bank (bank = monotonic_chunk % 2), exactly matching the engine's
-// scan_bank_base parity.  Asserts: the engine re-sweeps points 0..N-1 forever with the
-// CORRECT slot each point and NEVER stalls (underflow) at the wrap -- truly seamless.
+// scan_bank_base parity.  A 3x whole-timeline PulseBracket sits inside 2 Run repeats per row,
+// and the ten-row table runs for 3 Scan repeats.  Asserts the exact N*M*S nesting,
+// row-only CURSOR motion, finite DONE, and no underflow at either seam.
 module tb_scan_wrap;
   localparam integer CH=8, EAW=12, TW=32, NS=1, CW=16, DTW=32, BUSC=4, BW=10;
   localparam integer BANK_SIZE=4, SAW=3;          // SAW = clog2(BANK_SIZE)+1 = 3 (2 banks x 4)
   localparam integer NPTS=10;                      // K = ceil(10/4) = 3 (odd)
   localparam integer KCH=(NPTS+BANK_SIZE-1)/BANK_SIZE;
+  localparam integer BRACKET_REPEATS=3, RUN_REPEATS=2, SCAN_REPEATS=3;
   reg clk=0, reset=0, start=0; always #10 clk=~clk;
 
   // --- edge program: 2 edges/point, e0@tick0 (bit0=1), e1@tick10 (off); frame=10 ticks ---
@@ -38,10 +40,10 @@ module tb_scan_wrap;
 
   zlc_edge_streamer #(.CHANNEL_COUNT(CH),.SCAN_ADDR_WIDTH(SAW),.BANK_SIZE(BANK_SIZE),
                       .NUM_SLOTS(NS)) dut (
-    .clk(clk),.reset(reset),.start(start),.prog_count(13'd2),.repeat_forever(1'b1),
+    .clk(clk),.reset(reset),.start(start),.prog_count(13'd2),.run_repeat_count(RUN_REPEATS[31:0]),
     .loop_start_addr({EAW{1'b0}}),.loop_end_tick(32'd10),.loop_end_coeffs({NS*CW{1'b0}}),
-    .loop_count(32'd1),
-    .scan_enable(1'b1),.scan_count(NPTS[31:0]),
+    .loop_count(BRACKET_REPEATS[31:0]),
+    .scan_enable(1'b1),.scan_count(NPTS[31:0]),.scan_repeat_count(SCAN_REPEATS[31:0]),
     .edge_raddr(edge_raddr),.edge_tick_rdata(edge_tick_rdata),
     .edge_coeff_rdata({NS*CW{1'b0}}),.edge_mask_rdata(edge_mask_rdata),
     .scan_raddr(scan_raddr),.scan_rdata(scan_rdata),
@@ -60,7 +62,6 @@ module tb_scan_wrap;
   // chunk c (data) = points [c*BANK_SIZE .. ); host loads chunk (mono mod K) into bank (mono%2)
   // one-ahead, with REFILL_LAT cycles of write latency.  base = (#wraps * K) parity.
   localparam integer REFILL_LAT=6;
-  integer mono;            // monotonic chunk count the host has STARTED loading (0,1,2,..)
   integer load_at;         // cycle when the in-flight load completes
   integer load_bank, load_chunk;
   reg     load_busy;
@@ -72,9 +73,11 @@ module tb_scan_wrap;
     end
   end endtask
 
-  // engine monotonic position from observed cursor + wrap detection
-  integer eng_mono; reg [TW-1:0] cprev; integer sweeps;
+  // engine monotonic chunk comes directly from the hardware's cumulative row
+  // visit cursor: sweep=cursor/N, row=cursor%N.  Polling need not witness a wrap.
+  integer eng_mono;
   reg [NS*TW-1:0] slot_seq [0:255]; integer nseen; integer stalls_after_warmup;
+  reg [NS*TW-1:0] body_slots [0:511]; integer nbodies;
 
   initial begin
     reset=1; start=0; bank_ready=2'b00; bank_chunk0=0; bank_chunk1=0;
@@ -82,25 +85,19 @@ module tb_scan_wrap;
     load_chunk_into(0,0); bank_chunk0=0;
     load_chunk_into(1%KCH,1); bank_chunk1=(1%KCH);
     bank_ready=2'b11;
-    mono=2; load_busy=0; eng_mono=0; cprev=0; sweeps=0; nseen=0; stalls_after_warmup=0;
+    load_busy=0; eng_mono=0; nseen=0; nbodies=0; stalls_after_warmup=0;
     cyc=0; load_at=0; load_bank=0; load_chunk=0;
     repeat (300) @(posedge clk);
     reset=0; @(posedge clk); start=1; @(posedge clk); start=0;
   end
 
-  // host cyclic refill: track the engine's MONOTONIC chunk position directly (increment on
-  // every chunk-boundary crossing INCLUDING the wrap), and keep the bank for the NEXT
-  // monotonic chunk loaded with chunk ((eng_mono+1) mod K).  This mirrors the real host's
-  // own monotonic next_chunk counter -- robust at the wrap (no cursor/sweeps NBA lag).
+  // host cyclic refill: derive the current monotonic chunk directly and keep
+  // the bank for the NEXT monotonic chunk loaded with (chunk mod K).
   always @(posedge clk) begin
     cyc<=cyc+1;
     if (running) begin
-      // detect a chunk-boundary crossing: cursor wrapped (cursor<cprev) OR entered a new chunk
-      if (scan_cursor_w !== cprev) begin
-        if (scan_cursor_w < cprev || (scan_cursor_w / BANK_SIZE) != (cprev / BANK_SIZE))
-          eng_mono <= eng_mono + 1;
-        cprev<=scan_cursor_w;
-      end
+      eng_mono = (scan_cursor_w/NPTS)*KCH
+                 + ((scan_cursor_w%NPTS)/BANK_SIZE);
       // complete an in-flight load
       if (load_busy && cyc>=load_at) begin
         if (load_bank==0) bank_chunk0<=load_chunk[TW-1:0]; else bank_chunk1<=load_chunk[TW-1:0];
@@ -124,6 +121,10 @@ module tb_scan_wrap;
   reg [NS*TW-1:0] slot_prev; integer started=0;
   always @(posedge clk) begin
     if (running) begin
+      if (dut.time_count==1 && out[0]) begin
+        body_slots[nbodies]<=dut.slot_active;
+        nbodies<=nbodies+1;
+      end
       if (!started) begin started<=1; slot_prev<=dut.slot_active; slot_seq[0]<=dut.slot_active; nseen<=1; end
       else if (dut.slot_active !== slot_prev) begin
         slot_seq[nseen]<=dut.slot_active; nseen<=nseen+1; slot_prev<=dut.slot_active;
@@ -133,19 +134,29 @@ module tb_scan_wrap;
     end
   end
 
-  integer i; integer bad;
+  integer i; integer bad; integer timeout_cycles;
   initial begin
     wait(reset==1); wait(reset==0);
-    repeat (900) @(posedge clk);      // ~ several sweeps (each point ~11 ticks, 10 pts = 110)
-    // verify the slot sequence is 0,1,2,...,9,0,1,2,... (correct points, seamless re-sweep)
-    bad=0;
-    for (i=0;i<nseen;i=i+1) if (slot_seq[i] !== (i % NPTS)) begin
-      bad=bad+1;
-      if (bad<=6) $display("  MISMATCH seq[%0d]=%0d expected %0d", i, slot_seq[i], i%NPTS);
+    for (timeout_cycles=0; timeout_cycles<5000 && done!=1'b1; timeout_cycles=timeout_cycles+1)
+      @(posedge clk);
+    if (done!=1'b1) begin
+      $display("**FAIL** three-layer scan did not reach finite DONE");
+      $finish;
     end
-    $display("==== scan wrap test: K=%0d (odd) N=%0d : points_seen=%0d  seq_mismatches=%0d  wrap_stalls=%0d ====",
-             KCH, NPTS, nseen, bad, stalls_after_warmup);
-    $display("%s", (bad==0 && stalls_after_warmup==0 && nseen>=NPTS*2) ? "SEAMLESS-OK" : "**FAIL**");
+    repeat (10) @(posedge clk);
+    // Every body has its row's slot.  Bracket repeats are inner, then Run
+    // repeats, then row advance, then Scan repeats.
+    bad=0;
+    for (i=0;i<nbodies;i=i+1) if (body_slots[i] !== ((i/(BRACKET_REPEATS*RUN_REPEATS)) % NPTS)) begin
+      bad=bad+1;
+      if (bad<=6) $display("  MISMATCH body[%0d]=%0d expected %0d", i, body_slots[i], (i/(BRACKET_REPEATS*RUN_REPEATS))%NPTS);
+    end
+    $display("==== three-layer scan: K=%0d N=%0d bracket=%0d run=%0d sweeps=%0d bodies=%0d mismatches=%0d stalls=%0d cursor=%0d ====",
+             KCH, NPTS, BRACKET_REPEATS, RUN_REPEATS, SCAN_REPEATS, nbodies, bad, stalls_after_warmup, scan_cursor_w);
+    $display("%s", (bad==0 && stalls_after_warmup==0
+             && nbodies==NPTS*BRACKET_REPEATS*RUN_REPEATS*SCAN_REPEATS
+             && nseen==NPTS*SCAN_REPEATS
+             && scan_cursor_w==NPTS*SCAN_REPEATS-1) ? "SEAMLESS-OK" : "**FAIL**");
     $finish;
   end
 endmodule

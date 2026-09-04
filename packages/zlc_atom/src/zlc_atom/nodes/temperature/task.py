@@ -36,7 +36,6 @@ is the mean projection of this same truth, not a second accumulated Dataset.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -45,6 +44,7 @@ from zlc_data import (
     SITE,
     AxisId,
     AxisSpec,
+    DatasetSchema,
     DomainSpec,
     OwnedSnapshot,
 )
@@ -72,6 +72,7 @@ from zlc_atom.nodes.scan import (
     ScanPlan,
     SeamlessScanMeasurement,
     bind_plan,
+    scan_repeat_domain,
     scan_ports_for,
     slots_from_plan,
 )
@@ -250,7 +251,8 @@ class TemperatureTask:
         value: object,
         *,
         row: int,
-        visit: int,
+        scan_repeat: int,
+        run_repeat: int,
         point_rows: tuple[tuple[float, ...], ...],
     ) -> dict[str, object]:
         """One landed cycle: which sites held an atom, and which held it still.
@@ -287,19 +289,20 @@ class TemperatureTask:
             validity=eligible[None, None, :],
         )
         schema = event.block.schema
-        (repeat_axis,) = schema.repeat_domain.axes
-        canonical = replace(
-            schema,
-            repeat_domain=DomainSpec(
-                (self._repeats,),
-                (replace(repeat_axis, size=self._repeats),),
-                (tuple(range(self._repeats)),),
+        run_repeats = self._scan.shots_per_point
+        canonical = DatasetSchema(
+            scan_repeat_domain(
+                schema.repeat_domain,
+                scan_repeats=self._repeats,
+                run_repeats=run_repeats,
             ),
-            point_domain=DomainSpec(
+            DomainSpec(
                 (len(t_off),),
                 (self._point_axis(t_off),),
                 (tuple(range(len(t_off))),),
             ),
+            schema.cell_domain,
+            schema.value_schema,
         )
         return {
             SURVIVAL_OUTPUT.name: LiveDatasetOutput(
@@ -310,7 +313,11 @@ class TemperatureTask:
                     total_cells=self._repeats * len(t_off),
                 ),
                 canonical_schema=canonical,
-                cell_origin=(visit, row),
+                cell_origin=(
+                    (scan_repeat * run_repeats + run_repeat)
+                    * schema.repeat_domain.size,
+                    row,
+                ),
             ),
         }
 

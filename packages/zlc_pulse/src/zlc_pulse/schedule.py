@@ -1,4 +1,9 @@
-"""Pure timing queries derived from a compiled program."""
+"""Pure finite timing queries derived from a compiled program.
+
+Every query walks one table in hardware order: each row holds for
+``run_repeats`` complete Pulse timelines, then the complete table is replayed
+``scan_repeats`` times.  An infinite count cannot produce a finite projection.
+"""
 
 from __future__ import annotations
 
@@ -16,7 +21,8 @@ def trigger_times(
     channel: str,
     table: np.ndarray | None = None,
     *,
-    cycles: int = 1,
+    run_repeats: int = 1,
+    scan_repeats: int = 1,
 ) -> np.ndarray:
     """Return rising-edge ticks for one physical digital lane.
 
@@ -25,7 +31,13 @@ def trigger_times(
     """
 
     return np.asarray(
-        _channel_edges(prog, (channel,), table, cycles)[0][0::2],
+        _channel_edges(
+            prog,
+            (channel,),
+            table,
+            run_repeats,
+            scan_repeats,
+        )[0][0::2],
         dtype=np.uint64,
     )
 
@@ -35,7 +47,8 @@ def trigger_windows(
     channel: str,
     table: np.ndarray | None = None,
     *,
-    cycles: int = 1,
+    run_repeats: int = 1,
+    scan_repeats: int = 1,
 ) -> tuple[tuple[int, int], ...]:
     """Return (rise, fall) tick pairs for one lane, over one finite run.
 
@@ -45,7 +58,13 @@ def trigger_windows(
     rule, drifting from the one the board plays.
     """
 
-    return trigger_windows_by_channel(prog, (channel,), table, cycles=cycles)[channel]
+    return trigger_windows_by_channel(
+        prog,
+        (channel,),
+        table,
+        run_repeats=run_repeats,
+        scan_repeats=scan_repeats,
+    )[channel]
 
 
 def trigger_windows_by_channel(
@@ -53,7 +72,8 @@ def trigger_windows_by_channel(
     channels: Sequence[str],
     table: np.ndarray | None = None,
     *,
-    cycles: int = 1,
+    run_repeats: int = 1,
+    scan_repeats: int = 1,
 ) -> dict[str, tuple[tuple[int, int], ...]]:
     """Return the exposure windows of several lanes from ONE walk of the run.
 
@@ -63,7 +83,13 @@ def trigger_windows_by_channel(
     """
 
     names = tuple(channels)
-    streams = _channel_edges(prog, names, table, cycles)
+    streams = _channel_edges(
+        prog,
+        names,
+        table,
+        run_repeats,
+        scan_repeats,
+    )
     return {name: _windows_of(edges) for name, edges in zip(names, streams)}
 
 
@@ -72,7 +98,8 @@ def trigger_edge_ticks(
     channels: Sequence[str],
     table: np.ndarray | None = None,
     *,
-    cycles: int = 1,
+    run_repeats: int = 1,
+    scan_repeats: int = 1,
 ) -> dict[str, tuple[int, ...]]:
     """Return the tick of every edge each named lane plays.
 
@@ -86,7 +113,18 @@ def trigger_edge_ticks(
     """
 
     names = tuple(channels)
-    return dict(zip(names, _channel_edges(prog, names, table, cycles)))
+    return dict(
+        zip(
+            names,
+            _channel_edges(
+                prog,
+                names,
+                table,
+                run_repeats,
+                scan_repeats,
+            ),
+        )
+    )
 
 
 def _windows_of(edges: tuple[int, ...]) -> tuple[tuple[int, int], ...]:
@@ -102,14 +140,17 @@ def run_duration_seconds(
     prog: CompiledProgram,
     table: np.ndarray | None = None,
     *,
-    cycles: int = 1,
+    run_repeats: int = 1,
+    scan_repeats: int = 1,
 ) -> float:
     """Return the exact finite playback duration for one program/table run."""
 
     return sum(
         total for _effective, _loop_start, _loop_end, _final, _span, total in (
             _point_timing(prog, point, index)
-            for index, point in enumerate(_scan_points(prog, table, cycles))
+            for index, point in enumerate(
+                _scan_points(prog, table, run_repeats, scan_repeats)
+            )
         )
     ) / float(prog.clock_hz)
 
@@ -118,7 +159,8 @@ def _channel_edges(
     prog: CompiledProgram,
     channels: Sequence[str],
     table: np.ndarray | None,
-    cycles: int,
+    run_repeats: int,
+    scan_repeats: int,
 ) -> tuple[tuple[int, ...], ...]:
     """Project the tick of every edge each named lane plays, in playback order.
 
@@ -126,11 +168,11 @@ def _channel_edges(
     alternate: the first edge raises it, the second lowers it, and the
     position in the stream already says which.  Carrying a bool beside every
     tick allocated a tuple per edge -- 3.9 million of them for one 200-point
-    fire -- to repeat what counting says.
+    fire -- to restate what counting says.
 
     THE SHAPE OF A POINT IS SHARED BY EVERY LANE.  ``_point_timing`` has no
-    channel argument, and the table is cycled, so a scan of N rows has N
-    shapes however many cycles it plays.  Derived per lane, a program with
+    channel argument, and a scan of N rows has N shapes however many run or
+    scan repeats it plays.  Derived per lane, a program with
     nine delayed lanes derived the same table nine times -- and nine is
     authorable by accident, because a delay is written per port and a
     NEGATIVE one is expressed by lifting every OTHER driven lane, so one
@@ -151,7 +193,7 @@ def _channel_edges(
             raise ValueError("clock lanes do not have digital trigger results")
         bits.append(bit)
 
-    points = _scan_points(prog, table, cycles)
+    points = _scan_points(prog, table, run_repeats, scan_repeats)
     loop_count = prog.loop_count
     loop_start_index = prog.loop_start_index
     shapes: dict[tuple[int, ...], tuple] = {}
@@ -218,18 +260,20 @@ def _channel_edges(
 def _scan_points(
     prog: CompiledProgram,
     table: np.ndarray | None,
-    cycles: int,
+    run_repeats: int,
+    scan_repeats: int,
 ) -> tuple[tuple[int, ...], ...]:
+    """Return finite execution rows in ``scan -> row -> run`` order."""
+
     if not isinstance(prog, CompiledProgram):
         raise TypeError("prog must be CompiledProgram")
-    if isinstance(cycles, bool) or not isinstance(cycles, Integral):
-        raise TypeError("cycles must be an integer")
-    cycles = int(cycles)
-    if not 1 <= cycles <= MAXIMUM_REPEAT_COUNT:
-        raise ValueError("cycles must be in the hardware range [1, 2^32-1]")
+    run_repeats = _finite_repeat_count(run_repeats, "run_repeats")
+    scan_repeats = _finite_repeat_count(scan_repeats, "scan_repeats")
     if table is None:
         if prog.slot_count:
             raise ValueError("a slotted program requires an explicit value table")
+        if scan_repeats != 1:
+            raise ValueError("scan_repeats must be 1 when there is no scan table")
         rows = ((),)
     else:
         array = np.asarray(table)
@@ -247,7 +291,23 @@ def _scan_points(
         ):
             raise TypeError("table values must be integers")
         rows = tuple(tuple(int(value) for value in row) for row in raw_rows)
-    return tuple(rows[index % len(rows)] for index in range(cycles))
+    sweep = tuple(
+        row
+        for row in rows
+        for _run_index in range(run_repeats)
+    )
+    return sweep * scan_repeats
+
+
+def _finite_repeat_count(value: int, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise TypeError(f"{field_name} must be an integer")
+    count = int(value)
+    if not 1 <= count <= MAXIMUM_REPEAT_COUNT:
+        raise ValueError(
+            f"{field_name} must be in the finite hardware range [1, 2^32-1]"
+        )
+    return count
 
 
 def _point_timing(

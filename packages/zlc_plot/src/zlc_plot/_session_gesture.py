@@ -450,8 +450,26 @@ class GestureSessionMixin:
         if ticks == 0.0:
             ticks = 1.0 if direction == "up" else -1.0
         factor = zoom_factor ** ticks
-        x_axes = NumericRange(*sorted(map(float, axes.get_xlim())))
-        y_axes = NumericRange(*sorted(map(float, axes.get_ylim())))
+        # Anchor on the COMMITTED viewport, for the same reason the camera
+        # above anchors on the committed zoom: renders lag commits, and once
+        # rendering moved into its own process they lag by whole frames.
+        # Reading the DRAWN limits made every notch that arrived before the
+        # next frame re-derive the step already taken, so a scroll stopped
+        # advancing the view -- the operator turns the wheel and the picture
+        # keeps landing back where it was.  With nothing committed yet the
+        # drawn limits ARE the commitment: they are what autoscale chose.
+        committed = self._projected.viewport
+        if committed is None:
+            x_axes = NumericRange(*sorted(map(float, axes.get_xlim())))
+            y_axes = NumericRange(*sorted(map(float, axes.get_ylim())))
+        else:
+            axes_x = self._viewport_x_to_axes(committed.x)
+            x_axes = NumericRange(
+                *sorted((float(axes_x.low), float(axes_x.high)))
+            )
+            y_axes = NumericRange(
+                *sorted(map(float, self._viewport_y_to_axes(committed.y)))
+            )
 
         def centered(value: NumericRange, scale: str) -> NumericRange:
             low = axis_space(value.low, scale)
