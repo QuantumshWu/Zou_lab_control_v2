@@ -25,6 +25,8 @@ has no upstream publication and returns ``None`` for that half.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from zlc_runtime import SignalPublication, SignalValue
 from zlc_runtime.streams import SourceGenerationEnded, StreamEndedEarly
 
@@ -57,6 +59,13 @@ def wait_for_report(sequencer: object, context: object) -> object:
     The report comes back whole, fault and all: what a fault MEANS for the
     data is the caller's question (a scan point is lost; a Task that counted
     its own camera frames may know better), and only the waiting is shared.
+
+    NOTHING is waited for unconditionally.  ``wait_done`` answers None for two
+    different situations and only one of them is "not yet": a board that is no
+    longer firing has no report left to give and says so IMMEDIATELY, which
+    turned this -- the one wait in a shot with no deadline of its own -- into
+    a spin that never ended and never said anything.  Every other wait in a
+    shot batch is bounded and names its own failure; so is this one now.
     """
 
     while True:
@@ -64,6 +73,15 @@ def wait_for_report(sequencer: object, context: object) -> object:
         report = sequencer.wait_done(0.1)
         if report is not None:
             return report
+        state = sequencer.snapshot()
+        if not isinstance(state, Mapping):
+            raise TypeError("sequencer snapshot must be a mapping")
+        if not state.get("firing"):
+            raise RuntimeError(
+                "the board stopped without reporting this shot: it is no "
+                "longer firing and its report has already been taken or was "
+                "never written, so nothing further is coming for this batch"
+            )
 
 
 def wait_for_board(sequencer: object, context: object) -> None:

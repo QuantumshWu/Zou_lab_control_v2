@@ -2332,12 +2332,19 @@ class PulseEditorPresenter:
             self._remember_applied_scan(program, source, wire_rows)
         else:
             self._applied_scan = None
+        # EVERY execution fact the sync point later compares is adopted
+        # here, because this is the one door the board's answer comes through.
+        # The scan repeat count was not: it stayed whatever the editor last
+        # held, so a board playing two sweeps against an editor holding one
+        # reported "not synchronized" -- and pressing Sync could not fix it,
+        # because the comparison read a field the adoption never wrote.
         self._accept_state(
             replace(
                 self._state,
                 sequence=source,
                 scan_rows=authored_rows,
                 scan_source_dirty=bool(self._state.scan_source),
+                scan_repeats=int(getattr(state, "scan_repeats", 0) or 0),
             )
         )
         self.refresh()
@@ -2906,6 +2913,9 @@ class PulseEditorPresenter:
             source = self._execution_sequence()
         except Exception:
             return False
+        # The set compared here must equal the set ``_adopt_applied`` takes
+        # in.  A field on one side and not the other is a disagreement that
+        # pressing Sync cannot settle, which is worse than not noticing it.
         scan_repeats = self._state.scan_repeats if self._scan_armed() else 1
         return (
             self._board_state.run_repeats == source.run_repeats
