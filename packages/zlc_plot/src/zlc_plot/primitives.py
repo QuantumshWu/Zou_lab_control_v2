@@ -651,12 +651,19 @@ class PulseTimelineData:
         unknown_traces = {item.trace_name for item in scan_dac_segments} - set(names)
         if unknown_traces:
             raise ValueError(f"DAC scan segments reference unknown traces: {sorted(unknown_traces)}")
-        scan_numbers = [item.number for item in regions]
-        scan_numbers.extend(
-            item.number for item in scan_dac_segments if item.number is not None
+        # A badge is drawn in its kind's colour beside its digit, so what has
+        # to be unique is the PAIR.  Requiring the digit alone to be unique
+        # made one kind's numbering depend on how many of the other kind the
+        # pulse happened to declare -- the third API parameter of a pulse with
+        # two scan slots called itself 5, which is a position in no list.
+        marks = [(item.kind, item.number) for item in regions]
+        marks.extend(
+            (item.kind, item.number)
+            for item in scan_dac_segments
+            if item.number is not None
         )
-        if len(scan_numbers) != len(set(scan_numbers)):
-            raise ValueError("scan numbers must be unique across the timeline")
+        if len(marks) != len(set(marks)):
+            raise ValueError("a scan kind and number name one mark on the timeline")
         total_duration = self.total_duration
         if total_duration is not None:
             total_duration = _finite(total_duration, "total_duration")

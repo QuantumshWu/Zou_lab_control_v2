@@ -1438,15 +1438,20 @@ def test_load_opens_a_pulse_file_rather_than_refusing(sequence, tmp_path) -> Non
         presenter.close()
 
 
-def test_seeded_calibration_template_is_not_the_editor_current_document(
-    tmp_path, monkeypatch
-) -> None:
+def test_a_workspace_alone_is_not_a_current_document(tmp_path, monkeypatch) -> None:
+    """Opening the editor on a workspace opens NO pulse.
+
+    Which document is being edited is something the operator says, by naming
+    a file.  A workspace is only where files live, so resolving one without a
+    path leaves the editor holding nothing -- there is no document it can
+    have meant.
+    """
+
     from zlc_workbench.apps.pulse_editor import resolve
     from zlc_workbench.session import Workspace
 
     monkeypatch.setenv(Workspace.HOME_VARIABLE, str(tmp_path / "default"))
     default = Workspace.default()
-    assert (default.pulses / Workspace.IMAGING_TEMPLATE).is_file()
 
     space, state, path = resolve(default.root, None)
 
@@ -2873,10 +2878,16 @@ def test_every_bindable_field_shows_the_slot_it_is_bound_to(sequence) -> None:
         row = next(item for item in schedule.delay_rows if item.port_key == delayable)
         assert row.value.binding_kind == "api"
 
-        # Numbers are the slot positions, so no two bound fields share one.
-        numbers = {card.duration.binding_number, analog[dac].binding_number,
-                   row.value.binding_number}
-        assert len(numbers) == 3, numbers
+        # A number is a position in its OWN collection, so the two scan slots
+        # are 1 and 2 and the API parameter is 1 again -- what identifies a
+        # binding on screen is the pair, and the dot is filled in the kind's
+        # colour beside the digit.
+        marks = {
+            (card.duration.binding_kind, card.duration.binding_number),
+            (analog[dac].binding_kind, analog[dac].binding_number),
+            (row.value.binding_kind, row.value.binding_number),
+        }
+        assert marks == {("scan", 1), ("scan", 2), ("api", 1)}, marks
 
         # Cycling on through every owner and off again.  A field carries the
         # same name and unit the whole way round: the physical thing does not

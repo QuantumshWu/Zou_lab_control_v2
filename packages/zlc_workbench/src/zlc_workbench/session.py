@@ -192,6 +192,7 @@ class Workspace:
     def prepare(self) -> "Workspace":
         """Create the directories a session writes into."""
 
+        self.pulses.mkdir(parents=True, exist_ok=True)
         self.data.mkdir(parents=True, exist_ok=True)
         seed_current_config_values(self.config_values)
         return self
@@ -218,8 +219,17 @@ class Workspace:
         window was opened, and a saved pulse landed somewhere nobody would look
         for it again.
 
-        It is created on demand.  A home that must be made by hand before the
-        first save is a home that will not be there.
+        It is created on demand, HERE.  A home that must be made by hand
+        before the first save is a home that will not be there -- and this is
+        the only place that knows the home is meant rather than merely named,
+        so it cannot be left to whoever asks for it next.  It used to be made
+        as a side effect of copying packaged pulses into it; those pulses are
+        gone, because a pulse belongs to the operator's folder and not to the
+        code, and making the folder was never the copier's job anyway.
+
+        The pulse folder comes with it: it is one of the MARKERS, so a home
+        without one is not yet recognisable as an experiment's, not even to
+        ``discover`` standing inside it.
         """
 
         root = os.environ.get(cls.HOME_VARIABLE, "").strip()
@@ -228,6 +238,7 @@ class Workspace:
             if root
             else Path(__file__).resolve().parents[4] / cls.DEFAULT_HOME
         )
+        (home / "pulses").mkdir(parents=True, exist_ok=True)
         return cls(home)
 
     @classmethod
