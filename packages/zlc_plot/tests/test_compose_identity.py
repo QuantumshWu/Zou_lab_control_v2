@@ -36,9 +36,15 @@ from zlc_plot import (
     PlotSession,
     RollingPlot,
 )
+from zlc_plot import _raster_kernels as kernels
 from zlc_plot.rendering import MatplotlibRenderer
 from zlc_plot._selector_scene import ColorLimitCandidate
-from zlc_plot.selectors import NumericRange
+from zlc_plot.selectors import (
+    NumericRange,
+    RectangleRange,
+    SelectorKind,
+    SelectorState,
+)
 from zlc_plot.style import style_context
 
 
@@ -702,3 +708,121 @@ def test_a_histogram_grid_with_live_cell_fits_stays_full_draw_exact_and_parses_o
             assert len(values) == repeats and all("±" in value for value in values)
     finally:
         session.close()
+
+
+def _ink(buffer) -> int:
+    """Pixels that are not the frame's background colour."""
+
+    flat = np.asarray(buffer).reshape(-1, np.asarray(buffer).shape[-1])
+    colours, counts = np.unique(flat, axis=0, return_counts=True)
+    background = colours[int(np.argmax(counts))]
+    return int(np.count_nonzero(np.any(flat != background, axis=-1)))
+
+
+def _gesture_candidate(kind: SelectorKind) -> SelectorState:
+    if kind is SelectorKind.AREA:
+        return SelectorState(
+            kind, RectangleRange(NumericRange(-2.0, -1.0), NumericRange(5.0, 20.0))
+        )
+    return SelectorState(kind, NumericRange(-2.0, -1.0))
+
+
+@pytest.mark.parametrize("gesture", (SelectorKind.AREA, SelectorKind.X_RANGE))
+@pytest.mark.parametrize("spec_kind", ("curve", "facet_curve"))
+def test_a_selector_gesture_never_erases_the_scene_below_it(
+    spec_kind: str, gesture: SelectorKind
+) -> None:
+    """Opening a gesture may add ink to the frame; it may never take any away.
+
+    The compose splits the z-order where the gesture's own artists begin, so
+    a pointer move repaints only the tail over a captured frame.  That split
+    says WHERE the frame is cut -- never WHAT is drawn.  Every native pass
+    was gated on ``split is None`` instead, so with a gesture open the
+    kernels painted nothing, and a kind whose data is a prepared scene has
+    no artist to fall back on: the install hides the real lines and bars and
+    hands the picture to the kernels.  A curve panel therefore went blank
+    for the whole length of an area drag -- chrome and the rubber band, no
+    data -- which is exactly what an operator sees while dragging a region
+    on a live trace.
+
+    Ink is the operator's own measure, so it is the one asserted here, and
+    it holds for every kind and every gesture rather than for the one that
+    was reported.
+    """
+
+    points, repeats = 160, 6
+    schema = _curve_contract(points, repeats)
+    spec = (
+        CurvePlot(AxisRef.point("x"))
+        if spec_kind == "curve"
+        else FacetGridPlot(AxisRef.repeat("repeat"), CurvePlot(AxisRef.point("x")))
+    )
+    session = PlotSession(
+        _curve_snapshot(schema, points, repeats, 1, seed=71),
+        spec,
+        parameters={"uncertainty": spec_kind == "curve"},
+    )
+    try:
+        renderer = session._renderer
+        before = np.array(session.rgba(), copy=True)
+        prepared = renderer._has_prepared_scene()
+        if kernels.engaged():
+            assert prepared, (
+                "this guard is only worth anything over a kernel-drawn scene, "
+                "and this session did not produce one"
+            )
+
+        renderer.begin_selector_gesture(gesture)
+        renderer.preview_selector(_gesture_candidate(gesture))
+        during = np.array(session.rgba(), copy=True)
+
+        assert _ink(during) >= _ink(before), (
+            f"the {gesture.value} gesture erased the {spec_kind} scene: "
+            f"{_ink(before)} inked pixels before, {_ink(during)} during"
+        )
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("spec_kind", ("curve", "facet_curve"))
+def test_a_gesture_move_repaints_the_scene_a_compose_paints(spec_kind: str) -> None:
+    """The captured frame a move restores is the frame a compose would draw.
+
+    The cheap move path restores the capture and repaints only the tail, so
+    the capture has to be everything below it -- the kernel-stroked data
+    included.  Composing the same candidate with the capture thrown away
+    must therefore land on the same pixels.
+    """
+
+    points, repeats = 160, 6
+    schema = _curve_contract(points, repeats)
+    spec = (
+        CurvePlot(AxisRef.point("x"))
+        if spec_kind == "curve"
+        else FacetGridPlot(AxisRef.repeat("repeat"), CurvePlot(AxisRef.point("x")))
+    )
+    session = PlotSession(
+        _curve_snapshot(schema, points, repeats, 1, seed=72),
+        spec,
+        parameters={"uncertainty": spec_kind == "curve"},
+    )
+    try:
+        renderer = session._renderer
+        session.rgba()
+        renderer.begin_selector_gesture(SelectorKind.AREA)
+        candidate = _gesture_candidate(SelectorKind.AREA)
+        renderer.preview_selector(candidate)
+        moved = SelectorState(
+            SelectorKind.AREA,
+            RectangleRange(NumericRange(-2.0, -0.5), NumericRange(5.0, 25.0)),
+        )
+        renderer.preview_selector(moved)
+        cheap = np.array(session.rgba(), copy=True)
+
+        renderer._forget_gesture_region()
+        renderer.preview_selector(moved)
+        expensive = np.array(session.rgba(), copy=True)
+        assert np.array_equal(cheap, expensive)
+    finally:
+        session.close()
+
