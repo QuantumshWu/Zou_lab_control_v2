@@ -495,10 +495,21 @@ class FitProjection:
         return self._revision
 
     @property
-    def data_generation(self) -> str:
-        if not isinstance(self._data, OwnedSnapshot):
-            raise RuntimeError("data generation requires an OwnedSnapshot")
-        return snapshot_generation(self._data)
+    def data_generation(self) -> str | None:
+        """Which dataset this frame came out of, or None for a kind with no run.
+
+        THE ONE ANSWER.  A pulse timeline is authored, not acquired: it has a
+        revision but no run behind it, so "which dataset" has no answer and
+        None is that answer.  This used to REFUSE instead, and every caller
+        that knew the kind might have no generation wrote the refusal off as
+        an absent attribute -- ``getattr(projection, "data_generation", None)``
+        -- which is not what a raising property does.  So the Pulse Editor's
+        preview died on the one line meant to tolerate it, and the operator
+        was told the pulse could not be drawn.
+        """
+
+        data = self._data
+        return snapshot_generation(data) if isinstance(data, OwnedSnapshot) else None
 
     @property
     def data(self) -> OwnedSnapshot | PulseTimelineData:

@@ -98,3 +98,71 @@ def test_histogram_fit_uses_painted_count_bins_only() -> None:
     density_projection._build_view_and_payload()
     with pytest.raises(ValueError, match="density=False"):
         density_projection.fit_selection(model)
+
+
+def _pulse_timeline_data():
+    """A kind with no run behind it: authored, not acquired."""
+
+    from zlc_plot.primitives import PulseBlock, PulseChannel, PulseTimelineData
+
+    data = PulseTimelineData(
+        channels=(PulseChannel("laser", "Laser"), PulseChannel("probe", "Probe")),
+        blocks=(
+            PulseBlock("laser", 0.0, 4.0e-6, label="Init"),
+            PulseBlock("probe", 4.0e-6, 8.0e-6, label="Read"),
+        ),
+        time_unit="s",
+        total_duration=10.0e-6,
+    )
+    return data
+
+
+def _pulse_timeline_session():
+    from zlc_plot import PlotLabels
+    from zlc_plot.api import pulse_timeline
+
+    return pulse_timeline(_pulse_timeline_data(), labels=PlotLabels(title="Pulse"))
+
+
+def test_a_kind_with_no_run_answers_none_rather_than_refusing() -> None:
+    """"Which dataset is this frame from" has ONE answer, and None is legal.
+
+    A pulse timeline is authored, not acquired: it has a revision but no run
+    behind it.  The projection used to REFUSE the question, while the session
+    answered None and the front's own field is ``str | None`` -- so every
+    caller that knew the kind might have no generation wrote the refusal off
+    as an absent attribute, ``getattr(projection, "data_generation", None)``,
+    which is not what a raising property does.
+    """
+
+    session = _pulse_timeline_session()
+    assert session.data_generation is None
+    # The projection owns the data, so it owns the answer; the session says
+    # the same thing because it asks the projection.
+    assert session._projection.data_generation is None
+
+
+def test_resizing_a_pulse_timeline_keeps_drawing_it() -> None:
+    """The Pulse Editor's Size control, at the mechanism it actually drives.
+
+    ``set_size`` then ``update_data`` is what the preview does, and it goes
+    through ``commit_live_frame`` -- the one line that tolerated a kind with
+    no generation, and could not.  The operator saw "cannot draw this pulse"
+    and a half-painted canvas.
+    """
+
+    from zlc_plot import RasterPlotHost
+
+    session = _pulse_timeline_session()
+    host = RasterPlotHost.from_session(session)
+    try:
+        first = host.wait_for_front(timeout=5.0)
+        assert first is not None
+        for size in ("4x4", "8x8", "1x2"):
+            host.set_size(size).result(timeout=5.0)
+            host.update_data(_pulse_timeline_data()).result(timeout=5.0)
+            front = host.wait_for_front(timeout=5.0)
+            assert front is not None, f"no front came back at {size}"
+            assert front.identity.data_generation is None
+    finally:
+        host.close()

@@ -241,7 +241,7 @@ class LiveSessionMixin:
                     return None
                 revision = prepared.projection.data_revision
                 generation_changed = str(
-                    getattr(prepared.projection, "data_generation", None)
+                    prepared.projection.data_generation
                 ) != str(self.data_generation)
                 if not generation_changed and revision <= self.data_revision:
                     return None
