@@ -10,10 +10,15 @@ from zlc_pulse import (
     PulseBracket,
     PulsePeriod,
     PulsePortSpec,
+    PulseApiParameter,
+    PulseConfigParameter,
     PulseSequence,
     PulseSlot,
     PulseTarget,
+    apply_config_values,
+    authored_config_entries,
     compile_sequence,
+    resolve_config_parameters,
     sequence_from_tree,
     sequence_to_tree,
 )
@@ -197,3 +202,108 @@ def test_compile_binds_the_document_clock_and_complete_geometry() -> None:
     assert program.geometry_fingerprint != 0
     with np.testing.assert_raises(ValueError):
         compile_sequence(_sequence(), geometry, 25e6)
+
+
+def _configured() -> PulseSequence:
+    """A pulse whose probe duration and DAC bias come from its own config."""
+
+    base = _sequence()
+    return replace(
+        base,
+        delays=(OutputDelay("d1", 40, "ns"),),
+        config_parameters=(
+            PulseConfigParameter(
+                "probe_time", PulseFieldRef("duration", "p1"), "ns"
+            ),
+            PulseConfigParameter(
+                "bias_x", PulseFieldRef("dac", "p0", "dac"), "value"
+            ),
+            PulseConfigParameter(
+                "gate_delay", PulseFieldRef("delay", port="d1"), "ns"
+            ),
+        ),
+        config_source="calibration/current.json",
+    )
+
+
+def test_a_config_parameter_reads_the_number_the_pulse_already_carries() -> None:
+    """It is not a hole: the field's own value IS the config value."""
+
+    entries = authored_config_entries(_configured())
+    assert entries == {
+        "probe_time": (20.0, "ns"),
+        "bias_x": (0.0, "value"),
+        "gate_delay": (40.0, "ns"),
+    }
+
+
+def test_applying_a_config_set_overwrites_the_authored_numbers() -> None:
+    """The overwrite is the storage: afterwards the pulse holds what the file said.
+
+    So a pulse read back later needs no second file to be understood, and the
+    editor shows the calibrated numbers in the fields they belong to.
+    """
+
+    sequence, applied, unknown = apply_config_values(
+        _configured(),
+        {
+            "probe_time": (80, "ns"),
+            "bias_x": (1, "value"),
+            "somebody_elses": (1, "ns"),
+        },
+    )
+    assert sorted(applied) == ["bias_x", "probe_time"]
+    assert unknown == ("somebody_elses",)
+    # Written into the fields themselves, not kept beside them.
+    assert sequence.period_by_id["p1"].duration == 80
+    assert sequence.period_by_id["p0"].analog_steps[0].value == 1
+    # An id the set omitted keeps the number the operator authored.
+    assert authored_config_entries(sequence)["gate_delay"] == (40.0, "ns")
+    # The declarations survive an apply; only the numbers moved.
+    assert len(sequence.config_parameters) == 3
+    assert sequence.config_source == "calibration/current.json"
+
+
+def test_a_pulse_that_still_declares_config_parameters_cannot_be_compiled() -> None:
+    """The refusal is what makes the refresh impossible to skip.
+
+    A runner that never asked the config file for today's numbers has no path
+    to the board: the compiler stops it, exactly as it stops one that left an
+    API parameter unresolved.
+    """
+
+    geometry = StreamerParams(max_edges=8, bank_size=2)
+    with np.testing.assert_raises_regex(ValueError, "config parameters must be resolved"):
+        compile_sequence(_configured(), geometry, 50e6)
+
+    resolved = resolve_config_parameters(_configured())
+    assert resolved.config_parameters == ()
+    assert resolved.config_source == ""
+    # Retiring the declarations changes no number the board will play.
+    assert resolved.periods == _configured().periods
+    assert resolved.delays == _configured().delays
+    compile_sequence(resolved, geometry, 50e6)
+
+
+def test_one_field_carries_one_binding_and_one_id_namespace() -> None:
+    """Scan, API and config are three answers to one question, so they exclude."""
+
+    base = _sequence()
+    duration = PulseFieldRef("duration", "p0")
+    with np.testing.assert_raises_regex(ValueError, "at most one binding"):
+        replace(
+            base,
+            api_parameters=(PulseApiParameter("t", duration, "ns"),),
+            config_parameters=(PulseConfigParameter("t2", duration, "ns"),),
+        )
+    with np.testing.assert_raises_regex(ValueError, "unique id namespace"):
+        replace(
+            base,
+            api_parameters=(PulseApiParameter("shared", duration, "ns"),),
+            config_parameters=(
+                PulseConfigParameter(
+                    "shared", PulseFieldRef("duration", "p1"), "ns"
+                ),
+            ),
+        )
+

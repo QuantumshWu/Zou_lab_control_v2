@@ -494,6 +494,17 @@ def compile_sequence(
         raise ValueError(
             f"pulse API parameters must be resolved before compile: {declared}"
         )
+    if sequence.config_parameters:
+        # The same refusal, for the same reason, one category along: whoever
+        # is about to play this pulse has not asked its config file for
+        # today's numbers.  Refusing here is what makes the refresh
+        # impossible to forget -- there is no path to the board around it.
+        declared = tuple(
+            parameter.parameter_id for parameter in sequence.config_parameters
+        )
+        raise ValueError(
+            f"pulse config parameters must be resolved before compile: {declared}"
+        )
     params = geom
     if not isinstance(params, StreamerParams):
         raise TypeError("geom must be StreamerParams")

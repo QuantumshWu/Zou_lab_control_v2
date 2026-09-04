@@ -27,6 +27,7 @@ from .model import (
     MAXIMUM_REPEAT_COUNT,
     OutputDelay,
     PulseApiParameter,
+    PulseConfigParameter,
     PulseBracket,
     PulseFieldRef,
     PulsePeriod,
@@ -38,13 +39,16 @@ from .model import (
 from .compile import compile_sequence  # noqa: E402
 from .binding import (  # noqa: E402
     apply_api_values,
+    apply_config_values,
     authored_api_entries,
+    authored_config_entries,
     authored_api_values,
     field_label,
     prune_orphaned_bindings,
     convert_time,
     pulse_field_value,
     resolve_api_parameters,
+    resolve_config_parameters,
 )
 from .wire import load_streamer_config  # noqa: E402
 from .manifest import pulse_target_from_xdc  # noqa: E402
@@ -78,6 +82,7 @@ __all__ = [
     "serve",
     "PulseSequence",
     "PulseApiParameter",
+    "PulseConfigParameter",
     "PulsePeriod",
     "AnalogStep",
     "PulsePortSpec",
@@ -109,12 +114,15 @@ __all__ = [
     "api_values_from_tree",
     "api_values_to_tree",
     "apply_api_values",
+    "apply_config_values",
     "authored_api_entries",
+    "authored_config_entries",
     "authored_api_values",
     "field_label",
     "prune_orphaned_bindings",
     "convert_time",
     "resolve_api_parameters",
+    "resolve_config_parameters",
     "pulse_field_value",
     "api_parameter_columns_for",
     "prepare_scan_application",

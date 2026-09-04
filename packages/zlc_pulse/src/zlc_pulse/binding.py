@@ -168,6 +168,11 @@ def prune_orphaned_bindings(
         for parameter in sequence.api_parameters
         if held(parameter.field_ref)
     )
+    configured = tuple(
+        parameter
+        for parameter in sequence.config_parameters
+        if held(parameter.field_ref)
+    )
     dropped = tuple(
         [slot.slot_id for slot in sequence.slots if not held(slot.field_ref)]
         + [
@@ -175,10 +180,23 @@ def prune_orphaned_bindings(
             for parameter in sequence.api_parameters
             if not held(parameter.field_ref)
         ]
+        + [
+            parameter.parameter_id
+            for parameter in sequence.config_parameters
+            if not held(parameter.field_ref)
+        ]
     )
     if not dropped:
         return sequence, ()
-    return replace(sequence, slots=slots, api_parameters=parameters), dropped
+    return (
+        replace(
+            sequence,
+            slots=slots,
+            api_parameters=parameters,
+            config_parameters=configured,
+        ),
+        dropped,
+    )
 
 
 def field_label(sequence: PulseSequence, reference: PulseFieldRef) -> str:
@@ -248,6 +266,119 @@ def authored_api_values(sequence: PulseSequence) -> dict[str, float]:
     }
 
 
+def authored_config_entries(sequence: PulseSequence) -> dict[str, tuple[float, str]]:
+    """Every config parameter as ``(value, unit)``, both the pulse's own.
+
+    A config parameter is never a hole, so this is simply what the pulse will
+    play unless its config file says otherwise -- and after a refresh it IS
+    what the file said, because a refresh overwrites the authored number.
+    """
+
+    if not isinstance(sequence, PulseSequence):
+        raise TypeError("sequence must be PulseSequence")
+    entries: dict[str, tuple[float, str]] = {}
+    for parameter in sequence.config_parameters:
+        try:
+            value = pulse_field_value(
+                sequence, parameter.field_ref, parameter.unit
+            )
+        except ValueError as error:
+            raise ValueError(
+                f"config parameter {parameter.parameter_id!r} has no field: {error}"
+            ) from None
+        entries[parameter.parameter_id] = (float(value), parameter.unit)
+    return entries
+
+
+def apply_config_values(
+    sequence: PulseSequence,
+    entries: Mapping[str, tuple[int | float, str]],
+) -> tuple[PulseSequence, tuple[str, ...], tuple[str, ...]]:
+    """Overwrite the authored value of every config parameter the set names.
+
+    THE OVERWRITE IS THE STORAGE.  A config parameter keeps no value of its
+    own beside the field: refreshing one writes the number into the period's
+    duration, the DAC step or the delay it names, so what the pulse holds
+    afterwards is what the file said, and a pulse read back later needs no
+    second file to be understood.
+
+    Returns the sequence, the ids applied, and the ids the set named that this
+    pulse does not declare -- one calibrated set is meant to serve several
+    pulses, most of which declare only part of it.
+    """
+
+    return _apply_named_values(
+        sequence,
+        entries,
+        {
+            parameter.parameter_id: parameter
+            for parameter in _sequence_of(sequence).config_parameters
+        },
+        "config value",
+    )
+
+
+def _sequence_of(sequence: PulseSequence) -> PulseSequence:
+    if not isinstance(sequence, PulseSequence):
+        raise TypeError("sequence must be PulseSequence")
+    return sequence
+
+
+def _apply_named_values(
+    sequence: PulseSequence,
+    entries: Mapping[str, tuple[int | float, str]],
+    declared: Mapping[str, object],
+    label: str,
+) -> tuple[PulseSequence, tuple[str, ...], tuple[str, ...]]:
+    """Write one set of named numbers into the fields their names point at."""
+
+    if not isinstance(entries, Mapping):
+        raise TypeError(f"{label}s must be a mapping")
+    result = sequence
+    applied: list[str] = []
+    unknown: list[str] = []
+    for parameter_id, entry in entries.items():
+        parameter = declared.get(str(parameter_id))
+        if parameter is None:
+            unknown.append(str(parameter_id))
+            continue
+        number, unit = entry
+        if parameter.unit == "value" or unit == "value":
+            if parameter.unit != unit:
+                raise ValueError(
+                    f"{label} {parameter_id!r} is in {unit!r} where the pulse "
+                    f"declares {parameter.unit!r}"
+                )
+            authored = float(number)
+        else:
+            authored = convert_time(number, unit, parameter.unit)
+        result = replace_pulse_field(
+            result,
+            parameter.field_ref,
+            authored,
+            parameter.unit,
+            field_name=parameter.parameter_id,
+        )
+        applied.append(parameter.parameter_id)
+    return result, tuple(applied), tuple(unknown)
+
+
+def resolve_config_parameters(sequence: PulseSequence) -> PulseSequence:
+    """Retire the config declarations, leaving the numbers they named.
+
+    A config parameter is already resolved by construction -- its value is the
+    field's own -- so this removes the declarations and changes nothing else.
+    It exists because :func:`~zlc_pulse.compile_sequence` refuses a pulse that
+    still declares any, which is what makes refreshing them impossible to skip
+    by accident: a runner that never asked its config file for today's numbers
+    cannot reach the board.
+    """
+
+    if not isinstance(sequence, PulseSequence):
+        raise TypeError("sequence must be PulseSequence")
+    return replace(sequence, config_parameters=(), config_source="")
+
+
 def apply_api_values(
     sequence: PulseSequence,
     entries: Mapping[str, tuple[int | float, str]],
@@ -265,40 +396,15 @@ def apply_api_values(
     not whether they exist.  Baking them away is :func:`resolve_api_parameters`.
     """
 
-    if not isinstance(sequence, PulseSequence):
-        raise TypeError("sequence must be PulseSequence")
-    if not isinstance(entries, Mapping):
-        raise TypeError("API values must be a mapping")
-    declared = {
-        parameter.parameter_id: parameter for parameter in sequence.api_parameters
-    }
-    result = sequence
-    applied: list[str] = []
-    unknown: list[str] = []
-    for parameter_id, entry in entries.items():
-        parameter = declared.get(str(parameter_id))
-        if parameter is None:
-            unknown.append(str(parameter_id))
-            continue
-        number, unit = entry
-        if parameter.unit == "value" or unit == "value":
-            if parameter.unit != unit:
-                raise ValueError(
-                    f"API value {parameter_id!r} is in {unit!r} where the pulse "
-                    f"declares {parameter.unit!r}"
-                )
-            authored = float(number)
-        else:
-            authored = convert_time(number, unit, parameter.unit)
-        result = replace_pulse_field(
-            result,
-            parameter.field_ref,
-            authored,
-            parameter.unit,
-            field_name=parameter.parameter_id,
-        )
-        applied.append(parameter.parameter_id)
-    return result, tuple(applied), tuple(unknown)
+    return _apply_named_values(
+        sequence,
+        entries,
+        {
+            parameter.parameter_id: parameter
+            for parameter in _sequence_of(sequence).api_parameters
+        },
+        "API value",
+    )
 
 
 def resolve_api_parameters(
@@ -381,12 +487,15 @@ def _number_for(value: float) -> int | float:
 
 __all__ = [
     "apply_api_values",
+    "apply_config_values",
     "authored_api_entries",
     "authored_api_values",
+    "authored_config_entries",
     "convert_time",
     "field_label",
     "prune_orphaned_bindings",
     "pulse_field_value",
     "replace_pulse_field",
     "resolve_api_parameters",
+    "resolve_config_parameters",
 ]
