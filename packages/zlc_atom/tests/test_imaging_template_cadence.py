@@ -40,7 +40,10 @@ def test_the_three_camera_windows_share_one_trigger_cadence() -> None:
         "load", "long_before", "gap_0", "short", "gap_1", "long_after"
     }
     assert raw_periods["load"]["duration"] == 100
-    assert raw_periods["load"]["unit"] == "us"
+    # The canonical spelling, which is the one the registry shows and the
+    # document therefore stores.  "us" still READS -- it is an accepted
+    # alias -- but a saved pulse holds one name per unit.
+    assert raw_periods["load"]["unit"] == "µs"
     assert all(
         period["unit"] == "s"
         for period_id, period in raw_periods.items()

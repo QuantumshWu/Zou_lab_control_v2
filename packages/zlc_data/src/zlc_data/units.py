@@ -534,6 +534,12 @@ def _builtin_units() -> tuple[Unit, ...]:
         Unit("deg", "angle", Scaled(np.pi / 180.0), aliases=("°",)),
         Unit("dBm", "power", Decibel(1.0e-3)),
         Unit("count", "count"),
+        # A DAC code is a signed integer the board takes, where 0 is 0 V.
+        # It had no unit at all: carrying the editor's label "DAC code
+        # (0 = 0 V)" as one is what killed the first plot ever drawn over a
+        # scan, and the fix was to send an empty string instead -- which
+        # says the axis is dimensionless, and it is not.
+        Unit("code", "code"),
         Unit("pixel", "pixel"),
     )
 
