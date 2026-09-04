@@ -48,22 +48,16 @@ from zlc_pulse import (
     TIME_UNIT_CHOICES,
     TIME_UNIT_TO_NS,
     align_to_grid,
-    apply_api_values,
     apply_config_values,
-    authored_api_entries,
     field_label,
     prune_orphaned_bindings,
     resolve_api_parameters,
     resolve_scan_point,
 )
 from zlc_atom.pulse_values import (
-    API_VALUES_DIRECTORY,
     CONFIG_VALUES_DIRECTORY,
-    CURRENT_API_VALUES,
     CURRENT_CONFIG_VALUES,
-    read_api_values,
     read_config_values,
-    write_api_values,
     write_config_values,
 )
 from zlc_durable import unique_path
@@ -1183,24 +1177,12 @@ class PulseEditorPresenter:
             return False
         self._saved_state = candidate
         self.path = str(path)
-        try:
-            candidate, _changed = self._with_current_values(candidate)
-        except Exception as error:
-            self._warn(f"cannot apply the current API values: {error}")
         self._accept_state(candidate)
-        # Then the board's own numbers, so a pulse opens showing what it would
+        # The board's own numbers, so a pulse opens showing what it would
         # actually play rather than what it was last saved holding.
         self._sync_config_values()
         self.refresh()
         return True
-
-    def _api_values_directory(self) -> Path | None:
-        """Where saved sets of API values live for the workspace in play."""
-
-        base = Path(self.path).parent if self.path else Path(self.pulses_directory or "")
-        if not str(base) or str(base) == ".":
-            return None
-        return base.parent / API_VALUES_DIRECTORY
 
     def _config_values_directory(self) -> Path | None:
         """Where saved sets of the board's calibrated numbers live."""
@@ -1209,34 +1191,6 @@ class PulseEditorPresenter:
         if not str(base) or str(base) == ".":
             return None
         return base.parent / CONFIG_VALUES_DIRECTORY
-
-    def _with_current_values(
-        self, state: PulseEditorState
-    ) -> tuple[PulseEditorState, tuple[str, ...]]:
-        """``state`` as the apparatus is set today, and what changed.
-
-        Silent when there is nothing to apply: an empty set, no file, or a set
-        naming only ids this pulse does not declare.  A set that contradicts
-        the pulse raises, because a bias code in milliseconds is a mistake
-        somebody has to see.
-        """
-
-        directory = self._api_values_directory()
-        if state.sequence is None or directory is None:
-            return state, ()
-        path = directory / CURRENT_API_VALUES
-        if not path.is_file():
-            return state, ()
-        _name, _source, entries = read_api_values(path)
-        if not entries:
-            return state, ()
-        before = authored_api_entries(state.sequence)
-        sequence, applied, _unknown = apply_api_values(state.sequence, entries)
-        after = authored_api_entries(sequence)
-        changed = tuple(name for name in applied if before[name] != after[name])
-        if not changed:
-            return state, ()
-        return replace(state, sequence=sequence), changed
 
     def _binding_records(self) -> tuple[BindingRecord, ...]:
         """Every bound field, its id beside where it sits on the pulse."""
@@ -2714,26 +2668,13 @@ class PulseEditorPresenter:
         if self.sequence is None:
             self._warn("no pulse is open")
             return False
-        # The set of API values first, then the scan table over it: a pulse
-        # runs what the apparatus is set to today, not what its file was
-        # saved with, so a task that measured a new bias reaches the next On
-        # Pulse without anyone reopening the pulse.  Before the board is even
-        # consulted, because this is a fact about the document.
-        try:
-            state, _changed = self._with_current_values(self._state)
-        except Exception as error:
-            self._warn(f"cannot apply the current API values: {error}")
-            return False
-        if state is not self._state:
-            self._accept_state(state)
-            self.refresh()
         if self.sequencer is None:
             self._warn("this editor is not connected to a sequencer")
             return False
-        # Then the board's own calibrated numbers, BEFORE the request is
-        # built, so what is on screen and what is about to play are the same
-        # pulse.  ``compile_pulse`` would apply them anyway; doing it here is
-        # what makes the screen honest rather than merely the board correct.
+        # The board's own calibrated numbers, BEFORE the request is built, so
+        # what is on screen and what is about to play are the same pulse.
+        # ``compile_pulse`` would apply them anyway; doing it here is what
+        # makes the screen honest rather than merely the board correct.
         if self._sync_config_values():
             self.refresh()
         try:

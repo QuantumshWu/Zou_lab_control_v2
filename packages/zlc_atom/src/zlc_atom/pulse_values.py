@@ -29,8 +29,6 @@ from pathlib import Path
 
 from zlc_durable import atomic_write_bytes, readable_json_bytes
 from zlc_pulse import (
-    api_values_from_tree,
-    api_values_to_tree,
     config_values_from_tree,
     config_values_to_tree,
 )
@@ -38,44 +36,10 @@ from zlc_pulse import (
 
 #: Beside ``pulses/`` in the workspace, because these values belong to the
 #: apparatus the pulses run on rather than to any one of them.
-API_VALUES_DIRECTORY = "api_values"
-#: The set every pulse picks up by itself.  Others in the folder are saved
-#: sets an operator loads deliberately.
-CURRENT_API_VALUES = "current.json"
-
-#: Beside ``api_values/``, and for the same reason: a calibrated channel delay
-#: is a fact about the apparatus.  The difference is who holds it -- these are
-#: loaded onto the SEQUENCER, once, and fill every pulse that board plays.
 CONFIG_VALUES_DIRECTORY = "config_values"
 #: The set a session loads by itself when it opens a board.  Others in the
 #: folder are saved sets an operator loads deliberately.
 CURRENT_CONFIG_VALUES = "current.json"
-
-
-def read_api_values(path: str | Path) -> tuple[str, str, dict[str, tuple[float, str]]]:
-    """``(name, source, {parameter_id: (value, unit)})`` from one saved set."""
-
-    source = Path(path).expanduser().resolve()
-    if source.suffix.lower() != ".json":
-        raise ValueError(f"API values must be JSON: {source}")
-    return api_values_from_tree(json.loads(source.read_text(encoding="utf-8")))
-
-
-def write_api_values(
-    path: str | Path,
-    entries: Mapping[str, tuple[float, str]],
-    *,
-    name: str = "",
-    source: str = "hand",
-) -> None:
-    """Write one saved set through the sole grammar."""
-
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_bytes(
-        target,
-        readable_json_bytes(api_values_to_tree(entries, name=name, source=source)),
-    )
 
 
 def read_config_values(path: str | Path) -> tuple[str, str, dict[str, tuple[float, str]]]:
@@ -104,29 +68,9 @@ def write_config_values(
     )
 
 
-def current_api_values_path(pulse_path: str | Path) -> Path:
-    """Where the current set sits, for a pulse loaded from a workspace.
-
-    A pulse resource is refused unless it sits directly in the workspace's
-    ``pulses/`` folder, so the workspace is the folder holding that one -- the
-    caller does not have to be handed a root it never asked for.
-    """
-
-    return (
-        Path(pulse_path).expanduser().resolve().parent.parent
-        / API_VALUES_DIRECTORY
-        / CURRENT_API_VALUES
-    )
-
-
 __all__ = [
-    "API_VALUES_DIRECTORY",
     "CONFIG_VALUES_DIRECTORY",
-    "CURRENT_API_VALUES",
     "CURRENT_CONFIG_VALUES",
-    "current_api_values_path",
-    "read_api_values",
     "read_config_values",
-    "write_api_values",
     "write_config_values",
 ]

@@ -155,28 +155,13 @@ def seed_packaged_pulses(pulses: Path) -> None:
     )
 
 
-def seed_current_api_values(directory: Path) -> None:
-    """The empty set of API parameter values, present so it can be edited.
-
-    Empty on purpose: a seeded number would silently overwrite whatever the
-    operator had authored in a pulse the first time they opened it.
-    """
-
-    from zlc_atom.pulse_values import CURRENT_API_VALUES, write_api_values
-
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / CURRENT_API_VALUES
-    if not path.exists():
-        write_api_values(path, {}, name="current")
-
-
 def seed_current_config_values(directory: Path) -> None:
     """The empty set of config values, present so it can be edited.
 
-    Empty for a harder reason than the API set: a seeded channel delay or DAC
-    bias is a WRONG hardware calibration, applied to every pulse on the bench
-    at once.  A board with no set loaded refuses any pulse that declares a
-    config parameter, which is the failure worth having.
+    Empty on purpose: a seeded channel delay or DAC bias is a WRONG hardware
+    calibration, applied to every pulse on the bench at once.  A board with no
+    set loaded refuses any pulse that declares a config parameter, which is the
+    failure worth having.
     """
 
     from zlc_atom.pulse_values import CURRENT_CONFIG_VALUES, write_config_values
@@ -233,26 +218,11 @@ class Workspace:
         return self.root / "apparatus.json"
 
     @property
-    def api_values(self) -> Path:
-        """Saved sets of pulse API parameter values.
-
-        A bias code or a MOT duration measured once belongs to the apparatus,
-        not to whichever pulse happened to be open: an operator who
-        recalibrated had to retype it into every pulse.  A set saved here is
-        applied to any pulse that declares the same ids, and ``CURRENT_VALUES``
-        is the one every pulse picks up by itself.
-        """
-
-        from zlc_atom.pulse_values import API_VALUES_DIRECTORY
-
-        return self.root / API_VALUES_DIRECTORY
-
-    @property
     def config_values(self) -> Path:
         """Saved sets of the board's calibrated numbers.
 
-        The same idea as :attr:`api_values` one layer down: a channel delay or
-        a DAC bias belongs to the apparatus, so it is loaded onto the
+        A channel delay or a DAC bias belongs to the apparatus rather than to
+        whichever pulse happened to be open, so it is loaded onto the
         SEQUENCER rather than into a pulse, and ``CURRENT_CONFIG_VALUES`` is
         the one a session picks up by itself when it opens a board.
         """
@@ -272,7 +242,6 @@ class Workspace:
         """Create the directories a session writes into."""
 
         self.data.mkdir(parents=True, exist_ok=True)
-        seed_current_api_values(self.api_values)
         seed_current_config_values(self.config_values)
         return self
 

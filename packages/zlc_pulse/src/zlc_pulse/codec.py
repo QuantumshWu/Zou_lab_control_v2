@@ -40,12 +40,8 @@ from .model import (
 
 #: What a reader checks before trusting the rest.
 PULSE_TREE_FORMAT = "zlc.pulse"
-#: ...and the same for one saved set of API parameter values.
-API_VALUES_FORMAT = "zlc.pulse.api_values"
-#: ...and for a set of CONFIG parameter values, which is a different kind of
-#: file even though it holds the same shape of numbers: an API set is chosen
-#: for one run, a config set is what a pulse refreshes itself from.  Separate
-#: roots so neither can be handed to the other by mistake.
+#: ...and the same for one saved set of CONFIG parameter values: the board's
+#: own calibrated numbers, which a pulse refreshes itself from.
 CONFIG_VALUES_FORMAT = "zlc.pulse.config_values"
 PULSE_EDITOR_FIELDS = (
     "visible_ports",
@@ -467,28 +463,6 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
     )
 
 
-def api_values_to_tree(
-    values: Mapping[str, tuple[int | float, str]],
-    *,
-    name: str = "",
-    source: str = "hand",
-) -> dict[str, Any]:
-    """One named set of API parameter values, as a tree a file can hold.
-
-    Written from a pulse, so the ids and units are the pulse's own and an
-    operator editing the numbers by hand cannot invent a name that nothing
-    declares.  ``source`` is free text: whoever produced these numbers stamps
-    itself there, and a reader does not care who that was.
-    """
-
-    return {
-        **_named_values_tree(values, "API value"),
-        "format": API_VALUES_FORMAT,
-        "name": str(name),
-        "source": str(source),
-    }
-
-
 def _named_values_tree(
     values: Mapping[str, tuple[int | float, str]], label: str
 ) -> dict[str, Any]:
@@ -507,19 +481,6 @@ def _named_values_tree(
             raise ValueError(f"{label} {parameter_id!r} must carry a unit")
         entries[parameter_id] = {"value": _plain_number(float(number)), "unit": unit}
     return {"values": entries}
-
-
-def api_values_from_tree(
-    tree: Mapping[str, Any],
-) -> tuple[str, str, dict[str, tuple[float, str]]]:
-    """``(name, source, {parameter_id: (value, unit)})`` from a saved set.
-
-    The grammar is closed the way a pulse's is: an alternate root, a missing
-    field or an unknown one is refused here rather than becoming a silently
-    half-applied set of values.
-    """
-
-    return _named_values_from_tree(tree, API_VALUES_FORMAT, "API value")
 
 
 def _named_values_from_tree(
@@ -586,12 +547,9 @@ def _plain_number(value: float) -> int | float:
 
 
 __all__ = [
-    "API_VALUES_FORMAT",
     "CONFIG_VALUES_FORMAT",
     "PULSE_TREE_FORMAT",
     "PULSE_EDITOR_FIELDS",
-    "api_values_from_tree",
-    "api_values_to_tree",
     "config_values_from_tree",
     "config_values_to_tree",
     "parse_pulse_tree_json",

@@ -42,13 +42,7 @@ from zlc_ui.fluent import (
     fill_grouped_choice_combo,
 )
 
-from zlc_pulse import apply_api_values, authored_api_entries, field_label
-
-from zlc_atom.pulse_values import (
-    CURRENT_API_VALUES,
-    current_api_values_path,
-    read_api_values,
-)
+from zlc_pulse import authored_api_entries, field_label
 
 from .plan import (
     MANUAL_PARAM_FAMILY,
@@ -355,17 +349,9 @@ class ScanPlanEditor(QtWidgets.QWidget):
         # nothing sweeps them, they are the numbers the pulse holds while the
         # table plays.  A slot the plan DOES scan is left out -- the table
         # already says what it plays, and two places saying it is one too many.
-        values_header = QtWidgets.QHBoxLayout()
         self.values_title = QtWidgets.QLabel("API values")
         self.values_title.setStyleSheet("font-weight: 600;")
-        # Explicit, because a run has to be reproducible from what this node
-        # says.  The saved set is a place to PULL numbers from, not a second
-        # writer reaching into the pulse behind the form.
-        self.load_values_button = FluentButton("Load values…", color=GREY)
-        values_header.addWidget(self.values_title)
-        values_header.addStretch(1)
-        values_header.addWidget(self.load_values_button)
-        column.addLayout(values_header)
+        column.addWidget(self.values_title)
         self.values_grid = QtWidgets.QGridLayout()
         self.values_grid.setContentsMargins(0, 0, 0, 0)
         column.addLayout(self.values_grid)
@@ -381,8 +367,6 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self._authored: dict[str, tuple[float, str]] = {}
         self._value_rows: dict[str, QtWidgets.QWidget] = {}
         self._sequence: object = None
-        self._pulse_path: object = None
-        self.load_values_button.clicked.connect(self._load_values)
         self.add_button.clicked.connect(self._add_axis)
         self.add_manual_button.clicked.connect(self._add_manual_axis)
         # Whether a hand can be waited for is a fact about the NODE, known
@@ -396,7 +380,6 @@ class ScanPlanEditor(QtWidgets.QWidget):
         resources = projection.get("workspace_resources") or {}
         resource = resources.get("pulse_template") if isinstance(resources, Mapping) else None
         sequence = getattr(resource, "value", None)
-        self._pulse_path = getattr(resource, "path", None)
         # The editor offers exactly what this node's build binds against: the
         # pulse's parameters, and the bench's tunable devices only where a
         # host is there to move them.
@@ -494,7 +477,6 @@ class ScanPlanEditor(QtWidgets.QWidget):
         shown = bool(offered) or bool(broken)
         self.values_title.setVisible(shown)
         self.values_note.setVisible(shown)
-        self.load_values_button.setEnabled(bool(offered))
         if broken:
             self.values_note.setText(broken)
             return
@@ -540,82 +522,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
             )
         if scanned:
             parts.append(f"swept by the plan: {', '.join(sorted(scanned))}.")
-        differing = self._saved_set_differences()
-        if differing:
-            # Nothing is applied behind the operator's back; this only says
-            # that pressing Load would change something, so a recalibration
-            # nobody pulled in is visible rather than silently absent.
-            parts.append(
-                f"{CURRENT_API_VALUES} differs on: {', '.join(sorted(differing))}."
-            )
         self.values_note.setText("  ".join(parts))
-
-    def _saved_set(self) -> dict[str, float] | None:
-        """The workspace's current set, read in each parameter's own unit."""
-
-        if self._sequence is None or self._pulse_path is None:
-            return None
-        try:
-            path = current_api_values_path(self._pulse_path)
-            if not path.is_file():
-                return None
-            _name, _source, entries = read_api_values(path)
-            if not entries:
-                return None
-            applied, _ids, _absent = apply_api_values(self._sequence, entries)
-        except (OSError, ValueError, TypeError):
-            return None
-        return {
-            name: value for name, (value, _unit) in authored_api_entries(applied).items()
-        }
-
-    def _saved_set_differences(self) -> set[str]:
-        saved = self._saved_set()
-        if saved is None:
-            return set()
-        return {
-            name
-            for name, box in self._value_rows.items()
-            if name in saved and saved[name] != box.value()
-        }
-
-    def _load_values(self) -> None:
-        """Fill the boxes from one saved set of values.
-
-        The set is a place to pull numbers from.  What runs is what these
-        boxes say, so a run is reproducible from this node alone.
-        """
-
-        if not self._value_rows or self._sequence is None:
-            return
-        start = ""
-        if self._pulse_path is not None:
-            start = str(current_api_values_path(self._pulse_path))
-        chosen, _filter = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Load API values", start, "ZLC API values (*.json);;All files (*)"
-        )
-        if not chosen:
-            return
-        try:
-            _name, _source, entries = read_api_values(chosen)
-            applied, _ids, absent = apply_api_values(self._sequence, entries)
-        except (OSError, ValueError, TypeError) as error:
-            self.values_note.setText(f"cannot load that set: {error}")
-            return
-        loaded = authored_api_entries(applied)
-        self._loading = True
-        try:
-            for name, box in self._value_rows.items():
-                if name in loaded:
-                    box.setValue(loaded[name][0])
-        finally:
-            self._loading = False
-        self._emit_values()
-        if absent:
-            self.values_note.setText(
-                self.values_note.text()
-                + f"  Not in this pulse: {', '.join(sorted(absent))}."
-            )
 
     def set_mutation_enabled(self, enabled: bool) -> None:
         self.setEnabled(bool(enabled))
