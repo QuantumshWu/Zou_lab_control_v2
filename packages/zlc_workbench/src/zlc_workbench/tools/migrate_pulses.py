@@ -1,24 +1,24 @@
-"""Bring pulse files written by an older build up to today's document schema.
+"""Bring pulse files written before the bracket split up to today's schema.
 
 A pulse is experiment content: it lives in the operator's workspace, not in
 the package, and it outlives the build that wrote it.  The reader, by design,
 is a strict whitelist -- a field it does not know is an error, not something
-to ignore -- so every time the schema is renamed, every pulse already sitting
-on a disk stops opening, with a message naming a field the operator never
-typed:
+to ignore -- so ``663de9b``, which renamed ``repeat`` to ``bracket`` and made
+``run_repeats`` required, turned every pulse already sitting on a disk into
 
     cannot open imaging_template.json: unknown pulse field(s): repeat
 
-The product does not carry readers for old shapes; that is a deliberate
-choice and this tool is its other half.  It is a ONE-SHOT: run it once on
-each machine that holds pulses, then delete it -- module, launcher and test
-in one commit -- exactly as the previous migration was removed in ``5d889a7``.
+The three tracked template JSONs were edited by hand in that commit.  The
+pulses in an operator's workspace were not, and this is the other half of
+that change.  It is a ONE-SHOT: run it once on each machine that holds
+pulses, then delete it -- module, launcher and test in one commit -- exactly
+as the previous migration was removed in ``5d889a7``.
 
-What it will not do is guess.  Each step below restores one specific field
-the product itself once wrote, and nothing is written until the migrated
-document has been read back through the very reader the Pulse Editor uses.
-A document that still will not read is left exactly as it was found, and
-reported in the reader's own words.
+It knows that one rename and nothing else.  A document carrying anything
+else it cannot account for is refused in the reader's own words and left
+byte-for-byte as it was found, because a migration that silently drops what
+it cannot explain turns "will not open" into "opens, and something is
+missing".
 """
 
 from __future__ import annotations
@@ -34,16 +34,6 @@ from zlc_pulse.codec import PULSE_TREE_FORMAT, parse_pulse_tree_json
 
 from ..pulse_state import read_pulse, state_from_tree, write_pulse
 from ..session import Workspace
-
-#: What a pulse document called itself before ``de9d5ee`` dropped version
-#: suffixes from every artifact this project writes.  Listed rather than
-#: pattern-matched: a tag this tool has not been taught belongs to a document
-#: nobody has checked, and guessing at one is how a migration eats content.
-SUPERSEDED_FORMATS = (f"{PULSE_TREE_FORMAT}.v1",)
-
-#: Slot ids the pre-split editor gave to API parameters, back when they were
-#: slots and owned scan-table columns of their own.
-_API_SLOT_PREFIX = "api_"
 
 #: The original, kept beside the file it came from.  Deliberately not a
 #: ``.json`` name, so the Open dialog does not offer it as a pulse and a
@@ -62,41 +52,10 @@ def _default_run_repeats() -> int:
     return inspect.signature(PulseSequence.__init__).parameters["run_repeats"].default
 
 
-def _editor(tree: dict[str, Any]) -> dict[str, Any]:
-    section = tree.get("editor")
-    return dict(section) if isinstance(section, Mapping) else {}
-
-
-def _had_api_parameter_columns(before: Mapping[str, Any]) -> bool:
-    """Whether this document is older than the API-parameter split.
-
-    Before it, an API parameter was a slot named ``api_*`` and owned a column
-    in the scan table; after it, API parameters are their own list and the
-    scan table stopped carrying them.
-    """
-
-    if "api_parameters" in before:
-        return False
-    return any(
-        str(slot.get("slot_id", "")).startswith(_API_SLOT_PREFIX)
-        for slot in before.get("slots", ())
-        if isinstance(slot, Mapping)
-    )
-
-
-def _adopt_the_current_format_tag(
-    tree: dict[str, Any], before: Mapping[str, Any]
-) -> str | None:
-    if before.get("format") not in SUPERSEDED_FORMATS:
-        return None
-    tree["format"] = PULSE_TREE_FORMAT
-    return f"format {before['format']!r} -> {PULSE_TREE_FORMAT!r}"
-
-
 def _rename_repeat_to_bracket(
     tree: dict[str, Any], before: Mapping[str, Any]
 ) -> str | None:
-    """``663de9b``: one word, three meanings, split into three fields.
+    """One word that meant three things, split into three fields.
 
     The old ``repeat`` was the period bracket and only ever that; the run and
     scan repeats it was confused with were never in the file at all.
@@ -117,74 +76,11 @@ def _add_the_missing_run_repeats(
     return f"run_repeats = {tree['run_repeats']}"
 
 
-def _add_the_missing_api_parameters(
-    tree: dict[str, Any], before: Mapping[str, Any]
-) -> str | None:
-    """The API-parameter split, as the removed migrator performed it.
-
-    Columns belonging to ``api_*`` slots leave the scan table with them; a
-    document that never had such slots simply gains an empty list.
-    """
-
-    if "api_parameters" in before:
-        return None
-    tree["api_parameters"] = []
-    if not _had_api_parameter_columns(before):
-        return "api_parameters = []"
-    slots = tuple(before.get("slots", ()))
-    kept = tuple(
-        index
-        for index, slot in enumerate(slots)
-        if not str(slot.get("slot_id", "")).startswith(_API_SLOT_PREFIX)
-    )
-    section = _editor(tree)
-    rows = tuple(section.get("scan_rows") or ())
-    section["scan_rows"] = [
-        [row[index] for index in kept if index < len(row)] for row in rows
-    ]
-    tree["editor"] = section
-    return (
-        f"api_parameters = [] and {len(slots) - len(kept)} api_ scan column(s) dropped"
-    )
-
-
-def _retire_scan_use_loaded(
-    tree: dict[str, Any], before: Mapping[str, Any]
-) -> str | None:
-    """``6642b29``/``5d889a7``: a hint that only ever seeded one boolean.
-
-    ``scan_use_loaded`` said the rows came from a loaded table rather than
-    from running the source, which is one of the ways the source can be out
-    of step with its rows -- so it fed ``scan_source_dirty`` and nothing
-    else.  Its replacement is stated outright, and this fills it in with the
-    formula the migrator used before it was deleted.
-    """
-
-    section = _editor(tree)
-    if "scan_use_loaded" not in section:
-        return None
-    used = section.pop("scan_use_loaded")
-    if section.get("scan_source_dirty") is None:
-        section["scan_source_dirty"] = bool(section.get("scan_source", "")) and (
-            _had_api_parameter_columns(before)
-            or used is True
-            or not bool(section.get("scan_rows") or ())
-        )
-    tree["editor"] = section
-    return (
-        "editor.scan_use_loaded -> scan_source_dirty = "
-        f"{section['scan_source_dirty']}"
-    )
-
-
 #: In order.  Each reads the document AS FOUND for its condition, so a later
 #: step cannot be misled by an earlier one having already filled a field in.
 STEPS: tuple[Callable[[dict[str, Any], Mapping[str, Any]], "str | None"], ...] = (
-    _adopt_the_current_format_tag,
     _rename_repeat_to_bracket,
     _add_the_missing_run_repeats,
-    _add_the_missing_api_parameters,
-    _retire_scan_use_loaded,
 )
 
 
@@ -231,7 +127,7 @@ def migrate_file(path: Path) -> Outcome:
     except Exception as error:  # noqa: BLE001 - every reason is worth reporting
         return Outcome(path, "not a pulse", f"{type(error).__name__}: {error}")
     declared = before.get("format") if isinstance(before, Mapping) else None
-    if declared != PULSE_TREE_FORMAT and declared not in SUPERSEDED_FORMATS:
+    if declared != PULSE_TREE_FORMAT:
         return Outcome(path, "not a pulse", f"format is {declared!r}")
     try:
         read_pulse(path)

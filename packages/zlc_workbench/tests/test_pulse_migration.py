@@ -1,28 +1,22 @@
-"""The one-shot that lets a pulse survive a schema rename.
+"""The one-shot that lets a pulse survive the bracket rename.
 
 Delete this file together with ``tools/migrate_pulses.py`` and
 ``bin/migrate_pulses.bat`` once every machine holding pulses has run it.
 
-Every old shape here is DERIVED by taking a document the product writes today
+The old shape here is DERIVED by taking a document the product writes today
 and undoing the rename that produced it.  A hand-typed old pulse would only
 prove that this tool agrees with whatever the test author remembered.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from pulse_fixtures import ordinary_imaging_sequence
 from zlc_durable import write_readable_json
 from zlc_pulse import sequence_to_tree
-from zlc_pulse.codec import PULSE_TREE_FORMAT
 from zlc_workbench.pulse_state import read_pulse, state_from_tree
-from zlc_workbench.tools.migrate_pulses import (
-    BACKUP_SUFFIX,
-    SUPERSEDED_FORMATS,
-    migrate_file,
-)
+from zlc_workbench.tools.migrate_pulses import BACKUP_SUFFIX, migrate_file
 
 
 def _current_document() -> dict:
@@ -47,7 +41,9 @@ def _write(path: Path, document: dict) -> Path:
 
 def test_a_pulse_from_before_the_rename_opens_again(tmp_path: Path) -> None:
     current = _current_document()
-    path = _write(tmp_path / "imaging.json", _as_written_before_the_bracket_split(current))
+    path = _write(
+        tmp_path / "imaging.json", _as_written_before_the_bracket_split(current)
+    )
 
     # The failure the operator reports, reproduced before anything is fixed.
     try:
@@ -77,15 +73,6 @@ def test_the_original_is_kept_beside_the_file_it_came_from(tmp_path: Path) -> No
     # must not try to migrate the copy it just made.
     assert backup.suffix != ".json"
     assert migrate_file(backup).verdict == "not a pulse"
-
-
-def test_a_version_tagged_document_adopts_the_unversioned_tag(tmp_path: Path) -> None:
-    older = _as_written_before_the_bracket_split(_current_document())
-    older["format"] = SUPERSEDED_FORMATS[0]
-    path = _write(tmp_path / "imaging.json", older)
-
-    assert migrate_file(path).verdict == "migrated"
-    assert json.loads(path.read_text(encoding="utf-8"))["format"] == PULSE_TREE_FORMAT
 
 
 def test_a_current_pulse_is_not_rewritten(tmp_path: Path) -> None:

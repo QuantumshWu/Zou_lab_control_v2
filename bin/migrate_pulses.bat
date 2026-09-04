@@ -3,9 +3,12 @@ rem Bring this machine's pulse files up to the current document schema.
 rem
 rem A ONE-SHOT.  A pulse outlives the build that wrote it, and the reader is
 rem a strict whitelist, so a renamed field turns every pulse already on disk
-rem into "cannot open <name>.json: unknown pulse field(s): ...".  The product
-rem carries no readers for old shapes on purpose; this is the other half of
-rem that choice.  Run it once here, then it and its module get deleted.
+rem into "cannot open <name>.json: unknown pulse field(s): repeat".  The
+rem product carries no readers for old shapes on purpose; this is the other
+rem half of that choice.  Run it once here, then it and its module get deleted.
+rem
+rem It knows the bracket rename and nothing else.  Anything older says so and
+rem is left alone; anything it cannot account for is refused, not guessed at.
 rem
 rem Double-click it to migrate the workspace the Pulse Editor opens, or drag
 rem pulse files or a folder onto it to migrate those instead.  Originals are
