@@ -27,6 +27,7 @@ from zlc_ui.fluent import (
     FluentScrollArea,
     FluentSettingsPopupAnchor,
     FluentStatusDot,
+    fluent_text_width,
     GREY,
     ORANGE,
     popup_gap,
@@ -95,28 +96,106 @@ def data_structure_fragments(structure: object) -> tuple[tuple, tuple]:
     The separator is the multiplication SIGN, not the letter: an axis is
     very often called "x", and "(repeat)x(x)x()" asked the reader to work
     out which of those three x's was an axis name.
+
+    A fragment is ``(text, colour, elide)``, where ``elide`` is the Qt elide
+    mode this fragment gives up room by, or ``None`` for one that may not.
+    The brackets and the separators are STRUCTURE -- they say how many groups
+    there are and where each one ends -- so they are never shortened; only
+    what a group contains is, and it goes from the MIDDLE so the first axis
+    and the last one both stay legible.  That is what lets a strip too narrow
+    to say everything still show how many groups there are, in which colours,
+    paired line to line.
+
+    A domain with no axes is not a factor of anything and contributes no
+    group.  It used to render as an empty "()" behind its own multiplication
+    sign, which reads as a bracket somebody forgot to fill.  The colour
+    belongs to the DOMAIN rather than to the printed position, so the domains
+    that do appear keep their own colour instead of shifting up into the
+    missing one's.
     """
 
-    sizes: list[tuple[str, str | None]] = []
-    names: list[tuple[str, str | None]] = []
+    sizes: list[tuple[str, str | None, object]] = []
+    names: list[tuple[str, str | None, object]] = []
     for index, group in enumerate(tuple(structure or ())):
+        if not group:
+            continue
         colour = AXIS_GROUP_COLORS[index % len(AXIS_GROUP_COLORS)]
         if sizes:
-            sizes.append((" × ", None))
-            names.append((" × ", None))
-        sizes.append(
-            (
-                "(" + " × ".join(str(int(size)) for _name, size in group) + ")",
-                colour,
-            )
-        )
-        names.append(
-            (
-                "(" + " × ".join(str(name) for name, _size in group) + ")",
-                colour,
-            )
-        )
+            sizes.append((" × ", None, None))
+            names.append((" × ", None, None))
+        for line, inner in (
+            (sizes, " × ".join(str(int(size)) for _name, size in group)),
+            (names, " × ".join(str(name) for name, _size in group)),
+        ):
+            line.append(("(", colour, None))
+            line.append((inner, colour, QtCore.Qt.ElideMiddle))
+            line.append((")", colour, None))
     return tuple(sizes), tuple(names)
+
+
+def elide_fragments(fragments: object, metrics: object, available: int) -> tuple:
+    """The same fragments, shortened to ``available`` with their structure kept.
+
+    Eliding the LINE -- one ``elidedText`` over the whole strip's plain text --
+    threw away the two things the strip is read by.  The colours pair the
+    numbers above with the names below group by group, and a single escaped
+    string has no fragments left to colour; the brackets say where a group
+    ends, and ElideMiddle ate them from the middle outwards, so a three-domain
+    shape read "(rep...ite)" -- one bracket around everything.  Measured on a
+    15x15x15 scan, the names line asks for 1938 px and the widest card offers
+    500, so this was not the narrow case: it was every case.
+
+    The room is spent here instead.  Brackets and separators are kept whole,
+    and the room left over is shared between the group CONTENTS by equal
+    claim, not in proportion to what each asked for: a group that fits inside
+    an equal share keeps its whole name and hands the surplus back, and only
+    the groups that are genuinely long give anything up.  Splitting the width
+    in proportion instead starved the short groups to nothing -- a scan's
+    "(35) x (site)" became "() x ()" while the long one kept a stub -- which
+    is the same bracket-with-nothing-in-it this strip is not allowed to show.
+    """
+
+    fragments = tuple(fragments)
+    natural = tuple(
+        fluent_text_width(metrics, text) for text, _colour, _elide in fragments
+    )
+    if available <= 0 or sum(natural) <= available:
+        return fragments
+    fixed = sum(
+        width
+        for width, (_text, _colour, elide) in zip(natural, fragments)
+        if elide is None
+    )
+    claimants = [
+        index
+        for index, (_text, _colour, elide) in enumerate(fragments)
+        if elide is not None and natural[index]
+    ]
+    if not claimants:
+        return fragments
+    # An ellipsis is the least a fragment may be shown as: below that the
+    # bracket closes on nothing and the group reads as empty rather than as
+    # abbreviated.
+    floor = fluent_text_width(metrics, "\u2026")
+    remaining = max(0, available - fixed)
+    allotted: dict[int, int] = {}
+    while claimants:
+        share = remaining / len(claimants)
+        satisfied = [index for index in claimants if natural[index] <= share]
+        if not satisfied:
+            for index in claimants:
+                allotted[index] = max(int(share), floor)
+            break
+        for index in satisfied:
+            allotted[index] = natural[index]
+            remaining -= natural[index]
+        claimants = [index for index in claimants if index not in set(satisfied)]
+    return tuple(
+        (text, colour, elide)
+        if index not in allotted
+        else (metrics.elidedText(text, elide, allotted[index]), colour, elide)
+        for index, (text, colour, elide) in enumerate(fragments)
+    )
 
 
 class PanelCardView(FluentGroupBox):
@@ -544,9 +623,13 @@ class PanelCardView(FluentGroupBox):
         structure = tuple(self._parameter_surface.get("data_structure") or ())
         scope = tuple(self._parameter_surface.get("data_scope") or ())
         shape_sizes, shape_names = data_structure_fragments(structure)
-        sizes: list[tuple[str, str | None]] = [(self._caption(), None)]
+        # The caption is a NAME and names are read from the left, so it gives
+        # up its tail; a shape is read from both ends and gives up its middle.
+        sizes: list[tuple[str, str | None, object]] = [
+            (self._caption(), None, QtCore.Qt.ElideRight)
+        ]
         if shape_sizes:
-            sizes.append((" ", None))
+            sizes.append((" ", None, None))
             sizes.extend(shape_sizes)
         names = list(shape_names)
         for label, value in scope:
@@ -558,8 +641,14 @@ class PanelCardView(FluentGroupBox):
                 ),
                 None,
             )
-            names.append((", " if names else "", None))
-            names.append((f"{label}={_coordinate_text(value)}", axis_colour))
+            names.append((", " if names else "", None, None))
+            names.append(
+                (
+                    f"{label}={_coordinate_text(value)}",
+                    axis_colour,
+                    QtCore.Qt.ElideMiddle,
+                )
+            )
         return tuple(sizes), tuple(names)
 
     def _refresh_title_band(self) -> None:
@@ -574,22 +663,19 @@ class PanelCardView(FluentGroupBox):
         lines = []
         plain_lines = []
         for fragments in self._band_fragments():
-            plain = "".join(text for text, _colour in fragments)
-            plain_lines.append(plain)
-            if available and metrics.horizontalAdvance(plain) > available:
-                # Too narrow to say it all: shorten the LINE rather than let
-                # it decide how wide the card must be.  The colours pair the
-                # two lines up and an elided line has no pairs left to show.
-                lines.append(
-                    _escaped(metrics.elidedText(plain, QtCore.Qt.ElideMiddle, available))
-                )
-                continue
+            # How wide the card must be is not the strip's to decide -- a
+            # title that sets a minimum width packs cards the board then
+            # cannot shrink -- so a strip too narrow to say everything gives
+            # up TEXT, never structure and never colour.
+            plain_lines.append("".join(text for text, _colour, _elide in fragments))
             lines.append(
                 "".join(
                     _escaped(text)
                     if colour is None
                     else f'<span style="color:{colour}">{_escaped(text)}</span>'
-                    for text, colour in fragments
+                    for text, colour, _elide in elide_fragments(
+                        fragments, metrics, available
+                    )
                 )
             )
         label.setText("<br>".join(lines))

@@ -556,7 +556,7 @@ class _DataEditorView(QtWidgets.QWidget):
                 self._rich_text(text)
                 if colour is None
                 else f'<span style="color:{colour}">{self._rich_text(text)}</span>'
-                for text, colour in tuple(fragments)
+                for text, colour, _elide in tuple(fragments)
             )
 
         self.structure_label.setText(
