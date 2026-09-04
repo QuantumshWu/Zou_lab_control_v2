@@ -999,7 +999,18 @@ class ConsolePresenter:
             present=lambda host, operation: self._present_panel_operation(
                 binding, host, operation
             ),
-            invalidate=lambda panel_id: self.board.invalidate_presentations(
+            # A port asks for this when a prepared front was REFUSED -- the
+            # operator zoomed or dragged while it was in flight -- so what it
+            # owes is another staging pass at the publication nobody has seen
+            # yet.  It used to ask for a new representation EPOCH, which is
+            # the demand for a FRESH HOST: with a bounded history standing,
+            # every shot deepens the schema, so epoch-plus-changed-shape
+            # replaced the panel's host on the very gestures that refused the
+            # front -- a whole new session, worker, figure and first paint in
+            # the render child per notch, each one pasting the console's
+            # one-round-trip-old mirror of the viewport back over the zoom the
+            # operator had just set.  Owing a pass keeps the host.
+            invalidate=lambda panel_id: self.board.owe_presentation(
                 (panel_id,)
             ),
         )
@@ -1594,8 +1605,30 @@ class ConsolePresenter:
             changes["selector"] = {}
         if changes:
             binding.state = replace(state, **changes)
-            if "selector" in changes and binding.bridge is not None:
-                binding.bridge.clear_selection()
+            if "selector" in changes:
+                # A region is held in TWO places: this record, and a selector
+                # artist on every host that is painting it.  Retiring one
+                # alone left the card drawing a box the panel no longer had,
+                # so the derived signal stopped and a surface mounted
+                # afterwards -- Edit -- was built from a record with nothing
+                # in it, which reads exactly as "the card shows my ROI and
+                # Edit does not".  Both go, and the operator is told.
+                if binding.bridge is not None:
+                    binding.bridge.clear_selection()
+                for host in (binding.host, binding.editor_host):
+                    if host is None:
+                        continue
+                    self._track_panel_configuration(
+                        binding,
+                        host,
+                        _remove_panel_selection(host, selection),
+                    )
+                self._report(
+                    f"{state.title}: the region drawn here is not in the "
+                    "coordinates this Dataset now offers, so it is off the "
+                    "panel",
+                    severity="warning",
+                )
         viewport_cleared = False
         if (
             binding.interaction_viewport is not None
@@ -1674,6 +1707,7 @@ class ConsolePresenter:
         display_updates: object = _UNCHANGED,
         restore_interaction: bool = False,
         interaction_input: object = _UNCHANGED,
+        editor_surface: bool = False,
     ) -> object:
         """Make one of this panel's hosts show what the panel says.
 
@@ -1712,7 +1746,6 @@ class ConsolePresenter:
                 else "panel target does not resolve on this Dataset"
             )
         target_spec = projection.spec
-        interaction_spec = None
         classifier_thresholds: object = _UNCHANGED
         selectors: object = _UNCHANGED
         if restore_interaction:
@@ -1725,85 +1758,110 @@ class ConsolePresenter:
                     answer = describe()
                     answer = answer.result() if hasattr(answer, "result") else answer
                     accepted_display = getattr(answer, "value", answer)
-            interaction_spec = (
-                None
-                if accepted_display is None
-                or accepted_display.spec != target_spec
-                else accepted_display.spec
-            )
+            # ONE proof decides whether a stored interaction can be placed:
+            # the SELECTION's own vocabulary against the subject it was drawn
+            # in, which is panel_selection_matches_subject below.  Comparing
+            # two independently resolved SPECS was a second, cruder proxy for
+            # that same question standing in front of it, and it answered
+            # "no" for reasons that have nothing to do with coordinates: this
+            # host's spec is resolved against ITS subject -- frozen data, for
+            # Edit -- while the accepted one was resolved against the card's
+            # live data, and a plan that reads an axis SIZE makes the two
+            # disagree as soon as a standing history has deepened past one of
+            # its thresholds.  The operator's ROI then vanished from Edit
+            # with nothing said anywhere.  A thresholds question is about
+            # what THIS host will draw, so it asks this host's own spec.
             selection_subject = (
                 None
                 if accepted_display is None
                 else accepted_display.selection_subject
             )
-            if interaction_spec is not None:
-                if accepts_classifier_thresholds(
-                    interaction_spec, panel_state.display
-                ):
-                    classifier_thresholds = panel_state.classifier_thresholds
-                selection = panel_selection_from_document(panel_state.selector)
-                region_selectors = (
-                    panel_plot_selectors(
-                        selection,
-                        facet_index=panel_state.focused_cell,
-                    )
-                    if selection is not None
-                    and selection_subject is not None
-                    and panel_selection_matches_subject(
-                        selection, selection_subject
-                    )
-                    else ()
+            if accepts_classifier_thresholds(target_spec, panel_state.display):
+                classifier_thresholds = panel_state.classifier_thresholds
+            selection = panel_selection_from_document(panel_state.selector)
+            placeable = (
+                selection is not None
+                and selection_subject is not None
+                and panel_selection_matches_subject(selection, selection_subject)
+            )
+            region_selectors = (
+                panel_plot_selectors(
+                    selection,
+                    facet_index=panel_state.focused_cell,
                 )
-                recorded = dict(panel_state.crosshair)
-                if recorded:
-                    from zlc_plot.selectors import (
-                        CrosshairPoint,
-                        SelectorState as _SelectorState,
-                    )
+                if placeable
+                else ()
+            )
+            if selection is not None and not placeable:
+                # Withholding what the operator drew is a fact they must be
+                # told, not a silence: the card keeps painting the region
+                # while this surface has none, and only this line explains it.
+                self._report(
+                    f"{panel_state.title}: the region drawn on the card is not "
+                    "in the coordinates this surface draws, so it is not on it",
+                    severity="warning",
+                )
+            recorded = dict(panel_state.crosshair)
+            if recorded:
+                from zlc_plot.selectors import (
+                    CrosshairPoint,
+                    SelectorState as _SelectorState,
+                )
 
-                    crosshair_selectors: tuple = (
-                        _SelectorState(
-                            SelectorKind.CROSSHAIR,
-                            CrosshairPoint(
-                                float(recorded["x"]), float(recorded["y"])
-                            ),
+                crosshair_selectors: tuple = (
+                    _SelectorState(
+                        SelectorKind.CROSSHAIR,
+                        CrosshairPoint(
+                            float(recorded["x"]), float(recorded["y"])
                         ),
-                    )
-                else:
-                    crosshair_selectors = tuple(
-                        selector
-                        for selector in accepted_display.selectors
-                        if selector.kind is SelectorKind.CROSSHAIR
-                    )
-                selectors = (
-                    *region_selectors,
-                    *crosshair_selectors,
+                    ),
                 )
+            elif accepted_display is None:
+                crosshair_selectors = ()
             else:
-                # An unresolved host must not receive interaction state whose
-                # coordinate vocabulary cannot yet be proved.
-                selectors = ()
+                crosshair_selectors = tuple(
+                    selector
+                    for selector in accepted_display.selectors
+                    if selector.kind is SelectorKind.CROSSHAIR
+                )
+            selectors = (
+                *region_selectors,
+                *crosshair_selectors,
+            )
         selected_viewport = None
         if (
             restore_interaction
             and binding.interaction_viewport is not None
         ):
             measured_on, remembered = binding.interaction_viewport
+            subject = (
+                None if interaction_input is _UNCHANGED else interaction_input
+            )
+            # The store names the geometry ON SCREEN when the rectangle was
+            # measured; this names the geometry the host is ABOUT to draw.
+            # Two spellings of one identity on purpose -- collapsing them to
+            # the accepted description made the test vacuous, so a fate change
+            # that had not been accepted yet compared equal to itself and the
+            # rectangle survived onto axes that no longer carried it.
             if measured_on == self._panel_view_identity(
                 binding,
                 state=panel_state,
-                subject=(
-                    None
-                    if interaction_input is _UNCHANGED
-                    else interaction_input
-                ),
+                subject=subject,
             ):
                 selected_viewport = remembered
-            else:
+            elif not editor_surface:
                 # The data underneath moved: a range measured on the previous
                 # one would paste its limits onto axes that no longer have
                 # them, which is how a restarted producer came back framed by
                 # the picture before it.
+                #
+                # Only the panel's OWN live surface may retire the panel's
+                # memory, and it says so by being the caller.  A second
+                # surface -- Edit, over frozen data -- that cannot prove the
+                # rectangle against ITSELF declines to restore it for itself
+                # and leaves the card's zoom standing; writing its own failed
+                # proof into the shared slot threw the operator's zoom away
+                # every time they opened Edit.
                 binding.interaction_viewport = None
         semantic, display = projection.semantic, projection.parameters
         configuration: dict[str, object] = {
@@ -3936,6 +3994,7 @@ class ConsolePresenter:
                 host,
                 restore_interaction=True,
                 interaction_input=plot_input,
+                editor_surface=True,
             )
         except BaseException:
             self._retire_plot_host(host)
@@ -5935,15 +5994,23 @@ class ConsolePresenter:
             if display.get(name) is not None
         )
         # The RUN is deliberately absent.  A viewport is measured on
-        # GEOMETRY -- the schema fingerprint, the resolved spec, the
+        # GEOMETRY -- the schema's STRUCTURE, the resolved spec, the
         # units -- and the same instrument fired again puts the same
         # axes under the same numeric rectangle.  Keying on the stream
         # generation threw the operator's zoom away at every shot
         # boundary and mounted each new run at the autoscaled home,
         # which read as "my view keeps snapping back".  A different
-        # scan changes the fingerprint and still resets honestly.
+        # scan changes the structure and still resets honestly.
+        #
+        # The FULL fingerprint is the wrong name here for the same
+        # reason: it includes what the coordinates currently read, and a
+        # bounded shot history slides its own coordinates forward every
+        # shot by design.  Under a standing history that renamed the
+        # dataset on every shot, so the zoom an operator had just set
+        # was thrown away on the next one -- the snapping back the run
+        # was removed to stop, wearing a different field.
         return (
-            None if schema is None else getattr(schema, "fingerprint", None),
+            None if schema is None else getattr(schema, "structure_fingerprint", None),
             resolved,
             units,
             focused_cell,

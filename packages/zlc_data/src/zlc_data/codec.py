@@ -9,7 +9,7 @@ import numpy as np
 from ._tree import digest as _tree_digest, encode as _encode
 from .validation import canonical_text as _text, exact_mapping as _exact_map
 
-from .axis import AxisId, AxisRoleId, AxisSpec, CoordinateFrameId
+from .axis import PRIMARY_INDEX, AxisId, AxisRoleId, AxisSpec, CoordinateFrameId
 from .schema import (
     DatasetSchema,
     DomainSpec,
@@ -246,12 +246,90 @@ def dataset_schema_fingerprint(schema: DatasetSchema) -> str:
 
 #: Tree keys holding one entry per coordinate rather than a structural fact.
 _COORDINATE_KEYS = frozenset({"coordinates", "coordinate_labels"})
+#: One name for everything a bounded history's own advance renames.  Its
+#: DEPTH is not what the dataset is either: the window grows while it fills
+#: and then holds while its coordinates slide past, and neither is a
+#: different world to an interaction already under way.
+_SLIDING = "sliding"
+
+
+def _sliding_axes(axes: object) -> frozenset[int]:
+    """Positions in this domain held by an axis a bounded history slides.
+
+    The ROLE is what says so: a primary index IS the shot index, and a
+    bounded window advances it by design.
+    """
+
+    if not isinstance(axes, list):
+        return frozenset()
+    return frozenset(
+        index
+        for index, axis in enumerate(axes)
+        if isinstance(axis, dict) and axis.get("role") == PRIMARY_INDEX.value
+    )
+
+
+def _axis_structure(axis: object, sliding: bool) -> object:
+    if not isinstance(axis, dict):
+        return _structure_only(axis)
+    return {
+        key: (
+            _SLIDING
+            if sliding and key in ("size", "index_origin")
+            else None
+            if item is None
+            else _SLIDING
+            if sliding and key in _COORDINATE_KEYS and isinstance(item, list)
+            else len(item)
+            if key in _COORDINATE_KEYS and isinstance(item, list)
+            else _structure_only(item)
+        )
+        for key, item in axis.items()
+    }
+
+
+def _domain_structure(node: dict) -> dict:
+    """A domain named by what it IS, less any history depth inside it."""
+
+    sliding = _sliding_axes(node.get("axes"))
+    # An explicitly mapped domain has ONE physical dimension -- the flat
+    # carrier every axis is coded over -- so a sliding axis inside it sizes
+    # the whole shape, and lengthens every axis's codes rather than only its
+    # own.  An unmapped domain is axis-major, where the sliding axis sizes
+    # exactly its own dimension.
+    mapped = node.get("axis_codes") is not None
+    result: dict[str, Any] = {}
+    for key, item in node.items():
+        if key == "axes" and isinstance(item, list):
+            result[key] = [
+                _axis_structure(axis, index in sliding)
+                for index, axis in enumerate(item)
+            ]
+        elif key == "shape" and isinstance(item, list):
+            result[key] = [
+                _SLIDING
+                if sliding and (mapped or index in sliding)
+                else _structure_only(entry)
+                for index, entry in enumerate(item)
+            ]
+        elif key == "axis_codes" and sliding and item is not None:
+            result[key] = _SLIDING
+        else:
+            result[key] = _structure_only(item)
+    return result
 
 
 def _structure_only(node: object) -> object:
-    """The same tree with every coordinate LIST replaced by its length."""
+    """The same tree with every coordinate LIST replaced by its length.
+
+    A domain is named through :func:`_domain_structure`, which additionally
+    drops the depth of any axis a bounded history slides: the window's size,
+    its origin and its codes all advance with the history itself.
+    """
 
     if isinstance(node, dict):
+        if node.get("schema") == DOMAIN_SCHEMA:
+            return _domain_structure(node)
         return {
             key: (
                 None
@@ -274,8 +352,12 @@ def dataset_schema_structure_fingerprint(schema: DatasetSchema) -> str:
     "is this the same dataset".  It is the wrong question for "is this the
     same world an interaction was started in": a bounded shot history slides
     its own coordinates forward by design -- every shot renames them -- while
-    the axes, their roles, units and shape stand still.  Judging that by the
-    full fingerprint made every shot look like a new geometry.
+    the axes, their roles and units stand still.  Judging that by the full
+    fingerprint made every shot look like a new geometry.
+
+    The history's DEPTH goes with its coordinates, for the same reason: a
+    window that is still filling grows by one on every shot, and a panel
+    holding a viewport or an open drag would have lost it on each one.
     """
 
     return _tree_digest(_structure_only(dataset_schema_to_tree(schema)))

@@ -5389,9 +5389,12 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
     assert refused.parameter_surface["data_structure"] == expected
     assert field_scan.parameter_surface["data_structure"] == expected
 
+    # The refusal arrives as the CONFIGURE's failure, which the panel wears
+    # as its status; a present that never happened cannot report it.
     _settle_panel_hosts(
         presenter,
-        lambda: getattr(refused.port, "last_error", None) is not None,
+        lambda: "exceeds the fixed layout"
+        in str(presenter.view._cards[refused.panel_id].status[0]),
     )
     presenter._report_panel_errors()
     surface = refused.parameter_surface
