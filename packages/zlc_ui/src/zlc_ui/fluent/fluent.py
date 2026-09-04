@@ -153,6 +153,62 @@ def scaled_px(value: int | float, *, minimum: int = 1) -> int:
     return max(int(minimum), int(round(float(value) * _FLUENT_SCALE)))
 
 
+def _available_geometry_at(
+    point: QtCore.QPoint, *, widget: QtWidgets.QWidget | None = None
+) -> QtCore.QRect | None:
+    """The usable area of the screen a point falls on, or None if there is none.
+
+    "Where may a floating surface land" is ONE question -- a combo popup, a
+    modal card -- and it had grown two separate walks from a point to a
+    screen to its available geometry.  A third was about to be written for
+    the modal that opens off the edge of the monitor; that is what the
+    copies cost.
+
+    ``widget`` is asked only when the point is on no screen at all: a
+    window dragged past every edge still belongs to one.
+    """
+
+    application = QtWidgets.QApplication.instance()
+    screen_at = getattr(application, "screenAt", None) if application is not None else None
+    screen = screen_at(point) if callable(screen_at) else None
+    if screen is None and widget is not None and hasattr(widget, "screen"):
+        screen = widget.screen()
+    if screen is None and application is not None:
+        screen = application.primaryScreen()
+    return None if screen is None else screen.availableGeometry()
+
+
+def _placed_on_screen(
+    wanted: QtCore.QPoint,
+    size: QtCore.QSize,
+    *,
+    widget: QtWidgets.QWidget | None = None,
+) -> QtCore.QPoint:
+    """``wanted``, moved the least it takes to put the whole window on a screen.
+
+    A platform window manager never opens a window off the monitor.  Every
+    window this project places by hand -- a modal card centred on its
+    parent, a dialog window centred on the window that opened it -- can,
+    because a parent near an edge has its centre near that edge.  Modal is
+    what makes that fatal: nothing else takes a click, so a window past the
+    edge is one nobody can answer or move.
+    """
+
+    available = _available_geometry_at(wanted, widget=widget)
+    if available is None:
+        return wanted
+    return QtCore.QPoint(
+        min(
+            max(wanted.x(), available.left()),
+            max(available.left(), available.right() - size.width() + 1),
+        ),
+        min(
+            max(wanted.y(), available.top()),
+            max(available.top(), available.bottom() - size.height() + 1),
+        ),
+    )
+
+
 def screen_fit_window_size(window_ratio: float) -> QtCore.QSize:
     """Initial window size for a top-level GUI, fit to the primary screen.
 
@@ -782,12 +838,7 @@ def show_fluent_popup_for_anchor(
             (anchor_top_left.x() + anchor_bottom_right.x()) // 2,
             (anchor_top_left.y() + anchor_bottom_right.y()) // 2,
         )
-        screen = QtWidgets.QApplication.screenAt(anchor_center)
-        if screen is None and hasattr(anchor, "screen"):
-            screen = anchor.screen()
-        if screen is None:
-            screen = QtWidgets.QApplication.primaryScreen()
-        available = None if screen is None else screen.availableGeometry()
+        available = _available_geometry_at(anchor_center, widget=anchor)
     else:
         anchor_top_left = anchor.mapTo(page, QtCore.QPoint(0, 0))
         anchor_bottom_right = anchor.mapTo(
@@ -1707,6 +1758,15 @@ class FluentCardDialog(QtWidgets.QDialog):
     -- which is exactly how the two that did got there.  A subclass builds
     its own contents and renders its own title (a frameless card has no
     title bar to put one in); it inherits the card.
+
+    Taking the frame away takes two things with it, so the card supplies
+    both or it is not a usable modal.  WHERE IT OPENS: a platform frame is
+    placed by the window manager, which never puts one off the screen; a
+    card placed by hand at its parent's centre goes wherever that centre
+    is, and a window near an edge put the whole card past it -- modal, so
+    nothing else would take a click, and no button anyone could reach.
+    HOW IT MOVES: a platform frame has a title bar to drag, and a card has
+    none, so the card itself is the handle.
     """
 
     def __init__(self, parent=None, *, title: str = "") -> None:
@@ -1715,8 +1775,78 @@ class FluentCardDialog(QtWidgets.QDialog):
         self.setModal(True)
         self.setFont(QtGui.QFont(FONT, fluent_font_size()))
         self._radius = float(_radius())
+        self._drag_origin: QtCore.QPoint | None = None
         if title:
             self.setWindowTitle(str(title))
+
+    def exec_(self) -> int:
+        """Place the card where it can be used, then run the modal loop.
+
+        Every card modal goes through here, so none of them can be the one
+        that opens somewhere unreachable.
+        """
+
+        # Before the nested loop starts, not after: what it is about to
+        # paint has to be what is actually still there.
+        retire_pending_widgets()
+        self.adjustSize()
+        self.move(self._opening_position())
+        return super().exec_()
+
+    def _opening_position(self) -> QtCore.QPoint:
+        """Centred on the parent, but ALWAYS on the screen it lands on.
+
+        The centring is what makes a modal feel attached to the window it
+        came from.  The clamp is what keeps that from being fatal: a parent
+        near an edge -- or dragged half off one -- centres the card past
+        the screen, and a modal nobody can click is a window nobody can
+        close.
+        """
+
+        anchor = self.parentWidget()
+        # ``size``, not ``frameGeometry`` -- a frameless window has no frame,
+        # so the two are the same thing once it exists, and before it does
+        # only this one is right (the other is a pixel short in each
+        # direction, which is a pixel off the screen).
+        size = self.size()
+        if anchor is not None:
+            centre = anchor.mapToGlobal(anchor.rect().center())
+            wanted = QtCore.QPoint(
+                centre.x() - size.width() // 2, centre.y() - size.height() // 2
+            )
+        else:
+            wanted = self.pos()
+        return _placed_on_screen(wanted, size, widget=anchor or self)
+
+    # -- the card is its own title bar -----------------------------------
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        """Begin a drag, when nothing in the card wanted the press.
+
+        No widget list decides that: Qt only delivers a press HERE once
+        every child has declined it, so a button still clicks, a text body
+        still selects, and the dead space and the title label -- which
+        decline by nature -- are the handle.
+        """
+
+        if event.button() == QtCore.Qt.LeftButton:
+            self._drag_origin = (
+                event.globalPos() - self.frameGeometry().topLeft()
+            )
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        origin = self._drag_origin
+        if origin is not None and event.buttons() & QtCore.Qt.LeftButton:
+            self.move(event.globalPos() - origin)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        self._drag_origin = None
+        super().mouseReleaseEvent(event)
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         painter = QtGui.QPainter(self)
@@ -1801,26 +1931,11 @@ def retire_pending_widgets() -> None:
         application.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
 
 
-def _exec_centered_dialog(dialog: QtWidgets.QDialog, parent) -> int:
-    # Before the nested loop starts, not after: what it is about to paint has
-    # to be what is actually still there.
-    retire_pending_widgets()
-    dialog.adjustSize()
-    if parent is not None:
-        centre = parent.mapToGlobal(parent.rect().center())
-        dialog.move(
-            centre.x() - dialog.width() // 2,
-            centre.y() - dialog.height() // 2,
-        )
-    return dialog.exec_()
-
-
 def fluent_message(parent, title: str, text: str, *, kind: str = "info") -> None:
     """Show a modal Fluent message dialog (``kind`` = ``"info"`` | ``"warning"``) -- the ONE on-brand
     replacement for ``QMessageBox.information`` / ``.warning`` (no native frame, no stray app icon).
     Centres on ``parent``.  Blocks until the user clicks OK (or presses Escape)."""
-    dlg = _FluentMessageDialog(parent, title, text, kind=kind)
-    _exec_centered_dialog(dlg, parent)
+    _FluentMessageDialog(parent, title, text, kind=kind).exec_()
 
 
 def stamped_file_name(stem: str, extension: str, *, stamp: str | None = None) -> str:
@@ -1883,7 +1998,7 @@ def fluent_confirm(
         confirm_text=confirm_text,
         cancel_text=cancel_text,
     )
-    return _exec_centered_dialog(dlg, parent) == QtWidgets.QDialog.Accepted
+    return dlg.exec_() == QtWidgets.QDialog.Accepted
 
 
 #: Max rows a Fluent drop-down shows before it SCROLLS (the shared fluent scrollbar) -- one source for
@@ -2385,13 +2500,9 @@ class FluentComboBox(QtWidgets.QAbstractButton):
     def _popup_available_geometry(self) -> QtCore.QRect | None:
         """The screen containing the anchor, shared by cap/space/placement."""
 
-        app = QtWidgets.QApplication.instance()
-        center = self.mapToGlobal(self.rect().center())
-        screen_at = getattr(app, "screenAt", None) if app is not None else None
-        screen = screen_at(center) if callable(screen_at) else None
-        if screen is None and hasattr(self, "screen"):
-            screen = self.screen()
-        return screen.availableGeometry() if screen is not None else None
+        return _available_geometry_at(
+            self.mapToGlobal(self.rect().center()), widget=self
+        )
 
     def _popup_width_cap(self) -> int:
         available = self._popup_available_geometry()
@@ -4892,9 +5003,14 @@ class FluentDialogWindow(FluentWindow):
         if anchor is None:
             center_window_on_primary_screen(self, app)
         else:
+            # Centred on the window it came from, and then put on a screen:
+            # a window near an edge centres this one past it, and a modal
+            # nobody can reach is a bench nobody can carry on using.
             frame = self.frameGeometry()
             frame.moveCenter(anchor.window().frameGeometry().center())
-            self.move(frame.topLeft())
+            self.move(
+                _placed_on_screen(frame.topLeft(), self.size(), widget=anchor)
+            )
         retain_window(self)
         loop = QtCore.QEventLoop(self)
         self._dialog_loop = loop
