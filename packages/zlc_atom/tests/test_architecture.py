@@ -343,9 +343,9 @@ def test_pulse_resolver_uses_the_project_json_document(
         board = sequencer.describe()
         monkeypatch.setattr(
             calibration_pulse_module,
-            "sequence_from_document_tree",
-            lambda _tree: (_ for _ in ()).throw(
-                AssertionError("resolve_pulse decoded its resource a second time")
+            "read_pulse_document",
+            lambda _path: (_ for _ in ()).throw(
+                AssertionError("resolve_pulse read its resource a second time")
             ),
         )
         resolved = resolve_pulse(

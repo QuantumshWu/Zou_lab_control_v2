@@ -105,7 +105,7 @@ class PeriodCard(FluentGroupBox):
         top_layout.addWidget(self._center_label("Duration"))
         self.duration_edit = FluentScanLineEdit(
             "",
-            tooltip="Click the dot to cycle off → Scan → API → off",
+            tooltip="Click the dot to cycle off → Scan → API → Config → off",
         )
         control_width = period_control_width(width)
         self.duration_edit.setFixedWidth(control_width)
@@ -243,7 +243,7 @@ class PeriodCard(FluentGroupBox):
                     tooltip=(
                         f"{port.label}: signed integer {port.lo}..{port.hi} "
                         "(0 = 0 V)\n"
-                        "Click the dot to cycle off → Scan → API → off"
+                        "Click the dot to cycle off → Scan → API → Config → off"
                     ),
                 )
                 edit.set_numeric_validator("int", bottom=port.lo, top=port.hi)
@@ -400,6 +400,7 @@ class ChannelPanel(FluentGroupBox):
     binding_cycle_requested = QtCore.pyqtSignal(str, object, object)
     clear_port_requested = QtCore.pyqtSignal(str)
     scan_array_load_requested = QtCore.pyqtSignal()
+    run_repeats_committed = QtCore.pyqtSignal(int)
 
     def __init__(self, parent=None) -> None:
         super().__init__("Delay / Scan", parent)
@@ -430,8 +431,28 @@ class ChannelPanel(FluentGroupBox):
         self.clock_label.setEnabled(False)
         self.scan_summary_label = FluentLineEdit("")
         self.scan_summary_label.setEnabled(False)
+        # How many times the whole thing plays is a number the PULSE carries,
+        # like its clock and its scan table -- not an action, which is all the
+        # Control group beside it holds.  Reading it directly under the scan
+        # summary says the one sentence they make together: what will be
+        # played, and how many times.
+        self.run_repeats_spin = FluentDoubleSpinBox()
+        self.run_repeats_spin._step_btn.hide()
+        self.run_repeats_spin.setDecimals(0)
+        self.run_repeats_spin.setSingleStep(1.0)
+        self.run_repeats_spin.setRange(0.0, float((1 << 32) - 1))
+        self.run_repeats_spin.setToolTip(
+            "Complete Pulse runs per scan point (or per On Pulse without a "
+            "scan); 0 runs indefinitely"
+        )
+        self.run_repeats_spin.editingFinished.connect(
+            lambda: self.run_repeats_committed.emit(
+                int(self.run_repeats_spin.value())
+            )
+        )
         add_labeled_widget(top_layout, "Clock:", self.clock_label)
         add_labeled_widget(top_layout, "Scan:", self.scan_summary_label)
+        add_labeled_widget(top_layout, "Repeat:", self.run_repeats_spin)
         self.load_array_button = FluentButton("Load Array", color=ACCENT)
         self.load_array_button.clicked.connect(self.scan_array_load_requested)
         top_layout.addWidget(self.load_array_button)
@@ -456,7 +477,7 @@ class ChannelPanel(FluentGroupBox):
             if current is None:
                 edit = FluentScanLineEdit(
                     row.value.text,
-                    tooltip="Click the dot to cycle off → API → off",
+                    tooltip="Click the dot to cycle off → API → Config → off",
                 )
                 edit.setFixedWidth(px(70, minimum=60))
                 combo = FluentComboBox()
@@ -1179,27 +1200,6 @@ class PulseScheduleView(QtWidgets.QWidget):
             controls.setColumnStretch(column, 1)
         control_layout.addStretch(1)
         control_layout.addLayout(controls)
-        run_repeats_row = QtWidgets.QHBoxLayout()
-        run_repeats_row.setContentsMargins(0, 0, 0, 0)
-        run_repeats_row.setSpacing(px(6, minimum=4))
-        run_repeats_row.addWidget(FluentLabel("Run repeats (0 = ∞)"))
-        self.run_repeats_spin = FluentDoubleSpinBox()
-        self.run_repeats_spin._step_btn.hide()
-        self.run_repeats_spin.setDecimals(0)
-        self.run_repeats_spin.setSingleStep(1.0)
-        self.run_repeats_spin.setRange(0.0, float((1 << 32) - 1))
-        self.run_repeats_spin.setFixedHeight(control_height)
-        self.run_repeats_spin.setToolTip(
-            "Complete Pulse runs per scan point (or per On Pulse without a scan); "
-            "0 runs indefinitely"
-        )
-        self.run_repeats_spin.editingFinished.connect(
-            lambda: self.run_repeats_committed.emit(
-                int(self.run_repeats_spin.value())
-            )
-        )
-        run_repeats_row.addWidget(self.run_repeats_spin, 1)
-        control_layout.addLayout(run_repeats_row)
         control_layout.addStretch(1)
         bar.addWidget(control_area, 1)
 
@@ -1274,6 +1274,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.channel_panel.binding_cycle_requested.connect(self.binding_cycle_requested)
         self.channel_panel.clear_port_requested.connect(self.clear_port_requested)
         self.channel_panel.scan_array_load_requested.connect(self.scan_array_load_requested)
+        self.channel_panel.run_repeats_committed.connect(self.run_repeats_committed)
         self.drag_container.move_period_requested.connect(self.move_period_requested)
         self.drag_container.bracket_committed.connect(self.bracket_committed)
         self.run_button.clicked.connect(self.run_requested)
@@ -1426,9 +1427,9 @@ class PulseScheduleView(QtWidgets.QWidget):
             vm.bracket,
             minimum_bracket=vm.min_bracket_count,
         )
-        with signals_blocked(self.run_repeats_spin):
-            self.run_repeats_spin.setValue(float(vm.run_repeats))
-        self.run_repeats_spin.setEnabled(bool(vm.periods))
+        with signals_blocked(self.channel_panel.run_repeats_spin):
+            self.channel_panel.run_repeats_spin.setValue(float(vm.run_repeats))
+        self.channel_panel.run_repeats_spin.setEnabled(bool(vm.periods))
         self._rebuild_hidden_ports(vm)
         self.bracket_button.setText(
             "Del Bracket" if vm.bracket is not None else "Add Bracket"

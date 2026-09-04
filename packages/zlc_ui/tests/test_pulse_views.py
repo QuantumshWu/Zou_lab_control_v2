@@ -168,8 +168,8 @@ scan_edit = view._cards["p1"].duration_edit
 api_edit = view._cards["p2"].duration_edit
 delay_edit = view.channel_panel._rows["d0"][0]
 assert scan_edit.dot.isChecked() and scan_edit.dot._number == 1
-assert not api_edit.dot.isChecked() and api_edit.dot._api and api_edit.dot._number == 2
-assert not delay_edit.dot.isChecked() and delay_edit.dot._api and delay_edit.dot._number == 2
+assert not api_edit.dot.isChecked() and api_edit.dot._kind == "api" and api_edit.dot._number == 2
+assert not delay_edit.dot.isChecked() and delay_edit.dot._kind == "api" and delay_edit.dot._number == 2
 assert view.channel_panel.scan_summary_label.text() == "1 slot · 4 pts"
 """
     )
@@ -660,13 +660,13 @@ assert view.set_schedule(bracketed)
 view.show(); app.processEvents()
 
 # The persisted outer count is its own full-range control, including 0=∞.
-assert int(view.run_repeats_spin.maximum()) == (1 << 32) - 1
-assert int(view.run_repeats_spin.value()) == (1 << 32) - 1
-assert view.run_repeats_spin.text() == str((1 << 32) - 1)
+assert int(view.channel_panel.run_repeats_spin.maximum()) == (1 << 32) - 1
+assert int(view.channel_panel.run_repeats_spin.value()) == (1 << 32) - 1
+assert view.channel_panel.run_repeats_spin.text() == str((1 << 32) - 1)
 run_requests = []
 view.run_repeats_committed.connect(run_requests.append)
-view.run_repeats_spin.setValue(0)
-view.run_repeats_spin.editingFinished.emit()
+view.channel_panel.run_repeats_spin.setValue(0)
+view.channel_panel.run_repeats_spin.editingFinished.emit()
 assert run_requests == [0]
 assert view._schedule.run_repeats == (1 << 32) - 1, "the view only proposes"
 
@@ -743,3 +743,51 @@ app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete); app.processEvents()
 app.quit()
 '''
     )
+
+
+def test_a_config_binding_wears_its_own_colour_and_stays_editable() -> None:
+    """Three owners, three marks, and only the board's one takes the box away.
+
+    A scan column is written per point by the board, so its field is read
+    only.  An API parameter and a config parameter both hold a number the
+    operator can see and type, so theirs are not -- and the config one is
+    slate rather than violet, because nobody supplies it for a run: it is
+    already the pulse's own.
+    """
+
+    _run_qt(
+        """
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import API_VIOLET, CONFIG_SLATE, ORANGE
+from zlc_ui.pulse.scan_line_edit import FluentScanLineEdit
+from zlc_ui.pulse.scan_line_edit import _BINDING_FILL
+
+app = ensure_qt_app(["binding-colours"])
+assert _BINDING_FILL == {"scan": ORANGE, "api": API_VIOLET, "config": CONFIG_SLATE}
+
+edit = FluentScanLineEdit("12")
+edit.set_field_state(editable=True, binding="config", number=3)
+assert edit.dot._kind == "config"
+assert edit.dot._number == 3
+assert not edit.dot.isChecked(), "only a scan column marks the box as the board's"
+assert not edit.isReadOnly(), "a config number is the operator's to read and type"
+assert CONFIG_SLATE in edit.styleSheet()
+
+edit.set_field_state(editable=True, binding="scan", number=1)
+assert edit.isReadOnly() and edit.dot.isChecked()
+
+edit.set_field_state(editable=True, binding=None)
+assert edit.dot._kind is None and not edit.isReadOnly()
+
+try:
+    edit.set_field_state(editable=True, binding="whatever")
+except ValueError as error:
+    assert "scan" in str(error) and "config" in str(error)
+else:
+    raise AssertionError("an unknown binding must be refused")
+
+edit.deleteLater()
+app.processEvents()
+"""
+    )
+

@@ -2836,15 +2836,24 @@ def test_every_bindable_field_shows_the_slot_it_is_bound_to(sequence) -> None:
                    row.value.binding_number}
         assert len(numbers) == 3, numbers
 
-        # Cycling off takes the mark away again.
-        presenter.cycle_binding("duration", period, None)      # scan -> api
-        presenter.cycle_binding("duration", period, None)      # api  -> off
-        card = next(
-            item
-            for item in view.schedule_view.schedule.periods
-            if item.period_id == period
-        )
-        assert card.duration.binding_kind == ""
+        # Cycling on through every owner and off again.  A field carries the
+        # same name and unit the whole way round: the physical thing does not
+        # change, only who supplies its number.
+        def duration_card():
+            return next(
+                item
+                for item in view.schedule_view.schedule.periods
+                if item.period_id == period
+            )
+
+        presenter.cycle_binding("duration", period, None)      # scan   -> api
+        assert duration_card().duration.binding_kind == "api"
+        presenter.cycle_binding("duration", period, None)      # api    -> config
+        assert duration_card().duration.binding_kind == "config"
+        assert len(presenter.sequence.config_parameters) == 1
+        presenter.cycle_binding("duration", period, None)      # config -> off
+        assert duration_card().duration.binding_kind == ""
+        assert presenter.sequence.config_parameters == ()
     finally:
         presenter.close()
 

@@ -575,24 +575,28 @@ def bindings_of(sequence: PulseSequence | None) -> dict[tuple, tuple[str, int]]:
     to slot 0 looked exactly like one that was not bound at all -- the bind
     took, and the screen never said so.
 
-    Scan and API bindings are distinct domain collections.  Their displayed
-    numbers share one sequence only so every mark on the form is unambiguous;
-    API parameters never add a scan-table column.
+    Scan, API and config bindings are distinct domain collections.  Their
+    displayed numbers share one sequence only so every mark on the form is
+    unambiguous; neither an API nor a config parameter adds a scan-table
+    column.
     """
 
     if sequence is None:
         return {}
     found: dict[tuple, tuple[str, int]] = {}
-    for index, slot in enumerate(sequence.slots):
-        reference = slot.field_ref
-        found[(reference.kind, reference.period_id, reference.port)] = ("scan", index + 1)
-    offset = len(sequence.slots)
-    for index, parameter in enumerate(sequence.api_parameters):
-        reference = parameter.field_ref
-        found[(reference.kind, reference.period_id, reference.port)] = (
-            "api",
-            offset + index + 1,
-        )
+    number = 0
+    for kind, bindings in (
+        ("scan", sequence.slots),
+        ("api", sequence.api_parameters),
+        ("config", sequence.config_parameters),
+    ):
+        for binding in bindings:
+            number += 1
+            reference = binding.field_ref
+            found[(reference.kind, reference.period_id, reference.port)] = (
+                kind,
+                number,
+            )
     return found
 
 
@@ -3261,7 +3265,11 @@ class PulseEditorPresenter:
         domain value to the immutable sequence.
         """
 
-        from zlc_pulse import PulseApiParameter, PulseSlot
+        from zlc_pulse import (
+            PulseApiParameter,
+            PulseConfigParameter,
+            PulseSlot,
+        )
 
         if self.sequence is None:
             return
@@ -3284,8 +3292,23 @@ class PulseEditorPresenter:
             ),
             None,
         )
-        binding = "scan" if current_scan is not None else (
-            "api" if current_api is not None else None
+        current_config = next(
+            (
+                parameter
+                for parameter in self.sequence.config_parameters
+                if parameter.field_ref == reference
+            ),
+            None,
+        )
+        held = current_scan or current_api or current_config
+        binding = (
+            "scan"
+            if current_scan is not None
+            else "api"
+            if current_api is not None
+            else "config"
+            if current_config is not None
+            else None
         )
         wanted = cycle_binding_kind(binding, field_kind=reference.kind)
         slots = tuple(
@@ -3296,28 +3319,37 @@ class PulseEditorPresenter:
             for parameter in self.sequence.api_parameters
             if parameter.field_ref != reference
         )
+        config_parameters = tuple(
+            parameter
+            for parameter in self.sequence.config_parameters
+            if parameter.field_ref != reference
+        )
+        # A field keeps the name and unit it was given as it moves round the
+        # cycle: the same physical thing under a new owner, not a new one.
+        carried_id = (
+            (held.slot_id if current_scan is not None else held.parameter_id)
+            if held is not None
+            else self._binding_id(reference)
+        )
+        carried_unit = (
+            held.unit if held is not None else self.sequence.field_unit(reference)
+        )
         if wanted == "scan":
             slots = slots + (
-                PulseSlot(
-                    reference.kind,
-                    reference,
-                    self.sequence.field_unit(reference),
-                    slot_id=self._binding_id(reference),
-                ),
+                PulseSlot(reference.kind, reference, carried_unit, slot_id=carried_id),
             )
         elif wanted == "api":
             api_parameters = api_parameters + (
-                PulseApiParameter(
-                    current_scan.slot_id if current_scan is not None else self._binding_id(reference),
-                    reference,
-                    current_scan.unit if current_scan is not None else (
-                        self.sequence.field_unit(reference)
-                    ),
-                ),
+                PulseApiParameter(carried_id, reference, carried_unit),
+            )
+        elif wanted == "config":
+            config_parameters = config_parameters + (
+                PulseConfigParameter(carried_id, reference, carried_unit),
             )
         changes: dict[str, Any] = {
             "slots": slots,
             "api_parameters": api_parameters,
+            "config_parameters": config_parameters,
         }
         if wanted is not None:
             owning = self._periods_owning(reference)
