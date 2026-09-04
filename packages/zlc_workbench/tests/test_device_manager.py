@@ -1314,14 +1314,16 @@ def test_a_local_server_device_s_log_includes_its_declared_channels(tmp_path) ->
     assert manager.toggle_lifecycle() is True
     try:
         assert manager.toggle_remote("board") is True
-        logging.getLogger("zlc_pulse.remote").info("ZLC FIRE cycles=3")
+        logging.getLogger("zlc_pulse.remote").info(
+            "ZLC FIRE run_repeats=3 scan_repeats=1"
+        )
         logging.getLogger("zlc_atom.devices.slm.device").info("SLM APPLY ok=True")
         assert manager.show_device_log("board") is True
         ((key, snapshot),) = view.device_logs_opened
         assert key == "board"
         _total, lines = snapshot()
         tails = [line.split("] ", 1)[1] for line in lines]
-        assert "ZLC FIRE cycles=3" in tails
+        assert "ZLC FIRE run_repeats=3 scan_repeats=1" in tails
         assert not any(line.startswith("SLM ") for line in tails), (
             "the SLM's narration is not the board's"
         )

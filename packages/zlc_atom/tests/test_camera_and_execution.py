@@ -203,7 +203,7 @@ def test_an_external_gate_shortens_the_light_not_the_integration() -> None:
         },
     )
     sequencer.load(pulse.program, source=pulse.sequence)
-    sequencer.fire()
+    sequencer.fire(run_repeats=1, scan_repeats=1)
     records = camera.read_frame_records(3, timeout=1.0, exact=True)
     camera.finish_record_capture()
     sequencer.close()

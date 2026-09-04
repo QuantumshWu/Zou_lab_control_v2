@@ -20,6 +20,7 @@ from .dataset import (
     SCAN_OUTPUT,
     ScanDatasetWriter,
     scan_dataset_schema,
+    scan_repeat_domain,
 )
 from .seamless import MANUAL_AXIS_REQUEST, SeamlessScanMeasurement
 from .plan import (
@@ -89,6 +90,7 @@ __all__ = [
     "api_overrides_to_authored",
     "plan_from_authored",
     "scan_dataset_schema",
+    "scan_repeat_domain",
     "scan_ports_for",
     "scan_ports_for_devices",
 ]

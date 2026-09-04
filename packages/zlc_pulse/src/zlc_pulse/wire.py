@@ -26,7 +26,7 @@ __all__ = [
 
 # CTRL word 63 is the single host/bitstream geometry handshake.  The RTL carries
 # the precomputed value; host packing and generated headers call this function.
-LAYOUT_STRUCT_VERSION = 4   # Included in the word-63 compatibility fingerprint.
+LAYOUT_STRUCT_VERSION = 5   # Included in the word-63 compatibility fingerprint.
 
 # Only host-side validation caps are excluded; all other geometry fields are hashed.
 _FINGERPRINT_HOST_ONLY = frozenset({"ttl_delay_max_ticks"})
@@ -83,9 +83,9 @@ class CtrlWords:
     COMMAND = 1            # host -> top: LOAD/FIRE/RESET/SAFE (rising-edge)
     STATUS = 2            # top -> host: LOADED/RUNNING/DONE/ERROR/UNDERFLOW/LINK_ERROR
     PROG_COUNT = 3        # number of edges
-    SCAN_COUNT = 4        # total scan points N; may exceed the two-bank window
+    SCAN_COUNT = 4        # unique rows N in one sweep; may exceed the two-bank window
     SCAN_ENABLE = 5
-    REPEAT_FOREVER = 6
+    RUN_REPEAT_COUNT = 6   # complete Pulse executions per scan row; 0 = infinite
     LOOP_START = 7
     LOOP_COUNT = 8
     LOOP_END_TICK = 9
@@ -94,11 +94,11 @@ class CtrlWords:
     BUS_COUNTS = 12
     BANK_SIZE = 13        # scan points per ping-pong bank
     SLOT_COUNT = 14
-    CURSOR = 15           # top -> host: scan points consumed (for streaming refill)
+    CURSOR = 15           # top -> host: cumulative row-visit ordinal; unchanged by Run repeats
     BANK_READY = 16       # host -> top: bit b = bank b is loaded/ready
     BANK0_CHUNK = 17      # host -> top: sweep-chunk index currently resident in bank 0
     BANK1_CHUNK = 18      # host -> top: sweep-chunk index currently resident in bank 1
-    RESERVED_19 = 19
+    SCAN_REPEAT_COUNT = 19  # complete scan-table sweeps; 0 = infinite
     CLK_ENABLE = 20
     LAYOUT_ID = 63
 
@@ -388,19 +388,17 @@ def _bus_mode_name(v: int) -> str:
 
 # --------------------------------------------------------------------------- pack
 def scan_bank_words(rows, p: StreamerParams, chunk_index: int,
-                    target_bank: int | None = None, cycles: int = 1) -> dict[int, int]:
+                    target_bank: int | None = None) -> dict[int, int]:
     """Words to (re)load scan chunk ``chunk_index`` into a ping-pong bank.
 
     Chunk c = scan_points[c*bank_size:(c+1)*bank_size].  By default it lands in bank
     c%2 (the initial preload).  For the CONTINUOUS CYCLIC re-sweep the host streams
-    chunks 0,1,..,K-1,0,1,.. into the ALTERNATING bank by MONOTONIC position, so it
-    passes ``target_bank = mono % 2`` (which need not equal c%2 across a wrap) -- this
-    matches the engine's scan_bank_base parity so the wrap is seamless.  Returns a
-    sparse ``{word_offset: value}`` for just that bank.  Empty if the chunk is out of range.
-
-    ``cycles`` is the number of outer program executions.  Rows are only the
-    value table and repeat modulo their own length; sweep and shot meaning stay
-    with the Measurement caller that selected the cycle count."""
+    chunks 0,1,..,K-1,0,1,.. into alternating banks.  The caller passes the
+    table-local ``chunk_index`` and, after a sweep wrap, the physical
+    ``target_bank`` chosen by the monotonic stream position.  Rows are packed
+    exactly once; Run repeats and Scan repeats are independent control words.
+    Returns a sparse ``{word_offset: value}`` for just that bank.  Empty if the
+    chunk is out of range."""
     bases = region_bases(p)
     points = [list(point) for point in rows]
     if not points:
@@ -410,13 +408,10 @@ def scan_bank_words(rows, p: StreamerParams, chunk_index: int,
         raise ValueError(f"scan slot count {slot_count} exceeds wire capacity {p.num_slots}")
     if any(len(point) != slot_count for point in points):
         raise ValueError("scan rows must have equal widths")
-    cycles = _checked_unsigned(cycles, 32, "cycle count")
-    if cycles < 1:
-        raise ValueError("cycle count must be at least one")
     if isinstance(chunk_index, bool) or not isinstance(chunk_index, Integral) or chunk_index < 0:
         raise ValueError("chunk_index must be a non-negative integer")
     first = chunk_index * p.bank_size
-    total = cycles
+    total = len(points)
 
     if first >= total:
         return {}
@@ -430,7 +425,7 @@ def scan_bank_words(rows, p: StreamerParams, chunk_index: int,
         idx = first + off
         if idx >= total:
             break
-        point = points[idx % len(points)]
+        point = points[idx]
         row = base + off * p.scan_words
         for j in range(p.num_slots):
             val = point[j] if j < slot_count else 0
@@ -448,7 +443,7 @@ def pack_program(program, params: StreamerParams | None = None) -> dict[int, int
     """Pack a CompiledProgram into the FINAL AXI write image (sparse).
 
     Edges -> TICK/COEFF/MASK regions and bus -> BUS region.  Runtime rows,
-    cycle count and forever state are applied only by ``PulseStreamer.fire``.
+    Run/Scan repeat counts are applied only by ``PulseStreamer.fire``.
     COMMAND/STATUS/CURSOR/BANK_READY are runtime mailbox words."""
     p = params or StreamerParams()
     check_rtl_assumptions(p)   # hard gate: never pack for a geometry the shipped RTL corrupts
@@ -468,10 +463,9 @@ def pack_program(program, params: StreamerParams | None = None) -> dict[int, int
     w[CtrlWords.PROG_COUNT] = n_edges
     w[CtrlWords.SCAN_COUNT] = 0
     w[CtrlWords.SCAN_ENABLE] = 0
-    w[CtrlWords.REPEAT_FOREVER] = 0
-    # Word 19 is retained only to keep the deployed register layout stable.
+    w[CtrlWords.RUN_REPEAT_COUNT] = 1
     w[CtrlWords.LOOP_START] = int(program.loop_start_index)
-    w[CtrlWords.RESERVED_19] = 0
+    w[CtrlWords.SCAN_REPEAT_COUNT] = 1
     loop_count = _checked_unsigned(program.loop_count, 32, "loop count")
     if loop_count < 1:
         raise ValueError("loop count must be at least one")
@@ -671,15 +665,14 @@ def unpack_program(words: Mapping[int, int], params: StreamerParams | None = Non
     for i in range((p.channel_count + 31) // 32):
         clk_enable |= (g(CtrlWords.CLK_ENABLE + i) & 0xFFFFFFFF) << (32 * i)
     clk_enable &= (1 << p.channel_count) - 1
-    if g(CtrlWords.RESERVED_19) != 0:
-        raise ValueError("reserved control word 19 must be zero")
     return {
         "ticks": ticks, "masks": masks, "tick_slot_coeffs": coeffs,
         "channel_delays": channel_delays,
         "clk_enable": clk_enable,
         "scan_points_resident": scan_points, "scan_count": n_points, "slot_count": slot_count,
-        "repeat_forever": bool(g(CtrlWords.REPEAT_FOREVER) & 1),
-        # LOOP_START belongs only to the finite RepeatRegion bracket.
+        "run_repeat_count": g(CtrlWords.RUN_REPEAT_COUNT),
+        "scan_repeat_count": g(CtrlWords.SCAN_REPEAT_COUNT),
+        # LOOP_START belongs only to the finite PulseBracket.
         "loop_start_index": g(CtrlWords.LOOP_START),
         "loop_count": g(CtrlWords.LOOP_COUNT),
         "loop_end_tick": g(CtrlWords.LOOP_END_TICK),
@@ -1279,11 +1272,11 @@ def _main(argv: Sequence[str] | None = None) -> int:
     print(format_capacity_report(result))
     return 0 if result["ok"] else 1
 
-def pack_scan_rows(rows, geom: StreamerParams, bank: int, chunk: int, cycles: int = 1) -> dict[int, int]:
+def pack_scan_rows(rows, geom: StreamerParams, bank: int, chunk: int) -> dict[int, int]:
     """Pack one bank-sized chunk of slot rows into a resident scan bank.
 
-    The caller supplies the finite outer cycle count.  A point past the end of
-    the value table reads that table again.
+    The caller supplies a table-local chunk.  Repetition is owned by the
+    independent Run/Scan repeat control words and never materialized here.
     """
 
     if not isinstance(geom, StreamerParams):
@@ -1305,5 +1298,4 @@ def pack_scan_rows(rows, geom: StreamerParams, bank: int, chunk: int, cycles: in
         geom,
         int(chunk),
         target_bank=int(bank),
-        cycles=cycles,
     )

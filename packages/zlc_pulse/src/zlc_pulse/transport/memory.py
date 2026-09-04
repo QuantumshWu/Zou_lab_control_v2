@@ -13,6 +13,7 @@ from ..wire import (
     CtrlWords,
     REGISTER_LAYOUT_ID,
     STATUS_DONE,
+    STATUS_ERROR,
     STATUS_LOADED,
     STATUS_RUNNING,
     StreamerParams,
@@ -116,12 +117,30 @@ class MemoryRegisterTransport:
                     if value & CMD_LOAD:
                         self.status = STATUS_LOADED
                     if value & CMD_FIRE:
-                        forever = bool(self.words.get(CtrlWords.REPEAT_FOREVER, 0))
-                        self.status = (
-                            STATUS_RUNNING
-                            if forever or not self.auto_done
-                            else STATUS_DONE
+                        infinite = (
+                            self.words.get(CtrlWords.RUN_REPEAT_COUNT, 1) == 0
+                            or self.words.get(CtrlWords.SCAN_REPEAT_COUNT, 1) == 0
                         )
+                        if infinite or not self.auto_done:
+                            self.cursor_value = 0
+                            self.status = STATUS_RUNNING
+                        else:
+                            # The instant-completion twin publishes the same
+                            # terminal row-visit ordinal as RTL, not an initial
+                            # cursor that contradicts its DONE status.
+                            scan_count = self.words.get(CtrlWords.SCAN_COUNT, 0)
+                            scan_enabled = bool(
+                                self.words.get(CtrlWords.SCAN_ENABLE, 0)
+                            )
+                            scan_repeats = self.words.get(
+                                CtrlWords.SCAN_REPEAT_COUNT, 1
+                            )
+                            self.cursor_value = (
+                                (scan_count * scan_repeats - 1) & 0xFFFFFFFF
+                                if scan_enabled and scan_count
+                                else 0
+                            )
+                            self.status = STATUS_DONE
                     value = written
                 self.words[address] = value
 
@@ -143,5 +162,34 @@ class MemoryRegisterTransport:
             if int(word_offset) == CtrlWords.CURSOR:
                 return int(self.cursor_value) & 0xFFFFFFFF
             return int(self.words.get(int(word_offset), 0)) & 0xFFFFFFFF
+
+    def publish_execution_readback(self, *, status: int, cursor: int) -> bool:
+        """Publish one board-owned runtime state transition.
+
+        ``write_words`` is the host side of this in-memory register file.  A
+        virtual FPGA still needs a board side: its physical-world worker calls
+        this method at the same row-visit and terminal seams at which RTL would
+        update STATUS/CURSOR.  Keeping those registers here makes the memory
+        transport the sole hardware twin; the device observer continues to
+        learn runtime state through ordinary register reads.
+
+        A transition arriving after SAFE is deliberately ignored.  That is
+        the important race rule: once the host has driven the twin safe, a
+        late virtual-world callback must not resurrect RUNNING or overwrite
+        its final cursor.
+        """
+
+        status = int(status) & 0xFFFFFFFF
+        cursor = int(cursor) & 0xFFFFFFFF
+        if status not in (STATUS_RUNNING, STATUS_DONE, STATUS_ERROR):
+            raise ValueError(
+                "memory execution readback must be RUNNING, DONE, or ERROR"
+            )
+        with self._lock:
+            if not self.status & STATUS_RUNNING:
+                return False
+            self.cursor_value = cursor
+            self.status = status
+            return True
 
 __all__ = ["MemoryRegisterTransport"]

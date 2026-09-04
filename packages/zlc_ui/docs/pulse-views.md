@@ -9,7 +9,7 @@ domain object.
 ## View models
 
 The public records are `ConnectionChoiceVM`, `ConnectionVM`, `FieldVM`,
-`PortRowVM`, `PeriodVM`, `RepeatVM`,
+`PortRowVM`, `PeriodVM`, `BracketVM`,
 `DelayRowVM`, `ScheduleVM`, `ScanPageRecord`, `TargetPortRecord`, and
 `TargetWidthRule`. They are frozen dataclasses and contain only strings,
 numbers, booleans, and tuples. `FieldVM.text` is already display-ready: a
@@ -18,6 +18,9 @@ presenter replaces a binding with `sN`/`aN` before constructing the record.
 `ScheduleVM` carries `(document_generation, revision)`. `PulseScheduleView`
 rejects an older pair and accepts an identical pair idempotently; a different
 record at the same pair raises because one revision must have one projection.
+Its `bracket` is the one optional timeline-internal span, while
+`run_repeats` is the independent complete-Pulse count shown on Edit
+(`0 = infinite`).
 
 The inline dot is an intent control, not a local model.  A presenter handles
 `binding_cycle_requested`, asks the public `zlc_pulse.cycle_binding_kind()`
@@ -49,15 +52,17 @@ view.set_control_state(running, synchronized, file_dirty) -> None
 view.set_capabilities(can_sync, can_hold, can_step) -> None
 ```
 
-`PeriodCard`, `ChannelNamesPanel`, `ChannelPanel`, `RepeatBracket`, and
-`PulseDragContainer` are reusable subviews. A drag emits
-`move_period_requested(period_id, before_period_id)` and does not mutate the
-local order; the presenter commits the new `ScheduleVM`. The schedule page
+`PeriodCard`, `ChannelNamesPanel`, `ChannelPanel`, `BracketPost`, and
+`PulseDragContainer` are reusable subviews. A period drag emits
+`move_period_requested(period_id, before_period_id)`; a post drag emits
+`bracket_committed(start_period_id, end_period_id, count)`. Neither mutates
+local state; the presenter commits the new `ScheduleVM`. The schedule page
 also emits `document_name_committed`, `port_label_committed`,
 `period_name_committed`, `duration_committed`, `digital_committed`,
 `analog_committed`, `delay_committed`, `binding_cycle_requested`,
 `insert_period_requested`, `move_period_requested`,
-`remove_period_requested`, `repeat_committed`, `visible_ports_committed`,
+`remove_period_requested`, `bracket_committed`, `run_repeats_committed`,
+`visible_ports_committed`,
 `clear_port_requested`, `clear_all_requested`, the run/save/load/connection
 signals, and `feedback_requested`.
 

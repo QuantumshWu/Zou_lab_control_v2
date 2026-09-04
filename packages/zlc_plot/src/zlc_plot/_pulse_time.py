@@ -40,8 +40,8 @@ def pulse_content_bounds(payload: PulseTimelineData) -> tuple[float, float]:
         if trace.starts:
             starts.append(trace.starts[0])
             stops.append(trace.starts[-1])
-    starts.extend(marker.start for marker in payload.repeat_markers)
-    stops.extend(marker.stop for marker in payload.repeat_markers)
+    starts.extend(marker.start for marker in payload.loop_markers)
+    stops.extend(marker.stop for marker in payload.loop_markers)
     starts.extend(segment.start for segment in payload.scan_dac_segments)
     stops.extend(segment.stop for segment in payload.scan_dac_segments)
     if payload.total_duration is not None:

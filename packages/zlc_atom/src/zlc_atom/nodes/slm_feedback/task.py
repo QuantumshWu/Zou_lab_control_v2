@@ -2201,10 +2201,6 @@ class SlmFeedbackTask:
                 board_state = self.sequencer.snapshot()
                 if not isinstance(board_state, Mapping):
                     raise TypeError("sequencer snapshot must be a mapping")
-            if "sequencer" not in self._actual_device_snapshots:
-                self._actual_device_snapshots["sequencer"] = (
-                    sequencer_archive_snapshot(state=board_state)
-                )
             capture = node.prepare(should_stop=context.cancel_requested)
             actual = node.actual_working_point
             if actual is None:
@@ -2248,7 +2244,14 @@ class SlmFeedbackTask:
                 current=0,
                 total=requested,
             )
-            self.sequencer.fire(cycles=requested)
+            self.sequencer.fire(run_repeats=requested, scan_repeats=1)
+            if "sequencer" not in self._actual_device_snapshots:
+                execution_state = self.sequencer.snapshot()
+                if not isinstance(execution_state, Mapping):
+                    raise TypeError("sequencer snapshot must be a mapping")
+                self._actual_device_snapshots["sequencer"] = (
+                    sequencer_archive_snapshot(state=execution_state)
+                )
 
             def commit_camera_cycle(cycle: object, index: int) -> None:
                 output = _finite_cycle_output(node, cycle, index)

@@ -71,12 +71,13 @@ segment, not hundreds of TTL edge rows.
 
 The edge FIFO still supports adjacent 1-tick edges, and a finite one-shot may
 end after only 1 or 2 ticks.  The registered affine boundary cache is scheduled
-two clocks before a seam.  Therefore every outer cycle which has a successor
-needs at least 3 ticks after its final restart; a two-pass `RepeatRegion` needs
-its single boundary at or after absolute tick 3, and three or more passes need
-at least a 3-tick loop span.  The host validates only the rows that actually
-cross such a seam before FIRE/LOAD, rather than allowing a stale-cache cycle or
-misreporting the deterministic scheduling error as a scan-refill underflow.
+two clocks before a seam.  Therefore every complete Pulse execution which has
+a successor needs at least 3 ticks after its final restart; a two-pass
+`PulseBracket` needs its single boundary at or after absolute tick 3, and three
+or more passes need at least a 3-tick bracket span.  The host validates only the
+rows that actually cross such a seam before FIRE/LOAD, rather than allowing a
+stale boundary cache to cross the seam or misreporting the deterministic
+scheduling error as a scan-refill underflow.
 
 Frozen profile (from `zlc_pulse.wire.StreamerParams` and the deployed manifest's
 explicit 98% ceiling; the generic 90% solver correctly rejects this tight 35T):
@@ -84,8 +85,10 @@ explicit 98% ceiling; the generic 90% solver correctly rejects this tight 35T):
 bank-local resident slots), `TICK_WIDTH=32`, `COEFF_WIDTH=16`, `COEFF_FRAC_BITS=8`,
 `RD_LAT=2`, `FIFO_DEPTH=5`, `EVT_FIFO_DEPTH=64`, `BUS_EVT_FIFO_DEPTH=64`,
 `CLOCK_HZ=50 MHz` (20 ns tick). Vivado `report_utilization` is the final
-resource authority; the routed 2026-08-21 calibration used by
-`bin\estimate_resources.bat` is block-RAM tiles 82%, LUT 96.51%, FF 33.78%, DSP 84.44%.
+resource authority. The forced routed build of the three-layer repeat ABI on
+2026-09-03 uses block-RAM tiles 82.00%, Slice LUTs 94.38%, FFs 33.99%, and
+DSPs 84.44%; `bin\estimate_resources.bat` remains the conservative pre-build
+gate calibrated from the earlier routed design.
 This frozen 35T deployment is tight on LUTs; proposed geometry changes must be
 re-estimated and routed rather than inferred from the old 2026-06 profile.
 
@@ -98,12 +101,15 @@ over `axi_bram_ctrl`. The mailbox words (see `zlc_pulse.wire.CtrlWords`):
 COMMAND     host -> top   rising-edge LOAD(1) / FIRE(2) / RESET(4) / SAFE(8)
 STATUS      top -> host   LOADED(1) / RUNNING(2) / DONE(4) / ENGINE_ERROR(8) / UNDERFLOW(16) / LINK_ERROR(32)
 PROG_COUNT                number of edge rows
-SCAN_COUNT                TOTAL scan points N (independent of bank-local window depth)
-SCAN_ENABLE / REPEAT_FOREVER
+SCAN_COUNT                unique scan rows N in one table sweep
+SCAN_ENABLE
+RUN_REPEAT_COUNT          complete Pulse executions per row; 0 = infinite
+SCAN_REPEAT_COUNT         complete table sweeps; 0 = infinite
 LOOP_START / LOOP_COUNT / LOOP_END_TICK / LOOP_END_LO / LOOP_END_HI
 BUS_COUNTS                packed per-bus segment counts
 BANK_SIZE / SLOT_COUNT
-CURSOR      top -> host   scan points consumed so far (progress/terminal evidence)
+CURSOR      top -> host   cumulative row-visit ordinal; unchanged by Run repeats
+                          current table row is CURSOR modulo SCAN_COUNT
 BANK_READY  host -> top   bit b = bank b is loaded and ready
 BANK0_CHUNK / BANK1_CHUNK host -> top   sweep-chunk index resident in each bank
 CLK_ENABLE  host -> top   per-channel mask: output the 50 MHz clock instead of data

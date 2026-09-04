@@ -59,9 +59,9 @@ module tb_ramp_scan;
   wire running, done; wire [31:0] scan_cursor; wire underflow;
   zlc_edge_streamer #(.CHANNEL_COUNT(CH), .NUM_SLOTS(NS), .BUS_COUNT(BUSC), .BUS_WIDTH(BW),
                       .SCAN_ADDR_WIDTH(SAW), .BANK_SIZE(2)) dut (
-    .clk(clk),.reset(reset),.start(start),.prog_count(13'd3),.repeat_forever(1'b0),
+    .clk(clk),.reset(reset),.start(start),.prog_count(13'd3),.run_repeat_count(32'd1),
     .loop_start_addr({EAW{1'b0}}),.loop_end_tick(TF[TW-1:0]),.loop_end_coeffs({NS*CW{1'b0}}),
-    .loop_count(32'd1),.scan_enable(1'b1),.scan_count(32'd3),
+    .loop_count(32'd1),.scan_enable(1'b1),.scan_count(32'd3),.scan_repeat_count(32'd1),
     .edge_raddr(edge_raddr),.edge_tick_rdata(tp[2]),
     .edge_coeff_rdata({NS*CW{1'b0}}),.edge_mask_rdata(mp[2]),
     .scan_raddr(scan_raddr),.scan_rdata(scan_rdata),

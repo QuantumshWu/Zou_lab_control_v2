@@ -4004,6 +4004,8 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         self.setDecimals(323)
 
     def textFromValue(self, value: float) -> str:
+        if self.decimals() == 0:
+            return str(int(value))
         return repr(float(value))
 
     def valueFromText(self, text: str) -> float:

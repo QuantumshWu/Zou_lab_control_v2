@@ -54,9 +54,9 @@ module tb_delay_compact;
     .DELAY_COMPACT(1), .NUM_DELAY_CH(3), .DELAY_CH_IDX_W(6),
     .DELAY_CH_MAP({6'd6, 6'd5, 6'd1})
   ) dut (
-    .clk(clk),.reset(reset),.start(start),.prog_count(13'd8),.repeat_forever(1'b1),
+    .clk(clk),.reset(reset),.start(start),.prog_count(13'd8),.run_repeat_count(32'd0),
     .loop_start_addr({EAW{1'b0}}),.loop_end_tick(32'd2400),.loop_end_coeffs({NS*CW{1'b0}}),
-    .loop_count(32'd1),.scan_enable(1'b0),.scan_count(32'd0),
+    .loop_count(32'd1),.scan_enable(1'b0),.scan_count(32'd0),.scan_repeat_count(32'd1),
     .edge_raddr(edge_raddr),.edge_tick_rdata(edge_tick_rdata),
     .edge_coeff_rdata({NS*CW{1'b0}}),.edge_mask_rdata(edge_mask_rdata),
     .scan_raddr(scan_raddr),.scan_rdata({NS*TW{1'b0}}),

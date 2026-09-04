@@ -34,7 +34,7 @@ generated build tree remain owned here, separate from GUI and camera SDKs.
 
 ```text
 Pulse Editor / Workbench
-  -> RemotePulseStreamer.load(..., rows=...)/fire(cycles=...)/wait_done/applied
+  -> RemotePulseStreamer.load(..., rows=...)/fire(run_repeats=..., scan_repeats=...)/wait_done/applied
   -> zlc_pulse.remote on the FPGA computer (uart or injected axi backend)
   -> zlc_pulse.PulseStreamer
   -> zlc_pulse_streamer_top.bit on the FPGA
@@ -46,7 +46,7 @@ JTAG-to-AXI (`axi_bram_ctrl`), then drives the CTRL register-file mailbox
 The server uses the frozen package geometry and the explicit manifest lane
 indices; XDC/RTL are validated projections, not ordering authorities. It does
 not compile against GUI channels or know measurement/run state. `applied()` is
-a passive echo of the loaded program, source, rows, and cycle count for GUI
+a passive echo of the loaded program, source, rows, Run repeats, and Scan repeats for GUI
 sync, not trigger scheduling or point accounting.
 
 ## Normal Use

@@ -97,7 +97,7 @@ from .primitives import (
     PulseBlock,
     PulseChannel,
     PulseDacScanSegment,
-    PulseRepeatMarker,
+    PulseLoopMarker,
     PulseScanRegion,
     PulseTimelineData,
 )
@@ -333,7 +333,7 @@ class PulseTimelineSelectionData:
     analog_traces: tuple[PulseAnalogTrace, ...]
     scan_regions: tuple[PulseScanRegion, ...]
     scan_dac_segments: tuple[PulseDacScanSegment, ...]
-    repeat_markers: tuple[PulseRepeatMarker, ...]
+    loop_markers: tuple[PulseLoopMarker, ...]
     data_revision: int
 
     @property
@@ -358,7 +358,7 @@ class PulseTimelineSelectionData:
             ("analog_traces", PulseAnalogTrace),
             ("scan_regions", PulseScanRegion),
             ("scan_dac_segments", PulseDacScanSegment),
-            ("repeat_markers", PulseRepeatMarker),
+            ("loop_markers", PulseLoopMarker),
         )
         for name, record_type in record_fields:
             records = tuple(getattr(self, name))
@@ -4073,9 +4073,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             for record in payload.scan_dac_segments
             if intersects(record.start, record.stop)
         )
-        repeat_markers = tuple(
+        loop_markers = tuple(
             record
-            for record in payload.repeat_markers
+            for record in payload.loop_markers
             if intersects(record.start, record.stop)
         )
         return PulseTimelineSelectionData(
@@ -4086,7 +4086,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             analog_traces,
             scan_regions,
             scan_dac_segments,
-            repeat_markers,
+            loop_markers,
             self.data_revision,
         )
 

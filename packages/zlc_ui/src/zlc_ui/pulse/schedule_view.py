@@ -16,8 +16,8 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.form import FormChoice
 from zlc_ui.fluent import (
     ACCENT, GREEN, GREY, ORANGE, RED, YELLOW, FluentButton, FluentCheckBox,
-    FluentComboBox, FluentFrame, FluentGroupBox, FluentLabel, FluentLineEdit,
-    FluentScrollArea, FluentSpinBox, LinkedScrollPanes,
+    FluentComboBox, FluentDoubleSpinBox, FluentFrame, FluentGroupBox,
+    FluentLabel, FluentLineEdit, FluentScrollArea, LinkedScrollPanes,
     signals_blocked,
 )
 
@@ -35,7 +35,7 @@ from .models import (
     FieldVM,
     PeriodVM,
     PortRowVM,
-    RepeatVM,
+    BracketVM,
     ScheduleVM,
 )
 
@@ -518,11 +518,11 @@ class ChannelPanel(FluentGroupBox):
 BRACKET_WIDTH = 78
 
 
-class RepeatBracket(FluentGroupBox):
-    """One of the two posts that frame a repeated run of periods.
+class BracketPost(FluentGroupBox):
+    """One draggable post framing a bracketed run of periods.
 
     The shape is the point: an untitled column built to the same height and
-    header block as a period card, so its "Repeat" sits on the cards' own
+    header block as a period card, so its "Bracket" sits on the cards' own
     header line and its count on their first control line.  The
     bracket then reads as a frame drawn around cards rather than a widget
     wedged between them.
@@ -532,9 +532,9 @@ class RepeatBracket(FluentGroupBox):
     in the span it marked.
     """
 
-    repeat_committed = QtCore.pyqtSignal(int)
+    count_committed = QtCore.pyqtSignal(int)
 
-    def __init__(self, kind: str, *, count: int = 1, minimum: int = 1, parent=None) -> None:
+    def __init__(self, kind: str, *, count: int = 2, minimum: int = 2, parent=None) -> None:
         super().__init__("", parent)
         self.kind = str(kind)
         width = px(BRACKET_WIDTH, minimum=60)
@@ -549,18 +549,25 @@ class RepeatBracket(FluentGroupBox):
         top_layout = QtWidgets.QVBoxLayout(top)
         top_layout.setContentsMargins(0, 0, 0, 0)
         top_layout.setSpacing(px(6, minimum=4))
-        label = FluentLabel("Repeat")
+        label = FluentLabel("Bracket")
         label.setAlignment(QtCore.Qt.AlignCenter)
         label.setFixedHeight(row_height())
         top_layout.addWidget(label)
         # The count belongs to the end post: a span is closed by saying how
         # many times.  The start post keeps an empty line of the same height so
         # the two posts stay level with each other and with the cards.
-        self.count_spin = FluentSpinBox()
-        self.count_spin.setRange(int(minimum), (1 << 31) - 1)
-        self.count_spin.setValue(max(int(minimum), int(count)))
+        self.setCursor(QtCore.Qt.SizeHorCursor)
+        self.setToolTip("Drag this post to any valid period gap")
+        self.count_spin = FluentDoubleSpinBox()
+        self.count_spin._step_btn.hide()
+        self.count_spin.setDecimals(0)
+        self.count_spin.setSingleStep(1.0)
+        self.count_spin.setRange(float(minimum), float((1 << 32) - 1))
+        self.count_spin.setValue(float(max(int(minimum), int(count))))
         self.count_spin.setFixedSize(width - 2 * px(7), row_height())
-        self.count_spin.valueChanged.connect(lambda value: self.repeat_committed.emit(int(value)))
+        self.count_spin.valueChanged.connect(
+            lambda value: self.count_committed.emit(int(value))
+        )
         if kind == "start":
             self.count_spin.hide()
             spacer = QtWidgets.QWidget()
@@ -582,7 +589,7 @@ class PulseDragContainer(QtWidgets.QWidget):
     period_clicked = QtCore.pyqtSignal(str)
     gap_clicked = QtCore.pyqtSignal(int)
     move_period_requested = QtCore.pyqtSignal(str, object)
-    repeat_committed = QtCore.pyqtSignal(object, object, int)
+    bracket_committed = QtCore.pyqtSignal(object, object, int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -595,7 +602,7 @@ class PulseDragContainer(QtWidgets.QWidget):
         self.layout_main.setAlignment(QtCore.Qt.AlignLeft)
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
         self._cards: tuple[PeriodCard, ...] = ()
-        self._pressed: tuple[str, QtCore.QPoint] | None = None
+        self._pressed: tuple[str, str, QtCore.QPoint] | None = None
         self._dragging = False
         self._indicator = QtWidgets.QFrame(self)
         self._indicator.setFixedWidth(px(3, minimum=2))
@@ -607,7 +614,13 @@ class PulseDragContainer(QtWidgets.QWidget):
         self._selected_card: str | None = None
         self._selected_gap: int | None = None
 
-    def set_items(self, cards: tuple[PeriodCard, ...], repeat: RepeatVM | None, *, minimum_repeat: int = 1) -> None:
+    def set_items(
+        self,
+        cards: tuple[PeriodCard, ...],
+        bracket: BracketVM | None,
+        *,
+        minimum_bracket: int = 2,
+    ) -> None:
         while self.layout_main.count():
             item = self.layout_main.takeAt(0)
             widget = item.widget()
@@ -629,13 +642,44 @@ class PulseDragContainer(QtWidgets.QWidget):
         for card in self._cards:
             self.watch_card_chrome(card)
             self.layout_main.addWidget(card)
-        if repeat is not None:
-            # A compact marker keeps repeat visible without owning period order.
-            start = RepeatBracket("start", minimum=minimum_repeat)
-            end = RepeatBracket("end", count=repeat.count, minimum=minimum_repeat)
-            end.repeat_committed.connect(lambda count, s=repeat.start_period_id, e=repeat.end_period_id: self.repeat_committed.emit(s, e, int(count)))
-            start_index = next((i for i, card in enumerate(self._cards) if card.period_id == repeat.start_period_id), 0)
-            end_index = next((i for i, card in enumerate(self._cards) if card.period_id == repeat.end_period_id), len(self._cards) - 1)
+        if bracket is not None:
+            start = BracketPost("start", minimum=minimum_bracket)
+            end = BracketPost(
+                "end", count=bracket.count, minimum=minimum_bracket
+            )
+            payload = "\0".join(
+                (
+                    bracket.start_period_id,
+                    bracket.end_period_id,
+                    str(bracket.count),
+                )
+            )
+            for post in (start, end):
+                post.setProperty("zlcBracketPayload", payload)
+                self.watch_bracket_chrome(post)
+            end.count_committed.connect(
+                lambda count,
+                s=bracket.start_period_id,
+                e=bracket.end_period_id: self.bracket_committed.emit(
+                    s, e, int(count)
+                )
+            )
+            start_index = next(
+                (
+                    i
+                    for i, card in enumerate(self._cards)
+                    if card.period_id == bracket.start_period_id
+                ),
+                0,
+            )
+            end_index = next(
+                (
+                    i
+                    for i, card in enumerate(self._cards)
+                    if card.period_id == bracket.end_period_id
+                ),
+                len(self._cards) - 1,
+            )
             self.layout_main.insertWidget(start_index, start)
             self.layout_main.insertWidget(end_index + 2, end)
         self.setMinimumSize(0, 0)
@@ -675,6 +719,15 @@ class PulseDragContainer(QtWidgets.QWidget):
         for child in card.findChildren(QtWidgets.QWidget):
             self._watch_chrome(child)
 
+    def watch_bracket_chrome(self, post: "BracketPost") -> None:
+        """Make the post itself draggable while leaving its count editable."""
+
+        post.installEventFilter(self)
+        for child in post.findChildren(QtWidgets.QWidget):
+            if not isinstance(child, self._INTERACTIVE):
+                child.setCursor(QtCore.Qt.SizeHorCursor)
+                child.installEventFilter(self)
+
     def _watch_chrome(self, widget: QtWidgets.QWidget) -> None:
         if not isinstance(widget, self._INTERACTIVE):
             widget.installEventFilter(self)
@@ -684,6 +737,13 @@ class PulseDragContainer(QtWidgets.QWidget):
 
         while isinstance(widget, QtWidgets.QWidget):
             if isinstance(widget, PeriodCard):
+                return widget
+            widget = widget.parentWidget()
+        return None
+
+    def _post_of(self, widget: object) -> "BracketPost | None":
+        while isinstance(widget, QtWidgets.QWidget):
+            if isinstance(widget, BracketPost):
                 return widget
             widget = widget.parentWidget()
         return None
@@ -768,9 +828,12 @@ class PulseDragContainer(QtWidgets.QWidget):
     #: What a dragged period carries.  Typed, so a drop from anywhere else is
     #: not mistaken for one of ours.
     CARD_MIME = "application/x-zlc-pulse-card"
+    BRACKET_MIME = "application/x-zlc-pulse-bracket"
 
     def dragEnterEvent(self, event):  # noqa: N802 - Qt name
-        if event.mimeData().hasFormat(self.CARD_MIME):
+        if event.mimeData().hasFormat(self.CARD_MIME) or event.mimeData().hasFormat(
+            self.BRACKET_MIME
+        ):
             event.acceptProposedAction()
         else:
             super().dragEnterEvent(event)
@@ -783,16 +846,36 @@ class PulseDragContainer(QtWidgets.QWidget):
         screen to aim at, so a drag that clearly went somewhere did nothing.
         """
 
-        if not event.mimeData().hasFormat(self.CARD_MIME):
+        if not (
+            event.mimeData().hasFormat(self.CARD_MIME)
+            or event.mimeData().hasFormat(self.BRACKET_MIME)
+        ):
             return super().dragMoveEvent(event)
+        gap = self._gap_at(event.pos().x())
+        if event.mimeData().hasFormat(self.BRACKET_MIME):
+            if self._bracket_proposal(event.mimeData(), gap) is None:
+                event.ignore()
+                self._indicator.hide()
+                return
         event.acceptProposedAction()
-        self._show_indicator_at_gap(self._gap_at(event.pos().x()))
+        self._show_indicator_at_gap(gap)
 
     def dragLeaveEvent(self, event):  # noqa: N802 - Qt name
         self.show_selection(card=self._selected_card, gap=self._selected_gap)
         super().dragLeaveEvent(event)
 
     def dropEvent(self, event):  # noqa: N802 - Qt name
+        if event.mimeData().hasFormat(self.BRACKET_MIME):
+            gap = self._gap_at(event.pos().x())
+            proposal = self._bracket_proposal(event.mimeData(), gap)
+            self.show_selection(card=self._selected_card, gap=self._selected_gap)
+            if proposal is None:
+                event.ignore()
+                return
+            event.acceptProposedAction()
+            start, end, count = proposal
+            self.bracket_committed.emit(start, end, count)
+            return
         if not event.mimeData().hasFormat(self.CARD_MIME):
             return super().dropEvent(event)
         period_id = bytes(event.mimeData().data(self.CARD_MIME)).decode("utf-8")
@@ -812,6 +895,29 @@ class PulseDragContainer(QtWidgets.QWidget):
             period_id, order[gap] if gap < len(order) else None
         )
 
+    def _bracket_proposal(
+        self, data: QtCore.QMimeData, gap: int
+    ) -> tuple[str, str, int] | None:
+        """Translate a post drop into one proposed inclusive bracket span."""
+
+        parts = bytes(data.data(self.BRACKET_MIME)).decode("utf-8").split("\0")
+        if len(parts) != 4:
+            return None
+        kind, start, end, count_text = parts
+        order = [card.period_id for card in self._cards]
+        if start not in order or end not in order:
+            return None
+        count = int(count_text)
+        start_index = order.index(start)
+        end_index = order.index(end)
+        if kind == "start" and 0 <= gap <= end_index:
+            candidate = (order[gap], end, count)
+        elif kind == "end" and start_index < gap <= len(order):
+            candidate = (start, order[gap - 1], count)
+        else:
+            return None
+        return None if candidate == (start, end, count) else candidate
+
     def _begin_card_drag(self, period_id: str) -> None:
         """Carry one period under the cursor, Qt's own way.
 
@@ -830,27 +936,70 @@ class PulseDragContainer(QtWidgets.QWidget):
             drag.setHotSpot(QtCore.QPoint(card.width() // 2, 0))
         drag.exec_(QtCore.Qt.MoveAction)
 
+    def _begin_bracket_drag(self, post: BracketPost) -> None:
+        payload = str(post.property("zlcBracketPayload") or "")
+        data = QtCore.QMimeData()
+        data.setData(
+            self.BRACKET_MIME,
+            QtCore.QByteArray(f"{post.kind}\0{payload}".encode("utf-8")),
+        )
+        drag = QtGui.QDrag(self)
+        drag.setMimeData(data)
+        drag.setPixmap(post.grab())
+        drag.setHotSpot(QtCore.QPoint(post.width() // 2, 0))
+        drag.exec_(QtCore.Qt.MoveAction)
+
     def eventFilter(self, obj, event):  # noqa: N802
         card = self._card_of(obj)
         if card is not None:
             obj = card
-            if event.type() == QtCore.QEvent.MouseButtonPress and event.button() == QtCore.Qt.LeftButton:
-                self._pressed = (obj.period_id, event.pos())
+            if (
+                event.type() == QtCore.QEvent.MouseButtonPress
+                and event.button() == QtCore.Qt.LeftButton
+            ):
+                self._pressed = ("card", obj.period_id, event.pos())
                 self._dragging = False
             elif event.type() == QtCore.QEvent.MouseMove and self._pressed is not None:
                 if not self._dragging and (
-                    event.pos() - self._pressed[1]
+                    event.pos() - self._pressed[2]
                 ).manhattanLength() >= QtWidgets.QApplication.startDragDistance():
                     self._dragging = True
-                    period_id = self._pressed[0]
+                    period_id = self._pressed[1]
                     self._pressed = None
                     self._begin_card_drag(period_id)
                     return True
-            elif event.type() == QtCore.QEvent.MouseButtonRelease and event.button() == QtCore.Qt.LeftButton:
+            elif (
+                event.type() == QtCore.QEvent.MouseButtonRelease
+                and event.button() == QtCore.Qt.LeftButton
+            ):
                 # A drag was carried out by the QDrag loop and ended there, so
                 # a press that reaches release without one IS a click.
                 if not self._dragging and self._pressed is not None:
                     self.period_clicked.emit(obj.period_id)
+                self._pressed = None
+                self._dragging = False
+            return super().eventFilter(obj, event)
+
+        post = self._post_of(obj)
+        if post is not None:
+            if (
+                event.type() == QtCore.QEvent.MouseButtonPress
+                and event.button() == QtCore.Qt.LeftButton
+            ):
+                self._pressed = ("bracket", post.kind, event.pos())
+                self._dragging = False
+            elif event.type() == QtCore.QEvent.MouseMove and self._pressed is not None:
+                if not self._dragging and (
+                    event.pos() - self._pressed[2]
+                ).manhattanLength() >= QtWidgets.QApplication.startDragDistance():
+                    self._dragging = True
+                    self._pressed = None
+                    self._begin_bracket_drag(post)
+                    return True
+            elif (
+                event.type() == QtCore.QEvent.MouseButtonRelease
+                and event.button() == QtCore.Qt.LeftButton
+            ):
                 self._pressed = None
                 self._dragging = False
         return super().eventFilter(obj, event)
@@ -868,7 +1017,8 @@ class PulseScheduleView(QtWidgets.QWidget):
     insert_period_requested = QtCore.pyqtSignal(object)
     move_period_requested = QtCore.pyqtSignal(str, object)
     remove_period_requested = QtCore.pyqtSignal(str)
-    repeat_committed = QtCore.pyqtSignal(object, object, int)
+    bracket_committed = QtCore.pyqtSignal(object, object, int)
+    run_repeats_committed = QtCore.pyqtSignal(int)
     visible_ports_committed = QtCore.pyqtSignal(object)
     clear_port_requested = QtCore.pyqtSignal(str)
     run_requested = QtCore.pyqtSignal()
@@ -981,9 +1131,9 @@ class PulseScheduleView(QtWidgets.QWidget):
         layout.addWidget(dataset_frame, 1)
         self.dataset_panes = dataset_frame
 
-        # Bottom bar: the original three titled cards.  Control is a 3×3 grid;
-        # Connection and Ports retain their fixed widths so the timeline gets
-        # the remaining space instead of forcing a second row.
+        # Bottom bar: three titled cards.  Control keeps its compact button
+        # grid and the Pulse's one complete-run count; Connection and Ports
+        # retain fixed widths so the timeline gets the remaining space.
         self.button_frame = FluentFrame(bordered=False)
         self.button_frame.setObjectName("zlcPulseButtonBar")
         self.button_frame.setStyleSheet(
@@ -1029,6 +1179,27 @@ class PulseScheduleView(QtWidgets.QWidget):
             controls.setColumnStretch(column, 1)
         control_layout.addStretch(1)
         control_layout.addLayout(controls)
+        run_repeats_row = QtWidgets.QHBoxLayout()
+        run_repeats_row.setContentsMargins(0, 0, 0, 0)
+        run_repeats_row.setSpacing(px(6, minimum=4))
+        run_repeats_row.addWidget(FluentLabel("Run repeats (0 = ∞)"))
+        self.run_repeats_spin = FluentDoubleSpinBox()
+        self.run_repeats_spin._step_btn.hide()
+        self.run_repeats_spin.setDecimals(0)
+        self.run_repeats_spin.setSingleStep(1.0)
+        self.run_repeats_spin.setRange(0.0, float((1 << 32) - 1))
+        self.run_repeats_spin.setFixedHeight(control_height)
+        self.run_repeats_spin.setToolTip(
+            "Complete Pulse runs per scan point (or per On Pulse without a scan); "
+            "0 runs indefinitely"
+        )
+        self.run_repeats_spin.editingFinished.connect(
+            lambda: self.run_repeats_committed.emit(
+                int(self.run_repeats_spin.value())
+            )
+        )
+        run_repeats_row.addWidget(self.run_repeats_spin, 1)
+        control_layout.addLayout(run_repeats_row)
         control_layout.addStretch(1)
         bar.addWidget(control_area, 1)
 
@@ -1104,7 +1275,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.channel_panel.clear_port_requested.connect(self.clear_port_requested)
         self.channel_panel.scan_array_load_requested.connect(self.scan_array_load_requested)
         self.drag_container.move_period_requested.connect(self.move_period_requested)
-        self.drag_container.repeat_committed.connect(self.repeat_committed)
+        self.drag_container.bracket_committed.connect(self.bracket_committed)
         self.run_button.clicked.connect(self.run_requested)
         self.stop_button.clicked.connect(self.stop_requested)
         self.sync_button.clicked.connect(self.sync_requested)
@@ -1250,9 +1421,18 @@ class PulseScheduleView(QtWidgets.QWidget):
                 card.setParent(None)
                 card.deleteLater()
         self._cards = desired
-        self.drag_container.set_items(tuple(desired[p.period_id] for p in vm.periods), vm.repeat, minimum_repeat=vm.min_repeat_count)
+        self.drag_container.set_items(
+            tuple(desired[p.period_id] for p in vm.periods),
+            vm.bracket,
+            minimum_bracket=vm.min_bracket_count,
+        )
+        with signals_blocked(self.run_repeats_spin):
+            self.run_repeats_spin.setValue(float(vm.run_repeats))
+        self.run_repeats_spin.setEnabled(bool(vm.periods))
         self._rebuild_hidden_ports(vm)
-        self.bracket_button.setText("Del Bracket" if vm.repeat is not None else "Add Bracket")
+        self.bracket_button.setText(
+            "Del Bracket" if vm.bracket is not None else "Add Bracket"
+        )
 
     def _connect_card(self, card: PeriodCard) -> None:
         card.period_name_committed.connect(self.period_name_committed)
@@ -1491,15 +1671,15 @@ class PulseScheduleView(QtWidgets.QWidget):
 
         if self._schedule is None:
             return
-        if self._schedule.repeat is not None:
-            self.repeat_committed.emit(None, None, 0)
+        if self._schedule.bracket is not None:
+            self.bracket_committed.emit(None, None, 0)
             return
         if not self._schedule.periods:
             return
-        self.repeat_committed.emit(
+        self.bracket_committed.emit(
             self._schedule.periods[0].period_id,
             self._schedule.periods[-1].period_id,
-            self._schedule.default_repeat_count,
+            self._schedule.default_bracket_count,
         )
 
     def _request_add_port(self) -> None:
@@ -1560,5 +1740,5 @@ class PulseScheduleView(QtWidgets.QWidget):
 
 __all__ = [
     "ChannelNamesPanel", "ChannelPanel", "PeriodCard", "PulseDragContainer",
-    "PulseScheduleView", "RepeatBracket",
+    "PulseScheduleView", "BracketPost",
 ]

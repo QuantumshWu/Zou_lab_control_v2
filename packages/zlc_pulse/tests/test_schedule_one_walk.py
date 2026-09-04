@@ -22,10 +22,10 @@ import numpy as np
 
 from zlc_pulse import (
     AnalogStep,
+    PulseBracket,
     PulsePeriod,
     PulseSequence,
     PulseSlot,
-    RepeatRegion,
     compile_sequence,
     pulse_target_from_xdc,
 )
@@ -33,6 +33,7 @@ from zlc_pulse.model import PulseFieldRef
 from zlc_pulse.wire import StreamerParams
 from zlc_pulse import schedule
 from zlc_pulse.schedule import (
+    run_duration_seconds,
     trigger_edge_ticks,
     trigger_windows,
     trigger_windows_by_channel,
@@ -58,7 +59,7 @@ def _program(*, periods: int = 9):
         time_step_ns=20,
         periods=tuple(rows),
         slots=(PulseSlot("duration", PulseFieldRef("duration", "p0"), "ns", "p0_time"),),
-        repeat=RepeatRegion("p1", f"p{periods - 2}", 4),
+        bracket=PulseBracket("p1", f"p{periods - 2}", 4),
     )
     return compile_sequence(sequence, StreamerParams(), 50e6)
 
@@ -74,7 +75,7 @@ def _table(rows: int = 5) -> np.ndarray:
 def test_a_point_is_shaped_once_however_many_lanes_ask_about_it(monkeypatch) -> None:
     """The redundancy, stated as a count and not as a stopwatch.
 
-    Five distinct rows played over twenty cycles by six lanes: the point
+    Five distinct rows, each played four times, by six lanes: the point
     shape is a property of the program and the row, so it is derived five
     times.  Per lane it was derived thirty.
     """
@@ -89,7 +90,7 @@ def test_a_point_is_shaped_once_however_many_lanes_ask_about_it(monkeypatch) -> 
         return original(prog, point, point_index)
 
     monkeypatch.setattr(schedule, "_point_timing", counted)
-    trigger_edge_ticks(program, _LANES, table, cycles=20)
+    trigger_edge_ticks(program, _LANES, table, run_repeats=4)
 
     assert len(calls) == 5, f"{len(calls)} derivations for 5 distinct rows"
 
@@ -98,13 +99,21 @@ def test_asking_about_every_lane_at_once_answers_what_asking_one_by_one_does(
 ) -> None:
     program = _program()
     table = _table(4)
-    together = trigger_edge_ticks(program, _LANES, table, cycles=9)
+    together = trigger_edge_ticks(
+        program, _LANES, table, run_repeats=3, scan_repeats=2
+    )
     for lane in _LANES:
-        alone = trigger_edge_ticks(program, (lane,), table, cycles=9)
+        alone = trigger_edge_ticks(
+            program, (lane,), table, run_repeats=3, scan_repeats=2
+        )
         assert together[lane] == alone[lane], lane
-    windows = trigger_windows_by_channel(program, _LANES, table, cycles=9)
+    windows = trigger_windows_by_channel(
+        program, _LANES, table, run_repeats=3, scan_repeats=2
+    )
     for lane in _LANES:
-        assert windows[lane] == trigger_windows(program, lane, table, cycles=9)
+        assert windows[lane] == trigger_windows(
+            program, lane, table, run_repeats=3, scan_repeats=2
+        )
 
 
 def test_an_edge_stream_states_its_levels_by_position() -> None:
@@ -113,8 +122,12 @@ def test_an_edge_stream_states_its_levels_by_position() -> None:
     program = _program()
     table = _table(3)
     for lane in _LANES:
-        edges = trigger_edge_ticks(program, (lane,), table, cycles=7)[lane]
-        windows = trigger_windows(program, lane, table, cycles=7)
+        edges = trigger_edge_ticks(
+            program, (lane,), table, run_repeats=2, scan_repeats=2
+        )[lane]
+        windows = trigger_windows(
+            program, lane, table, run_repeats=2, scan_repeats=2
+        )
         assert tuple(zip(edges[0::2], edges[1::2])) == windows
         assert list(edges) == sorted(edges)
 
@@ -130,8 +143,67 @@ def test_the_capacity_question_is_asked_of_edges_not_of_exposures() -> None:
 
     program = _program()
     table = _table(4)
-    windows = trigger_windows_by_channel(program, _LANES, table, cycles=11)
-    edges = trigger_edge_ticks(program, _LANES, table, cycles=11)
+    windows = trigger_windows_by_channel(
+        program, _LANES, table, run_repeats=3, scan_repeats=2
+    )
+    edges = trigger_edge_ticks(
+        program, _LANES, table, run_repeats=3, scan_repeats=2
+    )
     for lane in _LANES:
         flattened = [tick for window in windows[lane] for tick in window]
         assert list(edges[lane]) == flattened == sorted(flattened)
+
+
+def test_run_repeats_hold_each_row_then_scan_repeats_replay_the_table() -> None:
+    lane = _LANES[0]
+    states = [0] * len(_TARGET.raw_lanes)
+    states[_TARGET.raw_lanes.index(lane)] = 1
+    sequence = PulseSequence(
+        target=_TARGET,
+        time_step_ns=20,
+        periods=(
+            PulsePeriod("variable", 40, "ns", tuple(states)),
+            PulsePeriod("low", 20, "ns", (0,) * len(states)),
+        ),
+        slots=(
+            PulseSlot(
+                "duration",
+                PulseFieldRef("duration", "variable"),
+                "ns",
+                "variable_time",
+            ),
+        ),
+    )
+    program = compile_sequence(sequence, StreamerParams(), 50e6)
+    table = np.asarray(((-1,), (0,), (1,)), dtype=np.int64)
+
+    windows = trigger_windows(
+        program,
+        lane,
+        table,
+        run_repeats=2,
+        scan_repeats=2,
+    )
+    assert [end - start for start, end in windows] == [1, 1, 2, 2, 3, 3] * 2
+    assert run_duration_seconds(
+        program,
+        table,
+        run_repeats=2,
+        scan_repeats=2,
+    ) == 36 / 50e6
+
+    for field in ("run_repeats", "scan_repeats"):
+        arguments = {field: 0}
+        with np.testing.assert_raises_regex(ValueError, field):
+            trigger_windows(program, lane, table, **arguments)
+    plain_program = compile_sequence(
+        PulseSequence(
+            target=_TARGET,
+            time_step_ns=20,
+            periods=sequence.periods,
+        ),
+        StreamerParams(),
+        50e6,
+    )
+    with np.testing.assert_raises_regex(ValueError, "no scan table"):
+        trigger_windows(plain_program, lane, scan_repeats=2)

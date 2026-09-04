@@ -295,6 +295,9 @@ edited = []; runs = []; scan.source_edited.connect(edited.append); scan.run_requ
 scan.scan_code.setPlainText("typing"); scan.scan_run_button.click()
 assert edited == ["typing"] and runs == ["run"]
 assert not hasattr(scan, "_code_dirty") and not hasattr(scan, "_source_revision")
+scan.set_repeats((1 << 32) - 1)
+assert int(scan.scan_repeats_spin.maximum()) == (1 << 32) - 1
+assert scan.scan_repeats_spin.text() == str((1 << 32) - 1)
 target = PulseTargetView(); target.set_width_rules(TargetWidthRule(1, 1, 1), TargetWidthRule(1, 2, 4))
 target.set_ports((TargetPortRecord("d0", "digital", "Gate", ("d0",), lane_order=(0,)),), True, "ready")
 events = []; target.apply_requested.connect(events.append)
@@ -563,10 +566,10 @@ app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete); app.processEvents()
     )
 
 
-def test_the_repeat_posts_are_built_to_frame_the_cards_they_span() -> None:
+def test_the_bracket_posts_are_built_to_frame_the_cards_they_span() -> None:
     """The bracket art carries the repeat meaning.
 
-    Two untitled posts the same height as a period card, each with "Repeat" on
+    Two untitled posts the same height as a period card, each with "Bracket" on
     the cards' own header line and the count on their first control line, so
     the pair reads as a frame drawn around the span.  It had become a titled
     box with a glyph in it at whatever height the layout gave -- the thing
@@ -578,18 +581,18 @@ def test_the_repeat_posts_are_built_to_frame_the_cards_they_span() -> None:
 from dataclasses import replace
 from PyQt5 import QtCore, QtWidgets
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.pulse import PulseScheduleView, RepeatBracket
+from zlc_ui.pulse import BracketPost, BracketVM, PulseScheduleView
 from zlc_ui.pulse._layout import panel_top_height
 """ + _schedule_source() + r'''
 app = ensure_qt_app(["repeat-art"])
 
-start = RepeatBracket("start", minimum=2)
-end = RepeatBracket("end", count=4, minimum=2)
+start = BracketPost("start", minimum=2)
+end = BracketPost("end", count=4, minimum=2)
 for post in (start, end):
     assert post.title() == "", "an untitled column, like the cards it frames"
     assert post.sizePolicy().verticalPolicy() == QtWidgets.QSizePolicy.Expanding
     labels = [w.text() for w in post.findChildren(QtWidgets.QLabel)]
-    assert "Repeat" in labels, labels
+    assert "Bracket" in labels, labels
     top = post.findChildren(QtWidgets.QWidget)[0]
     assert top.height() == panel_top_height(), (top.height(), panel_top_height())
 assert start.width() == end.width(), "the two posts match"
@@ -600,10 +603,12 @@ start.show(); end.show(); app.processEvents()
 assert not start.count_spin.isVisible()
 assert end.count_spin.isVisible() and end.count_spin.value() == 4
 assert end.count_spin.minimum() == 2, "once is not a repeat"
+assert int(end.count_spin.maximum()) == (1 << 32) - 1
+assert end.count_spin.text() == "4"
 
 # In the strip, the posts stand beside cards of the same build.
 view = PulseScheduleView(); view.set_schedule(vm); view.show(); app.processEvents()
-view.repeat_committed.emit("p1", "p2", 3)
+view.bracket_committed.emit("p1", "p2", 3)
 
 # One physical period has a non-zero span and may be repeated.  The model and
 # compiler accept start == end; the button must not invent a two-card rule.
@@ -617,16 +622,124 @@ one = replace(
 assert view.set_schedule(one)
 requested = []
 feedback = []
-view.repeat_committed.connect(lambda *payload: requested.append(payload))
+view.bracket_committed.connect(lambda *payload: requested.append(payload))
 view.feedback_requested.connect(feedback.append)
 view.bracket_button.click()
-assert requested == [("p1", "p1", one.default_repeat_count)]
+assert requested == [("p1", "p1", one.default_bracket_count)]
 assert feedback == []
 for widget in (view, start, end):
     widget.close()
     widget.deleteLater()
 app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
 app.processEvents()
+app.quit()
+'''
+    )
+
+
+def test_bracket_posts_drop_on_period_gaps_and_run_repeats_uses_uint32() -> None:
+    """Both independent repeat layers are editable on the real Edit page."""
+
+    _run_qt(
+        """
+from dataclasses import replace
+from PyQt5 import QtCore, QtGui, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.pulse import BracketPost, BracketVM, PulseScheduleView
+import zlc_ui.pulse.schedule_view as schedule_module
+""" + _schedule_source() + r'''
+app = ensure_qt_app(["bracket-drag-and-run-repeats"])
+view = PulseScheduleView()
+bracketed = replace(
+    vm,
+    revision=3,
+    bracket=BracketVM("p1", "p1", 4),
+    run_repeats=(1 << 32) - 1,
+)
+assert view.set_schedule(bracketed)
+view.show(); app.processEvents()
+
+# The persisted outer count is its own full-range control, including 0=∞.
+assert int(view.run_repeats_spin.maximum()) == (1 << 32) - 1
+assert int(view.run_repeats_spin.value()) == (1 << 32) - 1
+assert view.run_repeats_spin.text() == str((1 << 32) - 1)
+run_requests = []
+view.run_repeats_committed.connect(run_requests.append)
+view.run_repeats_spin.setValue(0)
+view.run_repeats_spin.editingFinished.emit()
+assert run_requests == [0]
+assert view._schedule.run_repeats == (1 << 32) - 1, "the view only proposes"
+
+bracket_requests = []
+view.bracket_committed.connect(lambda *payload: bracket_requests.append(payload))
+strip = view.drag_container
+
+# A real mouse move on either post starts the strip's QDrag, not a local
+# endpoint mutation.  Substitute only the native drag loop so the test can
+# inspect what the gesture carries without needing a desktop drag target.
+started = []
+real_drag = schedule_module.QtGui.QDrag
+class InspectDrag:
+    def __init__(self, parent): self.data = None; started.append(self)
+    def setMimeData(self, data): self.data = data
+    def setPixmap(self, _pixmap): pass
+    def setHotSpot(self, _point): pass
+    def exec_(self, _action): return QtCore.Qt.IgnoreAction
+schedule_module.QtGui.QDrag = InspectDrag
+start_post = next(post for post in strip.findChildren(BracketPost) if post.kind == "start")
+QtWidgets.QApplication.sendEvent(start_post, QtGui.QMouseEvent(
+    QtCore.QEvent.MouseButtonPress, QtCore.QPoint(5, 5), QtCore.Qt.LeftButton,
+    QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
+))
+QtWidgets.QApplication.sendEvent(start_post, QtGui.QMouseEvent(
+    QtCore.QEvent.MouseMove,
+    QtCore.QPoint(5 + QtWidgets.QApplication.startDragDistance() + 1, 5),
+    QtCore.Qt.NoButton, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
+))
+schedule_module.QtGui.QDrag = real_drag
+assert len(started) == 1
+assert started[0].data.hasFormat(strip.BRACKET_MIME)
+assert bytes(started[0].data.data(strip.BRACKET_MIME)).decode("utf-8") == (
+    "\0".join(("start", "p1", "p1", "4"))
+)
+
+def drop(kind, start, end, count, x):
+    data = QtCore.QMimeData()
+    payload = "\0".join((kind, start, end, str(count))).encode("utf-8")
+    data.setData(strip.BRACKET_MIME, QtCore.QByteArray(payload))
+    event = QtGui.QDropEvent(
+        QtCore.QPoint(x, 5), QtCore.Qt.MoveAction, data,
+        QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
+    )
+    strip.dropEvent(event)
+    return event.isAccepted()
+
+cards = strip.pulse_cards()
+assert drop("end", "p1", "p1", 4, cards[-1].geometry().right() + 40)
+assert bracket_requests == [("p1", "p2", 4)]
+assert view._schedule.bracket == bracketed.bracket, "a drop is proposal-only"
+
+# Re-project the accepted span, then move its left post to the first gap.
+bracket_requests.clear()
+right_only = replace(
+    bracketed,
+    revision=4,
+    bracket=BracketVM("p2", "p2", 4),
+)
+assert view.set_schedule(right_only)
+app.processEvents()
+cards = strip.pulse_cards()
+assert drop("start", "p2", "p2", 4, cards[0].geometry().left())
+assert bracket_requests == [("p1", "p2", 4)]
+assert view._schedule.bracket == right_only.bracket
+
+# A post cannot cross its partner; an illegal gap commits nothing.
+bracket_requests.clear()
+assert not drop("start", "p2", "p2", 4, cards[-1].geometry().right() + 40)
+assert bracket_requests == []
+
+view.close(); view.deleteLater()
+app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete); app.processEvents()
 app.quit()
 '''
     )

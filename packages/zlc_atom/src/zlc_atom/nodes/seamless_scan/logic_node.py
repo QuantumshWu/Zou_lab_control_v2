@@ -76,10 +76,9 @@ SEAMLESS_SCAN_SCHEMA = AuthoringSchema(
             "",
         ),
         # Repeats and shots both land on the dataset's repeat axis (size
-        # repeats x shots): shots play inside one point as the pulse's
-        # outermost repeat bracket; repeats are whole-table sweeps.
-        # Physically different, structurally the same fact -- the same
-        # conditions, again.
+        # repeats x shots): shots override the Pulse's Run repeats while the
+        # row is held; repeats override complete scan-table sweeps. The
+        # independent PulseBracket stays inside every shot.
         AuthoringField(
             "repeats",
             "int",

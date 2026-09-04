@@ -14,7 +14,7 @@
 //   * a depth-FIFO_DEPTH continuous PREFETCH of the next edges (one BRAM read per
 //     cycle, RD_LAT+2-cycle issue-to-data latency) plus one tracked boundary read
 //     latched at arm time per boundary, so the four gapless reload sites
-//     (start / loop-rewind / scan-advance / repeat) reseed instantly and
+//     (start / bracket-rewind / Run-repeat / row/sweep-advance) reseed instantly and
 //     back-to-back **1-tick (20 ns) edges** play one per cycle.
 //   * a 2-bank PING-PONG scan window: the engine plays scan point 0..N-1,
 //     addressing bank (idx/BANK_SIZE)%2.  The host preloads the first two chunks,
@@ -49,7 +49,7 @@ module zlc_edge_streamer #(
     parameter integer CHANNEL_COUNT = `ZLC_CHANNEL_COUNT,
     parameter integer EDGE_ADDR_WIDTH = `ZLC_EDGE_ADDR_WIDTH,
     parameter integer SCAN_ADDR_WIDTH = `ZLC_SCAN_ADDR_WIDTH,   // = clog2(2*BANK_SIZE)
-    parameter integer SCAN_COUNT_WIDTH = 32,    // encoded total scan-point count N; independent of bank depth
+    parameter integer SCAN_COUNT_WIDTH = 32,    // unique-row count/cursor width; independent of bank depth
     parameter integer BANK_SIZE = `ZLC_BANK_SIZE,               // power of two; points per ping-pong bank
     parameter integer TICK_WIDTH = `ZLC_TICK_WIDTH,
     parameter integer NUM_SLOTS = `ZLC_NUM_SLOTS,
@@ -105,13 +105,14 @@ module zlc_edge_streamer #(
 
     // held program scalars (top regfile)
     input  wire [EDGE_ADDR_WIDTH:0] prog_count,
-    input  wire repeat_forever,
+    input  wire [31:0] run_repeat_count,  // complete Pulse executions per row; 0 = infinite
     input  wire [EDGE_ADDR_WIDTH-1:0] loop_start_addr,
     input  wire [TICK_WIDTH-1:0] loop_end_tick,
     input  wire [NUM_SLOTS*COEFF_WIDTH-1:0] loop_end_coeffs,
     input  wire [31:0] loop_count,
     input  wire scan_enable,
-    input  wire [SCAN_COUNT_WIDTH-1:0] scan_count,   // total N points
+    input  wire [SCAN_COUNT_WIDTH-1:0] scan_count,   // unique rows in one sweep
+    input  wire [31:0] scan_repeat_count,            // complete sweeps; 0 = infinite
 
     // edge BRAM read port (3 parallel BRAMs, forced latency RD_LAT)
     output reg  [EDGE_ADDR_WIDTH-1:0] edge_raddr,
@@ -127,7 +128,7 @@ module zlc_edge_streamer #(
     input  wire [1:0] bank_ready,               // bit b: bank b loaded
     input  wire [SCAN_COUNT_WIDTH-1:0] bank_chunk0,  // chunk index resident in bank 0
     input  wire [SCAN_COUNT_WIDTH-1:0] bank_chunk1,  // chunk index resident in bank 1
-    output reg  [SCAN_COUNT_WIDTH-1:0] scan_cursor,  // points consumed (host refills behind)
+    output reg  [SCAN_COUNT_WIDTH-1:0] scan_cursor,  // cumulative row-visit ordinal; Run repeats do not increment
     output reg  underflow,                      // a bank was not ready in time
 
     // bus segment table write port (LUTRAM inside this module)
@@ -217,11 +218,13 @@ module zlc_edge_streamer #(
     reg [TICK_WIDTH-1:0] loop_prefetch_schedule_tick = {TICK_WIDTH{1'b0}};
     reg [EDGE_ADDR_WIDTH:0] edge_index = {(EDGE_ADDR_WIDTH+1){1'b0}};
     reg [EDGE_ADDR_WIDTH:0] active_count = {(EDGE_ADDR_WIDTH+1){1'b0}};
-    reg repeat_forever_active = 1'b0;
+    reg [31:0] run_repeat_count_active = 32'd1;
+    reg [31:0] runs_remaining = 32'd1;
     reg scan_enable_active = 1'b0;
     reg [SLOT_BITS-1:0] slot_active = {SLOT_BITS{1'b0}};
     reg [SCAN_COUNT_WIDTH-1:0] active_scan_count = {SCAN_COUNT_WIDTH{1'b0}};
     reg [SCAN_COUNT_WIDTH-1:0] scan_point_index = {SCAN_COUNT_WIDTH{1'b0}};
+    reg [31:0] scans_remaining = 32'd1;
     // CONTINUOUS CYCLIC PING-PONG bank parity: the bank a chunk lives in is
     // (chunk[0] ^ scan_bank_base), and scan_bank_base toggles by (n_chunks & 1) at each sweep
     // WRAP -- so the wrap is just another chunk boundary and the host feeds chunk 0 into the
@@ -703,7 +706,7 @@ module zlc_edge_streamer #(
     // bank b is usable for point idx only if it is armed AND actually holds idx's
     // chunk (host writes bank_chunk{0,1} when it loads a chunk).  This is the proven
     // streaming_scan_play handshake -- it makes a late/cyclic refill STALL, never a
-    // wrong/stale point, and lets repeat_forever re-sweep a streamed scan.
+    // wrong/stale point, and lets Scan repeats re-sweep a streamed scan.
     function scan_point_resident;
         input [SCAN_COUNT_WIDTH-1:0] idx;
         reg b;
@@ -728,6 +731,15 @@ module zlc_edge_streamer #(
         ((scan_wrap_base_next ? bank_chunk1 : bank_chunk0) == {SCAN_COUNT_WIDTH{1'b0}});
     wire scan_point0_ready_at_start = !(scan_enable && scan_count != 0)
                                       || (bank_ready[0] && bank_chunk0 == 0);
+    // The three outer decisions are deliberately independent of PulseBracket's
+    // LOOP_* counter.  Run repeats never move the row cursor; only a completed
+    // row can advance or wrap the scan table.
+    wire run_repeats_again = runs_remaining != 32'd1;
+    wire scan_point_after_current = scan_enable_active
+                                    && ((scan_point_index + 1'b1) < active_scan_count);
+    wire scan_sweeps_again = scans_remaining != 32'd1;
+    wire execution_infinite_active = (run_repeat_count_active == 0)
+                                     || (scans_remaining == 0);
     task zlc_bus_clear_runtime;
         integer i;
         begin
@@ -858,7 +870,7 @@ module zlc_edge_streamer #(
                 if (dly_bus > {{(TTL_DELAY_WIDTH-1){1'b0}}, 1'b1}) begin
                     // capture the RESOLVED ramp for the delayed re-player, in the delayed g_time base:
                     // emit = g_time + d (== rstart shifted); rstop = emit + span.  fend gates the
-                    // FREEZE: only a REPEAT_FOREVER frame wraps (re-inits at final_tick, truncating an
+                    // FREEZE: an infinite execution keeps wrapping frames (re-inits at final_tick, truncating an
                     // unfinished ramp to a HOLD -> the delayed re-player must freeze there), so fend =
                     // emit + ticks-left-in-frame.  A FINITE (fire-once) program never wraps -- the ramp
                     // runs to its rstop and snaps to target
@@ -875,7 +887,7 @@ module zlc_edge_streamer #(
                     // not-yet-committed registers at the reinit/wrap cycle where time_count==final_tick
                     // (boundary value), collapsing to 0 -> fend==emit -> the re-player FROZE the ramp at
                     // its start EVERY frame (the "delayed DAC = constant" bug).
-                    bus_seg_fend[i]   <= repeat_forever_active
+                    bus_seg_fend[i]   <= execution_infinite_active
                         ? (g_time + {{(GTIME_WIDTH-TTL_DELAY_WIDTH){1'b0}}, dly_bus}
                            + {{(GTIME_WIDTH-TICK_WIDTH){1'b0}},
                               (frame_end_tick - tkstart)})
@@ -1152,6 +1164,7 @@ module zlc_edge_streamer #(
             bus_prefetch_pending <= 1'b0;
             bus_refill_pending <= 1'b0;
             state_mask <= {CHANNEL_COUNT{1'b0}};
+            scan_cursor <= {SCAN_COUNT_WIDTH{1'b0}};
             arm_nv <= 3'd0; pend <= {PIPE{1'b0}};
             zlc_bus_clear_runtime();
             zlc_delay_clear_runtime();
@@ -1204,8 +1217,11 @@ module zlc_edge_streamer #(
             done <= (prog_count == 0);
             underflow <= !scan_point0_ready_at_start;
             overflow <= 1'b0; draining <= 1'b0; drain_settle <= 2'd0;
-            active_count <= prog_count; repeat_forever_active <= repeat_forever;
+            active_count <= prog_count;
+            run_repeat_count_active <= run_repeat_count;
+            runs_remaining <= run_repeat_count;
             scan_enable_active <= scan_enable && scan_count != 0; active_scan_count <= scan_count;
+            scans_remaining <= scan_repeat_count;
             slot_active <= scan_first_values; scan_point_index <= {SCAN_COUNT_WIDTH{1'b0}};
             scan_cursor <= {SCAN_COUNT_WIDTH{1'b0}};
             scan_bank_base <= 1'b0;                                                // sweep 0: chunk c in bank c[0]
@@ -1238,13 +1254,17 @@ module zlc_edge_streamer #(
                 bus_prefetch_slots <= slot_active;
                 bus_prefetch_scan <= 1'b0;
             end else if (time_count == final_prefetch_schedule_tick) begin
-                if (scan_enable_active && (scan_point_index + 1'b1) < active_scan_count) begin
+                if (run_repeats_again) begin
+                    bus_prefetch_pending <= 1'b1;
+                    bus_prefetch_slots <= slot_active;
+                    bus_prefetch_scan <= 1'b0;
+                end else if (scan_point_after_current) begin
                     if (scan_next_resident) begin
                         bus_prefetch_pending <= 1'b1;
                         bus_prefetch_slots <= scan_rdata;
                         bus_prefetch_scan <= 1'b1;
                     end
-                end else if (repeat_forever_active) begin
+                end else if (scan_sweeps_again) begin
                     bus_prefetch_pending <= 1'b1;
                     bus_prefetch_slots <= scan_first_values;
                     bus_prefetch_scan <= scan_enable_active;
@@ -1273,7 +1293,13 @@ module zlc_edge_streamer #(
                 end
                 bnd_bus_tick = 1'b1; bnd_bus_reinit = 1'b1; bnd_slots = slot_active;  // re(start) bus, keep slots
             end else if (time_count >= final_tick) begin
-                if (scan_enable_active && (scan_point_index+1'b1) < active_scan_count) begin
+                if (run_repeats_again) begin
+                    if (runs_remaining != 0)
+                        runs_remaining <= runs_remaining - 1'b1;
+                    loops_remaining <= loop_count_active;
+                    bnd_slots = slot_active; bnd_recompute_final = 1'b1;
+                    bnd_bus_tick = 1'b1; bnd_bus_reinit = 1'b1; bnd_seed = 1'b1;
+                end else if (scan_point_after_current) begin
                     if (!scan_point_resident(scan_point_index+1'b1)) begin
                         underflow <= 1'b1;          // STALL: next chunk not (yet) resident
                         scan_boundary_ready <= 1'b0;
@@ -1289,26 +1315,27 @@ module zlc_edge_streamer #(
                         end
                     end else begin
                         scan_point_index <= scan_point_index+1'b1;
-                        scan_cursor <= scan_point_index+1'b1;
+                        scan_cursor <= scan_cursor+1'b1;
                         scan_raddr <= scan_addr_of(scan_point_index+2'd2);   // pre-read following point
                         slot_active <= scan_rdata;
+                        runs_remaining <= run_repeat_count_active;
                         loops_remaining <= loop_count_active;
                         scan_boundary_ready <= 1'b0;
                         bnd_slots = scan_rdata; bnd_recompute_final = 1'b1;
                         bnd_bus_tick = 1'b1; bnd_bus_reinit = 1'b1; bnd_seed = 1'b1;
                     end
-                end else if (repeat_forever_active) begin
+                end else if (scan_sweeps_again) begin
                     // CONTINUOUS CYCLIC PING-PONG re-sweep: the wrap is just another chunk
                     // boundary.  scan_bank_base toggles by (n_chunks & 1) so chunk 0 lands in the
                     // bank the host fed it ONE-AHEAD (bank scan_wrap_base_next, NOT necessarily
                     // bank 0); for a RESIDENT scan (<=2 chunks) the toggle is 0 so chunk 0 stays
                     // in bank 0 (identical to before).  Proceed the instant point 0 is resident
                     // in that bank -- seamless; STALL (safe hold) only if the host is genuinely
-                    // behind.  scan_cursor is published = N so a late host still gets the signal.
+                    // behind.  CURSOR remains the current cumulative row visit;
+                    // Run repeats and an unavailable wrap do not advance it.
                     if (scan_enable_active && !scan_point0_ready_next) begin
                         underflow <= 1'b1;
                         scan_boundary_ready <= 1'b0;
-                        scan_cursor <= active_scan_count;
                     end else if (scan_enable_active && !scan_boundary_ready) begin
                         underflow <= 1'b1;
                         if (!bus_prefetch_pending) begin
@@ -1318,9 +1345,12 @@ module zlc_edge_streamer #(
                         end
                     end else begin
                         scan_bank_base <= scan_wrap_base_next;     // cyclic bank flip (0 if resident)
-                        slot_active <= scan_first_values; scan_point_index <= {SCAN_COUNT_WIDTH{1'b0}}; scan_cursor <= {SCAN_COUNT_WIDTH{1'b0}};
+                        slot_active <= scan_first_values; scan_point_index <= {SCAN_COUNT_WIDTH{1'b0}}; scan_cursor <= scan_cursor+1'b1;
                         // pre-read point 1 (chunk 0) from the NEW base's bank
                         scan_raddr <= {scan_wrap_base_next, {(SCAN_ADDR_WIDTH-2){1'b0}}, 1'b1};
+                        if (scans_remaining != 0)
+                            scans_remaining <= scans_remaining - 1'b1;
+                        runs_remaining <= run_repeat_count_active;
                         loops_remaining <= loop_count_active;
                         if (scan_enable_active) scan_boundary_ready <= 1'b0;
                         bnd_slots = scan_first_values; bnd_recompute_final = 1'b1;

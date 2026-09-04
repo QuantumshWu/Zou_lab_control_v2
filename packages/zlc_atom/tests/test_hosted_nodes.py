@@ -260,7 +260,7 @@ def test_a_node_host_runs_a_camera_measurement_to_completion() -> None:
         fired = False
         while time.monotonic() < deadline:
             if not fired and camera.is_armed if hasattr(camera, "is_armed") else not fired:
-                sequencer.fire()
+                sequencer.fire(run_repeats=1, scan_repeats=1)
                 sequencer.wait_done(1.0)
                 fired = True
             host.poll()
@@ -345,7 +345,7 @@ def test_a_node_host_runs_and_stops_repeat_zero_camera_measurement() -> None:
             time.sleep(0.005)
         assert camera.capture_state(), "hosted repeat-zero worker did not arm the camera"
 
-        sequencer.fire()
+        sequencer.fire(run_repeats=1, scan_repeats=1)
         sequencer.wait_done(1.0)
         signal_key = host.signal_key("frames")
         live_value = None
@@ -461,7 +461,7 @@ def test_a_finite_run_shows_its_dataset_filling_and_stops_when_asked() -> None:
         fired = 0
         while time.monotonic() < deadline and not host.observation.terminal:
             if fired < repeats:
-                sequencer.fire()
+                sequencer.fire(run_repeats=1, scan_repeats=1)
                 sequencer.wait_done(2.0)
                 fired += 1
             host.poll()
@@ -622,7 +622,7 @@ def test_stop_partial_is_identical_whether_or_not_ui_freezes() -> None:
             while not camera.capture_state() and time.monotonic() < deadline:
                 host.poll()
                 time.sleep(0.005)
-            sequencer.fire()
+            sequencer.fire(run_repeats=1, scan_repeats=1)
             sequencer.wait_done(1.0)
             signal = host.signal_key("frames")
             deadline = time.monotonic() + 5.0

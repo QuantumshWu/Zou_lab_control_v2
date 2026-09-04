@@ -155,11 +155,12 @@ class PublishedSignalSource:
         program: object,
         table: object = None,
         *,
-        cycles: int | None = None,
+        run_repeats: int = 1,
+        scan_repeats: int = 1,
     ) -> None:
         """A watched signal imposes no pulse/camera compatibility constraint."""
 
-        del program, table, cycles
+        del program, table, run_repeats, scan_repeats
 
     def arm(self) -> None:
         """Everything published so far belongs to the world before this point."""

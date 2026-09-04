@@ -22,7 +22,6 @@ from zlc_ui import (
     FormChoice,
     PeriodVM,
     PortRowVM,
-    RepeatVM,
     ScanPageRecord,
     ScheduleVM,
     TargetPortRecord,
@@ -135,7 +134,8 @@ def fake_schedule() -> ScheduleVM:
             FormChoice("Ramp", "ramp"),
             FormChoice("Hold", "hold"),
         ),
-        repeat=None,
+        bracket=None,
+        run_repeats=0,
         delay_rows=(
             DelayRowVM("ch00", _field("0"), "ns", (("ns", 1.0), ("us", 1000.0))),
             DelayRowVM("ch01", _field("0"), "ns", (("ns", 1.0), ("us", 1000.0))),
@@ -149,8 +149,8 @@ def fake_schedule() -> ScheduleVM:
             ),
         ),
         scan_summary_text="2 slots · 16 pts",
-        min_repeat_count=1,
-        default_repeat_count=1,
+        min_bracket_count=2,
+        default_bracket_count=2,
     )
 
 
@@ -243,7 +243,8 @@ def populate(editor) -> None:
         (schedule.analog_committed, "analog_committed"),
         (schedule.binding_cycle_requested, "binding_cycle_requested"),
         (schedule.move_period_requested, "move_period_requested"),
-        (schedule.repeat_committed, "repeat_committed"),
+        (schedule.bracket_committed, "bracket_committed"),
+        (schedule.run_repeats_committed, "run_repeats_committed"),
         (schedule.visible_ports_committed, "visible_ports_committed"),
         (scan.scan_hold_requested, "scan_hold_requested"),
         (scan.scan_step_requested, "scan_step_requested"),

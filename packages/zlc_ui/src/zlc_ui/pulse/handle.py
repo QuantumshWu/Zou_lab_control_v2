@@ -59,7 +59,8 @@ class PulseEditorHandle(QtCore.QObject):
     insert_period_requested = QtCore.pyqtSignal(object)
     move_period_requested = QtCore.pyqtSignal(str, object)
     remove_period_requested = QtCore.pyqtSignal(str)
-    repeat_committed = QtCore.pyqtSignal(object, object, int)
+    bracket_committed = QtCore.pyqtSignal(object, object, int)
+    run_repeats_committed = QtCore.pyqtSignal(int)
     visible_ports_committed = QtCore.pyqtSignal(object)
     clear_port_requested = QtCore.pyqtSignal(str)
     feedback_requested = QtCore.pyqtSignal(str)
@@ -109,7 +110,8 @@ class PulseEditorHandle(QtCore.QObject):
             "period_name_committed", "duration_committed", "digital_committed",
             "analog_committed", "delay_committed", "binding_cycle_requested",
             "insert_period_requested", "move_period_requested",
-            "remove_period_requested", "repeat_committed",
+            "remove_period_requested", "bracket_committed",
+            "run_repeats_committed",
             "visible_ports_committed", "clear_port_requested",
             "feedback_requested", "connection_requested", "stop_requested",
             "sync_requested", "save_requested", "load_requested",
