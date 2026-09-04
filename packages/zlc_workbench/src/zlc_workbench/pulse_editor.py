@@ -1330,7 +1330,23 @@ class PulseEditorPresenter:
             return False
         entries = sequencer.config_values()
         if not entries:
-            self._warn("this board is holding no config values")
+            # SAVE WRITES WHAT THE BOARD HOLDS, and a board holds a config
+            # value once a pulse has put one there.  Declaring a config
+            # parameter in this document is not that yet, so the refusal
+            # says which act is missing rather than only that something is.
+            declared = (
+                len(self.sequence.config_parameters)
+                if self.sequence is not None
+                else 0
+            )
+            self._warn(
+                "this board is holding no config values; press On Pulse to "
+                f"send this pulse's {declared} config parameter(s) to it "
+                "first, then save what it holds"
+                if declared
+                else "this board is holding no config values, and this pulse "
+                "declares no config parameter to give it one"
+            )
             return False
         directory = self._config_values_directory()
         chosen = self.view.ask_save_path(

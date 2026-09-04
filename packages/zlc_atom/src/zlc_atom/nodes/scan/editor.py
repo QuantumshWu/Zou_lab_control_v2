@@ -180,7 +180,7 @@ class _AxisRow(QtWidgets.QWidget):
             # came back as 1.0 in the box that is supposed to be showing what
             # will run.  Readability is the formatter's job now, and the
             # formatter does not round.
-            spin.setDisplayUnit("" if port is None else port.unit)
+            spin.setValueUnit("" if port is None else port.unit)
 
     def _port_changed(self, _index: int) -> None:
         self._custom_values = None

@@ -622,6 +622,22 @@ def _prefixable_symbol(unit: Unit, registry: UnitRegistry | None) -> bool:
     return base.prefixable and unit.is_linear
 
 
+def _plain_digits(value: Decimal) -> str:
+    """The number, with nothing after the point that says nothing.
+
+    Moving the decimal point leaves the zeros the shift walked past, so a
+    hertz field read in gigahertz printed ``6.8347000000``.  Those zeros are
+    not digits of the value -- dropping them changes nothing that can be
+    read back -- and the number they were padding is the one a person is
+    trying to read.
+    """
+
+    text = format(value, "f")
+    if "." not in text:
+        return text
+    return text.rstrip("0").rstrip(".") or "0"
+
+
 def format_quantity(
     value: object,
     unit: UnitLike = "1",
@@ -648,8 +664,7 @@ def format_quantity(
         raise UnitError(f"{resolved.symbol!r} cannot take the prefix {step.symbol!r}")
     shifted = decimal.scaleb(-step.exponent)
     symbol = f"{step.symbol}{resolved.symbol}" if resolved.symbol != "1" else step.symbol
-    text = format(shifted, "f")
-    return f"{text} {symbol}".strip()
+    return f"{_plain_digits(shifted)} {symbol}".strip()
 
 
 def format_quantities(

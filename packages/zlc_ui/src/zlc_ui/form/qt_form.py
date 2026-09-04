@@ -18,7 +18,12 @@ from typing import Any
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
-from zlc_data.units import UnitError, format_quantity, parse_quantity
+from zlc_data.units import (
+    DEFAULT_UNITS,
+    UnitError,
+    format_quantity,
+    parse_quantity,
+)
 
 from .form import (
     FormChoice,
@@ -245,7 +250,7 @@ class _IntHandler(_StaticHandler):
         if spin_range is None:
             raise ValueError("field cannot be represented by FluentSpinBox")
         widget.setRange(*spin_range)
-        widget.setDisplayUnit(field.unit)
+        widget.setValueUnit(field.unit)
 
     def normalize(self, field: FormFieldProps, value: object) -> int | None:
         if value is None:
@@ -416,7 +421,7 @@ class _FloatHandler(_StaticHandler):
         widget.setRange(*spin_range)
         # The field said what its number is IN.  Nothing read it before, so
         # every box in this project showed a bare repr and refused a prefix.
-        widget.setDisplayUnit(field.unit)
+        widget.setValueUnit(field.unit)
 
     def normalize(self, field: FormFieldProps, value: object) -> float | None:
         if value is None:
@@ -830,6 +835,23 @@ def _widget_family(field: FormFieldProps) -> str:
     raise ValueError(f"unsupported form field kind: {field.kind!r}")
 
 
+def _row_label_in(field: FormFieldProps, unit: str) -> str:
+    """The row's label, said in the unit the row is being READ in.
+
+    ``row_label`` states the owner's unit, which is what the field IS; this
+    states the one the operator chose to read it in, which is what the box
+    beside it now holds.  Same rule, one place, so the two cannot drift.
+    """
+
+    label = field.label.strip()
+    symbol = str(unit).strip()
+    if symbol and symbol != "1":
+        label = f"{label} ({symbol})"
+    if field.required:
+        label = f"{label} *"
+    return label
+
+
 def _automatic_label(field: FormFieldProps, checked: bool) -> str:
     return f"{'Auto' if checked else 'Manual'} {field.row_label}"
 
@@ -963,6 +985,8 @@ class FluentParameterForm(QtWidgets.QWidget):
         self._widgets: dict[str, QtWidgets.QWidget] = {}
         self._handlers: dict[str, FormWidgetHandler] = {}
         self._rows: dict[str, QtWidgets.QWidget] = {}
+        #: The unit picker beside each numeric row, by field key.
+        self._unit_pickers: dict[str, FluentTreeComboBox] = {}
         self._auto_switches: dict[str, FluentSwitch] = {}
         self._dependents = self._dependency_map(spec)
 
@@ -1027,9 +1051,88 @@ class FluentParameterForm(QtWidgets.QWidget):
                 and not field.unavailable
             )
 
+    def _unit_picker(self, field, widget):
+        """Which unit this row is READ in, when its own has other spellings.
+
+        A number's unit is its owner's -- what the device holds, what the
+        range is in -- and it never moves.  Which spelling of it an operator
+        reads and types is a different question, and theirs: the power a
+        board holds in dBm is the same power in mW, and nobody should have
+        to do that arithmetic by hand to work in the other one.
+
+        A TREE, because the choices are one: each base carries its own
+        prefixes on its branch, and a unit that is not a prefixed base
+        (dBm) stands beside them as its own.  A flat list of eighteen
+        spellings is the same information with the structure thrown away.
+        """
+
+        unit = (field.unit or "").strip()
+        if not unit or unit == "1" or not hasattr(widget, "setShownUnit"):
+            return None
+        try:
+            choices = DEFAULT_UNITS.display_choices(unit)
+        except UnitError:
+            return None
+        if len(choices) < 2:
+            return None
+        groups: list[tuple[str, list[tuple[str, str, str]]]] = []
+        branches: dict[str, list[tuple[str, str, str]]] = {}
+        for symbol in choices:
+            base = DEFAULT_UNITS.base_for(symbol)
+            trunk = base.symbol if base is not None else symbol
+            leaves = branches.get(trunk)
+            if leaves is None:
+                leaves = []
+                branches[trunk] = leaves
+                groups.append((trunk, leaves))
+            leaves.append((symbol, symbol, symbol))
+        picker = FluentTreeComboBox(self)
+        picker.set_choice_tree(
+            tuple((trunk, tuple(leaves)) for trunk, leaves in groups),
+            current=unit,
+        )
+        picker.setSizePolicy(
+            QtWidgets.QSizePolicy.Fixed,
+            QtWidgets.QSizePolicy.Preferred,
+        )
+        picker.setToolTip("Read and type this field in another unit")
+        picker.keyed_choice_picked.connect(
+            lambda symbol, key=field.key: self._shown_unit_picked(key, symbol)
+        )
+        return picker
+
+    def _shown_unit_picked(self, key: str, symbol: str) -> None:
+        """Show this row in another unit: the value is untouched."""
+
+        widget = self._widgets.get(key)
+        field = self._fields.get(key)
+        if widget is None or field is None:
+            return
+        try:
+            widget.setShownUnit(symbol)
+        except UnitError:
+            return
+        row = self._rows.get(key)
+        if row is not None and hasattr(row, "set_label"):
+            row.set_label(_row_label_in(field, symbol))
+
     def _make_row(self, field, widget, label_width):
         automatic = None
         label = field.row_label
+        picker = self._unit_picker(field, widget)
+        if picker is not None:
+            self._unit_pickers[field.key] = picker
+            holder = QtWidgets.QWidget(self)
+            holder.setSizePolicy(
+                QtWidgets.QSizePolicy.Expanding,
+                QtWidgets.QSizePolicy.Preferred,
+            )
+            beside = QtWidgets.QHBoxLayout(holder)
+            beside.setContentsMargins(0, 0, 0, 0)
+            beside.setSpacing(scaled_px(6, minimum=4))
+            beside.addWidget(widget, 1)
+            beside.addWidget(picker, 0)
+            widget = holder
         if field.automatic:
             automatic = FluentSwitch("", self)
             with signals_blocked(automatic):

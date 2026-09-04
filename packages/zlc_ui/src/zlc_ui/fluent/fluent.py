@@ -18,7 +18,12 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from qframelesswindow import FramelessWindow, StandardTitleBar
 
-from zlc_data.units import UnitError, format_quantity, parse_quantity
+from zlc_data.units import (
+    DEFAULT_UNITS,
+    UnitError,
+    format_quantity,
+    parse_quantity,
+)
 
 from ..qt import ensure_qt_app
 
@@ -4032,7 +4037,7 @@ class FluentSpinBox(_WheelFocusGuardMixin, QtWidgets.QSpinBox):
         self.lineEdit().setTextMargins(0, 0, 0, 0)
         self.setStyleSheet(fluent_spinbox_stylesheet("QSpinBox"))
 
-    def setDisplayUnit(self, unit: str) -> None:  # noqa: N802 - Qt API name
+    def setValueUnit(self, unit: str) -> None:  # noqa: N802 - Qt API name
         """Name what this whole number counts, beside the number.
 
         A prefix is not offered and not accepted: these are counts of things
@@ -4199,6 +4204,7 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
     #: inside a Qt slot does not become a traceback, it ends the process.
     #: Declared here, there is no instant in which they are missing.
     _unit = "1"
+    _shown_unit = "1"
     _last_value = 0.0
 
     def __init__(
@@ -4243,8 +4249,8 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         self.setSingleStep(1)
         self.setDecimals(323)
 
-    def setDisplayUnit(self, unit: str) -> None:  # noqa: N802 - Qt API name
-        """The unit this box's number is in, and is therefore shown in.
+    def setValueUnit(self, unit: str) -> None:  # noqa: N802 - Qt API name
+        """What this box's NUMBER is in -- its owner's unit, and its range's.
 
         Shown AND read: one table drives both, so a box that prints
         ``120.0000000 MHz`` accepts ``1.05M`` back without anyone writing a
@@ -4252,10 +4258,40 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         """
 
         self._unit = str(unit).strip() or "1"
+        self._shown_unit = self._unit
         self.lineEdit().setText(self.textFromValue(self.value()))
 
-    def displayUnit(self) -> str:  # noqa: N802 - Qt API name
+    def valueUnit(self) -> str:  # noqa: N802 - Qt API name
         return self._unit
+
+    def setShownUnit(self, unit: str) -> None:  # noqa: N802 - Qt API name
+        """Which compatible unit the operator is reading and typing in.
+
+        The VALUE never moves: the owner declared what this number is, and a
+        device that speaks hertz is not asking to be told megahertz.  What
+        the operator chooses is which spelling of the same quantity is on
+        screen -- the number is converted on the way out and back on the way
+        in, so a power field can be read in dBm and typed in mW.
+        """
+
+        wanted = str(unit).strip() or self._unit
+        if wanted != self._unit:
+            DEFAULT_UNITS.convert(0.0, self._unit, wanted)
+        self._shown_unit = wanted
+        self.lineEdit().setText(self.textFromValue(self.value()))
+
+    def shownUnit(self) -> str:  # noqa: N802 - Qt API name
+        return self._shown_unit
+
+    def _shown_from_value(self, number: float) -> float:
+        if self._shown_unit == self._unit:
+            return float(number)
+        return float(DEFAULT_UNITS.convert(number, self._unit, self._shown_unit))
+
+    def _value_from_shown(self, number: float) -> float:
+        if self._shown_unit == self._unit:
+            return float(number)
+        return float(DEFAULT_UNITS.convert(number, self._shown_unit, self._unit))
 
     def textFromValue(self, value: float) -> str:  # noqa: N802 - Qt API
         # NEVER raises, for the same reason valueFromText does not: Qt calls
@@ -4266,9 +4302,13 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         number = int(value) if self.decimals() == 0 else float(value)
         self._last_value = float(value)
         try:
-            return format_quantity(number, self._unit)
+            # DIGITS ONLY.  A box is for the number; which unit that number
+            # is read in is said once, beside it, by the row that owns it --
+            # printing the symbol in here as well put the same fact in two
+            # places and left no room to type in the box it was crowding.
+            return format_quantity(self._shown_from_value(number), "1")
         except UnitError:
-            return f"{number} {self._unit}".strip()
+            return str(number)
 
     def valueFromText(self, text: str) -> float:  # noqa: N802 - Qt API
         # NEVER raises.  Qt calls this from inside its own event handling, and
@@ -4277,7 +4317,7 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         # the text, which calls back into here, which would ask again -- one
         # unreadable keystroke and the stack is gone.
         try:
-            value = float(parse_quantity(text, self._unit))
+            value = self._value_from_shown(parse_quantity(text, self._shown_unit))
         except (UnitError, ValueError):
             return self._last_value
         self._last_value = value
@@ -4296,7 +4336,7 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         if not stripped or stripped in ("+", "-", ".", "+.", "-."):
             return QtGui.QValidator.Intermediate, text, position
         try:
-            parse_quantity(stripped, self._unit)
+            parse_quantity(stripped, self._shown_unit)
         except (UnitError, ValueError):
             return QtGui.QValidator.Intermediate, text, position
         return QtGui.QValidator.Acceptable, text, position
