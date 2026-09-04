@@ -124,9 +124,11 @@ def _discover_rigol() -> tuple[DeviceInstanceConfig, ...]:
             "VISA lists nothing to ask: no "
             f"{' or '.join(PROBED_RESOURCE_PREFIXES)} resource is registered "
             f"on this machine (it lists: {', '.join(listed) or 'nothing'}). "
-            "A LAN instrument has to be added in NI MAX (or reached by its "
-            "TCPIP address by hand); a USB one needs its USB-TMC driver bound "
-            "before VISA can see it at all."
+            "A LAN instrument has to be added in NI MAX -- or skip that and "
+            "type its TCPIP0::<address>::INSTR in by hand, which needs no "
+            "install; a USB one is invisible to VISA until a USB-TMC driver "
+            "is bound to it, which is what installing NI-VISA (or Rigol "
+            "UltraSigma) does."
         )
 
     def named(sighting) -> str:
