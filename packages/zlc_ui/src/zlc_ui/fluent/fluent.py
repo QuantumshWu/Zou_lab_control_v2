@@ -986,6 +986,16 @@ class FluentGroupBox(QtWidgets.QGroupBox):
             self._zlc_outline = value
             self.update()
 
+    def outline_colour(self) -> str | None:
+        """Which selection colour this box is wearing, or None for none.
+
+        Readable because "is this the selected one" is a question about what
+        is on screen, and the only other way to ask it is to name the private
+        attribute the painter happens to keep it in.
+        """
+
+        return getattr(self, "_zlc_outline", None)
+
     def paintEvent(self, event) -> None:
         # Paint the white body + a CONTINUOUS rounded border, THEN let Qt draw the grey title pill +
         # text on top (super) -- so the pill covers its segment of the border, never the reverse, and

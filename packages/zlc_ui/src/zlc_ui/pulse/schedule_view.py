@@ -609,6 +609,7 @@ class PulseDragContainer(QtWidgets.QWidget):
     """Horizontal card strip whose drag releases are proposal-only."""
 
     period_clicked = QtCore.pyqtSignal(str)
+    bracket_clicked = QtCore.pyqtSignal(str)
     gap_clicked = QtCore.pyqtSignal(int)
     move_period_requested = QtCore.pyqtSignal(str, object)
     bracket_committed = QtCore.pyqtSignal(object, object, int)
@@ -624,6 +625,7 @@ class PulseDragContainer(QtWidgets.QWidget):
         self.layout_main.setAlignment(QtCore.Qt.AlignLeft)
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
         self._cards: tuple[PeriodCard, ...] = ()
+        self._posts: tuple["BracketPost", ...] = ()
         self._pressed: tuple[str, str, QtCore.QPoint] | None = None
         self._dragging = False
         self._indicator = QtWidgets.QFrame(self)
@@ -634,6 +636,7 @@ class PulseDragContainer(QtWidgets.QWidget):
         # or neither.  The two are mutually exclusive because they answer the
         # same question, and clicking the current one again clears it.
         self._selected_card: str | None = None
+        self._selected_post: str | None = None
         self._selected_gap: int | None = None
 
     def set_items(
@@ -704,6 +707,9 @@ class PulseDragContainer(QtWidgets.QWidget):
             )
             self.layout_main.insertWidget(start_index, start)
             self.layout_main.insertWidget(end_index + 2, end)
+            self._posts = (start, end)
+        else:
+            self._posts = ()
         self.setMinimumSize(0, 0)
         self.adjustSize()
         # A rebuild drops every outline, and a selection that names a period
@@ -712,10 +718,18 @@ class PulseDragContainer(QtWidgets.QWidget):
         card = self._selected_card
         if card is not None and not any(item.period_id == card for item in self._cards):
             card = None
+        post = self._selected_post
+        if post is not None and not any(item.kind == post for item in self._posts):
+            post = None
         gap = self._selected_gap
         if gap is not None and gap > len(self._cards):
             gap = None
-        self.show_selection(card=card, gap=None if card is not None else gap)
+        if card is not None:
+            self.show_selection(card=card)
+        elif post is not None:
+            self.show_selection(post=post)
+        else:
+            self.show_selection(gap=gap)
 
     #: Widgets that need their own clicks: typing in them, ticking them and
     #: opening them ARE the click.  Everything else on a card is chrome, and a
@@ -774,27 +788,50 @@ class PulseDragContainer(QtWidgets.QWidget):
         return self._cards
 
     # ------------------------------------------------------- where edits land
-    def selection(self) -> tuple[str | None, int | None]:
-        """(selected period id, selected gap position).  At most one is set."""
+    def selection(self) -> tuple[str | None, str | None, int | None]:
+        """(period id, bracket post kind, gap position).  At most one is set."""
 
-        return self._selected_card, self._selected_gap
+        return self._selected_card, self._selected_post, self._selected_gap
 
-    def show_selection(self, *, card: str | None = None, gap: int | None = None) -> None:
-        """Mark the period or the gap an edit will act on.
+    def show_selection(
+        self,
+        *,
+        card: str | None = None,
+        post: str | None = None,
+        gap: int | None = None,
+    ) -> None:
+        """Mark the period, the bracket post, or the gap an edit will act on.
 
-        The outline is drawn on the card's own outer edge through
-        FluentGroupBox.set_outline -- a stylesheet border set here would cascade
-        into every widget inside the card.
+        A post is outlined exactly as a card is, by this same call: it is a
+        FluentGroupBox too, so the mechanism has been there since the day it
+        was written and simply never reached.  Clicking a card drew a border
+        and clicking a post drew nothing, which made the two look like
+        different kinds of thing when they are the same kind of thing --
+        something you pick, and then drag if you want to.
+
+        The outline goes on the widget's own outer edge through
+        FluentGroupBox.set_outline; a stylesheet border set here would
+        cascade into everything inside it.
         """
 
-        if card is not None and gap is not None:
-            raise ValueError("a card and a gap cannot both be selected")
+        chosen = tuple(
+            name
+            for name, value in (("card", card), ("post", post), ("gap", gap))
+            if value is not None
+        )
+        if len(chosen) > 1:
+            raise ValueError(
+                f"only one of these can be selected: {', '.join(chosen)}"
+            )
         self._selected_card = None if card is None else str(card)
+        self._selected_post = None if post is None else str(post)
         self._selected_gap = None if gap is None else int(gap)
         for widget in self._cards:
             widget.set_outline(
                 ACCENT if widget.period_id == self._selected_card else None
             )
+        for widget in self._posts:
+            widget.set_outline(ACCENT if widget.kind == self._selected_post else None)
         if self._selected_gap is None:
             self._indicator.hide()
         else:
@@ -803,7 +840,7 @@ class PulseDragContainer(QtWidgets.QWidget):
     def clear_selection(self) -> None:
         """Forget it.  Anything that changes the period LIST invalidates it."""
 
-        self.show_selection(card=None, gap=None)
+        self.show_selection()
 
     def _gap_at(self, x: int) -> int:
         """Which gap an empty-space click at ``x`` means, in period positions.
@@ -837,10 +874,14 @@ class PulseDragContainer(QtWidgets.QWidget):
         """
 
         if event.button() == QtCore.Qt.LeftButton and not any(
-            card.geometry().contains(event.pos()) for card in self._cards
+            widget.geometry().contains(event.pos())
+            for widget in self._cards + self._posts
         ):
-            # A release inside a card is that CARD's, even when the card let it
-            # through; only the strip between them is a gap.
+            # A release inside something this row HOLDS belongs to that thing,
+            # even when it let the release through; only the strip between
+            # them is a gap.  Cards were excluded and posts were not, so
+            # clicking a post picked the gap underneath it -- the click landed
+            # somewhere the operator had not clicked.
             self.gap_clicked.emit(self._gap_at(event.pos().x()))
         super().mouseReleaseEvent(event)
 
@@ -903,7 +944,7 @@ class PulseDragContainer(QtWidgets.QWidget):
         self._show_indicator_at_gap(gap)
 
     def dragLeaveEvent(self, event):  # noqa: N802 - Qt name
-        self.show_selection(card=self._selected_card, gap=self._selected_gap)
+        self._restore_selection()
         super().dragLeaveEvent(event)
 
     def dropEvent(self, event):  # noqa: N802 - Qt name
@@ -918,7 +959,7 @@ class PulseDragContainer(QtWidgets.QWidget):
         if not (data.hasFormat(self.CARD_MIME) or data.hasFormat(self.BRACKET_MIME)):
             return super().dropEvent(event)
         proposal = self._proposal_at(data, self._gap_at(event.pos().x()))
-        self.show_selection(card=self._selected_card, gap=self._selected_gap)
+        self._restore_selection()
         if proposal is None:
             event.ignore()
             return
@@ -927,6 +968,15 @@ class PulseDragContainer(QtWidgets.QWidget):
             self.bracket_committed.emit(*proposal)
         else:
             self.move_period_requested.emit(*proposal)
+
+    def _restore_selection(self) -> None:
+        """Put back whatever was picked before the drag moved the marker."""
+
+        self.show_selection(
+            card=self._selected_card,
+            post=self._selected_post,
+            gap=self._selected_gap,
+        )
 
     def _card_proposal(
         self, data: QtCore.QMimeData, gap: int
@@ -1052,6 +1102,10 @@ class PulseDragContainer(QtWidgets.QWidget):
                 event.type() == QtCore.QEvent.MouseButtonRelease
                 and event.button() == QtCore.Qt.LeftButton
             ):
+                # Same rule as a card's: a press that reaches release
+                # without a drag IS a click, and a click picks the thing.
+                if not self._dragging and self._pressed is not None:
+                    self.bracket_clicked.emit(post.kind)
                 self._pressed = None
                 self._dragging = False
         return super().eventFilter(obj, event)
@@ -1177,6 +1231,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.timeline_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
         self.drag_container = PulseDragContainer()
         self.drag_container.period_clicked.connect(self._period_clicked)
+        self.drag_container.bracket_clicked.connect(self._bracket_clicked)
         self.drag_container.gap_clicked.connect(self._gap_clicked)
         self.timeline_scroll.setWidget(self.drag_container)
         dataset_frame.add_pane(self.timeline_scroll, stretch=1)
@@ -1680,13 +1735,21 @@ class PulseScheduleView(QtWidgets.QWidget):
     def _period_clicked(self, period_id: str) -> None:
         """Select it, or clear it if it was already the selected one."""
 
-        current, _gap = self.drag_container.selection()
+        current, _post, _gap = self.drag_container.selection()
         self.drag_container.show_selection(
             card=None if current == str(period_id) else str(period_id)
         )
 
+    def _bracket_clicked(self, kind: str) -> None:
+        """Same rule as a period's, because it is the same kind of act."""
+
+        _card, current, _gap = self.drag_container.selection()
+        self.drag_container.show_selection(
+            post=None if current == str(kind) else str(kind)
+        )
+
     def _gap_clicked(self, position: int) -> None:
-        _card, current = self.drag_container.selection()
+        _card, _post, current = self.drag_container.selection()
         self.drag_container.show_selection(
             gap=None if current == int(position) else int(position)
         )
@@ -1701,7 +1764,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         """
 
         periods = self._schedule.periods if self._schedule else ()
-        card, gap = self.drag_container.selection()
+        card, _post, gap = self.drag_container.selection()
         if gap is not None:
             return periods[gap].period_id if gap < len(periods) else None
         if card is not None:
@@ -1718,7 +1781,7 @@ class PulseScheduleView(QtWidgets.QWidget):
 
         if not (self._schedule and self._schedule.periods):
             return
-        card, _gap = self.drag_container.selection()
+        card, _post, _gap = self.drag_container.selection()
         target = card if card is not None else self._schedule.periods[-1].period_id
         self.remove_period_requested.emit(target)
 
