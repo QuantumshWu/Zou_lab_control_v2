@@ -28,8 +28,9 @@ what is displayed is what is held, digit for digit.
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
+import math
 from numbers import Real
 import re
 from threading import RLock
@@ -158,6 +159,24 @@ Conversion = Scaled | Decibel
 # ------------------------------------------------------------------- the unit
 
 
+def _exact_decade(conversion: "Conversion") -> int | None:
+    """The whole power of ten this conversion is, when it is exactly one.
+
+    Exactly: the candidate is rebuilt and compared, so a factor that merely
+    rounds to a power of ten does not get to claim one.  A level and a
+    degree have no decade at all, and saying so is what keeps the exact
+    arithmetic honest about where it can be used.
+    """
+
+    if not isinstance(conversion, Scaled):
+        return None
+    factor = conversion.factor
+    if factor <= 0.0:
+        return None
+    candidate = round(math.log10(factor))
+    return candidate if 10.0**candidate == factor else None
+
+
 @dataclass(frozen=True, slots=True)
 class Unit:
     """One way of writing a quantity of one dimension.
@@ -179,13 +198,16 @@ class Unit:
     #: read either way round (a time is a frequency and back).
     inverse_dimension: str | None = None
     #: The EXACT power of ten this unit is of its base, when it is one.
-    #: ``scale`` is that number's float shadow and is not good enough
+    #: DERIVED, never authored: it is a fact about the conversion, and a
+    #: second place to state it is a second place to state it wrongly.
+    #:
+    #: ``scale`` is this number's float shadow and is not good enough
     #: everywhere: a microsecond is 1e-6 s, and 1e-6/1e-9 is not exactly a
     #: thousand in binary.  Whoever must be exact -- the compiler turning a
     #: duration into device ticks -- reads the integer and builds its own
     #: exact ratio from it.  ``None`` for a unit that is not a power of ten
     #: (a degree) and for a level (dBm).
-    decade: int | None = 0
+    decade: int | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         for text, field in ((self.symbol, "symbol"), (self.dimension, "dimension")):
@@ -210,15 +232,7 @@ class Unit:
             # exactly one thing.
             raise UnitError(f"only a base unit may take a prefix: {self.symbol!r}")
         object.__setattr__(self, "aliases", aliases)
-        if self.decade is not None:
-            if isinstance(self.decade, bool) or not isinstance(self.decade, int):
-                raise UnitError("unit decade must be an integer or None")
-            if not isinstance(self.conversion, Scaled) or not np.isclose(
-                self.conversion.factor, 10.0**self.decade, rtol=1e-12
-            ):
-                raise UnitError(
-                    f"unit {self.symbol!r} claims 10**{self.decade} but does not scale by it"
-                )
+        object.__setattr__(self, "decade", _exact_decade(self.conversion))
         inverse = self.inverse_dimension
         if inverse is not None and (
             not isinstance(inverse, str) or not inverse or inverse.strip() != inverse
@@ -297,7 +311,6 @@ def _prefixed(base: Unit, prefix: Prefix) -> Unit:
         symbol=f"{prefix.symbol}{base.symbol}",
         dimension=base.dimension,
         conversion=Scaled(base.scale * 10.0**prefix.exponent),
-        decade=None if base.decade is None else base.decade + prefix.exponent,
         aliases=tuple(
             f"{spelling}{name}"
             for spelling in prefix.spellings
@@ -518,8 +531,8 @@ def _builtin_units() -> tuple[Unit, ...]:
         Unit("W", "power", prefixable=True),
         Unit("K", "temperature", prefixable=True),
         Unit("rad", "angle", prefixable=True),
-        Unit("deg", "angle", Scaled(np.pi / 180.0), aliases=("°",), decade=None),
-        Unit("dBm", "power", Decibel(1.0e-3), decade=None),
+        Unit("deg", "angle", Scaled(np.pi / 180.0), aliases=("°",)),
+        Unit("dBm", "power", Decibel(1.0e-3)),
         Unit("count", "count"),
         Unit("pixel", "pixel"),
     )

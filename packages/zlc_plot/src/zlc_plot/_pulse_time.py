@@ -5,24 +5,30 @@ from __future__ import annotations
 import math
 from numbers import Real
 
+from zlc_data.units import UnitError, prefix_for, resolve_unit
+
 from .primitives import PulseTimelineData
 
 
-_SECONDS_PER_UNIT = {
-    "ns": 1e-9,
-    "us": 1e-6,
-    "µs": 1e-6,
-    "ms": 1e-3,
-    "s": 1.0,
-}
 _MINIMUM_SOURCE_SPAN = 1e-12
 
 
-def _normalized_unit(unit: str) -> str:
+def _time_unit(unit: str) -> object | None:
+    """One pulse time unit, or None for a source this cannot rescale.
+
+    This module used to keep its own four-row table AND its own spelling
+    rules, which had drifted the opposite way from the model's: the pulse
+    canonicalises to ``µs``, and this canonicalised to ``us``.  Two answers to
+    "what is this axis in" is one more than a timeline can have.
+    """
+
     if not isinstance(unit, str):
         raise TypeError("pulse time unit must be text")
-    normalized = unit.strip().lower().replace("μ", "µ")
-    return "us" if normalized == "µs" else normalized
+    try:
+        resolved = resolve_unit(unit.strip())
+    except UnitError:
+        return None
+    return resolved if resolved.dimension == "time" else None
 
 
 def pulse_content_bounds(payload: PulseTimelineData) -> tuple[float, float]:
@@ -63,10 +69,9 @@ def pulse_time_scale(
 
     if not isinstance(payload, PulseTimelineData):
         raise TypeError("payload must be PulseTimelineData")
-    source_unit = _normalized_unit(payload.time_unit)
-    seconds_per_source = _SECONDS_PER_UNIT.get(source_unit)
-    if seconds_per_source is None:
-        if display_unit is None or _normalized_unit(display_unit) == source_unit:
+    source = _time_unit(payload.time_unit)
+    if source is None:
+        if display_unit is None or _time_unit(display_unit) is None:
             return 1.0, payload.time_unit
         raise ValueError(
             f"cannot convert pulse source unit {payload.time_unit!r} to {display_unit!r}"
@@ -81,21 +86,17 @@ def pulse_time_scale(
             span = float(source_span)
         if not math.isfinite(span) or span <= 0.0:
             raise ValueError("pulse source span must be positive and finite")
-        seconds = abs(span) * seconds_per_source
-        if seconds < 1e-6:
-            target = "ns"
-        elif seconds < 1e-3:
-            target = "us"
-        elif seconds < 1.0:
-            target = "ms"
-        else:
-            target = "s"
+        # The same rule that sizes every other number in this project: put
+        # the value between one and a thousand.  This used to be a fourth
+        # hand-written ladder, so a timeline could disagree with the editor
+        # about which unit a duration reads best in.
+        seconds = abs(span) * source.scale
+        target = resolve_unit(f"{prefix_for([seconds], 's').symbol}s")
     else:
-        target = _normalized_unit(display_unit)
-    seconds_per_target = _SECONDS_PER_UNIT.get(target)
-    if seconds_per_target is None:
-        raise ValueError("pulse display unit must be ns, us, ms, or s")
-    return seconds_per_source / seconds_per_target, target
+        target = _time_unit(display_unit)
+        if target is None:
+            raise ValueError(f"pulse display unit must be a time unit: {display_unit!r}")
+    return source.scale / target.scale, target.symbol
 
 
 __all__ = ["pulse_content_bounds", "pulse_time_scale"]
