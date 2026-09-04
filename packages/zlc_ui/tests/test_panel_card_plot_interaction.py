@@ -370,7 +370,9 @@ assert card.width() - widget.width() == 2 * tested_module.CARD_PAD
 
 # Two lines, and what they say does not move the rectangle.
 assert '<br>' in card._title_label.text()
-assert '(20)x(10x10x10)x(3x35)' in card._title_label.toolTip()
+# The separator is the multiplication SIGN: an axis is often called
+# "x", and a letter between the numbers asked which was which.
+assert '(20) × (10 × 10 × 10) × (3 × 35)' in card._title_label.toolTip()
 form_keys = set(card._form_spec().keys)
 assert {
     'semantic__fate:point:field.x',

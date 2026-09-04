@@ -90,20 +90,31 @@ def _set_interaction(surface: object | None, enabled: bool) -> None:
 
 
 def data_structure_fragments(structure: object) -> tuple[tuple, tuple]:
-    """The one coloured two-line rendering of a three-domain shape."""
+    """The one coloured two-line rendering of a three-domain shape.
+
+    The separator is the multiplication SIGN, not the letter: an axis is
+    very often called "x", and "(repeat)x(x)x()" asked the reader to work
+    out which of those three x's was an axis name.
+    """
 
     sizes: list[tuple[str, str | None]] = []
     names: list[tuple[str, str | None]] = []
     for index, group in enumerate(tuple(structure or ())):
         colour = AXIS_GROUP_COLORS[index % len(AXIS_GROUP_COLORS)]
         if sizes:
-            sizes.append(("x", None))
-            names.append(("x", None))
+            sizes.append((" × ", None))
+            names.append((" × ", None))
         sizes.append(
-            ("(" + "x".join(str(int(size)) for _name, size in group) + ")", colour)
+            (
+                "(" + " × ".join(str(int(size)) for _name, size in group) + ")",
+                colour,
+            )
         )
         names.append(
-            ("(" + " x ".join(str(name) for name, _size in group) + ")", colour)
+            (
+                "(" + " × ".join(str(name) for name, _size in group) + ")",
+                colour,
+            )
         )
     return tuple(sizes), tuple(names)
 

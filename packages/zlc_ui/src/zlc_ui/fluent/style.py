@@ -7,6 +7,11 @@ custom host surfaces.
 from __future__ import annotations
 
 ACCENT = "#77AADD"
+#: The accent at reading strength: a wash a dark number stays legible
+#: on.  ACCENT itself is a BUTTON colour -- it carries white text --
+#: and a table cell painted with it hides the very number the click
+#: was asking to see.
+ACCENT_TINT = "#E4EFF9"
 HOVER = "#004578"
 BG = "#F3F3F3"
 TEXT = "#323130"
