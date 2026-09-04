@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import replace
+from pathlib import Path
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
@@ -1180,11 +1181,21 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.save_button = FluentButton("Save*", color=YELLOW)
         self.load_button = FluentButton("Load", color=ORANGE)
         self.collapse_button = FluentButton("Collapse", color=GREY)
-        # The API slots hold numbers measured elsewhere -- a bias code, a
-        # MOT duration.  These carry a whole set of them in and out, so a
-        # recalibration is loaded once instead of retyped per pulse.
-        self.load_values_button = FluentButton("Load values", color=ORANGE)
-        self.save_values_button = FluentButton("Save values", color=YELLOW)
+        # The board's calibrated numbers -- a channel delay, a DAC bias --
+        # which it then fills into every pulse it plays.  They belong to the
+        # apparatus, so these carry the whole set on and off the BOARD rather
+        # than editing the document that is open.
+        self.load_values_button = FluentButton("Load config", color=ORANGE)
+        self.save_values_button = FluentButton("Save config", color=YELLOW)
+        self.load_values_button.setToolTip(
+            "Give the connected board a set of calibrated values.  It holds "
+            "them until the next load and fills them into every pulse it "
+            "compiles, including ones fired from outside this window."
+        )
+        self.save_values_button.setToolTip(
+            "Write what the connected board is holding now as a set it can be "
+            "given again."
+        )
         control_buttons = (
             self.run_button, self.stop_button, self.sync_button,
             self.add_button, self.remove_button, self.bracket_button,
@@ -1225,6 +1236,12 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.connection_status = FluentLineEdit("")
         self.connection_status.setEnabled(False)
         self.connection_status.setFixedHeight(row_height())
+        # Which calibrated set the board is filling config parameters from.
+        # It belongs here rather than beside the pulse's own fields: it is a
+        # fact about the board, and it outlives whatever pulse is open.
+        self.config_source_line = FluentLineEdit("")
+        self.config_source_line.setEnabled(False)
+        self.config_source_line.setFixedHeight(row_height())
         connection_layout.addWidget(self.connection_combo)
         connection_row = QtWidgets.QHBoxLayout()
         connection_row.setContentsMargins(0, 0, 0, 0)
@@ -1233,6 +1250,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         connection_row.addWidget(self.connection_button)
         connection_layout.addLayout(connection_row)
         connection_layout.addWidget(self.connection_status)
+        connection_layout.addWidget(self.config_source_line)
         connection_layout.addStretch(1)
         bar.addWidget(connection_area)
 
@@ -1536,6 +1554,13 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.connection_button.setEnabled(not vm.locked)
         self._sync_endpoint_enabled()
         self.connection_status.setText(vm.status)
+        held = vm.config_source
+        self.config_source_line.setText(
+            f"Config: {Path(held).name}" if held else "Config: none loaded"
+        )
+        # The whole path, because the box is 252px and a calibration set is
+        # identified by which folder it came from as much as by its name.
+        self.config_source_line.setToolTip(held or "no config values loaded")
         self.connection_status.setToolTip(vm.status)
 
     def _request_connection(self) -> None:

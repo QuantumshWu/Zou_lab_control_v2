@@ -62,20 +62,35 @@ def sequencer_archive_snapshot(
     *,
     description: BoardDescription | None = None,
     state: Mapping[str, object] | None = None,
+    config: Mapping[str, tuple[float, str]] | None = None,
 ) -> dict[str, object]:
-    """Canonical archive snapshot of proven board facts and/or runtime state."""
+    """Canonical archive snapshot of proven board facts and/or runtime state.
 
-    if description is None and state is None:
-        raise ValueError("a sequencer archive snapshot needs description or state")
+    ``config`` is the calibrated set that was filling config parameters when
+    this ran.  It belongs with the board's own facts, not with the pulse: the
+    file it came from is overwritten by the next calibration, so naming the
+    pulse says nothing about which numbers played.
+    """
+
+    if description is None and state is None and config is None:
+        raise ValueError("a sequencer archive snapshot needs description, state or config")
     result: dict[str, object] = {}
     if description is not None:
         result["description"] = _description_snapshot(description)
+    if config is not None:
+        if not isinstance(config, Mapping):
+            raise TypeError("sequencer config values must be a mapping")
+        result["config"] = {
+            str(parameter_id): [float(value), str(unit)]
+            for parameter_id, (value, unit) in config.items()
+        }
     if state is not None:
         if not isinstance(state, Mapping):
             raise TypeError("sequencer state must be a mapping")
         selected: dict[str, object] = {}
         for name in (
             "opened",
+            "config_source",
             "loaded",
             "firing",
             "run_repeats",

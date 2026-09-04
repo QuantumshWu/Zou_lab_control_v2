@@ -837,7 +837,7 @@ def test_add_remove_and_move_change_the_next_triggered_qcmos_frame(
         pulse = resolve_pulse(
             IMAGING_PULSE_RESOURCE.value,
             path=IMAGING_PULSE_RESOURCE.path,
-            board=sequencer.describe(),
+            sequencer=sequencer,
             api_values={},
         )
         new_center = tuple(world._camera_centers(new_index.reshape(1, 2))[0])
@@ -1335,7 +1335,7 @@ def test_unslotted_cycles_are_independent_three_frame_shots(monkeypatch) -> None
         pulse = resolve_pulse(
             IMAGING_PULSE_RESOURCE.value,
             path=IMAGING_PULSE_RESOURCE.path,
-            board=sequencer.describe(),
+            sequencer=sequencer,
             api_values={
                 "reference_probe_duration_before": 0.02,
                 "readout_probe_duration": 0.005,
@@ -1473,7 +1473,7 @@ def test_calibration_bracket_keeps_one_shot_occupancy_and_exposure_scaling() -> 
         pulse = resolve_pulse(
             IMAGING_PULSE_RESOURCE.value,
             path=IMAGING_PULSE_RESOURCE.path,
-            board=sequencer.describe(),
+            sequencer=sequencer,
             api_values={
                 "reference_probe_duration_before": 0.02,
                 "readout_probe_duration": 0.005,
@@ -1581,7 +1581,7 @@ def test_public_repeat_reduction_conflates_loading_and_bright_dark_contrast() ->
         pulse = resolve_pulse(
             IMAGING_PULSE_RESOURCE.value,
             path=IMAGING_PULSE_RESOURCE.path,
-            board=sequencer.describe(),
+            sequencer=sequencer,
             api_values={
                 "reference_probe_duration_before": 0.02,
                 "readout_probe_duration": 0.005,

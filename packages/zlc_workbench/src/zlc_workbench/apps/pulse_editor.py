@@ -119,6 +119,7 @@ def build(
     *,
     path: str = "",
     pulses_directory: str = "",
+    config_values: str = "",
     sequencer: object | None = None,
     device_use: object | None = None,
     allow_dial: bool = True,
@@ -173,6 +174,28 @@ def build(
         plan = getattr(planned, "value", None)
         return tuple(getattr(plan, "logical_size", ()) or ()) or None
 
+    def dial_and_calibrate(mode: str, endpoint: str):
+        """Dial, then hand the board this workspace's current calibration.
+
+        A session does this for its own sequencer when it opens.  A standalone
+        editor dials its own, so it is the one that has to -- otherwise the
+        window a bench actually uses is the one place a pulse compiles against
+        an empty set.  Reading the file belongs here, at the composition root
+        that knows where the workspace is; zlc_pulse is handed entries.
+        """
+
+        streamer = dial(mode, endpoint)
+        if not config_values:
+            return streamer
+        from zlc_atom.pulse_values import read_config_values
+
+        path = Path(config_values)
+        if not path.is_file():
+            return streamer
+        _name, _origin, entries = read_config_values(path)
+        streamer.load_config_values(entries, source=str(path))
+        return streamer
+
     return PulseEditorPresenter(
         view,
         state,
@@ -180,7 +203,7 @@ def build(
         update_preview=update_preview,
         sequencer=sequencer,
         device_use=device_use,
-        dial=dial if allow_dial else None,
+        dial=dial_and_calibrate if allow_dial else None,
         pulses_directory=pulses_directory,
         path=path,
         default_endpoint=default_endpoint() if sequencer is None else "",
@@ -296,6 +319,7 @@ def create_window(
     entry means the window under inspection is the window that ships.
     """
 
+    from zlc_atom.pulse_values import CURRENT_CONFIG_VALUES
     from zlc_ui import open_pulse_editor
     from ..board import attach_qt_owner_turn, attach_qt_worker
 
@@ -316,6 +340,11 @@ def create_window(
             state,
             path=path,
             pulses_directory=str(space.pulses) if space is not None else "",
+            config_values=(
+                str(space.config_values / CURRENT_CONFIG_VALUES)
+                if space is not None
+                else ""
+            ),
             run_off_thread=run_off_thread,
             run_device_work=run_device_work,
             run_safe_work=run_safe_work,

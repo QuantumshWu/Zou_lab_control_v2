@@ -1,4 +1,4 @@
-"""The set of API parameter values an experiment is running today.
+"""The value sets an experiment is running today: API values, and config.
 
 A bias code or a MOT duration measured once is a fact about the apparatus,
 not about whichever pulse happened to be open when it was measured.  Until
@@ -11,8 +11,14 @@ from a workspace picks it up, and a pulse that declares none of its ids is
 simply left alone: the set is meant to be carried across pulses, most of
 which declare only some of it.
 
-The grammar is ``zlc_pulse``'s; what is here is where the file lives and how
-a pulse finds it.
+Config values are the same idea one layer down.  Where an API value answers
+"what does this run want", a config value answers "what is this apparatus
+calibrated at" -- a channel delay, a DAC bias.  Those belong to the BOARD, so
+their current set is loaded onto the sequencer once and fills every pulse it
+compiles; the pulse says only which of its fields are config parameters.
+
+The grammar is ``zlc_pulse``'s; what is here is where the files live and how
+they are found.
 """
 
 from __future__ import annotations
@@ -22,7 +28,12 @@ import json
 from pathlib import Path
 
 from zlc_durable import atomic_write_bytes, readable_json_bytes
-from zlc_pulse import api_values_from_tree, api_values_to_tree
+from zlc_pulse import (
+    api_values_from_tree,
+    api_values_to_tree,
+    config_values_from_tree,
+    config_values_to_tree,
+)
 
 
 #: Beside ``pulses/`` in the workspace, because these values belong to the
@@ -31,6 +42,14 @@ API_VALUES_DIRECTORY = "api_values"
 #: The set every pulse picks up by itself.  Others in the folder are saved
 #: sets an operator loads deliberately.
 CURRENT_API_VALUES = "current.json"
+
+#: Beside ``api_values/``, and for the same reason: a calibrated channel delay
+#: is a fact about the apparatus.  The difference is who holds it -- these are
+#: loaded onto the SEQUENCER, once, and fill every pulse that board plays.
+CONFIG_VALUES_DIRECTORY = "config_values"
+#: The set a session loads by itself when it opens a board.  Others in the
+#: folder are saved sets an operator loads deliberately.
+CURRENT_CONFIG_VALUES = "current.json"
 
 
 def read_api_values(path: str | Path) -> tuple[str, str, dict[str, tuple[float, str]]]:
@@ -59,6 +78,32 @@ def write_api_values(
     )
 
 
+def read_config_values(path: str | Path) -> tuple[str, str, dict[str, tuple[float, str]]]:
+    """``(name, source, {parameter_id: (value, unit)})`` from one saved set."""
+
+    source = Path(path).expanduser().resolve()
+    if source.suffix.lower() != ".json":
+        raise ValueError(f"config values must be JSON: {source}")
+    return config_values_from_tree(json.loads(source.read_text(encoding="utf-8")))
+
+
+def write_config_values(
+    path: str | Path,
+    entries: Mapping[str, tuple[float, str]],
+    *,
+    name: str = "",
+    source: str = "hand",
+) -> None:
+    """Write one saved set through the sole grammar."""
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_bytes(
+        target,
+        readable_json_bytes(config_values_to_tree(entries, name=name, source=source)),
+    )
+
+
 def current_api_values_path(pulse_path: str | Path) -> Path:
     """Where the current set sits, for a pulse loaded from a workspace.
 
@@ -76,8 +121,12 @@ def current_api_values_path(pulse_path: str | Path) -> Path:
 
 __all__ = [
     "API_VALUES_DIRECTORY",
+    "CONFIG_VALUES_DIRECTORY",
     "CURRENT_API_VALUES",
+    "CURRENT_CONFIG_VALUES",
     "current_api_values_path",
     "read_api_values",
+    "read_config_values",
     "write_api_values",
+    "write_config_values",
 ]

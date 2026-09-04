@@ -440,7 +440,7 @@ def test_live_monitor_chain_camera_occupancy_survival() -> None:
     try:
         camera = installation.capability("camera.adapter")
         sequencer = installation.device("sequencer")
-        program = build_calibration_pulse(sequencer.describe())
+        program = build_calibration_pulse(sequencer)
         sequencer.load(program)
 
         node = CameraMeasurementNode(

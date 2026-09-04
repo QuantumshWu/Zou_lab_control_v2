@@ -869,6 +869,8 @@ class _Sequencer:
         self.fail_on_fire = fail_on_fire
         self.never_done = never_done
         self._digest = ""
+        self._config_values: dict[str, tuple[float, str]] = {}
+        self._config_source = ""
         self._firing = False
         self._run_repeats = 1
         self._scan_repeats = 1
@@ -931,7 +933,45 @@ class _Sequencer:
             "run_repeats": self._run_repeats,
             "scan_repeats": self._scan_repeats,
             "applied_digest": self._digest,
+            "config_source": self.config_source,
         }
+
+    # The config surface, performed the way the real board performs it: the
+    # numbers are written INTO the fields at compile, and BOTH halves come
+    # back, or the double proves a behaviour the product does not have.
+    def load_config_values(self, entries, *, source: str = "") -> None:
+        self.events.append("load_config_values")
+        self._config_values = {
+            str(name): (float(value), str(unit))
+            for name, (value, unit) in dict(entries).items()
+        }
+        self._config_source = str(source or "")
+
+    def config_values(self) -> dict:
+        return dict(self._config_values)
+
+    @property
+    def config_source(self) -> str:
+        return self._config_source
+
+    def compile_pulse(self, sequence, geom, clock_hz, *, slot_tick_scales=None):
+        from zlc_pulse import apply_config_values, compile_sequence
+
+        held = dict(self._config_values)
+        absent = tuple(
+            parameter.parameter_id
+            for parameter in sequence.config_parameters
+            if parameter.parameter_id not in held
+        )
+        if absent:
+            raise ValueError(
+                f"{sequence.name!r} declares config parameter(s) {absent} that "
+                f"the loaded config values say nothing about"
+            )
+        filled, _applied, _unknown = apply_config_values(sequence, held)
+        return filled, compile_sequence(
+            filled, geom, clock_hz, slot_tick_scales=slot_tick_scales
+        )
 
 
 def test_on_pulse_runs_until_stop(sequence) -> None:
@@ -1330,7 +1370,7 @@ def test_an_injected_sequencer_is_not_closed_by_the_editor(sequence) -> None:
     with pytest.raises(RuntimeError, match="experiment session owns"):
         presenter.connect_to("given", "")
     presenter.cycle_binding("duration", sequence.periods[0].period_id, None)
-    assert presenter.compile().scan_coeff_frac_bits == 3
+    assert presenter.compile()[1].scan_coeff_frac_bits == 3
     assert presenter.fire() is True
     presenter.close()
     assert board.closed is False
@@ -1444,7 +1484,9 @@ def _formal_pulse_window(
             application_module,
             "resolve",
             lambda *_args, **_kwargs: (
-                SimpleNamespace(pulses=tmp_path), PulseEditorState(sequence=sequence), path,
+                SimpleNamespace(pulses=tmp_path, config_values=tmp_path / "config_values"),
+                PulseEditorState(sequence=sequence),
+                path,
             ),
         )
         if board is not None:
@@ -3035,7 +3077,7 @@ def test_brackets_never_choose_the_outer_execution_count(sequence) -> None:
         assert presenter.fire() is True
         assert board.events == ["load", "fire"], board.events
         assert (board._run_repeats, board._scan_repeats) == (4, 1)
-        assert presenter.compile().loop_count == 3
+        assert presenter.compile()[1].loop_count == 3
         assert view.schedule_view.control_state[1] is True
         view.run_repeats_committed.emit(5)
         assert view.schedule_view.control_state[1] is False
@@ -3269,10 +3311,12 @@ def test_scan_repeats_govern_nothing_when_no_scan_is_left(presenter, sequence) -
         "scan_table = (np.arange(4) + 1).reshape(-1, 1) * 0.001\n"
     )
     view.scan_repeats_committed.emit(3)
-    # scan -> api -> off: the field is unbound again.
+    # scan -> api -> config -> off: the field is unbound again.
+    view.binding_cycle_requested.emit("duration", period, None)
     view.binding_cycle_requested.emit("duration", period, None)
     view.binding_cycle_requested.emit("duration", period, None)
     assert not presenter.sequence.slots
+    assert not presenter.sequence.config_parameters
 
     board.events.clear()
     assert presenter.fire() is True
@@ -3720,4 +3764,112 @@ def test_a_rebuild_never_silently_unbinds_a_config_parameter(presenter, sequence
     assert len(presenter.sequence.config_parameters) == 1, (
         "a rebuild dropped the config binding"
     )
+
+
+
+def _bind_one_config_parameter(presenter, sequence):
+    """Cycle one duration all the way round to CONFIG, and say what it became."""
+
+    period = sequence.periods[3].period_id
+    for _ in range(3):  # off -> scan -> api -> config
+        presenter.view.binding_cycle_requested.emit("duration", period, None)
+    declared = presenter.sequence.config_parameters
+    assert len(declared) == 1, declared
+    return declared[0]
+
+
+def test_a_pulse_shows_the_boards_numbers_the_moment_a_board_is_there(
+    presenter, sequence
+) -> None:
+    """What is on screen is what would play, not what the file was saved with.
+
+    A config parameter's number belongs to the board, so with one attached the
+    authored number is stale by definition.  ``compile_pulse`` overwrites it
+    on the way through anyway -- doing it here is what makes the SCREEN honest
+    rather than only the board correct.
+    """
+
+    board = _Sequencer()
+    presenter.sequencer = board
+    assert presenter.adopt_board() is True
+    parameter = _bind_one_config_parameter(presenter, sequence)
+    period = sequence.periods[3].period_id
+    authored = presenter.sequence.period_by_id[period].duration
+
+    board.load_config_values(
+        {parameter.parameter_id: (authored + 20.0, parameter.unit)}, source="c.json"
+    )
+    assert presenter.fire() is True
+
+    # The field itself moved, so the number the operator reads is the number
+    # the board was handed.
+    assert presenter.sequence.period_by_id[period].duration == authored + 20.0
+    applied = board._applied
+    assert applied.source.period_by_id[period].duration == authored + 20.0
+
+
+def test_a_declared_config_parameter_with_no_set_refuses_to_fire(
+    presenter, sequence
+) -> None:
+    """Refusing beats playing an authored placeholder under a calibrated name."""
+
+    board = _Sequencer()
+    presenter.sequencer = board
+    assert presenter.adopt_board() is True
+    _bind_one_config_parameter(presenter, sequence)
+
+    board.events.clear()
+    assert presenter.fire() is False
+    assert "load" not in board.events, board.events
+
+
+def test_loading_a_set_moves_the_stale_dot_without_a_document_edit(
+    presenter, sequence, tmp_path
+) -> None:
+    """The digest cache is keyed on the DOCUMENT's revision.
+
+    A new value set changes what the screen compiles to while the revision
+    does not move, so a cache that is not invalidated goes on answering for
+    the previous calibration -- the dot says "the board holds what you see"
+    while the board holds something else.  Nothing in the document moves when
+    a board is recalibrated, which is exactly why this has to be said.
+    """
+
+    from zlc_atom.pulse_values import write_config_values
+
+    board = _Sequencer()
+    presenter.sequencer = board
+    assert presenter.adopt_board() is True
+    parameter = _bind_one_config_parameter(presenter, sequence)
+    authored = presenter.sequence.period_by_id[sequence.periods[3].period_id].duration
+
+    def give(value: float, name: str) -> None:
+        path = tmp_path / name
+        write_config_values(
+            path, {parameter.parameter_id: (value, parameter.unit)}, name=name
+        )
+        presenter.view.open_answer = str(path)
+        assert presenter.load_config_values() is True
+
+    give(authored, "first.json")
+    first = presenter._shown_digest()
+    assert first
+
+    give(authored * 2, "second.json")
+    assert presenter._shown_digest() != first
+    assert presenter.view.schedule_view.connection.config_source.endswith("second.json")
+
+
+def test_the_connection_box_names_the_set_the_board_is_holding(
+    presenter, sequence
+) -> None:
+    """Loaded once and shared by every pulse, so it is shown with the BOARD."""
+
+    board = _Sequencer()
+    presenter.sequencer = board
+    board.load_config_values({}, source="/bench/config_values/current.json")
+    assert presenter.adopt_board() is True
+
+    shown = presenter.view.schedule_view.connection
+    assert shown.config_source == "/bench/config_values/current.json"
 

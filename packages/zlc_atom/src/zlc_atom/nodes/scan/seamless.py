@@ -54,9 +54,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
 from zlc_pulse import (
-    authored_config_entries,
     PulseSequence,
-    compile_sequence,
     prepare_scan_application,
     resolve_api_parameters,
     scan_columns_for,
@@ -355,7 +353,11 @@ class SeamlessScanMeasurement:
         time.sleep(self.settle_seconds)
         self.source.open(context, cycles=readouts)
         try:
-            program = compile_sequence(
+            # Filled by the board, then compiled: a config parameter is the
+            # apparatus's calibrated number, and it is baked in HERE.  The
+            # filled sequence is what goes back as ``source=``, so the applied
+            # state and the archive describe what actually played.
+            streamed, program = self.sequencer.compile_pulse(
                 streamed,
                 board.geometry,
                 board.clock_hz,
@@ -611,7 +613,9 @@ class SeamlessScanMeasurement:
             **source_record,
             "named_devices": named_devices,
             "device_snapshots": {
-                "sequencer": sequencer_archive_snapshot(description=board),
+                "sequencer": sequencer_archive_snapshot(
+                    description=board, config=self.sequencer.config_values()
+                ),
                 **{
                     f"tunable:{key}": {
                         "settings": dict(device.tunable_values()),
@@ -627,17 +631,6 @@ class SeamlessScanMeasurement:
                 },
             },
             "pulse": self.sequence.name,
-            # What the config parameters actually held for this run.  A
-            # config value is refreshed from a file that a later calibration
-            # will overwrite, so naming the pulse is not enough to say what
-            # played: the numbers themselves belong in the record, and this
-            # is where a dataset keeps what it was made with.
-            "pulse_config": {
-                parameter_id: [value, unit]
-                for parameter_id, (value, unit) in authored_config_entries(
-                    self.sequence
-                ).items()
-            },
             "plan": {"axes": axes},
             "scan_shape": list(self.plan.shape),
             "scan_repeats": self.repeats,

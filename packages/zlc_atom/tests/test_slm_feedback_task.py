@@ -1887,7 +1887,7 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
             pulse = resolve_pulse(
                 FEEDBACK_PULSE_SEQUENCE,
                 path=IMAGING_PULSE_RESOURCE.path,
-                board=installation.device("sequencer").describe(),
+                sequencer=installation.device("sequencer"),
                 api_values={},
             )
         finally:
@@ -2051,7 +2051,7 @@ def test_electron_measurement_uses_current_conversion_and_saturation(
         pulse = resolve_pulse(
             FEEDBACK_PULSE_SEQUENCE,
             path=IMAGING_PULSE_RESOURCE.path,
-            board=installation.device("sequencer").describe(),
+            sequencer=installation.device("sequencer"),
             api_values={},
         )
     finally:
@@ -2185,7 +2185,7 @@ def test_measure_keeps_observer_only_faults_repeats_board_faults_and_loads_once(
         pulse = resolve_pulse(
             FEEDBACK_PULSE_SEQUENCE,
             path=IMAGING_PULSE_RESOURCE.path,
-            board=installation.device("sequencer").describe(),
+            sequencer=installation.device("sequencer"),
             api_values={},
         )
     finally:

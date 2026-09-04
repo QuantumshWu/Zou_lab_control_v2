@@ -1175,7 +1175,7 @@ class CalibrationTask:
         return resolve_pulse(
             self.pulse_sequence,
             path=self.pulse_path,
-            board=self.sequencer.describe(),
+            sequencer=self.sequencer,
             api_values=self._driven_values(),
         )
 

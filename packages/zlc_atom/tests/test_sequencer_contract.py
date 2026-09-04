@@ -114,7 +114,7 @@ def _virtual_streamer():
         world=SimulationWorld(SimulationWorldConfig(seed=0))
     )
     streamer.open()
-    program = build_calibration_pulse(streamer.describe())
+    program = build_calibration_pulse(streamer)
     return streamer, program
 
 

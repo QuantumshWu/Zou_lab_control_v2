@@ -49,6 +49,7 @@ from zlc_pulse import (
     TIME_UNIT_TO_NS,
     align_to_grid,
     apply_api_values,
+    apply_config_values,
     authored_api_entries,
     field_label,
     prune_orphaned_bindings,
@@ -57,9 +58,13 @@ from zlc_pulse import (
 )
 from zlc_atom.pulse_values import (
     API_VALUES_DIRECTORY,
+    CONFIG_VALUES_DIRECTORY,
     CURRENT_API_VALUES,
+    CURRENT_CONFIG_VALUES,
     read_api_values,
+    read_config_values,
     write_api_values,
+    write_config_values,
 )
 from zlc_durable import unique_path
 from zlc_plot import PANEL_SIZE_NAMES
@@ -1139,8 +1144,8 @@ class PulseEditorPresenter:
         view.stop_requested.connect(self._guarded(self.stop))
         view.sync_requested.connect(self._guarded(self._sync_from_view))
         view.save_requested.connect(self._guarded(self.save_pulse))
-        view.values_load_requested.connect(self._guarded(self.load_api_values))
-        view.values_save_requested.connect(self._guarded(self.save_api_values))
+        view.values_load_requested.connect(self._guarded(self.load_config_values))
+        view.values_save_requested.connect(self._guarded(self.save_config_values))
         view.binding_renamed.connect(self._guarded(self.rename_binding))
         view.load_requested.connect(self._guarded(self.ask_for_pulse))
         view.preview_include_off_toggled.connect(self._guarded(self._on_include_off))
@@ -1183,6 +1188,9 @@ class PulseEditorPresenter:
         except Exception as error:
             self._warn(f"cannot apply the current API values: {error}")
         self._accept_state(candidate)
+        # Then the board's own numbers, so a pulse opens showing what it would
+        # actually play rather than what it was last saved holding.
+        self._sync_config_values()
         self.refresh()
         return True
 
@@ -1193,6 +1201,14 @@ class PulseEditorPresenter:
         if not str(base) or str(base) == ".":
             return None
         return base.parent / API_VALUES_DIRECTORY
+
+    def _config_values_directory(self) -> Path | None:
+        """Where saved sets of the board's calibrated numbers live."""
+
+        base = Path(self.path).parent if self.path else Path(self.pulses_directory or "")
+        if not str(base) or str(base) == ".":
+            return None
+        return base.parent / CONFIG_VALUES_DIRECTORY
 
     def _with_current_values(
         self, state: PulseEditorState
@@ -1291,74 +1307,101 @@ class PulseEditorPresenter:
         self._apply(candidate)
         return True
 
-    def load_api_values(self) -> bool:
-        """Overwrite the API slots from one saved set of values.
+    def load_config_values(self) -> bool:
+        """Give the BOARD a calibrated set, for every pulse it plays.
 
-        What the slots hold, not whether they exist: the declarations survive,
-        so a scan table still overrides the ones it scans.  The set is applied
-        by name, and ids it carries that this pulse never declared are named
-        back rather than refused -- one set of bias codes is meant to be
-        carried across pulses that share a vocabulary.
+        Not a document edit at all.  A channel delay or a DAC bias is a fact
+        about the apparatus, so it is held by the sequencer until the next
+        calibration replaces it, and it fills the config parameters of any
+        pulse compiled for that board -- this one, the next one, and the ones
+        a scan node fires without ever opening this window.
         """
 
-        if self.sequence is None:
-            self._warn("there is no pulse to load values into")
+        sequencer = self.sequencer
+        if sequencer is None:
+            self._warn("connect to a sequencer before loading its config values")
             return False
-        directory = self._api_values_directory()
+        directory = self._config_values_directory()
         chosen = self.view.ask_open_path(
-            "Load API values",
-            str(directory / CURRENT_API_VALUES) if directory else "",
-            "ZLC API values (*.json);;All files (*)",
+            "Load config values",
+            str(directory / CURRENT_CONFIG_VALUES) if directory else "",
+            "ZLC config values (*.json);;All files (*)",
         )
         if not chosen:
             return False
         try:
-            _name, _source, entries = read_api_values(chosen)
-            sequence, applied, unknown = apply_api_values(self.sequence, entries)
+            _name, _source, entries = read_config_values(chosen)
+            sequencer.load_config_values(entries, source=str(chosen))
         except Exception as error:
             self._warn(f"cannot load {Path(chosen).name}: {error}")
             return False
-        self._apply(sequence)
-        report = f"applied {len(applied)} value(s)"
-        if unknown:
-            report += f"; not in this pulse: {', '.join(unknown)}"
-        self._done(report)
+        # What the board compiles to has changed without the document moving,
+        # so the cached digest -- keyed on the document's revision -- would go
+        # on answering for the previous set.
+        self._digest_revision = -1
+        self._sync_config_values()
+        self.refresh()
+        self._done(f"the board is holding {len(entries)} config value(s)")
         return True
 
-    def save_api_values(self) -> bool:
-        """Write what the API slots hold now as a set another pulse can load."""
+    def save_config_values(self) -> bool:
+        """Write what the board is holding now as a set it can be given again."""
 
-        if self.sequence is None:
-            self._warn("there is no pulse to save values from")
+        sequencer = self.sequencer
+        if sequencer is None:
+            self._warn("connect to a sequencer before saving its config values")
             return False
-        try:
-            entries = authored_api_entries(self.sequence)
-        except ValueError as error:
-            self._warn(str(error))
-            return False
+        entries = sequencer.config_values()
         if not entries:
-            self._warn("this pulse declares no API parameters")
+            self._warn("this board is holding no config values")
             return False
-        directory = self._api_values_directory()
+        directory = self._config_values_directory()
         chosen = self.view.ask_save_path(
-            "Save API values",
-            str(directory / CURRENT_API_VALUES) if directory else "",
-            "ZLC API values (*.json);;All files (*)",
+            "Save config values",
+            str(directory / CURRENT_CONFIG_VALUES) if directory else "",
+            "ZLC config values (*.json);;All files (*)",
         )
         if not chosen:
             return False
         target = Path(chosen).with_suffix(".json")
         try:
-            write_api_values(
+            write_config_values(
                 target,
                 entries,
                 name=target.stem,
-                source=self.sequence.name or Path(self.path).stem or "pulse editor",
+                source=self.connection[0] or "pulse editor",
             )
         except Exception as error:
             self._warn(f"cannot save {target.name}: {error}")
             return False
         self._done(f"saved {len(entries)} value(s) to {target.name}")
+        return True
+
+    def _sync_config_values(self) -> bool:
+        """Show, in the fields themselves, what the board would actually play.
+
+        A config parameter's number belongs to the board, so with one attached
+        the document is showing a number that is not the one that will play.
+        Writing the board's in is the same overwrite ``compile_pulse`` does --
+        the editor simply does it early, so what is on screen is the truth
+        before On Pulse rather than after it.
+
+        Disconnected, nothing is claimed: the authored numbers stand, which is
+        what an offline preview compiles anyway.
+        """
+
+        sequencer = self.sequencer
+        sequence = self.sequence
+        if sequencer is None or sequence is None or not sequence.config_parameters:
+            return False
+        try:
+            held = sequencer.config_values()
+        except Exception:
+            return False
+        synced, applied, _unknown = apply_config_values(sequence, held)
+        if not applied or synced == sequence:
+            return False
+        self._accept_state(replace(self._state, sequence=synced))
         return True
 
     def start_new_pulse(self) -> bool:
@@ -1721,13 +1764,19 @@ class PulseEditorPresenter:
         sequence: Any = None,
         *,
         slot_tick_scales: Sequence[int] | None = None,
-    ) -> Any:
-        """The sequence as the board would receive it.
-
+    ) -> tuple[Any, Any]:
+        """The sequence as the board would receive it, and the program.
 
         Compiled against the DEPLOYED board's geometry, not against defaults:
         a preview that compiles for an imaginary board is exactly the kind of
         confirmation that survives until the bench proves it wrong.
+
+        BOTH halves, because a connected board fills the pulse's config
+        parameters with its own calibrated numbers on the way through, and
+        the sequence that comes back is the one that must be handed to
+        ``load(source=...)``.  Disconnected there is no board to ask, so the
+        authored numbers stand and the pair is the sequence unchanged -- an
+        offline preview is honest about being one.
         """
 
         from zlc_pulse import compile_sequence
@@ -1736,7 +1785,15 @@ class PulseEditorPresenter:
         if sequence is None:
             raise RuntimeError("no pulse is open, so there is nothing to compile")
         geometry, clock_hz = self._compiler_target()
-        return compile_sequence(
+        sequencer = self.sequencer
+        if sequencer is not None:
+            return sequencer.compile_pulse(
+                sequence,
+                geometry,
+                clock_hz,
+                slot_tick_scales=slot_tick_scales,
+            )
+        return sequence, compile_sequence(
             sequence,
             geometry,
             clock_hz,
@@ -2157,6 +2214,12 @@ class PulseEditorPresenter:
 
         mode, endpoint = self.connection
         self._connection_status = str(status)
+        sequencer = self.sequencer
+        # Asked of the object, not of the board: the set is held host-side, so
+        # this costs a dict copy and never a round trip.
+        config_source = "" if sequencer is None else str(
+            getattr(sequencer, "config_source", "")
+        )
         self.view.set_connection(
             ConnectionVM(
                 choices=self._connection_choices,
@@ -2164,6 +2227,7 @@ class PulseEditorPresenter:
                 endpoint=endpoint,
                 status=self._connection_status,
                 locked=self._connection_locked,
+                config_source=config_source,
             )
         )
         self._render_run_state()
@@ -2318,12 +2382,8 @@ class PulseEditorPresenter:
         """Compile every local fact before attempting to acquire the device."""
 
         source, rows, sweeps, slot_tick_scales = self._execution_request()
-        return (
-            source,
-            self.compile(source, slot_tick_scales=slot_tick_scales),
-            rows,
-            sweeps,
-        )
+        source, program = self.compile(source, slot_tick_scales=slot_tick_scales)
+        return source, program, rows, sweeps
 
     def _execution_request(
         self,
@@ -2456,6 +2516,11 @@ class PulseEditorPresenter:
         if sequencer is None:
             self._warn("this editor is not connected to a sequencer")
             return
+        # The board's calibrated numbers, BEFORE the request is built.  This
+        # path -- not fire() -- is the one the On Pulse button takes whenever
+        # the window has a device worker, which is always in the GUI.
+        if self._sync_config_values():
+            self.refresh()
         try:
             source, rows, sweeps, slot_tick_scales = self._execution_request()
         except Exception as error:
@@ -2467,10 +2532,11 @@ class PulseEditorPresenter:
 
         def work(operation: int) -> object:
             program = None
+            loaded = source
             error: BaseException | None = None
             try:
                 if operation == self._device_operation:
-                    program = self.compile(
+                    loaded, program = self.compile(
                         source,
                         slot_tick_scales=slot_tick_scales,
                     )
@@ -2478,7 +2544,7 @@ class PulseEditorPresenter:
                     error = self._drive_program(
                         sequencer,
                         program,
-                        source,
+                        loaded,
                         rows=rows,
                         run_repeats=source.run_repeats,
                         scan_repeats=sweeps,
@@ -2664,6 +2730,12 @@ class PulseEditorPresenter:
         if self.sequencer is None:
             self._warn("this editor is not connected to a sequencer")
             return False
+        # Then the board's own calibrated numbers, BEFORE the request is
+        # built, so what is on screen and what is about to play are the same
+        # pulse.  ``compile_pulse`` would apply them anyway; doing it here is
+        # what makes the screen honest rather than merely the board correct.
+        if self._sync_config_values():
+            self.refresh()
         try:
             prepared = self._prepare_execution()
         except Exception as error:
@@ -2898,7 +2970,7 @@ class PulseEditorPresenter:
                 self._digest = self.compile(
                     source,
                     slot_tick_scales=scales,
-                ).digest
+                )[1].digest
             except Exception:
                 # A pulse that does not compile is not one any board can be
                 # holding, which is the honest answer to the question asked.
@@ -3742,8 +3814,7 @@ class PulseEditorPresenter:
             return False
 
         def prepare(held: int) -> tuple[PulseSequence, object]:
-            resolved = resolve_scan_point(source, effective_rows[held])
-            return resolved, self.compile(resolved)
+            return self.compile(resolve_scan_point(source, effective_rows[held]))
 
         if not self._acquire_command():
             return False

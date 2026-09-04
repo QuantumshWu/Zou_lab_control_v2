@@ -16,12 +16,12 @@ from zlc_pulse import (
     PulseSlot,
     PulseTarget,
     apply_config_values,
-    authored_config_entries,
     compile_sequence,
     sequence_from_tree,
     sequence_to_tree,
 )
 from zlc_pulse.compile import evaluate_affine_tick
+from zlc_pulse import pulse_field_value
 from zlc_pulse.model import PulseFieldRef
 from zlc_pulse.schedule import trigger_times, trigger_windows
 from zlc_pulse.wire import StreamerParams
@@ -227,12 +227,13 @@ def _configured() -> PulseSequence:
 def test_a_config_parameter_reads_the_number_the_pulse_already_carries() -> None:
     """It is not a hole: the field's own value IS the config value."""
 
-    entries = authored_config_entries(_configured())
-    assert entries == {
-        "probe_time": (20.0, "ns"),
-        "bias_x": (0.0, "value"),
-        "gate_delay": (40.0, "ns"),
-    }
+    configured = _configured()
+    assert {
+        parameter.parameter_id: pulse_field_value(
+            configured, parameter.field_ref, parameter.unit
+        )
+        for parameter in configured.config_parameters
+    } == {"probe_time": 20.0, "bias_x": 0.0, "gate_delay": 40.0}
 
 
 def test_applying_a_config_set_overwrites_the_authored_numbers() -> None:
@@ -257,7 +258,7 @@ def test_applying_a_config_set_overwrites_the_authored_numbers() -> None:
     assert sequence.period_by_id["p1"].duration == 80
     assert sequence.period_by_id["p0"].analog_steps[0].value == 1
     # An id the set omitted keeps the number the operator authored.
-    assert authored_config_entries(sequence)["gate_delay"] == (40.0, "ns")
+    assert pulse_field_value(sequence, PulseFieldRef("delay", port="d1"), "ns") == 40.0
     # The declarations survive an apply; only the numbers moved.
     assert len(sequence.config_parameters) == 3
 

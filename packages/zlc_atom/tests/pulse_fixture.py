@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from zlc_pulse.device import BoardDescription
 
 from zlc_atom.nodes.calibration import LOGIC_NODE as CALIBRATION_LOGIC_NODE
 from zlc_atom.devices.simulation.sequencer import CAMERA_TRIGGER_CHANNEL
@@ -31,7 +30,7 @@ IMAGING_PULSE_RESOURCE = CALIBRATION_LOGIC_NODE.workspace_resources[0].resolve(
 
 
 def build_calibration_pulse(
-    board: BoardDescription,
+    sequencer: object,
     *,
     reference_exposure_seconds: float = 0.020,
     readout_exposure_seconds: float = 0.005,
@@ -39,7 +38,7 @@ def build_calibration_pulse(
     resolved = resolve_pulse(
         IMAGING_PULSE_RESOURCE.value,
         path=IMAGING_PULSE_RESOURCE.path,
-        board=board,
+        sequencer=sequencer,
         api_values={
             "reference_probe_duration_before": reference_exposure_seconds,
             "readout_probe_duration": readout_exposure_seconds,

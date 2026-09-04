@@ -266,30 +266,6 @@ def authored_api_values(sequence: PulseSequence) -> dict[str, float]:
     }
 
 
-def authored_config_entries(sequence: PulseSequence) -> dict[str, tuple[float, str]]:
-    """Every config parameter as ``(value, unit)``, both the pulse's own.
-
-    A config parameter is never a hole, so this is simply what the pulse will
-    play unless its config file says otherwise -- and after a refresh it IS
-    what the file said, because a refresh overwrites the authored number.
-    """
-
-    if not isinstance(sequence, PulseSequence):
-        raise TypeError("sequence must be PulseSequence")
-    entries: dict[str, tuple[float, str]] = {}
-    for parameter in sequence.config_parameters:
-        try:
-            value = pulse_field_value(
-                sequence, parameter.field_ref, parameter.unit
-            )
-        except ValueError as error:
-            raise ValueError(
-                f"config parameter {parameter.parameter_id!r} has no field: {error}"
-            ) from None
-        entries[parameter.parameter_id] = (float(value), parameter.unit)
-    return entries
-
-
 def apply_config_values(
     sequence: PulseSequence,
     entries: Mapping[str, tuple[int | float, str]],
@@ -297,14 +273,14 @@ def apply_config_values(
     """Overwrite the authored value of every config parameter the set names.
 
     THE OVERWRITE IS THE STORAGE.  A config parameter keeps no value of its
-    own beside the field: refreshing one writes the number into the period's
-    duration, the DAC step or the delay it names, so what the pulse holds
-    afterwards is what the file said, and a pulse read back later needs no
-    second file to be understood.
+    own beside the field: filling one writes the number into the period's
+    duration, the DAC step or the delay it names, so the sequence that comes
+    back and the program compiled from it describe the same pulse -- which is
+    why the filled one, not the authored one, is what a load must carry.
 
     Returns the sequence, the ids applied, and the ids the set named that this
-    pulse does not declare -- one calibrated set is meant to serve several
-    pulses, most of which declare only part of it.
+    pulse does not declare -- one calibrated set serves every pulse a board
+    plays, most of which declare only part of it.
     """
 
     return _apply_named_values(
@@ -474,7 +450,6 @@ __all__ = [
     "apply_config_values",
     "authored_api_entries",
     "authored_api_values",
-    "authored_config_entries",
     "convert_time",
     "field_label",
     "prune_orphaned_bindings",
