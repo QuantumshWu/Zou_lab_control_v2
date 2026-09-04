@@ -16,6 +16,10 @@ dependencies = [
     "PyQt5==5.15.11",
     "PyQt5-Frameless-Window==0.8.0",
     "pyserial==3.5",
+    "PyVISA==1.16.1",
+    "PyVISA-py==0.8.1",
+    "pyusb==1.3.1",
+    "libusb-package==1.0.30.0",
     "scipy==1.17.1",
 ]
 
@@ -117,6 +121,7 @@ namespaces = false
 "zlc_atom.nodes.scan" = ["mot_field_template.json", "temperature_template.json"]
 "zlc_atom.devices.slm" = ["profiles/*.json"]
 zlc_plot = ["assets/*.ttf", "py.typed"]
+zlc_ui = ["assets/*.ico"]
 zlc_pulse = ["py.typed"]
 
 # RTL/XDC/Tcl are product data, not Python modules.  data-files keeps their

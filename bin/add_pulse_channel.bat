@@ -51,6 +51,10 @@ if "%ZLC_STATUS%"=="0" (
   echo flash the bitstream -- the board cannot be opened until you do.
 ) else if "%ZLC_STATUS%"=="1" (
   echo ZLC add-channel: REFUSED -- nothing was written.  Read the reason above.
+) else if "%ZLC_STATUS%"=="3" (
+  echo ZLC add-channel: the board change is IN, but one or more PULSE FILES were
+  echo NOT migrated -- they are named above with the reason, and the board will
+  echo refuse them until they are.  Do not skip this.
 ) else (
   echo ZLC add-channel failed with code %ZLC_STATUS% -- read the messages above.
 )
@@ -511,32 +515,53 @@ def main(argv):
             say("  REFUSED: %s is missing -- is %s a ZLC checkout?" % (path, root))
             return 1
 
-    say("Adding %s on pin %s." % (signal, pin))
-    try:
-        manifest_text = paths["manifest"].read_text(encoding="utf-8")
-        xdc_text = paths["xdc"].read_text(encoding="utf-8")
-        top_text = paths["top"].read_text(encoding="utf-8")
-        bench_text = paths["bench"].read_text(encoding="utf-8")
-        new_manifest, new_index = edited_manifest(manifest_text, signal, pin)
-        new_xdc, placeholder = edited_xdc(xdc_text, signal, pin)
-        new_top = edited_top(top_text, signal, placeholder, new_index)
-        new_bench = edited_bench(bench_text, signal, placeholder)
-    except Refused as error:
-        say("  REFUSED: %s" % error)
-        return 1
-    say(
-        "  lane index %d (after the last digital one), replacing the spare "
-        "output %s" % (new_index, placeholder)
+    manifest_text = paths["manifest"].read_text(encoding="utf-8")
+    standing = next(
+        (
+            lane
+            for lane in json.loads(manifest_text)["board"]["lanes"]
+            if lane["logical_signal"] == signal
+        ),
+        None,
     )
-
-    # Nothing is written until every edit above has been derived.
-    edits = [
-        (paths["manifest"], new_manifest),
-        (paths["xdc"], new_xdc),
-        (paths["top"], new_top),
-    ]
-    if new_bench is not None:
-        edits.append((paths["bench"], new_bench))
+    # Re-runnable on purpose: once the board change is in, this becomes the
+    # migration tool, so more pulse directories can be swept without undoing
+    # anything.  A pulse file the operator keeps outside the checkout is the
+    # ordinary case for that, and an unmigrated pulse is invisible in the
+    # editor -- it lists the OPENED pulse's ports, not the board's.
+    already = standing is not None and standing["package_pin"].upper() == pin.upper()
+    if already:
+        say(
+            "%s is already lane %d on %s -- the board change is in, so this run "
+            "only migrates pulse files." % (signal, standing["index"], pin)
+        )
+        edits = []
+        new_index = int(standing["index"])
+    else:
+        say("Adding %s on pin %s." % (signal, pin))
+        try:
+            xdc_text = paths["xdc"].read_text(encoding="utf-8")
+            top_text = paths["top"].read_text(encoding="utf-8")
+            bench_text = paths["bench"].read_text(encoding="utf-8")
+            new_manifest, new_index = edited_manifest(manifest_text, signal, pin)
+            new_xdc, placeholder = edited_xdc(xdc_text, signal, pin)
+            new_top = edited_top(top_text, signal, placeholder, new_index)
+            new_bench = edited_bench(bench_text, signal, placeholder)
+        except Refused as error:
+            say("  REFUSED: %s" % error)
+            return 1
+        say(
+            "  lane index %d (after the last digital one), replacing the spare "
+            "output %s" % (new_index, placeholder)
+        )
+        # Nothing is written until every edit above has been derived.
+        edits = [
+            (paths["manifest"], new_manifest),
+            (paths["xdc"], new_xdc),
+            (paths["top"], new_top),
+        ]
+        if new_bench is not None:
+            edits.append((paths["bench"], new_bench))
     try:
         for path, text in edits:
             backup = path.with_name(path.name + ".bak")
@@ -545,26 +570,27 @@ def main(argv):
             path.write_text(text, encoding="utf-8", newline="")
             say("  wrote %s (kept %s)" % (path.name, backup.name))
 
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "zou_lab_control",
-                "fpga",
-                "--config",
-                str(paths["manifest"]),
-                "--emit-geometry-vh",
-                str(paths["header"]),
-            ],
-            cwd=str(root),
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode not in (0, 1):
-            say("  regenerating the geometry header failed:")
-            say(result.stdout.strip() or result.stderr.strip())
-            return 2
-        say("  regenerated %s" % paths["header"].name)
+        if edits:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "zou_lab_control",
+                    "fpga",
+                    "--config",
+                    str(paths["manifest"]),
+                    "--emit-geometry-vh",
+                    str(paths["header"]),
+                ],
+                cwd=str(root),
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode not in (0, 1):
+                say("  regenerating the geometry header failed:")
+                say(result.stdout.strip() or result.stderr.strip())
+                return 2
+            say("  regenerated %s" % paths["header"].name)
 
         # The product's own three-way reconciliation.  A manifest, an XDC and a
         # top that disagree surface HERE, before any pulse file is touched.
@@ -615,7 +641,10 @@ def main(argv):
         if not backup.exists():
             backup.write_bytes(path.read_bytes())
         write_readable_json(path, tree)
-        say("  migrated %s (kept %s)" % (path.name, backup.name))
+        say(
+            "  migrated %s -> %d lanes (kept %s)"
+            % (path.name, len(tree["target"]["raw_lanes"]), backup.name)
+        )
     say(
         "  %d pulse file(s) migrated, %d already on this board, %d left alone"
         % (len(planned), already, len(problems))
@@ -658,7 +687,9 @@ def main(argv):
     if estimate.returncode == 1:
         say("  the part is OVER BUDGET for this geometry -- see the lines above.")
         return 1
-    return 0
+    # A pulse file left behind is a failure of the job the operator asked for,
+    # not a footnote: the board is changed and that file can no longer fire.
+    return 3 if problems else 0
 
 
 if __name__ == "__main__":

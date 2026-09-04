@@ -94,6 +94,63 @@ def _vaunix_factory(context, key: str, values: dict) -> InstalledLeaf:
     )
 
 
+def _discover_rigol() -> tuple[DeviceInstanceConfig, ...]:
+    """Every DG4000 that answers on this machine, named by what it answered.
+
+    The serial is the instrument's own, off ``*IDN?``, so unplugging one and
+    scanning again offers the same card rather than a differently numbered
+    stranger.  When an instrument gives no serial the resource it was found
+    at is the name -- still stable, still that instrument, just longer.
+    """
+
+    from zlc_atom.devices.rf.rigol_dg4000 import (
+        PROBED_RESOURCE_PREFIXES,
+        discover_dg4000,
+        probeable_resources,
+        visa_resources,
+    )
+
+    # "Found nothing" is only an answer if something was asked.  VISA's own
+    # list is far blinder than an operator expects: a LAN instrument appears
+    # only once it has been added in NI MAX, and a USB one only once its
+    # USB-TMC driver is bound -- so a Rigol sitting there, plugged in and
+    # working, can simply not be in the list.  Saying nothing then reports
+    # "no Rigol here" about a bench that has one.
+    manager = visa_resources()
+    listed = tuple(str(name) for name in manager.list_resources())
+    probeable = probeable_resources(listed)
+    if not probeable:
+        raise RuntimeError(
+            "VISA lists nothing to ask: no "
+            f"{' or '.join(PROBED_RESOURCE_PREFIXES)} resource is registered "
+            f"on this machine (it lists: {', '.join(listed) or 'nothing'}). "
+            "A LAN instrument has to be added in NI MAX -- or skip that and "
+            "type its TCPIP0::<address>::INSTR in by hand, which needs no "
+            "install; a USB one is invisible to VISA until a USB-TMC driver "
+            "is bound to it, which is what installing NI-VISA (or Rigol "
+            "UltraSigma) does."
+        )
+
+    def named(sighting) -> str:
+        tail = sighting.serial or "".join(
+            character if character.isalnum() else "_"
+            for character in sighting.resource
+        )
+        return f"dg4000_{tail}"
+
+    return tuple(
+        DeviceInstanceConfig(
+            instance_id=named(sighting),
+            role=named(sighting),
+            type_id="rf.rigol_dg4000",
+            parameters=RIGOL_DG4000_SCHEMA.project_values(
+                {"resource": sighting.resource}
+            ),
+        )
+        for sighting in discover_dg4000()
+    )
+
+
 def _discover_vaunix() -> tuple[DeviceInstanceConfig, ...]:
     """Every attached Lab Brick, by serial -- a count read, no opens.
 
@@ -127,6 +184,7 @@ DEVICE_TYPES = (
         RIGOL_DG4000_SCHEMA,
         ("rf.source",),
         factory=_rigol_factory,
+        discover=_discover_rigol,
     ),
     DeviceTypeDescriptor(
         "rf.vaunix_lms",

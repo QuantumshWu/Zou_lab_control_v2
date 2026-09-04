@@ -47,6 +47,8 @@ from .style import (
     RED,
     STEP_WIDTH,
     TEXT,
+    TITLE_ICON_GAP,
+    TITLE_ICON_RATIO,
     TITLE_LEFT_INSET,
     WINDOW_FALLBACK_MIN_PX,
     WINDOW_FALLBACK_PX,
@@ -4194,8 +4196,12 @@ class FluentScrollArea(QtWidgets.QScrollArea):
             bar = self.verticalScrollBar()
             needed = bar.maximum() > bar.minimum()
             reserved = 0 if needed else bar.sizeHint().width()
-            if self.viewportMargins().right() != reserved:
-                self.setViewportMargins(0, 0, reserved, 0)
+            margins = self.viewportMargins()
+            if margins.right() != reserved:
+                # The RIGHT gutter is this method's business; the bottom is
+                # not.  Zeroing it here undid whatever a linked group had
+                # padded the viewport with to keep its rows in step.
+                self.setViewportMargins(0, 0, reserved, margins.bottom())
         finally:
             self._reserving = False
 
@@ -4490,6 +4496,10 @@ class LinkedScrollPanes(QtWidgets.QWidget):
         self._row = row
         self._panes: list[QtWidgets.QAbstractScrollArea] = []
         self._moving = False
+        self._equalising = False
+        #: What each pane's viewport was padded by to make its reach match the
+        #: group's, keyed by the pane itself.
+        self._padding: dict[int, int] = {}
         self._bar = QtWidgets.QScrollBar(QtCore.Qt.Vertical, self)
         self._bar.setStyleSheet(fluent_scrollbar_stylesheet("QScrollBar"))
         self._bar.setFixedWidth(fluent_scrollbar_thickness())
@@ -4531,7 +4541,48 @@ class LinkedScrollPanes(QtWidgets.QWidget):
         bars = [pane.verticalScrollBar() for pane in self._panes]
         return max(bars, key=lambda bar: bar.maximum(), default=None)
 
+    def _equalise_reach(self) -> None:
+        """Give every pane the same reachable range, so one value means one row.
+
+        A pane's maximum is its content height less its VIEWPORT height, and
+        the viewports in a group are not the same height: a wide timeline gives
+        a strip up to its own horizontal scrollbar and the name column beside
+        it does not, and one column's content can end sooner than its
+        neighbour's.  Driving every pane to one value then parts them exactly
+        at the bottom -- Qt clamps the shallower pane at ITS maximum, so the
+        rows line up the whole way down and step out of line on the last
+        screenful.
+
+        Padding each viewport by what it lacks makes the group bottom out
+        together, whichever of those two reasons it was: the pane that runs out
+        first simply shows blank where its neighbour still has rows, which is
+        what "these columns are one surface" has to mean at the end of it.
+        """
+
+        if self._equalising or not self._panes:
+            return
+        self._equalising = True
+        try:
+            # The reach a pane would have with no padding of ours.
+            natural = [
+                pane.verticalScrollBar().maximum() - self._padding.get(id(pane), 0)
+                for pane in self._panes
+            ]
+            target = max(natural)
+            for pane, reach in zip(self._panes, natural):
+                wanted = max(0, target - reach)
+                if self._padding.get(id(pane), 0) == wanted:
+                    continue
+                self._padding[id(pane)] = wanted
+                margins = pane.viewportMargins()
+                pane.setViewportMargins(
+                    margins.left(), margins.top(), margins.right(), wanted
+                )
+        finally:
+            self._equalising = False
+
     def _reconcile_bar(self, *_range: int) -> None:
+        self._equalise_reach()
         deepest = self._deepest()
         maximum = deepest.maximum() if deepest is not None else 0
         self._bar.setRange(0, maximum)
@@ -4623,6 +4674,16 @@ class FluentWindow(FramelessWindow):
         self.setTitleBar(title_bar)
         self._zlc_title_bar = title_bar
         self.setWindowTitle(title)
+        # The product mark, left of the words: a window whose title bar wears a
+        # different face from its taskbar button reads as two programs.
+        self._zlc_icon = QtWidgets.QLabel(title_bar)
+        self._zlc_icon.setObjectName("zlcWindowIcon")
+        self._zlc_icon.setStyleSheet(
+            "QLabel#zlcWindowIcon { background: transparent; }"
+        )
+        self._zlc_icon.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+        self._zlc_icon.setAlignment(QtCore.Qt.AlignCenter)
+        self._zlc_icon.show()
         self._zlc_title = QtWidgets.QLabel(title, title_bar)
         self._zlc_title.setObjectName("zlcWindowTitle")
         self._zlc_title.setStyleSheet(
@@ -4677,7 +4738,29 @@ class FluentWindow(FramelessWindow):
         for child in tb.findChildren(QtWidgets.QAbstractButton):
             if child.isVisible() and child.width() > 0:
                 right = min(right, child.x())
-        lab.setGeometry(x, 0, max(0, right - x - scaled_px(8)), tb.height())
+
+        # The MARK takes the content column and the words follow it, so the
+        # title block still begins where the body below it does.
+        from ..qt import app_icon  # noqa: PLC0415 -- qt.py reads this module
+
+        side = max(1, int(round(tb.height() * TITLE_ICON_RATIO)))
+        # ASK IN LOGICAL PIXELS.  ensure_qt_app turns on AA_UseHighDpiPixmaps,
+        # so QIcon hands back a pixmap already scaled for the screen and
+        # already carrying its device ratio; scaling the request as well made
+        # it twice the label, and a QLabel does not shrink a pixmap -- it clips
+        # it, so the title bar showed the middle of the mark with its corners
+        # cropped away.
+        pixmap = app_icon().pixmap(side, side)
+        if not pixmap.isNull():
+            self._zlc_icon.setPixmap(pixmap)
+        self._zlc_icon.setGeometry(
+            x, max(0, (tb.height() - side) // 2), side, side
+        )
+        self._zlc_icon.setVisible(not pixmap.isNull())
+        self._zlc_icon.raise_()
+
+        words = x + (side + scaled_px(TITLE_ICON_GAP) if not pixmap.isNull() else 0)
+        lab.setGeometry(words, 0, max(0, right - words - scaled_px(8)), tb.height())
         lab.raise_()
 
     def showEvent(self, event):  # noqa: N802 - Qt naming
