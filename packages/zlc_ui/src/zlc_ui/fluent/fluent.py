@@ -2689,19 +2689,39 @@ class FluentCycleComboBox(FluentComboBox):
         label: str,
         choices: Sequence[tuple[object, str]],
     ) -> None:
-        """Append the one popup action backed by ``choices``."""
+        """Install the one popup action backed by ``choices``.
 
-        if self._cycle_row >= 0:
-            raise RuntimeError("cycle choices must be configured after clear()")
+        Re-installable, because the domain behind the action is DATA: an
+        axis that is still filling offers one more coordinate per shot.
+        Requiring a clear() first meant the only way to say "one more
+        coordinate" was to rebuild the whole popup -- which closed an open
+        dropdown and swallowed the click already travelling to it, once
+        per shot.  The action keeps its row; only what it cycles through
+        changes, and a position already chosen is kept where it still
+        exists.
+        """
+
         if not isinstance(label, str) or not label.strip():
             raise ValueError("cycle label must be non-empty text")
         if not isinstance(choices, Sequence) or not len(choices):
             raise ValueError("cycle choices must be a non-empty sequence")
+        previous = None
+        if self._cycle_row >= 0 and self._cycle_choices is not None:
+            if 0 <= self._cycle_position < len(self._cycle_choices):
+                previous = self._cycle_choices[self._cycle_position]
         self._cycle_choices = choices
         self._cycle_label = label.strip()
         self._cycle_position = 0
-        self._cycle_row = self.count()
-        self.addItem(self._cycle_label)
+        if previous is not None:
+            for position in range(len(choices)):
+                if self._typed_equal(self._cycle_choice(position)[0], previous[0]):
+                    self._cycle_position = position
+                    break
+        if self._cycle_row < 0:
+            self._cycle_row = self.count()
+            self.addItem(self._cycle_label)
+        elif self.itemText(self._cycle_row) != self._cycle_label:
+            self.setItemText(self._cycle_row, self._cycle_label)
 
     def _cycle_choice(self, position: int) -> tuple[object, str]:
         choices = self._cycle_choices

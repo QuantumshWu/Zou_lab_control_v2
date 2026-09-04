@@ -748,3 +748,87 @@ window.close()
 print('ok')
 """
     )
+
+
+def test_a_growing_axis_does_not_rebuild_the_fate_popup() -> None:
+    """One more shot is not a different form.
+
+    A Scope cycle carries every coordinate its axis offers, so it grows
+    with the data: one more shot, one more entry.  Compared as structure,
+    that refused adoption and sent the form through reconcile, which
+    refilled the combo -- ``clear()`` and re-add -- once per shot.  An
+    open dropdown closed under the operator and the click already on its
+    way was eaten, which is what "the facet option flickers, or clicking
+    it does nothing" looked like from the outside.
+    """
+
+    from PyQt5 import QtWidgets
+
+    from zlc_ui import ensure_qt_app
+    from zlc_ui.form import FormChoice, FormFieldProps, FormSpec
+    from zlc_ui.form.qt_form import FluentParameterForm
+
+    ensure_qt_app(["zlc-ui-tests"])
+
+    def spec(depth: int) -> FormSpec:
+        return FormSpec(
+            (
+                FormFieldProps(
+                    key="fate",
+                    kind="choice",
+                    label="source index",
+                    choices=(
+                        FormChoice("Reduce", "reduce"),
+                        FormChoice("Facet", "facet"),
+                    ),
+                    cycle_label="Scope",
+                    cycle_choices=tuple(
+                        (offset, f"= {offset}")
+                        for offset in range(-(depth - 1), 1)
+                    ),
+                ),
+            )
+        )
+
+    form = FluentParameterForm(spec(5), {"fate": "facet"})
+    widget = form.widget_for("fate")
+    cleared = {"count": 0}
+    original_clear = widget.clear
+
+    def counted_clear() -> None:
+        cleared["count"] += 1
+        return original_clear()
+
+    widget.clear = counted_clear
+
+    adopted = form.adopt_projection(spec(6), {"fate": "facet"})
+    assert adopted, "one more coordinate must not refuse adoption"
+    assert form.widget_for("fate") is widget, "the control must survive"
+    assert cleared["count"] == 0, "the popup must not be refilled"
+    assert form.read_value("fate") == "facet", form.read_value("fate")
+
+    # Growing it again through the full reconcile path is just as quiet.
+    form.reconcile(spec(7), {"fate": "facet"})
+    assert form.widget_for("fate") is widget
+    assert cleared["count"] == 0, "reconcile refilled a popup that did not change"
+    assert form.read_value("fate") == "facet", form.read_value("fate")
+
+    # A genuinely different choice list still refills, exactly as before.
+    changed = FormSpec(
+        (
+            FormFieldProps(
+                key="fate",
+                kind="choice",
+                label="source index",
+                choices=(
+                    FormChoice("Reduce", "reduce"),
+                    FormChoice("Facet", "facet"),
+                    FormChoice("X axis", "x"),
+                ),
+                cycle_label="Scope",
+                cycle_choices=((0, "= 0"),),
+            ),
+        )
+    )
+    form.reconcile(changed, {"fate": "facet"})
+    assert cleared["count"] == 1, "a new choice list must refill the popup"
