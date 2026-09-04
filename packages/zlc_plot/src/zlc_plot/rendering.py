@@ -3693,8 +3693,6 @@ class MatplotlibRenderer:
             # consecutive reusable frames.
             self._boundary_chrome_cache.clear()
             self._forget_chrome_commands()
-        dynamics = self._dynamic_artists()
-        ordered = sorted(dynamics, key=lambda entry: entry[0])
         # Where the gesture's own artists begin, in the one z-order a full
         # draw uses.  The frame below that point is captured on the way past,
         # so a pointer move repaints only the tail.  Splitting the SEQUENCE
@@ -3702,22 +3700,38 @@ class MatplotlibRenderer:
         # full-draw-exact: anything that legitimately draws above a selector
         # stays above it, and is simply repainted with it.
         selector_ids = self._selector_artist_ids()
-        split = None
-        if (
+        gesture_split = bool(
             self._selector_gesture_kind is not None
             and self._selector_gesture_kind is not SelectorSceneKind.COLOR_LIMITS
             and selector_ids
-        ):
-            split = next(
+        )
+
+        def ordered_with_split(entries: Any) -> tuple[list[Any], int | None]:
+            """The z-order and where the gesture's tail starts in THIS list.
+
+            Asked again whenever the artist list changes underneath it: a
+            fallback that materializes a prepared scene adds artists, and an
+            index into the list from before that is an index into a different
+            list -- it would cut the frame in the wrong place.
+            """
+
+            listed = sorted(entries, key=lambda entry: entry[0])
+            if not gesture_split:
+                return listed, None
+            first = next(
                 (
-                    index
-                    for index, (_key, artist) in enumerate(ordered)
+                    position
+                    for position, (_key, artist) in enumerate(listed)
                     if id(artist) in selector_ids
                 ),
                 None,
             )
-            if split is not None:
-                ordered, split = _gesture_ordering(ordered, split, selector_ids)
+            if first is None:
+                return listed, None
+            return _gesture_ordering(listed, first, selector_ids)
+
+        dynamics = self._dynamic_artists()
+        ordered, split = ordered_with_split(dynamics)
         # Every owner call enters the renderer's style once around mutation
         # and compose.  Re-entering here copied the full rcParams mapping for
         # every frame without changing a property on any existing artist.
@@ -3775,43 +3789,42 @@ class MatplotlibRenderer:
         else:
             restore(self._background_region)
         renderer = _prepare_renderer(get_renderer())
+        # WHAT IS DRAWN DOES NOT DEPEND ON THE SPLIT.  The split is where the
+        # frame is cut for the pointer-move capture, and nothing else; every
+        # pass below runs whether or not a gesture is open.  Each of them used
+        # to be gated on ``split is None``, which quietly made a gesture change
+        # the PICTURE: the kernels painted nothing, and a kind whose data is a
+        # prepared scene has no artist to fall back on -- installing the
+        # command hides the real lines and bars and hands the picture over
+        # (see ``_PREPARED_SCENE_KEYS``).  So a curve panel drew chrome and a
+        # rubber band and no data, for the whole length of an area drag.
         prepared_image_command = isinstance(
             self._artists.get("image:prepared"), dict
         )
-        native_image, native_image_ids = (
-            self._raster_prepared_images(canvas)
-            if split is None
-            else (False, frozenset())
-        )
-        image_fallback = bool(
-            split is None
-            and prepared_image_command
-            and not native_image
-        )
+        native_image, native_image_ids = self._raster_prepared_images(canvas)
+        image_fallback = bool(prepared_image_command and not native_image)
         if image_fallback:
             self._materialize_prepared_images()
             dynamics = self._dynamic_artists()
-            ordered = sorted(dynamics, key=lambda entry: entry[0])
+            ordered, split = ordered_with_split(dynamics)
         prepared_curve_command = isinstance(
             self._artists.get("curve:prepared"), dict
         )
         native_curve_command = (
             self._raster_facet_curve_command(canvas)
-            if split is None and not native_image
+            if not native_image
             else False
         )
         curve_fallback = bool(
-            split is None
-            and prepared_curve_command
-            and not native_curve_command
+            prepared_curve_command and not native_curve_command
         )
         if curve_fallback:
             self._materialize_prepared_curve()
             dynamics = self._dynamic_artists()
-            ordered = sorted(dynamics, key=lambda entry: entry[0])
+            ordered, split = ordered_with_split(dynamics)
         native_lines = (
             self._native_curve_lines()
-            if split is None and not native_image and not curve_fallback
+            if not native_image and not curve_fallback
             else None
         )
         facet_ellipse_ids = {
@@ -3854,6 +3867,45 @@ class MatplotlibRenderer:
                     )
                 )
                 color_overlay_ids = {id(artist) for _key, artist in color_overlay}
+        captured = False
+        blocked = False
+
+        def paint(entries: Any, *, at_split: bool) -> None:
+            """Paint one ordered subsequence, capturing at the gesture split.
+
+            ``at_split`` marks the LAST subsequence a branch paints: only
+            there can the capture be the whole frame below the gesture.  An
+            earlier subsequence that already reaches above the split blocks
+            the capture outright, so the move path composes instead of
+            restoring a frame that is missing what came after it.
+            """
+
+            nonlocal captured, blocked
+            capturing = (
+                at_split and split is not None and not captured and not blocked
+            )
+            for position, (index, (_key, artist)) in enumerate(entries):
+                if split is not None and index >= split and not captured:
+                    if capturing:
+                        self._gesture_region = capture(self._figure.bbox)
+                        self._gesture_overlay = tuple(
+                            entry for _index, entry in entries[position:]
+                        )
+                        self._gesture_selector_ids = selector_ids
+                        captured = True
+                        capturing = False
+                    else:
+                        blocked = True
+                if artist.get_visible():
+                    self._draw_dynamic_artist(artist, renderer, canvas)
+
+        def subsequence(keep: Any) -> list[Any]:
+            return [
+                (index, entry)
+                for index, entry in enumerate(ordered)
+                if keep(entry[1])
+            ]
+
         used_native = False
         if native_image:
             # Only the chrome the image raster may have OVERWRITTEN comes
@@ -3872,28 +3924,29 @@ class MatplotlibRenderer:
                     forward_ids.update(
                         id(artist) for artist, _owner, _zorder in entries
                     )
-            for _key, artist in ordered:
-                if (
-                    id(artist) in forward_ids
+            paint(
+                subsequence(
+                    lambda artist: id(artist) in forward_ids
                     and id(artist) not in color_overlay_ids
-                    and artist.get_visible()
-                ):
-                    self._draw_dynamic_artist(artist, renderer, canvas)
+                ),
+                at_split=False,
+            )
             ellipses_drawn, _ellipse_ids = self._raster_facet_fit_ellipses(canvas)
-            for _key, artist in ordered:
-                if (
-                    id(artist) not in native_image_ids
+            paint(
+                subsequence(
+                    lambda artist: id(artist) not in native_image_ids
                     and id(artist) not in forward_ids
                     and id(artist) not in color_overlay_ids
-                    and (not ellipses_drawn or id(artist) not in facet_ellipse_ids)
-                    and artist.get_visible()
-                ):
-                    self._draw_dynamic_artist(artist, renderer, canvas)
+                    and (
+                        not ellipses_drawn
+                        or id(artist) not in facet_ellipse_ids
+                    )
+                ),
+                at_split=not color_overlay,
+            )
             used_native = True
         if native_curve_command and native_lines is None:
-            for _key, artist in ordered:
-                if artist.get_visible():
-                    self._draw_dynamic_artist(artist, renderer, canvas)
+            paint(list(enumerate(ordered)), at_split=True)
             used_native = True
         if native_lines is not None:
             bar_groups, data_lines, fit_lines = native_lines
@@ -3911,41 +3964,35 @@ class MatplotlibRenderer:
             draw_boundary_ids = boundary_ids
             bars_native = self._raster_error_bars(bar_groups, canvas)
             if not bars_native:
-                for _key, artist in ordered:
-                    if id(artist) in bar_ids and artist.get_visible():
-                        self._draw_dynamic_artist(artist, renderer, canvas)
+                paint(
+                    subsequence(lambda artist: id(artist) in bar_ids),
+                    at_split=False,
+                )
             if self._raster_curve_lines(data_lines, canvas):
-                for _key, artist in ordered:
-                    if (
-                        id(artist) in draw_boundary_ids
-                        and artist.get_visible()
-                    ):
-                        self._draw_dynamic_artist(artist, renderer, canvas)
+                paint(
+                    subsequence(lambda artist: id(artist) in draw_boundary_ids),
+                    at_split=False,
+                )
                 if self._raster_curve_lines(fit_lines, canvas):
-                    for _key, artist in ordered:
-                        if (
-                            id(artist) not in native_ids
+                    paint(
+                        subsequence(
+                            lambda artist: id(artist) not in native_ids
                             and id(artist) not in boundary_ids
-                            and artist.get_visible()
-                        ):
-                            self._draw_dynamic_artist(artist, renderer, canvas)
+                        ),
+                        at_split=True,
+                    )
                     used_native = True
         if used_native and color_overlay:
             self._gesture_region = capture(self._figure.bbox)
             self._gesture_overlay = color_overlay
             self._gesture_selector_ids = selector_ids
+            captured = True
             for _key, artist in color_overlay:
                 if artist.get_visible():
                     self._draw_dynamic_artist(artist, renderer, canvas)
         if not used_native:
-            for index, (_key, artist) in enumerate(ordered):
-                if index == split:
-                    self._gesture_region = capture(self._figure.bbox)
-                    self._gesture_overlay = tuple(ordered[split:])
-                    self._gesture_selector_ids = selector_ids
-                if artist.get_visible():
-                    self._draw_dynamic_artist(artist, renderer, canvas)
-        if split is None and not color_overlay:
+            paint(list(enumerate(ordered)), at_split=True)
+        if not captured:
             self._forget_gesture_region()
         self._raster_generation += 1
         self._composed_generation = self._raster_generation

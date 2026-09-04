@@ -236,7 +236,15 @@ def test_no_image_front_is_ever_left_to_matplotlib(shape, ratio, presentation) -
     height, width = shape
     renderer_class = rendering_module.MatplotlibRenderer
     original = renderer_class._blit_exact_rgba_image
+    original_prepared = renderer_class._raster_prepared_images
     verdicts: list[bool] = []
+    #: Fronts the image raster painted straight into the canvas.  A front
+    #: that never reaches an artist at all is the BEST outcome, not a
+    #: missing one -- so it counts as having reached the compose.  Written
+    #: down because the gesture path used to be the one state that fell back
+    #: to an artist, and it was quietly the only thing keeping the
+    #: non-vacuity assertion below true.
+    rastered: list[bool] = []
 
     def watched(self, artist, canvas):
         from matplotlib.image import AxesImage
@@ -246,7 +254,14 @@ def test_no_image_front_is_ever_left_to_matplotlib(shape, ratio, presentation) -
             verdicts.append(bool(answer))
         return answer
 
+    def watched_prepared(self, canvas):
+        answer = original_prepared(self, canvas)
+        if answer[0]:
+            rastered.append(True)
+        return answer
+
     renderer_class._blit_exact_rgba_image = watched
+    renderer_class._raster_prepared_images = watched_prepared
     try:
         session = PlotSession(
             _camera_snapshot(height, width),
@@ -258,12 +273,14 @@ def test_no_image_front_is_ever_left_to_matplotlib(shape, ratio, presentation) -
             session.set_parameters({"presentation": presentation})
             session.rgba()
             verdicts.clear()
+            rastered.clear()
             _states(session, shape)
         finally:
             session.close()
     finally:
         renderer_class._blit_exact_rgba_image = original
-    assert verdicts, "no image front reached the compose at all"
+        renderer_class._raster_prepared_images = original_prepared
+    assert verdicts or rastered, "no image front reached the compose at all"
     assert all(verdicts), (
         "%d of %d image fronts fell back to Matplotlib's image machinery"
         % (verdicts.count(False), len(verdicts))
