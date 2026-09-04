@@ -1764,3 +1764,46 @@ def test_a_presenter_with_nobody_to_ask_never_discards_on_its_own() -> None:
     finally:
         presenter._data_drafts.clear()
         _close_presenter(presenter)
+
+
+def test_the_close_question_is_asked_once_per_gesture() -> None:
+    """Closing takes several passes; the decision is not one of them.
+
+    ``close`` is a retry loop -- panels first, then the IO worker, each
+    pass returning False and asking to be called again -- and the dirty
+    check sat inside it, so the operator was asked once per PASS.  A
+    first close wanted two passes and asked twice; after declining, the
+    pass already spent made the next close want one, and it asked once.
+    A decision about losing work belongs to the gesture, not to the
+    plumbing that carries it out.
+    """
+
+    view = _ViewerView()
+    asked: list[str] = []
+    view.confirm_discard = lambda text: asked.append(text) or True
+    presenter = _built_presenter(view)
+    try:
+        presenter._data_drafts["data-1"] = {
+            "name": "Manual data 1",
+            "modified": True,
+            "unsaved": False,
+            "message": "",
+            "producer": None,
+            "publication": None,
+        }
+        passes = {"count": 0}
+        finished = presenter._panel_presenter.close
+
+        def staged_close() -> bool:
+            passes["count"] += 1
+            return bool(passes["count"] > 1 and finished())
+
+        presenter._panel_presenter.close = staged_close
+
+        presenter.close()
+        presenter.close()
+        assert passes["count"] >= 2, "the test needs a close that takes two passes"
+        assert len(asked) == 1, asked
+    finally:
+        presenter._data_drafts.clear()
+        _close_presenter(presenter)

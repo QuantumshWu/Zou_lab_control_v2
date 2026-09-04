@@ -2096,6 +2096,8 @@ class FigureViewerPresenter:
         if confirm_discard is not None and not callable(confirm_discard):
             raise TypeError("confirm_discard must be callable or None")
         self._confirm_discard = confirm_discard
+        #: The answer belongs to the close GESTURE, not to a pass of it.
+        self._discard_agreed = False
         self._run_off_thread = run_off_thread
         self._close_worker = close_worker
         self._request_close = request_close
@@ -3057,13 +3059,23 @@ class FigureViewerPresenter:
             for draft in self._data_drafts.values()
             if bool(draft["modified"] or draft["unsaved"])
         )
-        if unsaved and not self._agrees_to_lose(", ".join(unsaved)):
-            self._close_requested = False
-            self.view.set_status(
-                "Save or discard the open data working copy before closing",
-                error=True,
-            )
-            return False
+        if unsaved and not self._discard_agreed:
+            # Closing takes several passes -- panels, then the IO worker --
+            # and each returns False and asks to be called again.  Asked
+            # inside that loop, the operator answered once per PASS: a
+            # first close wanted two and asked twice, and after declining,
+            # the pass already spent left the next close wanting one.  The
+            # decision is made once and held for as long as this gesture
+            # is in flight; declining ends the gesture and the next close
+            # is a fresh question.
+            if not self._agrees_to_lose(", ".join(unsaved)):
+                self._close_requested = False
+                self.view.set_status(
+                    "Save or discard the open data working copy before closing",
+                    error=True,
+                )
+                return False
+            self._discard_agreed = True
         self._close_requested = True
         if self._busy:
             self.view.set_status("closing after the current operation…")
