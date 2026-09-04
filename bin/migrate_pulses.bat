@@ -7,7 +7,8 @@ rem into "cannot open <name>.json: unknown pulse field(s): repeat".  The
 rem product carries no readers for old shapes on purpose; this is the other
 rem half of that choice.  Run it once here, then it and its module get deleted.
 rem
-rem It knows the bracket rename and nothing else.  Anything older says so and
+rem It knows the bracket rename and the config declaration, so one run takes
+rem a pulse written before either all the way to today.  Anything older says so and
 rem is left alone; anything it cannot account for is refused, not guessed at.
 rem
 rem Double-click it to migrate the workspace the Pulse Editor opens, or drag

@@ -14,7 +14,13 @@ that change.  It is a ONE-SHOT: run it once on each machine that holds
 pulses, then delete it -- module, launcher and test in one commit -- exactly
 as the previous migration was removed in ``5d889a7``.
 
-It knows that one rename and nothing else.  A document carrying anything
+A second grammar change followed it: a pulse now declares its ``config``
+parameters and the file it refreshes them from.  A document written before
+that declares neither, which is the same "unknown pulse field(s)" wall from
+the other side, so this tool carries both steps and one run takes a pulse
+written before the bracket split all the way to today.
+
+It knows those two changes and nothing else.  A document carrying anything
 else it cannot account for is refused in the reader's own words and left
 byte-for-byte as it was found, because a migration that silently drops what
 it cannot explain turns "will not open" into "opens, and something is
@@ -76,11 +82,32 @@ def _add_the_missing_run_repeats(
     return f"run_repeats = {tree['run_repeats']}"
 
 
+def _declare_no_config_binding(
+    tree: dict[str, Any], before: Mapping[str, Any]
+) -> str | None:
+    """A pulse written before config parameters existed declares none.
+
+    Empty is the honest reconstruction and the only safe one: the document
+    never named a field as configured, so nothing in it may be refreshed from
+    a file, and no file is named.  Whoever wants one says so in the editor.
+    """
+
+    added: list[str] = []
+    if "config_parameters" not in before:
+        tree["config_parameters"] = []
+        added.append("config_parameters = []")
+    if "config_source" not in before:
+        tree["config_source"] = ""
+        added.append('config_source = ""')
+    return ", ".join(added) if added else None
+
+
 #: In order.  Each reads the document AS FOUND for its condition, so a later
 #: step cannot be misled by an earlier one having already filled a field in.
 STEPS: tuple[Callable[[dict[str, Any], Mapping[str, Any]], "str | None"], ...] = (
     _rename_repeat_to_bracket,
     _add_the_missing_run_repeats,
+    _declare_no_config_binding,
 )
 
 
