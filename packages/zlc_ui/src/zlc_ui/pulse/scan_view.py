@@ -6,7 +6,7 @@ from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
     ACCENT, GREEN, GREY, ORANGE, RED, YELLOW, FluentButton, FluentCodeEdit,
-    FluentSpinBox, FluentFrame, FluentGroupBox, FluentLabel, FluentLineEdit,
+    FluentDoubleSpinBox, FluentFrame, FluentGroupBox, FluentLabel, FluentLineEdit,
     signals_blocked,
 )
 
@@ -55,11 +55,14 @@ class PulseScanView(QtWidgets.QWidget):
         run_row.setContentsMargins(0, 0, 0, 0)
         run_row.setSpacing(px(6, minimum=4))
         run_row.addWidget(FluentLabel("Scan repeats (0 = ∞)"))
-        # An integer control for an integer.  A double spin box told to show no
-        # decimals is still a float field: it accepts 2.5, formats what it
-        # holds, and offers a count of repeats that cannot be a count.
-        self.scan_repeats_spin = FluentSpinBox()
-        self.scan_repeats_spin.setMaximum(2**31 - 1)
+        # Qt's integer spin stops at signed 31-bit.  The zero-decimal Fluent
+        # double spin represents every uint32 integer exactly, so the visible
+        # control and the hardware count share the full domain.
+        self.scan_repeats_spin = FluentDoubleSpinBox()
+        self.scan_repeats_spin._step_btn.hide()
+        self.scan_repeats_spin.setDecimals(0)
+        self.scan_repeats_spin.setSingleStep(1.0)
+        self.scan_repeats_spin.setMaximum(float((1 << 32) - 1))
         self._minimum_repeats = 0
         self._committed_repeats = 0
         self.set_repeats_range(0, 0)
@@ -159,7 +162,7 @@ class PulseScanView(QtWidgets.QWidget):
     def set_repeats(self, repeats: int) -> None:
         value = max(self._minimum_repeats, int(repeats))
         with signals_blocked(self.scan_repeats_spin):
-            self.scan_repeats_spin.setValue(value)
+            self.scan_repeats_spin.setValue(float(value))
         self._committed_repeats = value
 
     def _commit_repeats(self) -> None:

@@ -36,38 +36,6 @@ def _camera_frames(*, cycles: int, frames: int):
     ).block.schema
 
 
-def _scalar_source(*, repeats: int = 1):
-    """One scalar per shot: what a scan of a device readout captures."""
-
-    from zlc_atom.data import snapshot_from_array
-
-    return snapshot_from_array(
-        np.zeros((repeats,), dtype=np.float64),
-        producer="device",
-        signal="readout",
-        generation="auto-kind",
-        revision=1,
-    ).block.schema
-
-
-def _scan(source, *, axes: dict[str, int], visits: int = 1):
-    """A scan dataset the way ScanDatasetWriter lays one out."""
-
-    import itertools
-
-    from zlc_atom.nodes.scan.dataset import scan_dataset_schema
-
-    rows = tuple(
-        itertools.product(*(range(size) for size in axes.values()))
-    )
-    return scan_dataset_schema(
-        source,
-        rows,
-        tuple((name, "V") for name in axes),
-        visits=visits,
-    )
-
-
 def _auto(schema):
     return task_console_fitting_spec(schema, "", "")
 

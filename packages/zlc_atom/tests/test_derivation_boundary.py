@@ -89,7 +89,7 @@ def _finished_shot(plane, camera, sequencer, windows):
         producer="cm",
     )
     capture = node.prepare()
-    sequencer.fire()
+    sequencer.fire(run_repeats=1, scan_repeats=1)
     sequencer.wait_done(1.0)
     return node, capture.collect()
 
@@ -594,7 +594,7 @@ def test_a_live_monitor_signal_does_carry_coverage(bench) -> None:
     )
     monitor = node.monitor()
     try:
-        sequencer.fire()
+        sequencer.fire(run_repeats=1, scan_repeats=1)
         sequencer.wait_done(1.0)
         deadline = time.monotonic() + 5.0
         while monitor.poll() is None and time.monotonic() < deadline:

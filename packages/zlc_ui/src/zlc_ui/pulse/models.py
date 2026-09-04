@@ -71,7 +71,7 @@ class PeriodVM:
 
 
 @dataclass(frozen=True)
-class RepeatVM:
+class BracketVM:
     start_period_id: str
     end_period_id: str
     count: int
@@ -165,11 +165,12 @@ class ScheduleVM:
     ports: tuple[PortRowVM, ...]
     periods: tuple[PeriodVM, ...]
     analog_mode_choices: tuple[FormChoice, ...] = ()
-    repeat: RepeatVM | None = None
+    bracket: BracketVM | None = None
+    run_repeats: int = 0
     delay_rows: tuple[DelayRowVM, ...] = ()
     scan_summary_text: str = ""
-    min_repeat_count: int = 1
-    default_repeat_count: int = 1
+    min_bracket_count: int = 2
+    default_bracket_count: int = 2
 
     def __post_init__(self) -> None:
         values = _string_choice_values(
@@ -238,7 +239,7 @@ __all__ = [
     "FieldVM",
     "PeriodVM",
     "PortRowVM",
-    "RepeatVM",
+    "BracketVM",
     "ScanPageRecord",
     "ScheduleVM",
     "TargetPortRecord",

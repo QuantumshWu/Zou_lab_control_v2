@@ -48,12 +48,15 @@ from zlc_runtime import SignalDataPlane
 from zlc_pulse import (
     AnalogStep,
     OutputDelay,
+    PulseFieldRef,
     PulsePeriod,
     PulseSequence,
+    PulseSlot,
     compile_sequence,
     load_streamer_config,
     resolve_api_parameters,
 )
+from zlc_pulse.wire import CtrlWords, STATUS_DONE, STATUS_RUNNING
 from tests.pulse_fixture import (
     CAMERA_CHANNEL,
     IMAGING_PULSE_RESOURCE,
@@ -861,7 +864,7 @@ def test_add_remove_and_move_change_the_next_triggered_qcmos_frame(
                 timeout=1.0,
             )
             arm_sequencer(sequencer, pulse)
-            sequencer.fire(cycles=1)
+            sequencer.fire(run_repeats=1, scan_repeats=1)
             records = camera.read_frame_records(3, timeout=2.0, exact=True)
             assert sequencer.wait_done(1.0) is not None
             terminal = camera.finish_record_capture()
@@ -1197,12 +1200,19 @@ def test_virtual_pulse_fire_uses_loaded_camera_window_count() -> None:
         program = compile_sequence(sequence, board.geometry, board.clock_hz)
         streamer.load(program, source=sequence)
         started = time.monotonic()
-        streamer.fire()
+        streamer.fire(run_repeats=1, scan_repeats=1)
+        assert streamer.snapshot()["status"] == STATUS_RUNNING
+        assert streamer.transport.read_word(CtrlWords.STATUS) == STATUS_RUNNING
         time.sleep(program.duration_seconds * 0.25)
         assert streamer.wait_done(0.0) is None
-        assert streamer.wait_done(1.0) is not None
+        first_report = streamer.wait_done(1.0)
+        assert first_report is not None
+        assert first_report.status == STATUS_DONE
+        assert first_report.cursor == 0
+        assert streamer.snapshot()["status"] == STATUS_DONE
+        assert streamer.snapshot()["firing"] is False
         assert time.monotonic() - started >= program.duration_seconds * 0.8
-        streamer.fire(cycles=None)
+        streamer.fire(run_repeats=0, scan_repeats=1)
         deadline = time.monotonic() + 0.5
         while world._fire_count < 3 and time.monotonic() < deadline:
             time.sleep(0.005)
@@ -1212,15 +1222,74 @@ def test_virtual_pulse_fire_uses_loaded_camera_window_count() -> None:
         time.sleep(0.08)
         assert world._fire_count == stopped_at
 
-        streamer.fire(cycles=20)
+        streamer.fire(run_repeats=20, scan_repeats=1)
         deadline = time.monotonic() + 0.5
         while world._fire_count < stopped_at + 2 and time.monotonic() < deadline:
             time.sleep(0.005)
         streamer.safe()
         interrupted_at = world._fire_count
+        safe_cursor = streamer.transport.read_word(CtrlWords.CURSOR)
         assert stopped_at + 2 <= interrupted_at < stopped_at + 20
         time.sleep(0.08)
         assert world._fire_count == interrupted_at
+        assert streamer.transport.read_word(CtrlWords.STATUS) == 0
+        assert streamer.transport.read_word(CtrlWords.CURSOR) == safe_cursor
+
+        # A scan row is visited once only after all of its whole-Pulse Run
+        # repeats.  Extend this existing lifecycle acceptance rather than
+        # creating a second virtual scheduler oracle.
+        slotted = replace(
+            _world_pulse(duration=0.03, cooling=True, trap=True),
+            slots=(
+                PulseSlot(
+                    "dac",
+                    PulseFieldRef("dac", "state", "da_bias_x"),
+                    "value",
+                ),
+            ),
+        )
+        program = compile_sequence(slotted, board.geometry, board.clock_hz)
+        rows = ((-16,), (24,))
+        streamer.load(program, source=slotted, rows=rows)
+        seen_rows: list[tuple[int, ...]] = []
+        original_fire = world.fire
+
+        def record_row(*args, table=None, **kwargs) -> None:
+            seen_rows.append(tuple(table))
+            original_fire(*args, table=table, **kwargs)
+
+        world.fire = record_row  # type: ignore[method-assign]
+        streamer.fire(run_repeats=2, scan_repeats=3)
+        deadline = time.monotonic() + 0.5
+        while len(seen_rows) < 2 and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert streamer.transport.read_word(CtrlWords.CURSOR) == 0
+        while len(seen_rows) < 3 and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert streamer.transport.read_word(CtrlWords.CURSOR) == 1
+        report = streamer.wait_done(1.0)
+        assert report is not None
+        assert report.status == STATUS_DONE
+        assert report.cursor == len(rows) * 3 - 1
+        assert streamer.snapshot()["status"] == STATUS_DONE
+        assert streamer.snapshot()["cursor"] == len(rows) * 3 - 1
+        assert streamer.snapshot()["firing"] is False
+        assert seen_rows == [rows[0], rows[0], rows[1], rows[1]] * 3
+
+        seen_rows.clear()
+        streamer.fire(run_repeats=1, scan_repeats=0)
+        deadline = time.monotonic() + 0.5
+        while len(seen_rows) < 3 and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert seen_rows[:3] == [rows[0], rows[1], rows[0]]
+        assert streamer.transport.read_word(CtrlWords.CURSOR) >= 2
+        streamer.safe()
+        scan_stopped_at = len(seen_rows)
+        scan_safe_cursor = streamer.transport.read_word(CtrlWords.CURSOR)
+        time.sleep(0.08)
+        assert len(seen_rows) == scan_stopped_at
+        assert streamer.transport.read_word(CtrlWords.STATUS) == 0
+        assert streamer.transport.read_word(CtrlWords.CURSOR) == scan_safe_cursor
     finally:
         streamer.close()
 
@@ -1281,7 +1350,7 @@ def test_unslotted_cycles_are_independent_three_frame_shots(monkeypatch) -> None
             timeout=1.0,
         )
         arm_sequencer(sequencer, pulse)
-        sequencer.fire(cycles=cycles)
+        sequencer.fire(run_repeats=cycles, scan_repeats=1)
         records = camera.read_frame_records(cycles * 3, timeout=2.0, exact=True)
         assert sequencer.wait_done(1.0) is not None
         terminal = camera.finish_record_capture()
@@ -1415,7 +1484,7 @@ def test_calibration_bracket_keeps_one_shot_occupancy_and_exposure_scaling() -> 
         arm_sequencer(sequencer, pulse)
         expected = []
         for _ in range(repeats):
-            sequencer.fire()
+            sequencer.fire(run_repeats=1, scan_repeats=1)
             sequencer.wait_done(1.0)
             expected.append(np.array(installation.world._occupancy, copy=True))
         result = capture.collect()
@@ -1524,7 +1593,7 @@ def test_public_repeat_reduction_conflates_loading_and_bright_dark_contrast() ->
             capture = measurement.prepare()
             arm_sequencer(sequencer, pulse)
             for _ in range(repeats):
-                sequencer.fire()
+                sequencer.fire(run_repeats=1, scan_repeats=1)
                 assert sequencer.wait_done(1.0) is not None
             result = capture.collect()
             return np.asarray(

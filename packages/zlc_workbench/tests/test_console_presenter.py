@@ -5326,7 +5326,8 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
         event_schema,
         tuple(tuple(float(value) for value in cell) for cell in cells),
         tuple((name, "") for name in names),
-        visits=2,
+        scan_repeats=2,
+        run_repeats=1,
     )
     event = owned_snapshot_from_arrays(
         event_schema,
@@ -5362,7 +5363,7 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
     publication = session.signal_plane.freeze().publication(signal)
     expected = schema_structure(canonical)
     assert expected == (
-        (("repeat", 1), ("visit", 2)),
+        (("repeat", 1), ("scan repeat", 2), ("run repeat", 1)),
         (
             ("pair", 3),
             ("field.x", 65),
@@ -5437,7 +5438,8 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
             tuple(float(value) for value in cell) for cell in map_cells
         ),
         tuple((name, "") for name in names),
-        visits=20,
+        scan_repeats=20,
+        run_repeats=1,
     )
     map_event = owned_snapshot_from_arrays(
         map_event_schema,
@@ -6717,7 +6719,11 @@ def test_a_region_drawn_on_a_scan_axis_in_microseconds_is_the_region_the_hand_dr
     )
     durations = np.arange(points) * 0.5
     canonical = scan_dataset_schema(
-        event_schema, [(float(value),) for value in durations], (("t", "us"),), visits=1
+        event_schema,
+        [(float(value),) for value in durations],
+        (("t", "us"),),
+        scan_repeats=1,
+        run_repeats=1,
     )
     values = np.zeros(canonical.physical_shape)
     values[0, :, :] = (0.5 + 0.4 * np.sin(durations / 3.0))[:, None]

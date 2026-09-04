@@ -18,7 +18,7 @@ from .codec import (
 )
 from .model import (
     ANALOG_MODE_CHOICES,
-    MINIMUM_REPEAT_COUNT,  # noqa: E402
+    MINIMUM_BRACKET_COUNT,  # noqa: E402
     TIME_UNIT_CHOICES,
     TIME_UNIT_TO_NS,
     align_to_grid,
@@ -27,13 +27,13 @@ from .model import (
     MAXIMUM_REPEAT_COUNT,
     OutputDelay,
     PulseApiParameter,
+    PulseBracket,
     PulseFieldRef,
     PulsePeriod,
     PulsePortSpec,
     PulseSequence,
     PulseSlot,
     PulseTarget,
-    RepeatRegion,
 )
 from .compile import compile_sequence  # noqa: E402
 from .binding import (  # noqa: E402
@@ -85,13 +85,13 @@ __all__ = [
     "PulseSlot",
     "PulseFieldRef",
     "OutputDelay",
-    "MINIMUM_REPEAT_COUNT",
+    "MINIMUM_BRACKET_COUNT",
     "API_VALUES_FORMAT",
     "PULSE_TREE_FORMAT",
     "sequence_from_tree",
     "sequence_to_tree",
     "MAXIMUM_REPEAT_COUNT",
-    "RepeatRegion",
+    "PulseBracket",
     "compile_sequence",
     "pulse_target_from_xdc",
     "load_streamer_config",

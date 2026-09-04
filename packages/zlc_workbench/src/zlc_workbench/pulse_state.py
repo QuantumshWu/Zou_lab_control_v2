@@ -11,6 +11,7 @@ from typing import Any
 
 from zlc_durable import write_readable_json
 from zlc_pulse import (
+    MAXIMUM_REPEAT_COUNT,
     PulseSequence,
     scan_columns_for,
     sequence_from_tree,
@@ -71,6 +72,8 @@ class PulseEditorState:
         repeats = self.scan_repeats
         if repeats < 0:
             raise ValueError("scan_repeats must be non-negative")
+        if repeats > MAXIMUM_REPEAT_COUNT:
+            raise ValueError("scan_repeats does not fit the hardware 32-bit count")
         if not isinstance(self.scan_source_dirty, bool):
             raise TypeError("scan_source_dirty must be a boolean")
 

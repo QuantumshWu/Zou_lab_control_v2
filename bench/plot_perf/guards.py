@@ -189,7 +189,7 @@ def free_running(session) -> None:
     except Exception:
         pass
     try:
-        session.sequencer.fire(cycles=None)
+        session.sequencer.fire(run_repeats=0, scan_repeats=1)
     except RuntimeError as error:
         if "still playing" not in str(error):
             raise

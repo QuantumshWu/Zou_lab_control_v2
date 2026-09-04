@@ -12,7 +12,7 @@ import time
 from collections.abc import Mapping
 
 from .compile import CompiledProgram, evaluate_affine_tick, slot_operand_width
-from .model import PORT_DAC, PulseSequence, PulseTarget
+from .model import MAXIMUM_REPEAT_COUNT, PORT_DAC, PulseSequence, PulseTarget
 from .schedule import trigger_edge_ticks
 from .transport.base import DEFAULT_OBSERVER_INTERVAL, RegisterTransport
 from .wire import (
@@ -40,25 +40,22 @@ LOAD_TIMEOUT = 5.0
 SAFE_TIMEOUT = 5.0
 SAFE_RETRY_AFTER = 0.05
 SAFE_POLL_INTERVAL = 0.001
-MAXIMUM_CYCLE_COUNT = (1 << 32) - 1
 _MIN_SEAM_SPAN_TICKS = 3
 
 
-def _execution_cycles(value: int | None) -> int | None:
-    if value is None:
-        return None
+def _repeat_count(value: int, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, Integral):
-        raise TypeError("cycles must be an integer or None for forever")
+        raise TypeError(f"{name} must be an integer")
     result = int(value)
-    if not 1 <= result <= MAXIMUM_CYCLE_COUNT:
-        raise ValueError("cycles must be in the hardware range [1, 2^32-1]")
+    if not 0 <= result <= MAXIMUM_REPEAT_COUNT:
+        raise ValueError(f"{name} must be in the hardware range [0, 2^32-1]")
     return result
 
 
 @dataclass(frozen=True)
 class DoneReport:
     status: int
-    cursor: int | None
+    cursor: int | None  # cumulative row-visit ordinal; table row = cursor % len(rows)
     underflow: bool
     elapsed_seconds: float
     status_reads: tuple[int, int] = ()
@@ -154,7 +151,8 @@ class AppliedState:
     program: CompiledProgram
     source: PulseSequence | None
     rows: tuple[tuple[int, ...], ...]
-    cycles: int | None
+    run_repeats: int
+    scan_repeats: int
     loaded_at: float
 
     def __post_init__(self) -> None:
@@ -175,12 +173,16 @@ class AppliedState:
             raise ValueError("a slotted program requires applied rows")
         if not self.program.slot_count and rows:
             raise ValueError("an unslotted program has no value rows")
-        cycles = _execution_cycles(self.cycles)
+        run_repeats = _repeat_count(self.run_repeats, "run_repeats")
+        scan_repeats = _repeat_count(self.scan_repeats, "scan_repeats")
+        if not rows and scan_repeats != 1:
+            raise ValueError("scan_repeats must be 1 when no scan table is loaded")
         loaded_at = float(self.loaded_at)
         if not math.isfinite(loaded_at) or loaded_at < 0:
             raise ValueError("applied loaded_at must be a finite non-negative timestamp")
         object.__setattr__(self, "rows", tuple(tuple(int(value) for value in row) for row in rows))
-        object.__setattr__(self, "cycles", cycles)
+        object.__setattr__(self, "run_repeats", run_repeats)
+        object.__setattr__(self, "scan_repeats", scan_repeats)
         object.__setattr__(self, "loaded_at", loaded_at)
 
 
@@ -284,12 +286,15 @@ class PulseStreamer:
         self._loaded = False
         self._hardware_loaded = self._last_fire_reloaded = False
         self._firing = False
-        self._cycles: int | None = 1
+        self._run_repeats = 1
+        self._scan_repeats = 1
         self._scan_rows: tuple[tuple[int, ...], ...] = ()
         self._scan_next_chunk = 2
         self._scan_ready = 0
         self._scan_armed = False
         self._scan_count = 0
+        self._scan_last_cursor = 0
+        self._scan_cursor_total = 0
         self._cursor_value: int | None = None
         self._underflow = False
         self._terminal_status_reads: tuple[int, int] = ()
@@ -372,6 +377,8 @@ class PulseStreamer:
         ):
             raise ValueError("source target ABI differs from the compiled program")
         normalized = tuple(tuple(row) for row in rows)
+        if len(normalized) > MAXIMUM_REPEAT_COUNT:
+            raise ValueError("scan table row count does not fit the 32-bit SCAN_COUNT")
         if any(len(row) != prog.slot_count for row in normalized):
             raise ValueError("application row width differs from the compiled program")
         if any(
@@ -396,9 +403,10 @@ class PulseStreamer:
             self._clear_safe_readback_locked()
             self._loaded = self._hardware_loaded = False; self._program = None; self._applied = None
             self._applied_digest = ""
-            self._scan_rows = normalized or ((),)
-            self._scan_count = 1
-            self._cycles = 1
+            self._scan_rows = normalized
+            self._scan_count = len(normalized)
+            self._run_repeats = 1
+            self._scan_repeats = 1
             self._scan_armed = False
             self._write(
                 tuple(sorted(words.items()))
@@ -413,6 +421,8 @@ class PulseStreamer:
             self._scan_next_chunk = 2
             self._scan_ready = self._initial_ready(self._scan_count)
             self._scan_armed = False
+            self._scan_last_cursor = 0
+            self._scan_cursor_total = 0
             self._cursor_value = 0
             self._underflow = False
             self._terminal_status_reads = ()
@@ -422,48 +432,66 @@ class PulseStreamer:
                 program=prog,
                 source=source,
                 rows=normalized,
-                cycles=1,
+                run_repeats=1,
+                scan_repeats=1,
                 loaded_at=time.time(),
             )
             self._applied_digest = prog.digest
-    def fire(self, *, cycles: int | None = 1) -> None:
-        cycles = _execution_cycles(cycles)
+
+    def fire(self, *, run_repeats: int, scan_repeats: int = 1) -> None:
+        run_repeats = _repeat_count(run_repeats, "run_repeats")
+        scan_repeats = _repeat_count(scan_repeats, "scan_repeats")
         with self._lock:
             self._require_open()
             self._require_loaded()
             self._require_idle()
             self._stop.clear()
             assert self._program is not None
-            self._validate_delay_capacity(self._program, self._scan_rows, cycles)
+            if not self._scan_rows and scan_repeats != 1:
+                raise ValueError("scan_repeats must be 1 when no scan table is loaded")
+            if (
+                self._scan_rows
+                and run_repeats != 0
+                and scan_repeats != 0
+                and len(self._scan_rows) * scan_repeats > (1 << 32)
+            ):
+                raise ValueError(
+                    "finite scan row visits exceed the 32-bit CURSOR range"
+                )
+            self._validate_delay_capacity(
+                self._program,
+                self._scan_rows,
+                run_repeats,
+                scan_repeats,
+            )
             # The single registered affine cache is prepared two clocks before
             # every frame seam.  A one-shot may be only one tick long, but every
             # point which is followed by another point must reach that schedule
             # tick after starting at tick 1.  Refuse an impossible seamless run
             # before touching the mailbox instead of letting RTL underflow or
             # consume the previous point's cache.
-            if cycles is None:
-                seam_rows = self._scan_rows
-            elif cycles > 1:
-                seam_count = cycles - 1
-                seam_rows = (
-                    self._scan_rows
-                    if seam_count >= len(self._scan_rows)
-                    else self._scan_rows[:seam_count]
-                )
+            table = self._scan_rows or ((),)
+            if run_repeats == 0:
+                seam_rows = table[:1]
+            elif run_repeats > 1 or scan_repeats != 1:
+                seam_rows = table
             else:
-                seam_rows = ()
+                seam_rows = table[:-1]
             for row in seam_rows:
                 self._validate_slot_row(
                     self._program,
                     row,
                     require_outer_seam=True,
                 )
-            self._cycles = cycles
-            forever = cycles is None
-            self._scan_count = len(self._scan_rows) if forever else cycles
+            self._run_repeats = run_repeats
+            self._scan_repeats = scan_repeats
             self._scan_armed = False
             assert self._applied is not None
-            self._applied = replace(self._applied, cycles=cycles)
+            self._applied = replace(
+                self._applied,
+                run_repeats=run_repeats,
+                scan_repeats=scan_repeats,
+            )
             # DONE/SAFE clear the RTL's LOADED gate; replay only its resident mini-loader.
             self._last_fire_reloaded = not self._hardware_loaded
             if self._last_fire_reloaded:
@@ -475,6 +503,8 @@ class PulseStreamer:
             self._done.clear()
             self._underflow = False
             self._cursor_value = 0
+            self._scan_last_cursor = 0
+            self._scan_cursor_total = 0
             self._terminal_status_reads = ()
             self._terminal_cursor_reads = ()
             self._observer_error = ""
@@ -490,8 +520,9 @@ class PulseStreamer:
                 self._write(
                     (
                         (CtrlWords.SCAN_COUNT, self._scan_count),
-                        (CtrlWords.SCAN_ENABLE, 1),
-                        (CtrlWords.REPEAT_FOREVER, int(forever)),
+                        (CtrlWords.SCAN_ENABLE, int(bool(self._scan_rows))),
+                        (CtrlWords.RUN_REPEAT_COUNT, run_repeats),
+                        (CtrlWords.SCAN_REPEAT_COUNT, scan_repeats),
                     )
                     + self._scan_bank_arming(),
                     stop=self._stop,
@@ -505,6 +536,7 @@ class PulseStreamer:
                 self._stop_worker()
                 raise
             self._fire_gate.set()
+
     def wait_done(self, timeout: float | None = None) -> DoneReport | None:
         with self._lock:
             self._require_open()
@@ -587,7 +619,8 @@ class PulseStreamer:
                 "opened": self._opened,
                 "loaded": self._loaded,
                 "firing": self._firing,
-                "cycles": self._cycles,
+                "run_repeats": self._run_repeats,
+                "scan_repeats": self._scan_repeats,
                 "reloaded_before_fire": self._last_fire_reloaded,
                 "cursor": self._cursor_value,
                 "scan_count": self._scan_count,
@@ -612,7 +645,7 @@ class PulseStreamer:
         nothing is lost by asking again: the answer the next poll gets is the
         same answer.  One failed poll used to end the observation with a
         fabricated ERROR, and the shot it condemned -- the board playing all
-        200 cycles, the camera collecting all 200 frames, SAFE acknowledged
+        200 Pulse runs, the camera collecting all 200 frames, SAFE acknowledged
         afterwards -- was thrown away over a single dropped byte.
 
         The transport's own transaction deadline is the grace: a poll fails
@@ -667,7 +700,7 @@ class PulseStreamer:
                     self._finish_observation(status, cursor)
                     self._done.set()
                     return
-                if self._scan_rows and self._cycles is not None:
+                if self._scan_rows:
                     self._refill(cursor)
                 if self._stop.wait(self._observer_interval):
                     return
@@ -752,7 +785,7 @@ class PulseStreamer:
             raise ValueError("compiled geometry does not match the connected sequencer")
         for row in rows or ((),):
             self._validate_slot_row(program, row)
-        self._validate_delay_capacity(program, rows or ((),), 1)
+        self._validate_delay_capacity(program, rows, 1, 1)
 
     def _validate_slot_row(
         self,
@@ -804,18 +837,18 @@ class PulseStreamer:
             raise ValueError("slot row makes compiled loop metadata invalid")
         if program.loop_count == 2 and loop_end < _MIN_SEAM_SPAN_TICKS:
             raise ValueError(
-                "inner RepeatRegion boundary must occur at or after "
+                "PulseBracket boundary must occur at or after "
                 f"hardware tick {_MIN_SEAM_SPAN_TICKS}"
             )
         if program.loop_count > 2 and loop_end - loop_start < _MIN_SEAM_SPAN_TICKS:
             raise ValueError(
-                "inner RepeatRegion span must be at least "
+                "PulseBracket span must be at least "
                 f"{_MIN_SEAM_SPAN_TICKS} hardware ticks"
             )
         outer_origin = loop_start if program.loop_count > 1 else 0
         if require_outer_seam and effective[-1] - outer_origin < _MIN_SEAM_SPAN_TICKS:
             raise ValueError(
-                "each cycle before another cycle must leave at least "
+                "each Pulse run before another run must leave at least "
                 f"{_MIN_SEAM_SPAN_TICKS} hardware ticks after its final restart"
             )
 
@@ -823,7 +856,8 @@ class PulseStreamer:
         self,
         program: CompiledProgram,
         rows: tuple[tuple[int, ...], ...],
-        cycles: int | None,
+        run_repeats: int,
+        scan_repeats: int,
     ) -> None:
         """Reject an application whose delayed events overflow frozen FIFOs.
 
@@ -847,15 +881,42 @@ class PulseStreamer:
             return
 
         table = rows or ((),)
-        # Every execution has the same number of digital transitions and bus
-        # descriptors; after ``depth`` preceding executions the FIFO has either
-        # overflowed or reached the periodic table state.  One full table plus
-        # that warm-up covers every row boundary without expanding an arbitrary
-        # 32-bit cycle count.
+        # After ``depth`` identical whole-Pulse executions the FIFO has either
+        # overflowed or reached its periodic state.  Preserve the real nesting
+        # order while bounding each row's Run repeats.  The final complete
+        # sweep plus at most ``depth`` preceding executions validates every row,
+        # the sweep seam, and finite terminal SAFE without materializing a
+        # 32-bit repeat count.
         depth = max(self.geom.evt_fifo_depth, self.geom.bus_evt_fifo_depth)
-        requested = len(table) + depth
-        checked_cycles = requested if cycles is None else min(cycles, requested)
-        # The same argument bounds an internal RepeatRegion: depth+1 bodies are
+        if run_repeats == 0:
+            execution_rows = (table[0],) * (depth + 1)
+            finite_completion = False
+        else:
+            bounded_run_repeats = min(run_repeats, depth + 1)
+            one_sweep = tuple(
+                row
+                for row in table
+                for _ in range(bounded_run_repeats)
+            )
+            finite_completion = scan_repeats != 0
+            preceding_executions = (
+                depth
+                if scan_repeats == 0
+                else min(depth, (scan_repeats - 1) * len(one_sweep))
+            )
+            if preceding_executions:
+                copies = (
+                    preceding_executions + len(one_sweep) - 1
+                ) // len(one_sweep)
+                warmup = (one_sweep * copies)[-preceding_executions:]
+            else:
+                warmup = ()
+            # Model the last complete sweep after the exact periodic suffix
+            # which can still own FIFO entries.  This includes an intermediate
+            # sweep seam, ends on the real terminal row, and remains bounded by
+            # one sweep plus ``depth`` whole-Pulse executions.
+            execution_rows = warmup + one_sweep
+        # The same argument bounds an internal PulseBracket: depth+1 bodies are
         # enough to prove overflow or periodic boundedness.
         checked_program = (
             program
@@ -879,11 +940,16 @@ class PulseStreamer:
             physical_to_logical.get(program.channels[bit], program.channels[bit])
             for bit, _delay in ttl
         )
+        # Compiled digital masks always end low, so the finite terminal SAFE
+        # creates no additional TTL transition: the final falling edge is
+        # already part of this schedule.  DAC state may end away from its safe
+        # code, which is why its explicit terminal descriptor is added below.
         edges = trigger_edge_ticks(
             checked_program,
             asked,
-            table,
-            cycles=checked_cycles,
+            execution_rows,
+            run_repeats=1,
+            scan_repeats=1,
         )
         for (bit, delay), logical in zip(ttl, asked):
             self._check_delay_window(
@@ -896,8 +962,7 @@ class PulseStreamer:
         if bus_delays:
             by_bus: dict[int, list[int]] = {bus: [] for bus in bus_delays}
             run_offset = 0
-            for point_index in range(checked_cycles):
-                point = table[point_index % len(table)]
+            for point in execution_rows:
                 effective = tuple(
                     evaluate_affine_tick(
                         base,
@@ -945,7 +1010,7 @@ class PulseStreamer:
                         )
                 run_offset += total
             # Finite completion captures one final SAFE descriptor per bus.
-            if cycles is not None:
+            if finite_completion:
                 for events in by_bus.values():
                     events.append(run_offset)
             for bus, events in by_bus.items():
@@ -1006,7 +1071,7 @@ class PulseStreamer:
         for chunk in (0, 1):
             if chunk * self.geom.bank_size < self._scan_count:
                 rows.extend(sorted(pack_scan_rows(
-                    self._scan_rows, self.geom, chunk & 1, chunk, self._scan_count
+                    self._scan_rows, self.geom, chunk & 1, chunk
                 ).items()))
         rows.append((CtrlWords.BANK0_CHUNK, 0))
         if self.geom.bank_size < self._scan_count:
@@ -1015,35 +1080,56 @@ class PulseStreamer:
         self._scan_next_chunk = 2
         self._scan_ready = ready
         self._scan_armed = True
+        self._scan_last_cursor = 0
+        self._scan_cursor_total = 0
         return tuple(rows)
 
     def _refill(self, cursor: int) -> None:
         """Keep the far bank one chunk ahead of where the engine is playing.
 
-        The contract the RTL is built to, and which the cycle model implements,
-        is one-ahead: when the engine crosses from chunk c into c+1 it frees the
-        bank holding c and the host refills it with c+2.  This waited for the
-        cursor to REACH the chunk it was about to write, which is one whole bank
-        late -- so any scan longer than the two pre-armed chunks stalled at
-        every chunk boundary while the host caught up.
+        CURSOR is a cumulative row-visit ordinal, not a sampled table index, so
+        division by the unique row count identifies the sweep without requiring
+        the observer to witness a wrap.  When the engine enters chunk c+1 it
+        frees c's bank and the host loads the next monotonic chunk into it.
         """
 
-        while (self._scan_next_chunk - 1) * self.geom.bank_size <= cursor:
-            first = self._scan_next_chunk * self.geom.bank_size
-            if first >= self._scan_count:
+        if self._scan_count <= 2 * self.geom.bank_size:
+            return
+        if cursor < 0 or cursor > MAXIMUM_REPEAT_COUNT:
+            raise RuntimeError(
+                f"board cursor {cursor} is outside its unsigned 32-bit range"
+            )
+        self._scan_cursor_total += (
+            cursor - self._scan_last_cursor
+        ) & MAXIMUM_REPEAT_COUNT
+        self._scan_last_cursor = cursor
+        chunks_per_sweep = (
+            self._scan_count + self.geom.bank_size - 1
+        ) // self.geom.bank_size
+        sweep_index, table_row = divmod(self._scan_cursor_total, self._scan_count)
+        current_stream_chunk = (
+            sweep_index * chunks_per_sweep
+            + table_row // self.geom.bank_size
+        )
+        while self._scan_next_chunk <= current_stream_chunk + 1:
+            if (
+                self._scan_repeats != 0
+                and self._scan_next_chunk >= chunks_per_sweep * self._scan_repeats
+            ):
                 return
-            chunk = self._scan_next_chunk
-            bank = chunk & 1
+            stream_chunk = self._scan_next_chunk
+            table_chunk = stream_chunk % chunks_per_sweep
+            bank = stream_chunk & 1
             bit = 1 << bank
             unarmed = self._scan_ready & ~bit
             words = pack_scan_rows(
-                self._scan_rows, self.geom, bank, chunk, self._scan_count
+                self._scan_rows, self.geom, bank, table_chunk
             )
             chunk_reg = CtrlWords.BANK0_CHUNK if bank == 0 else CtrlWords.BANK1_CHUNK
             self._write((
                 (CtrlWords.BANK_READY, unarmed),
                 *tuple(sorted(words.items())),
-                (chunk_reg, chunk),
+                (chunk_reg, table_chunk),
                 (CtrlWords.BANK_READY, self._scan_ready | bit),
             ), stop=self._stop)
             self._scan_next_chunk += 1

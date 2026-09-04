@@ -212,7 +212,7 @@ def test_a_column_needs_a_range_to_sweep() -> None:
         ScanColumnSpec("a", 1.0, 1.0)
 
 
-def test_cycle_count_reuses_one_value_table_without_copying_rows() -> None:
+def test_scan_rows_are_packed_once_without_materializing_repeats() -> None:
 
     from zlc_pulse import load_streamer_config
     from zlc_pulse.wire import pack_scan_rows
@@ -220,28 +220,13 @@ def test_cycle_count_reuses_one_value_table_without_copying_rows() -> None:
     geometry = load_streamer_config()["params"]
     rows = [(10,), (20,), (30,)]
 
-    def slot0(cycles):
-        words = pack_scan_rows(rows, geometry, 0, 0, cycles)
-        ordered = [words[key] for key in sorted(words)]
-        return ordered[:: geometry.num_slots]
-
-    assert slot0(3) == [10, 20, 30]
-    assert slot0(9) == [10, 20, 30, 10, 20, 30, 10, 20, 30]
+    words = pack_scan_rows(rows, geometry, 0, 0)
+    ordered = [words[key] for key in sorted(words)]
+    assert ordered[:: geometry.num_slots] == [10, 20, 30]
 
 
-def test_a_repeated_table_is_seamless_across_a_bank_boundary() -> None:
-    """The hard case: a table length that does NOT divide the bank size.
-
-    The end of one table traversal then falls in the MIDDLE of a chunk.  It
-    stays seamless because a finite cycle count does not re-arm anything: the
-    board is given one stream of cycles and the host fills chunks 0,1,2,... into
-    alternating banks, exactly as it does for any long scan.  The boundary
-    between two traversals is the boundary between two points and nothing else --
-    no re-arm, no bank-parity wrap, no gap.
-
-    (repeat_forever is the other path, where the RTL repeats the application
-    until SAFE.  That one is untouched.)
-    """
+def test_scan_sweeps_stream_table_local_chunks_into_alternating_banks() -> None:
+    """A partial final chunk wraps to chunk zero without copying the table."""
 
     from dataclasses import replace
 
@@ -249,17 +234,22 @@ def test_a_repeated_table_is_seamless_across_a_bank_boundary() -> None:
     from zlc_pulse.wire import pack_scan_rows
 
     geometry = replace(load_streamer_config()["params"], bank_size=4)
-    rows = [(10,), (20,), (30,)]
+    rows = [(value,) for value in range(10)]
+    chunks_per_sweep = 3
 
     played: list[int] = []
-    for chunk in range(4):
-        words = pack_scan_rows(rows, geometry, chunk & 1, chunk, 9)
-        if not words:
-            break
+    for stream_chunk in range(chunks_per_sweep * 3):
+        table_chunk = stream_chunk % chunks_per_sweep
+        words = pack_scan_rows(
+            rows,
+            geometry,
+            stream_chunk & 1,
+            table_chunk,
+        )
         ordered = [words[key] for key in sorted(words)]
         played.extend(ordered[:: geometry.num_slots])
 
-    assert played == [10, 20, 30] * 3
+    assert played == list(range(10)) * 3
 
 
 def test_a_resolved_scan_point_is_a_plain_pulse_carrying_that_row() -> None:

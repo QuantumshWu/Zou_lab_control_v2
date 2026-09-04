@@ -1699,3 +1699,68 @@ def test_panel_save_does_not_render_when_the_archive_fails(
         )
 
     assert not (tmp_path / "failed-archive.png").exists()
+
+
+def test_unsaved_edits_are_asked_about_rather_than_locked_in() -> None:
+    """A door that only opens from the inside is not a safeguard.
+
+    Closing with an open working copy used to be refused outright: the
+    operator was told to Save or Discard and the window simply would not
+    go.  The work is theirs, so they are asked once and the answer is
+    honoured -- and with nobody to ask (a headless host, a test), nothing
+    is discarded and the old refusal stands.
+    """
+
+    view = _ViewerView()
+    asked: list[str] = []
+    answer = {"value": True}
+    view.confirm_discard = lambda text: asked.append(text) or answer["value"]
+    presenter = _built_presenter(view)
+    try:
+        presenter._data_drafts["data-1"] = {
+            "name": "Manual data 1",
+            "modified": True,
+            "unsaved": False,
+            "message": "",
+            "producer": None,
+            "publication": None,
+        }
+
+        # Declining keeps the working copy and says so.
+        answer["value"] = False
+        assert presenter.close() is False
+        assert asked and "Manual data 1" in asked[-1], asked
+        assert "Save or discard" in view.status[-1][0], view.status[-1]
+        assert "data-1" in presenter._data_drafts
+
+        # Agreeing closes: the refusal is not repeated.
+        answer["value"] = True
+        before = len(asked)
+        presenter.close()
+        assert len(asked) == before + 1, asked
+        assert "Save or discard" not in view.status[-1][0], view.status[-1]
+    finally:
+        presenter._data_drafts.clear()
+        _close_presenter(presenter)
+
+
+def test_a_presenter_with_nobody_to_ask_never_discards_on_its_own() -> None:
+    """No confirm hook means the old refusal, not a silent loss."""
+
+    view = _ViewerView()
+    presenter = _built_presenter(view)
+    try:
+        assert presenter._confirm_discard is None
+        presenter._data_drafts["data-1"] = {
+            "name": "Manual data 1",
+            "modified": True,
+            "unsaved": False,
+            "message": "",
+            "producer": None,
+            "publication": None,
+        }
+        assert presenter.close() is False
+        assert "Save or discard" in view.status[-1][0], view.status[-1]
+    finally:
+        presenter._data_drafts.clear()
+        _close_presenter(presenter)

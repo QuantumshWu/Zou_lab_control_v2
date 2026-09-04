@@ -370,3 +370,130 @@ QtTest.QTest.keyClick(table, QtCore.Qt.Key_Down)
 assert table.currentIndex() == table.model().index(1, 1), table.currentIndex()
 """
     )
+
+
+def test_no_control_becomes_a_desktop_window_while_it_is_built() -> None:
+    """A parentless widget made visible IS a top-level window.
+
+    ``FluentPathEdit`` set its Refresh button visible before the layout
+    adopted it, so on the one GUI that asks for that button a 130x66
+    window titled "python" appeared on the desktop for a frame and
+    vanished when the reparent landed -- measured on a real launch, 170 ms
+    before the application window opened.  Construction is not a moment
+    for anything to be on screen: every child is born with its parent.
+    """
+
+    _run_qt_smoke(
+        """
+from PyQt5 import QtWidgets
+from zlc_ui import ensure_qt_app
+from zlc_ui.fluent import FluentPathEdit
+
+app = ensure_qt_app(['zlc-ui-tests'])
+strays = []
+original = QtWidgets.QWidget.setVisible
+
+def guarded(self, visible):
+    if visible and self.parent() is None:
+        strays.append(type(self).__name__)
+    return original(self, visible)
+
+QtWidgets.QWidget.setVisible = guarded
+try:
+    field = FluentPathEdit('demo.npz', refreshable=True)
+finally:
+    QtWidgets.QWidget.setVisible = original
+
+assert not strays, f'shown before being parented: {strays}'
+assert field.refresh.parent() is field
+assert field.browse.parent() is field
+assert field.edit.parent() is field
+assert field.refresh.isVisible() is False, 'unshown parent, unshown child'
+"""
+    )
+
+
+def test_all_four_directions_walk_the_grid_while_a_cell_is_open() -> None:
+    """Tab, Backtab, Up and Down are one contract, not three plus luck.
+
+    Qt hands the delegate Tab and Backtab.  Up and Down only ever
+    appeared to work because a QLineEdit ignores them and the unhandled
+    key reached the view underneath -- an accident that ends the moment
+    an editor consumes arrows, and one a single-row table cannot even
+    show.  The editor here is a spin box, which is exactly that case.
+    """
+
+    _run_qt_smoke(
+        """
+from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
+from zlc_ui import ensure_qt_app
+from zlc_ui.fluent import FluentTableView
+
+class Model(QtCore.QAbstractTableModel):
+    def rowCount(self, _p=QtCore.QModelIndex()):
+        return 5
+    def columnCount(self, _p=QtCore.QModelIndex()):
+        return 5
+    def data(self, index, role=QtCore.Qt.DisplayRole):
+        if role in (QtCore.Qt.DisplayRole, QtCore.Qt.EditRole):
+            return index.row() * 5 + index.column()
+        return None
+    def flags(self, index):
+        return (
+            QtCore.Qt.ItemIsEnabled
+            | QtCore.Qt.ItemIsSelectable
+            | QtCore.Qt.ItemIsEditable
+        )
+
+class SpinDelegate(QtWidgets.QStyledItemDelegate):
+    def createEditor(self, parent, option, index):
+        box = QtWidgets.QSpinBox(parent)
+        box.setRange(0, 999)
+        return box
+
+app = ensure_qt_app(['zlc-ui-tests'])
+table = FluentTableView()
+table.setModel(Model())
+table.setItemDelegate(SpinDelegate(table))
+table.resize(520, 220); table.show(); app.processEvents()
+
+def cell():
+    index = table.currentIndex()
+    return (index.row(), index.column())
+
+def open_editor(row, column):
+    target = table.model().index(row, column)
+    QtWidgets.QApplication.sendEvent(
+        table.viewport(),
+        QtGui.QMouseEvent(
+            QtCore.QEvent.MouseButtonPress,
+            QtCore.QPointF(table.visualRect(target).center()),
+            QtCore.Qt.LeftButton,
+            QtCore.Qt.LeftButton,
+            QtCore.Qt.NoModifier,
+        ),
+    )
+    app.processEvents()
+
+def press(key, modifier=QtCore.Qt.NoModifier):
+    editor = table.findChild(QtWidgets.QSpinBox)
+    QtTest.QTest.keyClick(editor if editor is not None else table, key, modifier)
+    app.processEvents()
+
+open_editor(2, 2)
+assert cell() == (2, 2), cell()
+assert table.findChild(QtWidgets.QSpinBox) is not None, 'one click opens the cell'
+
+press(QtCore.Qt.Key_Down)
+assert cell() == (3, 2), f'Down must step a row: {cell()}'
+press(QtCore.Qt.Key_Up)
+assert cell() == (2, 2), f'Up must step back: {cell()}'
+press(QtCore.Qt.Key_Tab)
+assert cell() == (2, 3), f'Tab must step right: {cell()}'
+press(QtCore.Qt.Key_Backtab, QtCore.Qt.ShiftModifier)
+assert cell() == (2, 2), f'Shift+Tab must step left: {cell()}'
+
+# The cell stays open as it moves: stepping is part of editing.
+assert table.findChild(QtWidgets.QSpinBox) is not None
+"""
+    )

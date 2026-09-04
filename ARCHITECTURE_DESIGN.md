@@ -275,9 +275,11 @@ Node new chunk
 
 ### 7.1 Execution vocabulary
 
-- `RepeatRegion`只表达timeline内部loop。
-- Cycle/shot、scan sweep和Dataset repeat是独立事实。
-- 一个finite execution入口表达N cycles；actual played values进入Dataset coordinates和run record。
+- Pulse执行固定为三层且各有唯一owner：`Scan repeats -> scan point -> Run repeats -> Pulse timeline -> PulseBracket`。`PulseBracket`只表达timeline内一个连续period区间的内部loop，左右端点可放在任意合法gap并由一个count控制；即使覆盖整个Pulse也不得冒充Run repeats。每个Pulse最多一个Bracket，因为硬件只有一套`LOOP_*`。
+- `run_repeats`是Pulse文件的正式字段，UI默认`0 = infinite`，有限值为`1..2^32-1`。无scan时它控制整个Pulse（包含Bracket）执行次数；有scan时它控制同一个scan point保持不变并执行整个Pulse的次数，完成后scan cursor才前进。Task的`shots_per_point`只是本次execution对该值的显式immutable override，不修改保存的Pulse。
+- `scan_repeats`保持独立，`0 = infinite`或有限完整table sweep数；Pulse Scan保留该字段，Seamless的`repeats`只是本次execution对它的override。它不改变Run repeats或Bracket。无scan时scan_repeats固定为1且不参与执行。
+- Host与RTL不得再把三层flatten成一个`cycles`真相：`LOOP_*`只属于Bracket，`RUN_REPEAT_COUNT`在同一row重复完整Pulse，`SCAN_COUNT`只表示一轮唯一row数，`SCAN_REPEAT_COUNT`控制table sweep。所有层间seam均在同一次FIRE内由FPGA推进；Host只提前补scan bank，补充不及时必须underflow并loud失败。
+- Readout/Dataset/run record分别保存实际Run repeats、Scan repeats与scan coordinates；`shots_per_point`只是Run repeats的Task侧名称，不形成第四层。有限Task在开始前由两层repeat、唯一scan rows与source cardinality算出精确readout数。不得用context-sensitive的0、隐式改1、复制scan rows或改写Bracket模拟另一层repeat。
 - Hardware duration scan的绝对period由32-bit nominal tick base保存；25-bit signed slot只携相对nominal的delta，不得冒充约335 ms的绝对period上限。Host按整张scan table选择能覆盖它的最小整数tick scale，scale受现有signed Q8 coefficient约束且DAC恒为1；不为扩大范围修改RTL multiplier宽度。
 - 同一次application的compiler、wire table、readback、Pulse Editor Run/Sync/Hold/Step与Seamless Dataset共用一个量化结果。Dataset coordinates和run record记录实际played values；若所需分辨率使两个不同authored points坍缩为同一点，必须在碰device前loud拒绝。
 

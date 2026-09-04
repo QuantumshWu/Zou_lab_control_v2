@@ -17,14 +17,11 @@ host call, which is exactly what does not happen between two cycles of one
 fired table, so such a plan is refused when it is bound -- by name, pointing
 at the node that can run it.
 
-A SHOT IS A BRACKET ITERATION, NOT A TABLE ROW.  A scan point is one row of
-the table: the board loads its slots and plays the pulse once, bracket and
-all.  So ``shots_per_point`` compiles into the pulse's outermost repeat
-bracket -- the hardware loop that plays INSIDE one point -- and the table
-carries exactly the plan's rows.  Repeating rows instead multiplied the
-table by the shot count, which is what pushed long scans past the board's
-two resident banks into streaming refill: the host then fed banks over UART
-against the clock while everything else on the link starved.
+A SHOT IS ONE WHOLE PULSE AT THE SAME TABLE ROW.  The board's Run-repeat
+counter plays the complete timeline -- including any independent internal
+Bracket -- ``shots_per_point`` times before its scan cursor advances.  The
+table therefore carries exactly the plan's rows and no caller rewrites the
+Bracket or duplicates rows to manufacture shots.
 
 A MANUAL AXIS BREAKS THE FIRE, NOT THE POINT.  An axis nobody here can
 advance -- a power knob, a waveplate -- is walked by the OPERATOR, so it
@@ -57,9 +54,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
 from zlc_pulse import (
-    MAXIMUM_REPEAT_COUNT,
     PulseSequence,
-    RepeatRegion,
     compile_sequence,
     prepare_scan_application,
     resolve_api_parameters,
@@ -198,51 +193,6 @@ class SeamlessScanMeasurement:
         streamed = resolve_api_parameters(self.sequence)
         columns = scan_columns_for(streamed)
         return streamed, columns
-
-    def _shot_bracketed(
-        self, sequence: PulseSequence
-    ) -> tuple[PulseSequence, int]:
-        """``shots_per_point`` compiled into the outermost repeat bracket.
-
-        The board's one hardware loop is the only place a shot can live: a
-        bare pulse gains a whole-sequence bracket counting the shots, and a
-        pulse that already brackets its whole span multiplies its count --
-        every iteration of a whole-sequence bracket is one shot, whoever
-        authored it.  A partial bracket cannot nest inside a second loop,
-        so asking for more than one shot of it is refused.
-
-        Returns the sequence and how many shots one point actually plays.
-        """
-
-        shots = self.shots_per_point
-        repeat = sequence.repeat
-        first = sequence.periods[0].period_id
-        last = sequence.periods[-1].period_id
-        if repeat is None:
-            if shots == 1:
-                return sequence, 1
-            bracketed = replace(
-                sequence, repeat=RepeatRegion(first, last, shots)
-            )
-            return bracketed, shots
-        if repeat.start_period_id != first or repeat.end_period_id != last:
-            if shots == 1:
-                return sequence, 1
-            raise ValueError(
-                "the board plays one hardware loop per point, and this "
-                "template already spends it on a bracket over "
-                f"{repeat.start_period_id!r}..{repeat.end_period_id!r}; "
-                "shots_per_point > 1 needs a whole-sequence bracket or none "
-                "-- author the shot loop in the template, or leave "
-                "shots_per_point at 1"
-            )
-        count = repeat.count * shots
-        if count > MAXIMUM_REPEAT_COUNT:
-            raise ValueError(
-                f"{repeat.count} bracket plays x {shots} shots per point do "
-                "not fit the hardware 32-bit repeat count"
-            )
-        return replace(sequence, repeat=replace(repeat, count=count)), count
 
     def _slot_ordered_rows(
         self, rows: Sequence[Sequence[float]], columns
@@ -386,7 +336,7 @@ class SeamlessScanMeasurement:
         shots: int,
         sweeps: int,
         row_offset: int,
-        visit_base: int,
+        scan_repeat_base: int,
         progress_base: int,
         progress_total: int,
         run_record: dict,
@@ -399,8 +349,7 @@ class SeamlessScanMeasurement:
         state this fire's first point starts from.
         """
 
-        fired = sweeps * inner_count
-        readouts = fired * shots
+        readouts = sweeps * inner_count * shots
         self.sequencer.safe()
         time.sleep(self.settle_seconds)
         self.source.open(context, cycles=readouts)
@@ -411,23 +360,32 @@ class SeamlessScanMeasurement:
                 board.clock_hz,
                 slot_tick_scales=slot_tick_scales,
             )
-            self.source.validate(program, wire, cycles=readouts)
+            self.source.validate(
+                program,
+                wire,
+                run_repeats=shots,
+                scan_repeats=sweeps,
+            )
             self.sequencer.load(program, source=streamed, rows=wire)
             self.source.arm()
-            self.sequencer.fire(cycles=fired)
+            self.sequencer.fire(
+                run_repeats=shots,
+                scan_repeats=sweeps,
+            )
             per_sweep = inner_count * shots
             for played in range(readouts):
                 check_cancelled(context)
                 sweep, rest = divmod(played, per_sweep)
                 row_index, shot = divmod(rest, shots)
                 value, source_publication = self.source.next_value(context)
-                visit = visit_base + sweep * shots + shot
+                scan_repeat = scan_repeat_base + sweep
                 row = row_offset + row_index
                 front = {
                     SCAN_OUTPUT.name: writer.write(
                         value,
                         row=row,
-                        visit=visit,
+                        scan_repeat=scan_repeat,
+                        run_repeat=shot,
                     )
                 }
                 if on_point is not None:
@@ -438,7 +396,8 @@ class SeamlessScanMeasurement:
                     companions = on_point(
                         value,
                         row=row,
-                        visit=visit,
+                        scan_repeat=scan_repeat,
+                        run_repeat=shot,
                         point_rows=rows,
                     ) or {}
                     front.update(
@@ -490,11 +449,11 @@ class SeamlessScanMeasurement:
         self._last_run_record = None
         board = self.sequencer.describe()
         inner_rows = self.board_plan.rows()
-        # The board fires one cycle per POINT -- the shots play inside it as
-        # the pulse's own repeat bracket -- while the source hands back one
-        # value per READOUT, of which every bracket iteration produces one.
+        # The board holds one row while Run repeats supplies its shots, then
+        # advances the row; the independent PulseBracket remains wholly inside
+        # each shot.
         streamed, columns = self._streamed_sequence(board)
-        streamed, shots = self._shot_bracketed(streamed)
+        shots = self.shots_per_point
         slot_rows = self._slot_ordered_rows(inner_rows, columns)
         effective_slot_rows, slot_tick_scales, wire = prepare_scan_application(
             streamed,
@@ -529,7 +488,8 @@ class SeamlessScanMeasurement:
         writer = ScanDatasetWriter(
             effective_rows,
             axes,
-            visits=self.repeats * shots,
+            scan_repeats=self.repeats,
+            run_repeats=shots,
             run_record=run_record,
         )
         inner_count = len(effective_inner)
@@ -551,7 +511,7 @@ class SeamlessScanMeasurement:
                 context,
                 sweeps=self.repeats,
                 row_offset=0,
-                visit_base=0,
+                scan_repeat_base=0,
                 progress_base=0,
                 **segment,
             )
@@ -595,7 +555,7 @@ class SeamlessScanMeasurement:
                         context,
                         sweeps=1,
                         row_offset=index * inner_count,
-                        visit_base=sweep * shots,
+                        scan_repeat_base=sweep,
                         progress_base=done,
                         **segment,
                     )
@@ -668,8 +628,8 @@ class SeamlessScanMeasurement:
             "pulse": self.sequence.name,
             "plan": {"axes": axes},
             "scan_shape": list(self.plan.shape),
-            "repeats": self.repeats,
-            "shots_per_point": self.shots_per_point,
+            "scan_repeats": self.repeats,
+            "run_repeats": self.shots_per_point,
             "settle_seconds": self.settle_seconds,
             "slot_tick_scales": list(slot_tick_scales),
         }

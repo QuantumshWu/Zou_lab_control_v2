@@ -260,7 +260,7 @@ def test_finite_measurement_collects_only_external_triggers() -> None:
         sequencer = installation.device("sequencer")
         sequencer.load(_one_camera_window_program())
         for _ in range(3):
-            sequencer.fire()
+            sequencer.fire(run_repeats=1, scan_repeats=1)
             sequencer.wait_done(1.0)
         worker.join(timeout=2.0)
         assert not worker.is_alive()

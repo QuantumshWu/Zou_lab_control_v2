@@ -204,12 +204,13 @@ commit, so it cannot overwrite an independent overlay update accepted while
 the frame was being prepared.
 
 PulseTimeline uses `PulseTimelineData` with public digital, analog, scan, DAC,
-and repeat records:
+and nested timeline-loop records. An outer `PulseLoopMarker` represents the
+whole-Pulse Run layer while an inner marker represents a Bracket:
 
 ```python
 from zlc_plot import (
     PlotSession, PulseAnalogTrace, PulseBlock, PulseChannel,
-    PulseDacScanSegment, PulseRepeatMarker, PulseScanRegion,
+    PulseDacScanSegment, PulseLoopMarker, PulseScanRegion,
     PulseTimelineData, PulseTimelinePlot,
 )
 
@@ -233,7 +234,7 @@ pulse_data = PulseTimelineData(
     scan_dac_segments=(
         PulseDacScanSegment("bias", 3.0, 6.0, value=0.3, number=2),
     ),
-    repeat_markers=(PulseRepeatMarker(1.5, 8.8, "×4"),),
+    loop_markers=(PulseLoopMarker(1.5, 8.8, "×4"),),
     time_unit="us",
     total_duration=9.0,
 )
@@ -438,7 +439,7 @@ print(
     pulse_selection.analog_traces,
     pulse_selection.scan_regions,
     pulse_selection.scan_dac_segments,
-    pulse_selection.repeat_markers,
+    pulse_selection.loop_markers,
 )
 ```
 

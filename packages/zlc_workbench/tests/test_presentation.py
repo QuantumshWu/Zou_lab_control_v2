@@ -240,7 +240,7 @@ def live_bench(tmp_path):
             producer="cm",
         )
         monitor = node.monitor()
-        sequencer.fire()
+        sequencer.fire(run_repeats=1, scan_repeats=1)
         sequencer.wait_done(1.0)
         deadline = time.monotonic() + 5.0
         while monitor.poll() is None and time.monotonic() < deadline:
@@ -296,7 +296,7 @@ def test_the_scheduler_drives_a_real_plotting_host(live_bench) -> None:
         presented = None
         deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline:
-            sequencer.fire()
+            sequencer.fire(run_repeats=1, scan_repeats=1)
             sequencer.wait_done(1.0)
             monitor.poll()
             scheduler.on_tick()
@@ -321,7 +321,7 @@ def test_the_scheduler_drives_a_real_plotting_host(live_bench) -> None:
         previous = presented
         deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline:
-            sequencer.fire()
+            sequencer.fire(run_repeats=1, scan_repeats=1)
             sequencer.wait_done(1.0)
             monitor.poll()
             scheduler.on_tick()
@@ -1622,7 +1622,7 @@ def test_a_stale_refusal_is_flow_control_not_a_panel_error(live_bench) -> None:
         deadline = time.monotonic() + 15.0
         presented = None
         while time.monotonic() < deadline:
-            sequencer.fire()
+            sequencer.fire(run_repeats=1, scan_repeats=1)
             sequencer.wait_done(1.0)
             monitor.poll()
             scheduler.on_tick()

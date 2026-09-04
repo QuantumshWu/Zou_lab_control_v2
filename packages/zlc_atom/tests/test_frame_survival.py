@@ -469,7 +469,7 @@ def test_live_monitor_chain_camera_occupancy_survival() -> None:
             lambda: True if camera.capture_state() else None,
             "camera never armed",
         )
-        sequencer.fire()
+        sequencer.fire(run_repeats=1, scan_repeats=1)
         sequencer.wait_done(1.0)
         frames_key = camera_host.signal_key("frames")
         frames_value = _await(
@@ -570,7 +570,7 @@ def test_live_monitor_chain_camera_occupancy_survival() -> None:
         assert plane.supports_indexed_history(survival_key)
         lease = plane.acquire_indexed_history(survival_key, 16)
         try:
-            sequencer.fire()
+            sequencer.fire(run_repeats=1, scan_repeats=1)
             sequencer.wait_done(1.0)
 
             def _indexed():

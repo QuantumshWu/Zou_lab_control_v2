@@ -10,12 +10,10 @@ where each later event belongs.  Runtime owns the chunks, invalid future cells,
 current materialization and terminal seal; this module never copies full scan
 history.
 
-REPEATS AND SHOTS ARE REPEAT-DOMAIN FACTS. ``shots_per_point`` runs adjacent
-trials of one point; ``repeats`` walks the whole plan again. The writer is
-given their already-authored product as ``visits``, so it records exactly one
-visit axis rather than guessing a decomposition it was not given. Source
-repeat axes remain separate logical axes in the same domain, and the run
-record retains the authored repeat/shot counts.
+SCAN AND RUN REPEATS ARE DISTINCT REPEAT-DOMAIN FACTS. ``run_repeats`` runs
+adjacent trials at one point; ``scan_repeats`` walks the whole plan again.
+The writer receives and records both facts directly. Source repeat axes remain
+separate logical axes in the same domain; no product axis is stored.
 
 The dataset's axes ARE the plan's axes, carrying each port's name and unit.
 That identity is what makes a saved scan self-describing, and it is the hook
@@ -45,6 +43,69 @@ from zlc_runtime import (
 
 SCAN_OUTPUT = DatasetOutputDeclaration("scan", "scan.result")
 
+_SCAN_REPEAT_AXIS_ID = AxisId("scan.repeat")
+_RUN_REPEAT_AXIS_ID = AxisId("pulse.run")
+
+
+def scan_repeat_domain(
+    source: DomainSpec,
+    *,
+    scan_repeats: int,
+    run_repeats: int,
+) -> DomainSpec:
+    """Layer actual scan/run execution over one source Repeat carrier.
+
+    Physical order is scan sweep outermost, Run repeat next, and the source's
+    own Repeat carrier innermost. Both execution axes remain present at length
+    one because they state how this scan was executed, not merely its shape.
+    """
+
+    scan_repeats = int(scan_repeats)
+    run_repeats = int(run_repeats)
+    if scan_repeats < 1:
+        raise ValueError("scan_repeats must be at least 1")
+    if run_repeats < 1:
+        raise ValueError("run_repeats must be at least 1")
+    occupied = {axis.axis_id for axis in source.axes}
+    reserved = {_SCAN_REPEAT_AXIS_ID, _RUN_REPEAT_AXIS_ID}
+    if occupied & reserved:
+        raise ValueError("source Repeat axes collide with scan execution axes")
+
+    source_size = source.size
+    scan_axis = AxisSpec(
+        _SCAN_REPEAT_AXIS_ID,
+        "scan repeat",
+        REPEAT,
+        scan_repeats,
+        tuple(range(scan_repeats)),
+    )
+    run_axis = AxisSpec(
+        _RUN_REPEAT_AXIS_ID,
+        "run repeat",
+        REPEAT,
+        run_repeats,
+        tuple(range(run_repeats)),
+    )
+    return DomainSpec(
+        (scan_repeats * run_repeats * source_size,),
+        (*source.axes, scan_axis, run_axis),
+        (
+            *(codes * (scan_repeats * run_repeats) for codes in source.axis_codes),
+            tuple(
+                scan_repeat
+                for scan_repeat in range(scan_repeats)
+                for _run_repeat in range(run_repeats)
+                for _source_repeat in range(source_size)
+            ),
+            tuple(
+                run_repeat
+                for _scan_repeat in range(scan_repeats)
+                for run_repeat in range(run_repeats)
+                for _source_repeat in range(source_size)
+            ),
+        ),
+    )
+
 
 def _unique_domain(values: Sequence[float]) -> tuple[tuple[float, ...], tuple[int, ...]]:
     domain: list[float] = []
@@ -64,17 +125,16 @@ def scan_dataset_schema(
     rows: Sequence[Sequence[float]],
     axes: Sequence[tuple[str, str]],
     *,
-    visits: int = 1,
+    scan_repeats: int = 1,
+    run_repeats: int = 1,
 ) -> DatasetSchema:
     """The scan dataset's schema: the plan's axes layered over the source's.
 
     ``rows`` carries one coordinate row per PLAN POINT; ``axes`` carries one
-    ``(name, unit)`` per column of those rows.  ``visits`` is how many times
-    every point is captured (repeats x shots); it adds one visit axis to the
-    Repeat domain, where "the same conditions, again" already lives. The
-    source's own axes (repeat, source points, data axes) are preserved
-    underneath, so a capture that was itself an image stays an image at
-    every scan point.
+    ``(name, unit)`` per column of those rows. ``scan_repeats`` and
+    ``run_repeats`` are recorded as separate Repeat axes. The source's own
+    axes (repeat, source points, data axes) are preserved underneath, so a
+    capture that was itself an image stays an image at every scan point.
     """
 
     rows = tuple(tuple(float(value) for value in row) for row in rows)
@@ -82,9 +142,12 @@ def scan_dataset_schema(
         raise ValueError("a scan dataset needs at least one point")
     if any(len(row) != len(axes) for row in rows):
         raise ValueError("every coordinate row carries one value per axis")
-    visits = int(visits)
-    if visits < 1:
-        raise ValueError("every plan point is visited at least once")
+    scan_repeats = int(scan_repeats)
+    run_repeats = int(run_repeats)
+    if scan_repeats < 1:
+        raise ValueError("scan_repeats must be at least 1")
+    if run_repeats < 1:
+        raise ValueError("run_repeats must be at least 1")
 
     source_points = source_schema.point_domain.size
 
@@ -93,6 +156,10 @@ def scan_dataset_schema(
         *(axis.axis_id for axis in source_schema.point_domain.axes),
         *(axis.axis_id for axis in source_schema.cell_domain.axes),
     }
+    execution_axis_ids = {_SCAN_REPEAT_AXIS_ID, _RUN_REPEAT_AXIS_ID}
+    if occupied_axis_ids & execution_axis_ids:
+        raise ValueError("source Dataset axes collide with scan execution axes")
+    occupied_axis_ids.update(execution_axis_ids)
 
     def free_axis_id(base: str) -> AxisId:
         suffix = 1
@@ -150,29 +217,11 @@ def scan_dataset_schema(
             ),
         ),
     )
-    source_repeat = source_schema.repeat_domain
-    if visits == 1:
-        repeat_domain = source_repeat
-    else:
-        visit_axis = AxisSpec(
-            free_axis_id("scan.visit"),
-            "visit",
-            REPEAT,
-            visits,
-            tuple(range(visits)),
-        )
-        repeat_domain = DomainSpec(
-            (visits * source_repeat.size,),
-            (*source_repeat.axes, visit_axis),
-            (
-                *(codes * visits for codes in source_repeat.axis_codes),
-                tuple(
-                    visit
-                    for visit in range(visits)
-                    for _source_repeat in range(source_repeat.size)
-                ),
-            ),
-        )
+    repeat_domain = scan_repeat_domain(
+        source_schema.repeat_domain,
+        scan_repeats=scan_repeats,
+        run_repeats=run_repeats,
+    )
     return DatasetSchema(
         repeat_domain,
         point_domain,
@@ -195,20 +244,24 @@ class ScanDatasetWriter:
         rows: Sequence[Sequence[float]],
         axes: Sequence[tuple[str, str]],
         *,
-        visits: int = 1,
+        scan_repeats: int = 1,
+        run_repeats: int = 1,
         run_record: Mapping[str, object] | None = None,
     ) -> None:
         self._rows = tuple(tuple(float(value) for value in row) for row in rows)
         if not self._rows:
             raise ValueError("a scan writes at least one point")
         self._axes = tuple((str(name), str(unit)) for name, unit in axes)
-        self._visits = int(visits)
-        if self._visits < 1:
-            raise ValueError("every plan point is visited at least once")
+        self._scan_repeats = int(scan_repeats)
+        self._run_repeats = int(run_repeats)
+        if self._scan_repeats < 1:
+            raise ValueError("scan_repeats must be at least 1")
+        if self._run_repeats < 1:
+            raise ValueError("run_repeats must be at least 1")
         self._run_record = dict(run_record or {})
         self._source_schema: DatasetSchema | None = None
         self._schema: DatasetSchema | None = None
-        self._filled: set[tuple[int, int]] = set()
+        self._filled: set[tuple[int, int, int]] = set()
         self._source_points = 0
         self._source_repeats = 0
         self._written = 0
@@ -219,30 +272,34 @@ class ScanDatasetWriter:
 
     @property
     def total(self) -> int:
-        return len(self._rows) * self._visits
+        return len(self._rows) * self._scan_repeats * self._run_repeats
 
     def write(
         self,
         value: SignalValue,
         *,
         row: int,
-        visit: int,
+        scan_repeat: int,
+        run_repeat: int,
     ) -> LiveDatasetOutput:
-        """Return one event chunk placed at its visit/plan-row destination."""
+        """Place one event at its scan-sweep, Run-repeat and plan row."""
 
         row = int(row)
-        visit = int(visit)
+        scan_repeat = int(scan_repeat)
+        run_repeat = int(run_repeat)
         if not 0 <= row < len(self._rows):
             raise IndexError("plan row is outside the scan plan")
-        if not 0 <= visit < self._visits:
-            raise IndexError("visit is outside the declared repeats x shots")
+        if not 0 <= scan_repeat < self._scan_repeats:
+            raise IndexError("scan_repeat is outside the declared scan repeats")
+        if not 0 <= run_repeat < self._run_repeats:
+            raise IndexError("run_repeat is outside the declared Run repeats")
         if self._schema is None:
             self._allocate(value)
         elif value.schema != self._source_schema:
             raise ValueError("the source dataset schema changed during the scan")
-        address = (visit, row)
+        address = (scan_repeat, run_repeat, row)
         if address in self._filled:
-            raise ValueError("this visit already captured this plan point")
+            raise ValueError("this Run repeat already captured this scan point")
         repeats = self._source_repeats
         points = self._source_points
         self._filled.add(address)
@@ -258,7 +315,10 @@ class ScanDatasetWriter:
             ),
             self._run_record,
             self._schema,
-            (visit * repeats, row * points),
+            (
+                (scan_repeat * self._run_repeats + run_repeat) * repeats,
+                row * points,
+            ),
             value.event_record,
         )
 
@@ -266,7 +326,11 @@ class ScanDatasetWriter:
         source_schema = value.schema
         self._source_schema = source_schema
         self._schema = scan_dataset_schema(
-            source_schema, self._rows, self._axes, visits=self._visits
+            source_schema,
+            self._rows,
+            self._axes,
+            scan_repeats=self._scan_repeats,
+            run_repeats=self._run_repeats,
         )
         self._source_points = source_schema.point_domain.size
         self._source_repeats = source_schema.repeat_domain.size
@@ -275,5 +339,6 @@ class ScanDatasetWriter:
 __all__ = [
     "SCAN_OUTPUT",
     "ScanDatasetWriter",
+    "scan_repeat_domain",
     "scan_dataset_schema",
 ]

@@ -124,6 +124,22 @@ class FigureViewerHandle(QtCore.QObject):
     def set_path(self, path: str) -> None:
         self._view.set_path(path)
 
+    def confirm_discard(self, text: str) -> bool:
+        """Ask whether unsaved edits may go; False keeps the working copy."""
+
+        from ..fluent import fluent_confirm
+
+        return bool(
+            fluent_confirm(
+                self._window if self._window is not None else self._view,
+                "Unsaved edits",
+                str(text),
+                confirm_text="Close anyway",
+                cancel_text="Keep editing",
+                kind="warning",
+            )
+        )
+
     def set_status(self, text: str, *, error: bool = False) -> None:
         self._view.set_status(text, error=error)
 

@@ -98,7 +98,7 @@ def test_firing_without_a_program_is_refused(sequencer) -> None:
 
     streamer, _program = sequencer
     with pytest.raises(RuntimeError):
-        streamer.fire()
+        streamer.fire(run_repeats=1, scan_repeats=1)
 
 
 def test_a_second_fire_before_the_first_finishes_is_refused(sequencer) -> None:
@@ -112,9 +112,9 @@ def test_a_second_fire_before_the_first_finishes_is_refused(sequencer) -> None:
 
     streamer, program = sequencer
     streamer.load(program)
-    streamer.fire()
+    streamer.fire(run_repeats=1, scan_repeats=1)
     with pytest.raises(RuntimeError):
-        streamer.fire()
+        streamer.fire(run_repeats=1, scan_repeats=1)
 
 
 def test_a_second_fire_after_waiting_is_allowed(sequencer) -> None:
@@ -123,7 +123,7 @@ def test_a_second_fire_after_waiting_is_allowed(sequencer) -> None:
     streamer, program = sequencer
     streamer.load(program)
     for _shot in range(3):
-        streamer.fire()
+        streamer.fire(run_repeats=1, scan_repeats=1)
         assert streamer.wait_done(1.0) is not None
 
 
@@ -137,7 +137,7 @@ def test_waiting_when_nothing_is_firing_reports_nothing(sequencer) -> None:
     streamer, program = sequencer
     streamer.load(program)
     assert streamer.wait_done(0.1) is None
-    streamer.fire()
+    streamer.fire(run_repeats=1, scan_repeats=1)
     assert streamer.wait_done(1.0) is not None
     assert streamer.wait_done(0.1) is None, "the same shot was reported twice"
 
@@ -147,7 +147,7 @@ def test_loading_while_firing_is_refused(sequencer) -> None:
 
     streamer, program = sequencer
     streamer.load(program)
-    streamer.fire()
+    streamer.fire(run_repeats=1, scan_repeats=1)
     with pytest.raises(RuntimeError):
         streamer.load(program)
 
@@ -158,7 +158,7 @@ def test_a_closed_device_refuses_everything(sequencer) -> None:
     with pytest.raises(RuntimeError):
         streamer.load(program)
     with pytest.raises(RuntimeError):
-        streamer.fire()
+        streamer.fire(run_repeats=1, scan_repeats=1)
 
 
 def test_wait_done_reports_the_shot_that_just_ran(sequencer) -> None:
@@ -171,7 +171,7 @@ def test_wait_done_reports_the_shot_that_just_ran(sequencer) -> None:
     assert described.clock_hz == streamer.streamer.clock_hz
     streamer.load(program)
     assert streamer.applied() is streamer.streamer.applied()
-    streamer.fire()
+    streamer.fire(run_repeats=1, scan_repeats=1)
     report = streamer.wait_done(1.0)
     assert report is not None
     assert hasattr(report, "status")
@@ -184,5 +184,5 @@ def test_safe_is_answerable_at_any_time(sequencer) -> None:
     streamer, program = sequencer
     assert streamer.safe() is not None
     streamer.load(program)
-    streamer.fire()
+    streamer.fire(run_repeats=1, scan_repeats=1)
     assert streamer.safe() is not None

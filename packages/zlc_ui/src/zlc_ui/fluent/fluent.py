@@ -1454,19 +1454,26 @@ class FluentPathEdit(QtWidgets.QWidget):
         row = QtWidgets.QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(scaled_px(6, minimum=4))
-        self.edit = FluentLineEdit(str(text))
+        # Every child is born WITH its parent.  A widget that has none is a
+        # top-level WINDOW the moment it is made visible, and this row set
+        # the Refresh button visible before the layout adopted it: on the
+        # one GUI that asks for that button, a 130x66 window titled
+        # "python" flashed on the desktop for a frame before the real
+        # window opened.  Parenting at construction makes the stray window
+        # unreachable rather than short-lived.
+        self.edit = FluentLineEdit(str(text), self)
         # a modest floor so the field + button still fit a narrow form column (the
         # edit grows with the column via the stretch below); never a 150px floor that
         # pushes the Browse button off a narrow Edit tab.
         self.edit.setMinimumWidth(scaled_px(96, minimum=72))
         self.edit.textChanged.connect(lambda t: self.changed.emit(str(t)))
-        self.browse = FluentButton("Browse…", color=GREY)
+        self.browse = FluentButton("Browse…", self, color=GREY)
         # size the button to its OWN label (+ padding) at the live DPR so "Browse…"
         # is never clipped (a fixed 80px clipped it to "owse" at some scales).
         self.browse.setFixedWidth(
             fluent_text_width(self.browse.fontMetrics(), "Browse…") + scaled_px(22, minimum=16))
         self.browse.clicked.connect(self._browse)
-        self.refresh = FluentButton("Refresh", color=GREY)
+        self.refresh = FluentButton("Refresh", self, color=GREY)
         self.refresh.setFixedWidth(
             fluent_text_width(self.refresh.fontMetrics(), "Refresh") + scaled_px(22, minimum=16))
         self.refresh.setToolTip("Re-read this file from disk")
@@ -4004,6 +4011,8 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         self.setDecimals(323)
 
     def textFromValue(self, value: float) -> str:
+        if self.decimals() == 0:
+            return str(int(value))
         return repr(float(value))
 
     def valueFromText(self, text: str) -> float:
@@ -4286,7 +4295,58 @@ class FluentTableView(QtWidgets.QTableView):
             return
         if not bool(index.flags() & QtCore.Qt.ItemIsEditable):
             return
-        self.edit(index)
+        super().edit(index)
+
+    def edit(self, index, trigger, event) -> bool:  # noqa: N802 - Qt naming
+        """Open a cell, and watch the editor's keys while it is open.
+
+        The editor's event filter belongs to the DELEGATE, not to the
+        view, so a view that wants a say has to ask for one -- and this
+        is the one place every editor is born, whichever trigger opened
+        it and whichever delegate made it.
+        """
+
+        started = bool(super().edit(index, trigger, event))
+        if started:
+            editor = self.viewport().focusWidget()
+            if editor is not None and editor is not self:
+                editor.installEventFilter(self)
+        return started
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt naming
+        """Walking the grid while a cell is open is part of editing it.
+
+        Qt gives the delegate Tab and Backtab -- commit, step sideways,
+        keep editing -- and nothing else.  Up and Down appeared to work
+        only because a QLineEdit ignores them and the unhandled key
+        reaches the view underneath: an accident that lasts exactly as
+        long as every editor happens to be a plain line edit, and one
+        that no single-row table can even show.  The four directions are
+        one contract, so all four are answered here.
+        """
+
+        if (
+            event.type() == QtCore.QEvent.KeyPress
+            and isinstance(watched, QtWidgets.QWidget)
+            and event.key() in (QtCore.Qt.Key_Up, QtCore.Qt.Key_Down)
+            and not event.modifiers()
+        ):
+            index = self.currentIndex()
+            model = self.model()
+            if index.isValid() and model is not None:
+                step = -1 if event.key() == QtCore.Qt.Key_Up else 1
+                row = index.row() + step
+                if 0 <= row < model.rowCount():
+                    moved = model.index(row, index.column())
+                    self.commitData(watched)
+                    self.closeEditor(
+                        watched, QtWidgets.QAbstractItemDelegate.NoHint
+                    )
+                    self.setCurrentIndex(moved)
+                    if bool(moved.flags() & QtCore.Qt.ItemIsEditable):
+                        super().edit(moved)
+                    return True
+        return super().eventFilter(watched, event)
 
     def _selected_bounds(self) -> tuple[tuple[QtCore.QModelIndex, ...], int, int, int, int] | None:
         selected = tuple(self.selectionModel().selectedIndexes())

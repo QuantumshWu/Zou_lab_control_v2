@@ -71,7 +71,8 @@ def sequencer_archive_snapshot(
             "opened",
             "loaded",
             "firing",
-            "cycles",
+            "run_repeats",
+            "scan_repeats",
             "reloaded_before_fire",
             "cursor",
             "scan_count",
@@ -121,8 +122,11 @@ class SequencerDevice:
     ) -> None:
         self.streamer.load(prog, source=source, rows=rows)
 
-    def fire(self, *, cycles: int | None = 1) -> None:
-        self.streamer.fire(cycles=cycles)
+    def fire(self, *, run_repeats: int, scan_repeats: int = 1) -> None:
+        self.streamer.fire(
+            run_repeats=run_repeats,
+            scan_repeats=scan_repeats,
+        )
 
     def wait_done(self, timeout: float | None = None) -> DoneReport | None:
         return self.streamer.wait_done(timeout)
