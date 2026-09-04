@@ -91,14 +91,6 @@ def _text(value: Any, field_name: str, *, empty: bool = False) -> str:
     return value
 
 
-def _text_or_empty(value: Any, field_name: str) -> str:
-    """Free text that may be empty -- a path a pulse points at, or nothing."""
-
-    if not isinstance(value, str):
-        raise TypeError(f"{field_name} must be text")
-    return value.strip()
-
-
 def _identifier(value: Any, field_name: str) -> str:
     result = _text(value, field_name)
     if _IDENTIFIER.fullmatch(result) is None:
@@ -565,10 +557,6 @@ class PulseSequence:
     slots: tuple[PulseSlot, ...]
     api_parameters: tuple[PulseApiParameter, ...]
     config_parameters: tuple[PulseConfigParameter, ...]
-    #: Where this pulse refreshes its config parameters from, relative to
-    #: the workspace; empty when it refreshes from nowhere and the authored
-    #: numbers stand.
-    config_source: str
     delays: tuple[OutputDelay, ...]
     bracket: PulseBracket | None
     run_repeats: int
@@ -587,7 +575,6 @@ class PulseSequence:
         slots: tuple[PulseSlot, ...] = (),
         api_parameters: tuple[PulseApiParameter, ...] = (),
         config_parameters: tuple[PulseConfigParameter, ...] = (),
-        config_source: str = "",
         delays: tuple[OutputDelay, ...] = (),
         bracket: PulseBracket | None = None,
         run_repeats: int = 0,
@@ -703,7 +690,6 @@ class PulseSequence:
         object.__setattr__(self, "slots", slot_values)
         object.__setattr__(self, "api_parameters", api_values)
         object.__setattr__(self, "config_parameters", config_values)
-        object.__setattr__(self, "config_source", _text_or_empty(config_source, "config_source"))
         object.__setattr__(self, "delays", delay_values)
         object.__setattr__(self, "bracket", bracket)
         object.__setattr__(self, "run_repeats", run_repeats)

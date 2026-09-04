@@ -167,9 +167,6 @@ class ScheduleVM:
     analog_mode_choices: tuple[FormChoice, ...] = ()
     bracket: BracketVM | None = None
     run_repeats: int = 0
-    #: Where this pulse refreshes its config parameters from, relative to
-    #: the pulse's own folder; empty when it refreshes from nowhere.
-    config_source: str = ""
     delay_rows: tuple[DelayRowVM, ...] = ()
     scan_summary_text: str = ""
     min_bracket_count: int = 2

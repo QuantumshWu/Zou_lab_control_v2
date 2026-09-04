@@ -42,7 +42,6 @@ def _as_written_before_the_bracket_split(document: dict) -> dict:
     older["repeat"] = older.pop("bracket")
     older.pop("run_repeats")
     older.pop("config_parameters")
-    older.pop("config_source")
     return older
 
 
@@ -70,10 +69,34 @@ def test_a_pulse_from_before_the_rename_opens_again(tmp_path: Path) -> None:
     assert outcome.verdict == "migrated", outcome.detail
     assert read_pulse(path) == state_from_tree(current)
     # Nothing may be invented on the way: a pulse that never named a field as
-    # configured refreshes nothing from nowhere.
-    migrated = read_pulse(path).sequence
-    assert migrated.config_parameters == ()
-    assert migrated.config_source == ""
+    # configured declares none.
+    assert read_pulse(path).sequence.config_parameters == ()
+
+
+def test_a_pulse_that_names_a_config_file_drops_the_name(tmp_path: Path) -> None:
+    """The config path lived in the document for one build, and must not stay.
+
+    Anything saved while it did carries a field today's reader refuses, so
+    the same one-shot has to carry a pulse forward from that shape too --
+    otherwise migrating cures the old wall by walking into a newer one.
+    """
+
+    current = _current_document()
+    interim = dict(current)
+    interim["config_source"] = "calibration/current.json"
+    path = _write(tmp_path / "imaging.json", interim)
+
+    try:
+        read_pulse(path)
+    except ValueError as error:
+        assert "config_source" in str(error)
+    else:  # pragma: no cover - the interim shape would still read
+        raise AssertionError("the interim shape must not read as a current pulse")
+
+    outcome = migrate_file(path)
+
+    assert outcome.verdict == "migrated", outcome.detail
+    assert read_pulse(path) == state_from_tree(current)
 
 
 def test_the_original_is_kept_beside_the_file_it_came_from(tmp_path: Path) -> None:

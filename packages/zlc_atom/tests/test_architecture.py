@@ -304,7 +304,6 @@ def test_pulse_resolver_uses_the_project_json_document(
         "slots",
         "api_parameters",
         "config_parameters",
-        "config_source",
         "delays",
         "bracket",
         "run_repeats",

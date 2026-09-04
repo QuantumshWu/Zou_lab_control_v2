@@ -34,19 +34,20 @@ A pulse field's value comes from one of three places, and which one is the
 whole meaning of its binding. A SCAN slot is filled by the board, one value per
 point, out of the hardware's four. An API parameter is a hole a caller fills
 once per run; `compile_sequence` refuses one that is still open. A CONFIG
-parameter is neither: its value IS the field's own authored number, and
-`config_source` names the file it is refreshed from, relative to the pulse's
-own folder. `read_pulse_document(path)` is the one place a pulse arrives from a
-file and it does that refresh, so the editor, a scan and a calibration all get
-today's calibrated numbers by loading the pulse, with no line of their own.
-Applying a set overwrites the authored number in the period, the DAC step or
-the delay it names -- the overwrite is the storage, so a pulse read back later
-needs no second file to be understood. A pulse declaring no config parameter
-never looks for a file; one whose file is missing, unreadable, or silent about
-a parameter it declares is refused before anything could play it. A field a run
-needs to vary is an API parameter, which is the whole difference between the
-two, so a field carries at most one binding and all three share one id
-namespace.
+parameter is neither: its value IS the field's own number, and the SEQUENCER
+supplies today's. A board is calibrated, not a pulse -- channel delays and DAC
+biases belong to the apparatus and are shared by every pulse it plays -- so the
+value set is loaded onto the device once and `PulseStreamer.compile_pulse` is
+the only way to compile for a board. It writes the held numbers into the
+period, the DAC step or the delay each parameter names and returns BOTH the
+filled sequence and the program, because the filled one is what must be handed
+back as `source=`. A declaration the held set says nothing about is refused
+there, before anything could play it: a stale number played while the run
+record claims it is fresh is the one outcome worse than refusing to run.
+`compile_sequence` itself stays blind to config parameters, so nothing but that
+one door is safe. A field a run needs to vary is an API parameter, which is the
+whole difference between the two, so a field carries at most one binding and
+all three share one id namespace.
 
 The package has no measurement, GUI, or run-planning layer. `applied()` is only
 the device's saved passive echo of the last program, source, rows, and repeat

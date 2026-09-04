@@ -91,8 +91,8 @@ def editor_state_from(
     """One authoring state from a decoded pulse and its editor section.
 
     Apart from :func:`state_from_tree`, because a pulse read from a FILE has
-    already been decoded -- and refreshed from its config source -- by the
-    time it gets here, and decoding it a second time from the tree would
+    already been decoded by the time it gets here, and decoding it a second
+    time from the tree would
     throw that refresh away.
     """
 

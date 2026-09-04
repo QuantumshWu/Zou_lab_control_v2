@@ -221,7 +221,6 @@ def _configured() -> PulseSequence:
                 "gate_delay", PulseFieldRef("delay", port="d1"), "ns"
             ),
         ),
-        config_source="calibration/current.json",
     )
 
 
@@ -237,10 +236,11 @@ def test_a_config_parameter_reads_the_number_the_pulse_already_carries() -> None
 
 
 def test_applying_a_config_set_overwrites_the_authored_numbers() -> None:
-    """The overwrite is the storage: afterwards the pulse holds what the file said.
+    """The overwrite is the storage: afterwards the pulse holds what was applied.
 
-    So a pulse read back later needs no second file to be understood, and the
-    editor shows the calibrated numbers in the fields they belong to.
+    The sequencer fills a config parameter by writing the number into the
+    field it names, so the compiled program and the sequence handed back as
+    ``source=`` describe the same pulse.
     """
 
     sequence, applied, unknown = apply_config_values(
@@ -260,7 +260,6 @@ def test_applying_a_config_set_overwrites_the_authored_numbers() -> None:
     assert authored_config_entries(sequence)["gate_delay"] == (40.0, "ns")
     # The declarations survive an apply; only the numbers moved.
     assert len(sequence.config_parameters) == 3
-    assert sequence.config_source == "calibration/current.json"
 
 
 def test_a_declared_config_parameter_needs_no_resolving_to_compile() -> None:
@@ -276,7 +275,7 @@ def test_a_declared_config_parameter_needs_no_resolving_to_compile() -> None:
     configured = _configured()
     program = compile_sequence(configured, geometry, 50e6)
     bare = compile_sequence(
-        replace(configured, config_parameters=(), config_source=""),
+        replace(configured, config_parameters=()),
         geometry,
         50e6,
     )
@@ -306,114 +305,4 @@ def test_one_field_carries_one_binding_and_one_id_namespace() -> None:
             ),
         )
 
-
-def _config_document(tmp_path, *, source: str, values: dict) -> "Path":
-    """One pulse on disk beside the config set it names."""
-
-    from pathlib import Path
-
-    import json
-
-    from zlc_pulse.codec import config_values_to_tree, sequence_to_tree
-
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    pulse = tmp_path / "configured.json"
-    pulse.write_text(
-        json.dumps(sequence_to_tree(replace(_configured(), config_source=source))),
-        encoding="utf-8",
-    )
-    if values is not None:
-        target = tmp_path / source
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(
-            json.dumps(config_values_to_tree(values, name="today", source="test")),
-            encoding="utf-8",
-        )
-    return Path(pulse)
-
-
-def test_reading_a_pulse_refreshes_the_numbers_its_config_file_names(tmp_path) -> None:
-    """The read IS the refresh, so nothing downstream has to remember one.
-
-    A runner that never heard of config parameters -- the editor, a scan, a
-    calibration -- gets today's numbers simply by loading the pulse.
-    """
-
-    from zlc_pulse import read_pulse_document
-
-    path = _config_document(
-        tmp_path,
-        source="calibration/current.json",
-        values={
-            "probe_time": (100, "ns"),
-            "bias_x": (1, "value"),
-            "gate_delay": (60, "ns"),
-            "a_value_for_some_other_pulse": (3, "ns"),
-        },
-    )
-    sequence, editor = read_pulse_document(path)
-
-    assert editor == {}
-    assert sequence.period_by_id["p1"].duration == 100
-    assert authored_config_entries(sequence) == {
-        "probe_time": (100.0, "ns"),
-        "bias_x": (1.0, "value"),
-        "gate_delay": (60.0, "ns"),
-    }
-    # The declarations and the source survive the read: the editor still has
-    # something to show, and the next read refreshes again.
-    assert len(sequence.config_parameters) == 3
-    assert sequence.config_source == "calibration/current.json"
-
-
-def test_a_pulse_that_declares_no_config_parameter_never_looks_for_a_file(
-    tmp_path,
-) -> None:
-    """Skipped entirely -- there is nothing to refresh and no file to miss."""
-
-    import json
-
-    from zlc_pulse import read_pulse_document
-    from zlc_pulse.codec import sequence_to_tree
-
-    path = tmp_path / "plain.json"
-    path.write_text(
-        json.dumps(
-            sequence_to_tree(replace(_sequence(), config_source="nothing/here.json"))
-        ),
-        encoding="utf-8",
-    )
-    sequence, _editor = read_pulse_document(path)
-    assert sequence.config_parameters == ()
-
-
-def test_a_config_file_that_cannot_answer_stops_the_pulse_at_the_reader(
-    tmp_path,
-) -> None:
-    """Every way it can be wrong is refused before anything could play it.
-
-    A stale number played while the pulse says it is fresh is the one outcome
-    worse than refusing to run, so silence about a declared parameter is an
-    error too -- not a quiet fall back to what was authored last month.
-    """
-
-    from zlc_pulse import read_pulse_document
-
-    missing = _config_document(tmp_path / "a", source="gone.json", values=None)
-    with np.testing.assert_raises_regex(ValueError, "cannot be read"):
-        read_pulse_document(missing)
-
-    (tmp_path / "b").mkdir(parents=True, exist_ok=True)
-    not_a_set = _config_document(tmp_path / "b", source="wrong.json", values={})
-    (tmp_path / "b" / "wrong.json").write_text("{}", encoding="utf-8")
-    with np.testing.assert_raises_regex(ValueError, "not a config value set"):
-        read_pulse_document(not_a_set)
-
-    silent = _config_document(
-        tmp_path / "c",
-        source="partial.json",
-        values={"probe_time": (100, "ns"), "bias_x": (1, "value")},
-    )
-    with np.testing.assert_raises_regex(ValueError, "says nothing about"):
-        read_pulse_document(silent)
 
