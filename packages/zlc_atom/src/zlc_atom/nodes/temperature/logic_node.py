@@ -70,7 +70,7 @@ TEMPERATURE_SCHEMA = AuthoringSchema(
             "pulse_template",
             "resource",
             "Pulse template",
-            "temperature_template.json",
+            "",
             required=True,
         ),
         # The release plan, in the unit the template's own release parameter

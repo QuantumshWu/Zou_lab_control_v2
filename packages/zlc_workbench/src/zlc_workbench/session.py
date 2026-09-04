@@ -106,55 +106,6 @@ def _resolved_simulation(space: "Workspace", config: object) -> dict[str, object
     return simulation
 
 
-def _seed_default_pulse(template: Path, packaged: bytes) -> None:
-    """Create or canonicalize only a packaged default pulse.
-
-    A differently authored or unreadable file is operator content and remains
-    untouched.  An equivalent old rendering is not a second pulse: write it
-    back through the one readable JSON serializer and durable file owner.
-    """
-
-    packaged_tree = json.loads(packaged.decode("utf-8"))
-    canonical = readable_json_bytes(packaged_tree)
-    if not template.exists():
-        atomic_write_bytes(template, canonical)
-        return
-    try:
-        existing = template.read_bytes()
-        existing_tree = json.loads(existing.decode("utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return
-    if _same_json_value(existing_tree, packaged_tree) and existing != canonical:
-        atomic_write_bytes(template, canonical)
-
-
-def seed_packaged_pulses(pulses: Path) -> None:
-    """Every packaged default pulse, present and canonical, in one place.
-
-    Called from every session entry, not only the checkout's own home: a
-    fresh experiment folder gets working calibration and scan templates, and
-    the seeder never touches operator content -- it creates what is absent
-    and canonicalizes only files that are byte-for-byte equivalent trees.
-    """
-
-    from zlc_atom.nodes import (
-        calibration_pulse_template_bytes,
-        scan_pulse_template_bytes,
-        temperature_pulse_template_bytes,
-    )
-
-    pulses.mkdir(parents=True, exist_ok=True)
-    _seed_default_pulse(
-        pulses / Workspace.IMAGING_TEMPLATE, calibration_pulse_template_bytes()
-    )
-    _seed_default_pulse(
-        pulses / "mot_field_template.json", scan_pulse_template_bytes()
-    )
-    _seed_default_pulse(
-        pulses / "temperature_template.json", temperature_pulse_template_bytes()
-    )
-
-
 def seed_current_config_values(directory: Path) -> None:
     """The empty set of config values, present so it can be edited.
 
@@ -253,11 +204,6 @@ class Workspace:
     #: .gitignore keeps it out, so a pull cannot replace a pulse and a reclone
     #: does not carry one machine's experiment to another.
     DEFAULT_HOME = "workspace"
-    #: Calibration's authored project template.  It is merely seeded into the
-    #: default workspace; opening devices and opening the ordinary Pulse Editor
-    #: never load or compile it implicitly.
-    IMAGING_TEMPLATE = "imaging_template.json"
-
     @classmethod
     def default(cls) -> "Workspace":
         """The one place an experiment lives when nothing else is nearer.
@@ -282,7 +228,6 @@ class Workspace:
             if root
             else Path(__file__).resolve().parents[4] / cls.DEFAULT_HOME
         )
-        seed_packaged_pulses(home / "pulses")
         return cls(home)
 
     @classmethod
@@ -357,10 +302,6 @@ class ExperimentSession:
         if not isinstance(config, InstallationConfig):
             raise TypeError("config must be InstallationConfig")
         space = workspace if isinstance(workspace, Workspace) else Workspace(workspace)
-        # Every experiment gets the packaged default pulses, not only the
-        # checkout's home: calibration and the scan work out of the box in a
-        # fresh folder, and the seeder never touches operator content.
-        seed_packaged_pulses(space.pulses)
         snapshot = catalog if catalog is not None else discover_device_catalog()
         return cls._from_config(space, config, snapshot)
 

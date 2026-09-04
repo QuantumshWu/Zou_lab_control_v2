@@ -117,8 +117,6 @@ include = ["zou_lab_control", "zlc_*"]
 namespaces = false
 
 [tool.setuptools.package-data]
-"zlc_atom.nodes.calibration" = ["imaging_template.json"]
-"zlc_atom.nodes.scan" = ["mot_field_template.json", "temperature_template.json"]
 "zlc_atom.devices.slm" = ["profiles/*.json"]
 zlc_plot = ["assets/*.ttf", "py.typed"]
 zlc_ui = ["assets/*.ico"]

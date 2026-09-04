@@ -52,7 +52,12 @@ CALIBRATION_SCHEMA = AuthoringSchema(
             "pulse_template",
             "resource",
             "Calibration pulse template",
-            "imaging_template.json",
+            # No default file name: pulses live in the workspace's pulse
+            # folder and the operator names the one this node runs.  A
+            # name shipped inside the logic layer was a pulse document in
+            # a place pulse documents do not live, and it went stale the
+            # moment anybody edited theirs.
+            "",
             required=True,
         ),
         AuthoringField("repeats", "int", "Samples", 200, minimum=1),

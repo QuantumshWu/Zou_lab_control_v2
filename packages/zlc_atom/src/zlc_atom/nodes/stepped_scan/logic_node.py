@@ -52,7 +52,7 @@ STEPPED_SCAN_SCHEMA = AuthoringSchema(
             "pulse_template",
             "resource",
             "Pulse template",
-            "mot_field_template.json",
+            "",
             required=True,
         ),
         AuthoringField(
