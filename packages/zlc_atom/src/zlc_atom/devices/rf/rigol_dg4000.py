@@ -40,22 +40,42 @@ class VisaResources(Protocol):
 
 
 def visa_resources() -> VisaResources:
-    """This machine's VISA, or the instruction for making it exist.
+    """This machine's VISA, or why this interpreter has none.
 
     One entry point, because "there is no VISA here" is the same fact for
     the driver opening one named instrument and for the probe asking what is
-    attached -- and it is a fact with a fix, which is the part an operator
-    needs to be told.
+    attached.  What it must NOT be is one sentence for every way of failing:
+    this said "no VISA backend is available: install pyvisa-py" whether the
+    backend was missing or PyVISA itself had never been installed, so an
+    operator who had just installed both read an instruction to install what
+    they had.  Which interpreter is asking is part of the answer, because
+    "installed" is only ever true of one of them.
     """
+
+    import sys
 
     try:
         import pyvisa
-
-        return pyvisa.ResourceManager()
     except Exception as error:
         raise RuntimeError(
-            "no VISA backend is available: install NI-VISA system-wide "
-            "(or `pip install pyvisa-py`), then restart the bench "
+            f"PyVISA is not installed for {sys.executable}: run "
+            "bin\\install_requirements.bat with THIS interpreter, or "
+            f"`pip install PyVISA PyVISA-py` into it ({type(error).__name__}: {error})"
+        ) from error
+    try:
+        return pyvisa.ResourceManager()
+    except Exception as error:
+        from pyvisa.highlevel import list_backends
+
+        try:
+            backends = ", ".join(list_backends()) or "none"
+        except Exception:  # noqa: BLE001 - the first failure is the one to report
+            backends = "unknown"
+        raise RuntimeError(
+            f"PyVISA {pyvisa.__version__} is installed for {sys.executable} "
+            f"but no backend answered (it offers: {backends}); 'ivi' means a "
+            "system NI-VISA whose visa32/visa64 DLL was not found, so install "
+            "NI-VISA, or `pip install PyVISA-py` into that same interpreter "
             f"({type(error).__name__}: {error})"
         ) from error
 

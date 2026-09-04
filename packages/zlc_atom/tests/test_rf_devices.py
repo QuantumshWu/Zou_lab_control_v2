@@ -485,6 +485,39 @@ def test_no_visa_at_all_is_an_instruction_not_an_empty_bench(monkeypatch) -> Non
         module.discover_dg4000()
 
 
+def test_a_missing_library_is_not_reported_as_a_missing_backend(monkeypatch) -> None:
+    """One sentence for two faults told an operator to install what they had.
+
+    "no VISA backend: pip install pyvisa-py" was raised whether the backend
+    was absent or PyVISA had never been imported at all -- and the second is
+    what an install into a DIFFERENT interpreter looks like from here.  So
+    each failure says which one it is, and names the interpreter that is
+    asking, because "installed" is only ever true of one of them.
+    """
+
+    import builtins
+    import sys
+
+    import zlc_atom.devices.rf.rigol_dg4000 as module
+
+    real_import = builtins.__import__
+
+    def _no_pyvisa(name, *rest):
+        if name == "pyvisa":
+            raise ModuleNotFoundError("No module named 'pyvisa'")
+        return real_import(name, *rest)
+
+    monkeypatch.delitem(sys.modules, "pyvisa", raising=False)
+    monkeypatch.setattr(builtins, "__import__", _no_pyvisa)
+    with pytest.raises(RuntimeError) as caught:
+        module.visa_resources()
+
+    message = str(caught.value)
+    assert "PyVISA is not installed" in message
+    assert sys.executable in message, "which interpreter is the answer"
+    assert "backend" not in message, "a missing library is not a missing backend"
+
+
 def test_a_found_instrument_is_offered_as_an_installable_card(monkeypatch) -> None:
     """What the scan finds must be addable without retyping the address."""
 
