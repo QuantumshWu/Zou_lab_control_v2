@@ -94,6 +94,37 @@ def _vaunix_factory(context, key: str, values: dict) -> InstalledLeaf:
     )
 
 
+def _discover_rigol() -> tuple[DeviceInstanceConfig, ...]:
+    """Every DG4000 that answers on this machine, named by what it answered.
+
+    The serial is the instrument's own, off ``*IDN?``, so unplugging one and
+    scanning again offers the same card rather than a differently numbered
+    stranger.  When an instrument gives no serial the resource it was found
+    at is the name -- still stable, still that instrument, just longer.
+    """
+
+    from zlc_atom.devices.rf.rigol_dg4000 import discover_dg4000
+
+    def named(sighting) -> str:
+        tail = sighting.serial or "".join(
+            character if character.isalnum() else "_"
+            for character in sighting.resource
+        )
+        return f"dg4000_{tail}"
+
+    return tuple(
+        DeviceInstanceConfig(
+            instance_id=named(sighting),
+            role=named(sighting),
+            type_id="rf.rigol_dg4000",
+            parameters=RIGOL_DG4000_SCHEMA.project_values(
+                {"resource": sighting.resource}
+            ),
+        )
+        for sighting in discover_dg4000()
+    )
+
+
 def _discover_vaunix() -> tuple[DeviceInstanceConfig, ...]:
     """Every attached Lab Brick, by serial -- a count read, no opens.
 
@@ -127,6 +158,7 @@ DEVICE_TYPES = (
         RIGOL_DG4000_SCHEMA,
         ("rf.source",),
         factory=_rigol_factory,
+        discover=_discover_rigol,
     ),
     DeviceTypeDescriptor(
         "rf.vaunix_lms",

@@ -333,3 +333,187 @@ def test_vendor_files_live_with_the_family_and_missing_means_instructions(
     monkeypatch.setattr(vendor_module, "resolve_vendor_file", _missing)
     with pytest.raises(FileNotFoundError, match="copy vnx_fmsynth.dll into"):
         module._discover_vaunix()
+
+
+class _VisaBus:
+    """A machine's worth of VISA: a resource list, and sessions on demand.
+
+    The fake is the lowest layer, as everywhere else here: the probe's real
+    filtering, its real ``*IDN?``, and its real identity rules run over this.
+    """
+
+    def __init__(self, instruments: dict, *, refuse: tuple = ()) -> None:
+        #: resource -> the ``*IDN?`` answer, or an exception to raise on query
+        self.instruments = instruments
+        #: resources whose open() fails, the way a busy instrument's does
+        self.refuse = tuple(refuse)
+        self.opened: list[str] = []
+        self.closed: list[str] = []
+        self.timeouts: list[int] = []
+
+    def list_resources(self) -> tuple[str, ...]:
+        return tuple(self.instruments)
+
+    def open_resource(self, resource: str, **kwargs):
+        self.opened.append(resource)
+        if resource in self.refuse:
+            raise OSError(f"{resource} is in use by another program")
+        return _VisaSession(self, resource, self.instruments[resource])
+
+
+class _VisaSession:
+    def __init__(self, bus: _VisaBus, resource: str, answer) -> None:
+        self._bus, self._resource, self._answer = bus, resource, answer
+        self.timeout = 0
+
+    def query(self, command: str) -> str:
+        assert command == "*IDN?", f"the probe asked {command!r}"
+        self._bus.timeouts.append(self.timeout)
+        if isinstance(self._answer, Exception):
+            raise self._answer
+        return self._answer
+
+    def close(self) -> None:
+        self._bus.closed.append(self._resource)
+
+
+def test_a_scpi_instrument_is_found_by_asking_what_it_is() -> None:
+    """VISA lists addresses; only *IDN? says what is on the other end.
+
+    So the probe opens each candidate, asks the one universal question, and
+    keeps the ones this driver can actually drive.  A scope on the same bus
+    answers and is passed over -- it is not a refusal, it is the answer.
+    """
+
+    from zlc_atom.devices.rf.rigol_dg4000 import discover_dg4000
+
+    bus = _VisaBus(
+        {
+            "USB0::0x1AB1::0x0641::DG4E0000000001::INSTR":
+                "RIGOL TECHNOLOGIES,DG4162,DG4E0000000001,00.01.12",
+            "TCPIP0::198.51.100.7::INSTR":
+                "RIGOL TECHNOLOGIES,DG4102,DG4E0000000002,00.01.12",
+            "TCPIP0::198.51.100.9::INSTR":
+                "KEYSIGHT TECHNOLOGIES,DSOX1204G,CN00000000,01.20",
+        }
+    )
+
+    found = discover_dg4000(bus)
+
+    assert [sighting.resource for sighting in found] == [
+        "USB0::0x1AB1::0x0641::DG4E0000000001::INSTR",
+        "TCPIP0::198.51.100.7::INSTR",
+    ]
+    assert [sighting.serial for sighting in found] == [
+        "DG4E0000000001",
+        "DG4E0000000002",
+    ]
+    assert [sighting.model for sighting in found] == ["DG4162", "DG4102"]
+    # Every session opened is a session closed, including the scope's: a scan
+    # must not leave an instrument held.
+    assert sorted(bus.closed) == sorted(bus.opened)
+
+
+def test_the_probe_never_opens_a_serial_port() -> None:
+    """ASRL is where the board's own UART lives, and it is not a question.
+
+    Opening a serial port to ask *IDN? takes it from whoever has it -- on
+    this bench, the pulse server that owns the streamer -- and gets nothing
+    back.  A signal-generator scan must not be able to do that.
+    """
+
+    from zlc_atom.devices.rf.rigol_dg4000 import discover_dg4000
+
+    bus = _VisaBus(
+        {
+            "ASRL3::INSTR": AssertionError("the probe opened a serial port"),
+            "USB0::0x1AB1::0x0641::DG4E0000000001::INSTR":
+                "RIGOL TECHNOLOGIES,DG4162,DG4E0000000001,00.01.12",
+        }
+    )
+
+    found = discover_dg4000(bus)
+
+    assert bus.opened == ["USB0::0x1AB1::0x0641::DG4E0000000001::INSTR"]
+    assert len(found) == 1
+
+
+def test_an_instrument_that_will_not_answer_is_passed_over(caplog) -> None:
+    """Busy, silent, or not SCPI: the ordinary case on a shared bus.
+
+    None of them may end the scan, because the instrument the operator IS
+    looking for is usually behind one of them in the list.
+    """
+
+    from zlc_atom.devices.rf.rigol_dg4000 import discover_dg4000
+
+    bus = _VisaBus(
+        {
+            "TCPIP0::198.51.100.1::INSTR": TimeoutError("no answer"),
+            "TCPIP0::198.51.100.2::INSTR": "",
+            "TCPIP0::198.51.100.3::INSTR": "SOME PRINTER,LX-80,,1.0",
+            "USB0::0x1AB1::0x0641::DG4E0000000001::INSTR":
+                "RIGOL TECHNOLOGIES,DG4162,DG4E0000000001,00.01.12",
+        },
+        refuse=("TCPIP0::198.51.100.2::INSTR",),
+    )
+
+    found = discover_dg4000(bus, timeout_seconds=0.25)
+
+    assert [sighting.serial for sighting in found] == ["DG4E0000000001"]
+    # The bound the probe was given is the bound each session got, in ms.
+    assert set(bus.timeouts) == {250}
+
+
+def test_no_visa_at_all_is_an_instruction_not_an_empty_bench(monkeypatch) -> None:
+    """The scan strip is where an operator asks "why no instruments?".
+
+    "None found" would be a lie on a machine that has no VISA to look with,
+    and it is a lie with no next step in it.
+    """
+
+    import zlc_atom.devices.rf.rigol_dg4000 as module
+
+    def _no_backend():
+        raise RuntimeError(
+            "no VISA backend is available: install NI-VISA system-wide "
+            "(or `pip install pyvisa-py`), then restart the bench"
+        )
+
+    monkeypatch.setattr(module, "visa_resources", _no_backend)
+    with pytest.raises(RuntimeError, match="install NI-VISA"):
+        module.discover_dg4000()
+
+
+def test_a_found_instrument_is_offered_as_an_installable_card(monkeypatch) -> None:
+    """What the scan finds must be addable without retyping the address."""
+
+    import zlc_atom.devices.rf.device_types as module
+    import zlc_atom.devices.rf.rigol_dg4000 as driver
+    from zlc_atom.install import discover_device_catalog
+
+    bus = _VisaBus(
+        {
+            "TCPIP0::198.51.100.7::INSTR":
+                "RIGOL TECHNOLOGIES,DG4162,DG4E0000000002,00.01.12",
+        }
+    )
+    monkeypatch.setattr(driver, "visa_resources", lambda: bus)
+
+    offered = module._discover_rigol()
+
+    assert len(offered) == 1
+    card = offered[0]
+    assert card.type_id == "rf.rigol_dg4000"
+    assert card.instance_id == "dg4000_DG4E0000000002" == card.role
+    assert card.parameters["resource"] == "TCPIP0::198.51.100.7::INSTR"
+    # The schema fills the rest, so the card installs without further typing.
+    assert card.parameters["timeout_seconds"] == 5.0
+
+    # And the scan strip reaches it: the descriptor now declares a discover.
+    rigol = next(
+        item
+        for item in discover_device_catalog().available
+        if item.type_id == "rf.rigol_dg4000"
+    )
+    assert rigol.discover is module._discover_rigol
