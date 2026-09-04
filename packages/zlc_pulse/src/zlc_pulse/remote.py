@@ -27,6 +27,7 @@ from typing import Any, Callable
 from .compile import CompiledProgram, TargetBusDelay as _TargetBusDelay, TargetBusSegment as _TargetBusSegment
 from .device import (
     AppliedState,
+    ConfigValueHolder,
     BoardDescription,
     DoneReport,
     PulseStreamer,
@@ -1253,7 +1254,7 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         return True
 
 
-class RemotePulseStreamer:
+class RemotePulseStreamer(ConfigValueHolder):
     """The local ``PulseStreamer`` method surface backed by one TCP connection."""
 
     def __init__(
@@ -1283,6 +1284,7 @@ class RemotePulseStreamer:
         self._socket: socket.socket | None = None
         self._request_id = 0
         self._io_lock = threading.RLock()
+        self._init_config_values()
 
     def open(self) -> None:
         with self._io_lock:
@@ -1370,7 +1372,12 @@ class RemotePulseStreamer:
         return self._call("safe", {})
 
     def snapshot(self) -> dict[str, object]:
-        return self._call("snapshot", {})
+        # The set is held here, not on the server, so the server's answer to
+        # "which calibration is filling my pulses" is about a streamer nobody
+        # compiles against.  Say what this client actually holds.
+        state = dict(self._call("snapshot", {}))
+        state["config_source"] = self.config_source
+        return state
 
     def applied(self) -> AppliedState | None:
         return self._call("applied", {})

@@ -11,7 +11,13 @@ import time
 
 from collections.abc import Mapping
 
-from .compile import CompiledProgram, evaluate_affine_tick, slot_operand_width
+from .binding import apply_config_values
+from .compile import (
+    CompiledProgram,
+    compile_sequence,
+    evaluate_affine_tick,
+    slot_operand_width,
+)
 from .model import MAXIMUM_REPEAT_COUNT, PORT_DAC, PulseSequence, PulseTarget
 from .schedule import trigger_edge_ticks
 from .transport.base import DEFAULT_OBSERVER_INTERVAL, RegisterTransport
@@ -226,7 +232,128 @@ class BoardDescription:
         return int(build_fingerprint(self.geometry))
 
 
-class PulseStreamer:
+class ConfigValueHolder:
+    """The calibrated set a board holds, and the only door to compiling for it.
+
+    Inherited by both the local streamer and the remote client, so the rule
+    is stated once.  Two copies of "what a config parameter means" is exactly
+    how the two ends of one board come to disagree about what played.
+
+    The set is client-side even for a remote board: nothing about it crosses
+    the wire, so the protocol is unchanged and a server can be older than the
+    host driving it.
+    """
+
+    def _init_config_values(self) -> None:
+        self._config_lock = threading.RLock()
+        self._config_values: dict[str, tuple[float, str]] = {}
+        self._config_source = ""
+
+    def load_config_values(
+        self,
+        entries: "Mapping[str, tuple[float, str]]",
+        *,
+        source: str = "",
+    ) -> None:
+        """Hold the calibrated values every pulse this board plays will use.
+
+        A CONFIG PARAMETER IS THE BOARD'S NUMBER, NOT THE PULSE'S.  Channel
+        delays and DAC biases are facts about the apparatus: they are measured
+        once and then shared by every pulse fired at it until the next
+        calibration.  So the set is held here, for as long as this streamer
+        lives, and a pulse says only which of its fields are filled from it.
+
+        Entries arrive already decoded.  Reading the file is the job of
+        whoever knows where the operator's files live, which is not a package
+        that talks to a register bus.
+        """
+
+        if not isinstance(entries, Mapping):
+            raise TypeError("config values must be a mapping")
+        held: dict[str, tuple[float, str]] = {}
+        for name, entry in entries.items():
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("a config value id must be non-empty text")
+            try:
+                value, unit = entry
+            except (TypeError, ValueError):
+                raise TypeError(
+                    f"config value {name!r} must be (value, unit)"
+                ) from None
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"config value {name!r} must be numeric")
+            if not math.isfinite(float(value)):
+                raise ValueError(f"config value {name!r} must be finite")
+            if not isinstance(unit, str) or not unit.strip():
+                raise ValueError(f"config value {name!r} must name a unit")
+            held[name] = (float(value), unit)
+        with self._config_lock:
+            self._config_values = held
+            self._config_source = str(source or "")
+
+    def config_values(self) -> dict[str, tuple[float, str]]:
+        """The calibrated set this board is holding, as a copy."""
+
+        with self._config_lock:
+            return dict(self._config_values)
+
+    def compile_pulse(
+        self,
+        sequence: PulseSequence,
+        geom: StreamerParams,
+        clock_hz: float,
+        *,
+        slot_tick_scales: "Sequence[int] | None" = None,
+    ) -> tuple[PulseSequence, CompiledProgram]:
+        """The only way to compile a pulse for a board: filled, then compiled.
+
+        A config parameter is baked in at compile -- a duration becomes ticks,
+        a DAC step becomes bus segments, a delay becomes a channel delay -- so
+        the fill cannot happen at load, and a caller that reaches
+        ``compile_sequence`` directly plays the authored placeholder with no
+        warning at all.  Routing every board compile through the device is
+        what makes that impossible rather than merely discouraged.
+
+        BOTH halves are returned because the fill writes the numbers INTO the
+        fields: the filled sequence is the one that must be handed back as
+        ``source=``, or the board plays calibrated numbers while the record
+        says authored ones.
+
+        Pure by design -- a dict lookup and a compile.  It runs once per scan
+        point and on every editor status refresh, so it never touches the
+        transport, and geometry is passed in rather than asked for.
+        """
+
+        if not isinstance(sequence, PulseSequence):
+            raise TypeError("sequence must be PulseSequence")
+        with self._config_lock:
+            held = dict(self._config_values)
+        absent = tuple(
+            parameter.parameter_id
+            for parameter in sequence.config_parameters
+            if parameter.parameter_id not in held
+        )
+        if absent:
+            # Playing a stale number while the run record calls it calibrated
+            # is the one outcome worse than refusing to run.
+            raise ValueError(
+                f"{sequence.name!r} declares config parameter(s) {absent} that "
+                f"the loaded config values say nothing about"
+            )
+        filled, _applied, _unknown = apply_config_values(sequence, held)
+        return filled, compile_sequence(
+            filled, geom, clock_hz, slot_tick_scales=slot_tick_scales
+        )
+
+    @property
+    def config_source(self) -> str:
+        """Where the held set came from, for the record and the operator."""
+
+        with self._config_lock:
+            return self._config_source
+
+
+class PulseStreamer(ConfigValueHolder):
     """Host control of the frozen streamer.
 
     After FIRE, the observer is the sole caller that reads status/cursor or
@@ -310,6 +437,9 @@ class PulseStreamer:
         self._fire_started = 0.0
         self._safe_status_word: int | None = None
         self._safe_clock_enable_words: tuple[int, ...] | None = None
+        # Board-lifetime, deliberately outside open()/close(): a calibrated
+        # set is a fact about the apparatus, not about one connection to it.
+        self._init_config_values()
 
     def open(self) -> None:
         with self._lock:
@@ -633,10 +763,14 @@ class PulseStreamer:
                 # remembering an answer that goes stale the moment anyone else
                 # loads.
                 "applied_digest": self._applied_digest,
+                # Which calibrated set is filling the config parameters of
+                # everything this board compiles.
+                "config_source": self.config_source,
             }
     def applied(self) -> AppliedState | None:
         with self._lock:
             return self._applied
+
     def _observe(self) -> None:
         """Poll STATUS/CURSOR until the board reports a terminal state.
 

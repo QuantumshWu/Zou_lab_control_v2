@@ -8,7 +8,14 @@ import math
 from typing import TypeAlias
 
 from zlc_pulse.compile import CompiledProgram
-from zlc_pulse.device import AppliedState, BoardDescription, DoneReport, PulseStreamer, SafeReadback
+from zlc_pulse.device import (
+    AppliedState,
+    BoardDescription,
+    DoneReport,
+    PulseStreamer,
+    SafeReadback,
+)
+from zlc_pulse.wire import StreamerParams
 from zlc_pulse.model import PulseSequence
 from zlc_pulse.remote import RemotePulseStreamer
 
@@ -142,6 +149,33 @@ class SequencerDevice:
 
     def applied(self) -> AppliedState | None:
         return self.streamer.applied()
+
+    def load_config_values(
+        self,
+        entries: Mapping[str, tuple[float, str]],
+        *,
+        source: str = "",
+    ) -> None:
+        self.streamer.load_config_values(entries, source=source)
+
+    def config_values(self) -> dict[str, tuple[float, str]]:
+        return self.streamer.config_values()
+
+    def compile_pulse(
+        self,
+        sequence: PulseSequence,
+        geom: StreamerParams,
+        clock_hz: float,
+        *,
+        slot_tick_scales: Sequence[int] | None = None,
+    ) -> tuple[PulseSequence, CompiledProgram]:
+        return self.streamer.compile_pulse(
+            sequence, geom, clock_hz, slot_tick_scales=slot_tick_scales
+        )
+
+    @property
+    def config_source(self) -> str:
+        return self.streamer.config_source
 
 
 __all__ = ["SequencerDevice", "Streamer", "sequencer_archive_snapshot"]
