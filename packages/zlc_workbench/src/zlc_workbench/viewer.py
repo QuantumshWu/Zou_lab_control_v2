@@ -2086,8 +2086,16 @@ class FigureViewerPresenter:
         build_figure_host: Callable[..., object],
         save_figure_artifact: Callable[..., object],
         save_front: Callable[..., object],
+        confirm_discard: Callable[[str], bool] | None = None,
     ) -> None:
         self.view = view
+        # Asked before edits are thrown away, and answered by a person.
+        # Without one, unsaved work is never discarded on this presenter's
+        # own initiative -- a headless host keeps the old refusal rather
+        # than silently losing a working copy.
+        if confirm_discard is not None and not callable(confirm_discard):
+            raise TypeError("confirm_discard must be callable or None")
+        self._confirm_discard = confirm_discard
         self._run_off_thread = run_off_thread
         self._close_worker = close_worker
         self._request_close = request_close
@@ -2480,11 +2488,31 @@ class FigureViewerPresenter:
             f"cannot edit {source['name']}",
         )
 
+    def _agrees_to_lose(self, what: str) -> bool:
+        """Ask once whether unsaved edits may go, and take the answer.
+
+        Refusing to close until the operator finds the Discard button is
+        not safety, it is a door that only opens from the inside: the
+        work is theirs, so they are asked, and a yes is honoured.  With
+        no one to ask -- a headless host, a test -- nothing is discarded.
+        """
+
+        ask = self._confirm_discard
+        if ask is None:
+            return False
+        return bool(
+            ask(
+                "%s has unsaved edits.  Close it and lose them?" % what
+            )
+        )
+
     def close_data_editor(self, editor_id: str) -> bool:
         draft = self._data_drafts.get(str(editor_id))
         if draft is None:
             return False
-        if bool(draft["modified"] or draft["unsaved"]):
+        if bool(draft["modified"] or draft["unsaved"]) and not self._agrees_to_lose(
+            str(draft["name"])
+        ):
             draft["message"] = "Save or discard this data working copy before closing"
             self._show_data_draft(draft)
             return False
@@ -3024,10 +3052,12 @@ class FigureViewerPresenter:
 
         if self._closed:
             return True
-        if any(
-            bool(draft["modified"] or draft["unsaved"])
+        unsaved = tuple(
+            str(draft["name"])
             for draft in self._data_drafts.values()
-        ):
+            if bool(draft["modified"] or draft["unsaved"])
+        )
+        if unsaved and not self._agrees_to_lose(", ".join(unsaved)):
             self._close_requested = False
             self.view.set_status(
                 "Save or discard the open data working copy before closing",

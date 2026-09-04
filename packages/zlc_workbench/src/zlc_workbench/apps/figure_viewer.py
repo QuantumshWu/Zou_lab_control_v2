@@ -125,6 +125,7 @@ def build(
         build_figure_host=editor_render.build_host,
         save_figure_artifact=editor_render.save_figure_artifact,
         save_front=editor_render.save_front,
+        confirm_discard=getattr(view, "confirm_discard", None),
     )
 
 
