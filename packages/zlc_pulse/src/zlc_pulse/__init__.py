@@ -10,6 +10,7 @@ if _PACKAGE_DIR.name != "zlc_pulse" or __package__ != "zlc_pulse":
 
 from .codec import (
     read_pulse_document,
+    refreshed_config_values,
     API_VALUES_FORMAT,
     PULSE_TREE_FORMAT,
     api_values_from_tree,
@@ -94,6 +95,7 @@ __all__ = [
     "API_VALUES_FORMAT",
     "PULSE_TREE_FORMAT",
     "read_pulse_document",
+    "refreshed_config_values",
     "sequence_from_tree",
     "sequence_to_tree",
     "MAXIMUM_REPEAT_COUNT",

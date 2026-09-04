@@ -137,13 +137,6 @@ def split_pulse_document_tree(
     return sequence_tree, editor
 
 
-def sequence_from_document_tree(tree: Mapping[str, Any]) -> PulseSequence:
-    """Decode the sequence from a complete Pulse Editor or bare pulse document."""
-
-    sequence_tree, _editor = split_pulse_document_tree(tree)
-    return sequence_from_tree(sequence_tree)
-
-
 def read_pulse_document(
     path: "str | os.PathLike[str]",
 ) -> tuple[PulseSequence, Mapping[str, Any]]:
@@ -168,11 +161,21 @@ def read_pulse_document(
     sequence_tree, editor = split_pulse_document_tree(
         parse_pulse_tree_json(source.read_text(encoding="utf-8"))
     )
-    return _refreshed_config(sequence_from_tree(sequence_tree), source), editor
+    return refreshed_config_values(sequence_from_tree(sequence_tree), source), editor
 
 
-def _refreshed_config(sequence: PulseSequence, pulse_path: Path) -> PulseSequence:
-    """This pulse with its config parameters set to what its config file says."""
+def refreshed_config_values(
+    sequence: PulseSequence, pulse_path: "str | os.PathLike[str]"
+) -> PulseSequence:
+    """This pulse with its config parameters set to what its config file says.
+
+    Public because two callers need the same rule and must not each have
+    their own: every read of a pulse from disk, and the Pulse Editor's
+    Refresh, which re-pulls without reopening the document the operator
+    may have edited.
+    """
+
+    pulse_path = Path(pulse_path)
 
     if not sequence.config_parameters or not sequence.config_source:
         return sequence
@@ -654,7 +657,7 @@ __all__ = [
     "api_values_to_tree",
     "parse_pulse_tree_json",
     "read_pulse_document",
-    "sequence_from_document_tree",
+    "refreshed_config_values",
     "sequence_from_tree",
     "sequence_to_tree",
     "split_pulse_document_tree",

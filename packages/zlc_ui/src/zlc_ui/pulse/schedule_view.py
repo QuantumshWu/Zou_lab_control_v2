@@ -17,7 +17,7 @@ from zlc_ui.form import FormChoice
 from zlc_ui.fluent import (
     ACCENT, GREEN, GREY, ORANGE, RED, YELLOW, FluentButton, FluentCheckBox,
     FluentComboBox, FluentDoubleSpinBox, FluentFrame, FluentGroupBox,
-    FluentLabel, FluentLineEdit, FluentScrollArea, LinkedScrollPanes,
+    FluentLabel, FluentLineEdit, FluentPathEdit, FluentScrollArea, LinkedScrollPanes,
     signals_blocked,
 )
 
@@ -1050,6 +1050,8 @@ class PulseScheduleView(QtWidgets.QWidget):
     values_save_requested = QtCore.pyqtSignal()
     values_load_requested = QtCore.pyqtSignal()
     connection_requested = QtCore.pyqtSignal(str, str)
+    config_source_committed = QtCore.pyqtSignal(str)
+    config_refresh_requested = QtCore.pyqtSignal()
     scan_array_load_requested = QtCore.pyqtSignal()
     left_panels_collapsed = QtCore.pyqtSignal(bool)
     feedback_requested = QtCore.pyqtSignal(str)
@@ -1200,6 +1202,31 @@ class PulseScheduleView(QtWidgets.QWidget):
             controls.setColumnStretch(column, 1)
         control_layout.addStretch(1)
         control_layout.addLayout(controls)
+        # Where the config parameters are refreshed from.  It sits with Load
+        # values and Save values because it answers the question those two
+        # answer -- where this pulse's numbers come from -- and it is the only
+        # one of the three the pulse itself remembers.
+        self.config_source_edit = FluentPathEdit(
+            mode="file",
+            file_filter="Config values (*.json)",
+            refreshable=True,
+        )
+        self.config_source_edit.setPlaceholderText("no config file")
+        self.config_source_edit.setToolTip(
+            "A set of calibrated values this pulse refreshes from every time it "
+            "is loaded, named relative to the pulse's own folder.  Refresh pulls "
+            "it in again now."
+        )
+        self.config_source_edit.changed.connect(self.config_source_committed)
+        self.config_source_edit.refresh_requested.connect(
+            self.config_refresh_requested
+        )
+        config_row = QtWidgets.QHBoxLayout()
+        config_row.setContentsMargins(0, 0, 0, 0)
+        config_row.setSpacing(px(6, minimum=4))
+        config_row.addWidget(FluentLabel("Config:"))
+        config_row.addWidget(self.config_source_edit, 1)
+        control_layout.addLayout(config_row)
         control_layout.addStretch(1)
         bar.addWidget(control_area, 1)
 
@@ -1427,6 +1454,8 @@ class PulseScheduleView(QtWidgets.QWidget):
             vm.bracket,
             minimum_bracket=vm.min_bracket_count,
         )
+        with signals_blocked(self.config_source_edit):
+            self.config_source_edit.setText(vm.config_source)
         with signals_blocked(self.channel_panel.run_repeats_spin):
             self.channel_panel.run_repeats_spin.setValue(float(vm.run_repeats))
         self.channel_panel.run_repeats_spin.setEnabled(bool(vm.periods))

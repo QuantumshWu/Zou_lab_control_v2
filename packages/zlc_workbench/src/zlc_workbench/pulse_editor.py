@@ -515,6 +515,7 @@ def project_schedule(
             )
         ),
         run_repeats=0 if sequence is None else sequence.run_repeats,
+        config_source="" if sequence is None else sequence.config_source,
         # Every output the board can delay gets a row whether or not a pulse is
         # open, because the row IS the board telling the operator that output
         # can be delayed.  With no pulse the value is the zero a missing delay
@@ -1113,6 +1114,8 @@ class PulseEditorPresenter:
         view.remove_period_requested.connect(self._guarded(self.remove_period))
         view.bracket_committed.connect(self._guarded(self.set_bracket))
         view.run_repeats_committed.connect(self._guarded(self.set_run_repeats))
+        view.config_source_committed.connect(self._guarded(self.set_config_source))
+        view.config_refresh_requested.connect(self._guarded(self.refresh_config_values))
         view.visible_ports_committed.connect(self._guarded(self.set_visible_ports))
         view.clear_port_requested.connect(self._guarded(self.clear_port))
         # From the button that raises it.  The schedule page also declared a
@@ -1609,6 +1612,48 @@ class PulseEditorPresenter:
             return
         self._apply(self._rebuilt(run_repeats=repeats))
 
+    def set_config_source(self, source: object) -> None:
+        """Point this pulse at the file its config parameters come from.
+
+        Naming one does not pull it in: the numbers arrive on the next read,
+        or now if the operator presses Refresh.  Saying so here rather than
+        refreshing on the keystroke keeps a half-typed path from reading a
+        file that happens to exist under it.
+        """
+
+        text = str(source or "").strip()
+        if self.sequence is None or text == self.sequence.config_source:
+            return
+        self._apply(self._rebuilt(config_source=text))
+
+    def refresh_config_values(self) -> None:
+        """Pull this pulse's config file in again, now.
+
+        The same rule a read applies, asked for by hand: the operator has
+        just recalibrated and wants the numbers without closing the document
+        they are working in.
+        """
+
+        from zlc_pulse import refreshed_config_values
+
+        sequence = self.sequence
+        if sequence is None or not sequence.config_parameters:
+            self._warn("this pulse declares no config parameters")
+            return
+        if not self.path:
+            self._warn("save this pulse before refreshing its config values")
+            return
+        try:
+            refreshed = refreshed_config_values(sequence, self.path)
+        except (OSError, ValueError, TypeError) as error:
+            self._warn(str(error))
+            return
+        if refreshed == sequence:
+            self._done("config values are already what the file says")
+            return
+        self._apply(refreshed)
+        self._done("config values refreshed from the pulse's config file")
+
     def set_visible_ports(self, ports: object) -> None:
         """Which ports have rows.  A VALUE change, so it goes the value way.
 
@@ -2065,6 +2110,11 @@ class PulseEditorPresenter:
             for parameter in current.api_parameters
             if parameter.field_ref.port is None or parameter.field_ref.port in ports
         )
+        config_parameters = tuple(
+            parameter
+            for parameter in current.config_parameters
+            if parameter.field_ref.port is None or parameter.field_ref.port in ports
+        )
         dropped_bindings = sorted(
             [
                 slot.slot_id
@@ -2076,6 +2126,11 @@ class PulseEditorPresenter:
                 for parameter in current.api_parameters
                 if parameter not in api_parameters
             ]
+            + [
+                parameter.parameter_id
+                for parameter in current.config_parameters
+                if parameter not in config_parameters
+            ]
         )
         candidate = PulseSequence(
             name=current.name,
@@ -2084,6 +2139,8 @@ class PulseEditorPresenter:
             periods=periods,
             slots=slots,
             api_parameters=api_parameters,
+            config_parameters=config_parameters,
+            config_source=current.config_source,
             delays=delays,
             bracket=current.bracket,
             run_repeats=current.run_repeats,

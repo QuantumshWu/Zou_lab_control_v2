@@ -367,6 +367,7 @@ class _EditorView:
         "scan_program_load_requested", "scan_template_requested",
         "scan_run_requested", "scan_array_save_requested",
         "scan_progress_refresh_requested",
+        "config_source_committed", "config_refresh_requested",
         "preview_include_off_toggled", "preview_size_committed",
         "preview_selectors_toggled", "preview_save_requested",
         "target_apply_requested",
@@ -3699,4 +3700,122 @@ def test_a_second_command_while_one_runs_is_refused_not_queued(sequence) -> None
     finally:
         gate.set()
         presenter.close()
+
+
+def _configured_pulse_on_disk(tmp_path, sequence, *, values):
+    """A saved pulse that names a config file, beside that file."""
+
+    import json
+
+    from zlc_pulse import PulseConfigParameter
+    from zlc_pulse.codec import config_values_to_tree
+    from zlc_pulse.model import PulseFieldRef
+    from zlc_workbench.pulse_state import PulseEditorState, write_pulse
+
+    period = sequence.periods[1]
+    configured = replace(
+        sequence,
+        config_parameters=(
+            PulseConfigParameter(
+                "probe_time", PulseFieldRef("duration", period.period_id), period.unit
+            ),
+        ),
+        config_source="calibration/current.json",
+    )
+    path = tmp_path / "configured.json"
+    write_pulse(path, PulseEditorState(sequence=configured))
+    target = tmp_path / "calibration" / "current.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps(config_values_to_tree(values, name="today", source="test")),
+        encoding="utf-8",
+    )
+    return path, target, period
+
+
+def test_opening_a_pulse_shows_what_its_config_file_says_now(sequence, tmp_path) -> None:
+    """The operator sees today's calibrated numbers without pulling anything in.
+
+    The pulse on disk was saved with one number; the calibration beside it has
+    since been rewritten.  Opening the document is the refresh, so the field
+    reads what the file says -- and the declaration survives, or the next open
+    would have nothing to refresh.
+    """
+
+    from zlc_workbench.pulse_state import read_pulse
+
+    period_unit = sequence.periods[1].unit
+    path, target, period = _configured_pulse_on_disk(
+        tmp_path, sequence, values={"probe_time": (7.0, period_unit)}
+    )
+    state = read_pulse(path)
+    assert state.sequence.period_by_id[period.period_id].duration == 7.0
+    assert len(state.sequence.config_parameters) == 1
+    assert state.sequence.config_source == "calibration/current.json"
+
+    # A recalibration lands, and the next open carries it without a gesture.
+    import json
+
+    from zlc_pulse.codec import config_values_to_tree
+
+    target.write_text(
+        json.dumps(
+            config_values_to_tree({"probe_time": (9.0, period_unit)}, source="recal")
+        ),
+        encoding="utf-8",
+    )
+    assert read_pulse(path).sequence.period_by_id[period.period_id].duration == 9.0
+
+
+def test_refresh_pulls_the_config_file_in_without_reopening(sequence, tmp_path) -> None:
+    """The one gesture that re-reads, for an operator who just recalibrated."""
+
+    import json
+
+    from zlc_pulse.codec import config_values_to_tree
+    from zlc_workbench.pulse_state import read_pulse
+
+    unit = sequence.periods[1].unit
+    path, target, period = _configured_pulse_on_disk(
+        tmp_path, sequence, values={"probe_time": (7.0, unit)}
+    )
+    view = _EditorView()
+    presenter = PulseEditorPresenter(view, read_pulse(path).sequence, path=str(path))
+    try:
+        assert presenter.sequence.period_by_id[period.period_id].duration == 7.0
+        target.write_text(
+            json.dumps(config_values_to_tree({"probe_time": (11.0, unit)})),
+            encoding="utf-8",
+        )
+        view.config_refresh_requested.emit()
+        assert presenter.sequence.period_by_id[period.period_id].duration == 11.0
+
+        # A config file that cannot answer says so and changes nothing.
+        target.unlink()
+        view.config_refresh_requested.emit()
+        assert presenter.sequence.period_by_id[period.period_id].duration == 11.0
+        assert any("cannot be read" in text for text in view.warnings), view.warnings
+    finally:
+        presenter.close()
+
+
+def test_a_rebuild_never_silently_unbinds_a_config_parameter(presenter, sequence) -> None:
+    """A rebuild lists the fields it keeps, so a new one is a field it drops.
+
+    Hiding a port rebuilds the whole pulse from a named list.  A category the
+    list forgot would vanish on the next unrelated edit -- the binding gone,
+    nothing said -- which is how a pulse would quietly stop refreshing.
+    """
+
+    period = sequence.periods[3].period_id
+    presenter.cycle_binding("duration", period, None)   # -> scan
+    presenter.cycle_binding("duration", period, None)   # -> api
+    presenter.cycle_binding("duration", period, None)   # -> config
+    assert len(presenter.sequence.config_parameters) == 1
+
+    visible = {port.key for port in presenter.sequence.target.ports}
+    presenter.set_visible_ports(sorted(visible))
+    assert len(presenter.sequence.config_parameters) == 1, (
+        "a rebuild dropped the config binding"
+    )
 

@@ -30,6 +30,24 @@ metadata. Even a bracket spanning the whole Pulse does not become or alter
 `run_repeats`. The sequence's authored `run_repeats` defaults to `0`; a task
 may explicitly override it for one execution without changing the saved Pulse.
 
+A pulse field's value comes from one of three places, and which one is the
+whole meaning of its binding. A SCAN slot is filled by the board, one value per
+point, out of the hardware's four. An API parameter is a hole a caller fills
+once per run; `compile_sequence` refuses one that is still open. A CONFIG
+parameter is neither: its value IS the field's own authored number, and
+`config_source` names the file it is refreshed from, relative to the pulse's
+own folder. `read_pulse_document(path)` is the one place a pulse arrives from a
+file and it does that refresh, so the editor, a scan and a calibration all get
+today's calibrated numbers by loading the pulse, with no line of their own.
+Applying a set overwrites the authored number in the period, the DAC step or
+the delay it names -- the overwrite is the storage, so a pulse read back later
+needs no second file to be understood. A pulse declaring no config parameter
+never looks for a file; one whose file is missing, unreadable, or silent about
+a parameter it declares is refused before anything could play it. A field a run
+needs to vary is an API parameter, which is the whole difference between the
+two, so a field carries at most one binding and all three share one id
+namespace.
+
 The package has no measurement, GUI, or run-planning layer. `applied()` is only
 the device's saved passive echo of the last program, source, rows, and repeat
 counts; it is not trigger scheduling, expected-frame accounting, or

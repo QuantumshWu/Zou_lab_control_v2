@@ -34,6 +34,7 @@ import time
 from collections.abc import Mapping, Sequence
 
 from zlc_pulse import (
+    authored_config_entries,
     PulseSequence,
     compile_sequence,
     pulse_field_value,
@@ -219,6 +220,17 @@ class SteppedScanMeasurement:
                 **tunable_snapshots,
             },
             "pulse": self.sequence.name,
+            # What the config parameters actually held for this run.  A
+            # config value is refreshed from a file that a later calibration
+            # will overwrite, so naming the pulse is not enough to say what
+            # played: the numbers themselves belong in the record, and this
+            # is where a dataset keeps what it was made with.
+            "pulse_config": {
+                parameter_id: [value, unit]
+                for parameter_id, (value, unit) in authored_config_entries(
+                    self.sequence
+                ).items()
+            },
             "plan": self.plan.to_tree(),
             "scan_shape": self.plan.shape,
             "scan_repeats": self.repeats,

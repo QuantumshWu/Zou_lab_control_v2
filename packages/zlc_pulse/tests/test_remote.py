@@ -116,10 +116,12 @@ def test_canonical_and_pulse_json_boundaries_do_not_coerce_or_drop_input() -> No
         "scan_source_dirty": False,
         "scan_repeats": 0,
     }
-    assert pulse_codec.sequence_from_document_tree(document) == _sequence()
+    sequence_tree, editor = pulse_codec.split_pulse_document_tree(document)
+    assert sequence_from_tree(sequence_tree) == _sequence()
+    assert editor["scan_repeats"] == 0
     document["editor"]["typo"] = True
     with pytest.raises(ValueError, match="unknown pulse editor field.*typo"):
-        pulse_codec.sequence_from_document_tree(document)
+        pulse_codec.split_pulse_document_tree(document)
 
     remote_tree = remote_module.encode_tree(_sequence())
     remote_tree["typo"] = 1
