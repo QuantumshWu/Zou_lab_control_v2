@@ -1,4 +1,4 @@
-"""A number on screen says what it is in, and can be typed back that way."""
+"""A number on screen is digits; which unit they are in is said beside them."""
 
 from __future__ import annotations
 
@@ -36,13 +36,14 @@ def _run_qt(code: str) -> None:
     assert completed.returncode == 0, completed.stderr or completed.stdout
 
 
-def test_a_field_is_shown_and_read_in_the_unit_it_declared() -> None:
-    """``FormFieldProps.unit`` was declared by owners and read by nobody.
+def test_a_field_holds_digits_and_says_its_unit_beside_them() -> None:
+    """The box is for the number; the row says what the number is in.
 
-    The word "unit" did not appear once in the whole Qt form layer, so every
-    box in this project showed a bare repr of a float and refused anything
-    that was not one -- the box that means megahertz being exactly the box
-    into which megahertz could not be typed.
+    Printing the symbol inside as well put the same fact in two places and
+    left no room to type in the box it was crowding.  A prefix is not typed
+    either: it is a way of SHOWING a number, and the picker beside the field
+    is the one place it is asked for -- so there is exactly one spelling of
+    the value on screen and one place that decides it.
     """
 
     _run_qt(
@@ -70,26 +71,44 @@ form = FluentParameterForm(
 )
 
 drive = form.widget_for('drive')
-assert drive.text() == '120.0000000 MHz', drive.text()
-assert drive.valueFromText('1.05M') == 1050000.0
-assert drive.valueFromText('1.05 MHz') == 1050000.0
-assert drive.valueFromText('1050 kHz') == 1050000.0
-assert drive.validate('1.05M', 5)[0] == QtGui.QValidator.Acceptable
+assert drive.text() == '120000000', drive.text()
+assert drive.valueFromText('1050000') == 1050000.0
+assert drive.validate('120', 3)[0] == QtGui.QValidator.Acceptable
+assert drive.validate('1.05M', 5)[0] == QtGui.QValidator.Invalid, 'a prefix is picked'
+assert drive.validate('1.05 MHz', 8)[0] == QtGui.QValidator.Invalid
+assert drive.validate('-', 1)[0] == QtGui.QValidator.Intermediate, 'still typing'
+
+# The picker is the ladder, and choosing on it moves the DISPLAY only.
+picker = form.unit_picker_for('drive')
+assert picker is not None, 'a unit with a ladder is offered'
+assert picker.unit() == 'Hz'
+drive.setShownUnit('MHz')
+assert drive.text() == '120', drive.text()
+assert drive.value() == 120000000.0, 'the value never moved'
+assert drive.valueFromText('121') == 121000000.0, 'typed in the unit on screen'
 
 floor = form.widget_for('floor')
-assert floor.text() == '-3.5 dBm', floor.text()
-assert floor.validator().validate('-6 dBm', 6)[0] == QtGui.QValidator.Acceptable
+assert floor.text() == '-3.5', floor.text()
 assert form.read_value('floor') == -3.5
-floor.setText('-6 dBm')
-assert form.read_value('floor') == -6.0, 'a unit may be typed into an optional field'
+floor.setText('-6')
+assert form.read_value('floor') == -6.0
 floor.setText('')
 assert form.read_value('floor') is None, 'blank still means no bound'
 
+# dBm and mW are the same power spelled two ways, and the field is workable
+# in either without anybody doing that arithmetic by hand.
+floor.setText('-3.0')
+floor.setShownUnit('mW')
+assert abs(form.read_value('floor') - -3.0) < 1e-9, form.read_value('floor')
+assert abs(float(floor.text()) - 0.5011872336272722) < 1e-9, floor.text()
+
 window = form.widget_for('window')
-assert window.suffix() == ' count', repr(window.suffix())
+assert window.suffix() == '', repr(window.suffix())
+assert form.unit_picker_for('window') is None, 'a count has no ladder'
 
 ratio = form.widget_for('ratio')
 assert ratio.text() == '0.5', ratio.text()
+assert form.unit_picker_for('ratio') is None, 'a bare number has no unit'
 print('ok')
 """
     )
@@ -111,19 +130,19 @@ from zlc_ui.fluent import FluentDoubleSpinBox
 app = ensure_qt_app(['quantity-safety'])
 box = FluentDoubleSpinBox()
 box.setRange(-1e18, 1e18)
-box.setDisplayUnit('Hz')
+box.setValueUnit('Hz')
 box.setValue(1.0)
 assert box.valueFromText('nonsense') == 1.0
 assert box.valueFromText('') == 1.0
-assert box.valueFromText('5 pixel') == 1.0, 'a wrong dimension is not a value'
+assert box.valueFromText('5 pixel') == 1.0, 'a unit is not typed into a box'
 
 # A unit nobody registered is a defect where it was declared, not a reason
-# for the window to die while painting.
+# for the window to die while painting.  It simply has no ladder to offer.
 odd = FluentDoubleSpinBox()
 odd.setRange(0.0, 10.0)
-odd.setDisplayUnit('DAC code')
+odd.setValueUnit('DAC code')
 odd.setValue(4.0)
-assert odd.text() == '4.0 DAC code', odd.text()
+assert odd.text() == '4', odd.text()
 print('ok')
 """
     )
@@ -157,7 +176,7 @@ projection = {
 }
 view = DeviceControlView(spec, projection)
 current = {key: widgets[0].text() for key, widgets in view._field_rows.items()}
-assert current['drive'] == '120.0000000 MHz', current
+assert current['drive'] == '120 MHz', current
 assert current['mode'] == 'holding', 'a device may report a word, not a number'
 print('ok')
 """

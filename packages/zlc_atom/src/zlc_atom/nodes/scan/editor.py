@@ -40,8 +40,10 @@ from zlc_ui.fluent import (
     FluentLineEdit,
     FluentSpinBox,
     fill_grouped_choice_combo,
+    fluent_unit_picker,
 )
 
+from zlc_data.units import UnitError
 from zlc_pulse import authored_api_entries, field_label
 
 from .plan import (
@@ -89,6 +91,11 @@ class _AxisRow(QtWidgets.QWidget):
         self.points_spin = FluentSpinBox()
         self.points_spin.setRange(1, 100_000)
         self.custom_label = QtWidgets.QLabel("")
+        #: Which spelling of the port's unit both ends are read in.  ONE
+        #: picker, not two: "from" and "to" are two ends of one sweep, and a
+        #: row that could say 1 us to 40 ms is a row nobody can read.
+        self.unit_picker = None
+        self.unit_label = QtWidgets.QLabel("")
         remove = FluentButton("×", color=GREY)
         remove.setFixedWidth(32)
         remove.setToolTip("Remove this axis")
@@ -98,6 +105,8 @@ class _AxisRow(QtWidgets.QWidget):
         layout.addWidget(self.start_spin, 1)
         layout.addWidget(QtWidgets.QLabel("to"))
         layout.addWidget(self.stop_spin, 1)
+        self._unit_slot = layout.count()
+        layout.addWidget(self.unit_label)
         layout.addWidget(QtWidgets.QLabel("points"))
         layout.addWidget(self.points_spin)
         layout.addWidget(self.custom_label)
@@ -181,6 +190,46 @@ class _AxisRow(QtWidgets.QWidget):
             # will run.  Readability is the formatter's job now, and the
             # formatter does not round.
             spin.setValueUnit("" if port is None else port.unit)
+        self._mount_unit_picker("" if port is None else port.unit)
+
+    def _mount_unit_picker(self, unit: str) -> None:
+        """Offer this port's other spellings, or just name the one it has.
+
+        The picker is rebuilt whenever the port changes, because the ladder
+        belongs to the port's unit: a row that swept microseconds and is
+        pointed at a DAC code has no microseconds left to offer.
+
+        Both spins go on holding the PORT's own number.  An axis is authored
+        in the unit the plan will run in, so choosing a spelling here changes
+        only what is on screen and nothing has to be converted on the way
+        into the plan or on the way back out of a saved one.
+        """
+
+        layout = self.layout()
+        if self.unit_picker is not None:
+            layout.removeWidget(self.unit_picker)
+            self.unit_picker.setParent(None)
+            self.unit_picker.deleteLater()
+            self.unit_picker = None
+        symbol = str(unit).strip()
+        picker = fluent_unit_picker(symbol, self)
+        if picker is None:
+            self.unit_label.setText("" if symbol in ("", "1") else symbol)
+            self.unit_label.setVisible(bool(self.unit_label.text()))
+            return
+        self.unit_label.setVisible(False)
+        picker.unit_picked.connect(self._shown_unit_picked)
+        layout.insertWidget(self._unit_slot, picker)
+        self.unit_picker = picker
+
+    def _shown_unit_picked(self, symbol: str) -> None:
+        """Read both ends in the chosen spelling; the swept values do not move."""
+
+        for spin in (self.start_spin, self.stop_spin):
+            try:
+                spin.setShownUnit(symbol)
+            except UnitError:
+                return
 
     def _port_changed(self, _index: int) -> None:
         self._custom_values = None
@@ -482,8 +531,16 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 label = QtWidgets.QLabel(field_label(sequence, parameter.field_ref))
                 label.setToolTip(name)
                 box = FluentDoubleSpinBox()
-                box.setDecimals(0 if unit == "value" else 6)
+                # A DAC code comes in whole codes; everything else is a
+                # quantity, and how many digits of it are worth reading is
+                # the formatter's question, not a number to guess here.
+                box.setDecimals(0 if unit == "value" else 323)
                 box.setRange(-1e12, 1e12)
+                # The slot said what its number is in.  The box holds that
+                # number whatever spelling is on screen, so the override
+                # written down below is in the pulse's own unit and no
+                # conversion crosses this editor's edge in either direction.
+                box.setValueUnit("" if unit == "value" else unit)
                 box.setValue(float(overrides.get(name, authored)))
                 # ONE GESTURE, ONE DRAFT.  Every intermediate value used to
                 # be written down, and a written draft is re-projected by
@@ -495,7 +552,9 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 box.editingFinished.connect(self._emit_values)
                 self.values_grid.addWidget(label, row, 0)
                 self.values_grid.addWidget(box, row, 1)
-                self.values_grid.addWidget(QtWidgets.QLabel(unit), row, 2)
+                self.values_grid.addWidget(
+                    self._unit_cell(box, unit), row, 2
+                )
                 self._value_rows[name] = box
         finally:
             self._loading = False
@@ -506,6 +565,23 @@ class ScanPlanEditor(QtWidgets.QWidget):
             self.values_note.setText(broken)
             return
         self._refresh_values_note(scanned & set(self._authored))
+
+    @staticmethod
+    def _unit_cell(box, unit: str) -> QtWidgets.QWidget:
+        """The cell beside a slot's box: its unit, pickable when it has a ladder.
+
+        A slot whose unit is one spelling only -- a DAC code, a count -- has
+        nothing to choose between and says its unit plainly.  One that does
+        gets the picker, which is the only way a prefix is ever asked for now
+        that a box takes digits alone.
+        """
+
+        symbol = "" if unit == "value" else str(unit).strip()
+        picker = fluent_unit_picker(symbol)
+        if picker is None:
+            return QtWidgets.QLabel(str(unit))
+        picker.unit_picked.connect(box.setShownUnit)
+        return picker
 
     def _current_overrides(self) -> dict[str, float]:
         try:

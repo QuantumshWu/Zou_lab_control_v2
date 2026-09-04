@@ -22,7 +22,6 @@ from zlc_data.units import (
     DEFAULT_UNITS,
     UnitError,
     format_quantity,
-    parse_quantity,
 )
 
 from .form import (
@@ -45,6 +44,7 @@ from ..fluent import (
     FluentSpinBox,
     FluentSwitch,
     FluentTreeComboBox,
+    fluent_unit_picker,
     fluent_switch_width,
     scaled_px,
     setting_label_width,
@@ -458,9 +458,9 @@ class _FloatHandler(_StaticHandler):
             if field.unit and field.unit != "1":
                 # A blank-or-number edit still holds a QUANTITY, and the RF
                 # bounds -- the fields that carry dBm -- are all of them: they
-                # default to None so the instrument's own limit stands.  The
-                # digit-only validator would have refused every unit it was
-                # meant to be written in.
+                # default to None so the instrument's own limit stands.  It
+                # takes digits like every other numeric field and gets the
+                # same picker beside it, which is where its scale is said.
                 widget.set_quantity_validator(
                     field.unit, bottom=field.minimum, top=field.maximum
                 )
@@ -484,9 +484,11 @@ class _FloatHandler(_StaticHandler):
         if not text:
             return self.normalize(field, None)
         try:
-            number = parse_quantity(text, field.unit or "1")
+            number = _in_value_unit(widget, float(text), field.unit)
         except UnitError as error:
             raise _value_error(field, str(error)) from error
+        except ValueError as error:
+            raise _value_error(field, "value is not a finite decimal number") from error
         return self.normalize(field, number)
 
     def write(self, field, widget, value):
@@ -497,7 +499,9 @@ class _FloatHandler(_StaticHandler):
             widget.setValue(prepared)
         else:
             widget.setText(
-                "" if prepared is None else format_quantity(prepared, field.unit or "1")
+                ""
+                if prepared is None
+                else format_quantity(_in_shown_unit(widget, prepared, field.unit), "1")
             )
 
     def is_empty(self, field, widget):
@@ -852,6 +856,34 @@ def _row_label_in(field: FormFieldProps, unit: str) -> str:
     return label
 
 
+def _shown_unit_of(widget: object, unit: str | None) -> str:
+    """Which spelling this widget is being read in right now."""
+
+    asked = getattr(widget, "shownUnit", None)
+    shown = str(asked()).strip() if callable(asked) else ""
+    return shown or (str(unit or "").strip() or "1")
+
+
+def _in_value_unit(widget: object, number: float, unit: str | None) -> float:
+    """A number typed on screen, said in the unit its owner declared."""
+
+    shown = _shown_unit_of(widget, unit)
+    owner = str(unit or "").strip() or "1"
+    return float(number) if shown == owner else float(
+        DEFAULT_UNITS.convert(number, shown, owner)
+    )
+
+
+def _in_shown_unit(widget: object, number: float, unit: str | None) -> float:
+    """A number the owner holds, said in the unit on screen."""
+
+    shown = _shown_unit_of(widget, unit)
+    owner = str(unit or "").strip() or "1"
+    return float(number) if shown == owner else float(
+        DEFAULT_UNITS.convert(number, owner, shown)
+    )
+
+
 def _automatic_label(field: FormFieldProps, checked: bool) -> str:
     return f"{'Auto' if checked else 'Manual'} {field.row_label}"
 
@@ -986,7 +1018,7 @@ class FluentParameterForm(QtWidgets.QWidget):
         self._handlers: dict[str, FormWidgetHandler] = {}
         self._rows: dict[str, QtWidgets.QWidget] = {}
         #: The unit picker beside each numeric row, by field key.
-        self._unit_pickers: dict[str, FluentTreeComboBox] = {}
+        self._unit_pickers: dict[str, object] = {}
         self._auto_switches: dict[str, FluentSwitch] = {}
         self._dependents = self._dependency_map(spec)
 
@@ -1052,53 +1084,20 @@ class FluentParameterForm(QtWidgets.QWidget):
             )
 
     def _unit_picker(self, field, widget):
-        """Which unit this row is READ in, when its own has other spellings.
+        """The shared picker, for a row whose unit has more than one spelling.
 
-        A number's unit is its owner's -- what the device holds, what the
-        range is in -- and it never moves.  Which spelling of it an operator
-        reads and types is a different question, and theirs: the power a
-        board holds in dBm is the same power in mW, and nobody should have
-        to do that arithmetic by hand to work in the other one.
-
-        A TREE, because the choices are one: each base carries its own
-        prefixes on its branch, and a unit that is not a prefixed base
-        (dBm) stands beside them as its own.  A flat list of eighteen
-        spellings is the same information with the structure thrown away.
+        Only for a widget that can be READ in another one: a count and a bare
+        number have no ladder, and a picker beside them would offer a choice
+        that changes nothing.
         """
 
-        unit = (field.unit or "").strip()
-        if not unit or unit == "1" or not hasattr(widget, "setShownUnit"):
+        if not hasattr(widget, "setShownUnit"):
             return None
-        try:
-            choices = DEFAULT_UNITS.display_choices(unit)
-        except UnitError:
-            return None
-        if len(choices) < 2:
-            return None
-        groups: list[tuple[str, list[tuple[str, str, str]]]] = []
-        branches: dict[str, list[tuple[str, str, str]]] = {}
-        for symbol in choices:
-            base = DEFAULT_UNITS.base_for(symbol)
-            trunk = base.symbol if base is not None else symbol
-            leaves = branches.get(trunk)
-            if leaves is None:
-                leaves = []
-                branches[trunk] = leaves
-                groups.append((trunk, leaves))
-            leaves.append((symbol, symbol, symbol))
-        picker = FluentTreeComboBox(self)
-        picker.set_choice_tree(
-            tuple((trunk, tuple(leaves)) for trunk, leaves in groups),
-            current=unit,
-        )
-        picker.setSizePolicy(
-            QtWidgets.QSizePolicy.Fixed,
-            QtWidgets.QSizePolicy.Preferred,
-        )
-        picker.setToolTip("Read and type this field in another unit")
-        picker.keyed_choice_picked.connect(
-            lambda symbol, key=field.key: self._shown_unit_picked(key, symbol)
-        )
+        picker = fluent_unit_picker(field.unit or "", self)
+        if picker is not None:
+            picker.unit_picked.connect(
+                lambda symbol, key=field.key: self._shown_unit_picked(key, symbol)
+            )
         return picker
 
     def _shown_unit_picked(self, key: str, symbol: str) -> None:
@@ -1204,6 +1203,11 @@ class FluentParameterForm(QtWidgets.QWidget):
             return self._widgets[key]
         except KeyError as exc:
             raise KeyError(f"unknown form field key: {key!r}") from exc
+
+    def unit_picker_for(self, key: str):
+        """The unit picker beside this row, or None when it has no ladder."""
+
+        return self._unit_pickers.get(key)
 
     def auto_switch_for(self, key: str) -> FluentSwitch:
         try:

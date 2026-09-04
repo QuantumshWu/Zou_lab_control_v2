@@ -22,7 +22,6 @@ from zlc_data.units import (
     DEFAULT_UNITS,
     UnitError,
     format_quantity,
-    parse_quantity,
 )
 
 from ..qt import ensure_qt_app
@@ -1169,6 +1168,7 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         self._allow_any = True
         self._numeric_bounds: tuple[float | None, float | None, str] = (None, None, "float")
         self._quantity_unit = ""
+        self._shown_quantity_unit = ""
         self.setMinimumHeight(scaled_px(30, minimum=22))
         self._apply_style()
         self.setText(str(text))
@@ -1260,19 +1260,56 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         bottom: float | None = None,
         top: float | None = None,
     ) -> None:
-        """Accept a NUMBER AND A UNIT, and show one back.
+        """This field holds a number OF ``unit``, and shows digits alone.
 
-        The numeric validator refuses every character that is not part of a
-        number, which is right for a bare count and wrong for a quantity: the
-        unit is half of what the value means, and a field declared in dBm was
-        a field into which dBm could not be typed.  Bounds still hold and
-        still clamp, in the field's own unit, because ``1.05M`` and
-        ``1050000`` are the same number and only one of them looks in range.
+        Which spelling of that unit the digits are in is the picker's to say,
+        beside the field -- so this takes a plain number, and the bounds,
+        which are the OWNER's and are in the owner's unit, are converted
+        rather than compared across two different scales.
         """
 
         self._numeric_bounds = (bottom, top, "quantity")
         self._quantity_unit = str(unit).strip() or "1"
-        self.setValidator(_QuantityValidator(self._quantity_unit, self))
+        self._shown_quantity_unit = self._quantity_unit
+        self.set_numeric_validator("float", bottom=None, top=None)
+        self._numeric_bounds = (bottom, top, "quantity")
+
+    def setShownUnit(self, unit: str) -> None:  # noqa: N802 - Qt API name
+        """Read this field in another spelling of its own unit.
+
+        The value does not move: what the owner holds is what it holds.  The
+        digits on screen are converted, and so is whatever is typed next, so
+        an RF floor declared in dBm can be worked in mW without anyone doing
+        that arithmetic by hand.
+        """
+
+        wanted = str(unit).strip() or self._quantity_unit
+        previous = self._shown_quantity_unit
+        if wanted == previous:
+            return
+        # Raises for an incompatible unit BEFORE anything on screen moves.
+        DEFAULT_UNITS.convert(0.0, self._quantity_unit, wanted)
+        self._shown_quantity_unit = wanted
+        text = self.text().strip()
+        if not text:
+            return
+        try:
+            self.setText(
+                format_quantity(
+                    DEFAULT_UNITS.convert(float(text), previous, wanted), "1"
+                )
+            )
+        except (UnitError, ValueError):
+            # Half-typed text is not a number to convert; the operator is
+            # still holding it, and the unit they just chose applies to
+            # whatever they finish typing.
+            return
+
+    def shownUnit(self) -> str:  # noqa: N802 - Qt API name
+        return self._shown_quantity_unit
+
+    def valueUnit(self) -> str:  # noqa: N802 - Qt API name
+        return self._quantity_unit
 
     def focusOutEvent(self, event) -> None:  # noqa: N802
         # BEFORE super(), which is what decides whether editingFinished is
@@ -1297,10 +1334,16 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         if not text:
             return
         try:
+            shown = float(text)
+            # The bounds are the owner's, in the owner's unit; the text is in
+            # whichever spelling is on screen.  Comparing them directly was
+            # comparing two different scales.
             value = (
-                parse_quantity(text, self._quantity_unit)
+                DEFAULT_UNITS.convert(
+                    shown, self._shown_quantity_unit, self._quantity_unit
+                )
                 if kind == "quantity"
-                else float(text)
+                else shown
             )
         except (UnitError, ValueError):
             # Non-numeric text is the validator's business, not this one's, and
@@ -1315,7 +1358,14 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         if clamped == value:
             return
         if kind == "quantity":
-            self.setText(format_quantity(clamped, self._quantity_unit))
+            self.setText(
+                format_quantity(
+                    DEFAULT_UNITS.convert(
+                        clamped, self._quantity_unit, self._shown_quantity_unit
+                    ),
+                    "1",
+                )
+            )
             return
         self.setText(str(int(clamped)) if kind == "int" else str(clamped))
 
@@ -1326,30 +1376,6 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         after = align_to_resolution(before, self._res_step, allow_any=self._allow_any)
         if after != before:
             self.setText(after)
-
-
-class _QuantityValidator(QtGui.QValidator):
-    """Anything on its way to a number with a unit is still acceptable.
-
-    Never Invalid: refusing a keystroke means the character never reaches the
-    box, and a person typing ``1.05 MHz`` is holding an unfinished quantity
-    for most of the word.  What cannot be read yet is Intermediate, which Qt
-    lets stand while the field has focus and refuses to commit.
-    """
-
-    def __init__(self, unit: str, parent=None) -> None:
-        super().__init__(parent)
-        self._unit = unit
-
-    def validate(self, text: str, position: int):
-        stripped = text.strip()
-        if not stripped or stripped in ("+", "-", ".", "+.", "-."):
-            return QtGui.QValidator.Intermediate, text, position
-        try:
-            parse_quantity(stripped, self._unit)
-        except (UnitError, ValueError):
-            return QtGui.QValidator.Intermediate, text, position
-        return QtGui.QValidator.Acceptable, text, position
 
 
 class FluentReadoutEdit(FluentLineEdit):
@@ -3422,6 +3448,80 @@ class FluentTreeComboBox(FluentComboBox):
         return str(data).strip() if data else ""
 
 
+class FluentUnitPicker(FluentTreeComboBox):
+    """Which spelling of one unit a field is read in.
+
+    A number's unit is its owner's -- what the device holds, what the range is
+    in -- and it never moves.  Which spelling of it an operator reads is a
+    different question, and theirs: the power a board holds in dBm is the same
+    power in mW, and nobody should have to do that arithmetic by hand to work
+    in the other one.  Since a prefix is not typed, this is the ONLY way to
+    ask for one, which is why it belongs beside every field that has a ladder
+    rather than inside the one form that first needed it.
+
+    A TREE, because the choices are one thing: each base carries its own
+    prefixes on its branch, and a unit that is not a prefixed base (dBm)
+    stands beside them as its own.  A flat list of eighteen spellings is the
+    same information with the structure thrown away.
+    """
+
+    #: emitted with the chosen spelling of the field's own unit
+    unit_picked = QtCore.pyqtSignal(str)
+
+    def __init__(self, unit: str, parent=None) -> None:
+        super().__init__(parent)
+        self._unit = str(unit).strip() or "1"
+        self.set_choice_tree(unit_choice_tree(self._unit), current=self._unit)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Fixed,
+            QtWidgets.QSizePolicy.Preferred,
+        )
+        self.setToolTip("Read this field in another unit")
+        self.keyed_choice_picked.connect(self.unit_picked)
+
+    def unit(self) -> str:
+        """The unit this field's NUMBER is in, whatever is on screen."""
+
+        return self._unit
+
+
+def unit_choice_tree(unit: str) -> tuple:
+    """Every spelling of ``unit``, grouped under the base each belongs to.
+
+    Empty when there is nothing to choose -- an unknown unit, a dimensionless
+    number, or a unit whose ladder is only itself -- which is how a caller
+    knows not to mount a picker at all.
+    """
+
+    symbol = str(unit).strip()
+    if not symbol or symbol == "1":
+        return ()
+    try:
+        choices = DEFAULT_UNITS.display_choices(symbol)
+    except UnitError:
+        return ()
+    if len(choices) < 2:
+        return ()
+    order: list[str] = []
+    branches: dict[str, list[tuple[str, str, str]]] = {}
+    for spelling in choices:
+        base = DEFAULT_UNITS.base_for(spelling)
+        trunk = base.symbol if base is not None else spelling
+        leaves = branches.get(trunk)
+        if leaves is None:
+            leaves = []
+            branches[trunk] = leaves
+            order.append(trunk)
+        leaves.append((spelling, spelling, spelling))
+    return tuple((trunk, tuple(branches[trunk])) for trunk in order)
+
+
+def fluent_unit_picker(unit: str, parent=None) -> "FluentUnitPicker | None":
+    """The picker for this unit, or None when it has only one spelling."""
+
+    return FluentUnitPicker(unit, parent) if unit_choice_tree(unit) else None
+
+
 class _FluentTabCloseButton(QtWidgets.QToolButton):
     """The close affordance for a closable tab: a small "x" glyph that darkens on
     hover with a subtle round highlight.
@@ -4045,16 +4145,16 @@ class FluentSpinBox(_WheelFocusGuardMixin, QtWidgets.QSpinBox):
         self.setStyleSheet(fluent_spinbox_stylesheet("QSpinBox"))
 
     def setValueUnit(self, unit: str) -> None:  # noqa: N802 - Qt API name
-        """Name what this whole number counts, beside the number.
+        """Accepted and ignored: a count has no scale to choose between.
 
-        A prefix is not offered and not accepted: these are counts of things
-        -- pixels, shots, windows -- and 1.2 k of a thing that comes in ones
-        is a number nobody meant.  A quantity that does scale is a float
-        field, where the whole ladder is available.
+        These are counts of things -- pixels, shots, windows -- so there is
+        no ladder to offer and nothing for a picker to do.  What the number
+        counts is said by the row's label, which every field's is, and
+        printing it inside the box as a suffix said it a second time in the
+        one place the operator is trying to type.
         """
 
-        symbol = str(unit).strip()
-        self.setSuffix(f" {symbol}" if symbol and symbol != "1" else "")
+        del unit
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
@@ -4266,9 +4366,11 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
     def setValueUnit(self, unit: str) -> None:  # noqa: N802 - Qt API name
         """What this box's NUMBER is in -- its owner's unit, and its range's.
 
-        Shown AND read: one table drives both, so a box that prints
-        ``120.0000000 MHz`` accepts ``1.05M`` back without anyone writing a
-        second parser that has to agree with the formatter.
+        The box shows and takes DIGITS.  Which unit those digits are in is
+        said beside it, by the picker the row mounts, and choosing there is
+        the only way the scale changes: a prefix typed into the number is a
+        second way to say the same thing, in the one place where getting it
+        wrong is silent and expensive.
         """
 
         self._unit = str(unit).strip() or "1"
@@ -4344,13 +4446,17 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
             return str(number)
 
     def valueFromText(self, text: str) -> float:  # noqa: N802 - Qt API
-        # NEVER raises.  Qt calls this from inside its own event handling, and
-        # an exception leaving a Qt slot ends the process instead of the edit.
-        # The fallback may NOT ask the box for its value: value() interprets
-        # the text, which calls back into here, which would ask again -- one
-        # unreadable keystroke and the stack is gone.
+        """The digits typed, read as a number OF THE UNIT ON SCREEN.
+
+        NEVER raises.  Qt calls this from inside its own event handling, and
+        an exception leaving a Qt slot ends the process instead of the edit.
+        The fallback may NOT ask the box for its value: value() interprets the
+        text, which calls back into here, which would ask again -- one
+        unreadable keystroke and the stack is gone.
+        """
+
         try:
-            value = self._value_from_shown(parse_quantity(text, self._shown_unit))
+            value = self._value_from_shown(float(str(text).strip()))
         except (UnitError, ValueError):
             return self._last_value
         self._last_value = value
@@ -4359,19 +4465,19 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
     def validate(self, text: str, position: int):
         """Accept while it is being typed; judge when it could be finished.
 
-        Qt's own numeric validator refuses every character that is not part of
-        a number, which is why ``1.05M`` could not be typed at all -- the M was
-        swallowed as the key went down, so the box that showed megahertz was
-        the one box megahertz could not be entered into.
+        A box holds digits, a sign and a decimal point, and nothing else.  Its
+        scale is the picker's to say, so there is no suffix to type past and
+        no partially-typed word to keep Intermediate for -- only a number that
+        is not finished yet, which "-" and "." and "" are.
         """
 
-        stripped = text.strip()
+        stripped = str(text).strip()
         if not stripped or stripped in ("+", "-", ".", "+.", "-."):
             return QtGui.QValidator.Intermediate, text, position
         try:
-            parse_quantity(stripped, self._shown_unit)
-        except (UnitError, ValueError):
-            return QtGui.QValidator.Intermediate, text, position
+            float(stripped)
+        except ValueError:
+            return QtGui.QValidator.Invalid, text, position
         return QtGui.QValidator.Acceptable, text, position
 
     def resizeEvent(self, event) -> None:

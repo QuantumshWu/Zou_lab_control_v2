@@ -26,6 +26,7 @@ for _name in (
     "retire_pending_widgets",
     "fluent_confirm", "fluent_save_path", "fluent_open_path", "stamped_file_name",
     "FluentComboBox", "FluentCycleComboBox", "FluentTreeComboBox", "FluentTabWidget",
+    "FluentUnitPicker", "fluent_unit_picker", "unit_choice_tree",
     "FluentSwitch", "fluent_switch_width", "fluent_spinbox_stylesheet", "FluentSpinBox", "FluentInputDialog", "FluentCardDialog",
     "FluentCodeEdit", "FluentDoubleSpinBox", "FluentCheckBox", "FluentScrollArea",
     "FluentPageBody", "FluentTableView",
