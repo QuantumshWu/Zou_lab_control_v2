@@ -18,7 +18,7 @@ from zlc_pulse import (
     sequence_to_tree,
     validate_scan_table,
 )
-from zlc_pulse.codec import parse_pulse_tree_json, split_pulse_document_tree
+from zlc_pulse.codec import read_pulse_document, split_pulse_document_tree
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,7 +82,20 @@ def state_from_tree(tree: Mapping[str, Any]) -> PulseEditorState:
     """Decode the pulse and its sole ``editor`` section as one candidate."""
 
     sequence_tree, raw = split_pulse_document_tree(tree)
-    sequence = sequence_from_tree(sequence_tree)
+    return editor_state_from(sequence_from_tree(sequence_tree), raw)
+
+
+def editor_state_from(
+    sequence: PulseSequence, raw: Mapping[str, Any]
+) -> PulseEditorState:
+    """One authoring state from a decoded pulse and its editor section.
+
+    Apart from :func:`state_from_tree`, because a pulse read from a FILE has
+    already been decoded -- and refreshed from its config source -- by the
+    time it gets here, and decoding it a second time from the tree would
+    throw that refresh away.
+    """
+
     visible = raw.get("visible_ports")
     source = raw.get("scan_source", "")
     rows = raw.get("scan_rows", ())
@@ -133,8 +146,7 @@ def read_pulse(path: str | os.PathLike[str]) -> PulseEditorState:
     source = Path(path)
     if source.suffix.lower() != ".json":
         raise ValueError(f"pulse files must be JSON: {source}")
-    tree = parse_pulse_tree_json(source.read_text(encoding="utf-8"))
-    return state_from_tree(tree)
+    return editor_state_from(*read_pulse_document(source))
 
 
 def write_pulse(path: str | os.PathLike[str], state: PulseEditorState) -> None:
@@ -143,4 +155,11 @@ def write_pulse(path: str | os.PathLike[str], state: PulseEditorState) -> None:
     write_readable_json(Path(path), state_to_tree(state))
 
 
-__all__ = ["PulseEditorState", "read_pulse", "state_from_tree", "state_to_tree", "write_pulse"]
+__all__ = [
+    "PulseEditorState",
+    "editor_state_from",
+    "read_pulse",
+    "state_from_tree",
+    "state_to_tree",
+    "write_pulse",
+]

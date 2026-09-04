@@ -363,22 +363,6 @@ def _apply_named_values(
     return result, tuple(applied), tuple(unknown)
 
 
-def resolve_config_parameters(sequence: PulseSequence) -> PulseSequence:
-    """Retire the config declarations, leaving the numbers they named.
-
-    A config parameter is already resolved by construction -- its value is the
-    field's own -- so this removes the declarations and changes nothing else.
-    It exists because :func:`~zlc_pulse.compile_sequence` refuses a pulse that
-    still declares any, which is what makes refreshing them impossible to skip
-    by accident: a runner that never asked its config file for today's numbers
-    cannot reach the board.
-    """
-
-    if not isinstance(sequence, PulseSequence):
-        raise TypeError("sequence must be PulseSequence")
-    return replace(sequence, config_parameters=(), config_source="")
-
-
 def apply_api_values(
     sequence: PulseSequence,
     entries: Mapping[str, tuple[int | float, str]],
@@ -497,5 +481,4 @@ __all__ = [
     "pulse_field_value",
     "replace_pulse_field",
     "resolve_api_parameters",
-    "resolve_config_parameters",
 ]

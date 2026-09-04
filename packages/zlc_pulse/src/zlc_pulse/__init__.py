@@ -9,6 +9,7 @@ if _PACKAGE_DIR.name != "zlc_pulse" or __package__ != "zlc_pulse":
     raise ImportError(f"unexpected zlc_pulse installation path: {_PACKAGE_DIR}")
 
 from .codec import (
+    read_pulse_document,
     API_VALUES_FORMAT,
     PULSE_TREE_FORMAT,
     api_values_from_tree,
@@ -48,7 +49,6 @@ from .binding import (  # noqa: E402
     convert_time,
     pulse_field_value,
     resolve_api_parameters,
-    resolve_config_parameters,
 )
 from .wire import load_streamer_config  # noqa: E402
 from .manifest import pulse_target_from_xdc  # noqa: E402
@@ -93,6 +93,7 @@ __all__ = [
     "MINIMUM_BRACKET_COUNT",
     "API_VALUES_FORMAT",
     "PULSE_TREE_FORMAT",
+    "read_pulse_document",
     "sequence_from_tree",
     "sequence_to_tree",
     "MAXIMUM_REPEAT_COUNT",
@@ -122,7 +123,6 @@ __all__ = [
     "prune_orphaned_bindings",
     "convert_time",
     "resolve_api_parameters",
-    "resolve_config_parameters",
     "pulse_field_value",
     "api_parameter_columns_for",
     "prepare_scan_application",

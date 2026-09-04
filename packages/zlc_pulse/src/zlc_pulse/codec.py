@@ -7,17 +7,24 @@ file" -- was true and answered a different question.  A pulse is saved as JSON
 beside the module, with that fact owned by the package that owns the model
 rather than re-derived by whoever happens to be writing a file.
 
-Trees only.  Reading and writing files belongs to whoever knows where an
-experiment keeps things, which is not this package.
+Trees only, with one exception that earns itself: :func:`read_pulse_document`.
+A pulse names the file it refreshes its config parameters from, and it names
+it RELATIVE TO ITSELF -- so the only thing that knows where that file is, is
+whoever is holding the pulse's own path.  Pushing the read outward would hand
+every consumer the same three lines to remember, and the one that forgot would
+play last month's bias without saying so.  Everything else here is still trees.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 import json
+import os
+from pathlib import Path
 from numbers import Real
 from typing import Any
 
+from .binding import apply_config_values
 from .model import (
     AnalogStep,
     MAXIMUM_REPEAT_COUNT,
@@ -135,6 +142,69 @@ def sequence_from_document_tree(tree: Mapping[str, Any]) -> PulseSequence:
 
     sequence_tree, _editor = split_pulse_document_tree(tree)
     return sequence_from_tree(sequence_tree)
+
+
+def read_pulse_document(
+    path: "str | os.PathLike[str]",
+) -> tuple[PulseSequence, Mapping[str, Any]]:
+    """One pulse from disk -- config values refreshed -- and its editor half.
+
+    THE ONE PLACE A PULSE ARRIVES FROM A FILE.  A config parameter's value is
+    the field's own number, so nothing downstream has to resolve anything: by
+    the time the pulse leaves here it already holds today's numbers, and a
+    runner that never heard of config parameters plays them correctly without
+    a line of its own.  That is the whole point of putting the read here
+    rather than at each of the places that fire a pulse.
+
+    A pulse that declares no config parameter never looks for a file.  One
+    that declares them and names no source keeps its authored numbers -- it
+    refreshes from nowhere, which is a legal thing to be.  Otherwise the file
+    is read, and anything wrong with it -- missing, unreadable, not a config
+    set, or silent about a parameter this pulse declares -- is raised here,
+    before the pulse reaches anything that could play it.
+    """
+
+    source = Path(path).expanduser().resolve()
+    sequence_tree, editor = split_pulse_document_tree(
+        parse_pulse_tree_json(source.read_text(encoding="utf-8"))
+    )
+    return _refreshed_config(sequence_from_tree(sequence_tree), source), editor
+
+
+def _refreshed_config(sequence: PulseSequence, pulse_path: Path) -> PulseSequence:
+    """This pulse with its config parameters set to what its config file says."""
+
+    if not sequence.config_parameters or not sequence.config_source:
+        return sequence
+    source = (pulse_path.parent / sequence.config_source).expanduser()
+    try:
+        text = source.read_text(encoding="utf-8")
+    except OSError as error:
+        raise ValueError(
+            f"{sequence.name!r} refreshes its config from {sequence.config_source!r}, "
+            f"which cannot be read: {error}"
+        ) from None
+    try:
+        _name, _origin, entries = config_values_from_tree(json.loads(text))
+    except Exception as error:
+        raise ValueError(
+            f"{sequence.name!r} refreshes its config from {sequence.config_source!r}, "
+            f"which is not a config value set: {error}"
+        ) from None
+    refreshed, _applied, _unknown = apply_config_values(sequence, entries)
+    absent = tuple(
+        parameter.parameter_id
+        for parameter in sequence.config_parameters
+        if parameter.parameter_id not in entries
+    )
+    if absent:
+        # Silence here would run a stale number while the pulse says it is
+        # fresh, which is the one outcome worse than refusing to run.
+        raise ValueError(
+            f"{sequence.name!r} declares config parameter(s) {absent} that "
+            f"{sequence.config_source!r} says nothing about"
+        )
+    return refreshed
 
 
 def _object(value: Any, expected: tuple[str, ...], name: str) -> Mapping[str, Any]:
@@ -583,6 +653,7 @@ __all__ = [
     "api_values_from_tree",
     "api_values_to_tree",
     "parse_pulse_tree_json",
+    "read_pulse_document",
     "sequence_from_document_tree",
     "sequence_from_tree",
     "sequence_to_tree",
