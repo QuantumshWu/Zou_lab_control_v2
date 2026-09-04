@@ -241,6 +241,15 @@ def test_occupancy_classifies_only_event_cells_and_runtime_owns_full_history(
     invalid = processor.evaluate(invalid_source)
     assert not np.any(invalid["occupied"].snapshot.block.values[:, 0])
     assert np.all(np.isnan(invalid["counts"].snapshot.block.values[:, 0]))
+    # A site's signal is a SUM OF SENSOR COUNTS, and single precision
+    # resolves every one of them exactly up to sixteen million.  It is
+    # also the array the verdict beside it was read from, so the two can
+    # never be derived from different values of one measurement -- and a
+    # scan holds one of these per shot, per site, for the whole run.
+    assert invalid["counts"].snapshot.block.schema.value_schema.dtype == (
+        np.dtype("<f4")
+    )
+    assert invalid["counts"].snapshot.block.values.dtype == np.dtype("<f4")
     assert not np.any(
         invalid["occupied"].snapshot.expanded_validity()[:, 0]
     )
