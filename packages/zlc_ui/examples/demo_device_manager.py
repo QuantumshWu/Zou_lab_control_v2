@@ -7,6 +7,12 @@ import os
 
 # The facade and nothing else: this file is the tutorial for the surface an
 # outside host may use, so it is written under the rule that surface enforces.
+# The product bootstrap, first, exactly as every launcher does it: it is
+# what puts THIS checkout's layers on the path.  Without it a demo run
+# from a source tree imports whichever copy of each layer an editable
+# install happens to point at, and demonstrates that one instead.
+import zou_lab_control  # noqa: F401
+
 from zlc_ui import (
     FormFieldProps,
     FormSpec,

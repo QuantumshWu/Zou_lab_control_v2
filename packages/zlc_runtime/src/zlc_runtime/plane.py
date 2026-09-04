@@ -780,6 +780,41 @@ def _rolled_planes(
     return values, validity, sigma
 
 
+def _extended_planes(
+    shape: tuple[int, ...],
+    dtype: object,
+    basis: OwnedSnapshot,
+    placements: tuple,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    """Planes for a dataset that only GAINED cells since a known basis.
+
+    Re-placing every chunk rebuilt an answer that could not have changed:
+    a run of N shots paid N placements on every redraw, so the cost of
+    watching a scan grew with the scan and the last shots of a long one
+    cost seconds each.  The basis is copied in one pass per plane and
+    only the chunks committed since are placed, so a redraw costs the
+    SHOT it added, not the run behind it.
+
+    Sigma follows the same rule as a from-scratch assembly: absent until
+    some contributing snapshot states one, and NaN wherever none did.
+    """
+
+    block = basis.block
+    values = np.array(block.values, dtype=dtype)
+    validity = np.array(basis.expanded_validity(), dtype=np.bool_)
+    sigma = None if block.sigma is None else np.array(block.sigma)
+    for target, snapshot in placements:
+        values[target] = snapshot.block.values
+        validity[target] = snapshot.expanded_validity()
+        stated = snapshot.block.sigma
+        if stated is None:
+            continue
+        if sigma is None:
+            sigma = np.full(shape, np.nan, dtype=np.float64)
+        sigma[target] = stated
+    return values, validity, sigma
+
+
 def _assembled_planes(
     shape: tuple[int, ...],
     dtype: object,
@@ -812,6 +847,23 @@ def _assembled_planes(
             sigma = np.full(shape, np.nan, dtype=np.float64)
         sigma[target] = stated
     return values, validity, sigma
+
+
+@dataclass(slots=True)
+class _MaterializedFinite:
+    """One full canonical materialization, kept as the next one's basis.
+
+    A canonical Dataset is written cell by cell and never rewrites a cell
+    it already holds -- the commit refuses an overlap -- so every cell of
+    this snapshot is still that cell's answer for every later sequence of
+    the same generation.  That is what makes it a basis rather than a
+    cache: the next materialization is this one plus the cells committed
+    since, and nothing else can have changed.
+    """
+
+    sequence: int
+    snapshot: OwnedSnapshot
+    record: Mapping[str, object]
 
 
 @dataclass(slots=True)
@@ -1084,10 +1136,7 @@ class _GenerationState:
         ],
     ] = field(default_factory=dict)
     occupied_cells: dict[str, np.ndarray] = field(default_factory=dict)
-    materialized: dict[
-        str,
-        tuple[int, OwnedSnapshot, Mapping[str, object]],
-    ] = field(default_factory=dict)
+    materialized: dict[str, _MaterializedFinite] = field(default_factory=dict)
     indexed_history: dict[str, _IndexedHistory] = field(default_factory=dict)
     committed_run_record: Mapping[str, object] | None = None
     sealing: bool = False
@@ -1899,18 +1948,27 @@ class SignalDataPlane:
         DatasetSchema,
         StreamGenerationId,
         tuple[tuple[OwnedSnapshot, tuple[int, int]], ...],
+        _MaterializedFinite | None,
     ]:
         schema = state.canonical_schemas.get(signal_name)
         if not isinstance(schema, DatasetSchema):
             raise RuntimeError("signal has no canonical Dataset schema")
+        # A basis answers for every cell it holds, so what is left to place
+        # is what was committed after it.  An older sequence than the basis
+        # is a view of the run BEFORE those cells existed: it cannot borrow
+        # a basis that already contains them, and assembles from scratch.
+        basis = state.materialized.get(signal_name)
+        if basis is not None and basis.sequence >= sequence:
+            basis = None
+        floor = -1 if basis is None else basis.sequence
         chunks = tuple(
             (value.snapshot, origin)
             for commit_sequence, value, origin, _parents in state.commit_chunks.get(
                 signal_name, ()
             )
-            if commit_sequence <= sequence
+            if floor < commit_sequence <= sequence
         )
-        return schema, state.generation, chunks
+        return schema, state.generation, chunks, basis
 
     @staticmethod
     def _materialize_dataset(
@@ -1919,6 +1977,7 @@ class SignalDataPlane:
         schema: DatasetSchema,
         generation: StreamGenerationId,
         chunks: tuple[tuple[OwnedSnapshot, tuple[int, int]], ...],
+        basis: _MaterializedFinite | None,
     ) -> OwnedSnapshot:
         def placements():
             for chunk, origin in chunks:
@@ -1935,11 +1994,19 @@ class SignalDataPlane:
                     chunk,
                 )
 
-        values, validity, sigma = _assembled_planes(
-            schema.physical_shape,
-            schema.value_schema.dtype,
-            placements(),
-        )
+        if basis is None:
+            values, validity, sigma = _assembled_planes(
+                schema.physical_shape,
+                schema.value_schema.dtype,
+                placements(),
+            )
+        else:
+            values, validity, sigma = _extended_planes(
+                schema.physical_shape,
+                schema.value_schema.dtype,
+                basis.snapshot,
+                tuple(placements()),
+            )
         return owned_snapshot_from_arrays(
             schema,
             values,
@@ -2367,8 +2434,8 @@ class SignalDataPlane:
                 ):
                     raise ValueError("publication is not a canonical commit of this run")
                 cached = state.materialized.get(name)
-                if cached is not None and cached[0] == sequence:
-                    return cached[1], cached[2]
+                if cached is not None and cached.sequence == sequence:
+                    return cached.snapshot, cached.record
                 finite_input = self._materialization_input_locked(
                     state,
                     name,
@@ -2416,8 +2483,8 @@ class SignalDataPlane:
                     # Keep one immutable prefix per signal, never a list of all
                     # prefixes.  A later materialization must not be displaced by
                     # an older request that happened to finish afterwards.
-                    if cached is None or cached[0] <= sequence:
-                        state.materialized[name] = (
+                    if cached is None or cached.sequence <= sequence:
+                        state.materialized[name] = _MaterializedFinite(
                             sequence,
                             snapshot,
                             materialized_record,
@@ -2444,10 +2511,7 @@ class SignalDataPlane:
         state = None
         sequence = 0
         retain_latest_monitor = False
-        materialized: dict[
-            str,
-            tuple[int, OwnedSnapshot, Mapping[str, object]],
-        ] = {}
+        materialized: dict[str, _MaterializedFinite] = {}
         pending: dict[
             str,
             tuple[
@@ -2455,6 +2519,7 @@ class SignalDataPlane:
                     DatasetSchema,
                     StreamGenerationId,
                     tuple[tuple[OwnedSnapshot, tuple[int, int]], ...],
+                    _MaterializedFinite | None,
                 ],
                 Mapping[str, object],
             ],
@@ -2485,7 +2550,7 @@ class SignalDataPlane:
                 sequence = state.publication.event_ref.sequence
                 for name in exact_outputs:
                     cached = state.materialized.get(name)
-                    if cached is not None and cached[0] == sequence:
+                    if cached is not None and cached.sequence == sequence:
                         materialized[name] = cached
                     else:
                         pending[name] = (
@@ -2534,7 +2599,7 @@ class SignalDataPlane:
             return False
         try:
             for name, (inputs, event_record) in pending.items():
-                materialized[name] = (
+                materialized[name] = _MaterializedFinite(
                     sequence,
                     self._materialize_dataset(name, sequence, *inputs),
                     event_record,

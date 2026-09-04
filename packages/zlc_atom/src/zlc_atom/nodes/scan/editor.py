@@ -36,8 +36,10 @@ from zlc_ui.fluent import (
     FluentButton,
     FluentComboBox,
     FluentDoubleSpinBox,
+    FluentTreeComboBox,
     FluentLineEdit,
     FluentSpinBox,
+    fill_grouped_choice_combo,
 )
 
 from zlc_pulse import apply_api_values, authored_api_entries, field_label
@@ -58,6 +60,8 @@ from .plan import (
     hardware_scan_ports_for,
     manual_axis,
     manual_axis_name,
+    port_group,
+    port_leaf,
     scan_ports_for,
     DEVICE_PARAM_FAMILY,
     scan_ports_for_devices,
@@ -81,9 +85,11 @@ class _AxisRow(QtWidgets.QWidget):
         super().__init__(parent)
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        self.port_combo = FluentComboBox()
-        for port in ports:
-            self.port_combo.addItem(port.label, port.port)
+        # A DEVICE's knobs gather under the device, the way an operator looks
+        # for one; the flat list put a laser current beside a pulse parameter
+        # by accident and grew with every device installed.  This is the same
+        # grouped chooser the signal pickers use.
+        self.port_combo = FluentTreeComboBox()
         self.start_spin = FluentDoubleSpinBox()
         self.stop_spin = FluentDoubleSpinBox()
         self.points_spin = FluentSpinBox()
@@ -105,20 +111,9 @@ class _AxisRow(QtWidgets.QWidget):
 
         self._ports = tuple(ports)
         self._custom_values: tuple[float, ...] | None = None
+        self._fill_ports(None if axis is None else axis.port)
         self._apply_port_limits()
         if axis is not None:
-            at = self.port_combo.findData(axis.port)
-            if at < 0:
-                # The pulse no longer offers this port -- it was renamed, or
-                # the binding was taken off the field.  Keep saying what the
-                # operator authored: silently selecting whatever sits at index
-                # zero re-points their axis at an unrelated knob, and the run
-                # would sweep it without a word.  Left as it is, bind_plan
-                # refuses by name before anything arms.
-                self.port_combo.addItem(f"{axis.port} (not in this pulse)", axis.port)
-                at = self.port_combo.count() - 1
-            self.port_combo.setCurrentIndex(at)
-            self._apply_port_limits()
             self.start_spin.setValue(axis.values[0])
             self.stop_spin.setValue(axis.values[-1])
             self.points_spin.setValue(len(axis.values))
@@ -132,10 +127,44 @@ class _AxisRow(QtWidgets.QWidget):
                 self.stop_spin.setValue(port.seed_hi)
             self.points_spin.setValue(5)
 
-        self.port_combo.currentIndexChanged[int].connect(self._port_changed)
+        # A tree leaf is picked through ``activated``, which covers the combo's
+        # own activation and the tree's leaf-click re-emission both.
+        self.port_combo.activated[int].connect(self._port_changed)
         for spin in (self.start_spin, self.stop_spin, self.points_spin):
             spin.valueChanged.connect(self._spins_edited)
         remove.clicked.connect(lambda: self.remove_requested.emit(self))
+
+    def _fill_ports(self, current: str | None) -> None:
+        """Offer every port, each under the thing that owns it."""
+
+        def branch(port: str) -> str:
+            try:
+                return port_group(port)
+            except ValueError:
+                return "unavailable"
+
+        labels = {port.port: port_leaf(port.port) for port in self._ports}
+        sources = {port.port: (branch(port.port),) for port in self._ports}
+        chosen = str(current or "")
+        offered = {port.port for port in self._ports}
+        if chosen and chosen not in offered:
+            # The pulse no longer offers this port -- it was renamed, or the
+            # binding was taken off the field.  Keep saying what the operator
+            # authored: silently selecting whatever sits first re-points their
+            # axis at an unrelated knob and the run would sweep it without a
+            # word.  Left as it is, bind_plan refuses by name before anything
+            # arms.
+            labels[chosen] = f"{port_leaf(chosen)} (not in this pulse)"
+            sources[chosen] = (branch(chosen),)
+        fill_grouped_choice_combo(
+            self.port_combo,
+            names=[port.port for port in self._ports],
+            sources=sources,
+            metadata={},
+            labels=labels,
+            current=chosen or (self._ports[0].port if self._ports else ""),
+            empty_source_label="ports",
+        )
 
     def _apply_port_limits(self) -> None:
         port = next(
@@ -147,7 +176,17 @@ class _AxisRow(QtWidgets.QWidget):
                 spin.setRange(-1e12, 1e12)
             else:
                 spin.setRange(port.lo, port.hi)
-            spin.setDecimals(4)
+            # The port has said all along what its numbers are in -- a
+            # duration sweeps in the period's own unit -- and these two boxes
+            # were the one place on the row that never repeated it, so a
+            # seamless axis read "from 1 to 40" with nothing saying of what.
+            #
+            # setDecimals(4) went with it.  It did not make the number
+            # readable, it made it four decimals long: an authored 1.00005 us
+            # came back as 1.0 in the box that is supposed to be showing what
+            # will run.  Readability is the formatter's job now, and the
+            # formatter does not round.
+            spin.setDisplayUnit("" if port is None else port.unit)
 
     def _port_changed(self, _index: int) -> None:
         self._custom_values = None

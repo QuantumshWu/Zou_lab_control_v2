@@ -9,6 +9,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from fractions import Fraction
+
+from zlc_data.units import PREFIXES, UnitError, resolve_unit
 import math
 import re
 from types import MappingProxyType
@@ -42,17 +44,57 @@ FIELD_BINDING_CYCLES = MappingProxyType(
         FIELD_DELAY: (None, BINDING_API, BINDING_CONFIG),
     }
 )
-#: How long one of each unit is, in nanoseconds.  A tick is NOT here: it is
-#: however long this board's clock says, and listing it as 1.0 ns made it a
-#: synonym for ns -- so on a 20 ns clock the one unit that is on the grid by
-#: definition became the one most likely to be refused.
-TIME_UNIT_TO_NS = {
-    "ns": 1.0,
-    "us": 1_000.0,
-    "ms": 1_000_000.0,
-    "s": 1_000_000_000.0,
-}
-TIME_UNIT_CHOICES = tuple(TIME_UNIT_TO_NS)
+#: The coarsest and finest a pulse may be authored in.  Not a limit of the
+#: unit system -- which reaches Ts and, going the other way, would happily
+#: offer more -- but of this instrument: a period is never kiloseconds long,
+#: and the board's clock is tens of nanoseconds, so a finer unit would only
+#: ever be refused by the grid check below.  A tick is NOT a unit: it is
+#: however long this board's clock says, and listing it as 1 ns once made it
+#: a synonym for ns, so on a 20 ns clock the one duration that is on the grid
+#: by definition became the one most likely to be refused.
+_COARSEST_TIME_DECADE = 0
+_FINEST_TIME_DECADE = -9
+
+#: Authorable time units, finest first.  Derived, so the spelling this project
+#: shows (``µs``) and the spellings it accepts (``us``) are decided in exactly
+#: one place, and a unit cannot exist for the editor and not for the compiler.
+TIME_UNIT_CHOICES = tuple(
+    resolve_unit(f"{prefix.symbol}s").symbol
+    for prefix in sorted(PREFIXES, key=lambda item: item.exponent)
+    if _FINEST_TIME_DECADE <= prefix.exponent <= _COARSEST_TIME_DECADE
+)
+
+
+def nanoseconds_per(unit: str) -> Fraction:
+    """How long one of ``unit`` is, in nanoseconds -- EXACTLY.
+
+    A Fraction, not a float, because this feeds the tick grid: 1e-6/1e-9 is
+    not exactly one thousand in binary, and a duration that misses the grid
+    by an ulp is refused with nothing wrong with it.  The exponent comes off
+    the unit itself, so the ratio is integer arithmetic all the way down.
+    """
+
+    resolved = resolve_unit(canonical_time_unit(unit, "time unit"))
+    return Fraction(10) ** (resolved.decade - resolve_unit("ns").decade)
+
+
+def canonical_time_unit(value: object, field_name: str) -> str:
+    """The one spelling this project stores, for any spelling it accepts.
+
+    ``us`` and ``µs`` are the same unit; storing whichever was typed would put
+    two names for one thing into every saved document and every comparison.
+    """
+
+    text = _text(value, field_name)
+    try:
+        resolved = resolve_unit(text)
+    except UnitError as error:
+        raise ValueError(f"{field_name} is unsupported: {text!r}") from error
+    if resolved.symbol not in TIME_UNIT_CHOICES:
+        raise ValueError(
+            f"{field_name} must be one of {TIME_UNIT_CHOICES}, not {text!r}"
+        )
+    return resolved.symbol
 #: Stable domain order for editors and serializers that must offer every
 #: model-supported analog step.  Labels remain a presentation concern.
 ANALOG_MODE_CHOICES = ("edge", "ramp")
@@ -118,9 +160,9 @@ def _nonnegative_int(value: Any, field_name: str) -> int:
 
 def _unit(value: Any, field_name: str) -> str:
     result = _text(value, field_name)
-    if result not in TIME_UNIT_TO_NS and result != "value":
-        raise ValueError(f"{field_name} is unsupported: {result!r}")
-    return result
+    if result == "value":
+        return result
+    return canonical_time_unit(result, field_name)
 
 
 def _tick_ratio(value: int | float, unit: str, time_step_ns: float,
@@ -134,9 +176,7 @@ def _tick_ratio(value: int | float, unit: str, time_step_ns: float,
     number = _number(value, field_name)
     if time_step_ns <= 0:
         raise ValueError("time_step_ns must be positive")
-    if unit not in TIME_UNIT_TO_NS:
-        raise ValueError(f"{field_name} has an unsupported time unit")
-    return Fraction(str(number)) * Fraction(str(TIME_UNIT_TO_NS[unit])) / Fraction(str(time_step_ns))
+    return Fraction(str(number)) * nanoseconds_per(unit) / Fraction(str(time_step_ns))
 
 
 def exact_ticks(value: int | float, unit: str, time_step_ns: float, field_name: str,
@@ -168,8 +208,7 @@ def align_to_grid(value: int | float, unit: str, time_step_ns: float, field_name
     ticks = int(ratio + half) if ratio >= 0 else -int(-ratio + half)
     if minimum is not None and ticks < minimum:
         ticks = minimum
-    return float(Fraction(ticks) * Fraction(str(time_step_ns))
-                 / Fraction(str(TIME_UNIT_TO_NS[unit])))
+    return float(Fraction(ticks) * Fraction(str(time_step_ns)) / nanoseconds_per(unit))
 
 
 @dataclass(frozen=True)
@@ -482,8 +521,7 @@ class PulsePeriod:
         if duration <= 0:
             raise ValueError("period duration must be positive")
         object.__setattr__(self, "duration", duration)
-        if self.unit not in TIME_UNIT_TO_NS:
-            raise ValueError("period unit must be a time unit")
+        object.__setattr__(self, "unit", canonical_time_unit(self.unit, "period unit"))
         states = tuple(self.states)
         if any(not isinstance(value, (int, bool)) or int(value) not in (0, 1) for value in states):
             raise ValueError("period states must contain only 0/1 values")
@@ -506,8 +544,7 @@ class OutputDelay:
     def __post_init__(self) -> None:
         object.__setattr__(self, "port", _identifier(self.port, "delay port"))
         object.__setattr__(self, "value", _number(self.value, "delay value"))
-        if self.unit not in TIME_UNIT_TO_NS:
-            raise ValueError("delay unit must be a time unit")
+        object.__setattr__(self, "unit", canonical_time_unit(self.unit, "delay unit"))
 
 
 #: The smallest count that makes a timeline bracket meaningful.
@@ -762,6 +799,7 @@ __all__ = [
     "PORT_DAC",
     "PORT_DIGITAL",
     "TIME_UNIT_CHOICES",
-    "TIME_UNIT_TO_NS",
+    "canonical_time_unit",
+    "nanoseconds_per",
     "exact_ticks",
 ]

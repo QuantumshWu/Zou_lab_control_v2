@@ -43,7 +43,10 @@ def test_the_mot_template_offers_the_three_bias_ports() -> None:
     ports = scan_ports_for(_template_sequence())
     assert tuple(port.port for port in ports) == BIAS_PORTS
     for port in ports:
-        assert port.unit == "", "a DAC code is dimensionless; the unit is empty"
+        # NOT dimensionless: a DAC code is a count of codes, and calling it
+        # nothing is what an empty string says.  The registry has the unit
+        # now, so the axis can carry it without a label reaching the plot.
+        assert port.unit == "code"
         assert port.lo < 0 < port.hi, "the signed range brackets zero"
 
 

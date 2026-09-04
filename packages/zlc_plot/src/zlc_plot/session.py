@@ -944,12 +944,11 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         for name, source in self._unit_parameter_sources().items():
             if name not in self._parameter_schema:
                 continue
-            compatible = []
-            for symbol in registry.distinct_symbols():
-                target = resolve_unit(symbol, registry)
-                if source.canonical_unit.compatible_with(target):
-                    compatible.append(symbol)
-            result[name] = tuple(compatible)
+            # The registry holds bases; the ladder is derived.  Walking the
+            # registered symbols and filtering by dimension used to be the
+            # whole list, because every prefixed spelling was a row in the
+            # table -- so a time axis would now be offered "s" alone.
+            result[name] = registry.display_choices(source.canonical_unit)
         return MappingProxyType(result)
 
     def _current_display_limits(self) -> RectangleRange:

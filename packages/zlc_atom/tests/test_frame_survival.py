@@ -89,7 +89,11 @@ def test_pairing_identity_per_entry() -> None:
         np.testing.assert_array_equal(
             values[:, entry, :][eligible], occupied[:, value, :][eligible]
         )
-        assert np.all(np.isnan(values[:, entry, :][~eligible]))
+        # Outside the denominator there was no trial, and the validity is
+        # what says so.  The value carries the occupancy verdict's own
+        # dtype, so "no trial" cannot be spelled in it a second time.
+        assert values.dtype == np.dtype("?")
+        assert not values[:, entry, :][~eligible].any()
 
 
 def test_unjudgeable_frames_leave_the_denominator() -> None:

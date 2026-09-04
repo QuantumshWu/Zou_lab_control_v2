@@ -110,10 +110,6 @@ _EXPORTS = {
     "Reduction": ("zlc_plot.specs", "Reduction"),
     "RollingPlot": ("zlc_plot.specs", "RollingPlot"),
     "parameter_controls": ("zlc_plot.ui", "parameter_controls"),
-    "DEFAULT_UNITS": ("zlc_plot.units", "DEFAULT_UNITS"),
-    "Unit": ("zlc_plot.units", "Unit"),
-    "UnitRegistry": ("zlc_plot.units", "UnitRegistry"),
-    "resolve_unit": ("zlc_plot.units", "resolve_unit"),
 }
 
 
@@ -161,7 +157,6 @@ __all__ = [
     "build_figure_host",
     "decode_plot_recipe",
     "DEFAULTS",
-    "DEFAULT_UNITS",
     "FacetGridPlot",
     "FitCancelled",
     "FitEvent",
@@ -209,8 +204,6 @@ __all__ = [
     "SelectorData",
     "SelectorKind",
     "normalize_classifier_threshold_targets",
-    "Unit",
-    "UnitRegistry",
     "curve",
     "describe_semantics",
     "ensure_qt5_application",
@@ -221,7 +214,6 @@ __all__ = [
     "image",
     "parameter_controls",
     "pulse_timeline",
-    "resolve_unit",
     "read_figure_plot",
     "rolling",
     "schema_summary",

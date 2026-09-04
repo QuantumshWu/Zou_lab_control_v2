@@ -16,6 +16,7 @@ a duration's nanosecond range and every point came back clamped.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from fractions import Fraction
 from dataclasses import dataclass, replace
 
 from .binding import pulse_field_value, replace_pulse_field
@@ -469,9 +470,9 @@ def prepare_scan_application(
 def _ticks_per(sequence: PulseSequence, unit: str) -> float:
     """How many device ticks one of that unit is worth."""
 
-    from .model import TIME_UNIT_TO_NS
+    from .model import nanoseconds_per
 
-    return TIME_UNIT_TO_NS[str(unit)] / float(sequence.time_step_ns)
+    return float(nanoseconds_per(str(unit)) / Fraction(str(float(sequence.time_step_ns))))
 
 
 def _quantum(sequence: PulseSequence, unit: str) -> float:

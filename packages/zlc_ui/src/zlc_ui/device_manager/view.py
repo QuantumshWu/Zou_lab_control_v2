@@ -27,6 +27,8 @@ from zlc_ui.fluent import (
     signals_blocked,
     window_pad,
 )
+from zlc_data.units import UnitError, format_quantity
+
 from zlc_ui.form.form import FormSpec
 from zlc_ui.form.qt_form import FluentParameterForm
 from zlc_ui.console.status_strip import StatusStrip
@@ -174,6 +176,22 @@ class _LiveDeviceCard(FluentFrame):
         self.setToolTip(self.instance_id)
 
 
+def _readable_value(value: object, unit: str) -> str:
+    """One device reading, in the same words its editable twin uses.
+
+    Falls back to the plain text for anything that is not a number: a device
+    may report a name, a mode, or a reason it cannot answer, and none of them
+    is improved by being pushed through a number formatter.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return str(value)
+    try:
+        return format_quantity(value, unit or "1")
+    except UnitError:
+        return str(value)
+
+
 class DeviceControlView(QtWidgets.QWidget):
     """Projection-only control surface for one loaded device."""
 
@@ -221,12 +239,16 @@ class DeviceControlView(QtWidgets.QWidget):
         self.field_heading = muted_note_label("Field")
         self.current_heading = muted_note_label("Current")
         self.desired_heading = muted_note_label("Desired")
-        self.live_heading = muted_note_label("Live apply")
+        self.live_heading = muted_note_label("Live")
         self.apply_heading = muted_note_label("Apply")
         self.status_heading = muted_note_label("Status")
+        # Only the CURRENT column is a number of our own; every other heading
+        # takes its width from the widget under it, in _align_headings.
         self.current_heading.setFixedWidth(window_pad(8.0))
-        self.live_heading.setFixedWidth(window_pad(5.5))
-        self.apply_heading.setFixedWidth(window_pad(5.5))
+        # These two name a control that is centred in its cell, so the word is
+        # centred over it rather than hanging off the column's left edge.
+        for heading in (self.live_heading, self.apply_heading):
+            heading.setAlignment(QtCore.Qt.AlignHCenter | QtCore.Qt.AlignVCenter)
         columns.addWidget(self.field_heading)
         columns.addWidget(self.current_heading)
         columns.addWidget(self.desired_heading, 1)
@@ -256,7 +278,7 @@ class DeviceControlView(QtWidgets.QWidget):
         if widgets is None:
             return
         current, live, apply, _dot, status = widgets
-        for widget in (current, live, apply, status.parentWidget()):
+        for widget in (current, live.parentWidget(), apply, status.parentWidget()):
             widget.hide()
             widget.deleteLater()
 
@@ -276,7 +298,16 @@ class DeviceControlView(QtWidgets.QWidget):
                 layout.takeAt(0)
             current = ElidedLabel("—", row)
             current.setFixedWidth(self.current_heading.width())
-            live = FluentSwitch("", row)
+            # The switch lives in a cell of its own so a field with no live
+            # write can leave the CELL EMPTY without the row closing up: the
+            # column keeps its width, the rows keep their grid.
+            live_host = QtWidgets.QWidget(row)
+            live_layout = QtWidgets.QHBoxLayout(live_host)
+            live_layout.setContentsMargins(0, 0, 0, 0)
+            live_layout.setSpacing(0)
+            live = FluentSwitch("", live_host)
+            live_layout.addWidget(live, 0, QtCore.Qt.AlignCenter)
+            live_host.setFixedWidth(max(1, live.sizeHint().width()))
             apply = FluentButton("Apply", color=ACCENT)
             dot = FluentStatusDot(size=12)
             status = ElidedLabel("", row)
@@ -289,7 +320,7 @@ class DeviceControlView(QtWidgets.QWidget):
             layout.addWidget(row._label)
             layout.addWidget(current)
             layout.addWidget(editor, 1)
-            layout.addWidget(live)
+            layout.addWidget(live_host)
             layout.addWidget(apply)
             layout.addWidget(status_host, 1)
             timer = QtCore.QTimer(self)
@@ -302,8 +333,60 @@ class DeviceControlView(QtWidgets.QWidget):
             apply.clicked.connect(lambda _checked=False, value=key: self._emit_apply(value))
             self._field_rows[key] = current, live, apply, dot, status
             self._live_timers[key] = timer
-        first = next(iter(self.form._rows.values()), None)
-        self.field_heading.setFixedWidth(0 if first is None else first._label.width())
+        self._align_headings()
+
+    def _align_headings(self) -> None:
+        """Put the headings on the SAME grid as the rows they name.
+
+        The headings are their own row of labels beside a form that lays out
+        its own; two layouts pretending to be one table only line up while
+        every column is the same width in both.  Field, Current and Desired
+        were kept in step by hand and the rest were given round numbers that no
+        widget had any reason to match, so Live apply, Apply and Status sat off
+        their columns.  Here each heading takes the width of the widget under
+        it, and the heading row borrows the row's own spacing and margins, so
+        there is one set of column widths and it is the one the rows use.
+        """
+
+        rows = tuple(self.form._rows.values())
+        if not rows:
+            self.field_heading.setFixedWidth(0)
+            return
+        layout = rows[0].layout()
+        headings = self.columns.layout()
+        headings.setContentsMargins(layout.contentsMargins())
+        headings.setSpacing(layout.spacing())
+        if layout.count() < 6:
+            return
+        # label, current, editor, live cell, apply, status.  A column is as
+        # wide as the widest thing IN it, heading included -- sized to the
+        # widget alone, "Live apply" was clipped by its own switch.  The
+        # stretched columns (editor, status) resolve equally once the fixed
+        # ones agree.
+        for index, heading in (
+            (0, self.field_heading),
+            (3, self.live_heading),
+            (4, self.apply_heading),
+        ):
+            cells = [
+                row.layout().itemAt(index).widget()
+                for row in rows
+                if row.layout().count() > index
+            ]
+            cells = [cell for cell in cells if cell is not None]
+            if not cells:
+                continue
+            width = max(
+                [heading.sizeHint().width()]
+                + [cell.sizeHint().width() for cell in cells]
+            )
+            heading.setFixedWidth(width)
+            for cell in cells:
+                cell.setFixedWidth(width)
+
+    def resizeEvent(self, event):  # noqa: N802 - Qt naming
+        super().resizeEvent(event)
+        self._align_headings()
 
     def set_projection(self, spec: FormSpec, projection: Mapping[str, object]) -> None:
         fields = projection.get("fields", {})
@@ -321,15 +404,27 @@ class DeviceControlView(QtWidgets.QWidget):
             "info": GREY, "idle": GREY, "ready": GREEN,
             "task": ORANGE, "warning": ORANGE, "error": RED,
         }
+        units = {declared.key: declared.unit for declared in spec.fields}
+        QtCore.QTimer.singleShot(0, self._align_headings)
         for key in spec.keys:
             field = fields[key]
             current, live, apply, dot, status = self._field_rows[key]
             shown = field.get("current")
-            current.setText("—" if shown is None else str(shown))
+            # The presenter hands over the device's own number; what it is IN
+            # is on the field beside it.  This printed str(value), so a
+            # readback of 120000000.0 Hz reached the operator as
+            # "120000000.0" -- the one column whose whole job is to be read
+            # at a glance, and the hardest thing on the page to read.
+            current.setText(
+                "—" if shown is None else _readable_value(shown, units[key])
+            )
             editor = self.form.widget_for(key)
             self._set_editable(key, bool(field.get("editable", False)))
             with signals_blocked(live):
                 live.setChecked(bool(field.get("live_apply", False)))
+            # Absent, not disabled: a control that can never be pressed is a
+            # question the operator has to answer every time they read the row.
+            live.setVisible(bool(field.get("live_capable", True)))
             live.setEnabled(bool(field.get("live_enabled", False)))
             apply.setEnabled(bool(field.get("apply_enabled", False)))
             if not bool(field.get("editable", False)) or not live.isChecked():

@@ -11,6 +11,15 @@ SRC = ROOT / "src"
 REPO_ROOT = ROOT.parents[1]
 
 
+#: Every snippet starts here.  Without it the subprocess resolves the
+#: layers through whatever the editable install points at -- on this
+#: machine, sibling checkouts of the same package names -- so the suite
+#: silently tested a DIFFERENT zlc_plot than the one beside it.  The
+#: product bootstrap is what puts this checkout's layers on the path,
+#: and it is the same one every launcher uses.
+_BOOTSTRAP = "import zou_lab_control" + chr(10)
+
+
 def _run_qt(code: str) -> None:
     environment = dict(os.environ)
     environment["PYTHONPATH"] = (

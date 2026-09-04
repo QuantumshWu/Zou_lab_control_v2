@@ -30,7 +30,7 @@ from zlc_data import (
 from zlc_data.axis import SCALAR
 
 from .kinds import AxisDomain, AxisRef
-from .units import DEFAULT_UNITS, Unit, UnitRegistry, resolve_unit
+from zlc_data.units import DEFAULT_UNITS, Unit, UnitRegistry, resolve_unit
 
 
 def snapshot_schema(snapshot: OwnedSnapshot) -> DatasetSchema:

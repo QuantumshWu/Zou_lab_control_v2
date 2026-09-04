@@ -39,6 +39,7 @@ from zlc_data import (
 from zlc_runtime.plane import (
     SignalDataPlane,
     _IndexedMaterialization,
+    _MaterializedFinite,
     _materialize_indexed_dataset,
 )
 
@@ -172,7 +173,7 @@ def test_the_exact_run_keeps_the_error_of_every_chunk() -> None:
         (_shot(chunk_schema, 5.0, 0.2), (1, 0)),
     )
     built = SignalDataPlane._materialize_dataset(
-        "scan/value", 3, run_schema, GENERATION, chunks
+        "scan/value", 3, run_schema, GENERATION, chunks, None
     )
     assert built.block.sigma is not None
     np.testing.assert_allclose(
@@ -206,3 +207,85 @@ def test_an_indexed_materialization_is_stamped_with_its_window() -> None:
     assert built.block.window == IndexedWindow(5, 7, 4)
     assert built.block.revision == DatasetRevision(9)
 
+
+
+def test_extending_a_run_gives_what_rebuilding_it_would_have() -> None:
+    """The basis is the same answer, reached without re-answering it.
+
+    A canonical Dataset never rewrites a cell it already holds, so the
+    cells assembled for an earlier sequence are still those cells at a
+    later one.  What that buys is cost -- the shot instead of the run --
+    and what it must not cost is a single different number, in any of
+    the three planes.
+    """
+
+    chunk_schema = _schema("run")
+    run_schema = DatasetSchema(
+        DomainSpec(
+            (3,),
+            (AxisSpec(AxisId("run.repeat"), "repeat", REPEAT, 3, (0, 1, 2)),),
+            ((0, 1, 2),),
+        ),
+        chunk_schema.point_domain,
+        chunk_schema.cell_domain,
+        chunk_schema.value_schema,
+    )
+    chunks = (
+        (_shot(chunk_schema, 4.0, 0.1), (0, 0)),
+        (_shot(chunk_schema, 5.0, None), (1, 0)),
+        (_shot(chunk_schema, 6.0, 0.3), (2, 0)),
+    )
+    whole = SignalDataPlane._materialize_dataset(
+        "scan/value", 3, run_schema, GENERATION, chunks, None
+    )
+    prefix = SignalDataPlane._materialize_dataset(
+        "scan/value", 2, run_schema, GENERATION, chunks[:2], None
+    )
+    extended = SignalDataPlane._materialize_dataset(
+        "scan/value",
+        3,
+        run_schema,
+        GENERATION,
+        chunks[2:],
+        _MaterializedFinite(2, prefix, {}),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(extended.block.values), np.asarray(whole.block.values)
+    )
+    np.testing.assert_array_equal(
+        np.asarray(extended.expanded_validity()),
+        np.asarray(whole.expanded_validity()),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(extended.block.sigma), np.asarray(whole.block.sigma)
+    )
+
+
+def test_a_run_that_states_no_error_gains_none_from_a_basis() -> None:
+    """What is not stated stays unstated across an extension too."""
+
+    chunk_schema = _schema("plain")
+    run_schema = DatasetSchema(
+        DomainSpec(
+            (2,),
+            (AxisSpec(AxisId("plain.repeat"), "repeat", REPEAT, 2, (0, 1)),),
+            ((0, 1),),
+        ),
+        chunk_schema.point_domain,
+        chunk_schema.cell_domain,
+        chunk_schema.value_schema,
+    )
+    first = (_shot(chunk_schema, 4.0, None), (0, 0))
+    second = (_shot(chunk_schema, 5.0, None), (1, 0))
+    prefix = SignalDataPlane._materialize_dataset(
+        "plain/value", 1, run_schema, GENERATION, (first,), None
+    )
+    extended = SignalDataPlane._materialize_dataset(
+        "plain/value",
+        2,
+        run_schema,
+        GENERATION,
+        (second,),
+        _MaterializedFinite(1, prefix, {}),
+    )
+    assert extended.block.sigma is None

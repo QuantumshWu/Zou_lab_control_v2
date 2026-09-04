@@ -13,7 +13,12 @@ SRC = ROOT / "src"
 def _environment() -> dict[str, str]:
     environment = dict(os.environ, QT_QPA_PLATFORM="offscreen")
     environment["PYTHONPATH"] = (
-        "" if environment.get("ZLC_TEST_INSTALLED") == "1" else str(SRC)
+        ""
+        if environment.get("ZLC_TEST_INSTALLED") == "1"
+        # The repository root too: an example bootstraps through
+        # zou_lab_control so it demonstrates THIS checkout, and the
+        # bootstrap lives there.
+        else os.pathsep.join((str(ROOT.parents[1]), str(SRC)))
     )
     return environment
 
@@ -39,6 +44,7 @@ def test_console_demo_imports_as_a_package_and_has_mixed_two_row_cards() -> None
             sys.executable,
             "-c",
             """
+import zou_lab_control
 from examples.demo_console import create_window
 from zlc_ui.console import TaskConsoleHandle
 from zlc_ui.qt import ensure_qt_app
@@ -72,6 +78,7 @@ def test_gallery_has_named_layers_scan_api_and_all_complete_demo_tabs() -> None:
             sys.executable,
             "-c",
             """
+import zou_lab_control
 from PyQt5 import QtWidgets
 from PyQt5 import QtCore, QtTest
 from zlc_ui.fluent import FluentTabWidget

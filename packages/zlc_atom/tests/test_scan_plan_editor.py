@@ -154,3 +154,48 @@ def test_a_manual_row_round_trips_through_the_document(points: int) -> None:
             reopened.deleteLater()
     finally:
         editor.deleteLater()
+
+
+def test_a_devices_knobs_hang_under_that_device_not_in_one_flat_list() -> None:
+    """The axis chooser is a tree, and its branches are what owns the knobs.
+
+    A flat list put a laser current beside a pulse parameter by accident and
+    grew with every device installed, so finding "what can the RF source
+    sweep" meant reading the whole thing.  The branch a port hangs under is
+    derived from the port itself, beside the label, so where a knob is found
+    and what it is called cannot drift apart.
+    """
+
+    from zlc_atom.nodes.scan.editor import _AxisRow
+    from zlc_atom.nodes.scan.plan import ScanAxis, port_label
+
+    def port(name: str, lo: float, hi: float) -> ScanPort:
+        return ScanPort(name, port_label(name), "", lo, hi)
+
+    ports = (
+        port("pulse:param:mot_duration", 0.0, 1.0),
+        port("device:rf_source:frequency_hz", 1e5, 5e6),
+        port("device:rf_source:power_dbm", -30.0, 10.0),
+        port("device:slm:tilt_x", -1.0, 1.0),
+    )
+    row = _AxisRow(ports, ScanAxis("device:rf_source:power_dbm", (0.0, 1.0, 2.0)))
+    try:
+        model = row.port_combo._model
+        tree = {
+            model.item(index).text(): [
+                model.item(index).child(leaf).text()
+                for leaf in range(model.item(index).rowCount())
+            ]
+            for index in range(model.rowCount())
+        }
+        assert tree == {
+            "pulse": ["mot_duration"],
+            "rf_source": ["frequency_hz", "power_dbm"],
+            "slm": ["tilt_x"],
+        }, tree
+        # The authored port is still the selection, and its own limits are
+        # what the sweep is bounded by.
+        assert row.port_combo.currentData() == "device:rf_source:power_dbm"
+        assert (row.start_spin.minimum(), row.start_spin.maximum()) == (-30.0, 10.0)
+    finally:
+        row.deleteLater()

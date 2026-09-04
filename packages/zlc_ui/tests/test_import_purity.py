@@ -22,6 +22,17 @@ FORBIDDEN_ROOTS = {
     "zlc_workbench",
 }
 
+#: The one exception, and it is a VOCABULARY, not a model.  A widget that
+#: shows a number has to know what the number is in -- which prefix suits it,
+#: whether the unit takes one at all, and how to read back what it printed.
+#: Every alternative to importing that here puts a second copy of the prefix
+#: table in the view layer, and a formatter and a parser that must agree with
+#: each other across a layer boundary is a formatter and a parser that will
+#: one day not.  Nothing else in zlc_data may be reached: the ban exists so
+#: this layer renders view models and never touches the data model, and one
+#: named module does not change that.
+ALLOWED_MODULES = {"zlc_data.units"}
+
 
 def _module_name(path: Path) -> str:
     relative = path.relative_to(SRC).with_suffix("")
@@ -36,6 +47,14 @@ def _package_modules() -> list[tuple[str, Path]]:
     for path in sorted(PACKAGE.rglob("*.py")):
         modules.append((_module_name(path), path))
     return modules
+
+
+def _imported_modules(node: ast.AST) -> list[str]:
+    """The full dotted module each name in one import statement comes from."""
+
+    if isinstance(node, ast.Import):
+        return [alias.name for alias in node.names]
+    return ["" if node.level else (node.module or "")]
 
 
 def _import_root(name: str, *, relative: bool) -> str:
@@ -78,7 +97,9 @@ def test_package_modules_are_nonempty_and_import_pure() -> None:
             else:
                 continue
 
-            for root in roots:
+            for root, module in zip(roots, _imported_modules(node), strict=True):
+                if module in ALLOWED_MODULES:
+                    continue
                 assert root not in FORBIDDEN_ROOTS, (
                     f"{module_name} imports forbidden root {root!r}"
                 )

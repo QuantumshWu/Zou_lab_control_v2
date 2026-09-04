@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from uuid import uuid4
 
 from . import _raster_kernels as kernels
-from .units import UnitRegistry
+from zlc_data.units import UnitRegistry
 
 from ._axis_transform import AxisTransform
 from ._validation import finite_real as _finite
