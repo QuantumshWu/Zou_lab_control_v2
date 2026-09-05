@@ -840,11 +840,13 @@ def _widget_family(field: FormFieldProps) -> str:
 
 
 def _row_label_in(field: FormFieldProps, unit: str) -> str:
-    """The row's label, said in the unit the row is being READ in.
+    """The row's label, naming ``unit`` beside it -- or nothing, for "".
 
-    ``row_label`` states the owner's unit, which is what the field IS; this
-    states the one the operator chose to read it in, which is what the box
-    beside it now holds.  Same rule, one place, so the two cannot drift.
+    A row whose unit has other spellings carries a picker, and the picker
+    says the unit; the label saying it too was the same fact in two places,
+    one of which went stale the moment the other was changed.  So such a row
+    is labelled with no unit at all, and a row with no picker keeps the
+    owner's unit in its label, because there is nothing else to say it.
     """
 
     label = field.label.strip()
@@ -1019,6 +1021,11 @@ class FluentParameterForm(QtWidgets.QWidget):
         self._rows: dict[str, QtWidgets.QWidget] = {}
         #: The unit picker beside each numeric row, by field key.
         self._unit_pickers: dict[str, object] = {}
+        #: What occupies each row's control column, by field key: the editor
+        #: itself, or the editor and its picker side by side.  ONE owner of
+        #: that fact -- a host that rebuilds a row from ``widget_for`` alone
+        #: leaves the picker orphaned in the row, painted wherever it was.
+        self._cells: dict[str, QtWidgets.QWidget] = {}
         self._auto_switches: dict[str, FluentSwitch] = {}
         self._dependents = self._dependency_map(spec)
 
@@ -1104,21 +1111,35 @@ class FluentParameterForm(QtWidgets.QWidget):
         """Show this row in another unit: the value is untouched."""
 
         widget = self._widgets.get(key)
-        field = self._fields.get(key)
-        if widget is None or field is None:
+        if widget is None:
             return
         try:
             widget.setShownUnit(symbol)
         except UnitError:
             return
-        row = self._rows.get(key)
-        if row is not None and hasattr(row, "set_label"):
-            row.set_label(_row_label_in(field, symbol))
+
+    def _label_for(self, field: FormFieldProps) -> str:
+        """The row's label: with the owner's unit, unless a picker says it."""
+
+        if field.key in self._unit_pickers:
+            return _row_label_in(field, "")
+        return field.row_label
+
+    def cell_for(self, key: str) -> QtWidgets.QWidget:
+        """What sits in this row's control column: editor, or editor + picker.
+
+        ``widget_for`` is the editor -- what is read, written and enabled.
+        A host that lays a row out for itself must place THIS, or the picker
+        the form built beside the editor is left behind in the row.
+        """
+
+        return self._cells.get(key, self.widget_for(key))
 
     def _make_row(self, field, widget, label_width):
         automatic = None
-        label = field.row_label
         picker = self._unit_picker(field, widget)
+        self._unit_pickers.pop(field.key, None)
+        self._cells[field.key] = widget
         if picker is not None:
             self._unit_pickers[field.key] = picker
             holder = QtWidgets.QWidget(self)
@@ -1132,6 +1153,8 @@ class FluentParameterForm(QtWidgets.QWidget):
             beside.addWidget(widget, 1)
             beside.addWidget(picker, 0)
             widget = holder
+            self._cells[field.key] = holder
+        label = self._label_for(field)
         if field.automatic:
             automatic = FluentSwitch("", self)
             with signals_blocked(automatic):
@@ -1560,6 +1583,8 @@ class FluentParameterForm(QtWidgets.QWidget):
                 self._rows.pop(key, None)
                 self._widgets.pop(key, None)
                 self._auto_switches.pop(key, None)
+                self._cells.pop(key, None)
+                self._unit_pickers.pop(key, None)
 
             for key, (widget, row, automatic) in replacements.items():
                 field = next(field for field in spec.fields if field.key == key)
@@ -1602,7 +1627,7 @@ class FluentParameterForm(QtWidgets.QWidget):
                     label = (
                         _automatic_label(field, automatic.isChecked())
                         if automatic is not None
-                        else field.row_label
+                        else self._label_for(field)
                     )
                     old_field = old_fields.get(field.key)
                     if (

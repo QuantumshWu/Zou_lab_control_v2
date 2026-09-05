@@ -3471,13 +3471,27 @@ class FluentUnitPicker(FluentTreeComboBox):
     def __init__(self, unit: str, parent=None) -> None:
         super().__init__(parent)
         self._unit = str(unit).strip() or "1"
-        self.set_choice_tree(unit_choice_tree(self._unit), current=self._unit)
-        self.setSizePolicy(
-            QtWidgets.QSizePolicy.Fixed,
-            QtWidgets.QSizePolicy.Preferred,
+        tree = unit_choice_tree(self._unit)
+        #: Every spelling this picker can show collapsed.  The base combo
+        #: measures its width over its TOP-LEVEL rows, which in a tree are
+        #: the trunks -- "W", one letter -- so the box was sized for "W" and
+        #: showed "dBm" as "dB...".  The leaves are what it shows.
+        self._spellings = tuple(
+            str(label) for _trunk, leaves in tree for label, _key, _full in leaves
         )
+        self.set_choice_tree(tree, current=self._unit)
+        # As wide as its widest spelling and no wider; as tall as every other
+        # control in the row.  Only the horizontal policy is this widget's to
+        # say -- a Preferred height let the row's tallest neighbour stretch
+        # it, so the picker stood taller than the box it belongs to.
+        policy = self.sizePolicy()
+        policy.setHorizontalPolicy(QtWidgets.QSizePolicy.Fixed)
+        self.setSizePolicy(policy)
         self.setToolTip("Read this field in another unit")
         self.keyed_choice_picked.connect(self.unit_picked)
+
+    def _collapsed_text_candidates(self) -> tuple[str, ...]:
+        return self._spellings or super()._collapsed_text_candidates()
 
     def unit(self) -> str:
         """The unit this field's NUMBER is in, whatever is on screen."""

@@ -319,7 +319,11 @@ class DeviceControlView(QtWidgets.QWidget):
             status_layout.addWidget(status, 1)
             layout.addWidget(row._label)
             layout.addWidget(current)
-            layout.addWidget(editor, 1)
+            # The form's CELL, not its editor: a numeric field with a unit
+            # ladder is the editor and a picker side by side, and placing the
+            # editor alone left the picker orphaned in the row, painted over
+            # the Field column.
+            layout.addWidget(self.form.cell_for(key), 1)
             layout.addWidget(live_host)
             layout.addWidget(apply)
             layout.addWidget(status_host, 1)
