@@ -214,11 +214,11 @@ def test_the_temperature_task_publishes_release_recapture_survival(
             preview.semantic,
         )
         assert schema.repeat_domain.size == REPEATS
-        assert tuple(axis.name for axis in schema.repeat_domain.axes[-2:]) == (
+        assert tuple(axis.name for axis in schema.repeat_domain.axes) == (
             "scan repeat",
             "run repeat",
         )
-        assert tuple(axis.size for axis in schema.repeat_domain.axes[-2:]) == (
+        assert tuple(axis.size for axis in schema.repeat_domain.axes) == (
             REPEATS,
             1,
         )

@@ -792,11 +792,11 @@ def test_repeats_walk_the_whole_plan_again_and_stop_again() -> None:
 
     schema = value.block.schema
     assert schema.repeat_domain.size == 2
-    assert tuple(axis.name for axis in schema.repeat_domain.axes[-2:]) == (
+    assert tuple(axis.name for axis in schema.repeat_domain.axes) == (
         "scan repeat",
         "run repeat",
     )
-    assert tuple(axis.size for axis in schema.repeat_domain.axes[-2:]) == (2, 1)
+    assert tuple(axis.size for axis in schema.repeat_domain.axes) == (2, 1)
     assert schema.point_domain.size == 4
     block = np.asarray(value.block.values, dtype=float)
     # Walk 0 played publications 0-3, walk 1 played 4-7, both over the same

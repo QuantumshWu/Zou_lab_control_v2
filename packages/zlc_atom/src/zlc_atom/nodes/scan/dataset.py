@@ -48,16 +48,19 @@ _RUN_REPEAT_AXIS_ID = AxisId("pulse.run")
 
 
 def scan_repeat_domain(
-    source: DomainSpec,
     *,
     scan_repeats: int,
     run_repeats: int,
 ) -> DomainSpec:
-    """Layer actual scan/run execution over one source Repeat carrier.
+    """A scan's Repeat domain: how the scan was executed, and nothing else.
 
-    Physical order is scan sweep outermost, Run repeat next, and the source's
-    own Repeat carrier innermost. Both execution axes remain present at length
-    one because they state how this scan was executed, not merely its shape.
+    Exactly the two facts the writer records and the board is fired with:
+    full sweeps of the table (scan repeats, ``SCAN_REPEAT_COUNT``) outer,
+    shots per point (run repeats, ``RUN_REPEAT_COUNT``) inner.  Both stay
+    present at length one because they state how this scan was executed.
+    A scan point's value is ONE shot; the source's own Repeat carrier is
+    consumed by the scan, not carried beside these -- carried, it appeared
+    as a third axis named "repeat" of size one, saying nothing twice.
     """
 
     scan_repeats = int(scan_repeats)
@@ -66,12 +69,7 @@ def scan_repeat_domain(
         raise ValueError("scan_repeats must be at least 1")
     if run_repeats < 1:
         raise ValueError("run_repeats must be at least 1")
-    occupied = {axis.axis_id for axis in source.axes}
-    reserved = {_SCAN_REPEAT_AXIS_ID, _RUN_REPEAT_AXIS_ID}
-    if occupied & reserved:
-        raise ValueError("source Repeat axes collide with scan execution axes")
 
-    source_size = source.size
     scan_axis = AxisSpec(
         _SCAN_REPEAT_AXIS_ID,
         "scan repeat",
@@ -87,21 +85,18 @@ def scan_repeat_domain(
         tuple(range(run_repeats)),
     )
     return DomainSpec(
-        (scan_repeats * run_repeats * source_size,),
-        (*source.axes, scan_axis, run_axis),
+        (scan_repeats * run_repeats,),
+        (scan_axis, run_axis),
         (
-            *(codes * (scan_repeats * run_repeats) for codes in source.axis_codes),
             tuple(
                 scan_repeat
                 for scan_repeat in range(scan_repeats)
                 for _run_repeat in range(run_repeats)
-                for _source_repeat in range(source_size)
             ),
             tuple(
                 run_repeat
                 for _scan_repeat in range(scan_repeats)
                 for run_repeat in range(run_repeats)
-                for _source_repeat in range(source_size)
             ),
         ),
     )
@@ -132,9 +127,11 @@ def scan_dataset_schema(
 
     ``rows`` carries one coordinate row per PLAN POINT; ``axes`` carries one
     ``(name, unit)`` per column of those rows. ``scan_repeats`` and
-    ``run_repeats`` are recorded as separate Repeat axes. The source's own
-    axes (repeat, source points, data axes) are preserved underneath, so a
-    capture that was itself an image stays an image at every scan point.
+    ``run_repeats`` are the Repeat domain, and the only Repeat axes there
+    are: a scan point's value is one shot, so the source must publish one
+    shot per event -- its own Repeat carrier is consumed here.  The source's
+    point and data axes are preserved underneath, so a capture that was
+    itself an image stays an image at every scan point.
     """
 
     rows = tuple(tuple(float(value) for value in row) for row in rows)
@@ -150,9 +147,17 @@ def scan_dataset_schema(
         raise ValueError("run_repeats must be at least 1")
 
     source_points = source_schema.point_domain.size
+    if source_schema.repeat_domain.size != 1:
+        carried = ", ".join(
+            axis.axis_id.value for axis in source_schema.repeat_domain.axes
+        )
+        raise ValueError(
+            "a scan point's source must publish one shot per event; "
+            f"its Repeat carrier ({carried}) holds "
+            f"{source_schema.repeat_domain.size}"
+        )
 
     occupied_axis_ids = {
-        *(axis.axis_id for axis in source_schema.repeat_domain.axes),
         *(axis.axis_id for axis in source_schema.point_domain.axes),
         *(axis.axis_id for axis in source_schema.cell_domain.axes),
     }
@@ -218,7 +223,6 @@ def scan_dataset_schema(
         ),
     )
     repeat_domain = scan_repeat_domain(
-        source_schema.repeat_domain,
         scan_repeats=scan_repeats,
         run_repeats=run_repeats,
     )
@@ -263,7 +267,6 @@ class ScanDatasetWriter:
         self._schema: DatasetSchema | None = None
         self._filled: set[tuple[int, int, int]] = set()
         self._source_points = 0
-        self._source_repeats = 0
         self._written = 0
 
     @property
@@ -300,25 +303,20 @@ class ScanDatasetWriter:
         address = (scan_repeat, run_repeat, row)
         if address in self._filled:
             raise ValueError("this Run repeat already captured this scan point")
-        repeats = self._source_repeats
         points = self._source_points
         self._filled.add(address)
         self._written += 1
-        cells_per_write = repeats * points
         assert self._schema is not None
         return LiveDatasetOutput(
             SCAN_OUTPUT,
             value.snapshot,
             DatasetCoverage(
-                self._written * cells_per_write,
-                self.total * cells_per_write,
+                self._written * points,
+                self.total * points,
             ),
             self._run_record,
             self._schema,
-            (
-                (scan_repeat * self._run_repeats + run_repeat) * repeats,
-                row * points,
-            ),
+            (scan_repeat * self._run_repeats + run_repeat, row * points),
             value.event_record,
         )
 
@@ -333,7 +331,6 @@ class ScanDatasetWriter:
             run_repeats=self._run_repeats,
         )
         self._source_points = source_schema.point_domain.size
-        self._source_repeats = source_schema.repeat_domain.size
 
 
 __all__ = [

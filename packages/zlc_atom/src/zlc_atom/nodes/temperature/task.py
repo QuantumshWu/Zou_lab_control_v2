@@ -292,7 +292,6 @@ class TemperatureTask:
         run_repeats = self._scan.shots_per_point
         canonical = DatasetSchema(
             scan_repeat_domain(
-                schema.repeat_domain,
                 scan_repeats=self._repeats,
                 run_repeats=run_repeats,
             ),
@@ -313,11 +312,7 @@ class TemperatureTask:
                     total_cells=self._repeats * len(t_off),
                 ),
                 canonical_schema=canonical,
-                cell_origin=(
-                    (scan_repeat * run_repeats + run_repeat)
-                    * schema.repeat_domain.size,
-                    row,
-                ),
+                cell_origin=(scan_repeat * run_repeats + run_repeat, row),
             ),
         }
 
