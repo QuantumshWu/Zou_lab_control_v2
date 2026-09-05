@@ -282,6 +282,19 @@ picker.hidePopup(); settle()
 picker.showPopup(); settle()
 view.setExpanded(trunk, True); settle()
 assert measure() == opened
+
+# COLLAPSED, the selected trunk included: the smallest popup there is,
+# three trunk rows -- where a horizontal bar once cut "Vpp" -- and the
+# view inside it follows the popup down and back up again.
+from zlc_ui.fluent import popup_gap
+selected = next(model.index(r, 0) for r in range(model.rowCount()) if model.item(r).text() == 'dBm')
+view.setExpanded(trunk, False); view.setExpanded(selected, False); settle()
+smallest = measure()
+assert smallest[1] < closed[1], (smallest, closed)
+assert view.size() == picker._popup.size() - QtCore.QSize(0, popup_gap()), (view.size(), picker._popup.size())
+view.setExpanded(selected, True); settle()
+assert measure() == closed
+assert view.size() == picker._popup.size() - QtCore.QSize(0, popup_gap())
 picker.hidePopup()
 print('ok')
 """
