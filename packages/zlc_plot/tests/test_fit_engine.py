@@ -73,6 +73,7 @@ _BUILTIN_MODEL_IDS = (
     "symmetric_lorentzian_doublet",
     "damped_sine",
     "exponential_decay",
+    "release_recapture",
     "anisotropic_gaussian_center",
     "radial_gaussian_center",
     "histogram_poisson_gaussian",
@@ -95,6 +96,7 @@ _BASE_PARAMETERS = {
     "symmetric_lorentzian_doublet": (0.1, 0.8, 1.4, 0.2, 2.5),
     "damped_sine": (1.2, 0.2, 0.25, 6.0, -0.3),
     "exponential_decay": (1.6, 0.2, 3.0),
+    "release_recapture": (0.8, 0.05, 6.0, 0.4),
     "anisotropic_gaussian_center": (3.0, 0.2, 0.9, 0.6, 0.35, -0.25),
     "radial_gaussian_center": (3.0, 0.2, 0.8, 0.35, -0.25),
     # A is the density's area (counts times bin): these put ~60 counts in
@@ -111,7 +113,62 @@ _BASE_PARAMETERS = {
 }
 
 
+def test_release_recapture_matches_lambert_reference_and_recovers_parameters() -> None:
+    from scipy.special import lambertw
+    from scipy.optimize._numdiff import approx_derivative
+
+    engine = FitEngine()
+    model = engine.registry.get("release_recapture")
+    assert model.parameter_names == ("amplitude", "offset", "eta", "frequency")
+    t = np.linspace(0.0, 200e-6, 128)
+    truth = np.array((0.8, 0.05, 6.0, 40_000.0))
+
+    def reference(parameters):
+        amplitude, offset, eta, frequency = parameters
+        z = (2.0 * np.pi * frequency * t) ** 2
+        q = np.exp(-lambertw(z).real)
+        return amplitude * (-np.expm1(-eta * q) / -np.expm1(-eta)) + offset
+
+    observations = reference(truth)
+    np.testing.assert_allclose(model.evaluate((t,), truth), observations, rtol=2e-14)
+    np.testing.assert_allclose(
+        model.evaluate_jacobian((t,), truth),
+        approx_derivative(reference, truth, method="3-point"),
+        rtol=2e-6, atol=2e-10,
+    )
+    np.testing.assert_array_equal(
+        model.evaluate_jacobian((np.array((0.0,)),), truth),
+        np.array(((1.0, 1.0, 0.0, 0.0),)),
+    )
+    small = truth.copy()
+    small[2] = 1e-10
+    q = np.exp(-lambertw((2.0 * np.pi * small[3] * t) ** 2).real)
+    np.testing.assert_allclose(
+        model.evaluate((t,), small), reference(small), rtol=2e-14,
+    )
+    np.testing.assert_allclose(
+        model.evaluate_jacobian((t,), small)[:, 2],
+        small[0] * q * (1.0 - q) / 2.0, rtol=1e-9, atol=1e-14,
+    )
+
+    fitted = engine.fit(model, (t,), observations)
+    assert fitted.success and fitted.covariance_valid
+    np.testing.assert_allclose(fitted.parameter_values, truth, rtol=2e-5, atol=1e-7)
+
+    # A/B use the existing exact-fixed-parameter mechanism; the normalized
+    # two-parameter model needs neither a second model nor extra options.
+    normalized = reference((1.0, 0.0, truth[2], truth[3]))
+    fixed = engine.fit(
+        model, (t,), normalized,
+        bounds={"amplitude": (1.0, 1.0), "offset": (0.0, 0.0)},
+    )
+    assert fixed.fixed_parameter_names == ("amplitude", "offset")
+    np.testing.assert_allclose(fixed.parameter_values, (1.0, 0.0, *truth[2:]), rtol=2e-5)
+
+
 def _coordinates(model_id: str) -> tuple[np.ndarray, ...]:
+    if model_id == "release_recapture":
+        return (np.linspace(0.0, 3.0, 112),)
     if model_id in _POISSON_MODELS:
         return (np.linspace(-2.0, 16.0, 73),)
     if model_id == "symmetric_lorentzian_doublet":
@@ -157,6 +214,8 @@ def _cell_parameters(model_id: str, cell: int) -> np.ndarray:
         )
     elif model_id == "exponential_decay":
         parameters[[0, 2]] += (0.2 * position, 0.5 * position)
+    elif model_id == "release_recapture":
+        parameters += np.asarray((0.04, 0.01, 0.5, 0.03)) * position
     elif model_id == "histogram_poisson_gaussian":
         parameters[[0, 1, 2]] += (60.0 * position, 0.8 * position, 0.15 * position)
     elif model_id == "bimodal_poisson_gaussian":

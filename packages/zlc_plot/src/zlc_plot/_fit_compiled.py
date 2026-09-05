@@ -4516,6 +4516,148 @@ def exponential_decay_descriptor() -> CompiledFitDescriptor:
     )
 
 
+@njit(cache=True, inline="always")
+def _release_recapture_w(frequency, time):
+    """Real principal Lambert W of (2*pi*frequency*time)^2, without overflow."""
+    magnitude = abs(frequency * time) * (2.0 * math.pi)
+    if magnitude < 1.0e-4:
+        z = magnitude * magnitude
+        return z * (1.0 - z * (1.0 - 1.5 * z))
+    if magnitude > 1.0e150:
+        log_z = 2.0 * (math.log(2.0 * math.pi) + math.log(frequency) + math.log(abs(time)))
+        w = log_z - math.log(log_z)
+        for _ in range(8):
+            step = (w + math.log(w) - log_z) * w / (1.0 + w)
+            w -= step
+            if abs(step) <= 2.0 * EPSILON * w:
+                break
+        return w
+    z = magnitude * magnitude
+    w = math.log1p(z)
+    if z > 3.0:
+        log_z = math.log(z)
+        w = log_z - math.log(log_z)
+    for _ in range(12):
+        # Halley in exp(-w) form never forms the potentially huge w*exp(w).
+        residual = w - z * math.exp(-w)
+        step = residual / (
+            1.0 + w - 0.5 * (w + 2.0) * residual / (w + 1.0)
+        )
+        w -= step
+        if abs(step) <= 2.0 * EPSILON * (1.0 + w):
+            break
+    return w
+
+
+@njit(cache=True, inline="always")
+def _point_release_recapture(coords, point, parameters, row):
+    amplitude, offset, eta, frequency = parameters
+    time = coords[0, point]
+    if time == 0.0:
+        row[0] = 1.0; row[1] = 1.0; row[2] = 0.0; row[3] = 0.0
+        return amplitude + offset
+    w = _release_recapture_w(frequency, time)
+    q = math.exp(-w)
+    complement = -math.expm1(-w)
+    denominator = -math.expm1(-eta)
+    scaled = eta * q
+    exponential = math.exp(-scaled)
+    survival = -math.expm1(-scaled) / denominator
+    if eta < 0.01:
+        # Difference of u/expm1(u) at eta*q and eta, divided by eta.
+        # Factoring (1-q) preserves both eta->0 and t->0 derivatives.
+        q2 = q * q
+        derivative_eta = survival * complement * (
+            0.5 - eta * (q + 1.0) / 12.0
+            + eta**3 * (q + 1.0) * (q2 + 1.0) / 720.0
+            - eta**5 * (1.0 + q + q2 + q2*q + q2*q2 + q2*q2*q) / 30240.0
+        )
+    elif q > 0.5:
+        derivative_eta = exponential * (
+            -math.expm1(-eta * complement) - complement * denominator
+        ) / (denominator * denominator)
+    else:
+        derivative_eta = (
+            q * exponential - survival * math.exp(-eta)
+        ) / denominator
+    derivative_frequency = (
+        -2.0 * (scaled * exponential) / denominator * (w / (1.0 + w)) / frequency
+    )
+    row[0] = survival
+    row[1] = 1.0
+    row[2] = amplitude * derivative_eta
+    row[3] = amplitude * derivative_frequency
+    return amplitude * survival + offset
+
+
+@njit(cache=True)
+def _value_jacobian_release_recapture(coords: np.ndarray, parameters: np.ndarray):
+    output = np.empty(coords.shape[1], dtype=np.float64)
+    jacobian = np.empty((coords.shape[1], 4), dtype=np.float64)
+    for point in range(output.size):
+        output[point] = _point_release_recapture(
+            coords, point, parameters, jacobian[point]
+        )
+    return output, jacobian
+
+
+@njit(cache=True)
+def _objective_release_recapture(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives):
+    if derivatives: compiled_reset_accumulators(gradient, info)
+    cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
+    for point in range(obs.size):
+        if not valid[point]: continue
+        predicted=_point_release_recapture(coords, point, params, full)
+        pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point], use_w, poisson, loss, gradient, info, row, derivatives)
+        if not ok: return math.inf, math.inf, False
+        cost+=pc; rss+=pr
+    if derivatives: compiled_finish_information(info)
+    return cost, rss, True
+
+
+@njit(cache=True)
+def _prepare_release_recapture(coords, observations, valid, seeds, lower, upper, context):
+    low = math.inf
+    high = -math.inf
+    for point in range(observations.size):
+        if valid[point]:
+            low = min(low, observations[point])
+            high = max(high, observations[point])
+    if not math.isfinite(low):
+        return 0
+    amplitude = max(high - low, EPSILON)
+    best = -1
+    distance = math.inf
+    for point in range(observations.size):
+        if valid[point] and coords[0, point] != 0.0:
+            normalized = (observations[point] - low) / amplitude
+            if abs(normalized - 0.5) < distance:
+                distance = abs(normalized - 0.5)
+                best = point
+    if best < 0:
+        return 0
+    survival = min(max((observations[best] - low) / amplitude, 1.0e-6), 1.0 - 1.0e-6)
+    time = abs(coords[0, best])
+    for index, eta in enumerate((0.3, 1.0, 5.0, 20.0)):
+        q = -math.log1p(survival * math.expm1(-eta)) / eta
+        seeds[index, 0] = amplitude
+        seeds[index, 1] = low
+        seeds[index, 2] = eta
+        seeds[index, 3] = math.sqrt(-math.log(q) / q) / (2.0 * math.pi * time)
+    return 4
+
+
+def release_recapture_descriptor() -> CompiledFitDescriptor:
+    return CompiledFitDescriptor(
+        prepare=_prepare_release_recapture,
+        objective=_objective_release_recapture,
+        value_jacobian=_value_jacobian_release_recapture,
+        context_builder=series_context_builder,
+        max_candidates=4,
+        cache_key="release-recapture-v1",
+    )
+
+
 def radial_gaussian_center_descriptor() -> CompiledFitDescriptor:
     return CompiledFitDescriptor(
         prepare=_prepare_radial,
@@ -4539,7 +4681,7 @@ def anisotropic_gaussian_center_descriptor() -> CompiledFitDescriptor:
 
 
 def production_dispatchers() -> tuple[Any, ...]:
-    """The exact 39 dispatchers whose machine code belongs in production cache.
+    """The exact dispatchers whose machine code belongs in production cache.
 
     Inline algebra helpers compile as dependencies of these roots and are not
     independent warmer responsibilities.  Keeping this list explicit prevents
@@ -4557,6 +4699,7 @@ def production_dispatchers() -> tuple[Any, ...]:
         _prepare_doublet,
         _prepare_damped,
         _prepare_exponential,
+        _prepare_release_recapture,
         _prepare_radial,
         _prepare_anisotropic,
         _objective_lorentzian,
@@ -4568,6 +4711,7 @@ def production_dispatchers() -> tuple[Any, ...]:
         _objective_doublet,
         _objective_damped,
         _objective_exponential,
+        _objective_release_recapture,
         _objective_radial,
         _objective_anisotropic,
         _value_jacobian_lorentzian,
@@ -4579,6 +4723,7 @@ def production_dispatchers() -> tuple[Any, ...]:
         _value_jacobian_doublet,
         _value_jacobian_damped,
         _value_jacobian_exponential,
+        _value_jacobian_release_recapture,
         _value_jacobian_radial,
         _value_jacobian_anisotropic,
         _prepare_serial,
@@ -4767,6 +4912,21 @@ def warm_production_cache() -> dict[str, Any]:
         np.asarray((infinity, infinity, infinity)),
     )
 
+    release_time = np.linspace(0.0, 0.0001, 97, dtype=np.float64)
+    release = np.asarray((0.9, 0.03, 5.0, 1.6e4), dtype=np.float64)
+    release_values = _value_jacobian_release_recapture(
+        np.ascontiguousarray(release_time.reshape(1, -1)), release
+    )[0]
+    run_single(
+        "release_recapture",
+        release_recapture_descriptor(),
+        (release_time,),
+        release_values,
+        release,
+        np.asarray((0.0, -infinity, positive, positive)),
+        np.full(4, infinity),
+    )
+
     axis = np.linspace(-2.0, 2.0, 17, dtype=np.float64)
     grid_x, grid_y = np.meshgrid(axis, axis, indexing="xy")
     image_x = np.ascontiguousarray(grid_x.reshape(-1))
@@ -4892,6 +5052,7 @@ __all__ = [
     "lorentzian_descriptor",
     "production_dispatchers",
     "radial_gaussian_center_descriptor",
+    "release_recapture_descriptor",
     "self_check",
     "solve_compiled_batch",
     "solve_compiled_single",

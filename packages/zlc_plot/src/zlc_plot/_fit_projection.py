@@ -2037,10 +2037,10 @@ class FitProjection:
 
         relation = spec.unit_relation
         solver_relation = spec.solver_unit_relation
-        if relation is UnitRelation.RADIAN:
-            if solver_relation is not UnitRelation.RADIAN:
-                raise ValueError("radian fit parameters require a radian solver relation")
-            return "rad"
+        if relation in {UnitRelation.DIMENSIONLESS, UnitRelation.RADIAN}:
+            if solver_relation is not relation:
+                raise ValueError("unit-free fit parameters cannot cross unit relations")
+            return "rad" if relation is UnitRelation.RADIAN else ""
         if relation is UnitRelation.VALUE and self._is_histogram_plot():
             if solver_relation is not UnitRelation.VALUE:
                 raise ValueError("histogram count parameters require value solver units")
@@ -2079,10 +2079,10 @@ class FitProjection:
     ) -> tuple[float, str]:
         relation = spec.unit_relation if display_relation is None else display_relation
         solver_relation = spec.solver_unit_relation
-        if relation is UnitRelation.RADIAN:
-            if solver_relation is not UnitRelation.RADIAN:
-                raise ValueError("radian display requires a radian solver parameter")
-            return value, "rad"
+        if relation in {UnitRelation.DIMENSIONLESS, UnitRelation.RADIAN}:
+            if solver_relation is not relation:
+                raise ValueError("unit-free fit parameters cannot cross unit relations")
+            return value, "rad" if relation is UnitRelation.RADIAN else ""
         if relation is UnitRelation.VALUE and self._is_histogram_plot():
             if solver_relation is not UnitRelation.VALUE:
                 raise ValueError("histogram count parameters require value solver units")

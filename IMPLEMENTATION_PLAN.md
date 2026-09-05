@@ -203,6 +203,7 @@
 
 ## 3. 当前验证状态
 
+- 2026-09-05 新增release–recapture四参数Series fit（A、B、eta、f）；f为普通频率，A=1/B=0可用现有表达式精确固定。解析Jacobian和Numba single/batch已接入，warmer新增3个模型callback。独立182个高精度锚最大函数误差2.22e-16、Jacobian绝对误差4.19e-15；完整FitEngine 32/128/512点中位0.85/2.00/7.24ms，64×128批量33.57ms，已有cache新进程首次fit343ms。详细口径与复现命令见Plot performance文档；这是SEM加权最小二乘，并非binomial MLE。
 - 2026-09-04 same-shot/Occupancy显示修复：Runtime与Workbench组等待/重启/延迟提交`34 passed`，Camera＋Occupancy与camera restart`2 passed`，Plot完整输入四入口（含真实RenderProcess）、动态invalid、active-fit配置及真实camera呈现`16 passed`，跨进程front/Save与typed overlay保存重开`2 passed`。清圈和全invalid的完整RGBA与同源无overlay对照0像素差；生产代码净减39行，无新production文件/类。实验机原始偶发现象未在本机复现；已复现并修复的是违背same-shot的缺成员放行与旧overlay继承路径。
 
 - 当前三进程worktree正式证据：process Host/selector/Fit/Fit-event/C Save、共享RGBA与input refcount通过；TaskConsole实际A崩溃自动remount通过；FigureViewer全文件`21 passed`，actual A/C archive/open/edit/Save image及TaskConsole/Viewer两种关闭顺序均通过且所有PID退出；三类Domain Task的existing artifact用例`3 passed`，注入Future writer等待`3/3`。最终owned-wire的15次2M Image stress与DPR3完整Edit/Refresh/C Save均0 BufferError/SharedMemory/resource-tracker warning。最终代码真实DPR3四Panel critical P50/P90/max为`142.80/161.93/188.31 → 89.34/100.30/103.65 ms`，零stall；Grid Save总等待`3895.1→843.8 ms`、GUI最长轮`366.1→6.9 ms`。完整表与内存代价见`packages/zlc_plot/docs/performance.md`。

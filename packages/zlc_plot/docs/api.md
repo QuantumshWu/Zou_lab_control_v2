@@ -528,11 +528,34 @@ available asynchronously through `plot_host.fit_models()`; Notebook and GUI
 must consume it instead of inferring compatibility from independent arity.
 
 The built-in catalogue is Series: Lorentzian (default), Gaussian with offset,
-symmetric Lorentzian doublet, damped sine and exponential decay; Histogram:
+symmetric Lorentzian doublet, damped sine, exponential decay and release–recapture; Histogram:
 Bimodal Gaussian (default) and Single Gaussian; Image: Radial Gaussian center
 (default, only for compatible x/y coordinate dimensions) plus Anisotropic
 Gaussian center for independent x/y dimensions. PulseTimeline has no numeric
 fit target.
+
+`release_recapture` implements the normalized sudden-release radial 2D model:
+
+```text
+q(t) = exp(-W0((2*pi*f*t)^2))
+P(t) = A * [1 - exp(-eta*q(t))] / [1 - exp(-eta)] + B
+```
+
+Its parameter names are `amplitude`, `offset`, `eta`, `frequency`; the editor
+symbols are `A, B, eta, f`. `P(0)=A+B` and the long-time limit is `B`.
+`eta` is dimensionless; `f` is ordinary frequency in inverse time, using the
+same unit conversion as sine frequency (`omega_r=2*pi*f`). Time is the actual
+release time: excluding the zero-time point with a selector does not shift the
+model's time origin. `A=1, B=0` in the existing expression field fixes the
+normalization and leaves only `eta, f` free.
+
+The model uses the shared single/batch compiled solver, analytic Jacobian,
+covariance, parameter expressions and Figure recipe. Curve SEM supplies the
+existing least-squares weights. It does not infer binomial trial counts from
+survival values, fit temperature/waist/depth separately, or run Monte Carlo.
+The radial-only approximation omits initial position spread, axial dynamics,
+gravity and switching transients; inspect the eta/f covariance and cover the
+initial plateau, roll-off and tail when estimating all four parameters.
 
 For coordinate fits the scope precedence is:
 

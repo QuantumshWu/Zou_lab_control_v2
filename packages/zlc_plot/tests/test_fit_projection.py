@@ -77,6 +77,40 @@ def test_curve_fit_selection_prefers_area_then_x_range_then_viewport_then_all() 
     assert selected.sample_count == 5
 
 
+def test_release_recapture_units_and_fixed_expression_use_the_series_contract() -> None:
+    from scipy.special import lambertw
+    from zlc_plot import PlotSession
+
+    t = np.linspace(0.0, 200e-6, 64)
+    q = np.exp(-lambertw((2 * np.pi * 40_000 * t) ** 2).real)
+    y = -np.expm1(-6.0 * q) / -np.expm1(-6.0)
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"time": t}, units={"time": "s"}),
+        value_unit="1",
+    )
+    session = PlotSession(
+        make_snapshot(schema, y.reshape(1, -1), revision=1),
+        CurvePlot(AxisRef.point("time")),
+    )
+    try:
+        session.set_parameter("x_display_unit", "us")
+        session.configure(fit={
+            "model": "release_recapture",
+            "expression": "A=1, B=0, eta=guess(5), f=guess(0.04)",
+        })
+        description = session.describe_display()
+        assert description.fit["fixed"] == {"amplitude": 1.0, "offset": 0.0}
+        assert description.fit["initial"]["frequency"] == pytest.approx(40_000.0)
+        model = FitEngine().registry.get("release_recapture")
+        assert session._projected._fit_parameter_units(model)["eta"] == ""
+        assert session._projected._fit_parameter_units(model)["frequency"] == "Hz"
+        assert session._projected._display_fit_parameter_value(model.parameters[3], 40_000.0)[0] == pytest.approx(0.04)
+        assert session.rgba().size > 0
+    finally:
+        session.close()
+
+
 def test_histogram_fit_uses_painted_count_bins_only() -> None:
     spec = HistogramPlot()
     projection = _projection(spec)

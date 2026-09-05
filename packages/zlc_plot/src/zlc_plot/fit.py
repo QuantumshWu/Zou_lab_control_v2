@@ -70,6 +70,7 @@ class ParameterDomain(str, Enum):
 
 
 class UnitRelation(str, Enum):
+    DIMENSIONLESS = "dimensionless"
     VALUE = "value"
     AXIS_0 = "axis_0"
     AXIS_1 = "axis_1"
@@ -2989,6 +2990,7 @@ def _covariance_from_information(
     return covariance, True
 
 
+DIMENSIONLESS = UnitRelation.DIMENSIONLESS
 VALUE = UnitRelation.VALUE
 AXIS_0 = UnitRelation.AXIS_0
 AXIS_1 = UnitRelation.AXIS_1
@@ -3164,9 +3166,9 @@ def _bimodal_gaussian_jacobian(
     ))
 
 
-def _poisson_kernel_input(x, values) -> tuple[np.ndarray, np.ndarray]:
+def _compiled_series_input(x, values) -> tuple[np.ndarray, np.ndarray]:
     """Fresh, writable, C-contiguous arrays: the one array type the compiled
-    Poisson-Gaussian kernels are specialised for (a read-only view would be
+    model callbacks are specialised for (a read-only view would be
     a second compilation of the same kernel)."""
 
     coords = np.array(np.reshape(x, (1, -1)), dtype=np.float64, order="C")
@@ -3186,12 +3188,12 @@ def _histogram_poisson_gaussian(x, amplitude, rate, sigma):
     (A NumPy twin evaluated over a pixel-value histogram cost forty cells'
     overlays 240 ms.)"""
 
-    coords, parameters = _poisson_kernel_input(x, (amplitude, rate, sigma))
+    coords, parameters = _compiled_series_input(x, (amplitude, rate, sigma))
     return _compiled_fit._value_jacobian_poisson(coords, parameters)[0]
 
 
 def _histogram_poisson_gaussian_jacobian(x, amplitude, rate, sigma):
-    coords, parameters = _poisson_kernel_input(x, (amplitude, rate, sigma))
+    coords, parameters = _compiled_series_input(x, (amplitude, rate, sigma))
     return _compiled_fit._value_jacobian_poisson(coords, parameters)[1]
 
 
@@ -3222,12 +3224,12 @@ def _poisson_bimodal_right(
 
 
 def _bimodal_poisson_gaussian(x, *parameters):
-    coords, values = _poisson_kernel_input(x, parameters)
+    coords, values = _compiled_series_input(x, parameters)
     return _compiled_fit._value_jacobian_poisson_bimodal(coords, values)[0]
 
 
 def _bimodal_poisson_gaussian_jacobian(x, *parameters):
-    coords, values = _poisson_kernel_input(x, parameters)
+    coords, values = _compiled_series_input(x, parameters)
     return _compiled_fit._value_jacobian_poisson_bimodal(coords, values)[1]
 
 
@@ -3235,6 +3237,41 @@ def _symmetric_lorentzian_doublet(x, center, common_fwhm, component_amplitude, o
     return _lorentzian(x, center - center_splitting / 2, common_fwhm, component_amplitude, offset) + _lorentzian(
         x, center + center_splitting / 2, common_fwhm, component_amplitude, 0.0
     )
+
+
+def _release_recapture(t, amplitude, offset, eta, frequency):
+    """Sudden radial 2D recapture, normalized at t=0; frequency is in cycles/time."""
+
+    coords, values = _compiled_series_input(t, (amplitude, offset, eta, frequency))
+    return _compiled_fit._value_jacobian_release_recapture(coords, values)[0]
+
+
+def _release_recapture_jacobian(t, amplitude, offset, eta, frequency):
+    coords, values = _compiled_series_input(t, (amplitude, offset, eta, frequency))
+    return _compiled_fit._value_jacobian_release_recapture(coords, values)[1]
+
+
+def _release_recapture_candidates(coordinates, observations):
+    """The same cold seeds in the SciPy and compiled solver lanes."""
+
+    coords = np.array(coordinates, dtype=np.float64, order="C")
+    values = np.array(observations, dtype=np.float64, order="C")
+    valid = np.ones(values.size, dtype=np.bool_)
+    descriptor = _compiled_fit.release_recapture_descriptor()
+    seeds = np.empty((descriptor.max_candidates, 4), dtype=np.float64)
+    lower = np.array((0.0, -np.inf, np.nextafter(0.0, 1.0), np.nextafter(0.0, 1.0)))
+    upper = np.full(4, np.inf)
+    count = descriptor.prepare(
+        coords, values, valid, seeds, lower, upper,
+        np.array(descriptor.context_builder(tuple(coords)), copy=True),
+    )
+    if count == 0:
+        raise ValueError("release-recapture fit requires finite time and survival data")
+    return tuple(seeds[:count])
+
+
+def _init_release_recapture(coordinates, observations):
+    return _release_recapture_candidates(coordinates, observations)[0]
 
 
 def _symmetric_lorentzian_doublet_jacobian(
@@ -4280,6 +4317,25 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             bounds_initializer=_exponential_bounds,
             capabilities=frozenset({_DOMAIN_ANCHORED}),
             compiled_descriptor=_compiled_fit.exponential_decay_descriptor(),
+        ),
+        FitModelSpec(
+            "release_recapture",
+            "Release–recapture",
+            1,
+            (
+                FitParameterSpec("amplitude", VALUE, NONNEGATIVE, display_label=r"$A$"),
+                FitParameterSpec("offset", VALUE, display_label=r"$B$", affine_point=True),
+                FitParameterSpec("eta", DIMENSIONLESS, POSITIVE, display_label=r"$\eta$"),
+                FitParameterSpec("frequency", INVERSE_AXIS_0, POSITIVE, display_label=r"$f$"),
+            ),
+            "eta",
+            _release_recapture,
+            _init_release_recapture,
+            (FitTarget.SERIES,),
+            formula=r"$P(t)=A\frac{1-e^{-\eta e^{-W_0((2\pi f t)^2)}}}{1-e^{-\eta}}+B$",
+            jacobian=_release_recapture_jacobian,
+            candidate_initializer=_release_recapture_candidates,
+            compiled_descriptor=_compiled_fit.release_recapture_descriptor(),
         ),
         FitModelSpec(
             "anisotropic_gaussian_center",

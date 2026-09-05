@@ -1071,3 +1071,51 @@ invalid shot, a replacement and window changes, and the session's payload
 with a count against its own edges -- and the cost is one reference: the
 previous revision's snapshot stays alive one revision longer, because the
 shots that leave are subtracted from it.
+
+## Release–recapture 解析拟合（2026-09-05）
+
+模型为 `P(t)=A R(t;eta,f)+B`，`R(0)=1`，内部无量纲时间是`2π f t`。
+拟合参数为`amplitude/offset/eta/frequency`，界面表达式符号为`A/B/eta/f`。
+零时刻为`A+B`，长时间趋近`B`；`A=1, B=0`复用现有固定参数机制，得到两自由参数模型。
+不从选区最小时间重新定义零点。
+
+实现只有一套实数Lambert W、稳定expm1归一化和解析Jacobian，普通模型求值、SciPy对照、
+Numba目标函数与最终fit曲线均复用。t=0直接采用解析极限；小eta导数使用展开避免相减消去。
+single与64-cell batch进入现有独立TRF，自动初值共4组，固定参数、SEM权重、robust loss和
+covariance仍由已有FitEngine管理。新增3个模型callback，已进入`warm_numba_cache.bat`的公共warmer；
+没有新增solver、进程池或Monte Carlo。
+
+本机Intel Core Ultra 7 265H（16 logical CPU）、Python 3.13.12，Numba启用4线程。
+数据时间0–200 μs，真值`A=.8, B=.05, eta=6, f=40 kHz`；SciPy Lambert W独立生成数据，
+加入标准差0.003的固定随机噪声并提供同一SEM。每项20次，编译/预热不计入稳态。
+计时包含完整FitEngine准备、冷初值竞争、求解和结果/covariance包装；不含Qt、渲染或采集。
+SciPy列是**同一个新模型**使用现有SciPy求解分支的对照，不是声称旧版本已有RR模型。
+
+| 输入 | SciPy中位数 | Numba中位数 | Numba P90 | 中位数加速 |
+|---|---:|---:|---:|---:|
+| 单条32点 | 9.06 ms | 0.85 ms | 1.14 ms | 10.7× |
+| 单条128点 | 7.41 ms | 2.00 ms | 2.87 ms | 3.7× |
+| 单条512点 | 14.51 ms | 7.24 ms | 7.42 ms | 2.0× |
+| 64条×128点 | 未测 | 33.57 ms | 45.90 ms | — |
+
+三个single case的Numba/SciPy最终曲线最大绝对差均≤2.22e-16。
+模型值加Jacobian一次调用的中位数约10/20/70 μs（含公共接口包装）。
+已有磁盘cache、另开Python进程后首次完整single fit为342.7 ms。
+开发期间一次未命中cache的首次fit为27.96 s，属于编译成本，未混入上述稳态数字。
+
+数值验证：182个mpmath锚覆盖eta=1e-12…1000、2πft=0…1e5，最大函数误差2.22e-16，
+Jacobian最大绝对误差4.19e-15；1201个Lambert W点对SciPy最大相对差1.49e-16。
+32点无噪声完整FitEngine回收`eta=5.99999887, f=39999.99485 Hz`。
+加噪声128点例的eta/f相关系数为0.99177；这说明有限噪声下两个参数可沿相关方向明显移动，
+不能把很小的曲线残差当成很精确的独立温度/频率测量。应检查已有covariance和standard errors。
+
+统计口径：当前Series只传入数值和SEM，因此是加权最小二乘，不是binomial MLE；
+框架没有从归约样本数猜测binomial trials，也未新增k/N输入或损失函数。
+
+复现：
+
+```powershell
+python -c "import zou_lab_control; import sys; sys.argv=['run_fit_models','--model','release_recapture','--rounds','20']; from bench.plot_perf.run_fit_models import main; raise SystemExit(main())"
+```
+
+原始输出位于`bench/results/release_recapture.json`。
