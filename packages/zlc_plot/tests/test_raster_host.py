@@ -2116,9 +2116,10 @@ def test_a_render_child_that_stops_answering_is_a_service_failure() -> None:
     and its pipe not having closed.  A child stopped mid-life satisfied both,
     so every request stayed pending for ever, every panel it served kept its
     last picture, and nothing anywhere said so.  The reader owns liveness
-    now: with requests outstanding and the pipe silent it asks, and a child
-    that does not answer within the deadline fails exactly as a dead one --
-    pending requests fail, hosts are marked, and a fresh child takes over.
+    now: a thread of the child's sends a sign of life every slice whatever
+    the dispatch loop is doing, and a child that gives none for the deadline
+    while requests are outstanding fails exactly as a dead one -- pending
+    requests fail, hosts are marked, and a fresh child takes over.
     """
 
     import psutil
@@ -2127,7 +2128,7 @@ def test_a_render_child_that_stops_answering_is_a_service_failure() -> None:
 
     snapshot = _snapshot()
     spec = CurvePlot(AxisRef.point("x"))
-    service = RenderProcess("raster-silent-child-test", answer_deadline_seconds=1.0)
+    service = RenderProcess("raster-silent-child-test", silence_deadline_seconds=1.0)
     remote = replacement = child = None
     try:
         remote = service.build_host(snapshot, spec)
@@ -2139,7 +2140,7 @@ def test_a_render_child_that_stops_answering_is_a_service_failure() -> None:
         pending = remote.set_parameter("title", "silent")
         error = pending.exception(timeout=30)
         assert isinstance(error, RuntimeError), error
-        assert "did not answer" in str(error), error
+        assert "no sign of life" in str(error), error
         assert remote.service_failure is True
         deadline = time.monotonic() + 10.0
         while not service._reader_stopped.is_set() and time.monotonic() < deadline:

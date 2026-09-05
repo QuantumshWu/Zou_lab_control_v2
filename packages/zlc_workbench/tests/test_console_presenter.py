@@ -6820,22 +6820,23 @@ def test_a_silent_plot_worker_cannot_hold_the_console_open(presenter) -> None:
     ), presenter.view.status[-4:]
 
 
-def test_a_surface_that_never_finishes_is_named_and_its_host_replaced(
+def test_a_surface_that_never_finishes_is_said_on_its_card(
     presenter, session
 ) -> None:
-    """A staged surface nobody finishes is said on the strip, then repaired.
+    """A staged surface nobody finishes is a standing condition on its card.
 
     Two views of one camera signal are one shot on screen.  One view's host
     stopped finishing its renders: its sibling waited in the same cohort,
     every later shot was withheld behind the busy one, the summary read
     "running", no card wore a dot and no line was written -- every picture
-    frozen, the application alive.  The board's completion budget names the
-    panel that held the shot, and the console replaces its host the way it
-    replaces one whose render service died.
+    frozen, the application alive.  Now the panel says how long its surface
+    has been travelling, and keeps waiting: the console cannot tell a render
+    that is slow from one that is dead, and cancelling a slow one turned
+    every large dataset's picture into one that never arrived.  The moment
+    the surface settles, the sibling presents and the condition clears.
     """
 
     from concurrent.futures import Future
-    from math import ceil
 
     session.load_pulse(PULSE_NAME)
     node = CameraMeasurementNode(
@@ -6871,37 +6872,39 @@ def test_a_surface_that_never_finishes_is_named_and_its_host_replaced(
     )
     stuck = presenter.panels[first.panel_id].host
     assert stuck is not None
-    stuck.update_data = lambda *_args, **_kwargs: Future()
+    finishing = stuck.update_data
+    never_settled: list[Future] = []
 
-    budget = ceil(
-        presenter.board.SURFACE_COMPLETION_SECONDS * 1000.0
-        / presenter.board.base_interval_ms
-    )
-    mark = len(presenter.view.status)
+    def never(*_args, **_kwargs) -> Future:
+        completion: Future = Future()
+        never_settled.append(completion)
+        return completion
+
+    stuck.update_data = never
+
     presenter.view.presented_fronts.clear()
-    # Inside the budget: the held shot keeps its sibling from presenting,
-    # and nothing has been said yet -- the freeze exactly as it was seen.
-    for _ in range(budget - 1):
+    started = time.monotonic()
+    while time.monotonic() - started < presenter.SURFACE_PATIENCE_SECONDS + 2.0:
         shot()
         presenter.beat()
-    assert not presenter.view.presented_fronts
-    assert not any(
-        "did not finish" in text for _severity, text in presenter.view.status[mark:]
+    condition, marked = presenter.view._cards[first.panel_id].status
+    assert marked and "travelling for" in condition, condition
+    assert not presenter.view.presented_fronts, (
+        "the held shot keeps its sibling from presenting; the picture waits"
     )
-    # The budget runs out: the panel that held the shot is named.
-    for _ in range(3):
-        shot()
-        presenter.beat()
-    said = [text for _severity, text in presenter.view.status[mark:]]
-    assert any("did not finish" in text for text in said), said
+    assert presenter.panels[first.panel_id].host is stuck, "nothing is rebuilt for it"
 
-    # Repaired: a fresh host takes the panel and both views present again.
+    # The surface settles (here: its host lets go of it), and the board goes on.
+    stuck.update_data = finishing
+    for completion in never_settled:
+        completion.cancel()
+    presenter.view.presented_fronts.clear()
     _settle_panel_hosts(
-        presenter, lambda: presenter.panels[first.panel_id].host is not stuck
+        presenter,
+        lambda: (shot(), presenter.beat()) and ids <= {
+            panel_id for panel_id, _front in presenter.view.presented_fronts
+        },
     )
-    presenter.view.presented_fronts.clear()
-    for _ in range(10):
-        shot()
-        presenter.beat()
-    presented = {panel_id for panel_id, _front in presenter.view.presented_fronts}
-    assert ids <= presented, presented
+    _settle_panel_hosts(
+        presenter, lambda: presenter.view._cards[first.panel_id].status == ("", False)
+    )

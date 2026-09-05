@@ -128,24 +128,6 @@ __all__ = ["ConsolePresenter", "PanelBinding", "PanelState"]
 _UNCHANGED = object()
 
 
-def _host_failed(binding: PanelBinding) -> bool:
-    """Whether the panel's host must be replaced rather than reconfigured.
-
-    Two facts, one answer.  A render service that died marks every host it
-    served (``service_failure``).  A host whose staged surface never finished
-    is named by its port: the board rejected the surface with a
-    ``TimeoutError`` after its completion budget, and a host that holds a
-    promise that long is not going to keep the next one either -- the
-    picture would stay frozen, now with its reason on the card.  Both are
-    repaired the same way: the unchanged authored target goes through the
-    ordinary replacement transaction and a fresh host takes the panel.
-    """
-
-    if bool(getattr(binding.host, "service_failure", False)):
-        return True
-    return isinstance(getattr(binding.port, "last_error", None), TimeoutError)
-
-
 def _refused_expression(binding: "PanelBinding") -> str:
     """What the operator typed into the Parameters box and the model refused.
 
@@ -449,11 +431,15 @@ class ConsolePresenter:
     """Wires a console view to a running session."""
 
     CLOSE_REPORT_SECONDS = 10.0
-    #: How long a mount may wait for a plot surface to describe itself.  The
-    #: wait is on the board's projection lane, and it is a REPLY FROM ANOTHER
-    #: PROCESS now; unbounded, one silent render child held board.close() open
-    #: for ever, and with it the console's whole close.
-    SURFACE_DESCRIBE_SECONDS = 10.0
+    #: How long the console waits on a plot surface before it says so: a
+    #: mount waiting for the surface to describe itself (that wait is on the
+    #: board's projection lane and is a reply from another process now;
+    #: unbounded, one silent render child held board.close() open for ever),
+    #: and a staged render still travelling.  Saying is all it does.  A late
+    #: surface is slow or dead and the console cannot tell which; cancelling
+    #: it and rebuilding the host turned every large dataset's slow render
+    #: into a picture that never arrived at all.
+    SURFACE_PATIENCE_SECONDS = 10.0
 
     def __init__(
         self,
@@ -1784,7 +1770,7 @@ class ConsolePresenter:
                     if hasattr(answer, "result"):
                         try:
                             answer = answer.result(
-                                timeout=self.SURFACE_DESCRIBE_SECONDS
+                                timeout=self.SURFACE_PATIENCE_SECONDS
                             )
                         except _AnswerTimeout:
                             # Say it: mounting without the operator's
@@ -2892,7 +2878,6 @@ class ConsolePresenter:
                 # reconfiguring it re-raises the same reason forever.  The
                 # accepted state change -- the repair -- rebuilds instead.
                 or getattr(binding.host, "startup_failure", None) is not None
-                or _host_failed(binding)
             )
         )
         if (
@@ -3464,14 +3449,13 @@ class ConsolePresenter:
             if (
                 configuration_entry is None
                 and host is not None
-                and _host_failed(binding)
+                and bool(getattr(host, "service_failure", False))
             ):
-                # A render-service crash, or a host that did not keep its
-                # surface promise, leaves the last complete Front on screen.
-                # Re-submit the unchanged authored target through the
-                # ordinary replacement transaction; its factory restarts A,
-                # and the old surface stays visible until the replacement is
-                # fully accepted.
+                # A render-service crash leaves the last complete Front on
+                # screen.  Re-submit the unchanged authored target through
+                # the ordinary replacement transaction; its factory restarts
+                # A, and the old surface stays visible until the replacement
+                # is fully accepted.
                 self.update_panel_state(binding.panel_id, {})
                 continue
             if (
@@ -6089,10 +6073,21 @@ class ConsolePresenter:
             # not a control under the controls it was about.
             refused = _refused_expression(binding)
             unapplied = binding.vacancy or binding.unapplied_display or refused
+            # A surface still travelling past the console's patience is the
+            # one condition that tells a stalled panel from a still one.  It
+            # is said as long as it lasts and clears the moment the surface
+            # lands; nothing is cancelled for it.
+            age = float(getattr(binding.port, "surface_age_seconds", 0.0) or 0.0)
+            late = (
+                f"its plot surface has been travelling for {age:.0f} s"
+                if age > self.SURFACE_PATIENCE_SECONDS
+                else ""
+            )
             standing = (
                 unapplied
                 or str(getattr(binding.bridge, "last_condition", "") or "")
                 or str(getattr(binding.port, "waiting_condition", "") or "")
+                or late
             )
             if error is None and standing:
                 # An authored table that cannot draw is a CONDITION of this

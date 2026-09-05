@@ -19,6 +19,7 @@ from __future__ import annotations
 from concurrent.futures import CancelledError, Future, InvalidStateError
 from dataclasses import dataclass, replace
 from threading import Lock
+from time import monotonic
 from typing import Any, Callable
 
 from zlc_runtime import SurfaceUpdate
@@ -40,6 +41,10 @@ class _Prepared:
     target: object
     front_refs: tuple[object, ...]
     presentation_epoch: int
+    #: When this surface was staged, so a panel can say how long it has
+    #: been waiting on one -- the one fact that tells a still panel from a
+    #: stalled one.
+    staged_at: float
     host: object | None = None
     description: object | None = None
     replacement_host: object | None = None
@@ -294,6 +299,24 @@ class PlotPanelPort:
 
         with self._state_lock:
             return bool(self._pending)
+
+    @property
+    def surface_age_seconds(self) -> float:
+        """How long the oldest surface still travelling for this panel has been out.
+
+        Zero when nothing is travelling.  A surface that never lands used to
+        be indistinguishable from a signal that stopped arriving: the panel
+        simply stayed still.  Its age is the fact that tells the two apart,
+        and the console says it on the card once it passes its patience --
+        says it, and keeps waiting, because a render that is late is either
+        slow or dead and nothing here can tell which.
+        """
+
+        now = monotonic()
+        with self._state_lock:
+            if not self._pending:
+                return 0.0
+            return max(now - prepared.staged_at for prepared in self._pending.values())
 
     @property
     def presentation_current(self) -> bool:
@@ -564,6 +587,7 @@ class PlotPanelPort:
                     target,
                     front_refs,
                     presentation_epoch,
+                    monotonic(),
                     completion=completion,
                 )
 

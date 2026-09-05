@@ -878,34 +878,35 @@ class _RemoteRasterPlotHost:
 class RenderProcess:
     """One long-lived process containing any number of RasterPlotHosts."""
 
-    #: How long a child may stay silent, with requests outstanding and after
-    #: being asked, before it has stopped.  "The service is up" used to have
-    #: two proxies and no owner -- the process existing and its pipe not
-    #: having closed -- and a child that was alive and not answering
-    #: satisfied both: every request stayed pending, every panel it served
-    #: kept its last picture, and nothing anywhere said so.  The reader owns
-    #: service failure, so the reader owns liveness.  The child's dispatch
-    #: loop only hands work to host workers and answers a ping in
-    #: microseconds; ten seconds of not even that is not slowness.
-    ANSWER_DEADLINE_SECONDS = 10.0
+    #: How long a child may give no sign of life, with requests outstanding,
+    #: before it has stopped.  "The service is up" used to have two proxies
+    #: and no owner -- the process existing and its pipe not having closed --
+    #: and a child that was alive and not answering satisfied both: every
+    #: request stayed pending, every panel it served kept its last picture,
+    #: and nothing anywhere said so.  The reader owns service failure, so
+    #: the reader owns liveness.  The sign of life is a heartbeat from a
+    #: thread of the child's that owes nothing else: a dispatch loop busy
+    #: for a minute loading one large dataset is alive, and the request
+    #: waiting behind it is slow, not dead.  A process that cannot run one
+    #: Python thread for ten seconds -- stopped, or wedged -- is not slow.
+    SILENCE_DEADLINE_SECONDS = 10.0
 
     def __init__(
-        self, name: str, *, answer_deadline_seconds: float | None = None
+        self, name: str, *, silence_deadline_seconds: float | None = None
     ) -> None:
         selected = str(name).strip()
         if not selected:
             raise ValueError("render process name must be non-empty")
         deadline = float(
-            self.ANSWER_DEADLINE_SECONDS
-            if answer_deadline_seconds is None
-            else answer_deadline_seconds
+            self.SILENCE_DEADLINE_SECONDS
+            if silence_deadline_seconds is None
+            else silence_deadline_seconds
         )
         if not deadline > 0.0:
-            raise ValueError("answer deadline must be positive")
+            raise ValueError("silence deadline must be positive")
         self.name = selected
-        self._answer_deadline = deadline
-        self._ping: tuple[int, float] | None = None
-        self._ping_serial = 0
+        self._silence_deadline = deadline
+        self._last_alive: float | None = None
         self._lock = RLock()
         self._pending: dict[int, _Pending] = {}
         self._callbacks: dict[int, Callable[..., object]] = {}
@@ -977,7 +978,7 @@ class RenderProcess:
         self._reader_stopped = stopped
         self._closed = False
         self._close_started = None
-        self._ping = None
+        self._last_alive = None
         self._outbox: Queue = Queue()
         self._writer = Thread(
             target=_write_messages,
@@ -1553,56 +1554,52 @@ class RenderProcess:
                 self._set_host_inputs(pending.host_id, retained | tokens)
         self._release_inputs(tokens)
 
-    def _require_answer(self) -> None:
-        """Silence with work outstanding is asked about, then judged.
+    def _require_signs_of_life(self) -> None:
+        """Silence with work outstanding is judged against the child's heartbeat.
 
         Runs on the reader thread whenever the pipe has said nothing for one
-        slice.  With nothing pending there is nothing to wait for.  With
-        requests pending, the first silent slice sends a ping; a child whose
-        dispatch loop is alive answers it at once, and the ping is forgotten
-        by :meth:`_answered`.  A ping still unanswered after the deadline is
-        the service's failure, raised here so that the reader ends exactly
-        as it ends on EOF: every pending request fails, every host is marked
-        failed, the child is terminated and the console remounts on a fresh
-        one -- said, this time, on the status strip.
+        slice.  Every message the child sends is a sign of life, and a
+        thread of its own sends one every slice whatever its dispatch loop
+        is doing, so a loop busy loading one large dataset is still alive.
+        With nothing pending there is nothing to wait for; before the
+        child's first word there is nothing to judge, it is still importing.
+        A child silent past the deadline with requests outstanding has
+        stopped, whatever the process table says, and the reader ends
+        exactly as it ends on EOF: every pending request fails, every host
+        is marked failed, the child is terminated and the console remounts
+        on a fresh one -- said, this time, on the status strip.
         """
 
         now = monotonic()
         with self._lock:
-            if not self._pending:
-                self._ping = None
+            if not self._pending or self._last_alive is None:
                 return
-            if self._ping is not None:
-                serial, asked = self._ping
-                if now - asked > self._answer_deadline:
-                    raise TimeoutError(
-                        f"render process {self.name!r} did not answer for "
-                        f"{self._answer_deadline:g} s with "
-                        f"{len(self._pending)} request(s) outstanding"
-                    )
+            silence = now - self._last_alive
+            if silence <= self._silence_deadline:
                 return
-            self._ping_serial += 1
-            serial = self._ping_serial
-            self._ping = (serial, now)
-        self._send(("ping", serial))
+            outstanding = len(self._pending)
+        raise TimeoutError(
+            f"render process {self.name!r} gave no sign of life for "
+            f"{silence:.0f} s with {outstanding} request(s) outstanding"
+        )
 
-    def _answered(self, serial: int) -> None:
+    def _sign_of_life(self) -> None:
         with self._lock:
-            if self._ping is not None and self._ping[0] == serial:
-                self._ping = None
+            self._last_alive = monotonic()
 
     def _read_messages(self) -> None:
         failure: BaseException | None = None
         try:
             while True:
                 if not self._connection.poll(_POLL_SLICE_SECONDS):
-                    self._require_answer()
+                    self._require_signs_of_life()
                     continue
                 message = _receive_message(self._connection)
+                self._sign_of_life()
                 kind = message[0]
-                if kind == "pong":
-                    self._answered(int(message[1]))
-                elif kind == "front":
+                if kind == "alive":
+                    continue
+                if kind == "front":
                     self._receive_front(*message[1:])
                 elif kind == "result":
                     self._receive_result(*message[1:])
@@ -2135,6 +2132,7 @@ def _render_process_main(connection: Connection, name: str) -> None:
         daemon=True,
     )
     writer.start()
+    stopping = Event()
 
     def send(message: object) -> None:
         """Hand one message to the writer, so this loop keeps reading.
@@ -2154,6 +2152,20 @@ def _render_process_main(connection: Connection, name: str) -> None:
             send(message)
         except Exception as error:
             _send_error(send, request_id, error)
+
+    def heartbeat() -> None:
+        """A sign of life every slice, from a thread that owes nothing else.
+
+        The parent judges a silent child by this, never by its dispatch
+        loop: the loop is legitimately busy for as long as one input takes
+        to load or one host takes to build, and a request waiting behind
+        that is slow, not dead.
+        """
+
+        while not stopping.wait(_POLL_SLICE_SECONDS):
+            send(("alive",))
+
+    Thread(target=heartbeat, name=f"zlc-render-{name}-alive", daemon=True).start()
 
     def publish_front(host_id: str, front: RasterFront) -> None:
         sequence = int(front.identity.sequence)
@@ -2524,9 +2536,6 @@ def _render_process_main(connection: Connection, name: str) -> None:
                 continue
             message = _receive_message(connection)
             kind = message[0]
-            if kind == "ping":
-                send(("pong", int(message[1])))
-                continue
             if kind == "input":
                 token, payload, descriptors = message[1:]
                 inputs[int(token)] = _load_input(payload, descriptors, schemas)
@@ -2573,6 +2582,7 @@ def _render_process_main(connection: Connection, name: str) -> None:
     except (EOFError, OSError):
         pass
     finally:
+        stopping.set()
         for answer in tuple(pending.values()):
             answer.cancel()
         for _host_id, release in tuple(subscriptions.values()):
