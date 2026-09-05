@@ -115,3 +115,42 @@ def test_an_integer_box_stays_integral(box) -> None:
     box.setValue(41)
     assert _step(box, 1) == "42"
     assert box.decimalValue() == Decimal("42")
+
+
+def test_a_unit_redeclared_keeps_the_spelling_on_screen(box) -> None:
+    """Every projection re-configures the box it keeps; "s" said again is
+    not a change, and the "ms" the operator chose to read it in is theirs."""
+
+    box.setRange(0.0, 10.0)
+    box.setValueUnit("s")
+    box.setValue(0.02)
+    box.setShownUnit("ms")
+    assert box.text() == "20"
+    box.setValueUnit("s")
+    assert box.shownUnit() == "ms"
+    assert box.text() == "20"
+    # A DIFFERENT owner unit is a change: the number is now in hertz, and
+    # milliseconds are no spelling of that.
+    box.setValueUnit("Hz")
+    assert box.shownUnit() == "Hz"
+    assert box.text() == "0.02"
+
+
+def test_a_count_box_counts_in_32_bits() -> None:
+    pytest.importorskip("PyQt5")
+    from zlc_ui.qt import ensure_qt_app
+    from zlc_ui.fluent import fluent_count_box
+
+    ensure_qt_app(["count-box"])
+    box = fluent_count_box()
+    assert box._step_btn.isHidden(), "a count moves one at a time"
+    box.setValue(4294967295)
+    assert box.text() == "4294967295"
+    assert _step(box, 1) == "4294967295", "uint32 is the board's ceiling"
+    box.setValue(41)
+    assert _step(box, 1) == "42"
+    assert _step(box, -42) == "0"
+    assert _step(box, -1) == "0", "and zero is its floor"
+    bounded = fluent_count_box(minimum=2)
+    bounded.setValue(1)
+    assert bounded.text() == "2"

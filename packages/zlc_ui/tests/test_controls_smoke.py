@@ -221,6 +221,73 @@ flat.close(); tree.close(); twelve.close(); capped.close()
     )
 
 
+def test_a_popup_opens_at_the_same_size_every_time_expanded_or_not() -> None:
+    """The popup's geometry is a function of its content, not of the last opening.
+
+    Read back from the scroll area's lazy layout, the chrome was the PREVIOUS
+    opening's, so the same picker alternated between a clean card and one
+    with two scrollbars cutting its rows.  Opened five times, expanded and
+    collapsed, it is the same numbers every time: the viewport holds the
+    content, the column is the viewport, and no horizontal bar exists.
+    """
+
+    _run_qt_smoke(
+        """
+from PyQt5 import QtCore, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import fluent_unit_picker, fluent_scrollbar_thickness
+app = ensure_qt_app(['popup-pure'])
+page = QtWidgets.QWidget()
+row = QtWidgets.QHBoxLayout(page)
+picker = fluent_unit_picker('dBm', page)
+row.addWidget(picker); row.addStretch(1)
+page.show(); app.processEvents()
+
+def settle():
+    for _ in range(5):
+        app.processEvents(QtCore.QEventLoop.AllEvents, 10)
+    app.sendPostedEvents()
+
+def measure():
+    view = picker._popup_view; popup = picker._popup
+    side = view.frameWidth()
+    content = view.sizeHintForColumn(0)
+    assert view.viewport().width() >= content, (view.viewport().width(), content)
+    assert view.header().sectionSize(0) <= view.viewport().width(), (
+        view.header().sectionSize(0), view.viewport().width())
+    assert not view.horizontalScrollBar().isVisible()
+    assert view.horizontalScrollBar().maximum() == 0
+    bar = fluent_scrollbar_thickness() if view.verticalScrollBar().isVisible() else 0
+    assert popup.width() == max(picker.width(), content + 2 * side + bar), (
+        popup.width(), picker.width(), content, side, bar)
+    return (popup.width(), popup.height())
+
+sizes = []
+for _ in range(5):
+    picker.showPopup(); settle()
+    sizes.append(measure())
+    picker.hidePopup(); settle()
+assert len(set(sizes)) == 1, sizes
+
+picker.showPopup(); settle()
+view = picker._popup_view; model = picker.model()
+closed = measure()
+trunk = next(model.index(r, 0) for r in range(model.rowCount()) if model.item(r).text() == 'W')
+view.setExpanded(trunk, True); settle()
+opened = measure()
+assert opened[1] > closed[1], (opened, closed)
+view.setExpanded(trunk, False); settle()
+assert measure() == closed
+picker.hidePopup(); settle()
+picker.showPopup(); settle()
+view.setExpanded(trunk, True); settle()
+assert measure() == opened
+picker.hidePopup()
+print('ok')
+"""
+    )
+
+
 def test_form_runtime_context_and_qt_projection() -> None:
     _run_qt_smoke(
         """

@@ -530,6 +530,9 @@ def align_to_resolution(value: str | float, resolution: float, *, allow_any: boo
 
 
 class FluentStatusDot(QtWidgets.QLabel):
+    #: Class attribute: set_color runs from __init__ before any assignment.
+    _color = ""
+
     def __init__(self, parent=None, *, color: str = GREY, size: int = 16):
         super().__init__(parent)
         self._size = scaled_px(size)
@@ -537,7 +540,19 @@ class FluentStatusDot(QtWidgets.QLabel):
         self.set_color(color)
 
     def set_color(self, color: str) -> None:
-        self.setStyleSheet(status_dot_stylesheet(color, radius=max(1, self._size // 2)))
+        """This colour, written once.
+
+        A stylesheet write repolishes and repaints whether or not it says
+        what the last one said, and a control re-projected every beat wrote
+        it every beat: one row of every device control repainted ten times
+        a second for nothing.
+        """
+
+        wanted = str(color)
+        if wanted == self._color:
+            return
+        self._color = wanted
+        self.setStyleSheet(status_dot_stylesheet(wanted, radius=max(1, self._size // 2)))
 
 
 class FluentLabel(QtWidgets.QLabel):
@@ -1759,6 +1774,8 @@ class FluentSettingRow(QtWidgets.QWidget):
         control: QtWidgets.QWidget,
         *,
         label_width: int | None = None,
+        before: tuple[QtWidgets.QWidget, ...] = (),
+        after: tuple[tuple[QtWidgets.QWidget, int], ...] = (),
         parent=None,
     ):
         super().__init__(parent)
@@ -1784,6 +1801,13 @@ class FluentSettingRow(QtWidgets.QWidget):
             lbl.setStyleSheet(MUTED_LABEL_STYLE)
         self._label = lbl                       # introspected by the layout-uniformity contract test
         h.addWidget(lbl)
+        # Cells a host puts BESIDE the control -- a device's current reading
+        # before it, its live switch, Apply and status after it -- belong to
+        # the row from the moment it exists.  A host that took the row apart
+        # to add them after the form had shown it painted a row with half
+        # its cells, once, on every control it opened.
+        for cell in before:
+            h.addWidget(cell)
         # A control that FILLS the cell (a combo / line-edit / spin / switch -- Expanding/Preferred
         # horizontal policy) is stretched so its left edge sits flush against the label column.  A
         # control pinned to its sizeHint (FIXED horizontal policy -- compact controls,
@@ -1793,9 +1817,12 @@ class FluentSettingRow(QtWidgets.QWidget):
         # EVERY control -- filling or fixed -- starts at the SAME left edge.
         if control.sizePolicy().horizontalPolicy() == QtWidgets.QSizePolicy.Fixed:
             h.addWidget(control, 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-            h.addStretch(1)
+            if not after:
+                h.addStretch(1)
         else:
             h.addWidget(control, 1)
+        for cell, stretch in after:
+            h.addWidget(cell, int(stretch))
 
     def set_label(self, text: str, *, width: int | None = None) -> None:
         """Update this stable row's label without replacing either control."""
@@ -2652,10 +2679,6 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         self._place_popup()
         popup.show()
         popup.raise_()
-        # A visible Qt.Popup has its final native frame/scrollbar geometry.
-        # Re-measure in the same owner turn; no paint occurs between these
-        # calls, and the second pass closes any platform/DPR rounding delta.
-        self._resize_popup_to_contents()
         view.setFocus(QtCore.Qt.PopupFocusReason)
 
     def hidePopup(self) -> None:  # noqa: N802 - Qt API name
@@ -2727,42 +2750,34 @@ class FluentComboBox(QtWidgets.QAbstractButton):
             return
         popup.move(self._popup_origin(popup.width()))
 
-    def _popup_pad(self) -> int:
-        return 2 * popup_gap()
-
     def _visible_popup_row_count(self) -> int:
         return min(self.count(), _COMBO_MAX_VISIBLE_ITEMS)
 
-    def _desired_popup_height(self) -> int:
-        """Fit the visible rows below the field; overflow remains in the native view."""
+    def _popup_row_total(self) -> int:
+        """Every row the open view holds; more than are shown is what the
+        vertical bar is for."""
 
-        view = self._popup_view
-        rows = self._visible_popup_row_count()
-        if view is None or rows <= 0:
-            return 0
-        row_h = view.sizeHintForRow(0)
-        if row_h <= 0:
-            row_h = view.fontMetrics().height() + scaled_px(8)
-        desired = rows * row_h + 2 * view.frameWidth() + self._popup_pad()
-        below, available = self._popup_space_below()
-        if available is None:
-            return int(desired)
-        return int(min(desired, below))
+        return self.count()
 
-    def _apply_popup_geometry(self, width: int, height: int) -> None:
-        """Apply one candidate geometry and force Qt's real viewport layout."""
+    def _apply_popup_geometry(
+        self, width: int, height: int, *, column_width: int
+    ) -> None:
+        """Give the popup this geometry and its one column this width."""
 
         view = self._popup_view
         popup = self._popup
         if view is None or popup is None:
             return
-        selected_width = max(1, int(width))
-        selected_height = max(0, int(height))
-        top_inset = popup_gap()
         layout = popup.layout()
         if layout is not None:
-            layout.setContentsMargins(0, top_inset, 0, 0)
-        popup.setFixedSize(selected_width, selected_height)
+            layout.setContentsMargins(0, popup_gap(), 0, 0)
+        # THE COLUMN FIRST.  A tree keeps a header even when it hides it,
+        # and the header's length is what its horizontal range is computed
+        # from on every geometry update -- so the section is set before the
+        # size that triggers one, never from a viewport read back afterwards.
+        header = getattr(view, "header", None)
+        if callable(header):
+            header().resizeSection(self.modelColumn(), int(column_width))
         # The popup is the sole geometry owner.  Its zero-horizontal-margin
         # layout gives the view the exact remaining rectangle; fixing both
         # parent and child would create two competing width authorities.
@@ -2771,91 +2786,70 @@ class FluentComboBox(QtWidgets.QAbstractButton):
             QtWidgets.QWIDGETSIZE_MAX,
             QtWidgets.QWIDGETSIZE_MAX,
         )
-        popup.ensurePolished()
-        view.ensurePolished()
+        popup.setFixedSize(max(1, int(width)), max(0, int(height)))
         if layout is not None:
             layout.activate()
         view.doItemsLayout()
-        # THE COLUMN TOO.  A tree keeps a header even when it hides it, and
-        # that header's one section sat at Qt's default 100 px whatever the
-        # rows measured -- so a picker whose popup is 83 px wide, holding
-        # rows 83 px wide, scrolled sideways by the 17 px the header owed to
-        # nobody.  The sole geometry owner sizes it: the content, or the
-        # viewport when the content fits.
-        header = getattr(view, "header", None)
-        if callable(header):
-            column = self.modelColumn()
-            header().resizeSection(
-                column,
-                max(int(view.sizeHintForColumn(column)), int(view.viewport().width())),
-            )
 
     def _resize_popup_to_contents(self, *_) -> None:
-        """Measure the laid-out item view and converge its popup geometry.
+        """The popup's geometry, a pure function of its content.
 
-        Width is not inferred from font metrics or hand-counted padding.  The
-        delegate first lays out the real list/tree at its final row height;
-        ``sizeHintForColumn`` then states the content width, while
-        ``view.width - viewport.width`` states the platform/DPR-specific frame
-        and vertical-scrollbar chrome.  A few fixed-point passes are necessary
-        because each scrollbar changes the opposite viewport dimension.
-
-        The horizontal scrollbar remains ``AsNeeded``.  It appears only when
-        this measured requirement exceeds the active screen's width cap.
+        The rows revealed, the delegate's row height, the content's column
+        width, the collapsed field's width, the space below it and the
+        screen's width: everything the geometry follows from is known before
+        the popup is shown, and nothing is read back from the scroll area.
+        It used to be -- ``view.width - viewport.width`` stood in for the
+        frame-and-scrollbar chrome -- and a scroll area lays itself out
+        lazily: hidden, a resize is only pended; visible, the vertical bar
+        shows or hides on a queued slot.  So the read was the PREVIOUS
+        opening's chrome, each opening left the opposite residue, and the
+        same picker alternated between a clean card and one with two
+        scrollbars cutting its rows.  Which bars there are is decided here,
+        from the numbers, and the view is told.
         """
 
         view = self._popup_view
         popup = self._popup
         if view is None or popup is None:
             return
-        base_height = self._desired_popup_height()
+        popup.ensurePolished()
+        view.ensurePolished()
+        column = self.modelColumn()
+        rows = self._visible_popup_row_count()
+        row_height = int(view.sizeHintForRow(0)) if rows > 0 else 0
+        if rows > 0 and row_height <= 0:
+            row_height = view.fontMetrics().height() + scaled_px(8)
+        # The view's frame is its border with the stylesheet padding folded
+        # in, on every side; above the view the popup keeps one gap.
+        side = int(view.frameWidth())
+        content_width = max(0, int(view.sizeHintForColumn(column)))
+        content_height = popup_gap() + 2 * side + rows * row_height
         below, _available = self._popup_space_below()
-        width_cap = self._popup_width_cap()
-        if popup.isVisible() and popup.width() > 0:
-            width = min(width_cap, max(1, popup.width()))
-            height = max(0, popup.height())
-        else:
-            width = min(width_cap, max(1, self.width()))
-            height = base_height
-        horizontal_extent = view.horizontalScrollBar().sizeHint().height()
-        seen: set[tuple[int, int]] = set()
-        for _pass in range(4):
-            geometry = (width, height)
-            seen.add(geometry)
-            self._apply_popup_geometry(width, height)
-            content_width = max(0, int(view.sizeHintForColumn(self.modelColumn())))
-            chrome_width = max(0, int(view.width() - view.viewport().width()))
-            target_width = min(
-                width_cap,
-                max(self.width(), content_width + chrome_width),
-            )
-            target_viewport_width = max(0, target_width - chrome_width)
-            needs_horizontal = content_width > target_viewport_width
-            target_height = min(
-                below,
-                base_height + (horizontal_extent if needs_horizontal else 0),
-            )
-            target = (target_width, target_height)
-            if target == geometry:
-                if popup.isVisible():
-                    self._place_popup()
-                return
-            if target in seen:
-                # A vertical/horizontal scrollbar can theoretically toggle a
-                # two-state geometry on a platform boundary.  The wider/taller
-                # member is the only state that cannot hide reachable content.
-                stable = (
-                    max(item[0] for item in (*seen, target)),
-                    max(item[1] for item in (*seen, target)),
-                )
-                if stable != geometry:
-                    self._apply_popup_geometry(*stable)
-                if popup.isVisible():
-                    self._place_popup()
-                return
-            width, height = target_width, target_height
-        # Only the not-yet-applied candidate from the pass limit remains.
-        self._apply_popup_geometry(width, height)
+        bar = fluent_scrollbar_thickness()
+        needs_vertical = self._popup_row_total() > rows or content_height > below
+        width = min(
+            self._popup_width_cap(),
+            max(
+                self.width(),
+                content_width + 2 * side + (bar if needs_vertical else 0),
+            ),
+        )
+        viewport_width = max(0, width - 2 * side - (bar if needs_vertical else 0))
+        needs_horizontal = content_width > viewport_width
+        height = min(below, content_height + (bar if needs_horizontal else 0))
+        view.setVerticalScrollBarPolicy(
+            QtCore.Qt.ScrollBarAlwaysOn
+            if needs_vertical
+            else QtCore.Qt.ScrollBarAlwaysOff
+        )
+        view.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarAlwaysOn
+            if needs_horizontal
+            else QtCore.Qt.ScrollBarAlwaysOff
+        )
+        self._apply_popup_geometry(
+            width, height, column_width=max(content_width, viewport_width)
+        )
         if popup.isVisible():
             self._place_popup()
 
@@ -3179,6 +3173,8 @@ class FluentTreeComboBox(FluentComboBox):
     def _create_popup_view(self) -> QtWidgets.QAbstractItemView:
         tree = _ExpandableTreeView(self)         # parent rows toggle on a name OR triangle click
         tree.setHeaderHidden(True)
+        # The column has one owner: the popup sizes it from its content.
+        tree.header().setStretchLastSection(False)
         tree.setRootIsDecorated(True)            # show the expand/collapse triangles
         tree.setItemsExpandable(True)
         tree.setUniformRowHeights(True)
@@ -3222,6 +3218,9 @@ class FluentTreeComboBox(FluentComboBox):
             if item is not None and item.data(QtCore.Qt.UserRole) == ""
         )
         return (*none_labels, *self._full_by_key.values())
+
+    def _popup_row_total(self) -> int:
+        return self._visible_popup_row_count()
 
     def _visible_popup_row_count(self) -> int:
         """Count the rows revealed by the current tree expansion state."""
@@ -3544,16 +3543,13 @@ class FluentUnitPicker(FluentTreeComboBox):
 
     def __init__(self, unit: str, parent=None) -> None:
         super().__init__(parent)
-        self._unit = str(unit).strip() or "1"
-        tree = unit_choice_tree(self._unit)
+        self._unit = ""
         #: Every spelling this picker can show collapsed.  The base combo
         #: measures its width over its TOP-LEVEL rows, which in a tree are
         #: the trunks -- "W", one letter -- so the box was sized for "W" and
         #: showed "dBm" as "dB...".  The leaves are what it shows.
-        self._spellings = tuple(
-            str(label) for _trunk, leaves in tree for label, _key, _full in leaves
-        )
-        self.set_choice_tree(tree, current=self._unit)
+        self._spellings: tuple[str, ...] = ()
+        self.set_unit(unit)
         # As wide as its widest spelling and no wider; as tall as every other
         # control in the row.  Only the horizontal policy is this widget's to
         # say -- a Preferred height let the row's tallest neighbour stretch
@@ -3571,6 +3567,25 @@ class FluentUnitPicker(FluentTreeComboBox):
         """The unit this field's NUMBER is in, whatever is on screen."""
 
         return self._unit
+
+    def set_unit(self, unit: str) -> None:
+        """Offer the spellings of ``unit`` instead: the row's port changed.
+
+        In place.  The tree is reconciled, not the picker rebuilt, so a row
+        that keeps its picker keeps its place in the layout and in the
+        focus chain -- and a unit that did not change costs nothing.
+        """
+
+        wanted = str(unit).strip() or "1"
+        if wanted == self._unit:
+            return
+        tree = unit_choice_tree(wanted)
+        self._unit = wanted
+        self._spellings = tuple(
+            str(label) for _trunk, leaves in tree for label, _key, _full in leaves
+        )
+        self.set_choice_tree(tree, current=wanted)
+        self._invalidate_content_width()
 
 
 def unit_choice_tree(unit: str) -> tuple:
@@ -4408,9 +4423,10 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
     direction.  A notch that would leave the owner's range stops at the last
     grid point inside it, and never lands on the bound itself when the bound
     is off the grid: down from 0.1 in steps of 0.1 with a floor of 0.001 is
-    0.1, not 0.001, so down-then-up returns exactly where it started.  Only
-    a TYPED number is clamped to the bound, because a typed number is the
-    operator naming a value and the bound is the owner refusing it.
+    0.1, not 0.001, so down-then-up returns exactly where it started.  A
+    NAMED number -- typed, or handed over by the owner -- is clamped to the
+    bound, because naming a value is asking for it and the bound is the
+    owner refusing it.
 
     The box never invents a range.  It used to derive one from a "length",
     which is how a field nobody had bounded acquired a floor of 1e-7 and
@@ -4479,13 +4495,24 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
     # ------------------------------------------------------------ the value
 
     def setValue(self, value: float) -> None:  # noqa: N802 - Qt API name
-        """The owner's number, taken exactly as the shortest decimal of it."""
+        """The owner's number, taken exactly as the shortest decimal of it,
+        inside the owner's own range."""
 
         try:
             number = _finite_decimal(value)
         except ValueError:
             return
-        self._commit(self._quantized(number))
+        self._commit(self._bounded(self._quantized(number)))
+
+    def _bounded(self, number: Decimal) -> Decimal:
+        """``number`` inside the owner's range: a box never holds a value
+        outside the bound its owner declared, whoever named it."""
+
+        try:
+            low, high = _finite_decimal(self.minimum()), _finite_decimal(self.maximum())
+        except ValueError:
+            return number
+        return min(max(number, low), high)
 
     def setSingleStep(self, step: float) -> None:  # noqa: N802 - Qt API name
         try:
@@ -4535,8 +4562,15 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         wrong is silent and expensive.
         """
 
-        self._unit = str(unit).strip() or "1"
-        self._shown_unit = self._unit
+        wanted = str(unit).strip() or "1"
+        if wanted == self._unit:
+            # Re-declared, not changed.  Every projection re-configures the
+            # box it keeps, and the spelling the operator chose to read it
+            # in is theirs: resetting it to the owner's unit on every draft
+            # is how "ms" snapped back to "s" the moment the wheel stopped.
+            return
+        self._unit = wanted
+        self._shown_unit = wanted
         self.lineEdit().setText(self.textFromValue(self.value()))
 
     def valueUnit(self) -> str:  # noqa: N802 - Qt API name
@@ -4649,8 +4683,8 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         text, which calls back into here, which would ask again -- one
         unreadable keystroke and the stack is gone.
 
-        A typed number is the operator naming a value, so it is the one
-        thing the owner's bound clamps: a step stops short of an off-grid
+        A typed number is the operator naming a value, and a named value
+        is what the owner's bound clamps: a step stops short of an off-grid
         bound, a typed number lands on it.
         """
 
@@ -4658,14 +4692,9 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
             typed = Decimal(str(text).strip())
             if not typed.is_finite():
                 raise ValueError(text)
-            number = self._quantized(self._value_from_shown(typed))
+            number = self._bounded(self._quantized(self._value_from_shown(typed)))
         except (UnitError, ValueError, ArithmeticError):
             return float(self._value)
-        try:
-            low, high = _finite_decimal(self.minimum()), _finite_decimal(self.maximum())
-        except ValueError:
-            return float(self._value)
-        number = min(max(number, low), high)
         self._value = number
         return float(number)
 
@@ -4745,6 +4774,26 @@ def _last_grid_point_inside(value: Decimal, step: Decimal, low: Decimal, high: D
     if value < low:
         return (Decimal(int((low / step).to_integral_value(rounding=ROUND_CEILING))) * step).normalize() + Decimal(0)
     return value
+
+
+def fluent_count_box(
+    *, minimum: int = 0, maximum: int = (1 << 32) - 1, parent=None
+) -> FluentDoubleSpinBox:
+    """A box for a whole number of things the board counts in 32 bits.
+
+    Qt's integer spin stops at signed 31 bits; a zero-decimal decimal box
+    holds every uint32 exactly, so the control and the hardware count share
+    one domain.  One factory, because three pages each spelled these four
+    settings by hand -- and the step button, which is for choosing a step
+    size, means nothing on a count that moves one at a time.
+    """
+
+    box = FluentDoubleSpinBox(parent)
+    box._step_btn.hide()
+    box.setDecimals(0)
+    box.setSingleStep(1)
+    box.setRange(float(minimum), float(maximum))
+    return box
 
 
 class FluentCheckBox(QtWidgets.QCheckBox):

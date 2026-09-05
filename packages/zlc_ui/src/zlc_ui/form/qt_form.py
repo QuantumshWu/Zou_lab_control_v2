@@ -110,8 +110,12 @@ def _connect_change(signal, on_change: Callable[[], None]) -> None:
     signal.connect(lambda *_args: on_change())
 
 
-def _being_edited(widget: QtWidgets.QWidget) -> bool:
+def being_edited(widget: QtWidgets.QWidget) -> bool:
     """Is the operator typing in this widget right now?
+
+    THE question every projected editor asks before writing, in this form
+    and outside it: a page that writes a projected count into its own spin
+    box asks it here rather than keeping a private answer.
 
     Live editing means every keystroke round-trips through the owner and
     comes back as a new projection, and reconcile writes projections into
@@ -969,11 +973,35 @@ class FluentParameterForm(QtWidgets.QWidget):
     #: spelling of its unit.  The value did not move; whoever shows a second
     #: number for the same field -- a device's current reading -- follows.
     shown_unit_changed = QtCore.pyqtSignal(str, str)
+    #: The operator is DONE with this row: Return, or the focus left it.
+    #: ``changed`` says every keystroke; a host that acts on a finished
+    #: name -- renaming what everything else calls a binding -- waits for
+    #: this one.
+    committed = QtCore.pyqtSignal(str)
 
-    def _connect_refresh(self, key: str, widget: QtWidgets.QWidget) -> None:
+    def _connect_editor_signals(self, key: str, widget: QtWidgets.QWidget) -> None:
         signal = getattr(widget, "refresh_requested", None)
         if signal is not None:
             signal.connect(lambda key=key: self.refresh_requested.emit(key))
+        finished = getattr(widget, "editingFinished", None)
+        if finished is not None:
+            finished.connect(lambda key=key: self.committed.emit(key))
+
+    def _row_cells(
+        self, field: FormFieldProps
+    ) -> tuple[
+        tuple[QtWidgets.QWidget, ...], tuple[tuple[QtWidgets.QWidget, int], ...]
+    ]:
+        """What a host puts beside this row's control: ``(before, after)``.
+
+        The row is assembled ONCE, with everything in it, before it is
+        shown.  A host that needs more than label and control -- a device
+        control's current reading, live switch, Apply and status -- says so
+        here, in a subclass, and never takes a built row apart.
+        """
+
+        del field
+        return (), ()
 
     @staticmethod
     def _dependency_map(spec: FormSpec) -> dict[str, list[str]]:
@@ -1040,7 +1068,7 @@ class FluentParameterForm(QtWidgets.QWidget):
                 self._runtime,
             )
             widget.setEnabled(not field.unavailable)
-            self._connect_refresh(field.key, widget)
+            self._connect_editor_signals(field.key, widget)
             self._widgets[field.key] = widget
             self._handlers[field.key] = handler
             row, automatic = self._make_row(field, widget, label_width)
@@ -1172,10 +1200,13 @@ class FluentParameterForm(QtWidgets.QWidget):
                 )
             )
             label = automatic
+        before, after = self._row_cells(field)
         row = FluentSettingRow(
             label,
             widget,
             label_width=label_width,
+            before=before,
+            after=after,
             parent=self,
         )
         return row, automatic
@@ -1470,7 +1501,7 @@ class FluentParameterForm(QtWidgets.QWidget):
                 # and then suppresses the accepted value that should restore
                 # it.
                 if self._fields[key].kind != "choice"
-                and _being_edited(widget)
+                and being_edited(widget)
             ),
             None,
         )
@@ -1502,7 +1533,7 @@ class FluentParameterForm(QtWidgets.QWidget):
                 self._runtime,
             )
             widget.setEnabled(not field.unavailable)
-            self._connect_refresh(field.key, widget)
+            self._connect_editor_signals(field.key, widget)
             row, automatic = self._make_row(field, widget, label_width)
             replacements[field.key] = widget, row, automatic
 
@@ -1541,7 +1572,7 @@ class FluentParameterForm(QtWidgets.QWidget):
                     # always win after a domain refill even though the combo
                     # still owns keyboard focus from the activation click.
                     editing = (
-                        field.kind != "choice" and _being_edited(widget)
+                        field.kind != "choice" and being_edited(widget)
                     )
                     if (
                         not editing
