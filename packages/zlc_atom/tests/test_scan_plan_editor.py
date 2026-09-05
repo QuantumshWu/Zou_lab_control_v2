@@ -376,3 +376,97 @@ def test_axis_rows_follow_the_ports_without_being_rebuilt() -> None:
     assert editor._rows == [row]
     editor.close()
     editor.deleteLater()
+
+
+def _plain_sequence():
+    """The same pulse with no API parameters at all."""
+
+    from dataclasses import replace
+
+    return replace(_bound_sequence(), api_parameters=())
+
+
+def _level_only_sequence():
+    from dataclasses import replace
+
+    bound = _bound_sequence()
+    return replace(bound, api_parameters=bound.api_parameters[1:])
+
+
+def test_api_values_are_rescoped_to_the_pulse_they_are_written_against() -> None:
+    """A value written against one pulse does not follow the node to the next.
+
+    The draft kept the previous pulse's ``hold = 250`` when a pulse with no
+    API parameters replaced it; the form had no row to show that line in,
+    and Start refused it by name -- a refusal the operator could neither
+    see the cause of nor undo.  The editor owns the re-scoping: it writes
+    the text back only when the pulse's vocabulary changes it, so one round
+    trip settles it; a box mid-word, a missing pulse and a frozen editor
+    decide nothing.
+    """
+
+    from PyQt5 import QtCore
+
+    app = ensure_qt_app(["scan-editor-rescope"])
+    editor = scan_plan_editor_factory(device_ports=False, hardware_slots=False)
+    editor.show()
+    drafts: list[dict] = []
+    editor.draft_changed.connect(drafts.append)
+    bound = _bound_sequence()
+
+    # Written against the pulse that declares it: nothing to re-scope.
+    editor.update_projection(_projection(bound, api_values="hold = 250"))
+    assert drafts == []
+    assert editor._values_text == "hold = 250"
+
+    # A pulse with no API parameters: the line is dropped, once.
+    editor.update_projection(_projection(_plain_sequence(), api_values="hold = 250"))
+    assert drafts == [{"values": {"api_values": ""}}]
+    assert editor._values_text == ""
+    editor.update_projection(_projection(_plain_sequence(), api_values=""))
+    assert len(drafts) == 1, "the re-scoped text projects back and settles"
+
+    # A pulse declaring other names keeps only what it declares.
+    drafts.clear()
+    editor.update_projection(
+        _projection(_level_only_sequence(), api_values="hold = 250\nlevel = 1")
+    )
+    assert drafts == [{"values": {"api_values": ""}}], drafts
+    drafts.clear()
+    editor.update_projection(
+        _projection(_level_only_sequence(), api_values="hold = 250\nlevel = -1")
+    )
+    assert drafts == [{"values": {"api_values": "level = -1"}}], drafts
+
+    # No pulse at all decides nothing: the text waits for one.
+    drafts.clear()
+    editor.update_projection({
+        "workspace_resources": {},
+        "form_values": {"plan": "", "api_values": "hold = 250"},
+    })
+    assert drafts == []
+    assert editor._values_text == "hold = 250"
+
+    # A box mid-word is the operator's: the text is not re-read over it.
+    editor.update_projection(_projection(bound, api_values="hold = 250"))
+    hold = editor.values_form.widget_for("hold")
+    hold.setFocus(QtCore.Qt.MouseFocusReason)
+    app.processEvents()
+    hold.lineEdit().setText("2")
+    drafts.clear()
+    editor.update_projection(_projection(bound, api_values="hold = 250"))
+    assert drafts == []
+    editor.close()
+    editor.deleteLater()
+
+
+def test_a_value_for_a_parameter_the_pulse_does_not_declare_is_refused_by_name() -> None:
+    """The backstop behind the editor: a build never runs a form written
+    against another pulse as though it were this one's."""
+
+    from zlc_atom.nodes.scan.plan import apply_api_overrides
+
+    with pytest.raises(ValueError, match="declares no API parameter"):
+        apply_api_overrides(_plain_sequence(), {"hold": 240.0})
+    applied = apply_api_overrides(_bound_sequence(), {"hold": 240.0})
+    assert applied.periods[0].duration == 240

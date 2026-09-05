@@ -474,6 +474,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self._values_text = ""
         self._authored: dict[str, tuple[float, str]] = {}
         self._sequence: object = None
+        self._values_broken = False
         self.add_button.clicked.connect(self._add_axis)
         self.add_manual_button.clicked.connect(self._add_manual_axis)
         # Whether a hand can be waited for is a fact about the NODE, known
@@ -521,6 +522,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self._refresh_summary()
         self._values_text = values_text
         self._reconcile_values(sequence)
+        self._rescope_values()
 
     # ---------------------------------------------------------- API values
 
@@ -602,6 +604,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 self.values_form.reconcile(FormSpec(()), {})
         finally:
             self._loading = False
+        self._values_broken = bool(broken)
         shown = bool(self.values_form.keys) or bool(broken)
         self.values_title.setVisible(shown)
         self.values_form.setVisible(shown)
@@ -610,6 +613,38 @@ class ScanPlanEditor(QtWidgets.QWidget):
             self.values_note.setText(broken)
             return
         self._refresh_values_note(scanned & set(self._authored))
+
+    def _rescope_values(self) -> None:
+        """The projected text, re-read against THIS pulse.
+
+        An API value is a difference written against one pulse: a name it
+        declares, at a value other than the one it carries.  Change the
+        pulse and the text may name parameters the new pulse does not
+        declare -- and the run's build refuses those by name, while the
+        form has no row to show them in, so the operator could neither see
+        the stale line nor remove it.  The draft is this editor's
+        projection, so the editor re-scopes it here: names the pulse does
+        not declare and values equal to its own are dropped, and the text
+        is written back only when that changes it, so one round trip
+        settles it.  Only the TEXT is re-read, never the boxes -- a box may
+        be mid-word, and the boxes speak through ``_value_changed``.  A
+        pulse that could not be read, or one that is not there, decides
+        nothing; nor does an editor its host has frozen.
+        """
+
+        if self._sequence is None or self._values_broken or not self.isEnabled():
+            return
+        current = self._current_overrides()
+        kept = {
+            name: value
+            for name, value in current.items()
+            if name in self.values_form.keys and value != self._authored[name][0]
+        }
+        if kept == current:
+            return
+        self._values_text = api_overrides_to_authored(kept)
+        self.draft_changed.emit({"values": {"api_values": self._values_text}})
+        self._refresh_values_note(set())
 
     def _current_overrides(self) -> dict[str, float]:
         try:
