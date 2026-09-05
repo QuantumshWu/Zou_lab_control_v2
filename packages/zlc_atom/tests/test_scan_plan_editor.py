@@ -146,7 +146,7 @@ def test_a_manual_row_round_trips_through_the_document(points: int) -> None:
 
         reopened = _editor()
         try:
-            reopened._rebuild_rows(text)
+            reopened._reconcile_rows(text)
             restored = next(row for row in reopened._rows if row.manual)
             assert restored.name_edit.text() == "angle"
             assert int(restored.points_spin.value()) == points
@@ -234,9 +234,9 @@ def test_rebuilding_rows_in_one_pass_never_shows_a_window() -> None:
     try:
         for _ in range(3):
             editor._add_axis()
-            editor._rebuild_rows("")
+            editor._reconcile_rows("")
             editor._add_axis()
-            editor._rebuild_rows("")
+            editor._reconcile_rows("")
         for _ in range(30):
             app.processEvents(QtCore.QEventLoop.AllEvents, 10)
         app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
@@ -245,3 +245,134 @@ def test_rebuilding_rows_in_one_pass_never_shows_a_window() -> None:
         editor.close()
         editor.deleteLater()
     assert seen == [], seen
+
+
+def _bound_sequence():
+    """A pulse with two API slots: a duration in ns and a DAC level."""
+
+    from zlc_pulse import (
+        AnalogStep,
+        PulseApiParameter,
+        PulseFieldRef,
+        PulsePeriod,
+        PulsePortSpec,
+        PulseSequence,
+        PulseTarget,
+    )
+
+    target = PulseTarget(
+        lanes=("d0", "d1", "a0", "a1"),
+        ports=(
+            PulsePortSpec("d0", "digital", ("d0",)),
+            PulsePortSpec("d1", "digital", ("d1",)),
+            PulsePortSpec("dac", "dac", ("a0", "a1"), bus_index=0),
+        ),
+    )
+    return PulseSequence(
+        name="bound",
+        target=target,
+        time_step_ns=20,
+        periods=(
+            PulsePeriod("p0", 200, "ns", (1, 0, 0, 0), (AnalogStep("dac", "edge", 1),)),
+            PulsePeriod("p1", 20, "ns", (0, 1, 0, 0)),
+        ),
+        api_parameters=(
+            PulseApiParameter("hold", PulseFieldRef("duration", "p0"), "ns"),
+            PulseApiParameter("level", PulseFieldRef("dac", "p0", "dac"), "value"),
+        ),
+    )
+
+
+def _projection(sequence, plan: str = "", api_values: str = "") -> dict:
+    from types import SimpleNamespace
+
+    return {
+        "workspace_resources": {"pulse_template": SimpleNamespace(value=sequence)},
+        "form_values": {"plan": plan, "api_values": api_values},
+    }
+
+
+def test_api_values_are_reconciled_under_the_operators_wheel() -> None:
+    """A projection follows every draft; the box under the wheel stays.
+
+    The section was rebuilt on every projection, so a wheel turned one
+    notch retired the box it was over and built another -- no focus, no
+    selection, and the unit the operator was reading it in reset to the
+    pulse's own.  The rows are the shared form now: reconciled by key, the
+    focused row is theirs, and a unit re-declared is not a change.
+    """
+
+    from PyQt5 import QtCore
+
+    app = ensure_qt_app(["scan-editor-values"])
+    sequence = _bound_sequence()
+    editor = scan_plan_editor_factory(device_ports=False, hardware_slots=False)
+    editor.show()
+    editor.update_projection(_projection(sequence))
+    app.processEvents()
+    form = editor.values_form
+    assert form.keys == ("hold", "level")
+    hold = form.widget_for("hold")
+    level = form.widget_for("level")
+    assert level.value() == 1 and type(level.value()) is int, "a DAC level is whole codes"
+    assert hold.value() == 200.0 and hold.valueUnit() == "ns"
+    assert form.unit_picker_for("hold") is not None, "a duration has a ladder"
+    assert form.unit_picker_for("level") is None, "a code has none"
+    assert hold.maximum() > 200.0 and hold.minimum() > 0.0, "the board's limit, not a guess"
+
+    # Read the duration in microseconds, then turn the wheel on it.
+    form._shown_unit_picked("hold", "µs")
+    assert hold.text() == "0.2"
+    hold.setFocus(QtCore.Qt.MouseFocusReason)
+    app.processEvents()
+    drafts: list[dict] = []
+    editor.draft_changed.connect(drafts.append)
+    hold.stepBy(1)
+    assert drafts, "a notch is a draft, now, not after a timer"
+    text = drafts[-1]["values"]["api_values"]
+    assert text.startswith("hold = ") and "level" not in text, text
+    # The host projects the draft straight back, and then again with no
+    # draft at all -- a beat -- and the row is the same widget both times,
+    # read in the unit the operator chose.
+    for _ in range(2):
+        editor.update_projection(_projection(sequence, api_values=text))
+        app.processEvents()
+        assert form.widget_for("hold") is hold
+        assert form.unit_picker_for("hold") is not None
+        assert hold.shownUnit() == "µs", hold.shownUnit()
+    assert "1 of 2 set for this run" in editor.values_note.text()
+    editor.close()
+    editor.deleteLater()
+
+
+def test_axis_rows_follow_the_ports_without_being_rebuilt() -> None:
+    """The bench re-projects its ports every time a reading moves; the row
+    the operator is inside is kept and re-pointed, never replaced."""
+
+    from PyQt5 import QtCore
+
+    app = ensure_qt_app(["scan-editor-rows"])
+    editor = _editor()
+    editor.show()
+    editor._add_axis()
+    row = editor._rows[0]
+    row.start_spin.setFocus(QtCore.Qt.MouseFocusReason)
+    app.processEvents()
+    row.start_spin.setValue(-0.25)
+    plan = editor._plan_text
+    # Wider limits from the bench: the same row, a new range, the value
+    # under the cursor untouched.
+    wider = ScanPort(BIAS.port, BIAS.label, BIAS.unit, -2.0, 2.0, -0.5, 0.5)
+    editor._ports = (wider,)
+    editor._reconcile_rows(plan)
+    assert editor._rows[0] is row
+    assert row.start_spin.minimum() == -2.0
+    assert row.start_spin.value() == -0.25
+    # A plan with one more axis adds a row and keeps the first.
+    editor._add_axis()
+    assert editor._rows[0] is row and len(editor._rows) == 2
+    # And a shorter plan retires only the row past its end.
+    editor._reconcile_rows(plan)
+    assert editor._rows == [row]
+    editor.close()
+    editor.deleteLater()

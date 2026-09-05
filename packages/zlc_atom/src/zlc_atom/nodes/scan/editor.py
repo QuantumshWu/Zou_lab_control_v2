@@ -42,10 +42,12 @@ from zlc_ui.fluent import (
     FluentSpinBox,
     fill_grouped_choice_combo,
     fluent_unit_picker,
+    signals_blocked,
 )
+from zlc_ui.form import FluentParameterForm, FormFieldProps, FormSpec, being_edited
 
 from zlc_data.units import UnitError
-from zlc_pulse import authored_api_entries, field_label
+from zlc_pulse import api_parameter_columns_for, authored_api_entries, field_label
 
 from .plan import (
     MANUAL_PARAM_FAMILY,
@@ -118,12 +120,7 @@ class _AxisRow(QtWidgets.QWidget):
         self._fill_ports(None if axis is None else axis.port)
         self._apply_port_limits()
         if axis is not None:
-            self.start_spin.setValue(axis.values[0])
-            self.stop_spin.setValue(axis.values[-1])
-            self.points_spin.setValue(len(axis.values))
-            if not _uniform(axis.values):
-                self._custom_values = axis.values
-                self.custom_label.setText("custom values")
+            self._show_values(axis)
         else:
             port = self._ports[0] if self._ports else None
             if port is not None:
@@ -196,9 +193,10 @@ class _AxisRow(QtWidgets.QWidget):
     def _mount_unit_picker(self, unit: str) -> None:
         """Offer this port's other spellings, or just name the one it has.
 
-        The picker is rebuilt whenever the port changes, because the ladder
-        belongs to the port's unit: a row that swept microseconds and is
-        pointed at a DAC code has no microseconds left to offer.
+        The ladder belongs to the port's unit: a row that swept microseconds
+        and is pointed at a DAC code has no microseconds left to offer.  A
+        picker already there is re-pointed in place; one is built or retired
+        only when the port's unit gains or loses its ladder.
 
         Both spins go on holding the PORT's own number.  An axis is authored
         in the unit the plan will run in, so choosing a spelling here changes
@@ -207,11 +205,15 @@ class _AxisRow(QtWidgets.QWidget):
         """
 
         layout = self.layout()
-        if self.unit_picker is not None:
-            layout.removeWidget(self.unit_picker)
-            retire_widget(self.unit_picker)
-            self.unit_picker = None
         symbol = str(unit).strip()
+        picker = self.unit_picker
+        if picker is not None:
+            if fluent_unit_picker(symbol) is not None:
+                picker.set_unit(symbol)
+                return
+            layout.removeWidget(picker)
+            retire_widget(picker)
+            self.unit_picker = None
         picker = fluent_unit_picker(symbol, self)
         if picker is None:
             self.unit_label.setText("" if symbol in ("", "1") else symbol)
@@ -221,6 +223,37 @@ class _AxisRow(QtWidgets.QWidget):
         picker.unit_picked.connect(self._shown_unit_picked)
         layout.insertWidget(self._unit_slot, picker)
         self.unit_picker = picker
+
+    def _show_values(self, axis: ScanAxis) -> None:
+        """Put this axis's values on the row: its ends, its count, or the
+        fact that they are a list nobody's ends describe."""
+
+        with signals_blocked(self.start_spin, self.stop_spin, self.points_spin):
+            self.start_spin.setValue(axis.values[0])
+            self.stop_spin.setValue(axis.values[-1])
+            self.points_spin.setValue(len(axis.values))
+        self._custom_values = None if _uniform(axis.values) else axis.values
+        self.custom_label.setText("" if self._custom_values is None else "custom values")
+
+    def reconcile(self, ports, axis: ScanAxis) -> None:
+        """Bring this row to ``axis`` over ``ports``, touching only what differs.
+
+        The row the operator is inside is theirs: its port, range and
+        picker follow the bench, its values do not move under their cursor.
+        """
+
+        ports = tuple(ports)
+        if ports != self._ports:
+            self._ports = ports
+            self._fill_ports(axis.port)
+            self._apply_port_limits()
+        elif str(self.port_combo.currentData()) != axis.port:
+            self._fill_ports(axis.port)
+            self._apply_port_limits()
+        if being_edited(self):
+            return
+        if self.axis() != axis:
+            self._show_values(axis)
 
     def _shown_unit_picked(self, symbol: str) -> None:
         """Read both ends in the chosen spelling; the swept values do not move."""
@@ -314,12 +347,7 @@ class _ManualAxisRow(QtWidgets.QWidget):
         self._custom_values: tuple[float, ...] | None = None
         if axis is not None:
             self.name_edit.setText(manual_axis_name(axis.port))
-            self.start_spin.setValue(axis.values[0])
-            self.stop_spin.setValue(axis.values[-1])
-            self.points_spin.setValue(len(axis.values))
-            if not _uniform(axis.values):
-                self._custom_values = axis.values
-                self.custom_label.setText("custom values")
+            self._show_values(axis)
         else:
             # A row the operator can run without first naming it: an
             # unnamed axis is not a plan, and an empty box is a form that
@@ -337,6 +365,21 @@ class _ManualAxisRow(QtWidgets.QWidget):
         self._custom_values = None
         self.custom_label.setText("")
         self.edited.emit()
+
+    _show_values = _AxisRow._show_values
+
+    def reconcile(self, ports, axis: ScanAxis) -> None:
+        """Bring this row to ``axis``; a hand's row has no port to follow."""
+
+        del ports
+        if being_edited(self):
+            return
+        name = manual_axis_name(axis.port)
+        if self.name_edit.text().strip() != name:
+            with signals_blocked(self.name_edit):
+                self.name_edit.setText(name)
+        if self.axis() != axis:
+            self._show_values(axis)
 
     @property
     def manual(self) -> bool:
@@ -369,14 +412,6 @@ class ScanPlanEditor(QtWidgets.QWidget):
         manual_axes: bool = False,
     ) -> None:
         super().__init__(parent)
-        #: A wheel or an arrow key moves a value repeatedly; the draft is
-        #: written when it stops moving.  Short enough that letting go and
-        #: reading the note feels immediate, long enough that a turn of the
-        #: wheel is one write.
-        self._values_settled = QtCore.QTimer(self)
-        self._values_settled.setSingleShot(True)
-        self._values_settled.setInterval(150)
-        self._values_settled.timeout.connect(self._emit_values)
         self._device_ports = bool(device_ports)
         self._hardware_slots = bool(hardware_slots)
         # Only a node that can STOP between plays can offer one, so the
@@ -419,9 +454,15 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self.values_title = QtWidgets.QLabel("API values")
         self.values_title.setStyleSheet("font-weight: 600;")
         column.addWidget(self.values_title)
-        self.values_grid = QtWidgets.QGridLayout()
-        self.values_grid.setContentsMargins(0, 0, 0, 0)
-        column.addLayout(self.values_grid)
+        # THE SHARED FORM, RECONCILED.  This section was a grid rebuilt from
+        # scratch on every projection -- and a projection follows every
+        # draft -- so the box under the operator's wheel was retired and
+        # replaced a notch at a time, taking its focus, its selection and
+        # the unit they were reading it in with it.  The form diffs by key:
+        # a row whose field is unchanged keeps its widget.
+        self.values_form = FluentParameterForm(FormSpec(()))
+        self.values_form.changed.connect(self._value_changed)
+        column.addWidget(self.values_form)
         self.values_note = QtWidgets.QLabel("")
         self.values_note.setWordWrap(True)
         column.addWidget(self.values_note)
@@ -432,7 +473,6 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self._plan_text = ""
         self._values_text = ""
         self._authored: dict[str, tuple[float, str]] = {}
-        self._value_rows: dict[str, QtWidgets.QWidget] = {}
         self._sequence: object = None
         self.add_button.clicked.connect(self._add_axis)
         self.add_manual_button.clicked.connect(self._add_manual_axis)
@@ -476,11 +516,11 @@ class ScanPlanEditor(QtWidgets.QWidget):
             self._ports = tuple(ports)
         if ports_changed or plan_text != self._plan_text:
             self._plan_text = plan_text
-            self._rebuild_rows(plan_text)
+            self._reconcile_rows(plan_text)
         self.add_button.setEnabled(bool(self._ports))
         self._refresh_summary()
         self._values_text = values_text
-        self._rebuild_values(sequence)
+        self._reconcile_values(sequence)
 
     # ---------------------------------------------------------- API values
 
@@ -494,98 +534,82 @@ class ScanPlanEditor(QtWidgets.QWidget):
             if axis.port.startswith(PULSE_PARAM_FAMILY)
         }
 
-    def _rebuild_values(self, sequence: object) -> None:
-        """One box per API slot this run sets but does not sweep."""
+    def _reconcile_values(self, sequence: object) -> None:
+        """One row per API slot this run sets but does not sweep."""
 
         parameters = tuple(getattr(sequence, "api_parameters", ()) or ())
         scanned = self._scanned_parameters()
-        offered = tuple(
-            parameter
-            for parameter in parameters
-            if parameter.parameter_id not in scanned
-        )
         self._sequence = sequence
         broken = ""
+        columns = {}
         try:
             self._authored = authored_api_entries(sequence) if parameters else {}
+            columns = {
+                column.name: column
+                for column in (api_parameter_columns_for(sequence) if parameters else ())
+            }
         except ValueError as error:
             # A pulse saved with a binding whose field was later cleared.  Say
             # so, rather than leaving a Qt slot on a raise.
             self._authored = {}
-            offered = ()
             broken = str(error)
+        offered = (
+            ()
+            if broken
+            else tuple(
+                parameter
+                for parameter in parameters
+                if parameter.parameter_id not in scanned
+            )
+        )
         overrides = self._current_overrides()
-
+        fields = []
+        values: dict[str, object] = {}
+        for parameter in offered:
+            name = parameter.parameter_id
+            authored, unit = self._authored[name]
+            column = columns[name]
+            # A DAC code comes in whole codes; everything else is a quantity
+            # in the unit the slot declared.  The box holds the pulse's own
+            # number whatever spelling is on screen, so the override written
+            # below is in that unit and nothing converts at this editor's
+            # edge.  The range is what the board can be given -- the
+            # column's limit -- not a number guessed here.
+            code = unit == "value"
+            number = float(overrides.get(name, authored))
+            values[name] = int(number) if code else number
+            fields.append(
+                FormFieldProps(
+                    key=name,
+                    kind="int" if code else "float",
+                    label=field_label(sequence, parameter.field_ref),
+                    default=values[name],
+                    required=True,
+                    unit="" if code else unit,
+                    description=name,
+                    minimum=int(column.limit_lo) if code else column.limit_lo,
+                    maximum=int(column.limit_hi) if code else column.limit_hi,
+                )
+            )
         self._loading = True
         try:
-            # RETIRED, not unparented.  This rebuild runs twice in one pass
-            # whenever the draft it writes re-projects it, and a row added
-            # to the visible grid and unparented in the same pass is shown
-            # by the queued show AFTER losing its parent -- as its own
-            # window, for one frame.  That was the flash at Add axis.
-            while self.values_grid.count():
-                item = self.values_grid.takeAt(0)
-                widget = item.widget()
-                if widget is not None:
-                    retire_widget(widget)
-            self._value_rows = {}
-            for row, parameter in enumerate(offered):
-                name = parameter.parameter_id
-                authored, unit = self._authored[name]
-                label = QtWidgets.QLabel(field_label(sequence, parameter.field_ref))
-                label.setToolTip(name)
-                box = FluentDoubleSpinBox()
-                # A DAC code comes in whole codes; everything else is a
-                # quantity, and how many digits of it are worth reading is
-                # the formatter's question, not a number to guess here.
-                box.setDecimals(0 if unit == "value" else 323)
-                box.setRange(-1e12, 1e12)
-                # The slot said what its number is in.  The box holds that
-                # number whatever spelling is on screen, so the override
-                # written down below is in the pulse's own unit and no
-                # conversion crosses this editor's edge in either direction.
-                box.setValueUnit("" if unit == "value" else unit)
-                box.setValue(float(overrides.get(name, authored)))
-                # ONE GESTURE, ONE DRAFT.  Every intermediate value used to
-                # be written down, and a written draft is re-projected by
-                # the console that holds it -- so a wheel turned through ten
-                # values paid for ten projections and stuttered a notch at a
-                # time.  What the operator MEANT is where the wheel came to
-                # rest, which is what settling on the last change says.
-                box.valueChanged.connect(self._values_touched)
-                box.editingFinished.connect(self._emit_values)
-                self.values_grid.addWidget(label, row, 0)
-                self.values_grid.addWidget(box, row, 1)
-                self.values_grid.addWidget(
-                    self._unit_cell(box, unit), row, 2
-                )
-                self._value_rows[name] = box
+            try:
+                self.values_form.reconcile(FormSpec(tuple(fields)), values)
+            except ValueError as error:
+                # A value outside the limit the pulse's own board states:
+                # the pulse cannot be authored as it is, and the note says so.
+                broken = str(error)
+                self.values_form.reconcile(FormSpec(()), {})
         finally:
             self._loading = False
-        shown = bool(offered) or bool(broken)
+        shown = bool(self.values_form.keys) or bool(broken)
         self.values_title.setVisible(shown)
+        self.values_form.setVisible(shown)
         self.values_note.setVisible(shown)
         if broken:
             self.values_note.setText(broken)
             return
         self._refresh_values_note(scanned & set(self._authored))
-
-    @staticmethod
-    def _unit_cell(box, unit: str) -> QtWidgets.QWidget:
-        """The cell beside a slot's box: its unit, pickable when it has a ladder.
-
-        A slot whose unit is one spelling only -- a DAC code, a count -- has
-        nothing to choose between and says its unit plainly.  One that does
-        gets the picker, which is the only way a prefix is ever asked for now
-        that a box takes digits alone.
-        """
-
-        symbol = "" if unit == "value" else str(unit).strip()
-        picker = fluent_unit_picker(symbol)
-        if picker is None:
-            return QtWidgets.QLabel(str(unit))
-        picker.unit_picked.connect(box.setShownUnit)
-        return picker
 
     def _current_overrides(self) -> dict[str, float]:
         try:
@@ -593,15 +617,21 @@ class ScanPlanEditor(QtWidgets.QWidget):
         except ValueError:
             return {}
 
-    def _values_touched(self) -> None:
-        """A value moved; write the draft once the moving stops."""
+    def _value_changed(self, _key: str) -> None:
+        """A value moved: the draft says so now.
+
+        A timer used to wait for the wheel to stop, because every write
+        rebuilt this section; a reconcile costs nothing, and writing later
+        put the round trip after the box's own select-all, which is what
+        cleared the selection under the wheel and made it blink.
+        """
 
         if self._loading:
             return
-        self._values_settled.start()
+        self._emit_values()
 
-    def _emit_values(self) -> None:
-        """Only what this run sets differently is written down.
+    def _overrides(self) -> dict[str, float]:
+        """Only what this run sets differently.
 
         A box left at the value the pulse carries is not an override: the
         pulse's own number is already the workspace's current one, and
@@ -609,28 +639,28 @@ class ScanPlanEditor(QtWidgets.QWidget):
         recalibration.
         """
 
-        self._values_settled.stop()
-        if self._loading:
-            return
-        overrides = {
-            name: box.value()
-            for name, box in self._value_rows.items()
-            if box.value() != self._authored[name][0]
-        }
-        self._values_text = api_overrides_to_authored(overrides)
+        overrides: dict[str, float] = {}
+        for name in self.values_form.keys:
+            try:
+                value = self.values_form.read_value(name)
+            except ValueError:
+                # Half-typed: not a number yet, so not an override yet.
+                continue
+            if value != self._authored[name][0]:
+                overrides[name] = float(value)
+        return overrides
+
+    def _emit_values(self) -> None:
+        self._values_text = api_overrides_to_authored(self._overrides())
         self.draft_changed.emit({"values": {"api_values": self._values_text}})
         self._refresh_values_note(set())
 
     def _refresh_values_note(self, scanned: set[str]) -> None:
         parts = []
-        overridden = sum(
-            1
-            for name, box in self._value_rows.items()
-            if box.value() != self._authored[name][0]
-        )
-        if self._value_rows:
+        offered = len(self.values_form.keys)
+        if offered:
             parts.append(
-                f"{overridden} of {len(self._value_rows)} set for this run; "
+                f"{len(self._overrides())} of {offered} set for this run; "
                 "the rest run what the pulse carries."
             )
         if scanned:
@@ -642,34 +672,63 @@ class ScanPlanEditor(QtWidgets.QWidget):
 
     # ------------------------------------------------------------ internals
 
-    def _rebuild_rows(self, plan_text: str) -> None:
+    def _reconcile_rows(self, plan_text: str) -> None:
+        """The axis rows brought to the plan, kept wherever they can be.
+
+        Retiring every row and building them again rebuilt the row under
+        the operator's cursor whenever the ports changed beneath the plan
+        -- which a bench does every time a device reading moves.  A row of
+        the right kind at its position is kept and re-pointed; only rows
+        past the plan's end go, and only missing ones are built.
+        """
+
         self._loading = True
         try:
-            for row in self._rows:
-                retire_widget(row)
-            self._rows = []
             axes: tuple[ScanAxis, ...] = ()
             if plan_text.strip():
                 try:
                     axes = ScanPlan.from_tree(json.loads(plan_text)).axes
                 except (ValueError, TypeError, json.JSONDecodeError):
                     axes = ()
-            for axis in axes:
-                if axis.port.startswith(MANUAL_PARAM_FAMILY):
-                    self._attach_manual_row(axis)
-                else:
-                    self._attach_row(axis)
+            kept: list[QtWidgets.QWidget] = []
+            for position, axis in enumerate(axes):
+                manual = axis.port.startswith(MANUAL_PARAM_FAMILY)
+                row = self._rows[position] if position < len(self._rows) else None
+                if row is not None and row.manual == manual:
+                    row.reconcile(self._ports, axis)
+                    kept.append(row)
+                    continue
+                if row is not None:
+                    self.rows_layout.removeWidget(row)
+                    retire_widget(row)
+                row = self._build_manual_row(axis) if manual else self._build_row(axis)
+                self.rows_layout.insertWidget(position, row)
+                kept.append(row)
+            for row in self._rows[len(axes):]:
+                self.rows_layout.removeWidget(row)
+                retire_widget(row)
+            self._rows = kept
             if self._only_port is not None and not self._rows and self._ports:
                 self._attach_row(None)
         finally:
             self._loading = False
 
-    def _attach_row(self, axis: ScanAxis | None) -> None:
+    def _build_row(self, axis: ScanAxis | None) -> _AxisRow:
         row = _AxisRow(self._ports, axis, self)
         if self._only_port is not None:
             row.remove_button.hide()
         row.edited.connect(self._emit_plan)
         row.remove_requested.connect(self._remove_row)
+        return row
+
+    def _build_manual_row(self, axis: ScanAxis | None) -> _ManualAxisRow:
+        row = _ManualAxisRow(axis, self._default_manual_name(), self)
+        row.edited.connect(self._emit_plan)
+        row.remove_requested.connect(self._remove_row)
+        return row
+
+    def _attach_row(self, axis: ScanAxis | None) -> None:
+        row = self._build_row(axis)
         self._rows.append(row)
         self.rows_layout.addWidget(row)
 
@@ -685,9 +744,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
         return f"manual {ordinal}"
 
     def _attach_manual_row(self, axis: ScanAxis | None) -> None:
-        row = _ManualAxisRow(axis, self._default_manual_name(), self)
-        row.edited.connect(self._emit_plan)
-        row.remove_requested.connect(self._remove_row)
+        row = self._build_manual_row(axis)
         # Above every machine row, because that is where it runs: the
         # displayed order IS the nesting order, and a manual axis nested
         # inside a fired table is not a thing the bench can do.
