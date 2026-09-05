@@ -37,7 +37,8 @@ from zlc_ui.fluent import (
     scaled_px,
     show_fluent_popup_for_anchor,
     signals_blocked,
-)
+    FONT,
+    fluent_font_size,)
 from zlc_ui.form.form import FormChoice, FormFieldProps, FormSpec
 from zlc_ui.form.qt_form import FluentParameterForm
 
@@ -247,6 +248,11 @@ class PanelCardView(FluentGroupBox):
         self._settings_scroll: FluentScrollArea | None = None
         self._settings_body: QtWidgets.QWidget | None = None
         self._settings_form: FluentParameterForm | None = None
+        #: What the card's status dot says, kept so the Setting frame can say
+        #: it too, whenever it is opened.
+        self._status_text = ""
+        self._status_error = False
+        self._settings_status: QtWidgets.QLabel | None = None
         #: The form's required content width in device pixels.  Carried to the
         #: popup sizer explicitly: the scroll body stays a width CONSUMER (its
         #: minimum is never pinned), so a screen-clamped popup reflows the
@@ -898,9 +904,33 @@ class PanelCardView(FluentGroupBox):
         """
 
         value = str(text)
+        self._status_text = value
+        self._status_error = bool(error)
         self.status_dot.set_color(RED if error else GREY)
         self.status_dot.setToolTip(value)
         self.status_dot.setVisible(bool(value))
+        self._project_settings_status()
+
+    def _project_settings_status(self) -> None:
+        """The same condition, written where the operator goes to fix it.
+
+        A red dot with a tooltip names the panel; it does not tell the
+        operator, who has opened Setting to put it right, WHAT is wrong.
+        The condition heads the Setting frame in the dot's colour, and
+        leaves with it.
+        """
+
+        label = self._settings_status
+        if label is None:
+            return
+        label.setText(self._status_text)
+        label.setStyleSheet(
+            f'QLabel {{ color: {RED if self._status_error else GREY}; '
+            f'font: {fluent_font_size()}pt "{FONT}"; background: transparent; '
+            f"border: none; }}"
+        )
+        label.setVisible(bool(self._status_text))
+        self._sync_settings_body_size()
 
     def set_selectors_enabled(self, enabled: bool) -> None:
         """Give the plot all pointer gestures when On and none when Off."""
@@ -1242,6 +1272,11 @@ class PanelCardView(FluentGroupBox):
             body_layout = QtWidgets.QVBoxLayout(body)
             body_layout.setContentsMargins(0, 0, pad, 0)
             body_layout.setSpacing(max(1, scaled_px(5)))
+            status = FluentLabel("", body)
+            status.setWordWrap(True)
+            status.hide()
+            body_layout.addWidget(status)
+            self._settings_status = status
             self._settings_form = FluentParameterForm(
                 self._form_spec(),
                 self._form_values(),
@@ -1273,6 +1308,7 @@ class PanelCardView(FluentGroupBox):
                 popup, self.settings_button
             )
             self._settings_drag_handle = drag_handle
+            self._project_settings_status()
             self._settings_close_button = close_button
             self._settings_scroll = scroll
             self._settings_body = body

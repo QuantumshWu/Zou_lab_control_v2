@@ -841,3 +841,31 @@ def test_a_growing_axis_does_not_rebuild_the_fate_popup() -> None:
     )
     form.reconcile(changed, {"fate": "facet"})
     assert cleared["count"] == 1, "a new choice list must refill the popup"
+
+
+def test_the_setting_frame_says_the_panels_standing_condition() -> None:
+    """What the card's dot says is written where the operator goes to fix it.
+
+    A red dot with a tooltip names the panel; an operator who opens Setting
+    to put it right needs the condition in front of them.  It heads the
+    frame in the dot's colour, follows every change, and leaves with it.
+    """
+
+    _run_qt(_SURFACE_PROLOGUE + """
+from zlc_ui.fluent import GREY, RED
+card.set_status('its plot surface has been travelling for 37 s', error=True)
+card._open_settings()
+app.processEvents()
+label = card._settings_status
+assert label is not None
+assert not label.isHidden()
+assert label.text() == 'its plot surface has been travelling for 37 s'
+assert RED.upper() in label.styleSheet().upper()
+card.set_status('waiting for a signal', error=False)
+assert label.text() == 'waiting for a signal'
+assert GREY.upper() in label.styleSheet().upper()
+card.set_status('', error=False)
+app.processEvents()
+assert label.isHidden() and label.text() == ''
+print('setting status ok')
+""")
