@@ -3211,6 +3211,40 @@ def test_the_grid_a_field_is_snapped_to_is_in_that_field_s_unit(sequence) -> Non
         assert field.validator_lo == pytest.approx(expected), unit
 
 
+def test_a_number_shown_in_a_field_is_the_number_the_document_holds(sequence) -> None:
+    """What the box shows IS what gets committed, so it may not be rounded.
+
+    ``_commit_duration`` parses the text in the box and emits that; so does
+    the delay row.  Formatted with %g -- six significant digits, exponential
+    above them -- an authored 1.0000005 ms was drawn as "1" and a 123456789 ns
+    delay as "1.23457e+08", and the first time an operator touched that period
+    the document quietly became a different pulse.  The project has one
+    formatter that never rounds; this is why it is not optional here.
+    """
+
+    from zlc_pulse import PulsePeriod, PulseSequence
+    from zlc_workbench.pulse_editor import project_schedule
+
+    safe = (0,) * len(sequence.target.raw_lanes)
+    # Every one of these is on the 20 ns grid the model enforces, and every
+    # one of them needs more than the six significant digits %g keeps.
+    for authored, unit in (
+        (123456780.0, "ns"),
+        (10.00002, "ms"),
+        (1.00002, "ms"),
+        (0.1, "ms"),
+    ):
+        one = PulseSequence(
+            name="t",
+            target=sequence.target,
+            time_step_ns=20.0,
+            periods=(PulsePeriod("p1", authored, unit, safe),),
+        )
+        shown = project_schedule(one).periods[0].duration.text
+        assert float(shown) == authored, (shown, authored, unit)
+        assert "e" not in shown.lower(), shown
+
+
 def test_the_edit_page_says_how_many_points_will_be_played(presenter, sequence) -> None:
     """Slots is half the question; the other half is what will actually run."""
 

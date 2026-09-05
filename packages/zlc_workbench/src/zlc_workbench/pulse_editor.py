@@ -418,7 +418,12 @@ def project_period(
         period_id=period.period_id,
         name=period.name or period.period_id,
         duration=FieldVM(
-            text=f"{period.duration:g}",
+            # DISPLAYED, THEN TYPED BACK.  ``_commit_duration`` parses what
+            # is in the box, so the way this number is written IS the number
+            # the document keeps: %g rounds at six significant digits and
+            # goes exponential above them, which silently rewrote an authored
+            # duration the first time anyone touched its period.
+            text=format_quantity(float(period.duration), "1"),
             binding_kind=duration_binding or "",
             binding_number=duration_number or 0,
             validator_kind=VALIDATOR_FLOAT,
@@ -497,10 +502,11 @@ def project_schedule(
         document_generation=int(generation),
         revision=int(revision),
         document_name=sequence.name if sequence is not None else "(no pulse)",
-        clock_text=f"{step_ns:g} ns/tick",
+        clock_text=f"{format_quantity(float(step_ns), '1')} ns/tick",
         total_text=_readable(total_ns) if sequence is not None else "",
         total_tooltip=(
-            f"{total_ns:g} ns over {len(periods)} period(s)"
+            f"{format_quantity(float(total_ns), '1')} ns over "
+            f"{len(periods)} period(s)"
             if sequence is not None
             else ""
         ),
@@ -534,7 +540,9 @@ def project_schedule(
                 port_key=port.key,
                 value=FieldVM(
                     text=(
-                        f"{_delay_of(sequence, port.key)[0]:g}"
+                        format_quantity(
+                            float(_delay_of(sequence, port.key)[0]), "1"
+                        )
                         if sequence is not None
                         else "0"
                     ),
@@ -2049,7 +2057,7 @@ class PulseEditorPresenter:
         where = (
             f"{_connection_name(*self.connection)} - {len(board.target.ports)} ports, "
             f"{len(board.target.raw_lanes)} lanes, "
-            f"{board.clock_hz / 1e6:g} MHz"
+            f"{format_quantity(board.clock_hz / 1e6, '1')} MHz"
         )
         self._show_connection(where)
         self.refresh()
@@ -3979,7 +3987,7 @@ class PulseEditorPresenter:
             return
         point = int(cursor) % len(rows)
         values = ", ".join(
-            f"{name} = {float(value):g}"
+            f"{name} = {format_quantity(float(value), '1')}"
             for name, value in zip(names, rows[point], strict=True)
         )
         self._scan_progress = (
@@ -4479,7 +4487,10 @@ class PulseEditorPresenter:
         visible = sum(1 for port in ports if port.visible)
         self.view.set_schedule_summary(
             total_text=_readable(total_ns),
-            total_tooltip=f"{total_ns:g} ns over {len(self.sequence.periods)} period(s)",
+            total_tooltip=(
+                f"{format_quantity(float(total_ns), '1')} ns over "
+                f"{len(self.sequence.periods)} period(s)"
+            ),
             period_count=len(self.sequence.periods),
             visible_text=f"{visible}/{len(ports)} ports",
             summary_text=(
