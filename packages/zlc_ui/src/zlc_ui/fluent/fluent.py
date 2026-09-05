@@ -2483,10 +2483,18 @@ class FluentComboBox(QtWidgets.QAbstractButton):
 
     def _collapsed_content_width(self) -> int:
         if self._cached_content_width is None:
-            metrics = QtGui.QFontMetrics(self._collapsed_font())
-            measure = getattr(metrics, "horizontalAdvance", metrics.width)
+            # CEILED, from the fractional advance.  The painter elides with
+            # the text engine's fractional width, and the integer metric
+            # rounds it -- so a box sized to exactly its widest item, which
+            # is what a Fixed-width combo is, was a fraction of a pixel too
+            # narrow for that item and painted it with an ellipsis: a power
+            # picker sized to "dBm" showed "dB...".
+            metrics = QtGui.QFontMetricsF(self._collapsed_font())
             self._cached_content_width = max(
-                (measure(text) for text in self._collapsed_text_candidates()),
+                (
+                    int(math.ceil(metrics.horizontalAdvance(text)))
+                    for text in self._collapsed_text_candidates()
+                ),
                 default=0,
             )
         return self._cached_content_width
