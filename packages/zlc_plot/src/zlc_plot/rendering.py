@@ -49,7 +49,7 @@ from ._selector_scene import (
     SelectorSceneStyle,
     SelectorTarget,
 )
-from .layout import SurfacePlan, facet_focus_box, fitted_facet_cell_title
+from .layout import SurfacePlan, facet_focus_box, facet_focus_room, fitted_facet_cell_title
 from .parameters import RenderEffect
 from .primitives import ImagePointOverlay, PointStatus, PulseTimelineData
 from .selectors import (
@@ -72,7 +72,13 @@ from .specs import (
 )
 from .state import DisplayState
 from .style import PlotStyleConfig, style_context
-from .ticks import apply_declared_ticks, apply_smart_ticks
+from .ticks import (
+    apply_declared_ticks,
+    apply_smart_ticks,
+    compact_number,
+    declare_colorbar_ticks,
+    declare_room,
+)
 from ._validation import readonly_copy
 
 
@@ -1171,47 +1177,6 @@ def _histogram_vertices(edges: np.ndarray, counts: np.ndarray) -> np.ndarray:
     return vertices
 
 
-def _compact_scientific(value: float, *, length: int | None = None) -> str:
-    """As many significant digits of one number as ``length`` characters allow.
-
-    NOT engineering notation, which is what it was called: it produces %g and
-    falls back to %e, so it prints 1.2e+06 where an engineering form would
-    print 1.2 M.  The name said the opposite of what it did for as long as it
-    existed.
-
-    This is also not :func:`zlc_data.units.format_quantity`, and must not
-    become it.  That one shows a QUANTITY -- every digit the value has, with
-    the unit it is in -- because a box an operator reads a device through may
-    not round.  This one is for a label with a character budget in a crowded
-    plot (a colour-bar end, a fit parameter, a threshold), where fitting is
-    the whole point and the unit is already written elsewhere.  Two jobs, two
-    rules; the mistake would be to give either one the other's.
-    """
-
-    if not math.isfinite(float(value)):
-        return "nan"
-    numeric = float(value)
-
-    def normalized(text: str) -> str:
-        if "e" not in text.lower():
-            return text
-        mantissa, exponent = text.lower().split("e")
-        return f"{mantissa.rstrip('0').rstrip('.')}e{int(exponent)}"
-
-    if length is None:
-        general = f"{numeric:.4g}"
-        return general if "e" not in general.lower() else normalized(f"{numeric:.1e}")
-    maximum = max(1, int(length))
-    for significant in range(4, 0, -1):
-        general = normalized(f"{numeric:.{significant}g}")
-        if len(general) <= maximum:
-            return general
-        scientific = normalized(f"{numeric:.{significant - 1}e}")
-        if len(scientific) <= maximum:
-            return scientific
-    return normalized(f"{numeric:.0e}")
-
-
 _ENVELOPE_MIN_POINTS_PER_COLUMN = 4
 _ENVELOPE_MIN_COLUMNS = 64
 _ENVELOPE_MAX_COLUMNS = 4096
@@ -1342,14 +1307,14 @@ def _facet_cell_title(cell: Any, fallback: int) -> str:
         if math.isfinite(numeric):
             raw = str(value)
             if raw in title:
-                title = title.replace(raw, _compact_scientific(numeric), 1)
+                title = title.replace(raw, compact_number(numeric), 1)
     return title
 
 
 def _fit_parameter_value_text(parameter: Any) -> str:
     """Format one fitted value for renderer-owned text."""
 
-    return _compact_scientific(float(parameter.value))
+    return compact_number(float(parameter.value))
 
 
 class _FitAnnotationDetail(str, Enum):
@@ -1932,6 +1897,7 @@ class MatplotlibRenderer:
         axes: dict[str, list[Any]] = {}
         for axes_plan in plan.axes:
             axis = figure.add_axes(axes_plan.box.matplotlib_bounds())
+            declare_room(axis, axes_plan.room)
             axis.set_gid(
                 f"{axes_plan.role}:{axes_plan.cell_index}"
                 if axes_plan.cell_index is not None
@@ -7445,9 +7411,10 @@ class MatplotlibRenderer:
             axes.add_collection(collection)
             self._artists[key] = collection
             # This rail's numbers are a bound, not a coordinate: counts per
-            # bin, always from zero.  Two ticks say all of it, at every
-            # preset -- the crowding ladder gave it two on a wide panel and
-            # none on a narrow one, which is a layout accident.
+            # bin, always from zero.  Its two ticks are declared, zero and
+            # the bound, and the shared ladder decides which fit the room
+            # the layout gave the strip: the bound always, the zero when it
+            # clears.
             apply_declared_ticks(
                 axes,
                 "x",
@@ -7829,13 +7796,10 @@ class MatplotlibRenderer:
                     previous_colorbar_state is None
                     or previous_colorbar_state[1] != (vmin, vmax)
                 ):
-                    colorbar.set_ticks((vmin, vmax))
-                    label_chars = policy.colorbar_endpoint_label_chars
-                    colorbar.set_ticklabels(
-                        (
-                            _compact_scientific(vmin, length=label_chars),
-                            _compact_scientific(vmax, length=label_chars),
-                        )
+                    declare_colorbar_ticks(
+                        colorbar,
+                        label_pt=self.style.fonts.tick_pt,
+                        label_chars=policy.colorbar_endpoint_label_chars,
                     )
                 self._artists[state_key] = colorbar_state
             # Only the colorbar parts whose pixels can change belong above
@@ -7857,14 +7821,9 @@ class MatplotlibRenderer:
         # With both writing, each frame reinstalled two locators per cell and
         # reset their tick artists, undoing the "install once" guarantee.
         if self._facet_focus_index is not None or self.semantic_spec is self.spec:
-            # An image's data axes has the distribution rail beside it, not a
-            # margin: an x edge label would print over the rail's own first
-            # one.  Above and below it there is only the figure's margin, so
-            # the y axis keeps the ends of its range.
-            apply_smart_ticks(
-                axes, "x", label_pt=self.style.fonts.tick_pt, prune_edges=True
-            )
-            apply_smart_ticks(axes, "y", label_pt=self.style.fonts.tick_pt)
+            # What lies past each edge -- the rail beside it, the margins
+            # above and below -- is the plan's room, already on the axes.
+            apply_smart_ticks(axes, label_pt=self.style.fonts.tick_pt)
 
     def _update_rolling(
         self,
@@ -8133,6 +8092,7 @@ class MatplotlibRenderer:
                 if item.role == "image":
                     continue
                 axis = self._figure.add_axes(item.box.matplotlib_bounds())
+                declare_room(axis, item.room)
                 axis.set_gid(item.role)
                 self._axes.setdefault(item.role, []).append(axis)
         self._facet_focus_chrome_index = index
@@ -8372,6 +8332,8 @@ class MatplotlibRenderer:
         )
         if self._facet_focus_index is None:
             for index, axis in enumerate(axes):
+                # A cell moved back into the grid owns the grid's room again.
+                declare_room(axis, self.plan.axes[index].room)
                 bounds = self._pixel_quantized_bounds(
                     axis,
                     self.plan.axes[index].box.matplotlib_bounds(),
@@ -8399,12 +8361,14 @@ class MatplotlibRenderer:
         selected_index = self._facet_focus_index
         if focus_plans is not None:
             # A focused image cell IS the standalone Image surface: the cell
-            # takes the split's image box, the side axes carry its chrome.
-            bounds = next(
-                item.box for item in focus_plans if item.role == "image"
-            ).matplotlib_bounds()
+            # takes the split's image box and its room, the side axes carry
+            # its chrome.
+            image_plan = next(item for item in focus_plans if item.role == "image")
+            bounds = image_plan.box.matplotlib_bounds()
+            declare_room(axes[selected_index], image_plan.room)
         else:
             bounds = facet_focus_box(self.plan).matplotlib_bounds()
+            declare_room(axes[selected_index], facet_focus_room(self.plan))
         for index, axis in enumerate(axes):
             visible = index == selected_index
             if axis.get_visible() != visible:
@@ -8736,14 +8700,14 @@ class MatplotlibRenderer:
             label_bottom = row == rows - 1 or index + columns >= len(cells)
             # A cell is a small panel, and it gets the same tick policy as a
             # large one -- which, being measured against the width it is
-            # actually painted at, spends a cell's inch differently from a
-            # panel's six.  A separate MaxNLocator(3) here meant the cells
-            # were the one surface the shared policy never reached: no
-            # compact offset, and three labels whether they fitted or not.
-            # Only WHICH cells show their labels is the grid's business.
+            # actually painted at and the half-gap room the plan gave it,
+            # spends a cell's inch differently from a panel's six.  A
+            # separate MaxNLocator(3) here meant the cells were the one
+            # surface the shared policy never reached: no compact offset,
+            # and three labels whether they fitted or not.  Only WHICH cells
+            # show their labels is the grid's business.
             apply_smart_ticks(
                 axis,
-                prune_edges=True,
                 label_pt=(
                     typography.tick_pt
                     if typography is not None
@@ -8816,10 +8780,7 @@ class MatplotlibRenderer:
             # The chrome authority already applied the standalone image
             # kind's spatial tick budget; restating it keeps the signature
             # stable instead of re-installing default-budget locators.
-            apply_smart_ticks(
-                selected, "x", label_pt=self.style.fonts.tick_pt, prune_edges=True
-            )
-            apply_smart_ticks(selected, "y", label_pt=self.style.fonts.tick_pt)
+            apply_smart_ticks(selected, label_pt=self.style.fonts.tick_pt)
         if (
             not selected.xaxis.get_tick_params().get("labelbottom", False)
             or not selected.yaxis.get_tick_params().get("labelleft", False)
@@ -9236,7 +9197,7 @@ class MatplotlibRenderer:
                     (np.sum(weights[:index]) + weights[index] * fraction) / total
                 )
         return (
-            f"th={_compact_scientific(threshold)}\n"
+            f"th={compact_number(threshold)}\n"
             f"L/R={100.0 * left_fraction:.1f}%/"
             f"{100.0 * (1.0 - left_fraction):.1f}%"
         )
@@ -9584,7 +9545,7 @@ class MatplotlibRenderer:
         uncertainty = (
             "n/a"
             if parameter.standard_error is None
-            else _compact_scientific(parameter.standard_error)
+            else compact_number(parameter.standard_error)
         )
         unit = f" {_literal_text(parameter.unit)}" if parameter.unit else ""
         return (

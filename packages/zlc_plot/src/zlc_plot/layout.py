@@ -7,7 +7,7 @@ window size and thereby create backend-specific layout behaviour.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 import math
 
@@ -291,10 +291,44 @@ class NormalizedBox:
 
 
 @dataclass(frozen=True, slots=True)
+class Room:
+    """How far past each edge of its box an axes' labels may reach.
+
+    Figure fractions, like :class:`NormalizedBox`.  The layout is the ONE
+    place that knows what lies beyond an edge -- the figure's margin, or a
+    neighbour that labels the same row -- so it says so once, and the tick
+    policy reads it instead of guessing with a caller's flag.  Beside a
+    neighbour the room is half the gap between them: two surfaces each
+    keeping to their half cannot print on each other.
+    """
+
+    left: float
+    right: float
+    top: float
+    bottom: float
+
+    def __post_init__(self) -> None:
+        for name in ("left", "right", "top", "bottom"):
+            value = _finite(getattr(self, name), name)
+            if value < 0.0:
+                raise ValueError(f"room {name} must be non-negative")
+            object.__setattr__(self, name, value)
+
+
+def _margin_room(box: NormalizedBox) -> Room:
+    """The room of a box with nothing labelled beside it: the figure's edges."""
+
+    return Room(box.left, 1.0 - box.right, box.top, 1.0 - box.bottom)
+
+
+@dataclass(frozen=True, slots=True)
 class AxesPlan:
     role: str
     box: NormalizedBox
     cell_index: int | None = None
+    #: Stated by every plan: an axes with no declared room has no way of
+    #: knowing whether the space past its edge is a margin or a neighbour.
+    room: Room = field(kw_only=True)
 
     def __post_init__(self) -> None:
         if not isinstance(self.role, str) or not self.role.strip():
@@ -302,6 +336,15 @@ class AxesPlan:
         object.__setattr__(self, "role", self.role.strip())
         if not isinstance(self.box, NormalizedBox):
             raise TypeError("axes box must be NormalizedBox")
+        if not isinstance(self.room, Room):
+            raise TypeError("axes room must be Room")
+        if (
+            self.box.left - self.room.left < -1e-9
+            or self.box.right + self.room.right > 1.0 + 1e-9
+            or self.box.top - self.room.top < -1e-9
+            or self.box.bottom + self.room.bottom > 1.0 + 1e-9
+        ):
+            raise ValueError("an axes' room cannot leave the figure")
         if self.cell_index is not None:
             object.__setattr__(self, "cell_index", integer(self.cell_index, "cell_index"))
             if self.cell_index < 0:
@@ -542,6 +585,13 @@ def facet_focus_box(plan: SurfacePlan) -> NormalizedBox:
     return _facet_cells_union(plan.axes)
 
 
+def facet_focus_room(plan: SurfacePlan) -> Room:
+    """The room of a focused cell that takes the whole overview region: the
+    figure's margins, as any standalone panel's."""
+
+    return _margin_room(facet_focus_box(plan))
+
+
 def recommended_facet_preset(
     topology: FacetTopology,
     layout: PlotLayoutConfig = DEFAULT_LAYOUT,
@@ -717,10 +767,27 @@ def _split_image(
     )
     if scene:
         image = _scene_box(image, data, split, region_px, distribution)
+    # Neighbours split their gap; the outer edges own the figure's margins.
+    # The rail's room stops half way to the colorbar: a bound printed under
+    # the colorbar reads as the colorbar's, whatever axis it belongs to.
+    rail_gap = max(0.0, distribution.left - image.right) / 2.0
+    bar_gap = max(0.0, colorbar.left - distribution.right) / 2.0
     return (
-        AxesPlan("image", image),
-        AxesPlan("distribution", distribution),
-        AxesPlan("colorbar", colorbar),
+        AxesPlan(
+            "image",
+            image,
+            room=Room(image.left, rail_gap, image.top, 1.0 - image.bottom),
+        ),
+        AxesPlan(
+            "distribution",
+            distribution,
+            room=Room(rail_gap, bar_gap, distribution.top, 1.0 - distribution.bottom),
+        ),
+        AxesPlan(
+            "colorbar",
+            colorbar,
+            room=Room(bar_gap, 1.0 - colorbar.right, colorbar.top, 1.0 - colorbar.bottom),
+        ),
     )
 
 
@@ -769,7 +836,7 @@ def _split_rolling(
     show_distribution: bool,
 ) -> tuple[AxesPlan, ...]:
     if not show_distribution:
-        return (AxesPlan("history", data),)
+        return (AxesPlan("history", data, room=_margin_room(data)),)
     history = NormalizedBox(
         data.left,
         data.top,
@@ -782,7 +849,24 @@ def _split_rolling(
         data.right,
         data.bottom,
     )
-    return (AxesPlan("history", history), AxesPlan("distribution", distribution))
+    half_gap = max(0.0, distribution.left - history.right) / 2.0
+    return (
+        AxesPlan(
+            "history",
+            history,
+            room=Room(history.left, half_gap, history.top, 1.0 - history.bottom),
+        ),
+        AxesPlan(
+            "distribution",
+            distribution,
+            room=Room(
+                half_gap,
+                1.0 - distribution.right,
+                distribution.top,
+                1.0 - distribution.bottom,
+            ),
+        ),
+    )
 
 
 def _facet_axes(
@@ -799,6 +883,15 @@ def _facet_axes(
     cell_height = max((data_height - (rows - 1) * row_gap) / rows, 1.0)
     figure_width = margins.left + data_width + margins.right
     figure_height = margins.bottom + data_height + margins.top
+    # EVERY cell gets the same room -- half a gap on each side -- the outer
+    # cells included, so the shared locator lays identical ticks in every
+    # cell and the marks read against one frame.
+    room = Room(
+        column_gap / 2.0 / figure_width,
+        column_gap / 2.0 / figure_width,
+        row_gap / 2.0 / figure_height,
+        row_gap / 2.0 / figure_height,
+    )
     result = []
     for index in range(count):
         row, column = divmod(index, columns)
@@ -815,6 +908,7 @@ def _facet_axes(
                     (top + cell_height) / figure_height,
                 ),
                 index,
+                room=room,
             )
         )
     return tuple(result)
@@ -981,7 +1075,7 @@ def resolve_surface(
             scene=image_scene,
         )
     else:
-        axes = (AxesPlan("main", data),)
+        axes = (AxesPlan("main", data, room=_margin_room(data)),)
     return SurfacePlan(
         image_height_over_width=(
             image_height_over_width
@@ -1065,11 +1159,13 @@ __all__ = [
     "PixelSize",
     "PlotLayoutConfig",
     "RollingSplit",
+    "Room",
     "SurfacePlan",
     "facet_shape",
     "recommended_pulse_preset",
     "facet_shape_for_cell_shape",
     "facet_focus_box",
+    "facet_focus_room",
     "recommended_facet_preset",
     "resolve_surface",
 ]
