@@ -4332,7 +4332,7 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             _release_recapture,
             _init_release_recapture,
             (FitTarget.SERIES,),
-            formula=r"$P(t)=A\frac{1-e^{-\eta e^{-W_0((2\pi f t)^2)}}}{1-e^{-\eta}}+B$",
+            formula=r"$P(t)=A[1-\exp(-\eta\exp(-W_0((2\pi f t)^2)))]/[1-\exp(-\eta)]+B$",
             jacobian=_release_recapture_jacobian,
             candidate_initializer=_release_recapture_candidates,
             compiled_descriptor=_compiled_fit.release_recapture_descriptor(),
