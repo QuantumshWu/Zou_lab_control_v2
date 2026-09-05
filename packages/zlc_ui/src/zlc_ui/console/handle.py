@@ -21,7 +21,12 @@ from typing import Any
 
 from PyQt5 import QtCore, QtWidgets
 
-from zlc_ui.fluent import FluentDialogWindow, fluent_open_path, fluent_save_path
+from zlc_ui.fluent import (
+    FluentDialogWindow,
+    fluent_open_path,
+    fluent_save_path,
+    retire_widget,
+)
 
 from .logic_row_view import LogicRowView
 from .logic_editor_view import LogicEditorView
@@ -564,7 +569,7 @@ class TaskConsoleHandle(QtCore.QObject):
         self.close_logic_editor(key)
         row = self._rows.pop(key, None)
         if row is not None:
-            row.setParent(None)
+            retire_widget(row)
         self._show_logic_rows()
 
     def logic_row_ids(self) -> tuple[str, ...]:
@@ -619,7 +624,7 @@ class TaskConsoleHandle(QtCore.QObject):
         for key, row in tuple(self._panel_publisher_rows.items()):
             if key not in incoming:
                 self.close_panel_publisher_editor(key)
-                row.setParent(None)
+                retire_widget(row)
         self._panel_publisher_rows = incoming
         self._show_logic_rows()
 

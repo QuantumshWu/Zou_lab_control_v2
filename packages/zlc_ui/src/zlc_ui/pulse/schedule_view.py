@@ -16,6 +16,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.form import FormChoice
 from zlc_ui.fluent import (
+    retire_widget,
     ACCENT, GREEN, GREY, ORANGE, RED, YELLOW, FluentButton, FluentCheckBox,
     FluentComboBox, FluentDoubleSpinBox, FluentFrame, FluentGroupBox,
     FluentLabel, FluentLineEdit, FluentScrollArea, LinkedScrollPanes,
@@ -654,15 +655,14 @@ class PulseDragContainer(QtWidgets.QWidget):
             widget.removeEventFilter(self)
             if widget in cards:
                 # About to be re-added below.  Taking it out of the LAYOUT is
-                # the whole job; setParent(None) additionally makes it a
+                # the whole job; detaching it as well would make it a
                 # top-level window, which is a different thing and one this
-                # widget spends the rest of the function undoing.
+                # widget would spend the rest of the function undoing.
                 continue
-            # Not wanted any more.  Hiding an orphan leaves it alive for the
-            # life of the process: every reopened pulse left its predecessor's
-            # cards behind, six of them per load, still holding their text.
-            widget.setParent(None)
-            widget.deleteLater()
+            # Not wanted any more.  Hidden AND deleted: hiding alone left
+            # every reopened pulse's predecessor cards alive, six per load,
+            # still holding their text.
+            retire_widget(widget)
         self._cards = tuple(cards)
         for card in self._cards:
             self.watch_card_chrome(card)
@@ -1546,8 +1546,7 @@ class PulseScheduleView(QtWidgets.QWidget):
             desired[period.period_id] = card
         for key, card in self._cards.items():
             if key not in desired:
-                card.setParent(None)
-                card.deleteLater()
+                retire_widget(card)
         self._cards = desired
         self.drag_container.set_items(
             tuple(desired[p.period_id] for p in vm.periods),

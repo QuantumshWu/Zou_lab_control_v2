@@ -11,6 +11,8 @@ from zlc_ui.board import (
     min_board_width,
     pack,
 )
+from zlc_ui.fluent import retire_widget
+
 from .panel_card_view import PanelCardView
 
 
@@ -51,10 +53,8 @@ class ConsoleBoardView(QtWidgets.QWidget):
         for panel_id, card in tuple(self._cards.items()):
             if panel_id not in wanted_ids:
                 card.retire_settings_popup()
-                card.hide()
-                card.setParent(None)
                 self._wired_cards.discard(card)
-                card.deleteLater()
+                retire_widget(card)
         self._cards = {card.panel_id: card for card in incoming}
         if self._anchor_id not in self._cards:
             self._anchor_id = None

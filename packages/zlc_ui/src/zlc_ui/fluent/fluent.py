@@ -2018,6 +2018,44 @@ class _FluentMessageDialog(FluentCardDialog):
         outer.addLayout(row)
 
 
+def retire_widget(widget: QtWidgets.QWidget) -> None:
+    """Take a widget off the screen for good, without it ever being a window.
+
+    THE one way to retire a widget.  It is hidden EXPLICITLY, then deleted
+    on the next pass of the loop, and it keeps its parent until then.
+
+    What it must never be is unparented first.  Adding a widget to a layout
+    under a visible parent QUEUES a show of it; ``setParent(None)`` on a
+    widget that was not explicitly hidden clears the explicit-hide mark; so
+    a widget added and then unparented in the same pass -- a row rebuilt
+    twice because the draft it wrote re-projected it -- is shown by that
+    queued event AFTER it has lost its parent, which on Windows is a real
+    top-level window on the desktop for the one frame before its deferred
+    delete runs.  That is the small window that flashed at Add axis, at a
+    pulse reopen, at a closed editor tab: thirteen retirements, one idiom.
+    An explicit hide is what the queued show checks for, so it is the one
+    line that makes the difference, and it lives here so nobody writes the
+    idiom without it.
+    """
+
+    widget.hide()
+    widget.deleteLater()
+
+
+def detach_widget(widget: QtWidgets.QWidget) -> None:
+    """Take a widget out of its host to be mounted somewhere else later.
+
+    The counterpart of :func:`retire_widget` for a widget that lives on: a
+    plot surface handed from one card to another, a row the handle still
+    owns.  It is hidden EXPLICITLY before it is unparented, for the reason
+    given there -- a queued show that lands after the unparenting maps a
+    top-level window -- and whoever mounts it next shows it.
+    """
+
+    widget.hide()
+    widget.setParent(None)
+
+
 def retire_pending_widgets() -> None:
     """Run the deletions the outer event loop has not got to yet.
 

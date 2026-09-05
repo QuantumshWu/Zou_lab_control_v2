@@ -31,6 +31,7 @@ from collections.abc import Mapping
 import numpy as np
 from PyQt5 import QtCore, QtWidgets
 from zlc_ui.fluent import (
+    retire_widget,
     ACCENT,
     GREY,
     FluentButton,
@@ -208,8 +209,7 @@ class _AxisRow(QtWidgets.QWidget):
         layout = self.layout()
         if self.unit_picker is not None:
             layout.removeWidget(self.unit_picker)
-            self.unit_picker.setParent(None)
-            self.unit_picker.deleteLater()
+            retire_widget(self.unit_picker)
             self.unit_picker = None
         symbol = str(unit).strip()
         picker = fluent_unit_picker(symbol, self)
@@ -518,12 +518,16 @@ class ScanPlanEditor(QtWidgets.QWidget):
 
         self._loading = True
         try:
+            # RETIRED, not unparented.  This rebuild runs twice in one pass
+            # whenever the draft it writes re-projects it, and a row added
+            # to the visible grid and unparented in the same pass is shown
+            # by the queued show AFTER losing its parent -- as its own
+            # window, for one frame.  That was the flash at Add axis.
             while self.values_grid.count():
                 item = self.values_grid.takeAt(0)
                 widget = item.widget()
                 if widget is not None:
-                    widget.setParent(None)
-                    widget.deleteLater()
+                    retire_widget(widget)
             self._value_rows = {}
             for row, parameter in enumerate(offered):
                 name = parameter.parameter_id
@@ -642,8 +646,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self._loading = True
         try:
             for row in self._rows:
-                row.setParent(None)
-                row.deleteLater()
+                retire_widget(row)
             self._rows = []
             axes: tuple[ScanAxis, ...] = ()
             if plan_text.strip():
@@ -705,8 +708,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
     def _remove_row(self, row) -> None:
         if row in self._rows:
             self._rows.remove(row)
-            row.setParent(None)
-            row.deleteLater()
+            retire_widget(row)
         self._emit_plan()
 
     def _current_plan(self) -> ScanPlan | None:
