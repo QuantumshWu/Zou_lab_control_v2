@@ -887,10 +887,10 @@ print('STOPPED_DRAFT')
 def test_task_takeover_and_live_preview_follow_the_real_buttons(workspace) -> None:
     """Start, preview and Stop use the same widgets an operator clicks."""
 
-    from zlc_atom.nodes import calibration_pulse_template_bytes
+    from pulse_fixture import pulse_document
 
     (workspace / "pulses" / "imaging_template.json").write_bytes(
-        calibration_pulse_template_bytes()
+        pulse_document("imaging_template.json")
     )
 
     environment = _subprocess_environment()

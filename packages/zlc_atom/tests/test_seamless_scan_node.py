@@ -17,7 +17,6 @@ does not happen.
 
 from __future__ import annotations
 
-import json
 import time
 from pathlib import Path
 
@@ -29,7 +28,6 @@ from zlc_pulse import (
     PulseBracket,
     compile_sequence,
     resolve_api_parameters,
-    sequence_from_tree,
 )
 from zlc_runtime import NodeHost, SignalDataPlane
 
@@ -37,9 +35,8 @@ from zlc_atom.install import create_installation
 from zlc_atom.nodes import (
     ResolvedWorkspaceResource,
     discover_logic_nodes,
-    scan_pulse_template_bytes,
-    temperature_pulse_template_bytes,
 )
+from tests.pulse_fixture import pulse_sequence
 from zlc_atom.nodes.scan import (
     DEVICE_PARAM_FAMILY,
     MANUAL_AXIS_REQUEST,
@@ -91,9 +88,7 @@ def _template_sequence(*scanned: str):
     compiles exactly those into the slots the template would have carried.
     """
 
-    raw = sequence_from_tree(
-        json.loads(scan_pulse_template_bytes().decode("utf-8"))
-    )
+    raw = pulse_sequence("mot_field_template.json")
     names = set(scanned) or {"da_bias_x"}
     ports = tuple(
         port
@@ -498,9 +493,7 @@ def test_the_board_advanced_scan_recovers_the_planted_trap_loss() -> None:
         monitor = camera_node.monitor()
         frames_signal = camera_node.signal_key("frames")
 
-        sequence = sequence_from_tree(
-            json.loads(temperature_pulse_template_bytes().decode("utf-8"))
-        )
+        sequence = pulse_sequence("temperature_template.json")
         board = sequencer.describe()
         seeded = resolve_api_parameters(sequence)
         sequencer.load(

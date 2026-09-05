@@ -293,6 +293,11 @@ class ScriptedScanBench:
             self._publisher = None
         return report
 
+    def snapshot(self) -> Mapping[str, object]:
+        # A scan that is still waiting for a report asks the board whether
+        # it is still firing; the answer is the real board's.
+        return self._sequencer.snapshot()
+
     def safe(self) -> SafeReadback:
         self.events.append(("safe", time.monotonic()))
         return self._sequencer.safe()

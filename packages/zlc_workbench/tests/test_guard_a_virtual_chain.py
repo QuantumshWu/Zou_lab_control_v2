@@ -9,10 +9,10 @@ import time
 import numpy as np
 
 from zlc_atom.install import create_installation
+from pulse_fixture import pulse_document
 from zlc_atom.nodes import (
     ResolvedArtifact,
     ResolvedWorkspaceResource,
-    calibration_pulse_template_bytes,
 )
 from zlc_atom.nodes.calibration import logic_node as calibration_logic_node
 from zlc_atom.nodes.camera_measurement import logic_node as camera_logic_node
@@ -140,7 +140,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         pulse_directory = tmp_path / "pulses"
         pulse_directory.mkdir()
         (pulse_directory / "imaging_template.json").write_bytes(
-            calibration_pulse_template_bytes()
+            pulse_document("imaging_template.json")
         )
         workspace = Workspace(tmp_path).prepare()
         assert {"calibration", "camera_measurement", "occupancy"} <= set(

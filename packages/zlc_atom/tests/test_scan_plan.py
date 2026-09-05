@@ -11,10 +11,9 @@ from __future__ import annotations
 import json
 
 import pytest
-from zlc_pulse import sequence_from_tree
 
 from zlc_atom.install import create_installation, tunable_devices
-from zlc_atom.nodes import scan_pulse_template_bytes
+from tests.pulse_fixture import pulse_document, pulse_sequence
 from zlc_atom.nodes.scan import (
     DEVICE_PARAM_FAMILY,
     PULSE_PARAM_FAMILY,
@@ -34,7 +33,7 @@ BIAS_PORTS = tuple(
 
 
 def _template_sequence():
-    return sequence_from_tree(json.loads(scan_pulse_template_bytes().decode("utf-8")))
+    return pulse_sequence("mot_field_template.json")
 
 
 def test_the_mot_template_offers_the_three_bias_ports() -> None:
@@ -53,7 +52,7 @@ def test_the_mot_template_offers_the_three_bias_ports() -> None:
 def test_scan_accepts_the_complete_document_saved_by_the_pulse_editor(
     tmp_path,
 ) -> None:
-    tree = json.loads(scan_pulse_template_bytes().decode("utf-8"))
+    tree = json.loads(pulse_document("mot_field_template.json").decode("utf-8"))
     tree["editor"] = {
         "visible_ports": None,
         "scan_source": "",

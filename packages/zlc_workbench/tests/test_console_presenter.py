@@ -3712,11 +3712,12 @@ def test_a_running_task_freezes_logic_identity_but_not_panels(
 
     from zlc_runtime import DatasetOutputDeclaration
     from zlc_runtime.host import LogicNodeObservation, NodeProgress
-    from zlc_atom.nodes import NodePreviewSpec, calibration_pulse_template_bytes
+    from pulse_fixture import pulse_document
+    from zlc_atom.nodes import NodePreviewSpec
     from zlc_workbench.logic import LogicCandidate, stable_signal_key
 
     (presenter.session.workspace.pulses / "imaging_template.json").write_bytes(
-        calibration_pulse_template_bytes()
+        pulse_document("imaging_template.json")
     )
 
     class TaskHost:
@@ -3781,6 +3782,9 @@ def test_a_running_task_freezes_logic_identity_but_not_panels(
             self.running = False
 
     task_id = presenter.add_logic("calibration", open_editor=False)
+    presenter.update_logic_draft(
+        task_id, values={"pulse_template": "imaging_template.json"}
+    )
     other_id = presenter.add_logic("camera_measurement", open_editor=False)
     panel = presenter.add_blank_panel("image")
     assert task_id and other_id and panel is not None

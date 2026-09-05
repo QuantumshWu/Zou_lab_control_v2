@@ -25,7 +25,6 @@ from zlc_atom.nodes import (
     ArtifactInputSpec,
     DatasetInputSpec,
     NodeKind,
-    calibration_pulse_template_bytes,
     discover_logic_nodes,
 )
 from zlc_atom.nodes.calibration import (
@@ -36,11 +35,10 @@ from zlc_atom.nodes.calibration import (
 )
 from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
 from tests.fakes import FakePlane, camera_cycle_snapshot
-from tests.pulse_fixture import IMAGING_PULSE_RESOURCE
+from tests.pulse_fixture import IMAGING_PULSE_RESOURCE, PULSE_ROOT
 
 
 ROOT = Path(__file__).parents[1]
-PULSE_ROOT = ROOT / "src" / "zlc_atom" / "nodes" / "calibration"
 
 
 class _CalibrationCoveragePlane(FakePlane):
@@ -309,10 +307,9 @@ def test_pulse_resolver_uses_the_project_json_document(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     asset = PULSE_ROOT / "imaging_template.json"
-    packaged = calibration_pulse_template_bytes()
-    assert packaged == asset.read_bytes()
-    tree = json.loads(packaged)
-    assert packaged == readable_json_bytes(tree)
+    document = asset.read_bytes()
+    tree = json.loads(document)
+    assert document == readable_json_bytes(tree)
     assert tuple(tree) == (
         "format",
         "name",
@@ -453,6 +450,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             camera_key="camera",
             sequencer=sequencer,
             sequencer_key="sequencer",
+            pulse_template=IMAGING_PULSE_RESOURCE.path.name,
             pulse_resource=IMAGING_PULSE_RESOURCE,
             signal_plane=plane,
             repeats=30,
@@ -622,18 +620,19 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             # run's, not the analysis's.
             "photoelectrons",
         )
-        assert descriptors["calibration"].authoring_schema.project_values({})[
-            "repeats"
-        ] == 200
-        assert descriptors["calibration"].authoring_schema.project_values({})[
-            "threshold_method"
-        ] == "gaussian"
-        assert descriptors["calibration"].authoring_schema.project_values({})[
-            "review_detected_sites"
-        ] is False
+        # The pulse is the one field with no default: pulses are workspace
+        # files the operator names, so a projection must name one.
+        with pytest.raises(ValueError, match="pulse_template"):
+            descriptors["calibration"].authoring_schema.project_values({})
+        named = {"pulse_template": IMAGING_PULSE_RESOURCE.path.name}
+        defaults = descriptors["calibration"].authoring_schema.project_values(named)
+        assert defaults["repeats"] == 200
+        assert defaults["threshold_method"] == "gaussian"
+        assert defaults["review_detected_sites"] is False
         with pytest.raises(ValueError, match="cannot exceed"):
             descriptors["calibration"].authoring_schema.project_values(
                 {
+                    **named,
                     "reference_exposure_seconds": 0.005,
                     "readout_exposure_seconds": 0.02,
                 }

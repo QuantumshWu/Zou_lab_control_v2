@@ -11,14 +11,13 @@ it KEPT -- against a source whose every publication is named.
 
 from __future__ import annotations
 
-import json
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from zlc_pulse import compile_sequence, resolve_api_parameters, sequence_from_tree
+from zlc_pulse import compile_sequence, resolve_api_parameters
 from zlc_runtime import MonitorCoverage, NodeHost, SignalDataPlane, SignalValue
 
 from zlc_atom.devices.simulation import DEFAULT_MOT_FIELD_OPTIMUM_DAC
@@ -26,8 +25,8 @@ from zlc_atom.install import create_installation, tunable_devices
 from zlc_atom.nodes import (
     ResolvedWorkspaceResource,
     discover_logic_nodes,
-    scan_pulse_template_bytes,
 )
+from tests.pulse_fixture import pulse_sequence
 from zlc_atom.nodes.scan import (
     DEVICE_PARAM_FAMILY,
     PULSE_PARAM_FAMILY,
@@ -79,7 +78,7 @@ def _source_value(size: int = 64) -> SignalValue:
 
 
 def _template_sequence():
-    return sequence_from_tree(json.loads(scan_pulse_template_bytes().decode("utf-8")))
+    return pulse_sequence("mot_field_template.json")
 
 
 def _pulse_resource(sequence):

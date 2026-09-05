@@ -36,7 +36,7 @@ import time
 import numpy as np
 from zlc_data import SITE
 from zlc_data.figure_archive import FIGURE_SCHEMA, read_archive
-from zlc_pulse import compile_sequence, resolve_api_parameters, sequence_from_tree
+from zlc_pulse import compile_sequence, resolve_api_parameters
 from zlc_pulse.schedule import trigger_windows
 from zlc_runtime import NodeHost, SignalDataPlane
 
@@ -44,10 +44,9 @@ from zlc_atom.install import create_installation
 from zlc_atom.nodes import (
     ResolvedWorkspaceResource,
     discover_logic_nodes,
-    temperature_pulse_template_bytes,
 )
 from zlc_atom.nodes.scan import PULSE_PARAM_FAMILY, SCAN_PULSE_CONTRACT, ScanAxis, ScanPlan
-from tests.pulse_fixture import IMAGING_PULSE_RESOURCE
+from tests.pulse_fixture import IMAGING_PULSE_RESOURCE, pulse_sequence
 
 
 #: The release times played, in the template's own unit (ms), and how many
@@ -88,9 +87,7 @@ def test_temperature_template_spaces_twenty_millisecond_exposures() -> None:
     installation = create_installation("virtual")
     try:
         board = installation.device("sequencer").describe()
-        authored = sequence_from_tree(
-            json.loads(temperature_pulse_template_bytes().decode("utf-8"))
-        )
+        authored = pulse_sequence("temperature_template.json")
         for release_ms in T_OFF_MS:
             sequence = resolve_api_parameters(authored, {"t_off": release_ms})
             program = compile_sequence(sequence, board.geometry, board.clock_hz)
@@ -130,6 +127,7 @@ def test_the_temperature_task_publishes_release_recapture_survival(
             camera_key="camera",
             sequencer=sequencer,
             sequencer_key="sequencer",
+            pulse_template=IMAGING_PULSE_RESOURCE.path.name,
             pulse_resource=IMAGING_PULSE_RESOURCE,
             signal_plane=plane,
             repeats=30,
@@ -152,9 +150,7 @@ def test_the_temperature_task_publishes_release_recapture_survival(
         #        release plan: no camera node was started, no signal was chosen,
         #        and no exposure was typed anywhere -- the Task takes the one
         #        the calibration's thresholds were measured at.
-        sequence = sequence_from_tree(
-            json.loads(temperature_pulse_template_bytes().decode("utf-8"))
-        )
+        sequence = pulse_sequence("temperature_template.json")
         plan = ScanPlan((ScanAxis(PULSE_PARAM_FAMILY + "t_off", T_OFF_MS),))
         task = descriptors["temperature"].instantiate(
             sequencer=sequencer,
@@ -163,6 +159,7 @@ def test_the_temperature_task_publishes_release_recapture_survival(
             camera_key="camera",
             signal_plane=plane,
             calibration=calibration,
+            pulse_template="temperature_template.json",
             pulse_resource=ResolvedWorkspaceResource(
                 Path("temperature_template.json"),
                 SCAN_PULSE_CONTRACT,

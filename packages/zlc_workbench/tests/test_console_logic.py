@@ -1134,10 +1134,10 @@ def test_missing_explicit_artifact_path_fails_start_and_keeps_the_draft(
 def test_calibration_pulse_is_a_workspace_file_picker(
     presenter,
 ) -> None:
-    from zlc_atom.nodes import calibration_pulse_template_bytes
+    from pulse_fixture import pulse_document
 
     template = presenter.session.workspace.pulses / "imaging_template.json"
-    template.write_bytes(calibration_pulse_template_bytes())
+    template.write_bytes(pulse_document("imaging_template.json"))
     invalid = presenter.session.workspace.pulses / "not-calibration.json"
     invalid.write_text(
         "{}", encoding="utf-8"
@@ -1153,9 +1153,16 @@ def test_calibration_pulse_is_a_workspace_file_picker(
     assert pulse.kind == "path"
     assert Path(pulse.base_dir) == presenter.session.workspace.pulses
     assert pulse.file_filter == "Calibration pulse template (*.json)"
-    assert projection["form_values"]["pulse_template"] == str(template.resolve())
+    # No pulse is named for the operator: pulses are workspace files, and
+    # the one this node runs is the operator's to pick.
+    assert projection["form_values"]["pulse_template"] == ""
     assert projection["form_values"]["repeats"] == 200
     assert "timeout_seconds" not in projection["form_values"]
+    assert projection["can_start"] is False
+
+    presenter.update_logic_draft(node_id, values={"pulse_template": template.name})
+    projection = presenter.logic_editor_projection(node_id)
+    assert projection["form_values"]["pulse_template"] == str(template.resolve())
     assert projection["can_start"] is True
 
     presenter.update_logic_draft(

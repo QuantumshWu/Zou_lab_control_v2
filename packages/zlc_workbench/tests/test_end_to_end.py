@@ -69,40 +69,6 @@ def test_session_closes_its_signal_plane_when_a_device_close_fails(tmp_path) -> 
     assert plane.closed is True
 
 
-def test_only_the_default_workspace_seeds_the_packaged_imaging_template(
-    tmp_path, monkeypatch
-) -> None:
-    from zlc_atom.nodes import calibration_pulse_template_bytes
-
-    default_home = tmp_path / "default"
-    monkeypatch.setenv(Workspace.HOME_VARIABLE, str(default_home))
-    default = Workspace.default()
-    template = default.pulses / Workspace.IMAGING_TEMPLATE
-    canonical = calibration_pulse_template_bytes()
-    assert template.read_bytes() == canonical
-
-    same_tree = json.loads(canonical)
-    template.write_text(json.dumps(same_tree, indent=4), encoding="utf-8")
-    Workspace.default()
-    assert template.read_bytes() == canonical, "equivalent seed was not canonicalized"
-
-    authored_tree = dict(same_tree)
-    authored_tree["name"] = "operator imaging template"
-    authored = json.dumps(authored_tree, indent=4).encode("utf-8")
-    template.write_bytes(authored)
-    Workspace.default()
-    assert template.read_bytes() == authored, "default seeding overwrote an authored pulse"
-
-    template.write_bytes(b"operator-owned\n")
-    assert Workspace.default().pulses == default.pulses
-    assert template.read_bytes() == b"operator-owned\n", "default seeding overwrote a pulse"
-
-    explicit_root = tmp_path / "explicit"
-    explicit_root.mkdir()
-    explicit = Workspace(explicit_root).prepare()
-    assert not (explicit.pulses / Workspace.IMAGING_TEMPLATE).exists()
-
-
 def test_the_pulse_must_exist_in_the_workspace(session) -> None:
     with pytest.raises(FileNotFoundError, match="no pulse named"):
         session.load_pulse("does-not-exist")

@@ -22,12 +22,12 @@ from pathlib import Path
 import pytest
 from zlc_pulse import nanoseconds_per
 
-from zlc_atom.nodes import calibration_pulse_template_bytes
 from zlc_atom.nodes.calibration.pulse import load_calibration_pulse_template
+from tests.pulse_fixture import pulse_document
 
 
 def test_the_three_camera_windows_share_one_trigger_cadence() -> None:
-    tree = json.loads(calibration_pulse_template_bytes().decode("utf-8"))
+    tree = json.loads(pulse_document("imaging_template.json").decode("utf-8"))
     raw_periods = {str(period["period_id"]): period for period in tree["periods"]}
     periods = {
         str(period["period_id"]): (
@@ -64,7 +64,7 @@ def test_the_three_camera_windows_share_one_trigger_cadence() -> None:
 def test_calibration_accepts_the_complete_document_saved_by_the_pulse_editor(
     tmp_path: Path,
 ) -> None:
-    tree = json.loads(calibration_pulse_template_bytes().decode("utf-8"))
+    tree = json.loads(pulse_document("imaging_template.json").decode("utf-8"))
     tree["editor"] = {
         "visible_ports": None,
         "scan_source": "",

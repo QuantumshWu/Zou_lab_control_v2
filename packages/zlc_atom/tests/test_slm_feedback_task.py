@@ -2988,6 +2988,7 @@ def test_virtual_feedback_recovers_missing_sites_and_retains_best_candidate(
             sequencer=calibration_sequencer,
             sequencer_key="sequencer",
             signal_plane=plane,
+            pulse_template=IMAGING_PULSE_RESOURCE.path.name,
             pulse_resource=IMAGING_PULSE_RESOURCE,
             repeats=30,
         )
