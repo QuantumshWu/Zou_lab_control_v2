@@ -18,6 +18,7 @@ from zlc_ui.fluent import (
     retire_widget,
     ACCENT,
     GREY,
+    FluentPageBody,
     ORANGE_TINT,
     FluentButton,
     FluentCheckBox,
@@ -275,8 +276,9 @@ class _DataEditorView(QtWidgets.QWidget):
         self.editor_scroll = FluentScrollArea(self)
         self.editor_scroll.setWidgetResizable(True)
         self.editor_scroll.setMinimumSize(0, 0)
-        content = QtWidgets.QWidget()
-        content.setStyleSheet("background: transparent;")
+        # The same opaque, surface-white page body the console's Edit page
+        # scrolls: transparent content showed the viewport's own grey.
+        content = FluentPageBody()
         root = QtWidgets.QVBoxLayout(content)
         root.setContentsMargins(
             window_pad(0.5), window_pad(0.5), window_pad(0.5), window_pad(0.5)

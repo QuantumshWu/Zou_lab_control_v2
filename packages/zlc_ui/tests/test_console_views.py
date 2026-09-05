@@ -2486,13 +2486,15 @@ def test_panel_editor_body_is_opaque_so_scrolling_blits() -> None:
     Qt decides by ``WA_OpaquePaintEvent`` (or an auto-filled opaque brush,
     which a stylesheet background switches off); the stylesheet that paints
     the colour is not consulted, so the promise is made explicitly and the
-    painted pixels must honour it.
+    painted pixels must honour it.  The colour it paints is the pane's
+    SURFACE: an Edit page is one tab among white ones, and it was the one
+    grey tab while its body painted the window's page colour.
     """
     _run_qt(
         """
 from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import BG
+from zlc_ui.fluent import SURFACE
 from zlc_ui.console import panel_editor_view as editor_module
 app = ensure_qt_app(['test'])
 owner = QtWidgets.QWidget()
@@ -2522,7 +2524,7 @@ app.processEvents()
 picture = body.grab().toImage()
 for x, y in ((1, 1), (picture.width() - 2, picture.height() - 2)):
     colour = QtGui.QColor(picture.pixel(x, y))
-    assert colour.alpha() == 255 and colour.name().upper() == BG.upper(), (x, y, colour.name(), BG)
+    assert colour.alpha() == 255 and colour.name().upper() == SURFACE.upper(), (x, y, colour.name(), SURFACE)
 editor.deleteLater()
 app.processEvents()
 print('opaque body ok')

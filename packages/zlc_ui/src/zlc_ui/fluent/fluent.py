@@ -70,7 +70,7 @@ from .style import (
     WINDOW_SCREEN_FRACTION,
     WINDOW_TITLEBAR_FLOOR_PX,
     WINDOW_TITLEBAR_PX,
-)
+    SURFACE,)
 
 
 def window_pad(mult: float = 1.0) -> int:
@@ -4849,7 +4849,7 @@ class FluentCheckBox(QtWidgets.QCheckBox):
 
 
 class FluentPageBody(QtWidgets.QWidget):
-    """A scrolled page body that paints the page colour and tells Qt so.
+    """A scrolled page body that paints its pane's surface and tells Qt so.
 
     The scrolled content used to be transparent, showing the same colour
     through from the page.  A scrolled widget Qt can see through is
@@ -4858,7 +4858,12 @@ class FluentPageBody(QtWidgets.QWidget):
     scroll -- where one Qt knows to be opaque is moved by blitting the
     backing store and only the exposed strip is painted.  Qt learns opacity
     from ``WA_OpaquePaintEvent``, which also stops it painting any styled
-    background, so this widget paints the page colour itself.
+    background, so this widget paints the colour itself.
+
+    The colour is the SURFACE: a page body lives inside a tab pane, and a
+    pane is white like every other page in it.  It painted the window's
+    page grey once, and the one tab that scrolled was the one tab that was
+    grey.
     """
 
     _REASSERT = (
@@ -4885,7 +4890,7 @@ class FluentPageBody(QtWidgets.QWidget):
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt API
         painter = QtGui.QPainter(self)
-        painter.fillRect(event.rect(), QtGui.QColor(BG))
+        painter.fillRect(event.rect(), QtGui.QColor(SURFACE))
         painter.end()
 
 
