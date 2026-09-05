@@ -1147,18 +1147,17 @@ class CameraMeasurementNode:
             owns_generation=False,
             should_stop=context.cancel_requested,
         )
-        result = capture.collect(
-            commit_cycle=lambda cycle, index: context.commit_live(
-                {
-                    CAMERA_FRAMES_OUTPUT.name: _finite_cycle_output(
-                        self,
-                        cycle,
-                        index,
-                    )
-                }
-            ),
-            retain_cycles=False,
-        )
+
+        def commit_cycle(cycle: object, index: int) -> None:
+            context.commit_live(
+                {CAMERA_FRAMES_OUTPUT.name: _finite_cycle_output(self, cycle, index)}
+            )
+            # A cycle landed is a repeat played; the bar says so as it happens.
+            context.report_progress(
+                "Capturing", current=index + 1, total=int(self.repeat)
+            )
+
+        result = capture.collect(commit_cycle=commit_cycle, retain_cycles=False)
         return {
             "cycles": 0 if result is None else result.cycle_count,
             "signals": tuple(

@@ -68,15 +68,24 @@ def fit_edit_targets(
 def panel_data_shape(
     schema: object,
     description: object | None,
+    *,
+    validity: object | None = None,
 ) -> dict[str, object]:
-    """Canonical three-part Dataset shape plus accepted typed scope fates."""
+    """Canonical three-part Dataset shape, how many samples of each Repeat
+    axis have landed whole, plus accepted typed scope fates.
+
+    ``validity`` is the shown snapshot's, when there is one: the strip then
+    says ``34\u2713`` beside a repeat axis instead of its size, because a
+    repeat is a sample and the count that means anything is the count of
+    complete ones.  With no snapshot there is no such count.
+    """
 
     from zlc_plot.semantics import (
         is_scope_fate,
         schema_structure,
         scope_coordinate_from_fate,
     )
-    from zlc_data import LATEST_COORDINATE
+    from zlc_data import LATEST_COORDINATE, repeat_validity_counts
 
     def pinned_text(field: object) -> str:
         value = getattr(field, "value", None)
@@ -100,6 +109,9 @@ def panel_data_shape(
     )
     return {
         "data_structure": schema_structure(schema),
+        "data_valid": (
+            {} if validity is None else repeat_validity_counts(validity, schema)
+        ),
         "data_scope": pinned,
     }
 

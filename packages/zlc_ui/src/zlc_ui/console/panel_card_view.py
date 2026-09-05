@@ -91,8 +91,16 @@ def _set_interaction(surface: object | None, enabled: bool) -> None:
         gate(bool(enabled))
 
 
-def data_structure_fragments(structure: object) -> tuple[tuple, tuple]:
+def data_structure_fragments(
+    structure: object, valid: object = None
+) -> tuple[tuple, tuple]:
     """The one coloured two-line rendering of a three-domain shape.
+
+    ``valid`` maps a Repeat axis's name to how many of its samples have
+    landed whole, and that axis then reads ``34\u2713`` where the others
+    read their size: a repeat is a sample, not a coordinate, and the count
+    a reader wants is the count of complete ones, which is also the number
+    that moves while a run is playing.
 
     The separator is the multiplication SIGN, not the letter: an axis is
     very often called "x", and "(repeat)x(x)x()" asked the reader to work
@@ -115,6 +123,11 @@ def data_structure_fragments(structure: object) -> tuple[tuple, tuple]:
     missing one's.
     """
 
+    landed = {str(name): int(count) for name, count in dict(valid or {}).items()}
+
+    def count_text(name: object, size: object) -> str:
+        return f"{landed[str(name)]}\u2713" if str(name) in landed else str(int(size))
+
     sizes: list[tuple[str, str | None, object]] = []
     names: list[tuple[str, str | None, object]] = []
     for index, group in enumerate(tuple(structure or ())):
@@ -125,7 +138,7 @@ def data_structure_fragments(structure: object) -> tuple[tuple, tuple]:
             sizes.append((" × ", None, None))
             names.append((" × ", None, None))
         for line, inner in (
-            (sizes, " × ".join(str(int(size)) for _name, size in group)),
+            (sizes, " × ".join(count_text(name, size) for name, size in group)),
             (names, " × ".join(str(name) for name, _size in group)),
         ):
             line.append(("(", colour, None))
@@ -623,7 +636,9 @@ class PanelCardView(FluentGroupBox):
 
         structure = tuple(self._parameter_surface.get("data_structure") or ())
         scope = tuple(self._parameter_surface.get("data_scope") or ())
-        shape_sizes, shape_names = data_structure_fragments(structure)
+        shape_sizes, shape_names = data_structure_fragments(
+            structure, self._parameter_surface.get("data_valid")
+        )
         # The caption is a NAME and names are read from the left, so it gives
         # up its tail; a shape is read from both ends and gives up its middle.
         sizes: list[tuple[str, str | None, object]] = [

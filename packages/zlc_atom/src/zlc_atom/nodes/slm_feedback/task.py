@@ -2268,6 +2268,14 @@ class SlmFeedbackTask:
                         )
                     )
                 node._commit_direct_outputs({CAMERA_FRAMES_OUTPUT.name: output})
+                # Every frame IS one repeat played: the bar moves with the
+                # batch instead of standing at 0 for the ninety seconds it
+                # takes and jumping to the end.
+                context.report_progress(
+                    f"Reading mean qCMOS brightness for candidate {iteration + 1}",
+                    current=index + 1,
+                    total=requested,
+                )
 
             try:
                 result = capture.collect(

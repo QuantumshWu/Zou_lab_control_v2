@@ -370,6 +370,35 @@ def expand_dataset_validity(
     return np.broadcast_to(validity.mask.reshape(tuple(broadcast_shape)), schema.physical_shape)
 
 
+def repeat_validity_counts(
+    validity: Valid | Invalid | CellValidity | DatasetComponentValidity,
+    schema: DatasetSchema,
+) -> dict[str, int]:
+    """How many coordinates of each Repeat axis are wholly valid, by axis name.
+
+    A repeat is a sample, and the number a reader wants beside a repeat axis
+    is how many samples have LANDED whole: every point and every component
+    at that coordinate valid.  A coordinate the carrier does not hold yet,
+    or one with any invalid cell -- the repeat still being played, a shot
+    the pulse faulted on -- is not counted.  Decided on the compact form: a
+    dense expansion over a frame's pixels would be as large as the frames.
+    """
+
+    _validate_dataset_validity(validity, schema)
+    rows = schema.repeat_domain.size
+    if isinstance(validity, (Valid, Invalid)):
+        row_valid = np.full(rows, isinstance(validity, Valid), dtype=bool)
+    else:
+        row_valid = np.asarray(validity.mask).reshape(rows, -1).all(axis=1)
+    counts: dict[str, int] = {}
+    for axis in schema.repeat_domain.axes:
+        codes = schema.repeat_domain.codes(axis.axis_id)
+        present = np.bincount(codes, minlength=axis.size) > 0
+        broken = np.bincount(codes[~row_valid], minlength=axis.size) > 0
+        counts[str(axis.name)] = int(np.count_nonzero(present & ~broken))
+    return counts
+
+
 def compact_dataset_validity(
     mask: np.ndarray,
     schema: DatasetSchema,

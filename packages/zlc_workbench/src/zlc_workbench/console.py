@@ -1434,7 +1434,11 @@ class ConsolePresenter:
         shown_schema = getattr(getattr(shown, "block", None), "schema", None)
         shape_changed = False
         if shown_schema is not None:
-            accepted_shape = panel_data_shape(shown_schema, description)
+            accepted_shape = panel_data_shape(
+                shown_schema,
+                description,
+                validity=getattr(getattr(shown, "block", None), "validity", None),
+            )
             shape_changed = any(
                 binding.parameter_surface.get(name) != value
                 for name, value in accepted_shape.items()
@@ -4479,9 +4483,13 @@ class ConsolePresenter:
         if schema is None:
             schema = self._panel_schema(binding)
         surface.update(
-            {"data_structure": (), "data_scope": ()}
+            {"data_structure": (), "data_valid": {}, "data_scope": ()}
             if schema is None
-            else panel_data_shape(schema, binding.accepted_display)
+            else panel_data_shape(
+                schema,
+                binding.accepted_display,
+                validity=getattr(getattr(snapshot, "block", None), "validity", None),
+            )
         )
         binding.parameter_surface = surface
 
