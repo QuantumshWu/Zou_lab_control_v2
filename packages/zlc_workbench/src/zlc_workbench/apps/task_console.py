@@ -317,6 +317,8 @@ class ExperimentGuiFlow:
         self._device_control_risk: dict[str, tuple[str, int] | None] = {}
         self._device_refresh_active: set[str] = set()
         self._device_refresh_pending: set[str] = set()
+        #: Devices whose control is being read for its first frame.
+        self._device_control_opening: set[str] = set()
         self._device_shutdown_pending = False
 
     def open(self) -> "ExperimentGuiFlow":
@@ -419,8 +421,15 @@ class ExperimentGuiFlow:
             presenter.beat()
         self._refresh_device_control_policies()
 
-    def open_device_control(self, instance_id: str) -> object:
-        """Open or raise the one control window for a loaded named device."""
+    def open_device_control(self, instance_id: str) -> object | None:
+        """Open or raise the one control window for a loaded named device.
+
+        A device with its own editor opens at once and is returned.  A
+        generic control opens on the device's first reading -- the window
+        is built from the fields the device declares, so it is read before
+        there is a window to show -- and ``None`` is returned while that
+        reading is under way.
+        """
 
         key = str(instance_id)
         if (
@@ -432,6 +441,8 @@ class ExperimentGuiFlow:
         if existing is not None:
             existing.restore()
             return existing
+        if key in self._device_control_opening:
+            return None
         session = self.session
         if session is None or self.catalog is None:
             raise RuntimeError("initialize devices before opening a control")
@@ -441,16 +452,22 @@ class ExperimentGuiFlow:
             raise KeyError(f"no loaded device {key!r}") from error
         descriptors = {item.type_id: item for item in self.catalog.available}
         descriptor = descriptors[leaf.type_id]
-        if descriptor.control_factory is not None:
-            control = descriptor.control_factory(
-                session,
-                key,
-                window_ratio=self.window_ratio,
-            )
-        else:
-            control = self._open_generic_control(key, leaf.device)
+        if descriptor.control_factory is None:
+            self._open_generic_control(key, leaf.device)
+            return None
+        control = descriptor.control_factory(
+            session,
+            key,
+            window_ratio=self.window_ratio,
+        )
+        self._adopt_device_control(key, leaf.device, control)
+        return control
+
+    def _adopt_device_control(self, key: str, device: object, control: object) -> None:
+        """This control is the one window for ``key`` until it closes."""
+
         self.device_controls[key] = control
-        self._device_control_devices[key] = leaf.device
+        self._device_control_devices[key] = device
 
         def released() -> None:
             if self.device_controls.get(key) is control:
@@ -465,99 +482,199 @@ class ExperimentGuiFlow:
                         self._device_tune_pending.pop(pending, None)
 
         control.closed.connect(released)
-        return control
 
-    def _open_generic_control(self, key: str, device: object) -> object:
-        from zlc_atom.authoring import AuthoringSchema
+    def _open_generic_control(self, key: str, device: object) -> None:
+        """Read the device, then open its control on what it said.
+
+        The window used to open at once, on an EMPTY spec with a placeholder
+        note, and be re-projected once the worker had read the device -- so
+        every control the operator opened painted a page with no rows, then
+        rows with half their cells, then the page.
+        The first frame is now the whole form: nothing is shown before the
+        fields it is made of are known.  A second press while the reading
+        is under way opens nothing; a reading that fails is reported where
+        the press was made, on the Device Manager.
+        """
+
         from zlc_ui import open_device_control
 
+        session = self.session
+        run = self._device_worker_run
+        if session is None or run is None:
+            raise RuntimeError("initialize devices before opening a control")
+        if key in self._device_control_opening:
+            return
+        self._device_control_opening.add(key)
+
+        def finish(result: object) -> None:
+            self._device_control_opening.discard(key)
+            if self.session is not session or key in self.device_controls:
+                return
+            try:
+                model: dict[str, object] = {
+                    "device": device,
+                    "control": None,
+                    "desired": {},
+                    "live": {},
+                    "status": {},
+                    "device_session_id": "",
+                }
+                self._adopt_device_reading(key, model, result)
+                self._device_control_models[key] = model
+                self._device_control_risk[key] = None
+                control = open_device_control(
+                    title=f"{key} control",
+                    spec=model["spec"],
+                    projection=self._device_control_projection(key),
+                )
+            except BaseException as error:
+                self._device_control_models.pop(key, None)
+                self._device_control_risk.pop(key, None)
+                self._report_device(f"{key}: {error}", "error")
+                return
+            model["control"] = control
+            # Each gesture guarded where it becomes a Qt slot: the projection
+            # under these handlers can raise (a closing session, a device that
+            # stopped answering), and an exception leaving a slot is qFatal --
+            # the crash arrives ON the control the operator is touching, so the
+            # report lands there too.
+            control.refresh_requested.connect(
+                self._guard_control_gesture(
+                    control,
+                    "refresh",
+                    lambda selected=key: self._request_device_control_refresh(selected),
+                )
+            )
+            control.risk_toggled.connect(
+                self._guard_control_gesture(
+                    control,
+                    "risk toggle",
+                    lambda accepted, selected=key: self._set_device_control_risk(
+                        selected, accepted
+                    ),
+                )
+            )
+            control.field_desired_changed.connect(
+                self._guard_control_gesture(
+                    control,
+                    "field edit",
+                    lambda field, value, selected=key: self._set_device_control_desired(
+                        selected, field, value
+                    ),
+                )
+            )
+            control.field_live_apply_toggled.connect(
+                self._guard_control_gesture(
+                    control,
+                    "live toggle",
+                    lambda field, enabled, selected=key: self._set_device_control_live(
+                        selected, field, enabled
+                    ),
+                )
+            )
+            control.field_apply_requested.connect(
+                self._guard_control_gesture(
+                    control,
+                    "apply",
+                    lambda field, value, selected=key: self._queue_device_tune(
+                        selected, field, value
+                    ),
+                )
+            )
+            control.set_close_guard(
+                lambda: self._generic_control_close_guard(key, control)
+            )
+            control.show_status(
+                "ready" if model["tunables"] else "No runtime controls", "idle"
+            )
+            self._adopt_device_control(key, device, control)
+
+        def failed(error: BaseException) -> None:
+            self._device_control_opening.discard(key)
+            self._report_device(f"{key}: {error}", "error")
+
+        try:
+            run(lambda: self._read_device_controls(device), finish, failed)
+        except BaseException as error:
+            failed(error)
+
+    def _report_device(self, text: str, severity: str) -> None:
+        """One line on the Device Manager, where the Control press was made."""
+
+        if self.devices is not None:
+            self.devices.show_status(text, severity)
+
+    @staticmethod
+    def _read_device_controls(
+        device: object,
+    ) -> tuple[tuple[object, ...], dict[str, object], dict[str, object]]:
+        """What the device declares and holds right now; runs on the worker."""
+
+        from zlc_atom.authoring import TunableField
+
+        declare = getattr(device, "tunable_fields", None)
+        if not callable(declare):
+            return (), {}, {}
+        fields = tuple(declare())
+        if any(not isinstance(field, TunableField) for field in fields):
+            raise TypeError("device tunable_fields must contain TunableField values")
+        tune = getattr(device, "tune", None)
+        provenance_reader = getattr(device, "settings_provenance", None)
+        if fields and (not callable(tune) or not callable(provenance_reader)):
+            raise TypeError(
+                "a tunable device must provide tune and settings_provenance"
+            )
+        current = {
+            field.metadata.name: field.current for field in fields
+        }
+        provenance = {} if not fields else dict(provenance_reader())
+        names = tuple(field.metadata.name for field in fields)
+        if set(current) != set(names):
+            raise ValueError("tunable current values differ from field metadata")
+        session_id = str(provenance.get("device_session_id", "")).strip()
+        epoch = provenance.get("settings_epoch")
+        if fields and (
+            not session_id or type(epoch) is not int or epoch < 0
+        ):
+            raise ValueError("device settings provenance is invalid")
+        return fields, current, provenance
+
+    def _adopt_device_reading(
+        self, key: str, model: dict[str, object], result: object
+    ) -> None:
+        """Put one reading of the device into its control model."""
+
+        from zlc_atom.authoring import AuthoringSchema
         from ..authoring_form import project_schema
 
-        session = self.session
-        if session is None:
-            raise RuntimeError("initialize devices before opening a control")
-        empty_spec = project_schema(AuthoringSchema(()))
-        control = open_device_control(
-            title=f"{key} control",
-            spec=empty_spec,
-            projection={
-                "owners": (),
-                "reason": "Reading device settings",
-                "risk_enabled": False,
-                "risk_accepted": False,
-                "fields": {},
-            },
+        fields, current, provenance = result
+        names = tuple(field.metadata.name for field in fields)
+        session_id = "" if not fields else str(provenance["device_session_id"])
+        epoch = 0 if not fields else int(provenance["settings_epoch"])
+        previous_session = str(model.get("device_session_id", ""))
+        model["tunables"] = fields
+        model["current"] = current
+        model["spec"] = project_schema(
+            AuthoringSchema(tuple(field.metadata for field in fields))
         )
-        self._device_control_models[key] = {
-            "device": device,
-            "control": control,
-            "spec": empty_spec,
-            "tunables": (),
-            "current": {},
-            "desired": {},
-            "live": {},
-            "status": {},
-            "device_session_id": "",
-        }
-        self._device_control_risk[key] = None
-        # Each gesture guarded where it becomes a Qt slot: the projection
-        # under these handlers can raise (a closing session, a device that
-        # stopped answering), and an exception leaving a slot is qFatal --
-        # the crash arrives ON the control the operator is touching, so the
-        # report lands there too.
-        control.refresh_requested.connect(
-            self._guard_control_gesture(
-                control,
-                "refresh",
-                lambda selected=key: self._request_device_control_refresh(selected),
-            )
-        )
-        control.risk_toggled.connect(
-            self._guard_control_gesture(
-                control,
-                "risk toggle",
-                lambda accepted, selected=key: self._set_device_control_risk(
-                    selected, accepted
-                ),
-            )
-        )
-        control.field_desired_changed.connect(
-            self._guard_control_gesture(
-                control,
-                "field edit",
-                lambda field, value, selected=key: self._set_device_control_desired(
-                    selected, field, value
-                ),
-            )
-        )
-        control.field_live_apply_toggled.connect(
-            self._guard_control_gesture(
-                control,
-                "live toggle",
-                lambda field, enabled, selected=key: self._set_device_control_live(
-                    selected, field, enabled
-                ),
-            )
-        )
-        control.field_apply_requested.connect(
-            self._guard_control_gesture(
-                control,
-                "apply",
-                lambda field, value, selected=key: self._queue_device_tune(
-                    selected, field, value
-                ),
-            )
-        )
-        self._request_device_control_refresh(key)
-        control.set_close_guard(
-            lambda: self._generic_control_close_guard(key, control)
-        )
-        return control
+        if previous_session != session_id:
+            model["desired"] = dict(current)
+            model["live"] = {name: False for name in names}
+            self._device_control_risk[key] = None
+        else:
+            desired = dict(model.get("desired", {}))
+            model["desired"] = {
+                name: desired.get(name, current[name]) for name in names
+            }
+            live = dict(model.get("live", {}))
+            model["live"] = {
+                name: bool(live.get(name, False)) for name in names
+            }
+        model["device_session_id"] = session_id
+        model["settings_epoch"] = epoch
+        model["status"] = {}
 
     def _request_device_control_refresh(self, key: str) -> None:
-        from zlc_atom.authoring import AuthoringSchema, TunableField
-        from ..authoring_form import project_schema
-
         key = str(key)
         model = self._device_control_models.get(key)
         run = self._device_worker_run
@@ -570,34 +687,6 @@ class ExperimentGuiFlow:
         device = model["device"]
         control = model["control"]
         control.show_status("refreshing device settings", "task")
-
-        def work() -> tuple[tuple[object, ...], dict[str, object], dict[str, object]]:
-            declare = getattr(device, "tunable_fields", None)
-            if not callable(declare):
-                return (), {}, {}
-            fields = tuple(declare())
-            if any(not isinstance(field, TunableField) for field in fields):
-                raise TypeError("device tunable_fields must contain TunableField values")
-            tune = getattr(device, "tune", None)
-            provenance_reader = getattr(device, "settings_provenance", None)
-            if fields and (not callable(tune) or not callable(provenance_reader)):
-                raise TypeError(
-                    "a tunable device must provide tune and settings_provenance"
-                )
-            current = {
-                field.metadata.name: field.current for field in fields
-            }
-            provenance = {} if not fields else dict(provenance_reader())
-            names = tuple(field.metadata.name for field in fields)
-            if set(current) != set(names):
-                raise ValueError("tunable current values differ from field metadata")
-            session_id = str(provenance.get("device_session_id", "")).strip()
-            epoch = provenance.get("settings_epoch")
-            if fields and (
-                not session_id or type(epoch) is not int or epoch < 0
-            ):
-                raise ValueError("device settings provenance is invalid")
-            return fields, current, provenance
 
         def settled() -> None:
             self._device_refresh_active.discard(key)
@@ -612,37 +701,10 @@ class ExperimentGuiFlow:
                 settled()
                 return
             try:
-                fields, current, provenance = result
-                names = tuple(field.metadata.name for field in fields)
-                session_id = (
-                    "" if not fields else str(provenance["device_session_id"])
-                )
-                epoch = 0 if not fields else int(provenance["settings_epoch"])
-                previous_session = str(model.get("device_session_id", ""))
-                model["tunables"] = fields
-                model["current"] = current
-                model["spec"] = project_schema(
-                    AuthoringSchema(tuple(field.metadata for field in fields))
-                )
-                if previous_session != session_id:
-                    model["desired"] = dict(current)
-                    model["live"] = {name: False for name in names}
-                    self._device_control_risk[key] = None
-                else:
-                    desired = dict(model.get("desired", {}))
-                    model["desired"] = {
-                        name: desired.get(name, current[name]) for name in names
-                    }
-                    live = dict(model.get("live", {}))
-                    model["live"] = {
-                        name: bool(live.get(name, False)) for name in names
-                    }
-                model["device_session_id"] = session_id
-                model["settings_epoch"] = epoch
-                model["status"] = {}
+                self._adopt_device_reading(key, model, result)
                 self._project_device_control(key)
                 control.show_status(
-                    "ready" if fields else "No runtime controls", "idle"
+                    "ready" if model["tunables"] else "No runtime controls", "idle"
                 )
             except BaseException as error:
                 control.show_status(str(error), "error")
@@ -655,7 +717,7 @@ class ExperimentGuiFlow:
             settled()
 
         try:
-            run(work, finish, failed)
+            run(lambda: self._read_device_controls(device), finish, failed)
         except BaseException as error:
             failed(error)
 

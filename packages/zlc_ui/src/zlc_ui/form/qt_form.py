@@ -962,6 +962,13 @@ def _reconfigure_widget(
             widget.setEnabled(not field.unavailable)
 
 
+#: ``(before, after)``: the widgets a host places before a row's control,
+#: and the ``(widget, stretch)`` pairs it places after it.
+RowCells = tuple[
+    tuple[QtWidgets.QWidget, ...], tuple[tuple[QtWidgets.QWidget, int], ...]
+]
+
+
 class FluentParameterForm(QtWidgets.QWidget):
     """Thin exact-key form built from one ordered :class:`FormSpec`."""
 
@@ -987,22 +994,6 @@ class FluentParameterForm(QtWidgets.QWidget):
         if finished is not None:
             finished.connect(lambda key=key: self.committed.emit(key))
 
-    def _row_cells(
-        self, field: FormFieldProps
-    ) -> tuple[
-        tuple[QtWidgets.QWidget, ...], tuple[tuple[QtWidgets.QWidget, int], ...]
-    ]:
-        """What a host puts beside this row's control: ``(before, after)``.
-
-        The row is assembled ONCE, with everything in it, before it is
-        shown.  A host that needs more than label and control -- a device
-        control's current reading, live switch, Apply and status -- says so
-        here, in a subclass, and never takes a built row apart.
-        """
-
-        del field
-        return (), ()
-
     @staticmethod
     def _dependency_map(spec: FormSpec) -> dict[str, list[str]]:
         declared = set(spec.keys)
@@ -1027,6 +1018,7 @@ class FluentParameterForm(QtWidgets.QWidget):
         *,
         runtime: FormRuntimeContext | None = None,
         label_width: int | None = None,
+        row_cells: Callable[[FormFieldProps], RowCells] | None = None,
     ) -> None:
         if not isinstance(spec, FormSpec):
             raise TypeError("spec must be FormSpec")
@@ -1040,6 +1032,13 @@ class FluentParameterForm(QtWidgets.QWidget):
         self._spec = spec
         self._runtime = runtime or FormRuntimeContext()
         self._label_width = label_width
+        #: What a host puts beside each row's control, ``(before, after)``.
+        #: The row is assembled ONCE, with everything in it, before it is
+        #: shown.  A host that needs more than label and control -- a device
+        #: control's current reading, live switch, Apply and status -- says
+        #: so here, and never takes a built row apart: a row dismantled
+        #: after the form had shown it painted with half its cells.
+        self._row_cells = row_cells or (lambda field: ((), ()))
         self._fields = {field.key: field for field in spec.fields}
         self._widgets: dict[str, QtWidgets.QWidget] = {}
         self._handlers: dict[str, FormWidgetHandler] = {}
@@ -1547,7 +1546,18 @@ class FluentParameterForm(QtWidgets.QWidget):
             for field in spec.fields
             if field.key not in replacements and field.key in self._auto_switches
         )
-        self.setUpdatesEnabled(False)
+        # Updates are held only while rows are built, removed or moved.
+        # Re-enabling updates repaints the WHOLE form whether or not
+        # anything changed, and a control re-projected every beat repainted
+        # every beat: a projection that changes no row repaints no row.
+        desired_keys = set(spec.keys)
+        structural = bool(replacements) or any(
+            key not in desired_keys for key in self._rows
+        ) or [key for key in self._layout_order() if key in self._rows] != [
+            field.key for field in spec.fields if field.key in self._rows
+        ]
+        if structural:
+            self.setUpdatesEnabled(False)
         try:
             with signals_blocked(*retained_widgets, *retained_switches):
                 for field in spec.fields:
@@ -1594,7 +1604,6 @@ class FluentParameterForm(QtWidgets.QWidget):
                     else:
                         widget.setEnabled(editing or not field.unavailable)
 
-            desired_keys = set(spec.keys)
             replaced_keys = set(replacements)
             for key, row in tuple(self._rows.items()):
                 if key in desired_keys and key not in replaced_keys:
@@ -1691,7 +1700,8 @@ class FluentParameterForm(QtWidgets.QWidget):
             self._handlers = new_handlers
             self._dependents = new_dependents
         finally:
-            self.setUpdatesEnabled(True)
+            if structural:
+                self.setUpdatesEnabled(True)
         for controller in self._dependents:
             self._controller_changed(controller)
 

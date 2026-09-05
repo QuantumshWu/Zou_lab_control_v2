@@ -4253,6 +4253,18 @@ class FluentSpinBox(_WheelFocusGuardMixin, QtWidgets.QSpinBox):
         self.lineEdit().setTextMargins(0, 0, 0, 0)
         self.setStyleSheet(fluent_spinbox_stylesheet("QSpinBox"))
 
+    def setRange(self, minimum: int, maximum: int) -> None:  # noqa: N802
+        """The owner's range -- applied when it changes.
+
+        Qt's own setRange invalidates the box's geometry whether or not the
+        numbers moved, and every reconcile re-declares them: a control
+        re-projected every beat relaid out and repainted every beat.
+        """
+
+        if (int(minimum), int(maximum)) == (self.minimum(), self.maximum()):
+            return
+        super().setRange(int(minimum), int(maximum))
+
     def setValueUnit(self, unit: str) -> None:  # noqa: N802 - Qt API name
         """Accepted and ignored: a count has no scale to choose between.
 
@@ -4513,6 +4525,13 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         except ValueError:
             return number
         return min(max(number, low), high)
+
+    def setRange(self, minimum: float, maximum: float) -> None:  # noqa: N802
+        """The owner's range -- applied when it changes, see FluentSpinBox."""
+
+        if (float(minimum), float(maximum)) == (self.minimum(), self.maximum()):
+            return
+        super().setRange(float(minimum), float(maximum))
 
     def setSingleStep(self, step: float) -> None:  # noqa: N802 - Qt API name
         try:

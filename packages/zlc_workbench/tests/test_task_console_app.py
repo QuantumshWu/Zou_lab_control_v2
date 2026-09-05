@@ -1043,11 +1043,11 @@ try:
     camera_card = flow.devices._view._loaded_cards['camera']
     QtTest.QTest.mouseClick(camera_card.control_button, QtCore.Qt.LeftButton)
     application.processEvents()
-    camera_control = flow.device_controls['camera']
     deadline = QtCore.QDeadlineTimer(2000)
-    while ('exposure_seconds' not in camera_control._view.form.keys or
-           'camera' in flow._device_refresh_active) and not deadline.hasExpired():
+    while 'camera' not in flow.device_controls and not deadline.hasExpired():
         application.processEvents(); QtTest.QTest.qWait(5)
+    camera_control = flow.device_controls['camera']
+    assert 'exposure_seconds' in camera_control._view.form.keys, 'opened on its first reading'
     exposure = camera_control._view.form.widget_for('exposure_seconds')
     exposure.setValue(0.05)
     camera_control._view._field_rows['exposure_seconds'][2].click()
@@ -1270,12 +1270,11 @@ try:
     camera_card = flow.devices._view._loaded_cards['camera']
     QtTest.QTest.mouseClick(camera_card.control_button, QtCore.Qt.LeftButton)
     application.processEvents()
-    control = flow.device_controls['camera']
     deadline = QtCore.QDeadlineTimer(2000)
-    while ('exposure_seconds' not in control._view.form.keys or
-           'camera' in flow._device_refresh_active) and not deadline.hasExpired():
+    while 'camera' not in flow.device_controls and not deadline.hasExpired():
         application.processEvents(); QtTest.QTest.qWait(5)
-    assert 'exposure_seconds' in control._view.form.keys
+    control = flow.device_controls['camera']
+    assert 'exposure_seconds' in control._view.form.keys, 'opened on its first reading'
     threading.Timer(0.4, release.set).start()
 
     exposure = control._view.form.widget_for('exposure_seconds')
@@ -1347,8 +1346,21 @@ try:
         },
         tune=lambda _name, value: value,
     )
-    slow_control = flow._open_generic_control('slow', slow)
-    flow.device_controls['slow'] = slow_control
+    flow._open_generic_control('slow', slow)
+    deadline = QtCore.QDeadlineTimer(1000)
+    while not refresh_started.is_set() and not deadline.hasExpired():
+        application.processEvents(); QtTest.QTest.qWait(5)
+    assert refresh_started.is_set()
+    assert 'slow' not in flow.device_controls, 'a control opens on its first reading, not before'
+    refresh_release.set()
+    deadline = QtCore.QDeadlineTimer(1000)
+    while 'slow' not in flow.device_controls and not deadline.hasExpired():
+        application.processEvents(); QtTest.QTest.qWait(5)
+    slow_control = flow.device_controls['slow']
+    assert slow_control.is_visible()
+    assert 'level' in slow_control._view.form.keys, 'its first frame is its whole form'
+    refresh_started.clear(); refresh_release.clear()
+    slow_control.refresh_requested.emit()
     deadline = QtCore.QDeadlineTimer(1000)
     while not refresh_started.is_set() and not deadline.hasExpired():
         application.processEvents(); QtTest.QTest.qWait(5)
@@ -1386,12 +1398,11 @@ try:
         settings_provenance=typed_provenance,
         tune=typed_tune,
     )
-    typed_control = flow._open_generic_control('typed', typed)
-    flow.device_controls['typed'] = typed_control
+    flow._open_generic_control('typed', typed)
     deadline = QtCore.QDeadlineTimer(1000)
-    while ('enabled' not in typed_control._view.form.keys or
-           'typed' in flow._device_refresh_active) and not deadline.hasExpired():
+    while 'typed' not in flow.device_controls and not deadline.hasExpired():
         application.processEvents(); QtTest.QTest.qWait(5)
+    typed_control = flow.device_controls['typed']
     switch = typed_control._view.form.widget_for('enabled')
     switch.setChecked(True)
     typed_control._view._field_rows['enabled'][2].click()

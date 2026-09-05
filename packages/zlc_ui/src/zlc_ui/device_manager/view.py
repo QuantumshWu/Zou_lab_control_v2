@@ -268,7 +268,12 @@ class DeviceControlView(QtWidgets.QWidget):
 
         fields = projection.get("fields", {})
         desired = {key: fields[key]["desired"] for key in spec.keys}
-        self.form = FluentParameterForm(spec, desired, parent=self)
+        # The form builds each row COMPLETE -- reading, editor, live switch,
+        # Apply, status -- through this hook, so no row is ever shown and
+        # then taken apart to have its cells added.
+        self.form = FluentParameterForm(
+            spec, desired, parent=self, row_cells=self._compose_cells
+        )
         self.form.changed.connect(self._desired_changed)
         self.form.shown_unit_changed.connect(self._shown_unit_changed)
         outer.addWidget(self.form)
@@ -284,69 +289,54 @@ class DeviceControlView(QtWidgets.QWidget):
         if timer is not None:
             timer.stop()
             timer.deleteLater()
-        widgets = self._field_rows.pop(str(key), None)
-        if widgets is None:
-            return
-        current, live, apply, _dot, status = widgets
-        for widget in (current, live.parentWidget(), apply, status.parentWidget()):
-            widget.hide()
-            widget.deleteLater()
+        # The cells belong to the row the form built them into, and go with it.
+        self._field_rows.pop(str(key), None)
 
-    def _sync_rows(self) -> None:
+    def _compose_cells(self, field):
+        """This row's cells, built once as the form builds the row."""
+
+        key = field.key
+        self._retire_field_row(key)
+        current = ElidedLabel("\u2014")
+        current.setFixedWidth(self.current_heading.width())
+        # The switch lives in a cell of its own so a field with no live
+        # write can leave the CELL EMPTY without the row closing up: the
+        # column keeps its width, the rows keep their grid.
+        live_host = QtWidgets.QWidget()
+        live_layout = QtWidgets.QHBoxLayout(live_host)
+        live_layout.setContentsMargins(0, 0, 0, 0)
+        live_layout.setSpacing(0)
+        live = FluentSwitch("", live_host)
+        live_layout.addWidget(live, 0, QtCore.Qt.AlignCenter)
+        live_host.setFixedWidth(max(1, live.sizeHint().width()))
+        apply = FluentButton("Apply", color=ACCENT)
+        dot = FluentStatusDot(size=12)
+        status = ElidedLabel("")
+        status_host = QtWidgets.QWidget()
+        status_layout = QtWidgets.QHBoxLayout(status_host)
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        status_layout.setSpacing(window_pad(0.2))
+        status_layout.addWidget(dot)
+        status_layout.addWidget(status, 1)
+        timer = QtCore.QTimer(self)
+        timer.setSingleShot(True)
+        timer.setInterval(75)
+        timer.timeout.connect(lambda value=key: self._emit_apply(value))
+        live.toggled.connect(
+            lambda checked, value=key: self._live_toggled(value, checked)
+        )
+        apply.clicked.connect(lambda _checked=False, value=key: self._emit_apply(value))
+        self._field_rows[key] = current, live, apply, dot, status
+        self._live_timers[key] = timer
+        return (current,), ((live_host, 0), (apply, 0), (status_host, 1))
+
+    def _prune_rows(self) -> None:
+        """Forget the cells of rows the form no longer has."""
+
         for key, widgets in tuple(self._field_rows.items()):
-            current = widgets[0]
-            if key not in self.form._rows or current.parentWidget() is not self.form._rows[key]:
+            row = self.form._rows.get(key)
+            if row is None or widgets[0].parentWidget() is not row:
                 self._retire_field_row(key)
-        for field in self.form.spec.fields:
-            key = field.key
-            if key in self._field_rows:
-                continue
-            row = self.form._rows[key]
-            editor = self.form.widget_for(key)
-            layout = row.layout()
-            while layout.count():
-                layout.takeAt(0)
-            current = ElidedLabel("—", row)
-            current.setFixedWidth(self.current_heading.width())
-            # The switch lives in a cell of its own so a field with no live
-            # write can leave the CELL EMPTY without the row closing up: the
-            # column keeps its width, the rows keep their grid.
-            live_host = QtWidgets.QWidget(row)
-            live_layout = QtWidgets.QHBoxLayout(live_host)
-            live_layout.setContentsMargins(0, 0, 0, 0)
-            live_layout.setSpacing(0)
-            live = FluentSwitch("", live_host)
-            live_layout.addWidget(live, 0, QtCore.Qt.AlignCenter)
-            live_host.setFixedWidth(max(1, live.sizeHint().width()))
-            apply = FluentButton("Apply", color=ACCENT)
-            dot = FluentStatusDot(size=12)
-            status = ElidedLabel("", row)
-            status_host = QtWidgets.QWidget(row)
-            status_layout = QtWidgets.QHBoxLayout(status_host)
-            status_layout.setContentsMargins(0, 0, 0, 0)
-            status_layout.setSpacing(window_pad(0.2))
-            status_layout.addWidget(dot)
-            status_layout.addWidget(status, 1)
-            layout.addWidget(row._label)
-            layout.addWidget(current)
-            # The form's CELL, not its editor: a numeric field with a unit
-            # ladder is the editor and a picker side by side, and placing the
-            # editor alone left the picker orphaned in the row, painted over
-            # the Field column.
-            layout.addWidget(self.form.cell_for(key), 1)
-            layout.addWidget(live_host)
-            layout.addWidget(apply)
-            layout.addWidget(status_host, 1)
-            timer = QtCore.QTimer(self)
-            timer.setSingleShot(True)
-            timer.setInterval(75)
-            timer.timeout.connect(lambda value=key: self._emit_apply(value))
-            live.toggled.connect(
-                lambda checked, value=key: self._live_toggled(value, checked)
-            )
-            apply.clicked.connect(lambda _checked=False, value=key: self._emit_apply(value))
-            self._field_rows[key] = current, live, apply, dot, status
-            self._live_timers[key] = timer
         self._align_headings()
 
     def _align_headings(self) -> None:
@@ -368,8 +358,12 @@ class DeviceControlView(QtWidgets.QWidget):
             return
         layout = rows[0].layout()
         headings = self.columns.layout()
-        headings.setContentsMargins(layout.contentsMargins())
-        headings.setSpacing(layout.spacing())
+        # Only what differs: a layout told its spacing again invalidates
+        # itself, and this runs on every projected beat.
+        if headings.contentsMargins() != layout.contentsMargins():
+            headings.setContentsMargins(layout.contentsMargins())
+        if headings.spacing() != layout.spacing():
+            headings.setSpacing(layout.spacing())
         if layout.count() < 6:
             return
         # label, current, editor, live cell, apply, status.  A column is as
@@ -394,9 +388,9 @@ class DeviceControlView(QtWidgets.QWidget):
                 [heading.sizeHint().width()]
                 + [cell.sizeHint().width() for cell in cells]
             )
-            heading.setFixedWidth(width)
-            for cell in cells:
-                cell.setFixedWidth(width)
+            for widget in (heading, *cells):
+                if widget.width() != width or widget.minimumWidth() != width:
+                    widget.setFixedWidth(width)
 
     def resizeEvent(self, event):  # noqa: N802 - Qt naming
         super().resizeEvent(event)
@@ -407,7 +401,7 @@ class DeviceControlView(QtWidgets.QWidget):
         self._field_states = dict(fields)
         desired = {key: fields[key]["desired"] for key in spec.keys}
         self.form.reconcile(spec, desired)
-        self._sync_rows()
+        self._prune_rows()
         owners = tuple(str(value) for value in projection.get("owners", ()))
         self.owner_label.setText(f"Owner: {', '.join(owners) if owners else 'none'}")
         self.reason_label.setText(str(projection.get("reason", "")))
