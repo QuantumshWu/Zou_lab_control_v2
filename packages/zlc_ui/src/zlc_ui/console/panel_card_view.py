@@ -97,7 +97,7 @@ def data_structure_fragments(
     """The one coloured two-line rendering of a three-domain shape.
 
     ``valid`` maps a Repeat axis's name to how many of its samples have
-    landed whole, and that axis then reads ``34\u2713`` where the others
+    landed whole, and that number is what the axis reads where the others
     read their size: a repeat is a sample, not a coordinate, and the count
     a reader wants is the count of complete ones, which is also the number
     that moves while a run is playing.
@@ -126,7 +126,7 @@ def data_structure_fragments(
     landed = {str(name): int(count) for name, count in dict(valid or {}).items()}
 
     def count_text(name: object, size: object) -> str:
-        return f"{landed[str(name)]}\u2713" if str(name) in landed else str(int(size))
+        return str(landed[str(name)]) if str(name) in landed else str(int(size))
 
     sizes: list[tuple[str, str | None, object]] = []
     names: list[tuple[str, str | None, object]] = []
