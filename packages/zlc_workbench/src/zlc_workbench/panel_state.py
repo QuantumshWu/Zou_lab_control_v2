@@ -75,7 +75,8 @@ def panel_data_shape(
     axis have landed whole, plus accepted typed scope fates.
 
     ``validity`` is the shown snapshot's, when there is one: the strip then
-    says ``34\u2713`` beside a repeat axis instead of its size, because a
+    prints, for a repeat axis, how many of its samples have landed whole
+    instead of its size, because a
     repeat is a sample and the count that means anything is the count of
     complete ones.  With no snapshot there is no such count.
     """
