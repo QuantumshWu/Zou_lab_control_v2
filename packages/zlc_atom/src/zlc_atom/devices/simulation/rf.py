@@ -70,10 +70,12 @@ class InMemoryLmsLibrary:
     def get_rf_on(self, handle: int) -> bool:
         return bool(self._registers(handle)["rf_on"])
 
-    #: An LMS-103's range, in the brick's own units (10 Hz, 0.25 dB): the
-    #: instrument's limits are a fact about the brick, and this one is
-    #: the model on the bench.
-    FREQUENCY_LIMIT_UNITS = (500_000, 20_000_000)
+    #: The virtual brick's own range, in the brick's units (10 Hz, 0.25 dB):
+    #: 500 MHz to 8 GHz, -40 dBm to +10 dBm.  A real brick answers its
+    #: limits from its firmware; the virtual one answers the range every
+    #: window the virtual bench authors lies inside, so a window narrows
+    #: the range and never empties it.
+    FREQUENCY_LIMIT_UNITS = (50_000_000, 800_000_000)
     POWER_LIMIT_UNITS = (-160, 40)
 
     def get_frequency_limits(self, handle: int) -> tuple[int, int]:
