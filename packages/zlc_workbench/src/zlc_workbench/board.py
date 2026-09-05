@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from math import ceil
 from threading import Lock
 from typing import Any
 
@@ -92,6 +93,12 @@ class OwnerWake:
 class LiveBoard:
     """A set of panels kept up to date from one signal plane."""
 
+    #: How long one staged surface may travel before the board stops waiting
+    #: for it and says which panel held the shot.  A render takes tens of
+    #: milliseconds and a live fit is bounded at one second, so ten seconds
+    #: is not a slow render: it is a promise nobody is going to keep.
+    SURFACE_COMPLETION_SECONDS = 10.0
+
     def __init__(
         self,
         plane: object,
@@ -116,9 +123,15 @@ class LiveBoard:
             thread_name_prefix="zlc-presentation",
         )
         self.wake = OwnerWake(notify)
-        self._arbiter = SurfaceBatchArbiter(self.wake)
-        self._ports = ports
         self._clock = HarmonicClock(tuple(intervals))
+        self._arbiter = SurfaceBatchArbiter(
+            self.wake,
+            completion_boundaries=ceil(
+                self.SURFACE_COMPLETION_SECONDS * 1000.0 / self._clock.base_ms
+            ),
+            boundary_ms=self._clock.base_ms,
+        )
+        self._ports = ports
         self._scheduler = BoardScheduler(
             plane,
             self._clock,

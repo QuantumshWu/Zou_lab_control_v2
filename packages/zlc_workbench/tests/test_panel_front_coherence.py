@@ -19,6 +19,12 @@ from zlc_runtime.presentation import HarmonicClock, SurfaceBatchArbiter
 from zlc_workbench.presentation import PlotPanelPort
 
 
+def _arbiter(wake):
+    """An arbiter with a completion budget no test here runs out of."""
+
+    return SurfaceBatchArbiter(wake, completion_boundaries=1000, boundary_ms=100)
+
+
 def _submit_now(work):
     from concurrent.futures import Future
 
@@ -100,7 +106,7 @@ def test_a_panels_annotation_reaches_the_planes_coherent_front_set() -> None:
     scheduler = BoardScheduler(
         plane,
         HarmonicClock((100, 200, 400, 800)),
-        SurfaceBatchArbiter(_Sink()),
+        _arbiter(_Sink()),
         lambda: (port,),
     )
 

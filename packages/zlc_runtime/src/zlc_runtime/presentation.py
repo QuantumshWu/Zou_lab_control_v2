@@ -168,13 +168,24 @@ class _ShotCohort:
     ticks (counted only after the staged work completes) as the fallback for
     a follower that never stages — a not-due slow panel must not hold its
     shot open forever.
+
+    ``completion_left`` is the other clock: how many display ticks the
+    members' renders may still take.  A cohort flips together or not at all,
+    so one member whose render never finishes held its whole shot, every
+    later panel of that shot, and anything attached to the board after it,
+    for ever and in silence.  When the budget runs out the cohort is
+    ``expired``: the unfinished members are cancelled and rejected by name,
+    the finished ones leave unpresented, and the shot's panels are free to
+    stage again.
     """
 
     roots: frozenset | None
     window_panels: frozenset[str]
     boundaries_left: int
+    completion_left: int
     sealed: bool
     abandoned: bool
+    expired: bool
     updates: list[tuple[SurfacePort, SurfaceUpdate]]
 
 
@@ -189,14 +200,36 @@ class SurfaceBatchArbiter:
     regresses.
     """
 
-    __slots__ = ("_closed", "_cohorts", "_wake")
+    __slots__ = (
+        "_boundary_ms",
+        "_closed",
+        "_cohorts",
+        "_completion_boundaries",
+        "_wake",
+    )
 
-    def __init__(self, wake: WakeSink) -> None:
+    def __init__(
+        self,
+        wake: WakeSink,
+        *,
+        completion_boundaries: int,
+        boundary_ms: int,
+    ) -> None:
         if not callable(getattr(wake, "request_owner_wake", None)):
             raise TypeError("surface arbiter requires an owner wake")
         self._wake = wake
+        self._completion_boundaries = _positive_int(
+            completion_boundaries, "surface completion budget"
+        )
+        self._boundary_ms = _positive_int(boundary_ms, "display boundary")
         self._cohorts: list[_ShotCohort] = []
         self._closed = False
+
+    @property
+    def completion_seconds(self) -> float:
+        """How long one staged cohort may take before it is rejected."""
+
+        return self._completion_boundaries * self._boundary_ms / 1000.0
 
     @staticmethod
     def _panel_id(port: SurfacePort) -> str:
@@ -335,10 +368,12 @@ class SurfaceBatchArbiter:
                 roots=shot_roots,
                 window_panels=window_panels,
                 boundaries_left=2 if window_panels else 1,
+                completion_left=self._completion_boundaries,
                 # Unresolvable lineage never joins anything: seal now so it
                 # presents the moment it completes.
                 sealed=shot_roots is None,
                 abandoned=False,
+                expired=False,
                 updates=[],
             )
             self._cohorts.append(cohort)
@@ -378,15 +413,39 @@ class SurfaceBatchArbiter:
         if self._closed:
             return
         for cohort in self._cohorts:
+            complete = all(
+                update.future.done() for _port, update in cohort.updates
+            )
+            if not complete and not cohort.expired:
+                cohort.completion_left -= 1
+                if cohort.completion_left <= 0:
+                    cohort.expired = True
+                    self._wake.request_owner_wake()
             if cohort.sealed:
                 continue
-            if cohort.window_panels and not all(
-                update.future.done() for _port, update in cohort.updates
-            ):
+            if cohort.window_panels and not complete:
                 continue
             cohort.boundaries_left -= 1
             if cohort.boundaries_left <= 0:
                 cohort.sealed = True
+
+    def _expire(self, cohort: _ShotCohort) -> None:
+        """A cohort past its budget leaves, and the member that held it is named."""
+
+        seconds = self.completion_seconds
+        for port, update in cohort.updates:
+            if update.future.done():
+                self._finish_unpresented(((port, update),))
+                continue
+            update.future.cancel()
+            self._reject(
+                port,
+                update,
+                TimeoutError(
+                    f"{update.panel_id}: its staged surface did not finish "
+                    f"within {seconds:g} s"
+                ),
+            )
 
     @staticmethod
     def _reject(
@@ -435,6 +494,11 @@ class SurfaceBatchArbiter:
                 }
                 if panel_ids & blocked_panels:
                     blocked_panels |= panel_ids
+                    continue
+                if cohort.expired:
+                    self._expire(cohort)
+                    self._cohorts.remove(cohort)
+                    progressed = True
                     continue
                 if not cohort.abandoned and any(
                     update.future.done() and self._superseded(update.future)
