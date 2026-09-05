@@ -229,8 +229,40 @@ class RfSourceBase:
     def _read_output(self, channel: str) -> bool:
         raise NotImplementedError
 
+    def _read_frequency_limits(self, channel: str) -> tuple[float, float]:
+        """The instrument's own frequency range for this channel, in hertz."""
+
+        raise NotImplementedError
+
+    def _read_power_limits(self, channel: str) -> tuple[float, float]:
+        """The instrument's own power range for this channel, in dBm."""
+
+        raise NotImplementedError
+
     def close(self) -> None:
         raise NotImplementedError
+
+    def _scan_range(
+        self,
+        window: tuple[float | None, float | None],
+        limits: tuple[float, float],
+    ) -> tuple[float, float]:
+        """What a knob may be swept over: the bench's window where the bench
+        set an edge, the instrument's own limit everywhere else.
+
+        A knob with no bench window used to have no scan range at all, and
+        so no axis in the seamless scan -- an operator who had not authored
+        a safety window could not sweep the frequency the instrument was
+        perfectly able to sweep.  The window narrows what the instrument
+        allows; it never has to exist for the instrument's range to.
+        """
+
+        low, high = window
+        limit_low, limit_high = limits
+        return (
+            limit_low if low is None else max(float(low), limit_low),
+            limit_high if high is None else min(float(high), limit_high),
+        )
 
     # -------------------------------------------------------------- contract
     def _channel_label(self, channel: str) -> str:
@@ -244,6 +276,13 @@ class RfSourceBase:
             for channel in self._channels:
                 label = self._channel_label(channel)
                 frequency = float(self._read_frequency(channel))
+                frequency_range = self._scan_range(
+                    (frequency_low, frequency_high),
+                    self._read_frequency_limits(channel),
+                )
+                power_range = self._scan_range(
+                    (power_low, power_high), self._read_power_limits(channel)
+                )
                 fields.append(
                     TunableField(
                         metadata=AuthoringField(
@@ -256,8 +295,8 @@ class RfSourceBase:
                             # bench policy unstateable -- the field would
                             # refuse its own instrument.
                             None,
-                            minimum=frequency_low,
-                            maximum=frequency_high,
+                            minimum=frequency_range[0],
+                            maximum=frequency_range[1],
                             unit="Hz",
                         ),
                         current=frequency,
@@ -275,8 +314,8 @@ class RfSourceBase:
                             "float",
                             f"{label}Power (dBm)",
                             None,
-                            minimum=power_low,
-                            maximum=power_high,
+                            minimum=power_range[0],
+                            maximum=power_range[1],
                             unit="dBm",
                         ),
                         current=power,

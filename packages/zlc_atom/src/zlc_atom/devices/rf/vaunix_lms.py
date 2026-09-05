@@ -47,6 +47,10 @@ class LmsLibrary(Protocol):
 
     def get_rf_on(self, handle: int) -> bool: ...
 
+    def get_frequency_limits(self, handle: int) -> tuple[int, int]: ...
+
+    def get_power_limits(self, handle: int) -> tuple[int, int]: ...
+
 
 class CtypesLmsLibrary:
     """The real DLL behind the Protocol.  Windows only, by the vendor."""
@@ -113,6 +117,18 @@ class CtypesLmsLibrary:
 
     def get_rf_on(self, handle: int) -> bool:
         return bool(self._dll.fnLMS_GetRF_On(handle))
+
+    def get_frequency_limits(self, handle: int) -> tuple[int, int]:
+        return (
+            int(self._dll.fnLMS_GetMinFreq(handle)),
+            int(self._dll.fnLMS_GetMaxFreq(handle)),
+        )
+
+    def get_power_limits(self, handle: int) -> tuple[int, int]:
+        return (
+            int(self._dll.fnLMS_GetMinPwr(handle)),
+            int(self._dll.fnLMS_GetMaxPwr(handle)),
+        )
 
 
 @dataclass(frozen=True)
@@ -188,6 +204,16 @@ class VaunixLmsRfSource(RfSourceBase):
     def _read_output(self, channel: str) -> bool:
         del channel
         return bool(self._library.get_rf_on(self._handle))
+
+    def _read_frequency_limits(self, channel: str) -> tuple[float, float]:
+        del channel
+        low, high = self._library.get_frequency_limits(self._handle)
+        return float(low) * FREQUENCY_UNIT_HZ, float(high) * FREQUENCY_UNIT_HZ
+
+    def _read_power_limits(self, channel: str) -> tuple[float, float]:
+        del channel
+        low, high = self._library.get_power_limits(self._handle)
+        return float(low) * POWER_UNIT_DBM, float(high) * POWER_UNIT_DBM
 
     def close(self) -> None:
         self._library.close_device(self._handle)

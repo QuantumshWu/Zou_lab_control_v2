@@ -70,6 +70,20 @@ class InMemoryLmsLibrary:
     def get_rf_on(self, handle: int) -> bool:
         return bool(self._registers(handle)["rf_on"])
 
+    #: An LMS-103's range, in the brick's own units (10 Hz, 0.25 dB): the
+    #: instrument's limits are a fact about the brick, and this one is
+    #: the model on the bench.
+    FREQUENCY_LIMIT_UNITS = (500_000, 20_000_000)
+    POWER_LIMIT_UNITS = (-160, 40)
+
+    def get_frequency_limits(self, handle: int) -> tuple[int, int]:
+        self._registers(handle)
+        return self.FREQUENCY_LIMIT_UNITS
+
+    def get_power_limits(self, handle: int) -> tuple[int, int]:
+        self._registers(handle)
+        return self.POWER_LIMIT_UNITS
+
 
 def virtual_rf_source(config: VaunixLmsConfig) -> VaunixLmsRfSource:
     """The production driver, with only its USB layer replaced."""

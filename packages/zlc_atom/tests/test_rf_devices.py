@@ -72,6 +72,15 @@ class _ScpiInstrument:
         if upper == "*IDN?":
             return "RIGOL TECHNOLOGIES,DG4162,DG4E0000000001,00.01.12"
         registers = self.registers[self._channel(command)]
+        # The instrument's own limits, as a DG4162 answers them.
+        if ":FREQUENCY? MIN" in upper:
+            return "1.000000E-06"
+        if ":FREQUENCY? MAX" in upper:
+            return "1.600000E+08"
+        if ":VOLTAGE? MIN" in upper:
+            return "-6.0000E+01" if registers["UNIT"] == "DBM" else "1.0000E-03"
+        if ":VOLTAGE? MAX" in upper:
+            return "2.3980E+01" if registers["UNIT"] == "DBM" else "1.0000E+01"
         if ":FREQUENCY?" in upper:
             return f"{registers['FREQ']:.6E}"
         if ":VOLTAGE:UNIT?" in upper:
@@ -189,9 +198,11 @@ def test_optional_window_is_one_init_and_control_policy() -> None:
     It is adjusted with plain Apply (never live), or through the same
     ``tune`` API -- and the scan add-axis combo must never offer it: the
     window fields are non-live and unbounded, which is exactly what
-    scan_ports_for_devices excludes.  Tightening an edge past a channel's
-    CURRENT value is refused by name: policy may fence a knob in, never
-    silently drag a set output to a new value.
+    scan_ports_for_devices excludes.  The knobs themselves are always
+    offered: with no window set, a knob's scan range is the instrument's
+    own limit, and an edge that IS set narrows it.  Tightening an edge past
+    a channel's CURRENT value is refused by name: policy may fence a knob
+    in, never silently drag a set output to a new value.
     """
 
     from zlc_atom.nodes.scan.plan import scan_ports_for_devices
@@ -209,8 +220,12 @@ def test_optional_window_is_one_init_and_control_policy() -> None:
         assert window.metadata.minimum is None and window.metadata.maximum is None
         assert window.current is None
 
-    ports = scan_ports_for_devices({"rf": source})
-    assert ports == (), "an unbounded knob has no finite scan-authoring range"
+    ports = {port.port.split(":")[-1]: port for port in scan_ports_for_devices({"rf": source})}
+    assert set(ports) == {
+        "ch1_frequency_hz", "ch1_power_dbm", "ch2_frequency_hz", "ch2_power_dbm"
+    }, "with no window, a knob is swept over the instrument's own range"
+    assert (ports["ch1_frequency_hz"].lo, ports["ch1_frequency_hz"].hi) == (1e-6, 160e6)
+    assert (ports["ch1_power_dbm"].lo, ports["ch1_power_dbm"].hi) == (-60.0, 23.98)
     assert not any("FREQuency " in command for command in instrument.log), (
         "omitting all policy edges must not move hardware at open"
     )
@@ -229,9 +244,13 @@ def test_optional_window_is_one_init_and_control_policy() -> None:
     assert source.tune("frequency_high_hz", None) is None
     assert source.tunable_values()["frequency_high_hz"] is None
     assert source.settings_provenance()["settings_epoch"] == before + 1
-    assert not any(
-        port.port.endswith(":ch1_frequency_hz") for port in scan_ports_for_devices({"rf": source})
-    ), "clearing either edge removes the finite scan range"
+    cleared = next(
+        port for port in scan_ports_for_devices({"rf": source})
+        if port.port.endswith(":ch1_frequency_hz")
+    )
+    assert (cleared.lo, cleared.hi) == (1e3, 160e6), (
+        "clearing an edge hands that side back to the instrument's own limit"
+    )
     assert source.tune("frequency_high_hz", 80e6) == 80e6
     # The channel knobs' own scan bounds follow the window immediately.
     by_name = {field.metadata.name: field for field in source.tunable_fields()}

@@ -299,6 +299,30 @@ class RigolDg4000RfSource(RfSourceBase):
     def _read_frequency(self, channel: str) -> float:
         return float(self._link.query(f"{self._source(channel)}:FREQuency?"))
 
+    def _read_frequency_limits(self, channel: str) -> tuple[float, float]:
+        """The instrument's own range, asked of it: a DG4062 stops at 60 MHz
+        and a DG4162 at 160 MHz, and the model knows which it is."""
+
+        source = self._source(channel)
+        return (
+            float(self._link.query(f"{source}:FREQuency? MINimum")),
+            float(self._link.query(f"{source}:FREQuency? MAXimum")),
+        )
+
+    def _read_power_limits(self, channel: str) -> tuple[float, float]:
+        """The instrument's amplitude range, in dBm through the channel's own
+        unit and load -- the same arithmetic every power read goes through."""
+
+        source = self._source(channel)
+        unit = self._amplitude_unit(channel)
+        edges = []
+        for extreme in ("MINimum", "MAXimum"):
+            amplitude = float(self._link.query(f"{source}:VOLTage? {extreme}"))
+            edges.append(
+                amplitude if unit == _DBM else self._dbm_from_volts(channel, amplitude, unit)
+            )
+        return min(edges), max(edges)
+
     def _read_power(self, channel: str) -> float:
         unit = self._amplitude_unit(channel)
         amplitude = float(self._link.query(f"{self._source(channel)}:VOLTage?"))
