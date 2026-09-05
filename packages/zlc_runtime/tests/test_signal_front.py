@@ -316,21 +316,8 @@ def test_plane_front_keeps_weak_parent_payload_alive() -> None:
         plane.close()
 
 
-def test_a_companion_that_never_spoke_in_its_generation_is_excused() -> None:
-    """After a restart, frames flow without the overlay -- never neither.
-
-    A processor re-reserved under a new generation carries its output name
-    before its first commit.  Counting that silent name as a leaf made the
-    whole component incoherent, and the fallback then popped the BASE too
-    (its generation had changed): a camera panel with an occupancy overlay
-    froze, silently and indefinitely, the moment a pulse restart re-reserved
-    the overlay before its first new-generation shot.
-
-    The distinction is per generation: a processor between two shots of ONE
-    generation (current publication None, previous front carrying its last)
-    is COMPUTING, and the hold-together contract above still stands -- the
-    transitive-fallback test pins that half.
-    """
+def test_a_requested_companion_waits_for_its_first_same_shot_publication() -> None:
+    """A first/restarted companion is pending, never an absent annotation."""
 
     root = _publication("camera", "g1", 1, "camera/frame")
     occupancy = _publication("occ", "g2", 1, "occ/sites", (root,))
@@ -339,10 +326,41 @@ def test_a_companion_that_never_spoke_in_its_generation_is_excused() -> None:
         _state("camera", "g1", "producer", ("camera/frame",), root),
         _state("occ", "g2", "processor", ("occ/sites",), occupancy, "camera/frame"),
     ]
+    states[1].publication = None
+    waiting = build_front(
+        states, {"camera/frame", "occ/sites"}, None, parents.__getitem__
+    )
+    assert waiting.names() == ()
+    # An unselected processor does not hold an ordinary camera panel.
+    flowing = build_front(states, {"camera/frame"}, None, parents.__getitem__)
+    assert flowing.publication("camera/frame") is root
+
+    states[1].publication = occupancy
     first = build_front(
         states, {"camera/frame", "occ/sites"}, None, parents.__getitem__
     )
     assert first.names() == ("camera/frame", "occ/sites")
+
+    # Before the overlay is selected, the camera is allowed ahead. Selecting
+    # it while the processor is pending must not reuse that mixed old front.
+    advanced = _publication("camera", "g1", 2, "camera/frame")
+    parents[advanced] = ()
+    states[0].publication = advanced
+    camera_only = build_front(states, {"camera/frame"}, first, parents.__getitem__)
+    states[1].publication = None
+    waiting = build_front(
+        states, {"camera/frame", "occ/sites"}, camera_only, parents.__getitem__
+    )
+    assert waiting.names() == ()
+    states[0].publication = root
+
+    # Restarting only Occupancy must not return the old camera half of the
+    # group. The surface keeps its previously accepted complete frame.
+    states[1] = _state("occ", "g4", "processor", ("occ/sites",), None, "camera/frame")
+    waiting = build_front(
+        states, {"camera/frame", "occ/sites"}, first, parents.__getitem__
+    )
+    assert waiting.names() == ()
 
     root2 = _publication("camera", "g3", 1, "camera/frame")
     parents[root2] = ()
@@ -353,9 +371,7 @@ def test_a_companion_that_never_spoke_in_its_generation_is_excused() -> None:
     resumed = build_front(
         restarted, {"camera/frame", "occ/sites"}, first, parents.__getitem__
     )
-    # The new frame is on screen; the old generation's rings are not.
-    assert resumed.publication("camera/frame") is root2
-    assert resumed.publication("occ/sites") is None
+    assert resumed.names() == ()
 
     # And the first new-generation commit joins atomically.
     occupancy2 = _publication("occ", "g4", 1, "occ/sites", (root2,))
@@ -365,3 +381,4 @@ def test_a_companion_that_never_spoke_in_its_generation_is_excused() -> None:
         restarted, {"camera/frame", "occ/sites"}, resumed, parents.__getitem__
     )
     assert joined.publication("occ/sites") is occupancy2
+    assert joined.publication("camera/frame") is root2

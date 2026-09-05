@@ -112,6 +112,7 @@ Node new chunk
   原子完整发布，不新增cell-internal tile/slice streaming contract。
 - Canonical display materialization只在实际display consumer到期时合并/cache，并在Qt owner thread之外执行；不得让producer每commit强制复制full prefix，也不得因Panel存在与否改变采集结果。
 - Live Panel、Panel Edit/Refresh/Save、selector、fit input和overlay必须从同一accepted canonical presentation snapshot投影；无法唯一对齐即拒绝。
+- 已选择共同显示的关联signal构成same-shot group，只有全部成员具有同一shot的publication才整体呈现。首发、Processor重启或本轮尚在计算都属于pending，不得把缺失成员排除后先呈现新图像；保留上一组完整accepted画面并显示等待状态。同shot已发布但validity为invalid的结果仍算本轮完成，只是不画对应标记，不得沿用旧判断。用户明确断开成员后才改变组的需求。
 - Bounded indexed history已经淘汰的旧publication属于正常presentation过期，不是signal/Panel故障：`SignalDataPlane.retains(signal, publication)`必须把primary index早于history first index回答为False，materialization以明确的expired/cancel结果拒绝；Surface丢弃这次排队更新并保留上一完整front、host和control vocabulary。Frozen Edit仍以自身accepted snapshot完成selector/fit/producer映射，但不得把已淘汰parent交给Runtime SelectionBridge；它同时撤下该bridge之前的derived output，绝不能拿latest冒充旧publication或留下旧ROI信号，也不能让普通`ValueError`关闭host或清空Fit/Setting UI。
 - Panel Edit的冻结数据是否落后于Live与冻结配置是否仍兼容是两个状态：同run coverage增长只标记`data advanced`，不得阻止对exact frozen snapshot做Fit、Refresh或Save；只有signal/spec/axis vocabulary真正不兼容才阻止保存。接受Display/Fit/Focus等配置时，PanelState、frozen target和两surface配置必须原子推进，不能先把自己标stale再由stale阻断同步。
 - Panel的title shape与Setting semantic都只能读取同一publication的canonical current Dataset，不得读取最后event chunk冒充完整signal。title结构固定为`(repeat axes) × (point axes) × (cell-data axes)`三组；例如Survival field scan显示`(20) × (3×10×10×10) × (35)`：survival的pair是Point domain内的READOUT_EVENT axis，scan axes在同一Point domain按声明顺序追加，site留在Cell-data。PanelCard以独立的accepted-data projection持有title structure/scope，不从Setting parameter surface读取；每次surface accept都直接更新该projection，即使不改变任何PanelState/control vocabulary。存在具名Point axes时不得再发明flattened `point` ordinal；多维FacetGrid默认facet最外层真实scan axis，其余轴保持可编辑的Reduced。即使当前projection因FacetGrid 64-cell上限等原因拒绝，错误只标记不可用的presentation/fit，完整canonical scan-axis fate仍必须留在Setting中供operator修复。live publication未改变PanelState或authoring字段域时不得reconcile Setting form；Plot kind是Add Panel时确定的panel identity，不进入Setting通用表单，FacetGrid仅暴露可变的Cell kind。
@@ -243,6 +244,7 @@ Node new chunk
 
 - Overlay producer发布匹配中立Plot contract的numeric/bool companion signal，并在同一run record中携带该contract要求的geometry document；`zlc_plot`拥有通用adapter与renderer，Workbench只按contract路由，不import domain plugin，也不重建science。
 - Data、Fit和Overlay共同使用同一个scope/axis/fate projection；无法唯一对齐则拒绝。
+- 图像数据更新是一份完整presentation输入；新数据未携overlay表示该帧没有overlay，直接更新与Host管线都必须清除旧层。同一数据上的显式overlay-only编辑仍是独立配置事务。动态status的invalid或无法唯一选定状态不画判断圈；静态Calibration/point-review显式标记不受该数据有效性规则影响。
 - ROI/binning坐标只由一个transform owner处理。
 - Selector Off时plot不消费任何pointer gesture：不画selector、不zoom/pan，也不响应双击facet focus；普通滚轮继续滚外层board。
 - Selector On时，FacetGrid overview只响应双击进入cell，不得在overview开始area selector；进入具体cell后，selector才按该cell的canonical projection工作。

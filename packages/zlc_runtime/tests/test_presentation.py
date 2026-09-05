@@ -13,6 +13,7 @@ from zlc_data import (
     AxisId,
     AxisSpec,
     BlockId,
+    CellValidity,
     DataBlock,
     DatasetRevision,
     DatasetSchema,
@@ -33,7 +34,9 @@ from zlc_runtime.presentation import (
 from zlc_runtime.streams import EventRef, StreamId
 
 
-def _front(name: str = "camera/frame", sequence: int = 1) -> SignalFront:
+def _front(
+    name: str = "camera/frame", sequence: int = 1, *, valid: bool = True
+) -> SignalFront:
     repeat = AxisSpec(AxisId(f"{name}.repeat"), "repeat", REPEAT, 1, (0,))
     schema = DatasetSchema(
         DomainSpec((1,), (repeat,), ((0,),)),
@@ -45,7 +48,7 @@ def _front(name: str = "camera/frame", sequence: int = 1) -> SignalFront:
         BlockId(f"{name}-{sequence}"),
         DatasetRevision(sequence),
         np.asarray([[[float(sequence)]]], dtype=np.float64),
-        VALID,
+        VALID if valid else CellValidity(np.zeros((1, 1), dtype=np.bool_)),
         schema,
     )
     snapshot = OwnedSnapshot(
@@ -141,9 +144,6 @@ class _Port:
             tuple(
                 front.publication(name).event_ref
                 for name in self.front_signals
-                # Mirrors the real port: a companion absent from the front
-                # is excused, never a veto.
-                if front.publication(name) is not None
             ),
             future,
         )
@@ -892,20 +892,42 @@ def test_a_paused_display_still_freezes_the_plane_and_advances_the_clock() -> No
     assert staged, "a resumed board must stage on its own next boundary"
 
 
-def test_a_missing_companion_is_reported_and_the_base_still_stages() -> None:
-    """A base frame without its overlay is honest; a held one is a stuck bench.
-
-    The companion veto in ``_front_refs`` plus a ``report_waiting`` that the
-    panel port implemented as a no-op meant an overlay that had not yet
-    published froze its base panel outright, with nothing on the card to say
-    why.  The companion is now excused -- and named, so the frame with no
-    rings is a labelled condition rather than a mystery.
-    """
+def test_a_missing_companion_holds_the_group_until_completion_wake() -> None:
 
     front = _front("camera/frame")
     arbiter = SurfaceBatchArbiter(_Sink())
     port = _Port("camera", "camera/frame", companions=("occ/sites",))
 
-    assert arbiter.enqueue_group((port,), front)
+    assert not arbiter.enqueue_group((port,), front)
     assert port.waiting == ["occ/sites"]
-    assert len(port.futures) == 1
+    assert port.futures == []
+    # Even when the coherent front withholds the camera too, report the
+    # missing companion instead of implying the camera stopped producing.
+    assert not arbiter.enqueue_group((port,), SignalFront({}))
+    assert port.waiting[-1] == "occ/sites"
+
+    plane = _Plane(front)
+    raw = _Port("raw", "camera/frame")
+    ports = {raw.panel_id: raw, port.panel_id: port}
+    scheduler = BoardScheduler(
+        plane, HarmonicClock((100, 2000)), arbiter, lambda: tuple(ports.values())
+    )
+    scheduler.on_tick()
+    assert raw.futures == port.futures == []
+    scheduler.stage_owed()
+    assert raw.futures == port.futures == []
+    # An explicitly invalid result has completed; it must not hold the image
+    # or keep the previous judgement alive. The renderer consumes validity.
+    companion = _front("occ/sites", valid=False)
+    plane.front = SignalFront(
+        {**front.signals, **companion.signals},
+        {**front.publication_by_signal, **companion.publication_by_signal},
+    )
+    scheduler.stage_owed()
+    assert len(raw.futures) == len(port.futures) == 1
+    raw.futures[-1].set_result("complete raw image")
+    arbiter.drain(ports.get)
+    assert raw.accepted == port.accepted == []
+    port.futures[-1].set_result("complete image and overlay")
+    arbiter.drain(ports.get)
+    assert len(raw.accepted) == len(port.accepted) == 1

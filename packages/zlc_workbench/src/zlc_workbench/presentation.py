@@ -369,12 +369,7 @@ class PlotPanelPort:
         """Every signal this panel reads from one front, shown one first."""
 
         with self._state_lock:
-            target = (
-                self._projection_target
-                if self._surface is None
-                or self._surface.presentation_epoch != self._presentation_epoch
-                else self._surface.target
-            )
+            target = self._projection_target
         companions = (
             ()
             if self._companion_signals is None
@@ -390,7 +385,7 @@ class PlotPanelPort:
         self,
         front: object,
         publication: object,
-    ) -> tuple[object, ...]:
+    ) -> tuple[object, ...] | None:
         refs = [publication.event_ref]
         companions = self.front_signals[1:]
         if not companions:
@@ -401,13 +396,8 @@ class PlotPanelPort:
         for name in companions:
             companion = publication_for(name)
             if companion is None:
-                # EXCUSED, not a veto -- the same rule the arbiter's
-                # _front_refs applies.  Raising here made an overlay that
-                # had not yet published in its generation freeze the base
-                # panel outright; a base frame shown without its overlay is
-                # honest, and the overlay joins atomically through the
-                # coherent front with its first commit.
-                continue
+                self.report_waiting(name)
+                return None
             refs.append(companion.event_ref)
         return tuple(refs)
 
@@ -439,6 +429,8 @@ class PlotPanelPort:
                 raise RuntimeError("plot panel port is closed")
             presentation_epoch = self._presentation_epoch
         front_refs = self._front_refs(front, publication)
+        if front_refs is None:
+            return None
         publication_generation = _generation_of(value)
         revision = _revision_of(value)
         completion: Future = Future()
@@ -923,12 +915,6 @@ class PlotPanelPort:
 
         if target_host is None:
             return False
-        # A presented update that carries every declared signal ends the
-        # waiting condition; a partial one (base without its overlay) keeps
-        # it standing, which is exactly what the card should say.
-        if len(update.front_refs) >= len(self.front_signals):
-            with self._state_lock:
-                self.waiting_condition = ""
         presented, present_error = self._put_on_screen(target_host, operation)
         if not presented:
             if replacement is not None:
@@ -974,6 +960,7 @@ class PlotPanelPort:
                 prepared.presentation_epoch,
             )
             self.last_error = None
+            self.waiting_condition = ""
 
         callback_error: BaseException | None = None
         if replacement is not None:

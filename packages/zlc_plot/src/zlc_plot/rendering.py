@@ -8848,7 +8848,7 @@ class MatplotlibRenderer:
         The overlay keeps the same repeat/point carrier as the image.  Its one
         resolution rule applies this PlotSpec's scopes and the current facet;
         a surface that still pools either leading axis has no single-shot
-        status and paints UNKNOWN rather than an invented consensus.
+        status and displays no judgement ring.
         """
 
         if not isinstance(self.semantic_spec, ImagePlot):
@@ -8871,7 +8871,11 @@ class MatplotlibRenderer:
         self._artists[signature_key] = signature
         collection = self._artists.get(f"{key}:points")
         labels: list[Any] = self._artists.setdefault(f"{key}:point-labels", [])
-        if overlay is None or overlay.count == 0:
+        statuses = None if overlay is None else overlay.statuses_for(self.spec, facet_value)
+        if (
+            overlay is None or overlay.count == 0
+            or (overlay.status is not None and statuses is None)
+        ):
             if collection is not None:
                 collection.set_visible(False)
             for label in labels:
@@ -8925,7 +8929,7 @@ class MatplotlibRenderer:
 
         radius_x = display_radius(x_quantity)
         radius_y = display_radius(y_quantity)
-        statuses = overlay.statuses_for(self.spec, facet_value) or (
+        statuses = statuses or (
             PointStatus.UNKNOWN,
         ) * overlay.count
         tokens = {
@@ -8935,7 +8939,11 @@ class MatplotlibRenderer:
             PointStatus.INVALID: self.style.artists.point_invalid,
         }
         edgecolors = tuple(
-            to_rgba(tokens[status].color, tokens[status].alpha)
+            to_rgba(
+                tokens[status].color,
+                0.0 if overlay.status is not None and status is PointStatus.INVALID
+                else tokens[status].alpha,
+            )
             for status in statuses
         )
         linewidths = tuple(tokens[status].linewidth for status in statuses)
@@ -8994,7 +9002,10 @@ class MatplotlibRenderer:
             -radius_y if axis.yaxis_inverted() else radius_y
         )
         for index, label in enumerate(labels):
-            visible = show_labels and index < overlay.count
+            visible = (
+                show_labels and index < overlay.count
+                and edgecolors[index][-1] > 0.0
+            )
             label.set_visible(visible)
             if not visible:
                 continue

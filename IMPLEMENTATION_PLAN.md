@@ -37,6 +37,7 @@
   通过presentation epoch使同signal全部Panel重新投影，不增加scientific publication/revision。
   Runtime内部绝对ordinal在materialize时统一转换为以最新为0的相对primary-index；Plot与
   Workbench只把它当普通AxisRef，不自动scope或建立history专用interaction路径。
+- 关联显示按完整same-shot group就绪；已选成员pending（含首发与重启）时整组保留上次完整画面，只有同shot明确invalid结果可呈现且不画无效标记。完整新图像输入不继承旧overlay；删除缺companion提前放行与同generation沿用旧层的旧行为。
 - `Occupancy Agreement`是普通Occupancy的纯数据下游：source picker选择`counts`，Runtime从同一原子publication交付其`occupied` sibling；默认frame `0/1/2`但三项均可编辑且可重复。一致的首/末occupancy保留共同bool和中间counts，不一致或任一所需值invalid则只通过Dataset validity标为invalid；不重新读取camera/calibration，不重新提取counts或分类，也不携带overlay知识。
 - Panel window demand在authored state接受时先于Plot render同步；最后lease的`10→1`在调用
   返回前释放并切回event表示。当前host的Focus/Area/Crosshair按同generation与accepted轴词汇
@@ -201,6 +202,8 @@
 - Domain Task仍在B决定科学数据、路径及非Figure NPZ/JSON并register artifact；只把Figure执行能力由composition注入C。direct/notebook显式使用本地Plot，不把TaskArtifactContext或Runtime变成Plot owner。
 
 ## 3. 当前验证状态
+
+- 2026-09-04 same-shot/Occupancy显示修复：Runtime与Workbench组等待/重启/延迟提交`34 passed`，Camera＋Occupancy与camera restart`2 passed`，Plot完整输入四入口（含真实RenderProcess）、动态invalid、active-fit配置及真实camera呈现`16 passed`，跨进程front/Save与typed overlay保存重开`2 passed`。清圈和全invalid的完整RGBA与同源无overlay对照0像素差；生产代码净减39行，无新production文件/类。实验机原始偶发现象未在本机复现；已复现并修复的是违背same-shot的缺成员放行与旧overlay继承路径。
 
 - 当前三进程worktree正式证据：process Host/selector/Fit/Fit-event/C Save、共享RGBA与input refcount通过；TaskConsole实际A崩溃自动remount通过；FigureViewer全文件`21 passed`，actual A/C archive/open/edit/Save image及TaskConsole/Viewer两种关闭顺序均通过且所有PID退出；三类Domain Task的existing artifact用例`3 passed`，注入Future writer等待`3/3`。最终owned-wire的15次2M Image stress与DPR3完整Edit/Refresh/C Save均0 BufferError/SharedMemory/resource-tracker warning。最终代码真实DPR3四Panel critical P50/P90/max为`142.80/161.93/188.31 → 89.34/100.30/103.65 ms`，零stall；Grid Save总等待`3895.1→843.8 ms`、GUI最长轮`366.1→6.9 ms`。完整表与内存代价见`packages/zlc_plot/docs/performance.md`。
 

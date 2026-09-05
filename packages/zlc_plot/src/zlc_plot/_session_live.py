@@ -117,7 +117,9 @@ class LiveSessionMixin:
                 active = self._live_prepare_future
                 if active is not None and not active.done():
                     raise RuntimeError("a live frame is already being prepared")
-                if image_overlay is not None:
+                if image_overlay is not None and not self._data_generation_changed(
+                    self._projection.data, data
+                ):
                     self._validate_image_frame_overlay(
                         self._image_overlay,
                         image_overlay,
@@ -245,41 +247,10 @@ class LiveSessionMixin:
                 ) != str(self.data_generation)
                 if not generation_changed and revision <= self.data_revision:
                     return None
-                accepted_image_overlay = (
-                    # The overlay is DATA-derived: a new run's frame must
-                    # not inherit the outgoing run's points.
-                    prepared.image_overlay
-                    if generation_changed
-                    else (
-                        self._image_overlay
-                        if prepared.image_overlay is None
-                        else prepared.image_overlay
-                    )
-                )
-            accepted_fit = None
-            resolution = None
-            fit_event = None
-            if solved is not None:
-                accepted_fit, resolution, fit_event = self._accept_pair_fit(
-                    solved,
-                    prepared.projection,
-                )
-            if fit_event is not None:
-                self._notify_fit(fit_event)
-            try:
-                presentation = self._present_projection_transaction(
-                    prepared.projection,
-                    image_overlay=accepted_image_overlay,
-                    accepted_fit=accepted_fit,
-                )
-            except Exception:
-                self._restore_live_fit_completion(resolution)
-                raise
-        if accepted_fit is not None and solved is not None:
-            self._remember_fit_warm_starts(
-                solved.result,
-                request_generation=solved.started.request_generation,
-                selections=accepted_fit.selections,
+            presentation, resolution = self._present_solved_projection(
+                prepared.projection,
+                image_overlay=prepared.image_overlay,
+                solved=solved,
             )
         return _LiveFrameFinalization(
             self._session_identity,

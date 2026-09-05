@@ -972,8 +972,21 @@ def test_complete_configuration_fits_clears_and_noops_as_one_front(
 ) -> None:
     """One desired target has one solve/front; replaying it has neither."""
 
+    from dataclasses import replace
+    from zlc_data import PRIMARY_INDEX
+    from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
+
     snapshots = _fit_curve_series("atomic-configuration", offset=0.1)
-    snapshot = snapshots(0, 0.3)
+    source = snapshots(0, 0.3)
+    schema = replace(
+        source.block.schema,
+        point_domain=mapped_domain_from_columns(
+            {"source index": np.zeros(81, dtype=np.int64), "x": np.linspace(-4, 4, 81)},
+            ids={"source index": str(PRIMARY_INDEX_AXIS_ID)},
+            roles={"source index": PRIMARY_INDEX},
+        ),
+    )
+    snapshot = make_snapshot(schema, source.block.values, revision=0)
     engine = FitEngine()
     solve_count = 0
     solve = engine.fit
@@ -1020,6 +1033,20 @@ def test_complete_configuration_fits_clears_and_noops_as_one_front(
         unchanged = host.configure(fit=fit_target, **desired).result(timeout=30)
         assert unchanged.front is fitted.front
         assert solve_count == 1
+
+        events = []
+        host.subscribe_fit(events.append).result(timeout=10)
+        for revision, fit_configuration in ((1, {}), (2, {"fit": fit_target})):
+            incoming = make_snapshot(
+                schema, snapshots(revision, 0.3 + 0.2 * revision).block.values,
+                revision=revision,
+            )
+            updated = host.configure(
+                data=incoming, **fit_configuration,
+            ).result(timeout=30)
+            assert updated.front.identity.data_revision == revision
+            assert events[-1].result.source_revision == revision
+            assert solve_count == revision + 1
 
         expressed = host.configure(
             fit={

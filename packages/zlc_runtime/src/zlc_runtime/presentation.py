@@ -236,26 +236,13 @@ class SurfaceBatchArbiter:
         port: SurfacePort,
         front: SignalFront,
     ) -> tuple[EventRef, ...] | None:
-        """The refs this port would present, or None when its OWN signal is absent.
+        """The complete requested refs, or None while any member is pending."""
 
-        A companion with no publication in the front is excused, not a
-        veto.  Requiring every companion made an overlay that had not yet
-        published -- or whose producer was down -- freeze its base panel
-        outright, through a report_waiting that said nothing.  A base frame
-        shown WITHOUT its overlay is honest; a base frame held back for an
-        overlay that may never come is a stuck experiment.  Atomicity is
-        untouched: a companion that HAS published joins through the
-        coherent front and can still hold the pair on one shot.
-        """
-
-        primary = SurfaceBatchArbiter._signal_name(port)
         refs: list[EventRef] = []
         for name in SurfaceBatchArbiter._front_signals(port):
             publication = front.publication(name)
             if publication is None:
-                if name == primary:
-                    return None
-                continue
+                return None
             refs.append(publication.event_ref)
         return tuple(refs)
 
@@ -295,14 +282,16 @@ class SurfaceBatchArbiter:
         for port, panel_id in zip(members, panel_ids, strict=True):
             front_refs = self._front_refs(port, front)
             if front_refs is None:
-                port.report_waiting(self._signal_name(port))
+                primary = self._signal_name(port)
+                missing = next(
+                    (
+                        name for name in self._front_signals(port)
+                        if name != primary and front.publication(name) is None
+                    ),
+                    primary,
+                )
+                port.report_waiting(missing)
                 return False
-            for name in self._front_signals(port):
-                if front.publication(name) is None:
-                    # Presented WITHOUT this companion -- and said so, so a
-                    # frame with no overlay is a labelled condition rather
-                    # than a mystery.
-                    port.report_waiting(name)
             signal_name = self._signal_name(port)
             value = front.value(signal_name)
             publication = front.publication(signal_name)
@@ -686,10 +675,20 @@ class BoardScheduler:
         busy_unresolved: set[str] = set()
         for port in ports:
             panel_id = SurfaceBatchArbiter._panel_id(port)
+            refs = SurfaceBatchArbiter._front_refs(port, front)
+            if refs is None:
+                # A selected companion may not have a producer state yet.
+                # Its primary still identifies the shot that every sibling
+                # surface must hold until the whole requested input exists.
+                primary = front.publication(SurfaceBatchArbiter._signal_name(port))
+                if primary is not None:
+                    roots = self._shot_roots(primary)
+                    if roots is not None:
+                        busy_roots.add(roots)
+                continue
             if panel_id not in eligible:
                 continue
-            refs = SurfaceBatchArbiter._front_refs(port, front)
-            if refs is None or self._presented_front_refs(port) == refs:
+            if self._presented_front_refs(port) == refs:
                 continue
             roots = self._port_shot_roots(port, front)
             candidates[panel_id] = roots

@@ -236,7 +236,8 @@ class ImagePointOverlay:
     status was measured.  The renderer applies the image PlotSpec's scope and
     facet to the shared leading axes and draws a judgement only when the
     surface names one exact ``(repeat, point)`` cell.  A pooled cell has no
-    per-shot judgement and therefore stays UNKNOWN.
+    per-shot judgement and therefore displays no status ring. Invalid dynamic
+    statuses likewise have no measured judgement and are hidden.
 
     Hand-authored/calibration markers have no run axes.  Their one immutable
     ``static_statuses`` vector is the other, mutually exclusive case.
@@ -442,8 +443,10 @@ class ImageFrame:
     """Immutable image-data and point-overlay presentation transaction.
 
     ``snapshot`` owns frame ordering. ``overlay`` remains independently
-    revisioned, so unchanged layers may be reused and clears use
-    :meth:`ImagePointOverlay.empty` rather than an unversioned sentinel.
+    revisioned, so an explicitly supplied unchanged layer may be reused.
+    Every data update replaces the whole frame: a bare ``OwnedSnapshot``
+    carries no point layer. Same-data overlay-only clears use
+    :meth:`ImagePointOverlay.empty` or the explicit presentation update API.
     """
 
     snapshot: OwnedSnapshot

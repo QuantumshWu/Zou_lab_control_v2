@@ -708,9 +708,14 @@ def _drawn_statuses(session: PlotSession, key: str) -> tuple[str, ...]:
             (PointStatus.INVALID, tokens.point_invalid),
         )
     }
-    collection = session._renderer._artists[key]
+    collection = session._renderer._artists.get(key)
+    if collection is None or not collection.get_visible():
+        return ()
     return tuple(
-        by_colour[tuple(round(float(value), 5) for value in colour)].name
+        (
+            "HIDDEN" if colour[-1] == 0.0
+            else by_colour[tuple(round(float(value), 5) for value in colour)].name
+        )
         for colour in collection.get_edgecolors()
     )
 
@@ -718,10 +723,10 @@ def test_the_rings_a_surface_draws_are_the_ones_it_pinned_that_axis_to() -> None
     """Only an exact repeat/point cell owns a site judgement.
 
     Scope and facet are the two ways a surface pins a leading axis.  An axis
-    left to the image reduction is deliberately UNKNOWN even when every shot
+    left to the image reduction has no ring even when every shot
     happened to agree; consensus is a scientific product, not a renderer
     default.  The final future cell is invalid in the canonical prefix and is
-    likewise UNKNOWN rather than a false INVALID measurement.
+    likewise hidden; invalid measurements never show a judgement ring.
     """
 
     snapshot = _frames_scan_snapshot(repeats=2)
@@ -743,7 +748,7 @@ def test_the_rings_a_surface_draws_are_the_ones_it_pinned_that_axis_to() -> None
             [[True, True, True], [True, True, False]],
         ),
     )
-    unknown = ("UNKNOWN", "UNKNOWN")
+    unknown = ()
 
     cases = (
         (
@@ -770,7 +775,7 @@ def test_the_rings_a_surface_draws_are_the_ones_it_pinned_that_axis_to() -> None
                     (AxisRef.point("bias"), 1.0),
                 ),
             ),
-            {"image:points": ("INVALID", "OCCUPIED")},
+            {"image:points": ("HIDDEN", "OCCUPIED")},
         ),
         (
             "point facets with repeat scoped draw each point cell",
@@ -782,7 +787,7 @@ def test_the_rings_a_surface_draws_are_the_ones_it_pinned_that_axis_to() -> None
             {
                 "facet:0:points": ("OCCUPIED", "EMPTY"),
                 "facet:1:points": ("EMPTY", "OCCUPIED"),
-                "facet:2:points": ("INVALID", "OCCUPIED"),
+                "facet:2:points": ("HIDDEN", "OCCUPIED"),
             },
         ),
         (
@@ -812,12 +817,51 @@ def test_the_rings_a_surface_draws_are_the_ones_it_pinned_that_axis_to() -> None
     )
     for title, spec, expected in cases:
         session = PlotSession(snapshot, spec, size="4x4")
+        reference = PlotSession(snapshot, spec, size="4x4")
         try:
+            reference.rgba()
             session.update_image_overlay(overlay)
             session.rgba()
             for key, statuses in expected.items():
                 assert _drawn_statuses(session, key) == statuses, title
+
+            from dataclasses import replace
+            from zlc_plot.primitives import ImageFrame
+
+            # The next complete shot has no valid classifications. The
+            # image is unchanged, so its whole raster must equal no overlay.
+            invalid_status = make_snapshot(
+                overlay.status.block.schema,
+                overlay.status.block.values,
+                revision=2,
+                validity=np.zeros_like(overlay.status.block.values, dtype=np.bool_),
+            )
+            invalid_overlay = replace(overlay, revision=2, status=invalid_status)
+            invalid_frame = make_snapshot(
+                snapshot.block.schema, snapshot.block.values, revision=2,
+            )
+            session.update_data(ImageFrame(invalid_frame, invalid_overlay))
+            reference.update_data(invalid_frame)
+            np.testing.assert_array_equal(session.rgba(), reference.rgba())
+            for key in expected:
+                assert _drawn_statuses(session, key) == (), title
+
+            restored_status = make_snapshot(
+                overlay.status.block.schema,
+                overlay.status.block.values,
+                revision=3,
+                validity=overlay.status.expanded_validity(),
+            )
+            restored_frame = make_snapshot(
+                snapshot.block.schema, snapshot.block.values, revision=3,
+            )
+            session.update_data(ImageFrame(
+                restored_frame, replace(overlay, revision=3, status=restored_status),
+            ))
+            for key, statuses in expected.items():
+                assert _drawn_statuses(session, key) == statuses, title
         finally:
+            reference.close()
             session.close()
 
 def test_multidimensional_grid_status_requires_every_point_axis_to_resolve() -> None:
@@ -853,8 +897,8 @@ def test_multidimensional_grid_status_requires_every_point_axis_to_resolve() -> 
         (
             pooled,
             {
-                "facet:0:points": ("UNKNOWN", "UNKNOWN"),
-                "facet:1:points": ("UNKNOWN", "UNKNOWN"),
+                "facet:0:points": (),
+                "facet:1:points": (),
             },
         ),
     )

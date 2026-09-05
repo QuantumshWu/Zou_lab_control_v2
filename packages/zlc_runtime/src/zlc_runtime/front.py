@@ -163,47 +163,13 @@ def build_front(
     )
     for component in components:
         requested_component = requested.intersection(component)
-        # DECLARED IS NOT SPEAKING.  A processor reserved against an armed
-        # source carries its output names before it has published anything
-        # in this generation -- deliberately, so the name exists the moment
-        # the source does.  But a name that has never spoken IN THIS
-        # GENERATION cannot anchor a shot, and counting it as a leaf made
-        # the whole component incoherent: the fallback then popped the BASE
-        # signal too whenever its generation had changed, so a camera panel
-        # with an occupancy overlay froze, silently and indefinitely, the
-        # moment a pulse restart re-reserved the overlay before its first
-        # shot of the new generation.
-        #
-        # "This generation" is the whole distinction.  A processor between
-        # two shots of ONE generation -- current publication None, but the
-        # previous front carrying its last one -- is COMPUTING, and holding
-        # the component on that last shot until it commits is exactly the
-        # atomicity this front exists for.  Only a name with no current
-        # publication and no same-generation history is excused; it joins
-        # the component atomically with its first commit.
-        def _speaks(name: str) -> bool:
-            if name in latest:
-                return True
-            previous = previous_publications.get(name)
-            if previous is None:
-                return False
-            state = _state_for_signal(states, name)
-            return (
-                state is not None
-                and getattr(state, "owner_id")
-                == previous.event_ref.stream_id.value
-                and getattr(state, "generation")
-                == previous.event_ref.generation
-            )
-
-        speaking = {name for name in requested_component if _speaks(name)}
         leaves = tuple(
             name
-            for name in sorted(speaking)
+            for name in sorted(requested_component)
             if not any(
                 other != name
                 and _name_is_ancestor(name, other, source_by_output)
-                for other in speaking
+                for other in requested_component
             )
         )
         leaf_publications = tuple(latest.get(name) for name in leaves)
@@ -233,7 +199,7 @@ def build_front(
                     ancestry[name] = candidate
                 if not coherent:
                     break
-        if coherent and any(name not in ancestry for name in speaking):
+        if coherent and any(name not in ancestry for name in requested_component):
             coherent = False
 
         if coherent:
@@ -241,6 +207,10 @@ def build_front(
                 if name in component and name in active_names:
                     selected[name] = publication
         else:
+            # Pending first/restarted outputs cannot be dropped from a group.
+            # Reuse only a complete same-shot group in current generations;
+            # otherwise leave the surface's last accepted picture untouched.
+            fallback: dict[str, SignalPublication] = {}
             for name in component:
                 previous = previous_publications.get(name)
                 current_state = _state_for_signal(states, name)
@@ -253,9 +223,17 @@ def build_front(
                     or getattr(current_state, "generation")
                     != previous.event_ref.generation
                 ):
-                    selected.pop(name, None)
-                else:
-                    selected[name] = previous
+                    continue
+                fallback[name] = previous
+            if not requested_component.issubset(fallback) or len({
+                _publication_roots(fallback[name], resolve_parents)
+                for name in requested_component
+                if name in fallback
+            }) != 1:
+                fallback.clear()
+            for name in component:
+                selected.pop(name, None)
+            selected.update(fallback)
 
     signals: dict[str, object] = {}
     publications: dict[str, SignalPublication] = {}

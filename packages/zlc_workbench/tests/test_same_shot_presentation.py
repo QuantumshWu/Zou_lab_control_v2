@@ -70,7 +70,7 @@ def _stage_on(host):
 class _Bench:
     """One plane with a camera producer and a derived occupancy signal."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, publish_initial_derived: bool = True) -> None:
         self.plane = SignalDataPlane()
         self.revision = 0
         self.outputs = {"frame": _exact_output("frame", 1)}
@@ -97,7 +97,8 @@ class _Bench:
             source_name=FRAME,
             source_publication=root,
         )
-        self.publish_derived()
+        if publish_initial_derived:
+            self.publish_derived()
 
     def publish_shot(self) -> None:
         self.revision += 1
@@ -182,12 +183,21 @@ def _wait_staged(count: int, *hosts: _RenderHost) -> None:
 
 
 def test_mismatched_render_arrival_still_presents_the_group_as_one_shot() -> None:
-    bench = _Bench()
+    bench = _Bench(publish_initial_derived=False)
     board, frame_host, occupancy_host, frame_port, occupancy_port, presents = (
         _bench_board(bench)
     )
     try:
         board.tick()
+        assert frame_host.rendered == occupancy_host.rendered == []
+        assert presents == []
+        assert frame_port.accepted_surface() is None
+        assert occupancy_port.accepted_surface() is None
+
+        # The first occupancy is pending, not a result with invalid sites.
+        # Its actual publication releases both members together.
+        bench.publish_derived()
+        board.commit()
         _wait_staged(1, frame_host, occupancy_host)
         assert len(frame_host.futures) == len(occupancy_host.futures) == 1
 

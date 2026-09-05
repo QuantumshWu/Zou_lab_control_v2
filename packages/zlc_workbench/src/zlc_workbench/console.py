@@ -1259,7 +1259,7 @@ class ConsolePresenter:
             return snapshot, event_records
         if selected.overlay_signal:
             if front is None:
-                return snapshot, event_records
+                raise CancelledError("the selected overlay has no coherent front")
             overlay_result = self._image_point_overlay(
                 front,
                 publication,
@@ -1268,7 +1268,7 @@ class ConsolePresenter:
                 binding.overlay_revision + 1,
             )
             if overlay_result is None:
-                return snapshot, event_records
+                raise CancelledError("the selected overlay is not ready for this shot")
             overlay, overlay_publication, overlay_record = overlay_result
             event_records = (
                 *event_records,
@@ -1290,8 +1290,6 @@ class ConsolePresenter:
                     PointStatus.UNKNOWN for _ in point_ids
                 ),
             )
-        if overlay is None:
-            return snapshot, event_records
         binding.overlay_revision += 1
         return ImageFrame(snapshot, overlay), event_records
 

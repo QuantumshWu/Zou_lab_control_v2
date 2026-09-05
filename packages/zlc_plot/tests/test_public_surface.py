@@ -36,10 +36,21 @@ def _snapshot(*, revision: int = 0, repeats: int = 1) -> OwnedSnapshot:
     values = np.tile(x, (repeats, 1))
     return make_snapshot(schema, values, revision=revision)
 
-def _image_snapshot() -> OwnedSnapshot:
+def _image_snapshot(*, indexed: bool = False) -> OwnedSnapshot:
+    from zlc_data import PRIMARY_INDEX
+    from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
+
     schema = make_dataset_schema(
         repeat_domain(size=1),
-        mapped_domain_from_columns({"sample": np.array([0.0])}),
+        (
+            mapped_domain_from_columns(
+                {"source index": [0]},
+                ids={"source index": str(PRIMARY_INDEX_AXIS_ID)},
+                roles={"source index": PRIMARY_INDEX},
+            )
+            if indexed
+            else mapped_domain_from_columns({"sample": np.array([0.0])})
+        ),
         cell_axes=(
             axis("row", size=2),
             axis("column", size=3),
@@ -84,12 +95,14 @@ def test_image_overlay_is_explicit_data_not_a_display_mode() -> None:
         curve.close()
         session.close()
 
-def test_image_frame_new_generation_may_restart_the_same_revision() -> None:
-    """ImageFrame wrapping must not hide the Dataset generation from live flow."""
+@pytest.mark.parametrize("entry", ("direct", "live", "configure", "process"))
+def test_image_frames_replace_the_complete_layer_and_keep_new_run_overlay(entry) -> None:
+    """Every data entry point replaces its point layer with the current frame."""
 
     from zlc_data import owned_snapshot_from_arrays
+    from zlc_plot import RenderProcess
 
-    base = _image_snapshot()
+    base = _image_snapshot(indexed=True)
     first = owned_snapshot_from_arrays(
         base.block.schema,
         base.block.values,
@@ -97,25 +110,69 @@ def test_image_frame_new_generation_may_restart_the_same_revision() -> None:
         validity=base.block.validity,
         stream_generation="image-run-a",
     )
-    second = owned_snapshot_from_arrays(
+    bare = owned_snapshot_from_arrays(
         base.block.schema,
-        base.block.values,
-        10,
+        base.block.values + 1.0,
+        11,
         validity=base.block.validity,
         stream_generation="image-run-b",
     )
-    overlay = ImagePointOverlay(0, np.empty((0, 2), dtype=float))
+    second = owned_snapshot_from_arrays(
+        base.block.schema, base.block.values + 2.0, 10,
+        validity=base.block.validity, stream_generation="image-run-b",
+    )
+    overlay = ImagePointOverlay(
+        10, np.asarray(((1.0, 0.5),)),
+        static_statuses=(PointStatus.OCCUPIED,),
+    )
+    incoming = ImagePointOverlay(
+        0, np.asarray(((1.0, 0.5),)),
+        static_statuses=(PointStatus.EMPTY,),
+    )
     spec = ImagePlot(AxisRef.cell_data("column"), AxisRef.cell_data("row"))
-    host = RasterPlotHost.from_plot(ImageFrame(first, overlay), spec)
+    service = RenderProcess("image-frame-contract") if entry == "process" else None
+    host = (
+        service.build_host(ImageFrame(first, overlay), spec)
+        if service is not None
+        else RasterPlotHost.from_plot(ImageFrame(first, overlay), spec)
+    )
     try:
-        host.wait_for_front(timeout=10)
-        operation = host.update_data(ImageFrame(second, overlay)).result(timeout=10)
-        assert operation.value.spec == spec
+        host.wait_for_front(timeout=30)
+
+        def update(data):
+            if entry == "direct":
+                return host.dispatch(
+                    lambda: host._require_session().update_data(data)
+                ).result(timeout=30)
+            if entry == "configure":
+                return host.configure(data=data).result(timeout=30)
+            return host.update_data(data).result(timeout=30)
+
+        operation = update(ImageFrame(second, incoming))
+        assert operation.front.identity.image_overlay_revision == 0
+        assert host.describe_display().result(timeout=30).value.spec == spec
         assert host.front is not None
         assert host.front.identity.data_generation == "image-run-b"
         assert host.front.identity.data_revision == 10
+
+        operation = update(bare)
+        assert operation.front.identity.data_revision == 11
+        assert operation.front.identity.image_overlay_revision is None
+        reference = RasterPlotHost.from_plot(first, spec)
+        try:
+            reference.wait_for_front(timeout=30)
+            reference.update_data(second).result(timeout=30)
+            clean = reference.update_data(bare).result(timeout=30).front
+            np.testing.assert_array_equal(
+                operation.front.buffer.as_rgba(), clean.buffer.as_rgba(),
+            )
+        finally:
+            reference.close(timeout=30)
+
     finally:
-        host.close(timeout=10)
+        host.close(timeout=30)
+        if service is not None:
+            service.close(timeout=30)
 
 def test_image_site_numbers_use_their_ring_status_style() -> None:
     """A small ordinal must remain visually attached to its status ring."""

@@ -287,18 +287,10 @@ def test_a_render_projected_under_a_revoked_setting_never_lands(
     )
 
 
-def test_a_missing_companion_is_a_named_condition_not_a_frozen_panel(
+def test_a_missing_companion_waits_without_staging_a_partial_shot(
     panels,
 ) -> None:
-    """A base frame without its overlay is honest -- and says so.
-
-    The port used to raise for a companion absent from the front, and
-    ``report_waiting`` was ``del missing_signal``: a camera panel whose
-    occupancy had not yet published in its generation froze outright, with
-    nothing on the card to say why.  The companion is now excused -- the
-    frame stages without it, the condition is named -- and the first full
-    shot clears the condition.
-    """
+    """A pending companion is not an invalid result for the new image."""
 
     pytest.importorskip("zlc_plot")
     picture = _publication("camera", "run-1", 1, SIGNAL)
@@ -308,23 +300,6 @@ def test_a_missing_companion_is_a_named_condition_not_a_frozen_panel(
     host = _RevisionHost(0)
     deferred = _Deferred()
 
-    def project(primary, publication, exact_front, target):
-        records = ((publication, primary.event_record),)
-        annotation = exact_front.publication(COMPANION)
-        if annotation is None:
-            # The console's own rule: no annotation for this shot, no
-            # overlay -- the picture is the snapshot alone.
-            return primary.snapshot, records
-        from zlc_plot.primitives import ImageFrame, ImagePointOverlay
-
-        return (
-            ImageFrame(
-                primary.snapshot,
-                ImagePointOverlay.empty(annotation.event_ref.sequence),
-            ),
-            (*records, (annotation, primary.event_record)),
-        )
-
     port = PlotPanelPort(
         "panel",
         SIGNAL,
@@ -332,24 +307,43 @@ def test_a_missing_companion_is_a_named_condition_not_a_frozen_panel(
         display_interval_ms=100,
         submit_projection=deferred,
         replace_host=_mounts(host),
-        companion_signals=lambda _target: (COMPANION,),
-        project_input=project,
+        companion_signals=lambda target: (
+            (COMPANION,) if target.overlay_signal else ()
+        ),
+        project_input=_overlay_projection(),
     )
     panels.append((port, deferred))
 
     update = port.prepare(picture.value(SIGNAL), picture, bare_front)
-    assert update is not None, "the base frame must stage without its overlay"
-    assert update.front_refs == (picture.event_ref,)
-    port.report_waiting(COMPANION)
+    assert update is None
+    assert deferred.queued == []
+    assert host.inputs == []
     assert COMPANION in port.waiting_condition
-    deferred.run()
-    assert port.accept(update, update.future.result(timeout=0))
-    # A partial presentation keeps the condition standing on the card.
-    assert port.waiting_condition
 
     value2, publication2, full_front = _shot(2, 202)
     complete = port.prepare(value2, publication2, full_front)
     assert complete is not None
     deferred.run()
     assert port.accept(complete, complete.future.result(timeout=0))
+    assert port.waiting_condition == ""
+
+    accepted = port.accepted_surface()
+    picture3 = _publication("camera", "run-1", 3, SIGNAL)
+    missing = SignalFront(
+        {SIGNAL: picture3.value(SIGNAL)}, {SIGNAL: picture3}
+    )
+    assert port.prepare(picture3.value(SIGNAL), picture3, missing) is None
+    assert port.accepted_surface() is accepted
+    assert len(host.inputs) == 1
+    assert deferred.queued == []
+    assert COMPANION in port.waiting_condition
+
+    # The operator explicitly disconnects the overlay.  The required group
+    # changes immediately, even before a new accepted surface exists.
+    port.retarget(SimpleNamespace(overlay_signal=""))
+    assert port.front_signals == (SIGNAL,)
+    unlinked = port.prepare(picture3.value(SIGNAL), picture3, missing)
+    assert unlinked is not None
+    deferred.run()
+    assert port.accept(unlinked, unlinked.future.result(timeout=0))
     assert port.waiting_condition == ""

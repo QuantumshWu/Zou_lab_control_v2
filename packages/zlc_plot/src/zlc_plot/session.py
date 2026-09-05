@@ -61,6 +61,7 @@ from ._session_state import (
     _PreparedLiveFrame,
     _ProjectionPresentation,
     _ResolvedFit,
+    _SolvedLiveFit,
     SelectionChange,
     _StartedFitRequest,
 )
@@ -1303,6 +1304,35 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             assert self._renderer is not None
             self._update_renderer(self._renderer, effects)
 
+    def _present_solved_projection(
+        self,
+        projection: FitProjection,
+        *,
+        image_overlay: ImagePointOverlay | None,
+        solved: _SolvedLiveFit | None,
+    ) -> tuple[_ProjectionPresentation, _FitResolution | None]:
+        """Accept one data/overlay/fit answer for every data entry point."""
+
+        accepted_fit = None
+        resolution = None
+        if solved is not None:
+            accepted_fit, resolution, event = self._accept_pair_fit(solved, projection)
+            self._notify_fit(event)
+        try:
+            presentation = self._present_projection_transaction(
+                projection, image_overlay=image_overlay, accepted_fit=accepted_fit,
+            )
+        except Exception:
+            self._restore_live_fit_completion(resolution)
+            raise
+        if accepted_fit is not None and solved is not None:
+            self._remember_fit_warm_starts(
+                solved.result,
+                request_generation=solved.started.request_generation,
+                selections=accepted_fit.selections,
+            )
+        return presentation, resolution
+
     def _present_projection_transaction(
         self,
         projection: FitProjection,
@@ -1356,9 +1386,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
 
         # A new generation over the SAME geometry is the bench firing
         # again: the axes, the selectors' meaning and the fit seeds all
-        # still name the same world, so only the DATA-derived accepted
-        # results reset.  Cancelling the gesture and rebuilding the
-        # selector controller on every shot made any drag that spanned a
+        # still name the same world. Data-derived results are supplied by
+        # this complete incoming frame. Cancelling the gesture and rebuilding
+        # the selector controller on every shot made any drag that spanned a
         # shot boundary go dead mid-flight.
         old_fingerprint = _fingerprint(self._projection.data)
         new_fingerprint = _fingerprint(projection.data)
@@ -1366,9 +1396,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             old_fingerprint is not None
             and old_fingerprint == new_fingerprint
         )
-        if generation_changed:
-            image_overlay = None
-            accepted_fit = None
         if old_count != new_count or geometry_changed:
             self._cancel_gesture()
         replacement_selector_controller = (
@@ -1577,7 +1604,10 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         selected_overlay = _UNSET
         if data is not _UNSET:
             selected_data, image_frame = self._split_image_frame(data, self._spec)
-            selected_overlay = _UNSET if image_frame is None else image_frame.overlay
+            selected_overlay = (
+                image_frame.overlay if image_frame is not None
+                else None if image_overlay is _UNSET else image_overlay
+            )
             FitProjection._validate_input(selected_data, self._spec)
 
         with self._render_lock:
@@ -1594,7 +1624,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     parameters=parameters,
                     parameter_updates=parameter_updates,
                     size=size,
-                    image_overlay=image_overlay,
+                    image_overlay=image_overlay if data is _UNSET else _UNSET,
                     classifier_thresholds=threshold_target,
                 )
                 if selected_data is not _UNSET:
@@ -1613,8 +1643,18 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                             )
                         current_revision = snapshot_revision(current_data)
                         selected_revision = snapshot_revision(selected_data)
-                        if selected_revision < current_revision:
+                        generation_changed = self._data_generation_changed(
+                            current_data, selected_data
+                        )
+                        if (
+                            not generation_changed
+                            and selected_revision < current_revision
+                        ):
                             raise ValueError("configuration data revision moved backwards")
+                        if selected_overlay is not None and not generation_changed:
+                            self._validate_image_frame_overlay(
+                                self._image_overlay, selected_overlay
+                            )
                         if (
                             selected_revision == current_revision
                             and selected_data.ref == current_data.ref
@@ -1631,15 +1671,19 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                         context=self._projection_context(),
                     )
                     projection._build_view_and_payload()
-                    self._present_projection_transaction(
+                    started = self._pair_started(projection)
+                    solved = None if started is None else self._solve_live_pair(started)
+                    _presentation, resolution = self._present_solved_projection(
                         projection,
-                        image_overlay=(
-                            self._image_overlay
-                            if selected_overlay is _UNSET
-                            else selected_overlay
-                        ),
-                        accepted_fit=self._accepted_fit,
+                        image_overlay=selected_overlay,
+                        solved=solved,
                     )
+                    if resolution is not None:
+                        self._configuration_fit_commit_actions.append(
+                            lambda: self._resolve_fit_completion(resolution)
+                        )
+                elif selected_overlay is not _UNSET:
+                    self.update_presentation(image_overlay=selected_overlay)
                 if facet_focus is not _UNSET:
                     if facet_focus is None:
                         if self._facet_focus_index is not None:
@@ -3002,7 +3046,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         """
 
         data, image_frame = self._split_image_frame(data, self._spec)
-        image_overlay = _UNSET if image_frame is None else image_frame.overlay
+        image_overlay = None if image_frame is None else image_frame.overlay
         FitProjection._validate_input(data, self._spec)
         if revision is not None:
             if isinstance(revision, bool) or not isinstance(revision, Integral):
@@ -3120,35 +3164,11 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     context=projection_context,
                 )
                 projection._build_view_and_payload()
-                accepted_overlay = (
-                    None
-                    if generation_changed and image_overlay is _UNSET
-                    else self._image_overlay
-                    if image_overlay is _UNSET
-                    else image_overlay
-                )
             started = None if generation_changed else self._pair_started(projection)
-            accepted_fit = None
-            resolution = None
-            fit_event = None
-            solved = None
-            if started is not None:
-                solved = self._solve_live_pair(started)
-                accepted_fit, resolution, fit_event = self._accept_pair_fit(
-                    solved,
-                    projection,
-                )
-            if fit_event is not None:
-                self._notify_fit(fit_event)
-            try:
-                presentation = self._present_projection_transaction(
-                    projection,
-                    image_overlay=accepted_overlay,
-                    accepted_fit=accepted_fit,
-                )
-            except Exception:
-                self._restore_live_fit_completion(resolution)
-                raise
+            solved = None if started is None else self._solve_live_pair(started)
+            presentation, resolution = self._present_solved_projection(
+                projection, image_overlay=image_overlay, solved=solved,
+            )
             if generation_changed:
                 withdrawn_fit = presentation.previous_accepted_fit is not None
                 with self._lock:
@@ -3172,12 +3192,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     completion,
                 )
             self._emit_projection_focus_change(presentation)
-        if accepted_fit is not None and solved is not None:
-            self._remember_fit_warm_starts(
-                solved.result,
-                request_generation=solved.started.request_generation,
-                selections=accepted_fit.selections,
-            )
         if resolution is not None:
             self._resolve_fit_completion(resolution)
         if generation_retirement is not None:
