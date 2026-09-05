@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 from PyQt5 import QtCore, QtWidgets
 
+from zlc_ui.form import being_edited
 from zlc_ui.fluent import (
     ACCENT, GREY, FluentButton, FluentFrame, FluentGroupBox, FluentLabel,
     FluentLineEdit, FluentScrollArea, FluentSpinBox, signals_blocked,
@@ -170,19 +171,20 @@ class PulseTargetView(QtWidgets.QWidget):
         with signals_blocked(row.signal, row.endpoints, row.width, row.clock_endpoint):
             self._set_line_text(row.signal, record.signal)
             self._set_line_text(row.endpoints, ", ".join(record.endpoints))
-            if row.width.value() != max(1, len(record.endpoints)):
-                row.width.setValue(max(1, len(record.endpoints)))
+            width = max(1, len(record.endpoints))
+            if row.width.value() != width and not being_edited(row.width):
+                row.width.setValue(width)
             self._set_line_text(row.clock_endpoint, record.clock_endpoint or "")
         row.record = record
 
     @staticmethod
     def _set_line_text(field: FluentLineEdit, text: str) -> None:
+        """A projected value lands in a field the operator is not inside."""
+
         text = str(text)
-        if field.text() == text:
+        if field.text() == text or being_edited(field):
             return
-        cursor = field.cursorPosition()
         field.setText(text)
-        field.setCursorPosition(min(cursor, len(text)))
 
     def _placed_widgets(self, row: _TargetRowWidgets) -> tuple[QtWidgets.QWidget, ...]:
         if row.record.kind == "digital":

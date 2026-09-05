@@ -5,11 +5,11 @@ from __future__ import annotations
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
-    retire_widget,
     ACCENT, GREEN, GREY, ORANGE, RED, YELLOW, FluentButton, FluentCodeEdit,
-    FluentDoubleSpinBox, FluentFrame, FluentGroupBox, FluentLabel, FluentLineEdit,
+    FluentFrame, FluentGroupBox, FluentLabel, fluent_count_box,
     signals_blocked,
 )
+from zlc_ui.form import FluentParameterForm, FormFieldProps, FormSpec, being_edited
 
 from ._layout import px, row_height
 from .models import BindingRecord, ScanPageRecord  # noqa: F401
@@ -47,23 +47,20 @@ class PulseScanView(QtWidgets.QWidget):
         # the period it sits in -- ``dac_load_da_bias_x`` -- which is fine
         # until a saved set of values has to name the same slot in another
         # pulse.  The field does not move; only what everything else calls it.
-        self.bindings_grid = QtWidgets.QGridLayout()
-        self.bindings_grid.setContentsMargins(0, px(4, minimum=2), 0, 0)
-        info_layout.addLayout(self.bindings_grid)
-        self._binding_edits: dict[str, FluentLineEdit] = {}
+        # On the shared form, keyed by POSITION: the page is projected on
+        # every record, and a grid rebuilt from scratch each time took the
+        # edit away from under the operator's cursor.  A row's key is its
+        # place in the pulse, which a rename does not change.
+        self.bindings_form = FluentParameterForm(FormSpec(()))
+        self.bindings_form.committed.connect(self._binding_committed)
+        info_layout.addWidget(self.bindings_form)
+        self._binding_ids: tuple[str, ...] = ()
 
         run_row = QtWidgets.QHBoxLayout()
         run_row.setContentsMargins(0, 0, 0, 0)
         run_row.setSpacing(px(6, minimum=4))
         run_row.addWidget(FluentLabel("Scan repeats (0 = ∞)"))
-        # Qt's integer spin stops at signed 31-bit.  The zero-decimal Fluent
-        # double spin represents every uint32 integer exactly, so the visible
-        # control and the hardware count share the full domain.
-        self.scan_repeats_spin = FluentDoubleSpinBox()
-        self.scan_repeats_spin._step_btn.hide()
-        self.scan_repeats_spin.setDecimals(0)
-        self.scan_repeats_spin.setSingleStep(1.0)
-        self.scan_repeats_spin.setMaximum(float((1 << 32) - 1))
+        self.scan_repeats_spin = fluent_count_box()
         self._minimum_repeats = 0
         self._committed_repeats = 0
         self.set_repeats_range(0, 0)
@@ -162,9 +159,13 @@ class PulseScanView(QtWidgets.QWidget):
 
     def set_repeats(self, repeats: int) -> None:
         value = max(self._minimum_repeats, int(repeats))
+        self._committed_repeats = value
+        # The box the operator is typing in is theirs; the committed count
+        # is what a projection says, and it lands when they are done.
+        if being_edited(self.scan_repeats_spin):
+            return
         with signals_blocked(self.scan_repeats_spin):
             self.scan_repeats_spin.setValue(float(value))
-        self._committed_repeats = value
 
     def _commit_repeats(self) -> None:
         value = int(self.scan_repeats_spin.value())
@@ -194,28 +195,38 @@ class PulseScanView(QtWidgets.QWidget):
         self.scan_slots_label.setText(str(text))
 
     def set_bindings(self, bindings) -> None:
-        while self.bindings_grid.count():
-            item = self.bindings_grid.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                retire_widget(widget)
-        self._binding_edits = {}
-        for row, record in enumerate(tuple(bindings)):
-            edit = FluentLineEdit(str(record.binding_id))
-            edit.setToolTip(
-                "The name a scan plan, a saved value set and a run record use"
+        records = tuple(bindings)
+        self._binding_ids = tuple(str(record.binding_id) for record in records)
+        fields = tuple(
+            FormFieldProps(
+                key=f"binding_{index}",
+                kind="text",
+                label=f"{record.label} \u00b7 {record.kind}",
+                default=str(record.binding_id),
+                required=True,
+                description="The name a scan plan, a saved value set and a run record use",
             )
-            edit.editingFinished.connect(
-                lambda edit=edit, was=str(record.binding_id): (
-                    self.binding_renamed.emit(was, edit.text().strip())
-                    if edit.text().strip() and edit.text().strip() != was
-                    else None
-                )
-            )
-            self.bindings_grid.addWidget(FluentLabel(str(record.label)), row, 0)
-            self.bindings_grid.addWidget(edit, row, 1)
-            self.bindings_grid.addWidget(FluentLabel(str(record.kind)), row, 2)
-            self._binding_edits[str(record.binding_id)] = edit
+            for index, record in enumerate(records)
+        )
+        self.bindings_form.reconcile(
+            FormSpec(fields),
+            {field.key: field.default for field in fields},
+        )
+        self.bindings_form.setVisible(bool(records))
+
+    def _binding_committed(self, key: str) -> None:
+        """The operator finished a name: say what it was and what it is now."""
+
+        index = int(str(key).rpartition("_")[2])
+        if index >= len(self._binding_ids):
+            return
+        try:
+            wanted = str(self.bindings_form.read_value(key)).strip()
+        except ValueError:
+            return
+        was = self._binding_ids[index]
+        if wanted and wanted != was:
+            self.binding_renamed.emit(was, wanted)
 
     def set_progress_text(self, text: str) -> None:
         self.scan_progress_label.setText(str(text))

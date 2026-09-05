@@ -14,11 +14,11 @@ from pathlib import Path
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
-from zlc_ui.form import FormChoice
+from zlc_ui.form import FormChoice, being_edited
 from zlc_ui.fluent import (
     retire_widget,
     ACCENT, GREEN, GREY, ORANGE, RED, YELLOW, FluentButton, FluentCheckBox,
-    FluentComboBox, FluentDoubleSpinBox, FluentFrame, FluentGroupBox,
+    FluentComboBox, FluentFrame, FluentGroupBox, fluent_count_box,
     FluentLabel, FluentLineEdit, FluentScrollArea, LinkedScrollPanes,
     signals_blocked,
 )
@@ -438,11 +438,7 @@ class ChannelPanel(FluentGroupBox):
         # Control group beside it holds.  Reading it directly under the scan
         # summary says the one sentence they make together: what will be
         # played, and how many times.
-        self.run_repeats_spin = FluentDoubleSpinBox()
-        self.run_repeats_spin._step_btn.hide()
-        self.run_repeats_spin.setDecimals(0)
-        self.run_repeats_spin.setSingleStep(1.0)
-        self.run_repeats_spin.setRange(0.0, float((1 << 32) - 1))
+        self.run_repeats_spin = fluent_count_box()
         self.run_repeats_spin.setToolTip(
             "Complete Pulse runs per scan point (or per On Pulse without a "
             "scan); 0 runs indefinitely"
@@ -581,12 +577,8 @@ class BracketPost(FluentGroupBox):
         # the two posts stay level with each other and with the cards.
         self.setCursor(QtCore.Qt.SizeHorCursor)
         self.setToolTip("Drag this post to any valid period gap")
-        self.count_spin = FluentDoubleSpinBox()
-        self.count_spin._step_btn.hide()
-        self.count_spin.setDecimals(0)
-        self.count_spin.setSingleStep(1.0)
-        self.count_spin.setRange(float(minimum), float((1 << 32) - 1))
-        self.count_spin.setValue(float(max(int(minimum), int(count))))
+        self.count_spin = fluent_count_box(minimum=int(minimum))
+        self.count_spin.setValue(float(count))
         self.count_spin.setFixedSize(width - 2 * px(7), row_height())
         self.count_spin.valueChanged.connect(
             lambda value: self.count_committed.emit(int(value))
@@ -1553,8 +1545,9 @@ class PulseScheduleView(QtWidgets.QWidget):
             vm.bracket,
             minimum_bracket=vm.min_bracket_count,
         )
-        with signals_blocked(self.channel_panel.run_repeats_spin):
-            self.channel_panel.run_repeats_spin.setValue(float(vm.run_repeats))
+        if not being_edited(self.channel_panel.run_repeats_spin):
+            with signals_blocked(self.channel_panel.run_repeats_spin):
+                self.channel_panel.run_repeats_spin.setValue(float(vm.run_repeats))
         self.channel_panel.run_repeats_spin.setEnabled(bool(vm.periods))
         self._rebuild_hidden_ports(vm)
         self.bracket_button.setText(
