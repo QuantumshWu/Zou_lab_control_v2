@@ -2162,16 +2162,20 @@ class SlmFeedbackTask:
         *,
         camera_owner: str,
     ) -> tuple[object, object, object]:
-        """One shot batch: safe, arm, fire, collect, and the board's report.
+        """One shot batch: safe, load, arm the camera, fire, collect, report.
 
-        The program is loaded once per run, not once per candidate: after
-        DONE or SAFE the board keeps the program resident and ``fire`` replays
-        its own mini-loader, so a LOAD per candidate only re-sent the whole
-        image over a lossy line 68 times for nothing.  What decides is the
-        board's own answer -- the digest it reports holding -- never a memory
-        of having loaded, so a program somebody else loaded in between is
-        replaced and a reopened board is loaded afresh.  ``safe()`` before
-        arming the camera stays: the camera must be armed while no trigger
+        The program is LOADED for every batch, the way calibration loads it
+        for every shot.  It used to be loaded once per run and then left
+        resident, with ``fire`` replaying the board's mini-loader after each
+        SAFE -- a saving of one image upload per candidate.  That replay is a
+        path nothing else in the product takes: the editor's On Pulse and
+        calibration both upload before they fire.  On the bench it is the
+        one difference between a batch that plays and one that does not: the
+        first candidate, whose program the board did not yet hold, was
+        loaded and played; the second, whose digest matched, was replayed
+        and the field never came, and the run sat waiting for a report.  A
+        board that is asked the same way every time answers the same way.
+        ``safe()`` first stays: the camera must be armed while no trigger
         edge can play, and on a board already safe it costs no traffic.
         """
 
@@ -2193,14 +2197,7 @@ class SlmFeedbackTask:
         capture = None
         try:
             self.sequencer.safe()
-            board_state = self.sequencer.snapshot()
-            if not isinstance(board_state, Mapping):
-                raise TypeError("sequencer snapshot must be a mapping")
-            if board_state.get("applied_digest") != pulse.program.digest:
-                arm_sequencer(self.sequencer, pulse)
-                board_state = self.sequencer.snapshot()
-                if not isinstance(board_state, Mapping):
-                    raise TypeError("sequencer snapshot must be a mapping")
+            arm_sequencer(self.sequencer, pulse)
             capture = node.prepare(should_stop=context.cancel_requested)
             actual = node.actual_working_point
             if actual is None:
