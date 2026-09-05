@@ -88,6 +88,10 @@ _PREFIX_BY_SPELLING = {
     if spelling
 }
 _PREFIX_BY_EXPONENT = {prefix.exponent: prefix for prefix in PREFIXES}
+#: The identity step, for a caller that wants a number in EXACTLY the unit it
+#: names -- a value read in the megahertz the operator chose must not come
+#: back as kilo-megahertz because it happened to be large.
+NO_PREFIX = _PREFIX_BY_EXPONENT[0]
 _SMALLEST_EXPONENT = min(prefix.exponent for prefix in PREFIXES)
 _LARGEST_EXPONENT = max(prefix.exponent for prefix in PREFIXES)
 #: The step between neighbouring prefixes.  Read off the table rather than
@@ -153,7 +157,65 @@ class Decibel:
             return self.factor * np.log10(ratio)
 
 
-Conversion = Scaled | Decibel
+@dataclass(frozen=True, slots=True)
+class PeakVoltageInto:
+    """A peak-to-peak amplitude, read as the power it delivers into a load.
+
+    ``base = value**2 / (8 * load_ohms)``: a sine of peak-to-peak amplitude
+    V has RMS V / (2 sqrt 2), and P = V_rms**2 / R.  Vpp is the third
+    spelling of one RF power -- W, dBm, Vpp -- and a signal generator's
+    front panel offers all three, so a field that holds one is workable in
+    the others only if the registry knows the load.  Fifty ohms is the RF
+    convention and what every instrument on this bench is terminated in; a
+    bench driving another load registers Vpp with its own.
+    """
+
+    load_ohms: float
+
+    def __post_init__(self) -> None:
+        load = float(self.load_ohms)
+        if not np.isfinite(load) or load <= 0.0:
+            raise UnitError("a load must be finite and positive")
+        object.__setattr__(self, "load_ohms", load)
+
+    def to_base(self, values: ArrayLike) -> NDArray[np.generic]:
+        volts = np.asarray(values, dtype=float)
+        return volts * volts / (8.0 * self.load_ohms)
+
+    def from_base(self, values: ArrayLike) -> NDArray[np.generic]:
+        watts = np.asarray(values, dtype=float)
+        with np.errstate(invalid="ignore"):
+            return np.sqrt(8.0 * self.load_ohms * watts)
+
+
+@dataclass(frozen=True, slots=True)
+class Prefixed:
+    """A prefix in front of a unit whose conversion is not a plain scale.
+
+    A prefix multiplies the NUMBER written in the unit -- a millivolt
+    peak-to-peak is a thousandth of a volt peak-to-peak -- so it is applied
+    before the unit's own conversion and undone after it.  A linear unit
+    never needs this: its prefixed spelling is one Scaled with an exact
+    decade, which is what the compiler reads.
+    """
+
+    inner: object
+    factor: float
+
+    def __post_init__(self) -> None:
+        factor = float(self.factor)
+        if not np.isfinite(factor) or factor <= 0.0:
+            raise UnitError("a prefix factor must be finite and positive")
+        object.__setattr__(self, "factor", factor)
+
+    def to_base(self, values: ArrayLike) -> NDArray[np.generic]:
+        return self.inner.to_base(np.asarray(values, dtype=float) * self.factor)
+
+    def from_base(self, values: ArrayLike) -> NDArray[np.generic]:
+        return np.asarray(self.inner.from_base(values), dtype=float) / self.factor
+
+
+Conversion = Scaled | Decibel | PeakVoltageInto | Prefixed
 
 
 # ------------------------------------------------------------------- the unit
@@ -213,8 +275,8 @@ class Unit:
         for text, field in ((self.symbol, "symbol"), (self.dimension, "dimension")):
             if not isinstance(text, str) or not text or text.strip() != text:
                 raise UnitError(f"unit {field} must be a non-empty, trimmed string")
-        if not isinstance(self.conversion, (Scaled, Decibel)):
-            raise UnitError("unit conversion must be Scaled or Decibel")
+        if not isinstance(self.conversion, (Scaled, Decibel, PeakVoltageInto, Prefixed)):
+            raise UnitError("unit conversion must be Scaled, Decibel, PeakVoltageInto or Prefixed")
         if isinstance(self.aliases, str):
             raise UnitError("unit aliases must be an iterable of strings, not a string")
         aliases = tuple(self.aliases)
@@ -226,11 +288,19 @@ class Unit:
         names = (self.symbol, *aliases)
         if len(set(names)) != len(names):
             raise UnitError(f"unit {self.symbol!r} contains duplicate names")
-        if self.prefixable and not self.is_base:
-            # A prefix multiplies the BASE.  Allowing one on anything else is
-            # how "ms" and "millis" both become resolvable and stop meaning
-            # exactly one thing.
-            raise UnitError(f"only a base unit may take a prefix: {self.symbol!r}")
+        if self.prefixable and (
+            isinstance(self.conversion, (Decibel, Prefixed))
+            or (self.is_linear and not self.is_base)
+        ):
+            # A prefix multiplies the number written in the unit, so it
+            # belongs on the reference of a spelling family and nowhere else:
+            # on a linear unit only if it is the base -- allowing it on "ms"
+            # is how "ms" and "millis" both become resolvable and stop
+            # meaning exactly one thing -- never on a level (there is no
+            # milli-dBm), and never on a spelling that already carries one.
+            # An amplitude such as Vpp is the reference of its own family
+            # although its dimension's base is the watt.
+            raise UnitError(f"this unit cannot take a prefix: {self.symbol!r}")
         object.__setattr__(self, "aliases", aliases)
         object.__setattr__(self, "decade", _exact_decade(self.conversion))
         inverse = self.inverse_dimension
@@ -307,10 +377,15 @@ def _prefixed(base: Unit, prefix: Prefix) -> Unit:
 
     if prefix.exponent == 0:
         return base
+    factor = 10.0**prefix.exponent
     return Unit(
         symbol=f"{prefix.symbol}{base.symbol}",
         dimension=base.dimension,
-        conversion=Scaled(base.scale * 10.0**prefix.exponent),
+        conversion=(
+            Scaled(base.scale * factor)
+            if base.is_linear
+            else Prefixed(base.conversion, factor)
+        ),
         aliases=tuple(
             f"{spelling}{name}"
             for spelling in prefix.spellings
@@ -435,6 +510,24 @@ class UnitRegistry:
     def compatible(self, left: UnitLike, right: UnitLike) -> bool:
         return self.resolve(left).compatible_with(self.resolve(right))
 
+    def family_of(self, unit: UnitLike) -> Unit:
+        """The registered unit this spelling is a prefixed form of, or itself.
+
+        ``mW`` belongs to ``W``; ``dBm`` and ``Vpp`` each belong to
+        themselves, although all three share one dimension and one base.  A
+        choice list groups by THIS and not by ``base_for``: the base of a
+        dimension is a fact about arithmetic, and which symbols a person
+        reads as one family is a fact about the symbols.
+        """
+
+        resolved = self.resolve(unit)
+        with self._lock:
+            registered = self._units.get(resolved.symbol)
+            if registered is not None:
+                return registered
+            base, _prefix = self._split_prefix(resolved.symbol)
+        return resolved if base is None else base
+
     def convert(
         self, values: ArrayLike, source: UnitLike, target: UnitLike
     ) -> NDArray[np.generic]:
@@ -513,6 +606,11 @@ def _display_order(unit: Unit) -> float:
     return float(np.log10(unit.scale)) if unit.is_linear else float("-inf")
 
 
+#: The load an RF amplitude is read into, in ohms.  The convention every
+#: signal generator's front panel assumes when it shows dBm beside Vpp.
+RF_LOAD_OHMS = 50.0
+
+
 def _builtin_units() -> tuple[Unit, ...]:
     """One base per dimension, plus the units that are their own thing.
 
@@ -533,6 +631,7 @@ def _builtin_units() -> tuple[Unit, ...]:
         Unit("rad", "angle", prefixable=True),
         Unit("deg", "angle", Scaled(np.pi / 180.0), aliases=("°",)),
         Unit("dBm", "power", Decibel(1.0e-3)),
+        Unit("Vpp", "power", PeakVoltageInto(RF_LOAD_OHMS), prefixable=True),
         Unit("count", "count"),
         # A DAC code is a signed integer the board takes, where 0 is 0 V.
         # It had no unit at all: carrying the editor's label "DAC code

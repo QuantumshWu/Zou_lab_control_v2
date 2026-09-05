@@ -27,7 +27,7 @@ from zlc_ui.fluent import (
     signals_blocked,
     window_pad,
 )
-from zlc_data.units import UnitError, format_quantity
+from zlc_data.units import DEFAULT_UNITS, NO_PREFIX, UnitError, format_quantity
 
 from zlc_ui.form.form import FormSpec
 from zlc_ui.form.qt_form import FluentParameterForm
@@ -176,18 +176,27 @@ class _LiveDeviceCard(FluentFrame):
         self.setToolTip(self.instance_id)
 
 
-def _readable_value(value: object, unit: str) -> str:
+def _readable_value(value: object, unit: str, shown: str = "") -> str:
     """One device reading, in the same words its editable twin uses.
 
-    Falls back to the plain text for anything that is not a number: a device
-    may report a name, a mode, or a reason it cannot answer, and none of them
-    is improved by being pushed through a number formatter.
+    In the spelling the operator chose for the row when they chose one --
+    a reading in hertz beside a box being read in megahertz is two numbers
+    for one field in two scales -- and otherwise in the readable prefix of
+    the field's own unit.  Falls back to the plain text for anything that is
+    not a number: a device may report a name, a mode, or a reason it cannot
+    answer, and none of them is improved by a number formatter.
     """
 
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return str(value)
+    own = (unit or "1").strip() or "1"
+    chosen = (shown or "").strip()
     try:
-        return format_quantity(value, unit or "1")
+        if chosen and chosen != own:
+            return format_quantity(
+                float(DEFAULT_UNITS.convert(value, own, chosen)), chosen, prefix=NO_PREFIX
+            )
+        return format_quantity(value, own)
     except UnitError:
         return str(value)
 
@@ -261,6 +270,7 @@ class DeviceControlView(QtWidgets.QWidget):
         desired = {key: fields[key]["desired"] for key in spec.keys}
         self.form = FluentParameterForm(spec, desired, parent=self)
         self.form.changed.connect(self._desired_changed)
+        self.form.shown_unit_changed.connect(self._shown_unit_changed)
         outer.addWidget(self.form)
         outer.addStretch(1)
         self.status_strip = StatusStrip(self)
@@ -409,7 +419,7 @@ class DeviceControlView(QtWidgets.QWidget):
             "task": ORANGE, "warning": ORANGE, "error": RED,
         }
         units = {declared.key: declared.unit for declared in spec.fields}
-        QtCore.QTimer.singleShot(0, self._align_headings)
+        self._units = units
         for key in spec.keys:
             field = fields[key]
             current, live, apply, dot, status = self._field_rows[key]
@@ -420,7 +430,9 @@ class DeviceControlView(QtWidgets.QWidget):
             # "120000000.0" -- the one column whose whole job is to be read
             # at a glance, and the hardest thing on the page to read.
             current.setText(
-                "—" if shown is None else _readable_value(shown, units[key])
+                "—"
+                if shown is None
+                else _readable_value(shown, units[key], self.form.shown_unit_for(key))
             )
             editor = self.form.widget_for(key)
             self._set_editable(key, bool(field.get("editable", False)))
@@ -438,6 +450,27 @@ class DeviceControlView(QtWidgets.QWidget):
             reason = str(field.get("reason", ""))
             for widget in (editor, live, apply, status):
                 widget.setToolTip(reason)
+        # NOW, not on a timer.  Every width this reads is a size hint, which
+        # exists before anything is painted; deferring it to the next pass
+        # put the headings on screen at one width and moved them at the
+        # first paint, which is the flicker every opened control showed.
+        self._align_headings()
+
+    def _shown_unit_changed(self, key: str, _symbol: str) -> None:
+        """The row is being read in another spelling: so is its reading."""
+
+        widgets = self._field_rows.get(str(key))
+        state = self._field_states.get(str(key))
+        if widgets is None or state is None:
+            return
+        shown = state.get("current")
+        widgets[0].setText(
+            "—"
+            if shown is None
+            else _readable_value(
+                shown, self._units.get(str(key), ""), self.form.shown_unit_for(str(key))
+            )
+        )
 
     def _desired_changed(self, key: str) -> None:
         try:

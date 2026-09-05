@@ -17,7 +17,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from .fluent import WINDOW_SCREEN_FRACTION, open_fluent_window
+from .fluent import (
+    WINDOW_SCREEN_FRACTION,
+    launch_fluent_window,
+    open_fluent_window,
+    screen_fit_window_size,
+)
+from .qt import ensure_qt_app
 
 
 def open_device_control(
@@ -37,39 +43,31 @@ def open_device_control(
     from .device_manager.handle import DeviceControlHandle
     from .device_manager.view import DeviceControlView
 
-    held: dict[str, Any] = {}
+    fraction = WINDOW_SCREEN_FRACTION if window_ratio is None else float(window_ratio)
+    app = ensure_qt_app()
+    view = DeviceControlView(spec, projection)
 
-    def _body() -> DeviceControlView:
-        view = DeviceControlView(spec, projection)
-        held["view"] = view
-        return view
+    def snug(window: Any) -> tuple[int, int]:
+        # Snug fit: a control's field set is fixed for the window's life, so
+        # the window takes the content's own height plus the chrome and half
+        # the standard width, instead of a screen fraction of blank space.
+        # Decided BEFORE the window is shown -- it used to open at the screen
+        # fraction and then resize and re-centre itself, which is the jump
+        # every opened control made.  It stays resizable: this is the
+        # OPENING size, not a fixed one.
+        standard = screen_fit_window_size(fraction)
+        hint = view.sizeHint()
+        chrome = max(0, window.sizeHint().height() - hint.height())
+        width = max(standard.width() // 2, hint.width())
+        height = hint.height() + chrome
+        screen = window.screen() or app.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            height = min(height, int(available.height() * 0.9))
+            width = min(width, available.width())
+        return width, height
 
-    window = open_fluent_window(
-        _body,
-        title=str(title),
-        window_ratio=(
-            WINDOW_SCREEN_FRACTION if window_ratio is None else float(window_ratio)
-        ),
-    )
-    view = held["view"]
-    # Snug fit: a control's field set is fixed for the window's life, so the
-    # window takes the content's own height (plus the chrome) and half the
-    # standard width, instead of a big screen fraction full of blank space.
-    # It stays resizable -- this is the OPENING size, not a fixed one.
-    chrome = max(0, window.height() - view.height())
-    hint = view.sizeHint()
-    width = max(window.width() // 2, hint.width())
-    height = hint.height() + chrome
-    screen = window.screen()
-    available = None if screen is None else screen.availableGeometry()
-    if available is not None:
-        height = min(height, int(available.height() * 0.9))
-        width = min(width, available.width())
-    window.resize(width, height)
-    if available is not None:
-        frame = window.frameGeometry()
-        frame.moveCenter(available.center())
-        window.move(frame.topLeft())
+    window = launch_fluent_window(view, title=str(title), size=snug)
     return DeviceControlHandle(window, view)
 
 
