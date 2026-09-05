@@ -606,6 +606,17 @@ class FluentPopup(QtWidgets.QFrame):
     #: native window underneath a widget that has already been polished.
     WINDOW_TYPE = QtCore.Qt.Popup
 
+    #: CLASS attributes, not instance ones.  The owner's event filter is
+    #: installed on a window that is already delivering events, and a
+    #: subclass may reach this widget through Qt before ``__init__`` below
+    #: has assigned anything -- QFrame's own constructor with a parent sends
+    #: events, and so does WA_TranslucentBackground.  An ``eventFilter`` that
+    #: read ``self._owner_window`` in that instant raised AttributeError out
+    #: of a Qt filter, which is not a traceback but the end of the process.
+    #: Declared here, there is no instant in which they are missing.
+    _owner_window = None
+    _on_hidden = None
+
     def __init__(self, parent=None, *, radius: float | None = None,
                  border: str = DIVIDER, fill: str = "white"):
         super().__init__(parent, self.WINDOW_TYPE | QtCore.Qt.FramelessWindowHint
@@ -626,7 +637,8 @@ class FluentPopup(QtWidgets.QFrame):
             self._owner_window.installEventFilter(self)
 
     def eventFilter(self, watched, event):  # noqa: N802 - Qt naming
-        if watched is self._owner_window:
+        owner = self._owner_window
+        if owner is not None and watched is owner:
             event_type = event.type()
             owner_retired = event_type in (
                 QtCore.QEvent.WindowDeactivate,
