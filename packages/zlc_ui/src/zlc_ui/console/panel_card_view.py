@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
+    detach_widget,
     ACCENT,
     AXIS_GROUP_COLORS,
     BG,
@@ -715,8 +716,7 @@ class PanelCardView(FluentGroupBox):
                 pass
             self._surface_error_connected = False
             self._surface_layout.removeWidget(self._surface)
-            self._surface.hide()
-            self._surface.setParent(None)
+            detach_widget(self._surface)
         self._surface = widget
         if widget is None:
             self._placeholder.show()

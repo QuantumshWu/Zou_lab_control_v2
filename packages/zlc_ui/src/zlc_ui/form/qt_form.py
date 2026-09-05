@@ -972,6 +972,10 @@ class FluentParameterForm(QtWidgets.QWidget):
     #: One field asked for its file to be re-read.  The form knows only which
     #: key; what re-reading means belongs to whoever owns the file.
     refresh_requested = QtCore.pyqtSignal(str)
+    #: (key, symbol): the operator chose to READ this row in another
+    #: spelling of its unit.  The value did not move; whoever shows a second
+    #: number for the same field -- a device's current reading -- follows.
+    shown_unit_changed = QtCore.pyqtSignal(str, str)
 
     def _connect_refresh(self, key: str, widget: QtWidgets.QWidget) -> None:
         signal = getattr(widget, "refresh_requested", None)
@@ -1117,6 +1121,13 @@ class FluentParameterForm(QtWidgets.QWidget):
             widget.setShownUnit(symbol)
         except UnitError:
             return
+        self.shown_unit_changed.emit(key, symbol)
+
+    def shown_unit_for(self, key: str) -> str:
+        """The spelling this row is read in right now; "" when it has none."""
+
+        asked = getattr(self.widget_for(key), "shownUnit", None)
+        return str(asked()).strip() if callable(asked) else ""
 
     def _label_for(self, field: FormFieldProps) -> str:
         """The row's label: with the owner's unit, unless a picker says it."""

@@ -10,6 +10,8 @@ from __future__ import annotations
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
+    retire_widget,
+    detach_widget,
     ACCENT,
     ElidedLabel,
     GREEN,
@@ -293,7 +295,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         for row in self._logic_rows:
             if id(row) not in incoming_ids:
                 self.logic_layout.removeWidget(row)
-                row.setParent(None)
+                detach_widget(row)
 
         for row in self._logic_rows:
             self.logic_layout.removeWidget(row)
@@ -332,8 +334,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         if index < 0:
             return False
         self.tabs.removeTab(index)
-        editor.setParent(None)
-        editor.deleteLater()
+        retire_widget(editor)
         return True
 
 

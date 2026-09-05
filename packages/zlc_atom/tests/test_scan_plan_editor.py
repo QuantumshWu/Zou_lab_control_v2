@@ -199,3 +199,49 @@ def test_a_devices_knobs_hang_under_that_device_not_in_one_flat_list() -> None:
         assert (row.start_spin.minimum(), row.start_spin.maximum()) == (-30.0, 10.0)
     finally:
         row.deleteLater()
+
+
+def test_rebuilding_rows_in_one_pass_never_shows_a_window() -> None:
+    """Add axis re-projects the editor in the same pass that built its rows.
+
+    A row added to the visible editor and retired before the loop turns used
+    to be shown by the queued show after losing its parent: a window on the
+    desktop for one frame, which the operator saw as a flash at Add axis.
+    """
+
+    from PyQt5 import QtCore, QtWidgets
+
+    app = ensure_qt_app(["scan-editor-rebuild"])
+    editor = _editor()
+    editor.show()
+    for _ in range(5):
+        app.processEvents(QtCore.QEventLoop.AllEvents, 10)
+
+    seen: list[str] = []
+
+    class Filter(QtCore.QObject):
+        def eventFilter(self, watched, event):
+            if (
+                event.type() == QtCore.QEvent.Show
+                and isinstance(watched, QtWidgets.QWidget)
+                and watched.isWindow()
+            ):
+                seen.append(type(watched).__name__)
+            return False
+
+    holder = Filter(app)
+    app.installEventFilter(holder)
+    try:
+        for _ in range(3):
+            editor._add_axis()
+            editor._rebuild_rows("")
+            editor._add_axis()
+            editor._rebuild_rows("")
+        for _ in range(30):
+            app.processEvents(QtCore.QEventLoop.AllEvents, 10)
+        app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+    finally:
+        app.removeEventFilter(holder)
+        editor.close()
+        editor.deleteLater()
+    assert seen == [], seen

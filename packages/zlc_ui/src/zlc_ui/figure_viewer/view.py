@@ -15,6 +15,7 @@ from zlc_ui.console.board_view import ConsoleBoardView
 from zlc_ui.console.panel_card_view import PanelCardView, data_structure_fragments
 from zlc_ui.console.panel_editor_view import PanelEditorView
 from zlc_ui.fluent import (
+    retire_widget,
     ACCENT,
     GREY,
     ORANGE_TINT,
@@ -1104,8 +1105,7 @@ class FigureViewerView(QtWidgets.QWidget):
         index = self.tabs.indexOf(editor)
         if index >= 0:
             self.tabs.removeTab(index)
-        editor.setParent(None)
-        editor.deleteLater()
+        retire_widget(editor)
         return True
 
     def update_data_editor(self, editor_id: str, projection: object) -> bool:
@@ -1146,8 +1146,7 @@ class FigureViewerView(QtWidgets.QWidget):
         index = self.tabs.indexOf(editor)
         if index >= 0:
             self.tabs.removeTab(index)
-        editor.setParent(None)
-        editor.deleteLater()
+        retire_widget(editor)
         return True
 
     def update_panel_editor(self, panel_id: str, projection: object) -> bool:

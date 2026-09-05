@@ -82,6 +82,22 @@ assert drive.validate('-', 1)[0] == QtGui.QValidator.Intermediate, 'still typing
 picker = form.unit_picker_for('drive')
 assert picker is not None, 'a unit with a ladder is offered'
 assert picker.unit() == 'Hz'
+# One tree per FAMILY, the field's own first: a power field offers W with
+# its prefixes, dBm on its own and Vpp with its prefixes, never dBm under W.
+from zlc_ui.fluent import unit_choice_tree
+trunks = [trunk for trunk, _leaves in unit_choice_tree('dBm')]
+assert trunks == ['dBm', 'W', 'Vpp'], trunks
+assert [leaf for leaf, _k, _f in dict(unit_choice_tree('dBm'))['dBm']] == ['dBm']
+assert 'mVpp' in [leaf for leaf, _k, _f in dict(unit_choice_tree('dBm'))['Vpp']]
+# The popup's one column is never wider than the popup that holds it.
+floor_picker = form.unit_picker_for('floor')
+floor_picker.showPopup()
+app.processEvents()
+view = floor_picker._popup_view
+assert view.header().sectionSize(0) <= view.viewport().width(), (
+    view.header().sectionSize(0), view.viewport().width())
+assert not view.horizontalScrollBar().isVisible()
+floor_picker.hidePopup()
 drive.setShownUnit('MHz')
 assert drive.text() == '120', drive.text()
 assert drive.value() == 120000000.0, 'the value never moved'
@@ -178,6 +194,12 @@ view = DeviceControlView(spec, projection)
 current = {key: widgets[0].text() for key, widgets in view._field_rows.items()}
 assert current['drive'] == '120 MHz', current
 assert current['mode'] == 'holding', 'a device may report a word, not a number'
+# Read the row in another spelling and the reading follows -- in exactly
+# that spelling, never re-prefixed into kilo-megahertz.
+view.form._shown_unit_picked('drive', 'kHz')
+assert view._field_rows['drive'][0].text() == '120000 kHz', view._field_rows['drive'][0].text()
+view.form._shown_unit_picked('drive', 'GHz')
+assert view._field_rows['drive'][0].text() == '0.12 GHz'
 print('ok')
 """
     )

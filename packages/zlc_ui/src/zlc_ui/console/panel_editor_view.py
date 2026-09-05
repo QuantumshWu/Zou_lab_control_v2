@@ -15,6 +15,7 @@ from typing import Any
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
+    detach_widget,
     ACCENT,
     FluentButton,
     FluentComboBox,
@@ -398,8 +399,7 @@ class PanelEditorView(QtWidgets.QWidget):
         if previous is not None:
             previous.removeEventFilter(self)
             self.surface_layout.removeWidget(previous)
-            previous.hide()
-            previous.setParent(None)
+            detach_widget(previous)
         self._surface = widget
         if widget is None:
             self.surface_placeholder.show()

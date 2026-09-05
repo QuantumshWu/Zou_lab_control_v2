@@ -5,6 +5,7 @@ from __future__ import annotations
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
+    retire_widget,
     ACCENT, GREEN, GREY, ORANGE, RED, YELLOW, FluentButton, FluentCodeEdit,
     FluentDoubleSpinBox, FluentFrame, FluentGroupBox, FluentLabel, FluentLineEdit,
     signals_blocked,
@@ -197,8 +198,7 @@ class PulseScanView(QtWidgets.QWidget):
             item = self.bindings_grid.takeAt(0)
             widget = item.widget()
             if widget is not None:
-                widget.setParent(None)
-                widget.deleteLater()
+                retire_widget(widget)
         self._binding_edits = {}
         for row, record in enumerate(tuple(bindings)):
             edit = FluentLineEdit(str(record.binding_id))

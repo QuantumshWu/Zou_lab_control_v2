@@ -73,18 +73,22 @@ def test_a_registered_spelling_is_never_read_as_a_prefix() -> None:
 
 
 def test_the_shown_digits_are_the_value_s_own() -> None:
-    """The point moves; nothing is rounded away.
+    """The point moves; nothing is rounded away, and nothing is padded.
 
     A box that shows a rounded number is a box showing something the device
     is not holding.  Shifting a decimal point is exact, so what is read off
     the screen is what is stored, digit for digit -- and can be typed back.
+    The zeros the shift walks past are not digits of the value, and a
+    hertz field read in gigahertz printing ``6.8347000000`` was seven
+    characters of nothing in front of the number; they go.
     """
 
-    assert format_quantity(120000000.0, "Hz") == "120.0000000 MHz"
-    assert format_quantity(1050000.0, "Hz") == "1.0500000 MHz"
+    assert format_quantity(120000000.0, "Hz") == "120 MHz"
+    assert format_quantity(1050000.0, "Hz") == "1.05 MHz"
+    assert format_quantity(6834700000.0, "Hz") == "6.8347 GHz"
     assert format_quantity(0.0000012, "s") == "1.2 µs"
     assert format_quantity(0.00000012, "s") == "120 ns"
-    assert format_quantity(0.0, "s") == "0.0 s"
+    assert format_quantity(0.0, "s") == "0 s"
     # A whole number has no decimals to show.
     assert format_quantity(512, "pixel") == "512 pixel"
 
@@ -219,6 +223,15 @@ def test_an_application_may_add_a_dimension_its_instruments_need() -> None:
         registry.resolve("mHz")
 
 
-def test_only_a_base_may_be_declared_prefixable() -> None:
-    with pytest.raises(UnitError, match="only a base unit"):
+def test_a_prefix_belongs_to_the_reference_of_a_family() -> None:
+    """A linear unit takes a prefix only as its dimension's base; a level
+    never does; an amplitude such as Vpp is the reference of its own family
+    although its dimension's base is the watt."""
+
+    from zlc_data.units import Decibel, PeakVoltageInto
+
+    with pytest.raises(UnitError, match="cannot take a prefix"):
         Unit("ms", "time", Scaled(1e-3), prefixable=True)
+    with pytest.raises(UnitError, match="cannot take a prefix"):
+        Unit("dBx", "power", Decibel(1.0), prefixable=True)
+    assert Unit("Vpk", "power", PeakVoltageInto(50.0), prefixable=True).prefixable

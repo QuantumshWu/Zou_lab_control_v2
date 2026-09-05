@@ -10,6 +10,7 @@ from __future__ import annotations
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
+    detach_widget,
     ACCENT, FluentButton, FluentComboBox, FluentFrame, FluentLabel,
     FluentLineEdit, FluentScrollArea, FluentSwitch, signals_blocked,
 )
@@ -127,8 +128,7 @@ class PulsePreviewView(QtWidgets.QWidget):
         if self._content_widget is not None and self._content_widget is not widget:
             retired = self._content_widget
             self.preview_body_layout.removeWidget(retired)
-            retired.hide()
-            retired.setParent(None)
+            detach_widget(retired)
         if self._content_widget is not widget:
             self.preview_body_layout.addWidget(widget, 0, QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop)
             self._content_widget = widget

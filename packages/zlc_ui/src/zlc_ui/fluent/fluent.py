@@ -2018,6 +2018,44 @@ class _FluentMessageDialog(FluentCardDialog):
         outer.addLayout(row)
 
 
+def retire_widget(widget: QtWidgets.QWidget) -> None:
+    """Take a widget off the screen for good, without it ever being a window.
+
+    THE one way to retire a widget.  It is hidden EXPLICITLY, then deleted
+    on the next pass of the loop, and it keeps its parent until then.
+
+    What it must never be is unparented first.  Adding a widget to a layout
+    under a visible parent QUEUES a show of it; ``setParent(None)`` on a
+    widget that was not explicitly hidden clears the explicit-hide mark; so
+    a widget added and then unparented in the same pass -- a row rebuilt
+    twice because the draft it wrote re-projected it -- is shown by that
+    queued event AFTER it has lost its parent, which on Windows is a real
+    top-level window on the desktop for the one frame before its deferred
+    delete runs.  That is the small window that flashed at Add axis, at a
+    pulse reopen, at a closed editor tab: thirteen retirements, one idiom.
+    An explicit hide is what the queued show checks for, so it is the one
+    line that makes the difference, and it lives here so nobody writes the
+    idiom without it.
+    """
+
+    widget.hide()
+    widget.deleteLater()
+
+
+def detach_widget(widget: QtWidgets.QWidget) -> None:
+    """Take a widget out of its host to be mounted somewhere else later.
+
+    The counterpart of :func:`retire_widget` for a widget that lives on: a
+    plot surface handed from one card to another, a row the handle still
+    owns.  It is hidden EXPLICITLY before it is unparented, for the reason
+    given there -- a queued show that lands after the unparenting maps a
+    top-level window -- and whoever mounts it next shows it.
+    """
+
+    widget.hide()
+    widget.setParent(None)
+
+
 def retire_pending_widgets() -> None:
     """Run the deletions the outer event loop has not got to yet.
 
@@ -2483,10 +2521,18 @@ class FluentComboBox(QtWidgets.QAbstractButton):
 
     def _collapsed_content_width(self) -> int:
         if self._cached_content_width is None:
-            metrics = QtGui.QFontMetrics(self._collapsed_font())
-            measure = getattr(metrics, "horizontalAdvance", metrics.width)
+            # CEILED, from the fractional advance.  The painter elides with
+            # the text engine's fractional width, and the integer metric
+            # rounds it -- so a box sized to exactly its widest item, which
+            # is what a Fixed-width combo is, was a fraction of a pixel too
+            # narrow for that item and painted it with an ellipsis: a power
+            # picker sized to "dBm" showed "dB...".
+            metrics = QtGui.QFontMetricsF(self._collapsed_font())
             self._cached_content_width = max(
-                (measure(text) for text in self._collapsed_text_candidates()),
+                (
+                    int(math.ceil(metrics.horizontalAdvance(text)))
+                    for text in self._collapsed_text_candidates()
+                ),
                 default=0,
             )
         return self._cached_content_width
@@ -2715,6 +2761,19 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         if layout is not None:
             layout.activate()
         view.doItemsLayout()
+        # THE COLUMN TOO.  A tree keeps a header even when it hides it, and
+        # that header's one section sat at Qt's default 100 px whatever the
+        # rows measured -- so a picker whose popup is 83 px wide, holding
+        # rows 83 px wide, scrolled sideways by the 17 px the header owed to
+        # nobody.  The sole geometry owner sizes it: the content, or the
+        # viewport when the content fits.
+        header = getattr(view, "header", None)
+        if callable(header):
+            column = self.modelColumn()
+            header().resizeSection(
+                column,
+                max(int(view.sizeHintForColumn(column)), int(view.viewport().width())),
+            )
 
     def _resize_popup_to_contents(self, *_) -> None:
         """Measure the laid-out item view and converge its popup geometry.
@@ -3500,7 +3559,13 @@ class FluentUnitPicker(FluentTreeComboBox):
 
 
 def unit_choice_tree(unit: str) -> tuple:
-    """Every spelling of ``unit``, grouped under the base each belongs to.
+    """Every spelling of ``unit``, grouped under the FAMILY each belongs to.
+
+    One tree per family, not per dimension: W with its prefixes, dBm on its
+    own, Vpp with its prefixes -- three trees for one power, because they
+    are three ways of writing it and not three sizes of one.  Grouping by
+    the dimension's base put dBm under W, which is arithmetic's view and
+    nobody's.  The field's own family comes first.
 
     Empty when there is nothing to choose -- an unknown unit, a dimensionless
     number, or a unit whose ladder is only itself -- which is how a caller
@@ -3516,18 +3581,18 @@ def unit_choice_tree(unit: str) -> tuple:
         return ()
     if len(choices) < 2:
         return ()
-    order: list[str] = []
-    branches: dict[str, list[tuple[str, str, str]]] = {}
+    own = DEFAULT_UNITS.family_of(symbol).symbol
+    order: list[str] = [own]
+    branches: dict[str, list[tuple[str, str, str]]] = {own: []}
     for spelling in choices:
-        base = DEFAULT_UNITS.base_for(spelling)
-        trunk = base.symbol if base is not None else spelling
+        trunk = DEFAULT_UNITS.family_of(spelling).symbol
         leaves = branches.get(trunk)
         if leaves is None:
             leaves = []
             branches[trunk] = leaves
             order.append(trunk)
         leaves.append((spelling, spelling, spelling))
-    return tuple((trunk, tuple(branches[trunk])) for trunk in order)
+    return tuple((trunk, tuple(branches[trunk])) for trunk in order if branches[trunk])
 
 
 def fluent_unit_picker(unit: str, parent=None) -> "FluentUnitPicker | None":
@@ -5489,7 +5554,12 @@ def launch_fluent_window(
         window.adjustSize()
         window.setFixedSize(window.size())
     elif size is not None:
-        window.resize(int(size[0]), int(size[1]))
+        # A size may be a policy rather than a number: a callable is asked
+        # with the built window, so a body that wants "the content's own
+        # height plus the chrome" is sized BEFORE it is shown, instead of
+        # appearing at the screen fraction and then jumping to its size.
+        wanted = size(window) if callable(size) else size
+        window.resize(int(wanted[0]), int(wanted[1]))
     else:
         target = screen_fit_window_size(float(window_ratio))
         window.resize(target)
