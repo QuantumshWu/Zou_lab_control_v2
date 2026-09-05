@@ -42,6 +42,12 @@ from zlc_workbench.session import read_pulse
 from pulse_fixtures import write_ordinary_pulse
 
 
+def _arbiter(wake):
+    """An arbiter with a completion budget no test here runs out of."""
+
+    return SurfaceBatchArbiter(wake, completion_boundaries=1000, boundary_ms=100)
+
+
 def _submit_now(work):
     from concurrent.futures import Future
 
@@ -289,7 +295,7 @@ def test_the_scheduler_drives_a_real_plotting_host(live_bench) -> None:
 
         wake = _Wake()
         channels = wake
-        arbiter = SurfaceBatchArbiter(channels)
+        arbiter = _arbiter(channels)
         clock = HarmonicClock((100, 200, 400, 800))
         scheduler = BoardScheduler(plane, clock, arbiter, lambda: (port,))
 
@@ -876,7 +882,7 @@ def test_frames_outpacing_the_render_worker_are_skipped_without_an_error(
             replace_host=_initial_then(host),
         )
         channels = SimpleNamespace(request_owner_wake=lambda: None)
-        arbiter = SurfaceBatchArbiter(channels)
+        arbiter = _arbiter(channels)
 
         def moment(step: int) -> SignalFront:
             stepped_value, stepped = _advanced(
@@ -1295,7 +1301,7 @@ def test_two_panel_generation_replacements_wait_for_one_cohort_accept(
         _mount(port, value, publication, front)
 
     channels = SimpleNamespace(request_owner_wake=lambda: None)
-    arbiter = SurfaceBatchArbiter(channels)
+    arbiter = _arbiter(channels)
     assert arbiter.enqueue_group(ports, restarted_front)
     assert tuple(_accepted(port, "host") for port in ports) == old
     assert not accepted
@@ -1364,7 +1370,7 @@ def test_two_panel_replacement_staging_failure_swaps_neither_host(
     for port in ports:
         _mount(port, value, publication, front)
     channels = SimpleNamespace(request_owner_wake=lambda: None)
-    arbiter = SurfaceBatchArbiter(channels)
+    arbiter = _arbiter(channels)
     assert arbiter.enqueue_group(ports, restarted_front)
     completions[0].set_result(_operation("ready"))
     completions[1].set_exception(RuntimeError("configuration failed"))
@@ -1493,9 +1499,7 @@ def test_board_close_releases_pending_generation_replacement(
         replace_host=_initial_then(old, later),
     )
     _mount(port, value, publication, front)
-    arbiter = SurfaceBatchArbiter(
-        SimpleNamespace(request_owner_wake=lambda: None)
-    )
+    arbiter = _arbiter(SimpleNamespace(request_owner_wake=lambda: None))
     assert arbiter.enqueue_group((port,), restarted_front)
 
     arbiter.close()
@@ -1615,7 +1619,7 @@ def test_a_stale_refusal_is_flow_control_not_a_panel_error(live_bench) -> None:
             def request_owner_wake(self) -> None:
                 self.pending.set()
 
-        arbiter = SurfaceBatchArbiter(_Wake())
+        arbiter = _arbiter(_Wake())
         clock = HarmonicClock((100, 200, 400, 800))
         scheduler = BoardScheduler(plane, clock, arbiter, lambda: (port,))
 

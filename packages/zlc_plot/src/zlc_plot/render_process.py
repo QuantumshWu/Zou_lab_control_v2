@@ -45,10 +45,14 @@ _MAPPING_OPENED = object()
 _MAPPING_RELEASED = object()
 _RETIRE_MAPPINGS = object()
 _STOP_WRITER = object()
+#: How long either end waits for the pipe before looking up from it: the
+#: child to notice its writer lost the parent, the parent to ask a silent
+#: child whether it is still there.
+_POLL_SLICE_SECONDS = 1.0
 
 
-def _send_message(connection: Connection, message: object) -> None:
-    """Send one owned pickle without Connection.send's transient BytesIO.
+def _encode_message(message: object) -> bytes:
+    """One owned pickle, made where the message is made.
 
     Python 3.13's ``Connection.send`` serialises through
     ``ForkingPickler.dumps``, which returns ``BytesIO.getbuffer()``.  A pipe
@@ -56,9 +60,16 @@ def _send_message(connection: Connection, message: object) -> None:
     BytesIO is finalized, producing an unraisable BufferError.  This protocol
     exchanges only ordinary pickle values after process startup, so an owned
     bytes payload is both sufficient and lifetime-safe.
+
+    Encoded by the SENDER, never by the writer thread: a value that cannot
+    cross the pipe fails the call that made it, where that call can answer
+    with an error instead.  Encoded by the writer, one such value read as a
+    lost peer -- the writer said so once and then drained every later front,
+    result and acknowledgement for the rest of the child's life, while the
+    child stayed alive and kept rendering into that void.
     """
 
-    connection.send_bytes(pickle.dumps(message, protocol=5))
+    return pickle.dumps(message, protocol=5)
 
 
 def _write_messages(connection: Connection, outbox: Queue, closed: Callable[[], None]) -> None:
@@ -74,14 +85,18 @@ def _write_messages(connection: Connection, outbox: Queue, closed: Callable[[], 
     writer per direction, fed by a queue, removes the cycle by construction:
     the readers keep reading no matter how far behind the writes fall, and
     ordering is the queue's.
+
+    It moves bytes its senders already encoded (:func:`_encode_message`), so
+    the only failure it can meet is the pipe's own, and that is the peer
+    gone.
     """
 
     while True:
-        message = outbox.get()
-        if message is _STOP_WRITER:
+        payload = outbox.get()
+        if payload is _STOP_WRITER:
             return
         try:
-            _send_message(connection, message)
+            connection.send_bytes(payload)
         except BaseException:
             # The peer is gone.  Say so once and drain, so nothing waits on a
             # queue nobody will ever write out; the reader's own EOF is what
@@ -863,11 +878,34 @@ class _RemoteRasterPlotHost:
 class RenderProcess:
     """One long-lived process containing any number of RasterPlotHosts."""
 
-    def __init__(self, name: str) -> None:
+    #: How long a child may stay silent, with requests outstanding and after
+    #: being asked, before it has stopped.  "The service is up" used to have
+    #: two proxies and no owner -- the process existing and its pipe not
+    #: having closed -- and a child that was alive and not answering
+    #: satisfied both: every request stayed pending, every panel it served
+    #: kept its last picture, and nothing anywhere said so.  The reader owns
+    #: service failure, so the reader owns liveness.  The child's dispatch
+    #: loop only hands work to host workers and answers a ping in
+    #: microseconds; ten seconds of not even that is not slowness.
+    ANSWER_DEADLINE_SECONDS = 10.0
+
+    def __init__(
+        self, name: str, *, answer_deadline_seconds: float | None = None
+    ) -> None:
         selected = str(name).strip()
         if not selected:
             raise ValueError("render process name must be non-empty")
+        deadline = float(
+            self.ANSWER_DEADLINE_SECONDS
+            if answer_deadline_seconds is None
+            else answer_deadline_seconds
+        )
+        if not deadline > 0.0:
+            raise ValueError("answer deadline must be positive")
         self.name = selected
+        self._answer_deadline = deadline
+        self._ping: tuple[int, float] | None = None
+        self._ping_serial = 0
         self._lock = RLock()
         self._pending: dict[int, _Pending] = {}
         self._callbacks: dict[int, Callable[..., object]] = {}
@@ -939,6 +977,7 @@ class RenderProcess:
         self._reader_stopped = stopped
         self._closed = False
         self._close_started = None
+        self._ping = None
         self._outbox: Queue = Queue()
         self._writer = Thread(
             target=_write_messages,
@@ -1332,7 +1371,7 @@ class RenderProcess:
 
         if self._closed:
             raise RuntimeError("render process is closed")
-        self._outbox.put(message)
+        self._outbox.put(_encode_message(message))
 
     def _mark_write_failed(self) -> None:
         """The writer lost the pipe.  The reader's EOF fails the requests."""
@@ -1414,9 +1453,7 @@ class RenderProcess:
             buffers.clear()
             with self._lock:
                 self._input_uploads[token] = tuple(shared)
-            self._outbox.put(
-                ("input", token, payload, tuple(descriptors))
-            )
+            self._send(("input", token, payload, tuple(descriptors)))
         except BaseException:
             for item in buffers[released_buffers:]:
                 try:
@@ -1516,13 +1553,56 @@ class RenderProcess:
                 self._set_host_inputs(pending.host_id, retained | tokens)
         self._release_inputs(tokens)
 
+    def _require_answer(self) -> None:
+        """Silence with work outstanding is asked about, then judged.
+
+        Runs on the reader thread whenever the pipe has said nothing for one
+        slice.  With nothing pending there is nothing to wait for.  With
+        requests pending, the first silent slice sends a ping; a child whose
+        dispatch loop is alive answers it at once, and the ping is forgotten
+        by :meth:`_answered`.  A ping still unanswered after the deadline is
+        the service's failure, raised here so that the reader ends exactly
+        as it ends on EOF: every pending request fails, every host is marked
+        failed, the child is terminated and the console remounts on a fresh
+        one -- said, this time, on the status strip.
+        """
+
+        now = monotonic()
+        with self._lock:
+            if not self._pending:
+                self._ping = None
+                return
+            if self._ping is not None:
+                serial, asked = self._ping
+                if now - asked > self._answer_deadline:
+                    raise TimeoutError(
+                        f"render process {self.name!r} did not answer for "
+                        f"{self._answer_deadline:g} s with "
+                        f"{len(self._pending)} request(s) outstanding"
+                    )
+                return
+            self._ping_serial += 1
+            serial = self._ping_serial
+            self._ping = (serial, now)
+        self._send(("ping", serial))
+
+    def _answered(self, serial: int) -> None:
+        with self._lock:
+            if self._ping is not None and self._ping[0] == serial:
+                self._ping = None
+
     def _read_messages(self) -> None:
         failure: BaseException | None = None
         try:
             while True:
+                if not self._connection.poll(_POLL_SLICE_SECONDS):
+                    self._require_answer()
+                    continue
                 message = _receive_message(self._connection)
                 kind = message[0]
-                if kind == "front":
+                if kind == "pong":
+                    self._answered(int(message[1]))
+                elif kind == "front":
                     self._receive_front(*message[1:])
                 elif kind == "result":
                     self._receive_result(*message[1:])
@@ -1767,6 +1847,9 @@ class RenderProcess:
             self._connection.close()
         except Exception:
             pass
+        if isinstance(failure, TimeoutError) and self._process.is_alive():
+            # A child that did not answer is not going to leave on its own.
+            self._process.terminate()
         self._process.join(timeout=5.0)
         if self._process.is_alive() and failure is not None:
             self._process.terminate()
@@ -2059,9 +2142,18 @@ def _render_process_main(connection: Connection, name: str) -> None:
         The service loop's own answers -- an input acknowledgement, a refusal
         -- used to wait behind whatever front was mid-write, which stopped it
         draining the parent's requests.  See :func:`_write_messages`.
+        Encoded here, on the sender's thread: see :func:`_encode_message`.
         """
 
-        outbox.put(message)
+        outbox.put(_encode_message(message))
+
+    def reply(request_id: int, message: object) -> None:
+        """One request's answer -- or the error that kept it from crossing."""
+
+        try:
+            send(message)
+        except Exception as error:
+            _send_error(send, request_id, error)
 
     def publish_front(host_id: str, front: RasterFront) -> None:
         sequence = int(front.identity.sequence)
@@ -2099,7 +2191,7 @@ def _render_process_main(connection: Connection, name: str) -> None:
         except BaseException as error:
             _send_error(send, request_id, error)
             return
-        send(("result", request_id, wire, sequence))
+        reply(request_id, ("result", request_id, wire, sequence))
 
     def begin(request_id: int, future: Future) -> None:
         pending[request_id] = future
@@ -2190,7 +2282,10 @@ def _render_process_main(connection: Connection, name: str) -> None:
                     send, request_id, RuntimeError("subscription host is closed")
                 )
             else:
-                send(("result", request_id, None, int(front.identity.sequence)))
+                reply(
+                    request_id,
+                    ("result", request_id, None, int(front.identity.sequence)),
+                )
             return
         answer = release()
         if isinstance(answer, Future):
@@ -2200,7 +2295,10 @@ def _render_process_main(connection: Connection, name: str) -> None:
         if front is None:
             _send_error(send, request_id, RuntimeError("subscription host is closed"))
         else:
-            send(("result", request_id, None, int(front.identity.sequence)))
+            reply(
+                request_id,
+                ("result", request_id, None, int(front.identity.sequence)),
+            )
 
     def create_host(
         request_id: int,
@@ -2389,7 +2487,7 @@ def _render_process_main(connection: Connection, name: str) -> None:
             except BaseException as error:
                 _send_error(send, request_id, error)
                 return
-            send(("result", request_id, encode(value), None))
+            reply(request_id, ("result", request_id, encode(value), None))
 
         answer.add_done_callback(completed)
 
@@ -2418,8 +2516,17 @@ def _render_process_main(connection: Connection, name: str) -> None:
 
     try:
         while True:
+            if not connection.poll(_POLL_SLICE_SECONDS):
+                if write_failed.is_set():
+                    # The parent stopped reading: nothing drawn here can
+                    # reach anyone.  Leave the way an EOF leaves.
+                    break
+                continue
             message = _receive_message(connection)
             kind = message[0]
+            if kind == "ping":
+                send(("pong", int(message[1])))
+                continue
             if kind == "input":
                 token, payload, descriptors = message[1:]
                 inputs[int(token)] = _load_input(payload, descriptors, schemas)

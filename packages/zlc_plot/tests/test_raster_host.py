@@ -2107,3 +2107,88 @@ def _drained(host: object, seconds: float = 30.0) -> bool:
             return True
         time.sleep(0.02)
     return False
+
+
+def test_a_render_child_that_stops_answering_is_a_service_failure() -> None:
+    """A child that is alive and silent has stopped, whatever the process table says.
+
+    "The service is up" had two proxies and no owner: the process existing
+    and its pipe not having closed.  A child stopped mid-life satisfied both,
+    so every request stayed pending for ever, every panel it served kept its
+    last picture, and nothing anywhere said so.  The reader owns liveness
+    now: with requests outstanding and the pipe silent it asks, and a child
+    that does not answer within the deadline fails exactly as a dead one --
+    pending requests fail, hosts are marked, and a fresh child takes over.
+    """
+
+    import psutil
+
+    from zlc_plot import RenderProcess
+
+    snapshot = _snapshot()
+    spec = CurvePlot(AxisRef.point("x"))
+    service = RenderProcess("raster-silent-child-test", answer_deadline_seconds=1.0)
+    remote = replacement = child = None
+    try:
+        remote = service.build_host(snapshot, spec)
+        remote.wait_for_front(timeout=30)
+        first_pid = service.pid
+        child = psutil.Process(first_pid)
+        child.suspend()
+
+        pending = remote.set_parameter("title", "silent")
+        error = pending.exception(timeout=30)
+        assert isinstance(error, RuntimeError), error
+        assert "did not answer" in str(error), error
+        assert remote.service_failure is True
+        deadline = time.monotonic() + 10.0
+        while not service._reader_stopped.is_set() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert service._reader_stopped.is_set()
+
+        replacement = service.build_host(snapshot, spec)
+        replacement.wait_for_front(timeout=30)
+        assert service.pid != first_pid
+        replacement.set_parameter("title", "answering again").result(timeout=30)
+    finally:
+        if child is not None and child.is_running():
+            try:
+                child.resume()
+                child.kill()
+            except psutil.Error:
+                pass
+        if replacement is not None:
+            replacement.close(timeout=30)
+        if remote is not None:
+            remote.close(timeout=30)
+        assert service.close(timeout=30)
+
+
+def test_a_message_that_cannot_cross_the_pipe_fails_its_sender_not_the_service() -> None:
+    """One unpicklable value fails the call that made it, and nothing else.
+
+    The writer thread used to encode every message itself, and treated ANY
+    failure as the peer gone: it said so once and then drained every later
+    front, result and acknowledgement for the rest of the process's life --
+    the process alive, the pictures frozen, the reason never written down.
+    Encoded by the sender, the value fails at the call, and the service
+    keeps answering.
+    """
+
+    from zlc_plot import RenderProcess
+
+    snapshot = _snapshot()
+    spec = CurvePlot(AxisRef.point("x"))
+    service = RenderProcess("raster-encode-test")
+    remote = None
+    try:
+        remote = service.build_host(snapshot, spec)
+        remote.wait_for_front(timeout=30)
+        with pytest.raises(Exception, match="pickle|lambda"):
+            service._send(("request", -1, "call", lambda: None))
+        assert service.alive
+        remote.set_parameter("title", "still answering").result(timeout=30)
+    finally:
+        if remote is not None:
+            remote.close(timeout=30)
+        assert service.close(timeout=30)

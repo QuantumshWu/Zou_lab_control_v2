@@ -128,6 +128,24 @@ __all__ = ["ConsolePresenter", "PanelBinding", "PanelState"]
 _UNCHANGED = object()
 
 
+def _host_failed(binding: PanelBinding) -> bool:
+    """Whether the panel's host must be replaced rather than reconfigured.
+
+    Two facts, one answer.  A render service that died marks every host it
+    served (``service_failure``).  A host whose staged surface never finished
+    is named by its port: the board rejected the surface with a
+    ``TimeoutError`` after its completion budget, and a host that holds a
+    promise that long is not going to keep the next one either -- the
+    picture would stay frozen, now with its reason on the card.  Both are
+    repaired the same way: the unchanged authored target goes through the
+    ordinary replacement transaction and a fresh host takes the panel.
+    """
+
+    if bool(getattr(binding.host, "service_failure", False)):
+        return True
+    return isinstance(getattr(binding.port, "last_error", None), TimeoutError)
+
+
 def _refused_expression(binding: "PanelBinding") -> str:
     """What the operator typed into the Parameters box and the model refused.
 
@@ -2874,6 +2892,7 @@ class ConsolePresenter:
                 # reconfiguring it re-raises the same reason forever.  The
                 # accepted state change -- the repair -- rebuilds instead.
                 or getattr(binding.host, "startup_failure", None) is not None
+                or _host_failed(binding)
             )
         )
         if (
@@ -3445,13 +3464,14 @@ class ConsolePresenter:
             if (
                 configuration_entry is None
                 and host is not None
-                and bool(getattr(host, "service_failure", False))
+                and _host_failed(binding)
             ):
-                # A render-service crash leaves the last complete Front on
-                # screen.  Re-submit the unchanged authored target through
-                # the ordinary replacement transaction; its factory restarts
-                # A, and the old surface stays visible until the replacement
-                # is fully accepted.
+                # A render-service crash, or a host that did not keep its
+                # surface promise, leaves the last complete Front on screen.
+                # Re-submit the unchanged authored target through the
+                # ordinary replacement transaction; its factory restarts A,
+                # and the old surface stays visible until the replacement is
+                # fully accepted.
                 self.update_panel_state(binding.panel_id, {})
                 continue
             if (

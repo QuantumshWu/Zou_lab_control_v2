@@ -6818,3 +6818,90 @@ def test_a_silent_plot_worker_cannot_hold_the_console_open(presenter) -> None:
         "still waiting for" in str(message)
         for _severity, message in presenter.view.status
     ), presenter.view.status[-4:]
+
+
+def test_a_surface_that_never_finishes_is_named_and_its_host_replaced(
+    presenter, session
+) -> None:
+    """A staged surface nobody finishes is said on the strip, then repaired.
+
+    Two views of one camera signal are one shot on screen.  One view's host
+    stopped finishing its renders: its sibling waited in the same cohort,
+    every later shot was withheld behind the busy one, the summary read
+    "running", no card wore a dot and no line was written -- every picture
+    frozen, the application alive.  The board's completion budget names the
+    panel that held the shot, and the console replaces its host the way it
+    replaces one whose render service died.
+    """
+
+    from concurrent.futures import Future
+    from math import ceil
+
+    session.load_pulse(PULSE_NAME)
+    node = CameraMeasurementNode(
+        camera=session.camera,
+        request=CameraMeasurementRequest("camera", 0.02, None, 0, CAMERA_WINDOWS),
+        signal_plane=session.signal_plane,
+        producer="stuck-surface",
+    )
+    monitor = node.monitor()
+    signal = node.signal_key("frames")
+    session.nodes = [node]
+    seen: dict[str, object] = {"publication": None}
+
+    def shot():
+        session.fire(shots=1)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            monitor.poll()
+            publication = session.signal_plane.latest_publication(signal)
+            if publication is not None and publication is not seen["publication"]:
+                seen["publication"] = publication
+                return publication
+            time.sleep(0.002)
+        raise AssertionError("the camera monitor did not publish its next cycle")
+
+    snapshot = shot().value(signal).snapshot
+    first = presenter.add_panel(signal, snapshot)
+    second = presenter.add_panel(signal, snapshot)
+    ids = {first.panel_id, second.panel_id}
+    _settle_panel_hosts(
+        presenter,
+        lambda: ids <= {panel_id for panel_id, _front in presenter.view.presented_fronts},
+    )
+    stuck = presenter.panels[first.panel_id].host
+    assert stuck is not None
+    stuck.update_data = lambda *_args, **_kwargs: Future()
+
+    budget = ceil(
+        presenter.board.SURFACE_COMPLETION_SECONDS * 1000.0
+        / presenter.board.base_interval_ms
+    )
+    mark = len(presenter.view.status)
+    presenter.view.presented_fronts.clear()
+    # Inside the budget: the held shot keeps its sibling from presenting,
+    # and nothing has been said yet -- the freeze exactly as it was seen.
+    for _ in range(budget - 1):
+        shot()
+        presenter.beat()
+    assert not presenter.view.presented_fronts
+    assert not any(
+        "did not finish" in text for _severity, text in presenter.view.status[mark:]
+    )
+    # The budget runs out: the panel that held the shot is named.
+    for _ in range(3):
+        shot()
+        presenter.beat()
+    said = [text for _severity, text in presenter.view.status[mark:]]
+    assert any("did not finish" in text for text in said), said
+
+    # Repaired: a fresh host takes the panel and both views present again.
+    _settle_panel_hosts(
+        presenter, lambda: presenter.panels[first.panel_id].host is not stuck
+    )
+    presenter.view.presented_fronts.clear()
+    for _ in range(10):
+        shot()
+        presenter.beat()
+    presented = {panel_id for panel_id, _front in presenter.view.presented_fronts}
+    assert ids <= presented, presented

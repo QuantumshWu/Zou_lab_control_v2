@@ -34,6 +34,12 @@ from zlc_runtime.presentation import (
 from zlc_runtime.streams import EventRef, StreamId
 
 
+def _arbiter(wake):
+    """An arbiter with a completion budget no test here runs out of."""
+
+    return SurfaceBatchArbiter(wake, completion_boundaries=1000, boundary_ms=100)
+
+
 def _front(
     name: str = "camera/frame", sequence: int = 1, *, valid: bool = True
 ) -> SignalFront:
@@ -194,7 +200,7 @@ def test_companion_only_currency_change_schedules_the_panel_again() -> None:
 
     plane = _Plane(combined(first_companion))
     channels = _Sink()
-    arbiter = SurfaceBatchArbiter(channels)
+    arbiter = _arbiter(channels)
     port = _Port(
         "camera",
         "camera/frame",
@@ -222,7 +228,7 @@ def test_companion_only_currency_change_schedules_the_panel_again() -> None:
 def test_surface_arbiter_is_all_or_nothing_and_wakes_when_done() -> None:
     sink = _Sink()
     channels = sink
-    arbiter = SurfaceBatchArbiter(channels)
+    arbiter = _arbiter(channels)
     front = _front()
     first = _Port("one", "camera/frame")
     second = _Port("two", "camera/frame")
@@ -244,7 +250,7 @@ def test_surface_arbiter_is_all_or_nothing_and_wakes_when_done() -> None:
 def test_surface_arbiter_releases_origin_when_panel_disappears() -> None:
     front = _front()
     port = _Port("panel", "camera/frame")
-    arbiter = SurfaceBatchArbiter(_Sink())
+    arbiter = _arbiter(_Sink())
 
     assert arbiter.enqueue_group((port,), front)
     port.futures[0].set_result("ready")
@@ -257,7 +263,7 @@ def test_surface_arbiter_releases_origin_when_panel_disappears() -> None:
 def test_surface_arbiter_close_releases_running_origin_operation() -> None:
     front = _front()
     port = _Port("panel", "camera/frame")
-    arbiter = SurfaceBatchArbiter(_Sink())
+    arbiter = _arbiter(_Sink())
 
     assert arbiter.enqueue_group((port,), front)
     assert port.futures[0].set_running_or_notify_cancel()
@@ -303,7 +309,7 @@ def test_same_shot_siblings_commit_together_in_one_cohort() -> None:
         _Port("second", "occupancy/counts", interval=400),
     )
     channels = _Sink()
-    arbiter = SurfaceBatchArbiter(channels)
+    arbiter = _arbiter(channels)
     scheduler = BoardScheduler(
         _Plane(front),
         HarmonicClock((100, 200, 400, 800)),
@@ -337,7 +343,7 @@ def test_a_failed_member_sinks_the_batch_and_is_the_only_one_blamed() -> None:
     """
 
     channels = _Sink()
-    arbiter = SurfaceBatchArbiter(channels)
+    arbiter = _arbiter(channels)
     front = _front()
     first = _Port("one", "camera/frame")
     second = _Port("two", "camera/frame")
@@ -359,7 +365,7 @@ def test_a_rebuilt_panel_marks_nobody_at_all() -> None:
     """
 
     channels = _Sink()
-    arbiter = SurfaceBatchArbiter(channels)
+    arbiter = _arbiter(channels)
     front = _front()
     healthy = _Port("healthy", "camera/frame")
     rebuilt = _Port("rebuilt", "camera/frame")
@@ -387,7 +393,7 @@ def test_a_superseded_member_abandons_its_whole_batch_without_an_error() -> None
     """
 
     channels = _Sink()
-    arbiter = SurfaceBatchArbiter(channels)
+    arbiter = _arbiter(channels)
     front = _front()
     first = _Port("one", "camera/frame")
     second = _Port("two", "camera/frame")
@@ -408,7 +414,7 @@ def test_a_render_that_raised_cancellation_is_superseded_not_failed() -> None:
     """The worker may surface its own supersession as a raised CancelledError."""
 
     channels = _Sink()
-    arbiter = SurfaceBatchArbiter(channels)
+    arbiter = _arbiter(channels)
     front = _front()
     first = _Port("one", "camera/frame")
     second = _Port("two", "camera/frame")
@@ -426,7 +432,7 @@ def test_a_render_that_raised_cancellation_is_superseded_not_failed() -> None:
 
 def test_a_batch_whose_every_member_was_superseded_just_finishes() -> None:
     channels = _Sink()
-    arbiter = SurfaceBatchArbiter(channels)
+    arbiter = _arbiter(channels)
     front = _front()
     first = _Port("one", "camera/frame")
     second = _Port("two", "camera/frame")
@@ -452,7 +458,7 @@ def test_a_sibling_error_still_never_marks_the_superseded_member() -> None:
     """
 
     channels = _Sink()
-    arbiter = SurfaceBatchArbiter(channels)
+    arbiter = _arbiter(channels)
     front = _front()
     first = _Port("one", "camera/frame")
     second = _Port("two", "camera/frame")
@@ -511,7 +517,7 @@ def test_due_panel_stages_on_the_next_publication_wake_without_advancing_clock()
     port = _Port("camera", "camera/frame")
     port.presented = old_publication
     port.presented_refs = (old_publication.event_ref,)
-    arbiter = SurfaceBatchArbiter(_Sink())
+    arbiter = _arbiter(_Sink())
     scheduler = BoardScheduler(
         plane,
         HarmonicClock((100, 200)),
@@ -558,7 +564,7 @@ def test_explicit_presentation_debt_restages_an_unchanged_screen_front() -> None
     port.presented = publication
     port.presented_refs = (publication.event_ref,)
     port.presentation_current = False
-    arbiter = SurfaceBatchArbiter(_Sink())
+    arbiter = _arbiter(_Sink())
     scheduler = BoardScheduler(
         plane,
         HarmonicClock((100, 200)),
@@ -588,7 +594,7 @@ def test_two_views_of_one_signal_flip_together_as_one_cohort() -> None:
     front = _front()
     plane = _Plane(front)
     channels = _Sink()
-    arbiter = SurfaceBatchArbiter(channels)
+    arbiter = _arbiter(channels)
     fast = _Port("fast", "camera/frame", interval=100)
     slow = _Port("slow", "camera/frame", interval=100)
     clock = HarmonicClock((100, 200, 400, 800))
@@ -645,7 +651,7 @@ def test_a_displayed_follower_joins_its_shot_within_the_open_window() -> None:
     plane.edges = frozenset({("camera/frame", "@logic/panel/center")})
     plane.parents = {fit_publication: (camera_publication,)}
     channels = _Sink()
-    arbiter = SurfaceBatchArbiter(channels)
+    arbiter = _arbiter(channels)
     camera = _Port("camera", "camera/frame", interval=100)
     trace = _Port("trace", "@logic/panel/center", interval=100)
     clock = HarmonicClock((100, 200, 400, 800))
@@ -696,7 +702,7 @@ def test_completion_wake_does_not_bypass_a_not_due_follower() -> None:
     plane = _Plane(camera_front)
     plane.edges = frozenset({("camera/frame", "@logic/panel/center")})
     plane.parents = {fit_publication: (camera_publication,)}
-    arbiter = SurfaceBatchArbiter(_Sink())
+    arbiter = _arbiter(_Sink())
     camera = _Port("camera", "camera/frame", interval=100)
     trace = _Port("trace", "@logic/panel/center", interval=200)
     scheduler = BoardScheduler(
@@ -755,7 +761,7 @@ def test_due_coherent_component_stages_on_its_completion_wake() -> None:
     camera.presented_refs = (old_camera_publication.event_ref,)
     roi.presented = old_roi_publication
     roi.presented_refs = (old_roi_publication.event_ref,)
-    arbiter = SurfaceBatchArbiter(_Sink())
+    arbiter = _arbiter(_Sink())
     scheduler = BoardScheduler(
         plane,
         HarmonicClock((100, 200)),
@@ -792,7 +798,7 @@ def test_board_scheduler_declares_its_port_signals_on_every_tick() -> None:
     front = _front()
     plane = _Plane(front)
     channels = _Sink()
-    arbiter = SurfaceBatchArbiter(channels)
+    arbiter = _arbiter(channels)
     ports: list[_Port] = [_Port("panel", "camera/frame", interval=100)]
     clock = HarmonicClock((100, 200, 400, 800))
     scheduler = BoardScheduler(plane, clock, arbiter, lambda: tuple(ports))
@@ -814,7 +820,7 @@ def test_board_scheduler_owes_a_failed_slow_beat_to_the_next_base_tick() -> None
     plane = _Plane(front)
     sink = _Sink()
     channels = sink
-    arbiter = SurfaceBatchArbiter(channels)
+    arbiter = _arbiter(channels)
     port = _Port("panel", "camera/frame", interval=2000, fail_prepare=1)
     clock = HarmonicClock((100, 2000))
     scheduler = BoardScheduler(plane, clock, arbiter, lambda: (port,))
@@ -835,7 +841,7 @@ def test_board_scheduler_owes_missing_value_until_the_next_base_tick() -> None:
     complete = _front()
     plane = _Plane(empty)
     channels = _Sink()
-    arbiter = SurfaceBatchArbiter(channels)
+    arbiter = _arbiter(channels)
     port = _Port("panel", "camera/frame", interval=2000)
     clock = HarmonicClock((100, 2000))
     scheduler = BoardScheduler(plane, clock, arbiter, lambda: (port,))
@@ -867,7 +873,7 @@ def test_a_paused_display_still_freezes_the_plane_and_advances_the_clock() -> No
     """
 
     plane = _Plane(_front())
-    arbiter = SurfaceBatchArbiter(_Sink())
+    arbiter = _arbiter(_Sink())
     port = _Port("camera", "camera/frame")
     clock = HarmonicClock((100, 200, 400, 800))
     scheduler = BoardScheduler(plane, clock, arbiter, lambda: (port,))
@@ -895,7 +901,7 @@ def test_a_paused_display_still_freezes_the_plane_and_advances_the_clock() -> No
 def test_a_missing_companion_holds_the_group_until_completion_wake() -> None:
 
     front = _front("camera/frame")
-    arbiter = SurfaceBatchArbiter(_Sink())
+    arbiter = _arbiter(_Sink())
     port = _Port("camera", "camera/frame", companions=("occ/sites",))
 
     assert not arbiter.enqueue_group((port,), front)
@@ -931,3 +937,53 @@ def test_a_missing_companion_holds_the_group_until_completion_wake() -> None:
     port.futures[-1].set_result("complete image and overlay")
     arbiter.drain(ports.get)
     assert len(raw.accepted) == len(port.accepted) == 1
+
+
+def test_a_staged_surface_that_never_finishes_is_rejected_after_its_budget() -> None:
+    """A cohort flips together or not at all -- and not at all has a clock.
+
+    One member whose render never finished held its shot open for ever: the
+    sibling that HAD finished waited in the same cohort, every later panel
+    of the shot was withheld from staging behind the busy one, and nothing
+    was said.  The budget names the member that held the shot, cancels its
+    render, lets the finished sibling leave unpresented, and frees the
+    shot's panels to stage again.
+    """
+
+    front = _front()
+    plane = _Plane(front)
+    channels = _Sink()
+    arbiter = SurfaceBatchArbiter(channels, completion_boundaries=3, boundary_ms=100)
+    assert arbiter.completion_seconds == 0.3
+    fast = _Port("fast", "camera/frame", interval=100)
+    slow = _Port("slow", "camera/frame", interval=100)
+    clock = HarmonicClock((100,))
+    scheduler = BoardScheduler(plane, clock, arbiter, lambda: (fast, slow))
+    resolve = {"fast": fast, "slow": slow}.get
+
+    scheduler.on_tick()
+    assert len(fast.updates) == len(slow.updates) == 1
+    slow.futures[0].set_result("slow")
+    arbiter.drain(resolve)
+    assert not slow.accepted and slow.pending == [slow.updates[0]]
+
+    # Two more boundaries: the budget is spent, the owner is woken.
+    wakes = channels.calls
+    scheduler.on_tick()
+    scheduler.on_tick()
+    assert channels.calls > wakes
+    arbiter.drain(resolve)
+
+    assert fast.futures[0].cancelled()
+    assert len(fast.rejected) == 1
+    rejected_update, error = fast.rejected[0]
+    assert rejected_update is fast.updates[0]
+    assert isinstance(error, TimeoutError)
+    assert "fast" in str(error) and "0.3 s" in str(error)
+    assert slow.finished == [slow.updates[0]]
+    assert not slow.rejected and not slow.accepted
+    assert fast.pending == [] and slow.pending == []
+
+    # The shot's panels are free again: the next tick stages both.
+    scheduler.on_tick()
+    assert len(fast.updates) == len(slow.updates) == 2
