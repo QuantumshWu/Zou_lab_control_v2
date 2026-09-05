@@ -663,15 +663,8 @@ class _AxisRangeHandler(_StaticHandler):
         lo, hi, points = self.normalize(field, value)
         minimum = -1.0e12 if field.minimum is None else float(field.minimum)
         maximum = 1.0e12 if field.maximum is None else float(field.maximum)
-        digits = max(5, len(str(int(abs(maximum) + 1))) + 4)
-        lo_spin = FluentDoubleSpinBox(
-            length=digits,
-            allow_minus=minimum < 0,
-        )
-        hi_spin = FluentDoubleSpinBox(
-            length=digits,
-            allow_minus=minimum < 0,
-        )
+        lo_spin = FluentDoubleSpinBox()
+        hi_spin = FluentDoubleSpinBox()
         for spin, seed in ((lo_spin, lo), (hi_spin, hi)):
             spin.setRange(minimum, maximum)
             spin.setValue(seed)

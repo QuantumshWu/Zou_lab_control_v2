@@ -653,7 +653,7 @@ def resolve_unit(value: UnitLike, registry: UnitRegistry | None = None) -> Unit:
 # ------------------------------------------------------------- showing a value
 
 
-def _decimal(value: object) -> Decimal | None:
+def decimal_of(value: object) -> Decimal | None:
     """The exact decimal a float IS, or None when it is not a finite number.
 
     ``repr`` of a float is the shortest string that reads back as the same
@@ -694,7 +694,7 @@ def prefix_for(values: ArrayLike, unit: UnitLike, registry: UnitRegistry | None 
         return _PREFIX_BY_EXPONENT[0]
     magnitudes = [
         decimal.adjusted()
-        for decimal in (_decimal(value) for value in np.atleast_1d(np.asarray(values, dtype=object)).ravel())
+        for decimal in (decimal_of(value) for value in np.atleast_1d(np.asarray(values, dtype=object)).ravel())
         if decimal is not None and decimal != 0
     ]
     if not magnitudes:
@@ -755,7 +755,7 @@ def format_quantity(
     """
 
     resolved = resolve_unit(unit, registry)
-    decimal = _decimal(value)
+    decimal = decimal_of(value)
     if decimal is None:
         return f"{value} {resolved.symbol}".strip()
     step = prefix if prefix is not None else prefix_for([decimal], resolved, registry)
@@ -783,7 +783,7 @@ def format_quantities(
     symbol = f"{step.symbol}{resolved.symbol}" if resolved.symbol != "1" else step.symbol
     texts = []
     for value in values:
-        decimal = _decimal(value)
+        decimal = decimal_of(value)
         texts.append(
             str(value) if decimal is None else format(decimal.scaleb(-step.exponent), "f")
         )

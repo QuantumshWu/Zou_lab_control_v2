@@ -32,6 +32,7 @@ from pathlib import Path
 import numpy as np
 from dataclasses import replace
 
+from zlc_data.units import format_quantity
 from zlc_pulse import (
     apply_api_values,
     PulseSequence,
@@ -610,7 +611,9 @@ def apply_api_overrides(
 def api_overrides_to_authored(overrides: Mapping[str, float]) -> str:
     """The text behind one mapping of API parameter values."""
 
-    lines = [f"{name} = {value:g}" for name, value in overrides.items()]
+    lines = [
+        f"{name} = {format_quantity(value, '1')}" for name, value in overrides.items()
+    ]
     return "\n".join(lines)
 
 

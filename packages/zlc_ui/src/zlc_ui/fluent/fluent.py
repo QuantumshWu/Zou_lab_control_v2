@@ -9,6 +9,8 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Callable, Sequence
 import logging
+import sys
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN
 import math
 import re
 import time
@@ -21,6 +23,7 @@ from qframelesswindow import FramelessWindow, StandardTitleBar
 from zlc_data.units import (
     DEFAULT_UNITS,
     UnitError,
+    decimal_of,
     format_quantity,
 )
 
@@ -4390,10 +4393,33 @@ class FluentCodeEdit(QtWidgets.QPlainTextEdit):
 
 
 class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
-    """Lossless double spin box with an inline step editor.
+    """A number box whose value is a DECIMAL, stepped on its step's own grid.
 
-    ``length`` sizes the initial numeric range; it never rounds the stored value.
-    Visual formatting must not become an authority-changing transform.
+    Qt's double is a shadow.  The authority is ``_value``, a Decimal in the
+    owner's unit: what was typed is the decimal of the text, what was
+    stepped is decimal arithmetic on the step, and what a device handed over
+    is the shortest decimal that reads back as that float.  So 0.1 stepped
+    three times is 0.3, not 0.30000000000000004 -- the formatter here never
+    rounds, which is right, and it had been printing every binary digit of
+    a sum that was never meant in binary.
+
+    A STEP STAYS ON THE GRID.  From a value that is on it, one notch is one
+    step; from one that is not, one notch is the next grid point in that
+    direction.  A notch that would leave the owner's range stops at the last
+    grid point inside it, and never lands on the bound itself when the bound
+    is off the grid: down from 0.1 in steps of 0.1 with a floor of 0.001 is
+    0.1, not 0.001, so down-then-up returns exactly where it started.  Only
+    a TYPED number is clamped to the bound, because a typed number is the
+    operator naming a value and the bound is the owner refusing it.
+
+    The box never invents a range.  It used to derive one from a "length",
+    which is how a field nobody had bounded acquired a floor of 1e-7 and
+    showed it.  A bound is the owner's fact -- the port's, the device's, the
+    board's tick -- and a box with no bound declared has none.
+
+    The unit on screen is the picker's.  A prefix shift between the owner's
+    unit and the shown one is a decimal point moving, done exactly; only a
+    conversion that is not a power of ten (dBm, Vpp) goes through floats.
     """
 
     #: CLASS attributes, not instance ones.  Qt asks this widget for its text
@@ -4403,14 +4429,10 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
     #: Declared here, there is no instant in which they are missing.
     _unit = "1"
     _shown_unit = "1"
-    _last_value = 0.0
+    _value = Decimal(0)
+    _step = Decimal(1)
 
-    def __init__(
-        self,
-        length=5,
-        allow_minus: bool = False,
-        parent=None,
-    ):
+    def __init__(self, parent=None):
         super().__init__(parent)
         self._install_wheel_focus_guard()
         # A HALF-TYPED NUMBER IS NOT A VALUE.  With keyboard tracking on,
@@ -4446,13 +4468,62 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         )
         self._step_btn.clicked.connect(self._on_edit_step)
 
-        self.length = max(int(length), 5)
-        if allow_minus:
-            self.setRange(1 - 10 ** (self.length - 1), 10**self.length - 1)
-        else:
-            self.setRange(10 ** -(self.length - 2), 10**self.length - 1)
-        self.setSingleStep(1)
+        # No range of its own: a bound is the owner's, declared through
+        # setRange, and until then the box holds whatever it is given.
+        super().setRange(-sys.float_info.max, sys.float_info.max)
+        # Every decimal digit, so Qt's shadow never rounds the value; an
+        # owner that declares a resolution says so with setDecimals.
         self.setDecimals(323)
+        self.setSingleStep(1)
+
+    # ------------------------------------------------------------ the value
+
+    def setValue(self, value: float) -> None:  # noqa: N802 - Qt API name
+        """The owner's number, taken exactly as the shortest decimal of it."""
+
+        try:
+            number = _finite_decimal(value)
+        except ValueError:
+            return
+        self._commit(self._quantized(number))
+
+    def setSingleStep(self, step: float) -> None:  # noqa: N802 - Qt API name
+        try:
+            magnitude = abs(_finite_decimal(step))
+        except ValueError:
+            return
+        if magnitude == 0:
+            return
+        self._step = magnitude
+        super().setSingleStep(float(magnitude))
+
+    def decimalValue(self) -> Decimal:  # noqa: N802 - Qt API style
+        """The value as the box holds it -- exact, in the owner's unit."""
+
+        return self._value
+
+    def _commit(self, number: Decimal) -> None:
+        """Make ``number`` the value, in the owner's unit, shadow and all."""
+
+        self._value = number
+        # Qt compares the double against its own range and last value and
+        # emits valueChanged; its rounding to decimals() is why the decimal
+        # is quantized to those decimals first, so shadow and value agree.
+        super().setValue(float(number))
+        # Qt only rewrites the text when the double changed; a decimal that
+        # differs in a digit the double cannot hold would otherwise be shown
+        # from the float.
+        self.lineEdit().setText(self.textFromValue(float(number)))
+
+    def _quantized(self, number: Decimal) -> Decimal:
+        """``number`` at the resolution the owner declared, when it did."""
+
+        places = int(self.decimals())
+        if places >= 323 or not number.is_finite():
+            return number
+        return number.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_EVEN)
+
+    # ------------------------------------------------------------- the unit
 
     def setValueUnit(self, unit: str) -> None:  # noqa: N802 - Qt API name
         """What this box's NUMBER is in -- its owner's unit, and its range's.
@@ -4490,34 +4561,63 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
     def shownUnit(self) -> str:  # noqa: N802 - Qt API name
         return self._shown_unit
 
-    def stepBy(self, steps: int) -> None:  # noqa: N802 - Qt API name
-        """One notch is one step OF THE UNIT ON SCREEN.
-
-        The step was always taken in the owner's unit, so a hertz field
-        being read in megahertz moved by one hertz a notch: the wheel
-        turned and the number did not visibly change, while the same wheel
-        on a field whose own unit was the one shown felt normal.  A step
-        belongs to the unit the operator is working in.
-        """
+    def _shift(self) -> int | None:
+        """How many decimal places the shown unit is from the owner's, or None
+        when the two are not a power of ten apart and floats must do."""
 
         if self._shown_unit == self._unit:
-            super().stepBy(steps)
+            return 0
+        try:
+            own = DEFAULT_UNITS.resolve(self._unit).decade
+            shown = DEFAULT_UNITS.resolve(self._shown_unit).decade
+        except UnitError:
+            return None
+        if own is None or shown is None:
+            return None
+        return own - shown
+
+    def _shown_from_value(self, number: Decimal) -> Decimal:
+        shift = self._shift()
+        if shift is not None:
+            return number.scaleb(shift) if shift else number
+        return _finite_decimal(
+            float(DEFAULT_UNITS.convert(float(number), self._unit, self._shown_unit))
+        )
+
+    def _value_from_shown(self, number: Decimal) -> Decimal:
+        shift = self._shift()
+        if shift is not None:
+            return number.scaleb(-shift) if shift else number
+        return _finite_decimal(
+            float(DEFAULT_UNITS.convert(float(number), self._shown_unit, self._unit))
+        )
+
+    # ------------------------------------------------------------- stepping
+
+    def stepBy(self, steps: int) -> None:  # noqa: N802 - Qt API name
+        """One notch is one step of the unit on screen, on that step's grid."""
+
+        steps = int(steps)
+        if not steps:
             return
         try:
-            moved = self._shown_from_value(self.value()) + steps * self.singleStep()
-            self.setValue(self._value_from_shown(moved))
-        except (UnitError, ValueError):
-            super().stepBy(steps)
+            shown = self._shown_from_value(self._value)
+            moved = _grid_step(shown, self._step, steps)
+            low = self._shown_from_value(_finite_decimal(self.minimum()))
+            high = self._shown_from_value(_finite_decimal(self.maximum()))
+        except (UnitError, ValueError, ArithmeticError):
+            return
+        moved = _last_grid_point_inside(moved, self._step, min(low, high), max(low, high))
+        if moved == shown:
+            return
+        try:
+            self._commit(self._quantized(self._value_from_shown(moved)))
+        except (UnitError, ValueError, ArithmeticError):
+            return
+        if self.hasFocus():
+            self.lineEdit().selectAll()
 
-    def _shown_from_value(self, number: float) -> float:
-        if self._shown_unit == self._unit:
-            return float(number)
-        return float(DEFAULT_UNITS.convert(number, self._unit, self._shown_unit))
-
-    def _value_from_shown(self, number: float) -> float:
-        if self._shown_unit == self._unit:
-            return float(number)
-        return float(DEFAULT_UNITS.convert(number, self._shown_unit, self._unit))
+    # ----------------------------------------------------------- the text
 
     def textFromValue(self, value: float) -> str:  # noqa: N802 - Qt API
         # NEVER raises, for the same reason valueFromText does not: Qt calls
@@ -4525,15 +4625,19 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         # process.  A unit this registry has never heard of is a defect to fix
         # where it was declared, not a reason for the window to die drawing a
         # number it could otherwise have shown.
-        number = int(value) if self.decimals() == 0 else float(value)
-        self._last_value = float(value)
+        try:
+            number = self._value if float(self._value) == float(value) else _finite_decimal(value)
+        except ValueError:
+            return str(value)
+        if self.decimals() == 0:
+            number = number.quantize(Decimal(1), rounding=ROUND_HALF_EVEN)
         try:
             # DIGITS ONLY.  A box is for the number; which unit that number
             # is read in is said once, beside it, by the row that owns it --
             # printing the symbol in here as well put the same fact in two
             # places and left no room to type in the box it was crowding.
             return format_quantity(self._shown_from_value(number), "1")
-        except UnitError:
+        except (UnitError, ValueError, ArithmeticError):
             return str(number)
 
     def valueFromText(self, text: str) -> float:  # noqa: N802 - Qt API
@@ -4544,14 +4648,26 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         The fallback may NOT ask the box for its value: value() interprets the
         text, which calls back into here, which would ask again -- one
         unreadable keystroke and the stack is gone.
+
+        A typed number is the operator naming a value, so it is the one
+        thing the owner's bound clamps: a step stops short of an off-grid
+        bound, a typed number lands on it.
         """
 
         try:
-            value = self._value_from_shown(float(str(text).strip()))
-        except (UnitError, ValueError):
-            return self._last_value
-        self._last_value = value
-        return value
+            typed = Decimal(str(text).strip())
+            if not typed.is_finite():
+                raise ValueError(text)
+            number = self._quantized(self._value_from_shown(typed))
+        except (UnitError, ValueError, ArithmeticError):
+            return float(self._value)
+        try:
+            low, high = _finite_decimal(self.minimum()), _finite_decimal(self.maximum())
+        except ValueError:
+            return float(self._value)
+        number = min(max(number, low), high)
+        self._value = number
+        return float(number)
 
     def validate(self, text: str, position: int):
         """Accept while it is being typed; judge when it could be finished.
@@ -4566,8 +4682,9 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         if not stripped or stripped in ("+", "-", ".", "+.", "-."):
             return QtGui.QValidator.Intermediate, text, position
         try:
-            float(stripped)
-        except ValueError:
+            if not Decimal(stripped).is_finite():
+                return QtGui.QValidator.Invalid, text, position
+        except ArithmeticError:
             return QtGui.QValidator.Invalid, text, position
         return QtGui.QValidator.Acceptable, text, position
 
@@ -4588,6 +4705,46 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
         _paint_fluent_spin_buttons(self)
+
+
+def _finite_decimal(value: object) -> Decimal:
+    """The shortest decimal that reads back as ``value``, or ValueError.
+
+    A Qt virtual that raised anything else would end the process, so inside
+    the box a number that is not a number is exactly one kind of failure.
+    """
+
+    number = decimal_of(value)
+    if number is None or not number.is_finite():
+        raise ValueError(f"not a finite number: {value!r}")
+    return number
+
+
+def _grid_step(value: Decimal, step: Decimal, steps: int) -> Decimal:
+    """``steps`` notches from ``value`` along the grid of multiples of ``step``.
+
+    On the grid, a notch is a step.  Off it, the first notch goes to the
+    nearest grid point in its direction and the rest are steps from there.
+    """
+
+    ratio = value / step
+    if ratio == ratio.to_integral_value():
+        index = int(ratio) + steps
+    elif steps > 0:
+        index = int(ratio.to_integral_value(rounding=ROUND_FLOOR)) + steps
+    else:
+        index = int(ratio.to_integral_value(rounding=ROUND_CEILING)) + steps
+    return (Decimal(index) * step).normalize() + Decimal(0)
+
+
+def _last_grid_point_inside(value: Decimal, step: Decimal, low: Decimal, high: Decimal) -> Decimal:
+    """``value``, or the last multiple of ``step`` still inside ``[low, high]``."""
+
+    if value > high:
+        return (Decimal(int((high / step).to_integral_value(rounding=ROUND_FLOOR))) * step).normalize() + Decimal(0)
+    if value < low:
+        return (Decimal(int((low / step).to_integral_value(rounding=ROUND_CEILING))) * step).normalize() + Decimal(0)
+    return value
 
 
 class FluentCheckBox(QtWidgets.QCheckBox):

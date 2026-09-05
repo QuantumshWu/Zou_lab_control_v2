@@ -77,7 +77,7 @@ def _host(values: np.ndarray, signal: str, title: str) -> RasterPlotHost:
 
 def _number_spin(parent: QtWidgets.QWidget, value: float, minimum: float,
                  maximum: float, *, integral: bool = False, decimals: int = 3):
-    spin = FluentSpinBox(parent) if integral else FluentDoubleSpinBox(5, parent=parent)
+    spin = FluentSpinBox(parent) if integral else FluentDoubleSpinBox(parent)
     spin.setRange(int(minimum), int(maximum)) if integral else spin.setRange(
         float(minimum), float(maximum)
     )
@@ -208,7 +208,7 @@ class SlmEditorControl(QtCore.QObject):
         self._mode.setMinimumWidth(104)
         controls.addWidget(self._mode)
         controls.addWidget(QtWidgets.QLabel("Intensity"))
-        self._intensity = FluentDoubleSpinBox(5, parent=edit)
+        self._intensity = FluentDoubleSpinBox(edit)
         self._intensity.setRange(0.0, 1000.0)
         self._intensity.setDecimals(3)
         self._intensity.setValue(1.0)
