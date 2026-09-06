@@ -173,21 +173,6 @@ class PanelEditorView(QtWidgets.QWidget):
         snapshot_layout.addLayout(snapshot_actions)
         body_layout.addWidget(snapshot_group)
 
-        interaction_group = FluentGroupBox("Interaction")
-        self.interaction_group = interaction_group
-        interaction_layout = QtWidgets.QVBoxLayout(interaction_group)
-        interaction_layout.setContentsMargins(margin, margin, margin, margin)
-        self.interaction_note = FluentLabel(
-            "Area controls the direct producer ROI when present; otherwise "
-            "the frozen plot's zoom/pan viewport controls it."
-        )
-        self.interaction_note.setWordWrap(True)
-        self.interaction_note.setStyleSheet(
-            f"color: {GREY}; background: transparent; border: none;"
-        )
-        interaction_layout.addWidget(self.interaction_note)
-        body_layout.addWidget(interaction_group)
-
         self.producer_group = FluentGroupBox("Direct producer")
         producer_layout = QtWidgets.QVBoxLayout(self.producer_group)
         producer_layout.setContentsMargins(margin, margin, margin, margin)
@@ -366,17 +351,6 @@ class PanelEditorView(QtWidgets.QWidget):
         self._snapshot_can_save = snapshot is not None and not stale
         self.save_button.setToolTip(
             "Refresh the stale snapshot before saving" if stale else ""
-        )
-        self.interaction_note.setText(
-            (
-                "Zoom and pan remain available. This frozen signal is stale, so "
-                "committed selections are ignored until Refresh snapshot."
-            )
-            if stale
-            else (
-                "Area controls the direct producer ROI when present; otherwise "
-                "the frozen plot's zoom/pan viewport controls it."
-            )
         )
         producer_node_id = str(incoming.get("producer_node_id") or "")
         self.producer_summary.setText(
