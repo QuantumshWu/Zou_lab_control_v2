@@ -62,8 +62,12 @@ def _snapshot(validity=VALID) -> OwnedSnapshot:
 
 
 def _archive_members(path: Path) -> dict[str, np.ndarray]:
+    """Every member by its physical name -- the oracle must not guess either."""
+
     with np.load(path, allow_pickle=False) as archive:
-        return {name: np.asarray(archive[name]) for name in archive.files}
+        return {
+            name[:-4]: np.asarray(archive[name]) for name in archive.zip.namelist()
+        }
 
 
 def _write_npz(path: Path, snapshot: OwnedSnapshot) -> None:
@@ -301,6 +305,60 @@ def test_npz_rejects_duplicate_manifest_json_keys(tmp_path: Path):
         load_npz(malformed)
 
 
+def test_npz_rejects_a_duplicate_member_instead_of_choosing_one(tmp_path: Path):
+    """Two ZIP entries of one name are an ambiguous archive, not a choice.
+
+    NpzFile answers a logical lookup with whichever entry it finds first;
+    a reader that calls itself strict must refuse rather than pick.
+    """
+
+    original = tmp_path / "original.npz"
+    malformed = tmp_path / "duplicate-member.npz"
+    _write_npz(original, _snapshot())
+    with zipfile.ZipFile(original) as source, zipfile.ZipFile(malformed, "w") as target:
+        for info in source.infolist():
+            target.writestr(info, source.read(info))
+        stream = BytesIO()
+        np.save(stream, np.full(_snapshot().block.values.shape, 22.0, dtype="<f4"))
+        with warnings.catch_warnings():
+            # The duplicate name is the point; zipfile warns about it.
+            warnings.simplefilter("ignore", UserWarning)
+            target.writestr("values.npy", stream.getvalue())
+
+    with pytest.raises(NPZFormatError, match="duplicate members.*values"):
+        load_npz(malformed)
+
+
+def test_npz_rejects_a_manifest_shape_the_writer_never_produces(tmp_path: Path):
+    """``ref`` must be an object, and a present ``sigma_key`` a member name.
+
+    A list of pairs happened to survive ``dict(...)``, and an explicit null
+    read as "absent"; both are shapes the writer never emits and the strict
+    reader claimed to reject.
+    """
+
+    original = tmp_path / "original.npz"
+    _write_npz(original, _snapshot())
+    arrays = _archive_members(original)
+    manifest = json.loads(str(arrays["manifest"].item()))
+
+    listed = dict(manifest)
+    listed["ref"] = list(manifest["ref"].items())
+    arrays["manifest"] = np.asarray(json.dumps(listed))
+    malformed = tmp_path / "ref-as-list.npz"
+    np.savez_compressed(malformed, **arrays)
+    with pytest.raises(NPZFormatError, match="manifest.ref must be an object"):
+        load_npz(malformed)
+
+    nulled = dict(manifest)
+    nulled["sigma_key"] = None
+    arrays["manifest"] = np.asarray(json.dumps(nulled))
+    malformed = tmp_path / "sigma-null.npz"
+    np.savez_compressed(malformed, **arrays)
+    with pytest.raises(NPZFormatError, match="sigma_key must be a non-empty string"):
+        load_npz(malformed)
+
+
 def test_npz_rejects_unknown_validity_kind(tmp_path: Path):
     original = tmp_path / "original.npz"
     malformed = tmp_path / "bad-validity-kind.npz"
@@ -327,7 +385,9 @@ def _figure_stream(name: str, *, arrays, sections) -> BytesIO:
 def _figure_members(stream: BytesIO) -> dict[str, np.ndarray]:
     stream.seek(0)
     with np.load(stream, allow_pickle=False) as archive:
-        return {name: np.asarray(archive[name]) for name in archive.files}
+        return {
+            name[:-4]: np.asarray(archive[name]) for name in archive.zip.namelist()
+        }
 
 
 def _figure_payload(members: dict[str, np.ndarray]) -> bytes:
@@ -408,6 +468,52 @@ def test_figure_writer_preplans_snapshot_member_namespace():
             sections={},
         )
     assert stream.getvalue() == b"", "validation failure wrote a partial archive"
+
+
+def test_figure_members_are_read_by_their_own_physical_names():
+    """``signal`` and ``signal.npy`` are two legal array keys; both come back.
+
+    The writer stores them as ``signal.npy`` and ``signal.npy.npy``.  Asked
+    for the logical key ``signal.npy``, NpzFile first matched it as a
+    physical name and answered with the OTHER array -- values swapped
+    under an untouched ref, and every shape and dtype check passing.
+    """
+
+    stream = BytesIO()
+    write_figure_archive(
+        stream,
+        "two members",
+        arrays={"signal": np.array([11]), "signal.npy": np.array([22])},
+        sections={},
+    )
+    stream.seek(0)
+    _info, arrays = read_archive(stream)
+    assert arrays["signal"].tolist() == [11]
+    assert arrays["signal.npy"].tolist() == [22]
+
+    first = _snapshot()
+    second = OwnedSnapshot(
+        first.ref,
+        DataBlock(
+            first.block.block_id,
+            first.block.revision,
+            np.full(first.block.values.shape, 22.0, dtype="<f4"),
+            VALID,
+            first.block.schema,
+        ),
+    )
+    typed = BytesIO()
+    write_figure_archive(
+        typed, "two datasets", arrays={"signal": first, "signal.npy": second}, sections={}
+    )
+    typed.seek(0)
+    info, arrays = read_archive(typed)
+    assert read_dataset(info, arrays, "signal").block.values.tolist() == (
+        first.block.values.tolist()
+    )
+    assert read_dataset(info, arrays, "signal.npy").block.values.tolist() == (
+        second.block.values.tolist()
+    )
 
 
 def test_large_figure_stream_does_not_allocate_archive_sized_python_bytes(

@@ -97,11 +97,14 @@ def data_structure_fragments(
 ) -> tuple[tuple, tuple]:
     """The one coloured two-line rendering of a three-domain shape.
 
-    ``valid`` maps a Repeat axis's name to how many of its samples have
-    landed whole, and that number is what the axis reads where the others
-    read their size: a repeat is a sample, not a coordinate, and the count
-    a reader wants is the count of complete ones, which is also the number
-    that moves while a run is playing.
+    ``valid`` is one landed count per axis of the Repeat group, in that
+    group's own order, and that number is what the axis reads where the
+    others read their size: a repeat is a sample, not a coordinate, and the
+    count a reader wants is the count of complete ones, which is also the
+    number that moves while a run is playing.  By POSITION within the
+    Repeat group, never by name: an axis is very often called "repeat", two
+    Repeat axes may both be, and so may a Point axis, and a name lookup
+    handed the last count to every one of them.
 
     The separator is the multiplication SIGN, not the letter: an axis is
     very often called "x", and "(repeat)x(x)x()" asked the reader to work
@@ -124,10 +127,12 @@ def data_structure_fragments(
     missing one's.
     """
 
-    landed = {str(name): int(count) for name, count in dict(valid or {}).items()}
+    landed = tuple(int(count) for count in tuple(valid or ()))
 
-    def count_text(name: object, size: object) -> str:
-        return str(landed[str(name)]) if str(name) in landed else str(int(size))
+    def count_text(group_index: int, position: int, size: object) -> str:
+        if group_index == 0 and position < len(landed):
+            return str(landed[position])
+        return str(int(size))
 
     sizes: list[tuple[str, str | None, object]] = []
     names: list[tuple[str, str | None, object]] = []
@@ -139,7 +144,13 @@ def data_structure_fragments(
             sizes.append((" × ", None, None))
             names.append((" × ", None, None))
         for line, inner in (
-            (sizes, " × ".join(count_text(name, size) for name, size in group)),
+            (
+                sizes,
+                " × ".join(
+                    count_text(index, position, size)
+                    for position, (_name, size) in enumerate(group)
+                ),
+            ),
             (names, " × ".join(str(name) for name, _size in group)),
         ):
             line.append(("(", colour, None))

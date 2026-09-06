@@ -4487,7 +4487,7 @@ class ConsolePresenter:
         if schema is None:
             schema = self._panel_schema(binding)
         surface.update(
-            {"data_structure": (), "data_valid": {}, "data_scope": ()}
+            {"data_structure": (), "data_valid": (), "data_scope": ()}
             if schema is None
             else panel_data_shape(
                 schema,

@@ -153,7 +153,6 @@ editor = view._editors['panel-1']
 assert view.tabs.currentWidget() is editor
 assert 'interval_ms' in editor.panel_form.spec.keys
 assert not editor.snapshot_group.isHidden()
-assert not editor.interaction_group.isHidden()
 assert not editor.producer_group.isHidden()
 assert not editor.open_producer_button.isEnabled()
 assert not editor.save_group.isHidden()

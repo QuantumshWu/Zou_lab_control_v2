@@ -378,7 +378,13 @@ def read_archive(path: object) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
             raise ValueError(f"figure contains duplicate NPZ members {duplicates!r}")
         if _INFO_KEY not in names:
             raise ValueError(f"figure carries no {_INFO_KEY} document")
-        info = _validate_current_info(_parse_info(np.asarray(archive[_INFO_KEY])))
+        # Every member is read by its own PHYSICAL name.  Asked for a logical
+        # key, NpzFile first tries that key as a physical name and only then
+        # appends ".npy": a member "signal.npy" beside a member "signal" --
+        # both legal array keys, both written -- read back as "signal".
+        info = _validate_current_info(
+            _parse_info(np.asarray(archive[f"{_INFO_KEY}.npy"]))
+        )
         expected = {_INFO_KEY, *info["members"]}
         actual = set(names)
         if actual != expected:
@@ -389,7 +395,7 @@ def read_archive(path: object) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
             )
         member_names = tuple(info["members"])
         arrays: dict[str, np.ndarray] = {
-            name: np.asarray(archive[name]) for name in member_names
+            name: np.asarray(archive[f"{name}.npy"]) for name in member_names
         }
         for name, descriptor in info["members"].items():
             array = arrays[name]

@@ -76,9 +76,11 @@ def panel_data_shape(
 
     ``validity`` is the shown snapshot's, when there is one: the strip then
     prints, for a repeat axis, how many of its samples have landed whole
-    instead of its size, because a
-    repeat is a sample and the count that means anything is the count of
-    complete ones.  With no snapshot there is no such count.
+    instead of its size, because a repeat is a sample and the count that
+    means anything is the count of complete ones.  With no snapshot there is
+    no such count.  ``data_valid`` carries one count per Repeat axis in the
+    order the Repeat group of ``data_structure`` lists them: a name is not
+    an identity, and two axes may share one.
     """
 
     from zlc_plot.semantics import (
@@ -111,7 +113,7 @@ def panel_data_shape(
     return {
         "data_structure": schema_structure(schema),
         "data_valid": (
-            {} if validity is None else repeat_validity_counts(validity, schema)
+            () if validity is None else repeat_validity_counts(validity, schema)
         ),
         "data_scope": pinned,
     }

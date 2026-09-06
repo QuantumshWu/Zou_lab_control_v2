@@ -21,7 +21,7 @@ def _line(fragments) -> str:
 
 
 def test_a_repeat_axis_reads_its_landed_count_where_the_others_read_their_size():
-    sizes, names = data_structure_fragments(STRUCTURE, {"repeat": 34, "run": 37})
+    sizes, names = data_structure_fragments(STRUCTURE, (34, 37))
     assert _line(sizes) == "(34 \u00d7 37) \u00d7 (10) \u00d7 (35)"
     assert _line(names) == "(repeat \u00d7 run) \u00d7 (field.x) \u00d7 (site)"
     # The count wears the repeat domain's colour, like the size it replaces.
@@ -31,5 +31,21 @@ def test_a_repeat_axis_reads_its_landed_count_where_the_others_read_their_size()
 
 
 def test_no_landed_count_means_the_size_is_shown():
-    sizes, _names = data_structure_fragments(STRUCTURE, {})
+    sizes, _names = data_structure_fragments(STRUCTURE, ())
     assert _line(sizes) == "(35 \u00d7 100) \u00d7 (10) \u00d7 (35)"
+
+
+def test_a_landed_count_is_the_axis_own_whatever_the_others_are_called():
+    """Two Repeat axes called "repeat", and a Point axis called "repeat" too.
+
+    Keyed by name, one count served all three; by position, each Repeat
+    axis reads its own count and the Point axis reads its size.
+    """
+
+    structure = (
+        (("repeat", 2), ("repeat", 3)),
+        (("repeat", 10),),
+        (("site", 35),),
+    )
+    sizes, _names = data_structure_fragments(structure, (1, 2))
+    assert _line(sizes) == "(1 \u00d7 2) \u00d7 (10) \u00d7 (35)"
