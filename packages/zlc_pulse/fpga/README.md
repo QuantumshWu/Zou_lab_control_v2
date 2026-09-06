@@ -99,9 +99,12 @@ Vivado 2019 debug cores are path-length sensitive. Keep the checkout short
 (`D:\ZLC`). The batch files print `ZLC build root` / `ZLC project dir`; those
 printed paths are the source of truth for the generated
 `impl_1\zlc_pulse_streamer_top.{bit,ltx}`. All FPGA launchers share the same
-resolver: an explicit `ZLC_FPGA_PYTHON` override wins, then the repository
-`.venv`, `.zlc_python_path`, and finally PATH; Vivado comes from
-`ZLC_PS_VIVADO_BIN`, known installation roots, then PATH. Set
+resolver: an explicit `ZLC_FPGA_PYTHON` override wins, then the stored
+`.zlc_python_path`, then PATH and the usual installation roots. A repository
+`.venv` is never preferred: this project installs its dependencies globally,
+and a venv without pyserial made the UART probe fail silently and the server
+fall back to JTAG forever. Vivado comes from `ZLC_PS_VIVADO_BIN`, known
+installation roots, then PATH. Set
 `ZLC_NO_PAUSE=1` for automation.
 
 ## Hardware acceptance runbook

@@ -1,1 +1,1 @@
-"""Affine edge-table pulse streamer: RTL + tcl + host-side Python."""
+"""Affine edge-table pulse streamer: RTL, benches and Vivado scripts."""

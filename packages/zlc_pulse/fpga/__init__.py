@@ -1,7 +1,7 @@
-"""FPGA design tree for Zou_lab_control (RTL + build tcl + host-side Python).
+"""The pulse streamer's FPGA assets: the frozen RTL and its simulation
+benches, the Vivado build/program scripts and the board configuration.
 
-Kept OUT of the Python device-driver package on purpose: everything FPGA-specific
-(the BRAM image layout, the cycle-accurate RTL behavioural models, the capacity
-solver) lives under ``fpga/`` next to the Verilog it describes.  The owning
-``zlc_pulse.transport`` implementation imports this frozen wire contract.
+Only what the Verilog and the Vivado flow read lives here.  The wire contract
+the host speaks to this RTL (BRAM image layout, capacity solver, transports)
+is owned by ``zlc_pulse.transport`` and the modules beside it.
 """

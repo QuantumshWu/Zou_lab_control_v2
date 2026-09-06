@@ -278,7 +278,7 @@ Node new chunk
 
 ### 7.1 Execution vocabulary
 
-- Pulse执行固定为三层且各有唯一owner：`Scan repeats -> scan point -> Run repeats -> Pulse timeline -> PulseBracket`。`PulseBracket`只表达timeline内一个连续period区间的内部loop，左右端点可放在任意合法gap并由一个count控制；即使覆盖整个Pulse也不得冒充Run repeats。每个Pulse最多一个Bracket，因为硬件只有一套`LOOP_*`。
+- Pulse执行固定为三层且各有唯一owner：`Scan repeats -> scan point -> Run repeats -> Pulse timeline -> PulseBracket`。`PulseBracket`只表达timeline内一个连续period区间的内部loop，左右端点可放在任意合法gap并由一个count控制；即使覆盖整个Pulse也不得冒充Run repeats。每个Pulse最多一个Bracket，因为硬件只有一套`LOOP_*`。Bracket回绕对TTL与DAC是同一件事：RTL在回绕拍输出loop-start边沿的mask，并把每条DAC段表重启到loop-start tick所在的段（恰好从该tick起始的段在回绕拍重放，否则沿用carry值直到该段起始），绝不重启到整个Pulse的第0段——preamble不属于Bracket，它的DAC码不得在任何一次重放中出现。
 - `run_repeats`是Pulse文件的正式字段，UI默认`0 = infinite`，有限值为`1..2^32-1`。无scan时它控制整个Pulse（包含Bracket）执行次数；有scan时它控制同一个scan point保持不变并执行整个Pulse的次数，完成后scan cursor才前进。Task的`shots_per_point`只是本次execution对该值的显式immutable override，不修改保存的Pulse。
 - `scan_repeats`保持独立，`0 = infinite`或有限完整table sweep数；Pulse Scan保留该字段，Seamless的`repeats`只是本次execution对它的override。它不改变Run repeats或Bracket。无scan时scan_repeats固定为1且不参与执行。
 - Host与RTL不得再把三层flatten成一个`cycles`真相：`LOOP_*`只属于Bracket，`RUN_REPEAT_COUNT`在同一row重复完整Pulse，`SCAN_COUNT`只表示一轮唯一row数，`SCAN_REPEAT_COUNT`控制table sweep。所有层间seam均在同一次FIRE内由FPGA推进；Host只提前补scan bank，补充不及时必须underflow并loud失败。
