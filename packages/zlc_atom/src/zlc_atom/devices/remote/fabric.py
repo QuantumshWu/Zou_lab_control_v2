@@ -267,6 +267,11 @@ class DeviceAnnouncer:
                         "current": field.current,
                         "live_write": field.live_write,
                         "dependency_group": list(field.dependency_group),
+                        "device_limits": (
+                            None
+                            if field.device_limits is None
+                            else list(field.device_limits)
+                        ),
                     }
                     for field in fields
                 ]
@@ -411,6 +416,11 @@ class RemoteTunableDevice:
                     ),
                     bool(entry["live_write"]),
                     tuple(str(name) for name in entry["dependency_group"]),
+                    (
+                        None
+                        if entry.get("device_limits") is None
+                        else tuple(float(edge) for edge in entry["device_limits"])
+                    ),
                 )
             )
         self._field_shapes = tuple(fields)
@@ -431,8 +441,9 @@ class RemoteTunableDevice:
                 current=current.get(metadata.name, metadata.default),
                 live_write=live_write,
                 dependency_group=group,
+                device_limits=limits,
             )
-            for metadata, live_write, group in self._field_shapes
+            for metadata, live_write, group, limits in self._field_shapes
         )
 
     def tune(self, name: str, value: Any) -> Any:

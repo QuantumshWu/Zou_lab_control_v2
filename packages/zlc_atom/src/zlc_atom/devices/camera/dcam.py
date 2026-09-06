@@ -122,16 +122,11 @@ class DcamCameraAdapter:
         config: DcamCameraConfig,
         *,
         driver: object | None = None,
-        library_path: str | None = None,
     ) -> None:
         if not isinstance(config, DcamCameraConfig):
             raise TypeError("config must be DcamCameraConfig")
-        if driver is not None and library_path is not None:
-            raise ValueError("library_path cannot accompany an injected driver")
         self._config = config
-        self._driver = (
-            DcamSdkDriver(library_path=library_path) if driver is None else driver
-        )
+        self._driver = DcamSdkDriver() if driver is None else driver
         self._lane = CameraSdkOwnerLane("zlc-dcam-camera-owner")
         self._state_lock = threading.RLock()
         self._finish_requested = threading.Event()
@@ -829,31 +824,34 @@ class DcamCameraAdapter:
         return self._lane.call(observe)
 
     def _close_on_owner(self) -> None:
-        """Release the handle and the runtime, whichever step fails.
+        """Release the handle; only a release the SDK confirmed lets go of it.
 
-        A driver that refuses one of them must not leave the other held: the
-        next open then finds a device already in use, from a process that
-        thinks it closed.
+        A close the driver refused leaves the handle where it is, still held
+        and still remembered, so that the next close attempts the same release
+        again.  Forgetting it regardless made that next close a no-op that
+        reported success over a device the SDK still considered open -- and
+        the installation, told the camera had closed, released the physical
+        binding of a camera nobody had closed.  The process runtime is not
+        touched here: it belongs to the process and outlives every camera.
         """
 
         device = self._device
-        try:
-            if device is not None:
-                device.close()
-        finally:
-            self._device = None
-            self._open = False
+        if device is not None:
+            device.close()
+        self._device = None
+        self._open = False
 
     def close(self) -> None:
-        """Stop the capture, release the handle, retire the lane -- all of them.
+        """Stop the capture, release the handle, retire the lane -- in that order.
 
-        This was a bare statement sequence, and finish_record_capture raises on
-        several ordinary hardware conditions.  When it did, the SDK handle was
-        abandoned and its non-daemon lane thread was left running: the process
-        could not exit, and the camera stayed claimed until it was power-cycled.
+        finish_record_capture raises on several ordinary hardware conditions,
+        and the handle still has to go.  A handle release the SDK refused is
+        reported and everything is kept: the handle, and the lane thread the
+        retry must run on, because an SDK handle is released from the thread
+        that owns it.  Only a confirmed release retires the lane.
         """
 
-        if not self._open and self._device is None:
+        if self._device is None:
             self._lane.close()
             return
         failures: list[BaseException] = []
@@ -864,10 +862,12 @@ class DcamCameraAdapter:
             failures.append(error)
         try:
             self._lane.call(self._close_on_owner)
-        except BaseException as error:  # noqa: BLE001 - the lane still retires
-            failures.append(error)
-        finally:
-            self._lane.close()
+        except BaseException as error:  # noqa: BLE001 - kept for the retry
+            if failures:
+                failures[0].add_note(f"DCAM handle release also failed: {error}")
+                raise failures[0]
+            raise
+        self._lane.close()
         if failures:
             raise failures[0]
 

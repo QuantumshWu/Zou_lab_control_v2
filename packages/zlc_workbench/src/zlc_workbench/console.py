@@ -5916,12 +5916,12 @@ class ConsolePresenter:
             return
 
         context = self._selection_context(publication)
-        if str(getattr(selection, "selector_kind", "")) != "area":
-            # A region is an area of the data; that is the only gesture whose
-            # coordinates mean a producer's setting.  A threshold line, an
-            # x range or a crosshair say something about the reading, not
-            # about how to take the next one.
-            return
+        # Which gestures mean a producer's setting is the producer's own
+        # declaration -- its selection mappings, matched by plot and
+        # selector kind -- and nothing here narrows it.  A box on a curve
+        # arrives as an x range, because a curve's y names no axis, and a
+        # scan declares that x range as its next sweep; a console rule that
+        # let only "area" through made that declared mapping unreachable.
         draft = dict(producer.draft.values)
         patch = producer.descriptor.selection_patch(
             selection,

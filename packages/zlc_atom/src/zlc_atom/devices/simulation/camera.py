@@ -478,6 +478,15 @@ class VirtualCamera:
             return records
 
     def finish_record_capture(self) -> CameraCaptureTerminalRecord:
+        """End the capture once the producer really has.
+
+        The camera stays armed until the worker is joined: a worker that
+        outlives the wait keeps the capture open, so the next finish waits
+        for it again rather than reporting a stop that has not happened.  A
+        worker that died has ended -- its counts are exact and its trigger
+        queue is gone -- so its terminal is recorded and the failure raised.
+        """
+
         with self._condition:
             if self._terminal is not None:
                 return self._terminal
@@ -492,8 +501,6 @@ class VirtualCamera:
         with self._condition:
             if worker is not None and worker.is_alive():
                 raise RuntimeError("virtual camera producer did not join")
-            if self._worker_error is not None:
-                raise RuntimeError("virtual camera frame worker failed") from self._worker_error
             self._armed = False
             self._terminal = CameraCaptureTerminalRecord(
                 self._produced_count,
@@ -502,6 +509,8 @@ class VirtualCamera:
                 True,
             )
             self._condition.notify_all()
+            if self._worker_error is not None:
+                raise RuntimeError("virtual camera frame worker failed") from self._worker_error
             return self._terminal
 
     def capture_state(self) -> bool:
@@ -509,16 +518,20 @@ class VirtualCamera:
             return self._armed
 
     def close(self) -> None:
-        try:
-            if self.capture_state():
-                self.finish_record_capture()
-        finally:
-            with self._condition:
-                self._armed = False
-                self._accepting = False
-                self._queue.clear()
-                self._trigger_queue.clear()
-                self._condition.notify_all()
+        """Finish an armed capture, then drop the queues.
+
+        Nothing is cleared before the producer has stopped: a finish that
+        could not join the worker leaves the camera armed, so the next close
+        waits for the worker again instead of returning as if it had.
+        """
+
+        if self.capture_state():
+            self.finish_record_capture()
+        with self._condition:
+            self._accepting = False
+            self._queue.clear()
+            self._trigger_queue.clear()
+            self._condition.notify_all()
 
     @property
     def produced_count(self) -> int:

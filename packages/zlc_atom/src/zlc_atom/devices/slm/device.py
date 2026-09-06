@@ -132,11 +132,18 @@ def _validated_state(
         or frozen_receipt["command_revision"] != command_revision
     ):
         raise ValueError("SLM command receipt revision differs from device truth")
+    # A receipt records the mapping the LAST EXECUTED command was built
+    # with.  Changing the correction afterwards advances the device's
+    # mapping without re-sending a phase, so a receipt older than the
+    # current mapping is the truthful state of a device whose picture
+    # predates its configuration; a receipt AHEAD of the device is what
+    # cannot be.
     if (
         type(frozen_receipt.get("mapping_revision")) is not int
-        or frozen_receipt["mapping_revision"] != mapping_revision
+        or frozen_receipt["mapping_revision"] < 0
+        or frozen_receipt["mapping_revision"] > mapping_revision
     ):
-        raise ValueError("SLM command receipt mapping differs from device truth")
+        raise ValueError("SLM command receipt mapping is newer than device truth")
     canonical = None if phase is None else canonical_phase(phase, shape)
     if phase is not None and (
         np.asarray(phase).flags.writeable or not np.array_equal(phase, canonical)

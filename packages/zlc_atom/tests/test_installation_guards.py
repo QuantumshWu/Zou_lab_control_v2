@@ -201,6 +201,44 @@ def test_installation_transfers_unchanged_leaf_ownership_once_and_by_revision() 
     assert source.devices["camera"] is retained
     assert "camera" not in target.devices
 
+    # A target that already holds the key -- as a device or as a remembered
+    # failure -- refuses before the source lets go.  The check used to need
+    # the key in BOTH, so a same-named leaf was overwritten on the target and
+    # lost by the source, and nobody closed it.
+    for taken in (
+        Installation(
+            {
+                "camera": InstalledLeaf(
+                    "camera",
+                    "test.other",
+                    object(),
+                    {},
+                    closer=lambda: closed.append("other camera"),
+                )
+            },
+            world=world,
+            broker=broker,
+        ),
+        Installation(
+            {},
+            world=world,
+            failures={"camera": RuntimeError("did not start")},
+            broker=broker,
+        ),
+    ):
+        with pytest.raises(ValueError, match=r"already owns keys \['camera'\]"):
+            source.transfer_leaves_to(
+                taken,
+                ("camera",),
+                source_revision=source.revision,
+                target_revision=taken.revision,
+            )
+        assert source.devices["camera"] is retained
+        assert source.revision == 0 and taken.revision == 0
+        taken.close()
+    assert closed == ["other camera"]
+    closed.clear()
+
     moved = source.transfer_leaves_to(
         target,
         ("camera",),
@@ -608,7 +646,16 @@ def test_borrowed_owner_and_revision_validation_precede_factory_side_effects() -
         owner.close()
 
 
-def test_factory_admission_rejects_foreign_binding_and_rolls_back_prior_leaves() -> None:
+def test_factory_admission_rejects_foreign_binding_and_keeps_its_prefix_for_recovery() -> None:
+    """A rejected candidate that cannot close keeps what it may still depend on.
+
+    ``bad`` depends on ``good``.  When bad's cleanup fails, good is NOT closed
+    by the composition: bad's retry may need it, exactly as a failed close
+    keeps its earlier possible dependencies.  Recovery owns both and closes
+    them in reverse order -- bad first, then good -- and a good that refuses
+    its own close stays owned for the next attempt.
+    """
+
     broker = DeviceBroker()
     foreign = DeviceBroker()
     closed: list[str] = []
@@ -679,14 +726,20 @@ def test_factory_admission_rejects_foreign_binding_and_rolls_back_prior_leaves()
         )
     assert isinstance(captured.value.exceptions[0], RuntimeError)
     assert "unknown" in str(captured.value.exceptions[0])
-    assert closed == ["bad-1", "good-1"]
-    assert captured.value.recovery.leaves == (accepted[0], rejected[0])
+    assert [str(error) for error in captured.value.exceptions[1:]] == ["bad cleanup failed"]
+    assert closed == ["bad-1"], "the prefix was closed before the candidate could retry"
+    recovery = captured.value.recovery
+    assert recovery.leaves == (accepted[0], rejected[0])
     assert foreign.verify_capability(rejected[0].binding).binding is rejected[0].binding
-    captured.value.recovery.close()
-    assert closed == ["bad-1", "good-1", "bad-2", "good-2"]
-    assert captured.value.recovery.leaves == ()
+    with pytest.raises(ExceptionGroup, match="recovery close failed"):
+        recovery.close()
+    assert closed == ["bad-1", "bad-2", "good-1"]
+    assert recovery.leaves == (accepted[0],)
     with pytest.raises(RuntimeError, match="unknown"):
         foreign.verify_capability(rejected[0].binding)
+    recovery.close()
+    assert closed == ["bad-1", "bad-2", "good-1", "good-2"]
+    assert recovery.leaves == ()
 
 
 @pytest.mark.parametrize(

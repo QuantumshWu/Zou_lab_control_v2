@@ -822,6 +822,80 @@ def test_pattern_wavefront_compose_and_science_phase_roundtrip(
         session.installation.close()
 
 
+def test_a_loaded_operator_keeps_its_precision_until_a_control_is_edited(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Load then Save must write the Context's operator back unchanged.
+
+    A Science Context may carry any finite coefficient; the wavefront spins
+    show five decimals.  Load put the coefficients into the spins and the
+    frozen phase on screen; Save then read the spins back, so a Context
+    saved straight after loading carried 0.12346 for 0.123456789 and
+    rebuilt a different phase on its next load.  The loaded operator stays
+    the file's fact until a control is actually edited.
+    """
+
+    import zlc_atom.devices.slm.editor as editor
+
+    app = ensure_qt_app()
+    session = _session(tmp_path)
+    monkeypatch.setattr(
+        editor,
+        "solve_phase",
+        lambda target, **_kwargs: (
+            canonical_phase(np.zeros(target.shape), target.shape),
+            {"method": "test", "iterations": 1},
+        ),
+    )
+    control = editor.SlmEditorControl(session, "slm")
+    try:
+        _pump(app, lambda: control.solver_idle)
+        control.set_phase(np.zeros(control.shape), {"source": "authored pattern"})
+        first = tmp_path / "first.npz"
+        control._save_context_operation(first)()
+        context = editor.load_science_context(first)
+        precise = tmp_path / "precise.npz"
+        coefficient = 0.123456789
+        editor.save_science_context(
+            precise,
+            context["pattern_phase"],
+            target_intensity=context["target_intensity"],
+            objective_kind=context["objective_kind"],
+            pupil=context["pupil"],
+            system_correction=None,
+            command_receipt=context["command_receipt"],
+            pattern_metadata=context["pattern_metadata"],
+            operator_metadata={
+                "enabled": True,
+                "carrier_waves_xy": [0.0, 0.0],
+                "zernike_noll_waves_rms": {"defocus": coefficient},
+            },
+        )
+        loaded = editor.load_science_context(precise)
+        control._set_context(loaded)
+        assert control._zernike["defocus"].value() == 0.12346, "five decimals on screen"
+        np.testing.assert_array_equal(control._phase, loaded["phase"])
+
+        saved = tmp_path / "saved.npz"
+        control._save_context_operation(saved)()
+        again = editor.load_science_context(saved)
+        assert again["operator_metadata"]["zernike_noll_waves_rms"]["defocus"] == coefficient
+        np.testing.assert_array_equal(again["phase"], loaded["phase"])
+
+        # An explicit edit hands the wavefront to the spins.
+        control._zernike["defocus"].setValue(0.25)
+        assert control._operator_settings()["zernike_noll_waves_rms"]["defocus"] == 0.25
+        edited = tmp_path / "edited.npz"
+        control._save_context_operation(edited)()
+        assert editor.load_science_context(edited)["operator_metadata"][
+            "zernike_noll_waves_rms"
+        ]["defocus"] == 0.25
+    finally:
+        _dispose(control, app)
+        session.device_use.assert_idle()
+        session.installation.close()
+
+
 def test_editor_keeps_the_original_plot_size_and_resizes_both_scrollable_surfaces(
     tmp_path: Path, monkeypatch,
 ) -> None:

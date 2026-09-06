@@ -16,7 +16,6 @@ from zlc_atom.devices.slm.device_types import (
     HAMAMATSU_X15213_SCHEMA,
     X15213_SERVER_SCHEMA,
     X15213Adapter,
-    _find_sdk_directory,
     _load_sdk,
     _load_correction,
     _load_profile,
@@ -101,7 +100,6 @@ def _config(**changes: object) -> dict[str, object]:
     values: dict[str, object] = {
         "transport": "usb",
         "display_name": "",
-        "sdk_directory": "",
         "device_profile": "LSH0804382",
         "wavelength_nm": 852.0,
         "correction_path": "",
@@ -116,8 +114,7 @@ def _patch_usb(monkeypatch, sdk: _UsbSdk, handle: _Handle | None = None) -> _Han
     import zlc_atom.devices.slm.device_types as module
 
     result = handle or _Handle()
-    monkeypatch.setattr(module, "_find_sdk_directory", lambda _authored="": Path("sdk"))
-    monkeypatch.setattr(module, "_load_sdk", lambda _directory: (sdk, result))
+    monkeypatch.setattr(module, "_load_sdk", lambda: (sdk, result))
     return result
 
 
@@ -355,6 +352,40 @@ def test_correction_revision_is_atomic_and_command_receipt_freezes_mapping(
         assert adapter.set_correction_enabled(False) == 2
         assert adapter.mapping_revision == 2
         assert adapter.last_command_receipt == frozen
+        # The frozen receipt is LEGAL state, not a contradiction: the
+        # binding validator and the remote decoder both accept a receipt
+        # older than the device's current mapping -- the picture on the
+        # head predates its configuration -- and refuse only a receipt
+        # AHEAD of it.
+        from zlc_atom.devices.slm.device import _validated_state
+
+        validated = _validated_state(
+            adapter.identity,
+            adapter.shape_yx,
+            adapter.last_commanded_phase,
+            adapter.command_revision,
+            adapter.mapping_revision,
+            adapter.last_command_receipt,
+        )
+        assert validated[4] == 2 and validated[5]["mapping_revision"] == 1
+        server, worker = _running_server(adapter)
+        try:
+            remote = _RemoteSlmAdapter("127.0.0.1", server.server_address[1], 2.0)
+            assert remote.mapping_revision == 2
+            assert remote.last_command_receipt["mapping_revision"] == 1
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=2.0)
+        with pytest.raises(ValueError, match="newer than device truth"):
+            _validated_state(
+                adapter.identity,
+                adapter.shape_yx,
+                adapter.last_commanded_phase,
+                adapter.command_revision,
+                adapter.mapping_revision,
+                {**adapter.last_command_receipt, "mapping_revision": 3},
+            )
         adapter.apply_phase(np.zeros(adapter.shape_yx, dtype=np.float32))
         assert adapter.last_command_receipt["mapping_revision"] == 2
         assert adapter.last_command_receipt["correction_enabled"] is False
@@ -403,16 +434,40 @@ def test_correction_rejects_unproven_cross_wavelength_conversion(
         )
 
 
-def test_sdk_loading_does_not_require_a_second_dll_preflight(
+def test_the_sdk_is_found_through_the_vendor_folder_and_nowhere_else(
     monkeypatch, tmp_path: Path
 ) -> None:
+    """The bench-wide vendor rule, through its one resolver.
+
+    The loader used to walk an authored directory, ``HAMAMATSU_SLM_SDK``,
+    every PATH entry, the working directory and Program Files, and then
+    hand a bare file name to the Windows loader -- an SDK found "somewhere"
+    that nobody could account for on the experiment machine.  Now: the
+    family's ``vendor/`` folder or the absolute path its ``vendor.json``
+    names, and a miss is the instruction saying so.
+    """
+
+    import json
+
     import zlc_atom.devices.slm.device_types as module
+    import zlc_atom.devices.vendor as vendor_module
 
-    primary = tmp_path / "hpkSLMdaLV.dll"
-    primary.write_bytes(b"vendor library placeholder")
-    assert _find_sdk_directory(str(tmp_path)) == tmp_path.resolve()
+    vendor = tmp_path / "vendor"
+    vendor.mkdir()
+    monkeypatch.setattr(vendor_module, "vendor_directory", lambda _anchor: vendor)
+    with pytest.raises(FileNotFoundError) as missing:
+        _load_sdk()
+    assert "copy hpkSLMdaLV.dll into" in str(missing.value)
+    assert str(vendor) in str(missing.value)
 
+    elsewhere = tmp_path / "sdk" / "hpkSLMdaLV.dll"
+    elsewhere.parent.mkdir()
+    elsewhere.write_bytes(b"vendor library placeholder")
+    (vendor / "vendor.json").write_text(
+        json.dumps({"hpkSLMdaLV.dll": str(elsewhere)}), encoding="utf-8"
+    )
     loaded: list[str] = []
+    registered: list[str] = []
     sentinel = object()
     monkeypatch.setattr(
         module.ctypes,
@@ -420,10 +475,18 @@ def test_sdk_loading_does_not_require_a_second_dll_preflight(
         lambda library: loaded.append(str(library)) or sentinel,
         raising=False,
     )
-    sdk, handle = _load_sdk(None)
+    monkeypatch.setattr(
+        module.os,
+        "add_dll_directory",
+        lambda directory: registered.append(str(directory)) or _Handle(),
+    )
+    sdk, handle = _load_sdk()
     assert sdk is sentinel
-    assert handle is None
-    assert loaded == ["hpkSLMdaLV.dll"]
+    assert loaded == [str(elsewhere)]
+    assert registered == [str(elsewhere.parent)], (
+        "the SDK's sibling DLLs load from the primary library's own folder"
+    )
+    assert isinstance(handle, _Handle)
 
 
 def test_dvi_server_transport_needs_no_vendor_dll_and_preserves_the_raster_path(
@@ -508,17 +571,16 @@ def test_broken_or_missing_usb_sdk_cannot_block_the_default_dvi_transport(
 ) -> None:
     import zlc_atom.devices.slm.device_types as module
 
-    monkeypatch.setattr(
-        module, "_find_sdk_directory", lambda _authored="": Path("sdk")
-    )
-    monkeypatch.setattr(
-        module,
-        "_load_sdk",
-        lambda _directory: (_ for _ in ()).throw(
-            OSError("could not find hpkSLMdaLV.dll")
-        ),
-    )
-    assert module._prepare_dvi_controller("", "LSH0804382") is False
+    for absent in (
+        FileNotFoundError("the Hamamatsu SLM SDK is not installed"),
+        OSError("could not load hpkSLMdaLV.dll"),
+    ):
+        monkeypatch.setattr(
+            module,
+            "_load_sdk",
+            lambda error=absent: (_ for _ in ()).throw(error),
+        )
+        assert module._prepare_dvi_controller("LSH0804382") is False
 
 
 def test_usb_mode_switch_reboots_reopens_and_rechecks_identity(monkeypatch) -> None:
@@ -932,24 +994,24 @@ def test_slm_server_prints_copyable_same_machine_and_lan_device_addresses(
     assert "0.0.0.0 is listen-only" in output
 
 
-def test_slm_server_check_uses_the_windows_loader_without_a_pair_preflight(
+def test_slm_server_check_names_the_vendor_library_it_loaded(
     monkeypatch, capsys
 ) -> None:
     import zlc_atom.devices.slm.device_types as module
 
-    calls: list[Path | None] = []
-    monkeypatch.setattr(module, "_find_sdk_directory", lambda _authored="": None)
+    calls: list[str] = []
+    monkeypatch.setattr(module, "_sdk_library", lambda: Path("C:/vendor/hpkSLMdaLV.dll"))
     monkeypatch.setattr(
-        module,
-        "_load_sdk",
-        lambda directory: (calls.append(directory) or object(), None),
+        module, "_load_sdk", lambda: (calls.append("loaded") or object(), None)
     )
 
     assert module.main(
         ["--check-config", "--transport", "usb", "--host", "127.0.0.1"]
     ) == 0
-    assert calls == [None]
-    assert "USB SDK=Windows loader" in capsys.readouterr().out
+    assert calls == ["loaded"]
+    assert "USB SDK=C:\\vendor\\hpkSLMdaLV.dll" in capsys.readouterr().out.replace(
+        "/", "\\"
+    )
 
 
 def test_slm_server_check_defaults_to_dvi_without_loading_the_sdk(
@@ -1035,3 +1097,61 @@ def test_the_local_slm_type_authors_the_server_knobs_plus_a_port() -> None:
     server_names = [field.name for field in X15213_SERVER_SCHEMA.fields]
     local_names = [field.name for field in X15213_LOCAL_SCHEMA.fields]
     assert local_names == server_names + ["port"]
+    assert "sdk_directory" not in server_names, (
+        "where the SDK lives is the vendor folder's fact, not a form field"
+    )
+
+
+def test_a_local_server_whose_thread_cannot_start_releases_what_it_opened(
+    monkeypatch,
+) -> None:
+    """The head and the listening socket are acquired before the serving
+    thread starts; a start that fails must give both back.
+
+    ``Thread.start`` was outside every cleanup path: the head stayed open
+    in the SDK and the port stayed bound, with no leaf to close either
+    through -- and a server that never started cannot be ``shutdown``,
+    which waits for a loop that never ran.
+    """
+
+    import socket
+
+    import zlc_atom.devices.slm.device_types as module
+
+    sdk = _UsbSdk()
+    handle = _patch_usb(monkeypatch, sdk)
+    servers = []
+    open_server = module._open_slm_server
+
+    def capture(adapter, host, port):
+        server = open_server(adapter, host, port)
+        servers.append(server)
+        return server
+
+    monkeypatch.setattr(module, "_open_slm_server", capture)
+
+    class _NeverStarts(Thread):
+        def start(self) -> None:
+            raise RuntimeError("no thread for the SLM server")
+
+    monkeypatch.setattr(module, "Thread", _NeverStarts)
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    installation = create_installation(
+        (
+            {
+                "key": "slm",
+                "type_id": "slm.hamamatsu_x15213_local",
+                "config": {**_config(), "port": port},
+            },
+        )
+    )
+    try:
+        assert "no thread for the SLM server" in str(installation.failures["slm"])
+        (server,) = servers
+        assert server.socket.fileno() == -1, "the listening socket was released"
+        assert sdk.close_count == 1, "the head was released"
+        assert handle.close_count == 1
+    finally:
+        installation.close()

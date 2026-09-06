@@ -12,6 +12,9 @@ import json
 
 import pytest
 
+from types import SimpleNamespace
+
+from zlc_atom.authoring import AuthoringField, TunableField
 from zlc_atom.install import create_installation, tunable_devices
 from tests.pulse_fixture import pulse_document, pulse_sequence
 from zlc_atom.nodes.scan import (
@@ -21,9 +24,14 @@ from zlc_atom.nodes.scan import (
     ScanPlan,
     bind_plan,
     load_stepped_template,
+    manual_axis,
+    scan_dataset_schema,
     scan_ports_for,
     scan_ports_for_devices,
 )
+from zlc_atom.nodes.scan.plan import scan_axis_ids
+from zlc_atom.nodes.seamless_scan import LOGIC_NODE as SEAMLESS_NODE
+from test_scan_repeat_domain import _source_schema
 
 
 BIAS_PORTS = tuple(
@@ -127,3 +135,71 @@ def test_tunable_devices_project_device_ports() -> None:
         assert 0 < port.lo < port.hi
     finally:
         installation.close()
+
+
+def _field(name: str, low: float, high: float) -> TunableField:
+    return TunableField(
+        AuthoringField(name, "float", name, None, minimum=low, maximum=high),
+        low,
+        True,
+        (name,),
+    )
+
+
+def test_a_field_pinned_to_one_value_is_a_control_not_an_axis() -> None:
+    """One knob with no interval must not take the device's other knobs down.
+
+    A live, bounded field whose minimum equals its maximum -- a knob fenced
+    to one value by policy -- satisfied every port filter and then failed
+    ScanPort's own "no usable initial sweep", so the whole projection
+    raised and no knob of any device was offered.  Such a field is a
+    control; the sweepable ones beside it are still axes.
+    """
+
+    device = SimpleNamespace(
+        tunable_fields=lambda: (_field("fixed", 1.0, 1.0), _field("level", 0.0, 3.0))
+    )
+    ports = scan_ports_for_devices({"device": device})
+    assert [port.port for port in ports] == [DEVICE_PARAM_FAMILY + "device:level"]
+
+
+def test_a_region_lands_on_the_axis_the_picture_drew_when_two_ports_share_a_name() -> None:
+    """The dataset names a plan's axes from the plan alone, and the selection
+    names them back the same way.
+
+    A manual ``bias`` and a pulse parameter ``bias`` are two legal ports
+    with one human name.  The schema disambiguated them as ``scan.bias``
+    and ``scan.bias.2``; the way back guessed ``scan.bias`` for BOTH, so a
+    box drawn on the picture wrote the x range into the y axis's port --
+    the wrong numbers in the wrong unit, as the next scan.
+    """
+
+    from zlc_runtime import SelectionRange, SelectionState
+
+    plan = ScanPlan(
+        (manual_axis("bias", (1.0, 2.0)), ScanAxis(PULSE_PARAM_FAMILY + "bias", (10.0, 20.0)))
+    )
+    labels = ("bias", "bias")
+    assert scan_axis_ids(labels) == ("scan.bias", "scan.bias.2")
+    schema = scan_dataset_schema(
+        _source_schema(shots=1), plan.rows(), (("bias", "1"), ("bias", "code"))
+    )
+    assert [axis.axis_id.value for axis in schema.point_domain.axes[-2:]] == [
+        "scan.bias",
+        "scan.bias.2",
+    ]
+
+    selection = SelectionState(
+        "image",
+        "area",
+        (
+            SelectionRange("scan.bias", 1.25, 1.75, domain="point"),
+            SelectionRange("scan.bias.2", 12.0, 18.0, domain="point"),
+        ),
+    )
+    patched = SEAMLESS_NODE.selection_patch(
+        selection, draft={"plan": json.dumps(plan.to_tree())}, context={}
+    )
+    narrowed = ScanPlan.from_tree(json.loads(patched["plan"]))
+    assert narrowed.axes[0].values == (1.25, 1.75)
+    assert narrowed.axes[1].values == (12.0, 18.0)

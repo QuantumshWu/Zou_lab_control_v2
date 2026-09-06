@@ -43,13 +43,21 @@ THE LOOP LIVES HERE, NOT IN A NODE PACKAGE, BECAUSE IT HAS TWO CONSUMERS.
 current canonical scan.  A Task that scans for a reason of its own commits its
 typed companions in the same event bundle, so neither can drift from the
 other about what a played point means.
+
+STOP IS READ BEFORE ANYTHING NEW IS DONE TO THE BENCH.  The settle before a
+fire is slept in slices with the flag read between them, and read once more
+before the fire itself: a Stop that arrived while the board was acknowledging
+SAFE used to be noticed only by the read-out loop, after the table had been
+loaded and fired again.
+
+THE BENCH IS HANDED BACK AS IT WAS FOUND.  Every device knob the plan moved
+is put back at its pre-run value when the scan ends -- complete, stopped or
+failed -- through the same verified ``tune`` that moved it.
 """
 
 from __future__ import annotations
 
 import itertools
-import math
-import time
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
@@ -61,6 +69,7 @@ from zlc_pulse import (
 )
 from zlc_atom.devices.sequencer import sequencer_archive_snapshot
 from .dataset import SCAN_OUTPUT, ScanDatasetWriter
+from .devices import ScanDeviceKnobs, release_after_scan
 from .plan import (
     DEVICE_PARAM_FAMILY,
     MANUAL_PARAM_FAMILY,
@@ -70,7 +79,7 @@ from .plan import (
     port_label,
     split_outer_axes,
 )
-from .source import check_cancelled, wait_for_board
+from .source import check_cancelled, settle, wait_for_board
 
 #: The one operator-input kind this engine raises, and it asks the one
 #: question a machine here cannot answer: move this knob to this value.
@@ -248,47 +257,24 @@ class SeamlessScanMeasurement:
     def _apply_device_setting(
         self,
         context: object,
+        knobs: ScanDeviceKnobs,
         *,
         changed: Sequence[tuple[str, float, int, int]],
     ) -> None:
-        """Move the installed knobs this row names, and verify each one.
+        """Move the installed knobs this row names, through the one owner
+        of the device-axis law.
 
-        The stepped executor's law, verbatim: ``tune`` returns the
-        instrument's own read-back, and anything other than exactly the
-        scan coordinate is a refusal -- a dataset column may only say what
-        the hardware actually did.  The board is already SAFE here (the
-        segment loop runs between fires), and the per-fire settle that
-        follows covers the device's own settling too.
+        The board is already SAFE here (the segment loop runs between
+        fires), and the per-fire settle that follows covers the device's
+        own settling too.
         """
 
         for port, value, index, points in changed:
-            key, _separator, field = port[
-                len(DEVICE_PARAM_FAMILY):
-            ].partition(":")
-            device = self.tunables[key]
+            check_cancelled(context)
             context.report_progress(
                 f"Setting {port_label(port)} ({index + 1}/{points})"
             )
-            effective = device.tune(field, value)
-            if isinstance(effective, bool):
-                raise TypeError(
-                    "device tune must return its effective numeric value"
-                )
-            try:
-                actual = float(effective)
-            except (TypeError, ValueError) as error:
-                raise TypeError(
-                    "device tune must return its effective numeric value"
-                ) from error
-            if not math.isfinite(actual):
-                raise ValueError(
-                    "device tune returned a non-finite effective value"
-                )
-            if actual != value:
-                raise RuntimeError(
-                    f"device field {field!r} applied {actual!r}, not the "
-                    f"scan coordinate {value!r}"
-                )
+            knobs.move(port, value)
 
     def _ask_for_setting(
         self,
@@ -350,7 +336,7 @@ class SeamlessScanMeasurement:
 
         readouts = sweeps * inner_count * shots
         self.sequencer.safe()
-        time.sleep(self.settle_seconds)
+        settle(context, self.settle_seconds)
         self.source.open(context, cycles=readouts)
         try:
             # Filled by the board, then compiled: a config parameter is the
@@ -371,6 +357,7 @@ class SeamlessScanMeasurement:
             )
             self.sequencer.load(program, source=streamed, rows=wire)
             self.source.arm()
+            check_cancelled(context)
             self.sequencer.fire(
                 run_repeats=shots,
                 scan_repeats=sweeps,
@@ -509,61 +496,73 @@ class SeamlessScanMeasurement:
             on_point=on_point,
             progress_total=self.repeats * len(effective_rows),
         )
-        if not self.outer_axes:
-            self._play_table(
-                context,
-                sweeps=self.repeats,
-                row_offset=0,
-                scan_repeat_base=0,
-                progress_base=0,
-                **segment,
-            )
-        else:
-            standing: tuple[float, ...] | None = None
-            done = 0
-            for sweep in range(self.repeats):
-                for index, outer_row in enumerate(outer_rows):
-                    changed = tuple(
-                        (
-                            axis.port,
-                            outer_row[position],
-                            index,
-                            len(outer_rows),
+        knobs = ScanDeviceKnobs(self.tunables)
+        # The source and the board are released per fire, inside
+        # ``_play_table``; what the whole plan owes the bench is the knobs
+        # back where they were, however it ended.
+        release = (("restoring the scanned device fields", knobs.restore),)
+        try:
+            if not self.outer_axes:
+                self._play_table(
+                    context,
+                    sweeps=self.repeats,
+                    row_offset=0,
+                    scan_repeat_base=0,
+                    progress_base=0,
+                    **segment,
+                )
+            else:
+                standing: tuple[float, ...] | None = None
+                done = 0
+                for sweep in range(self.repeats):
+                    for index, outer_row in enumerate(outer_rows):
+                        changed = tuple(
+                            (
+                                axis.port,
+                                outer_row[position],
+                                index,
+                                len(outer_rows),
+                            )
+                            for position, axis in enumerate(self.outer_axes)
+                            if standing is None
+                            or standing[position] != outer_row[position]
                         )
-                        for position, axis in enumerate(self.outer_axes)
-                        if standing is None
-                        or standing[position] != outer_row[position]
-                    )
-                    # The hand first, then the machine: an operator asked
-                    # to turn a thumbscrew should not find the bench half
-                    # reconfigured under them while the dialog is open.
-                    self._ask_for_setting(
-                        context,
-                        changed=tuple(
-                            entry
-                            for entry in changed
-                            if entry[0].startswith(MANUAL_PARAM_FAMILY)
-                        ),
-                    )
-                    self._apply_device_setting(
-                        context,
-                        changed=tuple(
-                            entry
-                            for entry in changed
-                            if entry[0].startswith(DEVICE_PARAM_FAMILY)
-                        ),
-                    )
-                    standing = outer_row
-                    self._play_table(
-                        context,
-                        sweeps=1,
-                        row_offset=index * inner_count,
-                        scan_repeat_base=sweep,
-                        progress_base=done,
-                        **segment,
-                    )
-                    done += inner_count
-        check_cancelled(context)
+                        # The hand first, then the machine: an operator
+                        # asked to turn a thumbscrew should not find the
+                        # bench half reconfigured under them while the
+                        # dialog is open.
+                        self._ask_for_setting(
+                            context,
+                            changed=tuple(
+                                entry
+                                for entry in changed
+                                if entry[0].startswith(MANUAL_PARAM_FAMILY)
+                            ),
+                        )
+                        self._apply_device_setting(
+                            context,
+                            knobs,
+                            changed=tuple(
+                                entry
+                                for entry in changed
+                                if entry[0].startswith(DEVICE_PARAM_FAMILY)
+                            ),
+                        )
+                        standing = outer_row
+                        self._play_table(
+                            context,
+                            sweeps=1,
+                            row_offset=index * inner_count,
+                            scan_repeat_base=sweep,
+                            progress_base=done,
+                            **segment,
+                        )
+                        done += inner_count
+            check_cancelled(context)
+        except BaseException as error:
+            release_after_scan(release, error)
+            raise
+        release_after_scan(release, None)
         return context.current_dataset(SCAN_OUTPUT.name), run_record
 
     def run_record(

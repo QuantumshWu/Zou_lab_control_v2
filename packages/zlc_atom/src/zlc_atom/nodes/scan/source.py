@@ -25,6 +25,7 @@ has no upstream publication and returns ``None`` for that half.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping
 
 from zlc_runtime import SignalPublication, SignalValue
@@ -40,6 +41,25 @@ def check_cancelled(context: object) -> None:
 
     if context.cancel_requested():
         raise RuntimeError("the scan was cancelled")
+
+
+def settle(context: object, seconds: float) -> None:
+    """Give the bench its authored settle time, and stay stoppable meanwhile.
+
+    The settle is the longest thing either engine does between SAFE and the
+    next fire, and one that sleeps it whole cannot see a Stop that arrives
+    during it: the next point was tuned, loaded and fired before the flag
+    was read.  Slept in slices with the flag read between them, Stop ends
+    the settle within a slice and nothing new reaches the bench.
+    """
+
+    deadline = time.monotonic() + float(seconds)
+    while True:
+        check_cancelled(context)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            return
+        time.sleep(min(remaining, 0.1))
 
 
 def wait_for_report(sequencer: object, context: object) -> object:
@@ -230,4 +250,11 @@ class PublishedSignalSource:
         return {"source_signal": self.signal_name}
 
 
-__all__ = ["PublishedSignalSource", "watched_signal_source"]
+__all__ = [
+    "PublishedSignalSource",
+    "check_cancelled",
+    "settle",
+    "wait_for_board",
+    "wait_for_report",
+    "watched_signal_source",
+]

@@ -136,6 +136,12 @@ class SlmEditorControl(QtCore.QObject):
             self.shape, initial_pupil
         )
         self._pupil_applied_description = self._pupil_description(True)
+        #: A loaded Science Context's operator, exactly as the file states
+        #: it, until the operator edits a wavefront control.  The spins show
+        #: it to five decimals; the phase on screen was built from the full
+        #: value, and a Save right after a Load must write that value back,
+        #: not the spins' reading of it.
+        self._frozen_operator: dict[str, object] | None = None
         self._wavefront_phase = science_operator_wavefront(
             self.shape,
             initial_pupil,
@@ -534,6 +540,8 @@ class SlmEditorControl(QtCore.QObject):
         }
 
     def _operator_settings(self) -> dict[str, object]:
+        if self._frozen_operator is not None:
+            return deepcopy(self._frozen_operator)
         return {
             "enabled": self._zernike_enabled.isChecked(),
             "carrier_waves_xy": [
@@ -700,6 +708,8 @@ class SlmEditorControl(QtCore.QObject):
         self._layer_changed()
 
     def _layer_changed(self, *_args: object) -> None:
+        # An explicit edit: the wavefront is the spins' from here on.
+        self._frozen_operator = None
         active = sum(bool(spin.value()) for spin in (
             self._carrier_x, self._carrier_y, *self._zernike.values()
         ))
@@ -1090,6 +1100,13 @@ class SlmEditorControl(QtCore.QObject):
         finally:
             for widget, previous in zip(widgets, blocked):
                 widget.blockSignals(previous)
+        self._frozen_operator = {
+            "enabled": bool(operator.get("enabled", False)),
+            "carrier_waves_xy": [float(value) for value in carrier],
+            "zernike_noll_waves_rms": {
+                key: float(value) for key, value in coefficients.items()
+            },
+        }
         self._request_revision += 1
         self._pending, self._spot_optimizer_state = None, None
         self._target = frozen_target

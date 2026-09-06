@@ -20,17 +20,24 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 from dataclasses import replace
 
+from zlc_data import owned_snapshot_from_arrays
 from zlc_pulse import (
     PulseBracket,
     compile_sequence,
+    load_streamer_config,
+    pulse_field_value,
     resolve_api_parameters,
 )
-from zlc_runtime import NodeHost, SignalDataPlane
+from zlc_pulse.device import BoardDescription, ConfigValueHolder
+from zlc_runtime import MonitorCoverage, NodeHost, SignalDataPlane, SignalValue
 
+from zlc_atom.authoring import AuthoringField, TunableField
 from zlc_atom.install import create_installation
 from zlc_atom.nodes import (
     ResolvedWorkspaceResource,
@@ -45,6 +52,10 @@ from zlc_atom.nodes.scan import (
     SCAN_OUTPUT,
     ScanAxis,
     ScanPlan,
+    ScanPort,
+    SeamlessScanMeasurement,
+    check_cancelled,
+    hardware_scan_ports_for,
     manual_axis,
     scan_ports_for,
     slots_from_plan,
@@ -53,6 +64,154 @@ from zlc_atom.nodes.scan import (
 from zlc_atom.nodes.seamless_scan import SEAMLESS_SCAN_SCHEMA
 
 from tests.fakes import SCRIPTED_SEED_VALUE, ScriptedScanBench
+from test_scan_repeat_domain import _source_schema
+
+
+class _FakeSequencer(ConfigValueHolder):
+    """The board's surface with no board behind it: every command counted.
+
+    ``on_safe`` runs inside SAFE, which is where an operator's Stop lands
+    while the board is acknowledging: the one moment the engines used to
+    read too late.
+    """
+
+    def __init__(self, sequence) -> None:
+        self._init_config_values()
+        settings = load_streamer_config()
+        self.board = BoardDescription(
+            sequence.target, settings["params"], settings["clock_hz"]
+        )
+        self.load_config_values(
+            {
+                parameter.parameter_id: (
+                    pulse_field_value(sequence, parameter.field_ref, parameter.unit),
+                    parameter.unit,
+                )
+                for parameter in sequence.config_parameters
+            }
+        )
+        self.fires = 0
+        self.safe_calls = 0
+        self.on_safe = None
+
+    def describe(self):
+        return self.board
+
+    def safe(self) -> None:
+        self.safe_calls += 1
+        if self.on_safe is not None:
+            self.on_safe()
+
+    def load(self, program, **_kwargs) -> None:
+        self.program = program
+
+    def fire(self, **_kwargs) -> None:
+        self.fires += 1
+
+    def wait_done(self, _timeout):
+        return SimpleNamespace(fault=None)
+
+
+class _FakeSource:
+    """A point's value on demand; ``fail_at`` names the take that fails and
+    ``on_take`` sees every take, so a test can press Stop at a moment."""
+
+    def __init__(self, *, fail_at: int | None = None) -> None:
+        self.taken = 0
+        self.fail_at = fail_at
+        self.on_take = None
+
+    def open(self, *_args, **_kwargs) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+    def validate(self, *_args, **_kwargs) -> None:
+        pass
+
+    def arm(self) -> None:
+        pass
+
+    def discard_pending(self) -> None:
+        pass
+
+    def describe(self) -> dict:
+        return {"source_signal": "fake"}
+
+    def next_value(self, context):
+        self.taken += 1
+        check_cancelled(context)
+        if self.taken == self.fail_at:
+            raise RuntimeError("scripted source failed")
+        schema = _source_schema(shots=1)
+        snapshot = owned_snapshot_from_arrays(
+            schema,
+            np.zeros(schema.physical_shape),
+            self.taken,
+            stream_generation="fake-source",
+        )
+        if self.on_take is not None:
+            self.on_take(self.taken)
+        return SignalValue("fake-source", snapshot, MonitorCoverage(1, 1)), None
+
+
+class _Knob:
+    """One installed device with one field, remembering every tune.
+
+    ``refuse_restore`` answers the pre-run value with something else, the
+    way an instrument that will not go back there would.
+    """
+
+    def __init__(self, level: float = 0.25, *, refuse_restore: bool = False) -> None:
+        self.level = level
+        self.tunes: list[float] = []
+        self.refuse_restore = refuse_restore
+
+    def tune(self, field: str, value: float) -> float:
+        assert field == "level"
+        self.tunes.append(float(value))
+        if self.refuse_restore and value == 0.25:
+            return float(value) + 1.0
+        self.level = float(value)
+        return self.level
+
+    def tunable_fields(self) -> tuple[TunableField, ...]:
+        return (
+            TunableField(
+                AuthoringField("level", "float", "level", 0.25, minimum=0.0, maximum=3.0),
+                self.level,
+                True,
+                ("level",),
+            ),
+        )
+
+    def tunable_values(self) -> dict:
+        return {"level": self.level}
+
+    def settings_provenance(self) -> dict:
+        return {"device_session_id": "knob", "settings_epoch": 0}
+
+
+class _Context:
+    """The host's surface: Stop is a flag, commits are counted."""
+
+    def __init__(self) -> None:
+        self.cancelled = False
+        self.commits = 0
+
+    def cancel_requested(self) -> bool:
+        return self.cancelled
+
+    def commit_live(self, outputs, *, source_publication=None) -> None:
+        del outputs, source_publication
+        self.commits += 1
+
+    def report_progress(self, *_args, **_kwargs) -> None:
+        pass
+
+    def current_dataset(self, name: str) -> str:
+        return name
 
 
 TEMPLATE_NAME = "mot_field_template.json"
@@ -921,17 +1080,19 @@ def _device_run(
     bench = None
     host = None
     if tunables is None:
-        tunables = {
-            "rf": virtual_rf_source(
-                VaunixLmsConfig(
-                    serial=1001,
-                    frequency_low_hz=500e6,
-                    frequency_high_hz=8e9,
-                    power_low_dbm=-40.0,
-                    power_high_dbm=10.0,
-                )
+        source = virtual_rf_source(
+            VaunixLmsConfig(
+                serial=1001,
+                frequency_low_hz=500e6,
+                frequency_high_hz=8e9,
+                power_low_dbm=-40.0,
+                power_high_dbm=10.0,
             )
-        }
+        )
+        # As an operator leaves a brick before scanning it: standing inside
+        # the window, where the scan can put it back.
+        source.tune("frequency_hz", 600e6)
+        tunables = {"rf": source}
     try:
         bench = ScriptedScanBench(
             installation.device("sequencer"),
@@ -1014,8 +1175,12 @@ def test_a_device_axis_is_the_outer_loop_and_the_device_is_verified() -> None:
     )
     assert frequency.unit == "Hz", "a device axis publishes its knob's unit"
 
-    # The instrument itself ends on the last coordinate -- tune() really ran.
-    assert source.tunable_values()["frequency_hz"] == pytest.approx(2e9)
+    # The instrument is handed back where the operator left it, and that
+    # tune() really ran shows in the epoch: three moves and the way back.
+    assert source.tunable_values()["frequency_hz"] == pytest.approx(600e6)
+    assert source.settings_provenance()["settings_epoch"] == (
+        record["device_snapshots"]["tunable:rf"]["settings_epoch"] + 4
+    )
 
     assert record["named_devices"]["tunable:rf"] == "rf"
     # The snapshot is the device's state at run START: the swept field's
@@ -1034,7 +1199,9 @@ def test_a_device_axis_is_the_outer_loop_and_the_device_is_verified() -> None:
         "power_low_dbm",
         "power_high_dbm",
     }
-    assert snapshot["device_session_id"] == "vaunix-lms:1001"
+    assert snapshot["device_session_id"] == (
+        source.settings_provenance()["device_session_id"]
+    ), "the session the scan ran under, not the instrument's label"
     assert "settings_epoch" in snapshot
 
     # The console converts these into runtime claims, so a control-panel
@@ -1059,13 +1226,77 @@ def test_an_off_grid_device_value_fails_the_run_with_the_grid_named() -> None:
         )
 
 
+def _device_seamless(knob: _Knob, sequencer: _FakeSequencer, source: _FakeSource):
+    sequence = _template_sequence()
+    pulse_port = hardware_scan_ports_for(sequence)[0]
+    device_port = ScanPort(
+        DEVICE_PARAM_FAMILY + "knob:level", "knob.level", "1", 0.0, 3.0
+    )
+    return SeamlessScanMeasurement(
+        sequencer=sequencer,
+        source=source,
+        sequence=sequence,
+        plan=ScanPlan(
+            (
+                ScanAxis(device_port.port, (1.0, 2.0)),
+                ScanAxis(pulse_port.port, (-256.0, 256.0)),
+            )
+        ),
+        ports=(device_port, pulse_port),
+        tunables={"knob": knob},
+        repeats=1,
+        shots_per_point=1,
+        settle_seconds=0.0,
+    )
+
+
+def test_a_device_axis_is_put_back_however_the_table_ends() -> None:
+    """The outer device knob goes back to its pre-run value: complete,
+    stopped or failed -- the same promise the stepped engine keeps."""
+
+    knob, sequencer, source = _Knob(), _FakeSequencer(_template_sequence()), _FakeSource()
+    _device_seamless(knob, sequencer, source).execute(_Context())
+    assert knob.tunes == [1.0, 2.0, 0.25] and knob.level == 0.25
+    assert sequencer.fires == 2, "one fire per device point"
+
+    knob, sequencer = _Knob(), _FakeSequencer(_template_sequence())
+    with pytest.raises(RuntimeError, match="scripted source failed"):
+        _device_seamless(knob, sequencer, _FakeSource(fail_at=2)).execute(_Context())
+    assert knob.tunes == [1.0, 0.25] and knob.level == 0.25
+
+    knob, sequencer, source, context = (
+        _Knob(), _FakeSequencer(_template_sequence()), _FakeSource(), _Context()
+    )
+    source.on_take = lambda taken: setattr(context, "cancelled", taken == 2)
+    with pytest.raises(RuntimeError, match="cancelled"):
+        _device_seamless(knob, sequencer, source).execute(context)
+    assert knob.tunes == [1.0, 0.25] and knob.level == 0.25
+    assert sequencer.fires == 1
+
+    knob, sequencer = _Knob(refuse_restore=True), _FakeSequencer(_template_sequence())
+    with pytest.raises(RuntimeError, match="not its pre-run value 0.25"):
+        _device_seamless(knob, sequencer, _FakeSource()).execute(_Context())
+
+
+def test_a_stop_received_while_the_board_goes_safe_fires_no_table() -> None:
+    """Stop during SAFE's acknowledgement: no load, no fire, knob put back."""
+
+    knob, sequencer, source, context = (
+        _Knob(), _FakeSequencer(_template_sequence()), _FakeSource(), _Context()
+    )
+    sequencer.on_safe = lambda: setattr(context, "cancelled", True)
+    with pytest.raises(RuntimeError, match="cancelled"):
+        _device_seamless(knob, sequencer, source).execute(context)
+    assert sequencer.fires == 0
+    # The device axis was applied before the segment's SAFE, and is put back.
+    assert knob.tunes == [1.0, 0.25] and knob.level == 0.25
+
+
 def test_a_device_that_answers_differently_fails_the_run() -> None:
     """tune() returns the read-back, and any difference is a refusal."""
 
     class _DriftingKnob:
         def tunable_fields(self):
-            from zlc_atom.authoring import AuthoringField, TunableField
-
             return (
                 TunableField(
                     metadata=AuthoringField(

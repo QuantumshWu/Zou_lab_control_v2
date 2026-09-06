@@ -1,21 +1,12 @@
-"""The value sets an experiment is running today: API values, and config.
+"""Where a workspace keeps the board's config values, and how they are read.
 
-A bias code or a MOT duration measured once is a fact about the apparatus,
-not about whichever pulse happened to be open when it was measured.  Until
-now the only thing that could say what an API slot holds was the pulse file
-itself, so recalibrating the field meant opening every pulse and retyping
-three numbers -- and a pulse missed that round quietly ran the old ones.
-
-The current set lives in one file beside the pulses.  Every pulse loaded
-from a workspace picks it up, and a pulse that declares none of its ids is
-simply left alone: the set is meant to be carried across pulses, most of
-which declare only some of it.
-
-Config values are the same idea one layer down.  Where an API value answers
-"what does this run want", a config value answers "what is this apparatus
-calibrated at" -- a channel delay, a DAC bias.  Those belong to the BOARD, so
-their current set is loaded onto the sequencer once and fills every pulse it
-compiles; the pulse says only which of its fields are config parameters.
+A config value answers "what is this apparatus calibrated at" -- a channel
+delay, a DAC bias.  Those belong to the BOARD, not to any one pulse: the
+current set is loaded onto the sequencer once and fills every pulse it
+compiles, and a pulse says only which of its fields are config parameters.
+A pulse's API values are a different thing and live in the pulse file itself,
+overridden per run by the node form; no file beside the pulses rewrites
+them.
 
 The grammar is ``zlc_pulse``'s; what is here is where the files live and how
 they are found.

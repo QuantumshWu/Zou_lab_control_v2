@@ -15,7 +15,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
-from zlc_atom.nodes.scan import ScanPlan, manual_axis_name
+from zlc_atom.nodes.scan import ScanAxis, ScanPlan, manual_axis_name
 from zlc_atom.nodes.scan.editor import scan_plan_editor_factory
 from zlc_atom.nodes.scan.plan import ScanPort
 from zlc_ui import ensure_qt_app
@@ -108,6 +108,72 @@ def test_a_manual_row_cannot_be_authored_inside_the_machine_axes() -> None:
         )
     finally:
         editor.deleteLater()
+
+
+def test_an_authored_grid_the_spins_cannot_regenerate_is_kept_exactly() -> None:
+    """An explicit list of values is the operator's until a spin is edited.
+
+    Uniformity was judged with a relative tolerance, so 1 000 000,
+    2 000 000, 3 000 005 -- a grid a notebook authored on purpose -- was
+    called uniform, its list dropped, and the row re-authored the middle
+    point as 2 000 002.5 the next time anything on the form changed.
+    """
+
+    editor = _editor()
+    try:
+        authored = (1_000_000.0, 2_000_000.0, 3_000_005.0)
+        wide = ScanPort(BIAS.port, BIAS.label, BIAS.unit, 0.0, 1e7, 0.0, 1e7)
+        editor._ports = (wide,)
+        editor._reconcile_rows(
+            json.dumps(ScanPlan((ScanAxis(BIAS.port, authored),)).to_tree())
+        )
+        (row,) = editor._rows
+        assert row.custom_label.text() == "custom values"
+        assert row.axis().values == authored
+        editor._emit_plan()
+        assert _plan(editor).axes[0].values == authored, "re-emitted as authored"
+        # A grid the spins DO describe is not custom, and an edited spin
+        # replaces a custom list with the grid the spins now describe.
+        editor._reconcile_rows(
+            json.dumps(ScanPlan((ScanAxis(BIAS.port, (0.0, 0.5, 1.0)),)).to_tree())
+        )
+        assert row.custom_label.text() == ""
+        editor._reconcile_rows(
+            json.dumps(ScanPlan((ScanAxis(BIAS.port, authored),)).to_tree())
+        )
+        row.points_spin.setValue(2)
+        assert row.axis().values == (1_000_000.0, 3_000_005.0)
+    finally:
+        editor.deleteLater()
+
+
+def test_the_stepped_form_never_shows_the_boards_ordering_refusal() -> None:
+    """The stepped engine applies every axis itself; only the seamless
+    form has a board table whose ordering can be refused.
+
+    A device-only plan is a plan the stepped node runs, and its summary
+    read "a plan of manual and device axes alone has no table to play" --
+    the seamless rule, applied to a form that has no table.
+    """
+
+    ensure_qt_app()
+    device = ScanPort("device:rf:frequency_hz", "rf.frequency_hz", "Hz", 1e5, 5e6)
+    stepped = scan_plan_editor_factory(device_ports=True, hardware_slots=False)
+    seamless = scan_plan_editor_factory(
+        device_ports=True, hardware_slots=True, manual_axes=True
+    )
+    try:
+        plan = json.dumps(ScanPlan((ScanAxis(device.port, (1e6, 2e6)),)).to_tree())
+        for editor in (stepped, seamless):
+            editor._ports = (device,)
+            editor._reconcile_rows(plan)
+            editor._refresh_summary()
+        assert "no table to play" in seamless.summary.text()
+        assert "no table to play" not in stepped.summary.text()
+        assert "2 device settings are applied" in stepped.summary.text()
+    finally:
+        stepped.deleteLater()
+        seamless.deleteLater()
 
 
 def test_a_node_that_cannot_stop_for_a_hand_never_offers_the_button() -> None:

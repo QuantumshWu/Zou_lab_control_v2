@@ -424,12 +424,13 @@ def imported_target(values: object) -> np.ndarray:
         raise ValueError("imported target must contain positive intensity")
     return _readonly(target / peak)
 
-#: Prepared solve inputs keyed by the identity of the caller's read-only
+#: Prepared solve inputs keyed by the identity of the caller's immutable
 #: array.  A feedback run hands the SAME frozen target and pupil to every
 #: candidate solve, and re-validating, re-copying and re-shifting a full
 #: 1024x1272 plane cost ~25 ms per call.  Identity is verified through the
-#: stored weak reference; writable arrays are never cached because the
-#: caller could mutate them in place between calls.
+#: stored weak reference, and only memory nothing can write -- an array
+#: over a ``bytes`` object, which is what every frozen input here is --
+#: may stand in for its contents across calls.
 _PREPARED_LIMIT = 8
 _PREPARED_TARGETS: dict[int, tuple[object, tuple]] = {}
 _PREPARED_PUPILS: dict[int, tuple[object, tuple]] = {}
@@ -472,8 +473,26 @@ def _frozen(values: np.ndarray) -> np.ndarray:
     return values
 
 
+def _immutable(values: object) -> bool:
+    """Whether NOTHING can write this array: its memory is a bytes object.
+
+    A cleared WRITEABLE flag is a request, not a guarantee -- the array's
+    owner can set it back and write, and a cache that trusted the flag
+    answered a later call from the array's old contents after the caller
+    had zeroed it.  Memory that has no writable form at all is the only
+    thing that may stand in for its contents across calls.
+    """
+
+    if not isinstance(values, np.ndarray) or values.flags.writeable:
+        return False
+    base = values
+    while isinstance(base, np.ndarray):
+        base = base.base
+    return isinstance(base, bytes)
+
+
 def _prepared_cache_get(cache: dict, values: object) -> tuple | None:
-    if not isinstance(values, np.ndarray):
+    if not _immutable(values):
         return None
     entry = cache.get(id(values))
     if entry is None:
@@ -486,7 +505,7 @@ def _prepared_cache_get(cache: dict, values: object) -> tuple | None:
 
 
 def _prepared_cache_put(cache: dict, values: object, prepared: tuple) -> None:
-    if not isinstance(values, np.ndarray) or values.flags.writeable:
+    if not _immutable(values):
         return
     key = id(values)
 

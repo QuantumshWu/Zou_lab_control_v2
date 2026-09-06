@@ -145,8 +145,17 @@ def optimal_gaussian_threshold(
         discriminant = b * b - 4.0 * a * c
         if discriminant < 0.0:
             return float("nan"), bright_above
-        root = sqrt(max(discriminant, 0.0))
-        roots = ((-b - root) / (2.0 * a), (-b + root) / (2.0 * a))
+        # Cancellation-free roots.  ``b`` is half the sum of two inverse
+        # variances and always positive, so ``-b - sqrt(D)`` is a sum of
+        # like signs; the other root is the product of roots, ``c/a``,
+        # divided by it.  Forming that root as ``(-b + sqrt(D)) / 2a``
+        # subtracted two nearly equal numbers whenever the two widths
+        # nearly agreed (``a`` -> 0) and handed back a threshold the two
+        # weighted curves do not cross at -- 1.80 for 1.8986, on widths
+        # differing by one part in 1e15 -- while the exactly-equal case
+        # took the linear branch and was right.
+        q = -0.5 * (b + sqrt(max(discriminant, 0.0)))
+        roots = (q / a, c / q)
     candidates = tuple(
         0.5 * (low_mean + high_mean) + value * separation
         for value in roots
@@ -356,8 +365,9 @@ def fit_bimodal(values: object, *, min_component_fraction: float = 0.01) -> Bimo
     a handful of tail samples from winning solely through an extremely narrow
     Gaussian, while enough real shots still dominate that prior.  This also
     permits a genuinely narrower bright peak; neither component owns the wide
-    side.  A winner pinned to the artificial width-ratio boundary is reported
-    descriptively but is not a valid two-population classifier.
+    side.  ``ok`` judges separation and population only: a winner pinned to
+    the width-ratio bound is as valid as any other, because that bound is the
+    estimator's own floor and may not judge the fit it shaped.
     """
 
     samples = np.asarray(values, dtype=float).reshape(-1)

@@ -917,13 +917,15 @@ class TrapCalibration:
             return self
         centers = np.asarray(self.site_map.centers_xy, dtype=float) + (shift_x, shift_y)
         radius = max(model.integration_half_width for model in self.models)
+        # THE rule again, not a second one: the readout rounds a centre to
+        # its pixel before it reads the box, so whether the crop covers a
+        # site is whether that pixel box is wholly inside it.  A continuous
+        # bound refused a site at x=0.8 with radius 1 whose 3x3 box (x=0..2)
+        # the readout reads in full.
         outside = [
             self.site_map.site_ids[index]
             for index, (x, y) in enumerate(centers)
-            if not (
-                radius <= x <= shape[1] - 1 - radius
-                and radius <= y <= shape[0] - 1 - radius
-            )
+            if not box_fits((float(x), float(y)), radius, shape)
         ]
         if outside:
             raise ValueError(

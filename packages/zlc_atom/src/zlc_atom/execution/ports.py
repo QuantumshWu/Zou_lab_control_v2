@@ -127,7 +127,10 @@ class DeviceBroker:
             raise TypeError("bind requires a ResourceKey and IdentityProof")
         if not callable(capability_probe):
             raise TypeError("capability_probe must be callable")
-        snapshot = dict(capability_probe())
+        # Checked before anything is registered: a capability the contract
+        # refuses must not leave the physical identity bound behind an
+        # exception, out of reach of the caller who could have released it.
+        snapshot = self._typed_snapshot(capability_probe())
         token = object()
         stamp = DeviceBindingStamp(identity.identity, uuid.uuid4().hex)
         binding = BoundDevice(key, stamp, snapshot, token, weakref.ref(self))
@@ -195,13 +198,16 @@ class DeviceBroker:
 
     def verify_capability(self, binding: BoundDevice) -> CapabilityProof:
         self._require_binding(binding)
-        snapshot = dict(binding.capabilities)
+        return CapabilityProof(binding, self._typed_snapshot(binding.capabilities))
+
+    def _typed_snapshot(self, capabilities: Mapping[str, object]) -> dict[str, object]:
+        snapshot = dict(capabilities)
         for token, expected in self.CAPABILITY_TYPES.items():
             if token in snapshot and not isinstance(snapshot[token], expected):
                 raise TypeError(
                     f"capability {token!r} must have type {expected.__name__}"
                 )
-        return CapabilityProof(binding, snapshot)
+        return snapshot
 
     def _require_binding(self, binding: BoundDevice) -> None:
         if not isinstance(binding, BoundDevice):
@@ -218,7 +224,13 @@ def bind_verified_device(
     identity_probe: IdentityProbe,
     capability_probe: CapabilityProbe,
 ) -> tuple[BoundDevice, CapabilityProof]:
-    """Bind one physical identity and verify its declared capabilities."""
+    """Bind one physical identity and verify its declared capabilities.
+
+    Either both come back or nothing was bound: the broker checks the
+    capability types before it registers the identity, so a refused
+    capability leaves no binding behind that the caller never received and
+    could not release.
+    """
 
     identity = broker.verify_identity(identity_probe)
     binding = broker.bind(

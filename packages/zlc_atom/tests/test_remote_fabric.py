@@ -75,7 +75,9 @@ def test_a_published_tunable_is_listed_and_driven_over_the_wire(announcer) -> No
         "the tune must have reached the machine that owns the instrument"
     )
     assert remote.tunable_values()["frequency_hz"] == pytest.approx(2.5e9)
-    assert remote.settings_provenance()["device_session_id"] == "vaunix-lms:1001"
+    assert remote.settings_provenance()["device_session_id"] == (
+        source.settings_provenance()["device_session_id"]
+    )
 
     # A refusal crosses the wire as a refusal, message intact.
     with pytest.raises(RuntimeError, match="10.*Hz grid"):

@@ -22,6 +22,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 import json
+import math
 import os
 from pathlib import Path
 from types import MappingProxyType
@@ -50,8 +51,18 @@ def _text(value: object, what: str) -> str:
 
 
 def _plain(value: object, what: str) -> Any:
-    """Reject anything a JSON file cannot hold, instead of mangling it."""
+    """Reject anything a JSON file cannot hold, instead of mangling it.
 
+    A non-finite float is refused here, on the one path every value takes,
+    because the writer cannot persist one: a number that overflowed on the way
+    in (``1e309`` reads as infinity) would load as a configuration that can
+    never be saved again.
+    """
+
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(
+            f"{what} cannot hold {value!r}; a configuration holds only finite numbers"
+        )
     if isinstance(value, (str, bool, int, float)) or value is None:
         return value
     if isinstance(value, Mapping):

@@ -134,11 +134,12 @@ class FrameSurvivalProcessor:
     def _output_schema(self, source: DatasetSchema) -> DatasetSchema:
         frame_axis, site_axis = self._source_axes(source)
         pairs = _forward_pairs(source.point_domain.size)
-        # Labels carry the SOURCE frame coordinates, whatever numbering the
-        # camera declared: the pair identity an operator reads is the one
-        # the frame axis already showed them.
+        # Labels carry the SOURCE frame coordinates, whatever the frame axis
+        # declared -- numbers or names, since a typed coordinate may be either:
+        # the pair identity an operator reads is the one the frame axis already
+        # showed them.
         frame_names = tuple(
-            "?" if value is None else f"{value:g}"
+            "?" if value is None else value if isinstance(value, str) else f"{value:g}"
             for code in source.point_domain.codes(frame_axis.axis_id)
             for value in (frame_axis.coordinate_at(code),)
         )

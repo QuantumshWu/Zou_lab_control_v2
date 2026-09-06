@@ -6783,6 +6783,73 @@ def test_a_region_drawn_on_a_scan_axis_in_microseconds_is_the_region_the_hand_dr
     assert binding.port is None or binding.port.last_error is None
 
 
+def test_a_region_on_a_scan_curve_reaches_the_scan_as_its_next_sweep() -> None:
+    """Which gestures mean a producer's setting is the producer's declaration.
+
+    A box on a curve arrives as an x range -- a curve's y names no axis --
+    and the scan declares that x range as its next sweep.  The console let
+    only "area" through before asking the descriptor, so the declared
+    mapping was unreachable: the box the operator drew on their scan changed
+    nothing.  A gesture the producer declares nothing for still changes
+    nothing, because the descriptor says so.
+    """
+
+    import json
+
+    from zlc_atom.nodes.scan import ScanAxis, ScanPlan
+    from zlc_atom.nodes.seamless_scan import LOGIC_NODE
+    from zlc_runtime import SelectionRange, SelectionState
+
+    plan = ScanPlan((ScanAxis("pulse:param:bias", (0.0, 1.0, 2.0)),))
+    routed: list[tuple[str, dict]] = []
+    frozen = object()
+    console = SimpleNamespace(
+        _publication_value=lambda _publication, _signal: frozen,
+        _direct_producer_node_id=lambda _signal: "scan-owner",
+        logic={
+            "scan-owner": SimpleNamespace(
+                descriptor=LOGIC_NODE,
+                draft=SimpleNamespace(values={"plan": json.dumps(plan.to_tree())}),
+            )
+        },
+        _selection_context=lambda _publication: {},
+        update_logic_draft=lambda name, **patch: routed.append((name, patch)),
+    )
+    publication = SimpleNamespace(run_record={})
+
+    ConsolePresenter._route_exact_panel_selection(
+        console,
+        "panel-1",
+        "@logic/scan-owner/scan",
+        publication,
+        SelectionState(
+            "curve",
+            "x_range",
+            (SelectionRange("scan.bias", 0.2, 0.8, domain="point"),),
+        ),
+        expected_snapshot=frozen,
+    )
+    narrowed = ScanPlan((ScanAxis("pulse:param:bias", (0.2, 0.5, 0.8)),))
+    assert routed == [
+        ("scan-owner", {"values": {"plan": json.dumps(narrowed.to_tree())}})
+    ]
+
+    routed.clear()
+    ConsolePresenter._route_exact_panel_selection(
+        console,
+        "panel-1",
+        "@logic/scan-owner/scan",
+        publication,
+        SelectionState(
+            "histogram",
+            "x_range",
+            (SelectionRange("scan.bias", 0.2, 0.8, domain="point"),),
+        ),
+        expected_snapshot=frozen,
+    )
+    assert routed == [], "a gesture the scan declares nothing for changes nothing"
+
+
 def test_a_silent_plot_worker_cannot_hold_the_console_open(presenter) -> None:
     """An operator must always be able to close the window.
 

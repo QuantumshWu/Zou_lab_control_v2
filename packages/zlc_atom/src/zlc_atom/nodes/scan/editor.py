@@ -67,11 +67,26 @@ from .plan import (
 )
 
 
-def _uniform(values: tuple[float, ...]) -> bool:
-    if len(values) < 3:
-        return True
-    steps = np.diff(np.asarray(values, dtype=float))
-    return bool(np.allclose(steps, steps[0]))
+def _spins_regenerate(row: QtWidgets.QWidget, values: tuple[float, ...]) -> bool:
+    """Whether from/to/points, as the row's spins now hold them, give back
+    exactly these values.
+
+    Exactly, not approximately: the grid the spins describe is what the
+    row will author the next time anything on the form changes, so any
+    other list is the operator's and must be kept as it was written.  An
+    approximate comparison once judged 1 000 000, 2 000 000, 3 000 005
+    uniform and silently re-authored it as 1 000 000, 2 000 002.5, 3 000 005.
+    """
+
+    regenerated = tuple(
+        float(value)
+        for value in np.linspace(
+            float(row.start_spin.value()),
+            float(row.stop_spin.value()),
+            int(row.points_spin.value()),
+        )
+    )
+    return regenerated == tuple(values)
 
 
 class _AxisRow(QtWidgets.QWidget):
@@ -232,7 +247,9 @@ class _AxisRow(QtWidgets.QWidget):
             self.start_spin.setValue(axis.values[0])
             self.stop_spin.setValue(axis.values[-1])
             self.points_spin.setValue(len(axis.values))
-        self._custom_values = None if _uniform(axis.values) else axis.values
+        self._custom_values = (
+            None if _spins_regenerate(self, axis.values) else axis.values
+        )
         self.custom_label.setText("" if self._custom_values is None else "custom values")
 
     def reconcile(self, ports, axis: ScanAxis) -> None:
@@ -828,16 +845,20 @@ class ScanPlanEditor(QtWidgets.QWidget):
             )
             return
         shape = " × ".join(str(n) for n in plan.shape)
-        # The ordering law lives in split_outer_axes; saying its refusal HERE
-        # is what lets the operator fix the order while the rows are still in
-        # front of them, instead of at Start.  Nothing is silently reordered.
-        try:
-            from .plan import split_outer_axes
+        # The ordering law lives in split_outer_axes and binds the BOARD's
+        # table: only the seamless form has one.  Saying its refusal HERE
+        # is what lets the operator fix the order while the rows are still
+        # in front of them, instead of at Start.  Nothing is silently
+        # reordered.  The stepped engine applies every axis itself, point by
+        # point, and has no table to refuse.
+        if self._hardware_slots:
+            try:
+                from .plan import split_outer_axes
 
-            split_outer_axes(plan)
-        except ValueError as refusal:
-            self.summary.setText(str(refusal))
-            return
+                split_outer_axes(plan)
+            except ValueError as refusal:
+                self.summary.setText(str(refusal))
+                return
         manual = tuple(
             axis for axis in plan.axes
             if axis.port.startswith(MANUAL_PARAM_FAMILY)

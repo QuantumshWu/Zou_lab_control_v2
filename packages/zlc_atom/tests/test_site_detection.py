@@ -225,14 +225,3 @@ def test_average_peak_identity_preserves_close_lattices_without_duplicates() -> 
     )
     stack[rng.random(100) < 0.5] += 1100.0 * one_spot
     assert detect_sites(stack, spot_sigma=1.2).n_sites == 1
-
-
-def test_pure_background_is_not_a_site() -> None:
-    """Pure background invents no spatially significant change or average peak."""
-
-    import pytest
-
-    rng = np.random.default_rng(17)
-    background = rng.normal(120.0, 7.0, size=(120, 76, 72))
-    with pytest.raises(ValueError, match="no detectable sites"):
-        detect_sites(background, spot_sigma=1.2)

@@ -72,6 +72,37 @@ def test_unbind_releases_only_the_exact_broker_minted_physical_binding() -> None
     assert broker.unbind(second) is True
 
 
+def test_a_refused_capability_leaves_no_physical_binding_behind() -> None:
+    """A helper call that raises must have bound nothing.
+
+    The capability types used to be checked after the identity was
+    registered, so a refused capability left the physical identity bound to
+    a binding the caller never received and could not release: the same
+    device could not be bound again in that broker.
+    """
+
+    broker = DeviceBroker()
+    identity = PhysicalDeviceIdentity(
+        "device:serial1",
+        DeviceIdentityEvidenceKind.HARDWARE_IDENTITY_READBACK,
+    )
+    with pytest.raises(TypeError, match="camera.adapter"):
+        bind_verified_device(
+            broker,
+            key=ResourceKey.parse("device/camera"),
+            identity_probe=lambda: identity,
+            capability_probe=lambda: {"camera.adapter": object()},
+        )
+    binding, proof = bind_verified_device(
+        broker,
+        key=ResourceKey.parse("device/camera"),
+        identity_probe=lambda: identity,
+        capability_probe=dict,
+    )
+    assert proof.binding is binding
+    assert broker.unbind(binding) is True
+
+
 def test_unbound_binding_tombstone_is_collected_without_retaining_broker() -> None:
     broker = DeviceBroker()
     binding = bind_verified_device(

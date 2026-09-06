@@ -49,17 +49,26 @@ def snap_roi_axis(
     snapped_origin = (start // origin_step) * origin_step
     covered = stop - snapped_origin
     snapped_extent = max(floor, -(-covered // extent_step) * extent_step)
-    if snapped_extent > sensor_extent:
-        # Larger than the sensor: nothing covers it, so take the whole sensor.
-        return 0, max(floor, (sensor_extent // extent_step) * extent_step)
-    if snapped_origin + snapped_extent > sensor_extent:
-        # The far edge cannot be reached from where the region starts -- an
-        # odd origin under an even size step, say.  Walk the origin back onto
-        # its own step, the direction it already rounds, rather than dropping
-        # the far edge: shrinking here would reinstate exactly the clipping
-        # this rule exists to prevent.
-        snapped_origin = ((sensor_extent - snapped_extent) // origin_step) * origin_step
-    return snapped_origin, snapped_extent
+    while snapped_extent <= sensor_extent:
+        if snapped_origin + snapped_extent > sensor_extent:
+            # The far edge cannot be reached from where the region starts --
+            # an odd origin under an even size step, say.  Walk the origin
+            # back onto its own step, the direction it already rounds, rather
+            # than dropping the far edge: shrinking here would reinstate
+            # exactly the clipping this rule exists to prevent.
+            snapped_origin = (
+                (sensor_extent - snapped_extent) // origin_step
+            ) * origin_step
+        if snapped_origin + snapped_extent >= stop:
+            return snapped_origin, snapped_extent
+        # Walking back lost the far edge: when the two steps do not nest, the
+        # origin can only retreat by whole origin steps, which is further than
+        # the size step it retreated for.  Grow the size by one more step and
+        # place it again; the loop ends because the size cannot outgrow the
+        # sensor.
+        snapped_extent += extent_step
+    # Larger than the sensor: nothing covers it, so take the whole sensor.
+    return 0, max(floor, (sensor_extent // extent_step) * extent_step)
 
 
 __all__ = ["snap_roi_axis"]

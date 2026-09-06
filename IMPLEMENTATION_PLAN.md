@@ -187,11 +187,11 @@
 ### 2.5 Device Control与settings provenance
 
 - Generic Device Control只消费adapter的`TunableField` contract，显示Current、Desired、Live apply、Apply、Status、Refresh及active owners；已删除旧的edit-immediate `field_committed/read_values/set_form`路径和demo残余。
-- RF frequency/power四个policy edge已进入Rigol、Vaunix及Virtual RF的optional Init schema并复用同一Control tunable；空值表示无该侧policy、可随时清回空值。只有完整有限的low/high pair才形成Scan port范围，单侧edge只约束直接tune；全空Init不归一化或改写硬件当前值。
+- RF frequency/power四个policy edge已进入Rigol、Vaunix及Virtual RF的optional Init schema并复用同一Control tunable；空值表示无该侧policy、可随时清回空值。仪器自身limits在Init读出并以`TunableField.device_limits`只读投影；Scan port范围、Control与外部`tune`的有效范围都是policy与device limits逐侧取更紧者，缺失policy edge时该侧就是仪器limit；全空Init不归一化或改写硬件当前值。
 - Pylon公开`gain_db`的SDK bounds/current与grabbing-safe write；Virtual camera公开`exposure_seconds`。成功且effective实际改变才推进session-local epoch；Stepped Scan严格使用effective return，不能把hardware未接受的值写成Dataset coordinate。
 - Logic静态requirements与Stepped Scan运行时选择的device ports都形成field claim。DeviceUse按device-specific owner revision原子核风险授权、dependency closure与pending write；字段命令期间不能进入新Logic，owner变化取消尚未执行的write。
 - Device I/O只在现有串行worker/adapter command lane执行。Refresh去重合并且属于close guard；75 ms live input在相同policy projection及in-flight write期间保留每字段latest-only值，Qt owner只处理plain projection和已完成readback。
-- CameraFrameRecord在adapter边界冻结settings session/epoch；Pylon无法证明live tune前后buffer边界时首个read batch明确携带old+new，Virtual在trigger时冻结。Runtime使用event-varying record并保持generation-stable run record，finite/scan/indexed保留范围合并为压缩epoch ranges。
+- CameraFrameRecord在adapter边界冻结settings session/epoch；Pylon无法证明live tune前后的buffer边界，tune之后直到本次arm结束的每个read都明确携带old+new（一次read取走部分旧队列不证明其余帧是新设置），重新arm才回到单一epoch；Virtual在trigger时冻结。Runtime使用event-varying record并保持generation-stable run record，finite/scan/indexed保留范围合并为压缩epoch ranges。
 - Figure lineage当前grammar包含每个event record及只解析实际引用epoch的device settings；FigureViewer Device tab读取同一事实。无active Logic的调整不写历史，完整参数状态不复制到每frame。
 
 ### 2.6 Plot三进程边界

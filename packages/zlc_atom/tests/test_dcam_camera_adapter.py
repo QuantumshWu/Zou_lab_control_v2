@@ -44,6 +44,7 @@ class _FakeDcamDevice:
         self.started = False
         self.released = 0
         self.stop_error: BaseException | None = None
+        self.close_error: BaseException | None = None
         self.transfer_error: BaseException | None = None
         self.advance_after_copy: tuple[int, int] | None = None
         self._condition = threading.Condition()
@@ -140,6 +141,8 @@ class _FakeDcamDevice:
 
     def close(self) -> None:
         self._sdk("close")
+        if self.close_error is not None:
+            raise self.close_error
 
     def publish(self, values: tuple[int, ...], *, newest: int) -> None:
         """Test producer: install one complete DCAM transfer snapshot."""
@@ -449,6 +452,106 @@ def test_stop_failure_retains_driver_ring_for_explicit_recovery() -> None:
     driver.device.stop_error = None
     adapter.finish_record_capture()
     adapter.close()
+
+
+def test_a_refused_handle_release_keeps_the_handle_for_the_next_close() -> None:
+    """The SDK, not the adapter, says when the handle is gone.
+
+    Forgetting the handle after a refused dcamdev_close made the next close a
+    no-op that reported success; the installation, told the camera had closed,
+    released the physical binding of a device the SDK still held open.  A
+    refused release keeps the handle and the owner lane it must be released
+    from, and the next close tries the same release again.
+    """
+
+    driver = _FakeDcamDriver()
+    adapter = DcamCameraAdapter(_config(), driver=driver)
+    driver.device.close_error = RuntimeError("injected handle close failure")
+
+    def closes() -> int:
+        return sum(1 for name, _thread in driver.calls if name == "close")
+
+    def owner_alive() -> bool:
+        return any(
+            thread.name == "zlc-dcam-camera-owner" for thread in threading.enumerate()
+        )
+
+    with pytest.raises(RuntimeError, match="handle close failure"):
+        adapter.close()
+    assert closes() == 1
+    assert owner_alive(), "the lane the retry must run on was retired"
+
+    driver.device.close_error = None
+    adapter.close()
+    assert closes() == 2, "the second close did not retry the SDK release"
+    assert not owner_alive()
+    adapter.close()
+    assert closes() == 2
+
+
+def test_the_factory_identity_is_the_device_index_not_the_logical_key() -> None:
+    """Two keys opening one DCAM index are one camera, and the broker must know.
+
+    The identity used to be the logical key, so the same physical device
+    under a second name was accepted as a second device.
+    """
+
+    from zlc_atom.devices.camera.device_types import DEVICE_TYPES
+    from zlc_atom.execution import DeviceBroker
+    from zlc_atom.install import InstallationFactoryContext
+
+    factory = next(item for item in DEVICE_TYPES if item.type_id == "camera.dcam").factory
+    broker = DeviceBroker()
+    context = InstallationFactoryContext(None, broker, {})
+    first = factory(context, "first-name", {"driver": _FakeDcamDriver(), "device_index": 0})
+    try:
+        assert first.physical_identity.stable_device_identity == "dcam-camera:index=0"
+        with pytest.raises(RuntimeError, match="already bound"):
+            factory(context, "second-name", {"driver": _FakeDcamDriver(), "device_index": 0})
+    finally:
+        first.close()
+        broker.unbind(first.binding)
+
+
+def test_the_default_driver_takes_the_dll_from_the_camera_vendor_folder_only(
+    monkeypatch,
+) -> None:
+    """The DCAM runtime is a vendor artifact, found by the one bench rule.
+
+    The default driver used to hand ``ctypes`` the bare name ``dcamapi.dll``
+    and let the operating system search for it: a copy the operator could
+    neither see nor replace, whose absence reported only that the library
+    could not load.  The driver, the default adapter and the Scan hardware
+    discovery all resolve it through ``resolve_vendor_file`` on the camera
+    family, whose error says which file goes into which folder.
+    """
+
+    import zlc_atom.devices.camera._dcam_driver as driver_module
+    from zlc_atom.devices.camera.device_types import DEVICE_TYPES
+
+    asked: list[tuple[str, str, str]] = []
+
+    def missing(anchor: str, filename: str, *, what: str) -> str:
+        asked.append((anchor, filename, what))
+        raise FileNotFoundError(
+            f"{what} is not installed: copy {filename} into the camera vendor folder"
+        )
+
+    monkeypatch.setattr(driver_module.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(driver_module, "resolve_vendor_file", missing)
+    with pytest.raises(FileNotFoundError, match="copy dcamapi.dll into"):
+        driver_module.DcamSdkDriver()
+    with pytest.raises(FileNotFoundError, match="copy dcamapi.dll into"):
+        DcamCameraAdapter(_config())
+    dcam = next(item for item in DEVICE_TYPES if item.type_id == "camera.dcam")
+    with pytest.raises(FileNotFoundError, match="copy dcamapi.dll into"):
+        dcam.discover()
+    assert asked == [
+        (driver_module.__file__, "dcamapi.dll", "the Hamamatsu DCAM-API runtime")
+    ] * 3
+    assert not any(
+        thread.name == "zlc-dcam-camera-owner" for thread in threading.enumerate()
+    ), "an adapter with no library left an owner lane behind"
 
 
 def test_released_ring_with_invalid_final_state_never_fabricates_terminal() -> None:

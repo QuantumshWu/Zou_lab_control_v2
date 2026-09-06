@@ -33,6 +33,12 @@ def _hardware_factory(context, key: str, values: dict) -> InstalledLeaf:
     An already-open streamer may be supplied (a test, or a session that opened
     the connection itself).  Otherwise the endpoint in the configuration is
     dialled -- which is the whole point of writing it down.
+
+    Whichever way it arrived, the streamer is this factory's to own from
+    here: on success the leaf's closer closes it, and a failure between
+    open and bind -- the broker refusing a physical identity that is
+    already bound, say -- closes it here, because a device that never
+    became a leaf has nobody else to close it.
     """
 
     streamer = values.get("streamer")
@@ -56,8 +62,20 @@ def _hardware_factory(context, key: str, values: dict) -> InstalledLeaf:
     if not isinstance(streamer, (PulseStreamer, RemotePulseStreamer)):
         raise TypeError("sequencer.hardware needs a zlc_pulse device")
     device = SequencerDevice(streamer)
-    device.open()
-    return bind_sequencer(context, key, device, f"sequencer:{key}", "sequencer.hardware")
+    try:
+        device.open()
+        return bind_sequencer(
+            context, key, device, f"sequencer:{key}", "sequencer.hardware"
+        )
+    except BaseException as error:
+        try:
+            device.close()
+        except BaseException as close_error:
+            error.add_note(
+                "closing the streamer also reported: "
+                f"{type(close_error).__name__}: {close_error}"
+            )
+        raise
 
 
 #: The machine the board is plugged into serves it FROM the bench process:
@@ -106,6 +124,7 @@ def _local_factory(context, key: str, values: dict) -> InstalledLeaf:
         uart_port=str(authored["uart_port"]).strip() or None,
         port=int(authored["port"]),
     )
+    device = None
     try:
         streamer = dial(
             "127.0.0.1", service.port, request_timeout=DEFAULT_REQUEST_TIMEOUT
@@ -116,7 +135,12 @@ def _local_factory(context, key: str, values: dict) -> InstalledLeaf:
             context, key, device, f"sequencer:{key}", "sequencer.local"
         )
     except BaseException:
-        service.close()
+        # The loopback client before its server, the order the closer keeps.
+        try:
+            if device is not None:
+                device.close()
+        finally:
+            service.close()
         raise
 
     def _close(device=device, service=service) -> None:

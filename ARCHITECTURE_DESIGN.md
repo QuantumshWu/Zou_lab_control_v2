@@ -263,10 +263,10 @@ Node new chunk
 - Device operation或projection-refresh pending期间Control、Close、TaskConsole X和root close不得越过owner状态；失败保持window/session可达并提供只刷新projection的retry，不重复hardware work。
 - Hosted Task可登记且只能登记一个domain-owned partial-exit writer；Runtime在worker线程、撤回Dataset及把TaskRun标为stopped/failed之前恰好调用一次。Writer只能从已经完成的数据原子写并登记checkpoint/process/Figure/preview/summary，不得制造required final；writer失败只附注原始错误，不能覆盖原始hardware/science failure。Calibration、Temperature与SLM Feedback都必须使用该边界保存各自可证明的partial报告。
 - Device Control只显示adapter声明的`TunableField`：稳定表单metadata、authoritative current、当前是否live-write及dependency group。每行统一为Current、Desired、Live apply、Apply和Status；打开/显式Refresh及成功Apply后的readback只走session-owned串行device worker，Qt不碰SDK，也不做周期hardware polling。
-- RF frequency/power policy window的四个edge是Init与Device Control共享的optional `TunableField`；`None`唯一表示该侧没有bench policy limit。Init省略全部edge不得移动硬件；Control可设置或清回`None`。只有low/high都存在且有序时相应knob才向Scan暴露有限range；单侧edge仍约束直接tune，但不伪造另一个scan bound。
+- RF frequency/power policy window的四个edge是Init与Device Control共享的optional `TunableField`；`None`唯一表示该侧没有bench policy limit。Init省略全部edge不得移动硬件；Control可设置或清回`None`。仪器自身的frequency/power limits在Init连接时从设备读出，并以`TunableField.device_limits`只读投影给Device Control显示；UI control、外部`tune`与Scan共用同一个有效范围＝policy window与device limits逐侧取更紧者，因此只要device limits存在knob就向Scan暴露有限range，缺失的policy edge不阻止扫描；window与仪器范围无交集时Init与Control都loud拒绝。
 - Logic在实际Start lease中声明protected fields；运行时才选出的device scan ports以nonexclusive resolved field claim加入同一lease。Device Manager按所有active claim与dependency closure锁字段，不按camera type或字段名特判；无owner时正常写，有owner时只有未claim且adapter确认live-safe的字段可在operator接受风险后写。
 - 风险接受只绑定当前`device_session_id + device-specific owner revision`。owner或session变化立即失效；字段命令在DeviceUse同一原子锁内再次核revision/claim，active field command阻止新Logic Start。in-flight live edits只保留每字段最新值，owner变化后尚未执行的write取消。
-- `device_session_id/settings_epoch`只在成功且effective值实际改变时推进；requested/effective/readback与active owners只在Logic运行期间的真实override中记录。Camera frame在adapter接受/复制边界冻结epoch，不能在publication时读取“当前epoch”倒填旧frame；无法证明边界的Pylon首批readback保守标为old/new mixed。Publication只带压缩epoch ranges，Figure只展开lineage实际引用的记录；idle调整不进入历史。
+- `device_session_id/settings_epoch`只在成功且effective值实际改变时推进；requested/effective/readback与active owners只在Logic运行期间的真实override中记录。Camera frame在adapter接受/复制边界冻结epoch，不能在publication时读取“当前epoch”倒填旧frame；Pylon无法证明live tune前后的buffer边界，因此本次arm内tune之后的每个readback都保守标为old/new mixed，只有重新arm才回到单一epoch——一次read碰巧取走部分旧队列不是其余帧已是新设置的证据。Publication只带压缩epoch ranges，Figure只展开lineage实际引用的记录；idle调整不进入历史。
 - Pulse Stop UI立即进入Stopping；Stop/SAFE高优先级并可取消普通wait/transport，hardware ack后台完成。
 - Timeout显示真实错误但不冻结UI；未确认前不能显示Safe。
 - Form reconcile必须按当前schema重建dependency graph。
@@ -322,7 +322,7 @@ Node new chunk
 ### 8.1 Server-owned device
 
 - server默认使用原本可用的DVI exact-raster presenter，不依赖vendor DLL；USB frame memory仅在显式`--transport usb`时使用。
-- 和Pulse一样，真实SLM只有一个apparatus device type，其init参数是server host/port；只有server process持有DVI/USB输出与profile/correction。客户端通过bounded length-prefix、strict-JSON metadata和canonical `float32`相位payload做握手与command代理，不形成第二个hardware owner。普通state读取使用握手cache；apply携带expected command/mapping revision并拒绝stale writer，不确定transport outcome后必须采样真实hardware state再继续。
+- 和Pulse一样，真实SLM有两个apparatus device type，物理adapter始终只归server process所有：`slm.hamamatsu_x15213`的init参数是server host/port，供另一台机器连接；`slm.hamamatsu_x15213_local`在插着SLM head的bench process内以server自己的表单（transport/profile/wavelength/correction/flips加serve port）启动server，bench自己的leaf再以loopback client接入，因此两种type装入的leaf都是同一remote proxy，DVI/USB输出与profile/correction只有server这一个hardware owner。客户端通过bounded length-prefix、strict-JSON metadata和canonical `float32`相位payload做握手与command代理，不形成第二个hardware owner。普通state读取使用握手cache；apply携带expected command/mapping revision并拒绝stale writer，不确定transport outcome后必须采样真实hardware state再继续。
 - SLM proxy无authentication/TLS，只能部署在trusted laboratory LAN，不得暴露到public Internet。
 - Initial command state是unknown，只有成功write/display/readback/settle后才known。
 - Side effect失败区分known-old、known-new和unknown outcome。
@@ -370,7 +370,7 @@ Node new chunk
 - Calibration只使用稳定`format="zlc.calibration.readout"`，无数字版本；reader只接受当前完整grammar，alternate root或缺失统计均loud拒绝。
 - Calibration run保存final JSON、summary JSON/text及精选报告图；每张报告图都有可由FigureViewer重开的typed Figure NPZ，PNG仅为preview。默认不保存全部raw frames；operator显式请求时才保存采样数据。
 - Temperature使用同一TaskRun lifecycle，保存final JSON、summary和生存率typed Figure/PNG，不建立第二套run管理。
-- Scan正常完成、Stop或失败都默认restore pre-run device values。
+- Scan正常完成、Stop或失败都默认restore pre-run device values：pre-run值在第一次移动该knob前从device本身读出，并须落在该field当前可命令的bounds内，否则Scan在移动任何knob前就按名拒绝启动（一个放不回去的knob不扫）；restore走同一个verified `tune`，其拒绝在成功的run中就是run的失败、在失败的run中附注在原错误上，不得被SAFE成功掩盖。
 - SimulationWorld保持一个类和一个state owner，不拆层。
 - SimulationWorld的物理site只有当前SLM phase经共同pupil illumination、共同low-order wavefront aberration和FFT得到的dominant local peaks这一份动态roster；trap位置、强度、occupancy与Camera位置不得再拆成nominal/extra双状态。所有peaks经过同一个Fourier→camera affine；fluorescence imaging使用一个由共同imaging pupil/aberration生成的shared非对称PSF，不存在逐site随机gain/ellipse/angle/skew。Probe为红失谐，正的trap light-shift参数只把detuning进一步推红，因此occupied bright-dark随trap depth单调下降；loading probability随depth上升。Camera shot真实混合dark/bright population，Feedback不得读取hidden depth/occupancy truth。
 - 默认plant的全部不均匀度必须来自FFT前同一个固定pupil amplitude/wavefront phase；该world wavefront与SLM command、Target和grid完全独立，并在每次propagation中始终相加。不得使用grid-resonant phase、target-specific correction或far-field site/field gain。默认nominal depth固定为520 µK；固定20 µK cooling温度下，低于500 µK的trap不load，超过阈值后按一个cooling-temperature尺度指数趋近全局loading ceiling。因nominal本身贴近实验loading edge，普通光学不均匀在不同grid中都会让至少约10% sites不可见，不得按某个grid反推nominal或由测试手改Target weight；`bright-dark`继续由现有probe参数决定。

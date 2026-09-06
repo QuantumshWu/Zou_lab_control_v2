@@ -165,6 +165,32 @@ def test_occupancy_agreement_filters_sampled_counts_and_allows_one_frame_noop() 
     assert np.isnan(consistent_counts.block.values[:, 0, 2:]).all()
     assert consistent_counts.block.schema.point_domain.axes[0].coordinates == (1,)
 
+    # The same data after a schema round trip through the Data codec: its
+    # site role is an EQUAL AxisRoleId, not the SITE object, and the
+    # processor must read roles by value, not by identity.
+    from zlc_data.codec import dataset_schema_from_tree, dataset_schema_to_tree
+
+    restored = {}
+    for name, snapshot in (("counts", counts), ("occupied", occupied)):
+        schema = dataset_schema_from_tree(dataset_schema_to_tree(snapshot.block.schema))
+        assert schema.cell_domain.axes[0].role is not SITE
+        restored[name] = SignalValue(
+            f"@logic/occupancy/{name}",
+            owned_snapshot_from_arrays(
+                schema,
+                snapshot.block.values,
+                snapshot.block.revision,
+                validity=snapshot.expanded_validity(),
+                stream_generation=snapshot.ref.stream_generation,
+            ),
+            None,
+        )
+    round_tripped = OccupancyAgreementProcessor().evaluate_inputs(restored)
+    np.testing.assert_array_equal(
+        round_tripped["consistent_counts"].snapshot.block.values,
+        consistent_counts.block.values,
+    )
+
     one_frame_occupied = _occupied_snapshot(occupied_values[:, :1, :], occupied_valid[:, :1, :])
     one_frame_counts = owned_snapshot_from_arrays(
         replace(
@@ -227,6 +253,24 @@ def test_pair_axis_carries_one_label_per_pair() -> None:
     assert pair_axis.coordinate_labels == ("0-1", "0-2", "1-2")
     (site_axis,) = schema.cell_domain.axes
     assert site_axis.axis_id == AxisId("occupancy.site")
+
+    # A frame axis may carry names as its typed coordinates; the labels then
+    # carry those names rather than a number format the name cannot take.
+    source = _occupied_snapshot(np.zeros((1, 2, 2), dtype=bool)).block.schema
+    named = replace(
+        source,
+        point_domain=DomainSpec(
+            (2,),
+            (replace(source.point_domain.axes[0], coordinates=("before", "after")),),
+            ((0, 1),),
+        ),
+    )
+    labelled = FrameSurvivalProcessor(producer="fs")._pair(
+        owned_snapshot_from_arrays(named, np.zeros((1, 2, 2), dtype=bool), 0)
+    )
+    assert labelled.block.schema.point_domain.axes[0].coordinate_labels == (
+        "before-after",
+    )
 
 
 def test_single_frame_and_wrong_shapes_are_refused() -> None:

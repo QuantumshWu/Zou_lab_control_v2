@@ -689,6 +689,32 @@ def test_arbitrary_grid_spacing_uses_one_fourier_to_camera_map() -> None:
     )
 
 
+def test_a_grid_with_no_span_in_an_axis_is_refused_before_any_world_is_built() -> None:
+    """The Fourier-to-camera map is anchored on the startup grid's span per axis.
+
+    A single row or column has no span, and the map used to divide by it:
+    the formal configuration accepted ``(1, 3)`` and every trap then had a
+    NaN camera position.  The geometry owner refuses such a grid, so the
+    device-type configuration refuses it before any world or WGS solve.
+    """
+
+    from zlc_atom.devices.simulation.device_types import _simulation_world_config
+    from zlc_atom.devices.simulation.world import SimulationGeometry
+
+    for grid in ((1, 3), (3, 1), (1, 1)):
+        with pytest.raises(ValueError, match="at least two rows and two columns"):
+            SimulationGeometry(grid_shape_yx=grid, image_shape_yx=(32, 32))
+        with pytest.raises(ValueError, match="at least two rows and two columns"):
+            _simulation_world_config(
+                {"image_shape_yx": (32, 32), "grid_shape_yx": grid}
+            )
+    accepted = _simulation_world_config(
+        {"image_shape_yx": (32, 32), "grid_shape_yx": (2, 3)}
+    )
+    assert accepted.geometry.grid_shape_yx == (2, 3)
+    assert np.isfinite(accepted.geometry.site_centers_xy).all()
+
+
 def test_a_removed_trap_cannot_resurrect_its_atom(monkeypatch) -> None:
     installation = create_installation(
         "virtual",

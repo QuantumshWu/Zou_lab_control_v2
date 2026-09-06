@@ -66,6 +66,44 @@ def test_virtual_camera_preserves_trigger_to_frame_causality_and_drops_monitor_h
     assert terminal.source_stopped and terminal.joined is True
 
 
+def test_a_close_that_could_not_join_the_producer_waits_for_it_again() -> None:
+    """A capture ends when its worker has, not when a close gave up waiting.
+
+    A close whose join timed out used to clear the armed state anyway, so
+    the next close asked nothing and returned as if the producer had ended
+    while it was still rendering.  The camera stays armed until the worker
+    is joined; the next close waits for it again and reports the real
+    terminal.
+    """
+
+    import threading
+
+    entered = threading.Event()
+    release = threading.Event()
+    shape = VirtualCameraConfig().frame_shape_yx
+
+    def slow_frame(_ordinal: int, _exposure: float) -> np.ndarray:
+        entered.set()
+        release.wait(10.0)
+        return np.ones(shape, dtype=np.uint16)
+
+    camera = VirtualCamera(frame_source=slow_frame)
+    camera.arm(1, source_group_sizes=(1,), buffer_frame_count=1, timeout=1.0)
+    camera.trigger(1)
+    assert entered.wait(5.0)
+    with pytest.raises(RuntimeError, match="did not join"):
+        camera.close()
+    assert camera.capture_state() is True, "reported closed while the producer still ran"
+    assert camera.produced_count == 0
+
+    release.set()
+    camera.close()
+    assert camera.capture_state() is False
+    assert camera.produced_count == 1
+    terminal = camera.finish_record_capture()
+    assert terminal.produced_count == 1 and terminal.source_stopped and terminal.joined
+
+
 def test_virtual_measurement_configuration_returns_actual_crop_and_is_idle_only() -> None:
     full = np.arange(80, dtype=np.uint16).reshape(8, 10)
     exposures: list[float] = []
