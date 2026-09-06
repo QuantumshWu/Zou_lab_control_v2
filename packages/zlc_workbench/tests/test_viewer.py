@@ -819,6 +819,30 @@ def test_the_description_reports_only_facts_saved_in_the_archive(saved) -> None:
     ]
     assert len(task.flow["edges"]) == 2
 
+def test_describing_an_archive_reads_recipes_without_rebuilding_datasets(
+    saved, monkeypatch
+) -> None:
+    """What a panel showed is a fact about its recipe, not its Dataset.
+
+    ``describe_archive`` used to read each recipe through
+    ``read_figure_plot``, which validates and materialises the Dataset
+    beside it -- a full copy of every array, thrown away -- before the
+    open path built the same Dataset again to keep.
+    """
+
+    import zlc_workbench.viewer as viewer_module
+
+    path, _snapshot = saved
+    info, arrays = read_archive(path)
+
+    def rebuilt(*_args, **_kwargs):
+        raise AssertionError("describe_archive rebuilt a Dataset")
+
+    monkeypatch.setattr(viewer_module, "read_figure_plot", rebuilt)
+    description = describe_archive(info, arrays)
+    plot_rows = dict(dict(description.tabs)["Plot"])
+    assert plot_rows["plot data"].startswith("image")
+
 def test_the_flow_projection_is_the_saved_exact_node_edge_graph(saved) -> None:
     path, _snapshot = saved
     description = describe_archive(*read_archive(path))

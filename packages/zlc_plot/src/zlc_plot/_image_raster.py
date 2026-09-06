@@ -96,11 +96,22 @@ def _area_mean(
     row_starts: np.ndarray,
     column_starts: np.ndarray,
 ) -> np.ndarray | np.ma.MaskedArray:
+    """The mean of every block, in the dtype the front promises.
+
+    The promised dtype is ``result_type(values, float32)``: float32 for the
+    narrow planes a camera makes, float64 for wide ones.  A floating
+    block's SUM is never held in that dtype: a finite float32 plane near
+    its range has block totals past it, and a sum narrowed before the
+    division came back as an infinite mean of finite samples.  Every
+    engine below accumulates a floating plane in float64 and narrows only
+    the quotient; an integer plane keeps the float32 arithmetic that is
+    exact for it by construction.
+    """
+
     all_valid = _all_true(valid)
     mean_dtype = np.result_type(values.dtype, np.float32)
     shape = (row_starts.size, column_starts.size)
     compiled = kernels.engaged()
-    counts = None
     if all_valid and compiled and kernels.block_sums_are_exact(
         values.dtype, row_starts, column_starts, values.shape
     ):
@@ -113,84 +124,95 @@ def _area_mean(
         kernels.block_sum_unsigned(
             kernels.readable(values), row_starts, column_starts, summed
         )
-    elif all_valid and compiled:
+        return _divided_by_block_sizes(summed, values.shape, row_starts, column_starts)
+    if compiled:
         # Everything the exact-integer judge turns away -- every floating
-        # plane, and the wide integers whose partials would round.  The
-        # kernel accumulates in float64, so for a float32 plane it is not a
-        # looser answer than ``reduceat`` (which accumulates in float32) but
-        # a tighter one; measured 9.24 ms -> 0.25 ms on a 1200x1920 plane,
-        # and 35.1 -> 0.46 on 2048x2048.
-        summed = np.empty(shape, dtype=mean_dtype)
-        kernels.block_sum_valid(
+        # plane, the wide integers whose partials would round, and any
+        # plane with missing samples, whose sum and count come out of ONE
+        # pass rather than a whole ``np.where(valid, values, 0)`` plane
+        # reduced twice.  The kernel accumulates in float64 and divides
+        # before it writes; measured 9.24 ms -> 0.25 ms on a 1200x1920
+        # plane, and 35.1 -> 0.46 on 2048x2048.
+        means = np.empty(shape, dtype=mean_dtype)
+        counts = _NO_COUNTS if all_valid else np.empty(shape, dtype=np.int64)
+        kernels.block_mean_valid(
             kernels.readable(values),
-            _NO_VALID,
-            False,
+            _NO_VALID if all_valid else kernels.readable(valid),
+            not all_valid,
             row_starts,
             column_starts,
-            summed,
-            _NO_COUNTS,
-        )
-    elif compiled:
-        # Missing samples, in ONE pass.  The reference builds a whole
-        # ``np.where(valid, values, 0)`` plane and then reduces twice, once
-        # for the sum and once for the count.
-        summed = np.empty(shape, dtype=mean_dtype)
-        counts = np.empty(shape, dtype=np.int64)
-        kernels.block_sum_valid(
-            kernels.readable(values),
-            kernels.readable(valid),
-            True,
-            row_starts,
-            column_starts,
-            summed,
+            means,
             counts,
         )
-    else:
-        # NO COMPILED KERNEL.  The reshape mean below is the fastest thing
-        # numpy alone can do here and the ragged partition is the general
-        # answer; both are slower than the kernels above, so this whole
-        # branch is what the interpreter falls back to, never a shortcut
-        # taken ahead of them.  Standing above the dispatch, the evenly
-        # divisible case -- every power-of-two camera frame, which is to
-        # say the common one -- returned from here and the kernels never
-        # ran at all: 7.18 ms against 1.01 reducing 2048 to 512, and 4.73
-        # against 0.31 reducing it to 256, for the identical answer.
-        source = values if all_valid else np.where(valid, values, 0)
-        rows, columns = values.shape
-        row_block = rows // row_starts.size
-        column_block = columns // column_starts.size
-        if all_valid and (
-            rows == row_block * row_starts.size
-            and columns == column_block * column_starts.size
-        ):
-            return source.reshape(
-                row_starts.size,
-                row_block,
-                column_starts.size,
-                column_block,
-            ).mean(axis=(1, 3), dtype=mean_dtype)
-        summed = _reduce_blocks(source, row_starts, column_starts, mean_dtype)
+        return means if all_valid else _masked_where_empty(means, counts)
+    # NO COMPILED KERNEL.  The reshape mean below is the fastest thing
+    # numpy alone can do here and the ragged partition is the general
+    # answer; both are slower than the kernels above, so this whole
+    # branch is what the interpreter falls back to, never a shortcut
+    # taken ahead of them.  Standing above the dispatch, the evenly
+    # divisible case -- every power-of-two camera frame, which is to
+    # say the common one -- returned from here and the kernels never
+    # ran at all: 7.18 ms against 1.01 reducing 2048 to 512, and 4.73
+    # against 0.31 reducing it to 256, for the identical answer.
+    accumulate = np.float64 if values.dtype.kind == "f" else mean_dtype
+    source = values if all_valid else np.where(valid, values, 0)
+    rows, columns = values.shape
+    row_block = rows // row_starts.size
+    column_block = columns // column_starts.size
+    if all_valid and (
+        rows == row_block * row_starts.size
+        and columns == column_block * column_starts.size
+    ):
+        return source.reshape(
+            row_starts.size,
+            row_block,
+            column_starts.size,
+            column_block,
+        ).mean(axis=(1, 3), dtype=accumulate).astype(mean_dtype, copy=False)
+    summed = _reduce_blocks(source, row_starts, column_starts, accumulate)
     if all_valid:
-        # IN THE SUM'S OWN DTYPE.  ``np.diff`` answers in the index dtype,
-        # and float32 divided by int64 is promoted to float64 for the whole
-        # array and demoted again on the way into ``out`` -- two float64
-        # passes over one and three quarter million cells, which measured
-        # 3.86 ms against 0.55 for the float32 division they stand in for,
-        # and cost more than the block sum they divide.
-        counts_dtype = summed.dtype
-        row_counts = np.diff(np.r_[row_starts, values.shape[0]]).astype(
-            counts_dtype, copy=False
-        )
-        column_counts = np.diff(np.r_[column_starts, values.shape[1]]).astype(
-            counts_dtype, copy=False
-        )
-        np.divide(summed, row_counts[:, np.newaxis], out=summed)
-        np.divide(summed, column_counts[np.newaxis, :], out=summed)
-        return summed
-    if counts is None:
-        counts = _reduce_blocks(valid, row_starts, column_starts, np.int64)
-    means = np.zeros(summed.shape, dtype=mean_dtype)
+        return _divided_by_block_sizes(
+            summed, values.shape, row_starts, column_starts
+        ).astype(mean_dtype, copy=False)
+    counts = _reduce_blocks(valid, row_starts, column_starts, np.int64)
+    means = np.zeros(summed.shape, dtype=accumulate)
     np.divide(summed, counts, out=means, where=counts != 0)
+    return _masked_where_empty(means.astype(mean_dtype, copy=False), counts)
+
+
+def _divided_by_block_sizes(
+    summed: np.ndarray,
+    shape: tuple[int, int],
+    row_starts: np.ndarray,
+    column_starts: np.ndarray,
+) -> np.ndarray:
+    """``summed`` divided in place by each block's sample count.
+
+    IN THE SUM'S OWN DTYPE.  ``np.diff`` answers in the index dtype, and
+    float32 divided by int64 is promoted to float64 for the whole array
+    and demoted again on the way into ``out`` -- two float64 passes over
+    one and three quarter million cells, which measured 3.86 ms against
+    0.55 for the float32 division they stand in for, and cost more than
+    the block sum they divide.
+    """
+
+    counts_dtype = summed.dtype
+    row_counts = np.diff(np.r_[row_starts, shape[0]]).astype(
+        counts_dtype, copy=False
+    )
+    column_counts = np.diff(np.r_[column_starts, shape[1]]).astype(
+        counts_dtype, copy=False
+    )
+    np.divide(summed, row_counts[:, np.newaxis], out=summed)
+    np.divide(summed, column_counts[np.newaxis, :], out=summed)
+    return summed
+
+
+def _masked_where_empty(
+    means: np.ndarray, counts: np.ndarray
+) -> np.ndarray | np.ma.MaskedArray:
+    """A block with no valid sample comes back masked, never divided by zero."""
+
     return means if bool(np.all(counts)) else np.ma.array(
         means, mask=counts == 0, copy=False
     )

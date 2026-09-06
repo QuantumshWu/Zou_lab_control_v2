@@ -1,16 +1,27 @@
-"""The console's default axis pick can always carry what the kind draws.
+"""The console fixes a panel's kind; every axis choice is the library's.
 
-A camera frame's Point domain has one row, and the plot library's curve
-default walks the point domain -- so "1D vector" on a camera signal opened as
-one invisible point.  The workbench resolver re-points a degenerate series x
-onto a dense axis through the library's own composition authority.
+A camera frame's Point domain has one row, and "1D vector" on a camera
+signal once opened as one invisible point -- so this resolver grew a rule
+of its own that re-pointed a degenerate x, and the console's default and
+the library's diverged on every shape the two rules read differently.
+The one default table in ``zlc_plot._kinds.defaults`` carries the rule;
+``fitting_panel_spec`` returns exactly what ``fitting_spec`` returns.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-from zlc_plot import AxisRef, PlotKind
+from zlc_data import (
+    REPEAT,
+    SCALAR_DOMAIN,
+    AxisId,
+    AxisSpec,
+    DatasetSchema,
+    DomainSpec,
+    ValueSchema,
+)
+from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, PlotKind, fitting_spec
 from zlc_plot.semantics import axis_size
 from data_factory import (
     axis,
@@ -44,18 +55,21 @@ def _scanned_schema():
 def test_default_curve_on_a_camera_frame_lands_on_a_dense_axis() -> None:
     schema = _camera_frame_schema()
     spec = fitting_panel_spec(schema, "curve")
+    assert spec == fitting_spec(schema, PlotKind.CURVE)
     assert spec is not None and spec.kind is PlotKind.CURVE
     assert axis_size(schema, spec.x) > 1
 
 def test_default_curve_on_a_scan_keeps_the_scan_axis() -> None:
     schema = _scanned_schema()
     spec = fitting_panel_spec(schema, "curve")
+    assert spec == fitting_spec(schema, PlotKind.CURVE)
     assert spec is not None
     assert spec.x == AxisRef.point("x")
 
 def test_facet_grid_curve_cell_default_is_also_dense() -> None:
     schema = _camera_frame_schema()
     spec = fitting_panel_spec(schema, "facet_grid", "curve")
+    assert spec == fitting_spec(schema, PlotKind.FACET_GRID, cell=PlotKind.CURVE)
     if spec is None:
         # A camera frame may not admit a facet grid at all; that refusal is
         # the library's own and not this resolver's concern.
@@ -65,7 +79,39 @@ def test_facet_grid_curve_cell_default_is_also_dense() -> None:
 def test_image_specs_pass_through_untouched() -> None:
     schema = _camera_frame_schema()
     spec = fitting_panel_spec(schema, "image")
+    assert spec == fitting_spec(schema, PlotKind.IMAGE)
     assert spec is not None and spec.kind is PlotKind.IMAGE
+
+def test_the_resolver_never_chooses_an_axis_of_its_own() -> None:
+    """The shape on which two rules gave two answers.
+
+    Two repeat axes, one of a single value and one of five, over an
+    unnamed point row and a scalar cell: the library's table answered
+    ``r1`` and this resolver re-pointed to ``r2``.  The table now moves a
+    degenerate x to the next axis with variation itself, and this layer
+    returns its answer for every kind it is asked for.
+    """
+
+    repeat = DomainSpec(
+        (5,),
+        (
+            AxisSpec(AxisId("r1"), "r1", REPEAT, 1, (0,)),
+            AxisSpec(AxisId("r2"), "r2", REPEAT, 5, (0, 1, 2, 3, 4)),
+        ),
+        ((0,) * 5, (0, 1, 2, 3, 4)),
+    )
+    schema = DatasetSchema(
+        repeat,
+        DomainSpec((1,), (), ()),
+        SCALAR_DOMAIN,
+        ValueSchema.scalar(np.dtype("<f8")),
+    )
+    expected = CurvePlot(AxisRef.repeat("r2"))
+    assert fitting_panel_spec(schema, "curve") == fitting_spec(schema, PlotKind.CURVE) == expected
+    assert fitting_panel_spec(schema, "facet_grid", "curve") == fitting_spec(
+        schema, PlotKind.FACET_GRID, cell=PlotKind.CURVE
+    ) == FacetGridPlot(None, expected)
+    assert fitting_panel_spec(schema) == fitting_spec(schema) == expected
 
 def test_the_workbench_joins_the_parameters_that_move_together() -> None:
     """The view layer cannot see the declaration, so this seam answers.

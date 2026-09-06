@@ -351,14 +351,26 @@ def decode_plot_recipe(value: object) -> dict[str, object]:
     }
 
 
-def read_figure_plot(
-    info: Mapping[str, Any], arrays: Mapping[str, np.ndarray], dataset: str,
-) -> tuple[object, dict[str, object]]:
+def figure_plot_recipe(info: Mapping[str, Any], dataset: str) -> dict[str, object]:
+    """The decoded recipe one dataset of a figure was drawn with.
+
+    Read from the info document alone: what a panel showed is a fact about
+    the recipe, and asking for it must not materialise the Dataset beside
+    it -- a viewer describing an archive did exactly that, copying every
+    array once to throw the copy away.
+    """
+
     recipes = info.get("sections", {}).get("plot")
     datasets = info.get("sections", {}).get("dataset")
     if not isinstance(recipes, Mapping) or not isinstance(datasets, Mapping) or set(recipes) != set(datasets):
         raise ValueError("figure must carry one exact plot recipe per dataset")
-    recipe = decode_plot_recipe(recipes[str(dataset)])
+    return decode_plot_recipe(recipes[str(dataset)])
+
+
+def read_figure_plot(
+    info: Mapping[str, Any], arrays: Mapping[str, np.ndarray], dataset: str,
+) -> tuple[object, dict[str, object]]:
+    recipe = figure_plot_recipe(info, dataset)
     snapshot = read_dataset(info, arrays, str(dataset))
     return _restore_overlay(snapshot, arrays, recipe.pop("overlay")), recipe
 
@@ -430,13 +442,17 @@ def open_figure_host(
 
 
 def _prepare_figure_artifact(
-    base_path: str | Path, *, plot_input: object, spec: object,
-    parameters: Mapping[str, object], size: str, viewport: RectangleRange | None = None,
-    classifier_thresholds: object = (), facet_focus: int | None = None,
-    fit: Mapping[str, object] | None = None, lineage: Mapping[str, object] | None = None,
-    selectors: object = (),
+    base_path: str | Path, *, plot_input: object,
+    lineage: Mapping[str, object] | None = None,
     source: Mapping[str, object] | None = None,
 ) -> tuple[OwnedSnapshot, Path, object]:
+    """The paths and the data of one archive, and the write that makes it.
+
+    The recipe is not an input: it is read off the settled
+    ``DisplayDescription`` the write is handed, which is the one truth of
+    what the host was showing when the archive was taken.
+    """
+
     selected = Path(base_path).expanduser().resolve()
     image_path = selected if selected.suffix else selected.with_suffix(".png")
     if image_path.suffix.lower() not in {".png", ".pdf", ".svg"}:
@@ -521,18 +537,7 @@ def _submit_figure_artifact(
     """
 
     snapshot, _image_path, write = _prepare_figure_artifact(
-        base_path,
-        plot_input=plot_input,
-        spec=spec,
-        parameters=parameters,
-        size=size,
-        viewport=viewport,
-        classifier_thresholds=classifier_thresholds,
-        facet_focus=facet_focus,
-        fit=fit,
-        lineage=lineage,
-        selectors=selectors,
-        source=source,
+        base_path, plot_input=plot_input, lineage=lineage, source=source
     )
     dispatch = getattr(host, "dispatch_control", None)
     require_session = getattr(host, "_require_session", None)
@@ -615,18 +620,7 @@ def save_figure_artifact(
         return operation.value
 
     snapshot, image_path, write = _prepare_figure_artifact(
-        base_path,
-        plot_input=plot_input,
-        spec=spec,
-        parameters=parameters,
-        size=size,
-        viewport=viewport,
-        classifier_thresholds=classifier_thresholds,
-        facet_focus=facet_focus,
-        fit=fit,
-        lineage=lineage,
-        selectors=selectors,
-        source=source,
+        base_path, plot_input=plot_input, lineage=lineage, source=source
     )
 
     owned_host = build_figure_host(
@@ -656,6 +650,6 @@ def save_figure_artifact(
 
 __all__ = [
     "build_figure_host", "decode_plot_recipe",
-    "encode_plot_recipe", "open_figure_host",
+    "encode_plot_recipe", "figure_plot_recipe", "open_figure_host",
     "read_figure_plot", "save_figure_artifact",
 ]

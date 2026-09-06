@@ -210,3 +210,27 @@ def test_primary_index_history_keeps_source_order_holes_and_site_groups() -> Non
         sample.source_index is None and sample.group_keys == ((),)
         for sample in repeat
     )
+
+def test_a_one_shot_history_skips_the_band_it_is_told_not_to_draw() -> None:
+    """``uncertainty=False`` reaches the single-revision reduction.
+
+    The standard error is a second pass over every value -- squared,
+    masked, reduced -- and a one-shot history (one repeat, no shot index:
+    the ordinary unindexed monitor) estimated it on every revision with
+    the band switched off, because the switch was dropped on the way in.
+    """
+
+    snapshot = _snapshot(0, repeats=1)
+    view = DataView(snapshot)
+    assert view.rolling_history(uncertainty=False).sem is None
+    assert view.rolling_history(
+        group=AxisRef.point("x"), uncertainty=False
+    ).sem is None
+    assert view.rolling_history(uncertainty=True).sem is not None
+    assert view.rolling_history(
+        group=AxisRef.point("x"), uncertainty=True
+    ).sem is not None
+    # A non-MEAN reduction has no band whatever the switch says.
+    assert view.rolling_history(
+        aggregation=Reduction.SUM, uncertainty=True
+    ).sem is None

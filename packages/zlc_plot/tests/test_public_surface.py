@@ -239,7 +239,14 @@ def test_image_site_numbers_use_their_ring_status_style() -> None:
     finally:
         session.close()
 
-def test_session_rolling_history_seeds_per_repeat_then_grows_one_sample_per_revision() -> None:
+def test_session_rolling_history_is_each_publications_own_repeat_axis() -> None:
+    """A static snapshot IS its shot record; the next publication replaces it.
+
+    The repeat axis seeds the history, and a later non-indexed publication
+    is a whole new record rather than one more sample: only Runtime's
+    indexed history grows across publications.
+    """
+
     rolling = PlotSession(_snapshot(repeats=3), RollingPlot())
     try:
         # A static snapshot is a complete shot record: the repeat axis seeds

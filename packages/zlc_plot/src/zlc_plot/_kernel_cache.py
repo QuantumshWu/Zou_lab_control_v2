@@ -13,6 +13,13 @@ here.
 
 ``NUMBA_CACHE_DIR`` remains the override.  Set it and nothing here applies
 -- which is what a sandbox, a CI runner or a read-only checkout needs.
+
+Installed as a wheel there is no checkout: the module sits in
+site-packages, and the folder four levels above it is whatever holds the
+interpreter -- a drive root, a user profile -- and belongs to nobody.
+There numba's own default applies, a ``__pycache__`` beside the module
+with numba's fallback to a per-user cache when that is read-only, and
+nothing here is set.
 """
 
 from __future__ import annotations
@@ -26,16 +33,32 @@ import pathlib
 CACHE_DIRECTORY_NAME = "numba_cache"
 
 
-def _checkout_root() -> pathlib.Path:
-    """The repository root: this module is packages/zlc_plot/src/zlc_plot/."""
+def _checkout_root() -> pathlib.Path | None:
+    """The repository root, when this module lives in a checkout.
 
-    return pathlib.Path(__file__).resolve().parents[4]
+    In a checkout this module is packages/zlc_plot/src/zlc_plot/, and the
+    root is the folder that holds ``packages``; a module anywhere else --
+    site-packages -- is not in a checkout, and ``None`` says so.
+    """
+
+    here = pathlib.Path(__file__).resolve()
+    root = here.parents[4]
+    if here.parent == root / "packages" / "zlc_plot" / "src" / "zlc_plot":
+        return root
+    return None
 
 
 def kernel_cache_dir() -> pathlib.Path:
-    """The directory compiled kernels cache in, whether or not it exists."""
+    """The directory compiled kernels cache in, whether or not it exists.
 
-    return _checkout_root() / CACHE_DIRECTORY_NAME
+    The checkout's ``numba_cache``, or, installed, numba's own default: the
+    ``__pycache__`` beside this module.
+    """
+
+    root = _checkout_root()
+    if root is None:
+        return pathlib.Path(__file__).resolve().parent / "__pycache__"
+    return root / CACHE_DIRECTORY_NAME
 
 
 def install() -> str:
@@ -50,6 +73,11 @@ def install() -> str:
     chosen = os.environ.get("NUMBA_CACHE_DIR")
     if chosen:
         return chosen
+    if _checkout_root() is None:
+        # Numba's default already is the directory kernel_cache_dir names,
+        # and naming it explicitly would only take away numba's fallback
+        # when a package directory is read-only.
+        return ""
     path = kernel_cache_dir()
     try:
         path.mkdir(parents=True, exist_ok=True)

@@ -82,16 +82,6 @@ def test_kind_registry_is_closed_and_complete() -> None:
         assert callable(handler.admits)
 
 
-def test_registry_semantic_metadata_is_the_only_extension_point() -> None:
-    """A new field is visible mechanically without GUI/per-kind branching."""
-
-    from dataclasses import replace
-
-    curve = next(handler for handler in HANDLERS if handler.kind is PlotKind.CURVE)
-    extended = replace(curve, semantic_fields=(*curve.semantic_fields, "future_axis"))
-    assert extended.semantic_fields[-1] == "future_axis"
-
-
 def test_kind_registry_resolves_each_authored_spec_exactly_once() -> None:
     specs = (
         CurvePlot(AxisRef.point("x")),

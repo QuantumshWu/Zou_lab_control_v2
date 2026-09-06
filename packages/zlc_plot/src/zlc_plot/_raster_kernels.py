@@ -188,8 +188,8 @@ def block_sum_unsigned(values, row_starts, column_starts, out):
 
 
 @njit(cache=True, parallel=True, nogil=True)
-def block_sum_valid(values, valid, use_valid, row_starts, column_starts, out, counts):
-    """Sum each block, accumulating wide -- and count, when there is a mask.
+def block_mean_valid(values, valid, use_valid, row_starts, column_starts, out, counts):
+    """Mean each block, accumulating wide -- and count, when there is a mask.
 
     ``np.add.reduceat`` books a segment per output cell -- two million of
     them, one or two samples wide -- and that bookkeeping, not the addition,
@@ -201,12 +201,17 @@ def block_sum_valid(values, valid, use_valid, row_starts, column_starts, out, co
     the compiler unswitches it, and the merged loop measured FASTER than
     the dedicated whole-plane kernel it replaced (0.22 vs 0.33 ms on a
     1200x1920 float32 plane), bit-identical on both paths.  With
-    ``use_valid`` false, ``valid`` and ``counts`` are untouched dummies.
+    ``use_valid`` false, ``valid`` and ``counts`` are untouched dummies and
+    every sample of a block counts; an empty masked block writes zero and
+    a zero count, which the caller masks.
 
-    It accumulates in float64 whatever the plane's dtype, which for a
-    float32 plane is not a looser answer than the one it replaces but a
-    tighter one: ``reduceat`` on float32 accumulates in float32 and lands
-    1e-7 relative away from a float64 reduction, where this lands on it
+    It accumulates in float64 whatever the plane's dtype and divides
+    BEFORE writing, so the block's sum never meets ``out``'s dtype: a
+    finite float32 plane near its range has block totals past it, and a
+    sum written back as float32 came back as an infinite mean of finite
+    samples.  For a float32 plane this is not a looser answer than
+    ``reduceat`` but a tighter one -- float32 accumulation lands 1e-7
+    relative away from a float64 reduction, where this lands on it
     exactly.  For a float64 plane the two differ only by summation order,
     measured at two ulps.
     """
@@ -227,9 +232,13 @@ def block_sum_valid(values, valid, use_valid, row_starts, column_starts, out, co
                             continue
                         seen += 1
                     total += np.float64(values[r, c])
-            out[i, j] = total
             if use_valid:
                 counts[i, j] = seen
+                out[i, j] = total / np.float64(seen) if seen > 0 else 0.0
+            else:
+                out[i, j] = total / np.float64(
+                    (row_stop - row_starts[i]) * (column_stop - column_starts[j])
+                )
 
 
 # ------------------------------------------------------------------- colour
@@ -573,12 +582,15 @@ def fused_masked_leading_float64(
 # ------------------------------------------------------------------ extrema
 @njit(cache=True, parallel=True, nogil=True)
 def finite_extrema(values, valid, use_valid, out):
-    """One pass for ``(finite count, min, max)`` over a masked pool.
+    """One pass for ``(finite count, min, max, all whole)`` over a masked pool.
 
-    Mirrors ``isfinite`` + ``any`` + ``min(where=)`` + ``max(where=)``: four
-    full reads of a two-million-value pool, and a bool plane the size of it,
-    to answer three numbers.  Extrema are order-independent, so the parallel
-    partials are the same numbers the reductions produce.
+    Mirrors ``isfinite`` + ``any`` + ``min(where=)`` + ``max(where=)`` +
+    ``all(x == floor(x), where=)``: five full reads of a two-million-value
+    pool, and a bool plane the size of it, to answer four numbers.  All are
+    order-independent, so the parallel partials are the same numbers the
+    reductions produce.  The fourth is the histogram's: whether every
+    finite sample is a whole number is a fact about every sample, and this
+    is the pass that sees every sample.
     """
 
     threads = out.shape[0] - 1
@@ -588,6 +600,7 @@ def finite_extrema(values, valid, use_valid, out):
         count = 0.0
         low = np.inf
         high = -np.inf
+        whole = 1.0
         for p in range(t * chunk, stop):
             if use_valid and not valid[p]:
                 continue
@@ -599,21 +612,28 @@ def finite_extrema(values, valid, use_valid, out):
                 low = sample
             if sample > high:
                 high = sample
+            if sample != np.floor(sample):
+                whole = 0.0
         out[t, 0] = count
         out[t, 1] = low
         out[t, 2] = high
+        out[t, 3] = whole
     total = 0.0
     lowest = np.inf
     highest = -np.inf
+    all_whole = 1.0
     for t in range(threads):
         total += out[t, 0]
         if out[t, 1] < lowest:
             lowest = out[t, 1]
         if out[t, 2] > highest:
             highest = out[t, 2]
+        if out[t, 3] == 0.0:
+            all_whole = 0.0
     out[threads, 0] = total
     out[threads, 1] = lowest
     out[threads, 2] = highest
+    out[threads, 3] = all_whole
 
 
 @njit(cache=True, parallel=True, nogil=True)
@@ -676,8 +696,16 @@ def masked_centred_square_sums(values: Any, offset: float, valid: Any) -> Any:
     return out
 
 
-def masked_finite_extrema(values: Any, valid: Any) -> tuple[int, float, float] | None:
-    """``(count, low, high)`` for a flat float pool, or ``None`` to defer."""
+def masked_finite_extrema(
+    values: Any, valid: Any
+) -> tuple[int, float, float, bool] | None:
+    """``(count, low, high, integral)`` for a flat float pool, or ``None`` to defer.
+
+    ``integral`` is whether every finite sample is a whole number (vacuously
+    so for an empty pool).  The mask stand-in goes through :func:`readable`
+    like a real mask: a writable dummy typed a second signature for the
+    kernel, and which one a caller got depended on whether it had a mask.
+    """
 
     if not engaged():
         return None
@@ -690,15 +718,20 @@ def masked_finite_extrema(values: Any, valid: Any) -> tuple[int, float, float] |
         if mask.size != flat.size:
             return None
     else:
-        mask = np.zeros(1, dtype=np.bool_)
+        mask = readable(np.zeros(1, dtype=np.bool_))
     threads = 1
     if HAVE_NUMBA:
         from numba import get_num_threads
 
         threads = int(get_num_threads())
-    out = np.empty((threads + 1, 3), dtype=np.float64)
+    out = np.empty((threads + 1, 4), dtype=np.float64)
     finite_extrema(flat, mask, use_valid, out)
-    return int(out[threads, 0]), float(out[threads, 1]), float(out[threads, 2])
+    return (
+        int(out[threads, 0]),
+        float(out[threads, 1]),
+        float(out[threads, 2]),
+        bool(out[threads, 3] != 0.0),
+    )
 
 
 # -------------------------------------------------------------- polylines
@@ -1060,6 +1093,73 @@ def raster_prepared_images(
             out[row, column, 3] = lut[code, 3]
 
 
+@njit(cache=True, nogil=True)
+def ellipse_boundary_distance(dx, dy, radius_x, radius_y):
+    """The distance from a point to the boundary of an axis-aligned ellipse.
+
+    ``(dx, dy)`` is the point relative to the centre.  The nearest boundary
+    point of ``(x / e0)**2 + (y / e1)**2 = 1`` with ``e0 >= e1`` to a
+    first-quadrant query ``(y0, y1)`` is ``(e0**2 y0 / (s + e0**2),
+    e1**2 y1 / (s + e1**2))`` for the one root ``s`` of
+
+        (e0 y0 / (s + e0**2))**2 + (e1 y1 / (s + e1**2))**2 = 1
+
+    above ``-e1**2``; Eberly's bracket makes bisection on it robust for
+    every query, including the ones on and inside the evolute where
+    Newton's method wanders.  Written in the normalised variable
+    ``t = s / e1**2`` so the bracket is dimensionless.  Bisection halves a
+    bracket no wider than the query's own distance, so 64 steps are far
+    past double precision and the loop leaves as soon as it stops moving.
+    """
+
+    y0 = abs(dx)
+    y1 = abs(dy)
+    e0 = radius_x
+    e1 = radius_y
+    if e0 < e1:
+        y0, y1 = y1, y0
+        e0, e1 = e1, e0
+    if y1 > 0.0:
+        if y0 > 0.0:
+            z0 = y0 / e0
+            z1 = y1 / e1
+            g = z0 * z0 + z1 * z1 - 1.0
+            if g == 0.0:
+                return 0.0
+            r0 = (e0 / e1) * (e0 / e1)
+            n0 = r0 * z0
+            s0 = z1 - 1.0
+            s1 = 0.0 if g < 0.0 else np.sqrt(n0 * n0 + z1 * z1) - 1.0
+            s = 0.0
+            for _ in range(64):
+                s = 0.5 * (s0 + s1)
+                if s == s0 or s == s1:
+                    break
+                ratio0 = n0 / (s + r0)
+                ratio1 = z1 / (s + 1.0)
+                g = ratio0 * ratio0 + ratio1 * ratio1 - 1.0
+                if g > 0.0:
+                    s0 = s
+                elif g < 0.0:
+                    s1 = s
+                else:
+                    break
+            x0 = r0 * y0 / (s + r0)
+            x1 = y1 / (s + 1.0)
+            return np.sqrt((x0 - y0) * (x0 - y0) + (x1 - y1) * (x1 - y1))
+        return abs(y1 - e1)
+    # On the major axis the nearest point is the vertex only outside the
+    # evolute's cusp; inside it the foot leaves the axis.
+    numerator = e0 * y0
+    denominator = e0 * e0 - e1 * e1
+    if numerator < denominator:
+        fraction = numerator / denominator
+        x0 = e0 * fraction
+        x1 = e1 * np.sqrt(1.0 - fraction * fraction)
+        return np.sqrt((x0 - y0) * (x0 - y0) + x1 * x1)
+    return abs(y0 - e0)
+
+
 @njit(cache=True, parallel=True, nogil=True)
 def raster_fit_ellipses(
     geometry,
@@ -1070,7 +1170,17 @@ def raster_fit_ellipses(
     clips,
     out,
 ):
-    """Paint independent axis-aligned fit rings and center markers."""
+    """Paint independent axis-aligned fit rings and center markers.
+
+    A ring is a stroke of ``ring_widths`` pixels centred on the ellipse's
+    boundary, so a pixel's coverage is decided by its centre's distance to
+    that boundary.  ``|n - 1| * min(rx, ry)``, with ``n`` the normalised
+    radius, is a LOWER bound on it (``n`` is ``1 / min(rx, ry)``-Lipschitz)
+    and the exact distance for a circle; a pixel it cannot rule out pays
+    for :func:`ellipse_boundary_distance`, and only when the ring is not a
+    circle.  Taken as the distance itself, the bound stroked a 5:1 ring
+    1.6 px into its interior.
+    """
 
     height, width = out.shape[:2]
     for item in prange(geometry.shape[0]):
@@ -1098,6 +1208,10 @@ def raster_fit_ellipses(
                     + (dy / radius_y) * (dy / radius_y)
                 )
                 distance = abs(normalized - 1.0) * scale
+                if radius_x != radius_y and distance < ring_radius + 0.5:
+                    distance = ellipse_boundary_distance(
+                        dx, dy, radius_x, radius_y
+                    )
                 amount = min(1.0, ring_radius + 0.5 - distance)
                 if amount > 0.0:
                     alpha = (

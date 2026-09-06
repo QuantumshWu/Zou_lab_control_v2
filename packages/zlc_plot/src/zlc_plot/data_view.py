@@ -2067,7 +2067,10 @@ class DataView:
                 buckets,
                 Reduction.SUM,
             )
-            sums_fold = np.nan_to_num(sums_fold, nan=0.0)
+            # An absent bucket has a zero count and is masked below; a
+            # present one keeps whatever its sum IS, an overflowed
+            # infinity included, so that the finiteness rule of validity
+            # can refuse it exactly as the generic path does.
             with np.errstate(invalid="ignore", divide="ignore"):
                 y_flat = (
                     sums_fold / counts
@@ -2124,7 +2127,6 @@ class DataView:
                     buckets,
                     Reduction.SUM,
                 )
-                folded = np.nan_to_num(folded, nan=0.0)
                 with np.errstate(invalid="ignore", divide="ignore"):
                     return np.where(counts > 0, folded / counts, np.nan)
 
@@ -3274,16 +3276,18 @@ class DataView:
         *,
         group: AxisRef | None = None,
         aggregation: Reduction = Reduction.MEAN,
+        uncertainty: bool = True,
     ) -> RollingHistory:
         """Reduce one source revision to a one-shot rolling history.
 
-        The MEAN's standard error and count are always computed alongside;
-        whether the operator shows the band is only a display choice.
+        ``uncertainty`` is whether the caller will DRAW the band, exactly
+        as for :meth:`rolling_history`: the standard error is a second
+        pass over every value, and only a MEAN has one.
         """
 
         self.validate_rolling(group)
         aggregation = _validate_aggregation(aggregation)
-        uncertainty = aggregation is Reduction.MEAN
+        uncertainty = bool(uncertainty) and aggregation is Reduction.MEAN
         if group is None:
             pooled = self.pooled_values()
             value = _reduce_scalar(pooled, aggregation)
@@ -3403,7 +3407,7 @@ class DataView:
         repeats = schema_repeat_count(self._schema)
         if repeats <= 1:
             return self._single_revision_history(
-                group=group, aggregation=aggregation
+                group=group, aggregation=aggregation, uncertainty=uncertainty
             )
         self.validate_rolling(group)
         aggregation = _validate_aggregation(aggregation)
@@ -4367,13 +4371,12 @@ class DataView:
             and positions.size < resolved.coordinate.canonical.size
         )
         if cached_flat is None and not sparse:
-            cached_flat = _readonly(
-                np.array(
-                    resolved.coordinate.indices,
-                    dtype=np.int64,
-                    copy=True,
-                ).reshape(-1)
-            )
+            # One copy, sealed in place: the plane is this owner's own,
+            # made this instant, so there is nothing to isolate it from.
+            cached_flat = np.array(
+                resolved.coordinate.indices, dtype=np.int64, copy=True
+            ).reshape(-1)
+            cached_flat.setflags(write=False)
             self._flat_cache[ref] = cached_flat
         if sparse:
             selected_indices = np.asarray(resolved.coordinate.indices).flat[
@@ -4522,18 +4525,16 @@ def aligned_histogram_edges(
     *,
     limits: tuple[float, float] | None = None,
 ) -> NDArray[np.float64]:
-    """Bin edges for one histogram; integer-valued samples get integer bins.
+    """Bin edges for one histogram pool; integer-valued samples get integer bins.
 
-    Equal-width float bins over integer-valued samples alias: a non-integer
-    bin width leaves some bins containing no representable value, which shows
-    up as structural zero-count holes in the middle of the distribution.
-    Integer-valued data therefore bins with an integer width on half-open
-    ``k - 0.5`` boundaries (the bin count may shrink below the request when
-    the value range is narrower); everything else keeps NumPy's equal-width
-    edges over the same range.
+    ``values`` is EVERY sample the histogram will bin.  Whether they are all
+    whole numbers is a fact about all of them and no prefix can prove it:
+    the same multiset with its two fractions stored last once binned as a
+    single integer bin, and stored first as the ten bins asked for.  A
+    caller that already made its own pass over the pool hands the facts to
+    :func:`histogram_edges`, which is where the edges are decided.
     """
 
-    bins = max(1, int(bins))
     flat = np.asarray(values).reshape(-1)
     if flat.dtype.kind == "f":
         flat = flat[np.isfinite(flat)]
@@ -4543,12 +4544,33 @@ def aligned_histogram_edges(
         low, high = float(np.min(flat)), float(np.max(flat))
     else:
         low, high = 0.0, 1.0
+    integral = flat.dtype.kind in "iub" or (
+        bool(flat.size) and bool(np.all(flat == np.floor(flat)))
+    )
+    return histogram_edges(low, high, bins, integral=integral)
+
+
+def histogram_edges(
+    low: float, high: float, bins: int, *, integral: bool
+) -> NDArray[np.float64]:
+    """The edges of ``bins`` bins over ``[low, high]``.
+
+    Equal-width float bins over integer-valued samples alias: a non-integer
+    bin width leaves some bins containing no representable value, which shows
+    up as structural zero-count holes in the middle of the distribution.
+    Integer-valued data therefore bins with an integer width on half-open
+    ``k - 0.5`` boundaries (the bin count may shrink below the request when
+    the value range is narrower); everything else keeps NumPy's equal-width
+    edges over the same range.  ``integral`` is the caller's proof that
+    every binned sample is a whole number, and only a pass over all of them
+    can give it: an integer dtype proves it by itself, a float pool by
+    being checked to its end.
+    """
+
+    bins = max(1, int(bins))
+    low, high = float(low), float(high)
     if high <= low:
         high = low + 1.0
-    integral = flat.dtype.kind in "iub"
-    if not integral and flat.size:
-        probe = flat[:65536]
-        integral = bool(np.all(probe == np.floor(probe)))
     if not integral:
         return np.linspace(low, high, bins + 1, dtype=float)
     first = math.floor(low + 0.5)
@@ -4665,9 +4687,21 @@ def _frequency_span(dtype: np.dtype, selected: NDArray[Any]) -> tuple[int, int] 
         return 0, 1
     low = int(np.min(selected))
     high = int(np.max(selected))
-    if high - low + 1 > _FREQUENCY_LEVEL_LIMIT:
+    if not _int64_holds(low, high) or high - low + 1 > _FREQUENCY_LEVEL_LIMIT:
         return None
     return low, high - low + 1
+
+
+def _int64_holds(low: int, high: int) -> bool:
+    """Whether both levels are int64 values.
+
+    The table is addressed by an int64 difference from its offset, so a
+    level past int64 -- the upper half of uint64 -- has no place in it
+    and the histogram counts the pool the ordinary way instead.
+    """
+
+    int64 = np.iinfo(np.int64)
+    return int64.min <= low and high <= int64.max
 
 
 def _apply_shot(
@@ -4695,6 +4729,8 @@ def _apply_shot(
         return table, offset
     low = int(np.min(selected))
     high = int(np.max(selected))
+    if not _int64_holds(low, high):
+        return None
     if low < offset or high >= offset + table.size:
         new_offset = min(offset, low)
         new_end = max(offset + table.size, high + 1)
@@ -4966,63 +5002,6 @@ def _stride_zero_all_true(mask: NDArray[np.bool_]) -> bool:
     return bool(mask.flat[0])
 
 
-def finite_probe(
-    flat: NDArray[Any],
-    valid: NDArray[np.bool_] | None = None,
-    limit: int = 65536,
-) -> NDArray[np.float64]:
-    """The first ``limit`` finite values, without a full-pool mask plane.
-
-    Same values, same order as ``_finite_probe`` over a materialised mask --
-    the mask is simply built one block at a time, because a pool whose head
-    is finite (every real pool) stops after the first.
-    """
-
-    collected: list[NDArray[Any]] = []
-    total = 0
-    for start in range(0, int(flat.size), limit):
-        block = flat[start : start + limit]
-        mask = np.isfinite(block)
-        if valid is not None:
-            mask &= valid[start : start + limit]
-        chosen = block[mask]
-        if chosen.size:
-            take = chosen[: limit - total]
-            collected.append(np.asarray(take, dtype=np.float64))
-            total += int(take.size)
-        if total >= limit:
-            break
-    if not collected:
-        return np.empty(0, dtype=np.float64)
-    return np.concatenate(collected)
-
-
-def _finite_probe(
-    flat: NDArray[Any],
-    finite: NDArray[np.bool_],
-    limit: int = 65536,
-) -> NDArray[np.float64]:
-    """The first ``limit`` finite values, without gathering the whole pool.
-
-    Exactly ``flat[finite][:limit]`` -- block-scanned so a pool whose head
-    is finite (every real pool) stops after one block.
-    """
-
-    collected: list[NDArray[np.float64]] = []
-    total = 0
-    for start in range(0, int(flat.size), limit):
-        block = flat[start : start + limit][finite[start : start + limit]]
-        if block.size:
-            take = block[: limit - total]
-            collected.append(np.asarray(take, dtype=np.float64))
-            total += int(take.size)
-        if total >= limit:
-            break
-    if not collected:
-        return np.empty(0, dtype=np.float64)
-    return np.concatenate(collected)
-
-
 def _reduce_scalar(values: NDArray[Any], aggregation: Reduction) -> float:
     """Reduce one already-valid flat pool with the canonical rolling rules."""
 
@@ -5120,12 +5099,19 @@ def _masked_leading_reduce(
     to retain native values and boolean validity without allocating that
     int64 plane.  Values where ``counts`` is zero are unspecified; validity
     is the contract.
+
+    A floating stack's MEAN and SUM accumulate in float64 whatever its
+    dtype, as every other reduction in this module does: three float32
+    samples 1e8, 1, -1e8 sum to 1 in float64 and to 0 in float32, and the
+    same view answered both depending on which layout the data took.
+    Integers keep NumPy's own exact accumulators.
     """
 
     identity = _leading_identity(values, usable)
     if identity is not None:
         value, valid = identity
         return value, np.asarray(valid, dtype=np.int64)
+    wide = np.float64 if values.dtype.kind == "f" else None
     if _stride_zero_all_true(usable) or bool(np.all(usable)):
         # With no holes, ``where=usable`` and a separately summed count plane
         # are pure overhead.  Plain leading-axis reductions are NumPy's
@@ -5136,9 +5122,9 @@ def _masked_leading_reduce(
             np.asarray(count, dtype=np.int64), values.shape[1:]
         )
         if aggregation is Reduction.MEAN:
-            result = np.mean(values, axis=0)
+            result = np.mean(values, axis=0, dtype=wide)
         elif aggregation is Reduction.SUM:
-            result = np.sum(values, axis=0)
+            result = np.sum(values, axis=0, dtype=wide)
         elif aggregation is Reduction.MIN:
             result = np.min(np.asarray(values, dtype=np.float64), axis=0)
         elif aggregation is Reduction.MAX:
@@ -5168,9 +5154,9 @@ def _masked_leading_reduce(
         # caller through ``counts``.
         warnings.simplefilter("ignore", category=RuntimeWarning)
         if aggregation is Reduction.MEAN:
-            result = np.mean(values, axis=0, where=usable)
+            result = np.mean(values, axis=0, where=usable, dtype=wide)
         elif aggregation is Reduction.SUM:
-            result = np.sum(values, axis=0, where=usable, initial=0)
+            result = np.sum(values, axis=0, where=usable, initial=0, dtype=wide)
             result = np.where(counts > 0, result, np.nan)
         elif aggregation is Reduction.MIN:
             converted = np.asarray(values, dtype=np.float64)

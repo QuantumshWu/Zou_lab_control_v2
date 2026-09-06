@@ -368,3 +368,51 @@ def test_the_value_axis_mode_is_the_operator_s_own_control() -> None:
     controls = {control.name: control for control in
                 parameter_controls(schema, values)}
     assert controls["x_min"].unavailable_reason == ""
+
+
+def _pool_snapshot(values: np.ndarray) -> OwnedSnapshot:
+    """One float pool, in the order given."""
+
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"shot": [0.0]}),
+        cell_axes=(axis("sample", size=values.size),),
+        dtype=np.float64,
+    )
+    return make_snapshot(schema, values.reshape(1, 1, -1), revision=1)
+
+
+def test_the_bins_of_a_pool_do_not_depend_on_its_storage_order() -> None:
+    """Whether every sample is a whole number is a fact about every sample.
+
+    65536 zeros and the fractions 0.1 and 0.4 are one multiset whichever
+    end the fractions are stored at.  Classified from a 65536-sample
+    prefix, the pool with its fractions last was "all integers" and drew
+    ONE integer bin where the same pool fractions-first drew the ten bins
+    asked for -- through the public edge helper and through the panel.
+    """
+
+    from zlc_plot.data_view import aligned_histogram_edges
+
+    fractions_last = np.concatenate([np.zeros(65536), [0.1, 0.4]])
+    fractions_first = np.concatenate([[0.1, 0.4], np.zeros(65536)])
+    np.testing.assert_array_equal(
+        aligned_histogram_edges(fractions_last, 10),
+        aligned_histogram_edges(fractions_first, 10),
+    )
+    assert aligned_histogram_edges(fractions_last, 10).size == 11
+
+    edges = []
+    for pool in (fractions_last, fractions_first):
+        session = PlotSession(
+            _pool_snapshot(pool),
+            HistogramPlot(),
+            parameters={"bin_count": 10, "x_relim_mode": "tight"},
+        )
+        try:
+            session.rgba()
+            edges.append(np.asarray(session._payload.edges.canonical))
+        finally:
+            session.close()
+    np.testing.assert_array_equal(edges[0], edges[1])
+    assert edges[0].size == 11

@@ -32,7 +32,7 @@ import re
 from typing import Any
 
 import numpy as np
-from zlc_plot import read_figure_plot
+from zlc_plot import figure_plot_recipe, read_figure_plot
 
 from zlc_data.figure_archive import read_archive
 
@@ -1359,7 +1359,7 @@ def describe_archive(
     signal = str(source.get("signal") or "").strip()
     label = f"{title} — {signal}" if title and signal and title != signal else title or signal
     datasets = tuple((key, label or key) for key in keys)
-    recipes = {key: read_figure_plot(info, arrays, key)[1] for key in keys}
+    recipes = {key: figure_plot_recipe(info, key) for key in keys}
     flow = _lineage_graph(sections["lineage"], source=source)
     return ArchiveDescription(
         name=str(info.get("name", "")),

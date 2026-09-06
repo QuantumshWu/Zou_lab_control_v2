@@ -192,6 +192,85 @@ def test_camera_clamps_its_angles() -> None:
     assert camera.elevation_deg == 80.0
     assert camera.zoom == 6.0
 
+def test_the_accepted_camera_parameters_are_the_cameras_own() -> None:
+    """A display value the camera cannot show is not display state.
+
+    The camera owns its range; the parameters were accepted as any finite
+    number, so a written zoom of 100 was held while the scene showed 6,
+    and every wheel notch back moved the hidden 100 and not the picture.
+    The accept boundary reads the value back through the camera, so the
+    state, the readout, the recipe and the scene are one number.
+    """
+
+    from zlc_plot.config import DEFAULTS
+    from zlc_plot.specs import parameter_schema_for
+
+    spec = ImagePlot(AxisRef.point("ax"), AxisRef.point("ay"))
+    accepted = dict(
+        parameter_schema_for(spec, style=DEFAULTS.style).initial_values(
+            {"camera_zoom": 100.0, "camera_elevation": 0.0, "camera_azimuth": 400.0}
+        )
+    )
+    camera = HeightBarCamera(azimuth_deg=400.0, elevation_deg=0.0, zoom=100.0)
+    assert accepted["camera_zoom"] == camera.zoom == 6.0
+    assert accepted["camera_elevation"] == camera.elevation_deg == 8.0
+    assert accepted["camera_azimuth"] == camera.azimuth_deg == 400.0
+
+    session = _session()
+    try:
+        session.set_parameter("presentation", "height_bars")
+        session.set_parameters({"camera_zoom": 100.0, "camera_elevation": 0.0})
+        session.rgba()
+        state = session.display_state
+        assert float(state["camera_zoom"]) == 6.0
+        assert float(state["camera_elevation"]) == 8.0
+        rendered = session._renderer._height_bars_rendered_camera
+        assert rendered.zoom == float(state["camera_zoom"])
+        assert rendered.elevation_deg == float(state["camera_elevation"])
+    finally:
+        session.close()
+
+def test_the_elevation_planes_are_cached_by_both_engines(monkeypatch) -> None:
+    """A second frame at the same camera derives nothing.
+
+    The scanline branch computed the two elevation-scaled planes and
+    walked past the cache write, so every frame of a still camera derived
+    them again; only the numpy branch published its pair.
+    """
+
+    from zlc_plot import _height3d_raster, _height3d_scanline
+
+    heights = np.asarray([[0.2, 0.5, 0.9], [0.4, 0.1, 0.7]])
+    colors = _ramp_table()
+    original = _height3d_scanline._derive_z_planes
+    calls = []
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(_height3d_scanline, "_derive_z_planes", counting)
+    previous = _height3d_raster._ENGINE
+    for engine in ("numba", "numpy"):
+        _height3d_raster._ENGINE = engine
+        try:
+            if engine == "numba" and not _height3d_raster._scanline_selected():
+                pytest.skip("no compiled scanline engine available")
+            cache: dict = {}
+            frames = []
+            for _ in range(2):
+                frame, _scene = render_height_bars(
+                    heights, colors, camera=HeightBarCamera(),
+                    value_limits=(0.0, 1.0), width=48, height=32,
+                    render_cache=cache,
+                )
+                frames.append(frame.copy())
+                assert "derived_z_key" in cache, engine
+        finally:
+            _height3d_raster._ENGINE = previous
+        np.testing.assert_array_equal(frames[0], frames[1])
+    assert len(calls) == 1, "the scanline engine derived the planes twice"
+
 # --------------------------------------------------------------- session
 def test_presentation_roundtrip_is_bit_identical_and_keeps_selectors() -> None:
     session = _session()

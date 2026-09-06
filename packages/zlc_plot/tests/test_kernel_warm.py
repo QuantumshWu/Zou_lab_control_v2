@@ -19,6 +19,7 @@ import matplotlib
 
 matplotlib.use("Agg", force=True)
 
+import numpy as np
 import pytest
 
 from zlc_plot import _kernel_warm
@@ -206,3 +207,43 @@ def test_the_regular_image_promotion_is_sealed_at_its_boundary() -> None:
     assert seen == [False], "the kernel must only ever see a sealed plane"
     assert promoted.dtype == np.float64 and promoted.flags.c_contiguous
     assert plane.flags.writeable, "sealing is a view, never a side effect on the caller"
+
+
+def test_the_zoom_the_warmer_renders_is_centred_on_the_image(monkeypatch) -> None:
+    """The warmer's frame is a (repeat, point, y, x) block; the picture is
+    its trailing two dimensions.  Read as ``shape[-3:-1]`` a 3 x 5 image
+    was 1 x 3, so the zoom work was centred on (1.5, 0.5) with the wrong
+    aspect -- a viewport no operator ever opens, compiled and cached in
+    place of the one they do."""
+
+    import zlc_plot
+    from zlc_plot import _height3d_raster, _raster_kernels, AxisRef, ImagePlot
+
+    viewports = []
+    original = zlc_plot.PlotSession.set_viewport
+
+    def recording(self, x, y):
+        viewports.append((x, y))
+        return original(self, x, y)
+
+    monkeypatch.setattr(zlc_plot.PlotSession, "set_viewport", recording)
+    previous_plot = _raster_kernels.ENGINE
+    previous_h3d = _height3d_raster._ENGINE
+    _raster_kernels.ENGINE = "numpy"
+    _height3d_raster._ENGINE = "numpy"
+    try:
+        snapshot = _kernel_warm._image_snapshot(3, 5, np.float64)
+        assert np.asarray(snapshot.block.values).shape == (1, 1, 3, 5)
+        _kernel_warm._render(
+            snapshot,
+            ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y")),
+            zoom_steps=1,
+        )
+    finally:
+        _raster_kernels.ENGINE = previous_plot
+        _height3d_raster._ENGINE = previous_h3d
+    assert len(viewports) == 1
+    x, y = viewports[0]
+    assert (x.low + x.high) / 2.0 == 2.5
+    assert (y.low + y.high) / 2.0 == 1.5
+    assert (y.high - y.low) / (x.high - x.low) == pytest.approx(3.0 / 5.0)

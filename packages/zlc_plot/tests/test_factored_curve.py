@@ -21,6 +21,8 @@ from data_factory import (
     mapped_domain_from_columns,
     repeat_domain,
 )
+import warnings
+
 from zlc_data import REPEAT, SITE
 from zlc_plot import AxisRef, Reduction
 from zlc_plot.data_view import DataView
@@ -647,3 +649,65 @@ def test_factored_row_facet_image_cells_compress_to_their_used_sets() -> None:
     for ours, theirs in zip(fast.cells, slow.cells):
         assert ours.label == theirs.label
         _assert_same_image(ours.payload, theirs.payload)
+
+
+def test_the_public_curve_sums_a_float32_stack_in_float64() -> None:
+    """Three repeats of one point row, two float32 cells of 1e8, 1, -1e8.
+
+    Every value is a float32 number; only the accumulation can lose the
+    1, and the dense leading reduction did -- in the input's own dtype --
+    where the generic bucket path accumulated in float64: the one public
+    ``curve`` answered 0 or 1/3 by which layout the data took.
+    """
+
+    schema = make_dataset_schema(
+        repeat_domain(size=3),
+        mapped_domain_from_columns({"p": [0.0]}),
+        cell_axes=(axis("x", values=[0.0, 1.0]),),
+        dtype=np.float32,
+    )
+    values = np.asarray(
+        [[[1e8, 2e8]], [[1.0, 2.0]], [[-1e8, -2e8]]], dtype=np.float32
+    )
+    view = DataView(make_snapshot(schema, values, revision=1))
+    x = AxisRef.cell_data("x")
+    for aggregation, expected in (
+        (Reduction.MEAN, [1 / 3, 2 / 3]),
+        (Reduction.SUM, [1.0, 2.0]),
+    ):
+        public = view.curve(x, aggregation=aggregation)
+        generic = view._curve_from_positions(
+            x, view._all_positions(), (), aggregation
+        )
+        np.testing.assert_allclose(
+            np.asarray(public.series[0].y.canonical), expected, rtol=1e-12
+        )
+        assert public.series[0].valid.all()
+        _assert_same(public, generic)
+
+def test_an_overflowed_factored_sum_is_invalid_not_a_finite_number() -> None:
+    """Two repeats of 1e308 sum past float64: the generic path answers
+    ``inf`` and invalid, and the factored path replaced the infinity with
+    DBL_MAX, divided by each x's count and published two different finite
+    "means" of one value as valid."""
+
+    schema = make_dataset_schema(
+        repeat_domain(size=2),
+        mapped_domain_from_columns({"scan": [0.0, 1.0, 0.0]}),
+        dtype=np.float64,
+    )
+    values = np.full(schema.physical_shape, 1e308)
+    view = DataView(make_snapshot(schema, values, revision=1))
+    x = AxisRef.point("scan")
+    with warnings.catch_warnings(), np.errstate(over="ignore", invalid="ignore"):
+        warnings.simplefilter("ignore", RuntimeWarning)
+        for aggregation in (Reduction.MEAN, Reduction.SUM):
+            # The band exists for a MEAN alone, and its square fold had
+            # the same replacement.
+            band = aggregation is Reduction.MEAN
+            public = view.curve(x, aggregation=aggregation, uncertainty=band)
+            generic = view._curve_from_positions(
+                x, view._all_positions(), (), aggregation, uncertainty=band
+            )
+            assert not public.series[0].valid.any()
+            _assert_same(public, generic)
