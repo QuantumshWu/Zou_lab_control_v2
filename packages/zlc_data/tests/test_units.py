@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from zlc_data.units import (
@@ -93,6 +94,29 @@ def test_the_shown_digits_are_the_value_s_own() -> None:
     assert format_quantity(512, "pixel") == "512 pixel"
 
 
+def test_a_numpy_integer_keeps_every_digit_of_the_integer_it_is() -> None:
+    """An int64 that went through a float came back as a different integer.
+
+    Only a Python ``int`` was read exactly; every other number became a
+    float first, and 9007199254740993 is not a float.  A count of that size
+    was shown as 9007199254740992 -- a count the dataset never held -- and a
+    column of them grew a ``.0`` it had no business having.
+    """
+
+    assert (
+        format_quantity(np.int64(9007199254740993), "count")
+        == "9007199254740993 count"
+    )
+    assert (
+        format_quantity(np.uint64(18446744073709551615), "count")
+        == "18446744073709551615 count"
+    )
+    texts, symbol = format_quantities(
+        np.array([9007199254740993, 1], dtype=np.int64), "count"
+    )
+    assert (texts, symbol) == (("9007199254740993", "1"), "count")
+
+
 def test_the_leading_digits_stay_between_one_and_a_thousand() -> None:
     for magnitude in range(-9, 13):
         value = 1.5 * 10.0**magnitude
@@ -112,15 +136,24 @@ def test_beyond_the_ladder_a_value_simply_grows() -> None:
 
 @pytest.mark.parametrize(
     "value",
-    [0.0, 1.0, -1.0, 120000000.0, 1.05e6, 0.0000012, 3.3, -0.25, 1e-9, 9.87e11],
+    [
+        0.0, 1.0, -1.0, 120000000.0, 1.05e6, 0.0000012, 3.3, -0.25, 1e-9,
+        9.87e11, 1e-10, 2.5e-10, 7e-7,
+    ],
 )
-@pytest.mark.parametrize("unit", ["Hz", "s", "V"])
+@pytest.mark.parametrize("unit", ["Hz", "s", "V", "Vpp", "us"])
 def test_everything_shown_can_be_typed_back_unchanged(value: float, unit: str) -> None:
-    """Display and input are one table used in two directions."""
+    """Display and input are one table used in two directions, and the
+    number read back is the number shown, to the last bit.
 
-    assert parse_quantity(format_quantity(value, unit), unit) == pytest.approx(
-        value, rel=0.0, abs=0.0
-    )
+    The formatter shifts a decimal point; the parser shifts it back, in
+    decimal, between any two spellings of one family.  Multiplied out as
+    floats instead, ``0.1 ns`` is ``0.1 * 1e-9`` = 1.0000000000000002e-10,
+    one ulp from the 1e-10 the box was showing -- and a field that re-reads
+    its own text on every commit drifts.
+    """
+
+    assert parse_quantity(format_quantity(value, unit), unit) == value
 
 
 def test_a_person_may_type_the_prefix_alone() -> None:
@@ -200,13 +233,44 @@ def test_a_choice_list_never_leaves_the_dimension() -> None:
 
 
 def test_a_unit_that_cannot_be_scaled_is_shown_plainly() -> None:
-    for value, unit in ((4096, "count"), (512, "pixel"), (1.5, "1")):
+    """A prefix goes only in front of a spelling that may carry one.
+
+    ``ms`` already carries one, ``deg`` and ``count`` have no ladder, and
+    the unit itself says so.  Asking the dimension instead -- seconds take
+    prefixes, so a millisecond must -- wrote ``2 kms``, ``1 mMHz`` and
+    ``1 mdeg``: spellings no resolver accepts, so the box showed a number
+    nobody could type back.
+    """
+
+    for value, unit, shown in (
+        (4096, "count", "4096 count"),
+        (512, "pixel", "512 pixel"),
+        (1.5, "1", "1.5"),
+        (2000.0, "ms", "2000 ms"),
+        (2000.0, "us", "2000 µs"),
+        (0.001, "MHz", "0.001 MHz"),
+        (0.001, "deg", "0.001 deg"),
+    ):
         text = format_quantity(value, unit)
-        assert not any(
-            text.split()[-1].startswith(prefix.symbol)
-            for prefix in PREFIXES
-            if prefix.symbol and unit != "1"
-        ), text
+        assert text == shown
+        assert parse_quantity(text, unit) == value
+
+
+def test_a_reciprocal_unit_is_the_exact_reciprocal_or_nothing() -> None:
+    """A tolerance in absolute seconds accepted one nanosecond for two.
+
+    The match used NumPy's default absolute tolerance, 1e-8, which beside a
+    scale of 1e-9 is no tolerance at all: a 500 MHz clock, whose period is
+    2 ns, was answered with ``ns``, and a time fitted on that axis read at
+    half its value.  A unit whose reciprocal is no rung of the ladder has no
+    inverse unit, and the caller writes ``1/<symbol>``.
+    """
+
+    assert DEFAULT_UNITS.inverse_for("us").symbol == "MHz"
+    assert DEFAULT_UNITS.inverse_for("kHz").symbol == "ms"
+    assert DEFAULT_UNITS.inverse_for("count") is None
+    clock = Unit("clock", "frequency", Scaled(5e8), inverse_dimension="time")
+    assert DEFAULT_UNITS.inverse_for(clock) is None
 
 
 def test_an_application_may_add_a_dimension_its_instruments_need() -> None:

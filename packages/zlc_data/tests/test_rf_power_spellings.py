@@ -6,7 +6,14 @@ import math
 
 import pytest
 
-from zlc_data.units import DEFAULT_UNITS, NO_PREFIX, RF_LOAD_OHMS, UnitError, format_quantity
+from zlc_data.units import (
+    DEFAULT_UNITS,
+    NO_PREFIX,
+    RF_LOAD_OHMS,
+    UnitError,
+    format_quantity,
+    parse_quantity,
+)
 
 
 def test_a_peak_to_peak_amplitude_is_a_power_into_the_load() -> None:
@@ -49,3 +56,16 @@ def test_a_number_read_in_the_unit_it_names_stays_in_it() -> None:
     # Six gigahertz asked for in megahertz is 6834.7 MHz, never 6.8347 kMHz.
     assert format_quantity(6834.7, "MHz", prefix=NO_PREFIX) == "6834.7 MHz"
     assert format_quantity(0.5, "Vpp", prefix=NO_PREFIX) == "0.5 Vpp"
+
+
+def test_a_bare_prefix_typed_into_an_amplitude_field_is_a_rung_of_its_own_family() -> None:
+    """``500u`` in a Vpp box is 500 µVpp, not 500 µW read back as an amplitude.
+
+    The prefix alone was put in front of the DIMENSION'S base -- the watt --
+    and the microwatts came back as 0.447 Vpp.  A prefix belongs to the
+    spelling family the field is in, which is what a person typing it means.
+    """
+
+    assert parse_quantity("500u", "Vpp") == 0.0005
+    assert format_quantity(0.0005, "Vpp") == "500 µVpp"
+    assert parse_quantity("500 µVpp", "Vpp") == 0.0005

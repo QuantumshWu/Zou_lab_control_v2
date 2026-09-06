@@ -203,6 +203,41 @@ def test_snapshot_array_axes_are_positional_and_allow_repeated_roles() -> None:
         )
 
 
+def test_a_validity_mask_that_is_not_bool_is_refused_not_truthed() -> None:
+    """A status code is not a validity; Data's bool contract is the only door.
+
+    The wrapper cast whatever it was handed with ``dtype=bool`` before the
+    Dataset saw it, so an int mask of ``[0, 2]`` -- an SDK status, a count
+    handed over by mistake -- became ``[False, True]`` and status 2 entered
+    the valid data plane.  The mask now reaches the one Data constructor as
+    it is, and that constructor refuses anything but bool.
+    """
+
+    from zlc_data import SCAN_POINT
+
+    values = np.array([[10.0, 20.0]])
+    with pytest.raises(TypeError, match="validity mask dtype must be bool"):
+        snapshot_from_array(
+            values,
+            producer="p",
+            signal="s",
+            point_axes=(SCAN_POINT,),
+            generation="g",
+            revision=1,
+            validity=np.array([[0, 2]], dtype=np.int64),
+        )
+    accepted = snapshot_from_array(
+        values,
+        producer="p",
+        signal="s",
+        point_axes=(SCAN_POINT,),
+        generation="g",
+        revision=1,
+        validity=np.array([[False, True]]),
+    )
+    assert accepted.expanded_validity().reshape(-1).tolist() == [False, True]
+
+
 def test_direct_monitor_disarms_when_empty_generation_retire_fails() -> None:
     installation = create_installation("virtual")
     plane = FakePlane()

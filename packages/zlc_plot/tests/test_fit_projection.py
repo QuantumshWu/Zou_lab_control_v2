@@ -13,6 +13,7 @@ from data_factory import (
 from zlc_data import OwnedSnapshot, REPEAT
 from zlc_plot import DEFAULTS, AxisRef, CurvePlot, HistogramPlot
 from zlc_plot._fit_projection import FitProjection, FitScope, ProjectionContext
+from zlc_plot.data_contract import DEFAULT_UNITS
 from zlc_plot.selectors import NumericRange, RectangleRange, SelectorKind, SelectorSnapshot, SelectorState
 from zlc_plot.specs import parameter_schema_for
 from zlc_plot.state import DisplayStateStore
@@ -28,10 +29,12 @@ def _snapshot() -> OwnedSnapshot:
     return make_snapshot(schema, np.arange(5, dtype=np.float64).reshape(1, 5), revision=3)
 
 
-def _projection(spec, *, selectors=(), viewport=None) -> FitProjection:
-    snapshot = _snapshot()
+def _projection(
+    spec, *, selectors=(), viewport=None, snapshot=None, display=None
+) -> FitProjection:
+    snapshot = _snapshot() if snapshot is None else snapshot
     schema = parameter_schema_for(spec, style=DEFAULTS.style)
-    display = DisplayStateStore(schema).state
+    display = DisplayStateStore(schema, display).state
     projection = FitProjection(
         data=snapshot,
             revision=snapshot.ref.revision.value,
@@ -109,6 +112,81 @@ def test_release_recapture_units_and_fixed_expression_use_the_series_contract() 
         assert session.rgba().size > 0
     finally:
         session.close()
+
+
+def _dbm_curve_snapshot() -> OwnedSnapshot:
+    x = np.linspace(-6.0, 6.0, 9)
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"x": x}, units={"x": "dBm"}),
+        dtype=np.float64,
+    )
+    return make_snapshot(schema, np.exp(-x * x / 8.0).reshape(1, -1), revision=0)
+
+
+def test_fit_expression_crosses_a_logarithmic_axis_as_the_unit_registry_does() -> None:
+    """A centre typed in watts on a dBm axis is the power it names.
+
+    dBm is a level: no scale turns it into watts.  Reading the crossing off
+    two converted points treated it as affine, so ``x_0=0.002`` (2 mW) was
+    fixed at 3.86 dBm -- 2.43 mW -- inside every bound and without a word,
+    and read back as 0.00243.  A width on that axis crosses unchanged in the
+    axis' own unit and has no value in watts at all, which is said aloud
+    rather than guessed.
+    """
+
+    spec = CurvePlot(AxisRef.point("x"))
+    snapshot = _dbm_curve_snapshot()
+    model = FitEngine().registry.get("gaussian_offset")
+
+    watts = _projection(spec, snapshot=snapshot, display={"x_display_unit": "W"})
+    target = watts.fit_expression_target(model, "x_0=0.002")
+    assert target["fixed"]["center"] == pytest.approx(
+        float(DEFAULT_UNITS.convert(0.002, "W", "dBm"))
+    )
+    symbol, literal = watts.fit_expression_text(model, target).split("=")
+    assert symbol == "x_0" and float(literal) == pytest.approx(0.002, rel=1e-12)
+    with pytest.raises(ValueError, match="only a position crosses a logarithmic unit"):
+        watts.fit_expression_target(model, "sigma=1.5")
+
+    own = _projection(spec, snapshot=snapshot)
+    assert own.fit_expression_target(model, "sigma=1.5") == {
+        "model": model.model_id,
+        "fixed": {"sigma": 1.5},
+    }
+    assert own.fit_expression_text(model, {"fixed": {"sigma": 1.5}}) == "sigma=1.5"
+
+
+def test_fit_selection_seals_the_sigma_plane_with_the_others() -> None:
+    """Every plane an accepted fit replays to its subscribers is read-only.
+
+    Coordinates, observations and indices were sealed; the sigma plane came
+    out of its advanced index writable -- the one plane through which what
+    the solver had weighted by could be rewritten after the fact.
+    """
+
+    scan = axis("scan", values=[10.0, 20.0, 30.0])
+    schema = make_dataset_schema(
+        repeat_domain(size=6),
+        mapped_domain_from_columns({"x": [0.0, 1.0]}),
+        cell_axes=(scan,),
+        dtype=np.float64,
+    )
+    values = np.random.default_rng(5).normal(size=schema.physical_shape)
+    projection = _projection(
+        CurvePlot(AxisRef.cell_data("scan")),
+        snapshot=make_snapshot(schema, values, revision=0),
+        display={"uncertainty": True},
+    )
+    selection = projection.fit_selection(FitEngine().registry.get("gaussian_offset"))
+    assert selection.observation_sigma is not None
+    planes = (
+        *selection.coordinates,
+        selection.observations,
+        selection.selected_indices,
+        selection.observation_sigma,
+    )
+    assert not any(plane.flags.writeable for plane in planes)
 
 
 def test_histogram_fit_uses_painted_count_bins_only() -> None:

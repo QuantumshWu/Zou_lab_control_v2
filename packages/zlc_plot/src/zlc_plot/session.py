@@ -60,7 +60,6 @@ from ._session_state import (
     _PointerUpdate,
     _PreparedLiveFrame,
     _ProjectionPresentation,
-    _ResolvedFit,
     _SolvedLiveFit,
     SelectionChange,
     _StartedFitRequest,

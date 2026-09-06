@@ -226,8 +226,14 @@ def test_relative_indexed_windows_share_one_event_layout() -> None:
         _indexed_schema((-1, 0)),
         _indexed_schema((-2, -1, 0)),
     )
-    # Offsets that do not end at the latest shot are not a different
-    # history: they are no history at all, and the one layout reader says so.
+    # A history restricted to its past shots keeps their coordinates and is
+    # still the same history.
+    assert indexed_schemas_compatible(
+        _indexed_schema((-2, -1)),
+        _indexed_schema((-2, -1, 0)),
+    )
+    # Offsets above 0 are absolute ordinals that never became relative
+    # coordinates: no history at all, and the one layout reader says so.
     with pytest.raises(ValueError, match="latest offset 0"):
         indexed_schemas_compatible(
             _indexed_schema((4, 5)),

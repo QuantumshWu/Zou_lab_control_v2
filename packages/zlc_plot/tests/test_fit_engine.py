@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from zlc_plot import FitCancelled
+from zlc_plot import FitCancelled, _fit_compiled
 from zlc_plot.fit import (
     FitEngine,
     FitOptions,
@@ -452,6 +452,66 @@ def test_public_batch_fixed_parameters_match_single(all_fixed: bool) -> None:
             assert np.count_nonzero(result.covariance) == 0
 
 
+def _all_fixed_bounds(model) -> dict[str, tuple[float, float]]:
+    return {
+        name: (value, value)
+        for name, value in zip(
+            model.parameter_names, _BASE_PARAMETERS[model.model_id], strict=True
+        )
+    }
+
+
+def test_all_fixed_fit_evaluates_the_full_curve_uncompressed() -> None:
+    """An all-fixed expression on a long curve is one evaluation of every point.
+
+    Compression decides where the solver iterates; with no free parameter
+    nothing iterates.  Binning 9000 points into 4096 statistics anyway and
+    then weighting the full-length residual by the bin weights raised a
+    broadcast error for an expression the exact-point option answered.
+    """
+
+    engine = FitEngine()
+    model = replace(engine.registry.get("gaussian_offset"), compiled_descriptor=None)
+    x = np.linspace(-4.0, 4.0, 9000)
+    observations = model.evaluate((x,), _BASE_PARAMETERS[model.model_id])
+    result = engine.fit(model, (x,), observations, bounds=_all_fixed_bounds(model))
+    assert result.success and result.message == "all parameters fixed"
+    assert result.residuals.size == x.size
+    assert result.reduced_chi_square == 0.0
+
+
+@pytest.mark.parametrize("compiled", (False, True), ids=("generic", "compiled"))
+def test_all_fixed_fit_honours_a_cancelled_request(compiled: bool) -> None:
+    """A cancelled request does no work, the all-fixed evaluation included.
+
+    The generic all-fixed shortcut evaluated the model and returned success
+    without ever asking ``cancelled``: the cooperative checks lived only in
+    the iterating path.
+    """
+
+    engine = FitEngine()
+    model = engine.registry.get("gaussian_offset")
+    if not compiled:
+        model = replace(model, compiled_descriptor=None)
+    x = np.linspace(-4.0, 4.0, 31)
+    observations = model.evaluate((x,), _BASE_PARAMETERS[model.model_id])
+    asked: list[bool] = []
+
+    def cancelled() -> bool:
+        asked.append(True)
+        return True
+
+    with pytest.raises(FitCancelled):
+        engine.fit(
+            model,
+            (x,),
+            observations,
+            bounds=_all_fixed_bounds(model),
+            cancelled=cancelled,
+        )
+    assert asked
+
+
 @pytest.mark.parametrize("model_id", tuple(_ANCHORED_MODELS))
 def test_public_batch_keeps_each_nonzero_coordinate_anchor(model_id: str) -> None:
     engine = FitEngine()
@@ -487,6 +547,62 @@ def test_public_batch_keeps_each_nonzero_coordinate_anchor(model_id: str) -> Non
             rtol=1e-12,
             atol=1e-12,
         )
+
+
+def test_compiled_batch_reports_the_origin_it_subtracted() -> None:
+    """Every cell of an anchored batch learns the window start it is relative to.
+
+    The shared axis' origin was computed once and then reported as zero for
+    every cell of a batch (only a single-cell solve kept it), so a caller
+    placing the anchored decays would have put them at t=0 instead of at
+    the window start.
+    """
+
+    engine = FitEngine()
+    model = engine.registry.get("exponential_decay")
+    descriptor = model.compiled_descriptor
+    assert descriptor is not None
+    relative = np.linspace(0.0, 10.0, 112)
+    observations = model.evaluate((relative,), _BASE_PARAMETERS[model.model_id])
+    lower = np.asarray([parameter.bounds[0] for parameter in model.parameters])
+    upper = np.asarray([parameter.bounds[1] for parameter in model.parameters])
+    single = _fit_compiled.solve_compiled_single(
+        descriptor,
+        (relative + 250.0,),
+        observations,
+        base_lower=lower,
+        base_upper=upper,
+    )
+    batch = _fit_compiled.solve_compiled_batch(
+        descriptor,
+        (relative + 250.0,),
+        np.stack([observations, observations]),
+        base_lower=lower,
+        base_upper=upper,
+    )
+    np.testing.assert_array_equal(single.coordinate_origins[:, 0], [250.0])
+    np.testing.assert_array_equal(batch.coordinate_origins[:, 0], [250.0, 250.0])
+    np.testing.assert_allclose(
+        batch.parameters,
+        np.stack([single.parameters[0]] * 2),
+        rtol=1e-7,
+    )
+
+
+def test_damped_sine_context_stays_linear_in_the_sample_count() -> None:
+    """The damped sine shares the series coordinate plan; no N-by-N table.
+
+    The model seeds itself from the observations with a Goertzel scan inside
+    its prepare callback, so a plan carrying an N-by-N trigonometric table
+    is dead weight: 128 MiB at the 4096-point budget, copied once per cell
+    of a batch and held in the engine's context cache.
+    """
+
+    descriptor = _fit_compiled.damped_sine_descriptor()
+    small = descriptor.context_builder((np.linspace(0.0, 1.0, 64),))
+    large = descriptor.context_builder((np.linspace(0.0, 1.0, 4096),))
+    assert small.shape[0] == large.shape[0]
+    assert large.nbytes == small.nbytes * 4096 // 64
 
 
 def test_public_batch_sigma_weights_and_nan_filter_keep_original_indices() -> None:
@@ -608,6 +724,55 @@ def test_explicit_batch_bounds_replace_model_derived_bounds() -> None:
         assert 2.1 <= result.parameters["center_x"] <= 2.3
 
 
+def test_public_batch_filters_a_nan_coordinate_after_temporaries_recycle_ids() -> None:
+    """A cell's NaN coordinate is filtered whatever ids earlier cells freed.
+
+    The batch remembers per axis OBJECT whether it is all-finite, so a tensor
+    facet's shared axes are scanned once.  Eight cells whose observations
+    are all NaN each proved a temporary axis finite, failed, and freed it;
+    the next cell's axis landed on a recycled id, inherited the proof, and
+    its NaN coordinate reached the evaluator -- "fixed fit evaluation is
+    non-finite" for a cell whose own single fit succeeds on the 32 finite
+    points.
+    """
+
+    engine = FitEngine()
+    model = engine.registry.get("gaussian_offset")
+    bounds = _all_fixed_bounds(model)
+    x = np.linspace(-2.0, 2.0, 33)
+    clean = model.evaluate((x,), _BASE_PARAMETERS[model.model_id])
+    modes = (0,) * 8 + (2, 1, 2)
+    coordinates = []
+    observations = []
+    for mode in modes:
+        axis = x.copy()
+        values = clean.copy()
+        if mode == 0:
+            values[:] = np.nan
+        elif mode == 1:
+            values[3] = np.nan
+        else:
+            axis[5] = np.nan
+        coordinates.append((axis,))
+        observations.append(values)
+    results, failures = engine.fit_batch(
+        model, tuple(coordinates), tuple(observations), bounds=bounds
+    )
+    for cell, mode in enumerate(modes):
+        if mode == 0:
+            assert results[cell] is None
+            assert failures[cell] == (
+                "fit requires more finite observations than free parameters"
+            )
+            continue
+        assert failures[cell] is None, (cell, failures[cell])
+        result = results[cell]
+        assert result is not None
+        single = engine.fit(model, coordinates[cell], observations[cell], bounds=bounds)
+        _assert_fit_equal(result, single)
+        assert result.selected_indices.size == x.size - 1
+
+
 def test_invalid_public_batch_warm_start_raises() -> None:
     engine = FitEngine()
     cases = tuple(
@@ -661,6 +826,47 @@ def test_public_batch_all_supported_losses_match_single(loss: str) -> None:
         )
 
 
+@pytest.mark.parametrize("compiled", (False, True), ids=("generic", "compiled"))
+def test_robust_candidates_compete_on_the_robust_cost(compiled: bool) -> None:
+    """A soft-L1 fit keeps the candidate its own loss prefers.
+
+    Two basins: the Gaussian at x=-1 and a lone spike of 50 at x=+1.  The
+    spike wins by squared residuals (2435 against 2500) and loses by the
+    soft-L1 sum (126 against 98); ranking the warm and authored candidates
+    by squared residuals returned the spike's basin from a robust fit in
+    both solver lanes.  The reported quality stays the raw residual sum of
+    squares.
+    """
+
+    engine = FitEngine()
+    model = engine.registry.get("gaussian_offset")
+    if not compiled:
+        model = replace(model, compiled_descriptor=None)
+    x = np.linspace(-3.0, 3.0, 601)
+    observations = np.exp(-0.5 * ((x + 1.0) / 0.1) ** 2)
+    observations[np.argmin(np.abs(x - 1.0))] += 50.0
+    result = engine.fit(
+        model,
+        (x,),
+        observations,
+        bounds={
+            "amplitude": (1.0, 1.0),
+            "offset": (0.0, 0.0),
+            "sigma": (0.1, 0.1),
+            "center": (-2.0, 2.0),
+        },
+        initial=(1.0, 0.0, 0.1, 1.0),
+        warm_start=(1.0, 0.0, 0.1, -1.0),
+        options=FitOptions(loss="soft_l1", max_exact_points=None),
+    )
+    assert result.success
+    assert result.parameters["center"] == pytest.approx(-1.0, abs=1e-4)
+    residuals = np.asarray(result.residuals)
+    assert result.reduced_chi_square == pytest.approx(
+        float(np.dot(residuals, residuals)) / (x.size - 1), rel=1e-9
+    )
+
+
 def test_rank_deficient_cell_stays_on_compiled_batch_without_scalar_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -691,6 +897,41 @@ def test_rank_deficient_cell_stays_on_compiled_batch_without_scalar_fallback(
     assert flat is not None and flat.success
     assert not flat.covariance_valid
     assert np.all(np.isnan(flat.standard_errors))
+
+
+def test_compiled_batch_judges_finiteness_on_the_points_it_fitted() -> None:
+    """A masked NaN observation leaves a cell's covariance valid.
+
+    The compiled solve masks non-finite observations out of the fit, but its
+    finalizer checked the residual of every point, masked or not, so one NaN
+    observation made an otherwise clean cell's covariance invalid and its
+    errors NaN.
+    """
+
+    engine = FitEngine()
+    model = engine.registry.get("gaussian_offset")
+    descriptor = model.compiled_descriptor
+    assert descriptor is not None
+    x = np.linspace(-5.0, 5.0, 112)
+    rng = np.random.default_rng(23)
+    clean = model.evaluate((x,), _BASE_PARAMETERS[model.model_id])
+    clean = clean + rng.normal(0.0, 0.003, clean.size)
+    holed = clean.copy()
+    holed[10] = np.nan
+    output = _fit_compiled.solve_compiled_batch(
+        descriptor,
+        (x,),
+        np.stack([clean, holed]),
+        base_lower=np.asarray([parameter.bounds[0] for parameter in model.parameters]),
+        base_upper=np.asarray([parameter.bounds[1] for parameter in model.parameters]),
+        # One plan for both cells, as the engine hands a bucket: a plan built
+        # per cell from its finite points would differ in shape here.
+        context=descriptor.context_builder((x,)),
+    )
+    assert output.success.tolist() == [True, True]
+    assert output.covariance_valid.tolist() == [True, True]
+    assert np.all(np.isfinite(output.standard_errors))
+    np.testing.assert_allclose(output.parameters[1], output.parameters[0], rtol=1e-3)
 
 
 @pytest.mark.parametrize("fallback", ("custom_model", "custom_engine"))
@@ -897,6 +1138,47 @@ def test_fit_cancellation_is_checked_before_work() -> None:
         )
 
 
+def test_reflected_trust_region_step_is_measured_to_the_sphere_ahead() -> None:
+    """The reflected candidate walks forward to the trust-region boundary.
+
+    From a point inside the sphere the reflected line meets it once behind
+    and once ahead.  Taking the root behind made every reflected stride
+    non-positive, so the solver never tried a reflection and, on this
+    positive-definite bounded subproblem, settled for a step eleven times
+    worse than the feasible reflected one.
+    """
+
+    forward = _fit_compiled._positive_intersection(
+        np.array([0.0]), np.array([1.0]), 1.0
+    )
+    assert forward == pytest.approx(1.0)
+
+    step = np.zeros(2)
+    scaled_step = np.zeros(2)
+    _fit_compiled._select_reflective_step(
+        np.zeros(2),
+        np.diag([1.0, 10.0]),
+        np.array([-1.0, -20.0]),
+        np.array([1.0, 2.0]),
+        np.ones(2),
+        3.0,
+        np.array([-3.0, -3.0]),
+        np.array([0.9, 3.0]),
+        0.995,
+        step,
+        scaled_step,
+    )
+
+    def objective(point: np.ndarray) -> float:
+        return 0.5 * ((point[0] - 1.0) ** 2 + 10.0 * (point[1] - 2.0) ** 2)
+
+    # The bound at x=0.9 reflects the Newton step into direction (-1, 2);
+    # the quadratic's minimum along that line sits 3.9/41 of the way.
+    reflected = np.array([0.9, 1.8]) + (3.9 / 41.0) * np.array([-1.0, 2.0])
+    np.testing.assert_allclose(step, reflected, rtol=1e-9)
+    assert objective(step) < objective(0.995 * np.array([0.9, 1.8]))
+
+
 def test_radial_regular_image_fast_path_matches_coordinate_path() -> None:
     engine = FitEngine()
     model = engine.registry.get("radial_gaussian_center")
@@ -916,6 +1198,81 @@ def test_radial_regular_image_fast_path_matches_coordinate_path() -> None:
         RegularImageFitInput(x_axis, y_axis, image),
     )
     assert np.allclose(regular.parameter_values, generic.parameter_values, rtol=5e-3, atol=5e-3)
+
+
+@pytest.mark.parametrize("background", (1e4, 1e8))
+def test_regular_image_quality_is_its_own_residual_sum_of_squares(
+    background: float,
+) -> None:
+    """A fixed exact model on a bright background reports no misfit.
+
+    The closed-form separable objective differences second moments of the
+    image, each about N*B^2; on a 1e8 background an exact fit reported a
+    reduced chi-square of 3 over residuals that were identically zero, while
+    the same image in a two-cell batch reported 0.  The quality is
+    accumulated from the per-pixel residuals the result itself hands back.
+    """
+
+    engine = FitEngine()
+    model = engine.registry.get("radial_gaussian_center")
+    x = np.linspace(-1.0, 1.0, 19)
+    y = np.linspace(-1.0, 1.0, 17)
+    xx, yy = np.meshgrid(x, y)
+    truth = np.asarray((1.0, background, 0.7, 0.15, -0.1))
+    image = model.evaluate((xx.reshape(-1), yy.reshape(-1)), truth).reshape(yy.shape)
+    bounds = {
+        name: (value, value)
+        for name, value in zip(model.parameter_names, truth, strict=True)
+    }
+    single = engine.fit(model, RegularImageFitInput(x, y, image), bounds=bounds)
+    pair, failures = engine.fit_batch(
+        model,
+        (RegularImageFitInput(x, y, image), RegularImageFitInput(x, y, image)),
+        (None, None),
+        bounds=bounds,
+    )
+    assert single.success and failures == (None, None)
+    residuals = np.asarray(single.residuals)
+    own_quality = float(np.dot(residuals, residuals)) / residuals.size
+    assert single.reduced_chi_square == pytest.approx(own_quality, abs=1e-9)
+    assert single.reduced_chi_square <= 1e-9
+    assert pair[0].reduced_chi_square == pytest.approx(single.reduced_chi_square, abs=1e-9)
+
+
+def test_regular_radial_fit_does_not_depend_on_which_axis_is_finer() -> None:
+    """One radius, one floor: half the finer pitch of the two axes.
+
+    A radial Gaussian sampled at 0.1 along x and 1.0 along y is resolved by
+    the x samples; deciding the floor per axis let whichever axis came last
+    win, so the same pixels fitted R=0.5 one way round and R=0.2 transposed.
+    """
+
+    engine = FitEngine()
+    model = engine.registry.get("radial_gaussian_center")
+    x = np.linspace(-2.0, 2.0, 41)
+    y = np.linspace(-2.0, 2.0, 5)
+    xx, yy = np.meshgrid(x, y)
+    truth = np.asarray((1.0, 0.0, 0.2, 0.0, 0.0))
+    image = model.evaluate((xx.reshape(-1), yy.reshape(-1)), truth).reshape(yy.shape)
+    bounds = {
+        name: (value, value)
+        for name, value in zip(model.parameter_names, truth, strict=True)
+        if name != "one_over_e_radius"
+    }
+    upright = engine.fit(
+        model, RegularImageFitInput(x, y, image), bounds=bounds, initial=tuple(truth)
+    )
+    transposed = engine.fit(
+        model,
+        RegularImageFitInput(y, x, np.ascontiguousarray(image.T)),
+        bounds=bounds,
+        initial=tuple(truth),
+    )
+    assert upright.success and transposed.success
+    assert upright.parameters["one_over_e_radius"] == pytest.approx(0.2, rel=1e-6)
+    assert transposed.parameters["one_over_e_radius"] == pytest.approx(
+        upright.parameters["one_over_e_radius"], rel=1e-6
+    )
 
 
 def _separable_image(

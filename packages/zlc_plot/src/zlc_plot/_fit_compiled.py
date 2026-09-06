@@ -512,6 +512,13 @@ def _positive_intersection(
     direction: np.ndarray,
     radius: float,
 ) -> float:
+    """Distance along ``direction`` from ``origin`` to the trust-region sphere.
+
+    The origin lies inside the sphere, so the line meets it once behind and
+    once ahead: the two roots have opposite signs and the forward one is the
+    larger.  Both come from the cancellation-free quadratic form.
+    """
+
     quadratic = 0.0
     linear = 0.0
     constant = -radius * radius
@@ -526,7 +533,7 @@ def _positive_intersection(
         return -linear / quadratic
     first = qvalue / quadratic
     second = constant / qvalue
-    return min(first, second)
+    return max(first, second)
 
 
 @njit(cache=True, inline="always")
@@ -1552,9 +1559,13 @@ def _solve_cell(
             choose = True
         elif successful and not best_success:
             choose = True
-        elif successful == best_success and raw_rss < (
-            best_rss - RSS_TIE_RELATIVE * max(1.0, abs(best_rss))
+        elif successful == best_success and cost < (
+            best_cost - RSS_TIE_RELATIVE * max(1.0, abs(best_cost))
         ):
+            # Candidates compete on the quantity each of them minimised: the
+            # robust cost, which is half the residual sum of squares only
+            # under the linear loss.  Ranking by squared residuals would hand
+            # the outlier the decision the loss just took away from it.
             choose = True
         if choose:
             for index in range(full_count):
@@ -1777,10 +1788,12 @@ def _finalize_one(
     for point in range(point_count):
         fitted[point] = predicted[point]
         residuals[point] = observations[point] - predicted[point]
+        if not valid[point]:
+            # A masked point is outside the fit; its residual (NaN for a NaN
+            # observation) says nothing about the solution's finiteness.
+            continue
         if not math.isfinite(fitted[point]) or not math.isfinite(residuals[point]):
             finite = False
-        if not valid[point]:
-            continue
         selected += 1
         (
             raw,
@@ -2065,23 +2078,31 @@ def _canonicalize_coordinates(
     *,
     already_canonical: bool,
 ) -> tuple[np.ndarray, np.ndarray]:
-    cells, axes, _points = coordinates.shape
+    """Subtract the anchored axis' minimum from the shared coordinate stack.
+
+    The stack holds ONE coordinate row for every cell of the batch, so one
+    origin serves them all: the smallest coordinate any cell's valid point
+    uses, so that no cell sees a negative relative coordinate.  The returned
+    origins repeat that number per cell -- it is what every cell's anchored
+    parameters are relative to, and a caller reading zero for a batch would
+    misplace every result by the window start.
+    """
+
+    cells = valid.shape[0]
+    axes = coordinates.shape[1]
     origins = np.zeros((cells, axes), dtype=np.float64)
     origin_axis = descriptor.coordinate_origin
     if origin_axis is None or already_canonical:
         return coordinates, origins
-    canonical = np.array(coordinates, dtype=np.float64, order="C", copy=True)
     if origin_axis >= axes:
         raise ValueError("compiled fit coordinate_origin exceeds coordinate arity")
-    for cell in range(cells):
-        selected = canonical[cell, origin_axis, valid[cell]]
-        if not selected.size:
-            continue
+    canonical = np.array(coordinates, dtype=np.float64, order="C", copy=True)
+    selected = canonical[0, origin_axis, np.any(valid, axis=0)]
+    if selected.size:
         origin = float(np.min(selected))
-        if not math.isfinite(origin):
-            continue
-        canonical[cell, origin_axis] -= origin
-        origins[cell, origin_axis] = origin
+        if math.isfinite(origin):
+            canonical[0, origin_axis] -= origin
+            origins[:, origin_axis] = origin
     return canonical, origins
 
 
@@ -2245,10 +2266,6 @@ def _solve_compiled(
         valid_values,
         already_canonical=bool(coordinates_are_canonical),
     )
-    if coordinate_origins.shape[0] == 1 and cells > 1:
-        coordinate_origins = np.zeros(
-            (cells, coordinate_origins.shape[1]), dtype=np.float64
-        )
     contexts = _context_stack(
         descriptor,
         coordinate_values,
@@ -2677,7 +2694,18 @@ def _readonly_context(values: np.ndarray) -> np.ndarray:
     return result
 
 
-def _context_1d(coordinates: tuple[np.ndarray, ...], *, trigonometric: bool) -> np.ndarray:
+def series_context_builder(coordinates: tuple[np.ndarray, ...]) -> np.ndarray:
+    """The coordinate plan every one-dimensional built-in model shares.
+
+    Three rows over the sample count: the sort order, the sorted axis and a
+    row of span statistics.  A plan is a function of the coordinates alone
+    and a batch copies it once per cell, so it carries nothing a model could
+    derive from its observations instead -- the damped sine seeds itself
+    with a Goertzel scan of the observations inside its own prepare
+    callback, and an N-by-N trigonometric table here would be a hundred
+    megabytes per cell at the exact-point budget for nothing.
+    """
+
     x = np.asarray(coordinates[0], dtype=np.float64).reshape(-1)
     if not x.size:
         return _readonly_context(np.zeros((3, 1), dtype=np.float64))
@@ -2690,8 +2718,7 @@ def _context_1d(coordinates: tuple[np.ndarray, ...], *, trigonometric: bool) -> 
         float(np.median(differences)) if differences.size else span,
         EPSILON,
     )
-    rows = 3 + (2 * (x.size // 2) if trigonometric else 0)
-    context = np.zeros((rows, x.size), dtype=np.float64)
+    context = np.zeros((3, x.size), dtype=np.float64)
     context[0] = order
     context[1] = sorted_x
     context[2, 0] = float(np.min(x))
@@ -2703,21 +2730,7 @@ def _context_1d(coordinates: tuple[np.ndarray, ...], *, trigonometric: bool) -> 
         context[2, 3] = float(np.mean(x))
     if x.size > 4:
         context[2, 4] = step
-    if trigonometric:
-        indices = np.arange(x.size, dtype=np.float64)
-        for harmonic in range(1, x.size // 2 + 1):
-            angle = 2.0 * np.pi * harmonic * indices / x.size
-            context[3 + 2 * (harmonic - 1)] = np.cos(angle)
-            context[4 + 2 * (harmonic - 1)] = np.sin(angle)
     return _readonly_context(context)
-
-
-def series_context_builder(coordinates: tuple[np.ndarray, ...]) -> np.ndarray:
-    return _context_1d(coordinates, trigonometric=False)
-
-
-def damped_context_builder(coordinates: tuple[np.ndarray, ...]) -> np.ndarray:
-    return _context_1d(coordinates, trigonometric=True)
 
 
 def image_context_builder(coordinates: tuple[np.ndarray, ...]) -> np.ndarray:
@@ -4497,7 +4510,7 @@ def damped_sine_descriptor() -> CompiledFitDescriptor:
         prepare=_prepare_damped,
         objective=_objective_damped,
         value_jacobian=_value_jacobian_damped,
-        context_builder=damped_context_builder,
+        context_builder=series_context_builder,
         max_candidates=3,
         coordinate_origin=0,
         cache_key="damped-sine-v1",

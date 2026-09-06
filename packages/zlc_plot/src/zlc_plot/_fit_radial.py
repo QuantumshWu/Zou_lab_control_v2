@@ -1451,6 +1451,14 @@ def fit_regular_separable_images(
     def refinement_bounds(data: RegularImageFitInput) -> tuple[np.ndarray, np.ndarray]:
         lower = base_model_lower.copy()
         upper = base_model_upper.copy()
+        # A radius resolves nothing finer than half the pitch of the axes it
+        # spans, and it is decided ONCE per radius: the radial kernel's one
+        # radius spans both axes, so its floor is the finer pitch of the two
+        # -- the coarse axis does not stop the fine one from resolving the
+        # width, and the compiled proxy floor says the same.  Decided axis
+        # by axis, whichever axis comes last overwrites the other and a
+        # transposed image fits a different radius.
+        floors: dict[int, float] = {}
         for parameter_index, coordinates in (
             (kernel.x_radius_index, data.x_coordinates),
             (kernel.y_radius_index, data.y_coordinates),
@@ -1461,6 +1469,10 @@ def fit_regular_separable_images(
                 if differences.size
                 else np.finfo(np.float64).eps
             )
+            floors[parameter_index] = min(
+                floors.get(parameter_index, math.inf), resolution
+            )
+        for parameter_index, resolution in floors.items():
             lower[parameter_index] = max(
                 0.5 * resolution, np.finfo(np.float64).eps
             )
@@ -1746,17 +1758,22 @@ def fit_regular_separable_images(
                 if polished
                 else _SolverStatus(bool(solved.success), str(solved.message))
             )
-        final_information = information(current)
-        if summary.all_valid and options.loss == "linear":
-            raw_rss = 2.0 * cost * scale**2
-        else:
-            _cost, _gradient, raw_rss, final_information = (
-                _regular_image_striped_objective(
-                    kernel, context, current, scale, options.loss, True
-                )
+        # The reported quality is the solved model's residual sum of squares
+        # over every valid pixel, accumulated from the per-pixel residuals.
+        # The closed-form objective that steers an all-valid linear solve
+        # differences six second moments of the image; on a bright
+        # background each moment is ~N*B^2 while their difference is the
+        # small quantity wanted: an exact fit on a 1e8 background reads a
+        # reduced chi-square of 3 off it over residuals that are identically
+        # zero.  One striped pass at the end is a fraction of the solve and
+        # yields the information matrix as well.
+        _cost, _gradient, raw_rss, final_information = (
+            _regular_image_striped_objective(
+                kernel, context, current, scale, options.loss, True
             )
-            if options.loss == "linear":
-                raw_rss *= scale**2
+        )
+        if options.loss == "linear":
+            raw_rss *= scale**2
         return current, raw_rss, status, context, summary, final_information
 
     active = {cell: item[2] for cell, item in enumerate(prepared) if item is not None}

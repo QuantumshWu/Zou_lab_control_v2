@@ -57,11 +57,15 @@ def test_warm_start_is_extra_candidate_not_an_early_success_exit(monkeypatch) ->
     def fake_least_squares(_residual, x0, **_kwargs):
         x0 = np.asarray(x0, dtype=float)
         good = np.isclose(x0[0], 1.0)
+        fun = np.zeros(5) if good else np.ones(5)
+        # SciPy's result carries the minimised cost beside the residual;
+        # candidates compete on it, so the double reports it the same way.
         return SimpleNamespace(
             success=True,
             message="ok",
             x=x0,
-            fun=np.zeros(5) if good else np.ones(5),
+            fun=fun,
+            cost=0.5 * float(np.dot(fun, fun)),
             jac=np.ones((5, 1)),
         )
 

@@ -1777,8 +1777,10 @@ class FitEngine:
         prepared: dict[int, dict[str, Any]] = {}
         #: Finiteness of a coordinate OBJECT, by identity -- a tensor
         #: facet's cells share their axis arrays, and every cell re-scanned
-        #: the same megabytes for NaNs.  True means proven all-finite.
-        axis_all_finite: dict[int, bool] = {}
+        #: the same megabytes for NaNs.  The entry holds the array itself:
+        #: a bare id outlives the temporary it named, and the next cell's
+        #: axis would be answered with a stranger's finiteness.
+        axis_all_finite: dict[int, tuple[np.ndarray, bool]] = {}
         for cell, coordinate_item in enumerate(coordinates):
             check()
             try:
@@ -1820,11 +1822,11 @@ class FitEngine:
                         )
                 finite = np.isfinite(values)
                 for axis in coords:
-                    proven = axis_all_finite.get(id(axis))
-                    if proven is None:
-                        proven = bool(np.all(np.isfinite(axis)))
-                        axis_all_finite[id(axis)] = proven
-                    if not proven:
+                    known = axis_all_finite.get(id(axis))
+                    if known is None:
+                        known = (axis, bool(np.all(np.isfinite(axis))))
+                        axis_all_finite[id(axis)] = known
+                    if not known[1]:
                         finite &= np.isfinite(axis)
                 if not bool(np.all(finite)):
                     coords = tuple(axis[finite] for axis in coords)
@@ -2443,6 +2445,22 @@ class FitEngine:
         if _DOMAIN_ANCHORED in spec.capabilities:
             spec = spec.anchored_at(float(np.min(coords[0])))
         counted_observations = spec.targets == (FitTarget.HISTOGRAM,)
+        fixed_names, free_indices = _fixed_parameter_partition(spec, bounds)
+        start = time.monotonic()
+        invalid_residual = np.finfo(np.float64).max ** 0.25
+
+        def check() -> None:
+            if cancelled is not None and cancelled():
+                raise FitCancelled("fit cancelled")
+            if (
+                opts.deadline_seconds is not None
+                and time.monotonic() - start > opts.deadline_seconds
+            ):
+                raise FitDeadlineExceeded("fit deadline exceeded")
+
+        # A request that is already cancelled does no work at all -- not the
+        # compression below, and not the one evaluation an all-fixed fit is.
+        check()
         solver_coords, solver_values = coords, values
         weight_roots: np.ndarray | None = None
         binned_statistics = False
@@ -2462,7 +2480,11 @@ class FitEngine:
                 )
                 weight_roots = 1.0 / bounded
         elif (
-            not counted_observations
+            # The compression decides where the solver ITERATES; with every
+            # parameter fixed nothing iterates and the full data is
+            # evaluated once, with weights of its own length.
+            free_indices
+            and not counted_observations
             and spec.independent_arity == 1
             and opts.max_exact_points is not None
             and values.size > 2 * opts.max_exact_points
@@ -2473,17 +2495,6 @@ class FitEngine:
             if compressed is not None:
                 solver_coords, solver_values, weight_roots = compressed
                 binned_statistics = True
-        start = time.monotonic()
-        invalid_residual = np.finfo(np.float64).max ** 0.25
-
-        def check() -> None:
-            if cancelled is not None and cancelled():
-                raise FitCancelled("fit cancelled")
-            if (
-                opts.deadline_seconds is not None
-                and time.monotonic() - start > opts.deadline_seconds
-            ):
-                raise FitDeadlineExceeded("fit deadline exceeded")
 
         def poisson_deviance(
             predicted: np.ndarray,
@@ -2528,10 +2539,10 @@ class FitEngine:
                         and lower[index] < floor < upper[index]
                     ):
                         lower[index] = floor
-        fixed_names, free_indices = _fixed_parameter_partition(spec, bounds)
         if values.size <= len(free_indices):
             raise ValueError("fit requires more finite observations than free parameters")
         if not free_indices:
+            check()
             fitted = spec.evaluate(coords, lower).reshape(-1)
             if fitted.shape != values.shape or not np.all(np.isfinite(fitted)):
                 raise RuntimeError("fixed fit evaluation is non-finite")
@@ -2648,8 +2659,8 @@ class FitEngine:
             )
             return jacobian * scale[:, None]
 
-        successful: list[tuple[float, Any]] = []
-        unsuccessful: list[tuple[float, Any]] = []
+        successful: list[tuple[float, float, Any]] = []
+        unsuccessful: list[tuple[float, float, Any]] = []
         last_error: Exception | None = None
         for seed_index, seed in enumerate(seeds):
             check()
@@ -2671,12 +2682,19 @@ class FitEngine:
                     or bool(np.all(solver_residual == invalid_residual))
                 ):
                     continue
-                # Candidates compete on the quantity being minimised.
+                # Candidates compete on the quantity each of them minimised:
+                # twice the solver's cost, which is the residual sum of
+                # squares under the linear loss and the robust loss's own
+                # sum otherwise.  Ranking robust candidates by squared
+                # residuals would hand the outlier the decision the loss
+                # has just taken away from it.  The raw sum of squares stays
+                # the reported quality.
                 rss = float(np.dot(solver_residual, solver_residual))
-                if not math.isfinite(rss):
+                cost = 2.0 * float(candidate.cost)
+                if not math.isfinite(rss) or not math.isfinite(cost):
                     continue
                 (successful if candidate.success else unsuccessful).append(
-                    (rss, candidate)
+                    (cost, rss, candidate)
                 )
                 if (
                     warm_start is not None
@@ -2699,7 +2717,7 @@ class FitEngine:
             scale = max(1.0, abs(best[0]))
             if candidate[0] < best[0] - _FIT_RSS_TIE_RELATIVE * scale:
                 best = candidate
-        _rss, solved = best
+        _cost, _rss, solved = best
         # The model and data residual are needed only for the winner.  Solver
         # residuals may encode a likelihood (histograms), so evaluate rather
         # than trying to invert ``solved.fun``.
@@ -2745,7 +2763,19 @@ class FitEngine:
 
 
 def _coordinate_arrays(coordinates: Sequence[np.ndarray], arity: int) -> ArrayTuple:
-    arrays = tuple(np.asarray(item, dtype=np.float64).reshape(-1) for item in coordinates)
+    """Flat float64 coordinate axes, one per independent variable.
+
+    An axis that already is a flat float64 array comes back as the SAME
+    object.  Batch callers key per-axis facts (finiteness, content digests)
+    on identity, and a tensor facet's cells share their axis arrays; a fresh
+    view per cell would make every cell a stranger to the last.
+    """
+
+    arrays = []
+    for item in coordinates:
+        array = np.asarray(item, dtype=np.float64)
+        arrays.append(array if array.ndim == 1 else array.reshape(-1))
+    arrays = tuple(arrays)
     if len(arrays) != arity:
         raise ValueError("coordinate arity does not match fit model")
     if arrays and any(item.shape != arrays[0].shape for item in arrays):

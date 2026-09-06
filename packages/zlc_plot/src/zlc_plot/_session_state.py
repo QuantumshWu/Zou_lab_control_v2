@@ -80,30 +80,6 @@ class _LiveFrameSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
-class _ResolvedFit:
-    """One complete solver result, selection authority and painted overlay."""
-
-    result: "FitResult | FacetFitBatchResult"
-    selection: FitSelection | None
-    overlay: FitOverlay | None
-    overlays: tuple[FitOverlay, ...] = ()
-    selections: tuple[FitSelection | None, ...] = ()
-
-    def __post_init__(self) -> None:
-        overlays = tuple(self.overlays)
-        if not overlays and self.overlay is not None:
-            overlays = (self.overlay,)
-        overlay = self.overlay
-        if overlay is None and len(overlays) == 1:
-            overlay = overlays[0]
-        selections = tuple(self.selections)
-        if not selections and self.selection is not None:
-            selections = (self.selection,)
-        object.__setattr__(self, "overlay", overlay)
-        object.__setattr__(self, "overlays", overlays)
-        object.__setattr__(self, "selections", selections)
-
-@dataclass(frozen=True, slots=True)
 class _PreparedLiveFrame:
     session_identity: object
     base_data_revision: int
@@ -138,12 +114,37 @@ class _FitResolution:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class _AcceptedFit(_ResolvedFit):
-    """One atomically accepted fit result and its painted presentation."""
+class _AcceptedFit:
+    """One atomically accepted fit result and its painted presentation.
 
+    A single fit travels as ``selection``/``overlay`` and a facet batch as
+    ``selections``/``overlays``; whichever form arrives, the other is
+    derived, so every reader may pick the one it needs.
+    """
+
+    result: "FitResult | FacetFitBatchResult"
+    selection: FitSelection | None
+    overlay: FitOverlay | None
     context_generation: int
     source_generation: str
     request: _LiveFitRequest
+    overlays: tuple[FitOverlay, ...] = ()
+    selections: tuple[FitSelection | None, ...] = ()
+
+    def __post_init__(self) -> None:
+        overlays = tuple(self.overlays)
+        if not overlays and self.overlay is not None:
+            overlays = (self.overlay,)
+        overlay = self.overlay
+        if overlay is None and len(overlays) == 1:
+            overlay = overlays[0]
+        selections = tuple(self.selections)
+        if not selections and self.selection is not None:
+            selections = (self.selection,)
+        object.__setattr__(self, "overlay", overlay)
+        object.__setattr__(self, "overlays", overlays)
+        object.__setattr__(self, "selections", selections)
+
 
 @dataclass(frozen=True, slots=True)
 class _ProjectionPresentation:
@@ -178,6 +179,6 @@ class _FitPresentation:
 __all__ = [
     "_AcceptedFit", "_FitPresentation", "_FitResolution", "_LiveFitRequest",
     "_LiveFrameFinalization", "_LiveFrameSnapshot", "_PointerUpdate",
-    "_PreparedLiveFrame", "_ProjectionPresentation", "_ResolvedFit",
+    "_PreparedLiveFrame", "_ProjectionPresentation",
     "_SolvedLiveFit", "_StartedFitRequest", "FitEvent", "SelectionChange",
 ]

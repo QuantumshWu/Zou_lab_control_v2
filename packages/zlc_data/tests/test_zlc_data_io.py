@@ -516,18 +516,28 @@ def test_figure_members_are_read_by_their_own_physical_names():
     )
 
 
+@pytest.mark.parametrize("layout", ["contiguous", "strided"])
 def test_large_figure_stream_does_not_allocate_archive_sized_python_bytes(
-    tmp_path,
+    tmp_path, layout: str
 ) -> None:
+    """Writing a large member costs a bounded working set, whatever its strides.
+
+    The compressibility probe samples one mebibyte.  Gathered with
+    ``np.take`` it first flattened a strided view into a contiguous copy of
+    the whole plane, so saving a bytes-backed slice -- which the Data
+    contract keeps as a view on purpose -- cost the size of the dataset.
+    """
+
     import tracemalloc
 
     def measured(size_mib: int) -> tuple[int, int]:
-        values = np.random.default_rng(size_mib).integers(
-            0,
-            256,
-            size=size_mib * 1024 * 1024,
-            dtype=np.uint8,
-        )
+        rng = np.random.default_rng(size_mib)
+        count = size_mib * 1024 * 1024
+        if layout == "strided":
+            values = rng.integers(0, 256, size=2 * count, dtype=np.uint8)[::2]
+            assert not values.flags.c_contiguous and not values.flags.f_contiguous
+        else:
+            values = rng.integers(0, 256, size=count, dtype=np.uint8)
         target = tmp_path / f"large-{size_mib}.npz"
         with target.open("wb") as stream:
             tracemalloc.start()

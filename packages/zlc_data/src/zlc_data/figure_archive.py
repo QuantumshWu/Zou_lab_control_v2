@@ -129,7 +129,12 @@ def _compression_sample(array: np.ndarray) -> bytes:
             max(1, wanted // max(1, int(array.dtype.itemsize))),
         )
         indices = np.linspace(0, max(0, array.size - 1), count, dtype=np.intp)
-        return np.take(array, indices).tobytes(order="C")
+        # Gathered through the flat iterator, which walks the strided view
+        # in logical C order and materializes only the elements asked for.
+        # ``np.take`` without an axis flattens its input first, and for a
+        # strided view that is a contiguous copy of the whole plane -- a
+        # probe meant to cost one mebibyte cost the size of the dataset.
+        return array.flat[indices].tobytes(order="C")
     if len(raw) <= wanted:
         return bytes(raw)
     chunk = max(1, wanted // 3)

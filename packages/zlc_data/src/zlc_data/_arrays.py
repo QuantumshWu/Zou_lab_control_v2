@@ -5,10 +5,6 @@ from __future__ import annotations
 import numpy as np
 
 
-_IMMUTABLE_FALSE = np.frombuffer(b"\x00", dtype=np.bool_)
-_IMMUTABLE_TRUE = np.frombuffer(b"\x01", dtype=np.bool_)
-
-
 def canonical_dtype(dtype) -> np.dtype:
     """Return the platform-independent little-endian spelling of ``dtype``."""
 

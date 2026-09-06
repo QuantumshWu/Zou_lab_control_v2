@@ -456,11 +456,13 @@ The radial Gaussian solver uses a bounded regular grid of at most 257×257 for
 its seed and primary parameter search, then checks the full-resolution
 objective and performs a bounded full-resolution convergence refinement when
 needed. The final fitted values, residuals, RSS and selected indices are always
-materialised from every selected source pixel. For an all-valid linear-loss
-image, the final full-resolution covariance uses the exact separable Gaussian
-information matrix; masked and robust-loss fits retain the bounded-row exact
-information pass. Thus optimization avoids repeatedly sweeping millions of
-pixels without turning a display-decimated raster into fit authority.
+materialised from every selected source pixel, and the reported RSS and the
+information matrix behind the covariance come from one bounded-row exact pass
+over those pixels for every loss: the separable closed form only steers the
+all-valid linear solve, because differencing its six second moments cannot
+report a small RSS on a bright background. Thus optimization avoids
+repeatedly sweeping millions of pixels without turning a display-decimated
+raster into fit authority.
 
 For regular images, the default lower radius bound is half the finest native
 coordinate spacing, not a fraction of the noise-sensitive moment seed. The
@@ -565,7 +567,7 @@ linear cell's transData as the affine it is; the whole-pixel cell-box
 searches are memoized on (plan box, figure size, ratio); the centred
 square-sum kernel accepts size-1 axes inside its kept block, which had
 been sending every facet-curve sem down a full centred-copy einsum;
-`block_sum_float` folded into `block_sum_valid` behind a loop-invariant
+`block_sum_float` folded into `block_mean_valid` behind a loop-invariant
 flag (measured faster on both faces); the uncertainty band's two edges
 ride one `transform_curve_batch` launch; batch fit proves each shared
 coordinate object once (digest and finiteness).  The damped-sine seeder's
