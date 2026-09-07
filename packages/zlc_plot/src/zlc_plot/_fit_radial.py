@@ -339,13 +339,17 @@ def _compiled_regular_linear_objective(
     if not information_only:
         source = context[0, 4:] if context.size else observations
         if derivatives or context.size:
-            # Same C-layout three-column operand for B1/Bn and cost/Jacobian
-            # requests. The constant-offset sum already has a scalar owner.
-            projection_basis = np.empty((width, 3), dtype=np.float64)
-            for column in range(width):
-                for vector in range(3):
-                    projection_basis[column, vector] = x_vectors[vector, column]
-            projected = (source.reshape(height, width) @ projection_basis).T
+            # One row of the image projected onto each x basis vector, as
+            # three matrix-vector products whose results are the rows of
+            # ``projected`` -- contiguous, which is what the dot products
+            # below and the B1/Bn accumulation read.  Projecting through a
+            # (width, 3) basis and transposing the (height, 3) result gave
+            # the same numbers as strided views, and np.dot on a strided
+            # operand falls off BLAS.  The constant-offset sum already has a
+            # scalar owner.
+            image = source.reshape(height, width)
+            for vector in range(3):
+                projected[vector] = image @ x_vectors[vector]
         if context.size:
             x_sum = np.sum(x_vectors[0])
             y_sum = np.sum(y_vectors[0])

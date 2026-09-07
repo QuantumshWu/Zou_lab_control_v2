@@ -170,14 +170,18 @@ def test_image_display_unit_change_preserves_canonical_pixel_geometry() -> None:
         assert axes.get_aspect() == pytest.approx(800.0)
         np.testing.assert_array_equal(np.asarray(image.get_array()), before_array)
         # The display extent changes by the unit conversion, while the
-        # renderer's physical square and prepared image remain invariant.  The
-        # RGBA artist fills the square viewport; the prepared extent remains
-        # the real data footprint inside that letterboxed view.
-        prepared = session._renderer._artists["image:prepared_current"]
-        assert np.isclose(float(prepared.extent[1]), 1000.0 * 2.1)
-        assert tuple(map(float, image.get_extent())) == pytest.approx(
-            (*map(float, axes.get_xlim()), *map(float, axes.get_ylim()))
-        )
+        # renderer's physical square and prepared image remain invariant.
+        # Native drawing paints the prepared scene itself, so the artist
+        # keeps the real data footprint and the axes keep the letterboxed
+        # square around it; the scene the native draw reads carries that
+        # footprint in display units.
+        prepared = session._renderer._artists["image:prepared"]
+        assert np.isclose(float(prepared["extents"][0][1]), 1000.0 * 2.1)
+        extent = tuple(map(float, image.get_extent()))
+        assert np.isclose(extent[1], 1000.0 * 2.1)
+        x_limits, y_limits = axes.get_xlim(), axes.get_ylim()
+        assert x_limits[0] <= extent[0] and extent[1] <= x_limits[1]
+        assert y_limits[0] <= extent[2] and extent[3] <= y_limits[1]
     finally:
         session.close()
 
@@ -196,9 +200,13 @@ def test_non_equivalent_image_still_uses_square_screen_cells() -> None:
         x_pixels = axes.transData.transform((x[1], y[0]))[0] - origin[0]
         y_pixels = axes.transData.transform((x[0], y[1]))[1] - origin[1]
         assert abs(x_pixels) == pytest.approx(abs(y_pixels), rel=1.0e-9)
+        # The artist keeps the data footprint; the square viewport that
+        # makes the cells square letterboxes around it.
         extent = tuple(float(value) for value in image.get_extent())
-        assert np.allclose(axes.get_xlim(), extent[:2])
-        assert np.allclose(axes.get_ylim(), extent[2:])
+        x_limits, y_limits = axes.get_xlim(), axes.get_ylim()
+        assert x_limits[0] <= extent[0] and extent[1] <= x_limits[1]
+        assert y_limits[0] <= extent[2] and extent[3] <= y_limits[1]
+        assert np.isclose(extent[0], -2.1) and np.isclose(extent[1], 2.1)
     finally:
         session.close()
 
