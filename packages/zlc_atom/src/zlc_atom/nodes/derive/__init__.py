@@ -1,17 +1,23 @@
-"""Derive processor: one expression over the outputs of one publication."""
+"""Derive processor: one program of named expressions over one publication."""
 
-from .expression import ExpressionError, Operand, evaluate, referenced_outputs
+from .expression import (
+    ExpressionError,
+    Operand,
+    evaluate,
+    published_names,
+    referenced_outputs,
+)
 from .logic_node import DERIVE_SCHEMA, LOGIC_NODE
-from .processor import DERIVE_OUTPUT, DERIVE_OUTPUTS, DeriveProcessor
+from .processor import DeriveProcessor, declared_outputs
 
 __all__ = [
-    "DERIVE_OUTPUT",
-    "DERIVE_OUTPUTS",
     "DERIVE_SCHEMA",
     "DeriveProcessor",
     "ExpressionError",
     "LOGIC_NODE",
     "Operand",
+    "declared_outputs",
     "evaluate",
+    "published_names",
     "referenced_outputs",
 ]

@@ -32,6 +32,7 @@ from .form import (
 from ..fluent import (
     FluentComboBox,
     FluentCycleComboBox,
+    FluentCodeEdit,
     FluentDoubleSpinBox,
     FluentLineEdit,
     FluentPathEdit,
@@ -265,6 +266,41 @@ class _TextHandler(_StaticHandler):
     def is_empty(self, field, widget):
         del field
         return not widget.text().strip()
+
+
+class _MultilineHandler(_TextHandler):
+    """Text that spans lines -- a program of expressions -- in the house
+    code editor.  The value rules are text's; only the box differs, and it
+    is live as it is typed like every other kind."""
+
+    def build(self, field, value, on_change, context=None):
+        del context
+        edit = FluentCodeEdit()
+        edit.setPlaceholderText(field.description)
+        edit.setToolTip(field.description)
+        edit.setMinimumHeight(scaled_px(96, minimum=72))
+        edit.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred
+        )
+        self.write(field, edit, value)
+        _connect_change(edit.textChanged, on_change)
+        return edit
+
+    def read(self, field, widget):
+        del field
+        return widget.toPlainText()
+
+    def write(self, field, widget, value):
+        # Only a DIFFERENT text is written: setPlainText moves the caret to
+        # the top, and a projection that wrote the same program back on
+        # every keystroke would fight the operator for the cursor.
+        text = self.normalize(field, value)
+        if widget.toPlainText() != text:
+            widget.setPlainText(text)
+
+    def is_empty(self, field, widget):
+        del field
+        return not widget.toPlainText().strip()
 
 
 class _IntHandler(_StaticHandler):
@@ -704,6 +740,7 @@ class _KeyedChoiceHandler(FormWidgetHandler):
 FORM_WIDGET_HANDLERS: Mapping[str, FormWidgetHandler] = MappingProxyType(
     {
         "text": _TextHandler(),
+        "multiline": _MultilineHandler(),
         "int": _IntHandler(),
         "float": _FloatHandler(),
         "number": _NumberHandler(),
@@ -730,6 +767,8 @@ def _widget_family(field: FormFieldProps) -> str:
         return f"{prefix}line-edit:{field.unit}"
     if field.kind == "text":
         return prefix + "line-edit"
+    if field.kind == "multiline":
+        return "code-edit"
     if field.kind == "choice":
         return prefix + (
             "choice-cycle" if field.cycle_choices is not None else "choice"

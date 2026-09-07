@@ -630,9 +630,12 @@ class LogicCatalog:
             (
                 name,
                 str(getattr(item.kind, "value", item.kind)),
-                ", ".join(
-                    output.name for output in item.outputs
-                ) or "nothing",
+                ", ".join(output.name for output in item.outputs)
+                or (
+                    "what its draft asks for"
+                    if item.declare_outputs is not None
+                    else "nothing"
+                ),
             )
             for name, item in sorted(self.by_name.items())
         )
@@ -648,11 +651,13 @@ def make_host(
     signal_plane: Any,
     instance_id: str,
     source_signal: str | None,
+    values: Mapping[str, Any],
     request_owner_wake: Callable[[], None] | None = None,
 ) -> NodeHost:
     """One node under the runtime's own lifecycle, named for its instance.
 
-    The descriptor's frozen output declarations are the sole signal vocabulary.
+    The descriptor's output declarations for this draft are the sole signal
+    vocabulary; the plane refuses a node whose own declarations differ.
     """
 
     inputs = dataset_inputs(descriptor)
@@ -681,7 +686,7 @@ def make_host(
         request_owner_wake,
         instance_id=str(instance_id),
         kind=kind,
-        dataset_output_declarations=tuple(descriptor.outputs),
+        dataset_output_declarations=descriptor.outputs_for(values),
         input_signal=selected_source,
         input_name=(
             inputs[0].name if has_input and kind == "processor" else None

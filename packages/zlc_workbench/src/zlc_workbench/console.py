@@ -3885,7 +3885,7 @@ class ConsolePresenter:
 
         if binding.host is not None:
             return tuple(binding.host.dataset_output_declarations)
-        return tuple(binding.descriptor.outputs)
+        return binding.descriptor.outputs_for(binding.draft.values)
 
     def panel_editor_projection(self, panel_id: str) -> dict[str, Any] | None:
         """Plain, widget-free state consumed by the non-modal Panel Edit tab."""
@@ -7637,6 +7637,7 @@ class ConsolePresenter:
             signal_plane=self.session.signal_plane,
             instance_id=binding.node_id,
             source_signal=finalization.source_signal or None,
+            values=finalization.values,
             request_owner_wake=self.board.wake.request_owner_wake,
         )
         claims = tuple(

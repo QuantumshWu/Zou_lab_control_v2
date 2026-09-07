@@ -30,7 +30,6 @@ from zlc_runtime import DatasetCoverage, SignalValue
 
 from zlc_atom.nodes.frame_survival import FrameSurvivalProcessor
 from zlc_atom.nodes.frame_survival.processor import _forward_pairs
-from zlc_atom.nodes.occupancy_agreement import OccupancyAgreementProcessor
 
 
 def _occupied_snapshot(
@@ -108,118 +107,6 @@ def test_unjudgeable_frames_leave_the_denominator() -> None:
     assert not validity[1].any()
     assert not validity[2, 0]
     assert validity[0].all() and validity[3].all()
-
-
-def test_occupancy_agreement_filters_sampled_counts_and_allows_one_frame_noop() -> None:
-    occupied_values = np.asarray(
-        [[[False, True, False, True, True],
-          [True, False, True, False, True],
-          [False, True, True, False, True]]],
-        dtype=bool,
-    )
-    occupied_valid = np.ones_like(occupied_values)
-    occupied_valid[:, :, 4] = False
-    occupied = _occupied_snapshot(occupied_values, occupied_valid)
-    occupied_schema = occupied.block.schema
-    counts_schema = replace(
-        occupied_schema,
-        value_schema=ValueSchema(
-            occupied_schema.value_schema.validity_contract,
-            np.dtype("<f8"),
-            "count",
-        ),
-    )
-    count_values = np.asarray(
-        [[[1, 2, 3, 4, 5], [11, 22, 33, 44, 55], [6, 7, 8, 9, 10]]],
-        dtype="<f8",
-    )
-    counts = owned_snapshot_from_arrays(
-        counts_schema,
-        count_values,
-        occupied.block.revision,
-        validity=np.ones_like(occupied_values),
-        stream_generation=occupied.ref.stream_generation,
-    )
-    outputs = OccupancyAgreementProcessor().evaluate_inputs(
-        {
-            "counts": SignalValue("@logic/occupancy/counts", counts, None),
-            "occupied": SignalValue("@logic/occupancy/occupied", occupied, None),
-        }
-    )
-    consistent_occupied = outputs["consistent_occupied"].snapshot
-    consistent_counts = outputs["consistent_counts"].snapshot
-    np.testing.assert_array_equal(
-        consistent_occupied.block.values[:, 0, :2], [[False, True]]
-    )
-    np.testing.assert_array_equal(
-        consistent_occupied.expanded_validity(),
-        [[[True, True, False, False, False]]],
-    )
-    np.testing.assert_array_equal(
-        consistent_counts.expanded_validity(),
-        [[[True, True, False, False, False]]],
-    )
-    np.testing.assert_array_equal(
-        consistent_counts.block.values[:, 0, :2], [[11.0, 22.0]]
-    )
-    assert np.isnan(consistent_counts.block.values[:, 0, 2:]).all()
-    assert consistent_counts.block.schema.point_domain.axes[0].coordinates == (1,)
-
-    # The same data after a schema round trip through the Data codec: its
-    # site role is an EQUAL AxisRoleId, not the SITE object, and the
-    # processor must read roles by value, not by identity.
-    from zlc_data.codec import dataset_schema_from_tree, dataset_schema_to_tree
-
-    restored = {}
-    for name, snapshot in (("counts", counts), ("occupied", occupied)):
-        schema = dataset_schema_from_tree(dataset_schema_to_tree(snapshot.block.schema))
-        assert schema.cell_domain.axes[0].role is not SITE
-        restored[name] = SignalValue(
-            f"@logic/occupancy/{name}",
-            owned_snapshot_from_arrays(
-                schema,
-                snapshot.block.values,
-                snapshot.block.revision,
-                validity=snapshot.expanded_validity(),
-                stream_generation=snapshot.ref.stream_generation,
-            ),
-            None,
-        )
-    round_tripped = OccupancyAgreementProcessor().evaluate_inputs(restored)
-    np.testing.assert_array_equal(
-        round_tripped["consistent_counts"].snapshot.block.values,
-        consistent_counts.block.values,
-    )
-
-    one_frame_occupied = _occupied_snapshot(occupied_values[:, :1, :], occupied_valid[:, :1, :])
-    one_frame_counts = owned_snapshot_from_arrays(
-        replace(
-            one_frame_occupied.block.schema,
-            value_schema=counts_schema.value_schema,
-        ),
-        count_values[:, :1, :],
-        one_frame_occupied.block.revision,
-        validity=np.ones_like(occupied_values[:, :1, :]),
-        stream_generation=one_frame_occupied.ref.stream_generation,
-    )
-    no_op = OccupancyAgreementProcessor(
-        first_occupancy_frame=0,
-        counts_frame=0,
-        second_occupancy_frame=0,
-    ).evaluate_inputs(
-        {
-            "counts": SignalValue("@logic/occupancy/counts", one_frame_counts, None),
-            "occupied": SignalValue("@logic/occupancy/occupied", one_frame_occupied, None),
-        }
-    )
-    np.testing.assert_array_equal(
-        no_op["consistent_counts"].snapshot.block.values[:, 0, :4],
-        count_values[:, 0, :4],
-    )
-    np.testing.assert_array_equal(
-        no_op["consistent_occupied"].snapshot.block.values[:, 0, :4],
-        occupied_values[:, 0, :4],
-    )
 
 
 def test_mean_over_validity_is_the_pooled_survival() -> None:

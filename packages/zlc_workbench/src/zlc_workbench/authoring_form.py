@@ -35,6 +35,8 @@ _FIELD_KINDS = {
     "float": "float",
     "str": "text",
     "text": "text",
+    #: Text that spans lines -- a program -- edited in the code editor.
+    "multiline": "multiline",
     "bool": "bool",
     "choice": "choice",
     "numeric_tuple": "text",
@@ -180,7 +182,7 @@ def _project_field(field: AuthoringField) -> FormFieldProps:
         choices=tuple(
             FormChoice(choice.label, choice.value) for choice in field.choices
         ),
-        description={
+        description=field.description or {
             "pair": "two integers as y, x",
             "numeric_tuple": "comma-separated finite numbers",
         }.get(str(field.value_type), ""),

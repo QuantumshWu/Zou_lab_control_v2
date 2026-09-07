@@ -20,6 +20,7 @@ from zlc_data.units import resolve_unit
 
 FormFieldKind: TypeAlias = Literal[
     "text",
+    "multiline",
     "int",
     "float",
     "number",
@@ -31,6 +32,7 @@ FormFieldKind: TypeAlias = Literal[
 _FORM_FIELD_KINDS = frozenset(
     {
         "text",
+        "multiline",
         "int",
         "float",
         "number",
@@ -321,9 +323,11 @@ class FormFieldProps:
                     raise TypeError(f"number field {self.key!r} {name} must be numeric")
                 if not math.isfinite(float(value)):
                     raise ValueError(f"number field {self.key!r} {name} must be finite")
-        elif self.kind == "text":
+        elif self.kind in ("text", "multiline"):
             if self.default is not None and not isinstance(self.default, str):
-                raise TypeError(f"text field {self.key!r} default must be str or None")
+                raise TypeError(
+                    f"{self.kind} field {self.key!r} default must be str or None"
+                )
         elif self.kind == "bool":
             if not isinstance(self.default, bool):
                 raise TypeError(f"bool field {self.key!r} default must be bool")

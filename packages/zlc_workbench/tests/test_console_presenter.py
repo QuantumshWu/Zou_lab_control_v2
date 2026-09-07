@@ -4766,9 +4766,11 @@ def test_a_derive_publishes_the_counts_of_the_occupied_sites(
 ) -> None:
     """The console runs a derive as it runs any processor.  Bound to the
     occupancy's counts, it reads the verdicts from the same publication,
-    and what it publishes -- the photon counts of the sites frame 1 judged
-    occupied, valid there and nowhere else -- opens on a histogram panel
-    like any other signal, expression and all in its record."""
+    and every line of its program publishes under its own name: the photon
+    counts of the sites frame 1 judged occupied, valid there and nowhere
+    else, open on a histogram panel like any other signal, and how many
+    sites that was is a second signal beside it -- program and all in
+    their record."""
 
     import numpy as np
     from zlc_atom.nodes.calibration import (
@@ -4813,21 +4815,29 @@ def test_a_derive_publishes_the_counts_of_the_occupied_sites(
     assert presenter.start_logic(occupancy_id) is True
     _settle_logic(presenter, occupancy_id)
     counts_signal = stable_signal_key("occupancy", "counts")
-    expression = "a.counts.frame(1).where(a.occupied.frame(1))"
+    program = (
+        "bright = a.counts.frame(1).where(a.occupied.frame(1))\n"
+        "how_many = a.occupied.frame(1).count('site')"
+    )
     derive_id = presenter.add_logic(
         "derive",
-        node_id="bright",
-        values={"expression": expression},
+        node_id="sites",
+        values={"expressions": program},
         source_signal=counts_signal,
         open_editor=False,
     )
+    # Named by the draft, before anything ran: the board's own listing of
+    # what this row will publish.
+    assert [
+        item.name for item in presenter._logic_outputs(presenter.logic[derive_id])
+    ] == ["bright", "how_many"]
     assert presenter.start_logic(derive_id) is True, presenter.view.status[-3:]
     _settle_logic(presenter, derive_id)
     observation = presenter.logic[derive_id].host.observation
     assert observation.error is None, observation
 
     front = session.signal_plane.freeze()
-    bright_signal = stable_signal_key("bright", "value")
+    bright_signal = stable_signal_key("sites", "bright")
     bright = front.value(bright_signal)
     counts = front.value(counts_signal)
     occupied = front.value(stable_signal_key("occupancy", "occupied"))
@@ -4844,7 +4854,12 @@ def test_a_derive_publishes_the_counts_of_the_occupied_sites(
     np.testing.assert_array_equal(values[judged], expected[judged])
     assert np.isnan(values[~judged]).all()
     assert bright.schema.value_schema.value_unit == counts.schema.value_schema.value_unit
-    assert bright.run_record["parameters"]["expression"] == expression
+    assert bright.run_record["parameters"]["expressions"] == program
+    how_many = front.value(stable_signal_key("sites", "how_many"))
+    assert how_many is not None
+    np.testing.assert_array_equal(
+        np.asarray(how_many.values)[:, 0, 0], judged[:, 0, :].sum(axis=-1)
+    )
 
     panel = presenter.add_panel(
         bright_signal,

@@ -1154,3 +1154,60 @@ def test_a_form_opens_on_the_values_it_is_given_and_an_int_has_no_width() -> Non
         QtGui.QKeyEvent(QtCore.QEvent.KeyPress, QtCore.Qt.Key_Return, QtCore.Qt.NoModifier),
     )
     assert form.read_value("n") == 2**40, "clamped exactly, in integers"
+
+
+def test_a_multiline_field_edits_a_program_in_the_code_editor() -> None:
+    """A field that spans lines -- a program of expressions -- is edited in
+    the house code editor: it applies as it is typed like every other kind,
+    reads back with its newlines, and a projection that carries the same
+    program back does not move the caret, because nothing is rewritten.
+    """
+
+    _run_qt(
+        """
+import zou_lab_control
+from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import FluentCodeEdit
+from zlc_ui.form.form import FormFieldProps, FormSpec
+from zlc_ui.form.qt_form import FluentParameterForm
+
+app = ensure_qt_app(['test'])
+spec = FormSpec((
+    FormFieldProps(
+        'expressions', 'multiline', 'Expressions', required=True,
+        description='one per line: name = expression',
+    ),
+))
+first = 'agree = a.occupied.frame(0) == a.occupied.frame(2)'
+form = FluentParameterForm(spec, {'expressions': first})
+window = QtWidgets.QMainWindow(); window.setCentralWidget(form); window.show(); app.processEvents()
+edit = form._widgets['expressions']
+assert isinstance(edit, FluentCodeEdit)
+assert edit.placeholderText() == 'one per line: name = expression'
+seen = []; form.changed.connect(seen.append)
+edit.setFocus(QtCore.Qt.MouseFocusReason)
+edit.moveCursor(QtGui.QTextCursor.End)
+QtTest.QTest.keyClick(edit, QtCore.Qt.Key_Return)
+QtTest.QTest.keyClicks(edit, 'counts = a.counts.frame(1).where(agree)')
+app.processEvents()
+assert seen.count('expressions') >= 2, seen
+program = first + '\\ncounts = a.counts.frame(1).where(agree)'
+assert form.read_all() == {'expressions': program}, form.read_all()
+
+# The operator has left the box; the projection of the same program lands
+# without rewriting it, so the caret stays at the end where they left it.
+edit.clearFocus(); app.processEvents()
+position = edit.textCursor().position()
+assert position == len(program)
+form.reconcile(spec, {'expressions': program})
+app.processEvents()
+assert edit.toPlainText() == program
+assert edit.textCursor().position() == position, edit.textCursor().position()
+assert not form.is_empty('expressions')
+form.populate({'expressions': ''})
+assert form.is_empty('expressions')
+window.close()
+print('ok')
+"""
+    )

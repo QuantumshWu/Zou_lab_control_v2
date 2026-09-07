@@ -1,17 +1,27 @@
-"""One expression over the outputs of one publication.
+"""One program of named expressions over the outputs of one publication.
 
-The expression is a Python expression, read by the standard parser and
-admitted node by node -- nothing runs that is not listed here.  ``a`` is
-the bound producer and ``a.<output>`` one of its outputs, an operand: a
-dataset with its validity and unit.  Operands compose::
+The program is Python, read by the standard parser and admitted node by
+node -- nothing runs that is not listed here.  Every line names what it
+publishes::
+
+    agree = a.occupied.frame(0) == a.occupied.frame(2)
+    counts = a.counts.frame(1).where(agree)
+    occupied = a.occupied.frame(0).where(agree)
+
+``a`` is the bound producer and ``a.<output>`` one of its outputs, an
+operand: a dataset with its validity and unit.  A name a line assigns is
+an operand on the lines below it, and every name is an output of the node
+that runs the program.  Operands compose::
 
     a.counts.frame(1).where(a.occupied.frame(1))   counts of the occupied sites
     a.occupied.frame(1).count("site")              how many sites were occupied
     a.counts.frame(0) - a.counts.frame(1)          same geometry, same unit
     a.counts.frame(1) > 120                        a boolean operand
+    a.occupied.frame(0) == a.occupied.frame(2)     two verdicts agree
 
-Operators: ``+ - * / **``, comparisons ``< <= > >= == !=``, boolean
-``& | ~``, and numbers.  Methods on an operand:
+Operators: ``+ - * / **``, comparisons ``< <= > >= == !=`` between
+numeric operands, ``== !=`` between boolean ones, boolean ``& | ~``, and
+numbers.  Methods on an operand:
 
 ``.frame(k)``
     One frame of the point domain, by index or by label.  The frame axis
@@ -25,8 +35,8 @@ Operators: ``+ - * / **``, comparisons ``< <= > >= == !=``, boolean
     ``count`` is the number of valid true cells of a boolean operand, or of
     valid samples of a numeric one.
 
-The same pass types a schema without arrays, so the shape of the result is
-known -- and refused -- before a single value exists.
+The same pass types a schema without arrays, so the shape of every result
+is known -- and refused -- before a single value exists.
 """
 
 from __future__ import annotations
@@ -66,18 +76,19 @@ _COMPARE = {
     ast.Eq: "==",
     ast.NotEq: "!=",
 }
+_EQUALITY = ("==", "!=")
 
 
 class ExpressionError(ValueError):
-    """The expression cannot be admitted or cannot be typed."""
+    """The program cannot be admitted or cannot be typed."""
 
 
 @dataclass(frozen=True)
 class Operand:
-    """A dataset in the expression: its schema, and its arrays when computing.
+    """A dataset in the program: its schema, and its arrays when computing.
 
     ``values`` and ``valid`` are None in the typing pass, which walks the
-    same expression over schemas alone.
+    same program over schemas alone.
     """
 
     schema: DatasetSchema
@@ -101,43 +112,99 @@ class Operand:
         return replace(self, values=values, valid=valid)
 
 
-def referenced_outputs(expression: str) -> tuple[str, ...]:
-    """The producer outputs the expression reads, in order of first use."""
+@dataclass(frozen=True)
+class _Line:
+    """One admitted line: the name it publishes and what it computes."""
 
-    tree = _admitted(expression)
-    reads = sorted(
-        (
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Attribute)
-            and isinstance(node.value, ast.Name)
-            and node.value.id == _SOURCE
-        ),
-        key=lambda node: (node.lineno, node.col_offset),
-    )
+    name: str
+    expression: ast.expr
+
+
+def published_names(program: str) -> tuple[str, ...]:
+    """The names the program publishes, one per line, in order."""
+
+    return tuple(line.name for line in _admitted(program))
+
+
+def referenced_outputs(program: str) -> tuple[str, ...]:
+    """The producer outputs the program reads, in order of first use."""
+
     names: list[str] = []
-    for node in reads:
-        if node.attr not in names:
-            names.append(node.attr)
+    for line in _admitted(program):
+        reads = sorted(
+            (
+                node
+                for node in ast.walk(line.expression)
+                if isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == _SOURCE
+            ),
+            key=lambda node: (node.lineno, node.col_offset),
+        )
+        for node in reads:
+            if node.attr not in names:
+                names.append(node.attr)
     return tuple(names)
 
 
-def evaluate(expression: str, outputs: Mapping[str, Operand]) -> Operand:
-    """The expression over the producer's outputs, typed and (if arrays are
-    present) computed.  Every refusal names what was written."""
+def evaluate(program: str, outputs: Mapping[str, Operand]) -> dict[str, Operand]:
+    """Every line of the program over the producer's outputs, by the name it
+    publishes: typed, and computed when the outputs carry arrays.  Every
+    refusal names what was written."""
 
-    tree = _admitted(expression)
-    return _Evaluator(outputs).visit(tree.body)
+    evaluator = _Evaluator(outputs)
+    results: dict[str, Operand] = {}
+    for line in _admitted(program):
+        result = evaluator.visit(line.expression)
+        if not isinstance(result, Operand):
+            raise ExpressionError(
+                f"{line.name} publishes no dataset; a line must compute from "
+                f"{_SOURCE}.<output>"
+            )
+        evaluator.remember(line.name, result)
+        results[line.name] = result
+    return results
 
 
-def _admitted(expression: str) -> ast.Expression:
-    text = str(expression).strip()
+def _admitted(program: str) -> tuple[_Line, ...]:
+    text = str(program).strip()
     if not text:
-        raise ExpressionError("the expression is empty")
+        raise ExpressionError(
+            "the program is empty; a line publishes what it names: name = expression"
+        )
     try:
-        tree = ast.parse(text, mode="eval")
+        module = ast.parse(text, mode="exec")
     except SyntaxError as error:
-        raise ExpressionError(f"cannot read the expression: {error.msg}") from None
+        raise ExpressionError(f"cannot read the program: {error.msg}") from None
+    lines: list[_Line] = []
+    named: list[str] = []
+    for statement in module.body:
+        if isinstance(statement, ast.Expr):
+            raise ExpressionError(
+                f"line {statement.lineno} publishes nothing; name it: name = expression"
+            )
+        if (
+            not isinstance(statement, ast.Assign)
+            or len(statement.targets) != 1
+            or not isinstance(statement.targets[0], ast.Name)
+        ):
+            raise ExpressionError(
+                f"line {statement.lineno} is not one 'name = expression'"
+            )
+        name = statement.targets[0].id
+        if name == _SOURCE:
+            raise ExpressionError(
+                f"{_SOURCE!r} is the bound producer; a line cannot be named after it"
+            )
+        if name in named:
+            raise ExpressionError(f"{name!r} is already published by an earlier line")
+        _admit(statement.value, tuple(named))
+        named.append(name)
+        lines.append(_Line(name, statement.value))
+    return tuple(lines)
+
+
+def _admit(tree: ast.expr, named: tuple[str, ...]) -> None:
     # A method is an attribute too, but of a call; the methods are admitted
     # by name where they are applied.
     methods = {
@@ -145,13 +212,19 @@ def _admitted(expression: str) -> ast.Expression:
     }
     for node in ast.walk(tree):
         if isinstance(node, ast.Name):
-            if node.id != _SOURCE:
+            if node.id != _SOURCE and node.id not in named:
                 raise ExpressionError(
-                    f"{node.id!r} is not an operand; only {_SOURCE}.<output> is"
+                    f"{node.id!r} is not an operand; only {_SOURCE}.<output> and "
+                    "the names of earlier lines are"
                 )
         elif isinstance(node, ast.Attribute):
             if id(node) in methods:
                 continue
+            if isinstance(node.value, ast.Name) and node.value.id in named:
+                raise ExpressionError(
+                    f"{node.value.id!r} has no outputs; .{node.attr} may only "
+                    f"follow {_SOURCE}, the bound producer"
+                )
             if isinstance(node.value, ast.Name) and node.value.id != _SOURCE:
                 raise ExpressionError(
                     f"{node.value.id!r} is not an operand; only {_SOURCE}.<output> is"
@@ -177,18 +250,28 @@ def _admitted(expression: str) -> ast.Expression:
         elif isinstance(node, ast.UnaryOp):
             if type(node.op) not in (ast.USub, ast.Invert):
                 raise ExpressionError(f"operator {type(node.op).__name__} is not admitted")
-        elif not isinstance(node, (ast.Expression, ast.Load, ast.cmpop, ast.operator, ast.unaryop)):
+        elif not isinstance(node, (ast.Load, ast.cmpop, ast.operator, ast.unaryop)):
             raise ExpressionError(f"{type(node).__name__} is not admitted in an expression")
-    return tree
 
 
 class _Evaluator:
     def __init__(self, outputs: Mapping[str, Operand]) -> None:
         self._outputs = outputs
+        self._named: dict[str, Operand] = {}
+
+    def remember(self, name: str, operand: Operand) -> None:
+        self._named[name] = operand
 
     def visit(self, node: ast.expr) -> Operand | float | str:
         if isinstance(node, ast.Constant):
             return node.value
+        if isinstance(node, ast.Name):
+            if node.id == _SOURCE:
+                raise ExpressionError(
+                    f"{_SOURCE} is the bound producer; read one of its outputs as "
+                    f"{_SOURCE}.<output>"
+                )
+            return self._named[node.id]
         if isinstance(node, ast.Attribute):
             operand = self._outputs.get(node.attr)
             if operand is None:
@@ -390,19 +473,25 @@ def _binary(operator: str, left: object, right: object) -> Operand | float:
         schema_source = left
     else:
         schema_source = left if isinstance(left, Operand) else right
-    boolean = operator in ("&", "|")
-    comparison = operator in _COMPARE.values()
-    if boolean:
-        for side in (left, right):
-            if not isinstance(side, Operand) or not side.is_boolean:
-                raise ExpressionError(f"{operator} needs two boolean operands")
+    boolean_sides = tuple(
+        isinstance(side, Operand) and side.is_boolean for side in (left, right)
+    )
+    # Two verdicts agree or differ: == and != between boolean operands are
+    # the logic of the verdicts, not arithmetic on them.
+    logical = operator in ("&", "|") or (
+        operator in _EQUALITY and any(boolean_sides)
+    )
+    if logical:
+        if not all(boolean_sides):
+            raise ExpressionError(f"{operator} needs two boolean operands")
         dtype, unit = np.dtype("?"), _DIMENSIONLESS
     else:
-        for side in (left, right):
-            if isinstance(side, Operand) and side.is_boolean:
-                raise ExpressionError(f"{operator} needs numeric operands; a boolean one can be counted")
+        if any(boolean_sides):
+            raise ExpressionError(
+                f"{operator} needs numeric operands; a boolean one can be counted"
+            )
         unit = _unit_of(operator, left, right)
-        dtype = np.dtype("?") if comparison else np.dtype(np.float64)
+        dtype = np.dtype("?") if operator in _COMPARE.values() else np.dtype(np.float64)
     schema = DatasetSchema(
         schema_source.schema.repeat_domain,
         schema_source.schema.point_domain,
@@ -417,7 +506,7 @@ def _binary(operator: str, left: object, right: object) -> Operand | float:
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
         result = _apply(operator, left_values, right_values)
     result = np.asarray(result, dtype=dtype)
-    if not boolean and not comparison:
+    if dtype.kind == "f":
         valid = valid & np.isfinite(result)
     return Operand(schema, _masked(result, valid), valid)
 
@@ -547,4 +636,10 @@ def _masked(values: np.ndarray, valid: np.ndarray) -> np.ndarray:
     return masked
 
 
-__all__ = ["ExpressionError", "Operand", "evaluate", "referenced_outputs"]
+__all__ = [
+    "ExpressionError",
+    "Operand",
+    "evaluate",
+    "published_names",
+    "referenced_outputs",
+]

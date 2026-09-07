@@ -1,4 +1,4 @@
-"""Publish one expression over the outputs of one publication."""
+"""Publish every named line of one program over one publication."""
 
 from __future__ import annotations
 
@@ -14,46 +14,57 @@ from zlc_runtime import (
     SignalValue,
 )
 
-from .expression import Operand, evaluate, referenced_outputs
+from .expression import Operand, evaluate, published_names, referenced_outputs
 
-DERIVE_OUTPUT = DatasetOutputDeclaration("value", "derive.value", index_by_source=True)
-DERIVE_OUTPUTS = (DERIVE_OUTPUT,)
+
+def declared_outputs(program: str) -> tuple[DatasetOutputDeclaration, ...]:
+    """What one program publishes: one output per named line, in order.
+
+    The name is the line's own; the contract says a derive computed it.  A
+    panel leasing an output's history is what makes it a bounded dataset,
+    so every line is indexed by its source, as the bound signal is.
+    """
+
+    return tuple(
+        DatasetOutputDeclaration(name, f"derive.{name}", index_by_source=True)
+        for name in published_names(program)
+    )
 
 
 class DeriveProcessor:
-    """Evaluate one expression on every publication of the bound producer.
+    """Evaluate one program on every publication of the bound producer.
 
-    The inputs are the producer's outputs the expression names: the bound
+    The inputs are the producer's outputs the program names: the bound
     signal itself and its siblings from the same publication, so they are
     aligned by construction -- one event, one answer, one exact causal
-    parent.  An expression over two producers is a join, which this
-    runtime's lineage does not carry; it is not something this node quietly
+    parent.  A program over two producers is a join, which this runtime's
+    lineage does not carry; it is not something this node quietly
     approximates.
     """
 
     def __init__(
         self,
         *,
-        expression: str,
+        expressions: str,
         primary_output: str | None,
         producer: str = "derive",
     ) -> None:
         self.instance_id = str(producer).strip()
         if not self.instance_id:
             raise ValueError("producer must be non-empty")
-        self.expression = str(expression).strip()
-        referenced = referenced_outputs(self.expression)
+        self.expressions = str(expressions).strip()
+        referenced = referenced_outputs(self.expressions)
         if primary_output is not None and primary_output not in referenced:
             raise ValueError(
-                f"the bound output {primary_output!r} is not one the expression reads"
+                f"the bound output {primary_output!r} is not one the program reads"
             )
         self.primary_output = primary_output
-        #: The producer outputs the expression reads beside the bound one:
+        #: The producer outputs the program reads beside the bound one:
         #: what the host must fetch from the same publication.
         self.dataset_input_siblings = tuple(
             name for name in referenced if name != primary_output
         )
-        self.dataset_output_declarations = DERIVE_OUTPUTS
+        self.dataset_output_declarations = declared_outputs(self.expressions)
 
     def evaluate(self, source: SignalValue) -> dict[str, LiveDatasetOutput]:
         return self.evaluate_inputs({"a": source})
@@ -81,59 +92,86 @@ class DeriveProcessor:
             )
             for name, value in by_output.items()
         }
-        result = evaluate(self.expression, operands)
-        assert result.values is not None and result.valid is not None
-        snapshot = owned_snapshot_from_arrays(
-            result.schema,
-            result.values,
-            primary.snapshot.block.revision,
-            validity=result.valid,
-            stream_generation=primary.snapshot.ref.stream_generation,
-        )
+        results = evaluate(self.expressions, operands)
         run_record = {
             "node": self.instance_id,
             "parameters": {
-                "expression": self.expression,
+                "expressions": self.expressions,
                 "source_signal": primary.name,
                 "inputs": {name: value.name for name, value in by_output.items()},
             },
         }
-        coverage, canonical, origin = self._placement(primary, by_output, result.schema)
-        return {
-            DERIVE_OUTPUT.name: LiveDatasetOutput(
-                DERIVE_OUTPUT,
+        canonical = self._canonical_schemas(primary, by_output)
+        outputs: dict[str, LiveDatasetOutput] = {}
+        for declaration in self.dataset_output_declarations:
+            result = results[declaration.name]
+            assert result.values is not None and result.valid is not None
+            snapshot = owned_snapshot_from_arrays(
+                result.schema,
+                result.values,
+                primary.snapshot.block.revision,
+                validity=result.valid,
+                stream_generation=primary.snapshot.ref.stream_generation,
+            )
+            coverage, canonical_schema, origin = self._placement(
+                primary, result.schema, canonical.get(declaration.name)
+            )
+            outputs[declaration.name] = LiveDatasetOutput(
+                declaration,
                 snapshot,
                 coverage,
                 run_record,
-                canonical,
+                canonical_schema,
                 origin,
             )
-        }
+        return outputs
 
-    def _placement(
+    def _canonical_schemas(
         self,
         primary: SignalValue,
         by_output: Mapping[str, SignalValue],
+    ) -> dict[str, DatasetSchema]:
+        """The complete-run schema of every line -- the same program typed
+        over the bound signal's canonical schema.  Only a finite run has one."""
+
+        if not isinstance(primary.coverage, DatasetCoverage):
+            return {}
+        if primary.canonical_schema is None or primary.cell_origin is None:
+            raise ValueError("finite derive input lacks canonical placement")
+        typed = evaluate(
+            self.expressions,
+            {
+                name: Operand(
+                    value.canonical_schema
+                    if value.canonical_schema is not None
+                    else value.schema
+                )
+                for name, value in by_output.items()
+            },
+        )
+        return {name: operand.schema for name, operand in typed.items()}
+
+    @staticmethod
+    def _placement(
+        primary: SignalValue,
         schema: DatasetSchema,
+        canonical: DatasetSchema | None,
     ) -> tuple[
         DatasetCoverage | MonitorCoverage,
         DatasetSchema | None,
         tuple[int, int] | None,
     ]:
-        """Where the result sits in its run, from where the bound signal sits.
+        """Where one result sits in its run, from where the bound signal sits.
 
-        The expression may collapse the point domain (``.frame(k)``); the
-        run's cell count shrinks by the same factor, and the canonical
-        (complete-run) schema is the same expression typed over the bound
-        signal's canonical schema.
+        A line may collapse the point domain (``.frame(k)``); the run's cell
+        count shrinks by the same factor.
         """
 
         source_schema = primary.schema
         cycles = source_schema.repeat_domain.size
         scale = source_schema.point_domain.size // schema.point_domain.size
         if isinstance(primary.coverage, DatasetCoverage):
-            if primary.canonical_schema is None or primary.cell_origin is None:
-                raise ValueError("finite derive input lacks canonical placement")
+            assert canonical is not None and primary.cell_origin is not None
             if (
                 primary.coverage.written_cells % scale
                 or primary.coverage.total_cells % scale
@@ -142,17 +180,6 @@ class DeriveProcessor:
                     "the bound signal's coverage is not whole cycles; derive "
                     "cannot keep exact bookkeeping"
                 )
-            canonical = evaluate(
-                self.expression,
-                {
-                    name: Operand(
-                        value.canonical_schema
-                        if value.canonical_schema is not None
-                        else value.schema
-                    )
-                    for name, value in by_output.items()
-                },
-            ).schema
             coverage: DatasetCoverage | MonitorCoverage = DatasetCoverage(
                 primary.coverage.written_cells // scale,
                 primary.coverage.total_cells // scale,
@@ -174,4 +201,4 @@ class DeriveProcessor:
         )
 
 
-__all__ = ["DERIVE_OUTPUT", "DERIVE_OUTPUTS", "DeriveProcessor"]
+__all__ = ["DeriveProcessor", "declared_outputs"]

@@ -42,7 +42,7 @@
   Runtime内部绝对ordinal在materialize时统一转换为以最新为0的相对primary-index；Plot与
   Workbench只把它当普通AxisRef，不自动scope或建立history专用interaction路径。
 - 关联显示按完整same-shot group就绪；已选成员pending（含首发与重启）时整组保留上次完整画面，只有同shot明确invalid结果可呈现且不画无效标记。完整新图像输入不继承旧overlay；删除缺companion提前放行与同generation沿用旧层的旧行为。
-- `Occupancy Agreement`是普通Occupancy的纯数据下游：source picker选择`counts`，Runtime从同一原子publication交付其`occupied` sibling；默认frame `0/1/2`但三项均可编辑且可重复。一致的首/末occupancy保留共同bool和中间counts，不一致或任一所需值invalid则只通过Dataset validity标为invalid；不重新读取camera/calibration，不重新提取counts或分类，也不携带overlay知识。
+- 判决一致性（原`Occupancy Agreement`节点）是`derive`的一段程序：source picker选择Occupancy的`counts`，Runtime从同一原子publication交付其`occupied` sibling；`agree = a.occupied.frame(0) == a.occupied.frame(2)`、`counts = a.counts.frame(1).where(agree)`、`occupied = a.occupied.frame(0).where(agree)`三行各按其名发布，帧号可编辑且可重复。不一致或任一所需值invalid则只通过Dataset validity标为invalid；不重新读取camera/calibration，不重新提取counts或分类，也不携带overlay知识。
 - Panel window demand在authored state接受时先于Plot render同步；最后lease的`10→1`在调用
   返回前释放并切回event表示。当前host的Focus/Area/Crosshair按同generation与accepted轴词汇
   接受，owner落后一版不得否决indexed front，Facet只忽略其自身focus cell这一层subject差异。

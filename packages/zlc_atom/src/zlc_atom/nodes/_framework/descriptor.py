@@ -345,6 +345,13 @@ class LogicNodeDescriptor:
     authoring_schema: AuthoringSchema
     input_specs: tuple[DatasetInputSpec | ArtifactInputSpec, ...] = ()
     outputs: tuple[DatasetOutputDeclaration, ...] = ()
+    #: For a node whose outputs are named by what it is asked to compute --
+    #: a derive publishes the lines of its program -- the declarations of
+    #: one authored draft.  ``outputs`` is then empty: a node declares its
+    #: outputs once, by name or by draft.
+    declare_outputs: (
+        Callable[[Mapping[str, Any]], tuple[DatasetOutputDeclaration, ...]] | None
+    ) = None
     device_requirements: tuple[DeviceRequirement, ...] = ()
     build: Callable[..., object] | None = None
     node_previews: tuple[NodePreviewSpec, ...] | None = None
@@ -371,6 +378,20 @@ class LogicNodeDescriptor:
         """Whether Start can put a declared output on screen."""
 
         return bool(self.node_previews)
+
+    def outputs_for(
+        self, values: Mapping[str, Any]
+    ) -> tuple[DatasetOutputDeclaration, ...]:
+        """What one authored draft publishes."""
+
+        if self.declare_outputs is None:
+            return self.outputs
+        declared = tuple(self.declare_outputs(values))
+        if any(not isinstance(value, DatasetOutputDeclaration) for value in declared):
+            raise TypeError("declare_outputs must return DatasetOutputDeclaration values")
+        if len({value.name for value in declared}) != len(declared):
+            raise ValueError("output names must be unique")
+        return declared
 
     def __post_init__(self) -> None:
         if not self.api_name or not isinstance(self.kind, NodeKind):
@@ -420,6 +441,14 @@ class LogicNodeDescriptor:
             raise ValueError("input names must be unique")
         if len({value.name for value in outputs}) != len(outputs):
             raise ValueError("output names must be unique")
+        if self.declare_outputs is not None:
+            if not callable(self.declare_outputs):
+                raise TypeError("declare_outputs must be callable or None")
+            if outputs:
+                raise ValueError(
+                    "a node declares its outputs once: by name, or by what "
+                    "its draft is asked to compute"
+                )
         preview_keys = tuple(
             (value.producer, value.output.name) for value in node_previews
         )

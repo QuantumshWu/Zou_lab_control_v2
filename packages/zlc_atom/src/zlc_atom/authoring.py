@@ -50,10 +50,15 @@ class AuthoringField:
     #: KNOB -- an RF frequency is hertz whoever reads it -- and a scan axis
     #: built over the field publishes this unit into its dataset column.
     unit: str | None = None
+    #: What the field wants written, for the operator: the syntax of a
+    #: program, the shape of a pair.  Shown where the value is typed.
+    description: str = ""
 
     def __post_init__(self) -> None:
         if not self.name or not self.value_type or not self.label:
             raise ValueError("authoring fields require name, value_type, and label")
+        if not isinstance(self.description, str):
+            raise TypeError("authoring field description must be text")
         if self.unit is not None:
             if not isinstance(self.unit, str) or not self.unit.strip():
                 raise ValueError("authoring field unit must be non-empty text or None")
@@ -227,7 +232,9 @@ class AuthoringSchema:
         complete = True
         for field in self.fields:
             value = _project_value(field, supplied.get(field.name, field.default))
-            if value is None and str(field.value_type) in ("str", "text", "folder"):
+            if value is None and str(field.value_type) in (
+                "str", "text", "multiline", "folder"
+            ):
                 # One vacancy spelling per type family: an absent text is the
                 # empty string everywhere (form widgets hold "" natively).
                 value = ""
@@ -312,7 +319,7 @@ def _project_value(field: AuthoringField, value: object) -> object:
             if normalized in {"false", "0", "no", "off"}:
                 return False
         raise TypeError(f"{field.label} must be true or false")
-    if declared in {"str", "text", "choice", "resource", "folder"}:
+    if declared in {"str", "text", "multiline", "choice", "resource", "folder"}:
         if not isinstance(value, str):
             if declared not in {"choice"}:
                 raise TypeError(f"{field.label} must be text")
