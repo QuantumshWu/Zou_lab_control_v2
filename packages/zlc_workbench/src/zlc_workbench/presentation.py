@@ -158,14 +158,18 @@ class PlotPanelPort:
         #: until the next shot arrived.
         self._staged_generation: object | None = None
         self._staged_revision: int | None = None
-        #: What the HOST has been handed, which is a different fact from
-        #: what the screen shows: a render reaches the host on the
-        #: projection worker and reaches the screen on the owner thread,
-        #: so between those two moments the host holds something the
-        #: surface does not yet show.  Only the call that hands data over
-        #: can state this, so only it writes here.
-        self._held_generation: object | None = None
-        self._held_revision: int | None = None
+        #: Data this port handed a host and the screen has not accepted,
+        #: by (generation, revision): the exact publication and plot input
+        #: behind a render the host may commit without the port hearing of
+        #: it.  The Future the port waits on is cancellable at any moment --
+        #: a retarget cancels it, so does the cohort's abandon -- while the
+        #: host's running operation finishes regardless, so a commit can
+        #: never be learned from that Future; what the host holds is read
+        #: from the host itself, its front's data identity.  These records
+        #: are what let such data still reach the surface: through a
+        #: configure whose front is painted over it, or the scheduler's
+        #: re-offer of the same publication.
+        self._handed: dict[tuple[object, int], _Prepared] = {}
         self._staged_front_refs: tuple[object, ...] = ()
         self._staged_presentation_epoch = -1
         self._serial = 0
@@ -271,8 +275,7 @@ class PlotPanelPort:
             self._staged_revision = None
             self._staged_generation = None
             self._staged_presentation_epoch = -1
-            self._held_generation = None
-            self._held_revision = None
+            self._handed.clear()
             pending = tuple(
                 prepared.completion
                 for prepared in self._pending.values()
@@ -344,38 +347,43 @@ class PlotPanelPort:
     def publication_for_identity(
         self, generation: object, revision: object
     ) -> object | None:
-        """The exact generation/revision publication held by this surface.
+        """The exact generation/revision publication this panel holds.
 
         Revisions restart at one for every run.  A fit therefore names both
         identities; revision-only lookup could bind a delayed result to a
         different run carrying the same number.
+
+        Held is wider than shown: a render the host committed but the
+        screen has not accepted yet is data the host's live fit solves
+        against, so a fit naming it must find its publication.
         """
 
         with self._state_lock:
             wanted = self._revision_value(revision)
             if wanted is None:
                 return None
-            for prepared in self._pending.values():
-                if (
-                    _generation_value(
-                        _generation_of(prepared.plot_input)
-                    )
-                    == _generation_value(generation)
-                    and self._revision_value(_revision_of(prepared.plot_input))
-                    == wanted
+            records = (
+                *self._pending.values(),
+                *self._handed.values(),
+                *(() if self._surface is None else (self._surface,)),
+            )
+            for record in records:
+                if self._record_shows(
+                    record, _generation_value(generation), wanted
                 ):
-                    return prepared.publication
-            if (
-                self._surface is not None
-                and _generation_value(
-                    _generation_of(self._surface.plot_input)
-                )
-                == _generation_value(generation)
-                and self._revision_value(_revision_of(self._surface.plot_input))
-                == wanted
-            ):
-                return self._surface.publication
+                    return record.publication
             return None
+
+    @classmethod
+    def _record_shows(
+        cls, record: _Prepared, generation: object, revision: int
+    ) -> bool:
+        """Whether a record's plot input is exactly that data revision."""
+
+        return (
+            _generation_value(_generation_of(record.plot_input)) == generation
+            and cls._revision_value(_revision_of(record.plot_input)) == revision
+        )
 
     def _host_token_locked(self) -> object:
         surface = self._surface
@@ -580,6 +588,7 @@ class PlotPanelPort:
                 # old answer, so the next frame was drawn to a setting
                 # that had just been revoked.
                 target = self._projection_target
+                staged_at = monotonic()
                 self._pending[serial] = _Prepared(
                     publication,
                     value.snapshot,
@@ -587,7 +596,7 @@ class PlotPanelPort:
                     target,
                     front_refs,
                     presentation_epoch,
-                    monotonic(),
+                    staged_at,
                     completion=completion,
                 )
 
@@ -596,10 +605,6 @@ class PlotPanelPort:
                 self._on_presented(notify_presented)
             return None
         assert serial is not None and host_token is not None
-
-        #: What this render handed to the host, recorded only if the
-        #: host's own operation then completed.
-        handed: list[tuple[object, int | None]] = []
 
         def project_and_stage() -> object:
             if self._project_input is None:
@@ -672,13 +677,16 @@ class PlotPanelPort:
                     publication_generation != shown_generation
                     or presentation_epoch != surface.presentation_epoch
                 )
-                held_generation = self._held_generation
-                held_revision = self._held_revision
+                shown = None if surface is None else surface.plot_input
 
             # Host construction/configuration can be substantial.  Keeping it
             # on this same projection job preserves ordering without holding
             # the identity lock that close and owner acceptance need.
             replacement = None
+            #: The host this projection hands DATA to, if any; a re-present
+            #: of data the host already holds hands over nothing.
+            handed_to = None
+            incoming = self._revision_value(_revision_of(plot_input))
             if replace_current_host:
                 if self._replace_host is None:
                     raise RuntimeError(
@@ -695,43 +703,79 @@ class PlotPanelPort:
                         "panel host replacement must return a plotting host"
                     )
                 # A fresh host holds exactly what it was built from.
-                handed.append(
-                    (
-                        publication_generation,
-                        self._revision_value(_revision_of(plot_input)),
-                    )
-                )
+                handed_to = replacement
             else:
                 # What the host HOLDS decides what can be done to it, and
-                # only the code that hands it data knows that.  Asking
-                # instead whether this publication is the one on screen
-                # answered a different question: a shot can leave the
-                # screen between staging a render and running it, and the
-                # answer flipped to "no" for an input whose data the host
-                # already had -- which was then pushed as DATA, refused
-                # ("data revision must increase") and shown on the card.
-                incoming = self._revision_value(_revision_of(plot_input))
+                # the host itself is asked.  Asking instead whether this
+                # publication is the one on screen answered a different
+                # question: a shot can leave the screen between staging a
+                # render and running it, and the answer flipped to "no"
+                # for an input whose data the host already had -- which
+                # was then pushed as DATA, refused ("data revision must
+                # increase") and shown on the card.
+                held_generation, held_revision = self._held_by(host, shown)
                 same_stream = (
                     held_revision is not None
                     and incoming is not None
-                    and held_generation == publication_generation
+                    and held_generation == _generation_value(publication_generation)
                 )
                 if same_stream and incoming < held_revision:
                     # The picture this describes is gone and is not coming
                     # back.  There is nothing to draw.
                     raise CancelledError()
                 if same_stream and incoming == held_revision:
-                    if not (
-                        hasattr(plot_input, "overlay")
+                    # The host holds this data and refuses a revision it
+                    # holds; what the panel still owes is the SCREEN.  A
+                    # render whose consumer was cancelled after the host
+                    # committed it, or whose cohort was abandoned, left the
+                    # accepted surface behind the host -- and while the
+                    # source stood, the re-offer used to be cancelled once
+                    # per beat, so the picture never caught up.  The host's
+                    # own current front is the answer, re-described.  Only
+                    # a companion that moved -- the one thing drawn OVER
+                    # unchanged data -- is a configure, and only then: a
+                    # configure shares the host's coalesce key with the
+                    # Console's own, and the host cancels the queued one it
+                    # supersedes, so a re-describe sent as a configure
+                    # silently dropped the operator's edit in flight.
+                    companions_moved = (
+                        surface is None
+                        or front_refs[1:] != surface.front_refs[1:]
+                    )
+                    if (
+                        companions_moved
+                        and hasattr(plot_input, "overlay")
                         and callable(getattr(host, "configure", None))
                     ):
-                        raise CancelledError()
-                    # Same data, so the only thing that can have changed
-                    # is what is drawn OVER it.
-                    rendered = host.configure(image_overlay=plot_input.overlay)
+                        rendered = host.configure(
+                            image_overlay=plot_input.overlay
+                        )
+                    else:
+                        describe = getattr(host, "describe_display", None)
+                        if not callable(describe):
+                            raise CancelledError()
+                        rendered = describe()
                 else:
                     rendered = host.update_data(plot_input)
-                    handed.append((publication_generation, incoming))
+                    handed_to = host
+            if handed_to is not None and incoming is not None:
+                # Remembered at the hand-over, because nothing later can be
+                # relied on to say what became of it: the consumer may be
+                # cancelled while the host commits anyway.
+                with self._state_lock:
+                    if not self._closed:
+                        self._handed[
+                            (_generation_value(publication_generation), incoming)
+                        ] = _Prepared(
+                            publication,
+                            plot_input,
+                            event_records,
+                            target,
+                            front_refs,
+                            presentation_epoch,
+                            staged_at,
+                            host=handed_to,
+                        )
 
             with self._state_lock:
                 current = self._pending.get(serial)
@@ -773,11 +817,6 @@ class PlotPanelPort:
                 except InvalidStateError:
                     pass
             else:
-                # The host COMMITTED it.  Handing data over is not the
-                # same event: a render cancelled while queued never
-                # reached the session, and its revision is still free.
-                if handed:
-                    self._note_held(*handed[-1])
                 try:
                     completion.set_result(operation)
                 except InvalidStateError:
@@ -872,18 +911,46 @@ class PlotPanelPort:
                 and prepared.presentation_epoch == self._presentation_epoch
             )
 
-    def _note_held(self, generation: object, revision: object) -> None:
-        """Record what the plotting host now holds."""
+    @classmethod
+    def _held_by(
+        cls, host: object, shown: object
+    ) -> tuple[object | None, int | None]:
+        """The data identity a host holds, as (generation value, revision).
 
-        value = self._revision_value(revision)
-        with self._state_lock:
-            if self._held_generation != generation:
-                self._held_generation = generation
-                self._held_revision = value
-            elif value is not None and (
-                self._held_revision is None or value > self._held_revision
+        Asked of the HOST -- its current front -- because the port's own
+        bookkeeping cannot know: the Future it waits on can be cancelled
+        after the host has committed.  A host that publishes no front (or
+        no data identity) holds what the surface shows.
+        """
+
+        identity = getattr(getattr(host, "front", None), "identity", None)
+        generation = getattr(identity, "data_generation", None)
+        revision = cls._revision_value(getattr(identity, "data_revision", None))
+        if generation is not None and revision is not None:
+            return str(generation), revision
+        if shown is None:
+            return None, None
+        return (
+            _generation_value(_generation_of(shown)),
+            cls._revision_value(_revision_of(shown)),
+        )
+
+    def _forget_handed_locked(
+        self,
+        host: object,
+        generation: object = None,
+        revision: int | None = None,
+    ) -> None:
+        """Drop handed records nothing can present any more: another
+        host's, and this host's at or below the revision the screen shows."""
+
+        for key, record in tuple(self._handed.items()):
+            if record.host is not host or (
+                revision is not None
+                and key[0] == generation
+                and key[1] <= revision
             ):
-                self._held_revision = value
+                del self._handed[key]
 
     def _advance_staged(
         self,
@@ -983,6 +1050,11 @@ class PlotPanelPort:
                 prepared.front_refs,
                 prepared.presentation_epoch,
             )
+            self._forget_handed_locked(
+                target_host,
+                _generation_value(_generation_of(prepared.plot_input)),
+                self._revision_value(_revision_of(prepared.plot_input)),
+            )
             self.last_error = None
             self.waiting_condition = ""
 
@@ -1011,13 +1083,36 @@ class PlotPanelPort:
         operation: object,
         target: object,
     ) -> object | None:
-        """Commit one live configure result only after its front reaches screen."""
+        """Commit one live configure result only after its front reaches screen.
+
+        The front a configure returns is painted over the data the host
+        holds NOW, which is not always the data the accepted surface shows:
+        a render commits on the host's worker and reaches the surface on
+        the owner's beat, and between the two its consumer can be cancelled
+        (a retarget) or its cohort abandoned.  So the configure lands on
+        the record its front's data identity names -- the shown surface, or
+        the newest committed render, to which the screen advances here.
+        Re-describing the old surface under a front of newer data made the
+        title, the selection, the fit binding and Save name one revision
+        while the pixels showed another.  A front over data this port never
+        handed its host is not accepted: the panel owes a presentation
+        pass instead.
+        """
 
         with self._state_lock:
             surface = self._surface
             if self._closed or surface is None:
                 return None
             host = surface.host
+            handed = tuple(
+                record
+                for record in self._handed.values()
+                if record.host is host
+            )
+        basis = self._front_basis(operation, surface, handed)
+        if basis is None:
+            self._request_invalidation()
+            return None
         presented, error = self._put_on_screen(host, operation)
         if not presented:
             if error is not None:
@@ -1030,19 +1125,73 @@ class PlotPanelPort:
         description = getattr(operation, "value", None)
         if not hasattr(description, "spec"):
             raise TypeError("a live plot configuration must return DisplayDescription")
+        advanced = basis is not surface
         with self._state_lock:
             current = self._surface
             if current is None or current.host is not host:
                 return None
             accepted = replace(
-                current,
+                basis if advanced else current,
+                host=host,
                 target=target,
                 description=description,
+                replacement_host=None,
+                operation=None,
+                completion=None,
             )
             self._surface = accepted
             self._projection_target = target
+            if advanced:
+                self._advance_staged(
+                    _generation_of(accepted.plot_input),
+                    _revision_of(accepted.plot_input),
+                    accepted.front_refs,
+                    accepted.presentation_epoch,
+                )
+                self._forget_handed_locked(
+                    host,
+                    _generation_value(_generation_of(accepted.plot_input)),
+                    self._revision_value(_revision_of(accepted.plot_input)),
+                )
             self.last_error = None
-            return accepted
+        if advanced and self._on_presented is not None:
+            # The screen changed what it shows, exactly as an accept does.
+            try:
+                self._on_presented(accepted)
+            except BaseException as error:
+                with self._state_lock:
+                    self.last_error = error
+        return accepted
+
+    @classmethod
+    def _front_basis(
+        cls,
+        operation: object,
+        surface: _Prepared,
+        handed: tuple[_Prepared, ...],
+    ) -> _Prepared | None:
+        """The record whose data an operation's front was painted over.
+
+        A front that names no data (a host whose input carries no dataset
+        identity) can only mean the surface; so can a surface whose input
+        carries none.  Otherwise the front's generation and revision must
+        name the surface or a render handed to this host, else nothing
+        here.
+        """
+
+        identity = getattr(getattr(operation, "front", None), "identity", None)
+        generation = getattr(identity, "data_generation", None)
+        revision = cls._revision_value(getattr(identity, "data_revision", None))
+        if (
+            generation is None
+            or revision is None
+            or _generation_of(surface.plot_input) is None
+        ):
+            return surface
+        for record in (surface, *handed):
+            if cls._record_shows(record, str(generation), revision):
+                return record
+        return None
 
     def _put_on_screen(
         self, host: object, operation: object
@@ -1096,6 +1245,16 @@ class PlotPanelPort:
                     )
             if error is not None and not isinstance(error, CancelledError):
                 self.last_error = error
+                if prepared is not None:
+                    # The host answered this render with a failure: it
+                    # holds nothing of it that a later front could show.
+                    self._handed.pop(
+                        (
+                            _generation_value(_generation_of(prepared.plot_input)),
+                            self._revision_value(_revision_of(prepared.plot_input)),
+                        ),
+                        None,
+                    )
         if prepared is not None and prepared.replacement_host is not None:
             self._cancel_operation(prepared.operation)
             self._close_staged_host(prepared.replacement_host)
@@ -1142,6 +1301,10 @@ class PlotPanelPort:
                 pass
 
     def _close_staged_host(self, host: object) -> None:
+        with self._state_lock:
+            for key, record in tuple(self._handed.items()):
+                if record.host is host:
+                    del self._handed[key]
         if self._retire_host is not None:
             self._retire_host(host)
             return
@@ -1162,6 +1325,7 @@ class PlotPanelPort:
             self._closed = True
             pending = tuple(self._pending.values())
             self._pending.clear()
+            self._handed.clear()
         for prepared in pending:
             self._cancel_operation(prepared.operation)
             self._cancel_operation(prepared.completion)

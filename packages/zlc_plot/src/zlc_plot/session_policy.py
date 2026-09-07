@@ -24,6 +24,7 @@ from .specs import (
     PlotSpec,
     PulseTimelinePlot,
     RollingPlot,
+    limit_pairs,
     semantic_spec,
 )
 
@@ -78,14 +79,38 @@ def _retain_parameters(
     old_parameters: Mapping[str, object],
     schema: ParameterSchema,
 ) -> dict[str, object]:
-    """Retain values one at a time, dropping values invalid for the new schema."""
+    """Retain what is still valid for the new schema, one dependency at a time.
+
+    Most values stand alone and are tried alone.  A limit pair does not: its
+    mode is only valid WITH both bounds, and either bound without the mode
+    is inert.  Tried one field at a time, ``fixed`` was refused for lacking
+    the bounds that were about to follow it, the bounds were then kept on
+    their own, and a reduction change silently turned an operator's fixed
+    range back into automatic limits -- with their numbers still in the bag.
+    Each pair the new schema declares is therefore tried as the group it
+    is, and only a group the new schema cannot take falls back to its
+    members.
+    """
 
     if not isinstance(old_parameters, Mapping):
         raise TypeError("old parameters must be a mapping")
     current = schema.initial_values()
     retained: dict[str, object] = {}
-    for name in schema.names:
-        if name not in old_parameters:
+    names = tuple(schema.names)
+    for group in limit_pairs():
+        if any(name not in names or name not in old_parameters for name in group):
+            continue
+        try:
+            candidate = schema.prepare_transition(
+                current, {name: old_parameters[name] for name in group}
+            )
+        except (TypeError, ValueError, KeyError):
+            continue
+        current = candidate
+        for name in group:
+            retained[name] = candidate[name]
+    for name in names:
+        if name not in old_parameters or name in retained:
             continue
         try:
             candidate = schema.prepare_transition(current, {name: old_parameters[name]})

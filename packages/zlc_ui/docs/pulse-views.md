@@ -38,19 +38,24 @@ choosing `Edge` or `Ramp` with a value creates the domain step.
 ```python
 view = PulseScheduleView()
 view.set_schedule(schedule_vm) -> bool
-view.accept_local_commit(generation, revision) -> None
 view.set_period(period_vm) -> None
 view.set_delay_row(delay_row_vm) -> None
 view.set_port_label(key, label) -> None
 view.set_visible_ports(tuple[str, ...]) -> None
 view.set_summary(total_text, total_tooltip, period_count,
                  visible_text, summary_text, scan_summary_text) -> None
-view.set_scan_source(use_loaded, path) -> None
 view.set_scan_busy(busy) -> None
 view.set_connection(connection_vm) -> None
-view.set_control_state(running, synchronized, file_dirty) -> None
+view.set_control_state(running, synchronized, file_dirty,
+                       *, can_run, can_stop) -> None
 view.set_capabilities(can_sync, can_hold, can_step) -> None
 ```
+
+The value-level setters (`set_period`, `set_delay_row`, `set_port_label`,
+`set_visible_ports`) update the accepted `ScheduleVM` the view holds as
+well as the controls, so the next rebuild from that model shows the same
+thing the controls do.  A port whose `kind` changes under the same key is
+rebuilt as a new row.
 
 `PeriodCard`, `ChannelNamesPanel`, `ChannelPanel`, `BracketPost`, and
 `PulseDragContainer` are reusable subviews. A period drag emits
@@ -68,13 +73,12 @@ signals, and `feedback_requested`.
 
 ## Scan, target, and preview pages
 
-`PulseScanView` accepts `set_page(ScanPageRecord)`, `set_repeats_range(minimum,
-default)`, `set_repeats`, `set_scan_code`, `replace_scan_draft`,
-`acknowledge_scan_draft`, `set_scan_table_text`, `set_slots_text`,
+`PulseScanView` accepts one `set_page(ScanPageRecord)` projection -- the
+record carries the scan code, its draft revision, the table and slot texts
+-- plus `set_repeats_range(minimum, default)`, `set_repeats`,
 `set_progress_text`, `set_workspace_busy`, `set_run_dirty`, and
-`set_progress_polling`. The three draft methods are intentionally separate:
-the presenter can acknowledge a revision without overwriting text currently
-being typed.
+`set_progress_polling`.  Text the operator is typing is never overwritten
+by a projection of the revision they are typing against.
 
 `PulseTargetView` accepts `set_ports(records, editable, status_text)`,
 `set_width_rules(digital, dac)`, and `set_feedback(text)`. Its
@@ -82,10 +86,12 @@ being typed.
 construction and domain validation stay in the presenter.
 
 `PulsePreviewView` accepts `set_size_names(tuple[str, ...])`,
-`set_preview_size(size, pinned=...)`, `set_status`, `show_placeholder`, and
+`set_preview_size(size)`, `set_status`, `show_placeholder`, and
 `mount_content(widget, logical_size=..., wheel_target=...)`. The latter is a
 QWidget mount point, not a renderer. It emits `include_off_toggled`,
-`selectors_toggled`, `size_committed`, and `save_requested`.
+`selectors_toggled`, `size_committed`, and `save_requested`.  Whether the
+shown size is pinned by the operator or chosen by the content is the
+presenter's fact; the view keeps no copy of it.
 
 ## Editor shell
 

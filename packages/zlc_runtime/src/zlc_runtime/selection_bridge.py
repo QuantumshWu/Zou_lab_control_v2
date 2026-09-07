@@ -1272,13 +1272,23 @@ class SelectionBridge:
             # plane withdrew the run.  A LEVEL, so a restarted run's first
             # successful fit clears it; recorded as an ERROR it latched
             # forever and its red report degraded the whole panel surface.
+            #
+            # And the route comes down WITH the answer, as the selection
+            # branch's does: parameters derived from a run the plane no
+            # longer holds are not a public value any more.  Left standing,
+            # a Frozen panel's fit over an expired history parent kept the
+            # previous solve readable under the condition that said it
+            # derives nothing.
+            self._release_route("fit")
             self._record_condition(
                 "this run is no longer held, so its fit derives nothing"
             )
             return
+        source_snapshot, source_record = self._source_view(publication)
         outputs = self._materialize_fit_outputs(
-            self._source_snapshot(publication),
+            source_snapshot,
             event,
+            event_record=source_record,
         )
         # From here the plane's output NAMES are claimed -- by the attach, or
         # by the terminal reserve -- and only afterwards can this event learn
@@ -1443,9 +1453,11 @@ class SelectionBridge:
                     "exact source publication has no selected signal"
                 )
             try:
+                source_snapshot, source_record = self._source_view(publication)
                 outputs = self._materialize_selection_outputs(
-                    self._source_snapshot(publication),
+                    source_snapshot,
                     state,
+                    event_record=source_record,
                 )
             except EmptySelection as error:
                 # A real answer, not a failure: a box drawn in the band
@@ -1642,7 +1654,7 @@ class SelectionBridge:
         source: SignalValue,
         source_publication: SignalPublication,
     ) -> Mapping[str, LiveDatasetOutput]:
-        snapshot = self._source_snapshot(source_publication)
+        snapshot, record = self._source_view(source_publication)
         with self._lock:
             if processor._role == "selection":
                 state = self._selection
@@ -1666,9 +1678,13 @@ class SelectionBridge:
                     )
                 trigger = ("fit", trigger_revision)
         outputs = (
-            self._materialize_selection_outputs(snapshot, state)
+            self._materialize_selection_outputs(
+                snapshot, state, event_record=record
+            )
             if state is not None
-            else self._materialize_fit_outputs(snapshot, event)
+            else self._materialize_fit_outputs(
+                snapshot, event, event_record=record
+            )
         )
         return _TriggeredOutputs(outputs, trigger)
 
@@ -1703,13 +1719,21 @@ class SelectionBridge:
             self._selection = None
             self._selection_publication = None
 
-    def _source_snapshot(
+    def _source_view(
         self,
         publication: SignalPublication,
-    ) -> OwnedSnapshot:
-        """The exact dataset prefix the panel and this derivation both mean."""
+    ) -> tuple[OwnedSnapshot, Mapping[str, object]]:
+        """The exact dataset prefix the panel and this derivation both mean,
+        with the event record of the rows that prefix actually contains.
 
-        return self._plane.current_dataset(
+        A publication's own record names only the LAST event; the canonical
+        prefix a region is cut from holds every event committed so far, and
+        the plane merges their records when it materializes the prefix.
+        Taking the prefix without its record left an ROI's captured lineage
+        naming the device epoch of the newest frame alone.
+        """
+
+        return self._plane.current_dataset_view(
             self._source_signal,
             publication,
         )
@@ -2042,7 +2066,16 @@ class SelectionBridge:
         self,
         schema: DatasetSchema,
         state: SelectionState,
-    ) -> Selection:
+    ) -> Selection | None:
+        """The axis terms a region names, or None when it names no axis.
+
+        A region made only of value or shot bounds restricts what COUNTS,
+        not which rows exist, and a Selection cannot say "every row" -- it
+        requires a term.  Spelling that as a full-range term on the first
+        Repeat axis assumed there is one, and a legal Dataset whose Repeat
+        domain is a single unnamed row (the last Repeat axis removed) had
+        no axis to name: IndexError, where the band should simply apply.
+        """
         def range_term(value: SelectionRange):
             _axis_id, axis, _kind = self._resolve_axis(
                 schema,
@@ -2110,17 +2143,7 @@ class SelectionBridge:
                     ).terms[0]
                 )
         if not terms:
-            # A region made only of value or shot bounds restricts no axis at
-            # all -- it restricts what COUNTS.  Saying so as a full-range term
-            # keeps one path through the projection instead of a second way to
-            # mean "every row", and a contiguous range indexes as a slice.
-            terms.append(
-                IndexRangeSelection(
-                    schema.repeat_domain.axes[0].axis_id,
-                    0,
-                    schema.repeat_domain.axes[0].size,
-                )
-            )
+            return None
         return Selection(tuple(terms))
 
     def _next_reference(
@@ -2146,6 +2169,8 @@ class SelectionBridge:
         self,
         source: OwnedSnapshot,
         state: SelectionState,
+        *,
+        event_record: Mapping[str, object],
     ) -> Mapping[str, LiveDatasetOutput]:
         """Cut one committed selection into signals that keep the parent's axes.
 
@@ -2157,29 +2182,53 @@ class SelectionBridge:
         parent's Point domain intact.  Pooling Point into a single
         scalar instead would silently average a cycle's physically distinct
         frames, which are different POINTS -- different moments of the pulse.
+
+        ``event_record`` is the record of the rows ``source`` holds -- the
+        plane's merged record of the canonical prefix, not the newest
+        event's alone -- and every output carries it, because a derivation's
+        provenance is the data it actually consumed.  One record for the
+        whole bundle: the plane refuses siblings that disagree.
         """
 
         source_schema = source.block.schema
         selection = self._build_selection(source_schema, state)
-        repeat_indices, point_indices, data_indices = selection_indices(
-            source_schema,
-            selection,
-        )
+        if selection is None:
+            # No axis is restricted: every row and every cell survives, and
+            # the band below decides what counts.
+            repeat_indices: range | tuple[int, ...] = range(
+                source_schema.repeat_domain.size
+            )
+            point_indices: range | tuple[int, ...] = range(
+                source_schema.point_domain.size
+            )
+            data_indices: Mapping[AxisId, range | tuple[int, ...]] = {
+                axis.axis_id: range(axis.size)
+                for axis in source_schema.cell_domain.axes
+            }
+        else:
+            repeat_indices, point_indices, data_indices = selection_indices(
+                source_schema,
+                selection,
+            )
         valid = expand_dataset_validity(source.block.validity, source_schema)
-        values = restricted_values(
-            source.block.values,
-            source_schema,
-            repeat_indices,
-            point_indices,
-            data_indices,
-        )
-        valid_values = restricted_values(
-            valid,
-            source_schema,
-            repeat_indices,
-            point_indices,
-            data_indices,
-        )
+
+        def restrict(plane: np.ndarray) -> np.ndarray:
+            return restricted_values(
+                plane,
+                source_schema,
+                repeat_indices,
+                point_indices,
+                data_indices,
+            )
+
+        values = restrict(source.block.values)
+        valid_values = restrict(valid)
+        # A sample's uncertainty is the sample's own and survives every
+        # restriction with it: a region cut from a fitted parameter keeps
+        # the error the fit reported for each value it keeps.  None stays
+        # None; NaN stays unknown.
+        sigma = source.block.sigma
+        region_sigma = None if sigma is None else restrict(sigma)
         value_band = _selection_filters(state)
         if value_band is not None:
             # A band on the measured value cuts no axis: the cells outside
@@ -2234,6 +2283,7 @@ class SelectionBridge:
                 values,
                 schema=derived_schema,
                 validity=compact_dataset_validity(valid_values, derived_schema),
+                sigma=region_sigma,
                 reference_for=lambda schema, output_name=name: self._next_reference(
                     source,
                     output_name,
@@ -2249,6 +2299,7 @@ class SelectionBridge:
                 ),
                 derived,
                 MonitorCoverage(total, total),
+                event_record=event_record,
             )
         if not scalar_outputs:
             return output
@@ -2291,6 +2342,7 @@ class SelectionBridge:
                 ),
                 derived,
                 MonitorCoverage(total, total),
+                event_record=event_record,
             )
         return output
 
@@ -2298,7 +2350,15 @@ class SelectionBridge:
         self,
         source: OwnedSnapshot,
         event: FitEventValue,
+        *,
+        event_record: Mapping[str, object],
     ) -> Mapping[str, LiveDatasetOutput]:
+        """One output per published parameter, over the source it fitted.
+
+        ``event_record`` is the record of the rows the solver actually saw
+        (see ``_materialize_selection_outputs``); every parameter carries it.
+        """
+
         output: dict[str, LiveDatasetOutput] = {}
         source_schema = source.block.schema
         sample_count = int(event.success.size)
@@ -2392,6 +2452,7 @@ class SelectionBridge:
                 value_validity,
                 "zlc.selection.fit.parameter",
                 coverage,
+                event_record,
                 sigma=errors,
             )
         return output
@@ -2406,6 +2467,7 @@ class SelectionBridge:
         validity: CellValidity,
         contract_id: str,
         coverage: MonitorCoverage,
+        event_record: Mapping[str, object],
         sigma: np.ndarray | None = None,
     ) -> LiveDatasetOutput:
         derived = materialize_derived_dataset(
@@ -2431,4 +2493,5 @@ class SelectionBridge:
             ),
             derived,
             coverage,
+            event_record=event_record,
         )

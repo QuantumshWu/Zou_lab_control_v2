@@ -277,3 +277,52 @@ def test_session_fit_all_facets_returns_one_result_per_painted_cell() -> None:
         assert result.facet == AxisRef.point("facet")
     finally:
         session.close()
+
+def test_an_identical_static_fit_target_does_no_work() -> None:
+    """A second identical static target IS the fit already painted.
+
+    Only the live target answered "same request" with silence; a static one
+    re-solved, re-rendered and stamped a new batch revision every time the
+    same complete target came back -- and a Setting form re-sends its whole
+    target on every unrelated edit.  Something the fit depends on moving is
+    what makes the same target solve again.
+    """
+
+    session = PlotSession(_snapshot(), CurvePlot(AxisRef.point("x")))
+    fronts: list[None] = []
+    release = session.subscribe_surface(lambda: fronts.append(None))
+    target = {
+        "model": "gaussian_offset",
+        "fixed": {"amplitude": 1.0, "center": 2.5, "sigma": 1.0, "offset": 0.0},
+    }
+    try:
+        session.configure(fit=target, fit_live=False)
+        first = session.last_fit
+        assert first is not None
+        painted = len(fronts)
+        session.configure(fit=target, fit_live=False)
+        assert session.last_fit is first
+        assert len(fronts) == painted
+        session.set_x_selector(1.0, 4.0)
+        session.configure(fit=target, fit_live=False)
+        assert session.last_fit is not first
+    finally:
+        release()
+        session.close()
+
+def test_the_same_indexed_publication_may_be_restated() -> None:
+    """Configuring the data a session already holds is zero work, not an error."""
+
+    snapshot = _image_snapshot(indexed=True)
+    session = PlotSession(
+        snapshot, ImagePlot(AxisRef.cell_data("column"), AxisRef.cell_data("row"))
+    )
+    fronts: list[None] = []
+    release = session.subscribe_surface(lambda: fronts.append(None))
+    try:
+        described = session.configure(data=snapshot)
+        assert described.display_state == session.display_state
+        assert fronts == []
+    finally:
+        release()
+        session.close()

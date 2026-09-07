@@ -215,12 +215,16 @@ def create_window(
         if editor_shutdown:
             editor_render.close(timeout=30.0)
 
-    # One call, one handle: this layer never names a widget class.
+    # One call, one handle: this layer never names a widget class.  The
+    # panels are a console board, so they get the console's staging policy.
+    from .task_console import staged_panel_surface
+
     try:
         window = open_figure_viewer(
             title="FigureViewer@Zou lab",
             window_ratio=window_ratio,
             path_base_dir=str(today),
+            plot_surface=staged_panel_surface,
         )
     except BaseException:
         abandon_render_processes()

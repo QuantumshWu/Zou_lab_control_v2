@@ -60,7 +60,6 @@ from zlc_runtime import SelectionChange as RuntimeSelectionChange
 from zlc_runtime import SelectionRange, SelectionState
 from zlc_workbench.selection import (
     PlotSelectionSource,
-    panel_selection_binds_a_revision,
     attach_selection_bridge,
     panel_plot_selectors,
     panel_selection_document,
@@ -89,6 +88,35 @@ def test_selection_subscription_install_and_close_never_wait_for_plot_worker() -
 
     assert released == [True]
     source.close()
+
+
+def test_an_unsubscribed_listener_leaves_no_release_behind() -> None:
+    """Unsubscribing retires the record too, not only the subscription.
+
+    ``_once`` released the plot subscription and stayed listed until
+    ``close``: twenty subscribe/unsubscribe pairs on one source left
+    twenty inert closures for close to walk.  A release that already ran
+    has nothing left to do at close, so it is not kept for it.
+    """
+
+    released: list[int] = []
+    subscriptions: list[Future] = []
+
+    def subscribe(_listener):
+        pending: Future = Future()
+        index = len(subscriptions)
+        pending.set_result(lambda: released.append(index))
+        subscriptions.append(pending)
+        return pending
+
+    source = PlotSelectionSource(SimpleNamespace(subscribe_selection=subscribe))
+    for _ in range(3):
+        unsubscribe = source.subscribe_observation(lambda _observation: None)
+        unsubscribe()
+    assert released == [0, 1, 2]
+    assert not source._releases, "retired subscriptions stayed listed"
+    source.close()
+    assert released == [0, 1, 2], "close released a retired subscription again"
 
 
 @pytest.fixture
@@ -981,6 +1009,43 @@ def test_rolling_viewport_survives_without_claiming_an_upstream_axis() -> None:
         assert viewports[-1].subject.plot_kind is plot.PlotKind.ROLLING
         assert viewports[-1].subject.x is None
         assert viewports[-1].display is not None
+        assert source.last_error is None
+    finally:
+        source.close()
+        host.close()
+
+
+def test_a_rolling_region_names_its_scope_like_every_other_kind() -> None:
+    """A rolling region drawn at one scope does not match another.
+
+    The rolling branch of ``panel_selection_matches_subject`` compared only
+    the shot/value ranges and returned before the scope comparison every
+    other kind goes through, so a region stored for repeat 1 was accepted
+    as belonging to the surface showing repeat 0 -- and restored onto it.
+    """
+
+    plot = pytest.importorskip("zlc_plot")
+    snapshot = _curve_scan_snapshot(repeats=3)
+    host = plot.RasterPlotHost.from_plot(
+        snapshot,
+        plot.RollingPlot(scope=((plot.AxisRef.repeat("repeat"), 1.0),)),
+    )
+    source = PlotSelectionSource(host)
+    seen: list = []
+    source.subscribe_observation(seen.append)
+    try:
+        host.wait_for_front(20.0)
+        _commit_x_range(host, 0.0, 1.0)
+        assert seen and seen[-1].state.plot_kind == "rolling"
+        state, subject = seen[-1].state, seen[-1].subject
+        assert tuple(
+            (item.axis, item.value, item.domain) for item in state.facets
+        ) == (("repeat", 1.0, "repeat"),)
+        assert panel_selection_matches_subject(state, subject)
+        elsewhere = replace(
+            subject, scope=((plot.AxisRef.repeat("repeat"), 0.0),)
+        )
+        assert not panel_selection_matches_subject(state, elsewhere)
         assert source.last_error is None
     finally:
         source.close()

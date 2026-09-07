@@ -329,8 +329,9 @@ row = next(iter(control._view.form._rows.values()))
 cells = [row.layout().itemAt(i).widget() for i in range(row.layout().count())]
 headings = [
     control._view.field_heading, control._view.current_heading,
-    control._view.desired_heading, control._view.live_heading,
-    control._view.apply_heading, control._view.status_heading,
+    control._view.desired_heading, control._view.limits_heading,
+    control._view.live_heading, control._view.apply_heading,
+    control._view.status_heading,
 ]
 assert len(cells) == len(headings), (len(cells), len(headings))
 for heading, cell in zip(headings, cells):
@@ -363,17 +364,17 @@ assert control._view.form is form
 assert form.widget_for('gain') is widget
 app.processEvents()
 row = form._rows['gain']
-current, live, apply, _dot, status = control._view._field_rows['gain']
-ordered = (row._label, current, widget, live, apply, status.parentWidget())
+current, limits, live, apply, _dot, status = control._view._field_rows['gain']
+ordered = (row._label, current, widget, limits, live, apply, status.parentWidget())
 for left, right in zip(ordered, ordered[1:]):
     assert left.mapTo(row, left.rect().topRight()).x() <= right.mapTo(row, right.rect().topLeft()).x()
 widget.setValue(4); app.processEvents()
 assert desired_events == [('gain', 4)]
 assert apply_events == []
-control._view._field_rows['gain'][2].click()
+control._view._field_rows['gain'][3].click()
 assert apply_events == [('gain', 4)]
 
-live = control._view._field_rows['gain'][1]
+live = control._view._field_rows['gain'][2]
 QtTest.QTest.mouseClick(live, QtCore.Qt.LeftButton)
 assert live_events[-1] == ('gain', True)
 widget.setValue(5); widget.setValue(6)
@@ -411,7 +412,7 @@ control.set_projection(spec, {
     },
 })
 assert control._view._field_rows['gain'][0].text() == '6'
-assert control._view._field_rows['gain'][4].text() == 'Protected'
+assert control._view._field_rows['gain'][5].text() == 'Protected'
 assert not widget.isEnabled()
 assert widget.toolTip() == 'Camera Measurement claims this field'
 assert form.read_value('gain') == 6
@@ -430,5 +431,126 @@ control.close(); app.processEvents()
 assert closed == [True]
 assert not control.is_visible()
 manager.close(); app.processEvents()
+"""
+    )
+
+
+def test_a_projected_type_is_not_a_pick() -> None:
+    """``type_picked`` is the operator choosing; ``set_devices`` projecting
+    the host's own record selected the type with signals live and told the
+    host the operator had just asked for it."""
+
+    _run_qt(
+        """import zlc_ui.device_manager.view as tested_module
+print(tested_module.__file__)
+from zlc_ui.device_manager import DeviceManagerView
+from zlc_ui.qt import ensure_qt_app
+app = ensure_qt_app(['device-projection'])
+view = DeviceManagerView()
+view.set_device_choices((('First', 'sensor.first', 'sensor'), ('Second', 'sensor.second', 'sensor')))
+picks = []
+view.type_picked.connect(lambda key, value: picks.append((key, value)))
+view.set_devices((('sensor', 'Sensor', 'sensor.second', 'sensor'),))
+view.set_devices((('sensor', 'Sensor', 'sensor.first', 'sensor'),))
+assert picks == [], picks
+card = view._cards['sensor']
+assert card.type_combo.currentData() == 'sensor.first'
+card.type_combo.setCurrentIndex(1)
+assert picks == [('sensor', 'sensor.second')], 'a real pick still reaches the host'
+"""
+    )
+
+
+def test_a_closed_log_window_stops_polling_and_is_forgotten() -> None:
+    """A log window that was closed kept reading the snapshot every 500 ms
+    for the life of the manager; the clock follows the widget's own
+    visibility, and the closed window is retired rather than kept."""
+
+    _run_qt(
+        """import zlc_ui.device_manager.view as tested_module
+print(tested_module.__file__)
+from PyQt5 import QtCore, QtTest, sip
+from zlc_ui.device_manager import DeviceManagerView
+from zlc_ui.qt import ensure_qt_app
+app = ensure_qt_app(['device-log'])
+view = DeviceManagerView()
+calls = []
+
+def snapshot():
+    calls.append(True)
+    return len(calls), ('line',)
+
+view.open_device_log('sensor', snapshot)
+window = view._device_log_windows['sensor']
+body = window.loaded
+assert body._timer.isActive(), 'shown, it polls'
+window.close()
+assert not body._timer.isActive(), 'hidden, it stops'
+assert 'sensor' not in view._device_log_windows, 'a closed window is over'
+before = len(calls)
+QtTest.QTest.qWait(700)
+assert len(calls) == before, 'a closed log asks for nothing'
+assert sip.isdeleted(window), 'and it is retired, not kept'
+view.open_device_log('sensor', snapshot)
+again = view._device_log_windows['sensor']
+assert again is not window and again.loaded._timer.isActive()
+again.close(); app.processEvents()
+app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+"""
+    )
+
+
+def test_the_control_shows_the_devices_own_limits_beside_the_window() -> None:
+    """An operator setting a bench window has to see which fence bites: the
+    instrument's own range is shown, read-only, in its own column beside
+    the editable window, in the spelling the row is read in; a field whose
+    device states none shows nothing there."""
+
+    _run_qt(
+        """import zlc_ui.device_manager.view as tested_module
+print(tested_module.__file__)
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.form.form import FormFieldProps, FormSpec
+from zlc_ui.device_manager.view import DeviceControlView
+app = ensure_qt_app(['device-limits'])
+spec = FormSpec((
+    FormFieldProps(key='power', kind='float', label='Power', unit='dBm',
+                   minimum=-20.0, maximum=10.0),
+    FormFieldProps(key='output', kind='bool', label='Output', default=False),
+))
+def state(current, limits):
+    return {'current': current, 'desired': current, 'editable': True,
+            'live_apply': False, 'live_enabled': True, 'apply_enabled': False,
+            'status': '', 'severity': 'info', 'reason': '', 'device_limits': limits}
+view = DeviceControlView(spec, {
+    'fields': {'power': state(-3.0, (-120.0, 30.0)), 'output': state(False, None)},
+    'owners': (), 'reason': '', 'risk_accepted': False, 'risk_enabled': False,
+})
+limits = {key: row[1] for key, row in view._field_rows.items()}
+assert limits['power'].text() == '-120 dBm to 30 dBm', limits['power'].text()
+assert limits['output'].text() == '', 'a device that states no range shows none'
+assert view.form.widget_for('power') is not limits['power'], 'a value, not a control'
+view.form._shown_unit_picked('power', 'mW')
+assert limits['power'].text() == '0.000000000001 mW to 1000 mW', limits['power'].text()
+view.form._shown_unit_picked('power', 'dBm')
+assert limits['power'].text() == '-120 dBm to 30 dBm'
+view.set_projection(spec, {
+    'fields': {'power': state(-3.0, (-110.0, 20.0)), 'output': state(False, None)},
+    'owners': (), 'reason': '', 'risk_accepted': False, 'risk_enabled': False,
+})
+assert limits['power'].text() == '-110 dBm to 20 dBm'
+view.resize(1100, 300); view.show()
+for _ in range(3):
+    app.processEvents()
+view._align_headings(); app.processEvents()
+row = view.form._rows['power']
+cells = [row.layout().itemAt(i).widget() for i in range(row.layout().count())]
+headings = [view.field_heading, view.current_heading, view.desired_heading,
+            view.limits_heading, view.live_heading, view.apply_heading, view.status_heading]
+assert len(cells) == len(headings), (len(cells), len(headings))
+for heading, cell in zip(headings, cells):
+    assert (heading.x(), heading.width()) == (cell.x(), cell.width()), (
+        heading.text(), heading.x(), heading.width(), cell.x(), cell.width())
+assert cells[3] is limits['power']
 """
     )

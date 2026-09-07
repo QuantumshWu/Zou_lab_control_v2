@@ -1438,6 +1438,25 @@ handle.show_panel_editor('panel-1', second_host)
 assert editor._surface is second_host.widget
 assert first_host.widget.parentWidget() is None
 assert second_host.widget.parentWidget() is editor.surface_holder
+# An Edit surface's refusals are relayed like the card's, and a replaced
+# surface goes quiet.
+class _ErrorSurface(QtWidgets.QWidget):
+    errorOccurred = QtCore.pyqtSignal(str)
+class _ErrorHost:
+    def __init__(self):
+        self.widget = _ErrorSurface()
+    def qt_widget(self):
+        return self.widget
+reports = []
+editor.plot_error.connect(reports.append)
+noisy = _ErrorHost()
+handle.show_panel_editor('panel-1', noisy)
+noisy.widget.errorOccurred.emit('editor refusal')
+assert reports == ['editor refusal'], reports
+handle.show_panel_editor('panel-1', second_host)
+noisy.widget.errorOccurred.emit('stale editor noise')
+assert reports == ['editor refusal'], reports
+assert editor._surface is second_host.widget
 assert view.tabs.count() == 3 and view.tabs.currentWidget() is editor
 assert editor.kind_label.text() == 'image'
 facet_projection = dict(projection, state=facet_state)
@@ -1676,7 +1695,7 @@ assert view.load_layout_button.geometry().right() == right_edge
 center_y = header.rect().center().y()
 for widget in (
     view.status_dot,
-    view.name_edit,
+    view.name_label,
     view.summary_label,
     view.kind_combo,
     view.add_panel_button,
@@ -1779,7 +1798,6 @@ camera_row = handle._rows['camera']
 handle.set_task_takeover(True)
 assert view.status_strip.action_button is not None
 assert view.status_strip.action_button.isVisible()
-assert view.name_edit.isEnabled()
 assert view.kind_combo.isEnabled()
 assert not view.add_panel_button.isEnabled()
 assert view.save_layout_button.isEnabled()
@@ -1808,7 +1826,6 @@ assert events[-1] == ('stop-task',)
 
 handle.set_task_takeover(False)
 assert not view.status_strip.action_button.isVisible()
-assert view.name_edit.isEnabled()
 assert view.kind_combo.isEnabled()
 assert view.add_panel_button.isEnabled()
 assert preview.settings_button.isEnabled()
@@ -2069,7 +2086,9 @@ def test_every_panel_kind_opens_its_setting_form_with_exact_keys() -> None:
     slot -- so a spec that declares a row the values do not supply does not
     raise, it ABORTS the process the moment an operator presses Setting.  The
     only test that can catch it is one that compares the two key sets for
-    every panel kind a card can be put in.
+    every panel kind a card can be put in: image, facet grid with each cell
+    kind, curve, histogram, rolling and pulse timeline.  The parameter
+    surfaces are empty on purpose -- the question is the card's OWN rows.
     """
 
     _run_qt(
@@ -2101,6 +2120,8 @@ try:
         ('facet_grid', 'histogram', ''),
         ('curve', '', ''),
         ('histogram', '', ''),
+        ('rolling', '', ''),
+        ('pulse_timeline', '', ''),
     ):
         card = None
         editor = None
@@ -2348,7 +2369,7 @@ assert line == 'panel-2@camera_measurement/frames', line
 
 # The name itself is untouched, everywhere it is the NAME and not a caption.
 assert card._base_title == '@logic/camera_measurement/frames'
-assert card.title_edit.text() == '@logic/camera_measurement/frames'
+assert card._form_values()['title'] == '@logic/camera_measurement/frames'
 
 # A signal from somewhere other than logic keeps its own prefix.
 project(card, '@device/mot_camera/frames', '@device/mot_camera/frames')
@@ -2362,7 +2383,7 @@ assert card._caption() == 'panel-2 Image 2', card._caption()
 # And an operator's own name still shows, with the card it belongs to.
 project(card, 'MOT shot', '@logic/camera_measurement/frames')
 assert card._caption() == 'panel-2 MOT shot', card._caption()
-assert card.title_edit.text() == 'MOT shot'
+assert card._form_values()['title'] == 'MOT shot'
 card.deleteLater()
 print('ok')
 """
@@ -2523,10 +2544,75 @@ editor.show()
 app.processEvents()
 picture = body.grab().toImage()
 for x, y in ((1, 1), (picture.width() - 2, picture.height() - 2)):
-    colour = QtGui.QColor(picture.pixel(x, y))
+    # pixelColor, not QColor(pixel): a QColor built from a packed pixel
+    # reads it as RGB and reports alpha 255 for a transparent pixel.
+    colour = picture.pixelColor(x, y)
     assert colour.alpha() == 255 and colour.name().upper() == SURFACE.upper(), (x, y, colour.name(), SURFACE)
 editor.deleteLater()
 app.processEvents()
 print('opaque body ok')
+"""
+    )
+
+
+def test_a_card_replaced_under_its_id_leaves_the_board() -> None:
+    """One panel_id is one card.  A different object arriving under an id
+    already on the board was wired and shown beside the object it replaced,
+    which stayed a child of the board, still wired, behind it."""
+
+    _run_qt(
+        """
+from PyQt5 import QtCore, sip
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.console import ConsoleBoardView, PanelCardView
+app = ensure_qt_app(['test'])
+board = ConsoleBoardView()
+old = PanelCardView('stable', 'old')
+new = PanelCardView('stable', 'new')
+board.set_cards((old,))
+board.set_cards((new,))
+assert old.isHidden(), 'the replaced card is retired'
+assert old not in board._wired_cards and board._cards == {'stable': new}
+app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+assert sip.isdeleted(old)
+assert board.findChildren(PanelCardView, options=QtCore.Qt.FindDirectChildrenOnly) == [new]
+# The same object under the same id is kept, exactly as before.
+board.set_cards((new,))
+assert not new.isHidden() and board._cards == {'stable': new}
+"""
+    )
+
+
+def test_identical_artifact_results_keep_their_readouts() -> None:
+    """The same results re-projected destroyed every readout and built
+    them again on every beat; a readout whose name is still listed is kept
+    and re-told its path."""
+
+    _run_qt(
+        """
+from PyQt5 import QtCore
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.console import LogicEditorView
+from zlc_ui.form import FormSpec
+app = ensure_qt_app(['test'])
+def projection(path, *names):
+    return {'form_spec': FormSpec(()), 'form_values': {},
+            'preview_offered': False, 'auto_preview': False,
+            'artifact_results': tuple(
+                {'name': name, 'path': path, 'contract_id': 'review'} for name in names)}
+editor = LogicEditorView('logic', projection('C:/data/report.npz', 'report'))
+readout = editor._artifact_result_readouts['report']
+destroyed = []
+readout.destroyed.connect(lambda *_: destroyed.append(True))
+editor.update_projection(projection('C:/data/report.npz', 'report'))
+app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+assert editor._artifact_result_readouts['report'] is readout and destroyed == []
+editor.update_projection(projection('C:/data/report-2.npz', 'report'))
+assert editor._artifact_result_readouts['report'] is readout
+assert readout.text() == 'C:/data/report-2.npz', 'a new path is told to the same readout'
+editor.update_projection(projection('C:/data/report-2.npz', 'report', 'summary'))
+assert editor._artifact_result_readouts['report'] is not readout, 'a new name set rebuilds the rows'
+assert list(editor._artifact_result_readouts) == ['report', 'summary']
+editor.deleteLater(); app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
 """
     )

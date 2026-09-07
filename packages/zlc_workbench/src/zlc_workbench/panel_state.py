@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
+from numbers import Real
 from types import MappingProxyType
 from typing import Any
 
@@ -454,6 +456,32 @@ def _plain_state(values: Mapping[str, Any]) -> Mapping[str, Any]:
     return _state_value(values)
 
 
+def _validated_crosshair(value: Mapping[str, Any]) -> Mapping[str, Any]:
+    """A crosshair marker is empty, or exactly one finite (x, y).
+
+    Judged at the record's door like every other field.  A marker with a
+    missing or non-finite coordinate used to pass here and fail at the
+    host, when the panel mounted -- far from the layout that carried it.
+    """
+
+    marker = dict(value)
+    if not marker:
+        return {}
+    if set(marker) != {"x", "y"}:
+        raise ValueError("a crosshair names exactly x and y")
+    point: dict[str, float] = {}
+    for name in ("x", "y"):
+        coordinate = marker[name]
+        if (
+            isinstance(coordinate, bool)
+            or not isinstance(coordinate, Real)
+            or not math.isfinite(coordinate)
+        ):
+            raise ValueError(f"crosshair {name} must be a finite number")
+        point[name] = float(coordinate)
+    return point
+
+
 def _validated_selector_document(value: Mapping[str, Any]) -> Mapping[str, Any]:
     from .selection import (
         panel_selection_document,
@@ -732,6 +760,14 @@ class PanelState:
             self,
             "selector",
             _validated_selector_document(self.selector),
+        )
+        # Deep-owned like the rest: the caller's dict must not stay a live
+        # alias into a frozen record (two states replaced from one marker
+        # both moved when the caller's dict did).
+        object.__setattr__(
+            self,
+            "crosshair",
+            _plain_state(_validated_crosshair(self.crosshair)),
         )
         object.__setattr__(
             self,

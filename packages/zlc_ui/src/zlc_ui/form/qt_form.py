@@ -14,9 +14,8 @@ import math
 import re
 import sys
 from types import MappingProxyType
-from typing import Any
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore, QtWidgets
 
 from zlc_data.units import (
     DEFAULT_UNITS,
@@ -25,25 +24,21 @@ from zlc_data.units import (
 )
 
 from .form import (
-    FormChoice,
     FormFieldProps,
     FormSpec,
     parse_number_text,
 )
 
 from ..fluent import (
-    GREY,
     FluentComboBox,
     FluentCycleComboBox,
     FluentDoubleSpinBox,
-    FluentLabel,
     FluentLineEdit,
     FluentPathEdit,
-    FluentSectionLabel,
     FluentSettingRow,
-    FluentSpinBox,
     FluentSwitch,
     FluentTreeComboBox,
+    fluent_integer_box,
     fluent_unit_picker,
     fluent_switch_width,
     scaled_px,
@@ -58,11 +53,6 @@ from ..fluent.choice_picker import (
 
 
 _INT_TEXT = re.compile(r"[+-]?\d+")
-_FLOAT_TEXT = re.compile(
-    r"[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[eE][+-]?\d+)?"
-)
-_QT_INT_MIN = -(2**31)
-_QT_INT_MAX = 2**31 - 1
 
 
 def _empty_mapping() -> Mapping[str, object]:
@@ -188,6 +178,49 @@ class _StaticHandler(FormWidgetHandler):
         del field, widget, context
 
 
+def _blank_placeholder(field: FormFieldProps) -> str:
+    """What a blank-or-number edit says while it is blank."""
+
+    if not field.blank_allowed:
+        return ""
+    return "(required)" if field.required else "(optional)"
+
+
+def _install_validator(field: FormFieldProps, widget: FluentLineEdit) -> None:
+    """The owner's bounds on a blank-or-number edit.
+
+    Called when the edit is built AND whenever the owner re-declares the
+    field it keeps: the validator and the leave-time clamp both hold the
+    bounds, and a widget kept across a widened range with the old ones
+    judged a legal 50 as unfinished and clamped it back to the old 10 on
+    Return.
+    """
+
+    if field.kind == "int":
+        widget.set_numeric_validator("int", bottom=field.minimum, top=field.maximum)
+    elif field.kind == "float" and field.unit and field.unit != "1":
+        # A blank-or-number edit still holds a QUANTITY, and the RF bounds
+        # -- the fields that carry dBm -- are all of them: they default to
+        # None so the instrument's own limit stands.  It takes digits like
+        # every other numeric field and gets the same picker beside it,
+        # which is where its scale is said.
+        widget.set_quantity_validator(
+            field.unit, bottom=field.minimum, top=field.maximum
+        )
+    else:
+        widget.set_numeric_validator(
+            "float", bottom=field.minimum, top=field.maximum
+        )
+
+
+def _blank_or_number_edit(field: FormFieldProps) -> FluentLineEdit:
+    widget = FluentLineEdit()
+    widget.setMinimumWidth(scaled_px(120, minimum=96))
+    widget.setPlaceholderText(_blank_placeholder(field))
+    _install_validator(field, widget)
+    return widget
+
+
 class _TextHandler(_StaticHandler):
     def normalize(self, field: FormFieldProps, value: object) -> str:
         if value is None:
@@ -235,25 +268,22 @@ class _TextHandler(_StaticHandler):
 
 
 class _IntHandler(_StaticHandler):
-    @staticmethod
-    def _spin_range(field: FormFieldProps) -> tuple[int, int] | None:
-        # QSpinBox is a numeric value editor, not a tagged ``None | int``
-        # control.  Optional numbers use the validated blank-or-number editor
-        # below; never steal an out-of-domain integer and paint it as text.
-        if field.blank_allowed:
-            return None
-        minimum = _QT_INT_MIN if field.minimum is None else int(field.minimum)
-        maximum = _QT_INT_MAX if field.maximum is None else int(field.maximum)
-        if not (_QT_INT_MIN <= minimum <= maximum <= _QT_INT_MAX):
-            return None
-        return minimum, maximum
+    """A Python int has no width, and neither does the box that holds one.
 
-    @classmethod
-    def _configure_spin(cls, field: FormFieldProps, widget: FluentSpinBox) -> None:
-        spin_range = cls._spin_range(field)
-        if spin_range is None:
-            raise ValueError("field cannot be represented by FluentSpinBox")
-        widget.setRange(*spin_range)
+    A required integer is a whole-number box bounded only where its owner
+    bounded it -- Qt's own integer spin stops at signed 31 bits and cannot
+    say "no bound", so a form that used it invented one, and a legal 2**40
+    overflowed the control that was supposed to hold it.  An optional
+    integer is a blank-or-number edit, because a spin box is a number
+    editor and cannot hold the vacancy.
+    """
+
+    @staticmethod
+    def _configure_spin(field: FormFieldProps, widget: FluentDoubleSpinBox) -> None:
+        widget.setRange(
+            -sys.float_info.max if field.minimum is None else field.minimum,
+            sys.float_info.max if field.maximum is None else field.maximum,
+        )
         widget.setValueUnit(field.unit)
 
     def normalize(self, field: FormFieldProps, value: object) -> int | None:
@@ -271,35 +301,25 @@ class _IntHandler(_StaticHandler):
 
     def build(self, field, value, on_change, context=None):
         del context
-        spin_range = self._spin_range(field)
-        if spin_range is not None:
-            widget = FluentSpinBox()
+        if not field.blank_allowed:
+            widget = fluent_integer_box()
             self._configure_spin(field, widget)
             self.write(field, widget, value)
             _connect_change(widget.valueChanged, on_change)
         else:
-            widget = FluentLineEdit()
-            widget.setMinimumWidth(scaled_px(120, minimum=96))
-            widget.setPlaceholderText(
-                ("(required)" if field.required else "(optional)")
-                if field.blank_allowed
-                else ""
-            )
-            widget.set_numeric_validator(
-                "int",
-                bottom=field.minimum,
-                top=field.maximum,
-            )
+            widget = _blank_or_number_edit(field)
             self.write(field, widget, value)
             _connect_change(widget.textChanged, on_change)
         widget.setToolTip(field.description)
         return widget
 
     def read(self, field, widget):
-        if isinstance(widget, FluentSpinBox):
+        if isinstance(widget, FluentDoubleSpinBox):
             if not widget.hasAcceptableInput():
                 raise _value_error(field, "value is not a base-10 integer")
-            return self.normalize(field, int(widget.value()))
+            # The decimal, not the double: the box holds the integer exactly
+            # and its Qt shadow is an approximation past 2**53.
+            return self.normalize(field, int(widget.decimalValue()))
         text = widget.text().strip()
         if not text:
             return self.normalize(field, None)
@@ -309,7 +329,7 @@ class _IntHandler(_StaticHandler):
 
     def write(self, field, widget, value):
         prepared = self.normalize(field, value)
-        if isinstance(widget, FluentSpinBox):
+        if isinstance(widget, FluentDoubleSpinBox):
             if prepared is None:
                 raise _value_error(field, "numeric spin cannot represent None")
             widget.setValue(prepared)
@@ -317,7 +337,7 @@ class _IntHandler(_StaticHandler):
             widget.setText("" if prepared is None else str(prepared))
 
     def is_empty(self, field, widget):
-        if isinstance(widget, FluentSpinBox):
+        if isinstance(widget, FluentDoubleSpinBox):
             return False
         return not widget.text().strip()
 
@@ -352,18 +372,7 @@ class _NumberHandler(_StaticHandler):
 
     def build(self, field, value, on_change, context=None):
         del context
-        widget = FluentLineEdit()
-        widget.setMinimumWidth(scaled_px(120, minimum=96))
-        widget.setPlaceholderText(
-            ("(required)" if field.required else "(optional)")
-            if field.blank_allowed
-            else ""
-        )
-        widget.set_numeric_validator(
-            "float",
-            bottom=field.minimum,
-            top=field.maximum,
-        )
+        widget = _blank_or_number_edit(field)
         widget.setToolTip(field.description)
         self.write(field, widget, value)
         _connect_change(widget.textChanged, on_change)
@@ -395,34 +404,13 @@ class _NumberHandler(_StaticHandler):
 
 class _FloatHandler(_StaticHandler):
     @staticmethod
-    def _spin_range(field: FormFieldProps) -> tuple[float, float] | None:
-        # QDoubleSpinBox owns one real number only.  Optional numbers remain a
-        # typed blank-or-number edit instead of smuggling None through an
-        # out-of-domain floating-point value and a textual numeric sentinel.
-        if field.blank_allowed:
-            return None
-        minimum = (
-            -sys.float_info.max
-            if field.minimum is None
-            else float(field.minimum)
+    def _configure_spin(field: FormFieldProps, widget: FluentDoubleSpinBox) -> None:
+        # The box invents no bound: a side the owner left None is Qt's whole
+        # double line, which the box reads as "none".
+        widget.setRange(
+            -sys.float_info.max if field.minimum is None else float(field.minimum),
+            sys.float_info.max if field.maximum is None else float(field.maximum),
         )
-        maximum = (
-            sys.float_info.max
-            if field.maximum is None
-            else float(field.maximum)
-        )
-        return minimum, maximum
-
-    @classmethod
-    def _configure_spin(
-        cls,
-        field: FormFieldProps,
-        widget: FluentDoubleSpinBox,
-    ) -> None:
-        spin_range = cls._spin_range(field)
-        if spin_range is None:
-            raise ValueError("field cannot be represented by FluentDoubleSpinBox")
-        widget.setRange(*spin_range)
         # The field said what its number is IN.  Nothing read it before, so
         # every box in this project showed a bare repr and refused a prefix.
         widget.setValueUnit(field.unit)
@@ -445,35 +433,16 @@ class _FloatHandler(_StaticHandler):
 
     def build(self, field, value, on_change, context=None):
         del context
-        spin_range = self._spin_range(field)
-        if spin_range is not None:
+        if not field.blank_allowed:
+            # QDoubleSpinBox owns one real number only.  Optional numbers
+            # remain a typed blank-or-number edit instead of smuggling None
+            # through an out-of-domain float and a textual sentinel.
             widget = FluentDoubleSpinBox()
             self._configure_spin(field, widget)
             self.write(field, widget, value)
             _connect_change(widget.valueChanged, on_change)
         else:
-            widget = FluentLineEdit()
-            widget.setMinimumWidth(scaled_px(120, minimum=96))
-            widget.setPlaceholderText(
-                ("(required)" if field.required else "(optional)")
-                if field.blank_allowed
-                else ""
-            )
-            if field.unit and field.unit != "1":
-                # A blank-or-number edit still holds a QUANTITY, and the RF
-                # bounds -- the fields that carry dBm -- are all of them: they
-                # default to None so the instrument's own limit stands.  It
-                # takes digits like every other numeric field and gets the
-                # same picker beside it, which is where its scale is said.
-                widget.set_quantity_validator(
-                    field.unit, bottom=field.minimum, top=field.maximum
-                )
-            else:
-                widget.set_numeric_validator(
-                    "float",
-                    bottom=field.minimum,
-                    top=field.maximum,
-                )
+            widget = _blank_or_number_edit(field)
             self.write(field, widget, value)
             _connect_change(widget.textChanged, on_change)
         widget.setToolTip(field.description)
@@ -540,6 +509,15 @@ class _BoolHandler(_StaticHandler):
 
 
 class _ChoiceHandler(FormWidgetHandler):
+    """The popup rows, and behind one of them a lazy sub-domain.
+
+    The sub-domain is DATA -- every coordinate of an axis -- read one
+    position at a time, so nothing here walks it when the widget already
+    answers the question: what the widget shows at its position IS a value
+    of the domain, and asking the domain to confirm it read the whole axis,
+    on every beat, for a value that had not moved.
+    """
+
     def normalize(self, field: FormFieldProps, value: object) -> object:
         if value is None:
             return None
@@ -550,6 +528,14 @@ class _ChoiceHandler(FormWidgetHandler):
         if cycle is not None:
             return cycle[1]
         raise _value_error(field, "value is not one of the typed choices")
+
+    @staticmethod
+    def _shows(widget: FluentComboBox, value: object) -> bool:
+        """Whether the widget's current row already holds ``value``."""
+
+        if widget.currentIndex() < 0:
+            return value is None
+        return _same_typed_value(widget.currentData(), value)
 
     @staticmethod
     def _fill_cycle(field: FormFieldProps, widget: FluentComboBox) -> None:
@@ -584,7 +570,6 @@ class _ChoiceHandler(FormWidgetHandler):
         )
         self._fill(field, widget)
         self.write(field, widget, value)
-        widget.setEnabled(not field.unavailable)
         widget.setToolTip(field.unavailable_reason or field.description)
         _connect_change(widget.activated, on_change)
         return widget
@@ -592,23 +577,30 @@ class _ChoiceHandler(FormWidgetHandler):
     def read(self, field, widget):
         if widget.currentIndex() < 0:
             return None
+        if isinstance(widget, FluentCycleComboBox) and widget.isCycleSelected():
+            # One read, at the position the widget holds: the domain is what
+            # the field installed, so the value there needs no confirming.
+            return widget.currentData()
         return self.normalize(field, widget.currentData())
 
     def write(self, field, widget, value):
-        prepared = self.normalize(field, value)
-        if prepared is None:
+        if value is None:
             widget.setCurrentIndex(-1)
             return
-        choice = field.choice_for(prepared)
+        choice = field.choice_for(value)
         if choice is not None:
-            index = next(
-                index for index, item in enumerate(field.choices) if item is choice
+            widget.setCurrentIndex(
+                next(index for index, item in enumerate(field.choices) if item is choice)
             )
-            widget.setCurrentIndex(index)
             return
         if not isinstance(widget, FluentCycleComboBox):
             raise TypeError("cycle value requires FluentCycleComboBox")
-        widget.setCycleValue(prepared)
+        if widget.isCycleSelected() and self._shows(widget, value):
+            return
+        cycle = field.cycle_choice_for(value)
+        if cycle is None:
+            raise _value_error(field, "value is not one of the typed choices")
+        widget.setCyclePosition(cycle[0])
 
     def is_empty(self, field, widget):
         del field
@@ -627,94 +619,7 @@ class _ChoiceHandler(FormWidgetHandler):
         if existing != desired:
             self._fill(field, widget)
             self.write(field, widget, current)
-        widget.setEnabled(not field.unavailable)
         widget.setToolTip(field.unavailable_reason or field.description)
-
-
-def _grey_label(text: str) -> FluentLabel:
-    label = FluentLabel(text)
-    label.setStyleSheet(f"color: {GREY}; background: transparent; border: none;")
-    return label
-
-
-class _AxisRangeHandler(_StaticHandler):
-    def normalize(self, field, value):
-        if not isinstance(value, (tuple, list)) or len(value) != 3:
-            raise _value_error(field, "value must be (minimum, maximum, points)")
-        lo, hi, points = value
-        if (
-            isinstance(lo, bool)
-            or isinstance(hi, bool)
-            or not isinstance(lo, (int, float))
-            or not isinstance(hi, (int, float))
-            or not isinstance(points, int)
-            or isinstance(points, bool)
-        ):
-            raise _value_error(field, "range endpoints must be numeric and points int")
-        lo_value, hi_value = float(lo), float(hi)
-        if not math.isfinite(lo_value) or not math.isfinite(hi_value):
-            raise _value_error(field, "range endpoints must be finite")
-        if field.minimum is not None and min(lo_value, hi_value) < field.minimum:
-            raise _value_error(field, f"range is below {field.minimum}")
-        if field.maximum is not None and max(lo_value, hi_value) > field.maximum:
-            raise _value_error(field, f"range is above {field.maximum}")
-        if points < 2 or points > 100_000:
-            raise _value_error(field, "points must be between 2 and 100000")
-        return lo_value, hi_value, points
-
-    def build(self, field, value, on_change, context=None):
-        del context
-        lo, hi, points = self.normalize(field, value)
-        minimum = -1.0e12 if field.minimum is None else float(field.minimum)
-        maximum = 1.0e12 if field.maximum is None else float(field.maximum)
-        lo_spin = FluentDoubleSpinBox()
-        hi_spin = FluentDoubleSpinBox()
-        for spin, seed in ((lo_spin, lo), (hi_spin, hi)):
-            spin.setRange(minimum, maximum)
-            spin.setValue(seed)
-            spin.setToolTip(field.description)
-        points_spin = FluentSpinBox()
-        points_spin.setRange(2, 100_000)
-        points_spin.setValue(points)
-        points_spin.setToolTip("Number of scan points (>= 2).")
-
-        host = QtWidgets.QWidget()
-        host.setStyleSheet("background: transparent;")
-        row = QtWidgets.QHBoxLayout(host)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(scaled_px(4, minimum=3))
-        row.addWidget(lo_spin)
-        row.addWidget(_grey_label("to"))
-        row.addWidget(hi_spin)
-        row.addWidget(_grey_label("/"))
-        row.addWidget(points_spin)
-        row.addWidget(_grey_label("pts"))
-        host.min_spin = lo_spin
-        host.max_spin = hi_spin
-        host.pts_spin = points_spin
-        for spin in (lo_spin, hi_spin, points_spin):
-            _connect_change(spin.valueChanged, on_change)
-        return host
-
-    def read(self, field, widget):
-        return self.normalize(
-            field,
-            (
-                float(widget.min_spin.value()),
-                float(widget.max_spin.value()),
-                int(widget.pts_spin.value()),
-            ),
-        )
-
-    def write(self, field, widget, value):
-        lo, hi, points = self.normalize(field, value)
-        widget.min_spin.setValue(lo)
-        widget.max_spin.setValue(hi)
-        widget.pts_spin.setValue(points)
-
-    def is_empty(self, field, widget):
-        del field, widget
-        return False
 
 
 class _PathHandler(_StaticHandler):
@@ -804,7 +709,6 @@ FORM_WIDGET_HANDLERS: Mapping[str, FormWidgetHandler] = MappingProxyType(
         "number": _NumberHandler(),
         "choice": _ChoiceHandler(),
         "bool": _BoolHandler(),
-        "axis_range": _AxisRangeHandler(),
         "path": _PathHandler(),
         "keyed_choice": _KeyedChoiceHandler(),
     }
@@ -812,14 +716,19 @@ FORM_WIDGET_HANDLERS: Mapping[str, FormWidgetHandler] = MappingProxyType(
 
 
 def _widget_family(field: FormFieldProps) -> str:
-    """Concrete control family required by one declaration."""
+    """Concrete control family required by one declaration.
+
+    A numeric family names its UNIT: the picker mounted beside the control
+    is built for that unit's ladder, so a field re-declared in another unit
+    is another row, not a re-configured one.
+    """
 
     prefix = "auto:" if field.automatic else ""
-    if field.kind == "int" and _IntHandler._spin_range(field) is not None:
-        return prefix + "int-spin"
-    if field.kind == "float" and _FloatHandler._spin_range(field) is not None:
-        return prefix + "float-spin"
-    if field.kind in {"text", "int", "float", "number"}:
+    if field.kind in {"int", "float"} and not field.blank_allowed:
+        return f"{prefix}{field.kind}-spin:{field.unit}"
+    if field.kind in {"int", "float", "number"}:
+        return f"{prefix}line-edit:{field.unit}"
+    if field.kind == "text":
         return prefix + "line-edit"
     if field.kind == "choice":
         return prefix + (
@@ -827,8 +736,6 @@ def _widget_family(field: FormFieldProps) -> str:
         )
     if field.kind == "bool":
         return "bool"
-    if field.kind == "axis_range":
-        return f"axis-range:{field.minimum}:{field.maximum}"
     if field.kind == "path":
         return f"path:{field.path_mode}:{field.file_filter}:{field.base_dir}:{field.refreshable}"
     if field.kind == "keyed_choice":
@@ -913,17 +820,38 @@ def _same_typed_value(left: object, right: object) -> bool:
     return type(left) is type(right) and left == right
 
 
+#: What a widget answers when it holds nothing readable.
+_NO_VALUE = object()
+
+
+def _widget_value(
+    handler: FormWidgetHandler,
+    field: FormFieldProps,
+    widget: QtWidgets.QWidget,
+) -> object:
+    try:
+        return handler.read(field, widget)
+    except (TypeError, ValueError):
+        return _NO_VALUE
+
+
 def _widget_has_value(
     handler: FormWidgetHandler,
     field: FormFieldProps,
     widget: QtWidgets.QWidget,
     value: object,
 ) -> bool:
-    try:
-        current = handler.read(field, widget)
-    except (TypeError, ValueError):
-        return False
-    return _same_typed_value(current, value)
+    return _same_typed_value(_widget_value(handler, field, widget), value)
+
+
+def _seed(field: FormFieldProps, prepared: object) -> object:
+    """What a new control is built holding: the prepared value, or, for an
+    automatic field on Auto, the declared default -- Auto holds no value,
+    and a number box has to be built holding some number."""
+
+    if prepared is None and field.automatic:
+        return field.default
+    return prepared
 
 
 def _reconfigure_widget(
@@ -931,27 +859,26 @@ def _reconfigure_widget(
     field: FormFieldProps,
     widget: QtWidgets.QWidget,
 ) -> None:
-    """Apply changed presentation constraints to one compatible control."""
+    """Apply changed presentation constraints to one compatible control.
+
+    Whether the control is ENABLED is the form's decision, made in one
+    place from the field, its Auto switch and its controller; nothing here
+    touches it.
+    """
 
     widget.setToolTip(field.unavailable_reason or field.description)
-    widget.setEnabled(not field.unavailable)
     if isinstance(widget, FluentLineEdit):
         if field.kind == "text":
             widget.setPlaceholderText(field.description[:48])
-        elif field.kind in {"int", "float", "number"}:
-            widget.setPlaceholderText(
-                ("(required)" if field.required else "(optional)")
-                if field.blank_allowed
-                else ""
-            )
-    elif isinstance(widget, FluentSpinBox):
-        _IntHandler._configure_spin(field, widget)
+        else:
+            widget.setPlaceholderText(_blank_placeholder(field))
+            _install_validator(field, widget)
     elif isinstance(widget, FluentDoubleSpinBox):
-        _FloatHandler._configure_spin(field, widget)
+        handler = _IntHandler if field.kind == "int" else _FloatHandler
+        handler._configure_spin(field, widget)
     elif isinstance(widget, FluentComboBox):
         if old_field.choices != field.choices:
             _ChoiceHandler._fill(field, widget)
-            widget.setEnabled(not field.unavailable)
         elif (
             old_field.cycle_choices != field.cycle_choices
             or old_field.cycle_label != field.cycle_label
@@ -959,7 +886,6 @@ def _reconfigure_widget(
             # The choices the operator picks from are the same; only the
             # coordinates behind the Scope action moved.
             _ChoiceHandler._fill_cycle(field, widget)
-            widget.setEnabled(not field.unavailable)
 
 
 #: ``(before, after)``: the widgets a host places before a row's control,
@@ -1058,23 +984,34 @@ class FluentParameterForm(QtWidgets.QWidget):
         self._layout.setSpacing(scaled_px(6, minimum=4))
         self._layout.setSizeConstraint(QtWidgets.QLayout.SetMinimumSize)
         label_width = self._label_width or _form_label_width(spec.fields)
+        # Built ONCE, with the values it opens on.  A form that was built on
+        # each field's default and then populated wrote every control twice
+        # -- and refused a valid incoming value whenever the default it never
+        # meant to show was not one: a required field with no default could
+        # not be constructed with the value it was given.
+        prepared = self._prepare_population(
+            spec.default_values() if values is None else values, spec
+        )
         for field in spec.fields:
             handler = FORM_WIDGET_HANDLERS[field.kind]
             widget = handler.build(
                 field,
-                field.default,
+                _seed(field, prepared[field.key]),
                 lambda key=field.key: self.changed.emit(key),
                 self._runtime,
             )
-            widget.setEnabled(not field.unavailable)
             self._connect_editor_signals(field.key, widget)
-            self._widgets[field.key] = widget
-            self._handlers[field.key] = handler
-            row, automatic = self._make_row(field, widget, label_width)
-            self._rows[field.key] = row
-            if automatic is not None:
-                self._auto_switches[field.key] = automatic
-            self._layout.addWidget(row)
+            self._install_row(
+                field,
+                widget,
+                *self._make_row(
+                    field,
+                    widget,
+                    label_width,
+                    automatic_checked=prepared[field.key] is None,
+                ),
+            )
+            self._layout.addWidget(self._rows[field.key])
         # THE SLACK GOES BELOW THE ROWS, not between them.  Without this a
         # form shorter than its host shares the surplus height across its
         # rows, so the PITCH depends on the row COUNT: adding one control
@@ -1094,25 +1031,68 @@ class FluentParameterForm(QtWidgets.QWidget):
         # once even when the initial schema has no dependencies; reconcile may
         # introduce them later.
         self.changed.connect(self._controller_changed)
-        if values is not None:
-            self.populate(values)
-        for controller in self._dependents:
-            self._controller_changed(controller)
+        self._project_enabled_all()
 
     def _controller_changed(self, key: str) -> None:
         for dependent in self._dependents.get(str(key), ()):
-            field = self._fields[dependent]
-            controller, enabling = field.enabled_when
-            current = self._handlers[controller].read(
-                self._fields[controller], self._widgets[controller]
-            )
-            self._widgets[dependent].setEnabled(
-                any(
-                    type(current) is type(value) and current == value
-                    for value in enabling
-                )
-                and not field.unavailable
-            )
+            self._project_enabled(dependent)
+
+    # ------------------------------------------------------- enabled state
+    #
+    # ONE formula.  Whether a control may be edited is decided by the field
+    # (unavailable), its Auto switch (Auto holds no value to edit) and the
+    # field that governs it (enabled_when), together -- and every path that
+    # can change any of those projects the result through here.  Written as
+    # three partial formulas in construction, populate and reconcile, the
+    # same values enabled a dependent through one entry and disabled it
+    # through another, and a governed field's Auto state was overwritten by
+    # its controller.
+
+    def _controller_value(self, key: str) -> object:
+        """What the governing field holds; None while it holds nothing
+        readable -- Auto, or text the operator is still typing.  Either is
+        "not one of the enabling values", and neither may raise: this runs
+        inside the form's own change slot."""
+
+        automatic = self._auto_switches.get(key)
+        if automatic is not None and automatic.isChecked():
+            return None
+        try:
+            return self._handlers[key].read(self._fields[key], self._widgets[key])
+        except (TypeError, ValueError):
+            return None
+
+    def _enabled(self, key: str, *, editing: bool = False) -> bool:
+        if editing:
+            # The operator is inside it; a projection never takes a control
+            # away under their cursor.
+            return True
+        field = self._fields[key]
+        if field.unavailable:
+            return False
+        automatic = self._auto_switches.get(key)
+        if automatic is not None and automatic.isChecked():
+            return False
+        if field.enabled_when is None:
+            return True
+        controller, enabling = field.enabled_when
+        current = self._controller_value(controller)
+        return any(
+            type(current) is type(value) and current == value for value in enabling
+        )
+
+    def _project_enabled(self, key: str, *, editing: bool = False) -> None:
+        """Enable the EDITOR, never the cell around it: a unit picker beside
+        a disabled number still chooses how the number is read."""
+
+        self._widgets[key].setEnabled(self._enabled(key, editing=editing))
+        automatic = self._auto_switches.get(key)
+        if automatic is not None:
+            automatic.setEnabled(not self._fields[key].unavailable)
+
+    def _project_enabled_all(self, *, editing_key: str | None = None) -> None:
+        for key in self._spec.keys:
+            self._project_enabled(key, editing=key == editing_key)
 
     def _unit_picker(self, field, widget):
         """The shared picker, for a row whose unit has more than one spelling.
@@ -1149,12 +1129,12 @@ class FluentParameterForm(QtWidgets.QWidget):
         asked = getattr(self.widget_for(key), "shownUnit", None)
         return str(asked()).strip() if callable(asked) else ""
 
-    def _label_for(self, field: FormFieldProps) -> str:
+    def _label_for(self, field: FormFieldProps, *, picked: bool | None = None) -> str:
         """The row's label: with the owner's unit, unless a picker says it."""
 
-        if field.key in self._unit_pickers:
-            return _row_label_in(field, "")
-        return field.row_label
+        if picked is None:
+            picked = field.key in self._unit_pickers
+        return _row_label_in(field, "") if picked else field.row_label
 
     def cell_for(self, key: str) -> QtWidgets.QWidget:
         """What sits in this row's control column: editor, or editor + picker.
@@ -1166,13 +1146,21 @@ class FluentParameterForm(QtWidgets.QWidget):
 
         return self._cells.get(key, self.widget_for(key))
 
-    def _make_row(self, field, widget, label_width):
+    def _make_row(self, field, widget, label_width, *, automatic_checked: bool):
+        """Build one row around ``widget`` and hand back its parts.
+
+        Nothing is INSTALLED here: the row, its cell, its picker and its
+        Auto switch are returned together and recorded by the caller once
+        the row they replace is gone.  Recording the new cell and picker
+        while the old row was still to be retired let the retirement erase
+        them, and the form then answered ``unit_picker_for`` with None for a
+        picker that was on screen.
+        """
+
         automatic = None
         picker = self._unit_picker(field, widget)
-        self._unit_pickers.pop(field.key, None)
-        self._cells[field.key] = widget
+        cell = widget
         if picker is not None:
-            self._unit_pickers[field.key] = picker
             holder = QtWidgets.QWidget(self)
             holder.setSizePolicy(
                 QtWidgets.QSizePolicy.Expanding,
@@ -1183,16 +1171,13 @@ class FluentParameterForm(QtWidgets.QWidget):
             beside.setSpacing(scaled_px(6, minimum=4))
             beside.addWidget(widget, 1)
             beside.addWidget(picker, 0)
-            widget = holder
-            self._cells[field.key] = holder
-        label = self._label_for(field)
+            cell = holder
+        label = self._label_for(field, picked=picker is not None)
         if field.automatic:
             automatic = FluentSwitch("", self)
             with signals_blocked(automatic):
-                automatic.setChecked(field.default is None)
-            automatic.setText(_automatic_label(field, automatic.isChecked()))
-            automatic.setEnabled(not field.unavailable)
-            widget.setEnabled(not automatic.isChecked() and not field.unavailable)
+                automatic.setChecked(automatic_checked)
+            automatic.setText(_automatic_label(field, automatic_checked))
             automatic.toggled.connect(
                 lambda checked, key=field.key: self._automatic_toggled(
                     key, checked
@@ -1202,20 +1187,48 @@ class FluentParameterForm(QtWidgets.QWidget):
         before, after = self._row_cells(field)
         row = FluentSettingRow(
             label,
-            widget,
+            cell,
             label_width=label_width,
             before=before,
             after=after,
             parent=self,
         )
-        return row, automatic
+        return row, automatic, cell, picker
+
+    def _install_row(self, field, widget, row, automatic, cell, picker) -> None:
+        """Record every part of one built row, in the one place that does."""
+
+        key = field.key
+        self._widgets[key] = widget
+        self._handlers[key] = FORM_WIDGET_HANDLERS[field.kind]
+        self._rows[key] = row
+        self._cells[key] = cell
+        if picker is not None:
+            self._unit_pickers[key] = picker
+        if automatic is not None:
+            self._auto_switches[key] = automatic
+
+    def _retire_row(self, key: str) -> None:
+        """Take one row off the form and forget every part of it."""
+
+        row = self._rows.pop(key)
+        self._layout.removeWidget(row)
+        # Reconcile may run while an Edit page is visible.  An unparented
+        # QWidget becomes a transient native window; hide the retired row
+        # and retain this form as QObject owner until DeferredDelete.
+        row.hide()
+        row.deleteLater()
+        self._widgets.pop(key, None)
+        self._handlers.pop(key, None)
+        self._auto_switches.pop(key, None)
+        self._cells.pop(key, None)
+        self._unit_pickers.pop(key, None)
 
     def _automatic_toggled(self, key: str, automatic: bool) -> None:
         field = self._fields[key]
         widget = self._widgets[key]
-        switch = self._auto_switches[key]
         self._set_automatic_label(key)
-        widget.setEnabled(not automatic and not field.unavailable)
+        self._project_enabled(key)
         if not automatic and self._handlers[key].is_empty(field, widget):
             if field.kind == "choice" and field.choices:
                 self._handlers[key].write(field, widget, field.choices[0].value)
@@ -1339,7 +1352,7 @@ class FluentParameterForm(QtWidgets.QWidget):
         with signals_blocked(*widgets, *automatic):
             for field in self._spec.fields:
                 switch = self._auto_switches.get(field.key)
-                selected = switch is not None and values[field.key] is None
+                selected = switch is not None and prepared[field.key] is None
                 if not selected:
                     self._handlers[field.key].write(
                         field, self._widgets[field.key], prepared[field.key]
@@ -1347,12 +1360,7 @@ class FluentParameterForm(QtWidgets.QWidget):
                 if switch is not None:
                     switch.setChecked(selected)
                     self._set_automatic_label(field.key)
-                    switch.setEnabled(not field.unavailable)
-                    self._widgets[field.key].setEnabled(
-                        not selected and not field.unavailable
-                    )
-                else:
-                    self._widgets[field.key].setEnabled(not field.unavailable)
+        self._project_enabled_all()
 
     def validate_population(self, values: Mapping[str, object]) -> None:
         """Validate one exact owner projection without mutating any widget."""
@@ -1387,22 +1395,35 @@ class FluentParameterForm(QtWidgets.QWidget):
             )
         ):
             return False
-        prepared = self._prepare_population(values)
-        for field in self._spec.fields:
-            automatic = self._auto_switches.get(field.key)
-            selected = automatic is not None and values[field.key] is None
-            if automatic is not None and automatic.isChecked() != selected:
-                return False
-            if not selected and not _widget_has_value(
-                self._handlers[field.key],
-                field,
-                self._widgets[field.key],
-                prepared[field.key],
-            ):
-                return False
+        # The coordinates move in BEFORE the values are judged: a value and
+        # the vocabulary it is judged against come from the same moment.
+        # Judged against the vocabulary already installed, a coordinate the
+        # axis had just grown was "not one of the typed choices", and the
+        # refusal was an exception rather than the False that hands the
+        # projection to reconcile.
         for current, incoming in zip(self._spec.fields, spec.fields, strict=True):
             if current.cycle_choices != incoming.cycle_choices:
                 _ChoiceHandler._fill_cycle(incoming, self._widgets[incoming.key])
+        exact = self._require_exact_values(values, spec)
+        for field in spec.fields:
+            automatic = self._auto_switches.get(field.key)
+            selected = automatic is not None and exact[field.key] is None
+            if automatic is not None and automatic.isChecked() != selected:
+                return False
+            if selected:
+                continue
+            handler = FORM_WIDGET_HANDLERS[field.kind]
+            widget = self._widgets[field.key]
+            shown = _widget_value(handler, field, widget)
+            # What the widget shows is a value of its own vocabulary, so a
+            # projection that repeats it is accepted on that one read; only
+            # a value that differs is normalized, which for a lazy axis
+            # means walking it.
+            if shown is _NO_VALUE or not (
+                _same_typed_value(shown, exact[field.key])
+                or _same_typed_value(shown, handler.normalize(field, exact[field.key]))
+            ):
+                return False
         self._spec = spec
         self._fields = {field.key: field for field in spec.fields}
         self._dependents = self._dependency_map(spec)
@@ -1411,13 +1432,25 @@ class FluentParameterForm(QtWidgets.QWidget):
     def _prepare_population(
         self,
         values: Mapping[str, object],
+        spec: FormSpec | None = None,
     ) -> dict[str, object]:
-        exact = self._require_exact_values(values)
+        """Every value normalized by its field, before any widget is touched.
+
+        An automatic field given None is on Auto: it holds no value, so
+        there is nothing to normalize and nothing for its editor to refuse.
+        """
+
+        spec = self._spec if spec is None else spec
+        exact = self._require_exact_values(values, spec)
         return {
-            field.key: self._handlers[field.key].normalize(
-                field, exact[field.key]
+            field.key: (
+                None
+                if field.automatic and exact[field.key] is None
+                else FORM_WIDGET_HANDLERS[field.kind].normalize(
+                    field, exact[field.key]
+                )
             )
-            for field in self._spec.fields
+            for field in spec.fields
         }
 
     def write_all(self, values: Mapping[str, object]) -> None:
@@ -1467,12 +1500,7 @@ class FluentParameterForm(QtWidgets.QWidget):
             field.key: FORM_WIDGET_HANDLERS[field.kind]
             for field in spec.fields
         }
-        prepared = {
-            field.key: new_handlers[field.key].normalize(
-                field, incoming[field.key]
-            )
-            for field in spec.fields
-        }
+        prepared = self._prepare_population(incoming, spec)
         new_dependents = self._dependency_map(spec)
 
         old_fields = self._fields
@@ -1527,14 +1555,20 @@ class FluentParameterForm(QtWidgets.QWidget):
             handler = new_handlers[field.key]
             widget = handler.build(
                 field,
-                prepared[field.key],
+                _seed(field, prepared[field.key]),
                 lambda key=field.key: self.changed.emit(key),
                 self._runtime,
             )
-            widget.setEnabled(not field.unavailable)
             self._connect_editor_signals(field.key, widget)
-            row, automatic = self._make_row(field, widget, label_width)
-            replacements[field.key] = widget, row, automatic
+            replacements[field.key] = (
+                widget,
+                *self._make_row(
+                    field,
+                    widget,
+                    label_width,
+                    automatic_checked=prepared[field.key] is None,
+                ),
+            )
 
         retained_widgets = tuple(
             self._widgets[field.key]
@@ -1576,7 +1610,7 @@ class FluentParameterForm(QtWidgets.QWidget):
                         handler.refresh(field, widget, self._runtime)
                     selected = (
                         field.key in self._auto_switches
-                        and incoming[field.key] is None
+                        and prepared[field.key] is None
                     )
                     # Choice edits are atomic.  Their owner projection must
                     # always win after a domain refill even though the combo
@@ -1593,19 +1627,12 @@ class FluentParameterForm(QtWidgets.QWidget):
                     ):
                         handler.write(field, widget, prepared[field.key])
                     automatic = self._auto_switches.get(field.key)
-                    if automatic is not None:
-                        if not editing:
-                            automatic.setChecked(selected)
-                            automatic.setText(_automatic_label(field, selected))
-                        automatic.setEnabled(not field.unavailable)
-                        widget.setEnabled(
-                            editing or (not selected and not field.unavailable)
-                        )
-                    else:
-                        widget.setEnabled(editing or not field.unavailable)
+                    if automatic is not None and not editing:
+                        automatic.setChecked(selected)
+                        automatic.setText(_automatic_label(field, selected))
 
             replaced_keys = set(replacements)
-            for key, row in tuple(self._rows.items()):
+            for key in tuple(self._rows):
                 if key in desired_keys and key not in replaced_keys:
                     continue
                 # No exemption for the focused row here.  A focused key
@@ -1617,31 +1644,13 @@ class FluentParameterForm(QtWidgets.QWidget):
                 # spec alone: the next keystroke fired the build-time
                 # changed(key), read_value raised KeyError out of a Qt
                 # slot, and PyQt aborted the process with no traceback.
-                self._layout.removeWidget(row)
-                # Reconcile may run while an Edit page is visible.  An
-                # unparented QWidget becomes a transient native window; hide
-                # the retired row and retain this form as QObject owner until
-                # DeferredDelete instead.
-                row.hide()
-                row.deleteLater()
-                self._rows.pop(key, None)
-                self._widgets.pop(key, None)
-                self._auto_switches.pop(key, None)
-                self._cells.pop(key, None)
-                self._unit_pickers.pop(key, None)
+                self._retire_row(key)
 
-            for key, (widget, row, automatic) in replacements.items():
+            # The old row is gone; only now are the new row's parts recorded,
+            # so the retirement above cannot erase what it did not build.
+            for key, parts in replacements.items():
                 field = next(field for field in spec.fields if field.key == key)
-                self._widgets[key] = widget
-                self._rows[key] = row
-                if automatic is not None:
-                    self._auto_switches[key] = automatic
-                    selected = incoming[key] is None
-                    with signals_blocked(automatic):
-                        automatic.setChecked(selected)
-                    automatic.setText(_automatic_label(field, selected))
-                    automatic.setEnabled(not field.unavailable)
-                    widget.setEnabled(not selected and not field.unavailable)
+                self._install_row(field, *parts)
 
             # Only the rows whose POSITION changed.  This used to be
             # "any key was replaced or the key list differs", so adding
@@ -1702,8 +1711,7 @@ class FluentParameterForm(QtWidgets.QWidget):
         finally:
             if structural:
                 self.setUpdatesEnabled(True)
-        for controller in self._dependents:
-            self._controller_changed(controller)
+        self._project_enabled_all(editing_key=editing_key)
 
     def refresh(self) -> None:
         """Refresh every handler, preserving legal selections and edit silence."""
@@ -1716,14 +1724,9 @@ class FluentParameterForm(QtWidgets.QWidget):
                     self._widgets[field.key],
                     self._runtime,
                 )
-                automatic = self._auto_switches.get(field.key)
-                if automatic is not None:
-                    automatic.setEnabled(not field.unavailable)
+                if field.key in self._auto_switches:
                     self._set_automatic_label(field.key)
-                self._widgets[field.key].setEnabled(
-                    not field.unavailable
-                    and not (automatic is not None and automatic.isChecked())
-                )
+        self._project_enabled_all()
 
     def _field_for(self, key: str) -> FormFieldProps:
         try:
@@ -1732,19 +1735,20 @@ class FluentParameterForm(QtWidgets.QWidget):
             raise KeyError(f"unknown form field key: {key!r}") from exc
 
     def _require_exact_values(
-        self, values: Mapping[str, object]
+        self, values: Mapping[str, object], spec: FormSpec | None = None
     ) -> dict[str, object]:
+        spec = self._spec if spec is None else spec
         if not isinstance(values, Mapping):
             raise TypeError("form values must be a mapping")
         supplied = set(values.keys())
-        expected = set(self._spec.keys)
+        expected = set(spec.keys)
         if supplied != expected:
             missing = sorted(repr(key) for key in expected - supplied)
             extra = sorted(repr(key) for key in supplied - expected)
             raise ValueError(
                 f"form values must have exact keys; missing={missing}, extra={extra}"
             )
-        return {key: values[key] for key in self._spec.keys}
+        return {key: values[key] for key in spec.keys}
 
 
 __all__ = [

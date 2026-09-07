@@ -74,6 +74,11 @@ class _StartedFitRequest:
 @dataclass(frozen=True, slots=True)
 class _LiveFrameSnapshot:
     projection: FitProjection
+    #: The data this frame was prepared ON TOP OF: its generation and its
+    #: revision, because a new run restarts revisions at the same numbers.
+    #: Carrying the revision alone let a frame prepared over run A@0 commit
+    #: over run B@0 and put run A back on the panel.
+    base_data_generation: str | None
     base_data_revision: int
     image_overlay: ImagePointOverlay | None
     image_overlay_authority: ImagePointOverlay | None
@@ -82,6 +87,7 @@ class _LiveFrameSnapshot:
 @dataclass(frozen=True, slots=True)
 class _PreparedLiveFrame:
     session_identity: object
+    base_data_generation: str | None
     base_data_revision: int
     image_overlay: ImagePointOverlay | None
     image_overlay_authority: ImagePointOverlay | None
@@ -117,14 +123,15 @@ class _FitResolution:
 class _AcceptedFit:
     """One atomically accepted fit result and its painted presentation.
 
-    A single fit travels as ``selection``/``overlay`` and a facet batch as
-    ``selections``/``overlays``; whichever form arrives, the other is
-    derived, so every reader may pick the one it needs.
+    The painted overlays are ONE tuple, whether a single fit painted one
+    or a facet batch painted a cell each; ``overlay`` reads the single
+    case out of it.  Holding the single overlay as a second field beside
+    the tuple let a unit change refresh the field while the renderer kept
+    reading the tuple, and the old volts were painted as millivolts.
     """
 
     result: "FitResult | FacetFitBatchResult"
     selection: FitSelection | None
-    overlay: FitOverlay | None
     context_generation: int
     source_generation: str
     request: _LiveFitRequest
@@ -132,18 +139,17 @@ class _AcceptedFit:
     selections: tuple[FitSelection | None, ...] = ()
 
     def __post_init__(self) -> None:
-        overlays = tuple(self.overlays)
-        if not overlays and self.overlay is not None:
-            overlays = (self.overlay,)
-        overlay = self.overlay
-        if overlay is None and len(overlays) == 1:
-            overlay = overlays[0]
         selections = tuple(self.selections)
         if not selections and self.selection is not None:
             selections = (self.selection,)
-        object.__setattr__(self, "overlay", overlay)
-        object.__setattr__(self, "overlays", overlays)
+        object.__setattr__(self, "overlays", tuple(self.overlays))
         object.__setattr__(self, "selections", selections)
+
+    @property
+    def overlay(self) -> FitOverlay | None:
+        """The one painted overlay of a single fit, from the same tuple."""
+
+        return self.overlays[0] if len(self.overlays) == 1 else None
 
 
 @dataclass(frozen=True, slots=True)

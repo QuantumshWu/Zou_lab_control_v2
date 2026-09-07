@@ -52,7 +52,11 @@ def _opener(arguments: argparse.Namespace, ratio: float):
         )
     from ..apps.figure_viewer import create_window
 
-    return lambda: create_window(path=arguments.path, window_ratio=ratio)
+    return lambda: create_window(
+        path=arguments.path,
+        workspace=arguments.workspace,
+        window_ratio=ratio,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

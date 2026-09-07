@@ -62,6 +62,33 @@ def test_layout_rejected_replace_rolls_back_completely() -> None:
     finally:
         session.close()
 
+def test_a_refused_configure_restores_the_picture_with_the_state() -> None:
+    """The rollback is the whole front: fields AND pixels.
+
+    ``configure`` rolls its fields back and rebuilds the axes on the old
+    plan, and a rebuilt Figure shows nothing until it is presented.  The
+    old raster buffer lingered, so the immediate picture looked right while
+    the actual axes sat at default limits -- and the next redraw painted an
+    empty plot under a description that still named the accepted range.
+    """
+
+    session = _grid_session()
+    try:
+        before = session.rgba()
+        limits = session.describe_display().limits
+        with pytest.raises(ValueError, match="y_min must be smaller than y_max"):
+            session.configure(
+                parameters={"relim_mode": "fixed", "y_min": 2.0, "y_max": 1.0}
+            )
+        assert session.describe_display().limits == limits
+        assert np.array_equal(session.rgba(), before)
+        session.redraw_surface()
+        assert np.array_equal(session.rgba(), before), (
+            "the restored axes must hold the accepted picture, not defaults"
+        )
+    finally:
+        session.close()
+
 def test_projection_rejected_replace_is_untouched_precommit(logical_shape) -> None:
     session = _grid_session()
     try:

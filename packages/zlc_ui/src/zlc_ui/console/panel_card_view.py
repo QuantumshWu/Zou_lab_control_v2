@@ -1,9 +1,9 @@
 """The compact console panel card.
 
 The board owns placement; this widget owns only the titled Fluent surface and
-the compact ``Setting`` / guarded ``×`` affordances.  Signal/size/update controls remain
-available through the settings popup for the lightweight presenter API, but
-they do not add an invented toolbar to the card face.
+the compact ``Setting`` / guarded ``×`` affordances.  Signal, size and update
+interval are edited in the Setting form and nowhere else: the card keeps no
+second control for any of them.
 """
 
 from __future__ import annotations
@@ -20,10 +20,8 @@ from zlc_ui.fluent import (
     CARD_PAD,
     CARD_TITLE_PAD,
     FluentButton,
-    FluentComboBox,
     FluentGroupBox,
     FluentLabel,
-    FluentLineEdit,
     FluentOverlayFrame,
     FluentScrollArea,
     FluentSettingsPopupAnchor,
@@ -36,7 +34,6 @@ from zlc_ui.fluent import (
     RED,
     scaled_px,
     show_fluent_popup_for_anchor,
-    signals_blocked,
     FONT,
     fluent_font_size,)
 from zlc_ui.form.form import FormChoice, FormFieldProps, FormSpec
@@ -76,6 +73,36 @@ def _escaped(text: str) -> str:
         .replace(">", "&gt;")
         .replace(" ", "&nbsp;")
     )
+
+
+def relay_surface_errors(widget: object, relay: object) -> bool:
+    """Connect a mounted plot surface's ``errorOccurred`` to ``relay``.
+
+    ONE rule for every surface mount -- the card's and the editor's.  A
+    plot surface says what a gesture could not do through this one signal
+    (a pointer front that lost its surface, a refused RGBA) and the mount
+    relays it so the console can report it; a mount that did not connect
+    it kept those refusals fully silent.  Returns whether a connection was
+    made, which is what its release needs to know.
+    """
+
+    source = getattr(widget, "errorOccurred", None)
+    if not hasattr(source, "connect"):
+        return False
+    source.connect(relay)
+    return True
+
+
+def release_surface_errors(widget: object, relay: object, connected: bool) -> None:
+    """Undo :func:`relay_surface_errors` when the surface leaves the mount,
+    so a retired surface's refusals are not reported as the panel's."""
+
+    if not connected:
+        return
+    try:
+        widget.errorOccurred.disconnect(relay)
+    except (AttributeError, RuntimeError, TypeError):
+        pass
 
 
 def _set_interaction(surface: object | None, enabled: bool) -> None:
@@ -227,15 +254,14 @@ def elide_fragments(fragments: object, metrics: object, available: int) -> tuple
 class PanelCardView(FluentGroupBox):
     """A titled card with a replaceable QWidget surface."""
 
-    signal_picked = QtCore.pyqtSignal(str)
-    size_picked = QtCore.pyqtSignal(str)
-    title_committed = QtCore.pyqtSignal(str)
     remove_requested = QtCore.pyqtSignal()
     edit_requested = QtCore.pyqtSignal()
     state_changed = QtCore.pyqtSignal(object)
     dropped = QtCore.pyqtSignal(tuple)
+    #: The card crossed the drag threshold and is following the pointer.
+    #: Emitted ONCE per gesture; where it is while it moves is its own
+    #: geometry, and no board does anything with the pointer until release.
     drag_started = QtCore.pyqtSignal(tuple)
-    drag_moved = QtCore.pyqtSignal(tuple)
     geometry_changed = QtCore.pyqtSignal()
     #: A refusal the mounted plot surface reported (``errorOccurred``).  The
     #: card only relays it: unconnected, those refusals were fully silent.
@@ -391,17 +417,6 @@ class PanelCardView(FluentGroupBox):
         self._placeholder = FluentLabel("Pick a signal in Setting")
         self._placeholder.setAlignment(QtCore.Qt.AlignCenter)
         holder.addWidget(self._placeholder)
-        # FigureViewer also embeds this card and exposes these lightweight
-        # handles through its own port. TaskConsole state never reads them.
-        self.title_edit = FluentLineEdit(str(title), parent=self)
-        self.title_edit.hide()
-        self.title_edit.editingFinished.connect(self._commit_title)
-        self.signal_combo = FluentComboBox(parent=self)
-        self.signal_combo.hide()
-        self.signal_combo.currentIndexChanged[int].connect(self._signal_changed)
-        self.size_combo = FluentComboBox(parent=self)
-        self.size_combo.hide()
-        self.size_combo.currentIndexChanged[int].connect(self._size_changed)
         self.setCursor(QtCore.Qt.OpenHandCursor)
         # A bare reusable card has no TaskConsole switch, so its plot remains
         # interactive.  TaskConsoleHandle projects the global switch onto every
@@ -501,12 +516,6 @@ class PanelCardView(FluentGroupBox):
             raise ValueError("default panel size must be one of the choices")
         self._size_choices = values
         self._default_size = default
-        with signals_blocked(self.size_combo):
-            self.size_combo.clear()
-            for value in values:
-                self.size_combo.addItem(value, value)
-            current = str(self._state_projection.get("size") or default)
-            self.size_combo.setCurrentIndex(self.size_combo.findData(current))
         if not self._state_projection.get("kind"):
             self._state_projection["size"] = default
         self._apply_card_size(str(self._state_projection["size"]))
@@ -555,14 +564,6 @@ class PanelCardView(FluentGroupBox):
         self._state_projection = dict(incoming)
         self._base_title = incoming["title"] or "Panel"
         self._refresh_title_band()
-        with signals_blocked(self.title_edit, self.signal_combo, self.size_combo):
-            self.title_edit.setText(self._base_title)
-            signal_index = self.signal_combo.findData(incoming["signal"])
-            if signal_index >= 0:
-                self.signal_combo.setCurrentIndex(signal_index)
-            size_index = self.size_combo.findData(incoming["size"])
-            if size_index >= 0:
-                self.size_combo.setCurrentIndex(size_index)
         if incoming["size"] != previous_size:
             self._apply_card_size(str(incoming["size"]))
         if rebuild_form:
@@ -737,11 +738,9 @@ class PanelCardView(FluentGroupBox):
             _set_interaction(widget, self._selectors_on)
         if self._surface is not None:
             self._surface.removeEventFilter(self)
-            if self._surface_error_connected:
-                try:
-                    self._surface.errorOccurred.disconnect(self.plot_error)
-                except (AttributeError, RuntimeError, TypeError):
-                    pass
+            release_surface_errors(
+                self._surface, self.plot_error, self._surface_error_connected
+            )
             try:
                 self._surface.surfaceChanged.disconnect(self._surface_resized)
             except (AttributeError, RuntimeError, TypeError):
@@ -756,12 +755,9 @@ class PanelCardView(FluentGroupBox):
         self._placeholder.hide()
         widget.setParent(self)
         widget.installEventFilter(self)
-        relay = getattr(widget, "errorOccurred", None)
-        if hasattr(relay, "connect"):
-            # A plot surface says what a gesture could not do through this
-            # one signal; the card relays it so the console can report it.
-            relay.connect(self.plot_error)
-            self._surface_error_connected = True
+        self._surface_error_connected = relay_surface_errors(
+            widget, self.plot_error
+        )
         resized = getattr(widget, "surfaceChanged", None)
         if hasattr(resized, "connect"):
             # A plot surface also says when its picture became a DIFFERENT
@@ -890,18 +886,6 @@ class PanelCardView(FluentGroupBox):
         if current:
             self._state_projection["signal"] = current
         self._state_projection["overlay_signal"] = overlay
-        with signals_blocked(self.signal_combo):
-            self.signal_combo.clear()
-            for producer, leaves in self._groups:
-                self.signal_combo.addItem(producer, None)
-                header = self.signal_combo.model().item(self.signal_combo.count() - 1)
-                if header is not None:
-                    header.setEnabled(False)
-                for display, key in leaves:
-                    self.signal_combo.addItem(f"    {display}", key)
-            index = self.signal_combo.findData(current)
-            if index >= 0:
-                self.signal_combo.setCurrentIndex(index)
         self._rebuild_settings_form(force=True)
 
     def set_status(self, text: str, *, error: bool) -> None:
@@ -966,20 +950,6 @@ class PanelCardView(FluentGroupBox):
 
         if self._settings_popup is not None:
             self._settings_popup.hide()
-
-    def _commit_title(self) -> None:
-        value = self.title_edit.text().strip()
-        self.title_committed.emit(value)
-
-    def _signal_changed(self, index: int) -> None:
-        value = self.signal_combo.itemData(index)
-        if isinstance(value, str):
-            self.signal_picked.emit(value)
-
-    def _size_changed(self, index: int) -> None:
-        value = self.size_combo.itemData(index)
-        if isinstance(value, str):
-            self.size_picked.emit(value)
 
     def _form_spec(self) -> FormSpec:
         state = self._state_projection
@@ -1476,10 +1446,10 @@ class PanelCardView(FluentGroupBox):
                 # The closed hand marks the grab, so it appears when the
                 # card actually starts following the pointer.
                 self.setCursor(QtCore.Qt.ClosedHandCursor)
+                self.drag_started.emit(
+                    (int(event.pos().x()), int(event.pos().y()))
+                )
             self.move(self.mapToParent(event.pos() - self._drag_offset))
-            point = (int(event.pos().x()), int(event.pos().y()))
-            self.drag_started.emit(point)
-            self.drag_moved.emit(point)
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt API

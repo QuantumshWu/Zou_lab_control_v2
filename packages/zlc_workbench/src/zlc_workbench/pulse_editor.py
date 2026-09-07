@@ -4312,7 +4312,7 @@ class PulseEditorPresenter:
 
         view = self.view
         view.set_preview_size_names(PANEL_SIZE_NAMES)
-        view.set_preview_size(size, pinned=bool(self._pinned_size))
+        view.set_preview_size(size)
         view.set_preview_status(
             f"{periods} period(s), "
             f"{rows} channel(s), "

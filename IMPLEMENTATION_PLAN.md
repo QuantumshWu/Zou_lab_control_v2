@@ -88,7 +88,7 @@
 - Fluent Combo popup宽度根修：TaskConsole Add chooser恰有13项并首次触发vertical bar；旧实屏
   `popup/view/viewport/content=242/242/226/228 px`，手算native scrollbar chrome少2 px，产生
   `horizontal maximum=2`。现删除flat文字/QSS手算、Tree indentation手算及`_desired_popup_width`
-  三个重复owner；唯一popup在最终高度后用delegate column hint与真实viewport chrome最多四轮收敛。
+  三个重复owner；唯一popup在最终高度后由delegate column hint、frameWidth与共享scrollbar厚度一次定出宽度与scrollbar policy，不读回viewport chrome。
   同一实屏为`244/244/228/228 px`、horizontal maximum `0`、vertical正常；12/13行、Tree展开折叠、
   open model变宽及screen-cap真overflow均由现有Combo smoke覆盖，横向滚动没有被禁用或隐藏。
 - PanelState只保存authored target；Live、Frozen和FigureViewer都以Plot成功返回的完整accepted

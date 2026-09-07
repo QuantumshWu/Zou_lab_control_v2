@@ -215,7 +215,6 @@ class _PreviewView:
         self.save_requested = _Signal()
         self.size_names: tuple = ()
         self.size = ""
-        self.pinned = None
         self.content = None
         self.logical_size = None
         self.placeholder = ""
@@ -245,10 +244,8 @@ class _PreviewView:
     def set_size_names(self, names) -> None:
         self.size_names = tuple(names)
 
-    def set_preview_size(self, size: str, *, pinned=None) -> None:
+    def set_preview_size(self, size: str) -> None:
         self.size = str(size)
-        if pinned is not None:
-            self.pinned = bool(pinned)
 
 
 class _TargetView:
@@ -494,18 +491,11 @@ class _EditorView:
     def preview_size(self) -> str:
         return str(self.preview_view.preview_size)
 
-    @property
-    def preview_size_pinned(self) -> bool:
-        return bool(self.preview_view.preview_size_pinned)
-
-    def set_preview_size(self, size: str, *, pinned=None) -> None:
-        self.preview_view.set_preview_size(size, pinned=pinned)
+    def set_preview_size(self, size: str) -> None:
+        self.preview_view.set_preview_size(size)
 
     def set_preview_size_names(self, names) -> None:
         self.preview_view.set_size_names(names)
-
-    def reset_preview_size_pin(self) -> None:
-        self.preview_view.reset_preview_size_pin()
 
     def set_preview_status(self, text: str) -> None:
         self.preview_view.set_status(text)
@@ -2133,7 +2123,6 @@ def test_the_preview_offers_its_sizes_and_the_content_picks_one(presenter) -> No
     assert view.size == recommended_pulse_preset(
         presenter._preview_rows(), len(presenter.sequence.periods)
     )
-    assert view.pinned is False
 
 
 def test_picking_a_size_pins_it_until_the_content_changes_shape(presenter) -> None:
@@ -2142,7 +2131,6 @@ def test_picking_a_size_pins_it_until_the_content_changes_shape(presenter) -> No
     view = presenter.view.preview_view
     presenter.view.preview_size_committed.emit("8x8")
     assert presenter.preview_size() == "8x8"
-    assert view.pinned is True
 
     # An edit keeps the pin: the pulse is the same shape.
     period_id = presenter.sequence.periods[0].period_id
@@ -2153,7 +2141,6 @@ def test_picking_a_size_pins_it_until_the_content_changes_shape(presenter) -> No
     view._include_off = True
     presenter.view.preview_include_off_toggled.emit(True)
     assert presenter._pinned_size is None
-    assert view.pinned is False
 
 
 def test_show_all_channels_draws_the_ones_that_are_always_off(presenter, sequence) -> None:

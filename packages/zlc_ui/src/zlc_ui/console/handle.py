@@ -37,6 +37,24 @@ from .signal_chooser import choose_signal
 from .task_console_view import TaskConsoleView
 
 
+def panel_surface_for(current: Any, host: Any, plot_surface: Any) -> Any:
+    """The widget a board panel shows ``host`` on, under one policy.
+
+    One widget per host: the surface already mounted is reused when it is
+    his.  Otherwise the composition root's ``plot_surface`` policy builds
+    it -- every board window (TaskConsole, FigureViewer) hands the same
+    staging policy in, so the board presents each panel's front and no
+    panel widget installs its own -- and with no policy the host supplies
+    its own default widget.
+    """
+
+    if current is not None and getattr(current, "host", None) is host:
+        return current
+    if plot_surface is not None:
+        return plot_surface(host)
+    return host.qt_widget()
+
+
 class TaskConsoleHandle(QtCore.QObject):
     """One task console, as the outside sees it."""
 
@@ -402,17 +420,11 @@ class TaskConsoleHandle(QtCore.QObject):
         """Draw what this host holds on a named panel, given the host itself."""
 
         card = self._cards[str(panel_id)]
-        card.set_surface(None if host is None else self._surface_for(card, host))
-
-    def _surface_for(self, card: PanelCardView, host: Any) -> Any:
-        """One widget per host: reuse the mounted surface when it is his."""
-
-        current = card.surface
-        if current is not None and getattr(current, "host", None) is host:
-            return current
-        if self._plot_surface is not None:
-            return self._plot_surface(host)
-        return host.qt_widget()
+        card.set_surface(
+            None
+            if host is None
+            else panel_surface_for(card.surface, host, self._plot_surface)
+        )
 
     def present_panel_front(self, panel_id: str, front: Any) -> bool:
         """Put one completed immutable front on a panel's staged widget.
@@ -487,6 +499,13 @@ class TaskConsoleHandle(QtCore.QObject):
             )
             editor.save_figure_requested.connect(
                 lambda path, pid=key: self.panel_save_figure_requested.emit(pid, str(path))
+            )
+            # The Edit surface's failures travel the same channel as the
+            # card's: one relay rule, one place the console reports a plot.
+            editor.plot_error.connect(
+                lambda message, pid=key: self.panel_plot_error.emit(
+                    pid, str(message)
+                )
             )
             self._panel_editors[key] = editor
             state = incoming.get("state") or {}

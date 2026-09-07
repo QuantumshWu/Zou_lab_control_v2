@@ -75,13 +75,26 @@ def _name_is_ancestor(
     ancestor: str,
     descendant: str,
     source_by_output: Mapping[str, str],
+    bundle_of: Mapping[str, frozenset[str]],
 ) -> bool:
+    """Whether ``descendant`` derives, along source routes, from ``ancestor``.
+
+    Each step up a route lands on a SOURCE name, and that name is published
+    with its siblings in one atomic event: the event that carries ``counts``
+    carries ``occupied`` too, so a processor of ``counts`` descends from
+    ``occupied`` as well.  Judged by the exact source name alone, a
+    requested sibling was an independent leaf whose latest publication was
+    set against the processor's older shot -- and a complete same-shot
+    front the plane already held was reported as pending for as long as
+    the processor lagged its source.
+    """
+
     seen: set[str] = set()
     current = descendant
     while current in source_by_output and current not in seen:
         seen.add(current)
         current = source_by_output[current]
-        if current == ancestor:
+        if current == ancestor or ancestor in bundle_of.get(current, ()):
             return True
     return False
 
@@ -107,6 +120,8 @@ def build_front(
     active_names: set[str] = set()
     adjacency: dict[str, set[str]] = {}
     source_by_output: dict[str, str] = {}
+    #: Every active name -> the names one owner commits beside it.
+    bundle_of: dict[str, frozenset[str]] = {}
 
     for state in states:
         if getattr(state, "retired"):
@@ -117,6 +132,9 @@ def build_front(
         else:
             state_active_names = set(getattr(state, "output_names"))
         active_names.update(state_active_names)
+        bundle = frozenset(state_active_names)
+        for name in bundle:
+            bundle_of[name] = bundle
         if publication is not None:
             for name in publication.signals:
                 if name in latest:
@@ -168,7 +186,7 @@ def build_front(
             for name in sorted(requested_component)
             if not any(
                 other != name
-                and _name_is_ancestor(name, other, source_by_output)
+                and _name_is_ancestor(name, other, source_by_output, bundle_of)
                 for other in requested_component
             )
         )

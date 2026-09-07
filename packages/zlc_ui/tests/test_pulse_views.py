@@ -700,13 +700,18 @@ class InspectDrag:
     def exec_(self, _action): return QtCore.Qt.IgnoreAction
 schedule_module.QtGui.QDrag = InspectDrag
 start_post = next(post for post in strip.findChildren(BracketPost) if post.kind == "start")
+# The gesture is measured in global coordinates, as a real pointer's is;
+# a synthetic event carries its global position explicitly.
+pressed = QtCore.QPoint(5, 5)
+moved = QtCore.QPoint(5 + QtWidgets.QApplication.startDragDistance() + 1, 5)
 QtWidgets.QApplication.sendEvent(start_post, QtGui.QMouseEvent(
-    QtCore.QEvent.MouseButtonPress, QtCore.QPoint(5, 5), QtCore.Qt.LeftButton,
+    QtCore.QEvent.MouseButtonPress, QtCore.QPointF(pressed),
+    QtCore.QPointF(start_post.mapToGlobal(pressed)), QtCore.Qt.LeftButton,
     QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
 ))
 QtWidgets.QApplication.sendEvent(start_post, QtGui.QMouseEvent(
-    QtCore.QEvent.MouseMove,
-    QtCore.QPoint(5 + QtWidgets.QApplication.startDragDistance() + 1, 5),
+    QtCore.QEvent.MouseMove, QtCore.QPointF(moved),
+    QtCore.QPointF(start_post.mapToGlobal(moved)),
     QtCore.Qt.NoButton, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
 ))
 schedule_module.QtGui.QDrag = real_drag
@@ -1129,4 +1134,132 @@ for index in range(shortest):
 view.close()
 app.processEvents()
 '''
+    )
+
+
+def test_a_renamed_port_survives_the_next_rebuild() -> None:
+    """``set_port_label`` renamed the three visible controls and not the
+    model the next Hide/Show rebuilds from, so the old name came back."""
+
+    _run_qt(
+        """
+from PyQt5 import QtCore
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.pulse import FieldVM, PeriodVM, PortRowVM, PulseScheduleView, ScheduleVM
+app = ensure_qt_app(["schedule-rename"])
+ports = (PortRowVM("d0", "digital", "Gate", "pin1"),)
+period = PeriodVM("p1", "One", FieldVM("1"), "us", ("ns", "us"), digital=(("d0", True),))
+view = PulseScheduleView()
+view.set_schedule(ScheduleVM(1, 1, "Pulse", "50 MHz", "1 us", "", 1, "1/1", "", ports, (period,)))
+view.set_port_label("d0", "Renamed gate")
+assert view.names_panel._rows["d0"].text() == "Renamed gate"
+assert view._schedule.ports[0].label == "Renamed gate", "the model the rebuild reads"
+view.set_visible_ports(())
+view.set_visible_ports(("d0",))
+assert view.names_panel._rows["d0"].text() == "Renamed gate"
+assert view._cards["p1"].checks["d0"].text() == "Renamed gate"
+view.deleteLater(); app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+"""
+    )
+
+
+def test_a_press_on_a_cards_chrome_does_not_start_a_drag_by_itself() -> None:
+    """The press reaches the strip's filter once through the label and once
+    through the card, each in its own local frame.  Compared across frames,
+    a pointer that had not moved measured a whole label's offset and a
+    click on "Duration" started a drag."""
+
+    _run_qt(
+        """
+from PyQt5 import QtCore, QtGui, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.pulse import PulseScheduleView
+""" + _schedule_source() + r'''
+app = ensure_qt_app(["chrome-press"])
+view = PulseScheduleView()
+assert view.set_schedule(vm)
+view.resize(1200, 700); view.show(); app.processEvents()
+strip = view.drag_container
+card = view._cards["p1"]
+label = next(w for w in card.findChildren(QtWidgets.QLabel) if w.text() == "Duration")
+local = label.rect().center()
+global_pos = label.mapToGlobal(local)
+starts = []
+strip._begin_card_drag = starts.append
+
+def send(kind, button, buttons):
+    event = QtGui.QMouseEvent(kind, QtCore.QPointF(local), QtCore.QPointF(global_pos),
+                              button, buttons, QtCore.Qt.NoModifier)
+    QtWidgets.QApplication.sendEvent(label, event)
+
+send(QtCore.QEvent.MouseButtonPress, QtCore.Qt.LeftButton, QtCore.Qt.LeftButton)
+send(QtCore.QEvent.MouseMove, QtCore.Qt.NoButton, QtCore.Qt.LeftButton)
+assert starts == [], "no motion, no drag"
+clicked = []
+strip.period_clicked.connect(clicked.append)
+send(QtCore.QEvent.MouseButtonRelease, QtCore.Qt.LeftButton, QtCore.Qt.NoButton)
+assert clicked == ["p1"], "a press that reaches release without moving is a click"
+
+# Real motion past the threshold, measured in the same global frame, drags.
+send(QtCore.QEvent.MouseButtonPress, QtCore.Qt.LeftButton, QtCore.Qt.LeftButton)
+far = global_pos + QtCore.QPoint(QtWidgets.QApplication.startDragDistance() * 3, 0)
+QtWidgets.QApplication.sendEvent(label, QtGui.QMouseEvent(
+    QtCore.QEvent.MouseMove, QtCore.QPointF(label.mapFromGlobal(far)), QtCore.QPointF(far),
+    QtCore.Qt.NoButton, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier))
+assert starts == ["p1"]
+view.close(); view.deleteLater()
+app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+'''
+    )
+
+
+def test_a_port_that_changes_kind_under_its_key_is_rebuilt() -> None:
+    """A document that turned a digital output into a DAC bus kept the old
+    checkbox in the card, because the row reconcile asked only whether the
+    key was known -- never what kind of row it was."""
+
+    _run_qt(
+        """
+from dataclasses import replace
+from PyQt5 import QtCore
+from zlc_ui import FormChoice
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.pulse import FieldVM, PeriodVM, PortRowVM, PulseScheduleView, ScheduleVM
+app = ensure_qt_app(["schedule-kind-change"])
+ports = (PortRowVM("d0", "digital", "Gate", "pin1"),)
+period = PeriodVM("p1", "One", FieldVM("1"), "us", ("ns", "us"), digital=(("d0", True),))
+vm = ScheduleVM(1, 1, "Pulse", "50 MHz", "1 us", "", 1, "1/1", "", ports, (period,))
+view = PulseScheduleView()
+assert view.set_schedule(vm)
+old_row = view._cards["p1"].port_rows["d0"]
+dac_port = PortRowVM("d0", "dac", "DAC", "dac pins", width=2, lo=-2, hi=1)
+dac_period = replace(period, digital=(), analog=(("d0", "edge", FieldVM("1")),))
+incoming = replace(vm, document_generation=2, revision=1, ports=(dac_port,),
+                   periods=(dac_period,), analog_mode_choices=(FormChoice("Edge", "edge"),))
+assert view.set_schedule(incoming)
+card = view._cards["p1"]
+assert card.port_rows["d0"] is not old_row
+assert "d0" not in card.checks and "d0" in card.bus_value_edits
+assert card.bus_mode_combos["d0"].currentData() == "edge"
+view.deleteLater(); app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+"""
+    )
+
+
+def test_the_preview_keeps_no_copy_of_the_pin() -> None:
+    """Whether the shown size is the operator's pin is the presenter's fact;
+    a copy in the view had no reader and drifted from the one that decides."""
+
+    _run_qt(
+        """
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.pulse import PulsePreviewView
+app = ensure_qt_app(["preview-pin"])
+view = PulsePreviewView()
+view.set_size_names(("4x4", "8x8"))
+view.set_preview_size("8x8")
+assert view.preview_size == "8x8"
+assert not hasattr(view, "preview_size_pinned")
+assert not hasattr(view, "reset_preview_size_pin")
+"""
     )

@@ -874,9 +874,12 @@ class _MaterializedIndexed:
     snapshot: OwnedSnapshot
     record: Mapping[str, object]
     #: The UNFROZEN merged event record.  Kept because the merge is
-    #: re-entrant -- merging this with each appended event's record gives
-    #: the same result as merging every retained record from scratch --
-    #: while the frozen form is not a valid merge input.
+    #: re-entrant while the window only GROWS -- merging this with each
+    #: appended event's record gives the same result as merging every
+    #: retained record from scratch -- while the frozen form is not a
+    #: valid merge input.  Once the window has rolled, rows this record
+    #: describes are gone, and the next record is merged from the
+    #: retained rows instead.
     raw_record: Mapping[str, object]
     start: int
     latest: int
@@ -892,10 +895,13 @@ class _IndexedHistory:
     and every retained event record was re-merged -- turning a 5000-deep
     35-site occupancy history into ~300 ms on the one presentation
     thread every panel shares.  ``materialized`` therefore keeps the last
-    full materialization as a BASIS: while the window only rolls forward,
-    the next shot reuses its schema object outright (the indexed schema
-    depends on nothing but the retained count), copies the overlapping
-    plane rows in one slice, and merges only the appended records.
+    full materialization as a BASIS: while the window only rolls forward
+    and still overlaps it, the next shot reuses its schema object outright
+    (the indexed schema depends on nothing but the retained count) and
+    copies the overlapping plane rows in one slice.  The record merge is
+    incremental only while the window grows; a rolled window re-merges
+    the records of the rows it kept, because the epoch-range union of the
+    rows that left cannot be subtracted.
 
     The basis is invalidated by COMPARISON, never by clearing:
     ``replaced_at`` records the last sequence at which a retained index
@@ -1041,32 +1047,48 @@ def _indexed_materialization_input(
         and cached.sequence <= sequence
         and history.replaced_at <= cached.sequence
         and primary_index > cached.latest
-        and start >= cached.start
+        and cached.start <= start <= cached.latest
     ):
+        # A basis is reusable only where the new window OVERLAPS it: its
+        # rows from ``start`` to its latest are copied forward and the
+        # rest appended.  A source that jumped past the whole window has
+        # nothing to copy, and rolling from it sliced an empty overlap
+        # into cells the appends could not fill.
         basis = cached
     selected_events = []
-    selected_records = []
+    appended_records = []
+    window_records = []
     append_from = start if basis is None else basis.latest + 1
-    for index in range(append_from, primary_index + 1):
+    for index in range(start, primary_index + 1):
         if index == primary_index:
-            selected_events.append((index, value.snapshot))
             held = events.get(index)
-            selected_records.append(
+            record = (
                 held[2]
                 if held is not None and held[0] == sequence
                 else value.event_record
             )
+            selected_events.append((index, value.snapshot))
+            appended_records.append(record)
+            window_records.append(record)
             continue
         held = events.get(index)
-        if held is not None and held[0] <= sequence:
+        if held is None or held[0] > sequence:
+            continue
+        window_records.append(held[2])
+        if index >= append_from:
             selected_events.append((index, held[1]))
-            selected_records.append(held[2])
-    if basis is None:
-        raw_record = _merge_event_records(selected_records)
+            appended_records.append(held[2])
+    if basis is not None and start == basis.start:
+        # Pure growth: every row the basis described is still here, so
+        # its record plus the appended ones is the window's record.
+        raw_record = _merge_event_records((basis.raw_record, *appended_records))
     else:
-        raw_record = _merge_event_records(
-            (basis.raw_record, *selected_records)
-        )
+        # The window ROLLED (or there is no basis): rows left it, and a
+        # union of epoch ranges cannot subtract what they contributed.
+        # The record is the union of the rows actually retained, however
+        # the values themselves were assembled -- otherwise how often a
+        # panel was read decided which device epochs its picture claimed.
+        raw_record = _merge_event_records(window_records)
     schema = None
     if (
         cached is not None

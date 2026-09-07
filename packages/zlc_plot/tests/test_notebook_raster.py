@@ -811,3 +811,19 @@ def test_fit_area_pointer_sequence_never_promotes_a_blank_front() -> None:
             assert np.count_nonzero(rgba) > 0
     finally:
         host.close(timeout=5.0)
+
+def test_the_device_pixel_ratio_has_one_entry() -> None:
+    """A DPR change goes through the public entry alone.
+
+    The private variant it wrapped preserved an attached native canvas that
+    no caller attaches any more; a flag every caller passed as False is a
+    branch nobody can reach.
+    """
+
+    session = _session()
+    try:
+        assert not hasattr(session, "_set_device_pixel_ratio")
+        assert session.set_device_pixel_ratio(2.0).device_pixel_ratio == 2.0
+        assert session.surface_plan.device_pixel_ratio == 2.0
+    finally:
+        session.close()

@@ -8,6 +8,7 @@ a notebook running beside the window.
 from __future__ import annotations
 
 import ast
+from contextlib import contextmanager
 import json
 import os
 import time
@@ -20,6 +21,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("MPLBACKEND", "Agg")
 
+from zlc_runtime import SignalDataPlane
 from zlc_workbench.console import ConsolePresenter
 from zlc_workbench.logic import (
     LogicCatalog,
@@ -69,6 +71,8 @@ def test_workbench_never_imports_a_concrete_logic_node_leaf() -> None:
 
 @pytest.fixture
 def session(tmp_path):
+    """The virtual apparatus: for tests that start, stop, claim or publish."""
+
     write_ordinary_pulse(tmp_path)
     session = ExperimentSession.open(tmp_path, template="virtual")
     try:
@@ -77,8 +81,58 @@ def session(tmp_path):
         session.close()
 
 
+#: Cameras, so they answer what a camera answers: a draft's units are decided
+#: from the bound device, and a bare object() states nothing.
+_DEFAULT_CAMERA = SimpleNamespace(photoelectron_conversion=(200.0, 0.107))
+_MOT_CAMERA = SimpleNamespace(photoelectron_conversion=(200.0, 0.107))
+_SEQUENCER = object()
+
+
+class _BenchInstallation:
+    """Three installed devices, in memory: what composition reads of a bench.
+
+    Enough for catalog, drafts, device-key options, finalization and build
+    arguments; a test about starting, claiming or publishing needs the
+    virtual apparatus instead.
+    """
+
+    devices = {
+        "mot_camera": SimpleNamespace(
+            capabilities={"camera.adapter": _MOT_CAMERA}, device=_MOT_CAMERA
+        ),
+        "sequencer": SimpleNamespace(
+            capabilities={"sequencer.streamer": _SEQUENCER}, device=_SEQUENCER
+        ),
+        "camera": SimpleNamespace(
+            capabilities={"camera.adapter": _DEFAULT_CAMERA}, device=_DEFAULT_CAMERA
+        ),
+    }
+
+    def capability(self, token, *, key=None):
+        return self.devices[key].capabilities[token]
+
+
 @pytest.fixture
-def presenter(session):
+def bench(tmp_path):
+    """A session with a bare plane and the in-memory bench: no apparatus."""
+
+    plane = SignalDataPlane()
+    try:
+        yield SimpleNamespace(
+            signal_plane=plane,
+            installation=_BenchInstallation(),
+            workspace=SimpleNamespace(root=tmp_path, data=tmp_path),
+            day_folder_path=lambda: str(tmp_path),
+            nodes=(),
+        )
+    finally:
+        plane.close()
+
+
+@contextmanager
+def _console_over(session):
+    """The console presenter over ``session``, retired on the way out."""
+
     plot = pytest.importorskip("zlc_plot")
     from zlc_workbench.apps.task_console import build_panel_host
 
@@ -113,7 +167,19 @@ def presenter(session):
         assert presenter.close(), "Console test owner did not retire"
 
 
-def test_the_node_types_offered_are_the_ones_that_exist(presenter) -> None:
+@pytest.fixture
+def presenter(session):
+    with _console_over(session) as presenter:
+        yield presenter
+
+
+@pytest.fixture
+def bench_presenter(bench):
+    with _console_over(bench) as presenter:
+        yield presenter
+
+
+def test_the_node_types_offered_are_the_ones_that_exist(bench_presenter) -> None:
     """Not a menu the console keeps.
 
     A second catalog drifts, and the way it shows up is an operator picking
@@ -122,14 +188,15 @@ def test_the_node_types_offered_are_the_ones_that_exist(presenter) -> None:
 
     from zlc_atom.nodes import discover_logic_nodes
 
-    offered = {name for name, _kind, _publishes in presenter.catalog.rows()}
+    offered = {name for name, _kind, _publishes in bench_presenter.catalog.rows()}
     assert offered == {item.api_name for item in discover_logic_nodes()}
     assert "camera_measurement" in offered
 
 
-def test_adding_a_node_creates_only_a_stopped_draft_and_opens_edit(presenter) -> None:
+def test_adding_a_node_creates_only_a_stopped_draft_and_opens_edit(bench_presenter) -> None:
     """Add is authoring, so it cannot build or acquire before Start."""
 
+    presenter = bench_presenter
     node_id = presenter.add_logic("camera_measurement")
 
     assert node_id == "camera_measurement"
@@ -354,7 +421,7 @@ def test_editing_an_idle_row_does_not_build_it(presenter) -> None:
     assert presenter.logic[node_id].host is None
 
 
-def test_a_build_is_handed_only_what_it_asks_for(session) -> None:
+def test_a_build_is_handed_only_what_it_asks_for(bench) -> None:
     """Passing every fact and hoping fails on the first build without **values.
 
     Which is most of them, and it fails naming a keyword rather than the bench
@@ -366,14 +433,14 @@ def test_a_build_is_handed_only_what_it_asks_for(session) -> None:
     finalization = finalize_logic_draft(
         descriptor,
         LogicDraft(values={"repeat": 2}, device_keys={"camera": "camera"}),
-        installation=session.installation,
-        signal_plane=session.signal_plane,
-        workspace=session.workspace,
+        installation=bench.installation,
+        signal_plane=bench.signal_plane,
+        workspace=bench.workspace,
     )
     assert finalization.can_start
     arguments = build_arguments(
         descriptor,
-        signal_plane=session.signal_plane,
+        signal_plane=bench.signal_plane,
         finalization=finalization,
     )
 
@@ -388,7 +455,7 @@ def test_a_build_is_handed_only_what_it_asks_for(session) -> None:
     task_descriptor = replace(descriptor, build=task_build)
     task_arguments = build_arguments(
         task_descriptor,
-        signal_plane=session.signal_plane,
+        signal_plane=bench.signal_plane,
         finalization=finalization,
         extras={
             "save_figure_artifact": figure_writer,
@@ -396,14 +463,14 @@ def test_a_build_is_handed_only_what_it_asks_for(session) -> None:
         },
     )
     assert task_arguments == {
-        "camera": session.camera,
-        "signal_plane": session.signal_plane,
+        "camera": _DEFAULT_CAMERA,
+        "signal_plane": bench.signal_plane,
         "save_figure_artifact": figure_writer,
     }
     with pytest.raises(ValueError, match="extras collide"):
         build_arguments(
             descriptor,
-            signal_plane=session.signal_plane,
+            signal_plane=bench.signal_plane,
             finalization=finalization,
             extras={"camera": object()},
         )
@@ -412,30 +479,8 @@ def test_a_build_is_handed_only_what_it_asks_for(session) -> None:
 def test_named_device_options_and_build_resolution_use_compatible_instances() -> None:
     from zlc_atom.nodes.camera_measurement.logic_node import LOGIC_NODE
 
-    # Cameras, so they answer what a camera answers: this draft's units are
-    # decided from the bound device, and a bare object() states nothing.
-    default_camera = SimpleNamespace(photoelectron_conversion=(200.0, 0.107))
-    mot_camera = SimpleNamespace(photoelectron_conversion=(200.0, 0.107))
-    sequencer = object()
-
-    class _Installation:
-        devices = {
-            "mot_camera": SimpleNamespace(
-                capabilities={"camera.adapter": mot_camera}
-            ),
-            "sequencer": SimpleNamespace(
-                capabilities={"sequencer.streamer": sequencer}
-            ),
-            "camera": SimpleNamespace(
-                capabilities={"camera.adapter": default_camera}
-            ),
-        }
-
-        def capability(self, token, *, key=None):
-            return self.devices[key].capabilities[token]
-
     descriptor = LOGIC_NODE
-    assert device_key_options(descriptor, installation=_Installation()) == {
+    assert device_key_options(descriptor, installation=_BenchInstallation()) == {
         "camera": ("camera", "mot_camera")
     }
 
@@ -449,7 +494,7 @@ def test_named_device_options_and_build_resolution_use_compatible_instances() ->
         return finalize_logic_draft(
             keyed_descriptor,
             LogicDraft(device_keys={"camera": key}),
-            installation=_Installation(),
+            installation=_BenchInstallation(),
             signal_plane=plane,
             workspace=workspace,
         )
@@ -465,9 +510,9 @@ def test_named_device_options_and_build_resolution_use_compatible_instances() ->
         finalization=finalized("mot_camera"),
     )
 
-    assert default["camera"] is default_camera
+    assert default["camera"] is _DEFAULT_CAMERA
     assert default["camera_key"] == "camera"
-    assert selected["camera"] is mot_camera
+    assert selected["camera"] is _MOT_CAMERA
     assert selected["camera_key"] == "mot_camera"
     invalid = finalized("sequencer")
     assert not invalid.can_start

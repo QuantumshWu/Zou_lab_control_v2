@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import ast
 import importlib
-import importlib.util
 import sys
-import sysconfig
 from pathlib import Path
 
 
@@ -64,20 +62,23 @@ def _import_root(name: str, *, relative: bool) -> str:
 
 
 def _is_stdlib(root: str) -> bool:
-    if root in sys.builtin_module_names:
-        return True
-    try:
-        spec = importlib.util.find_spec(root)
-    except (ImportError, ModuleNotFoundError, ValueError):
-        return False
-    if spec is None or spec.origin in {None, "built-in", "frozen"}:
-        return spec is not None
-    stdlib = Path(sysconfig.get_paths()["stdlib"]).resolve()
-    try:
-        Path(spec.origin).resolve().relative_to(stdlib)
-    except ValueError:
-        return False
-    return True
+    """Whether ``root`` is a standard-library module, by Python's own list.
+
+    Not by where the module's file lives: ``site-packages`` is a
+    subdirectory of the standard library's own directory, so a path test
+    called every installed third-party package standard and this guard
+    could not refuse a new dependency.
+    """
+
+    return root in sys.builtin_module_names or root in sys.stdlib_module_names
+
+
+def test_a_third_party_package_is_not_the_standard_library() -> None:
+    """The guard's own oracle: pytest is installed, and is not stdlib."""
+
+    assert _is_stdlib("json") and _is_stdlib("sys")
+    assert not _is_stdlib("pytest")
+    assert not _is_stdlib("PyQt5")
 
 
 def test_package_modules_are_nonempty_and_import_pure() -> None:
@@ -129,8 +130,11 @@ def test_the_view_layer_does_not_infer_parameter_relationships_from_spelling() -
     "1e" left in the colour minimum, typing 70 into the colour maximum threw
     that 70 away and reported an error about the field they had not touched.
 
-    The rule is not "pair them somewhere else": nothing at this layer needs
-    to pair them at all.
+    What the layer DOES do is receive the relationship the owner declared
+    -- a field's ``co_edited_with`` -- and read the fields it names together
+    once each has a valid value.  That is the owner's fact carried through,
+    not a guess from spelling, and it is what this test leaves alone: only
+    the spelled pairing is forbidden.
     """
 
     offenders = []

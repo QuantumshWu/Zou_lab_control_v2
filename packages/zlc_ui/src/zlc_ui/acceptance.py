@@ -53,6 +53,12 @@ class AcceptanceCapture:
     content_top_margin: int | None
     output: Path | None
     desktop_output: Path | None
+    #: Whether the window had actually left the screen when the capture
+    #: returned -- None when it was asked to stay.  A close is a REQUEST:
+    #: a window guarded by an asynchronous owner may refuse it or finish it
+    #: later, and a capture that reported the screenshot alone let that
+    #: pending close pass for a finished one.
+    window_closed: bool | None
 
     def as_dict(self) -> dict[str, object]:
         """Return a JSON-friendly diagnostic mapping."""
@@ -75,6 +81,7 @@ class AcceptanceCapture:
             "desktop_relative_output": (
                 None if self.desktop_output is None else str(self.desktop_output)
             ),
+            "window_closed": self.window_closed,
         }
 
 
@@ -255,6 +262,15 @@ def capture_window(
             actual.width() / available.width(),
             actual.height() / available.height(),
         )
+        window_closed = None
+        if close:
+            # Asked, then given the same settle interval the capture had,
+            # and reported as it stands: still visible means the close is
+            # refused or pending, and the report says so rather than
+            # pretending.
+            window.close()
+            _settle(app, settle_ms)
+            window_closed = not window.isVisible()
         return AcceptanceCapture(
             platform=platform,
             available_geometry=_rect(available),
@@ -275,9 +291,10 @@ def capture_window(
             content_top_margin=content_top_margin,
             output=output_path,
             desktop_output=desktop_path,
+            window_closed=window_closed,
         )
     finally:
-        if close and window is not None:
+        if close and window is not None and window.isVisible():
             window.close()
             app.processEvents()
 

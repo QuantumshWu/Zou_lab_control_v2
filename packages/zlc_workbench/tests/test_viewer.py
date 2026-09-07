@@ -351,16 +351,17 @@ def _active_record(presenter: FigureViewerPresenter) -> dict[str, object]:
         ),
     }
 
-def _formal_viewer_window(saved, _monkeypatch, host_factory):
+def _formal_viewer_window(saved, build_host):
+    """The product window over ``saved``, drawing with ``build_host``."""
+
     pytest.importorskip("PyQt5")
-    from PyQt5 import QtCore, QtWidgets
+    from PyQt5 import QtCore
     from zlc_ui.qt import ensure_qt_app
     from zlc_workbench.apps.figure_viewer import create_window
 
     application = ensure_qt_app(["formal-figure-viewer"])
-    host = host_factory(application, QtCore, QtWidgets)
     render = SimpleNamespace(
-        build_host=lambda *_args, **_kwargs: host,
+        build_host=build_host,
         save_figure_artifact=lambda *_args, **_kwargs: None,
         save_front=lambda *_args, **_kwargs: None,
         retain=lambda: None,
@@ -592,6 +593,7 @@ def test_manual_axis_metadata_edit_preserves_its_existing_scientific_role(saved)
     draft = viewer_module._draft_from_snapshot(
         snapshot,
         editor_id="role-check",
+        producer_serial=1,
         name="camera",
         note="",
         source_text="camera",
@@ -624,6 +626,213 @@ def test_manual_axis_metadata_edit_preserves_its_existing_scientific_role(saved)
     assert restored.block.schema.repeat_domain.axes == ()
     assert restored.block.schema.repeat_domain.shape == (1,)
 
+def _manual_draft(editor_id: str = "draft") -> dict:
+    import zlc_workbench.viewer as viewer_module
+
+    return viewer_module._draft_from_snapshot(
+        viewer_module._new_manual_snapshot(),
+        editor_id=editor_id,
+        producer_serial=1,
+        name="manual",
+        note="",
+        source_text="manual",
+        source_path=None,
+        source_dataset="",
+        source_lineage={"root": None, "nodes": [], "device_settings": []},
+        source_document={},
+        recipe=None,
+        described=None,
+        overlay=None,
+    )
+
+def test_two_open_working_copies_publish_as_two_producers() -> None:
+    """Two Data copies opened before either is applied are two producers.
+
+    A copy's Runtime identity is its own from the moment it opens.  Read
+    from a shared "latest copy" counter at Apply instead, both copies
+    applied under one owner id and one data signal, the second Apply
+    replaced the first copy's data on the plane, and nothing reported it.
+    """
+
+    view = _ViewerView()
+    # Both copies stay applied and unsaved; closing asks, and this answers.
+    view.confirm_discard = lambda _text: True
+    presenter = _built_presenter(view)
+    try:
+        view.new_data_requested.emit()
+        view.new_data_requested.emit()
+        first, second = tuple(presenter._data_drafts)
+        for editor_id, amount in ((first, "11"), (second, "22")):
+            view.data_editor_intent.emit(
+                editor_id,
+                {
+                    "op": "set_cells",
+                    "component": "values",
+                    "cells": ((0, 0, amount),),
+                },
+            )
+            view.data_editor_intent.emit(
+                editor_id, {"op": "apply_preview", "note": editor_id}
+            )
+        producers = {
+            editor_id: presenter._data_drafts[editor_id]["producer"]
+            for editor_id in (first, second)
+        }
+        assert producers[first].data_signal != producers[second].data_signal
+        assert producers[first].instance_id != producers[second].instance_id
+        for editor_id, amount in ((first, 11.0), (second, 22.0)):
+            signal = producers[editor_id].data_signal
+            publication = presenter._signal_plane.latest_publication(signal)
+            assert publication is not None
+            values = publication.value(signal).snapshot.block.values
+            assert values.reshape(-1)[0] == amount
+        assert not any(error for _text, error in view.status), view.status
+    finally:
+        _close_presenter(presenter)
+
+def test_moving_an_axis_between_repeat_and_point_keeps_the_scalar_carrier(
+    monkeypatch,
+) -> None:
+    """A named Repeat axis moved to Point reorders the arrays it holds.
+
+    The scalar Cell-data carrier is one of the stored dimensions and stays
+    one across that move; asking the arrays for an order without it refused
+    the transpose after the axis lists had already moved, and the copy was
+    left with axes and values that disagreed until Discard.  An edit the
+    arrays refuse must leave the copy exactly as it was.
+    """
+
+    import zlc_workbench.viewer as viewer_module
+
+    draft = _manual_draft("scalar-move")
+    viewer_module._edit_axis(
+        draft, "manual.repeat", name="repeat", length=2, unit="", domain="repeat"
+    )
+    assert viewer_module._edit_axis(
+        draft, "manual.repeat", name="repeat", length=2, unit="", domain="point"
+    )
+    assert [str(axis.axis_id) for axis in draft["repeat_axes"]] == []
+    assert [str(axis.axis_id) for axis in draft["point_axes"]] == [
+        "manual.x",
+        "manual.repeat",
+    ]
+    assert draft["values"].shape == viewer_module._logical_shape(draft) == (16, 2, 1)
+    assert draft["validity"].shape == (16, 2, 1)
+    restored = viewer_module._manual_snapshot(draft)
+    assert restored.block.schema.point_domain.shape == (32,)
+
+    # The last Cell-data axis leaving its domain brings the carrier back.
+    viewer_module._add_axis(draft, name="site", length=3, unit="", domain="cell_data")
+    site = str(draft["selected_axis"])
+    assert draft["values"].shape == (16, 2, 3)
+    assert viewer_module._edit_axis(
+        draft, site, name="site", length=3, unit="", domain="point"
+    )
+    assert draft["values"].shape == viewer_module._logical_shape(draft) == (16, 2, 3, 1)
+
+    before = {
+        key: draft[key] for key in ("repeat_axes", "point_axes", "cell_axes", "values", "validity")
+    }
+    monkeypatch.setattr(
+        viewer_module,
+        "_normalize_table_axes",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("refused late")),
+    )
+    with pytest.raises(RuntimeError, match="refused late"):
+        viewer_module._edit_axis(
+            draft, site, name="site", length=3, unit="", domain="cell_data"
+        )
+    for key, value in before.items():
+        assert draft[key] is value, f"a refused edit changed {key}"
+
+def test_renaming_an_implicit_axis_keeps_its_coordinate_origin() -> None:
+    """An axis that counts from 40 still counts from 40 after a rename.
+
+    ``index_origin`` is where an implicit axis's coordinates start, and the
+    Data contract reads it as a coordinate; rebuilding the axis with origin
+    zero rebound the same values to 0, 1, 2.  A longer axis extends from
+    the same start.
+    """
+
+    import zlc_workbench.viewer as viewer_module
+    from zlc_data import REPEAT, SCALAR_DOMAIN, SCAN_POINT
+
+    repeat = AxisSpec(AxisId("review.repeat"), "repeat", REPEAT, 1)
+    point = AxisSpec(AxisId("review.x"), "x", SCAN_POINT, 3, index_origin=40)
+    schema = DatasetSchema(
+        DomainSpec((1,), (repeat,), ((0,),)),
+        DomainSpec((3,), (point,), ((0, 1, 2),)),
+        SCALAR_DOMAIN,
+        ValueSchema.scalar(np.dtype("<f8")),
+    )
+    snapshot = owned_snapshot_from_arrays(schema, np.arange(3.0).reshape(1, 3, 1), 0)
+    draft = viewer_module._draft_from_snapshot(
+        snapshot,
+        editor_id="origin",
+        producer_serial=1,
+        name="origin",
+        note="",
+        source_text="origin",
+        source_path=None,
+        source_dataset="data",
+        source_lineage={"root": None, "nodes": [], "device_settings": []},
+        source_document={},
+        recipe=None,
+        described=None,
+        overlay=None,
+    )
+    viewer_module._edit_axis(
+        draft, "review.x", name="renamed", length=3, unit="", domain="point"
+    )
+    renamed = draft["point_axes"][0]
+    assert renamed.name == "renamed"
+    assert renamed.coordinates is None and renamed.index_origin == 40
+    assert tuple(renamed.coordinate_at(index) for index in range(3)) == (40, 41, 42)
+    viewer_module._edit_axis(
+        draft, "review.x", name="renamed", length=4, unit="", domain="point"
+    )
+    assert draft["point_axes"][0].coordinate_at(3) == 43
+    restored = viewer_module._manual_snapshot(draft)
+    assert restored.block.schema.point_domain.axes[0].index_origin == 40
+
+def test_extending_a_numeric_axis_advances_by_its_step_or_refuses() -> None:
+    """Growing an axis continues it by its last step, and never spins.
+
+    ``1e20`` and ``5e19`` are ints on an axis, ``0.5`` is not; the step is
+    then a float and the candidate ``1e20`` already exists, and a retry by
+    one leaves ``1e20`` exactly where it is.  The next coordinate is one
+    more step along.  A step that cannot move the candidate is refused
+    with the axis named, not looped on.
+    """
+
+    import zlc_workbench.viewer as viewer_module
+
+    draft = _manual_draft("growth")
+    viewer_module._edit_axis(
+        draft, "manual.x", name="x", length=3, unit="", domain="point"
+    )
+    viewer_module._set_axis_values(
+        draft, "manual.x", ((0, 0, "1e20"), (0, 1, "0.5"), (0, 2, "5e19"))
+    )
+    viewer_module._edit_axis(
+        draft, "manual.x", name="x", length=4, unit="", domain="point"
+    )
+    grown = draft["point_axes"][0].coordinates
+    assert grown == (10**20, 0.5, 5 * 10**19, 15 * 10**19)
+    assert len(set(grown)) == 4
+
+    viewer_module._edit_axis(
+        draft, "manual.x", name="x", length=2, unit="", domain="point"
+    )
+    viewer_module._set_axis_values(
+        draft, "manual.x", ((0, 0, "1.9999999999999998"), (0, 1, "2"))
+    )
+    with pytest.raises(ValueError, match="cannot continue the axis"):
+        viewer_module._edit_axis(
+            draft, "manual.x", name="x", length=3, unit="", domain="point"
+        )
+    assert draft["point_axes"][0].size == 2, "a refused growth changed the axis"
+
 def test_manual_interaction_projection_does_not_rebuild_domains(monkeypatch) -> None:
     import zlc_workbench.viewer as viewer_module
 
@@ -631,6 +840,7 @@ def test_manual_interaction_projection_does_not_rebuild_domains(monkeypatch) -> 
     draft = viewer_module._draft_from_snapshot(
         snapshot,
         editor_id="projection-check",
+        producer_serial=1,
         name="manual",
         note="",
         source_text="manual",
@@ -680,6 +890,7 @@ def test_manual_value_edit_preserves_a_sparse_serpentine_domain() -> None:
     draft = viewer_module._draft_from_snapshot(
         snapshot,
         editor_id="mapped-edit",
+        producer_serial=1,
         name="mapped",
         note="",
         source_text="mapped",
@@ -1006,33 +1217,39 @@ def test_formal_window_slow_failed_open_keeps_turning_and_retains_the_last_figur
     saved,
     monkeypatch,
 ) -> None:
+    import zlc_workbench.apps.task_console as console_app
     import zlc_workbench.viewer as viewer_module
-    from zlc_plot import read_figure_plot
 
     path, _snapshot = saved
-    info, arrays = read_archive(path)
-    plot_input, recipe = read_figure_plot(info, arrays, "data")
-    description = _display_description(plot_input, recipe)
+    # The viewer's panels are a console board and mount the console's
+    # staging widget: a host's own default widget presents each render as
+    # it lands, before the one Console that owns both boards accepted it.
+    staging = console_app.staged_panel_surface
+    staged: list[object] = []
 
-    def host_factory(_application, _QtCore, QtWidgets):
-        surface = QtWidgets.QLabel("last accepted figure")
-        return SimpleNamespace(
-            configure=lambda **_kwargs: None,
-            describe_display=lambda: SimpleNamespace(value=description),
-            qt_widget=lambda: surface,
-            close=lambda: None,
-        )
+    def recorded_staging(host):
+        widget = staging(host)
+        staged.append(widget)
+        return widget
 
+    monkeypatch.setattr(console_app, "staged_panel_surface", recorded_staging)
     _application, _QtCore, window, owner_turns, timer = _formal_viewer_window(
-        saved, monkeypatch, host_factory
+        saved, build_figure_host
     )
     try:
         _wait_until(lambda: window.presenter.description is not None)
+        _wait_until(
+            lambda: bool(staged)
+            and bool(window.panel_ids())
+            and window._view.panel_surface(window.presenter._active_panel_id)
+            is staged[0]
+        )
         accepted = (
             window.presenter.path,
             window.presenter.description,
             _active_record(window.presenter)["host"],
         )
+        assert accepted[2] is staged[0].host
         original_read = viewer_module.read_archive
 
         def slow_failed_read(candidate):
@@ -1062,55 +1279,66 @@ def test_formal_window_slow_failed_open_keeps_turning_and_retains_the_last_figur
 
 def test_formal_window_waits_for_guarded_host_work_without_blocking_or_hiding(
     saved,
-    monkeypatch,
 ) -> None:
     from concurrent.futures import Future
     from threading import Event, Thread
 
+    from PyQt5 import QtCore
+    from zlc_ui.qt import ensure_qt_app
+
+    application = ensure_qt_app(["formal-figure-viewer"])
     configured = Event()
     release_configure = Event()
     closing = Event()
     release_close = Event()
 
-    def host_factory(application, QtCore, QtWidgets):
-        surface = QtWidgets.QLabel("guarded figure")
+    class GuardedHost:
+        """A raster host whose configure waits, staged like every panel."""
 
-        class GuardedHost:
-            host_id = "guarded-host"
-            startup_failure = None
+        host_id = "guarded-host"
+        startup_failure = None
+        closing = False
+        front = None
 
-            def configure(self, **_kwargs):
-                future = Future()
+        def configure(self, **_kwargs):
+            future = Future()
 
-                def work() -> None:
-                    try:
-                        assert QtCore.QThread.currentThread() != application.thread()
-                        configured.set()
-                        assert release_configure.wait(5.0), (
-                            "test never released guarded host work"
-                        )
-                    except BaseException as error:
-                        if not future.done():
-                            future.set_exception(error)
-                    else:
-                        if not future.done():
-                            future.set_result(None)
+            def work() -> None:
+                try:
+                    assert QtCore.QThread.currentThread() != application.thread()
+                    configured.set()
+                    assert release_configure.wait(5.0), (
+                        "test never released guarded host work"
+                    )
+                except BaseException as error:
+                    if not future.done():
+                        future.set_exception(error)
+                else:
+                    if not future.done():
+                        future.set_result(None)
 
-                Thread(target=work, daemon=True).start()
-                return future
+            Thread(target=work, daemon=True).start()
+            return future
 
-            def qt_widget(self):
-                return surface
+        def subscribe_front(self, _callback):
+            return lambda: None
 
-            def close(self, *, timeout=0.0):
-                assert timeout == 0.0
-                closing.set()
-                return release_close.is_set()
+        def set_device_pixel_ratio(self, _ratio):
+            done = Future()
+            done.set_result(None)
+            return done
 
-        return GuardedHost()
+        def pointer_event(self, *_args, **_kwargs):
+            return None
 
+        def close(self, *, timeout=0.0):
+            assert timeout == 0.0
+            closing.set()
+            return release_close.is_set()
+
+    guarded_host = GuardedHost()
     application, _QtCore, window, owner_turns, timer = _formal_viewer_window(
-        saved, monkeypatch, host_factory
+        saved, lambda *_args, **_kwargs: guarded_host
     )
     try:
         _wait_until(configured.is_set)

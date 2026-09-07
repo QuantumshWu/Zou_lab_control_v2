@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # install happens to point at, and demonstrates that one instead.
 import zou_lab_control  # noqa: F401
 
-from PyQt5 import QtCore, QtGui, QtWidgets  # noqa: E402
+from PyQt5 import QtCore, QtWidgets  # noqa: E402
 
 import zlc_ui.console as _console  # noqa: E402
 import zlc_ui.fluent as _fluent  # noqa: E402
@@ -47,7 +47,6 @@ FluentGroupBox = _fluent.FluentGroupBox
 FluentLabel = _fluent.FluentLabel
 FluentLineEdit = _fluent.FluentLineEdit
 FluentPathEdit = _fluent.FluentPathEdit
-FluentPopup = _fluent.FluentPopup
 FluentReadoutEdit = _fluent.FluentReadoutEdit
 FluentReadoutMultiline = _fluent.FluentReadoutMultiline
 FluentScrollArea = _fluent.FluentScrollArea
@@ -70,6 +69,7 @@ InfoPane = _fluent.InfoPane
 Metrics = _fluent.Metrics
 launch_qt_window = _fluent.launch_qt_window
 muted_note_label = _fluent.muted_note_label
+retire_widget = _fluent.retire_widget
 scaled_px = _fluent.scaled_px
 WINDOW_SCREEN_FRACTION = _fluent.WINDOW_SCREEN_FRACTION
 window_pad = _fluent.window_pad
@@ -161,10 +161,6 @@ class _GalleryBody(QtWidgets.QWidget):
         shell.setSpacing(0)
         shell.addWidget(self.scroll)
 
-        self._popup = FluentPopup(self)
-        self._popup.resize(280, 120)
-        self._popup.hide()
-
     def _build_body(self) -> QtWidgets.QWidget:
         body = QtWidgets.QWidget()
         body.setObjectName("GalleryBody")
@@ -194,7 +190,7 @@ class _GalleryBody(QtWidgets.QWidget):
         layout.addWidget(self._build_board_section())
         layout.addWidget(self._build_tabs_section())
         layout.addWidget(self._build_info_section())
-        layout.addWidget(self._heading("3", "完整 GUI 示例", "下面四个页面直接使用正式 demo 的 build_demo()；独立窗口使用同一套 create_window()。"))
+        layout.addWidget(self._heading("3", "完整 GUI 示例", "下面四个页面各自用本示例的假数据填充正式的 view；独立窗口使用同一套 create_window()。"))
         layout.addWidget(self._build_gui_examples_section())
         layout.addStretch(1)
         return body
@@ -234,7 +230,7 @@ class _GalleryBody(QtWidgets.QWidget):
         layout.addWidget(widget)
         return holder
 
-    def _build_typography_section(self) -> QWidget:
+    def _build_typography_section(self) -> QtWidgets.QWidget:
         card, inner = self._section("基础：Typography / labels / status dot")
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(window_pad())
@@ -246,7 +242,7 @@ class _GalleryBody(QtWidgets.QWidget):
         inner.addLayout(row)
         return card
 
-    def _build_input_section(self) -> QWidget:
+    def _build_input_section(self) -> QtWidgets.QWidget:
         card, inner = self._section("基础：buttons / text / choices / numeric controls")
 
         buttons = QtWidgets.QHBoxLayout()
@@ -291,12 +287,15 @@ class _GalleryBody(QtWidgets.QWidget):
         controls.addWidget(self._named("FluentComboBox", combo))
         controls.addWidget(self._named("FluentTreeComboBox", tree))
         controls.addWidget(self._named("FluentSpinBox", FluentSpinBox()))
-        controls.addWidget(self._named("FluentDoubleSpinBox", FluentDoubleSpinBox(length=6, allow_minus=True)))
+        decimal_box = FluentDoubleSpinBox()
+        decimal_box.setSingleStep(0.1)
+        decimal_box.setValue(-1.5)
+        controls.addWidget(self._named("FluentDoubleSpinBox", decimal_box))
         controls.addStretch(1)
         inner.addLayout(controls)
         return card
 
-    def _build_status_form_section(self) -> QWidget:
+    def _build_status_form_section(self) -> QtWidgets.QWidget:
         card, inner = self._section("组合：FluentStatusStrip")
         status = FluentStatusStrip(action_text="Review")
         status.show_message("task: fake acquisition is ready", severity="task")
@@ -305,7 +304,7 @@ class _GalleryBody(QtWidgets.QWidget):
 
         return card
 
-    def _build_pulse_binding_section(self) -> QWidget:
+    def _build_pulse_binding_section(self) -> QtWidgets.QWidget:
         card, inner = self._section("组合：FluentScanLineEdit — Scan slot / API slot")
         note = muted_note_label(
             "这些是 PulseEditor 实际使用的动态字段。点击右侧圆点只发 intent；binding 的合法迁移由 Pulse domain 决定，再由 presenter 投回字段。"
@@ -349,7 +348,7 @@ class _GalleryBody(QtWidgets.QWidget):
         label.setText(f"last binding click: {key} → {state}{suffix}")
         print(label.text(), flush=True)
 
-    def _build_board_section(self) -> QWidget:
+    def _build_board_section(self) -> QtWidgets.QWidget:
         card, inner = self._section("ConsoleBoardView — drag cards to reorder")
         board = ConsoleBoardView(metrics=self._board_metrics)
         board.setMinimumHeight(285)
@@ -378,7 +377,7 @@ class _GalleryBody(QtWidgets.QWidget):
         return card
 
     @staticmethod
-    def _board_surface(text: str, color: str) -> QWidget:
+    def _board_surface(text: str, color: str) -> QtWidgets.QWidget:
         surface = FluentLabel(text)
         surface.setAlignment(QtCore.Qt.AlignCenter)
         surface.setMinimumHeight(105)
@@ -393,7 +392,7 @@ class _GalleryBody(QtWidgets.QWidget):
         label.setText(text)
         print(text, flush=True)
 
-    def _build_form_section(self) -> QWidget:
+    def _build_form_section(self) -> QtWidgets.QWidget:
         card, inner = self._section("Headless FormSpec → Qt projection")
         spec = FormSpec(
             (
@@ -420,7 +419,7 @@ class _GalleryBody(QtWidgets.QWidget):
         inner.addWidget(self._named("FluentParameterForm", form))
         return card
 
-    def _build_gui_examples_section(self) -> QWidget:
+    def _build_gui_examples_section(self) -> QtWidgets.QWidget:
         if __package__:
             from .demo_console import populate as populate_console_demo
         else:
@@ -503,7 +502,7 @@ class _GalleryBody(QtWidgets.QWidget):
         inner.addWidget(self._named("FluentTabWidget · complete GUI navigation", tabs))
         return card
 
-    def _build_tabs_section(self) -> QWidget:
+    def _build_tabs_section(self) -> QtWidgets.QWidget:
         card, inner = self._section("Permanent and closable tabs")
         tabs = FluentTabWidget()
         for name, text in (("Monitor", "A permanent tab"), ("Logic", "Another permanent tab")):
@@ -511,15 +510,18 @@ class _GalleryBody(QtWidgets.QWidget):
         edit = FluentLabel("A closable fake Edit page")
         tabs.add_closable_tab(edit, "Edit — fake panel")
         # The X emits; SOMETHING has to act on it, or the gallery demonstrates a
-        # control that does nothing.  Removing the page is what a host does.
-        tabs.tab_close_requested.connect(
-            lambda widget: tabs.removeTab(tabs.indexOf(widget))
-        )
+        # control that does nothing.  Removing the page and retiring it is
+        # what a host does.
+        def close_page(widget: QtWidgets.QWidget) -> None:
+            tabs.removeTab(tabs.indexOf(widget))
+            retire_widget(widget)
+
+        tabs.tab_close_requested.connect(close_page)
         tabs.setMinimumHeight(130)
         inner.addWidget(self._named("FluentTabWidget", tabs))
         return card
 
-    def _build_info_section(self) -> QWidget:
+    def _build_info_section(self) -> QtWidgets.QWidget:
         card, inner = self._section("InfoPane and published-signal legend")
         row = QtWidgets.QHBoxLayout()
         info = InfoPane(

@@ -51,7 +51,11 @@ from ._panel_projection import (
     parameter_form_values,
     signal_form_runtime,
 )
-from .panel_card_view import _set_interaction
+from .panel_card_view import (
+    _set_interaction,
+    relay_surface_errors,
+    release_surface_errors,
+)
 
 
 _IMAGE_FORMATS = ("png", "pdf", "svg")
@@ -64,6 +68,11 @@ class PanelEditorView(QtWidgets.QWidget):
     snapshot_refresh_requested = QtCore.pyqtSignal()
     producer_edit_requested = QtCore.pyqtSignal(str)
     save_figure_requested = QtCore.pyqtSignal(str)
+    #: A refusal the mounted Edit plot surface reported (``errorOccurred``),
+    #: relayed exactly as the card relays its own: the console reports it
+    #: on the same channel.  Unconnected, an Edit surface's refusals were
+    #: the one plot error the console never heard.
+    plot_error = QtCore.pyqtSignal(str)
 
     def __init__(self, panel_id: str, projection: Mapping[str, object], parent=None) -> None:
         super().__init__(parent)
@@ -78,6 +87,7 @@ class PanelEditorView(QtWidgets.QWidget):
             "fit": {},
         }
         self._surface: QtWidgets.QWidget | None = None
+        self._surface_error_connected = False
         self._selectors_on = True
         self._save_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._save_directory_initialized = False
@@ -372,6 +382,10 @@ class PanelEditorView(QtWidgets.QWidget):
         previous = self._surface
         if previous is not None:
             previous.removeEventFilter(self)
+            release_surface_errors(
+                previous, self.plot_error, self._surface_error_connected
+            )
+            self._surface_error_connected = False
             self.surface_layout.removeWidget(previous)
             detach_widget(previous)
         self._surface = widget
@@ -381,6 +395,9 @@ class PanelEditorView(QtWidgets.QWidget):
         self.surface_placeholder.hide()
         widget.setParent(self.surface_holder)
         widget.installEventFilter(self)
+        self._surface_error_connected = relay_surface_errors(
+            widget, self.plot_error
+        )
         _set_interaction(widget, self._selectors_on)
         self.surface_layout.addWidget(widget)
         widget.show()

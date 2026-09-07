@@ -134,6 +134,32 @@ def test_one_cleared_end_of_a_fixed_pair_materializes_like_two() -> None:
     finally:
         session.close()
 
+def test_a_half_authored_fixed_pair_reaches_the_first_picture(snapshot) -> None:
+    """The deferred pair is DRAWN, not only stored.
+
+    A constructor given ``relim_mode="fixed"`` with one authored end used
+    to commit the materialised pair to the display store after the first
+    picture had been rendered on automatic limits -- so the state said
+    ``y_min=2`` while the axes still started at zero, until some later edit
+    happened to repaint.  The first picture is the accepted state.
+    """
+
+    session = PlotSession(
+        snapshot,
+        CurvePlot(AxisRef.point("x")),
+        parameters={"relim_mode": "fixed", "y_min": 2.0, "y_max": None},
+    )
+    try:
+        values = session.display_state.values
+        assert values["relim_mode"] == "fixed"
+        assert float(values["y_min"]) == 2.0
+        assert values["y_max"] is not None
+        limits = session.describe_display().limits
+        assert limits.y.low == pytest.approx(2.0)
+        assert limits.y.high == pytest.approx(float(values["y_max"]))
+    finally:
+        session.close()
+
 def test_replacing_the_spec_keeps_the_promise_too() -> None:
     """Every DisplayStateStore in a session, not just the two on the edit path.
 

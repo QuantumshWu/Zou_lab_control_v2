@@ -100,7 +100,38 @@ def test_fates_saved_under_one_representation_replay_under_the_other() -> None:
         assert projection.drawable, projection.vacancy
         resolved, semantic = projection.spec, projection.semantic
         assert resolved is not None
-        assert set(semantic) >= _fate_names(target) - {"kind"} or True
+        # every fate row the target vocabulary offers is answered, by the
+        # replayed value or by the kind's own default -- a replay that left
+        # a row unanswered would leave the picture with a vacant role
+        assert set(semantic) >= _fate_names(target) - {"kind"}, (
+            sorted(_fate_names(target) - set(semantic))
+        )
+
+
+def test_a_crosshair_is_owned_and_judged_at_the_panel_state_door() -> None:
+    """The marker is deep-owned like every other field, and judged there.
+
+    A PanelState built from a caller's dict kept that dict: moving the
+    caller's ``x`` moved the marker of every state replaced from it, and a
+    marker with a missing or non-finite coordinate was accepted here to
+    fail at the host when the panel mounted.
+    """
+
+    from dataclasses import replace
+
+    import pytest
+
+    marker = {"x": 1.0, "y": 2.0}
+    first = _state({})
+    first = replace(first, crosshair=marker)
+    second = replace(first, title="next")
+    marker["x"] = 999.0
+    assert dict(first.crosshair) == {"x": 1.0, "y": 2.0}
+    assert dict(second.crosshair) == {"x": 1.0, "y": 2.0}
+    assert dict(replace(first, crosshair={}).crosshair) == {}
+    for bad in ({"x": 1.0}, {"x": float("nan"), "y": 0.0}, {"x": "1", "y": 2.0}):
+        with pytest.raises((TypeError, ValueError)):
+            replace(first, crosshair=bad)
 
 
 def test_non_fate_unknown_names_stay_hard_errors() -> None:
@@ -146,44 +177,64 @@ def test_shot_index_presents_as_shots_not_as_a_point_geometry() -> None:
 def test_frozen_data_advanced_is_not_configuration_incompatibility(
     monkeypatch,
 ) -> None:
-    """A growing live scan does not invalidate an exact frozen Edit target."""
+    """Live moving on under the same run marks Edit's freeze as behind --
+    never as a configuration the panel has left.
+
+    The question is the exact Dataset revision each surface shows.  A
+    growing scan and a Monitor publishing its next value are both a new
+    revision of the shown input; coverage is a fact of the SignalValue,
+    not of the publication, and reading it off two publications answered
+    None for both -- so the same-run branch never fired and the badge
+    stayed dark while the card moved on.
+    """
 
     from types import SimpleNamespace
 
-    from zlc_runtime import DatasetCoverage
+    from zlc_data import owned_snapshot_from_arrays
     from zlc_workbench.console import PanelBinding
     from zlc_workbench.panel_state import PanelFrozenData
 
     state = _state({})
+    schema = _event_schema()
 
-    def publication(written: int) -> object:
+    def snapshot(revision: int, run: str = "run-1"):
+        return owned_snapshot_from_arrays(
+            schema,
+            np.zeros(schema.physical_shape),
+            revision,
+            block_id="block",
+            stream_generation=run,
+        )
+
+    def surface(revision: int, run: str = "run-1") -> object:
         return SimpleNamespace(
-            event_ref=SimpleNamespace(generation="run-1"),
-            coverage=DatasetCoverage(written, 16),
+            publication=SimpleNamespace(
+                event_ref=SimpleNamespace(generation=run)
+            ),
+            plot_input=snapshot(revision, run),
         )
 
     frozen = PanelFrozenData(
-        publication=publication(2),
-        plot_input=object(),
+        publication=surface(2).publication,
+        plot_input=snapshot(2),
         target=state,
         description=object(),
     )
     binding = PanelBinding(panel_id="p", state=state, frozen_data=frozen)
-    shown = {"value": publication(2)}
+    shown = {"value": surface(2)}
     monkeypatch.setattr(
         PanelBinding,
         "accepted_surface",
-        property(lambda self: SimpleNamespace(publication=shown["value"])),
+        property(lambda self: shown["value"]),
     )
     assert binding.frozen_configuration_incompatible is False
     assert binding.frozen_data_advanced is False
-    shown["value"] = publication(16)
+    # the same run, the next revision: a scan that grew or a Monitor that
+    # published again
+    shown["value"] = surface(3)
     assert binding.frozen_configuration_incompatible is False
     assert binding.frozen_data_advanced is True
     # A later RUN is also data advancement, not configuration corruption.
-    shown["value"] = SimpleNamespace(
-        event_ref=SimpleNamespace(generation="run-2"),
-        coverage=DatasetCoverage(1, 16),
-    )
+    shown["value"] = surface(1, "run-2")
     assert binding.frozen_configuration_incompatible is False
     assert binding.frozen_data_advanced is True

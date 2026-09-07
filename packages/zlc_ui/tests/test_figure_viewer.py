@@ -91,6 +91,26 @@ assert view.info_pane.path_edit.text() == "D:/data/2026_08_05/run.npz"
 assert committed == []
 
 handle = FigureViewerHandle(None, view)
+
+# The board's panel-widget policy reaches the viewer's cards through the
+# handle, and one widget serves one host.  A host asked for its own widget
+# presents every render the moment it lands, before the board accepted it.
+staged = []
+def staging_policy(host):
+    widget = QtWidgets.QLabel('staged'); widget.host = host
+    staged.append(widget); return widget
+class SelfPresentingHost:
+    def qt_widget(self):
+        raise AssertionError('the viewer asked the host for its own widget')
+host = SelfPresentingHost()
+staged_handle = FigureViewerHandle(None, view, plot_surface=staging_policy)
+staged_handle.show_panel('panel-1', host)
+staged_handle.show_panel('panel-1', host)
+assert len(staged) == 1 and view._cards['panel-1'].surface is staged[0]
+staged_handle.show_panel('panel-1', None)
+assert view._cards['panel-1'].surface is None
+view.set_panel_surface('panel-1', second)
+
 graph = {
     'nodes': (
         {'id': 'device:camera', 'kind': 'device', 'title': 'camera', 'subtitle': 'Device · camera', 'root': False, 'tooltip': 'camera'},
@@ -338,6 +358,15 @@ assert intents[-1] == (
 )
 
 QtTest.QTest.mouseClick(editor.add_axis_button, QtCore.Qt.LeftButton)
+# Add is a mode of the same control group, entered without a presenter
+# round trip: nothing of the selected axis may still be clickable, and the
+# New axis form must be writable even when nothing was selected before.
+assert not editor.remove_axis_button.isEnabled()
+assert not editor.axis_value_table.isEnabled()
+assert editor.axis_name_edit.isEnabled() and editor.apply_axis_button.isEnabled()
+before_delete = len(intents)
+QtTest.QTest.mouseClick(editor.remove_axis_button, QtCore.Qt.LeftButton)
+assert len(intents) == before_delete, 'Delete fired while adding an axis'
 editor.axis_name_edit.setText('shot')
 editor.axis_size_spin.setValue(2)
 domain = editor.domain_combo.findData('repeat')
@@ -348,6 +377,29 @@ assert intents[-1] == (
     {'op': 'add_axis', 'name': 'shot', 'length': 2, 'unit': '',
      'domain': 'repeat'},
 )
+
+# A Dataset with no named axis left can still get its first one.
+scalar = dict(projection)
+scalar['axes'] = (); scalar['selected_axis'] = ''
+scalar['axis_values'] = {'shape': (1, 0), 'values': ((),), 'row_headers': ('Value',),
+                         'column_headers': (), 'editable': True}
+scalar['table'] = dict(projection['table'])
+scalar['table'].update({'shape': (1, 1), 'values': ((0,),), 'validity': ((True,),),
+                        'row_headers': (0,), 'column_headers': (0,),
+                        'structure': ((), (), ()), 'axes': ()})
+editor.update_projection(scalar)
+assert not editor.axis_name_edit.isEnabled() and not editor.apply_axis_button.isEnabled()
+QtTest.QTest.mouseClick(editor.add_axis_button, QtCore.Qt.LeftButton)
+assert editor.axis_name_edit.isEnabled() and editor.apply_axis_button.isEnabled()
+assert editor.domain_combo.count() == 3 and not editor.remove_axis_button.isEnabled()
+editor.axis_name_edit.setText('again')
+QtTest.QTest.mouseClick(editor.apply_axis_button, QtCore.Qt.LeftButton)
+assert intents[-1] == (
+    'manual-1',
+    {'op': 'add_axis', 'name': 'again', 'length': 1, 'unit': '',
+     'domain': 'repeat'},
+)
+editor.update_projection(projection)
 
 # One rectangular paste remains one presenter intent.
 editor.value_table.setCurrentIndex(editor.value_model.index(2, 3))

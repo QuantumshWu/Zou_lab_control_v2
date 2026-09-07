@@ -8,7 +8,7 @@ it never loads Qt.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 import math
@@ -25,7 +25,6 @@ FormFieldKind: TypeAlias = Literal[
     "number",
     "choice",
     "bool",
-    "axis_range",
     "path",
     "keyed_choice",
 ]
@@ -37,7 +36,6 @@ _FORM_FIELD_KINDS = frozenset(
         "number",
         "choice",
         "bool",
-        "axis_range",
         "path",
         "keyed_choice",
     }
@@ -284,7 +282,7 @@ class FormFieldProps:
                 raise ValueError(f"field {self.key!r} default is not a typed choice value")
         elif choices:
             raise ValueError(f"non-choice field {self.key!r} cannot declare choices")
-        if self.kind not in {"int", "float", "number", "axis_range"} and (
+        if self.kind not in {"int", "float", "number"} and (
             self.minimum is not None or self.maximum is not None
         ):
             raise ValueError(f"non-numeric field {self.key!r} cannot declare bounds")
@@ -329,50 +327,6 @@ class FormFieldProps:
         elif self.kind == "bool":
             if not isinstance(self.default, bool):
                 raise TypeError(f"bool field {self.key!r} default must be bool")
-        elif self.kind == "axis_range":
-            for name, value in (("minimum", self.minimum), ("maximum", self.maximum)):
-                if value is None:
-                    continue
-                if not isinstance(value, (int, float)) or isinstance(value, bool):
-                    raise TypeError(
-                        f"axis_range field {self.key!r} {name} must be numeric"
-                    )
-                if not math.isfinite(float(value)):
-                    raise ValueError(
-                        f"axis_range field {self.key!r} {name} must be finite"
-                    )
-            default = self.default
-            if (
-                not isinstance(default, tuple)
-                or len(default) != 3
-                or isinstance(default[0], bool)
-                or isinstance(default[1], bool)
-                or not isinstance(default[0], (int, float))
-                or not isinstance(default[1], (int, float))
-                or not isinstance(default[2], int)
-                or isinstance(default[2], bool)
-            ):
-                raise TypeError(
-                    f"axis_range field {self.key!r} default must be "
-                    "(number, number, int)"
-                )
-            lo, hi, points = default
-            if not math.isfinite(float(lo)) or not math.isfinite(float(hi)):
-                raise ValueError(
-                    f"axis_range field {self.key!r} endpoints must be finite"
-                )
-            if points < 2:
-                raise ValueError(
-                    f"axis_range field {self.key!r} points must be at least 2"
-                )
-            if self.minimum is not None and min(float(lo), float(hi)) < self.minimum:
-                raise ValueError(
-                    f"axis_range field {self.key!r} default is below minimum"
-                )
-            if self.maximum is not None and max(float(lo), float(hi)) > self.maximum:
-                raise ValueError(
-                    f"axis_range field {self.key!r} default is above maximum"
-                )
         elif self.kind in {"path", "keyed_choice"}:
             if self.default is not None and not isinstance(self.default, str):
                 raise TypeError(
@@ -453,25 +407,39 @@ class FormFieldProps:
             None,
         )
 
+    def cycle_choice_at(self, index: int) -> tuple[object, str]:
+        """The ``(exact value, label)`` pair at one position of the wheel domain."""
+
+        if self.kind != "choice" or self.cycle_choices is None:
+            raise ValueError(f"field {self.key!r} declares no cycle choices")
+        choice = self.cycle_choices[index]
+        if (
+            not isinstance(choice, tuple)
+            or len(choice) != 2
+            or not isinstance(choice[1], str)
+            or not choice[1].strip()
+        ):
+            raise TypeError(
+                f"field {self.key!r} cycle choices must yield "
+                "(value, non-empty label) pairs"
+            )
+        return choice[0], choice[1]
+
     def cycle_choice_for(self, value: object) -> tuple[int, object, str] | None:
-        """Return ``(index, exact value, label)`` from the lazy wheel domain."""
+        """Return ``(index, exact value, label)`` from the lazy wheel domain.
+
+        This is the one walk over the domain, and the domain may be a large
+        axis read lazily: a caller that already holds a position -- the
+        widget showing the value -- asks the widget first and comes here
+        only when the value really moved.
+        """
 
         if self.kind != "choice" or self.cycle_choices is None:
             return None
         for index in range(len(self.cycle_choices)):
-            choice = self.cycle_choices[index]
-            if (
-                not isinstance(choice, tuple)
-                or len(choice) != 2
-                or not isinstance(choice[1], str)
-                or not choice[1].strip()
-            ):
-                raise TypeError(
-                    f"field {self.key!r} cycle choices must yield "
-                    "(value, non-empty label) pairs"
-                )
-            if _typed_equal(value, choice[0]):
-                return index, choice[0], choice[1]
+            chosen, label = self.cycle_choice_at(index)
+            if _typed_equal(value, chosen):
+                return index, chosen, label
         return None
 
 

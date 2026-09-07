@@ -21,7 +21,6 @@ from zlc_ui.fluent import (
     FluentComboBox,
     FluentFrame,
     FluentLabel,
-    FluentLineEdit,
     FluentScrollArea,
     FluentStatusDot,
     FluentSwitch,
@@ -82,9 +81,10 @@ class TaskConsoleView(QtWidgets.QWidget):
 
         self.status_dot = FluentStatusDot(size=16)
         self.status_dot.set_color(GREEN)
-        self.name_edit = FluentLineEdit("task")
-        self.name_edit.setPlaceholderText("task name")
-        self.name_edit.setFixedWidth(scaled_px(150, minimum=110))
+        # The window's identity, as a word: nothing reads a name typed here,
+        # so an edit box in its place was an input that changed nothing.
+        self.name_label = FluentLabel("task")
+        self.name_label.setFixedWidth(scaled_px(150, minimum=110))
         self.summary_label = ElidedLabel("")
         self.summary = self.summary_label
         self.summary_label.setStyleSheet(f"color: {GREY}; background: transparent; border: none;")
@@ -115,7 +115,7 @@ class TaskConsoleView(QtWidgets.QWidget):
 
         for widget in (
             self.status_dot,
-            self.name_edit,
+            self.name_label,
         ):
             header.addWidget(widget, 0, QtCore.Qt.AlignVCenter)
         header.addWidget(self.summary_label, 1, QtCore.Qt.AlignVCenter)

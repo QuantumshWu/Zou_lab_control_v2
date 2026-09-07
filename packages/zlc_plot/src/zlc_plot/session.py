@@ -574,16 +574,12 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         self._update_renderer(renderer, RenderEffect.LAYOUT)
         self._renderer = renderer
         if deferred_fixed_limits is not None:
-            previous = self.display_state
-            prepared = self._parameter_schema.prepare_updates(
-                deferred_fixed_limits
-            )
-            self._materialize_fixed_limits(prepared, previous)
-            candidate = self._parameter_schema._transition_prepared(
-                previous.values,
-                prepared,
-            )
-            self._display_store._commit_prepared(previous, candidate)
+            # The renderer exists now and can say what the picture shows,
+            # so the deferred pair takes the road an operator's edit takes:
+            # materialised against the current limits, committed, and
+            # DRAWN.  Committing it to the store alone left the first
+            # picture on automatic limits under a state that said fixed.
+            self._set_configuration_values(deferred_fixed_limits)
 
     @staticmethod
     def _split_image_frame(
@@ -1682,7 +1678,13 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                             lambda: self._resolve_fit_completion(resolution)
                         )
                 elif selected_overlay is not _UNSET:
-                    self.update_presentation(image_overlay=selected_overlay)
+                    # The same publication restated: only the layer drawn
+                    # over it can differ, and the overlay's one owner
+                    # already answers an unchanged layer with zero work and
+                    # an absent one with the clearing the input asked for.
+                    self._set_configuration_values(
+                        {}, image_overlay=selected_overlay
+                    )
                 if facet_focus is not _UNSET:
                     if facet_focus is None:
                         if self._facet_focus_index is not None:
@@ -1743,11 +1745,15 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._configuration_fit_commit_actions = None
                 description = self.describe_display()
             except BaseException:
-                self._restore_configuration_state(previous_state)
+                # Leave the deferred envelope BEFORE restoring: the restore
+                # has to paint, and a paint requested inside the envelope
+                # is only recorded.  Nothing the refused transaction
+                # produced is notified.
                 self._configuration_effects = None
                 self._configuration_display_events = None
                 self._configuration_fit_events = None
                 self._configuration_fit_commit_actions = None
+                self._restore_configuration_state(previous_state)
                 raise
 
         for action in fit_commit_actions:
@@ -1771,6 +1777,17 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         return snapshot
 
     def _restore_configuration_state(self, snapshot: Mapping[str, object]) -> None:
+        """Put the session AND its picture back to the accepted state.
+
+        A refused configure rolls the session's fields back and rebuilds
+        the renderer's axes on the old plan -- and a rebuilt Figure holds
+        nothing until it is presented.  Restoring the fields alone left the
+        actual axes at default limits under a description that still named
+        the accepted range: the old pixels lingered in the raster buffer
+        until the next redraw threw them away.  The restored frame is
+        presented here, so the state and the picture are one front again.
+        """
+
         display_store = snapshot["_display_store"]
         display_state = snapshot["display_state"]
         current_store = self._display_store
@@ -1786,11 +1803,10 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         self._fit_warm_starts = dict(snapshot["fit_warm_starts"])
         assert self._renderer is not None
         self._renderer.spec = self._spec
-        self._renderer.relayout(
-            snapshot["renderer_plan"],
-            facet_index=self._focused_facet_index,
-            facet_focus_index=self._facet_focus_index,
-        )
+        try:
+            self._apply_layout_plan(snapshot["renderer_plan"])
+        except Exception:
+            self.redraw_surface()
 
     def _apply_configuration(
         self,
@@ -2089,18 +2105,16 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 refreshed.append(
                     cell_projection._make_fit_overlay(result, selection)
                 )
-            return replace(
-                accepted,
-                overlay=None,
-                overlays=tuple(refreshed),
-            )
+            return replace(accepted, overlays=tuple(refreshed))
         if accepted.selection is None:
             raise RuntimeError("single fit acceptance has no selection")
         return replace(
             accepted,
-            overlay=projection._make_fit_overlay(
-                accepted.result,
-                accepted.selection,
+            overlays=(
+                projection._make_fit_overlay(
+                    accepted.result,
+                    accepted.selection,
+                ),
             ),
         )
 
@@ -2681,7 +2695,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
 
     def set_size(self, preset: str) -> SurfacePlan:
         selected = self._defaults.layout.validate_preset(preset)
-        callbacks: tuple[SurfaceCallback, ...] = ()
         with self._render_lock:
             with self._lock:
                 self._assert_open()
@@ -2813,16 +2826,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             self._viewport = None
 
     def set_device_pixel_ratio(self, ratio: float) -> SurfacePlan:
-        return self._set_device_pixel_ratio(ratio, preserve_native_canvas=False)
-
-    def _set_device_pixel_ratio(
-        self,
-        ratio: float,
-        *,
-        preserve_native_canvas: bool,
-    ) -> SurfacePlan:
         selected = _validated_device_pixel_ratio(ratio)
-        callbacks: tuple[SurfaceCallback, ...] = ()
         with self._render_lock:
             with self._lock:
                 self._assert_open()
@@ -2836,25 +2840,12 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     self._device_pixel_ratio = selected
                     plan = self._resolve_plan()
                     self._layout_revision += 1
-                    if preserve_native_canvas:
-                        assert self._renderer is not None
-                        self._renderer.plan = plan
-                        figure = self._renderer.figure
-                        figure._original_dpi = plan.logical_dpi
-                        figure._set_dpi(plan.dpi, forward=False)
                 except Exception:
                     self._device_pixel_ratio = previous_ratio
                     self._layout_revision = previous_revision
                     raise
             try:
-                if preserve_native_canvas:
-                    self._render_current(
-                        RenderEffect.LAYOUT,
-                    )
-                else:
-                    self._apply_layout_plan(
-                        plan,
-                    )
+                self._apply_layout_plan(plan)
             except Exception:
                 with self._lock:
                     self._device_pixel_ratio = previous_ratio
@@ -2865,14 +2856,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     figure._original_dpi = previous_plan.logical_dpi
                     figure._set_dpi(previous_plan.dpi, forward=False)
                 try:
-                    if preserve_native_canvas:
-                        self._render_current(
-                            RenderEffect.LAYOUT,
-                        )
-                    else:
-                        self._apply_layout_plan(
-                            previous_plan,
-                        )
+                    self._apply_layout_plan(previous_plan)
                 except Exception:
                     self.redraw_surface()
                 raise

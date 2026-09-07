@@ -447,6 +447,24 @@ def test_replace_spec_policy_keeps_viewport_for_reduction_only_change() -> None:
     finally:
         session.close()
 
+def test_replace_spec_policy_keeps_a_fixed_range_for_a_reduction_only_change() -> None:
+    """A fixed range is one dependency -- the mode and both bounds -- and it
+    crosses a semantic edit as one.  Tried one field at a time, ``fixed``
+    was refused for lacking the bounds that followed it, the bounds were
+    kept inert, and a reduction change turned the range back to automatic."""
+
+    snapshot = _snapshot()
+    session = PlotSession(snapshot, CurvePlot(AxisRef.point("x")))
+    try:
+        session.set_parameters({"relim_mode": "fixed", "y_min": -1.0, "y_max": 3.0})
+        session.replace_spec(CurvePlot(AxisRef.point("x"), reduction=Reduction.SUM))
+        values = session.display_state.values
+        assert values["relim_mode"] == "fixed"
+        assert (values["y_min"], values["y_max"]) == (-1.0, 3.0)
+        assert session.describe_display().limits.y.low == pytest.approx(-1.0)
+    finally:
+        session.close()
+
 def test_a_camera_cycle_names_its_rows_frames_and_nothing_else() -> None:
     """What an operator reads for the three shapes a bench produces."""
 

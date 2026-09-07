@@ -20,31 +20,6 @@ SRC = ROOT / "src"
 _BOOTSTRAP = "import zou_lab_control" + chr(10)
 
 
-def _function_stack(tree: ast.AST, target: ast.AST) -> list[str]:
-    stack: list[str] = []
-
-    class Visitor(ast.NodeVisitor):
-        def generic_visit(self, node: ast.AST) -> None:
-            if node is target:
-                raise StopIteration
-            super().generic_visit(node)
-
-        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-            stack.append(node.name)
-            try:
-                self.generic_visit(node)
-            finally:
-                stack.pop()
-
-        visit_AsyncFunctionDef = visit_FunctionDef
-
-    try:
-        Visitor().visit(tree)
-    except StopIteration:
-        return stack.copy()
-    return []
-
-
 def _python_files() -> list[Path]:
     return sorted(SRC.rglob("*.py"))
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from data_factory import (
     make_dataset_schema,
@@ -141,3 +142,27 @@ def test_selectors_on_an_axis_not_in_base_units_round_trip_exactly() -> None:
     finally:
         session.close()
 
+
+def test_a_unit_change_repaints_the_one_overlay_the_renderer_reads() -> None:
+    """The accepted fit has ONE tuple of painted overlays, refreshed as one.
+
+    A single fit used to carry its overlay twice -- as a field and as the
+    one-element tuple the render frame reads.  ``set_value_unit`` refreshed
+    the field; the renderer kept painting the tuple, so the curve stayed in
+    volts on axes that now said millivolts.
+    """
+
+    session = _session()
+    try:
+        session.fit("gaussian_offset", initial=(2.0, 0.1, 0.4, 1.5), live=False)
+        before = session._accepted_fit.overlays[0]
+        session.set_value_unit("mV")
+        accepted = session._accepted_fit
+        assert accepted.overlays[0] is not before
+        assert accepted.overlay is accepted.overlays[0]
+        assert session._renderer._last_fit_overlays == accepted.overlays
+        assert np.max(accepted.overlays[0].polylines[0].y) == pytest.approx(
+            np.max(before.polylines[0].y) * 1000.0
+        )
+    finally:
+        session.close()

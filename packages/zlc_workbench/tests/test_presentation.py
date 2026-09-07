@@ -1565,6 +1565,167 @@ def test_the_wake_coalesces_so_a_burst_costs_one_turn() -> None:
     assert len(notifications) == 2, "a wake after a turn must notify again"
 
 
+def _committed_behind_a_cancelled_consumer(plot, live_bench, work):
+    """Drive one render whose host commit lands before its consumer settles.
+
+    The gate sits INSIDE the session's own publish, after the frame is
+    committed and before the host's operation Future resolves -- the
+    window a retarget can open on a live panel.  ``work`` runs in that
+    window with the port, the host, the travelling update and the next
+    front; the gate is released when it returns.
+    """
+
+    from unittest.mock import patch
+
+    plane, node, _sequencer, _monitor = live_bench
+    signal = node.signal_key("frames")
+    front = plane.freeze()
+    value = front.value(signal)
+    publication = front.publication(signal)
+    assert value is not None and publication is not None
+
+    host = plot.RasterPlotHost.from_plot(
+        value.snapshot, _camera_image_spec(plot, value)
+    )
+    port = None
+    try:
+        host.wait_for_front(timeout=15)
+        target = object()
+        port = PlotPanelPort(
+            "panel-1",
+            signal,
+            display_interval_ms=100,
+            initial_target=target,
+            submit_projection=_submit_now,
+            replace_host=_initial_then(host),
+        )
+        _mount(port, value, publication, front)
+        next_value, next_publication = _advanced(value, publication, signal)
+        next_front = SignalFront(
+            {signal: next_value}, {signal: next_publication}
+        )
+        session = host._require_session()
+        original_publish = session.publish_live_frame
+        entered, gate = Event(), Event()
+
+        def delayed_return(*args, **kwargs):
+            result = original_publish(*args, **kwargs)
+            entered.set()
+            assert gate.wait(10), "the test gate was not released"
+            return result
+
+        with patch.object(session, "publish_live_frame", delayed_return):
+            travelling = port.prepare(next_value, next_publication, next_front)
+            assert travelling is not None
+            assert entered.wait(10), "the host did not publish the frame"
+            outcome = work(port, host, travelling, next_value, next_publication, next_front)
+            gate.set()
+        assert travelling.future.cancelled(), "the consumer was not cancelled"
+        return port, host, outcome
+    except BaseException:
+        if port is not None:
+            port.close()
+        host.close(timeout=15)
+        raise
+
+
+def test_a_render_the_host_committed_lands_on_the_configure_that_follows(
+    live_bench,
+) -> None:
+    """A retarget cancels a render's CONSUMER, never the host's commit.
+
+    The host's serial worker had already published revision 2; only the
+    Future the port was waiting on was cancelled, and the port learned
+    nothing of the commit.  The configure that followed the retarget --
+    its front painted over revision 2 -- was accepted onto the surface of
+    revision 1, so the accepted publication, the title, the selection, the
+    fit binding and Save named one revision while the pixels showed the
+    other; and every re-offer of revision 2 then bounced off the host as
+    already held.
+    """
+
+    plot = pytest.importorskip("zlc_plot")
+    changed = object()
+
+    def retarget_then_configure(port, host, travelling, *_front):
+        port.retarget(changed)
+        configured = host.configure(parameters={"title": "operator change"})
+        # the scheduler abandons the cancelled member before the host answers
+        port.finish_unpresented(travelling)
+        return configured
+
+    port, host, configured = _committed_behind_a_cancelled_consumer(
+        plot, live_bench, retarget_then_configure
+    )
+    try:
+        operation = configured.result(timeout=15)
+        accepted = port.accept_configuration(operation, changed)
+        assert accepted is not None, "the configure was refused"
+        signal = port.signal_name
+        shown = accepted.plot_input.ref
+        assert accepted.publication.value(signal).snapshot.ref == shown
+        assert shown.revision.value == operation.front.identity.data_revision
+        assert accepted.target is changed
+        assert port.publication_for_identity(
+            shown.stream_generation, shown.revision.value
+        ) is accepted.publication
+        next_publication = accepted.publication
+        next_value = next_publication.value(signal)
+        front = SignalFront({signal: next_value}, {signal: next_publication})
+        # the screen shows what the host holds: nothing is owed
+        assert port.prepare(next_value, next_publication, front) is None
+        assert port.last_error is None
+    finally:
+        port.close()
+        host.close(timeout=15)
+
+
+def test_data_the_host_already_holds_is_re_presented_not_cancelled(
+    live_bench,
+) -> None:
+    """The re-offer of a committed-but-unpresented revision reaches the screen.
+
+    With the consumer cancelled and the cohort abandoned, the host holds
+    revision 2 and the surface shows revision 1.  The scheduler re-offers
+    the publication on the next beat; pushing it as DATA is refused by the
+    host ("the session already holds this data revision"), so the re-offer
+    used to end in a CancelledError once per beat for as long as the source
+    stood.  The host's current front, re-described, is what the panel owes.
+    """
+
+    plot = pytest.importorskip("zlc_plot")
+
+    def abandon(port, _host, travelling, *_front):
+        port.retarget(object())
+        port.finish_unpresented(travelling)
+
+    port, host, _outcome = _committed_behind_a_cancelled_consumer(
+        plot, live_bench, abandon
+    )
+    try:
+        # a later serial control proves the host's update has ended
+        host.describe_display().result(timeout=15)
+        signal = port.signal_name
+        held = host.front.identity.data_revision
+        assert _accepted(port, "plot_input").ref.revision.value < held
+        shown_value = _accepted(port, "publication").value(signal)
+        next_value, next_publication = _advanced(
+            shown_value, _accepted(port, "publication"), signal
+        )
+        next_front = SignalFront({signal: next_value}, {signal: next_publication})
+        assert next_value.snapshot.ref.revision.value == held
+        retried = port.prepare(next_value, next_publication, next_front)
+        assert retried is not None, "the re-offer was declined"
+        operation = retried.future.result(timeout=15)
+        assert port.accept(retried, operation)
+        assert _accepted(port, "publication") is next_publication
+        assert _accepted(port, "plot_input").ref.revision.value == held
+        assert port.last_error is None
+    finally:
+        port.close()
+        host.close(timeout=15)
+
+
 def test_a_stale_refusal_is_flow_control_not_a_panel_error(live_bench) -> None:
     """The widget's False means "a newer front already paints" -- the
     documented stale-race answer during any continuous gesture.  It was

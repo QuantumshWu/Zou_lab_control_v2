@@ -135,3 +135,37 @@ def test_a_detached_widget_is_hidden_until_its_next_host_shows_it(stage) -> None
     app.removeEventFilter(holder)
     assert child.isVisible() and not child.isWindow()
     assert seen == [], "a re-hosted widget is a child again, not a window"
+
+
+def test_a_one_shot_dialog_or_menu_is_retired_once_it_is_answered(stage) -> None:
+    """A message box, a confirmation and a context menu are made for one
+    click.  Parented so they centre on and stack with their widget, they
+    outlived the local name that made them: every message a window ever
+    showed stayed in its object tree until the window died."""
+
+    from unittest.mock import patch
+
+    from PyQt5 import QtCore, QtGui, QtWidgets
+    import zlc_ui.fluent.fluent as fluent
+
+    app, parent, layout = stage
+
+    def answered(dialog):
+        dialog.accept()
+        return QtWidgets.QDialog.Accepted
+
+    with patch.object(fluent.FluentCardDialog, "exec_", answered):
+        for _ in range(3):
+            fluent.fluent_message(parent, "review", "one message")
+        assert fluent.fluent_confirm(parent, "review", "one question")
+    edit = fluent.FluentLineEdit("text", parent)
+    layout.addWidget(edit)
+    with patch.object(fluent._FluentRoundedMenu, "exec_", lambda *_: None):
+        for _ in range(3):
+            event = QtGui.QContextMenuEvent(
+                QtGui.QContextMenuEvent.Mouse, QtCore.QPoint(1, 1)
+            )
+            fluent._apply_fluent_context_menu(edit, event)
+    _pump(app)
+    assert parent.findChildren(fluent._FluentMessageDialog) == []
+    assert edit.findChildren(fluent._FluentRoundedMenu) == []

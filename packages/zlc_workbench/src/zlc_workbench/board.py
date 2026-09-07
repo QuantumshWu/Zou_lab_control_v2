@@ -1,14 +1,20 @@
 """Driving a board of live panels: the tick, the wake, and who owns which.
 
-Three parties, and the whole difficulty is that they run on different threads:
+Three parties, and the whole difficulty is who may run where:
 
-* the SCHEDULER freezes one signal front per tick and asks each panel to prepare
-  from it.  It must not run on the GUI thread -- preparing means drawing.
+* the SCHEDULER freezes one signal front per beat and asks each panel to STAGE
+  from it.  Staging is short owner-thread work -- a lock-guarded reservation
+  of what the panel will show -- and never the drawing: canonical run
+  assembly and companion projection run on this board's own projection
+  worker, the render on each plotting host's worker.  The beat that drives
+  the scheduler is the GUI timer, and it stays cheap because nothing heavy
+  runs in it.
 * the ARBITER holds prepared surfaces until a whole board is ready, then hands
   them over together.  Committing touches widgets, so it must run ON the GUI
   thread.
-* the WAKE carries "there is something to commit" from the first to the second,
-  coalescing so a burst of ready surfaces causes one turn, not a queue of them.
+* the WAKE carries "there is something to commit" from the workers to the
+  owner, coalescing so a burst of ready surfaces causes one turn, not a queue
+  of them.
 
 Nothing ticked and nothing polled before this: the scheduler existed, the wake
 primitive existed, and no code connected them, so a live panel could never
@@ -147,7 +153,10 @@ class LiveBoard:
         return self._clock.base_ms
 
     def tick(self, *, stage: bool = True) -> object:
-        """Freeze one front and stage whatever is due.  NOT the GUI thread.
+        """Freeze one front and stage whatever is due: the owner's short step.
+
+        Staging reserves; the projection and the render it leads to run on
+        the workers, and their completion wakes the owner to commit.
 
         ``stage=False`` is a paused DISPLAY: the front is still frozen and the
         clock still advances, so the bench keeps running and its derived

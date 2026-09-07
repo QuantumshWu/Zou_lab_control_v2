@@ -9,6 +9,7 @@ down.  Both are the box deciding arithmetic it was never asked to decide.
 from __future__ import annotations
 
 from decimal import Decimal
+import math
 
 import pytest
 
@@ -154,3 +155,55 @@ def test_a_count_box_counts_in_32_bits() -> None:
     bounded = fluent_count_box(minimum=2)
     bounded.setValue(1)
     assert bounded.text() == "2"
+
+
+def test_a_narrowed_range_moves_the_value_before_the_first_step(box) -> None:
+    """Qt clamped its shadow and the decimal stayed at 7: the box showed 5,
+    stepped from the hidden 7 and was clamped straight back -- the first
+    notch down went nowhere.  Every entry that can move the value goes
+    through the one decimal authority, and a slot hearing valueChanged from
+    inside setRange reads the same number the signal carries."""
+
+    heard: list[tuple[float, Decimal]] = []
+    box.valueChanged.connect(lambda value: heard.append((value, box.decimalValue())))
+    box.setSingleStep(1)
+    box.setValue(7)
+    box.setRange(0.0, 5.0)
+    assert box.decimalValue() == Decimal(5)
+    assert (box.value(), box.text()) == (5.0, "5")
+    assert heard[-1] == (5.0, Decimal(5)), heard
+    assert _step(box, -1) == "4"
+    box.setMinimum(4.5)
+    assert (box.decimalValue(), box.text()) == (Decimal("4.5"), "4.5")
+    box.setMinimum(0.0)
+    box.setMaximum(2.0)
+    assert (box.decimalValue(), box.text()) == (Decimal(2), "2")
+    box.setValue(1.123)
+    box.setDecimals(2)
+    assert (box.decimalValue(), box.text()) == (Decimal("1.12"), "1.12")
+    box.setSingleStep(0.05)
+    assert _step(box, 1) == "1.15"
+
+
+def test_a_box_with_no_bound_steps_in_a_logarithmic_unit(box) -> None:
+    """Qt says "no bound" with the whole double line, and the top of that
+    line read in milliwatts is 10**(DBL_MAX / 10): a step that converted
+    both ends before moving could not move at all."""
+
+    box.setValueUnit("dBm")
+    box.setValue(0.0)
+    box.setShownUnit("mW")
+    box.setSingleStep(0.1)
+    assert box.text() == "1"
+    assert _step(box, 1) == "1.1"
+    assert abs(box.value() - 10 * math.log10(1.1)) < 1e-12
+    # A floor of 0 W is no floor in dBm: there is no dBm for it to be.
+    power = type(box)()
+    power.setValueUnit("W")
+    power.setRange(0.0, 1.0)
+    power.setValue(0.001)
+    power.setShownUnit("dBm")
+    power.setSingleStep(1)
+    assert power.text() == "0"
+    assert _step(power, -1) == "-1"
+    assert abs(power.value() - 10 ** (-0.1) / 1000) < 1e-15

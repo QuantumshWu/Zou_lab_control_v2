@@ -66,14 +66,19 @@ def _publication(
     stream: str,
     generation: str,
     sequence: int,
-    name: str,
+    name: str | tuple[str, ...],
     parents: tuple[SignalPublication, ...] = (),
 ) -> SignalPublication:
-    output = _output(name.replace("/", "_"), sequence)
-    value = SignalValue(name, output.snapshot, output.coverage)
+    """One event of ``stream``; a tuple of names is one atomic sibling bundle."""
+
+    names = (name,) if isinstance(name, str) else name
+    signals = {}
+    for each in names:
+        output = _output(each.replace("/", "_"), sequence)
+        signals[each] = SignalValue(each, output.snapshot, output.coverage)
     return SignalPublication(
         EventRef(StreamId(stream), StreamGenerationId(generation), sequence),
-        {name: value},
+        signals,
         object(),
         tuple(parent.event_ref for parent in parents),
     )
@@ -144,6 +149,50 @@ def test_build_front_is_transitive_and_falls_back_as_one_family() -> None:
         for name in recovered.names()
     }
     assert len(roots) == 1
+
+
+def test_a_source_sibling_joins_a_lagging_processor_at_the_processor_s_shot() -> None:
+    """A processor descends from every signal its source published beside
+    its input, because the source commits them as one event.
+
+    Judged by the exact source name alone, a requested sibling was a leaf
+    of its own, and its latest shot was set against the processor's older
+    one: the complete shot the plane already held -- both siblings and the
+    processor's answer -- was reported as pending for as long as the
+    processor lagged its source, and the panel stayed blank or stale.
+    """
+
+    bundle = ("occ/counts", "occ/occupied")
+    first = _publication("occ", "g1", 1, bundle)
+    agreement = _publication("agreement", "g2", 1, "agreement/counts", (first,))
+    second = _publication("occ", "g1", 2, bundle)
+    parents = {first: (), agreement: (first,), second: ()}
+    states = [
+        _state("occ", "g1", "producer", bundle, second),
+        _state(
+            "agreement", "g2", "processor", ("agreement/counts",),
+            agreement, "occ/counts",
+        ),
+    ]
+
+    through_sibling = build_front(
+        states, {"occ/occupied", "agreement/counts"}, None, parents.__getitem__
+    )
+    assert through_sibling.publication("agreement/counts") is agreement
+    assert through_sibling.publication("occ/occupied") is first
+    assert through_sibling.publication("occ/counts") is first
+    through_source = build_front(
+        states, {"occ/counts", "agreement/counts"}, None, parents.__getitem__
+    )
+    assert through_source.publication_by_signal == (
+        through_sibling.publication_by_signal
+    )
+
+    # Siblings of one owner are not each other's ancestors: asked for both
+    # alone, the bundle simply flows at its latest shot.
+    siblings_only = build_front(states, set(bundle), None, parents.__getitem__)
+    assert siblings_only.publication("occ/counts") is second
+    assert siblings_only.publication("occ/occupied") is second
 
 
 def test_a_presentation_paced_follower_never_holds_its_source() -> None:

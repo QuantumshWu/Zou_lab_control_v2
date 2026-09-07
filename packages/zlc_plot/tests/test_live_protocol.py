@@ -283,3 +283,24 @@ def test_stale_revision_is_rejected_before_prepare_and_commit() -> None:
         assert session.data_revision == 2
     finally:
         session.close()
+
+
+def test_a_failed_first_explicit_live_fit_settles_its_future() -> None:
+    """A solve that RAN and failed answers the request that asked for it.
+
+    The first explicit live fit is solved on the analysis executor; its
+    failure was caught into a local and never handed to the request's
+    completion, so ``fit_async(live=True)`` on three points stayed pending
+    for ever while the source stood still.  The request stays armed -- the
+    next revision may solve -- but the Future is answered.
+    """
+
+    session = _session()
+    try:
+        logical = session.fit_async("gaussian_offset", live=True)
+        with pytest.raises(ValueError, match="more finite observations"):
+            logical.result(timeout=10)
+        assert session.last_fit is None
+        assert session._live_fit_request is not None
+    finally:
+        session.close()
