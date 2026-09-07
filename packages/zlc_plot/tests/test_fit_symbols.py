@@ -38,6 +38,35 @@ def test_every_parameter_is_written_in_its_own_formula() -> None:
             )
 
 
+def test_the_catalogue_writes_e_to_a_power_and_sizes_tall_parentheses() -> None:
+    """One typography for every formula an operator reads.
+
+    An exponential is ``e`` to a power, never ``exp(...)``: the catalogue
+    printed one model the other way, and beside its neighbours it read as
+    code.  A parenthesis that holds a stacked fraction is sized to it with
+    ``\\left(``; an inline one is plain.  Each line of a formula is one
+    level of superscript deep at most -- a model that would nest deeper
+    names an intermediate on its own line instead.
+    """
+
+    import re
+
+    for model in builtin_fit_models():
+        formula = model.formula
+        assert r"\exp" not in formula, (model.model_id, formula)
+        assert not re.search(r"(?<!\\left)\(\s*\\frac", formula), (model.model_id, formula)
+        for line in formula.split("\n"):
+            depth = 0
+            deepest = 0
+            for index, char in enumerate(line):
+                if char == "^" and line[index + 1 : index + 2] == "{":
+                    depth += 1
+                    deepest = max(deepest, depth)
+                elif char == "}" and depth:
+                    depth -= 1
+            assert deepest <= 1, (model.model_id, line)
+
+
 def test_no_two_parameters_of_one_model_share_a_symbol() -> None:
     """Two boxes with one name is a box the operator cannot address."""
 

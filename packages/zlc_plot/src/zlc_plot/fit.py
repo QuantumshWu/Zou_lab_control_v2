@@ -4387,7 +4387,17 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             _release_recapture,
             _init_release_recapture,
             (FitTarget.SERIES,),
-            formula=r"$P(t)=A[1-\exp(-\eta\exp(-W_0((2\pi f t)^2)))]/[1-\exp(-\eta)]+B$",
+            # Two lines on purpose: the model is an exponential of an
+            # exponential, and written in one it nests three levels deep at
+            # annotation size.  Naming the inner survival factor keeps each
+            # line one level deep, e to a power reads as every other model
+            # in this catalogue does, and the ratio stays inline so every
+            # glyph keeps the annotation's full size.
+            formula=(
+                r"$P(t)=A\,[1-e^{-\eta s}]/[1-e^{-\eta}]+B$"
+                "\n"
+                r"$s=e^{-W_0((2\pi f t)^2)}$"
+            ),
             jacobian=_release_recapture_jacobian,
             candidate_initializer=_release_recapture_candidates,
             compiled_descriptor=_compiled_fit.release_recapture_descriptor(),
