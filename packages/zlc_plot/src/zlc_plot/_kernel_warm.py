@@ -30,6 +30,7 @@ import hashlib
 import os
 import pathlib
 import sys
+import tempfile
 from typing import Any
 
 import numpy as np
@@ -385,6 +386,56 @@ def _render(
         session.close()
 
 
+def _save(
+    snapshot: Any,
+    spec: Any,
+    parameters: dict | None = None,
+    *,
+    zoom_steps: int = 0,
+) -> None:
+    """Render through the export path, which materializes what native leaves lazy.
+
+    A native draw is the pixel consumer of a live image and rasterizes no
+    fallback picture for it: the block reductions, the colour tables and the
+    view-filling gather that turn a prepared front into RGBA answer only when
+    the scene is MATERIALIZED -- a Save, or a facet overview.  Those are
+    production renders too, and an operator's first Save compiling for a
+    minute is the wheel-notch compile in another place, so the warmer asks
+    for them the way Save does.
+    """
+
+    from . import PlotSession  # noqa: PLC0415
+    from .selectors import NumericRange  # noqa: PLC0415
+
+    session = PlotSession(snapshot, spec)
+    try:
+        session.set_size("2x2")
+        if parameters:
+            session.set_parameters(dict(parameters))
+        with tempfile.TemporaryDirectory() as folder:
+            target = pathlib.Path(folder) / "warm.png"
+            session.save(target)
+            if not zoom_steps:
+                return
+            height, width = (
+                int(size) for size in np.asarray(snapshot.block.values).shape[-2:]
+            )
+            span = float(width)
+            for _ in range(zoom_steps):
+                span /= 1.7
+                half = span / 2.0
+                session.set_viewport(
+                    NumericRange(width / 2.0 - half, width / 2.0 + half),
+                    NumericRange(
+                        height / 2.0 - half * height / width,
+                        height / 2.0 + half * height / width,
+                    ),
+                )
+                session.save(target)
+    finally:
+        session.close()
+
+
 def representative_work(*, include_compiled_fit: bool = True) -> None:
     """Render what production renders, until every kernel has been asked.
 
@@ -433,6 +484,13 @@ def representative_work(*, include_compiled_fit: bool = True) -> None:
     for dtype in (np.float32, np.float64):
         # With holes: the masked block sum, which also counts.
         _render(_image_snapshot(1200, 1920, dtype, holes=True), image)
+    # The same pictures materialized, as a Save materializes them: the
+    # exact unsigned block sum and the direct colour table for a narrow
+    # unsigned frame, the counting block mean and the float colour table
+    # for a floating one, and the view-filling gather of a zoomed front.
+    _save(_image_snapshot(96, 96, np.uint16), image)
+    _save(_image_snapshot(1200, 1920, np.uint16), image, zoom_steps=2)
+    _save(_image_snapshot(1200, 1920, np.float64, holes=True), image, zoom_steps=2)
 
     series = _series_snapshot(8, 400)
     # The centred second moment and fused curve validity/bounds pass.

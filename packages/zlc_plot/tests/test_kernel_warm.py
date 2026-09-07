@@ -96,6 +96,33 @@ def test_the_work_the_warmer_runs_is_work_the_product_can_do() -> None:
         _height3d_raster._ENGINE = previous_h3d
 
 
+def test_the_representative_work_reaches_every_kernel() -> None:
+    """After the warmer's own renders, no production kernel is cold.
+
+    A render path that stops asking for a kernel -- native drawing that no
+    longer rasterizes the fallback picture, so the block reductions, colour
+    tables and view-filling gather answer only when a Save materializes the
+    scene -- leaves that kernel to compile on an operator's first Save, and
+    the warm tool refusing on every machine that runs it.  On a machine that
+    has warmed its cache this loads from disk; on one that has not, it is
+    the compile the warmer exists to take.
+    """
+
+    pytest.importorskip("numba")
+    from zlc_plot import _height3d_raster, _raster_kernels
+
+    previous_plot = _raster_kernels.ENGINE
+    previous_h3d = _height3d_raster._ENGINE
+    _raster_kernels.ENGINE = "numba"
+    _height3d_raster._ENGINE = "numba"
+    try:
+        _kernel_warm.representative_work()
+    finally:
+        _raster_kernels.ENGINE = previous_plot
+        _height3d_raster._ENGINE = previous_h3d
+    assert _kernel_warm.cold_kernels() == ()
+
+
 def test_a_missing_numba_is_reported_not_raised() -> None:
     """The one cause the launcher used to name is the one that cannot fail."""
 
