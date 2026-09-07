@@ -68,11 +68,13 @@ def populate(viewer) -> None:
                 {
                     "id": "device:camera", "kind": "device", "title": "camera",
                     "subtitle": "Device · camera", "root": False, "tooltip": "camera",
+                    "row": ("Devices", "camera"),
                 },
                 {
                     "id": "logic:calibration", "kind": "logic",
                     "title": "calibration", "subtitle": "site map",
                     "root": True, "tooltip": "calibration",
+                    "row": ("Logic", "calibration"),
                 },
             ),
             "edges": (

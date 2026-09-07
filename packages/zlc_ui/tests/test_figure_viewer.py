@@ -113,13 +113,13 @@ view.set_panel_surface('panel-1', second)
 
 graph = {
     'nodes': (
-        {'id': 'device:camera', 'kind': 'device', 'title': 'camera', 'subtitle': 'Device · camera', 'root': False, 'tooltip': 'camera'},
-        {'id': 'device:sequencer', 'kind': 'device', 'title': 'sequencer', 'subtitle': 'Device · sequencer', 'root': False, 'tooltip': 'sequencer'},
-        {'id': 'device:slm', 'kind': 'device', 'title': 'slm', 'subtitle': 'Device · slm', 'root': False, 'tooltip': 'slm'},
-        {'id': 'logic:camera', 'kind': 'logic', 'title': 'camera measurement', 'subtitle': 'frames', 'root': False, 'tooltip': 'camera measurement'},
-        {'id': 'logic:left', 'kind': 'logic', 'title': 'left processor', 'subtitle': 'left', 'root': False, 'tooltip': 'left'},
-        {'id': 'logic:right', 'kind': 'logic', 'title': 'right processor', 'subtitle': 'right', 'root': False, 'tooltip': 'right'},
-        {'id': 'logic:fit', 'kind': 'logic', 'title': 'fit', 'subtitle': 'amplitude', 'root': True, 'tooltip': 'fit'},
+        {'id': 'device:camera', 'kind': 'device', 'title': 'camera', 'subtitle': 'Device · camera', 'root': False, 'tooltip': 'camera', 'row': None},
+        {'id': 'device:sequencer', 'kind': 'device', 'title': 'sequencer', 'subtitle': 'Device · sequencer', 'root': False, 'tooltip': 'sequencer', 'row': None},
+        {'id': 'device:slm', 'kind': 'device', 'title': 'slm', 'subtitle': 'Device · slm', 'root': False, 'tooltip': 'slm', 'row': None},
+        {'id': 'logic:camera', 'kind': 'logic', 'title': 'camera measurement', 'subtitle': 'frames', 'root': False, 'tooltip': 'camera measurement', 'row': None},
+        {'id': 'logic:left', 'kind': 'logic', 'title': 'left processor', 'subtitle': 'left', 'root': False, 'tooltip': 'left', 'row': None},
+        {'id': 'logic:right', 'kind': 'logic', 'title': 'right processor', 'subtitle': 'right', 'root': False, 'tooltip': 'right', 'row': None},
+        {'id': 'logic:fit', 'kind': 'logic', 'title': 'fit', 'subtitle': 'amplitude', 'root': True, 'tooltip': 'fit', 'row': None},
     ),
     'edges': (
         {'source': 'device:camera', 'target': 'logic:camera', 'kind': 'device', 'label': 'camera'},
@@ -607,5 +607,103 @@ assert pane.info_tabs.tabText(pane.info_tabs.currentIndex()) == 'Devices', (
 pane.set_tabs((('Plot', (('a', '9'),)), ('Logic', (('a', '9'),))))
 app.processEvents()
 assert pane.info_tabs.tabText(pane.info_tabs.currentIndex()) == 'Plot'
+"""
+    )
+
+
+def test_a_record_is_read_as_a_tree_and_the_flow_is_a_map_of_it() -> None:
+    """A run's record opens under the run, a device's snapshot under the
+    device; a filter finds a name or a value anywhere in the tab; Copy
+    takes the whole value; and a click on a flow card opens the row it
+    stands for.  The pane used to print each record as a Python literal."""
+
+    _run_qt(
+        """
+from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
+from zlc_ui.fluent.info_pane import InfoPane, copy_text, value_text
+from zlc_ui.qt import ensure_qt_app
+app = ensure_qt_app(['info-tree'])
+
+TITLES = ('Plot', 'Logic', 'Devices', 'Flow', 'Raw')
+record = {
+    'outputs': ['frames'],
+    'parameters': {'exposure_seconds': 0.02, 'frames_per_cycle': 3, 'photoelectrons': False, 'roi_xywh': None},
+}
+device = {
+    'roles': ['camera'], 'used_by': ['cm'],
+    'snapshots': [{'logic': 'cm', 'scope': 'run', 'snapshot': {
+        'exposure_seconds': 0.02, 'roi_shape_yx': [96, 128],
+        'coordinates': list(range(96)),
+    }}],
+}
+pane = InfoPane(label_names=TITLES, graph_tabs=('Flow',))
+pane.set_tabs((
+    ('Plot', (('data', '1x3x96x128 uint16'),)),
+    ('Logic', (('cm', record),)),
+    ('Devices', (('camera', device), ('sequencer pulse 1', {'text': 'imaging', 'action': 'pulse:k'}))),
+    ('Flow', ()),
+    ('Raw', (('source', {'signal': '@logic/cm/frames', 'title': 'camera'}),)),
+))
+pane.resize(520, 640); pane.show(); app.processEvents()
+
+# The record is a tree: the run's name, then its fields, then the fields
+# of its fields -- and a summary of the scalars beside every branch.
+logic = pane._rows_tabs['Logic'].tree
+cm = logic.topLevelItem(0)
+assert cm.text(0) == 'cm' and cm.isExpanded()
+assert [cm.child(i).text(0) for i in range(cm.childCount())] == ['outputs', 'parameters']
+assert cm.child(0).text(1) == 'frames'
+parameters = cm.child(1)
+assert not parameters.isExpanded()
+assert parameters.text(1) == 'exposure_seconds: 0.02; frames_per_cycle: 3; photoelectrons: false; roi_xywh: none'
+assert [parameters.child(i).text(1) for i in range(4)] == ['0.02', '3', 'false', 'none']
+assert value_text(list(range(96))) == '96 numbers, 0 to 95'
+assert copy_text(list(range(3))) == '0, 1, 2'
+assert copy_text(record).splitlines()[0:3] == ['outputs: frames', 'parameters:', '  exposure_seconds: 0.02']
+
+# A filter finds a value deep in a device's snapshot and opens the way to it.
+devices = pane._rows_tabs['Devices']
+devices.filter_edit.setText('roi_shape')
+app.processEvents()
+camera = devices.tree.topLevelItem(0)
+assert not camera.isHidden() and camera.isExpanded()
+snapshots = next(camera.child(i) for i in range(camera.childCount()) if camera.child(i).text(0) == 'snapshots')
+assert snapshots.isExpanded() and not snapshots.isHidden()
+roles = next(camera.child(i) for i in range(camera.childCount()) if camera.child(i).text(0) == 'roles')
+assert roles.isHidden()
+assert devices.tree.topLevelItem(1).isHidden(), 'the pulse row does not mention roi_shape'
+devices.filter_edit.clear(); app.processEvents()
+assert not roles.isHidden() and not devices.tree.topLevelItem(1).isHidden()
+assert camera.isExpanded() and not snapshots.isExpanded()
+
+# Copy takes the whole value, not the summary on screen.
+logic.setCurrentItem(parameters)
+QtTest.QTest.keyClick(logic, QtCore.Qt.Key_C, QtCore.Qt.ControlModifier)
+assert QtWidgets.QApplication.clipboard().text() == copy_text(record['parameters'])
+assert logic.row_name() == 'cm.parameters'
+
+# A pressed action row still asks for its action.
+actions = []; pane.action_requested.connect(actions.append)
+button = devices.tree.itemWidget(devices.tree.topLevelItem(1), 1)
+button.click()
+assert actions == ['pulse:k']
+
+# A flow card names its row; a click on it opens that tab on that row.
+pane.set_graph('Flow', {
+    'nodes': (
+        {'id': 'device:camera', 'kind': 'device', 'title': 'camera', 'subtitle': 'camera', 'root': False, 'tooltip': 'camera', 'row': ('Devices', 'camera')},
+        {'id': 'logic:cm', 'kind': 'logic', 'title': 'cm', 'subtitle': 'frames', 'root': True, 'tooltip': 'cm', 'row': ('Logic', 'cm')},
+    ),
+    'edges': ({'source': 'device:camera', 'target': 'logic:cm', 'kind': 'device', 'label': 'camera'},),
+})
+pane.info_tabs.setCurrentWidget(pane._graph_tabs['Flow']); app.processEvents()
+flow = pane._graph_tabs['Flow']
+centre = flow.mapFromScene(flow._flow_node_rects['device:camera'].center())
+QtTest.QTest.mouseClick(flow.viewport(), QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, centre)
+app.processEvents()
+assert pane.info_tabs.currentWidget() is devices
+assert devices.tree.currentItem() is camera and camera.isExpanded()
+assert pane.show_row('Logic', 'cm') and logic.currentItem() is cm
+assert not pane.show_row('Logic', 'nobody')
 """
     )

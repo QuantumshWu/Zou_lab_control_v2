@@ -1264,6 +1264,11 @@ def test_the_flow_projection_is_the_saved_exact_node_edge_graph(saved) -> None:
     camera = next(node for node in nodes.values() if node["kind"] == "device")
     assert logic["title"] == "cm" and "frames" in logic["subtitle"]
     assert camera["title"] == "camera"
+    # Every card names the row it stands for, so the picture is a map of
+    # the Logic and Devices tabs -- and the row it names exists there.
+    tabs = dict(description.tabs)
+    assert logic["row"] == ("Logic", "cm") and "cm" in dict(tabs["Logic"])
+    assert camera["row"] == ("Devices", "camera") and "camera" in dict(tabs["Devices"])
     assert any(
         edge["source"] == camera["id"] and edge["target"] == logic["id"]
         for edge in edges
@@ -1321,16 +1326,19 @@ def test_the_flow_projection_is_the_saved_exact_node_edge_graph(saved) -> None:
     assert [item["scope"] for item in camera_snapshots] == ["run", "event"]
 
 def test_the_raw_tab_is_the_typed_document_not_a_node_probe(saved) -> None:
-    """Every projected tab is a reading; this is the document itself."""
+    """Every projected tab is a reading; this is the document itself, one
+    row per section, nested as the file nests it -- not flattened into
+    hundreds of dotted paths."""
 
     path, _snapshot = saved
     info, arrays = read_archive(path)
-    raw = dict(describe_archive(info, arrays).tabs)["Raw"]
-    labels = {label for label, _value in raw}
-    assert "source.signal" in labels
-    assert any(label.startswith("lineage.nodes") for label in labels)
+    raw = dict(dict(describe_archive(info, arrays).tabs)["Raw"])
+    assert tuple(raw) == ("dataset", "plot", "lineage", "source")
+    assert raw["source"] is info["sections"]["source"]
+    assert raw["source"]["signal"] == "@logic/cm/frames"
+    assert [node["id"] for node in raw["lineage"]["nodes"]] == ["event-1"]
     # The dataset manifest is part of the document too, however verbose.
-    assert any(label.startswith("dataset.data.") for label in labels)
+    assert "data" in raw["dataset"]
 
 def test_opening_shows_the_figure_and_its_record(presenter, saved, tmp_path) -> None:
     path, _snapshot = saved

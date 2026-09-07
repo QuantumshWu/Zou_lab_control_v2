@@ -1442,7 +1442,9 @@ def describe_archive(
             ("Logic", _logic_rows(sections["lineage"], source=source)),
             ("Devices", _device_rows(sections["lineage"], source=source)),
             ("Flow", ()),
-            ("Raw", _flatten(sections)),
+            # The document itself, section by section: what the other tabs
+            # are readings of, opened where the reader looks.
+            ("Raw", tuple((name, sections[name]) for name in ("dataset", "plot", "lineage", "source"))),
         ),
     )
 
@@ -1627,6 +1629,28 @@ def _logic_record(value: object) -> object:
     return value
 
 
+def _logic_labels(nodes: Mapping[str, Mapping[str, Any]]) -> dict[str, str]:
+    """One operator-facing label per Logic node, the same on the Logic tab
+    and on the Flow: the Logic's name, told apart by its event only when
+    the archive holds that name more than once."""
+
+    names = {node_id: _logic_name(node) for node_id, node in nodes.items()}
+    repeated = {name for name, count in Counter(names.values()).items() if count > 1}
+    labels: dict[str, str] = {}
+    for node_id, name in names.items():
+        event = nodes[node_id]["event"]
+        labels[node_id] = (
+            f"{name} · sequence {event['sequence']} · {str(event['generation'])[:8]}"
+            if name in repeated
+            else name
+        )
+    return labels
+
+
+def _saved_source_label(name: str, *, beside_nodes: bool) -> str:
+    return f"{name} · saved source" if beside_nodes else name
+
+
 def _logic_rows(
     value: object,
     *,
@@ -1646,7 +1670,7 @@ def _logic_rows(
         projected = _logic_record(record)
         assert isinstance(projected, Mapping)
         rows.append((
-            f"{name} · saved source" if nodes else name,
+            _saved_source_label(name, beside_nodes=bool(nodes)),
             {
                 "outputs": [output],
                 **{
@@ -1658,16 +1682,9 @@ def _logic_rows(
         ))
     if not nodes:
         return tuple(rows)
-    names = [_logic_name(node) for node in nodes.values()]
-    repeated = {name for name, count in Counter(names).items() if count > 1}
-    for node in nodes.values():
-        name = _logic_name(node)
-        event = node["event"]
-        label = (
-            f"{name} · sequence {event['sequence']} · {str(event['generation'])[:8]}"
-            if name in repeated
-            else name
-        )
+    labels = _logic_labels(nodes)
+    for node_id, node in nodes.items():
+        label = labels[node_id]
         projected = _logic_record(node["record"])
         assert isinstance(projected, Mapping)
         record = {
@@ -1708,6 +1725,7 @@ def _lineage_graph(
                 "subtitle": str(output),
                 "root": True,
                 "tooltip": f"Logic: {name}\nSaved result: {output}",
+                "row": ("Logic", _saved_source_label(name, beside_nodes=False)),
             }
         ]
         graph_edges: list[Mapping[str, object]] = []
@@ -1726,6 +1744,7 @@ def _lineage_graph(
                         f"Device: {device_key}\nRoles: {', '.join(roles)}\n"
                         f"Used by: {name}"
                     ),
+                    "row": ("Devices", device_key),
                 }
             )
             graph_edges.append(
@@ -1762,32 +1781,27 @@ def _lineage_graph(
     graph_edges: list[Mapping[str, object]] = []
     devices: dict[str, dict[str, object]] = {}
     device_edges: set[tuple[str, str, str]] = set()
-    logic_names = [_logic_name(nodes[node_id]) for node_id in order]
-    repeated_logic = {
-        name for name, count in Counter(logic_names).items() if count > 1
-    }
+    labels = _logic_labels(nodes)
     for node_id in order:
         node = nodes[node_id]
         event = node["event"]
         signals = [_signal_name(item) for item in node["signals"]]
+        name = _logic_name(node)
         graph_nodes.append(
             {
                 "id": f"logic:{node_id}",
                 "kind": "logic",
-                "title": _logic_name(node),
+                "title": name,
                 "subtitle": (
                     f"{', '.join(signals) or _signal_name(event['stream'])}"
-                    + (
-                        f" · sequence {event['sequence']} · {str(event['generation'])[:8]}"
-                        if _logic_name(node) in repeated_logic
-                        else ""
-                    )
+                    + labels[node_id][len(name):]
                 ),
                 "root": node_id == root,
                 "tooltip": (
-                    f"Logic: {_logic_name(node)}\n"
+                    f"Logic: {name}\n"
                     f"Outputs: {', '.join(node['signals']) or event['stream']}"
                 ),
+                "row": ("Logic", labels[node_id]),
             }
         )
         for parent in node["parents"]:
@@ -1854,6 +1868,7 @@ def _lineage_graph(
                     f"Device: {device_key}\nRoles: {', '.join(roles)}\n"
                     f"Used by: {', '.join(consumers)}"
                 ),
+                "row": ("Devices", device_key),
             }
         )
     saved = (
@@ -1875,6 +1890,7 @@ def _lineage_graph(
                     f"Logic: {name}\nSaved result: {output}\n"
                     "This Task record has no exact Runtime event edge in the archive."
                 ),
+                "row": ("Logic", _saved_source_label(name, beside_nodes=True)),
             }
         )
         source_devices: dict[str, list[str]] = {}
@@ -1899,6 +1915,7 @@ def _lineage_graph(
                             f"Device: {device_key}\nRoles: {', '.join(roles)}\n"
                             f"Used by: {name}"
                         ),
+                        "row": ("Devices", device_key),
                     }
                 )
                 existing_device_ids.add(device_id)
@@ -2200,25 +2217,6 @@ def _device_tab_snapshot(snapshot: Mapping[str, object]) -> dict[str, object]:
     if isinstance(program, Mapping) and isinstance(program.get("rows"), (list, tuple)):
         shown["program"] = {**program, "rows": len(program["rows"])}
     return shown
-
-
-def _flatten(value: Any, prefix: str = "") -> Rows:
-    """Every leaf of the document, so nothing is hidden by the other tabs."""
-
-    if isinstance(value, Mapping):
-        rows: list[tuple[str, str]] = []
-        for key, item in sorted(value.items(), key=lambda pair: str(pair[0])):
-            rows.extend(_flatten(item, f"{prefix}.{key}" if prefix else str(key)))
-        return tuple(rows)
-    return ((prefix, _text(value)),)
-
-
-def _text(value: Any) -> str:
-    if isinstance(value, (list, tuple)):
-        return ", ".join(_text(item) for item in value)
-    if isinstance(value, float):
-        return f"{value:g}"
-    return str(value)
 
 
 class FigureViewerPresenter:
