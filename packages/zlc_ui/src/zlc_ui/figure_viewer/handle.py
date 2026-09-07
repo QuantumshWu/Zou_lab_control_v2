@@ -42,6 +42,8 @@ class FigureViewerHandle(QtCore.QObject):
     panel_save_figure_requested = QtCore.pyqtSignal(str, str)
     panel_plot_error = QtCore.pyqtSignal(str, str)
     save_image_requested = QtCore.pyqtSignal()
+    info_action_requested = QtCore.pyqtSignal(str)
+    pulse_tab_closed = QtCore.pyqtSignal(str)
 
     def __init__(
         self,
@@ -81,6 +83,8 @@ class FigureViewerHandle(QtCore.QObject):
         view.panel_save_figure_requested.connect(self.panel_save_figure_requested)
         view.panel_plot_error.connect(self.panel_plot_error)
         view.save_image_requested.connect(self.save_image_requested)
+        view.info_action_requested.connect(self.info_action_requested)
+        view.pulse_tab_closed.connect(self.pulse_tab_closed)
         view.close_requested.connect(self.close_requested)
         if window is not None and hasattr(window, "closed"):
             window.closed.connect(self.closed)
@@ -263,6 +267,35 @@ class FigureViewerHandle(QtCore.QObject):
         state = dict(projection).get("state", {}) if isinstance(projection, dict) else {}
         resolved_title = str(title or f"Edit Panel · {dict(state).get('title', panel_id)}")
         self._view.open_panel_editor(panel_id, projection, resolved_title)
+
+    # ------------------------------------------------------------ pulse tabs
+
+    def open_pulse_tab(self, key: str, title: str) -> None:
+        self._view.open_pulse_tab(key, title)
+
+    def has_pulse_tab(self, key: str) -> bool:
+        return self._view.has_pulse_tab(key)
+
+    def show_pulse(self, key: str, host: Any) -> bool:
+        """Put the drawn pulse on its tab, given the thing that owns it.
+
+        The host is asked for its widget here, as the editor's preview is:
+        zlc_ui may not import the package that draws, and the outside may
+        not hold a widget.
+        """
+
+        return self._view.mount_pulse(
+            key,
+            host.qt_widget(),
+            logical_size=getattr(host, "logical_size", None),
+            wheel_target=host.wheel_target() if hasattr(host, "wheel_target") else None,
+        )
+
+    def show_pulse_placeholder(self, key: str, text: str) -> bool:
+        return self._view.show_pulse_placeholder(key, text)
+
+    def close_pulse_tab(self, key: str) -> bool:
+        return self._view.close_pulse_tab(key)
 
     def close_panel_editor(self, panel_id: str) -> bool:
         return self._view.close_panel_editor(panel_id)

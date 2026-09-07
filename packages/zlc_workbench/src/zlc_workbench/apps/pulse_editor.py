@@ -131,48 +131,9 @@ def build(
 ) -> object:
     """Wire one editor window, with or without a pulse in it."""
 
-    import zlc_plot as plot
 
     from ..pulse_editor import PulseEditorPresenter
-
-    def make_preview(timeline, *, size: str = "2x2"):
-        # The host, and only the host.  It is what a save writes through, what
-        # the next edit updates rather than replaces, and -- since it can be
-        # asked for its own widget and its own size -- the whole of what the
-        # window needs.  This used to hand back a QWidget it had constructed
-        # here, which is a composition root assembling a UI.
-        host = plot.RasterPlotHost.from_plot(
-            timeline, plot.PulseTimelinePlot(), size=str(size)
-        )
-        # No selector is placed here.  A selection is something the operator
-        # drags onto the picture; putting one there at build time gave every
-        # preview a full-width band it had not asked for and could not remove,
-        # because the Selectors switch says whether one may be DRAWN, not
-        # whether one exists.
-        # The preview page lays content out at its natural size rather than
-        # stretching it, so nothing may be mounted before a front exists: a
-        # raster host has no size until it has painted one.
-        try:
-            host.wait_for_front(5.0)
-        except BaseException:
-            host.close()
-            raise
-        return host
-
-    def update_preview(host, timeline, *, size: str = "2x2"):
-        """Give the standing preview new data, and say how big it now is.
-
-        The canvas widget was sized once, when it was first mounted, so a
-        pulse that grew -- 2 rows becoming 22 the moment Show off rows is
-        switched on -- was drawn in full into a widget still shaped for the
-        old one, and the operator saw the top three channels and blank space.
-        The host knows its new size; this hands it back.
-        """
-
-        planned = host.set_size(str(size)).result(timeout=5.0)
-        host.update_data(timeline).result(timeout=5.0)
-        plan = getattr(planned, "value", None)
-        return tuple(getattr(plan, "logical_size", ()) or ()) or None
+    from ..pulse_preview import build_pulse_preview_host, resize_pulse_preview_host
 
     def dial_and_calibrate(mode: str, endpoint: str):
         """Dial, then hand the board this workspace's current calibration.
@@ -212,8 +173,8 @@ def build(
     return PulseEditorPresenter(
         view,
         state,
-        make_preview=make_preview,
-        update_preview=update_preview,
+        make_preview=build_pulse_preview_host,
+        update_preview=resize_pulse_preview_host,
         sequencer=sequencer,
         device_use=device_use,
         dial=dial_and_calibrate if allow_dial else None,

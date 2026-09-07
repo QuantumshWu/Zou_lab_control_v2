@@ -1152,6 +1152,8 @@ class ArchiveDescription:
     datasets: tuple[tuple[str, str], ...]
     #: Plain node/edge data for the one Flow projection owned by the UI.
     flow: Mapping[str, tuple[Mapping[str, object], ...]]
+    #: Every pulse a run in this archive played, drawable on its own tab.
+    pulses: tuple["PlayedPulse", ...] = ()
 
     @property
     def dataset_keys(self) -> tuple[str, ...]:
@@ -1434,6 +1436,7 @@ def describe_archive(
         schema=str(info.get("schema", "")),
         datasets=datasets,
         flow=flow,
+        pulses=played_pulses(sections["lineage"]),
         tabs=(
             ("Plot", _plot_rows(arrays, recipes)),
             ("Logic", _logic_rows(sections["lineage"], source=source)),
@@ -2108,7 +2111,71 @@ def _device_rows(
                 },
             )
         )
+    # The pulse a run played is offered, not printed: the Devices page says
+    # which pulse and hands the operator the tab that draws it.
+    for played in played_pulses(value):
+        rows.append(
+            (
+                f"{played.device_key} pulse {played.sequence}",
+                {"text": played.name, "action": f"pulse:{played.key}"},
+            )
+        )
     return tuple(rows)
+
+
+@dataclass(frozen=True)
+class PlayedPulse:
+    """One pulse a run in the archive played, as its board recorded it."""
+
+    #: Names the pulse within the archive: the Logic, its event and its board.
+    key: str
+    device_key: str
+    logic: str
+    #: The Logic event the run record belongs to, as the lineage numbers it.
+    sequence: int
+    #: The file the operator chose, which is what the run record calls it.
+    name: str
+    #: The filled pulse document, exactly as the board's snapshot holds it.
+    tree: Mapping[str, object]
+
+
+def played_pulses(lineage: object) -> tuple[PlayedPulse, ...]:
+    """Every played pulse the lineage's run records carry, in lineage order.
+
+    A sequencer's snapshot carries the document it played under ``pulse``
+    (see ``sequencer_archive_snapshot``); the run record names the file
+    under its own ``pulse``.  One entry per (Logic event, board), so an
+    archive whose lineage holds several runs offers each of them.
+    """
+
+    _root, nodes = _lineage_nodes(lineage)
+    found: list[PlayedPulse] = []
+    for node in nodes.values():
+        record = node["record"]
+        named = _named_devices(record)
+        logic = _logic_name(node)
+        sequence = int(node["event"]["sequence"])
+        for role, device_key, snapshot in _record_devices(record, named_devices=named):
+            document = snapshot.get("pulse")
+            if not isinstance(document, Mapping):
+                continue
+            file_record = record.get("pulse")
+            name = (
+                str(file_record.get("name"))
+                if isinstance(file_record, Mapping) and file_record.get("name")
+                else str(document.get("name") or role)
+            )
+            found.append(
+                PlayedPulse(
+                    key=f"{logic}:{sequence}:{device_key}",
+                    device_key=str(device_key),
+                    logic=logic,
+                    sequence=sequence,
+                    name=name,
+                    tree=document,
+                )
+            )
+    return tuple(found)
 
 
 def _device_tab_snapshot(snapshot: Mapping[str, object]) -> dict[str, object]:
@@ -2177,6 +2244,7 @@ class FigureViewerPresenter:
         save_figure_artifact: Callable[..., object],
         save_front: Callable[..., object],
         confirm_discard: Callable[[str], bool] | None = None,
+        make_pulse_preview: Callable[..., object] | None = None,
     ) -> None:
         self.view = view
         # Asked before edits are thrown away, and answered by a person.
@@ -2215,6 +2283,10 @@ class FigureViewerPresenter:
         self.panels = panel_presenter.panels
         self._active_panel_id = ""
         self._busy = False
+        #: How a played pulse's timeline becomes a picture -- the Pulse
+        #: Editor's own preview builder, injected by the composition root.
+        self._make_pulse_preview = make_pulse_preview
+        self._pulse_hosts: dict[str, object] = {}
         self._close_requested = False
         self._closed = False
         self._connect()
@@ -2226,6 +2298,8 @@ class FigureViewerPresenter:
             ("edit_data_requested", self.edit_data),
             ("data_editor_intent", self.data_editor_intent),
             ("data_editor_closed", self.close_data_editor),
+            ("info_action_requested", self.info_action),
+            ("pulse_tab_closed", self.close_pulse_tab),
         ):
             signal = getattr(self.view, signal_name, None)
             if signal is not None:
@@ -2238,6 +2312,102 @@ class FigureViewerPresenter:
         self.view.panel_edit_requested.connect(self._remember_panel)
         self.view.panel_remove_requested.connect(self._remember_removed_panel)
         self.view.save_image_requested.connect(self.save_image)
+
+    # ------------------------------------------------------------ pulse tabs
+
+    def info_action(self, action: str) -> None:
+        """An action a Devices row offered.  Only played pulses offer one."""
+
+        text = str(action)
+        if text.startswith("pulse:"):
+            self.open_pulse(text[len("pulse:"):])
+            return
+        self.view.set_status(f"unknown action {text!r}", error=True)
+
+    def open_pulse(self, key: str) -> None:
+        """Draw one played pulse on its own tab, through the editor's preview.
+
+        The recorded document comes back as the pulse it is, becomes the
+        same timeline the Pulse Editor draws, and is rendered off the owner
+        thread by the same host builder; the tab shows the picture once it
+        has painted.  Read-only: the document is what played, not a draft.
+        """
+
+        key = str(key)
+        description = self.description
+        played = next(
+            (item for item in (description.pulses if description else ()) if item.key == key),
+            None,
+        )
+        if played is None:
+            self.view.set_status(f"this archive played no pulse {key!r}", error=True)
+            return
+        title = f"Pulse · {played.name}"
+        if self.view.has_pulse_tab(key):
+            self.view.open_pulse_tab(key, title)
+            return
+        if self._make_pulse_preview is None:
+            self.view.set_status("this viewer cannot draw pulses", error=True)
+            return
+        self.view.open_pulse_tab(key, title)
+
+        def draw() -> object:
+            from zlc_plot import recommended_pulse_preset
+            from zlc_pulse import sequence_from_tree
+
+            from .pulse_editor import timeline_of
+
+            sequence = sequence_from_tree(played.tree)
+            data = timeline_of(sequence)
+            rows = len(getattr(data, "channels", ())) + len(
+                getattr(data, "analog_traces", ())
+            )
+            size = recommended_pulse_preset(rows, len(sequence.periods))
+            return self._make_pulse_preview(data, size=size)
+
+        def drawn(host: object) -> None:
+            if not self.view.has_pulse_tab(key):
+                # Closed while it was drawing: nothing to show it on.
+                self._close_host(host)
+                return
+            self._pulse_hosts[key] = host
+            self.view.show_pulse(key, host)
+            self.view.set_status(f"showing pulse {played.name}")
+
+        def failed(error: BaseException) -> None:
+            self.view.show_pulse_placeholder(key, f"cannot draw this pulse: {error}")
+            self.view.set_status(f"cannot draw pulse {played.name}: {error}", error=True)
+
+        self._submit(
+            f"drawing pulse {played.name}…",
+            draw,
+            drawn,
+            "cannot draw pulse",
+            on_failure=failed,
+        )
+
+    def close_pulse_tab(self, key: str) -> bool:
+        """Retire one pulse tab and the host that drew it."""
+
+        key = str(key)
+        host = self._pulse_hosts.pop(key, None)
+        if host is not None:
+            self._close_host(host)
+        return self.view.close_pulse_tab(key)
+
+    def _close_pulse_tabs(self) -> None:
+        for key in tuple(self._pulse_hosts) + tuple(
+            key for key in self._open_pulse_tab_keys() if key not in self._pulse_hosts
+        ):
+            self.close_pulse_tab(key)
+
+    def _open_pulse_tab_keys(self) -> tuple[str, ...]:
+        description = self.description
+        return tuple(
+            item.key
+            for item in (description.pulses if description else ())
+            if self.view.has_pulse_tab(item.key)
+        )
 
     def _remember_added_panel(self, _kind: object) -> None:
         self._active_panel_id = next(reversed(self.panels), "")
@@ -2407,6 +2577,7 @@ class FigureViewerPresenter:
         self._data_drafts.clear()
         self._data_source_editors.clear()
         self._archive_data.clear()
+        self._close_pulse_tabs()
         labels = dict(description.datasets)
         source_title = str(source_document.get("title") or "").strip()
         for key, plot_input, recipe, described in loaded:
@@ -3171,6 +3342,7 @@ class FigureViewerPresenter:
         if self._busy:
             self.view.set_status("closing after the current operation…")
             return False
+        self._close_pulse_tabs()
         timer = self.timer
         if not self._panel_presenter.close():
             self._panel_presenter.beat()

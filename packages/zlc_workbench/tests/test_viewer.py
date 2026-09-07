@@ -55,7 +55,12 @@ from zlc_plot import (
 )
 from zlc_plot.primitives import ImageFrame, ImagePointOverlay
 from zlc_plot.selectors import RectangleRange, SelectorState
-from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, write_ordinary_pulse
+from pulse_fixtures import (
+    CAMERA_WINDOWS,
+    PULSE_NAME,
+    ordinary_imaging_sequence,
+    write_ordinary_pulse,
+)
 
 def _frozen_surface(
     state: PanelState,
@@ -144,7 +149,10 @@ class _ViewerView:
         self.panel_save_figure_requested = _Signal()
         self.panel_plot_error = _Signal()
         self.save_image_requested = _Signal()
+        self.info_action_requested = _Signal()
+        self.pulse_tab_closed = _Signal()
         self.close_requested = _Signal()
+        self.pulse_tabs: dict[str, dict] = {}
         self.tabs: tuple = ()
         self.flow: object = {"nodes": (), "edges": ()}
         self.surface = None
@@ -276,6 +284,31 @@ class _ViewerView:
     def set_archive_info(self, tabs, graph) -> None:
         self.tabs = tuple(tabs)
         self.flow = graph
+
+    def open_pulse_tab(self, key, title) -> None:
+        self.pulse_tabs.setdefault(
+            str(key), {"title": str(title), "host": None, "placeholder": ""}
+        )
+
+    def has_pulse_tab(self, key) -> bool:
+        return str(key) in self.pulse_tabs
+
+    def show_pulse(self, key, host) -> bool:
+        tab = self.pulse_tabs.get(str(key))
+        if tab is None:
+            return False
+        tab["host"] = host
+        return True
+
+    def show_pulse_placeholder(self, key, text) -> bool:
+        tab = self.pulse_tabs.get(str(key))
+        if tab is None:
+            return False
+        tab["placeholder"] = str(text)
+        return True
+
+    def close_pulse_tab(self, key) -> bool:
+        return self.pulse_tabs.pop(str(key), None) is not None
 
     def set_title(self, text: str) -> None:
         self.title = str(text)
@@ -993,6 +1026,84 @@ def test_a_played_pulse_is_named_on_the_device_tab_not_dumped() -> None:
     assert shown["program"] == {"digest": "abc", "duration_seconds": 0.5, "rows": 2}
     assert shown["description"] == {"clock_hz": 5e7}
     assert snapshot["program"]["rows"] == [[1, 2], [3, 4]], "the record itself is untouched"
+
+
+def test_a_played_pulse_is_offered_on_the_device_tab_and_drawn_on_its_own(saved) -> None:
+    """The Devices page names the pulse a run played and offers to draw it;
+    the tab draws the recorded document through the editor's own preview
+    builder and takes its host down with it.
+
+    The document itself is hundreds of rows of timing: the Devices page
+    says which pulse and how many periods, the picture is where a pulse is
+    read.
+    """
+
+    from zlc_pulse import sequence_to_tree
+
+    path, _snapshot = saved
+    info, arrays = read_archive(path)
+    node = info["sections"]["lineage"]["nodes"][0]
+    played_sequence = ordinary_imaging_sequence()
+    record = dict(node["record"])
+    record["named_devices"] = {**dict(record.get("named_devices", {})), "sequencer": "sequencer"}
+    record["pulse"] = {"name": "imaging", "path": "C:/bench/pulses/imaging.json"}
+    record["device_snapshots"] = {
+        **dict(record.get("device_snapshots", {})),
+        "sequencer": {
+            "program": {"digest": "abc", "rows": [[1, 2], [3, 4]]},
+            "pulse": sequence_to_tree(played_sequence),
+        },
+    }
+    node["record"] = record
+    description = describe_archive(info, arrays)
+    (played,) = description.pulses
+    assert (played.name, played.device_key) == ("imaging", "sequencer")
+    devices = dict(dict(description.tabs)["Devices"])
+    assert devices[f"sequencer pulse {played.sequence}"] == {
+        "text": "imaging",
+        "action": f"pulse:{played.key}",
+    }
+    shown = devices["sequencer"]["snapshots"][0]["snapshot"]
+    assert shown["pulse"] == {
+        "name": played_sequence.name,
+        "periods": len(played_sequence.periods),
+    }
+    assert shown["program"] == {"digest": "abc", "rows": 2}
+
+    view = _ViewerView()
+    presenter = _built_presenter(view)
+    try:
+        built: list[tuple[object, str]] = []
+
+        class _Host:
+            closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        def make(timeline, *, size):
+            built.append((timeline, size))
+            return _Host()
+
+        presenter._make_pulse_preview = make
+        presenter.description = description
+        presenter.info_action(f"pulse:{played.key}")
+        assert view.pulse_tabs[played.key]["title"] == "Pulse · imaging"
+        _wait_until(
+            lambda: view.pulse_tabs[played.key]["host"] is not None and not presenter._busy
+        )
+        ((timeline, size),) = built
+        assert timeline.total_duration > 0 and size
+        assert [channel.label for channel in timeline.channels]
+        host = view.pulse_tabs[played.key]["host"]
+        presenter.info_action(f"pulse:{played.key}")
+        assert built == [(timeline, size)], "a second open focuses the tab, it does not redraw"
+        assert presenter.close_pulse_tab(played.key)
+        assert host.closed and played.key not in view.pulse_tabs
+        presenter.info_action("pulse:nobody")
+        assert any("played no pulse" in text for text, _error in view.status)
+    finally:
+        _close_presenter(presenter)
 
 
 def test_the_description_reports_only_facts_saved_in_the_archive(saved) -> None:

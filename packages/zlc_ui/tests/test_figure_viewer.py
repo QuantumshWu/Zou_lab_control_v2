@@ -211,6 +211,61 @@ assert [console.tabs.tabText(i) for i in range(console.tabs.count())] == ['Monit
     )
 
 
+def test_a_played_pulse_gets_a_read_only_tab_beside_board_and_edit() -> None:
+    """A Devices row's action opens one preview tab per played pulse: the
+    picture and its scroll, no control row; a second open focuses it, and
+    closing the tab tells the presenter which one went."""
+
+    _run_qt(
+        """
+from PyQt5 import QtWidgets
+from zlc_ui.figure_viewer import FigureViewerHandle, FigureViewerView
+from zlc_ui.fluent import FluentButton
+from zlc_ui.qt import ensure_qt_app
+app = ensure_qt_app(['pulse-tab'])
+view = FigureViewerView()
+handle = FigureViewerHandle(None, view)
+actions, closed = [], []
+handle.info_action_requested.connect(actions.append)
+handle.pulse_tab_closed.connect(closed.append)
+view.set_archive_info(
+    (('Devices', (('sequencer pulse (scan)', {'text': 'Open scan', 'action': 'pulse:k'}),)), ('Flow', ())),
+    {'nodes': (), 'edges': ()},
+)
+buttons = [b for b in view.info_pane.findChildren(FluentButton) if b.text() == 'Open scan']
+assert len(buttons) == 1, [b.text() for b in view.info_pane.findChildren(FluentButton)]
+buttons[0].click()
+assert actions == ['pulse:k']
+before = view.tabs.count()
+handle.open_pulse_tab('k', 'Pulse · scan')
+assert view.tabs.count() == before + 1
+assert view.tabs.tabText(view.tabs.currentIndex()) == 'Pulse · scan'
+assert handle.has_pulse_tab('k')
+page = view._pulse_tabs['k']
+assert not page.controls.isVisibleTo(page), 'a played pulse is read-only: no control row'
+class _Host:
+    logical_size = (120, 80)
+    def __init__(self):
+        self.widget = QtWidgets.QWidget()
+    def qt_widget(self):
+        return self.widget
+    def wheel_target(self):
+        return self.widget
+host = _Host()
+assert handle.show_pulse('k', host)
+assert page.preview_placeholder.isHidden()
+assert host.widget.parent() is page.preview_body
+handle.open_pulse_tab('k', 'Pulse · scan')
+assert view.tabs.count() == before + 1, 'a second open focuses, never duplicates'
+view._tab_close_clicked(page)
+assert closed == ['k']
+assert handle.close_pulse_tab('k')
+assert view.tabs.count() == before and not handle.has_pulse_tab('k')
+assert handle.show_pulse_placeholder('k', 'gone') is False
+"""
+    )
+
+
 def test_manual_data_editor_is_virtual_and_emits_plain_intents() -> None:
     _run_qt(
         """

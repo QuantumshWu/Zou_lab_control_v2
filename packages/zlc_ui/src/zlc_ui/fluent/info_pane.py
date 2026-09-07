@@ -9,6 +9,7 @@ from pprint import pformat
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from .fluent import (
+    FluentButton,
     FluentFrame,
     FluentPathEdit,
     FluentReadoutMultiline,
@@ -52,6 +53,10 @@ class InfoPane(QtWidgets.QWidget):
     """
 
     path_committed = QtCore.pyqtSignal(str)
+    #: A row's action was pressed; carries the action the row named.
+    action_requested = QtCore.pyqtSignal(str)
+    #: A row's action was pressed; carries the action the row named.
+    action_requested = QtCore.pyqtSignal(str)
 
     def __init__(
         self,
@@ -206,7 +211,34 @@ class InfoPane(QtWidgets.QWidget):
         self._tab_layouts[title] = tab_layout
 
     def _fill_rows(self, layout: QtWidgets.QVBoxLayout, rows: tuple[InfoRow, ...]) -> None:
+        """Every row a readout, except an ACTION, which is a button.
+
+        A value shaped ``{"text": ..., "action": ...}`` is something the
+        presenter offers to do about the row -- open the pulse a run played,
+        say -- and pressing it emits ``action_requested`` with the action.
+        Plain data on both sides, so the pane still imports nobody's model.
+        """
+
         for key, value in rows:
+            if _is_action(value):
+                button = FluentButton(str(value["text"]), color=ACCENT)
+                # The value column's width, like every readout beside it: a
+                # button sized to its own text overflowed the column and was
+                # clipped mid-word the moment the text was a real name.
+                button.setSizePolicy(
+                    QtWidgets.QSizePolicy.Expanding,
+                    QtWidgets.QSizePolicy.Fixed,
+                )
+                button.setMinimumWidth(0)
+                button.clicked.connect(
+                    lambda _checked=False, action=str(value["action"]): (
+                        self.action_requested.emit(action)
+                    )
+                )
+                layout.addWidget(
+                    FluentSettingRow(str(key), button, label_width=self._label_width)
+                )
+                continue
             text = self._readout_text(value)
             field = FluentReadoutMultiline(text)
             field.setSizePolicy(
@@ -562,6 +594,15 @@ class InfoPane(QtWidgets.QWidget):
                 for item in value
             )
         return str(value)
+
+
+def _is_action(value: object) -> bool:
+    return (
+        isinstance(value, Mapping)
+        and set(value) == {"text", "action"}
+        and isinstance(value["text"], str)
+        and isinstance(value["action"], str)
+    )
 
 
 __all__ = ["InfoPane", "InfoRow", "InfoTab"]

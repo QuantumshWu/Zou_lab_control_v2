@@ -14,6 +14,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.console.board_view import ConsoleBoardView
 from zlc_ui.console.panel_card_view import PanelCardView, data_structure_fragments
 from zlc_ui.console.panel_editor_view import PanelEditorView
+from zlc_ui.pulse.preview_view import PulsePreviewView
 from zlc_ui.fluent import (
     retire_widget,
     ACCENT,
@@ -742,6 +743,10 @@ class FigureViewerView(QtWidgets.QWidget):
     panel_save_figure_requested = QtCore.pyqtSignal(str, str)
     panel_plot_error = QtCore.pyqtSignal(str, str)
     save_image_requested = QtCore.pyqtSignal()
+    #: An action a Devices row offered was pressed (the action's id).
+    info_action_requested = QtCore.pyqtSignal(str)
+    #: The operator closed a pulse tab (its key).
+    pulse_tab_closed = QtCore.pyqtSignal(str)
     close_requested = QtCore.pyqtSignal()
 
     def __init__(self, parent=None, *, path_base_dir: str = "") -> None:
@@ -751,6 +756,7 @@ class FigureViewerView(QtWidgets.QWidget):
         self._cards: dict[str, PanelCardView] = {}
         self._editors: dict[str, QtWidgets.QWidget] = {}
         self._data_editors: dict[str, _DataEditorView] = {}
+        self._pulse_tabs: dict[str, PulsePreviewView] = {}
         self._panel_sizes: tuple[str, ...] = ()
         self._panel_default_size = ""
         self._panel_intervals: tuple[int, ...] = ()
@@ -787,6 +793,7 @@ class FigureViewerView(QtWidgets.QWidget):
             parent=self,
         )
         self.info_pane.path_committed.connect(self.path_committed)
+        self.info_pane.action_requested.connect(self.info_action_requested)
         root.addWidget(self.info_pane, 0)
 
         # The right half is one white Fluent work surface.  Cards remain
@@ -1119,6 +1126,55 @@ class FigureViewerView(QtWidgets.QWidget):
         self.tabs.add_closable_tab(editor, str(title), focus=True)
         self._sync_data_editor_title(editor)
 
+    # ------------------------------------------------------------ pulse tabs
+
+    def open_pulse_tab(self, key: str, title: str) -> None:
+        """One read-only preview tab per played pulse, beside Board and Edit."""
+
+        key = str(key)
+        existing = self._pulse_tabs.get(key)
+        if existing is not None:
+            self.tabs.setCurrentWidget(existing)
+            return
+        page = PulsePreviewView(self, with_controls=False)
+        page.show_placeholder("drawing the pulse…")
+        self._pulse_tabs[key] = page
+        self.tabs.add_closable_tab(page, str(title), focus=True)
+
+    def has_pulse_tab(self, key: str) -> bool:
+        return str(key) in self._pulse_tabs
+
+    def mount_pulse(
+        self,
+        key: str,
+        widget: QtWidgets.QWidget,
+        *,
+        logical_size: tuple[int, int] | None = None,
+        wheel_target: QtWidgets.QWidget | None = None,
+    ) -> bool:
+        page = self._pulse_tabs.get(str(key))
+        if page is None:
+            return False
+        page.mount_content(widget, logical_size=logical_size, wheel_target=wheel_target)
+        return True
+
+    def show_pulse_placeholder(self, key: str, text: str) -> bool:
+        page = self._pulse_tabs.get(str(key))
+        if page is None:
+            return False
+        page.show_placeholder(str(text))
+        return True
+
+    def close_pulse_tab(self, key: str) -> bool:
+        page = self._pulse_tabs.pop(str(key), None)
+        if page is None:
+            return False
+        index = self.tabs.indexOf(page)
+        if index >= 0:
+            self.tabs.removeTab(index)
+        retire_widget(page)
+        return True
+
     def close_data_editor(self, editor_id: str) -> bool:
         key = str(editor_id)
         editor = self._data_editors.pop(key, None)
@@ -1199,6 +1255,13 @@ class FigureViewerView(QtWidgets.QWidget):
         return True
 
     def _tab_close_clicked(self, editor: QtWidgets.QWidget) -> None:
+        pulse_key = next(
+            (key for key, value in self._pulse_tabs.items() if value is editor),
+            "",
+        )
+        if pulse_key:
+            self.pulse_tab_closed.emit(pulse_key)
+            return
         data_editor_id = next(
             (key for key, value in self._data_editors.items() if value is editor),
             "",

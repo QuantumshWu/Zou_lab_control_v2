@@ -24,7 +24,16 @@ class PulsePreviewView(QtWidgets.QWidget):
     size_committed = QtCore.pyqtSignal(str)
     save_requested = QtCore.pyqtSignal()
 
-    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget | None = None,
+        *,
+        with_controls: bool = True,
+    ) -> None:
+        """``with_controls=False`` is the read-only preview: the picture and
+        its scroll, without the row that edits how it is drawn -- what a
+        viewer shows for a pulse that already played."""
+
         super().__init__(parent)
         self.setStyleSheet("background: transparent;")
         self._content_widget: QtWidgets.QWidget | None = None
@@ -62,6 +71,8 @@ class PulsePreviewView(QtWidgets.QWidget):
             row.addWidget(widget)
         row.addWidget(self.preview_status, 1)
         row.addWidget(self.preview_save_figure_button)
+        self.controls = controls
+        controls.setVisible(bool(with_controls))
         layout.addWidget(controls)
 
         self.preview_scroll = FluentScrollArea()
