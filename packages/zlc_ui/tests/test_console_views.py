@@ -1691,7 +1691,7 @@ assert view.selectors_switch.width() > 0
 header = view.summary_label.parentWidget()
 layout = header.layout()
 right_edge = header.rect().right() - layout.contentsMargins().right()
-assert view.load_layout_button.geometry().right() == right_edge
+assert view.clear_board_button.geometry().right() == right_edge
 center_y = header.rect().center().y()
 for widget in (
     view.status_dot,
@@ -1704,6 +1704,7 @@ for widget in (
     view.save_screenshot_button,
     view.save_layout_button,
     view.load_layout_button,
+    view.clear_board_button,
 ):
     assert abs(widget.geometry().center().y() - center_y) <= 1
 """
@@ -1760,6 +1761,7 @@ handle.add_logic_requested.connect(lambda api_name: events.append(('logic', api_
 handle.pause_toggled.connect(lambda value: events.append(('pause', value)))
 handle.save_screenshot_requested.connect(lambda: events.append(('screenshot',)))
 handle.save_layout_requested.connect(lambda: events.append(('layout',)))
+handle.clear_board_requested.connect(lambda: events.append(('clear',)))
 handle.stop_task_requested.connect(lambda: events.append(('stop-task',)))
 assert view.kind_combo.count() == 5
 assert view.kind_combo.itemData(0) == ('plot', 'curve')
@@ -1780,11 +1782,13 @@ QtTest.QTest.mouseClick(view.add_panel_button, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(view.pause_switch, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(view.save_screenshot_button, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(view.save_layout_button, QtCore.Qt.LeftButton)
+QtTest.QTest.mouseClick(view.clear_board_button, QtCore.Qt.LeftButton)
 assert ('panel', 'image') in events
 assert ('logic', 'camera_measurement') in events
 assert ('pause', True) in events
 assert ('screenshot',) in events
 assert ('layout',) in events
+assert ('clear',) in events
 
 # A running Task freezes Logic identity, not the monitor window.
 handle.add_panel('task-preview', 'Capture preview')
@@ -1802,6 +1806,7 @@ assert view.kind_combo.isEnabled()
 assert not view.add_panel_button.isEnabled()
 assert view.save_layout_button.isEnabled()
 assert not view.load_layout_button.isEnabled()
+assert not view.clear_board_button.isEnabled()
 assert view.selectors_switch.isEnabled()
 assert view.pause_switch.isEnabled()
 assert view.save_screenshot_button.isEnabled()

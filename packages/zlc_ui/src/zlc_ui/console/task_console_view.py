@@ -50,6 +50,8 @@ class TaskConsoleView(QtWidgets.QWidget):
     #: figure data is saved from a panel's Edit tab, never from this header.
     save_layout_requested = QtCore.pyqtSignal()
     load_layout_requested = QtCore.pyqtSignal()
+    #: The whole board at once: every panel and every logic node.
+    clear_board_requested = QtCore.pyqtSignal()
     save_screenshot_requested = QtCore.pyqtSignal()
     stop_task_requested = QtCore.pyqtSignal()
     #: Re-raised from the board, because a presenter talks to the view it was
@@ -112,6 +114,8 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.save_layout_button.setToolTip("Save the layout and signal wiring")
         self.load_layout_button = FluentButton("Load", color=ORANGE)
         self.load_layout_button.setToolTip("Load a saved layout and signal wiring")
+        self.clear_board_button = FluentButton("Clear", color=ORANGE)
+        self.clear_board_button.setToolTip("Remove every panel and logic node from the board")
 
         for widget in (
             self.status_dot,
@@ -127,6 +131,7 @@ class TaskConsoleView(QtWidgets.QWidget):
             self.save_screenshot_button,
             self.save_layout_button,
             self.load_layout_button,
+            self.clear_board_button,
         ):
             header.addWidget(widget, 0, QtCore.Qt.AlignVCenter)
         outer.addWidget(header_frame)
@@ -189,6 +194,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.save_screenshot_button.clicked.connect(self.save_screenshot_requested.emit)
         self.save_layout_button.clicked.connect(self.save_layout_requested.emit)
         self.load_layout_button.clicked.connect(self.load_layout_requested.emit)
+        self.clear_board_button.clicked.connect(self.clear_board_requested.emit)
 
     def set_panel_kinds(self, kinds: tuple[tuple[str, str], ...], current: str = "") -> None:
         """Replace the Plot entries in the combined chooser."""
@@ -312,7 +318,10 @@ class TaskConsoleView(QtWidgets.QWidget):
         """Project the console-wide Task command gate onto header chrome."""
 
         self._task_takeover = bool(active)
+        # A running Task owns the board: neither another board nor an empty
+        # one may replace it from under the task.
         self.load_layout_button.setEnabled(not self._task_takeover)
+        self.clear_board_button.setEnabled(not self._task_takeover)
         self._update_add_button()
         self.status_strip.set_action_visible(self._task_takeover)
 

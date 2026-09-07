@@ -513,6 +513,9 @@ class ConsolePresenter:
         # phase and progress continue to come exclusively from the row's host.
         self._active_task_id: str | None = None
         self._shown_task_takeover: bool | None = None
+        #: A whole board waiting to go up -- loaded or empty -- and the words
+        #: for when it has, held until every node it replaces has stopped.
+        self._pending_board: tuple[_LayoutCandidate, str] | None = None
         # Auto-created Task previews are reconciled against Runtime terminal
         # truth: an absent signal retires, a sealed signal remains ordinary.
         self._auto_task_previews: dict[str, dict[str, str]] = {}
@@ -663,6 +666,7 @@ class ConsolePresenter:
             self.view.pause_toggled.connect(self._guarded(self.set_paused))
             self.view.save_layout_requested.connect(self._guarded(self.save_layout))
             self.view.load_layout_requested.connect(self._guarded(self.load_layout))
+            self.view.clear_board_requested.connect(self._guarded(self.clear_board))
             self.view.save_screenshot_requested.connect(self._guarded(self.save_screenshot))
             self.view.selectors_toggled.connect(self._guarded(self.set_deriving))
             self.view.add_logic_requested.connect(self._guarded(self.add_logic))
@@ -5041,9 +5045,92 @@ class ConsolePresenter:
         self._refresh_console_projection()
         self._refresh_signal_choices()
 
+    def _running_logic(self) -> tuple[LogicBinding, ...]:
+        """Every node still at work: started, or waiting to start."""
+
+        return tuple(
+            binding
+            for binding in self.logic.values()
+            if binding.pending is not None
+            or (binding.host is not None and binding.host.running)
+        )
+
+    def _confirm_board_replaced(self, verb: str, *, confirm_text: str) -> bool:
+        """Ask before the whole board goes, saying what goes with it.
+
+        The question names what is on the board and what is still running,
+        because the answer stops those nodes: replacing a board is not a
+        pause, and a board that was never saved does not come back.
+        """
+
+        counted = [
+            f"{count} {noun}" + ("s" if count != 1 else "")
+            for count, noun in (
+                (len(self.panels), "panel"),
+                (len(self.logic), "logic node"),
+            )
+            if count
+        ]
+        text = f"{verb} removes {' and '.join(counted)} from this board."
+        running = self._running_logic()
+        if running:
+            text += (
+                " It first stops "
+                + ", ".join(binding.node_id for binding in running)
+                + "."
+            )
+        text += " A board that was not saved cannot be brought back."
+        return bool(
+            self.view.confirm_board_replaced(
+                "Replace the board?", text, confirm_text=confirm_text
+            )
+        )
+
+    def _replace_board(self, candidate: _LayoutCandidate, done: str) -> None:
+        """Put the candidate on the board once nothing on it is still running.
+
+        Stopping is asked for, never waited for: a host closes only after it
+        has reached terminal, and what would be waiting is the window.  So
+        the candidate is held, and the beat commits it the moment the last
+        running node has stopped -- as ``remove_logic`` retires one row.  A
+        candidate arriving meanwhile replaces the one still waiting.
+        """
+
+        running = self._running_logic()
+        if not running:
+            self._pending_board = None
+            self._commit_layout_candidate(candidate)
+            self._report(done, severity="task")
+            return
+        self._pending_board = (candidate, done)
+        for binding in running:
+            self.stop_logic(binding.node_id)
+        self._report(
+            "stopping "
+            + ", ".join(binding.node_id for binding in running)
+            + "; the board is replaced when they have stopped",
+            severity="task",
+        )
+
+    def clear_board(self) -> bool:
+        """Take every panel and logic node off the board, after asking."""
+
+        if not self.panels and not self.logic:
+            self._report("the board is already empty", severity="idle")
+            return False
+        if not self._confirm_board_replaced("Clearing", confirm_text="Clear"):
+            return False
+        self._replace_board(
+            _LayoutCandidate(logic=(), panels=(), panel_serial=self._panel_serial),
+            "board cleared",
+        )
+        return True
+
     def apply_layout(
         self,
         document: Mapping[str, Any] | LayoutDocument,
+        *,
+        stop_running: bool = False,
     ) -> bool:
         """Put a written-down board back, on whatever is publishing now.
 
@@ -5052,13 +5139,15 @@ class ConsolePresenter:
         publishes today is reported and skipped rather than refused wholesale --
         a board saved with four panels and reopened against three live signals
         is still three quarters of an afternoon's work.
+
+        Running logic is the operator's to stop.  A caller without their word
+        is refused; one that carries it (``stop_running``) has those nodes
+        stopped once the new board is known to be loadable, and the board
+        goes up when they have.
         """
 
-        if any(
-            binding.pending is not None
-            or (binding.host is not None and binding.host.running)
-            for binding in self.logic.values()
-        ):
+        running = self._running_logic()
+        if running and not stop_running:
             self._report(
                 "stop running logic before loading a board",
                 severity="warning",
@@ -5076,7 +5165,7 @@ class ConsolePresenter:
                 f"cannot load the layout: {_error_text(error)}", severity="error"
             )
             return False
-        self._commit_layout_candidate(candidate)
+        self._replace_board(candidate, "layout loaded")
         if candidate.missing_signals:
             self._report(
                 "nothing is publishing "
@@ -5135,7 +5224,11 @@ class ConsolePresenter:
                 f"cannot read that layout: {_error_text(error)}", severity="error"
             )
             return False
-        return self.apply_layout(document)
+        if self._running_logic() and not self._confirm_board_replaced(
+            "Loading this layout", confirm_text="Stop and load"
+        ):
+            return False
+        return self.apply_layout(document, stop_running=True)
 
     def save_screenshot(self) -> str:
         """Save one ordinary image of the whole current TaskConsole GUI."""
@@ -7283,6 +7376,13 @@ class ConsolePresenter:
             ):
                 if self._retire_logic(binding):
                     continue
+
+        pending_board = self._pending_board
+        if pending_board is not None and not self._running_logic():
+            self._pending_board = None
+            candidate, done = pending_board
+            self._commit_layout_candidate(candidate)
+            self._report(done, severity="task")
 
         for binding in tuple(self.logic.values()):
             candidate = binding.pending
