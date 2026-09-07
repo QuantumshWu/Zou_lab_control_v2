@@ -44,6 +44,10 @@ class FigureViewerHandle(QtCore.QObject):
     save_image_requested = QtCore.pyqtSignal()
     info_action_requested = QtCore.pyqtSignal(str)
     pulse_tab_closed = QtCore.pyqtSignal(str)
+    pulse_include_off_toggled = QtCore.pyqtSignal(str, bool)
+    pulse_selectors_toggled = QtCore.pyqtSignal(str, bool)
+    pulse_size_committed = QtCore.pyqtSignal(str, str)
+    pulse_save_requested = QtCore.pyqtSignal(str)
 
     def __init__(
         self,
@@ -85,6 +89,10 @@ class FigureViewerHandle(QtCore.QObject):
         view.save_image_requested.connect(self.save_image_requested)
         view.info_action_requested.connect(self.info_action_requested)
         view.pulse_tab_closed.connect(self.pulse_tab_closed)
+        view.pulse_include_off_toggled.connect(self.pulse_include_off_toggled)
+        view.pulse_selectors_toggled.connect(self.pulse_selectors_toggled)
+        view.pulse_size_committed.connect(self.pulse_size_committed)
+        view.pulse_save_requested.connect(self.pulse_save_requested)
         view.close_requested.connect(self.close_requested)
         if window is not None and hasattr(window, "closed"):
             window.closed.connect(self.closed)
@@ -293,6 +301,15 @@ class FigureViewerHandle(QtCore.QObject):
 
     def show_pulse_placeholder(self, key: str, text: str) -> bool:
         return self._view.show_pulse_placeholder(key, text)
+
+    def set_pulse_size_names(self, key: str, names: tuple[str, ...]) -> bool:
+        return self._view.set_pulse_size_names(key, names)
+
+    def set_pulse_size(self, key: str, size: str) -> bool:
+        return self._view.set_pulse_size(key, size)
+
+    def set_pulse_status(self, key: str, text: str) -> bool:
+        return self._view.set_pulse_status(key, text)
 
     def close_pulse_tab(self, key: str) -> bool:
         return self._view.close_pulse_tab(key)

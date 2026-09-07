@@ -449,6 +449,78 @@ def test_every_public_loop_bracket_stands_inside_the_timeline_axes() -> None:
     assert bottoms[1] == bottoms[2] == authored
     assert bottoms[3] < bottoms[2]
 
+def test_period_names_are_printed_over_their_spans_above_the_rows() -> None:
+    """A pulse is read by its periods: each name over its span, a rule at
+    every boundary, in a band above the top row that the brackets and the
+    frame make room for.  A timeline written without periods draws as it
+    always did."""
+
+    from zlc_plot import (
+        PulseBlock,
+        PulseChannel,
+        PulseLoopMarker,
+        PulsePeriodMark,
+        PulseTimelineData,
+        pulse_timeline,
+    )
+
+    def timeline(periods):
+        return pulse_timeline(
+            PulseTimelineData(
+                channels=(PulseChannel("laser", "Laser"),),
+                blocks=(PulseBlock("laser", 0.0, 4.0e-6, label="Init"),),
+                loop_markers=(PulseLoopMarker(0.0, 12.0e-6, "Run ×2"),),
+                periods=periods,
+                time_unit="s",
+                total_duration=12.0e-6,
+            )
+        )
+
+    marks = (
+        PulsePeriodMark(0.0, 4.0e-6, "cooling"),
+        PulsePeriodMark(4.0e-6, 12.0e-6, "probe"),
+    )
+    tops: dict[bool, float] = {}
+    for named in (False, True):
+        session = timeline(marks if named else ())
+        try:
+            renderer = session._renderer
+            renderer.draw()
+            axes = renderer.primary_axes
+            tops[named] = float(axes.get_ylim()[1])
+            labels = [
+                text for text in renderer._artists["pulse:period_labels"] if text.get_visible()
+            ]
+            bounds = renderer._artists["pulse:period_bounds"]
+            rail = renderer._artists["pulse:loop_left"][0]
+            if not named:
+                assert labels == [] and len(bounds) == 0
+                continue
+            assert [text.get_text() for text in labels] == ["cooling", "probe"]
+            palette = renderer.style.palette
+            assert palette.pulse_period != palette.pulse_name, (
+                "period names are inked on the background, not in the blocks' white"
+            )
+            for text in labels:
+                assert text.get_color() == palette.pulse_period
+            np.testing.assert_allclose(
+                [float(text.get_position()[0]) for text in labels], [2.0e-6, 8.0e-6]
+            )
+            row_top = renderer.style.pulse.row_height / 2.0
+            for text in labels:
+                assert float(text.get_position()[1]) > row_top, "the band sits above the top row"
+                assert float(np.max(rail.get_ydata())) > float(text.get_position()[1]), (
+                    "the bracket rail clears the band"
+                )
+                assert float(text.get_position()[1]) < tops[True]
+            np.testing.assert_allclose(
+                [float(line.get_xdata()[0]) for line in bounds], [0.0, 4.0e-6, 12.0e-6]
+            )
+        finally:
+            session.close()
+    assert tops[True] > tops[False], "the frame grows by the band"
+
+
 def test_environment_message_rescales_raster_to_reported_pixel_ratio() -> None:
     """The browser's pixel-density report must drive the kernel raster size."""
 

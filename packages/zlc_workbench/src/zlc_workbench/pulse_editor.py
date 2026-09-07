@@ -741,6 +741,7 @@ def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
         PulseChannel,
         PulseDacScanSegment,
         PulseLoopMarker,
+        PulsePeriodMark,
         PulseScanRegion,
         PulseTimelineData,
     )
@@ -753,6 +754,17 @@ def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
         starts.append(elapsed)
         elapsed += _nanoseconds(period.duration, period.unit) * 1e-9
     total = elapsed
+    # The periods themselves, named as the operator named them, for the
+    # band the renderer prints above the rows.
+    period_marks = tuple(
+        PulsePeriodMark(
+            start,
+            start + _nanoseconds(period.duration, period.unit) * 1e-9,
+            period.name or period.period_id,
+        )
+        for start, period in zip(starts, sequence.periods)
+        if _nanoseconds(period.duration, period.unit) > 0
+    )
 
     channels: list[Any] = []
     blocks: list[Any] = []
@@ -908,6 +920,7 @@ def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
         scan_regions=tuple(regions),
         scan_dac_segments=tuple(segments),
         loop_markers=tuple(markers),
+        periods=period_marks,
     )
 
 

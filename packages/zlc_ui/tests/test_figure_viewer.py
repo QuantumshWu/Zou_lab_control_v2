@@ -212,9 +212,10 @@ assert [console.tabs.tabText(i) for i in range(console.tabs.count())] == ['Monit
 
 
 def test_a_played_pulse_gets_a_read_only_tab_beside_board_and_edit() -> None:
-    """A Devices row's action opens one preview tab per played pulse: the
-    picture and its scroll, no control row; a second open focuses it, and
-    closing the tab tells the presenter which one went."""
+    """A Devices row's action opens one preview tab per played pulse -- the
+    editor's preview page, controls and all, each control speaking with the
+    tab's key; a second open focuses it, and closing the tab tells the
+    presenter which one went."""
 
     _run_qt(
         """
@@ -225,9 +226,13 @@ from zlc_ui.qt import ensure_qt_app
 app = ensure_qt_app(['pulse-tab'])
 view = FigureViewerView()
 handle = FigureViewerHandle(None, view)
-actions, closed = [], []
+actions, closed, controls = [], [], []
 handle.info_action_requested.connect(actions.append)
 handle.pulse_tab_closed.connect(closed.append)
+handle.pulse_include_off_toggled.connect(lambda key, on: controls.append(('off', key, on)))
+handle.pulse_selectors_toggled.connect(lambda key, on: controls.append(('selectors', key, on)))
+handle.pulse_size_committed.connect(lambda key, size: controls.append(('size', key, size)))
+handle.pulse_save_requested.connect(lambda key: controls.append(('save', key)))
 view.set_archive_info(
     (('Devices', (('sequencer pulse (scan)', {'text': 'Open scan', 'action': 'pulse:k'}),)), ('Flow', ())),
     {'nodes': (), 'edges': ()},
@@ -242,7 +247,16 @@ assert view.tabs.count() == before + 1
 assert view.tabs.tabText(view.tabs.currentIndex()) == 'Pulse · scan'
 assert handle.has_pulse_tab('k')
 page = view._pulse_tabs['k']
-assert not page.controls.isVisibleTo(page), 'a played pulse is read-only: no control row'
+assert page.preview_size_combo.isVisibleTo(page) and page.preview_selectors_switch.isVisibleTo(page)
+assert handle.set_pulse_size_names('k', ('2x2', '4x4')) and handle.set_pulse_size('k', '4x4')
+assert page.preview_size == '4x4'
+assert handle.set_pulse_status('k', '4x4 · 3 periods') and page.preview_status.text() == '4x4 · 3 periods'
+page.preview_include_off.setChecked(True)
+page.preview_selectors_switch.setChecked(True)
+page.preview_size_combo.setCurrentText('2x2')
+page.preview_size_combo.activated[int].emit(page.preview_size_combo.currentIndex())
+page.preview_save_figure_button.click()
+assert controls == [('off', 'k', True), ('selectors', 'k', True), ('size', 'k', '2x2'), ('save', 'k')], controls
 class _Host:
     logical_size = (120, 80)
     def __init__(self):

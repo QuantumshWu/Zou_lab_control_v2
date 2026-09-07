@@ -55,7 +55,7 @@ def build(
     from ..console import ConsolePresenter
     from ..device_use import DeviceUseCoordinator
     from ..panel_catalog import task_console_fitting_spec
-    from ..pulse_preview import build_pulse_preview_host
+    from ..pulse_preview import build_pulse_preview_host, resize_pulse_preview_host
     from ..viewer import FigureViewerPresenter
 
     if workspace is None:
@@ -128,6 +128,7 @@ def build(
         save_front=editor_render.save_front,
         confirm_discard=getattr(view, "confirm_discard", None),
         make_pulse_preview=build_pulse_preview_host,
+        resize_pulse_preview=resize_pulse_preview_host,
     )
 
 

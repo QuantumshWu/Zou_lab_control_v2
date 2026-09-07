@@ -151,6 +151,10 @@ class _ViewerView:
         self.save_image_requested = _Signal()
         self.info_action_requested = _Signal()
         self.pulse_tab_closed = _Signal()
+        self.pulse_include_off_toggled = _Signal()
+        self.pulse_selectors_toggled = _Signal()
+        self.pulse_size_committed = _Signal()
+        self.pulse_save_requested = _Signal()
         self.close_requested = _Signal()
         self.pulse_tabs: dict[str, dict] = {}
         self.tabs: tuple = ()
@@ -287,8 +291,31 @@ class _ViewerView:
 
     def open_pulse_tab(self, key, title) -> None:
         self.pulse_tabs.setdefault(
-            str(key), {"title": str(title), "host": None, "placeholder": ""}
+            str(key),
+            {"title": str(title), "host": None, "placeholder": "", "mounts": 0,
+             "size_names": (), "size": "", "status": ""},
         )
+
+    def set_pulse_size_names(self, key, names) -> bool:
+        tab = self.pulse_tabs.get(str(key))
+        if tab is None:
+            return False
+        tab["size_names"] = tuple(names)
+        return True
+
+    def set_pulse_size(self, key, size) -> bool:
+        tab = self.pulse_tabs.get(str(key))
+        if tab is None:
+            return False
+        tab["size"] = str(size)
+        return True
+
+    def set_pulse_status(self, key, text) -> bool:
+        tab = self.pulse_tabs.get(str(key))
+        if tab is None:
+            return False
+        tab["status"] = str(text)
+        return True
 
     def has_pulse_tab(self, key) -> bool:
         return str(key) in self.pulse_tabs
@@ -298,6 +325,7 @@ class _ViewerView:
         if tab is None:
             return False
         tab["host"] = host
+        tab["mounts"] += 1
         return True
 
     def show_pulse_placeholder(self, key, text) -> bool:
@@ -1074,30 +1102,72 @@ def test_a_played_pulse_is_offered_on_the_device_tab_and_drawn_on_its_own(saved)
     presenter = _built_presenter(view)
     try:
         built: list[tuple[object, str]] = []
+        resized: list[tuple[object, str]] = []
 
         class _Host:
             closed = False
+            interaction = None
+            saved: list[Path] = []
+            logical_size = (300, 200)
 
             def close(self) -> None:
                 self.closed = True
+
+            def set_interaction_enabled(self, enabled: bool) -> None:
+                self.interaction = bool(enabled)
+
+            def save(self, target) -> None:
+                Path(target).write_bytes(b"png")
+                self.saved.append(Path(target))
 
         def make(timeline, *, size):
             built.append((timeline, size))
             return _Host()
 
+        def resize(host, timeline, *, size):
+            resized.append((timeline, size))
+            return host.logical_size
+
         presenter._make_pulse_preview = make
+        presenter._resize_pulse_preview = resize
         presenter.description = description
+        presenter.path = path
         presenter.info_action(f"pulse:{played.key}")
-        assert view.pulse_tabs[played.key]["title"] == "Pulse · imaging"
-        _wait_until(
-            lambda: view.pulse_tabs[played.key]["host"] is not None and not presenter._busy
-        )
+        tab = view.pulse_tabs[played.key]
+        assert tab["title"] == "Pulse · imaging"
+        assert tab["size_names"], "the tab offers the same sizes the editor's preview does"
+        _wait_until(lambda: tab["host"] is not None and not presenter._busy)
         ((timeline, size),) = built
         assert timeline.total_duration > 0 and size
         assert [channel.label for channel in timeline.channels]
-        host = view.pulse_tabs[played.key]["host"]
+        assert [mark.name for mark in timeline.periods] == [
+            period.name or period.period_id for period in played_sequence.periods
+        ]
+        host = tab["host"]
+        assert (tab["size"], tab["mounts"]) == (size, 1)
+        assert host.interaction is False
         presenter.info_action(f"pulse:{played.key}")
         assert built == [(timeline, size)], "a second open focuses the tab, it does not redraw"
+
+        # The controls act on the drawing: size and off rows redraw the
+        # standing host, selectors gate its interaction, Save writes it.
+        presenter.set_pulse_size(played.key, "4x4")
+        _wait_until(lambda: tab["mounts"] == 2 and not presenter._busy)
+        assert resized[-1][1] == "4x4" and tab["size"] == "4x4"
+        presenter.set_pulse_include_off(played.key, True)
+        _wait_until(lambda: tab["mounts"] == 3 and not presenter._busy)
+        assert len(resized[-1][0].channels) >= len(timeline.channels)
+        presenter.set_pulse_selectors(played.key, True)
+        assert host.interaction is True
+        presenter.save_pulse_image(played.key)
+        _wait_until(lambda: host.saved and not presenter._busy)
+        assert host.saved[0].parent == path.parent.resolve() and host.saved[0].suffix == ".png"
+        saved_name = next(
+            text[len("saved "):] for text, _error in view.status if text.startswith("saved ")
+        )
+        assert saved_name == f"{path.stem}-pulse-imaging.png"
+        assert (path.parent / saved_name).read_bytes() == b"png"
+
         assert presenter.close_pulse_tab(played.key)
         assert host.closed and played.key not in view.pulse_tabs
         presenter.info_action("pulse:nobody")

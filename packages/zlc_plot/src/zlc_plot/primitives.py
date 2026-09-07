@@ -580,6 +580,30 @@ class PulseLoopMarker:
         object.__setattr__(self, "label", _text(self.label, "loop label"))
 
 
+@dataclass(frozen=True)
+class PulsePeriodMark:
+    """One authored period: where it starts and stops, and what it is called.
+
+    A pulse is written as periods and read by them -- "the cooling", "the
+    readout" -- so the timeline carries the periods beside the channels'
+    levels, and the renderer prints each name over its span and rules its
+    boundaries.
+    """
+
+    start: float
+    stop: float
+    name: str
+
+    def __post_init__(self) -> None:
+        start = _nonnegative_time(self.start, "period start")
+        stop = _nonnegative_time(self.stop, "period stop")
+        if stop <= start:
+            raise ValueError("period stop must be greater than start")
+        object.__setattr__(self, "start", start)
+        object.__setattr__(self, "stop", stop)
+        object.__setattr__(self, "name", _text(self.name, "period name"))
+
+
 @dataclass(frozen=True, slots=True)
 class PulseDacScanSegment:
     trace_name: str
@@ -616,6 +640,9 @@ class PulseTimelineData:
     analog_traces: tuple[PulseAnalogTrace, ...] = ()
     loop_markers: tuple[PulseLoopMarker, ...] = ()
     scan_dac_segments: tuple[PulseDacScanSegment, ...] = ()
+    #: The authored periods in order, each named; empty for a timeline that
+    #: was not written as periods.
+    periods: tuple[PulsePeriodMark, ...] = ()
 
     def __post_init__(self) -> None:
         channels = tuple(self.channels)
@@ -651,6 +678,13 @@ class PulseTimelineData:
         scan_dac_segments = tuple(self.scan_dac_segments)
         if any(not isinstance(item, PulseDacScanSegment) for item in scan_dac_segments):
             raise TypeError("scan_dac_segments must contain PulseDacScanSegment values")
+        periods = tuple(self.periods)
+        if any(not isinstance(item, PulsePeriodMark) for item in periods):
+            raise TypeError("periods must contain PulsePeriodMark values")
+        for earlier, later in zip(periods, periods[1:]):
+            if later.start < earlier.stop:
+                raise ValueError("periods must follow one another without overlap")
+        object.__setattr__(self, "periods", periods)
         unknown_traces = {item.trace_name for item in scan_dac_segments} - set(names)
         if unknown_traces:
             raise ValueError(f"DAC scan segments reference unknown traces: {sorted(unknown_traces)}")
@@ -705,6 +739,7 @@ __all__ = [
     "PulseChannel",
     "PulseDacScanSegment",
     "PulseLoopMarker",
+    "PulsePeriodMark",
     "PulseScanRegion",
     "PulseTimelineData",
 ]

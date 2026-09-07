@@ -2966,6 +2966,33 @@ def test_a_bracket_of_one_is_refused_by_the_model_itself(sequence) -> None:
         PulseBracket(sequence.periods[0].period_id, sequence.periods[-1].period_id, 1)
 
 
+def test_a_timeline_names_its_periods_over_their_spans(sequence) -> None:
+    """The preview prints the periods the operator wrote, by name and span."""
+
+    from zlc_workbench.pulse_editor import _nanoseconds, timeline_of
+
+    view = _EditorView()
+    presenter = PulseEditorPresenter(view, sequence)
+    try:
+        presenter.insert_period(None)
+        presenter.set_period_name(presenter.sequence.periods[0].period_id, "cooling")
+        data = timeline_of(presenter.sequence)
+        periods = presenter.sequence.periods
+        assert [mark.name for mark in data.periods] == [
+            period.name or period.period_id for period in periods
+        ]
+        assert data.periods[0].name == "cooling"
+        assert data.periods[0].start == 0.0
+        for earlier, later in zip(data.periods, data.periods[1:]):
+            assert later.start == pytest.approx(earlier.stop)
+        assert data.periods[-1].stop == pytest.approx(data.total_duration)
+        assert data.periods[0].stop == pytest.approx(
+            _nanoseconds(periods[0].duration, periods[0].unit) * 1e-9
+        )
+    finally:
+        presenter.close()
+
+
 def test_preview_keeps_run_repeats_and_bracket_as_separate_markers(sequence) -> None:
     """Even a full-span bracket cannot replace the complete-Pulse Run loop."""
 

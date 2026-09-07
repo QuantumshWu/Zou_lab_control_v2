@@ -208,6 +208,8 @@ class PaletteConfig:
     data_scatter: str
     pulse_name: str
     pulse_grid: str
+    #: The ink of a pulse's period names and the rules at their boundaries.
+    pulse_period: str
 
     def __post_init__(self) -> None:
         for field in ("series", "pulse_cycle", "bracket_cycle"):
@@ -231,6 +233,7 @@ class PaletteConfig:
             "data_scatter",
             "pulse_name",
             "pulse_grid",
+            "pulse_period",
         ):
             object.__setattr__(self, field, _color(getattr(self, field), field))
 
@@ -432,6 +435,11 @@ class PulseStyleConfig:
     grid_linewidth: float = 0.35
     trace_linewidth: float = 0.65
     block_label_min_span_fraction: float = 0.09
+    #: The band above the top row where period names are printed, in rows.
+    period_band_height: float = 0.6
+    period_label_min_span_fraction: float = 0.06
+    period_boundary_linewidth: float = 0.7
+    period_boundary_alpha: float = 0.35
     analog_zero_alpha: float = 0.5
     analog_zero_dash: tuple[float, tuple[float, float]] = (0.0, (4.0, 3.0))
     scan_region_alpha: float = 0.18
@@ -477,6 +485,8 @@ class PulseStyleConfig:
             "trace_linewidth",
             "scan_badge_pad",
             "scan_dac_linewidth",
+            "period_band_height",
+            "period_boundary_linewidth",
             "repeat_bottom_step",
             "repeat_top_step",
             "repeat_linewidth",
@@ -492,6 +502,8 @@ class PulseStyleConfig:
         for field in (
             "x_margin_fraction",
             "block_label_min_span_fraction",
+            "period_label_min_span_fraction",
+            "period_boundary_alpha",
             "repeat_tick_fraction",
             "repeat_max_foot_fraction",
             "repeat_min_foot_fraction",
@@ -794,6 +806,7 @@ def build_plot_style() -> PlotStyleConfig:
         data_scatter="lightgrey",
         pulse_name="white",
         pulse_grid="0.88",
+        pulse_period="#4A4A4A",
     )
     artists = ArtistStyleConfig(
         curve=LineToken(

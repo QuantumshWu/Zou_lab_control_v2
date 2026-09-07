@@ -304,6 +304,46 @@ def update_pulse_timeline(
         text.update(scan_text)
         text.set_visible(show_scan and number is not None)
 
+    # THE PERIODS, NAMED.  A band above the top row carries each period's
+    # name over its span and a rule at every boundary runs down the rows,
+    # so the drawing reads the way the pulse was written -- by period --
+    # and the brackets and the frame make room for the band.
+    periods = payload.periods
+    band = pulse.period_band_height if periods else 0.0
+    row_top = row_count - 1 + row_height / 2.0
+    edges = tuple(mark.start for mark in periods) + (
+        (periods[-1].stop,) if periods else ()
+    )
+    boundaries = _sync_lines(axis, artists, "pulse:period_bounds", len(edges))
+    for index, edge in enumerate(edges):
+        line = boundaries[index]
+        line.set_data((edge, edge), (pulse.ylim_bottom, row_top + band))
+        line.set_color(style.palette.pulse_period)
+        line.set_linewidth(pulse.period_boundary_linewidth)
+        line.set_alpha(pulse.period_boundary_alpha)
+        line.set_linestyle("-")
+        line.set_clip_on(True)
+        line.set_zorder(pulse.base_zorder - 1.0)
+    period_labels = _sync_texts(axis, artists, "pulse:period_labels", len(periods))
+    for index, mark in enumerate(periods):
+        text = period_labels[index]
+        text.set_position(((mark.start + mark.stop) / 2.0, row_top + band / 2.0))
+        text.set_text(mark.name)
+        text.set_ha("center")
+        text.set_va("center")
+        text.set_clip_on(True)
+        text.set_zorder(pulse.base_zorder + 1.0)
+        text.update(
+            {
+                "fontsize": style.fonts.pulse_bar_label_pt,
+                "color": style.palette.pulse_period,
+            }
+        )
+        text.set_visible(
+            bool(mark.name)
+            and (mark.stop - mark.start)
+            >= pulse.period_label_min_span_fraction * label_duration
+        )
     left_brackets = _sync_lines(
         axis,
         artists,
@@ -332,7 +372,9 @@ def update_pulse_timeline(
         # Bracket visually surround the complete Run loop.
         outer_depth = index
         y_low = pulse.repeat_bottom - pulse.repeat_bottom_step * outer_depth
-        y_high = row_count + pulse.repeat_top_offset + pulse.repeat_top_step * outer_depth
+        y_high = (
+            row_count + band + pulse.repeat_top_offset + pulse.repeat_top_step * outer_depth
+        )
         tick = min(
             max(tick_base, home_span * pulse.repeat_min_foot_fraction),
             (stop - start) * pulse.repeat_max_foot_fraction,
@@ -372,11 +414,12 @@ def update_pulse_timeline(
         text.set_visible(bool(label_value))
 
     axis.set_xlim(left_limit, right_limit)
-    top_limit = row_count + pulse.ylim_top_offset
+    top_limit = row_count + band + pulse.ylim_top_offset
     bottom_limit = pulse.ylim_bottom
     if loop_markers:
         top_limit = (
             row_count
+            + band
             + pulse.repeat_ylim_top_offset
             + pulse.repeat_ylim_top_step * max(0, len(loop_markers) - 1)
         )

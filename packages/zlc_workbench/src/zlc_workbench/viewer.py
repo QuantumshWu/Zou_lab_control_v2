@@ -2245,6 +2245,7 @@ class FigureViewerPresenter:
         save_front: Callable[..., object],
         confirm_discard: Callable[[str], bool] | None = None,
         make_pulse_preview: Callable[..., object] | None = None,
+        resize_pulse_preview: Callable[..., object] | None = None,
     ) -> None:
         self.view = view
         # Asked before edits are thrown away, and answered by a person.
@@ -2286,7 +2287,9 @@ class FigureViewerPresenter:
         #: How a played pulse's timeline becomes a picture -- the Pulse
         #: Editor's own preview builder, injected by the composition root.
         self._make_pulse_preview = make_pulse_preview
-        self._pulse_hosts: dict[str, object] = {}
+        self._resize_pulse_preview = resize_pulse_preview
+        #: Every open pulse tab: its sequence, host and drawing choices.
+        self._pulse_tabs: dict[str, dict[str, object]] = {}
         self._close_requested = False
         self._closed = False
         self._connect()
@@ -2300,6 +2303,10 @@ class FigureViewerPresenter:
             ("data_editor_closed", self.close_data_editor),
             ("info_action_requested", self.info_action),
             ("pulse_tab_closed", self.close_pulse_tab),
+            ("pulse_include_off_toggled", self.set_pulse_include_off),
+            ("pulse_selectors_toggled", self.set_pulse_selectors),
+            ("pulse_size_committed", self.set_pulse_size),
+            ("pulse_save_requested", self.save_pulse_image),
         ):
             signal = getattr(self.view, signal_name, None)
             if signal is not None:
@@ -2330,7 +2337,8 @@ class FigureViewerPresenter:
         The recorded document comes back as the pulse it is, becomes the
         same timeline the Pulse Editor draws, and is rendered off the owner
         thread by the same host builder; the tab shows the picture once it
-        has painted.  Read-only: the document is what played, not a draft.
+        has painted.  The document is what played, not a draft: the tab's
+        controls change how it is drawn, never what it is.
         """
 
         key = str(key)
@@ -2343,35 +2351,40 @@ class FigureViewerPresenter:
             self.view.set_status(f"this archive played no pulse {key!r}", error=True)
             return
         title = f"Pulse · {played.name}"
-        if self.view.has_pulse_tab(key):
+        if key in self._pulse_tabs:
             self.view.open_pulse_tab(key, title)
             return
         if self._make_pulse_preview is None:
             self.view.set_status("this viewer cannot draw pulses", error=True)
             return
+        from zlc_plot import PANEL_SIZE_NAMES
+        from zlc_pulse import sequence_from_tree
+
+        tab: dict[str, object] = {
+            "name": played.name,
+            "sequence": sequence_from_tree(played.tree),
+            "host": None,
+            "include_off": False,
+            "size": "",
+            "selectors": False,
+        }
+        self._pulse_tabs[key] = tab
         self.view.open_pulse_tab(key, title)
+        self.view.set_pulse_size_names(key, tuple(PANEL_SIZE_NAMES))
 
         def draw() -> object:
-            from zlc_plot import recommended_pulse_preset
-            from zlc_pulse import sequence_from_tree
+            data, size = self._pulse_timeline(tab)
+            return self._make_pulse_preview(data, size=size), size
 
-            from .pulse_editor import timeline_of
-
-            sequence = sequence_from_tree(played.tree)
-            data = timeline_of(sequence)
-            rows = len(getattr(data, "channels", ())) + len(
-                getattr(data, "analog_traces", ())
-            )
-            size = recommended_pulse_preset(rows, len(sequence.periods))
-            return self._make_pulse_preview(data, size=size)
-
-        def drawn(host: object) -> None:
-            if not self.view.has_pulse_tab(key):
+        def drawn(result: object) -> None:
+            host, size = result
+            if key not in self._pulse_tabs:
                 # Closed while it was drawing: nothing to show it on.
                 self._close_host(host)
                 return
-            self._pulse_hosts[key] = host
-            self.view.show_pulse(key, host)
+            tab["host"] = host
+            host.set_interaction_enabled(bool(tab["selectors"]))
+            self._show_pulse(key, size)
             self.view.set_status(f"showing pulse {played.name}")
 
         def failed(error: BaseException) -> None:
@@ -2386,28 +2399,119 @@ class FigureViewerPresenter:
             on_failure=failed,
         )
 
+    @staticmethod
+    def _pulse_timeline(tab: Mapping[str, object]) -> tuple[object, str]:
+        """The timeline the tab draws and the size it is drawn at.
+
+        The operator's size sticks; otherwise the content decides through
+        the one rule zlc_plot owns for pulses, as the editor's preview does.
+        """
+
+        from zlc_plot import recommended_pulse_preset
+
+        from .pulse_editor import timeline_of
+
+        sequence = tab["sequence"]
+        data = timeline_of(sequence, include_off=bool(tab["include_off"]))
+        size = str(tab["size"])
+        if not size:
+            rows = len(getattr(data, "channels", ())) + len(
+                getattr(data, "analog_traces", ())
+            )
+            size = recommended_pulse_preset(rows, len(sequence.periods))
+        return data, size
+
+    def _show_pulse(self, key: str, size: str) -> None:
+        tab = self._pulse_tabs[key]
+        sequence = tab["sequence"]
+        self.view.show_pulse(key, tab["host"])
+        self.view.set_pulse_size(key, size)
+        self.view.set_pulse_status(
+            key, f"{size} · {len(sequence.periods)} periods · played as recorded"
+        )
+
+    def _redraw_pulse(self, key: str) -> None:
+        """Give the tab's standing host the timeline its controls now ask for."""
+
+        tab = self._pulse_tabs.get(key)
+        if tab is None or tab["host"] is None or self._resize_pulse_preview is None:
+            return
+        host = tab["host"]
+
+        def redraw() -> object:
+            data, size = self._pulse_timeline(tab)
+            self._resize_pulse_preview(host, data, size=size)
+            return size
+
+        def redrawn(size: object) -> None:
+            if self._pulse_tabs.get(key) is tab:
+                self._show_pulse(key, str(size))
+
+        self._submit(
+            f"redrawing pulse {tab['name']}…", redraw, redrawn, "cannot redraw pulse"
+        )
+
+    def set_pulse_include_off(self, key: str, enabled: bool) -> None:
+        tab = self._pulse_tabs.get(str(key))
+        if tab is None:
+            return
+        tab["include_off"] = bool(enabled)
+        self._redraw_pulse(str(key))
+
+    def set_pulse_size(self, key: str, size: str) -> None:
+        tab = self._pulse_tabs.get(str(key))
+        if tab is None:
+            return
+        tab["size"] = str(size)
+        self._redraw_pulse(str(key))
+
+    def set_pulse_selectors(self, key: str, enabled: bool) -> None:
+        """Whether the operator may drag on the drawing; the host gates it."""
+
+        tab = self._pulse_tabs.get(str(key))
+        if tab is None:
+            return
+        tab["selectors"] = bool(enabled)
+        if tab["host"] is not None:
+            tab["host"].set_interaction_enabled(bool(enabled))
+
+    def save_pulse_image(self, key: str) -> None:
+        """Write the tab's drawing exactly as drawn, beside the archive."""
+
+        from zlc_durable import unique_path
+
+        tab = self._pulse_tabs.get(str(key))
+        if tab is None or tab["host"] is None or self.path is None:
+            self.view.set_status("there is no drawn pulse to save", error=True)
+            return
+        host = tab["host"]
+        path = self.path
+        name = str(tab["name"])
+
+        def write_image() -> object:
+            def write(temporary: Path) -> None:
+                self._await(host.save(temporary))
+
+            return unique_path(path.parent, f"{path.stem}-pulse-{name}", ".png", writer=write)
+
+        self._submit(
+            f"saving pulse {name}…",
+            write_image,
+            lambda target: self.view.set_status(f"saved {target.name}"),
+            "cannot save the pulse",
+        )
+
     def close_pulse_tab(self, key: str) -> bool:
         """Retire one pulse tab and the host that drew it."""
 
-        key = str(key)
-        host = self._pulse_hosts.pop(key, None)
-        if host is not None:
-            self._close_host(host)
+        tab = self._pulse_tabs.pop(str(key), None)
+        if tab is not None and tab["host"] is not None:
+            self._close_host(tab["host"])
         return self.view.close_pulse_tab(key)
 
     def _close_pulse_tabs(self) -> None:
-        for key in tuple(self._pulse_hosts) + tuple(
-            key for key in self._open_pulse_tab_keys() if key not in self._pulse_hosts
-        ):
+        for key in tuple(self._pulse_tabs):
             self.close_pulse_tab(key)
-
-    def _open_pulse_tab_keys(self) -> tuple[str, ...]:
-        description = self.description
-        return tuple(
-            item.key
-            for item in (description.pulses if description else ())
-            if self.view.has_pulse_tab(item.key)
-        )
 
     def _remember_added_panel(self, _kind: object) -> None:
         self._active_panel_id = next(reversed(self.panels), "")
