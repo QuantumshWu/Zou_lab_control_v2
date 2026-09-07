@@ -663,6 +663,18 @@ def make_host(
     selected_source = (
         str(source_signal or "").strip() if has_input else None
     )
+    siblings: tuple[str, ...] = ()
+    if has_input and kind == "processor":
+        # Which sibling outputs a processor reads is usually fixed by its
+        # kind and declared once.  A node that computes what it was asked
+        # to (derive) reads the outputs its expression names, and says so
+        # on the instance; the declaration then only says there ARE inputs.
+        declared_by_node = getattr(node, "dataset_input_siblings", None)
+        siblings = (
+            tuple(declared_by_node)
+            if declared_by_node is not None
+            else tuple(inputs[0].sibling_outputs)
+        )
     return NodeHost(
         node,
         signal_plane,
@@ -674,11 +686,7 @@ def make_host(
         input_name=(
             inputs[0].name if has_input and kind == "processor" else None
         ),
-        input_siblings=(
-            inputs[0].sibling_outputs
-            if has_input and kind == "processor"
-            else ()
-        ),
+        input_siblings=siblings,
         input_delivery=(
             str(inputs[0].delivery) if has_input else None
         ),

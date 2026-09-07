@@ -4753,6 +4753,109 @@ def test_task_terminal_removes_only_its_auto_previews(
     assert manual.panel_id in presenter.panels
 
 
+def _settle_logic(presenter, node_id: str, *, timeout: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout
+    while presenter.logic[node_id].host.running and time.monotonic() < deadline:
+        presenter.poll_logic()
+        time.sleep(0.005)
+    presenter.poll_logic()
+
+
+def test_a_derive_publishes_the_counts_of_the_occupied_sites(
+    presenter, session, tmp_path
+) -> None:
+    """The console runs a derive as it runs any processor.  Bound to the
+    occupancy's counts, it reads the verdicts from the same publication,
+    and what it publishes -- the photon counts of the sites frame 1 judged
+    occupied, valid there and nowhere else -- opens on a histogram panel
+    like any other signal, expression and all in its record."""
+
+    import numpy as np
+    from zlc_atom.nodes.calibration import (
+        FrameContract,
+        ReadoutModel,
+        ReadoutModelKind,
+        SiteMap,
+        TrapCalibration,
+    )
+    from zlc_workbench.logic import stable_signal_key
+
+    camera_node, _snapshot = _one_shot(session, producer="camera_measurement")
+    site_ids = ("site-0", "site-1")
+    calibration_path = tmp_path / "derive-calibration.json"
+    TrapCalibration(
+        SiteMap(
+            site_ids,
+            np.asarray(((12.0, 10.0), (30.0, 20.0))),
+            np.asarray((True, True)),
+            np.asarray((1.0, 1.0)),
+        ),
+        (
+            ReadoutModel(
+                site_ids,
+                np.asarray((100.0, 100.0)),
+                np.zeros(2),
+                np.ones(2),
+                np.asarray((True, True)),
+                np.asarray((1.0, 1.0)),
+            ),
+        ),
+        ReadoutModelKind.BOX,
+        FrameContract((96, 128)),
+    ).save(calibration_path)
+    occupancy_id = presenter.add_logic(
+        "occupancy",
+        node_id="occupancy",
+        artifact_inputs={"calibration_path": str(calibration_path)},
+        source_signal=camera_node.signal_key("frames"),
+        open_editor=False,
+    )
+    assert presenter.start_logic(occupancy_id) is True
+    _settle_logic(presenter, occupancy_id)
+    counts_signal = stable_signal_key("occupancy", "counts")
+    expression = "a.counts.frame(1).where(a.occupied.frame(1))"
+    derive_id = presenter.add_logic(
+        "derive",
+        node_id="bright",
+        values={"expression": expression},
+        source_signal=counts_signal,
+        open_editor=False,
+    )
+    assert presenter.start_logic(derive_id) is True, presenter.view.status[-3:]
+    _settle_logic(presenter, derive_id)
+    observation = presenter.logic[derive_id].host.observation
+    assert observation.error is None, observation
+
+    front = session.signal_plane.freeze()
+    bright_signal = stable_signal_key("bright", "value")
+    bright = front.value(bright_signal)
+    counts = front.value(counts_signal)
+    occupied = front.value(stable_signal_key("occupancy", "occupied"))
+    assert bright is not None and counts is not None and occupied is not None
+    judged = (
+        np.asarray(occupied.values, dtype=bool)[:, 1:2, :]
+        & np.asarray(occupied.snapshot.expanded_validity(), dtype=bool)[:, 1:2, :]
+    )
+    np.testing.assert_array_equal(
+        np.asarray(bright.snapshot.expanded_validity(), dtype=bool), judged
+    )
+    values = np.asarray(bright.values)
+    expected = np.asarray(counts.values)[:, 1:2, :]
+    np.testing.assert_array_equal(values[judged], expected[judged])
+    assert np.isnan(values[~judged]).all()
+    assert bright.schema.value_schema.value_unit == counts.schema.value_schema.value_unit
+    assert bright.run_record["parameters"]["expression"] == expression
+
+    panel = presenter.add_panel(
+        bright_signal,
+        bright.snapshot,
+        title="bright-site counts",
+        kind="histogram",
+        initial_publication=front.publication(bright_signal),
+    )
+    assert panel is not None, presenter.view.status[-3:]
+
+
 def test_a_facet_grid_panel_of_frames_carries_the_occupancy_overlay(
     presenter, session, tmp_path, monkeypatch
 ) -> None:
