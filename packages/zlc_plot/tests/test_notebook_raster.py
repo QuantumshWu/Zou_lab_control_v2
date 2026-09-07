@@ -452,8 +452,10 @@ def test_every_public_loop_bracket_stands_inside_the_timeline_axes() -> None:
 def test_period_names_are_printed_over_their_spans_above_the_rows() -> None:
     """A pulse is read by its periods: each name over its span, a rule at
     every boundary, in a band above the top row that the brackets and the
-    frame make room for.  A timeline written without periods draws as it
-    always did."""
+    frame make room for.  A name is printed where its span is wide enough
+    ON SCREEN to hold it: the 0.12 µs "kick" hides its name in the home
+    view and shows it once the view zooms onto it.  A timeline written
+    without periods draws as it always did."""
 
     from zlc_plot import (
         PulseBlock,
@@ -463,12 +465,16 @@ def test_period_names_are_printed_over_their_spans_above_the_rows() -> None:
         PulseTimelineData,
         pulse_timeline,
     )
+    from zlc_plot.selectors import NumericRange
 
     def timeline(periods):
         return pulse_timeline(
             PulseTimelineData(
                 channels=(PulseChannel("laser", "Laser"),),
-                blocks=(PulseBlock("laser", 0.0, 4.0e-6, label="Init"),),
+                blocks=(
+                    PulseBlock("laser", 0.0, 4.0e-6, label="Init"),
+                    PulseBlock("laser", 11.88e-6, 12.0e-6, label="kick"),
+                ),
                 loop_markers=(PulseLoopMarker(0.0, 12.0e-6, "Run ×2"),),
                 periods=periods,
                 time_unit="s",
@@ -478,8 +484,13 @@ def test_period_names_are_printed_over_their_spans_above_the_rows() -> None:
 
     marks = (
         PulsePeriodMark(0.0, 4.0e-6, "cooling"),
-        PulsePeriodMark(4.0e-6, 12.0e-6, "probe"),
+        PulsePeriodMark(4.0e-6, 11.88e-6, "probe"),
+        PulsePeriodMark(11.88e-6, 12.0e-6, "kick"),
     )
+
+    def printed(renderer, key):
+        return [text.get_text() for text in renderer._artists[key] if text.fitted]
+
     tops: dict[bool, float] = {}
     for named in (False, True):
         session = timeline(marks if named else ())
@@ -488,15 +499,17 @@ def test_period_names_are_printed_over_their_spans_above_the_rows() -> None:
             renderer.draw()
             axes = renderer.primary_axes
             tops[named] = float(axes.get_ylim()[1])
-            labels = [
-                text for text in renderer._artists["pulse:period_labels"] if text.get_visible()
-            ]
+            labels = renderer._artists["pulse:period_labels"]
             bounds = renderer._artists["pulse:period_bounds"]
             rail = renderer._artists["pulse:loop_left"][0]
+            assert printed(renderer, "pulse:block_labels") == ["Init"], (
+                "a block name is printed only where the block holds it"
+            )
             if not named:
                 assert labels == [] and len(bounds) == 0
                 continue
-            assert [text.get_text() for text in labels] == ["cooling", "probe"]
+            assert [text.get_text() for text in labels] == ["cooling", "probe", "kick"]
+            assert printed(renderer, "pulse:period_labels") == ["cooling", "probe"]
             palette = renderer.style.palette
             assert palette.pulse_period != palette.pulse_name, (
                 "period names are inked on the background, not in the blocks' white"
@@ -504,7 +517,8 @@ def test_period_names_are_printed_over_their_spans_above_the_rows() -> None:
             for text in labels:
                 assert text.get_color() == palette.pulse_period
             np.testing.assert_allclose(
-                [float(text.get_position()[0]) for text in labels], [2.0e-6, 8.0e-6]
+                [float(text.get_position()[0]) for text in labels],
+                [2.0e-6, 7.94e-6, 11.94e-6],
             )
             row_top = renderer.style.pulse.row_height / 2.0
             for text in labels:
@@ -514,8 +528,25 @@ def test_period_names_are_printed_over_their_spans_above_the_rows() -> None:
                 )
                 assert float(text.get_position()[1]) < tops[True]
             np.testing.assert_allclose(
-                [float(line.get_xdata()[0]) for line in bounds], [0.0, 4.0e-6, 12.0e-6]
+                [float(line.get_xdata()[0]) for line in bounds],
+                [0.0, 4.0e-6, 11.88e-6, 12.0e-6],
             )
+
+            # Zoom onto the kick: on screen its span is now wide enough,
+            # so the same document prints the name it hid a moment ago.
+            # (The names left outside the frame are clipped by the axes,
+            # not by this rule: their spans only got wider.)
+            session.set_viewport(
+                session._viewport_x_from_axes(NumericRange(11.8e-6, 12.0e-6)),
+                NumericRange(*map(float, axes.get_ylim())),
+            )
+            renderer.draw()
+            assert "kick" in printed(renderer, "pulse:period_labels")
+            assert "kick" in printed(renderer, "pulse:block_labels")
+            session.reset_viewport()
+            renderer.draw()
+            assert printed(renderer, "pulse:period_labels") == ["cooling", "probe"]
+            assert printed(renderer, "pulse:block_labels") == ["Init"]
         finally:
             session.close()
     assert tops[True] > tops[False], "the frame grows by the band"
