@@ -300,10 +300,12 @@ Node new chunk
 
 - 无密码、认证、TLS或权限UI。
 - Second client默认last-client-wins；旧handler立即失效，takeover前旧active command必须成功Stop/SAFE。
+- 同一client的Stop不排队：其command lane正在等LOAD/FIRE的回复时，client用`open`回复里的cancel token在另一条自己的连接上发一次`cancel`，server执行与takeover/disconnect相同的第一步——command lane旁的SAFE，其stop event打断pending transport——而owner、epoch与command lane都不变；最终SAFE readback仍来自command lane上串行的`safe`。cancel连接一问一答后关闭、从不claim；token不是当前owner的按名拒绝且不碰板子；任何socket始终只有一个线程读写，timeout不因此缩短。
 - 正常连接无idle timeout；控制进程/socket/连接真正断开时自动SAFE。
 - UART auto枚举COM、优先USB VID/PID，并只在word-63 fingerprint匹配后选用；
   显式port把探测限制为该端口。auto探测失败才回退JTAG，显式UART失败则报错。
 - 只有server process持hardware transport；不保留假的进程内Interprocess lease。
+- Device Manager的Remote把本机一个loaded device公布到bench fabric（generic tunable plane；自带协议的device只公布其server地址）。公布即交出：它在Session的DeviceUse里取该device的command claim——任何本地Logic/command占用该device时按名拒绝且不公布；已公布期间所有本地Logic、command、字段写入与rebuild都按名拒绝，直到Remote撤回。撤回先撤公告再释放claim；unload与Shutdown先撤回全部公布。排他是整个device而不是字段，没有第二张owner表。公布的是loaded device所来自的accepted apparatus，不是表单上未Apply的draft；远端proxy不缓存字段，每次Refresh都经fields RPC取当前完整字段投影（metadata/current/live_write/group/device_limits）。
 
 ### 7.4 Host/RTL/build invariants
 
@@ -329,6 +331,7 @@ Node new chunk
 - Correction mutation取得同一DeviceUse claim并冻结mapping revision。
 - Profile记录model、serial、wavelength、phase curve来源和settle语义；不新增hash。
 - Editor明确区分authoring draft与device command；external Task后旧Send不得静默覆盖。
+- Editor的device状态问句（100 ms轮询与每次草稿变化）在Editor自己的串行command executor上问、在Qt线程上显示：一次只有一问在途，command进行中不问——command的交付本身带回它留下的device状态；Qt线程从不等在remote proxy的apply锁后面，远端慢apply只推迟状态行，不冻结event loop。
 
 ### 8.2 Context与artifacts
 

@@ -16,7 +16,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date as _date
-import json
 from numbers import Integral
 import os
 from pathlib import Path
@@ -24,7 +23,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any
 
-from zlc_durable import atomic_write_bytes, day_folder, day_folder_path, readable_json_bytes
+from zlc_durable import day_folder, day_folder_path
 from zlc_durable.paths import resolve_under
 
 from .device_use import DeviceClaim, DeviceUseCoordinator
@@ -82,15 +81,23 @@ def _same_json_value(left: object, right: object) -> bool:
     return left == right
 
 
-def _same_device_setup(left: object, right: object) -> bool:
-    """Compare the factory inputs for two named-device declarations."""
+def _same_device_setup(descriptors: Mapping[str, Any], left: object, right: object) -> bool:
+    """Whether two named-device declarations resolve to the same factory inputs.
 
-    return (
-        left.type_id == right.type_id
-        and _same_json_value(
-            left.to_dict()["parameters"],
-            right.to_dict()["parameters"],
-        )
+    The type, and the parameters AS THE TYPE'S OWN SCHEMA PROJECTS THEM: the
+    schema is the one grammar of a device's settings -- its factory reads the
+    same projection -- so ``"1"`` and ``1`` for an int field are one setup.
+    Comparing the authored spellings instead closed, rebuilt and interrupted
+    a device that nothing had changed on.  A parameter the schema does not
+    declare is refused here by name, before any device is touched.
+    """
+
+    if left.type_id != right.type_id:
+        return False
+    schema = descriptors[left.type_id].authoring_schema
+    return _same_json_value(
+        schema.project_values(left.parameters),
+        schema.project_values(right.parameters),
     )
 
 
@@ -330,18 +337,42 @@ class ExperimentSession:
         if not isinstance(config, InstallationConfig):
             raise TypeError("config must be InstallationConfig")
 
-        return cls(
-            installation=create_installation(
-                config.specs(),
-                simulation=_resolved_simulation(space, config),
-                catalog=catalog,
-                connect_pulse=_connect_pulse,
-            ),
-            signal_plane=SignalDataPlane(),
-            workspace=space,
-            installation_config=config,
-            device_catalog=catalog,
+        # What can fail without a device fails before any device opens.
+        space.prepare()
+        installation = create_installation(
+            config.specs(),
+            simulation=_resolved_simulation(space, config),
+            catalog=catalog,
+            connect_pulse=_connect_pulse,
         )
+        plane = SignalDataPlane()
+        try:
+            return cls(
+                installation=installation,
+                signal_plane=plane,
+                workspace=space,
+                installation_config=config,
+                device_catalog=catalog,
+            )
+        except BaseException as error:
+            # The devices are open and the session that would have owned
+            # them was never delivered: nobody else can close them.  A
+            # device that will not close is said beside the original error
+            # rather than instead of it -- an open device with no owner is
+            # the worse of the two silences.
+            failures: list[BaseException] = [error]
+            for close in (installation.close, plane.close):
+                try:
+                    close()
+                except BaseException as close_error:
+                    failures.append(close_error)
+            if len(failures) > 1:
+                raise BaseExceptionGroup(
+                    "experiment session did not initialise, and not everything "
+                    "it opened closed",
+                    failures,
+                ) from None
+            raise
 
     def __init__(
         self,
@@ -602,7 +633,7 @@ class ExperimentSession:
             after = wanted_by_key.get(key)
             if before is None:
                 continue
-            if after is None or not _same_device_setup(before, after):
+            if after is None or not _same_device_setup(descriptors, before, after):
                 affected.add(key)
                 affected_types.add(before.type_id)
                 if after is not None:
@@ -630,7 +661,9 @@ class ExperimentSession:
             if key in target_by_key
             and key not in affected
             and key in current_by_key
-            and _same_device_setup(current_by_key[key], target_by_key[key])
+            and _same_device_setup(
+                descriptors, current_by_key[key], target_by_key[key]
+            )
         )
         build = tuple(
             item.instance_id

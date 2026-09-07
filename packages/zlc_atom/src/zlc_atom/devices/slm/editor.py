@@ -104,6 +104,7 @@ class SlmEditorControl(QtCore.QObject):
     closed = QtCore.pyqtSignal()
     _solve_ready = QtCore.pyqtSignal(object)
     _command_ready = QtCore.pyqtSignal(object)
+    _device_state_ready = QtCore.pyqtSignal(object)
 
     def __init__(self, session: object, device_key: str) -> None:
         super().__init__()
@@ -118,9 +119,16 @@ class SlmEditorControl(QtCore.QObject):
         self._pattern_metadata: dict[str, object] = {"source": "deterministic-seed"}
         self._phase_metadata: dict[str, object] = {"source": "authoring-draft"}
         self._system_correction: dict[str, object] | None = None
-        self._context_command_receipt = dict(self.device.last_command_receipt)
-        self._draft_command_revision = int(self.device.command_revision)
-        self._draft_mapping_revision = int(self.device.mapping_revision)
+        #: The device's last answer -- revisions, commanded phase, receipt --
+        #: as this editor shows it.  Asked on the command executor, where the
+        #: device's I/O belongs, never on the Qt thread; one question in
+        #: flight at a time.
+        self._device_state_in_flight = False
+        self._device_state = self._read_device_state()
+        command_revision, mapping_revision, _phase, receipt = self._device_state
+        self._context_command_receipt = dict(receipt)
+        self._draft_command_revision = command_revision
+        self._draft_mapping_revision = mapping_revision
         self._device_diverged = False
         self._objective_kind = "spots"
         height, width = self.shape
@@ -182,11 +190,15 @@ class SlmEditorControl(QtCore.QObject):
             self._guarded("command finish", self._finish_command),
             QtCore.Qt.QueuedConnection,
         )
+        self._device_state_ready.connect(
+            self._guarded("device state", self._show_device_state),
+            QtCore.Qt.QueuedConnection,
+        )
         self._device_poll = QtCore.QTimer(self)
         self._device_poll.setInterval(100)
-        # The HOT boundary: this fires ten times a second and reads the
-        # device directly -- a remote transport hiccup must be a status
-        # line, never ten chances a second to kill the whole bench.
+        # The HOT boundary: this fires ten times a second -- a remote
+        # transport hiccup must be a status line, never ten chances a
+        # second to kill the whole bench.
         self._device_poll.timeout.connect(
             self._guarded("device poll", self._sync_device_state)
         )
@@ -811,9 +823,10 @@ class SlmEditorControl(QtCore.QObject):
             np.zeros(self.shape, dtype=np.float32), self.shape
         )
         self._system_correction = None
-        self._context_command_receipt = dict(self.device.last_command_receipt)
-        self._draft_command_revision = int(self.device.command_revision)
-        self._draft_mapping_revision = int(self.device.mapping_revision)
+        command_revision, mapping_revision, _phase, receipt = self._device_state
+        self._context_command_receipt = dict(receipt)
+        self._draft_command_revision = command_revision
+        self._draft_mapping_revision = mapping_revision
         self._zernike_status.setText("Off")
         self._show_phase()
         self._show_wavefront()
@@ -860,13 +873,57 @@ class SlmEditorControl(QtCore.QObject):
 
         return guarded
 
+    def _read_device_state(self) -> tuple[int, int, np.ndarray | None, dict[str, object]]:
+        """The device's state question, asked where its I/O belongs."""
+
+        return (
+            int(self.device.command_revision),
+            int(self.device.mapping_revision),
+            self.device.last_commanded_phase,
+            dict(self.device.last_command_receipt),
+        )
+
     def _sync_device_state(self) -> None:
+        """Show what the device last answered, and ask it again off the Qt thread.
+
+        The 100 ms poll and every draft change come through here.  A remote
+        SLM answers its state questions from a cache behind the same lock
+        its apply holds for the whole network round trip, so a question
+        asked on the Qt thread waited behind a Task's Send -- the event
+        loop with it.  The question runs on the command executor instead:
+        serial with this editor's own commands, so it never overtakes one,
+        and asked only while none of them runs, because a command's own
+        delivery reports the device it left behind.  One question is in
+        flight at a time; ``_show_device_state`` shows the answer here.
+        """
+
         if self._closed:
             return
-        command_revision = int(self.device.command_revision)
-        mapping_revision = int(self.device.mapping_revision)
-        phase = self.device.last_commanded_phase
-        receipt = dict(self.device.last_command_receipt)
+        self._render_device_state()
+        if self._device_state_in_flight or self._command_active:
+            return
+        self._device_state_in_flight = True
+        try:
+            future = self._command_executor.submit(self._read_device_state)
+        except BaseException:
+            self._device_state_in_flight = False
+            raise
+        future.add_done_callback(self._device_state_ready.emit)
+
+    @QtCore.pyqtSlot(object)
+    def _show_device_state(self, future: object) -> None:
+        self._device_state_in_flight = False
+        if self._closed:
+            return
+        try:
+            self._device_state = future.result()
+        except Exception as error:
+            self._device_status.setText(f"Device state unavailable: {error}")
+            return
+        self._render_device_state()
+
+    def _render_device_state(self) -> None:
+        command_revision, mapping_revision, phase, receipt = self._device_state
         self._device_diverged = (
             command_revision != self._draft_command_revision or mapping_revision != self._draft_mapping_revision
         )
@@ -1219,10 +1276,11 @@ class SlmEditorControl(QtCore.QObject):
                     "Device command changed before ownership was acquired; reconcile first"
                 )
             result = operation()
-            return (
-                result, int(self.device.command_revision),
-                int(self.device.mapping_revision), dict(self.device.last_command_receipt),
-            )
+            # The device this command left behind, read under the same
+            # lease: the delivery is the editor's next state answer, so the
+            # answer from before the command is never shown as an external
+            # change after it.
+            return result, self._read_device_state()
         finally:
             lease.release()
 
@@ -1246,13 +1304,15 @@ class SlmEditorControl(QtCore.QObject):
         try:
             result = future.result()
             if claimed:
-                _value, command_revision, mapping_revision, receipt = result
+                _value, delivered = result
+                command_revision, mapping_revision, _phase, receipt = delivered
             elif completion is not None:
                 completion(result)
         except Exception as error:
             self._status.setText(str(error))
         else:
             if claimed:
+                self._device_state = delivered
                 self._draft_mapping_revision = mapping_revision
                 if label.startswith("Phase"):
                     self._draft_command_revision = command_revision
@@ -1345,7 +1405,12 @@ class SlmEditorControl(QtCore.QObject):
             host.close(timeout=0.0)
             for host in (self._target_host, self._phase_host, self._wavefront_host)
         )
-        if self._running or self._command_active or not all(hosts_stopped):
+        if (
+            self._running
+            or self._command_active
+            or self._device_state_in_flight
+            or not all(hosts_stopped)
+        ):
             if time.monotonic() >= self._close_deadline:
                 self._status.setText(
                     "SLM Editor close timed out; waiting for active work to finish"

@@ -16,6 +16,7 @@ import argparse
 import json
 import logging
 import math
+import secrets
 import socket
 import socketserver
 import struct
@@ -74,6 +75,15 @@ REMOTE_METHODS = (
     "snapshot",
     "applied",
 )
+
+#: The cancel lane.  Not a command: it is the one request a client may make
+#: on a connection OTHER than its command lane, and the only thing it may
+#: say there.  A client whose command lane is waiting for a reply (a LOAD
+#: or FIRE in flight) cannot say "stop" on that connection until the reply
+#: arrives, so it says it on a connection of its own, naming itself by the
+#: token its ``open`` was answered with.  One request, then the connection
+#: closes; it never claims the board.
+CANCEL_METHOD = "cancel"
 
 _TREE_TYPES = {
     cls.__name__: cls
@@ -711,7 +721,7 @@ class _RemoteHandler(socketserver.BaseRequestHandler):
                     params = request["params"]
                     if not isinstance(method, str):
                         raise ValueError("request method must be text")
-                    if method not in REMOTE_METHODS:
+                    if method not in REMOTE_METHODS and method != CANCEL_METHOD:
                         raise ValueError(f"unknown remote method: {method}")
                     if not isinstance(params, Mapping):
                         raise ValueError("request params must be an object")
@@ -720,18 +730,29 @@ class _RemoteHandler(socketserver.BaseRequestHandler):
                     # server cannot read costs the client its answer and
                     # nothing else.
                     params = decode_tree(params)
-                    if not claimed:
-                        server.claim_client(client, self.request)
-                        claimed = True
-                        _server_log(
-                            "CLIENT CONNECTED", client=client, detail="status=OWNER"
+                    if method == CANCEL_METHOD:
+                        # The cancel lane never claims: the connection that
+                        # sent this closes after its one answer, below,
+                        # because ``claimed`` stays False.
+                        if claimed:
+                            raise ValueError(
+                                "cancel travels on a connection of its own, "
+                                "beside the command lane"
+                            )
+                        result = server.cancel_owner_command(params, client=client)
+                    else:
+                        if not claimed:
+                            server.claim_client(client, self.request)
+                            claimed = True
+                            _server_log(
+                                "CLIENT CONNECTED", client=client, detail="status=OWNER"
+                            )
+                        result = server.dispatch(
+                            method,
+                            params,
+                            client=client,
+                            connection=self.request,
                         )
-                    result = server.dispatch(
-                        method,
-                        params,
-                        client=client,
-                        connection=self.request,
-                    )
                     response = {"id": request_id, "ok": True, "result": result}
                 except Exception as exc:
                     _server_log(
@@ -836,6 +857,9 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self._owner_epoch = 0
         self._owner_client: str | None = None
         self._owner_connection: socket.socket | None = None
+        #: How the owner names itself on the cancel lane: minted with each
+        #: ownership, handed back by ``open``, gone with the ownership.
+        self._owner_token: str | None = None
         self._owner_started = 0.0
         self._fault: str | None = None
         self._connections: set[socket.socket] = set()
@@ -866,10 +890,12 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                 self._owner_epoch += 1
                 self._owner_client = client
                 self._owner_connection = connection
+                self._owner_token = secrets.token_hex(16)
                 self._owner_started = time.monotonic()
                 return
             self._owner_client = None
             self._owner_connection = None
+            self._owner_token = None
             self._owner_started = 0.0
             self._owner_epoch += 1
             transition_epoch = self._owner_epoch
@@ -913,6 +939,7 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                     self._fault = None
                     self._owner_client = client
                     self._owner_connection = connection
+                    self._owner_token = secrets.token_hex(16)
                     self._owner_started = time.monotonic()
                 else:
                     failure_message = (
@@ -1003,7 +1030,11 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                 if method == "open":
                     self.streamer.open()
                     _server_log("OPEN", client=client, detail=_log_fields(device_session="ready"))
-                    result = None
+                    # The owner learns how to name itself on the cancel
+                    # lane; the ownership checks around this lane have
+                    # already proved the token is this connection's.
+                    with self._client_lock:
+                        result = {"cancel_token": self._owner_token}
                 elif method == "describe":
                     result = self.streamer.describe()
                     _server_log(
@@ -1171,6 +1202,44 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                     raise RuntimeError("this connection no longer owns the pulse server")
             return result
 
+    def cancel_owner_command(
+        self, params: Mapping[str, Any], *, client: str
+    ) -> None:
+        """The owner's Stop, arriving beside its own command lane.
+
+        This is the first step of a takeover and of a disconnect -- SAFE
+        beside the active command lane, whose stop event interrupts the
+        pending transport action -- and nothing more: the owner keeps the
+        board, its epoch does not move, and its own serial ``safe`` request
+        on the command lane delivers the final readback once the interrupted
+        command has retired.  Only the current owner may say it, and it
+        says who it is with the token its ``open`` was answered with.
+        """
+
+        if set(params) != {"token"} or not isinstance(params["token"], str):
+            raise ValueError("cancel parameters must be exactly token")
+        with self._client_lock:
+            owner = self._owner_client
+            if (
+                owner is None
+                or self._fault is not None
+                or params["token"] != self._owner_token
+            ):
+                raise RuntimeError("the cancel token does not name the current owner")
+        _server_log(
+            "CANCEL", client=owner, detail=_log_fields(lane=client, action="SAFE beside the command lane")
+        )
+        result = self.streamer.safe()
+        _server_log(
+            "CANCEL SAFE",
+            client=owner,
+            detail=_log_fields(
+                stable=result.stable,
+                status_reads=_compact_tuple(result.status_reads),
+                clock_enable_words=_compact_tuple(result.clock_enable_words),
+            ),
+        )
+
     def client_disconnected(
         self,
         *,
@@ -1190,6 +1259,7 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             connection_to_drop = self._owner_connection
             self._owner_client = None
             self._owner_connection = None
+            self._owner_token = None
             self._owner_started = 0.0
             self._owner_epoch += 1
             transition_epoch = self._owner_epoch
@@ -1283,14 +1353,29 @@ class RemotePulseStreamer(ConfigValueHolder):
         self.poll_interval = float(poll_interval)
         self._socket: socket.socket | None = None
         self._request_id = 0
+        #: One request in flight per connection: the lock IS the command
+        #: lane, and a thread that finds it held knows a reply is pending.
         self._io_lock = threading.RLock()
+        #: How this client names itself on the cancel lane, from the
+        #: server's answer to ``open``; None while there is no connection.
+        self._cancel_token: str | None = None
         self._init_config_values()
 
     def open(self) -> None:
         with self._io_lock:
             try:
                 self._connect_locked()
-                self._call_locked("open", {})
+                answer = self._call_locked("open", {})
+                if (
+                    not isinstance(answer, Mapping)
+                    or set(answer) != {"cancel_token"}
+                    or not isinstance(answer["cancel_token"], str)
+                    or not answer["cancel_token"]
+                ):
+                    raise ConnectionError(
+                        "the pulse server's open reply carries no cancel token"
+                    )
+                self._cancel_token = answer["cancel_token"]
             except Exception:
                 self._disconnect_locked()
                 raise
@@ -1369,7 +1454,66 @@ class RemotePulseStreamer(ConfigValueHolder):
         return self._call("cursor", {})
 
     def safe(self) -> SafeReadback:
-        return self._call("safe", {})
+        """Stop the board now; answer with the final SAFE readback.
+
+        Stop is the one intent that must not queue.  When another thread of
+        this client holds the command lane -- a LOAD or FIRE waiting for its
+        reply -- the intent goes to the server on the cancel lane first, so
+        its stop event interrupts the pending command instead of waiting
+        behind that command's reply.  The readback still comes from an
+        ordinary ``safe`` request on the command lane, after the interrupted
+        command has retired: final SAFE is serial, only the notice is not.
+        """
+
+        if self._io_lock.acquire(blocking=False):
+            try:
+                return self._call_locked("safe", {})
+            finally:
+                self._io_lock.release()
+        self._cancel_pending_command()
+        with self._io_lock:
+            return self._call_locked("safe", {})
+
+    def _cancel_pending_command(self) -> None:
+        """Say "stop" beside the busy command lane, on a connection of its own.
+
+        One request and one answer on a fresh connection: no thread ever
+        reads or writes the command lane's socket but the one holding the
+        lane.  Whatever the lane answers is not the verdict -- the serial
+        ``safe`` that follows is -- so a refusal here (the board changed
+        hands, the server is gone) is narrated and left to that request
+        to report.
+        """
+
+        token = self._cancel_token
+        if token is None:
+            return
+        try:
+            with socket.create_connection(
+                (self.host, self.port), timeout=self.connect_timeout
+            ) as lane:
+                lane.settimeout(self.request_timeout)
+                _send_frame(
+                    lane,
+                    {"id": 1, "method": CANCEL_METHOD, "params": {"token": token}},
+                )
+                answer = _recv_frame(lane)
+        except OSError as error:
+            _LOG.info(
+                "CLIENT CANCEL LANE UNREACHABLE endpoint=%s:%d error=%s: %s",
+                self.host,
+                self.port,
+                type(error).__name__,
+                str(error).replace(chr(10), " "),
+            )
+            return
+        if not isinstance(answer, Mapping) or answer.get("ok") is not True:
+            _LOG.info(
+                "CLIENT CANCEL LANE REFUSED endpoint=%s:%d answer=%s",
+                self.host,
+                self.port,
+                json.dumps(answer, default=str)[:200],
+            )
 
     def snapshot(self) -> dict[str, object]:
         # The set is held here, not on the server, so the server's answer to
@@ -1414,6 +1558,7 @@ class RemotePulseStreamer(ConfigValueHolder):
 
     def _disconnect_locked(self) -> None:
         connection, self._socket = self._socket, None
+        self._cancel_token = None
         if connection is not None:
             try:
                 connection.shutdown(socket.SHUT_RDWR)

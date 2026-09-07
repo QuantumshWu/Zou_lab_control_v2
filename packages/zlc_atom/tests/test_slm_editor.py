@@ -1833,3 +1833,127 @@ def test_send_command_keeps_qt_responsive_holds_lease_and_close_retries(
         _dispose(control, app)
         session.device_use.assert_idle()
         session.installation.close()
+
+
+def test_the_status_poll_never_waits_behind_a_remote_apply(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """The Qt thread asks nothing of a device that may be mid round trip.
+
+    A remote SLM answers its cached state from behind the lock its apply
+    holds for the whole network exchange.  The editor's 100 ms status poll
+    used to read that state on the Qt thread, so a Send from a Task (or a
+    slow server) froze the event loop for as long as the apply took.  The
+    question now runs on the command executor and its answer is shown on
+    the Qt thread: the heartbeat keeps beating while an apply from another
+    thread holds the device, and the answer arrives once it lets go.  A
+    command of the editor's own is its next answer: the board it just
+    commanded is never shown as "changed externally" while the question
+    that follows the delivery is still on its way back.
+    """
+
+    import zlc_atom.devices.slm.device as device_module
+    import zlc_atom.devices.slm.editor as editor
+
+    app = ensure_qt_app()
+    physical_installation = create_installation((DeviceSpec("slm", "slm.virtual"),))
+    physical = physical_installation.device("slm")
+    server = device_module._open_slm_server(physical, "127.0.0.1", 0)
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    apply_started, apply_release = threading.Event(), threading.Event()
+    original_rpc = device_module._rpc_call
+
+    def gated_rpc(endpoint, method, arguments, timeout):
+        if method == "apply":
+            apply_started.set()
+            assert apply_release.wait(5.0)
+        return original_rpc(endpoint, method, arguments, timeout)
+
+    monkeypatch.setattr(device_module, "_rpc_call", gated_rpc)
+    installation = create_installation(
+        (
+            {
+                "key": "slm",
+                "type_id": "slm.hamamatsu_x15213",
+                "config": {"host": "127.0.0.1", "port": server.server_address[1]},
+            },
+        )
+    )
+    session = ExperimentSession(
+        installation=installation,
+        signal_plane=SimpleNamespace(close=lambda: None),
+        workspace=Workspace(tmp_path).prepare(),
+    )
+    device = session.installation.device("slm")
+    external_phase = canonical_phase(np.full(device.shape_yx, 1.25), device.shape_yx)
+    external = threading.Thread(target=device.apply_phase, args=(external_phase,))
+    heartbeat: list[float] = []
+    held = threading.Event()
+    timer = QtCore.QTimer()
+    timer.setInterval(5)
+    timer.timeout.connect(lambda: heartbeat.append(time.monotonic()))
+    control = None
+    try:
+        control = editor.SlmEditorControl(session, "slm")
+        assert "command r0" in control._device_status.text()
+        external.start()
+        assert apply_started.wait(1.0)
+        timer.start()
+        # Several 100 ms polls fire while the apply holds the device's
+        # lock; the event loop must keep beating through every one.
+        _pump(app, lambda: len(heartbeat) >= 60, timeout=1.5)
+        assert not apply_release.is_set()
+        assert "command r0" in control._device_status.text()
+
+        apply_release.set()
+        external.join(timeout=5.0)
+        assert not external.is_alive()
+        _pump(
+            app,
+            lambda: "command r1" in control._device_status.text(),
+            timeout=5.0,
+        )
+        assert "changed externally" in control._device_status.text()
+
+        # Adopt takes the external command as the draft; with the poll
+        # stopped, the reads after Send are exactly the question Send
+        # asks, the delivery's own read, and the question that follows the
+        # delivery -- held, so only the delivery can say what the board is.
+        control._adopt_device_command()
+        assert not control._device_diverged
+        control._device_poll.stop()
+        _pump(app, lambda: not control._device_state_in_flight)
+        reads: list[int] = []
+        original_read = control._read_device_state
+
+        def counted_read():
+            reads.append(len(reads))
+            if len(reads) == 3:
+                assert held.wait(5.0)
+            return original_read()
+
+        monkeypatch.setattr(control, "_read_device_state", counted_read)
+        assert control.send() is True
+        _pump(app, lambda: not control.command_active, timeout=5.0)
+        assert not held.is_set()
+        assert "command r2" in control._device_status.text()
+        assert "changed externally" not in control._device_status.text()
+        assert not control._device_diverged
+        assert control._send.isEnabled()
+        held.set()
+        _pump(app, lambda: not control._device_state_in_flight, timeout=5.0)
+        assert "command r2" in control._device_status.text()
+        assert not control._device_diverged
+    finally:
+        held.set()
+        apply_release.set()
+        external.join(timeout=5.0)
+        timer.stop()
+        if control is not None:
+            _dispose(control, app)
+        session.installation.close()
+        server.shutdown()
+        server.server_close()
+        serving.join(timeout=2.0)
+        physical_installation.close()

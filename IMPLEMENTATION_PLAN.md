@@ -193,6 +193,7 @@
 - Device I/O只在现有串行worker/adapter command lane执行。Refresh去重合并且属于close guard；75 ms live input在相同policy projection及in-flight write期间保留每字段latest-only值，Qt owner只处理plain projection和已完成readback。
 - CameraFrameRecord在adapter边界冻结settings session/epoch；Pylon无法证明live tune前后的buffer边界，tune之后直到本次arm结束的每个read都明确携带old+new（一次read取走部分旧队列不证明其余帧是新设置），重新arm才回到单一epoch；Virtual在trigger时冻结。Runtime使用event-varying record并保持generation-stable run record，finite/scan/indexed保留范围合并为压缩epoch ranges。
 - Figure lineage当前grammar包含每个event record及只解析实际引用epoch的device settings；FigureViewer Device tab读取同一事实。无active Logic的调整不写历史，完整参数状态不复制到每frame。
+- Device Manager的Remote公布是Session DeviceUse里该device的command claim：本地Logic/command占用时按名拒绝且不公布，已公布期间本地Logic、command、字段写入与rebuild按名拒绝直到撤回；公布的是accepted apparatus而非draft，远端proxy每次Refresh经fields RPC取当前完整字段投影、不缓存bounds。SLM Editor的device状态问句在其串行command executor上问、Qt线程只显示答案，command的交付带回它留下的状态；Qt从不等remote proxy的apply锁。
 
 ### 2.6 Plot三进程边界
 
@@ -254,7 +255,7 @@
 - Camera restart selector顺序根修：`_refresh_signal_choices`原来把“首个surface尚未accept、因此`binding.host is None`”误当成“panel尚未mount”，在已有initial `PlotPanelPort`忙于首帧时又启动第二个retarget port；后完成的候选会关闭已接受crosshair的port。恢复路径现在只在唯一生命周期真相`binding.port is None`时创建port，Board继续独占已有port的首帧accept；没有新增状态、helper、selector/restart特判或测试函数。原必现的auto-inference→camera-restart顺序`2 passed`；Workbench全包该缺陷已消失，结果`436 passed`，唯一剩余失败是当前master新增`warm_numba_cache.bat`直接运行layer module的launcher约束，与本cut无关。
 - 长Task partial artifacts：Runtime在worker failure/Stop边界调用domain writer；Feedback普通异常从最后完成candidate生成6组Figure后rollback，Temperature从已提交survival保存partial curve/Figure，Calibration从最新完整三帧cycle保存partial capture（分析完成则保存完整报告）。`run.json`只索引这些已完成文件，不再是失败run唯一内容。
 - Feedback的`candidates/candidate-XXXX.npz`现为标准Science Context；operator可在既有Science Context输入中手动选择它作为新run起点。过程数组移至`data/measurements/measurement-XXXX.npz`。新run从candidate 1开始并使用本次authored update预算；没有resume输入、自动旧run查找、续编号或旧run预算继承。
-- Pulse STATUS ABI当前为LOADED/RUNNING/DONE/ENGINE_ERROR/UNDERFLOW/LINK_ERROR；UART fault不再置engine ERROR，observer failure不再伪装成board error，Remote日志使用ERROR/DONE真实事件名并写status/cursor双读、observer exception与FIRE总elapsed。三层repeat register layout令layout fingerprint更新为`0x5A86511A`，实验板必须重build/program。
+- Pulse STATUS ABI当前为LOADED/RUNNING/DONE/ENGINE_ERROR/UNDERFLOW/LINK_ERROR；UART fault不再置engine ERROR，observer failure不再伪装成board error，Remote日志使用ERROR/DONE真实事件名并写status/cursor双读、observer exception与FIRE总elapsed。Remote client的`safe()`在command lane被LOAD/FIRE占着等回复时，先用`open`回复的cancel token在自己的一条连接上发一次`cancel`（server执行takeover/disconnect的第一步：command lane旁SAFE、stop event打断pending transport，owner/epoch不变），再在command lane上串行`safe`取最终readback；cancel连接从不claim、一问即关。三层repeat register layout令layout fingerprint更新为`0x5A86511A`，实验板必须重build/program。
 - 第一次installed software尝试曾在重负载下出现一次本地SLM测试TCP connect timeout；
   同一wheel的精确case随后连续5/5通过，第二次完整installed software lane通过，因此没有
   用该不可复现事件改动产品remote timeout或server逻辑。

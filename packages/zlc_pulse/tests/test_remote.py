@@ -375,6 +375,173 @@ def test_remote_safe_interrupts_forever_fire_on_the_same_connection() -> None:
             client.disconnect()
 
 
+def test_remote_safe_cancels_a_pending_load_before_its_reply(monkeypatch) -> None:
+    """Stop must not wait behind the previous request's reply.
+
+    An editor's Stop runs on its own worker while the drive worker's LOAD is
+    still waiting for the server to answer.  ``safe()`` used to queue on
+    the client's command lane behind that reply, so the one intent that
+    must reach the board NOW arrived only when the board had finished what
+    it was told to do.  The cancel lane carries it beside the busy lane:
+    the server's stop event interrupts the pending command, the same
+    connection keeps the board, and the final readback still comes from
+    the ordinary serial ``safe`` after the interrupted command retires.
+    """
+
+    geom = _sequence_geometry()
+    source = _sequence()
+    program = compile_sequence(source, geom, 50e6)
+    transport = MemoryRegisterTransport(geom=geom)
+    streamer = PulseStreamer(transport, geom, 50e6, target=source.target)
+    command_entered = threading.Event()
+    natural_release = threading.Event()
+    command_cancelled = threading.Event()
+    original_write = transport.write_words
+
+    def blocked_write(rows, *, stop=None, deadline=None, resend=True):
+        if stop is not None and not command_entered.is_set():
+            command_entered.set()
+            while not natural_release.is_set():
+                if stop.wait(0.01):
+                    command_cancelled.set()
+                    raise RuntimeError("blocked transport command cancelled")
+        return original_write(rows, stop=stop, deadline=deadline, resend=resend)
+
+    monkeypatch.setattr(transport, "write_words", blocked_write)
+    load_failures: list[BaseException] = []
+    safe_results: list[object] = []
+    with _server(streamer) as server:
+        client = _client(server)
+        owner = server.owner_status()[0]
+
+        def load() -> None:
+            try:
+                client.load(program)
+            except BaseException as error:
+                load_failures.append(error)
+
+        def stop() -> None:
+            safe_results.append(client.safe())
+
+        loader = threading.Thread(target=load)
+        stopper = threading.Thread(target=stop)
+        try:
+            loader.start()
+            assert command_entered.wait(1.0)
+            stopper.start()
+            cancelled_without_release = command_cancelled.wait(1.0)
+            if not cancelled_without_release:
+                natural_release.set()
+            loader.join(timeout=2.0)
+            stopper.join(timeout=2.0)
+
+            assert cancelled_without_release is True, (
+                "Stop waited behind the pending reply"
+            )
+            assert not loader.is_alive()
+            assert not stopper.is_alive()
+            assert len(load_failures) == 1
+            assert "cancelled" in str(load_failures[0])
+            assert len(safe_results) == 1
+            assert safe_results[0].stable
+            # Stop is not a takeover: the same connection still owns the board.
+            assert server.owner_status()[0] == owner
+            assert client.snapshot()["firing"] is False
+            assert client.applied() is None
+        finally:
+            natural_release.set()
+            loader.join(timeout=2.0)
+            stopper.join(timeout=2.0)
+            client.disconnect()
+
+
+def test_the_cancel_lane_names_its_owner_by_token(capsys) -> None:
+    """Only the owner may stop the owner's command, and only beside its lane.
+
+    A cancel with a token that is not the current owner's is refused and
+    touches nothing; a cancel sent on the owner's own command lane is
+    refused too, because a busy lane could never carry it in time.  The
+    connection that carried a cancel closes after its one answer, having
+    never claimed the board.
+    """
+
+    import json
+    import struct
+
+    geom = replace(StreamerParams(), max_edges=8, bank_size=2)
+    streamer = PulseStreamer(
+        MemoryRegisterTransport(geom=geom), geom, 50e6, target=_BOARD_TARGET
+    )
+    streamer.open()
+    safes: list[str] = []
+    original_safe = streamer.safe
+
+    def counted_safe():
+        safes.append("safe")
+        return original_safe()
+
+    streamer.safe = counted_safe  # type: ignore[method-assign]
+
+    def send(connection, message):
+        payload = json.dumps(message).encode("utf-8")
+        connection.sendall(struct.pack("!I", len(payload)) + payload)
+
+    def receive(connection):
+        header = b""
+        while len(header) < 4:
+            header += connection.recv(4 - len(header))
+        (size,) = struct.unpack("!I", header)
+        body = b""
+        while len(body) < size:
+            body += connection.recv(size - len(body))
+        return json.loads(body.decode("utf-8"))
+
+    with _server(streamer) as server:
+        client = _client(server)
+        try:
+            token = client._cancel_token
+            assert isinstance(token, str) and token
+            owner = server.owner_status()[0]
+            safes.clear()
+
+            lane = socket.create_connection(
+                ("127.0.0.1", server.server_address[1]), timeout=5.0
+            )
+            try:
+                send(lane, {"id": 1, "method": "cancel", "params": {"token": "not-" + token}})
+                answer = receive(lane)
+                assert answer["ok"] is False
+                assert "does not name the current owner" in answer["error"]["message"]
+                assert safes == [], "a stranger's cancel must not touch the board"
+                assert lane.recv(1) == b"", "one request, then the lane closes"
+            finally:
+                lane.close()
+            assert server.owner_status()[0] == owner, "the cancel lane never claims"
+
+            lane = socket.create_connection(
+                ("127.0.0.1", server.server_address[1]), timeout=5.0
+            )
+            try:
+                send(lane, {"id": 1, "method": "cancel", "params": {"token": token}})
+                assert receive(lane)["ok"] is True
+                assert safes == ["safe"]
+                assert lane.recv(1) == b"", "one request, then the lane closes"
+            finally:
+                lane.close()
+            assert server.owner_status()[0] == owner
+
+            # On the command lane itself, cancel is refused by name and the
+            # session goes on.
+            send(client._socket, {"id": 99, "method": "cancel", "params": {"token": token}})
+            answer = receive(client._socket)
+            assert answer["ok"] is False
+            assert "connection of its own" in answer["error"]["message"]
+            assert client.describe() is not None
+        finally:
+            client.close()
+    assert "ZLC CANCEL" in capsys.readouterr().out
+
+
 def test_remote_logs_lifecycle_events_without_payload_dump(capsys) -> None:
     geom = _sequence_geometry()
     source = _sequence(slotted=True)

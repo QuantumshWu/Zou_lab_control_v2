@@ -83,6 +83,31 @@ def test_a_published_tunable_is_listed_and_driven_over_the_wire(announcer) -> No
     with pytest.raises(RuntimeError, match="10.*Hz grid"):
         remote.tune("frequency_hz", 2_500_000_005.0)
 
+    # Bounds are device truth, not open-time facts: the RF owner moves its
+    # commandable window when a policy edge is tuned, and a Refresh (or the
+    # scan port projection) must offer the window the device accepts NOW.
+    from zlc_atom.nodes.scan.plan import scan_ports_for_devices
+
+    assert remote.tune("frequency_low_hz", 2e9) == 2e9
+    refreshed = {field.metadata.name: field for field in remote.tunable_fields()}
+    local = {field.metadata.name: field for field in source.tunable_fields()}
+    assert (
+        refreshed["frequency_hz"].metadata.minimum,
+        refreshed["frequency_hz"].metadata.maximum,
+    ) == (
+        local["frequency_hz"].metadata.minimum,
+        local["frequency_hz"].metadata.maximum,
+    ) == (2e9, 8e9)
+    assert refreshed["frequency_hz"].current == pytest.approx(2.5e9)
+    port = next(
+        item
+        for item in scan_ports_for_devices({"rf": remote})
+        if item.port.endswith(":frequency_hz")
+    )
+    assert (port.lo, port.hi) == (2e9, 8e9)
+    with pytest.raises(RuntimeError, match="must lie in"):
+        remote.tune("frequency_hz", 1e9)
+
 
 def test_an_endpoint_device_is_announced_for_its_own_protocol(announcer) -> None:
     """A pulse or SLM record carries its server's address, nothing more.

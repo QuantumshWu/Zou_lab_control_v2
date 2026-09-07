@@ -44,6 +44,7 @@ from zlc_atom.install import (
     installation_template_names,
 )
 from .authoring_form import display_value, project_schema
+from .device_use import DeviceClaim, DeviceUseBusy
 
 
 _LOG = logging.getLogger(__name__)
@@ -202,10 +203,12 @@ class DeviceManagerPresenter:
         self._on_shutdown = on_shutdown
         self._on_device_open = on_device_open
         self._active_session: object | None = None
-        #: The bench fabric, started on the first publish and owned
-        #: here for the process's life; the set names what is out.
+        #: The bench fabric, started on the first publish and owned here
+        #: for the process's life.  What is out is named by key, each
+        #: holding the session's device-use claim that keeps local hands
+        #: off the device for as long as a peer may be on it.
         self._announcer = None
-        self._remoted: set[str] = set()
+        self._remoted: dict[str, object] = {}
         self._server_log = _server_log_buffer()
         self._active_config: InstallationConfig | None = None
         self._refresh_pending = False
@@ -734,6 +737,16 @@ class DeviceManagerPresenter:
         the SLM) is announced with its endpoint parameters, this machine's
         LAN address substituted for any loopback, and the existing client
         protocol stays the data plane it always was.
+
+        Published means handed over: the peer owns the device for as long
+        as it is out.  So publication is a device-level claim in the
+        session's own DeviceUse -- the same command claim a local editor
+        takes -- refused by name while any local Logic or command occupies
+        the device, and refusing every local Logic, command, field write
+        and rebuild of that device by name until Remote is withdrawn.  What
+        is announced is the ACCEPTED apparatus the loaded device was built
+        from, never the draft on the form: an un-applied edit is not where
+        the server is.
         """
 
         key = str(instance_id)
@@ -752,17 +765,21 @@ class DeviceManagerPresenter:
         )
 
         if key in self._remoted:
-            if self._announcer is not None:
-                self._announcer.withdraw(key)
-            self._remoted.discard(key)
+            self._withdraw(key)
             self.view.set_remoted(tuple(sorted(self._remoted)))
             self._report(f"{key}: withdrawn from the bench fabric", severity="task")
             return True
-        config = next(
-            (item for item in self.devices if item.instance_id == key), None
+        accepted = self._active_config
+        config = (
+            None
+            if accepted is None
+            else next(
+                (item for item in accepted.devices if item.instance_id == key),
+                None,
+            )
         )
         if config is None:
-            self._report(f"{key}: no authored configuration to announce", severity="warning")
+            self._report(f"{key}: no accepted configuration to announce", severity="warning")
             return False
         from zlc_atom.devices.remote.device_types import FABRIC_TUNABLE_TYPE
 
@@ -817,24 +834,33 @@ class DeviceManagerPresenter:
             # The authored host is where THIS machine dials its own server
             # (loopback); a peer needs this machine's address.
             parameters["host"] = local_lan_ip()
+        record = PublishedDevice(
+            instance_id=key,
+            role=config.role,
+            type_id=announced_type,
+            parameters=parameters,
+            tunable=device if speaks_tunable else None,
+        )
+        try:
+            lease = session.device_use.acquire_command(
+                record,
+                f"remote publication of {key}",
+                (DeviceClaim(key, key, device),),
+            )
+        except DeviceUseBusy as error:
+            self._report(f"{key}: not published -- {error}", severity="warning")
+            return False
         if self._announcer is None:
             try:
                 self._announcer = DeviceAnnouncer()
             except OSError as error:
+                lease.release()
                 self._report(
                     f"the bench fabric could not start: {error}", severity="error"
                 )
                 return False
-        self._announcer.publish(
-            PublishedDevice(
-                instance_id=key,
-                role=config.role,
-                type_id=announced_type,
-                parameters=parameters,
-                tunable=device if speaks_tunable else None,
-            )
-        )
-        self._remoted.add(key)
+        self._announcer.publish(record)
+        self._remoted[key] = lease
         self.view.set_remoted(tuple(sorted(self._remoted)))
         self._report(
             f"{key}: published on the bench fabric (port "
@@ -842,6 +868,18 @@ class DeviceManagerPresenter:
             severity="task",
         )
         return True
+
+    def _withdraw(self, key: str) -> None:
+        """Take one device back from the fabric.
+
+        The announcement goes first, so no new peer request can reach the
+        device; the claim that kept local users off it is released after.
+        """
+
+        lease = self._remoted.pop(key)
+        if self._announcer is not None:
+            self._announcer.withdraw(key)
+        lease.release()
 
     def close_device(self, instance_id: str) -> bool:
         """Request retirement of exactly one currently loaded device."""
@@ -1124,6 +1162,10 @@ class DeviceManagerPresenter:
                 return False
             if not prepared:
                 return False
+        # Nothing stays published that this machine is about to stop
+        # serving -- and the session's close insists that no claim is left.
+        for key in tuple(self._remoted):
+            self._withdraw(key)
         self.busy = True
         self._show()
         self._report("shutting down devices")
@@ -1252,7 +1294,18 @@ class DeviceManagerPresenter:
         )
 
     def _free_name(self, domain: str) -> str:
-        taken = {item.role for item in self.devices}
+        """The first name in a family that no card holds as EITHER identity.
+
+        A new card takes the name as its stable ``instance_id`` and as its
+        role at once, so it must be free as both: a card whose role was
+        edited to ``reference`` is still instance ``camera``, and a second
+        ``camera`` card would collide with it in the file rather than on the
+        screen -- an ordinary Add producing a draft that cannot be saved.
+        """
+
+        taken = {item.role for item in self.devices} | {
+            item.instance_id for item in self.devices
+        }
         if domain not in taken:
             return domain
         index = 2
@@ -1335,10 +1388,8 @@ class DeviceManagerPresenter:
         )
         # A device that left the session leaves the fabric with it: nothing
         # may stay published that this machine can no longer serve.
-        for stale in tuple(self._remoted - loaded_keys):
-            if self._announcer is not None:
-                self._announcer.withdraw(stale)
-            self._remoted.discard(stale)
+        for stale in tuple(key for key in self._remoted if key not in loaded_keys):
+            self._withdraw(stale)
         self.view.set_remoted(tuple(sorted(self._remoted)))
         active_devices = tuple(
             (item.instance_id, item.role, item.type_id)
