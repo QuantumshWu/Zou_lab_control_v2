@@ -1263,3 +1263,34 @@ assert not hasattr(view, "preview_size_pinned")
 assert not hasattr(view, "reset_preview_size_pin")
 """
     )
+
+
+def test_a_channel_row_offers_on_for_digital_and_off_for_every_port() -> None:
+    """Every row can turn its output off in all periods; only a digital row
+    can turn it on -- an analog output has no level to fill with.  Each
+    button names the port it acts on."""
+
+    _run_qt(
+        _schedule_source()
+        + """
+from dataclasses import replace
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.pulse import DelayRowVM, PulseScheduleView
+app = ensure_qt_app(["channel-buttons"])
+view = PulseScheduleView()
+view.set_schedule(replace(vm, delay_rows=tuple(
+    DelayRowVM(port.key, FieldVM("0"), "ns", (("ns", 1.0),)) for port in ports
+)))
+app.processEvents()
+asked = []
+view.fill_port_requested.connect(lambda key: asked.append(("on", key)))
+view.clear_port_requested.connect(lambda key: asked.append(("off", key)))
+_edit, _combo, fill_d, clear_d = view.channel_panel._rows["d0"]
+_edit, _combo, fill_a, clear_a = view.channel_panel._rows["a0"]
+assert fill_d.isVisibleTo(view) and clear_d.isVisibleTo(view)
+assert not fill_a.isVisibleTo(view) and clear_a.isVisibleTo(view)
+assert fill_d.text() == "●" and clear_d.text() == "○"
+fill_d.click(); clear_d.click(); clear_a.click()
+assert asked == [("on", "d0"), ("off", "d0"), ("off", "a0")], asked
+"""
+    )

@@ -414,6 +414,9 @@ class ChannelNamesPanel(FluentGroupBox):
 class ChannelPanel(FluentGroupBox):
     delay_committed = QtCore.pyqtSignal(str, object, str)
     binding_cycle_requested = QtCore.pyqtSignal(str, object, object)
+    #: One output in EVERY period at once: on (a digital port high) or off
+    #: (a digital port low, an analog port without steps).
+    fill_port_requested = QtCore.pyqtSignal(str)
     clear_port_requested = QtCore.pyqtSignal(str)
     scan_array_load_requested = QtCore.pyqtSignal()
     run_repeats_committed = QtCore.pyqtSignal(int)
@@ -427,8 +430,8 @@ class ChannelPanel(FluentGroupBox):
             label_width
             + delay_width
             + time_unit_width()
-            + hide_button_width()
-            + gap * 3
+            + 2 * hide_button_width()
+            + gap * 4
             + px(16)
         )
         self.setMinimumWidth(panel_width)
@@ -470,21 +473,29 @@ class ChannelPanel(FluentGroupBox):
         top_layout.addWidget(self.load_array_button)
         top_layout.addStretch(1)
         self._layout.addWidget(top)
-        self._rows: dict[str, tuple[FluentScanLineEdit, FluentComboBox, FluentButton]] = {}
+        self._rows: dict[
+            str, tuple[FluentScanLineEdit, FluentComboBox, FluentButton, FluentButton]
+        ] = {}
         self._row_labels: dict[str, FluentLabel] = {}
         self._layout.addStretch(1)
 
     def set_delay_rows(
         self,
         rows: tuple[DelayRowVM, ...],
-        labels: dict[str, str] | None = None,
+        ports: tuple[PortRowVM, ...],
     ) -> None:
-        labels = {} if labels is None else {
-            str(key): str(value) for key, value in labels.items()
-        }
+        """One row per delay, beside the port it belongs to.
+
+        The port says what the row can do to it: a digital output can be
+        turned on or off in every period, an analog one only cleared of its
+        steps -- there is no level to fill it with.
+        """
+
+        by_key = {port.key: port for port in ports}
         existing = self._rows
         self._rows = {}
         for row in rows:
+            port = by_key[row.port_key]
             current = existing.pop(row.port_key, None)
             if current is None:
                 edit = FluentScanLineEdit(
@@ -494,36 +505,46 @@ class ChannelPanel(FluentGroupBox):
                 edit.setFixedWidth(px(70, minimum=60))
                 combo = FluentComboBox()
                 combo.setFixedWidth(time_unit_width())
-                clear = FluentButton("X", color=ORANGE)
+                fill = FluentButton("●", color=ACCENT)
+                fill.setFixedWidth(hide_button_width())
+                fill.setToolTip("Turn this output on in every period")
+                clear = FluentButton("○", color=ORANGE)
                 clear.setFixedWidth(hide_button_width())
                 edit.dot.clicked.connect(lambda _checked=False, key=row.port_key: self.binding_cycle_requested.emit("delay", None, key))
                 edit.editingFinished.connect(lambda key=row.port_key, field=edit, units=combo: self._emit_delay(key, field, units))
                 combo.currentTextChanged.connect(lambda _text, key=row.port_key, field=edit, units=combo: self._emit_delay(key, field, units))
+                fill.clicked.connect(lambda _checked=False, key=row.port_key: self.fill_port_requested.emit(key))
                 clear.clicked.connect(lambda _checked=False, key=row.port_key: self.clear_port_requested.emit(key))
                 holder = QtWidgets.QWidget()
                 holder_layout = QtWidgets.QHBoxLayout(holder)
                 holder_layout.setContentsMargins(0, 0, 0, 0)
-                label = FluentLabel(labels.get(row.port_key, row.port_key))
+                label = FluentLabel(port.label)
                 label.setFixedSize(channel_label_width(), channel_row_height())
                 label.setAlignment(QtCore.Qt.AlignCenter)
                 holder_layout.addWidget(label)
                 holder_layout.addWidget(edit)
                 holder_layout.addWidget(combo)
+                holder_layout.addWidget(fill)
                 holder_layout.addWidget(clear)
                 self._layout.insertWidget(self._layout.count() - 1, holder)
                 self._row_labels[row.port_key] = label
-                current = (edit, combo, clear)
-            edit, combo, clear = current
-            label = self._row_labels.get(row.port_key)
-            if label is not None:
-                label.setText(labels.get(row.port_key, label.text()))
+                current = (edit, combo, fill, clear)
+            edit, combo, fill, clear = current
+            digital = port.kind == "digital"
+            fill.setVisible(digital)
+            clear.setToolTip(
+                "Turn this output off in every period"
+                if digital
+                else "Remove this output's steps from every period"
+            )
+            self._row_labels[row.port_key].setText(port.label)
             _apply_field(edit, row.value)
             with signals_blocked(combo):
                 combo.clear()
                 combo.addItems([unit for unit, _quantum in row.unit_quantums] or [row.unit])
                 combo.setCurrentText(row.unit)
             self._rows[row.port_key] = current
-        for key, (edit, combo, clear) in existing.items():
+        for key, (edit, _combo, _fill, _clear) in existing.items():
             holder = edit.parentWidget()
             if holder is not None:
                 self._layout.removeWidget(holder)
@@ -1137,6 +1158,7 @@ class PulseScheduleView(QtWidgets.QWidget):
     bracket_committed = QtCore.pyqtSignal(object, object, int)
     run_repeats_committed = QtCore.pyqtSignal(int)
     visible_ports_committed = QtCore.pyqtSignal(object)
+    fill_port_requested = QtCore.pyqtSignal(str)
     clear_port_requested = QtCore.pyqtSignal(str)
     run_requested = QtCore.pyqtSignal()
     stop_requested = QtCore.pyqtSignal()
@@ -1410,6 +1432,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.names_panel.port_label_committed.connect(self.port_label_committed)
         self.channel_panel.delay_committed.connect(self.delay_committed)
         self.channel_panel.binding_cycle_requested.connect(self.binding_cycle_requested)
+        self.channel_panel.fill_port_requested.connect(self.fill_port_requested)
         self.channel_panel.clear_port_requested.connect(self.clear_port_requested)
         self.channel_panel.scan_array_load_requested.connect(self.scan_array_load_requested)
         self.channel_panel.run_repeats_committed.connect(self.run_repeats_committed)
@@ -1528,10 +1551,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         )
         self.names_panel.set_ports(vm.document_name, vm.ports)
         self.names_panel.set_summary(vm.total_text, len(vm.periods), vm.visible_text)
-        self.channel_panel.set_delay_rows(
-            self._visible_delay_rows(vm),
-            {port.key: port.label for port in vm.ports},
-        )
+        self.channel_panel.set_delay_rows(self._visible_delay_rows(vm), vm.ports)
         self.channel_panel.set_clock(vm.clock_text)
         self.channel_panel.set_scan_summary(vm.scan_summary_text)
         desired: dict[str, PeriodCard] = {}
@@ -1622,8 +1642,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         rows = tuple(row if item.port_key == row.port_key else item for item in self._schedule.delay_rows)
         self._schedule = replace(self._schedule, delay_rows=rows)
         self.channel_panel.set_delay_rows(
-            self._visible_delay_rows(self._schedule),
-            {port.key: port.label for port in self._schedule.ports},
+            self._visible_delay_rows(self._schedule), self._schedule.ports
         )
 
     def set_port_label(self, key: str, label: str) -> None:

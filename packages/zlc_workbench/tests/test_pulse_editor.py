@@ -89,6 +89,7 @@ class _ScheduleView:
         "bracket_committed",
         "run_repeats_committed",
         "visible_ports_committed",
+        "fill_port_requested",
         "clear_port_requested",
         "binding_cycle_requested",
         "scan_array_load_requested",
@@ -355,7 +356,7 @@ class _EditorView:
         "insert_period_requested", "move_period_requested",
         "remove_period_requested", "bracket_committed",
         "run_repeats_committed",
-        "visible_ports_committed", "clear_port_requested",
+        "visible_ports_committed", "fill_port_requested", "clear_port_requested",
         "feedback_requested", "connection_requested", "fire_requested",
         "stop_requested", "sync_requested", "save_requested", "load_requested",
         "values_save_requested", "values_load_requested", "binding_renamed",
@@ -698,18 +699,67 @@ def test_inserting_a_period_copies_its_neighbour(presenter) -> None:
     assert len({period.period_id for period in after}) == len(after)
 
 
-def test_clearing_a_port_leaves_the_others_alone(presenter, sequence) -> None:
+def test_clearing_a_port_leaves_the_others_and_its_delay_alone(presenter, sequence) -> None:
+    """Off in every period is a statement about the periods.  The port's
+    delay is the output's own timing and is not what the button says."""
+
     ports = [port for port in sequence.target.ports if port.kind == "digital"]
     cleared, kept = ports[0], ports[1]
     lanes = sequence.target.raw_lanes
     cleared_index = lanes.index(cleared.lanes[0])
     kept_index = lanes.index(kept.lanes[0])
     kept_before = [period.states[kept_index] for period in presenter.sequence.periods]
+    presenter.view.delay_committed.emit(cleared.key, 40, "ns")
+    delayed = {item.port: item for item in presenter.sequence.delays}
+    assert cleared.key in delayed
 
     presenter.view.clear_port_requested.emit(cleared.key)
 
     assert all(period.states[cleared_index] == 0 for period in presenter.sequence.periods)
     assert [period.states[kept_index] for period in presenter.sequence.periods] == kept_before
+    assert {item.port: item for item in presenter.sequence.delays} == delayed
+
+
+def test_filling_a_port_turns_it_on_in_every_period(presenter, sequence) -> None:
+    ports = [port for port in sequence.target.ports if port.kind == "digital"]
+    filled, kept = ports[0], ports[1]
+    lanes = sequence.target.raw_lanes
+    filled_index = lanes.index(filled.lanes[0])
+    kept_index = lanes.index(kept.lanes[0])
+    kept_before = [period.states[kept_index] for period in presenter.sequence.periods]
+    presenter.view.clear_port_requested.emit(filled.key)
+    assert all(period.states[filled_index] == 0 for period in presenter.sequence.periods)
+
+    presenter.view.fill_port_requested.emit(filled.key)
+
+    assert all(period.states[filled_index] == 1 for period in presenter.sequence.periods)
+    assert [period.states[kept_index] for period in presenter.sequence.periods] == kept_before
+
+
+def test_an_analog_port_can_be_cleared_but_not_filled(presenter, sequence) -> None:
+    analog = next((port for port in sequence.target.ports if port.kind == "dac"), None)
+    if analog is None:
+        pytest.skip("this target has no DAC port")
+    _low, high = analog.signed_range
+    period_id = presenter.sequence.periods[0].period_id
+    presenter.view.analog_committed.emit(period_id, analog.key, "edge", high)
+    assert any(
+        step.port == analog.key
+        for period in presenter.sequence.periods
+        for step in period.analog_steps
+    )
+    before = presenter.sequence
+
+    presenter.view.fill_port_requested.emit(analog.key)
+    assert presenter.sequence is before
+    assert any("no level" in text for text in presenter.view.warnings)
+
+    presenter.view.clear_port_requested.emit(analog.key)
+    assert not any(
+        step.port == analog.key
+        for period in presenter.sequence.periods
+        for step in period.analog_steps
+    )
 
 
 def test_clear_all_makes_one_safe_blank_without_moving_the_file_baseline(
