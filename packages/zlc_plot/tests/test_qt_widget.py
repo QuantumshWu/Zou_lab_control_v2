@@ -201,7 +201,8 @@ def test_qt_widget_receives_front_and_commits_area_drag() -> None:
 @pytest.mark.gui
 def test_staged_widget_accepts_its_exact_current_front_idempotently() -> None:
     try:
-        ensure_qt5_application([])
+        app = ensure_qt5_application([])
+        from PyQt5 import QtCore, QtGui, QtTest
     except Exception as error:  # pragma: no cover - environment-dependent
         pytest.skip(f"Qt5 offscreen unavailable: {error}")
 
@@ -216,7 +217,8 @@ def test_staged_widget_accepts_its_exact_current_front_idempotently() -> None:
     try:
         host.wait_for_front(timeout=10)
         widget = Qt5PlotWidget(host, auto_present=False)
-        current = widget.presented_front
+        assert widget.presented_front is None
+        current = host.front
         assert current is not None
 
         assert widget.present_front(current) is True
@@ -227,6 +229,41 @@ def test_staged_widget_accepts_its_exact_current_front_idempotently() -> None:
         assert widget.present_front(newer) is True
         assert widget.present_front(current) is False
         assert widget.presented_front is newer
+
+        widget.show(); app.processEvents()
+        nx, ny = newer.interaction.axes[0].display_to_normalized(1.0, 2.0)
+        start = QtCore.QPointF(nx * widget.width(), ny * widget.height())
+        end = start + QtCore.QPointF(12.0, 8.0)
+        for kind, point, button in (
+            (QtCore.QEvent.MouseButtonPress, start, QtCore.Qt.MiddleButton),
+            (QtCore.QEvent.MouseMove, end, QtCore.Qt.NoButton),
+        ):
+            app.sendEvent(widget, QtGui.QMouseEvent(
+                kind, point, button, QtCore.Qt.MiddleButton, QtCore.Qt.NoModifier))
+        host.describe_display().result(timeout=10); QtTest.QTest.qWait(20)
+        panned = widget.presented_front
+        assert panned.identity.sequence > newer.identity.sequence
+        assert panned.interaction.axes != newer.interaction.axes
+
+        # A real active pan can preview this shot, but cannot accept the next.
+        data_front = host.update_data(make_snapshot(
+            schema, np.asarray([[4.0, 5.0, 6.0]]), 1,
+            generation=newer.identity.data_generation,
+        )).result(timeout=10).front
+        QtTest.QTest.qWait(20)
+        assert widget.presented_front.identity.data_revision == 0
+        app.sendEvent(widget, QtGui.QMouseEvent(
+            QtCore.QEvent.MouseButtonRelease, end, QtCore.Qt.MiddleButton,
+            QtCore.Qt.NoButton, QtCore.Qt.NoModifier))
+        app.sendEvent(widget, QtGui.QWheelEvent(
+            end, QtCore.QPointF(widget.mapToGlobal(end.toPoint())),
+            QtCore.QPoint(), QtCore.QPoint(0, 120), QtCore.Qt.NoButton,
+            QtCore.Qt.NoModifier, QtCore.Qt.NoScrollPhase, False))
+        host.describe_display().result(timeout=10); QtTest.QTest.qWait(20)
+        assert widget.presented_front.identity.data_revision == 0
+        assert data_front.identity.data_revision == 1
+        assert widget.present_front(host.front) is True
+        assert widget.presented_front.identity.data_revision == 1
     finally:
         if widget is not None:
             widget.close_adapter()

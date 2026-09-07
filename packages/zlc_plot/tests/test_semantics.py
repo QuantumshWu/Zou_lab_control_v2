@@ -107,6 +107,20 @@ def test_a_pinned_axis_narrows_everything_the_panel_shows() -> None:
     finally:
         unscoped.close()
 
+    # Changing one fate must remove its old membership before the typed
+    # Histogram spec is constructed, without disturbing the other axes.
+    pinned_axis, other_pin = AxisRef.point("row"), AxisRef.point("x")
+    other_reduced = AxisRef.repeat("repeat")
+    pinned = HistogramPlot(
+        reduced=(other_reduced,), scope=((pinned_axis, 1.0), (other_pin, 2.0)),
+    )
+    reduced = updated_spec(schema, pinned, row.name, "reduce")
+    assert reduced.reduced == (other_reduced, pinned_axis)
+    assert reduced.scope == ((other_pin, 2.0),)
+    restored = updated_spec(schema, reduced, row.name, scope_fate(1.0))
+    assert restored.reduced == (other_reduced,)
+    assert dict(restored.scope) == {pinned_axis: 1.0, other_pin: 2.0}
+
 def test_a_scoped_axis_can_take_a_curve_role_again() -> None:
     snapshot = _snapshot()
     schema = snapshot.block.schema

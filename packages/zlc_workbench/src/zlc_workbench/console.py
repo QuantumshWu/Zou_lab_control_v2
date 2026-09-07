@@ -1103,11 +1103,17 @@ class ConsolePresenter:
                                 other.state,
                                 semantic=semantic,
                             )
-                projected = self._schema_projected_parameters(
-                    other, semantic_schema, self._RESOLVING_REASON
-                )
-                if projected is not None:
-                    other.parameter_surface = projected
+                surface = other.accepted_surface
+                if (surface is None or surface.description is None
+                        or not _same_panel_plot_identity(surface.target, other.state)):
+                    projected = self._schema_projected_parameters(
+                        other, semantic_schema, self._RESOLVING_REASON
+                    )
+                    if projected is not None:
+                        other.parameter_surface = projected
+                # A described panel keeps its complete visible vocabulary.
+                # The new schema and its controls arrive with the same next
+                # accepted surface, never via a partial form with no Fit rows.
             if other.port is not None:
                 invalidated.append(other.panel_id)
                 targets[other.panel_id] = other.state
@@ -2163,6 +2169,14 @@ class ConsolePresenter:
                     return
                 try:
                     operation = future.result()
+                    identity = operation.front.identity
+                    if not plot_identity_matches_plot_input(
+                        current.plot_input, identity.data_generation, identity.data_revision,
+                    ):
+                        # An interaction can repaint this shot immediately,
+                        # but only the board may advance a same-shot group.
+                        self.board.owe_presentation((binding.panel_id,))
+                        return
                     target = replace(
                         current.target,
                         selector=binding.state.selector,
@@ -2262,6 +2276,11 @@ class ConsolePresenter:
     ) -> None:
         """Swap one staged generation without throwing out of cohort accept."""
 
+        if (old_host is not None and binding.configuration is not None
+                and binding.configuration[0] == "configure"):
+            # The replacement already carries the authored target. Its old
+            # host's completion must not roll back this newly accepted host.
+            self._cancel_panel_configuration(binding)
         errors: list[BaseException] = []
         for resource in (binding.selections, binding.bridge):
             if resource is None:
@@ -2473,6 +2492,7 @@ class ConsolePresenter:
             if (
                 binding.port is None
                 and binding.state.signal
+                and not binding.vacancy
                 and front.value(binding.state.signal) is not None
             ):
                 self.update_panel_state(panel_id, {"signal": binding.state.signal})
@@ -2766,30 +2786,10 @@ class ConsolePresenter:
                 )
                 return False
             vacancy_reason = projection.vacancy
-            if vacancy_reason:
-                # The operator's fates STICK.  A table whose required role
-                # is vacant draws nothing -- that is the panel's state, not
-                # a reason to bounce the edit back.
-                semantic = {
-                    **{
-                        str(name): value
-                        for name, value in dict(current.semantic).items()
-                    },
-                    **{
-                        str(name): value
-                        for name, value in dict(changes["semantic"]).items()
-                    },
-                }
-                # The authored table is kept FIRST and the reason is told
-                # afterwards.  Reporting between deciding the table and
-                # storing it made a broken diagnostic lose the edit: this
-                # branch reported at a severity the real status strip does
-                # not have, and the raise carried the operator's fates away
-                # with it -- the vacant role silently reverted to the axis
-                # they had just taken it from.
-            else:
-                semantic = projection.semantic
-            merged["semantic"] = semantic
+            # A vacancy still carries the complete composed table, including
+            # the displaced axis's new fate. Rebuilding current + edited here
+            # would discard that swap and assign the same role twice.
+            merged["semantic"] = projection.semantic
             binding.vacancy = vacancy_reason
             if vacancy_reason:
                 self._report(f"{panel_id}: {vacancy_reason}", severity="warning")
@@ -2799,14 +2799,18 @@ class ConsolePresenter:
                 current,
                 **{**merged, "overlay_signal": ""},
             )
-            resolved_projection = (
+            projection = (
                 None
                 if candidate_schema is None
-                else self._panel_resolved_spec(
+                else self._panel_projection(
                     binding,
                     projection_candidate,
                     schema=candidate_schema,
                 )
+            )
+            vacancy_reason = "" if projection is None else projection.vacancy
+            resolved_projection = (
+                None if projection is None or not projection.drawable else projection.spec
             )
             if (
                 desired_overlay
@@ -2953,6 +2957,20 @@ class ConsolePresenter:
             binding.state = candidate
             binding.parameter_surface = self._unbound_panel_parameters(candidate)
             binding.frozen_data = None
+            self._publish_panel_state(binding)
+            self._refresh_console_projection()
+            return True
+
+        if needs_mount and vacancy_reason:
+            # A known vacancy is a repairable target, not a failed host.
+            # Do not start a candidate only to cancel it during projection.
+            self._cancel_panel_configuration(binding)
+            binding.state = candidate
+            binding.vacancy = vacancy_reason
+            binding.parameter_surface = (
+                self._schema_projected_parameters(binding, candidate_schema, vacancy_reason)
+                or self._unbound_panel_parameters(candidate)
+            )
             self._publish_panel_state(binding)
             self._refresh_console_projection()
             return True
@@ -3104,6 +3122,10 @@ class ConsolePresenter:
                     self._publish_panel_state(binding)
                     self._refresh_console_projection()
                     return False
+                # Releasing history can retire an axis and normalize the
+                # authored fates on binding.state. Do not send the pre-change
+                # copy back to the port: its target would never match again.
+                candidate = binding.state
                 # Both hosts already own the immutable Dataset they display. A
                 # history-window edit is a Plot projection over those bytes;
                 # Runtime's lease controls only what future publications retain.
@@ -3586,9 +3608,12 @@ class ConsolePresenter:
                             target,
                             operation.value,
                         )
-                        if binding.state not in (target, normalized_target):
+                        if not any(_same_panel_plot_target(binding.state, candidate)
+                                   for candidate in (target, normalized_target)):
                             raise RuntimeError(
-                                "panel target changed while replacement rendered"
+                                "panel target changed while replacement rendered: "
+                                + ", ".join(name for name in type(target).__dataclass_fields__
+                                            if getattr(binding.state, name) != getattr(target, name))
                             )
                         if not candidate_port.can_accept(update, operation):
                             raise RuntimeError(
@@ -3679,9 +3704,12 @@ class ConsolePresenter:
                             )
                         )
                         if accepted is None:
-                            raise RuntimeError(
-                                "configured plot front was not presented"
-                            )
+                            # The port explicitly declines a superseded or
+                            # not-yet-coherent front. Keep the authored target;
+                            # the owed board pass accepts its complete picture.
+                            # A refused configuration itself raises above.
+                            self.board.owe_presentation((binding.panel_id,))
+                            continue
                         description = accepted.description
                         self._accept_panel_display_state(
                             binding,
@@ -3779,6 +3807,15 @@ class ConsolePresenter:
             if editor_pending is not None and editor_pending.done():
                 if binding.editor_configuration is editor_entry:
                     binding.editor_configuration = None
+                if not binding.editor_open or not _same_panel_plot_target(
+                    binding.state, editor_target,
+                ):
+                    # A later user edit superseded this candidate. It cannot
+                    # become the accepted record or report failure on its
+                    # successor; a still-mounted old picture remains intact.
+                    if editor_host is not binding.editor_host:
+                        self._retire_plot_host(editor_host)
+                    continue
                 try:
                     if editor_pending.cancelled():
                         raise RuntimeError("plot editor configuration was cancelled")
@@ -3796,16 +3833,11 @@ class ConsolePresenter:
                     # record, which while the candidate travels is the
                     # Editor's LAST picture, not this one.
                     if (
-                        not binding.editor_open
-                        or editor_frozen is None
-                        or not _same_panel_plot_target(
-                            binding.state,
-                            editor_target,
-                        )
+                        editor_frozen is None
                         or not callable(mount)
                     ):
                         raise RuntimeError(
-                            "plot editor target is no longer current"
+                            "plot editor has no frozen input or view"
                         )
                     accepted_frozen = replace(
                         editor_frozen,
@@ -4162,6 +4194,8 @@ class ConsolePresenter:
         the target moved, the geometry changed -- is replaced, as before.
         """
 
+        from zlc_data.snapshot_projection import indexed_schemas_compatible
+
         entry = binding.editor_configuration
         # The surface Edit has, or the one being staged for it: a host
         # built for the previous freeze takes this one through its data
@@ -4182,11 +4216,17 @@ class ConsolePresenter:
             # No host at all, or a moved target: stage a complete host.
             self._replace_panel_editor_host(binding, frozen=frozen)
             return
-        try:
-            pending = host.update_data(frozen.plot_input)
-        except Exception:
+        previous_schema = previous.snapshot.block.schema
+        next_schema = frozen.snapshot.block.schema
+        if previous_schema != next_schema and not indexed_schemas_compatible(
+            previous_schema, next_schema
+        ):
+            # Plot's data pipeline permits only identical geometry or a
+            # changed indexed window. A new ROI needs a new host before the
+            # asynchronous update is submitted, not after its Future fails.
             self._replace_panel_editor_host(binding, frozen=frozen)
             return
+        pending = host.update_data(frozen.plot_input)
         # A freeze still on its way to this host is superseded, not failed:
         # the host keeps only the latest waiting frame and cancels the rest
         # itself, and the entry simply points at the newest.  A live source
@@ -4426,7 +4466,7 @@ class ConsolePresenter:
         # pass: the display interval paces the bench, not the operator.
         binding.refresh_requested = True
         self.board.owe_presentation((binding.panel_id,))
-        self.board.tick()
+        self.board.tick(stage=not self._paused)
         return True
 
     def save_panel_figure(self, panel_id: str, selected: str) -> bool:

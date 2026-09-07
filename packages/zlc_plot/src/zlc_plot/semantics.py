@@ -798,6 +798,21 @@ def composed_spec(
         desired_roles = dict(current_roles)
         edited_axes = set(fate_values)
 
+        # Edited axes leave their old non-role fate before any intermediate
+        # dataclass is built. New scopes still attach only in _settled.
+        previous_scope = _scope_terms(candidate)
+        terms = tuple(
+            (axis, value) for axis, value in previous_scope.items()
+            if axis not in edited_axes
+        )
+        if terms != tuple(previous_scope.items()):
+            candidate = replace(candidate, scope=terms)
+        if _declares_reduced(candidate):
+            previous_reduced = semantic_spec(candidate).reduced
+            reduced = tuple(axis for axis in previous_reduced if axis not in edited_axes)
+            if reduced != previous_reduced:
+                candidate = _with_reduced(candidate, reduced)
+
         for axis, value in fate_values.items():
             if is_scope_fate(value):
                 if not axis_admits_scope(schema, axis, value):
@@ -899,22 +914,6 @@ def composed_spec(
 
         for role in declared_roles:
             rest[role] = desired_roles[role]
-
-    if role_targets:
-        # A scoped axis promoted back to X/Group/Facet must stop being scoped
-        # before the role-bearing dataclass is constructed.  `_settled`
-        # removes the conflict too, but it runs after `replace`; by then the
-        # dataclass has already (correctly) rejected an axis that appears in
-        # both places.  Apply only removals here.  Newly authored scopes still
-        # wait until roles have been vacated and are attached by `_settled`.
-        before_roles = dict(_scope_terms(candidate))
-        for target in role_targets.values():
-            for scoped in tuple(before_roles):
-                if scoped == target:
-                    before_roles.pop(scoped)
-        terms = tuple(before_roles.items())
-        if terms != tuple(_scope_terms(candidate).items()):
-            candidate = replace(candidate, scope=terms)
 
     def _settled(candidate: PlotSpec) -> PlotSpec:
         """Attach the scope to the FINISHED candidate and repair the conflict.

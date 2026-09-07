@@ -225,6 +225,9 @@ Node new chunk
 - Curve prepared state同时拥有series、valid runs、SEM low/high、fit source presentation与style。Overview error bar必须保留每个独立stem/cap的几何并使用subpixel coverage（可在cell-local supersampled buffer绘制后area downsample），不得把多个bar按整数display column合并成min/max envelope。Facet pooled y范围必须包含finite SEM low/high。Fit annotation由公共Matplotlib MathText语义owner格式化；native可缓存MathText最终RGBA，但不得删除`$`、反斜杠或下标后用第二套plain glyph语法重画。
 - 未声明coordinate labels的数值轴由共享SmartOffset/locator按空间决定ticks；一旦Dataset显式声明完整coordinate labels，每个label都必须在对应tick原样显示，不得为避免重叠静默抽稀、改写或省略。标签密度、Panel尺寸与zoom是operator明确authoring后的取舍。
 - Color-limit drag的每个accepted move是一个原子preview transaction：先更新candidate与native/Agg共享clim authority，再compose一次并发布该front；不得先发布旧颜色front，再在独立cadence分支recolor，release只负责提交最终DisplayState而不是第一次显示颜色变化。
+- Staged Monitor widget的自动front与手势回复只能即时呈现当前已安装数据identity的preview；拖动不授予切换shot的权力。新数据仍由Board按same-shot group显式呈现，交互description若已带新数据则只请求已有presentation pass，不单独推进该成员。普通自动呈现的Notebook/Edit不受Monitor cohort门约束。
+- History表示切换若删除退场轴的fate，后续configure与port必须继续使用同一归一化后的PanelState，不得回写调用前的旧candidate。已同identity描述的Panel在新surface接受前保留完整controls；schema-only fallback只用于尚无对应accepted description的面板，不能用空Fit词汇替换已显示词汇。
+- Pause时Edit/Refresh仍可采用已显示的完整快照，但不得隐式stage新的Live数据；尚欠的新数据刷新由Resume后的正常admission兑现。同数据上的clim、selector和viewport交互继续正常工作。
 - 同一shot的Surface仍原子accept；staging只把active-fit surface排在display-only sibling之前，使更深依赖链先启动，不改变panel cadence、cohort membership或accept顺序。
 - A内的Panel仍各自保留现有Raster/analysis worker、latest-only admission与串行Host状态机；它们
   共享A的一把Python GIL，所以该拓扑保证UI/Runtime与Save/Edit隔离，而不冒充Panel间Python

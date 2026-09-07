@@ -600,18 +600,12 @@ def _qt5_plot_widget_class() -> type[Any]:
                 self._apply_device_pixel_ratio(
                     self._pixel_ratio_observer.current_ratio
                 )
-                # Always subscribed.  ``auto_present`` says who owns the
-                # picture when NO hand is on it -- a console owns that, so
-                # its panels present on the owner's turn with the rest of a
-                # shot cohort.  A hand holding this surface owns its own
-                # picture: its frames answer nobody else and belong to no
-                # cohort, and waiting for one put a gesture's own reply
-                # behind another panel's data frame.  Measured on a live
-                # console: a front promoted at 27 ms reached the screen at
-                # 122, batched with two other panels.
+                # Subscribe for immediate same-data gesture previews. A hand
+                # may change the view, not advance the data outside the
+                # application's coordinated presentation.
                 self._unsubscribe = self._host.subscribe_front(self._on_front)
                 initial_front = self._host.front
-                if initial_front is not None:
+                if self._auto_present and initial_front is not None:
                     self._install_front(initial_front)
             except Exception:
                 self.close_adapter()
@@ -784,7 +778,17 @@ def _qt5_plot_widget_class() -> type[Any]:
                     and front.identity.host_id == self._host.host_id
                     and front.identity.same_surface(latest.identity)
                 ):
-                    self._install_front(front)
+                    self._install_preview(front)
+
+        def _install_preview(self, front: RasterFront) -> bool:
+            if not self._auto_present:
+                current = self._front
+                if current is None or (
+                    front.identity.data_generation != current.identity.data_generation
+                    or front.identity.data_revision != current.identity.data_revision
+                ):
+                    return False
+            return self._install_front(front)
 
         def _install_front(self, front: RasterFront) -> bool:
             if self._closed:
@@ -1245,12 +1249,12 @@ def _qt5_plot_widget_class() -> type[Any]:
             if action in {"release", "cancel", "key"}:
                 self._clear_interaction()
                 if state.publish_front and operation_front is not None:
-                    self._install_front(operation_front)
+                    self._install_preview(operation_front)
                 return
             if candidate is not None:
                 self._candidate = candidate
             if state.publish_front and operation_front is not None:
-                self._install_front(operation_front)
+                self._install_preview(operation_front)
             if (
                 action in {"move", "leave"}
                 and self._pointer_button is None
