@@ -6947,6 +6947,19 @@ def test_save_renders_through_the_settled_editor_host(
         and not binding.frozen_configuration_incompatible,
     )
     host = binding.editor_host
+    presenter.set_deriving(True)
+    _commit_area(binding.host)
+    _settle_panel_hosts(
+        presenter,
+        lambda: bool(binding.state.selector)
+        and binding.editor_configuration is None
+        and bool(binding.frozen_data.description.selectors),
+    )
+    painted = _operation_value(host.describe_display())
+    assert binding.frozen_data.description.selectors == painted.selectors
+    assert painted.selectors[0].value == (
+        _operation_value(binding.host.describe_display()).selectors[0].value
+    )
 
     def refused(*_args, **_kwargs):
         raise AssertionError("Save built a second host beside the settled editor")

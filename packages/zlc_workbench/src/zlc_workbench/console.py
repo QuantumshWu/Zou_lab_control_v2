@@ -14,7 +14,7 @@ session below it does not know a window exists.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import CancelledError, TimeoutError as _AnswerTimeout
+from concurrent.futures import CancelledError, Future, TimeoutError as _AnswerTimeout
 from dataclasses import dataclass, field, replace
 from functools import wraps
 from weakref import ref
@@ -117,8 +117,6 @@ from .selection import (
     panel_plot_selectors,
     observation_matches_plot_input,
     plot_identity_matches_plot_input,
-    _apply_panel_selection,
-    _remove_panel_selection,
     attach_selection_bridge,
 )
 from .topology import format_signal_shape, project_signals
@@ -1682,7 +1680,9 @@ class ConsolePresenter:
                     self._track_panel_configuration(
                         binding,
                         host,
-                        _remove_panel_selection(host, selection),
+                        host.configure(selector_updates={
+                            SelectorKind(selection.selector_kind): None,
+                        }),
                     )
                 self._report(
                     f"{state.title}: the region drawn here is not in the "
@@ -2080,37 +2080,6 @@ class ConsolePresenter:
                 ) from restore_error
         return False
 
-    def _present_when_done(self, binding: PanelBinding, operation: object) -> object:
-        """Present a host operation's front once its worker completes.
-
-        Completion callbacks fire on the plot worker; the present crosses to
-        the GUI thread through the same interaction queue every other raster
-        callback already uses, and is drained by the beat.
-        """
-
-        add = getattr(operation, "add_done_callback", None)
-        if not callable(add):
-            return operation
-        host = binding.host
-
-        def completed(future: object) -> None:
-            try:
-                result = future.result()
-            except BaseException:
-                # Cancelled or failed operations have no front; their errors
-                # surface through the paths that already own them.
-                return
-            self._enqueue_panel_interaction(
-                lambda: (
-                    None
-                    if host is None or binding.host is not host
-                    else self._present_panel_operation(binding, host, result)
-                )
-            )
-
-        add(completed)
-        return operation
-
     def _track_panel_configuration(
         self,
         binding: PanelBinding,
@@ -2123,16 +2092,73 @@ class ConsolePresenter:
         if not callable(add):
             return
 
+        if host is binding.editor_host:
+            # Interaction is an Edit configuration too: its record and Save
+            # eligibility must settle through the same slot as Refresh.
+            previous = binding.editor_configuration
+            if previous is not None and previous[0] is not host:
+                # This mounted host is already being replaced. Do not let
+                # its last gesture overwrite the staged host's freeze.
+                return
+            frozen = self._frozen_intent(binding)
+            if frozen is None:
+                return
+            normalize = False
+            if previous is not None and previous[0] is host:
+                normalize = previous[2]
+                prerequisites = (previous[1], pending)
+                settled = Future()
+                remaining = len(prerequisites)
+                operations = []
+
+                def collect(operation: object, error: BaseException | None) -> None:
+                    nonlocal remaining
+                    if settled.done():
+                        return
+                    remaining -= 1
+                    if error is not None:
+                        settled.set_exception(error)
+                        return
+                    if operation is not None:
+                        operations.append(operation)
+                    if remaining:
+                        return
+                    try:
+                        if not operations:
+                            raise CancelledError()
+                        # Refresh's data pipeline and a gesture can finish
+                        # in either order. Each result owns its description
+                        # AND front; retain the later whole operation.
+                        settled.set_result(max(
+                            operations, key=lambda item: item.front.identity.sequence,
+                        ))
+                    except BaseException as error:
+                        settled.set_exception(error)
+
+                def collected(done: object) -> None:
+                    operation = error = None
+                    try:
+                        operation = done.result()
+                    except CancelledError:
+                        pass  # A coalesced configure is carried by its successor.
+                    except BaseException as caught:
+                        error = caught
+                    self._enqueue_panel_interaction(lambda: collect(operation, error))
+
+                for item in prerequisites:
+                    item.add_done_callback(collected)
+                pending = settled
+            binding.editor_configuration = (
+                host, pending, normalize, binding.state, frozen,
+            )
+            self._wake_when_done(pending)
+            return
+
         def completed(future: object) -> None:
             def accept() -> None:
-                live = host is binding.host
-                current = (
-                    binding.accepted_surface
-                    if live
-                    else binding.frozen_data
-                    if host is binding.editor_host
-                    else None
-                )
+                if host is not binding.host:
+                    return
+                current = binding.accepted_surface
                 if current is None:
                     return
                 try:
@@ -2143,29 +2169,12 @@ class ConsolePresenter:
                         classifier_thresholds=binding.state.classifier_thresholds,
                         focused_cell=binding.state.focused_cell,
                     )
-                    if live:
-                        if binding.port is None:
-                            raise RuntimeError(
-                                "the panel has no live surface to update"
-                            )
-                        if binding.port.accept_configuration(
-                            operation, target
-                        ) is None:
-                            # A refusal here is the widget's stale-race
-                            # answer: a newer front already paints, and it
-                            # was rendered from this same session state.
-                            # The record catches up when that front is
-                            # accepted.  Reporting it turned an ordinary
-                            # race -- a shot landing while a crosshair or
-                            # a colour limit commits -- into "interactive
-                            # plot front was not presented" on the card.
-                            return
-                    else:
-                        binding.frozen_data = replace(
-                            current,
-                            target=target,
-                            description=operation.value,
-                        )
+                    if binding.port is None:
+                        raise RuntimeError("the panel has no live surface to update")
+                    if binding.port.accept_configuration(operation, target) is None:
+                        # A newer front already paints from this same
+                        # session. Its acceptance will advance the record.
+                        return
                     self._normalize_panel_interaction(binding)
                     self._publish_panel_state(binding)
                 except Exception as error:
@@ -5674,13 +5683,6 @@ class ConsolePresenter:
     ) -> object:
         """Keep live and frozen views on one selector/viewport truth."""
 
-        def mirror(operation: object) -> None:
-            # The live panel's widget stages its fronts, so a selector mirrored
-            # onto it must be presented when drawn; the frozen Edit surface
-            # presents its own fronts.
-            if other_host is binding.host:
-                self._present_when_done(binding, operation)
-
         if viewport is not _UNCHANGED:
             # Zoom and pan are how an operator looks, not what they ask for.
             # A viewport used to be routed to the producer whenever no region
@@ -5707,7 +5709,11 @@ class ConsolePresenter:
                 return _UNCHANGED
             self._remember_panel_view(binding, selector={})
             if other_host is not None:
-                mirror(_remove_panel_selection(other_host, previous))
+                self._track_panel_configuration(
+                    binding, other_host, other_host.configure(selector_updates={
+                        SelectorKind(previous.selector_kind): None,
+                    }),
+                )
             if not self._task_science_locked(binding):
                 self._resync_producer_draft(binding, previous)
             return _UNCHANGED
@@ -5719,7 +5725,13 @@ class ConsolePresenter:
             binding, selector=panel_selection_document(selection)
         )
         if other_host is not None:
-            mirror(_apply_panel_selection(other_host, selection))
+            self._track_panel_configuration(
+                binding, other_host, other_host.configure(selector_updates={
+                    item.kind: item for item in panel_plot_selectors(
+                        selection, facet_index=binding.state.focused_cell,
+                    )
+                }),
+            )
         return selection
 
     def _route_panel_viewport(

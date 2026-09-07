@@ -529,36 +529,6 @@ def panel_selection_binds_a_revision(selection: SelectionState) -> bool:
     return any(item.domain not in _NON_AXIS_DOMAINS for item in selection.ranges)
 
 
-def _apply_panel_selection(host: Any, selection: SelectionState) -> object:
-    """Project one panel-owned canonical selection onto a plot surface."""
-
-    kind, x_bounds, y_bounds = _surface_geometry(selection)
-    if kind == "area":
-        assert y_bounds is not None
-        return host.set_area_selector(
-            NumericRange(*x_bounds),
-            NumericRange(*y_bounds),
-            display=False,
-            emit_change=False,
-        )
-    return host.set_x_selector(
-        x_bounds[0],
-        x_bounds[1],
-        display=False,
-        emit_change=False,
-    )
-
-
-def _remove_panel_selection(host: Any, selection: SelectionState) -> object:
-    """Remove the same selector kind from the panel's other plot surface."""
-
-    kind, _x_bounds, _y_bounds = _surface_geometry(selection)
-    return host.remove_selector(
-        SelectorKind(kind),
-        emit_change=False,
-    )
-
-
 class _Unbridgeable(Exception):
     """A selection this translator cannot express, with the reason why."""
 

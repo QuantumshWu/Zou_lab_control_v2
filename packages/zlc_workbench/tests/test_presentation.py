@@ -1207,6 +1207,8 @@ def test_same_geometry_image_frame_generation_restart_updates_in_place(
 def test_atomic_surface_advances_only_after_its_front_is_presented(
     live_bench,
 ) -> None:
+    from zlc_plot.selectors import NumericRange, SelectorKind, SelectorState
+
     plane, node, _sequencer, _monitor = live_bench
     signal = node.signal_key("frames")
     front = plane.freeze()
@@ -1218,6 +1220,11 @@ def test_atomic_surface_advances_only_after_its_front_is_presented(
     shown = _ClosingHost("shown")
     debt: list[str] = []
     refuse = [False]
+    presented = []
+
+    def present(_target, operation):
+        presented.append(operation)
+        return not refuse[0]
 
     port = PlotPanelPort(
         "panel",
@@ -1228,7 +1235,7 @@ def test_atomic_surface_advances_only_after_its_front_is_presented(
             shown,
             _ready("first"),
         ),
-        present=lambda _target, _operation: not refuse[0],
+        present=present,
         invalidate=debt.append,
     )
     _mount(port, value, publication, front)
@@ -1239,6 +1246,18 @@ def test_atomic_surface_advances_only_after_its_front_is_presented(
 
     assert accepted is port.accepted_surface()
     assert accepted.description is second
+
+    # remove_selector returns the removed SelectorState, not a description.
+    # Rejecting that misrouted operation must happen BEFORE touching pixels.
+    removed = SelectorState(SelectorKind.X_RANGE, NumericRange(0.0, 1.0))
+    before_presented = tuple(presented)
+    with pytest.raises(TypeError, match="must return DisplayDescription"):
+        port.accept_configuration(SimpleNamespace(value=removed), object())
+    assert tuple(presented) == before_presented
+    assert port.accepted_surface() is accepted
+    assert port._projection_target is accepted.target
+    assert port.last_error is None
+    assert debt == []
 
     previous = accepted
     refuse[0] = True

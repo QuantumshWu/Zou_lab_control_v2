@@ -1561,6 +1561,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         image_overlay: ImagePointOverlay | None | object = _UNSET,
         classifier_thresholds: object = _UNSET,
         selectors: Sequence[SelectorState] | object = _UNSET,
+        selector_updates: Mapping[SelectorKind, SelectorState | None] | object = _UNSET,
         viewport: RectangleRange | None | object = _UNSET,
         facet_focus: int | None | object = _UNSET,
         fit: Mapping[str, object] | None | object = _UNSET,
@@ -1570,14 +1571,37 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
 
         A complete parameter target may carry its current authored delta so
         transition normalization stays exact even when queued targets coalesce.
+        ``selector_updates`` patches managed kinds at execution time; None
+        removes one kind. If ``selectors`` is also named, replace then patch.
         """
 
+        managed = {
+            SelectorKind.X_RANGE,
+            SelectorKind.AREA,
+            SelectorKind.THRESHOLD,
+            SelectorKind.CROSSHAIR,
+        }
         if selectors is not _UNSET:
             if isinstance(selectors, (str, bytes)):
                 raise TypeError("selectors must be a sequence of SelectorState")
             selector_target = SelectorSnapshot(tuple(selectors)).committed
         else:
             selector_target = None
+        selector_patch = None
+        if selector_updates is not _UNSET:
+            if not isinstance(selector_updates, Mapping):
+                raise TypeError("selector_updates must be a mapping")
+            selector_patch = dict(selector_updates)
+            for kind, state in selector_patch.items():
+                if not isinstance(kind, SelectorKind):
+                    raise TypeError("selector_updates keys must be SelectorKind")
+                if kind not in managed:
+                    raise ValueError("selector_updates kind is not managed by configure")
+                if state is not None:
+                    if not isinstance(state, SelectorState):
+                        raise TypeError("selector_updates values must be SelectorState or None")
+                    if state.kind is not kind:
+                        raise ValueError("selector_updates state kind does not match its key")
         threshold_target = (
             _UNSET
             if classifier_thresholds is _UNSET
@@ -1692,23 +1716,22 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                             self.show_facet_overview(emit_change=False)
                     elif facet_focus != self._facet_focus_index:
                         self.focus_facet(facet_focus, emit_change=False)
-                if selector_target is not None:
-                    managed = {
-                        SelectorKind.X_RANGE,
-                        SelectorKind.AREA,
-                        SelectorKind.THRESHOLD,
-                        SelectorKind.CROSSHAIR,
-                    }
+                if selector_target is not None or selector_patch:
                     current = {
                         state.kind: state
                         for state in self._selector_controller.states()
                         if state.kind in managed
                     }
-                    wanted = {
+                    wanted = dict(current) if selector_target is None else {
                         state.kind: state
                         for state in selector_target
                         if state.kind in managed
                     }
+                    for kind, state in (selector_patch or {}).items():
+                        if state is None:
+                            wanted.pop(kind, None)
+                        else:
+                            wanted[kind] = state
                     for kind in managed:
                         before = current.get(kind)
                         after = wanted.get(kind)

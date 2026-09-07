@@ -1109,6 +1109,11 @@ class PlotPanelPort:
                 for record in self._handed.values()
                 if record.host is host
             )
+        # A selector operation returns its selector, not a description. Refuse
+        # a misrouted result before presenting pixels or changing screen debt.
+        description = getattr(operation, "value", None)
+        if not hasattr(description, "spec"):
+            raise TypeError("a live plot configuration must return DisplayDescription")
         basis = self._front_basis(operation, surface, handed)
         if basis is None:
             self._request_invalidation()
@@ -1122,9 +1127,6 @@ class PlotPanelPort:
             # control, not a failure to report.
             self._request_invalidation()
             return None
-        description = getattr(operation, "value", None)
-        if not hasattr(description, "spec"):
-            raise TypeError("a live plot configuration must return DisplayDescription")
         advanced = basis is not surface
         with self._state_lock:
             current = self._surface

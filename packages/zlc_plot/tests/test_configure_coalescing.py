@@ -13,6 +13,7 @@ from __future__ import annotations
 from threading import Event
 
 import numpy as np
+import pytest
 
 from data_factory import (
     axis,
@@ -24,7 +25,7 @@ from data_factory import (
 from zlc_data import OwnedSnapshot, REPEAT
 from zlc_plot import AxisRef, CurvePlot
 from zlc_plot.raster import RasterPlotHost
-from zlc_plot.selectors import NumericRange, RectangleRange
+from zlc_plot.selectors import CrosshairPoint, NumericRange, RectangleRange, SelectorKind, SelectorState
 
 
 def _snapshot() -> OwnedSnapshot:
@@ -37,7 +38,7 @@ def _snapshot() -> OwnedSnapshot:
 
 
 def test_a_later_configure_carries_the_queued_one_forward() -> None:
-    """The title edit and the mirrored viewport both land."""
+    """Queued fields and kind-local selector edits land as one description."""
 
     host = RasterPlotHost.from_plot(_snapshot(), CurvePlot(AxisRef.point("x")))
     gate = Event()
@@ -52,7 +53,19 @@ def test_a_later_configure_carries_the_queued_one_forward() -> None:
         host.dispatch_control(block)
         assert started.wait(2.0)
 
-        first = host.configure(parameters={"title": "from Setting"})
+        crosshair = SelectorState(SelectorKind.CROSSHAIR, CrosshairPoint(1.0, 2.0))
+        newer_crosshair = SelectorState(SelectorKind.CROSSHAIR, CrosshairPoint(1.5, 2.5))
+        x_range = SelectorState(SelectorKind.X_RANGE, NumericRange(0.5, 1.5))
+        newer_range = SelectorState(SelectorKind.X_RANGE, NumericRange(0.25, 1.75))
+        area = SelectorState(SelectorKind.AREA,
+                             RectangleRange(NumericRange(0.5, 1.5), NumericRange(1.5, 2.5)))
+        newer_area = SelectorState(SelectorKind.AREA,
+                                   RectangleRange(NumericRange(0.25, 1.75), NumericRange(1.25, 2.75)))
+        # This setter has not run when the patch is submitted. The patch
+        # must read execution-time state, not replay an earlier empty tuple.
+        host.set_crosshair_selector(1.0, 2.0, display=False)
+        first = host.configure(parameters={"title": "from Setting"},
+                               selector_updates={SelectorKind.X_RANGE: x_range})
         viewport = RectangleRange(NumericRange(0.5, 1.5), NumericRange(1.5, 2.5))
         second = host.configure(viewport=viewport)
         gate.set()
@@ -64,6 +77,44 @@ def test_a_later_configure_carries_the_queued_one_forward() -> None:
         description = host.describe_display().result(timeout=10).value
         assert description.display_state["title"] == "from Setting"
         assert description.viewport == viewport
+        assert {state.kind: state.value for state in description.selectors} == {
+            SelectorKind.CROSSHAIR: crosshair.value, SelectorKind.X_RANGE: x_range.value}
+
+        for targets, expected in (
+            (({"selector_updates": {SelectorKind.X_RANGE: x_range}},
+              {"selector_updates": {SelectorKind.CROSSHAIR: newer_crosshair}},
+              {"selector_updates": {SelectorKind.X_RANGE: newer_range}}),
+             {SelectorKind.X_RANGE: newer_range.value, SelectorKind.CROSSHAIR: newer_crosshair.value}),
+            (({"selector_updates": {SelectorKind.X_RANGE: x_range}},
+              {"selectors": (crosshair,), "selector_updates": {SelectorKind.AREA: area}},
+              {"selector_updates": {SelectorKind.CROSSHAIR: None, SelectorKind.AREA: newer_area}}),
+             {SelectorKind.AREA: newer_area.value}),
+        ):
+            gate.clear()
+            started.clear()
+            host.dispatch_control(block)
+            assert started.wait(2.0)
+            operations = [host.configure(**target) for target in targets]
+            gate.set()
+            answer = operations[-1].result(timeout=10)
+            assert {state.kind: state.value for state in answer.value.selectors} == expected
+            assert answer.front.interaction.selectors == answer.value.selectors
+            assert answer.front.identity.data_revision == 0
+            assert answer.value.display_state["title"] == "from Setting"
+
+        before = host.front
+        noop = host.configure(selector_updates={SelectorKind.X_RANGE: None}).result(timeout=10)
+        assert noop.front is before, "removing an absent kind is a configure no-op"
+        assert {state.kind: state.value for state in noop.value.selectors} == {SelectorKind.AREA: newer_area.value}
+        for patch, message in (
+            ({"area": None}, "keys must be SelectorKind"),
+            ({SelectorKind.X_RANGE: crosshair}, "kind does not match"),
+            ({SelectorKind.AREA: "not a state"}, "must be SelectorState or None"),
+        ):
+            with pytest.raises((TypeError, ValueError), match=message):
+                host.configure(parameters={"title": "must not land"}, selector_updates=patch).result(timeout=10)
+            assert host.front is before
+            assert host.describe_display().result(timeout=10).value.display_state["title"] == "from Setting"
     finally:
         gate.set()
         host.close(timeout=10)

@@ -1326,6 +1326,7 @@ class RasterPlotHost:
         image_overlay: "ImagePointOverlay | None | object" = _UNSET,
         classifier_thresholds: object = _UNSET,
         selectors: Sequence[SelectorState] | object = _UNSET,
+        selector_updates: Mapping[SelectorKind, SelectorState | None] | object = _UNSET,
         viewport: RectangleRange | None | object = _UNSET,
         facet_focus: int | None | object = _UNSET,
         fit: Mapping[str, object] | None | object = _UNSET,
@@ -1345,6 +1346,9 @@ class RasterPlotHost:
         viewport or facet_focus.  Whichever arrived first had its fields
         silently dropped, with nothing told: an edit in Setting simply did
         not take, or a mirrored viewport did not follow.
+
+        Selector patches merge by kind. A later complete ``selectors`` target
+        drops older patches; patches in that same call then apply on top.
         """
 
         configuration: dict[str, object] = {}
@@ -1366,6 +1370,10 @@ class RasterPlotHost:
             configuration["classifier_thresholds"] = tuple(classifier_thresholds)
         if selectors is not _UNSET:
             configuration["selectors"] = tuple(selectors)
+        if selector_updates is not _UNSET:
+            if not isinstance(selector_updates, Mapping):
+                raise TypeError("selector_updates must be a mapping")
+            configuration["selector_updates"] = dict(selector_updates)
         if viewport is not _UNSET:
             configuration["viewport"] = viewport
         if facet_focus is not _UNSET:
@@ -1379,6 +1387,13 @@ class RasterPlotHost:
             queued = self._queued_configuration
             if queued is not None:
                 merged = dict(queued)
+                if "selectors" in configuration:
+                    merged.pop("selector_updates", None)
+                elif "selector_updates" in configuration:
+                    configuration["selector_updates"] = {
+                        **merged.get("selector_updates", {}),
+                        **configuration["selector_updates"],
+                    }
                 merged.update(configuration)
                 configuration = merged
             self._queued_configuration = configuration

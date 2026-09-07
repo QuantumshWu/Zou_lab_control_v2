@@ -161,6 +161,7 @@
   Add/Delete、跨domain移动或length改变才把受影响domain明确重建成dense authored map，不能把
   sparse/serpentine scan在普通Apply时静默膨胀成Cartesian product。
 - Plot共享手势现要求Area press只arm：无move时0 candidate、0 selection callback、0 overlay render；首个真实held move才启动preview。Qt double-click的首个press/release和Notebook explicit double均不得生成Area，已有Area空白click清除语义保留但不再通过degenerate draft实现。
+- GUI探索使用既有ConsoleBench、真实Qt控件事件和zlc_ui截图，记录可重放操作及front安装/paint/accepted状态；截图不能替代瞬态状态证据。所有运行结果保持在ignored目录。选区镜像统一提交partial configure并复用Edit配置接受入口，删除只呈现像素而不更新冻结描述的旁路。
 - Numeric axis继续由SmartOffset/locator防重叠；既有Dataset的显式coordinate labels全部忠实
   保存与显示，不做renderer端抽稀。Manual Data editor允许编辑axis coordinate values但不提供
   labels authoring，因而不再维护partial-label草稿或补全规则。
