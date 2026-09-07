@@ -445,17 +445,18 @@ host.close(timeout=10)
 """
     )
 
-def test_a_card_takes_the_new_presets_room_the_moment_it_is_picked() -> None:
-    """A preset is a size the plotting package already knows.
+def test_a_card_moves_with_its_picture_and_never_ahead_of_it() -> None:
+    """A card that frames a picture changes size with that picture, once.
 
-    It plans the canvas, and its answer does not depend on the kind or the
-    cell count -- so the card asks, and is right at once, instead of waiting
-    for a picture to be drawn at the new size and being wrong until then.
+    Picking a preset does not move the card: the picture on it is still the
+    old size, and a frame that jumped first stood around the old picture,
+    strip re-elided, until the new one was painted -- a middle state the
+    operator saw on every resize.  When the picture drawn at the preset
+    lands, the card frames it in that same event and tells the board once.
     The card's own half -- its strip and its margins -- it measures.
 
-    Measured before this: the card kept the old rectangle, so growing clipped
-    241 px of plot until a drag re-packed the board, and shrinking left 263 px
-    of blank under the strip.
+    An empty card is the exception: a board packs it before any picture
+    exists, so it is the preset's planned frame at once.
     """
 
     _run_qt(
@@ -478,25 +479,14 @@ pad = tested_module.scaled_px(2) + tested_module.CARD_PAD
 packed = []
 card.geometry_changed.connect(lambda: packed.append(card.size()))
 
-def framed(size):
-    # Whatever this context can say a preset's picture measures: with the
-    # Workbench present that IS the plotting package's plan, and in this
-    # package alone it is zlc_ui's own cell.  Either way the card asks and
-    # is right at once, and the picture corrects it if the two differ.
-    planned = panel_display_size(size)
-    return (
-        card.width() == planned[0] + 2 * tested_module.CARD_PAD
-        and card.height() == planned[1] + band.height() + pad
-    )
-
 for size in ('4x4', '2x2'):
     packed.clear()
+    before = card.size()
     card.set_panel_size(size)
     app.processEvents()
-    # At once -- not one front later.
-    assert framed(size), (size, card.size(), panel_display_size(size))
-    assert packed, 'the card resized without telling the board'
-    # And when the picture arrives it fits the room exactly.
+    # Not yet: the picture on the card is still the old size.
+    assert card.size() == before, (size, card.size(), before)
+    assert not packed, 'the card moved before its picture did'
     host.set_size(size).result(timeout=20)
     wait_until(
         lambda size=size: (
@@ -506,10 +496,34 @@ for size in ('4x4', '2x2'):
         message=f'the plot never redrew at {size}',
     )
     app.processEvents()
-    # The picture landed, and the card frames THAT: a preset's planned size
-    # and a drawn picture's size are the same number wherever both are known.
+    # The picture landed, and in that same event the card framed THAT
+    # picture exactly, and told the board exactly once.
+    assert len(packed) == 1, packed
     assert card.height() - band.height() - widget.height() == pad, size
     assert card.width() - widget.width() == 2 * tested_module.CARD_PAD, size
+
+# Whatever this context can say a preset's picture measures: with the
+# Workbench present that IS the plotting package's plan, and in this
+# package alone it is zlc_ui's own cell.  The empty card asks, at once.
+bare = PanelCardView('panel-2', 'Plot')
+bare.set_size_choices(('1x2', '2x2', '4x4'), '2x2')
+bare.set_panel_size('4x4')
+planned = panel_display_size('4x4')
+assert bare.width() == planned[0] + 2 * tested_module.CARD_PAD, (bare.width(), planned)
+assert bare.height() == planned[1] + bare._title_band.height() + pad, (bare.height(), planned)
+
+# A widget made over a host that already has a front shows it from its
+# first moment, before any card could listen: the card frames it on mount.
+late = Qt5PlotWidget(host)
+assert late.presented_front is not None
+framed_card = PanelCardView('panel-3', 'Plot')
+framed_card.set_size_choices(('1x2', '2x2', '4x4'), '2x2')
+framed_card.set_surface(late)
+app.processEvents()
+assert framed_card.width() - late.width() == 2 * tested_module.CARD_PAD
+assert framed_card.height() - framed_card._title_band.height() - late.height() == pad
+framed_card.set_surface(None)
+late.close_adapter()
 
 card.set_surface(None)
 widget.close_adapter()
