@@ -590,3 +590,114 @@ def test_every_axis_shows_at_least_two_labels_even_as_a_tiny_cell(
             assert len(shown) >= 2, (name, inches, axis.axis_name, shown)
     finally:
         plt.close(figure)
+
+
+def _offset_parts(text: str) -> tuple[float, float]:
+    """The (scale, constant) an offset text states; 1 and 0 when absent."""
+
+    scale, constant = 1.0, 0.0
+    for part in text.replace("\n", " ").split():
+        if part.startswith("×1e"):
+            scale = 10.0 ** int(part[3:])
+        else:
+            constant = float(part)
+    return scale, constant
+
+
+def test_the_printed_offset_reconstructs_every_coordinate_exactly() -> None:
+    """The offset is an operand, so it is printed with every digit it has.
+
+    Labels ``0 1 2 3 4`` beside ``+1.234e8`` said 123400000..123400004 of
+    an axis over 123456789..123456793: the locator's exact constant had
+    been rounded to fit a character budget, and every coordinate read
+    56789 too low.
+    """
+
+    figure, axes = _drawn(123456789.0, 123456793.0, surface="panel", inches=6.0)
+    try:
+        for axis in (axes.xaxis, axes.yaxis):
+            locator = axis.get_major_locator()
+            scale, constant = _offset_parts(axis.get_offset_text().get_text())
+            assert constant == 123456789.0
+            labels = [text.get_text() for text in axis.get_ticklabels()]
+            ticks = [float(value) for value in axis.get_majorticklocs()]
+            assert len(labels) == len(ticks) >= 2
+            for label, tick in zip(labels, ticks):
+                assert float(label) * scale + constant == tick
+            assert ticks == list(locator.ticks)
+    finally:
+        plt.close(figure)
+
+
+def _colorbar(low: float, high: float):
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.colors import Normalize
+
+    figure = plt.figure(figsize=(3.0, 2.0), dpi=72)
+    axes = figure.add_subplot(111)
+    colorbar = figure.colorbar(
+        ScalarMappable(norm=Normalize(low, high), cmap="gray"), ax=axes
+    )
+    return figure, colorbar
+
+
+def test_a_colorbar_spells_close_ends_apart() -> None:
+    """Two identical labels are one statement; the ends grow until they differ.
+
+    10001 and 10002 fit in five characters each, but the spelling was
+    capped at four significant digits at every length the colorbar tried,
+    so all four tiers read ``1e4, 1e4`` and the ladder -- rightly refusing
+    a repeated label -- had nothing left to print.
+    """
+
+    from zlc_plot.ticks import declare_colorbar_ticks
+
+    figure, colorbar = _colorbar(10001.0, 10002.0)
+    try:
+        declare_colorbar_ticks(colorbar, label_pt=LABEL_PT, label_chars=5)
+        figure.canvas.draw()
+        labels = [
+            text.get_text()
+            for text in colorbar.ax.get_yticklabels()
+            if text.get_text()
+        ]
+        assert labels == ["10001", "10002"]
+    finally:
+        plt.close(figure)
+
+
+def test_a_colorbar_limit_change_keeps_the_size_its_labels_were_priced_at() -> None:
+    """The locator owns the drawn size once the configuration exists.
+
+    Restating the authored size on every limit change grew the labels back
+    to it while the locator still recorded the smaller size it had priced
+    them at -- and, seeing no change, never restored it.
+    """
+
+    from zlc_plot.config import DEFAULTS
+    from zlc_plot.style import style_context
+    from zlc_plot.ticks import declare_colorbar_ticks
+
+    with style_context(DEFAULTS.style):
+        figure, colorbar = _colorbar(0.0, 1.0)
+        try:
+            drawn: list[tuple[float, set[float]]] = []
+            for limits in ((0.0, 1.0), (0.0, 2.0)):
+                colorbar.mappable.set_clim(*limits)
+                declare_colorbar_ticks(colorbar, label_pt=50.0, label_chars=5)
+                figure.canvas.draw()
+                drawn.append(
+                    (
+                        float(colorbar.locator.drawn_pt),
+                        {
+                            float(text.get_fontsize())
+                            for text in colorbar.ax.get_yticklabels()
+                            if text.get_text()
+                        },
+                    )
+                )
+            for priced, actual in drawn:
+                assert 0.0 < priced < 50.0
+                assert actual == {priced}
+        finally:
+            plt.close(figure)

@@ -144,7 +144,11 @@ def compact_number(value: float, *, length: int | None = None) -> str:
         general = f"{numeric:.4g}"
         return general if "e" not in general.lower() else normalized(f"{numeric:.1e}")
     maximum = max(1, int(length))
-    for significant in range(4, 0, -1):
+    # A budget of N characters holds at most N significant digits, so the
+    # ladder starts there: a longer spelling really is longer.  Capped at
+    # four whatever the budget, 10001 and 10002 both spelled "1e4" at every
+    # length a colorbar tried, and its scale printed no label at all.
+    for significant in range(max(4, maximum), 0, -1):
         general = normalized(f"{numeric:.{significant}g}")
         if len(general) <= maximum:
             return general
@@ -521,6 +525,11 @@ class _MeasuredLocator(ticker.Locator):
         self.drawn_pt = float(size_pt)
         name = "x" if self.axis is getattr(self.axis.axes, "xaxis", None) else "y"
         self.axis.axes.tick_params(axis=name, labelsize=float(size_pt))
+        # The offset text is one of this axis's labels -- the part the
+        # labels share -- and ``tick_params`` does not size it, so it is
+        # sized here with them: an offset at the panel's size beside labels
+        # shrunk for a cell ran off the cell's canvas.
+        self.axis.get_offset_text().set_fontsize(float(size_pt))
 
     def _nearest(self, value: float) -> int | None:
         if not self.ticks:
@@ -969,27 +978,34 @@ class SmartOffsetFormatter(_AlignedFormatter):
         fraction = f"{remainder:0{-exp10}d}".rstrip("0")
         return f"{sign}{quotient}.{fraction}" if fraction else f"{sign}{quotient}"
 
+    #: A constant of up to this many characters -- a sign and seven digits --
+    #: is written in full; a longer one takes its exact scientific spelling
+    #: when that is shorter.  A preference between two exact spellings, never
+    #: a budget the digits are cut to fit.
+    PLAIN_OFFSET_CHARACTERS = 8
+
     def _format_C(self) -> str:
-        plain = self._fmt_scaled_int(
-            self.locator.C_int,
-            int(self.locator.C_exp),
-            force_sign=True,
-        )
-        if plain in ("", "+0", "-0"):
-            return ""
-        max_length = 8
-        if len(plain) <= max_length:
-            return plain
+        """The common constant, exactly, in one of its two exact spellings.
+
+        The constant is an OPERAND: every label is a distance forward from
+        it, so every digit it has is a digit of every coordinate.  Rounded
+        to fit a character budget it printed ``+1.234e8`` for 123456789 and
+        every coordinate on the axis read 56789 too low.
+        """
+
         value = int(self.locator.C_int)
-        sign = "-" if value < 0 else "+"
-        digits = str(abs(value))
-        if digits == "0":
+        if value == 0:
             return ""
-        exponent = int(self.locator.C_exp) + len(digits) - 1
-        suffix = f"e{exponent:d}"
-        keep = max(0, max_length - 2 - len(suffix))
-        fraction = digits[1:keep]
-        return sign + digits[0] + (("." + fraction) if fraction else "") + suffix
+        exponent = int(self.locator.C_exp)
+        plain = self._fmt_scaled_int(value, exponent, force_sign=True)
+        if len(plain) <= self.PLAIN_OFFSET_CHARACTERS:
+            return plain
+        magnitude = str(abs(value))
+        significant = magnitude.rstrip("0")
+        power = exponent + (len(magnitude) - len(significant)) + len(significant) - 1
+        mantissa = significant[0] + (f".{significant[1:]}" if len(significant) > 1 else "")
+        scientific = f"{'-' if value < 0 else '+'}{mantissa}e{power}"
+        return scientific if len(scientific) < len(plain) else plain
 
     def get_offset(self) -> str:
         parts = []
@@ -1080,11 +1096,6 @@ class DeclaredFormatter(_AlignedFormatter):
 # ------------------------------------------------------------- installers
 
 
-def _measured(axis: Any) -> _MeasuredLocator | None:
-    locator = axis.get_major_locator()
-    return locator if isinstance(locator, _MeasuredLocator) else None
-
-
 def apply_smart_ticks(
     axis: Any,
     which: str = "both",
@@ -1150,6 +1161,7 @@ def apply_smart_ticks(
             target.set_minor_locator(ticker.NullLocator())
         target.set_minor_formatter(ticker.NullFormatter())
         target.get_offset_text().set_visible(True)
+        target.get_offset_text().set_fontsize(size_pt)
         axis.tick_params(axis=name, labelsize=size_pt)
         target._zlc_tick_signature = signature
 
@@ -1206,6 +1218,49 @@ def apply_declared_ticks(
     target._zlc_tick_signature = signature
 
 
+def apply_named_ticks(
+    axis: Any,
+    which: str,
+    positions: Sequence[float],
+    names: Sequence[str],
+    *,
+    label_pt: float,
+) -> None:
+    """Tick one axis BY NAME: one tick per declared coordinate, saying its name.
+
+    An enumerated axis -- a categorical x whose coordinates carry labels --
+    stands outside the ladder: there is nothing to search, the names ARE the
+    labels.  It is installed through the same once-per-configuration
+    signature the searched policies use, so a later :func:`apply_smart_ticks`
+    on the OTHER axis of the same axes leaves the names alone, and a surface
+    whose names change re-fires.  Every consumer of a declared coordinate
+    label -- a native overview cell, a generic cell, a focused cell -- comes
+    through here, which is what keeps the names from being replaced by
+    numbers on one of them.
+    """
+
+    if which not in {"x", "y"}:
+        raise ValueError("which must be 'x' or 'y'")
+    size_pt = float(label_pt)
+    if not size_pt > 0.0:
+        raise ValueError("label_pt must be positive")
+    ticks = tuple(float(value) for value in positions)
+    texts = tuple(str(name) for name in names)
+    if len(ticks) != len(texts):
+        raise ValueError("named ticks need one name per position")
+    target = axis.xaxis if which == "x" else axis.yaxis
+    signature = ("named", ticks, texts, size_pt)
+    if getattr(target, "_zlc_tick_signature", None) == signature:
+        return
+    target.set_major_locator(ticker.FixedLocator(ticks))
+    target.set_major_formatter(ticker.FixedFormatter(texts))
+    target.set_minor_locator(ticker.NullLocator())
+    target.set_minor_formatter(ticker.NullFormatter())
+    target.get_offset_text().set_visible(False)
+    target.axes.tick_params(axis=which, labelsize=size_pt)
+    target._zlc_tick_signature = signature
+
+
 def declare_colorbar_ticks(
     colorbar: Any,
     *,
@@ -1218,6 +1273,12 @@ def declare_colorbar_ticks(
     Through the Colorbar's own locator slot, because a colorbar reinstalls
     its axis's locator whenever its norm moves; installed on the axis
     directly, the policy was gone by the second frame.
+
+    The authored label size is written once, when the configuration is
+    made; from then on the locator owns the drawn size, because the ladder
+    may have shrunk it.  Restating the authored size on every limit change
+    grew the labels back while the locator still recorded the smaller size
+    it had priced, and skipped restoring it.
     """
 
     size_pt = float(label_pt)
@@ -1236,12 +1297,12 @@ def declare_colorbar_ticks(
             measure=_label_size_pt,
         )
         colorbar._zlc_tick_signature = signature
+        colorbar.ax.tick_params(labelsize=size_pt)
     locator = colorbar._zlc_tick_locator
     colorbar.locator = locator
     colorbar.formatter = DeclaredFormatter(locator)
     colorbar.minorlocator = ticker.NullLocator()
     colorbar.update_ticks()
-    colorbar.ax.tick_params(labelsize=size_pt)
 
 
 __all__ = [
@@ -1251,6 +1312,7 @@ __all__ = [
     "SmartOffsetFormatter",
     "SmartOffsetLocator",
     "apply_declared_ticks",
+    "apply_named_ticks",
     "apply_smart_ticks",
     "compact_number",
     "count_label",

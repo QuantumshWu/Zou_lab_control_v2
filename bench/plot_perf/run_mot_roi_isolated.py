@@ -2,14 +2,12 @@
 from __future__ import annotations
 
 import argparse
-import json
-from pathlib import Path
 import time
 
 import numpy as np
 
 from . import probe
-from .common import ROOT, stats, write_result
+from .common import stats, write_result
 from .run_console import renderer_seams
 
 
@@ -292,8 +290,9 @@ def run(*, updates: int) -> dict:
             fit={"model": "anisotropic_gaussian_center", "fit_all_facets": True},
         ),
         # The console's facet grid draws its curve cells with the product
-        # default -- uncertainty bars ON -- and the same-source comparison
-        # is only a comparison when this side asks for the same picture.
+        # default -- uncertainty bars ON -- and this side asks for the same
+        # picture, so its numbers can be read beside the chain's report of
+        # the same source.
         _case(
             "panel3 facet-curve-fit-40",
             roi,
@@ -321,25 +320,6 @@ def run(*, updates: int) -> dict:
             parameters={"uncertainty": True},
         ),
     ]
-    console_path = ROOT / "bench" / "results" / "console-mot-roi-four-panel.json"
-    console = json.loads(console_path.read_text(encoding="utf-8"))
-    console_stages = {
-        row["panel"]: row for row in console["measured"]["stage_summary"]
-    }
-    comparison = {}
-    for case in cases:
-        console_row = console_stages.get(case["label"])
-        if console_row is None:
-            continue
-        isolated_render = case["stages"]["render"]["median_ms"]
-        console_render = console_row["stages"]["renderer_present"][
-            "wall_ms_per_call"
-        ]
-        comparison[case["label"]] = {
-            "isolated_render_ms": isolated_render,
-            "console_render_ms": console_render,
-            "console_over_isolated": round(console_render / isolated_render, 2),
-        }
     return {
         "scenario": "mot-simulation-world-isolated",
         "source": {
@@ -349,7 +329,6 @@ def run(*, updates: int) -> dict:
             "history": 40,
         },
         "cases": cases,
-        "comparison": comparison,
     }
 
 
@@ -365,17 +344,6 @@ def _print(result: dict) -> None:
                     stages[name].get("median_ms", 0.0)
                     for name in ("projection", "fit", "render", "total")
                 ]
-            )
-        )
-    print("console / isolated render:")
-    for label, row in result["comparison"].items():
-        print(
-            "  %-23s %7.2f / %7.2f = %.2fx"
-            % (
-                label,
-                row["console_render_ms"],
-                row["isolated_render_ms"],
-                row["console_over_isolated"],
             )
         )
 

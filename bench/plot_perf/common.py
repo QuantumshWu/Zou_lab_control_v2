@@ -256,6 +256,35 @@ class Presented:
             time.sleep(0.0003)
         return None
 
+    def window(self) -> "PresentedWindow":
+        """Open one measurement window on this counter."""
+
+        return PresentedWindow(self)
+
+
+class PresentedWindow:
+    """Presented fronts counted against the clock they were counted with.
+
+    Both edges are taken together: the count is polled and read at the
+    instant the clock starts and again at the instant it stops.  Whatever
+    is presented after ``end`` -- a latest frame still in flight, the
+    front a release produces, the settle -- is outside the window, and so
+    outside BOTH the numerator and the denominator.  A count read after the
+    settle put frames into a rate whose clock had already stopped.
+    """
+
+    def __init__(self, presented: Presented) -> None:
+        presented.poll()
+        self._presented = presented
+        self._count = presented.count
+        self.started = time.perf_counter()
+
+    def end(self) -> tuple[float, int]:
+        """The window's elapsed seconds and its presented count, together."""
+
+        self._presented.poll()
+        return time.perf_counter() - self.started, self._presented.count - self._count
+
 class Pointer:
     """Real QMouseEvents in widget-logical coordinates."""
 

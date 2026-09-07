@@ -373,13 +373,24 @@ def update_pulse_timeline(
 
     axis.set_xlim(left_limit, right_limit)
     top_limit = row_count + pulse.ylim_top_offset
+    bottom_limit = pulse.ylim_bottom
     if loop_markers:
         top_limit = (
             row_count
             + pulse.repeat_ylim_top_offset
             + pulse.repeat_ylim_top_step * max(0, len(loop_markers) - 1)
         )
-    axis.set_ylim(pulse.ylim_bottom, top_limit)
+        # Every bracket's foot stands INSIDE the axes, or its bottom rail
+        # is clipped away at the edge.  The footer clears the second
+        # bracket's foot by a margin; a deeper bracket keeps that same
+        # margin under its own foot, so one or two brackets draw exactly
+        # as they always have and a third is drawn complete.
+        lowest_foot = pulse.repeat_bottom - pulse.repeat_bottom_step * (
+            len(loop_markers) - 1
+        )
+        margin = pulse.repeat_bottom - pulse.repeat_bottom_step - pulse.ylim_bottom
+        bottom_limit = min(bottom_limit, lowest_foot - margin)
+    axis.set_ylim(bottom_limit, top_limit)
     axis.set_yticks([row_index[key] for key in row_keys])
     row_labels = [channel.label for channel in channels] + [
         trace.label for trace in analog_traces

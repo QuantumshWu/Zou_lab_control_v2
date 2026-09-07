@@ -1390,41 +1390,51 @@ class RenderProcess:
             return "overlay", id(value), value.revision
         raise TypeError(f"unsupported plot input {type(value).__name__}")
 
+    def _reuse_input_token(self, key: object, used: set[int]) -> int | None:
+        """The token already published for ``key``, counted once per request."""
+
+        token = self._input_tokens.get(key)
+        if token is not None and token not in used:
+            self._input_refcounts[token] += 1
+            used.add(token)
+        return token
+
     def _input_reference(
         self, value: object, used: set[int]
     ) -> tuple[str, int]:
+        """The token a request names this input by, uploading it once.
+
+        A token is visible to other callers only once its ``input`` message
+        is in the outbox: publication and enqueueing happen under the one
+        lock, as one step.  Published first and uploaded after, a concurrent
+        Host's request that saw the token was enqueued ahead of the upload
+        it named, and the child refused it as an input released before use.
+        The serialization and the shared-memory copy -- the expensive part
+        -- run outside the lock, on a value nobody else can see yet; a
+        second caller that raced to the same input discards its own copy
+        and takes the published token.
+        """
+
         key = self._input_key(value)
         with self._lock:
-            token = self._input_tokens.get(key)
+            token = self._reuse_input_token(key, used)
             if token is not None:
-                if token not in used:
-                    self._input_refcounts[token] += 1
-                    used.add(token)
-                return _INPUT_REF, token
-        # Register the token, then enqueue its input.  A concurrent host
-        # call may see the token, but its request cannot overtake this
-        # message: one writer per direction drains the queue in order.
-        with self._lock:
-            token = self._input_tokens.get(key)
-            if token is not None:
-                if token not in used:
-                    self._input_refcounts[token] += 1
-                    used.add(token)
                 return _INPUT_REF, token
             if self._closing or self._closed:
                 raise RuntimeError("render process is closing")
-            self._input_serial += 1
-            token = self._input_serial
-            self._input_tokens[key] = token
-            self._input_keys[token] = key
-            self._input_identity_owners[token] = value
-            self._input_kinds[token] = str(key[0])
-            self._input_refcounts[token] = 1
-            used.add(token)
         buffers: list[pickle.PickleBuffer] = []
         released_buffers = 0
         shared: list[SharedMemory] = []
         descriptors: list[tuple[str, int]] = []
+
+        def discard_blocks() -> None:
+            for block in shared:
+                try:
+                    block.close()
+                    block.unlink()
+                except Exception:
+                    pass
+
         try:
             payload = pickle.dumps(
                 value, protocol=5, buffer_callback=buffers.append
@@ -1452,9 +1462,6 @@ class RenderProcess:
                     item.release()
                     released_buffers += 1
             buffers.clear()
-            with self._lock:
-                self._input_uploads[token] = tuple(shared)
-            self._send(("input", token, payload, tuple(descriptors)))
         except BaseException:
             for item in buffers[released_buffers:]:
                 try:
@@ -1462,20 +1469,30 @@ class RenderProcess:
                 except Exception:
                     pass
             buffers.clear()
-            with self._lock:
-                self._input_tokens.pop(key, None)
-                self._input_keys.pop(token, None)
-                self._input_identity_owners.pop(token, None)
-                self._input_kinds.pop(token, None)
-                self._input_refcounts.pop(token, None)
-                self._input_uploads.pop(token, None)
-            for block in shared:
-                try:
-                    block.close()
-                    block.unlink()
-                except Exception:
-                    pass
+            discard_blocks()
             raise
+        with self._lock:
+            token = self._reuse_input_token(key, used)
+            if token is not None:
+                discard_blocks()
+                return _INPUT_REF, token
+            if self._closing or self._closed:
+                discard_blocks()
+                raise RuntimeError("render process is closing")
+            self._input_serial += 1
+            token = self._input_serial
+            try:
+                self._send(("input", token, payload, tuple(descriptors)))
+            except BaseException:
+                discard_blocks()
+                raise
+            self._input_tokens[key] = token
+            self._input_keys[token] = key
+            self._input_identity_owners[token] = value
+            self._input_kinds[token] = str(key[0])
+            self._input_refcounts[token] = 1
+            self._input_uploads[token] = tuple(shared)
+            used.add(token)
         return _INPUT_REF, token
 
     def _replace_inputs(self, value: object, used: set[int]) -> object:
@@ -1853,6 +1870,13 @@ class RenderProcess:
             self._process.join(timeout=5.0)
         with self._lock:
             self._closed = not self._process.is_alive()
+        # This generation's writer retires with its pipe, HERE, before a
+        # restart replaces the outbox and writer handles: a writer left
+        # blocked on the old queue could never be reached again, and it
+        # outlived the service it wrote for.  Marking the service closed
+        # first (above) is what stops anything enqueueing behind the STOP.
+        self._outbox.put(_STOP_WRITER)
+        self._writer.join(timeout=5.0)
         self._reader_stopped.set()
 
     def close(self, timeout: float = 0.0) -> bool:
@@ -2007,6 +2031,10 @@ def _owned_input(value: object, schemas: OrderedDict[str, object]) -> object:
                 if value.block.sigma is None
                 else np.asarray(value.block.sigma)
             ),
+            # The producer's own statement of which shots this window
+            # holds: immutable metadata, and the admission ticket for the
+            # incremental integer-history frequency path.
+            value.block.window,
         )
         return OwnedSnapshot(value.ref, block)
     if isinstance(value, ImagePointOverlay):

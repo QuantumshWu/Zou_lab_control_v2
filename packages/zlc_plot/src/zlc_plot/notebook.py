@@ -11,15 +11,16 @@ from __future__ import annotations
 
 import base64
 from concurrent.futures import Future
+from dataclasses import fields
 import json
 import math
 import struct
 import threading
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from ._axis_transform import AxisTransform
 from .backends import BackendUnavailableError
-from .front import RasterFront, RasterOperation
+from .front import RasterFront, RasterIdentity, RasterOperation
 from .raster import RasterPlotHost
 from .selectors import (
     CrosshairPoint,
@@ -50,6 +51,88 @@ def _axis_to_dict(axis: AxisTransform) -> dict[str, object]:
         "x_scale": axis.x_scale,
         "y_scale": axis.y_scale,
     }
+
+
+def _axis_from_dict(value: Mapping[str, object]) -> AxisTransform:
+    """The AxisTransform a browser echoed back, exactly as it was sent."""
+
+    def pair(name: str) -> tuple[float, float]:
+        low, high = value[name]
+        return float(low), float(high)
+
+    cell_index = value["cell_index"]
+    left, top, right, bottom = value["bounds"]
+    return AxisTransform(
+        role=str(value["role"]),
+        cell_index=None if cell_index is None else int(cell_index),
+        bounds=(float(left), float(top), float(right), float(bottom)),
+        x_limits=pair("x_limits"),
+        y_limits=pair("y_limits"),
+        canonical_x_limits=pair("canonical_x_limits"),
+        canonical_y_limits=pair("canonical_y_limits"),
+        x_scale=str(value["x_scale"]),
+        y_scale=str(value["y_scale"]),
+    )
+
+
+_IDENTITY_FIELDS = tuple(field.name for field in fields(RasterIdentity))
+
+
+def _frame_context(front: RasterFront) -> dict[str, object]:
+    """The part of a front a pointer is read through: its identity and axes.
+
+    It travels to the browser inside the frame packet and comes back,
+    verbatim, on every pointer message, so the kernel interprets a pointer
+    through the geometry of the frame the browser has PAINTED.  The newest
+    front the kernel sent is not that frame: it may still be in flight, or
+    waiting on the browser's next animation frame, while the operator
+    points at the picture before it -- and read through the newer axes a
+    press on x=5 of a 0..10 view landed at x=50 of the 0..100 one.
+    """
+
+    return {
+        "identity": {
+            name: getattr(front.identity, name) for name in _IDENTITY_FIELDS
+        },
+        "axes": [_axis_to_dict(axis) for axis in front.interaction.axes],
+    }
+
+
+def _painted_frame(
+    content: Mapping[str, object],
+) -> tuple[RasterIdentity, tuple[AxisTransform, ...]] | None:
+    """The frame a pointer message says the browser painted, or None.
+
+    A pointer is a point ON A PICTURE; a message that names no painted
+    frame, or names one this kernel cannot read back, points at nothing
+    and is dropped here.  Raising instead would die unseen inside the comm
+    callback, where ipywidgets swallows the traceback.
+    """
+
+    frame = content.get("frame")
+    if not isinstance(frame, Mapping):
+        return None
+    identity = frame.get("identity")
+    axes = frame.get("axes")
+    if not isinstance(identity, Mapping) or not isinstance(axes, Sequence):
+        return None
+    try:
+        return (
+            RasterIdentity(**{name: identity.get(name) for name in _IDENTITY_FIELDS}),
+            tuple(_axis_from_dict(item) for item in axes),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _axis_for(
+    axes: Sequence[AxisTransform], x: float, y: float
+) -> AxisTransform | None:
+    for axis in axes:
+        left, top, right, bottom = axis.bounds
+        if left <= x <= right and top <= y <= bottom:
+            return axis
+    return None
 
 
 def _selector_state_to_dict(state: SelectorState) -> dict[str, object]:
@@ -89,8 +172,7 @@ def _front_packet(front: RasterFront) -> bytes:
             "logical_height": front.logical_size[1],
             "logical_dpi": front.logical_dpi,
             "device_pixel_ratio": front.device_pixel_ratio,
-            "sequence": front.identity.sequence,
-            "axes": [_axis_to_dict(axis) for axis in front.interaction.axes],
+            **_frame_context(front),
             "selectors": [
                 _selector_state_to_dict(state)
                 for state in front.interaction.selectors
@@ -211,6 +293,10 @@ class ZlcRasterView {
     this._pressChain = {time: 0, x: 0, y: 0, button: null};
     this._paintPending = false;
     this._frame = null;
+    // The frame whose pixels are on the canvas.  Accepting a frame and
+    // painting it are separate turns, so this is what a pointer is a
+    // point on -- never the frame most recently accepted.
+    this._painted = null;
     // Hold a mismatched-density first frame briefly: the kernel republishes
     // at the reported ratio moments after the environment message lands, and
     // painting the ratio-1 frame first reads as a blurry-to-sharp jump.
@@ -303,12 +389,18 @@ class ZlcRasterView {
     const rgba = bytes.slice(4 + headerSize);
     if (!Number.isInteger(width) || !Number.isInteger(height) ||
         width <= 0 || height <= 0 || rgba.length !== width * height * 4) return null;
+    const identity = header.identity || null;
     return {
       width, height,
       logical_width: Number(header.logical_width),
       logical_height: Number(header.logical_height),
       device_pixel_ratio: Number(header.device_pixel_ratio) || 1,
-      sequence: Number(header.sequence) || 0,
+      sequence: Number(identity && identity.sequence) || 0,
+      // Echoed back, untouched, with every pointer: the kernel reads the
+      // pointer through THIS frame's geometry.  The view computes nothing
+      // from them.
+      identity,
+      axes: header.axes || [],
       rgba,
     };
   }
@@ -325,6 +417,7 @@ class ZlcRasterView {
     }
     this.canvas.getContext('2d').putImageData(
       new ImageData(new Uint8ClampedArray(frame.rgba), w, h), 0, 0);
+    this._painted = frame;
   }
   _normalized(e) {
     // A zero-size rect (hidden panel, mid-layout) yields NaN, which JSON
@@ -338,10 +431,17 @@ class ZlcRasterView {
     };
   }
   _send(action, e, fields) {
+    // A pointer is a point ON A PICTURE: the frame this view has painted,
+    // whose identity and axes go back with it so the kernel reads the point
+    // through that frame's geometry.  Nothing painted yet, nothing to
+    // point at.
+    const painted = this._painted;
+    if (!painted) return;
     const point = this._normalized(e);
     this.model.send(Object.assign({
       type: 'pointer', action: action, x: point.x, y: point.y,
       button: null, double: false, step: 0, key: null,
+      frame: {identity: painted.identity, axes: painted.axes},
     }, fields || {}));
   }
   _isDouble(e, button) {
@@ -372,11 +472,19 @@ class ZlcRasterView {
       this._send('press', e, {button: this._button, double: this._isDouble(e, this._button)});
     });
     this.canvas.addEventListener('pointermove', e => {
-      if (!this._dragging || !e.isPrimary) return;
+      if (!e.isPrimary) return;
       const now = performance.now();
       if (now - this._lastMoveSent < 30) return;
       this._lastMoveSent = now;
-      this._send('move', e, {button: this._button});
+      // A move with no button down is a hover, and the kernel's series
+      // inspector -- the grouped-curve highlight and its text -- is fed by
+      // exactly that message, as it is by the Qt widget's.
+      this._send('move', e, {button: this._dragging ? this._button : null});
+    });
+    this.canvas.addEventListener('pointerleave', e => {
+      // Leaving clears the hover; a drag keeps its capture and its state.
+      if (!e.isPrimary || this._dragging) return;
+      this._send('leave', e, {});
     });
     this.canvas.addEventListener('pointerup', e => {
       if (!this._dragging || !e.isPrimary) return;
@@ -429,7 +537,10 @@ class NotebookView:
         self._front: RasterFront | None = None
         self._front_release: Any | None = None
         self._closed = False
-        self._gesture_front: RasterFront | None = None
+        # The frame a press landed on, held for the drag it started: every
+        # move and the release are read through the press-time geometry,
+        # whatever the browser paints meanwhile.
+        self._gesture_identity: RasterIdentity | None = None
         self._gesture_axes: AxisTransform | None = None
         self._pointer_serial = 0
         self._consumed_serial = -1
@@ -530,20 +641,17 @@ class NotebookView:
             # frame a newer send already superseded.
             self._schedule(lambda: self._publish_front(front))
 
-    def _axis_for(self, front: RasterFront, x: float, y: float) -> AxisTransform | None:
-        for axis in front.interaction.axes:
-            left, top, right, bottom = axis.bounds
-            if left <= x <= right and top <= y <= bottom:
-                return axis
-        return None
-
     def _pointer_message(self, content: Mapping[str, object]) -> None:
         with self._kernel_lock:
             return self._pointer_message_locked(content)
 
     def _pointer_message_locked(self, content: Mapping[str, object]) -> None:
-        if self._closed or self._front is None:
+        if self._closed:
             return
+        painted = _painted_frame(content)
+        if painted is None:
+            return
+        identity, painted_axes = painted
         self._pointer_serial += 1
         serial = self._pointer_serial
         action = str(content.get("action", "")).lower()
@@ -553,26 +661,34 @@ class NotebookView:
         raw_x, raw_y = content.get("x"), content.get("y")
         x = float(raw_x) if isinstance(raw_x, (int, float)) else 0.0
         y = float(raw_y) if isinstance(raw_y, (int, float)) else 0.0
-        front = self._front
+        button = None if content.get("button") is None else int(content["button"])
         if action == "press":
-            self._gesture_front = front
-            self._gesture_axes = self._axis_for(front, x, y)
-        elif action in {"move", "release", "cancel"} and self._gesture_front is not None:
-            front = self._gesture_front
-        axes = self._gesture_axes if action in {"move", "release"} else self._axis_for(front, x, y)
-        identity = front.identity if action != "cancel" else None
-        interaction = front.interaction if action == "press" else None
+            self._gesture_identity = identity
+            self._gesture_axes = _axis_for(painted_axes, x, y)
+        in_gesture = (
+            action in {"move", "release", "cancel"}
+            and self._gesture_identity is not None
+        )
+        if in_gesture:
+            identity = self._gesture_identity
+        axes = (
+            self._gesture_axes
+            if in_gesture and action != "cancel"
+            else _axis_for(painted_axes, x, y)
+        )
         future = self._host.pointer_event(
             action,
             x,
             y,
-            button=None if content.get("button") is None else int(content["button"]),
+            button=button,
             double=bool(content.get("double", False)),
             step=float(content.get("step", 0.0)),
             key=None if content.get("key") is None else str(content["key"]),
-            identity=identity,
-            axes=axes,
-            interaction=interaction,
+            identity=None if action == "cancel" else identity,
+            axes=None if action == "cancel" else axes,
+            # A move with a button down is a hand on the surface; a hover
+            # is not, and the arbiter serves the two differently.
+            held=action == "move" and button is not None,
         )
         future.add_done_callback(
             lambda completed: self._schedule(
@@ -595,7 +711,7 @@ class NotebookView:
                 if serial != self._pointer_serial:
                     return
                 self._consumed_serial = serial
-                self._gesture_front = None
+                self._gesture_identity = None
                 self._gesture_axes = None
                 if self._host.front is not None:
                     self._publish_front(self._host.front)
@@ -604,7 +720,7 @@ class NotebookView:
             if operation.front is not None:
                 self._publish_front(operation.front)
             if action in {"release", "cancel"}:
-                self._gesture_front = None
+                self._gesture_identity = None
                 self._gesture_axes = None
 
     def _on_widget_message(self, _widget: Any, content: object, _buffers: object) -> None:

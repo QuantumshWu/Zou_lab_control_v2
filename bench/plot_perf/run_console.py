@@ -863,7 +863,8 @@ class ConsoleBench:
         never takes -- and one that never checks the value took reads a
         refused edit as a product defect.
 
-        Returns what the edit cost: the wait until the next presented front.
+        Returns what the edit cost: the wait until the panel's own
+        configuration has been delivered and presented.
         """
 
         if section not in {"display", "semantic", "fit"}:
@@ -872,23 +873,33 @@ class ConsoleBench:
         current.update(values)
         fronts = _PanelFronts(self, panel)
         fronts.poll()
+        baseline = fronts.count
         cursor = self.report_cursor()
         started = time.perf_counter()
         self.view.panel_state_changed.emit(panel.panel_id, {section: current})
         answered = None
-        deadline = time.monotonic() + 15.0
-        while time.monotonic() < deadline:
-            self.presenter.beat()
-            self.app.processEvents()
+
+        def settled() -> bool:
             errors = self.errors_since(cursor)
             if errors:
                 raise guards.HarnessError(
                     f"{section} edit failed: " + " | ".join(errors)
                 )
-            if fronts.poll():
+            # The edit is answered when the panel's OWN transaction has been
+            # delivered and presented and the picture changed -- not when
+            # any front arrived, which on a live card is the producer's next
+            # frame: the false answer ``_flows`` already refuses.
+            return (
+                fronts.count > baseline
+                and panel.configuration is None
+                and (panel.port is None or panel.port.presentation_current)
+            )
+
+        # At the board's rate, like every other wait: a tight beat loop is
+        # the load it claims to measure.
+        with guards.ProductBeat(self.app, self.presenter) as beat:
+            if beat.run_until(settled, 15.0, tick=fronts.poll):
                 answered = time.perf_counter() - started
-                break
-            time.sleep(0.002)
         self._pump(0.5)
         applied = dict(getattr(panel.state, section, {}) or {})
         refused = {
@@ -913,7 +924,7 @@ class ConsoleBench:
             "values": dict(values),
             "refused": refused or None,
             "answered": answered is not None,
-            "to_next_front_ms": None if answered is None else round(answered * 1e3, 2),
+            "to_presented_ms": None if answered is None else round(answered * 1e3, 2),
         }
 
     # Strings the bench is allowed to invent a different value for.  Every
@@ -977,7 +988,7 @@ class ConsoleBench:
         # A refused edit redraws nothing and must not be averaged in with
         # the ones that did.
         answered = [
-            row["to_next_front_ms"]
+            row["to_presented_ms"]
             for row in rows
             if row["answered"] and not row["refused"]
         ]
@@ -1234,10 +1245,14 @@ class ConsoleBench:
 
         def owned():
             if motion == "orbit":
-                camera = self.renderer(panel).height_bars_camera
-                return None if camera is None else (
-                    round(camera.azimuth_deg, 3),
-                    round(camera.elevation_deg, 3),
+                # The accepted camera, from the public description -- the
+                # process-isolated Host exposes no session or renderer.
+                values = (
+                    panel.host.describe_display().result().value.display_state.values
+                )
+                return (
+                    round(float(values["camera_azimuth"]), 3),
+                    round(float(values["camera_elevation"]), 3),
                 )
             if motion == "pan":
                 value = panel.host.describe_display().result().value.limits
@@ -1737,14 +1752,14 @@ def main() -> None:
         print("Setting-form edits while live  (%d of %d redrew)"
               % (block["answered"], block["of"]))
         for row in sorted(block["edits"],
-                          key=lambda item: -(item["to_next_front_ms"] or 0.0)):
+                          key=lambda item: -(item["to_presented_ms"] or 0.0)):
             field = ", ".join("%s=%r" % item for item in row["values"].items())
             print("   %-44s %s"
                   % (field,
                      "REFUSED by the panel (holds %r)" % row["refused"]
                      if row["refused"] else
                      "no redraw" if not row["answered"]
-                     else "%7.1f ms to the new picture" % row["to_next_front_ms"]))
+                     else "%7.1f ms to the new picture" % row["to_presented_ms"]))
         for item in block["skipped"]:
             print("   %-44s not exercised: %s" % (item["field"], item["why"]))
     payload["threads_left_running"] = list(bench.surviving_threads())

@@ -427,3 +427,26 @@ def test_the_history_a_trailing_mean_needs_reaches_behind_the_window() -> None:
         session.close()
     np.testing.assert_allclose(y, _trailing_mean(shots, 5)[-10:], rtol=1e-12)
     assert y[0] == 8.0
+
+def test_a_window_with_no_valid_shot_has_an_empty_distribution() -> None:
+    """The rolling rail counts the samples in the window and nothing else.
+
+    With no valid sample the rail used to bin one invented value at the
+    history's lower limit -- a bar for a shot that never happened.
+    """
+
+    session = PlotSession(_shots(np.full((1, 3), np.nan)), RollingPlot())
+    try:
+        renderer = session._renderer
+        renderer.draw()
+        rail = next(
+            value
+            for key, value in renderer._artists.items()
+            if key.endswith(":distribution") and hasattr(value, "get_paths")
+        )
+        counts = [
+            float(np.max(path.vertices[:, 0])) for path in rail.get_paths()
+        ]
+        assert counts and max(counts) == 0.0
+    finally:
+        session.close()

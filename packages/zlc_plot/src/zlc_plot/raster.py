@@ -90,6 +90,11 @@ class _DataFrame:
     started_at: float = 0.0
     cancel: Event = field(default_factory=Event)
     stage: str = "latest"
+    #: The prepared frame once ``prepare`` has answered: its projection is
+    #: the identity -- generation and revision -- of THIS input, which a
+    #: failure report about this input must carry, whatever the session
+    #: has committed meanwhile.
+    prepared: object | None = None
 
 
 def _plot_input_revision(data: object) -> int | None:
@@ -112,13 +117,14 @@ class _HandArbiter:
 
     :meth:`RasterPlotHost._take_next_task` already rules that a pointer
     beats a data frame inside one host.  The bench found the identical
-    competition BETWEEN hosts: a panel's Edit surface and its live card
-    render on two threads but share one machine, and the card's
-    full-resolution committed frames -- an all-cores kernel plus a
-    GIL-held compose -- stalled the drag on the Edit surface for a third
-    of a second at a time (measured over 1024x1024 data: per-move p90
-    59 ms alone, 354 ms with the sibling live).  The ruling's true scope
-    is the machine, so the arbiter is process-wide.
+    competition BETWEEN hosts: two hosts of one process render on two
+    threads but share one machine, and one host's full-resolution
+    committed frames -- an all-cores kernel plus a GIL-held compose --
+    stalled a drag on the other for a third of a second at a time
+    (measured over 1024x1024 data: per-move p90 59 ms alone, 354 ms with
+    the sibling live).  The ruling's scope is every host this process
+    renders, so the arbiter is process-wide; a host rendered by another
+    process is outside its reach and arbitrates among its own.
 
     Yielding costs nothing but freshness: a data frame retains only its
     latest successor, so work deferred while the hand moves collapses to
@@ -262,6 +268,10 @@ class _WorkerTask:
     #: Pointer work: this task IS the operator's hand, and every other
     #: host's speculative frame yields to it while it moves.
     hand: bool = False
+    #: Pointer work of any kind -- press, move, release, scroll, hover.  It
+    #: goes before every other queued task, in its own arrival order; how
+    #: its result is PUBLISHED is a separate question answered by ``mode``.
+    pointer: bool = False
 
 
 class RasterPlotHost:
@@ -299,7 +309,6 @@ class RasterPlotHost:
         self._session_defaults: PlotLibraryDefaults | None = None
         self._release_session_host: Callable[[], None] | None = None
         self._surface_release: Callable[[], None] | None = None
-        self._active_mode: _DispatchMode | None = None
         self._condition = Condition(Lock())
         self._pending: deque[_WorkerTask] = deque()
         #: One frame travels prepare -> solve -> commit.  While it travels,
@@ -760,7 +769,6 @@ class RasterPlotHost:
         """Run the only callback-to-front presentation state machine."""
 
         promoted = False
-        self._active_mode = mode
         try:
             session = self._require_session()
             presentation_epoch = session._raster_presentation_epoch()
@@ -790,7 +798,7 @@ class RasterPlotHost:
                 assert after_publish is not None
                 after_publish()
             return RasterOperation(value, front)
-        except Exception as error:
+        except Exception:
             if mode is _DispatchMode.PRESENTATION and not promoted:
                 assert on_abort is not None
                 try:
@@ -798,8 +806,6 @@ class RasterPlotHost:
                 except Exception:
                     self._require_session().redraw_surface()
             raise
-        finally:
-            self._active_mode = None
 
     def _discard_surface_sync_tasks(self) -> None:
         cancelled: list[Future[RasterOperation[Any]]] = []
@@ -844,6 +850,7 @@ class RasterPlotHost:
         _mode: _DispatchMode,
         coalesce_key: object | None = None,
         _hand: bool = False,
+        _pointer: bool = False,
         **kwargs: Any,
     ) -> Future[RasterOperation[Any]]:
         callback = lambda: operation(*args, **kwargs)
@@ -852,6 +859,7 @@ class RasterPlotHost:
             mode=_mode,
             coalesce_key=coalesce_key,
             hand=_hand,
+            pointer=_pointer,
         )
 
     def dispatch(self, callback: Callable[[], None]) -> Future[RasterOperation[None]]:
@@ -978,11 +986,18 @@ class RasterPlotHost:
         except BaseException as cancel_error:
             error.add_note(f"fit cancellation failed: {cancel_error}")
 
+        # The frame that timed out is the one the gap is about: its own
+        # prepared projection carries its generation.  Left to the session's
+        # committed projection, a new run's first revision was reported as a
+        # failure of the previous run.
+        projection = getattr(frame.prepared, "projection", None)
+
         def publish() -> None:
             if frame.revision is not None:
                 self._require_session().publish_live_fit_gap(
                     frame.revision,
                     error,
+                    projection=projection,
                 )
 
         dispatched = self._submit(publish, mode=_DispatchMode.CONTROL)
@@ -1110,6 +1125,7 @@ class RasterPlotHost:
         if frame.cancel.is_set():
             self._finish_data_frame(frame, cancelled=True)
             return
+        frame.prepared = prepared
         try:
             # Analysis completion is not the raster worker.  Submission only
             # touches PlotSession's lock-protected fit state.
@@ -1927,9 +1943,7 @@ class RasterPlotHost:
                     # A newer coalesced scroll task already drained the
                     # accumulated ticks; nothing is left to apply.
                     return session._raster_pointer_state(publish_front=False)
-            effective_identity = identity
             effective_axes = axes
-            effective_interaction = interaction
             if identity is not None:
                 if identity.host_id != self._host_id:
                     raise RuntimeError(
@@ -1968,6 +1982,7 @@ class RasterPlotHost:
             _mode=_DispatchMode.ADAPTIVE,
             coalesce_key=_pointer_coalesce((selected_action,), {}),
             _hand=_is_a_hand(selected_action, bool(held)),
+            _pointer=True,
         )
 
     def set_viewport(
@@ -2052,6 +2067,7 @@ class RasterPlotHost:
         after_publish: Callable[[], None] | None = None,
         on_abort: Callable[[], None] | None = None,
         hand: bool = False,
+        pointer: bool = False,
     ) -> Future[RasterOperation[ValueT]]:
         if not isinstance(mode, _DispatchMode):
             raise TypeError("task mode must be _DispatchMode")
@@ -2074,6 +2090,7 @@ class RasterPlotHost:
             after_publish,
             on_abort,
             hand,
+            pointer,
         )
         superseded: Future[RasterOperation[Any]] | None = None
         with self._condition:
@@ -2141,6 +2158,13 @@ class RasterPlotHost:
         pointer task appends the replacement instead of dropping it into
         the superseded one's slot -- which used to let a drag's first move
         overtake its own press.  See _submit.
+
+        What goes first is POINTER work, by that mark alone.  Its publish
+        mode is not a priority: a ``configure`` publishes adaptively too,
+        for the different reason that a no-op must not re-send a front,
+        and ranked by mode it overtook a Save that was queued ahead of it
+        -- the settled recipe that Save had frozen no longer matched the
+        host by the time it ran.
         """
 
         if self._front is None:
@@ -2149,7 +2173,7 @@ class RasterPlotHost:
                     del self._pending[index]
                     return candidate
         for index, candidate in enumerate(self._pending):
-            if candidate.mode is _DispatchMode.ADAPTIVE:
+            if candidate.pointer:
                 del self._pending[index]
                 return candidate
         return self._pending.popleft()
@@ -2172,9 +2196,13 @@ class RasterPlotHost:
         return _HANDS.busy()
 
     def _run(self) -> None:
-        kernels.configure_worker_threads()
         try:
             try:
+                # Inside the startup boundary with the session factory: a
+                # refused thread configuration is a startup failure the
+                # caller is told about, not a silently dead worker whose
+                # initial Future stays pending.
+                kernels.configure_worker_threads()
                 from .session import PlotSession
 
                 factory = self._session_factory

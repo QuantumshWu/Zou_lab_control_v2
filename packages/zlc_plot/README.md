@@ -162,8 +162,8 @@ controls = parameter_controls(
 核心 schema 持有名称、类型、默认值、范围、合法选项和 render impact；
 `zlc_plot.ui` 只把它投影成 toolkit-neutral control description，PyQt5 子模块再映射成
 实际 widgets。具体应用只负责页面布局和业务流程。`describe_semantics(schema, spec)`
-及 `session.describe_semantics()` 从 kind registry 机械生成 kind、AxisRef、group、
-reduction、samples、facet_rows/facet_cols 的编辑域；`zlc_plot.ui.semantic_controls()` 复用同一
+及 `session.describe_semantics()` 从 kind registry 机械生成 kind、每个 Dataset 轴的 fate
+（x/y/group/facet/pool/reduce 或 tagged Scope 坐标）与 reduction 的编辑域；`zlc_plot.ui.semantic_controls()` 复用同一
 control 管线。拥有完整表单状态的宿主一次调用
 `session.configure(...)` / `RasterPlotHost.configure(...)`，同时提交 semantic mapping、
 display mapping、size、Image overlay 和 fit choice；宿主不判断原位更新还是重排。
@@ -183,8 +183,8 @@ Image payload 更新可以只把 image artist 作为单独 axis layer paint。�
 Curve、Rolling 与 Histogram 提供 `set_y_limits()` / `reset_y_limits()`；Image
 提供 `set_color_limits()` / `reset_color_limits()` / `resolved_color_limits()`，这些图都支持
 normal/tight/fixed relim。`set_view_limits()` 可原子修改当前显示单位下的 x/y viewport。
-Histogram 的 `normal` / `fixed` bin domain 在 live revision 间只向越界一侧扩展，
-不会缩回或重新居中；`tight` 才逐帧重新贴合当前数据。
+Histogram 的 `normal` bin domain 在 live revision 间只向越界一侧扩展，
+不会缩回或重新居中；`fixed` 保持 authored 边界，不随数据变化；`tight` 才逐帧重新贴合当前数据。
 
 ## Live plot
 
@@ -288,8 +288,9 @@ image_session.set_parameter("show_point_labels", True)
 `IMAGE_POINT_OVERLAY_CONTRACT`，用`image_point_overlay_geometry(...)`记录image
 axes、XY坐标和完整status data axis，再由
 `image_point_overlay_from_signal(...)`构造同一个`ImagePointOverlay`。Dataset
-values表达EMPTY/OCCUPIED，Dataset validity表达INVALID；future-invalid或一个
-surface仍pool多个repeat/point cells时显示UNKNOWN，不发明跨cells共识。geometry
+values表达EMPTY/OCCUPIED；validity为invalid的点、以及一个surface仍pool多个
+repeat/point cells而无法唯一选定状态的点都不画判断圈，不发明跨cells共识；静态
+`static_statuses`的显式INVALID/UNKNOWN标记不受此规则影响。geometry
 严格绑定status axis identity与canonical coordinates，所以同数量但顺序不同的
 site vector也会被拒绝。点环尺寸和状态颜色由package style统一解析，不属于可变
 显示参数。
@@ -314,11 +315,12 @@ next_frame = ImageFrame(
 image_session.update_data(next_frame)
 ```
 
-Image 的 equal-aspect 使用 canonical 单位的物理比例；例如 x 以 nm、y 以 µm 显示时，
-屏幕上的同一物理半径仍是圆，而不是把两个显示数值强行当作同一尺度。drag、wheel zoom、
-API viewport 和 reset 都只修改同一个 limits authority，不移动第二张缩略图或副本。
-只有 x/y 量纲兼容时才应用物理比例；不兼容时回退 numeric aspect，并从该 session 的
-catalogue 中过滤 radial fit。
+Image 的主显示框始终是固定正方形，每个离散 data point 都是正方形 screen cell：规则 grid
+以 x/y cell pitch 的唯一比例把 canonical 坐标归一为 lattice geometry，canonical 步长只控制
+tick、selector、overlay 与 fit 的坐标映射，不控制 cell 长宽；非方阵数据在 square frame 内
+居中 letterbox。drag、wheel zoom、API viewport 和 reset 都只修改同一个 limits authority，
+不移动第二张缩略图或副本。x/y 量纲是否兼容只决定 radial fit 是否进入该 session 的
+catalogue，不改变几何。
 
 PulseTimeline 的公开输入由 `PulseTimelineData` 组合 `PulseChannel`、`PulseBlock`、`PulseAnalogTrace`、`PulseScanRegion`、`PulseDacScanSegment` 和 `PulseLoopMarker`。这些 records 分别描述 digital channels、digital blocks、analog traces、scan regions、DAC scan segments 和明确标注的timeline loops。所有 timeline 时间必须非负；`PulseScanRegion.number` 和已提供的 DAC scan `number` 必须是全 timeline 内唯一的正整数。
 

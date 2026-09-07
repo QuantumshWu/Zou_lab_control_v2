@@ -968,12 +968,15 @@ class _RcLane:
                 if self._readers == 0:
                     context, self._context = self._context, None
                     self._installed = None
-                    self._local.key = None
                     if context is not None:
                         context.__exit__(None, None, None)
                     condition.notify_all()
-                else:
-                    self._local.key = None
+            # What this thread held before it entered is what it holds
+            # again: a nested entry of the same style leaves the outer one
+            # in force.  Clearing the mark here let the next different style
+            # on this thread pass the refusal above and wait for a drain
+            # whose last reader was itself.
+            self._local.key = held
 
 
 _MATPLOTLIB_COMPOSE_LANE = _RcLane()

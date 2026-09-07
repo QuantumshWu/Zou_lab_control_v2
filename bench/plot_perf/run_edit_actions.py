@@ -288,82 +288,6 @@ class _HostTimeline:
         return out
 
 
-class _EventWatch:
-    """The slowest Qt events delivered while installed, by type and receiver.
-
-    A stack sample of the owner thread inside ``processEvents`` says only
-    "Qt".  An application event filter sees every delivered event enter and
-    leave (``eventFilter`` runs before the receiver; the time until the
-    next event enters is that event's cost, to within the filter's own
-    work), so the turn can be charged to a paint of a particular widget, a
-    timer, a queued method call.
-    """
-
-    def __init__(self, app) -> None:
-        from PyQt5 import QtCore
-
-        self._QtCore = QtCore
-        self._app = app
-        self.slowest: list[tuple[float, str, str]] = []
-        self._filter = None
-
-    def __enter__(self) -> "_EventWatch":
-        QtCore = self._QtCore
-        watch = self
-
-        class Filter(QtCore.QObject):
-            def __init__(self):
-                super().__init__()
-                self._open = None
-
-            def eventFilter(self, receiver, event):  # noqa: N802 - Qt API
-                now = time.perf_counter()
-                if self._open is not None:
-                    began, kind, who = self._open
-                    watch._record(now - began, kind, who)
-                try:
-                    kind = str(event.type())
-                    who = f"{receiver.metaObject().className()}:{receiver.objectName() or ''}"
-                except Exception:
-                    kind, who = "?", "?"
-                self._open = (now, kind, who)
-                return False
-
-        self._filter = Filter()
-        self._app.installEventFilter(self._filter)
-        _EventWatch.current = self
-        return self
-
-    current: "_EventWatch | None" = None
-
-    def close_open(self) -> None:
-        """The pump returned: the open event's cost ends here, not at the next pump."""
-
-        if self._filter is not None and self._filter._open is not None:
-            began, kind, who = self._filter._open
-            self._record(time.perf_counter() - began, kind, who)
-            self._filter._open = None
-
-    def __exit__(self, *_exc) -> None:
-        if self._filter is not None:
-            self._app.removeEventFilter(self._filter)
-            self._filter = None
-        if _EventWatch.current is self:
-            _EventWatch.current = None
-
-    def _record(self, cost: float, kind: str, who: str) -> None:
-        if cost < 0.004:
-            return
-        self.slowest.append((cost, kind, who))
-        if len(self.slowest) > 400:
-            self.slowest.sort(reverse=True)
-            del self.slowest[200:]
-
-    def summary(self, top: int = 8) -> list[str]:
-        self.slowest.sort(reverse=True)
-        return [f"{cost * 1000.0:6.1f} ms  {kind}  {who}" for cost, kind, who in self.slowest[:top]]
-
-
 class _RelayTimer:
     """Every owner-turn relay's slot, timed: which turn a queued call is.
 
@@ -519,9 +443,6 @@ class _LoopClock:
     def pump(self) -> None:
         begin = time.perf_counter()
         self._app.processEvents(self._flag, 20)
-        watch = _EventWatch.current
-        if watch is not None:
-            watch.close_open()
         end = time.perf_counter()
         self.turns.append(end - begin)
         if end - begin > self.longest[1] - self.longest[0]:
@@ -848,7 +769,7 @@ def _timed_action(bench: ConsoleBench, what: str, trigger, predicate, *, timeout
         profile = cProfile.Profile()
         if mode != "trigger":
             profile.enable()
-    with _OwnerSampler() as sampler, _HostTimeline(bench) as timeline, _EventWatch(bench.app) as events, _OwnerSteps(bench) as steps:
+    with _OwnerSampler() as sampler, _HostTimeline(bench) as timeline, _OwnerSteps(bench) as steps:
         began = time.perf_counter()
         # "trigger" profiles the synchronous call alone: it runs on the
         # owner with the workers mostly waiting, so its self times are the
@@ -862,12 +783,16 @@ def _timed_action(bench: ConsoleBench, what: str, trigger, predicate, *, timeout
         trigger_ms = (triggered - began) * 1000.0
         if result is False:
             raise guards.HarnessError(f"{what} was refused")
-        wall = _wait(bench, clock, predicate, what, timeout)
+        wait = _wait(bench, clock, predicate, what, timeout)
         finished = time.perf_counter()
     row = {
         "what": what,
         "trigger_ms": round(trigger_ms, 1),
-        "wall_ms": round(wall * 1000.0, 1),
+        # The whole action, from the call to the visible answer: what the
+        # operator waits for.  The trigger is its synchronous part and the
+        # wait what follows; reported apart, they still add up to it.
+        "wall_ms": round((finished - began) * 1000.0, 1),
+        "wait_ms": round(wait * 1000.0, 1),
         **clock.summary(),
         "owner": sampler.summary(),
         "longest_turn_frames": sampler.during(clock.longest),
@@ -877,7 +802,6 @@ def _timed_action(bench: ConsoleBench, what: str, trigger, predicate, *, timeout
             _host_label(bench, host, index): timeline.rows(host, began)
             for index, host in enumerate(timeline.new_hosts(began))
         },
-        "slowest_events": events.summary(),
         "owner_steps": steps.summary(),
         "relay_turns": _RelayTimer.summary((began, finished)),
     }
@@ -1138,10 +1062,6 @@ def _print(payload: dict) -> None:
                 print(f"   synchronous trigger ({row.get('trigger_ms')} ms) ran:", row["trigger_frames"])
             if row.get("action_frames"):
                 print(f"   whole action ({row.get('wall_ms')} ms), other threads worked in:", row["action_frames"][-13:])
-            if row.get("slowest_events"):
-                print("   slowest Qt events delivered during the action:")
-                for line in row["slowest_events"]:
-                    print("     ", line)
             if row.get("owner_steps"):
                 print("   owner turn steps during the action:")
                 for line in row["owner_steps"]:

@@ -74,6 +74,7 @@ from .state import DisplayState
 from .style import PlotStyleConfig, style_context
 from .ticks import (
     apply_declared_ticks,
+    apply_named_ticks,
     apply_smart_ticks,
     compact_number,
     declare_colorbar_ticks,
@@ -555,13 +556,20 @@ def _drawable_text(text: str) -> str:
 
 
 def _quantity_label(value: Any, fallback: str, explicit: str | None = None) -> str:
+    """The axis text for one quantity: an explicit label, else the quantity's
+    own name, with the display unit appended unless the label carries one.
+
+    ``explicit`` comes from :func:`_state_label` and is literal text already;
+    escaping it a second time printed an operator's ``$`` as ``\\$``.  Only
+    the quantity's own name and its unit symbol are escaped here.
+    """
+
     if explicit is not None:
         label = str(explicit)
         if not label:
             return ""
     else:
-        label = str(getattr(value, "label", fallback) or fallback)
-    label = _literal_text(label)
+        label = _literal_text(str(getattr(value, "label", fallback) or fallback))
     unit = _literal_text(_unit_symbol(value))
     if not unit or unit == "1":
         return label
@@ -576,8 +584,19 @@ def _state_label(
     name: str,
     fallback: str | None,
 ) -> str | None:
+    """The literal text one label shows: the operator's edit, else the
+    authored spec text.
+
+    Both are NAMES (see :func:`_literal_text`), so whichever is selected is
+    escaped here, exactly once.  The spec fallback used to reach the artist
+    raw, so resetting a title to its authored default handed a plain name to
+    the mathtext parser.
+    """
+
     value = state.values.get(name)
-    return fallback if value is None else _literal_text(value)
+    if value is None:
+        value = fallback
+    return None if value is None else _literal_text(value)
 
 
 def _curve_x_limits(values: np.ndarray) -> tuple[float, float] | None:
@@ -851,7 +870,17 @@ def _point_ring_radius(
     return float(fraction) * float(np.median(nearest))
 
 
+#: How far, as a fraction of the pitch, a coordinate may sit from the
+#: regular lattice through its neighbours and still be one of its cells.
+#: A hundredth of a cell is below anything a pixel can show at any zoom the
+#: product offers and above the rounding a producer's coordinate table
+#: carries; ``[0, 1, 10]`` is refused.
+_IMAGE_REGULAR_GRID_TOLERANCE = 1e-2
+
+
 def _centers_extent(x: np.ndarray, y: np.ndarray) -> tuple[float, float, float, float]:
+    """The extent regular image centres cover: half a pitch past each end."""
+
     def edge(values: np.ndarray) -> tuple[float, float]:
         values = np.asarray(values, dtype=float).reshape(-1)
         if not values.size or not bool(np.all(np.isfinite(values))):
@@ -861,6 +890,19 @@ def _centers_extent(x: np.ndarray, y: np.ndarray) -> tuple[float, float, float, 
         steps = np.diff(values)
         if not (bool(np.all(steps > 0.0)) or bool(np.all(steps < 0.0))):
             raise ValueError("image coordinates must be strictly monotonic")
+        # An Image is a REGULAR grid: one cell per pitch, drawn as one
+        # extent.  Irregular centres have no such extent -- painted
+        # uniformly, the pixel at a coordinate and the crosshair's nearest
+        # cell disagree about which sample is there -- so the geometry is
+        # refused here, at the one place every image owner asks for it,
+        # rather than drawn as something it is not.
+        pitch = (values[-1] - values[0]) / (values.size - 1)
+        drift = np.abs(values - (values[0] + pitch * np.arange(values.size)))
+        if bool(np.any(drift > _IMAGE_REGULAR_GRID_TOLERANCE * abs(pitch))):
+            raise ValueError(
+                "image coordinates must be uniformly spaced: an Image is a "
+                "regular grid drawn one cell per pitch"
+            )
         return (
             float(values[0] - steps[0] / 2.0),
             float(values[-1] + steps[-1] / 2.0),
@@ -1193,12 +1235,17 @@ def _envelope_decimated(
     Past a few samples per pixel column a stroked polyline is visually
     defined by each column's extremes alone; the envelope hands Agg exactly
     those extremes (three vertices per column: minimum, maximum, and a
-    separator that becomes NaN wherever the column holds an invalid sample,
-    so gaps stay gaps at pixel resolution) instead of one vertex per sample.
+    separator that repeats the maximum) instead of one vertex per sample.
     Sparse windows -- a deep zoom, a short trace -- return None and the
     caller draws every point, which keeps the picture exact where the
     envelope has nothing to save.  ``x`` must be finite and sorted; gaps
     travel in ``y`` as NaN.
+
+    A column's extremes are a picture of the stroke only while every sample
+    in the column belongs to ONE stroke, so each run of finite samples is
+    enveloped on its own and the runs are joined by a NaN vertex: a gap
+    stays a gap at pixel resolution.  Aggregating across a NaN once joined
+    two disconnected runs with a vertical segment no sample supports.
     """
 
     low, high = float(window[0]), float(window[1])
@@ -1210,39 +1257,44 @@ def _envelope_decimated(
         return None
     x_view = x[start:stop]
     y_view = y[start:stop]
-    edges = np.linspace(low, high, columns + 1)
-    starts = np.searchsorted(x_view, edges[:-1], side="left")
-    counts = np.diff(np.append(starts, x_view.size))
     finite = np.isfinite(y_view)
-    guarded_min = np.where(finite, y_view, np.inf)
-    guarded_max = np.where(finite, y_view, -np.inf)
-    with np.errstate(invalid="ignore"):
-        col_min = np.minimum.reduceat(guarded_min, np.minimum(starts, x_view.size - 1))
-        col_max = np.maximum.reduceat(guarded_max, np.minimum(starts, x_view.size - 1))
-        finite_counts = np.add.reduceat(
-            finite.astype(np.int64), np.minimum(starts, x_view.size - 1)
-        )
-    empty = counts == 0
-    finite_counts = np.where(empty, 0, finite_counts)
-    gap = finite_counts < counts
-    blank = finite_counts == 0
-    centers = 0.5 * (edges[:-1] + edges[1:])
-    out_x = np.repeat(centers, 3)
-    out_y = np.empty(columns * 3, dtype=np.float64)
-    out_y[0::3] = np.where(blank, np.nan, col_min)
-    out_y[1::3] = np.where(blank, np.nan, col_max)
-    # The separator repeats the maximum (a zero-length segment) except where
-    # the column carried an invalid sample: there it breaks the stroke.
-    out_y[2::3] = np.where(gap, np.nan, out_y[1::3])
+    if not bool(np.any(finite)):
+        return None
+    boundaries = np.flatnonzero(np.diff(finite.astype(np.int8))) + 1
+    run_edges = np.concatenate(([0], boundaries, [x_view.size]))
+    edges = np.linspace(low, high, columns + 1)
+    pieces_x: list[np.ndarray] = []
+    pieces_y: list[np.ndarray] = []
+    for run_start, run_stop in zip(run_edges[:-1], run_edges[1:]):
+        if not finite[run_start]:
+            # An invalid run is the break between two strokes: one NaN
+            # vertex, standing where the gap begins, says so.
+            pieces_x.append(np.asarray([x_view[run_start]], dtype=np.float64))
+            pieces_y.append(np.asarray([np.nan], dtype=np.float64))
+            continue
+        run_x = x_view[run_start:run_stop]
+        run_y = y_view[run_start:run_stop]
+        first = max(0, int(np.searchsorted(edges, run_x[0], side="right")) - 1)
+        last = min(columns - 1, int(np.searchsorted(edges, run_x[-1], side="right")) - 1)
+        run_edges_view = edges[first : last + 2]
+        starts = np.searchsorted(run_x, run_edges_view[:-1], side="left")
+        counts = np.diff(np.append(starts, run_x.size))
+        indices = np.minimum(starts, run_x.size - 1)
+        col_min = np.minimum.reduceat(run_y, indices)
+        col_max = np.maximum.reduceat(run_y, indices)
+        blank = counts == 0
+        centers = 0.5 * (run_edges_view[:-1] + run_edges_view[1:])
+        out_y = np.empty(centers.size * 3, dtype=np.float64)
+        out_y[0::3] = np.where(blank, np.nan, col_min)
+        out_y[1::3] = np.where(blank, np.nan, col_max)
+        out_y[2::3] = out_y[1::3]
+        pieces_x.append(np.repeat(centers, 3))
+        pieces_y.append(out_y)
     # One raw neighbour on each side keeps the entering/leaving segment at
     # the window edge instead of clipping it a column early.
-    prefix_x = x[start - 1 : start]
-    prefix_y = y[start - 1 : start]
-    suffix_x = x[stop : stop + 1]
-    suffix_y = y[stop : stop + 1]
     return (
-        np.concatenate((prefix_x, out_x, suffix_x)),
-        np.concatenate((prefix_y, out_y, suffix_y)),
+        np.concatenate((x[start - 1 : start], *pieces_x, x[stop : stop + 1])),
+        np.concatenate((y[start - 1 : start], *pieces_y, y[stop : stop + 1])),
     )
 
 
@@ -1996,7 +2048,8 @@ class MatplotlibRenderer:
         self._composed_generation = -1
         previous_payload = self._last_payload
         previous_data_revision = self._data_revision
-        state_changed = self._last_state is None or state.revision != self._last_state.revision
+        fresh_axes = self._last_state is None
+        state_changed = fresh_axes or state.revision != self._last_state.revision
         payload_changed = (
             payload is not previous_payload
             or frame.data_revision != previous_data_revision
@@ -2071,9 +2124,13 @@ class MatplotlibRenderer:
                     self._capture_home_limits(axes)
             elif style_only:
                 self._update_base_style(state)
-            if state_changed and selected_effects & RenderEffect.TEXT:
+            # Freshly built axes -- the first frame, or the ones a relayout
+            # just rebuilt -- carry no text and no chrome yet, whatever the
+            # frame's effects say: the accepted title and grid must reach them
+            # here, while a steady frame still does only the work it names.
+            if fresh_axes or (state_changed and selected_effects & RenderEffect.TEXT):
                 self._update_text_artists(payload, state)
-            if state_changed and selected_effects & RenderEffect.CHROME:
+            if fresh_axes or (state_changed and selected_effects & RenderEffect.CHROME):
                 self._update_chrome_artists(state)
             # A height-bar scene owns its whole data region: 2D overlays --
             # selectors, fit polylines, classifier guides, the point
@@ -4513,13 +4570,28 @@ class MatplotlibRenderer:
             )
         return tuple(prepared)
 
-    @staticmethod
     def _native_curve_scene_supported(
+        self,
         series: Sequence[_PreparedSeries],
     ) -> bool:
-        """Whether the native stroke can paint every visible primitive."""
+        """Whether the native stroke can paint every visible primitive.
+
+        The native kernel strokes solid polylines and nothing else, so the
+        authored curve style is admitted first: a dashed line or a marker
+        belongs to the generic artists, which draw the LineToken as
+        declared.  Admitting a marker-only style here drew it as a
+        connected line live and as unconnected markers in the export.
+        """
 
         if not series:
+            return False
+        token = self.style.artists.curve
+        if token.linestyle not in ("-", "solid") or token.marker not in (
+            None,
+            "None",
+            "",
+            " ",
+        ):
             return False
         for item in series:
             plotted = np.where(item.valid, item.y, np.nan)
@@ -4627,15 +4699,7 @@ class MatplotlibRenderer:
                 axes.set_xlabel(x_label)
             if axes.get_ylabel() != y_label:
                 axes.set_ylabel(y_label)
-            apply_smart_ticks(axes, label_pt=self.style.fonts.tick_pt)
-            labelled = next(
-                (item for item in series if item.x_labels is not None), None
-            )
-            if labelled is not None:
-                axes.set_xticks(
-                    np.asarray(labelled.x, dtype=float),
-                    labels=[_literal_text(name) for name in labelled.x_labels],
-                )
+            self._apply_curve_ticks(axes, series, label_pt=self.style.fonts.tick_pt)
             self._artists["curve:prepared"] = {
                 "series": (series,),
                 "limits": (tuple(axes.get_xlim()), tuple(axes.get_ylim())),
@@ -4903,19 +4967,40 @@ class MatplotlibRenderer:
             # the GRID loop, at the grid's typography.  Installing the
             # standalone policy here too made the two signatures thrash:
             # every cell re-installed both locators on every frame.
-            apply_smart_ticks(axes, label_pt=self.style.fonts.tick_pt)
+            self._apply_curve_ticks(axes, series, label_pt=self.style.fonts.tick_pt)
+        self._apply_series_focus(id(axes))
+
+    @staticmethod
+    def _apply_curve_ticks(
+        axes: Any,
+        series: Sequence[_PreparedSeries],
+        *,
+        label_pt: float,
+    ) -> None:
+        """The tick policy of one curve surface, from one rule.
+
+        Declared coordinate names tick x BY NAME, one tick per coordinate --
+        the same names the legend, hover and scope rows already use; every
+        other axis takes the searched policy.  The native overview cell,
+        the generic cell, the standalone plot and the focused cell all come
+        through here, so no later tick pass can put numbers back where the
+        producer declared names.
+        """
+
         labelled = next(
             (item for item in series if item.x_labels is not None), None
         )
-        if labelled is not None:
-            # A labelled categorical axis ticks BY NAME, one tick per
-            # declared coordinate -- the same names the legend, hover and
-            # scope rows already use.
-            axes.set_xticks(
-                np.asarray(labelled.x, dtype=float),
-                labels=[_literal_text(name) for name in labelled.x_labels],
-            )
-        self._apply_series_focus(id(axes))
+        if labelled is None:
+            apply_smart_ticks(axes, label_pt=label_pt)
+            return
+        apply_smart_ticks(axes, "y", label_pt=label_pt)
+        apply_named_ticks(
+            axes,
+            "x",
+            np.asarray(labelled.x, dtype=float),
+            [_literal_text(name) for name in labelled.x_labels],
+            label_pt=label_pt,
+        )
 
     def _materialize_prepared_curve(self) -> None:
         """Build public Curve artists from the current prepared native scene."""
@@ -5542,7 +5627,10 @@ class MatplotlibRenderer:
                     )
                 else:
                     expand = peak > prior_high
-                    expanded = (0.0, max(1.0, peak * 1.25))
+                    # Headroom scales with the peak that breached, whatever
+                    # a count means: a density peak near 1e-2 pinned to a
+                    # floor of 1.0 is an axis with no histogram on it.
+                    expanded = (0.0, peak * 1.25)
                 shrink = (
                     target[1] < shrink_ratio * prior_high
                     or (
@@ -6287,10 +6375,13 @@ class MatplotlibRenderer:
         else:
             heights = np.asarray(values, dtype=np.float64)
             if valid is not None:
-                usable = _valid_array(valid, heights.shape)
-                # Nothing missing is the ordinary case for a camera frame,
-                # and writing every cell back over itself to say so cost
-                # 5.4 ms of every live frame at 2.3M cells.
+                # ``valid`` is the payload's own boolean plane, already
+                # normalised by the caller; an invalid cell holds a finite
+                # value that must not become a bar.  Nothing missing is the
+                # ordinary case for a camera frame, and writing every cell
+                # back over itself to say so cost 5.4 ms of every live frame
+                # at 2.3M cells.
+                usable = np.broadcast_to(np.asarray(valid, dtype=bool), heights.shape)
                 if not usable.all():
                     heights = np.where(usable, heights, np.nan)
 
@@ -7358,28 +7449,26 @@ class MatplotlibRenderer:
             else:
                 rgba = table[values]
         else:
-            # In-place float32 passes; boundary pixels may differ from
-            # Matplotlib's float64 normalize by one 256-level step, which is
-            # the same quantization the colormap applies anyway.
+            # The offset comes off and the range is normalised at the
+            # values' OWN precision: narrowing a 1e10 background to float32
+            # before subtracting it left a one-unit colour range as a single
+            # colour.  Only the residue, already inside [0, 256), is narrowed
+            # for the lookup, where a 256-level quantisation is the same one
+            # the colormap applies anyway.
+            scaled = (values - vmin) * (256.0 / (vmax - vmin))
             if kernels.engaged():
-                # One pass instead of six: the copy, the subtract, the
-                # multiply, the clip, the cast and the gather all happen
-                # per pixel, in registers, with nothing materialised
-                # between them but the answer.
+                # One pass for the clip, the cast and the gather, per pixel,
+                # in registers, with nothing materialised but the answer.
                 rgba = np.empty(values.shape + (4,), dtype=np.uint8)
                 kernels.colour_float32(
-                    kernels.readable(
-                        np.asarray(values, dtype=np.float32)
-                    ),
+                    kernels.readable(np.asarray(scaled, dtype=np.float32)),
                     kernels.readable(lut),
-                    np.float32(vmin),
-                    np.float32(256.0 / (vmax - vmin)),
+                    np.float32(0.0),
+                    np.float32(1.0),
                     rgba,
                 )
             else:
-                scaled = values.astype(np.float32, copy=True)
-                scaled -= np.float32(vmin)
-                scaled *= np.float32(256.0 / (vmax - vmin))
+                scaled = np.asarray(scaled, dtype=np.float32)
                 np.clip(scaled, 0.0, 255.0, out=scaled)
                 rgba = lut[scaled.astype(np.uint8)]
         rgba.setflags(write=False)
@@ -7663,8 +7752,9 @@ class MatplotlibRenderer:
                     valid,
                     policy.image_distribution_sample_target,
                 )
-                if not samples.size:
-                    samples = np.asarray([histogram_limits[0]], dtype=float)
+                # An image with no valid pixel has an empty distribution:
+                # the held range still lays out the bins, and every count
+                # is zero.  A sample invented to steady the axis was a bar.
                 edges = np.asarray(
                     aligned_histogram_edges(
                         samples,
@@ -8013,8 +8103,11 @@ class MatplotlibRenderer:
                 ),
             )
             y_limits = tuple(float(value) for value in history.get_ylim())
+            # No sample in the window is an empty distribution over the
+            # history's own range -- all-zero counts, never a bar invented
+            # at the lower limit to steady the axis.
             counts, edges = np.histogram(
-                values[np.isfinite(values)] if values.size else np.asarray([y_limits[0]]),
+                values[np.isfinite(values)],
                 bins=bin_count,
                 range=tuple(sorted(y_limits)),
             )
@@ -8705,15 +8798,21 @@ class MatplotlibRenderer:
             # separate MaxNLocator(3) here meant the cells were the one
             # surface the shared policy never reached: no compact offset,
             # and three labels whether they fitted or not.  Only WHICH cells
-            # show their labels is the grid's business.
-            apply_smart_ticks(
-                axis,
-                label_pt=(
-                    typography.tick_pt
-                    if typography is not None
-                    else self.style.fonts.tick_pt
-                ),
+            # show their labels is the grid's business.  A curve cell's
+            # declared coordinate names come through the same entry the
+            # standalone curve uses, whether or not the cell was painted
+            # natively.
+            cell_tick_pt = (
+                typography.tick_pt
+                if typography is not None
+                else self.style.fonts.tick_pt
             )
+            if curve_series:
+                self._apply_curve_ticks(
+                    axis, curve_series[index], label_pt=cell_tick_pt
+                )
+            else:
+                apply_smart_ticks(axis, label_pt=cell_tick_pt)
             if axis.yaxis.get_tick_params().get("labelleft") != label_left:
                 axis.tick_params(axis="y", labelleft=label_left)
             if axis.xaxis.get_tick_params().get("labelbottom") != label_bottom:
@@ -8781,6 +8880,14 @@ class MatplotlibRenderer:
             # kind's spatial tick budget; restating it keeps the signature
             # stable instead of re-installing default-budget locators.
             apply_smart_ticks(selected, label_pt=self.style.fonts.tick_pt)
+        elif curve_series:
+            # The focused curve cell is the standalone curve surface: its
+            # ticks come from the same entry, at the panel's typography.
+            self._apply_curve_ticks(
+                selected,
+                curve_series[selected_index],
+                label_pt=self.style.fonts.tick_pt,
+            )
         if (
             not selected.xaxis.get_tick_params().get("labelbottom", False)
             or not selected.yaxis.get_tick_params().get("labelleft", False)
@@ -10307,13 +10414,17 @@ class MatplotlibRenderer:
             with style_context(self.style):
                 # ``savefig`` draws through matplotlib's own machinery, which
                 # knows nothing of the native prepared scene -- and that scene
-                # keeps its series artists HIDDEN and empty.  An export of a
-                # natively stroked Curve or Rolling panel was a complete frame
-                # of axes and chrome with NO data on it.  Image is unaffected:
-                # its artist always carries the picture.  The final draw()
-                # below composes from the materialized artists, and the next
-                # data update reinstalls the native scene.
+                # keeps its series artists HIDDEN and empty, and its Facet
+                # image cell artists at whatever revision last went through
+                # the generic render.  An export of a natively stroked Curve
+                # or Rolling panel was a complete frame of axes and chrome
+                # with NO data on it; an export of a reused Facet image grid
+                # was the PREVIOUS revision's picture.  Both scenes are
+                # materialized from their current prepared inputs first.  The
+                # final draw() below composes from the materialized artists,
+                # and the next data update reinstalls the native scene.
                 self._materialize_prepared_curve()
+                self._materialize_prepared_images()
                 # ``savefig`` creates a private renderer internally, so the
                 # live-draw hook cannot wrap that renderer's mathtext parser.
                 # It must join the same process-global parser lane here or a

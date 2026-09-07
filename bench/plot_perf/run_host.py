@@ -108,7 +108,6 @@ class HostBench:
 
         deadline = time.perf_counter() + limit
         last_change = time.perf_counter()
-        baseline = self.presented.count
         while time.perf_counter() < deadline:
             self.app.processEvents()
             if self.presented.poll():
@@ -156,14 +155,12 @@ class HostBench:
         stop.setSingleShot(True)
         stop.setInterval(3000)
         stop.timeout.connect(self.app.quit)
-        baseline = self.presented.count
-        start = time.perf_counter()
+        window = self.presented.window()
         feed_timer.start(); poller.start(); stop.start()
         self.app.exec_()
         feed_timer.stop(); poller.stop()
-        elapsed = time.perf_counter() - start
+        elapsed, shown = window.end()
         self.settle()
-        shown = self.presented.count - baseline
         self.report["live_25hz"] = {
             "submitted_hz": round(state["submitted"] / elapsed, 1),
             "presented_hz": round(shown / elapsed, 1),
@@ -185,11 +182,10 @@ class HostBench:
         return result
 
     def _spray_moves(self, positions, seconds: float) -> dict:
-        baseline = self.presented.count
-        start = time.perf_counter()
+        window = self.presented.window()
         index = 0
         sent = 0
-        while time.perf_counter() - start < seconds:
+        while time.perf_counter() - window.started < seconds:
             nx, ny = positions[index % len(positions)]
             index += 1
             self.pointer.move(nx, ny)
@@ -197,12 +193,11 @@ class HostBench:
             self.app.processEvents()
             self.presented.poll()
             time.sleep(0.003)
-        elapsed = time.perf_counter() - start
+        elapsed, shown = window.end()
         pump(self.app, 0.3)
-        self.presented.poll()
         return {
             "sent_hz": round(sent / elapsed, 1),
-            "presented_hz": round((self.presented.count - baseline) / elapsed, 1),
+            "presented_hz": round(shown / elapsed, 1),
         }
 
     def bench_interactions(self) -> None:
@@ -498,19 +493,16 @@ class HostBench:
         stop.timeout.connect(self.app.quit)
         self.pointer.press(*path[0])
         pump(self.app, 0.1)
-        baseline = self.presented.count
-        start = time.perf_counter()
+        window = self.presented.window()
         feed_timer.start(); mover.start(); poller.start(); stop.start()
         self.app.exec_()
         feed_timer.stop(); mover.stop(); poller.stop()
-        elapsed = time.perf_counter() - start
+        elapsed, shown = window.end()
         self.pointer.release(*path[-1])
         self.settle()
         self.report["live_plus_drag"] = {
             "submitted_hz": round(state["submitted"] / elapsed, 1),
-            "presented_hz": round(
-                (self.presented.count - baseline) / elapsed, 1
-            ),
+            "presented_hz": round(shown / elapsed, 1),
         }
 
     def run(self) -> dict:

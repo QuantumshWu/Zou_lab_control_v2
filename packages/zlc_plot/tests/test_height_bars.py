@@ -1568,3 +1568,60 @@ def test_the_warmer_renders_what_production_renders() -> None:
         representative_render()
     finally:
         raster._ENGINE = previous
+
+def test_an_invalid_finite_cell_is_not_a_bar(monkeypatch) -> None:
+    """A cell the dataset marks invalid is absent from the scene.
+
+    The height renderer's only word for "no bar here" is NaN; a per-cell
+    validity plane must therefore blank its cells before the heights cross
+    that boundary.  The entry read the plane through a helper that looked
+    for a ``.valid`` attribute on what was already the boolean array, found
+    none, and handed every finite value over as a bar.
+    """
+
+    from dataclasses import replace
+
+    from zlc_data import SPATIAL_X, SPATIAL_Y, ValidityContract
+    import zlc_plot._height3d_raster as height_raster
+
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"frame": [0]}),
+        cell_axes=(
+            axis("y", values=np.arange(2), role=SPATIAL_Y),
+            axis("x", values=np.arange(2), role=SPATIAL_X),
+        ),
+        dtype=np.float64,
+    )
+    schema = replace(
+        schema,
+        value_schema=replace(
+            schema.value_schema,
+            validity_contract=ValidityContract.components(
+                *(item.axis_id for item in schema.cell_domain.axes)
+            ),
+        ),
+    )
+    values = np.array([[[[1.0, 100.0], [2.0, 3.0]]]])
+    valid = np.array([[[[True, False], [True, True]]]])
+    snapshot = make_snapshot(schema, values, revision=0, validity=valid)
+    handed: list[np.ndarray] = []
+    original = height_raster.render_height_bars
+
+    def capture(heights, *args, **kwargs):
+        handed.append(np.array(heights, copy=True))
+        return original(heights, *args, **kwargs)
+
+    monkeypatch.setattr(height_raster, "render_height_bars", capture)
+    session = PlotSession(
+        snapshot, ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y"))
+    )
+    try:
+        session.set_parameter("presentation", "height_bars")
+        session.rgba()
+        assert handed, "the scene was not rendered"
+        heights = handed[-1]
+        assert np.isnan(heights).sum() == 1
+        assert np.nanmax(heights) == 3.0
+    finally:
+        session.close()
