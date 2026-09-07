@@ -8,7 +8,7 @@ topology from values.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 from numbers import Integral
 from typing import Any, TypeAlias
@@ -542,6 +542,7 @@ class _ProjectedAxis:
     domain_canonical: NDArray[Any]
     domain_display: NDArray[Any]
     coordinate_labels: tuple[str, ...] | None
+    retained_domain: _Domain | None = field(default=None, compare=False, repr=False)
 
     @property
     def dimension(self) -> int:
@@ -2556,11 +2557,16 @@ class DataView:
         for ref in refs:
             resolved = self._resolve(ref)
             dimension = int(resolved.dimension)
-            stride = 1
-            for size in shape[dimension + 1:]:
-                stride *= int(size)
-            representatives = np.arange(shape[dimension], dtype=np.int64) * stride
-            domain = self._domain(ref, representatives)
+            domain = resolved.retained_domain
+            if domain is None:
+                stride = 1
+                for size in shape[dimension + 1:]:
+                    stride *= int(size)
+                representatives = np.arange(shape[dimension], dtype=np.int64) * stride
+                domain = self._domain(ref, representatives)
+                # These codes depend only on the resolved schema/unit context,
+                # which already gates _axis_cache inheritance across revisions.
+                object.__setattr__(resolved, "retained_domain", domain)
             codes = np.asarray(domain.codes, dtype=np.int64)
             axis_codes.append(codes)
             dimensions.append(dimension)
@@ -4411,6 +4417,10 @@ class DataView:
         inverse = remap[declared]
         canonical_values = resolved.domain_canonical[used_indices]
         display_values = resolved.domain_display[used_indices]
+        # Both gathers are ours. Seal them before the immutable domain wrappers
+        # so its lazy labels do not retain another pair of writable copies.
+        canonical_values.setflags(write=False)
+        display_values.setflags(write=False)
         if valid_local is None:
             codes = inverse
         else:
@@ -4418,15 +4428,21 @@ class DataView:
             codes[valid_local] = inverse
         codes.setflags(write=False)
 
+        # A retained domain belongs to resolved: do not capture that owner in
+        # its lazy callback and create a cycle holding the coordinate arrays.
+        declared_labels = resolved.coordinate_labels
+        axis_label = resolved.coordinate.label
+        display_unit = resolved.coordinate.display_unit
+
         def build_values() -> tuple[AxisValue, ...]:
             indices: tuple[int | None, ...] = tuple(
                 int(index) for index in used_indices
             )
             coordinate_labels = (
                 (None,) * len(indices)
-                if resolved.coordinate_labels is None
+                if declared_labels is None
                 else tuple(
-                    resolved.coordinate_labels[int(index)]
+                    declared_labels[int(index)]
                     for index in used_indices
                 )
             )
@@ -4437,9 +4453,9 @@ class DataView:
                     canonical=_python_scalar(canonical_value),
                     display=_python_scalar(display_value),
                     label=_axis_value_label(
-                        resolved.coordinate.label,
+                        axis_label,
                         display_value,
-                        resolved.coordinate.display_unit,
+                        display_unit,
                         coordinate_label,
                     ),
                 )

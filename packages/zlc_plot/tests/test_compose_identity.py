@@ -188,11 +188,29 @@ def test_color_limit_preview_composes_without_touching_chrome() -> None:
         preview_front = renderer._artists["image:applied_front"]
         assert preview_front.shape == before_front.shape
         background = renderer._axes_background_rgba(image.axes)
-        _rows, columns = renderer._artists["image:view_sampling"][1]
-        column, column_stop, _column_map = columns
-        assert column > 0 and column_stop < preview_front.shape[1]
-        assert np.all(preview_front[:, :column] == background)
-        assert np.all(preview_front[:, column_stop:] == background)
+        # Check the picture the operator receives, not an optional fallback
+        # RGBA cache. Native Image now keeps the accepted scalar source on
+        # the artist and only materializes that cache when a consumer needs it.
+        pixels = np.asarray(renderer.figure.canvas.buffer_rgba())
+        box = image.axes.bbox
+        extent = image.get_extent()
+        edges = image.axes.transData.transform(
+            ((extent[0], extent[2]), (extent[1], extent[3]))
+        )
+        data_left, data_right = sorted(edges[:, 0])
+        data_top, data_bottom = sorted(pixels.shape[0] - edges[:, 1])
+        stroke = max(spine.get_linewidth() for spine in image.axes.spines.values())
+        tick = max(mark.tick1line.get_markersize()
+                   for axis in (image.axes.xaxis, image.axes.yaxis) for mark in axis.majorTicks)
+        pad = 2 + int(np.ceil((stroke + tick) * renderer.figure.dpi / 72.0))
+        # The clim readout above the data and the inward ticks are legitimate
+        # chrome, not image pixels; inspect both margins alongside the data.
+        top = max(int(np.ceil(pixels.shape[0] - box.y1)) + pad, int(np.ceil(data_top)) + 1)
+        bottom = min(int(np.floor(pixels.shape[0] - box.y0)) - pad, int(np.floor(data_bottom)) - 1)
+        for left, right in ((int(np.ceil(box.x0)) + pad, int(np.floor(data_left)) - 1),
+                            (int(np.ceil(data_right)) + 1, int(np.floor(box.x1)) - pad)):
+            assert right > left and bottom > top
+            assert np.all(pixels[top:bottom, left:right] == background)
         renderer.end_selector_gesture()
         session.set_color_limits(20.0, 145.0, fixed=True)
         assert renderer._artists["image:colorbar_state"][1] == (20.0, 145.0)

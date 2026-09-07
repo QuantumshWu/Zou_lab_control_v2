@@ -295,6 +295,42 @@ def test_the_extrema_kernel_matches_the_masked_reductions() -> None:
                 assert got[1] == expected[1]
                 assert got[2] == expected[2]
 
+            # The Curve pass also writes its exact validity plane and records
+            # singleton runs while reading these same bounds, not a second scan.
+            x = np.arange(pool.size, dtype=np.float64)
+            if x.size > 1:
+                x[-1] = np.nan
+            source_valid = np.ones(pool.size, dtype=bool) if mask is None else mask
+            marks = source_valid & np.isfinite(x) & np.isfinite(pool)
+            connected = np.zeros(marks.shape, dtype=bool)
+            connected[:-1] |= marks[:-1] & marks[1:]
+            connected[1:] |= marks[:-1] & marks[1:]
+            low, high = pool - 0.125, pool + 0.25
+            low[::7] = np.nan
+            for has_band in (False, True):
+                valid = np.empty(marks.shape, dtype=bool)
+                summary = np.empty(7, dtype=np.float64)
+                kernels.prepare_curve_summary(
+                    kernels.readable(x), kernels.readable(pool), kernels.readable(source_valid),
+                    kernels.readable(low), kernels.readable(high), has_band, valid, summary,
+                )
+                low_source = np.where(np.isfinite(low), low, pool) if has_band else pool
+                high_source = np.where(np.isfinite(high), high, pool) if has_band else pool
+                np.testing.assert_array_equal(valid, marks)
+                np.testing.assert_array_equal(summary, (
+                    np.min(x, where=marks, initial=np.inf),
+                    np.max(x, where=marks, initial=-np.inf),
+                    np.min(low_source, where=marks, initial=np.inf),
+                    np.max(high_source, where=marks, initial=-np.inf),
+                    bool(np.any(marks & ~connected)),
+                    min(np.min(pool, where=marks, initial=np.inf),
+                        np.min(low_source, where=marks, initial=np.inf),
+                        np.min(high_source, where=marks, initial=np.inf)),
+                    max(np.max(pool, where=marks, initial=-np.inf),
+                        np.max(low_source, where=marks, initial=-np.inf),
+                        np.max(high_source, where=marks, initial=-np.inf)),
+                ))
+
 
 def test_the_finite_probe_takes_the_same_leading_values() -> None:
     """Block-built masks pick the same values, in the same order."""

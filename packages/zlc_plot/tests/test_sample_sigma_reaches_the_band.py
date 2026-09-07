@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from matplotlib.collections import LineCollection
 
 from data_factory import (
     make_dataset_schema,
@@ -65,7 +66,18 @@ def _curve_sem(snapshot: OwnedSnapshot) -> np.ndarray:
     try:
         session._renderer.draw()
         series = session._projection._payload.series[0]
-        return np.asarray(series.sem, dtype=float)
+        sem = np.asarray(series.sem, dtype=float)
+        session._renderer._materialize_prepared_curve()
+        bars = [
+            artist
+            for axes in session._renderer.figure.axes
+            for artist in axes.collections
+            if isinstance(artist, LineCollection) and artist.get_visible()
+        ]
+        assert any(len(artist.get_segments()) for artist in bars) == bool(
+            np.any(np.isfinite(sem) & (sem > 0.0))
+        ), "a finite stated error must reach the rendered single-sample band"
+        return sem
     finally:
         session.close()
 

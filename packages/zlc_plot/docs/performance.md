@@ -1,5 +1,68 @@
 # Plot performance
 
+## 后续性价比收口（2026-09-06，第二轮）
+
+在上一轮投影/SEM准备cut上继续：完成Future不再由取消回调引用自身；共享front池的
+free预算跟随当前Host数并在关闭时缩减；Curve/Rolling/Facet复用一个serial nogil
+summary核的valid/范围/孤点结果，直接读取readonly strided view而不强制C-copy。
+同phase1 DataView的完整Session增量对照（DPR3，2×2，n=3）为真2M single
+49.86→42.66ms、8组共2M 46.90→40.68ms；每case7帧完整RGBA相等。小MOT
+F40 Curve的16.72→17.61ms不利结果保留，不声称全矩阵提速。
+
+Fit保留每轮fresh候选，warm仅缓存成功参数tuple；删除原半径/幅度/chi阈值及原图扫描。
+warm-only在noisy→clean/峰跳变后可连续success却停在错误盆地，故不采用。
+仅RegularImage普通最小二乘`loss=linear`的proxy采用1e-5容差；robust proxy与全部
+full refinement仍保持1e-10/1e-8。难例单阶段配对约84→2ms，真实MOT B40 warm
+n3中位28.15→26.76ms，cold没有可靠收益。非bit-exact：极噪样本最大曲线逐点差
+0.00498%（相对旧拟合范围），MOT约1.19e-12；未把proxy当最终结果。
+
+实际production、真实鼠标ROI43×502、40-shot、四Panel对照：
+
+| 场景 | 本轮前critical P50/P90 | 本轮后critical P50/P90 |
+|---|---:|---:|
+| Curve-fit | 97.50/109.64ms | 89.85/93.83ms |
+| Image-fit | 111.52/118.54ms | 99.07/101.65ms |
+
+各关闭细分探针窗口6秒、45个matched cohorts；critical为首个B Panel.prepare到四front
+accept，非曝光开始。固定尺寸的6秒细分窗口新shared block均为0（前为112），总峰值RSS
+分别1607→1098MiB、1678→1081MiB。并非首次打开或resize不需分配，也不由约7.5Hz
+source证明15–20Hz。屏幕viewport没有同时完整显示四图，仍非完整Qt paint/scanout上限。
+最终Image验收曾暴露disjoint history误用滚动basis的广播错误；复用审查分支的真实重叠
+条件、从保留事件重组后验收通过，不以补零或放宽shape掩盖。全部当前生产修改相对
+ec706be2净减30行，未新增生产文件/类/进程；主要remaining仍为Fit、有效SEM、compose
+与A内竞争。详细方法、不利结果及数值限定见当前worktree的`research/COST_EFFECTIVE_REPORT.md`。
+
+## 准备阶段减量（2026-09-06）
+
+相对 `ec706be2`，只在现有 DataView、renderer、regular-image Fit 准备 owner 内
+收口：retained-axis domain 沿既有 schema/unit cache 复用；全非有限 SEM 不再生成
+band geometry；孤点检查复用 prepared.valid；有效误差棒省去完整有效数组的 gather、
+重复线性端点变换与同帧颜色打包；Fit 直接 stack float64 并只组合显式 mask。
+生产代码净增25行，无新生产文件、类、kernel、cache signature 或线程池。
+
+同进程同源、DPR3、2×2 preset，旧 DataView＋旧 renderer 对照当前实现，
+2 warm＋5次无hook计时：
+
+| 完整 PlotSession 输入→输出 | 前P50 | 后P50 |
+|---|---:|---:|
+| 真2M输出点，单Curve | 144.49 ms | 54.77 ms |
+| 真2M输出点，8组Curve | 150.58 ms | 62.70 ms |
+
+两项所有完整RGBA及Curve数值payload相等。独立投影的fresh A/B为
+87.68→11.80 ms、19.41→6.62 ms。坐标复用额外保留codes/used-indices约32/4 MB；
+不保留旧科学values或history。有效20k误差棒的同prepared-state交错helper对照
+6.85→6.38 ms（n=7），完整RGBA相同，kernel约占八成且未修改；不称达到物理极限。
+Fit准备仅约1ms量级，single warm短测有反向波动，不作为稳定加速承诺。
+
+**真实MOT四图未证明明显加速。** 相同真实鼠标ROI43×502、40-shot history：
+Curve-fit critical P50/P90为95.77/102.32→98.07/108.10 ms；Image-fit为
+110.08/118.62→106.40/117.02 ms，后者max反而125.13→164.47 ms。
+每个无方法hook窗口6s、42–45个matched样本。source约7.2–7.7Hz，不据此证明20Hz；
+四surface均完整render/accept，但屏幕scroll viewport没有同时显示完整四幅图。
+普通Image/Histogram控制项有不利波动，不列为本轮收益。剩余主要成本仍是
+Curve准备/范围计算、有效SEM像素混合、Facet Histogram compose、Fit及A内竞争。
+数值/画质/同shot/selector/square/MathText/solver目标保持原contract。
+
 ## Current performance baseline (2026-08-20)
 
 - One `PlotSession` owns one serial analysis executor. Frame preparation,
@@ -1119,3 +1182,24 @@ python -c "import zou_lab_control; import sys; sys.argv=['run_fit_models','--mod
 ```
 
 原始输出位于`bench/results/release_recapture.json`。
+# 2026-09-07：共享 Fit / foreground 实施结果
+
+当前性能worktree相同MOT、43×502 ROI、40-shot、DPR3四Panel，关闭细分探针窗口：
+Curve-fit critical P50/P90 `89.85/93.83→84.69/86.92 ms`；Image-fit
+`98.08/100.83→83.27/85.81 ms`。source约7.5–7.7Hz，不能据此声称15–20Hz能力。
+隔离F40 Curve commit `32.73→25.00 ms`、Facet64 Histogram `32.53→25.79 ms`，各9帧完整RGBA相同。
+
+RegularImage single/Bn统一proxy→full TRF，规则轴不展开，既有context贯通objective，复用中心化统计量、
+省去未启用的权重图/重复valid扫描，最终直接核RSS；信息矩阵/协方差共享数值owner。
+最终同源AB：B40 `27.52→24.70 ms`；1200×1920 single `19.32→26.70 ms`，后者增加7.38ms，不能算作单图加速。
+旧single Newton/L-BFGS及其无人消费的辅助代码已删除。原始u8/u16保留，浮点至多f64。
+
+前景由原Agg/FT/MathText提供coverage，现有compose按原顺序批量重放；Single/Facet/Focus共用。
+Image只在fallback/export需要时物化备用RGBA，实际scalar/validity与clim/geometry仍保留。
+本轮production相对开始快照净+71行（含f32/f64预热样本），连同前轮相对HEAD累计净+41行；无新production文件或类。
+
+正常计时窗口均0 stalls，但Curve带探针窗口有一次约205ms长尾。单次补充复核明确记录gen2 GC
+117.334ms、回收54,628对象，嵌套在120.772ms front capture内；不得把它错算成像素复制成本。
+探针可能改变GC触发时刻，未证明无探针的发生频率，也未禁用/挪动GC。尚未达到物理性能极限。
+完整代价、科学资格、失败中间版本、缓存限制和最终记录见
+`research/FINAL_MAJOR_OPTIMIZATION_REPORT.md`。

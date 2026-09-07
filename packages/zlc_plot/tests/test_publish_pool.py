@@ -35,7 +35,8 @@ def _session() -> PlotSession:
         device_pixel_ratio=2.0,
     )
 
-def test_a_released_buffer_is_the_one_reissued() -> None:
+@pytest.mark.parametrize("surfaces", (1, 4))
+def test_a_released_buffer_is_the_one_reissued(surfaces) -> None:
     """Steady state stops allocating: the same storage comes back around."""
 
     pool = PublishBufferPool()
@@ -47,6 +48,33 @@ def test_a_released_buffer_is_the_one_reissued() -> None:
     del writable, published
     again_writable, again_published = pool.take(1024)
     assert again_writable.obj is block
+
+    from zlc_plot.render_process import _SharedFrontPool
+
+    shared = _SharedFrontPool()
+    try:
+        first = [shared.publish(bytes(1024)) for _ in range(surfaces)]
+        held_id, held_name, _size = shared.publish(bytes([7]) * 1024)
+        first_names = {name for _lease, name, _size in first}
+        assert held_name not in first_names
+        for lease, _name, _size in first:
+            shared.release(lease, surfaces)
+        reissued = [shared.publish(bytes(1024)) for _ in range(surfaces)]
+        assert {name for _lease, name, _size in reissued} == first_names
+        assert bytes(shared._leased[held_id].buf) == bytes([7]) * 1024
+        for lease, _name, _size in reissued:
+            shared.release(lease, surfaces)
+        shared.trim_free(1)
+        assert len(shared._free) == 1
+        for size in range(2, 8):
+            lease, _name, _size = shared.publish(bytes(size * 1024))
+            shared.release(lease, surfaces)
+            assert len(shared._free) <= surfaces
+        shared.trim_free(0)
+        assert not shared._free
+        assert held_id in shared._leased
+    finally:
+        shared.close()
 
 def test_a_held_buffer_is_never_reissued() -> None:
     """The failure mode of a holder is a fresh allocation, not shared pixels."""

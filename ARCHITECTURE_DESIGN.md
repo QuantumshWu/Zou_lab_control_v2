@@ -232,6 +232,9 @@ Node new chunk
   可在本次kernel内临时扩到8并立即恢复。A与C的并发native team总预算不得超过本机容量，B不再
   初始化Plot kernel pool。operator显式环境设置仍优先；不得用跨host render/fit锁重新串行化A。
 - RegularImage live batch即使具有完整warm seed也必须保留cold proxy竞争，再以选出的seed做full refinement；warm不能跳过cold证据、成为不可恢复的authority。
+- RegularImage的single是同一批量数值流程的一条lane；不得按cell数量维护不同full-refinement算法。规则网格以明确的内部shape/axis包交给同一TRF，不展开重复的逐像素坐标，也不改变Dataset或Plot轴语义。现有数值context同时供prepare与objective使用，可保留每cell一次计算的中心化统计量；原始物理参数、bounds和损失/收敛含义保持不变。最终质量仍由真实数据的直接残差核对，不能用不稳定的大数相减或放松精度换取提速。
+- 编译Fit中未启用权重时，由既有use_weights表示并传递空权重行，所有objective/finalizer只在启用时读取权重数据；不得为默认权重1建立完整B×N数组。前景仍由Agg/FreeType/MathText产生字形/覆盖率，现有compose按原顺序批量重放；未纳入批量覆盖的artist在原顺序位置保留既有draw，不另建科学数据路线。Image的备用像素在fallback/export消费时才由公共owner物化，普通native帧不重复生成一份未绘制RGBA。
+- Fit的warm记忆只保留当前request/model/cell最近一次成功参数tuple，失败清除；前次参数仅是与当前数据自动候选竞争的初值，不再通过半径/幅度/history chi-square阈值另设资格状态或扫描原图。RegularImage的线性least-squares proxy只负责寻找初值盆地，可使用与最终输出不同的收敛精度；robust loss仍保留原proxy精度。所有fresh正负候选仍参与，最终参数、残差与协方差必须继续来自完整数据及既有full-refinement精度，不能把proxy结果直接当成最终拟合。
 - Title/layout等非plot变化不得re-fit。
 - 删除重复configure/clear/replay与多front handoff。
 - Qt owner必须在RasterPlotHost第一次render前把当前screen DPR以plain scalar交给Plot；不得先按默认DPR生成front，再在Widget挂载后为同一data/state重画一次。Form consumer在FormSpec结构和实际Widget值均已匹配时只接受新metadata，不得reconcile；keyed runtime choice domain真实变化仍强制刷新。

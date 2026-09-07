@@ -18,7 +18,7 @@ The callback ABI is deliberately small and write-oriented:
 
 ``objective(coords, observations, valid, full_parameters, free_indices,
 weights, use_weights, poisson, loss_code, gradient, information, jacobian_row,
-with_derivatives) -> (cost, raw_rss, finite)``
+with_derivatives, context) -> (cost, raw_rss, finite)``
     Evaluate the robust objective and, when requested, fill the gradient and
     Gauss--Newton information for *free* parameters.  Model callbacks should
     use ``compiled_point_terms`` and the accumulator helpers below so linear,
@@ -127,6 +127,7 @@ _OBJECTIVE_CALLBACK_SIGNATURE = _OBJECTIVE_RETURN(
     _F64_2C,
     _F64_1C,
     nb_types.boolean,
+    _F64_2C,
 )
 _OBJECTIVE_FUNCTION_TYPE = nb_types.FunctionType(_OBJECTIVE_CALLBACK_SIGNATURE)
 
@@ -192,6 +193,7 @@ _SOLVE_KERNEL_SIGNATURE = nb_types.void(
     _I32_2C,
     _I32_2C,
     _I32_2C,
+    _F64_3C,
 )
 
 _FINALIZE_KERNEL_SIGNATURE = nb_types.void(
@@ -231,6 +233,12 @@ class CompiledFitDescriptor:
     preparation data.  It receives the canonical tuple of coordinate arrays;
     callers may cache its read-only result by ``cache_key`` plus their exact
     coordinate fingerprint.  The solver itself has no model registry.
+
+    ``coordinate_layout="rectangular-grid"`` explicitly supplies independent
+    x/y axes for a row-major image.  Its private callback buffer has two rows:
+    width/height in column zero, followed by the respective axis coordinates.
+    Padding is not a coordinate.  This layout uses caller-owned finalization
+    and an explicit context; ordinary point-model callback layout is unchanged.
     """
 
     prepare: Any
@@ -240,6 +248,7 @@ class CompiledFitDescriptor:
     max_candidates: int
     coordinate_origin: int | None = None
     cache_key: str = ""
+    coordinate_layout: str = "points"
 
     def __post_init__(self) -> None:
         if not callable(self.prepare):
@@ -256,6 +265,10 @@ class CompiledFitDescriptor:
         origin = self.coordinate_origin
         if origin is not None and int(origin) < 0:
             raise ValueError("compiled fit coordinate_origin must be non-negative")
+        if self.coordinate_layout not in ("points", "rectangular-grid"):
+            raise ValueError("unknown compiled fit coordinate_layout")
+        if self.coordinate_layout == "rectangular-grid" and origin is not None:
+            raise ValueError("rectangular-grid coordinates do not use coordinate_origin")
         object.__setattr__(self, "max_candidates", count)
         object.__setattr__(self, "coordinate_origin", None if origin is None else int(origin))
         object.__setattr__(self, "cache_key", str(self.cache_key))
@@ -1173,6 +1186,7 @@ def _solve_seed(
     ftol: float,
     xtol: float,
     gtol: float,
+    context: np.ndarray,
 ) -> tuple[np.ndarray, float, float, int, int, int, int]:
     free_count = seed.size
     values = seed.copy()
@@ -1245,6 +1259,7 @@ def _solve_seed(
             information,
             jacobian_row,
             True,
+            context,
         )
         if iteration == 0:
             nfev = 1
@@ -1412,6 +1427,7 @@ def _solve_seed(
                 information,
                 jacobian_row,
                 False,
+                context,
             )
             nfev += 1
             scaled_norm = _vector_norm(scaled_step)
@@ -1486,6 +1502,7 @@ def _solve_cell(
     lane_nfev: np.ndarray,
     lane_njev: np.ndarray,
     lane_iterations: np.ndarray,
+    context: np.ndarray,
 ) -> tuple[np.ndarray, float, float, int, int, int, int, int]:
     full_count = full_lower.size
     free_count = free_indices.size
@@ -1541,6 +1558,7 @@ def _solve_cell(
             ftol,
             xtol,
             gtol,
+            context,
         )
         lane_status[seed_index] = status
         lane_nfev[seed_index] = nfev
@@ -1626,6 +1644,7 @@ def _solve_serial(
     lane_nfev: np.ndarray,
     lane_njev: np.ndarray,
     lane_iterations: np.ndarray,
+    contexts: np.ndarray,
 ) -> None:
     for cell in range(observations.shape[0]):
         (
@@ -1661,6 +1680,7 @@ def _solve_serial(
             lane_nfev[cell],
             lane_njev[cell],
             lane_iterations[cell],
+            contexts[cell],
         )
 
 
@@ -1697,6 +1717,7 @@ def _solve_parallel(
     lane_nfev: np.ndarray,
     lane_njev: np.ndarray,
     lane_iterations: np.ndarray,
+    contexts: np.ndarray,
 ) -> None:
     for cell in prange(observations.shape[0]):
         (
@@ -1732,6 +1753,7 @@ def _solve_parallel(
             lane_nfev[cell],
             lane_njev[cell],
             lane_iterations[cell],
+            contexts[cell],
         )
 
 
@@ -1793,7 +1815,7 @@ def _finalize_one(
             predicted[point],
             observations[point],
             poisson,
-            weights[point],
+            weights[point] if use_weights else 1.0,
             use_weights,
             loss_code,
         )
@@ -2046,9 +2068,21 @@ def _seed_cube(
 def _coordinate_stack(
     coordinates: Sequence[np.ndarray],
     points: int,
+    layout: str = "points",
 ) -> np.ndarray:
     if not coordinates:
         raise ValueError("compiled fit requires at least one coordinate axis")
+    if layout == "rectangular-grid":
+        if len(coordinates) != 2:
+            raise ValueError("compiled rectangular grid requires x and y axes")
+        x, y = (np.asarray(axis, dtype=np.float64) for axis in coordinates)
+        if x.ndim != 1 or y.ndim != 1 or not x.size or not y.size or x.size * y.size != points:
+            raise ValueError("compiled rectangular-grid axis sizes must match observations")
+        stack = np.zeros((1, 2, max(x.size, y.size) + 1), dtype=np.float64)
+        stack[0, 0, 0], stack[0, 1, 0] = x.size, y.size
+        stack[0, 0, 1 : x.size + 1] = x
+        stack[0, 1, 1 : y.size + 1] = y
+        return stack
     stack = np.empty((1, len(coordinates), points), dtype=np.float64)
     for axis, values in enumerate(coordinates):
         array = np.asarray(values, dtype=np.float64)
@@ -2099,6 +2133,8 @@ def _context_stack(
             array = np.broadcast_to(array, (cells, *array.shape))
         elif array.ndim != 3 or array.shape[0] != cells:
             raise ValueError("compiled fit context must be shared 2D or per-cell 3D")
+        if array.ndim == 3 and array.flags.c_contiguous and array.flags.writeable:
+            return array
         return np.array(array, dtype=np.float64, order="C", copy=True)
     built: list[np.ndarray] = []
     shape: tuple[int, int] | None = None
@@ -2210,6 +2246,9 @@ def _solve_compiled(
 ) -> CompiledFitOutput:
     if not isinstance(descriptor, CompiledFitDescriptor):
         raise TypeError("descriptor must be CompiledFitDescriptor")
+    grid = descriptor.coordinate_layout == "rectangular-grid"
+    if grid and (finalize or context is None):
+        raise ValueError("rectangular-grid fits require explicit context and caller finalization")
     _ensure_compiled_abi(descriptor, parallel=parallel)
     values = np.asarray(observations)
     if values.ndim == 1:
@@ -2225,7 +2264,7 @@ def _solve_compiled(
     cells, points = values.shape
     if cells == 0 or points == 0:
         raise ValueError("compiled fit observations cannot be empty")
-    coordinate_values = _coordinate_stack(coordinates, points)
+    coordinate_values = _coordinate_stack(coordinates, points, descriptor.coordinate_layout)
     if valid is None:
         valid_values = np.ones((cells, points), dtype=np.bool_)
     else:
@@ -2236,8 +2275,14 @@ def _solve_compiled(
             raise ValueError("compiled fit valid mask must match observations")
         valid_values = np.array(valid_values, dtype=np.bool_, order="C", copy=True)
     valid_values &= np.isfinite(values)
-    for axis in range(coordinate_values.shape[1]):
-        valid_values &= np.isfinite(coordinate_values[:, axis, :])
+    if grid:
+        width, height = (int(coordinate_values[0, axis, 0]) for axis in range(2))
+        valid_grid = valid_values.reshape(cells, height, width)
+        valid_grid &= np.isfinite(coordinate_values[0, 0, 1 : width + 1])[None, None, :]
+        valid_grid &= np.isfinite(coordinate_values[0, 1, 1 : height + 1])[None, :, None]
+    else:
+        for axis in range(coordinate_values.shape[1]):
+            valid_values &= np.isfinite(coordinate_values[:, axis, :])
 
     coordinate_values, coordinate_origins = _canonicalize_coordinates(
         descriptor,
@@ -2371,7 +2416,9 @@ def _solve_compiled(
             raise ValueError("warm fit initializer returned invalid parameter values")
 
     if weights is None:
-        weight_values = np.ones((cells, points), dtype=np.float64)
+        # The existing use_weights flag owns this choice. An unweighted
+        # objective needs the scalar identity, not a full image of ones.
+        weight_values = np.empty((cells, 0), dtype=np.float64)
         use_weights_value = False
     else:
         weight_values = np.asarray(weights, dtype=np.float64)
@@ -2486,6 +2533,7 @@ def _solve_compiled(
         lane_nfev,
         lane_njev,
         lane_iterations,
+        contexts,
     )
 
     covariance = np.full(
@@ -3410,13 +3458,13 @@ def _point_anisotropic(coords, point, parameters, row):
 
 
 @njit(cache=True)
-def _objective_lorentzian(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives):
+def _objective_lorentzian(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives, context):
     if derivatives: compiled_reset_accumulators(gradient, info)
     cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
     for point in range(obs.size):
         if not valid[point]: continue
         predicted=_point_lorentzian(coords, point, params, full)
-        pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point], use_w, poisson, loss, gradient, info, row, derivatives)
+        pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point] if use_w else 1.0, use_w, poisson, loss, gradient, info, row, derivatives)
         if not ok: return math.inf, math.inf, False
         cost+=pc; rss+=pr
     if derivatives: compiled_finish_information(info)
@@ -3424,13 +3472,13 @@ def _objective_lorentzian(coords, obs, valid, params, free, weights, use_w, pois
 
 
 @njit(cache=True)
-def _objective_gaussian(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives):
+def _objective_gaussian(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives, context):
     if derivatives: compiled_reset_accumulators(gradient, info)
     cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
     for point in range(obs.size):
         if not valid[point]: continue
         predicted=_point_gaussian(coords, point, params, full)
-        pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point], use_w, poisson, loss, gradient, info, row, derivatives)
+        pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point] if use_w else 1.0, use_w, poisson, loss, gradient, info, row, derivatives)
         if not ok: return math.inf, math.inf, False
         cost+=pc; rss+=pr
     if derivatives: compiled_finish_information(info)
@@ -3438,13 +3486,13 @@ def _objective_gaussian(coords, obs, valid, params, free, weights, use_w, poisso
 
 
 @njit(cache=True)
-def _objective_histogram(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives):
+def _objective_histogram(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives, context):
     if derivatives: compiled_reset_accumulators(gradient, info)
     cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
     for point in range(obs.size):
         if not valid[point]: continue
         predicted=_point_histogram(coords, point, params, full)
-        pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point], use_w, poisson, loss, gradient, info, row, derivatives)
+        pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point] if use_w else 1.0, use_w, poisson, loss, gradient, info, row, derivatives)
         if not ok: return math.inf, math.inf, False
         cost+=pc; rss+=pr
     if derivatives: compiled_finish_information(info)
@@ -3452,13 +3500,13 @@ def _objective_histogram(coords, obs, valid, params, free, weights, use_w, poiss
 
 
 @njit(cache=True)
-def _objective_bimodal(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives):
+def _objective_bimodal(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives, context):
     if derivatives: compiled_reset_accumulators(gradient, info)
     cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
     for point in range(obs.size):
         if not valid[point]: continue
         predicted=_point_bimodal(coords, point, params, full)
-        pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point], use_w, poisson, loss, gradient, info, row, derivatives)
+        pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point] if use_w else 1.0, use_w, poisson, loss, gradient, info, row, derivatives)
         if not ok: return math.inf, math.inf, False
         cost+=pc; rss+=pr
     if derivatives: compiled_finish_information(info)
@@ -3466,14 +3514,14 @@ def _objective_bimodal(coords, obs, valid, params, free, weights, use_w, poisson
 
 
 @njit(cache=True)
-def _objective_poisson(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives):
+def _objective_poisson(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives, context):
     if derivatives: compiled_reset_accumulators(gradient, info)
     cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
     grid=_poisson_grid(params[1], params[2])
     for point in range(obs.size):
         if not valid[point]: continue
         predicted=_point_poisson(coords, point, params, full, grid)
-        pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point], use_w, poisson, loss, gradient, info, row, derivatives)
+        pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point] if use_w else 1.0, use_w, poisson, loss, gradient, info, row, derivatives)
         if not ok: return math.inf, math.inf, False
         cost+=pc; rss+=pr
     if derivatives: compiled_finish_information(info)
@@ -3481,7 +3529,7 @@ def _objective_poisson(coords, obs, valid, params, free, weights, use_w, poisson
 
 
 @njit(cache=True)
-def _objective_poisson_bimodal(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives):
+def _objective_poisson_bimodal(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives, context):
     if derivatives: compiled_reset_accumulators(gradient, info)
     cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
     left=_poisson_grid(params[0], params[3])
@@ -3489,7 +3537,7 @@ def _objective_poisson_bimodal(coords, obs, valid, params, free, weights, use_w,
     for point in range(obs.size):
         if not valid[point]: continue
         predicted=_point_poisson_bimodal(coords, point, params, full, left, right)
-        pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point], use_w, poisson, loss, gradient, info, row, derivatives)
+        pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point] if use_w else 1.0, use_w, poisson, loss, gradient, info, row, derivatives)
         if not ok: return math.inf, math.inf, False
         cost+=pc; rss+=pr
     if derivatives: compiled_finish_information(info)
@@ -3497,13 +3545,13 @@ def _objective_poisson_bimodal(coords, obs, valid, params, free, weights, use_w,
 
 
 @njit(cache=True)
-def _objective_doublet(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives):
+def _objective_doublet(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives, context):
     if derivatives: compiled_reset_accumulators(gradient, info)
     cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
     for point in range(obs.size):
         if not valid[point]: continue
         predicted=_point_doublet(coords, point, params, full)
-        pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point], use_w, poisson, loss, gradient, info, row, derivatives)
+        pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point] if use_w else 1.0, use_w, poisson, loss, gradient, info, row, derivatives)
         if not ok: return math.inf, math.inf, False
         cost+=pc; rss+=pr
     if derivatives: compiled_finish_information(info)
@@ -3511,13 +3559,13 @@ def _objective_doublet(coords, obs, valid, params, free, weights, use_w, poisson
 
 
 @njit(cache=True)
-def _objective_damped(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives):
+def _objective_damped(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives, context):
     if derivatives: compiled_reset_accumulators(gradient, info)
     cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
     for point in range(obs.size):
         if not valid[point]: continue
         predicted=_point_damped(coords, point, params, full)
-        pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point], use_w, poisson, loss, gradient, info, row, derivatives)
+        pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point] if use_w else 1.0, use_w, poisson, loss, gradient, info, row, derivatives)
         if not ok: return math.inf, math.inf, False
         cost+=pc; rss+=pr
     if derivatives: compiled_finish_information(info)
@@ -3525,13 +3573,13 @@ def _objective_damped(coords, obs, valid, params, free, weights, use_w, poisson,
 
 
 @njit(cache=True)
-def _objective_exponential(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives):
+def _objective_exponential(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives, context):
     if derivatives: compiled_reset_accumulators(gradient, info)
     cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
     for point in range(obs.size):
         if not valid[point]: continue
         predicted=_point_exponential(coords, point, params, full)
-        pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point], use_w, poisson, loss, gradient, info, row, derivatives)
+        pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point] if use_w else 1.0, use_w, poisson, loss, gradient, info, row, derivatives)
         if not ok: return math.inf, math.inf, False
         cost+=pc; rss+=pr
     if derivatives: compiled_finish_information(info)
@@ -3539,13 +3587,13 @@ def _objective_exponential(coords, obs, valid, params, free, weights, use_w, poi
 
 
 @njit(cache=True)
-def _objective_radial(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives):
+def _objective_radial(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives, context):
     if derivatives: compiled_reset_accumulators(gradient, info)
     cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
     for point in range(obs.size):
         if not valid[point]: continue
         predicted=_point_radial(coords, point, params, full)
-        pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point], use_w, poisson, loss, gradient, info, row, derivatives)
+        pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point] if use_w else 1.0, use_w, poisson, loss, gradient, info, row, derivatives)
         if not ok: return math.inf, math.inf, False
         cost+=pc; rss+=pr
     if derivatives: compiled_finish_information(info)
@@ -3553,13 +3601,13 @@ def _objective_radial(coords, obs, valid, params, free, weights, use_w, poisson,
 
 
 @njit(cache=True)
-def _objective_anisotropic(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives):
+def _objective_anisotropic(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives, context):
     if derivatives: compiled_reset_accumulators(gradient, info)
     cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
     for point in range(obs.size):
         if not valid[point]: continue
         predicted=_point_anisotropic(coords, point, params, full)
-        pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point], use_w, poisson, loss, gradient, info, row, derivatives)
+        pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point] if use_w else 1.0, use_w, poisson, loss, gradient, info, row, derivatives)
         if not ok: return math.inf, math.inf, False
         cost+=pc; rss+=pr
     if derivatives: compiled_finish_information(info)
@@ -4602,13 +4650,13 @@ def _value_jacobian_release_recapture(coords: np.ndarray, parameters: np.ndarray
 
 
 @njit(cache=True)
-def _objective_release_recapture(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives):
+def _objective_release_recapture(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives, context):
     if derivatives: compiled_reset_accumulators(gradient, info)
     cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
     for point in range(obs.size):
         if not valid[point]: continue
         predicted=_point_release_recapture(coords, point, params, full)
-        pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point], use_w, poisson, loss, gradient, info, row, derivatives)
+        pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point] if use_w else 1.0, use_w, poisson, loss, gradient, info, row, derivatives)
         if not ok: return math.inf, math.inf, False
         cost+=pc; rss+=pr
     if derivatives: compiled_finish_information(info)

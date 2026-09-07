@@ -574,6 +574,8 @@ def test_close_does_not_wait_for_running_projection(live_bench) -> None:
 
 def test_already_completed_render_does_not_reenter_state_lock(live_bench) -> None:
     from concurrent.futures import Future
+    import gc
+    import weakref
 
     plane, node, _sequencer, _monitor = live_bench
     signal = node.signal_key("frames")
@@ -598,12 +600,25 @@ def test_already_completed_render_does_not_reenter_state_lock(live_bench) -> Non
     _mount(port, value, publication, front)
     next_value, next_publication = _advanced(value, publication, signal)
 
-    update = _without_deadlock(
-        lambda: port.prepare(next_value, next_publication, front)
-    )
-
-    assert update is not None
-    assert update.future.result(timeout=0) is operation
+    collecting = gc.isenabled()
+    gc.disable()
+    try:
+        update = _without_deadlock(
+            lambda: port.prepare(next_value, next_publication, front)
+        )
+        assert update is not None
+        assert update.future.result(timeout=0) is operation
+        assert port.accept(update, operation)
+        completed = weakref.ref(update.future)
+        del update
+        # The deadlock guard's helper thread may still be unwinding its result.
+        deadline = time.monotonic() + 1.0
+        while completed() is not None and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert completed() is None, "an accepted operation must not wait for cyclic GC"
+    finally:
+        if collecting:
+            gc.enable()
 
 
 def test_already_completed_replacement_does_not_reenter_state_lock(

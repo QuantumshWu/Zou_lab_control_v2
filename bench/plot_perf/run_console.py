@@ -712,6 +712,7 @@ class ConsoleBench:
         seconds: float = 10.0,
         *,
         window_start=None,
+        process_ids=None,
     ) -> dict:
         """Every panel measured in ONE window, plus what the process paid.
 
@@ -743,6 +744,14 @@ class ConsoleBench:
         cursor = self.report_cursor()
         cpu_before = process.cpu_times()
         rss_before = process.memory_info().rss
+        measured_processes = {
+            name: psutil.Process(pid)
+            for name, pid in dict(process_ids or {"B": os.getpid()}).items()
+        }
+        process_cpu_before = {
+            name: (time.perf_counter(), sum(item.cpu_times()[:2]))
+            for name, item in measured_processes.items()
+        }
 
         def tick():
             for counter in counters:
@@ -751,6 +760,18 @@ class ConsoleBench:
         origin = time.perf_counter()
         with guards.ProductBeat(self.app, self.presenter) as beat:
             elapsed = beat.run(seconds, tick=tick)
+        process_cpu = {}
+        for name, item in measured_processes.items():
+            current_cpu = sum(item.cpu_times()[:2])
+            current_time = time.perf_counter()
+            cpu_origin, first_cpu = process_cpu_before[name]
+            cpu_elapsed = current_time - cpu_origin
+            cpu_used = max(0.0, current_cpu - first_cpu)
+            process_cpu[name] = {
+                "cpu_seconds": cpu_used,
+                "window_s": cpu_elapsed,
+                "cpu_percent_of_one_core": 100.0 * cpu_used / cpu_elapsed,
+            }
         self.require_no_errors(cursor, "multi-panel live window")
 
         cpu_after = process.cpu_times()
@@ -780,7 +801,8 @@ class ConsoleBench:
                 }
             )
         return {
-            "window_s": round(elapsed, 2),
+            "window_s": elapsed,
+            "process_cpu": process_cpu,
             "panels": rows,
             "beat_ms": round(beat_s * 1e3, 1),
             "cpu_percent_of_one_core": round(100.0 * used / elapsed, 0),
@@ -863,7 +885,7 @@ class ConsoleBench:
         never takes -- and one that never checks the value took reads a
         refused edit as a product defect.
 
-        Returns what the edit cost: the wait until the next presented front.
+        Returns time until this edit is settled on the presented surface.
         """
 
         if section not in {"display", "semantic", "fit"}:
@@ -876,19 +898,27 @@ class ConsoleBench:
         started = time.perf_counter()
         self.view.panel_state_changed.emit(panel.panel_id, {section: current})
         answered = None
-        deadline = time.monotonic() + 15.0
-        while time.monotonic() < deadline:
-            self.presenter.beat()
-            self.app.processEvents()
+        saw_front = False
+
+        def settled() -> bool:
+            nonlocal answered, saw_front
             errors = self.errors_since(cursor)
             if errors:
                 raise guards.HarnessError(
                     f"{section} edit failed: " + " | ".join(errors)
                 )
-            if fronts.poll():
+            saw_front = bool(fronts.poll()) or saw_front
+            if (
+                saw_front
+                and panel.configuration is None
+                and (panel.port is None or panel.port.presentation_current)
+            ):
                 answered = time.perf_counter() - started
-                break
-            time.sleep(0.002)
+                return True
+            return False
+
+        with guards.ProductBeat(self.app, self.presenter) as beat:
+            beat.run_until(settled, 15.0)
         self._pump(0.5)
         applied = dict(getattr(panel.state, section, {}) or {})
         refused = {

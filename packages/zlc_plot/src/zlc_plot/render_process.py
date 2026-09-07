@@ -1907,9 +1907,8 @@ class _SharedFrontPool:
     def __init__(self) -> None:
         self._lock = Lock()
         self._leased: dict[str, SharedMemory] = {}
-        # Three reusable blocks TOTAL, not three for every historical raster
-        # size.  A window dragged through hundreds of pixel sizes must not
-        # turn every old size into a permanent shared-memory cache entry.
+        # One reusable block per current service Host, across ALL sizes.
+        # Old raster sizes must not each grow their own permanent cache.
         self._free: deque[SharedMemory] = deque()
 
     def publish(self, pixels: object) -> tuple[str, str, int]:
@@ -1932,18 +1931,22 @@ class _SharedFrontPool:
             self._leased[lease_id] = block
         return lease_id, block.name, nbytes
 
-    def release(self, lease_id: str) -> None:
-        retired = None
+    def release(self, lease_id: str, free_budget: int) -> None:
         with self._lock:
             block = self._leased.pop(str(lease_id), None)
             if block is None:
                 return
             self._free.append(block)
-            if len(self._free) > 3:
-                retired = self._free.popleft()
-        if retired is not None:
-            retired.close()
-            retired.unlink()
+        self.trim_free(free_budget)
+
+    def trim_free(self, free_budget: int) -> None:
+        retired = []
+        with self._lock:
+            while len(self._free) > free_budget:
+                retired.append(self._free.popleft())
+        for block in retired:
+            block.close()
+            block.unlink()
 
     def close(self) -> None:
         with self._lock:
@@ -2378,23 +2381,24 @@ def _render_process_main(connection: Connection, name: str) -> None:
                 if host is not None:
                     stopped = bool(host.close(timeout=30.0))
             finally:
-                with state_lock:
-                    # A worker that did NOT stop stays in the table: after the
-                    # pop this is the only handle on it, and the shutdown
-                    # sweep could no longer see the thread it must still join.
-                    if stopped:
-                        hosts.pop(host_id, None)
-                        last_front_sequence.pop(host_id, None)
-                    closing_hosts.discard(host_id)
-                    closer_threads.discard(thread)
-                # The acknowledgement goes out either way: it is what lets the
-                # console finish closing, and a worker this child is still
-                # holding is this child's problem, not a reason to strand the
-                # operator in a window that will not close.
                 try:
-                    send(("host-closed", host_id))
-                except Exception:
-                    pass
+                    with state_lock:
+                        # A worker that did NOT stop stays in the table: after the
+                        # pop this is the only handle on it, and the shutdown
+                        # sweep could no longer see the thread it must still join.
+                        if stopped:
+                            hosts.pop(host_id, None)
+                            last_front_sequence.pop(host_id, None)
+                        closing_hosts.discard(host_id)
+                        closer_threads.discard(thread)
+                        fronts.trim_free(len(hosts))
+                finally:
+                    # A pool cleanup failure must not suppress this existing ack;
+                    # it still propagates out of the close worker.
+                    try:
+                        send(("host-closed", host_id))
+                    except Exception:
+                        pass
 
         thread = Thread(
             target=finish,
@@ -2542,7 +2546,8 @@ def _render_process_main(connection: Connection, name: str) -> None:
                 send(("input-ack", int(token)))
                 continue
             if kind == "release-front":
-                fronts.release(str(message[1]))
+                with state_lock:
+                    fronts.release(str(message[1]), len(hosts))
                 continue
             if kind == "drop-input":
                 inputs.pop(int(message[1]), None)

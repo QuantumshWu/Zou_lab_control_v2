@@ -806,7 +806,7 @@ class PlotPanelPort:
                 prepared = self._pending.get(serial)
                 operation = (
                     None
-                    if prepared is None or prepared.completion is not completion
+                    if prepared is None or prepared.completion is not done
                     else prepared.operation
                 )
             self._cancel_operation(operation)

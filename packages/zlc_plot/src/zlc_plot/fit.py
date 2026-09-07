@@ -2956,38 +2956,63 @@ def _covariance(
 
 def _covariance_from_information(
     information: np.ndarray,
-    reduced_chi_square: float,
-    observation_count: int,
-) -> tuple[np.ndarray, bool]:
+    reduced_chi_square: float | np.ndarray,
+    observation_count: int | np.ndarray,
+) -> tuple[np.ndarray, bool | np.ndarray]:
+    """The same normalized rank test for one matrix or a batch of cells."""
+
     matrix = np.asarray(information, dtype=np.float64)
-    count = matrix.shape[0] if matrix.ndim == 2 else 0
-    invalid = np.full((count, count), np.nan, dtype=np.float64)
-    if (
-        matrix.shape != (count, count)
-        or not count
-        or observation_count <= count
-        or not np.all(np.isfinite(matrix))
-        or not math.isfinite(reduced_chi_square)
-        or reduced_chi_square < 0.0
-    ):
-        return invalid, False
-    norms = np.sqrt(np.maximum(np.diag(matrix), 0.0))
-    if np.any(norms <= np.finfo(np.float64).tiny):
-        return invalid, False
-    normalized = matrix / np.outer(norms, norms)
+    single = matrix.ndim == 2
+    if single:
+        matrix = matrix[None, :, :]
+    if matrix.ndim != 3:
+        return np.full((0, 0), np.nan), False
+    cells, count, _columns = matrix.shape
+    covariance = np.full((cells, count, count), np.nan, dtype=np.float64)
+    valid = np.zeros(cells, dtype=np.bool_)
+    if matrix.shape[2] != count or not count:
+        return (covariance[0], False) if single else (covariance, valid)
+    reduced = np.broadcast_to(np.asarray(reduced_chi_square, dtype=np.float64), (cells,))
+    observations = np.broadcast_to(np.asarray(observation_count), (cells,))
+    selected = np.flatnonzero(
+        (observations > count)
+        & np.all(np.isfinite(matrix), axis=(1, 2))
+        & np.isfinite(reduced)
+        & (reduced >= 0.0)
+    )
+    norms = np.sqrt(np.maximum(np.diagonal(matrix[selected], axis1=1, axis2=2), 0.0))
+    nonzero = np.all(norms > np.finfo(np.float64).tiny, axis=1)
+    selected, norms = selected[nonzero], norms[nonzero]
+    if not selected.size:
+        return (covariance[0], False) if single else (covariance, valid)
+    divisor = norms[:, :, None] * norms[:, None, :]
+    normalized = matrix[selected] / divisor
     try:
-        values, vectors = np.linalg.eigh((normalized + normalized.T) / 2.0)
+        values, vectors = np.linalg.eigh(
+            (normalized + normalized.swapaxes(1, 2)) / 2.0
+        )
     except np.linalg.LinAlgError:
-        return invalid, False
-    tolerance = np.finfo(np.float64).eps * count * float(np.max(values))
-    if values[0] <= tolerance:
-        return invalid, False
-    covariance = (vectors / values) @ vectors.T
-    covariance *= float(reduced_chi_square) / np.outer(norms, norms)
-    covariance = (covariance + covariance.T) / 2.0
-    if not np.all(np.isfinite(covariance)) or np.any(np.diag(covariance) < 0.0):
-        return invalid, False
-    return covariance, True
+        # A single non-converging cell must not invalidate its neighbours.
+        if not single:
+            for cell in selected:
+                covariance[cell], valid[cell] = _covariance_from_information(
+                    matrix[cell], float(reduced[cell]), observations[cell]
+                )
+        return (covariance[0], False) if single else (covariance, valid)
+    tolerance = np.finfo(np.float64).eps * count * np.max(values, axis=1)
+    ranked = values[:, 0] > tolerance
+    selected, values, vectors, divisor = (
+        selected[ranked], values[ranked], vectors[ranked], divisor[ranked]
+    )
+    computed = (vectors / values[:, None, :]) @ vectors.swapaxes(1, 2)
+    computed *= reduced[selected, None, None] / divisor
+    computed = (computed + computed.swapaxes(1, 2)) / 2.0
+    finite = np.all(np.isfinite(computed), axis=(1, 2)) & np.all(
+        np.diagonal(computed, axis1=1, axis2=2) >= 0.0, axis=1
+    )
+    covariance[selected[finite]] = computed[finite]
+    valid[selected[finite]] = True
+    return (covariance[0], bool(valid[0])) if single else (covariance, valid)
 
 
 DIMENSIONLESS = UnitRelation.DIMENSIONLESS

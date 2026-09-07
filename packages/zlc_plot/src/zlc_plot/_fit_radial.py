@@ -5,10 +5,9 @@ public fit catalogue supplies the model and unit semantics; this module owns
 the stripe/BLAS numerical implementation shared by every separable Gaussian
 image model (the built-in radial and anisotropic centers).
 
-The solver seeds every cell on a bounded proxy through the common independent
-TRF.  Multi-cell refinement evaluates the exact separable full-image objective
-in one compiled batch; the one-cell specialization keeps the faster BLAS
-axis form.  Both enter through the same public owner and convergence contract.
+The solver seeds every cell on a bounded proxy and refines the full image
+through the same independent TRF.  B1 and multiple cells use one compact-axis,
+BLAS-backed objective and the same final-information/covariance pipeline.
 Result arrays are deferred: the returned :class:`FitResult` retains only the
 fit input and parameters and materializes
 ``fitted_values``/``residuals``/``selected_indices`` on first access.
@@ -22,12 +21,10 @@ import time
 from typing import Callable, Mapping, Sequence
 
 import numpy as np
-from numba import njit
+from numba import njit, prange
 from scipy.ndimage import median_filter
-from scipy.optimize import minimize
 
 from . import _fit_compiled as _compiled_fit
-from . import _raster_kernels
 from .fit import (
     ArrayTuple,
     FitCancelled,
@@ -38,12 +35,9 @@ from .fit import (
     RegularImageFitInput,
     _covariance_from_information,
     _DeferredFitData,
-    _expand_fixed_covariance,
     _fixed_parameter_partition,
     _initial_values,
     _solver_bounds,
-    _span,
-    _value_range,
 )
 
 
@@ -52,29 +46,12 @@ __all__ = ["fit_regular_separable_image"]
 _COMPILED_LINEAR_LOSS = int(_compiled_fit.LOSS_CODES["linear"])
 
 
-@dataclass(frozen=True, slots=True)
-class _RegularImageSummary:
-    minimum: float
-    maximum: float
-    scale: float
-    count: int
-    all_valid: bool
-    normalized_sum: float
-    normalized_square_sum: float
-
-
-@dataclass(frozen=True, slots=True)
-class _SolverStatus:
-    success: bool
-    message: str
-
-
 _REGULAR_IMAGE_STRIPE_ROWS = 64
 _REGULAR_IMAGE_SAMPLE_LIMIT = 129
-_REGULAR_IMAGE_MAX_LINE_SEARCH_STEPS = 75
-_REGULAR_IMAGE_MAX_NEWTON_STEPS = 8
 _REGULAR_IMAGE_FTOL = 1e-10
 _REGULAR_IMAGE_GTOL = 1e-8
+# Linear proxies select a basin; robust losses and full refinement stay strict.
+_REGULAR_IMAGE_PROXY_TOL = 1e-5
 @dataclass(frozen=True, slots=True)
 class _SeparableKernel:
     """Separable structure of one regular-image Gaussian model.
@@ -92,7 +69,6 @@ class _SeparableKernel:
     x_radius_index: int
     y_radius_index: int
     geometry_terms: tuple[tuple[tuple[int, int], ...], ...]
-    natural_scale_builder: Callable[[float, float, float], tuple[float, ...]]
 
     def x_vectors(
         self,
@@ -137,13 +113,6 @@ _RADIAL_KERNEL = _SeparableKernel(
     x_radius_index=2,
     y_radius_index=2,
     geometry_terms=(((0, 1), (1, 0)), ((0, 2),), ((2, 0),)),
-    natural_scale_builder=lambda value_range, x_span, y_span: (
-        value_range,
-        value_range,
-        max(x_span, y_span) / 4.0,
-        x_span / 4.0,
-        y_span / 4.0,
-    ),
 )
 
 _ANISOTROPIC_KERNEL = _SeparableKernel(
@@ -152,40 +121,11 @@ _ANISOTROPIC_KERNEL = _SeparableKernel(
     x_radius_index=2,
     y_radius_index=3,
     geometry_terms=(((0, 1),), ((1, 0),), ((0, 2),), ((2, 0),)),
-    natural_scale_builder=lambda value_range, x_span, y_span: (
-        value_range,
-        value_range,
-        x_span / 4.0,
-        y_span / 4.0,
-        x_span / 4.0,
-        y_span / 4.0,
-    ),
 )
 
 _KERNELS = (_RADIAL_KERNEL, _ANISOTROPIC_KERNEL)
 
 
-@njit(cache=True, nogil=True)
-def _promote_unsigned_summary(
-    source: np.ndarray,
-) -> tuple[np.ndarray, float, float, float, float]:
-    """Promote a compact camera plane while deriving its exact moments."""
-
-    target = np.empty(source.shape, dtype=np.float64)
-    incoming = source.reshape(-1)
-    outgoing = target.reshape(-1)
-    minimum = float(incoming[0])
-    maximum = minimum
-    total = 0.0
-    square_total = 0.0
-    for index in range(incoming.size):
-        value = float(incoming[index])
-        outgoing[index] = value
-        minimum = min(minimum, value)
-        maximum = max(maximum, value)
-        total += value
-        square_total += value * value
-    return target, minimum, maximum, total, square_total
 
 
 def _kernel_for(model: FitModelSpec) -> _SeparableKernel:
@@ -243,6 +183,19 @@ def _regular_resolution_floor(coordinates, radius_index, lower):
 
 
 @njit(cache=True)
+def _expanded_regular_coordinates(packed):
+    """Expand the bounded proxy only, for the existing point-wise initializers."""
+
+    width, height = int(packed[0, 0]), int(packed[1, 0])
+    coordinates = np.empty((2, width * height), dtype=np.float64)
+    for row in range(height):
+        for column in range(width):
+            coordinates[0, row * width + column] = packed[0, column + 1]
+            coordinates[1, row * width + column] = packed[1, row + 1]
+    return coordinates
+
+
+@njit(cache=True)
 def _prepare_regular_radial_compiled(
     coordinates,
     observations,
@@ -252,6 +205,7 @@ def _prepare_regular_radial_compiled(
     upper,
     context,
 ):
+    coordinates = _expanded_regular_coordinates(coordinates)
     count = _compiled_fit._prepare_radial(
         coordinates, observations, valid, seeds, lower, upper, context
     )
@@ -269,6 +223,7 @@ def _prepare_regular_anisotropic_compiled(
     upper,
     context,
 ):
+    coordinates = _expanded_regular_coordinates(coordinates)
     count = _compiled_fit._prepare_anisotropic(
         coordinates, observations, valid, seeds, lower, upper, context
     )
@@ -292,6 +247,67 @@ def _compiled_axis_terms(
     )
 
 
+@njit(cache=True, nogil=True, parallel=True)
+def _compiled_regular_centered_context(source, mask, width):
+    """Pack physical values and centered moments in one shared stripe pass."""
+
+    cells, points = source.shape
+    values = np.empty((cells, points), dtype=np.float64)
+    contexts = np.empty((cells, 1, points + 4), dtype=np.float64)
+    stripe_size = _REGULAR_IMAGE_STRIPE_ROWS * width
+    stripes = (points + stripe_size - 1) // stripe_size
+    moments = np.empty((cells, stripes, 3), dtype=np.float64)
+    for cell in range(cells):
+        reference = 0.0
+        for point in range(points):
+            value = float(source[cell, point])
+            if (mask.size == 0 or mask[cell, point]) and math.isfinite(value):
+                reference = value
+                break
+        contexts[cell, 0, 0] = reference
+    for lane in prange(cells * stripes):
+        cell, stripe = lane // stripes, lane % stripes
+        reference = contexts[cell, 0, 0]
+        total, squares, count = 0.0, 0.0, 0
+        for point in range(stripe * stripe_size, min((stripe + 1) * stripe_size, points)):
+            value = float(source[cell, point])
+            values[cell, point] = value
+            centered = value - reference
+            contexts[cell, 0, point + 4] = centered
+            if (mask.size == 0 or mask[cell, point]) and math.isfinite(value):
+                total += centered
+                squares += centered * centered
+                count += 1
+        moments[cell, stripe, 0] = total
+        moments[cell, stripe, 1] = squares
+        moments[cell, stripe, 2] = count
+    for cell in range(cells):
+        for moment in range(3):
+            total = 0.0
+            for stripe in range(stripes):
+                total += moments[cell, stripe, moment]
+            contexts[cell, 0, moment + 1] = total
+    return values, contexts
+
+
+@njit(cache=True)
+def _compiled_regular_residual_rss(observations, amplitude, offset, x_basis, y_basis):
+    width, height = x_basis.size, y_basis.size
+    residuals = np.empty(min(height, _REGULAR_IMAGE_STRIPE_ROWS) * width, dtype=np.float64)
+    rss = 0.0
+    for start in range(0, height, _REGULAR_IMAGE_STRIPE_ROWS):
+        stop = min(height, start + _REGULAR_IMAGE_STRIPE_ROWS)
+        for row in range(start, stop):
+            for column in range(width):
+                residuals[(row - start) * width + column] = (
+                    amplitude * y_basis[row] * x_basis[column]
+                    + offset - observations[row * width + column]
+                )
+        stripe = residuals[: (stop - start) * width]
+        rss += np.dot(stripe, stripe)
+    return rss
+
+
 @njit(cache=True)
 def _compiled_regular_linear_objective(
     observations,
@@ -303,39 +319,68 @@ def _compiled_regular_linear_objective(
     y_vectors,
     derivatives,
     radial,
+    context,
+    information_only=False,
 ):
     """Closed-form linear residual derivatives for one complete image."""
 
     height = y_vectors.shape[1]
     width = x_vectors.shape[1]
     amplitude = parameters[0]
-    offset = parameters[1]
-    projected_count = 4 if derivatives else 1
-    projected = np.zeros((projected_count, height), dtype=np.float64)
-    raw_rss = 0.0
-    for row_index in range(height):
-        y_basis = y_vectors[0, row_index]
-        for column in range(width):
-            point = row_index * width + column
-            observed = observations[point]
-            x_basis = x_vectors[0, column]
-            residual = amplitude * y_basis * x_basis + offset - observed
-            raw_rss += residual * residual
-            projected[0, row_index] += observed * x_basis
-            if derivatives:
-                projected[1, row_index] += observed * x_vectors[1, column]
-                projected[2, row_index] += observed * x_vectors[2, column]
-                projected[3, row_index] += observed
-    if not derivatives:
-        return 0.5 * raw_rss, raw_rss, math.isfinite(raw_rss)
-
+    physical_offset = parameters[1]
+    offset = physical_offset - (context[0, 0] if context.size else 0.0)
     x_full = np.ones((4, width), dtype=np.float64)
     y_full = np.ones((4, height), dtype=np.float64)
     for vector in range(3):
-        for column in range(width):
-            x_full[vector, column] = x_vectors[vector, column]
-        for row_index in range(height):
-            y_full[vector, row_index] = y_vectors[vector, row_index]
+        x_full[vector] = x_vectors[vector]
+        y_full[vector] = y_vectors[vector]
+    projected = np.zeros((3, height), dtype=np.float64)
+    raw_rss = 0.0
+    if not information_only:
+        source = context[0, 4:] if context.size else observations
+        if derivatives or context.size:
+            # Same C-layout three-column operand for B1/Bn and cost/Jacobian
+            # requests. The constant-offset sum already has a scalar owner.
+            projection_basis = np.empty((width, 3), dtype=np.float64)
+            for column in range(width):
+                for vector in range(3):
+                    projection_basis[column, vector] = x_vectors[vector, column]
+            projected = (source.reshape(height, width) @ projection_basis).T
+        if context.size:
+            x_sum = np.sum(x_vectors[0])
+            y_sum = np.sum(y_vectors[0])
+            terms = (
+                amplitude * amplitude * np.dot(x_vectors[0], x_vectors[0]) * np.dot(y_vectors[0], y_vectors[0]),
+                2.0 * amplitude * offset * x_sum * y_sum,
+                offset * offset * observations.size,
+                -2.0 * amplitude * np.dot(y_vectors[0], projected[0]),
+                -2.0 * offset * context[0, 1],
+                context[0, 2],
+            )
+            correction, magnitude = 0.0, 0.0
+            for term in terms:
+                combined = raw_rss + term
+                correction += ((raw_rss - combined) + term if abs(raw_rss) >= abs(term) else (term - combined) + raw_rss)
+                raw_rss = combined
+                magnitude += abs(term)
+            raw_rss += correction
+            # Conservative accumulation-roundoff bound, not a fit-quality gate.
+            # Near cancellation uses the same direct residual calculation for
+            # every cell and every batch size; final RSS is always direct.
+            operations = observations.size + width + height + 16
+            roundoff = operations * np.finfo(np.float64).eps
+            roundoff /= 1.0 - roundoff
+            if raw_rss <= roundoff * magnitude:
+                raw_rss = _compiled_regular_residual_rss(
+                    observations, amplitude, physical_offset, x_vectors[0], y_vectors[0]
+                )
+        else:
+            raw_rss = _compiled_regular_residual_rss(
+                observations, amplitude, physical_offset, x_vectors[0], y_vectors[0]
+            )
+    if not derivatives:
+        return 0.5 * raw_rss, raw_rss, math.isfinite(raw_rss)
+    observed_sum = context[0, 1] if context.size else np.sum(observations)
     x_sums = np.empty(4, dtype=np.float64)
     y_sums = np.empty(4, dtype=np.float64)
     x_inner = np.empty((4, 4), dtype=np.float64)
@@ -359,9 +404,12 @@ def _compiled_regular_linear_objective(
             data_dot = 0.0
             for row_index in range(height):
                 y_dot += y_full[left, row_index] * y_full[right, row_index]
-                data_dot += y_full[left, row_index] * projected[right, row_index]
+                if right < 3:
+                    data_dot += y_full[left, row_index] * projected[right, row_index]
             y_inner[left, right] = y_dot
-            data_inner[left, right] = data_dot
+            # Only the offset derivative uses the constant x-column, and its
+            # y-column is also constant. Other entries here are never read.
+            data_inner[left, right] = (observed_sum if left == 3 else 0.0) if right == 3 else data_dot
 
     parameter_count = parameters.size
     term_count = np.ones(parameter_count, dtype=np.int64)
@@ -442,6 +490,69 @@ def _compiled_regular_linear_objective(
     return 0.5 * raw_rss, raw_rss, finite
 
 
+@njit(cache=True, nogil=True, parallel=True)
+def _compiled_regular_information_batch(x_coordinates, y_coordinates, parameters, radial, observations, complete):
+    """Shared axis-Gram information and one final direct physical RSS pass."""
+
+    cells, count = parameters.shape
+    matrices = np.full((cells, count, count), np.nan, dtype=np.float64)
+    raw_rss = np.full(cells, np.nan, dtype=np.float64)
+    usable = np.zeros(cells, dtype=np.bool_)
+    x_bases = np.empty((cells, x_coordinates.size), dtype=np.float64)
+    y_bases = np.empty((cells, y_coordinates.size), dtype=np.float64)
+    free = np.arange(count, dtype=np.int64)
+    empty = np.empty(0, dtype=np.float64)
+    empty_context = np.empty((0, 0), dtype=np.float64)
+    for cell in range(cells):
+        if not complete[cell]:
+            continue
+        values = parameters[cell]
+        radius_x = values[2]
+        radius_y = values[2] if radial else values[3]
+        if not np.all(np.isfinite(values)) or radius_x * radius_x == 0.0 or radius_y * radius_y == 0.0:
+            continue
+        x_vectors = np.empty((3, x_coordinates.size), dtype=np.float64)
+        y_vectors = np.empty((3, y_coordinates.size), dtype=np.float64)
+        for column in range(x_coordinates.size):
+            terms = _compiled_axis_terms(
+                x_coordinates[column], values[-2], radius_x
+            )
+            for vector in range(3):
+                x_vectors[vector, column] = terms[vector]
+        for row in range(y_coordinates.size):
+            terms = _compiled_axis_terms(
+                y_coordinates[row], values[-1], radius_y
+            )
+            for vector in range(3):
+                y_vectors[vector, row] = terms[vector]
+        _compiled_regular_linear_objective(
+            empty, values, free, np.empty(count), matrices[cell],
+            x_vectors, y_vectors, True, radial, empty_context, True,
+        )
+        x_bases[cell] = x_vectors[0]
+        y_bases[cell] = y_vectors[0]
+        usable[cell] = True
+    stripes = (y_coordinates.size + _REGULAR_IMAGE_STRIPE_ROWS - 1) // _REGULAR_IMAGE_STRIPE_ROWS
+    partials = np.empty((cells, stripes), dtype=np.float64)
+    for lane in prange(cells * stripes):
+        cell, stripe = lane // stripes, lane % stripes
+        if not usable[cell]:
+            continue
+        start = stripe * _REGULAR_IMAGE_STRIPE_ROWS
+        stop = min(start + _REGULAR_IMAGE_STRIPE_ROWS, y_coordinates.size)
+        partials[cell, stripe] = _compiled_regular_residual_rss(
+            observations[cell, start * x_coordinates.size : stop * x_coordinates.size],
+            parameters[cell, 0], parameters[cell, 1], x_bases[cell], y_bases[cell, start:stop],
+        )
+    for cell in range(cells):
+        if usable[cell]:
+            total = 0.0
+            for stripe in range(stripes):
+                total += partials[cell, stripe]
+            raw_rss[cell] = total
+    return matrices, raw_rss
+
+
 @njit(cache=True)
 def _compiled_regular_image_objective(
     coordinates,
@@ -458,19 +569,16 @@ def _compiled_regular_image_objective(
     jacobian_row,
     derivatives,
     radial,
+    context,
 ):
     """Exact regular-grid Gaussian objective with one axis exponential pass."""
 
     point_count = observations.size
     if point_count == 0 or coordinates.shape[0] != 2:
         return math.inf, math.inf, False
-    width = 1
-    first_y = coordinates[1, 0]
-    while width < point_count and coordinates[1, width] == first_y:
-        width += 1
-    if point_count % width:
+    width, height = int(coordinates[0, 0]), int(coordinates[1, 0])
+    if width <= 0 or height <= 0 or width * height != point_count:
         return math.inf, math.inf, False
-    height = point_count // width
     radius_x = parameters[2]
     radius_y = parameters[2] if radial else parameters[3]
     center_x = parameters[-2]
@@ -482,24 +590,29 @@ def _compiled_regular_image_objective(
     y_vectors = np.empty((3, height), dtype=np.float64)
     for column in range(width):
         values = _compiled_axis_terms(
-            coordinates[0, column], center_x, radius_x
+            coordinates[0, column + 1], center_x, radius_x
         )
         x_vectors[0, column] = values[0]
         x_vectors[1, column] = values[1]
         x_vectors[2, column] = values[2]
     for row_index in range(height):
         values = _compiled_axis_terms(
-            coordinates[1, row_index * width], center_y, radius_y
+            coordinates[1, row_index + 1], center_y, radius_y
         )
         y_vectors[0, row_index] = values[0]
         y_vectors[1, row_index] = values[1]
         y_vectors[2, row_index] = values[2]
 
-    all_valid = True
-    for point in range(point_count):
-        if not valid[point]:
-            all_valid = False
-            break
+    if context.size:
+        # Full preparation already counted finite, unmasked values; the public
+        # regular-input boundary validates both coordinate axes.
+        all_valid = context[0, 3] == point_count
+    else:
+        all_valid = True
+        for point in range(point_count):
+            if not valid[point]:
+                all_valid = False
+                break
     if (
         all_valid
         and not use_weights
@@ -516,6 +629,7 @@ def _compiled_regular_image_objective(
             y_vectors,
             derivatives,
             radial,
+            context,
         )
 
     if derivatives:
@@ -524,7 +638,8 @@ def _compiled_regular_image_objective(
     raw_rss = 0.0
     full_row = np.empty(parameters.size, dtype=np.float64)
     amplitude = parameters[0]
-    offset = parameters[1]
+    offset = parameters[1] - (context[0, 0] if context.size else 0.0)
+    source = context[0, 4:] if context.size else observations
     for row_index in range(height):
         y_basis = y_vectors[0, row_index]
         y_radius = y_vectors[1, row_index]
@@ -545,9 +660,9 @@ def _compiled_regular_image_objective(
                 finite,
             ) = _compiled_fit.compiled_point_terms(
                 predicted,
-                observations[point],
+                source[point],
                 poisson,
-                weights[point],
+                weights[point] if use_weights else 1.0,
                 use_weights,
                 loss_code,
             )
@@ -602,6 +717,7 @@ def _compiled_regular_radial_objective(
     information,
     jacobian_row,
     derivatives,
+    context,
 ):
     return _compiled_regular_image_objective(
         coordinates,
@@ -618,6 +734,7 @@ def _compiled_regular_radial_objective(
         jacobian_row,
         derivatives,
         True,
+        context,
     )
 
 
@@ -636,6 +753,7 @@ def _compiled_regular_anisotropic_objective(
     information,
     jacobian_row,
     derivatives,
+    context,
 ):
     return _compiled_regular_image_objective(
         coordinates,
@@ -652,6 +770,7 @@ def _compiled_regular_anisotropic_objective(
         jacobian_row,
         derivatives,
         False,
+        context,
     )
 
 
@@ -677,6 +796,7 @@ def _compiled_regular_descriptor(
         context_builder=base.context_builder,
         max_candidates=base.max_candidates,
         cache_key=f"{base.cache_key}-regular-grid-v1",
+        coordinate_layout="rectangular-grid",
     )
 
 
@@ -721,7 +841,6 @@ class _ImageContext:
         "check",
         "_float_observations",
         "_all_finite",
-        "_unsigned_summary",
     )
 
     def __init__(
@@ -733,7 +852,6 @@ class _ImageContext:
         self.check = check
         self._float_observations: np.ndarray | None = None
         self._all_finite: bool | None = None
-        self._unsigned_summary: tuple[float, float, float, float] | None = None
 
     def float_observations(self) -> np.ndarray:
         """Promote the image to float64 exactly once so '@' hits BLAS.
@@ -746,30 +864,7 @@ class _ImageContext:
         cached = self._float_observations
         if cached is None:
             cached = np.asarray(self.data.observations)
-            if (
-                cached.dtype.kind == "u"
-                and cached.dtype.itemsize <= 2
-            ):
-                # SEALED, not merely contiguous.  ``ascontiguousarray`` hands
-                # back whatever it was given when that is already contiguous,
-                # so the plane's mutability reached the kernel as an accident
-                # of its origin: a published snapshot is read-only, a warmer's
-                # or a notebook's fresh copy is writable, and numba compiled
-                # and cached the promotion twice per dtype for the difference.
-                (
-                    cached,
-                    minimum,
-                    maximum,
-                    total,
-                    square_total,
-                ) = _promote_unsigned_summary(_raster_kernels.readable(cached))
-                self._unsigned_summary = (
-                    minimum,
-                    maximum,
-                    total,
-                    square_total,
-                )
-            elif cached.dtype != np.float64 or not cached.flags.c_contiguous:
+            if cached.dtype != np.float64 or not cached.flags.c_contiguous:
                 cached = _promoted_c_contiguous(cached)
             self._float_observations = cached
             return cached
@@ -806,74 +901,6 @@ class _ImageContext:
         return cached
 
 
-def _regular_image_summary(context: _ImageContext) -> _RegularImageSummary:
-    """One fused sweep: extrema, count, validity and normalization sums."""
-
-    check = context.check
-    data = context.data
-    observed = context.float_observations()
-    if data.valid_mask is None and data.observations.dtype.kind != "f":
-        # Unsigned camera planes derive all four statistics while promotion
-        # fills the float cache.  Other integer sources retain the exact
-        # stripe reduction used before this fused camera path.
-        check()
-        count = int(data.observations.size)
-        fused = context._unsigned_summary
-        if fused is not None:
-            minimum, maximum, total, square_total = fused
-        else:
-            minimum = float(np.min(data.observations))
-            maximum = float(np.max(data.observations))
-            sums = []
-            square_sums = []
-            for start, stop in context.stripe_bounds():
-                check()
-                values = observed[start:stop].reshape(-1)
-                sums.append(float(np.sum(values)))
-                square_sums.append(float(np.dot(values, values)))
-            total = math.fsum(sums)
-            square_total = math.fsum(square_sums)
-        scale = max(abs(minimum), abs(maximum)) or 1.0
-        return _RegularImageSummary(
-            minimum,
-            maximum,
-            scale,
-            count,
-            True,
-            total / scale,
-            square_total / scale**2,
-        )
-    minimum, maximum, count = math.inf, -math.inf, 0
-    all_valid = True
-    sums = []
-    square_sums = []
-    for start, stop in context.stripe_bounds():
-        check()
-        mask = context.stripe_mask(start, stop)
-        all_valid &= mask is None
-        values = (
-            observed[start:stop].reshape(-1)
-            if mask is None
-            else observed[start:stop][mask]
-        )
-        if values.size:
-            minimum = min(minimum, float(np.min(values)))
-            maximum = max(maximum, float(np.max(values)))
-            count += values.size
-            sums.append(float(np.sum(values)))
-            square_sums.append(float(np.dot(values, values)))
-    if count == 0:
-        raise ValueError("regular image has no finite valid observations")
-    scale = max(abs(minimum), abs(maximum)) or 1.0
-    return _RegularImageSummary(
-        minimum,
-        maximum,
-        scale,
-        count,
-        all_valid,
-        math.fsum(sums) / scale,
-        math.fsum(square_sums) / scale**2,
-    )
 
 
 def _crop_to_valid_bounds(
@@ -1008,156 +1035,6 @@ def _regular_image_sample(
     return (x_grid[valid], y_grid[valid]), filtered[valid]
 
 
-def _axis_stats(
-    vectors: tuple[np.ndarray, np.ndarray, np.ndarray],
-) -> tuple[tuple[float, ...], tuple[float, ...]]:
-    """Sums of each axis vector and dots of each against the basis."""
-
-    basis = vectors[0]
-    sums = tuple(float(np.sum(vector)) for vector in vectors)
-    basis_dots = tuple(float(np.dot(basis, vector)) for vector in vectors)
-    return sums, basis_dots
-
-
-def _regular_image_linear_objective(
-    kernel: _SeparableKernel,
-    context: _ImageContext,
-    summary: _RegularImageSummary,
-    parameters: np.ndarray,
-) -> tuple[float, np.ndarray]:
-    """Closed-form separable RSS and gradient for all-valid linear fits."""
-
-    amplitude, offset = float(parameters[0]), float(parameters[1])
-    data = context.data
-    x_vectors, y_vectors = kernel.axis_vectors(
-        parameters, data.x_coordinates, data.y_coordinates
-    )
-    projected = context.float_observations() @ np.column_stack(x_vectors)
-    projected = projected / summary.scale
-
-    x_sums, x_basis_dots = _axis_stats(x_vectors)
-    y_sums, y_basis_dots = _axis_stats(y_vectors)
-    phi_sum = x_sums[0] * y_sums[0]
-    phi_square = x_basis_dots[0] * y_basis_dots[0]
-    data_phi = float(np.dot(y_vectors[0], projected[:, 0]))
-    data_derivatives = np.asarray(
-        [
-            math.fsum(
-                float(np.dot(y_vectors[y_index], projected[:, x_index]))
-                for y_index, x_index in terms
-            )
-            for terms in kernel.geometry_terms
-        ]
-    )
-    derivative_sums = np.asarray(
-        [
-            math.fsum(
-                y_sums[y_index] * x_sums[x_index] for y_index, x_index in terms
-            )
-            for terms in kernel.geometry_terms
-        ]
-    )
-    phi_derivatives = np.asarray(
-        [
-            math.fsum(
-                y_basis_dots[y_index] * x_basis_dots[x_index]
-                for y_index, x_index in terms
-            )
-            for terms in kernel.geometry_terms
-        ]
-    )
-
-    amplitude /= summary.scale
-    offset /= summary.scale
-    terms = (
-        amplitude**2 * phi_square,
-        2.0 * amplitude * offset * phi_sum,
-        offset**2 * summary.count,
-        -2.0 * amplitude * data_phi,
-        -2.0 * offset * summary.normalized_sum,
-        summary.normalized_square_sum,
-    )
-    rss = math.fsum(terms)
-    tolerance = 64.0 * np.finfo(np.float64).eps * max(math.fsum(map(abs, terms)), 1.0)
-    if not math.isfinite(rss) or rss < -tolerance:
-        raise FloatingPointError("regular-image objective is non-finite")
-    rss = max(rss, 0.0)
-
-    residual_phi = amplitude * phi_square + offset * phi_sum - data_phi
-    residual_sum = amplitude * phi_sum + offset * summary.count - summary.normalized_sum
-    geometry = amplitude * (
-        amplitude * phi_derivatives + offset * derivative_sums - data_derivatives
-    )
-    gradient = np.r_[
-        residual_phi / summary.scale,
-        residual_sum / summary.scale,
-        geometry,
-    ]
-    if not np.all(np.isfinite(gradient)):
-        raise FloatingPointError("regular-image gradient is non-finite")
-    return 0.5 * rss, gradient
-
-
-def _regular_image_linear_information(
-    kernel: _SeparableKernel,
-    context: _ImageContext,
-    parameters: np.ndarray,
-    scale: float,
-) -> np.ndarray:
-    amplitude = float(parameters[0])
-    data = context.data
-    x_vectors, y_vectors = kernel.axis_vectors(
-        parameters, data.x_coordinates, data.y_coordinates
-    )
-    x_sums = tuple(float(np.sum(vector)) for vector in x_vectors)
-    y_sums = tuple(float(np.sum(vector)) for vector in y_vectors)
-    x_inner = [
-        [float(np.dot(left, right)) for right in x_vectors] for left in x_vectors
-    ]
-    y_inner = [
-        [float(np.dot(left, right)) for right in y_vectors] for left in y_vectors
-    ]
-
-    rows: list[tuple[tuple[float, int | None, int | None], ...]] = [
-        ((1.0, 0, 0),),
-        ((1.0, None, None),),
-    ]
-    rows.extend(
-        tuple((amplitude, y_index, x_index) for y_index, x_index in terms)
-        for terms in kernel.geometry_terms
-    )
-
-    def axis_inner(
-        inner: list[list[float]],
-        sums: tuple[float, ...],
-        size: int,
-        left: int | None,
-        right: int | None,
-    ) -> float:
-        if left is None:
-            return float(size) if right is None else sums[right]
-        return sums[left] if right is None else inner[left][right]
-
-    count = kernel.parameter_count
-    information = np.empty((count, count), dtype=np.float64)
-    for row in range(count):
-        for column in range(row, count):
-            value = math.fsum(
-                row_scale
-                * column_scale
-                * axis_inner(
-                    y_inner, y_sums, data.y_coordinates.size, row_y, column_y
-                )
-                * axis_inner(
-                    x_inner, x_sums, data.x_coordinates.size, row_x, column_x
-                )
-                for row_scale, row_y, row_x in rows[row]
-                for column_scale, column_y, column_x in rows[column]
-            ) / scale**2
-            information[row, column] = information[column, row] = value
-    if not np.all(np.isfinite(information)):
-        raise FloatingPointError("regular-image information is non-finite")
-    return information
 
 
 def _regular_image_loss_terms(
@@ -1203,7 +1080,7 @@ def _regular_image_striped_objective(
     scale: float,
     loss: str,
     collect_information: bool,
-) -> tuple[float, np.ndarray, float, np.ndarray]:
+) -> tuple[float, np.ndarray, float, np.ndarray, int]:
     """Masked/robust objective over row stripes, fanned across a small pool.
 
     Partial results are combined in stripe order after joining, so the
@@ -1225,6 +1102,7 @@ def _regular_image_striped_objective(
         float,
         np.ndarray,
         tuple[np.ndarray, np.ndarray, float] | None,
+        int,
     ]:
         start, stop = bounds
         context.check()
@@ -1265,7 +1143,7 @@ def _regular_image_striped_objective(
                 weighted_jacobian.sum(axis=0) / scale,
                 float(np.sum(information_weight)) / scale**2,
             )
-        return cost, square_sum, gradient, information
+        return cost, square_sum, gradient, information, residual.size
 
     bounds_list = context.stripe_bounds()
     # PlotSession already owns the analysis worker.  A second persistent pool
@@ -1280,7 +1158,9 @@ def _regular_image_striped_objective(
     core = np.zeros((parameter_count - 1, parameter_count - 1), dtype=np.float64)
     offset_column = np.zeros(parameter_count - 1, dtype=np.float64)
     offset_diagonal = 0.0
-    for cost, square_sum, stripe_gradient, stripe_information in stripe_results:
+    observation_count = 0
+    for cost, square_sum, stripe_gradient, stripe_information, stripe_count in stripe_results:
+        observation_count += stripe_count
         costs.append(cost)
         square_sums.append(square_sum)
         gradient += stripe_gradient
@@ -1303,7 +1183,7 @@ def _regular_image_striped_objective(
     )
     if not finite:
         raise FloatingPointError("regular-image objective is non-finite")
-    return cost, gradient, rss, information
+    return cost, gradient, rss, information, observation_count
 
 
 def _regular_image_result_arrays(
@@ -1474,6 +1354,8 @@ def fit_regular_separable_images(
         )
         return lower, upper
 
+    full_information: dict[int, np.ndarray | None] = {}
+
     def solve_stage(
         stage_items: Mapping[int, RegularImageFitInput],
         seeds: Mapping[int, np.ndarray] | None,
@@ -1493,28 +1375,32 @@ def fit_regular_separable_images(
             check()
             first = stage_items[cells[0]]
             height, width = first.observations.shape
-            x_grid = np.ascontiguousarray(
-                np.broadcast_to(first.x_coordinates, (height, width)).reshape(-1)
+            source = np.stack(
+                [stage_items[cell].observations.reshape(-1) for cell in cells],
             )
-            y_grid = np.ascontiguousarray(
-                np.broadcast_to(
-                    first.y_coordinates[:, None], (height, width)
-                ).reshape(-1)
-            )
-            values = np.stack(
-                [stage_items[cell].observations.reshape(-1) for cell in cells]
-            )
-            valid_rows = []
-            all_valid = True
-            for cell in cells:
-                data = stage_items[cell]
-                valid = np.ones(data.observations.shape, dtype=np.bool_)
-                if data.valid_mask is not None:
-                    valid &= data.valid_mask
-                if data.observations.dtype.kind == "f":
-                    valid &= np.isfinite(data.observations)
-                all_valid &= bool(np.all(valid))
-                valid_rows.append(valid.reshape(-1))
+            # The compiled boundary combines these explicit masks with value
+            # and coordinate finiteness; do not build that full mask twice.
+            masks = [stage_items[cell].valid_mask for cell in cells]
+            valid = None
+            if any(mask is not None for mask in masks):
+                valid = np.stack([
+                    np.ones(height * width, dtype=np.bool_)
+                    if mask is None else mask.reshape(-1)
+                    for mask in masks
+                ])
+            if refinement:
+                # Numba accepts the native integer/f32/f64 camera types. Other
+                # real floating storage retains the existing f64 conversion.
+                if source.dtype.kind == "f" and source.dtype.itemsize not in (4, 8):
+                    source = np.asarray(source, dtype=np.float64)
+                values, native_context = _compiled_regular_centered_context(
+                    source, np.empty((0, 0), dtype=np.bool_) if valid is None else valid,
+                    width,
+                )
+            else:
+                values = np.asarray(source, dtype=np.float64)
+                native_context = np.empty((0, 0), dtype=np.float64)
+            check()
             if refinement:
                 bounds_rows = [refinement_bounds(stage_items[cell]) for cell in cells]
                 base_lower = np.stack([row[0] for row in bounds_rows])
@@ -1546,20 +1432,15 @@ def fit_regular_separable_images(
                 if len(cells) == 1
                 else _compiled_fit.solve_compiled_batch
             )
+            coarse_proxy = not refinement and options.loss == "linear"
             output = solve_compiled(
                 _compiled_regular_descriptor(kernel, refinement=refinement),
-                (x_grid, y_grid),
+                (first.x_coordinates, first.y_coordinates),
                 values[0] if len(cells) == 1 else values,
                 base_lower=base_lower,
                 base_upper=base_upper,
-                valid=(
-                    None
-                    if all_valid
-                    else valid_rows[0]
-                    if len(cells) == 1
-                    else np.stack(valid_rows)
-                ),
-                context=np.empty((0, 0), dtype=np.float64),
+                valid=valid,
+                context=native_context,
                 requested_lower=requested_lower,
                 requested_upper=requested_upper,
                 requested_mask=requested_mask,
@@ -1570,258 +1451,66 @@ def fit_regular_separable_images(
                 poisson=False,
                 loss=options.loss,
                 max_nfev=options.max_nfev,
-                ftol=_REGULAR_IMAGE_FTOL,
-                xtol=_REGULAR_IMAGE_FTOL,
-                gtol=_REGULAR_IMAGE_GTOL,
+                ftol=_REGULAR_IMAGE_PROXY_TOL if coarse_proxy else _REGULAR_IMAGE_FTOL,
+                xtol=_REGULAR_IMAGE_PROXY_TOL if coarse_proxy else _REGULAR_IMAGE_FTOL,
+                gtol=_REGULAR_IMAGE_PROXY_TOL if coarse_proxy else _REGULAR_IMAGE_GTOL,
                 finalize=False,
             )
+            direct_rss = None
+            if refinement and options.loss == "linear":
+                complete = np.asarray([
+                    stage_items[cell].valid_mask is None for cell in cells
+                ])
+                if any(stage_items[cell].observations.dtype.kind == "f" for cell in cells):
+                    complete &= np.all(np.isfinite(values), axis=1)
+                selected = np.flatnonzero(complete)
+                if selected.size:
+                    matrices, direct_rss = _compiled_regular_information_batch(
+                        first.x_coordinates, first.y_coordinates,
+                        output.parameters, kernel is _RADIAL_KERNEL, values, complete,
+                    )
+                    finite = np.all(np.isfinite(matrices), axis=(1, 2))
+                    for local in selected:
+                        full_information[cells[local]] = matrices[local] if finite[local] else None
             for local, cell in enumerate(cells):
                 solved[cell] = (
                     np.asarray(output.parameters[local], dtype=np.float64).copy(),
-                    float(output.raw_rss[local]),
+                    float(direct_rss[local] if direct_rss is not None and complete[local] else output.raw_rss[local]),
                     int(output.status[local]),
                     bool(output.success[local]),
                 )
         return solved
 
-    def refine_cell(
-        data: RegularImageFitInput,
-        context: _ImageContext,
-        parameters: np.ndarray,
-    ) -> tuple[
-        np.ndarray,
-        float,
-        _SolverStatus,
-        _ImageContext,
-        _RegularImageSummary,
-        np.ndarray,
-    ]:
-        summary = _regular_image_summary(context)
-        if summary.count <= len(free_indices):
-            raise ValueError(
-                "fit requires more finite observations than free parameters"
-            )
-        lower, upper = refinement_bounds(data)
-        lower[requested_mask] = requested_lower[requested_mask]
-        upper[requested_mask] = requested_upper[requested_mask]
-        lower_inside = np.nextafter(lower, upper)
-        upper_inside = np.nextafter(upper, lower)
-        free_index = np.asarray(free_indices, dtype=np.int64)
-        current = np.asarray(parameters, dtype=np.float64).copy()
-        if free_indices:
-            current[free_index] = np.clip(
-                current[free_index], lower_inside[free_index], upper_inside[free_index]
-            )
-        fixed = np.flatnonzero(lower == upper)
-        current[fixed] = lower[fixed]
-        scale = summary.scale if options.loss == "linear" else 1.0
-        natural_scale = np.asarray(
-            kernel.natural_scale_builder(
-                max(summary.maximum - summary.minimum, np.finfo(float).eps),
-                _span(data.x_coordinates),
-                _span(data.y_coordinates),
-            ),
-            dtype=np.float64,
-        )
-
-        def objective(values: np.ndarray) -> tuple[float, np.ndarray]:
-            check()
-            if summary.all_valid and options.loss == "linear":
-                return _regular_image_linear_objective(
-                    kernel, context, summary, values
-                )
-            cost, gradient, _rss, _information = (
-                _regular_image_striped_objective(
-                    kernel, context, values, scale, options.loss, False
-                )
-            )
-            return cost, gradient
-
-        def information(values: np.ndarray) -> np.ndarray:
-            if summary.all_valid and options.loss == "linear":
-                return _regular_image_linear_information(
-                    kernel, context, values, scale
-                )
-            return _regular_image_striped_objective(
-                kernel, context, values, scale, options.loss, True
-            )[3]
-
-        def gradient_norm(values: np.ndarray, gradient: np.ndarray) -> float:
-            if not free_indices:
-                return 0.0
-            parameter_scale = np.maximum(
-                np.abs(values[free_index]), natural_scale[free_index]
-            )
-            return float(
-                np.max(np.abs(gradient[free_index] * parameter_scale))
-            )
-
-        def converged(values: np.ndarray, gradient: np.ndarray) -> bool:
-            return gradient_norm(values, gradient) <= _REGULAR_IMAGE_GTOL
-
-        def newton_polish(
-            values: np.ndarray,
-            cost: float,
-            gradient: np.ndarray,
-        ) -> tuple[np.ndarray, float, np.ndarray, bool]:
-            for _step in range(_REGULAR_IMAGE_MAX_NEWTON_STEPS):
-                if converged(values, gradient):
-                    return values, cost, gradient, True
-                try:
-                    step = np.linalg.solve(
-                        information(values)[np.ix_(free_index, free_index)],
-                        -gradient[free_index],
-                    )
-                except np.linalg.LinAlgError:
-                    break
-                candidate = values.copy()
-                candidate[free_index] = np.clip(
-                    values[free_index] + step,
-                    lower_inside[free_index],
-                    upper_inside[free_index],
-                )
-                candidate_cost, candidate_gradient = objective(candidate)
-                improved = math.isfinite(candidate_cost) and (
-                    candidate_cost < cost
-                    or gradient_norm(candidate, candidate_gradient)
-                    < gradient_norm(values, gradient)
-                )
-                if not improved:
-                    break
-                values, cost, gradient = (
-                    candidate,
-                    candidate_cost,
-                    candidate_gradient,
-                )
-            return values, cost, gradient, converged(values, gradient)
-
-        cost, gradient = objective(current)
-        current, cost, gradient, polished = newton_polish(
-            current, cost, gradient
-        )
-        status = _SolverStatus(
-            polished, "full-resolution Newton refinement converged"
-            if polished
-            else "full-resolution refinement did not converge"
-        )
-        if not status.success and free_indices:
-            parameter_scale = np.maximum(
-                np.abs(current[free_index]), natural_scale[free_index]
-            )
-
-            def scaled_objective(values: np.ndarray) -> tuple[float, np.ndarray]:
-                complete = current.copy()
-                complete[free_index] = values * parameter_scale
-                local_cost, local_gradient = objective(complete)
-                return local_cost, local_gradient[free_index] * parameter_scale
-
-            solved = minimize(
-                scaled_objective,
-                current[free_index] / parameter_scale,
-                method="L-BFGS-B",
-                jac=True,
-                bounds=tuple(
-                    zip(
-                        lower[free_index] / parameter_scale,
-                        upper[free_index] / parameter_scale,
-                    )
-                ),
-                options={
-                    "ftol": _REGULAR_IMAGE_FTOL,
-                    "gtol": _REGULAR_IMAGE_GTOL,
-                    "maxfun": options.max_nfev,
-                    "maxiter": options.max_nfev,
-                    "maxls": _REGULAR_IMAGE_MAX_LINE_SEARCH_STEPS,
-                },
-            )
-            current[free_index] = np.asarray(solved.x) * parameter_scale
-            cost, gradient = objective(current)
-            current, cost, gradient, polished = newton_polish(
-                current, cost, gradient
-            )
-            status = (
-                _SolverStatus(
-                    True, "full-resolution Newton refinement converged"
-                )
-                if polished
-                else _SolverStatus(bool(solved.success), str(solved.message))
-            )
-        final_information = information(current)
-        if summary.all_valid and options.loss == "linear":
-            raw_rss = 2.0 * cost * scale**2
-        else:
-            _cost, _gradient, raw_rss, final_information = (
-                _regular_image_striped_objective(
-                    kernel, context, current, scale, options.loss, True
-                )
-            )
-            if options.loss == "linear":
-                raw_rss *= scale**2
-        return current, raw_rss, status, context, summary, final_information
 
     active = {cell: item[2] for cell, item in enumerate(prepared) if item is not None}
     proxy_solved = solve_stage(active, None, refinement=False)
-    batch_refinement = len(active) > 1
-    full_solved = (
-        solve_stage(
-            {cell: prepared[cell][0] for cell in active},  # type: ignore[index]
-            {cell: proxy_solved[cell][0] for cell in active},
-            refinement=True,
-        )
-        if batch_refinement
-        else {}
+    full_solved = solve_stage(
+        {cell: prepared[cell][0] for cell in active},  # type: ignore[index]
+        {cell: proxy_solved[cell][0] for cell in active},
+        refinement=True,
     )
     check()
 
+    finished: list[
+        tuple[int, np.ndarray, bool, str, int, float, np.ndarray]
+    ] = []
     for cell, item in enumerate(prepared):
         if item is None:
             continue
         data, index_origin, _proxy, context = item
         try:
-            if batch_refinement:
-                parameters, raw_rss, status_code, success = full_solved[cell]
-                status = _SolverStatus(
-                    success, _compiled_fit.termination_message(status_code)
-                )
-                complete_linear = (
-                    options.loss == "linear"
-                    and data.valid_mask is None
-                    and (
-                        data.observations.dtype.kind != "f"
-                        or context.finite_everywhere()
-                    )
-                )
-                if complete_linear:
-                    observation_count = int(data.observations.size)
-                    information = _regular_image_linear_information(
-                        kernel, context, parameters, 1.0
-                    )
-                else:
-                    summary = _regular_image_summary(context)
-                    observation_count = summary.count
-                    _cost, _gradient, raw_rss, information = (
-                        _regular_image_striped_objective(
-                            kernel,
-                            context,
-                            parameters,
-                            1.0,
-                            options.loss,
-                            True,
-                        )
-                    )
-                information_scale = 1.0
+            parameters, raw_rss, status_code, success = full_solved[cell]
+            message = _compiled_fit.termination_message(status_code)
+            if cell in full_information:
+                observation_count = int(data.observations.size)
+                information = full_information[cell]
+                if information is None:
+                    raise FloatingPointError("regular-image information is non-finite")
             else:
-                (
-                    parameters,
-                    raw_rss,
-                    status,
-                    context,
-                    summary,
-                    information,
-                ) = refine_cell(data, context, proxy_solved[cell][0])
-                observation_count = summary.count
-                information_scale = (
-                    summary.scale if options.loss == "linear" else 1.0
+                _cost, _gradient, raw_rss, information, observation_count = (
+                    _regular_image_striped_objective(
+                        kernel, context, parameters, 1.0, options.loss, True,
+                    )
                 )
             if observation_count <= len(free_indices):
                 raise ValueError(
@@ -1829,24 +1518,36 @@ def fit_regular_separable_images(
                 )
             degrees = max(observation_count - len(free_indices), 1)
             reduced = raw_rss / degrees
-            covariance_reduced = reduced / information_scale**2
-            if free_indices:
-                free_index = np.asarray(free_indices, dtype=np.int64)
-                free_covariance, covariance_valid = _covariance_from_information(
-                    information[np.ix_(free_index, free_index)],
-                    covariance_reduced,
-                    observation_count,
-                )
-                covariance, errors = _expand_fixed_covariance(
-                    len(model.parameters),
-                    free_indices,
-                    free_covariance,
-                    covariance_valid,
-                )
-            else:
-                covariance_valid = True
-                covariance = np.zeros((len(model.parameters),) * 2)
-                errors = np.zeros(len(model.parameters))
+            finished.append((
+                cell, parameters, success, message, observation_count,
+                reduced, information,
+            ))
+        except (FitCancelled, FitDeadlineExceeded):
+            raise
+        except Exception as error:
+            failures[cell] = str(error) or type(error).__name__
+
+    check()
+    parameter_count = len(model.parameters)
+    covariances = np.zeros((len(finished), parameter_count, parameter_count))
+    errors_batch = np.zeros((len(finished), parameter_count))
+    covariance_valid_batch = np.ones(len(finished), dtype=np.bool_)
+    if finished and free_indices:
+        free_index = np.asarray(free_indices, dtype=np.int64)
+        matrices = np.stack([row[6] for row in finished])
+        free_covariances, covariance_valid_batch = _covariance_from_information(
+            matrices[:, free_index[:, None], free_index[None, :]],
+            np.asarray([row[5] for row in finished]),
+            np.asarray([row[4] for row in finished]),
+        )
+        covariances[:, free_index[:, None], free_index[None, :]] = free_covariances
+        errors_batch = np.sqrt(np.maximum(
+            np.diagonal(covariances, axis1=1, axis2=2), 0.0
+        ))
+    check()
+    for row, (cell, parameters, success, message, observation_count, reduced, _info) in enumerate(finished):
+        data, index_origin, _proxy, _context = prepared[cell]
+        try:
             result_parameters = parameters.copy()
             deferred = _DeferredFitData(
                 lambda data=data, parameters=result_parameters,
@@ -1858,16 +1559,16 @@ def fit_regular_separable_images(
             results[cell] = FitResult(
                 model,
                 parameters,
-                errors,
-                covariance,
+                errors_batch[row],
+                covariances[row],
                 deferred,
                 deferred,
                 deferred,
                 int(data_revisions[cell]),
-                status.success,
-                status.message,
+                success,
+                message,
                 float(reduced),
-                covariance_valid=covariance_valid,
+                covariance_valid=bool(covariance_valid_batch[row]),
                 fixed_parameter_names=fixed_names,
             )
             failures[cell] = None
@@ -1908,15 +1609,16 @@ def fit_regular_separable_image(
 
 
 def production_dispatchers() -> tuple[object, ...]:
-    """The six regular-image roots whose machine code is production state."""
+    """Regular-image roots whose machine code is production state."""
 
     return (
-        _promote_unsigned_summary,
         _prepare_regular_image_refinement,
         _prepare_regular_radial_compiled,
         _prepare_regular_anisotropic_compiled,
         _compiled_regular_radial_objective,
         _compiled_regular_anisotropic_objective,
+        _compiled_regular_information_batch,
+        _compiled_regular_centered_context,
     )
 
 
@@ -1941,15 +1643,27 @@ def warm_production_cache() -> dict[str, tuple[bool, ...]]:
             np.asarray((3.0, 0.2, 0.65, 0.9, 0.15, -0.1), dtype=np.float64),
             np.dtype(np.uint16),
         ),
+        (
+            "radial_gaussian_center",
+            np.asarray((3.0, 0.2, 0.7, 0.15, -0.1), dtype=np.float64),
+            np.dtype(np.float32),
+        ),
+        (
+            "anisotropic_gaussian_center",
+            np.asarray((3.0, 0.2, 0.65, 0.9, 0.15, -0.1), dtype=np.float64),
+            np.dtype(np.float64),
+        ),
     ):
         model = engine.registry.get(model_id)
         image = model.evaluate(
             (grid_x.reshape(-1), grid_y.reshape(-1)), parameters
         ).reshape(y.size, x.size)
-        maximum = np.iinfo(storage_dtype).max
-        stored = np.clip(np.rint(image * 40.0), 0.0, maximum).astype(
-            storage_dtype
-        )
+        if storage_dtype.kind == "u":
+            stored = np.clip(
+                np.rint(image * 40.0), 0.0, np.iinfo(storage_dtype).max
+            ).astype(storage_dtype)
+        else:
+            stored = image.astype(storage_dtype)
         inputs = tuple(
             RegularImageFitInput(x, y, stored.copy()) for _index in range(4)
         )

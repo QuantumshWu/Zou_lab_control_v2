@@ -1041,7 +1041,7 @@ def _indexed_materialization_input(
         and cached.sequence <= sequence
         and history.replaced_at <= cached.sequence
         and primary_index > cached.latest
-        and start >= cached.start
+        and cached.start <= start <= cached.latest
     ):
         basis = cached
     selected_events = []

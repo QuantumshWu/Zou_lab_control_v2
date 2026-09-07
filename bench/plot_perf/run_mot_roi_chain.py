@@ -154,6 +154,7 @@ def _draw_mot_roi(
     *,
     height: int = 40,
     width: int = 500,
+    center_yx: tuple[int, int] | None = None,
 ) -> dict:
     """Draw the requested ROI through real QMouseEvents and publish roi_frame."""
 
@@ -174,6 +175,8 @@ def _draw_mot_roi(
         )
     score = np.where(valid & np.isfinite(z), z, -np.inf)
     peak_row, peak_column = np.unravel_index(int(np.argmax(score)), score.shape)
+    if center_yx is not None:
+        peak_row, peak_column = center_yx
     row_start = int(np.clip(peak_row - height // 2, 0, y.size - height))
     column_start = int(np.clip(peak_column - width // 2, 0, x.size - width))
     row_stop = row_start + height
@@ -624,17 +627,12 @@ def run(
         }
         memory_samples = {name: [] for name in process_ids}
         total_memory_samples = []
-        cpu_start = {}
         memory_stop = threading.Event()
         try:
             import psutil
 
             processes = {
                 name: psutil.Process(pid) for name, pid in process_ids.items()
-            }
-            cpu_start = {
-                name: sum(process.cpu_times()[:2])
-                for name, process in processes.items()
             }
 
             def sample_processes() -> None:
@@ -690,6 +688,7 @@ def run(
             panels,
             baseline_seconds,
             window_start=baseline_begin,
+            process_ids=process_ids,
         )
         baseline["source_rate"] = baseline_finish(baseline["window_s"])
         baseline["causal_timeline"] = timeline.summary(labels)
@@ -712,6 +711,7 @@ def run(
             panels,
             seconds,
             window_start=main_begin,
+            process_ids=process_ids,
         )
         measured["source_rate"] = main_finish(measured["window_s"])
         measured["causal_timeline"] = timeline.summary(labels)
@@ -727,10 +727,9 @@ def run(
         process_memory = {}
         for name, process in processes.items():
             samples = memory_samples[name]
-            try:
-                cpu_end = sum(process.cpu_times()[:2])
-            except psutil.Error:
-                cpu_end = cpu_start.get(name, 0.0)
+            cpu_windows = [
+                block["process_cpu"][name] for block in (baseline, measured)
+            ]
             process_memory[name] = {
                 "pid": process_ids[name],
                 "rss_start_mib": (
@@ -743,11 +742,12 @@ def run(
                     None if not samples else round(max(samples) / 2**20, 2)
                 ),
                 "cpu_percent_of_one_core": round(
-                    max(0.0, cpu_end - cpu_start.get(name, cpu_end))
-                    / max(1.0e-9, baseline["window_s"] + measured["window_s"])
+                    sum(window["cpu_seconds"] for window in cpu_windows)
+                    / sum(window["window_s"] for window in cpu_windows)
                     * 100.0,
                     1,
                 ),
+                "cpu_scope": "measurement windows only; excludes warmup",
             }
         process_memory["total"] = {
             "rss_start_mib": (

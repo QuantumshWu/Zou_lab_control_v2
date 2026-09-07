@@ -402,6 +402,7 @@ def representative_work(*, include_compiled_fit: bool = True) -> None:
         FacetGridPlot,
         HistogramPlot,
         ImagePlot,
+        RollingPlot,
     )
     from . import (  # noqa: PLC0415
         _fit_compiled,
@@ -436,7 +437,7 @@ def representative_work(*, include_compiled_fit: bool = True) -> None:
         _render(_image_snapshot(1200, 1920, dtype, holes=True), image)
 
     series = _series_snapshot(8, 400)
-    # The centred second moment behind an uncertainty band.
+    # The centred second moment and fused curve validity/bounds pass.
     _render(series, CurvePlot(AxisRef.point("x")), {"uncertainty": True})
     # Uniform binning and the masked extrema that choose its domain.
     _render(series, HistogramPlot())
@@ -450,6 +451,16 @@ def representative_work(*, include_compiled_fit: bool = True) -> None:
         mixed,
         CurvePlot(AxisRef.cell_data("site"), group=AxisRef.point("group")),
         {"uncertainty": True},
+    )
+    # Dense grouped Cell data exposes a strided y view to the serial summary
+    # scan. Warm its actual A-layout signature without copying it to C.
+    _render(
+        _image_snapshot(8, 16, np.float64),
+        CurvePlot(AxisRef.cell_data("x"), group=AxisRef.cell_data("y")),
+    )
+    _render(
+        _mixed_snapshot(repeats=8, points=8, sites=8),
+        RollingPlot(group=AxisRef.cell_data("site")),
     )
     # The fused value+count leading reduction exists only for a genuinely
     # holey, C-laid-out floating tensor; an all-valid curve takes NumPy's

@@ -10,6 +10,9 @@
 
 ## 1. 当前实施范围
 
+- 2026-09-07 当前性能worktree实施要求：RegularImage single/Bn收敛为同一数值流程，内部规则轴不再展开成逐像素坐标；现有context贯通prepare/objective，以稳定中心化统计量减少重复整图扫描，并直接核对最终残差。前景文字/边框仍由Matplotlib语义生成，在同一有序compose owner内批量重放。最终是否保留必须由同输入正确性、single/Bn代价和真实四Panel结果裁决，不能将尚未通过的候选记为性能完成。
+- 该cut最终已在worktree实现并验证，未提交/合并master：四Panel Curve critical `89.85→84.69ms`、Image `98.08→83.27ms`；isolated B40 image fit `27.52→24.70ms`，single `19.32→26.70ms`是明确代价。无新production类/文件，本轮净+71行（包括最后补齐的f32/f64预热样本）。带探针Curve的约205ms长尾在补测中定位到117.334ms gen2 GC，不归入renderer/solver正常耗时；无探针的发生频率尚未确定，不宣称物理极限或永不掉帧。细节及剩余大头以`research/FINAL_MAJOR_OPTIMIZATION_REPORT.md`为准。
+
 - 所有项目内部持久化格式、Dataset contract和artifact contract改为稳定语义名；
   Figure、Calibration、Pulse、Target和Science Context不带数字版本。
 - Reader只接受当前完整grammar；现有workspace不转换，文件可直接不受当前reader支持。
@@ -56,6 +59,7 @@
   既有浮点数值等价与结构精确contract，聚焦回归63项通过。
 - Facet/Single规则tensor投影已收敛到同一retained-axis reduction：一次保留`facet/x/y/group`真实tensor axes、一次归约其它轴，Curve/Image只包装不同payload；Histogram继续共用其批量分箱terminal。Curve/Image/Fit/SEM的native raster快路保留，并继续以完整差异像素而非阈值子集评价其Agg接近度；不得通过回退Agg把差异人为归零。RegularImage即使有完整warm seed也保留cold proxy竞争；Board的active-fit staging保持不变。
 - FacetGrid现允许facet fate为空：DataView发布一个`Facet 1`完整cell，不创建phantom axis；真实facet被归约/移走时仍可画、fit和保存，重新赋予Facet fate后恢复普通多cell路径。
+- 本性能worktree的后续收口：Session warm记忆只保存成功参数tuple，删除半径/幅度/旧chi阈值及其扫描，数值cold+warm竞争不变；RegularImage仅linear loss的proxy使用1e-5收敛容差，robust proxy及全部full refinement保留原精度，保留fresh正负候选，不以warm成功为由跳过cold。旧Front完成回调不再闭包捕获自身Future，共享像素free预算跟随service现有Host数，关闭时缩减且不复用leased块。Curve/Rolling/Facet共用prepared summary的一次valid/范围/孤点扫描；serial Numba核直接读只读stride view，不增加尺寸阈值、OpenMP或第二缓存owner。具体数值证据见Plot performance文档与当前worktree报告。
 - 当前Render coherence Goal按以下顺序根修，全部在现有owner内完成且允许证据驱动调整实现细节：
   1. clim move合并为`candidate+clim mutation+compose+front`一次原子preview；
   2. indexed history旧publication改为正常expired cancellation，Panel保留最后完整front与Fit/Setting vocabulary；Edit拆开`data advanced`和真正configuration incompatibility，并让PanelState/frozen target原子同步；

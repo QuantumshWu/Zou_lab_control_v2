@@ -46,7 +46,7 @@ from ._gesture_engine import (
     pan_rectangle,
     range_endpoint_hit,
 )
-from ._session_fit import FitSessionMixin, _WarmSeed
+from ._session_fit import FitSessionMixin
 from ._session_gesture import GestureSessionMixin
 from ._session_live import LiveSessionMixin
 from ._session_state import (
@@ -535,7 +535,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         self._live_fit_request: _LiveFitRequest | None = None
         self._live_fit_future: Future[FitResult | FacetFitBatchResult] | None = None
         self._live_fit_completion: Future[FitResult | FacetFitBatchResult] | None = None
-        self._fit_warm_starts: dict[tuple[int, str, int | None], _WarmSeed] = {}
+        self._fit_warm_starts: dict[
+            tuple[int, str, int | None], tuple[float, ...]
+        ] = {}
         self._fit_batch_revision = 0
         self._viewport: RectangleRange | None = None
         self._focused_facet_index: int | None = (
@@ -1329,7 +1331,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             self._remember_fit_warm_starts(
                 solved.result,
                 request_generation=solved.started.request_generation,
-                selections=accepted_fit.selections,
             )
         return presentation, resolution
 

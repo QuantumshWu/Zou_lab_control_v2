@@ -190,7 +190,7 @@ def test_threshold_classifier_refresh_warm_starts_from_prior_solution() -> None:
         assert settled[0] is not None
         key = (-1, "bimodal_gaussian", None)
         assert key in session._fit_warm_starts
-        seeded = session._fit_warm_starts[key].parameters
+        seeded = session._fit_warm_starts[key]
         first_threshold = settled[0]
         session._refresh_threshold_classifier()
         # The warm refresh re-solves from the prior solution; the threshold
@@ -198,7 +198,7 @@ def test_threshold_classifier_refresh_warm_starts_from_prior_solution() -> None:
         assert session._classifier_thresholds_settled()[0] == pytest.approx(
             first_threshold, rel=1e-2, abs=1e-3
         )
-        assert session._fit_warm_starts[key].parameters == pytest.approx(
+        assert session._fit_warm_starts[key] == pytest.approx(
             seeded, rel=1e-3, abs=1e-6
         )
     finally:
@@ -405,11 +405,11 @@ def test_live_image_refit_matches_cold_across_occupancy_resamples() -> None:
         session.close()
 
 
-# --- warm-seed memory hardening ---------------------------------------------
+# --- remembered parameters remain candidates, not the solution authority ----
 
 
-def test_degenerate_image_accepts_are_never_remembered_as_seeds() -> None:
-    """Frame-sized radii and vanished amplitudes must not seed later solves."""
+def test_bad_accepted_image_seed_still_competes_with_current_data() -> None:
+    """A successful but uninformative prior cannot trap the next live frame."""
 
     session = PlotSession(
         _blob_image_snapshot(((64.0, 48.0, 3000.0),), revision=0),
@@ -417,24 +417,27 @@ def test_degenerate_image_accepts_are_never_remembered_as_seeds() -> None:
     )
     try:
         selection = session.fit_selection("radial_gaussian_center")
-        good = session.fit("radial_gaussian_center", live=False)
-        assert session._propose_warm_seed(good, selection) is not None
+        good = session.fit("radial_gaussian_center", live=True)
+        generation = session._fit_request_generation
+        key = (generation, good.model.model_id, None)
         values = np.asarray(good.parameter_values).copy()
         radius_index = good.parameter_names.index("one_over_e_radius")
         values[radius_index] = 0.6 * float(np.ptp(selection.regular_image.x_coordinates))
-        pinned = replace(good, parameter_values=values)
-        assert session._propose_warm_seed(pinned, selection) is None
-        values = np.asarray(good.parameter_values).copy()
         values[good.parameter_names.index("amplitude")] = 1e-4
-        flat = replace(good, parameter_values=values)
-        assert session._propose_warm_seed(flat, selection) is None
-        assert session._propose_warm_seed(replace(good, success=False), selection) is None
+        bad = replace(good, parameter_values=values, reduced_chi_square=1e6)
+        session._remember_fit_warm_starts(bad, request_generation=generation)
+        assert session._fit_warm_starts[key] == tuple(values)
+        moved = _blob_image_snapshot(((24.0, 78.0, 3000.0),), revision=1)
+        result = _present_and_wait(session, moved, 1)
+        assert result.success
+        assert result.parameters["center_x"] == pytest.approx(24.0, abs=0.1)
+        assert result.parameters["center_y"] == pytest.approx(78.0, abs=0.1)
     finally:
         session.close()
 
 
-def test_chi_square_blowup_drops_the_remembered_seed() -> None:
-    """A drastically worse accept clears the memory; the next solve runs cold."""
+def test_failed_fit_result_drops_the_remembered_seed() -> None:
+    """An unsuccessful result leaves no candidate for the next solve."""
 
     session = PlotSession(
         _blob_image_snapshot(((64.0, 48.0, 3000.0),), revision=0),
@@ -446,25 +449,8 @@ def test_chi_square_blowup_drops_the_remembered_seed() -> None:
         generation = session._fit_request_generation
         key = (generation, "radial_gaussian_center", None)
         assert key in session._fit_warm_starts
-        selection = session.fit_selection("radial_gaussian_center")
-        remembered = session._fit_warm_starts[key]
-        # A modest degradation (inside two orders of magnitude above the
-        # noise floor) keeps the memory fresh.
-        modest = replace(
-            accepted, reduced_chi_square=max(accepted.reduced_chi_square, 1e-9)
-        )
         session._remember_fit_warm_starts(
-            modest, request_generation=generation, selections=(selection,)
-        )
-        assert key in session._fit_warm_starts
-        # A blow-up far beyond the remembered accept drops the seed entirely.
-        blown = replace(
-            accepted,
-            reduced_chi_square=1e6
-            * max(remembered.reduced_chi_square, remembered.noise_floor, 1e-6),
-        )
-        session._remember_fit_warm_starts(
-            blown, request_generation=generation, selections=(selection,)
+            replace(accepted, success=False), request_generation=generation,
         )
         assert key not in session._fit_warm_starts
     finally:

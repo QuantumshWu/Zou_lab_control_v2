@@ -234,10 +234,16 @@ class FitSelection:
             RegularImageFitInput,
         ):
             raise TypeError("regular_image must be RegularImageFitInput or None")
+        # A regular selection describes that exact validated input; it does
+        # not own a second copy of the input's coordinate axes.
         object.__setattr__(
             self,
             "coordinates",
-            tuple(readonly_copy(value, dtype=float) for value in self.coordinates),
+            (
+                (regular_image.x_coordinates, regular_image.y_coordinates)
+                if regular_image is not None
+                else tuple(readonly_copy(value, dtype=float) for value in self.coordinates)
+            ),
         )
         if regular_image is None:
             observations = readonly_copy(self.observations, dtype=float)
@@ -1565,12 +1571,6 @@ class FitProjection:
             payload,
             selector_kind,
         )
-        finite_x = np.isfinite(x_solver)
-        finite_y = np.isfinite(y_solver)
-        if not (bool(np.all(finite_x)) and bool(np.all(finite_y))):
-            plane = finite_y[:, None] & finite_x[None, :]
-            valid = plane if valid is None else valid & plane
-
         regular = RegularImageFitInput(
             x_solver,
             y_solver,

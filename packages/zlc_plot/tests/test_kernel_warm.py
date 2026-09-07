@@ -174,35 +174,24 @@ def test_distinct_dtypes_and_a_repeated_exact_signature_are_not_twins() -> None:
     assert _kernel_warm.duplicate_signatures({"promote": kernel}) == ()
 
 
-def test_the_regular_image_promotion_is_sealed_at_its_boundary() -> None:
-    """A writable camera plane reaches the promotion kernel read-only.
-
-    The plane's mutability used to be whatever its origin made it: a
-    published snapshot sealed, a fresh copy writable, and numba compiled the
-    promotion twice per dtype for the difference.
-    """
+def test_regular_image_fit_preserves_camera_storage_and_returns_float64() -> None:
+    """The public fit promotes values without mutating the camera source."""
 
     import numpy as np
 
-    from zlc_plot import _fit_radial
+    from zlc_plot.fit import FitEngine, RegularImageFitInput
 
-    seen: list[bool] = []
-    original = _fit_radial._promote_unsigned_summary
-
-    def spy(plane):
-        seen.append(bool(plane.flags.writeable))
-        return original(plane)
-
-    _fit_radial._promote_unsigned_summary = spy
-    try:
-        plane = np.arange(12, dtype=np.uint8).reshape(3, 4)  # writable, contiguous
-        data = _fit_radial.RegularImageFitInput(
-            np.arange(4, dtype=np.float64), np.arange(3, dtype=np.float64), plane
-        )
-        context = _fit_radial._ImageContext(data, lambda: None)
-        promoted = context.float_observations()
-    finally:
-        _fit_radial._promote_unsigned_summary = original
-    assert seen == [False], "the kernel must only ever see a sealed plane"
-    assert promoted.dtype == np.float64 and promoted.flags.c_contiguous
-    assert plane.flags.writeable, "sealing is a view, never a side effect on the caller"
+    x = np.arange(19, dtype=np.float64)
+    y = np.arange(17, dtype=np.float64)
+    plane = np.rint(
+        5.0 + 80.0 * np.exp(-((x[None, :] - 9.0) ** 2 + (y[:, None] - 8.0) ** 2) / 9.0)
+    ).astype(np.uint8)
+    original = plane.copy()
+    result = FitEngine().fit("radial_gaussian_center", RegularImageFitInput(x, y, plane))
+    assert result.success
+    assert plane.flags.writeable and np.array_equal(plane, original)
+    assert result.fitted_values.dtype == np.float64
+    assert not result.fitted_values.flags.writeable
+    np.testing.assert_allclose(
+        result.fitted_values + result.residuals, original.reshape(-1), rtol=0.0, atol=1e-12
+    )

@@ -315,24 +315,76 @@ def test_identity_tensor_uncertainty_is_the_same_undefined_single_sample(
     _assert_curve_arrays_exact(fast, slow)
 
 def test_resolved_axis_cache_crosses_only_the_same_schema_and_unit_context() -> None:
+    from dataclasses import replace
+    from zlc_data import BlockId, DatasetRevisionRef, DomainSpec, Selection
+    from zlc_data.snapshot_projection import restrict_snapshot
+    from zlc_plot.data_contract import DEFAULT_UNITS, UnitRegistry
+
+    x = AxisRef.repeat("repeat")
+    groups = (AxisRef.cell_data("series"),)
+    overrides = {x: "ms"}
     first = DataView(
         _identity_bucket_snapshot(grouped=True, holes=False, revision=1),
-        axis_display_units={AxisRef.repeat("repeat"): "ms"},
+        axis_display_units=overrides,
     )
-    resolved = first._resolve(AxisRef.repeat("repeat"))
+    first.curve(x, group_by=groups)
+    resolved = first._resolve(x)
+    retained = first._axis_projection((x,))[0][0]
+    source = _identity_bucket_snapshot(grouped=True, holes=True, revision=2)
     second = DataView(
-        _identity_bucket_snapshot(grouped=True, holes=True, revision=2),
-        axis_display_units={AxisRef.repeat("repeat"): "ms"},
+        source,
+        axis_display_units=overrides,
         inherit_domains_from=first,
     )
-    assert second._resolve(AxisRef.repeat("repeat")) is resolved
+    _assert_curve_arrays_exact(
+        second.curve(x, group_by=groups),
+        DataView(source, axis_display_units=overrides).curve(x, group_by=groups),
+    )
+    assert second._resolve(x) is resolved
+    assert second._axis_projection((x,))[0][0] is retained
 
     changed_unit = DataView(
         _identity_bucket_snapshot(grouped=True, holes=False, revision=3),
-        axis_display_units={AxisRef.repeat("repeat"): "s"},
+        axis_display_units={x: "s"},
         inherit_domains_from=second,
     )
-    assert changed_unit._resolve(AxisRef.repeat("repeat")) is not resolved
+    assert changed_unit._resolve(x) is not resolved
+    np.testing.assert_array_equal(
+        changed_unit.curve(x, group_by=groups).series[0].x.display,
+        first.curve(x, group_by=groups).series[0].x.canonical,
+    )
+
+    # Same shape and names do not imply the same physical-to-logical order.
+    repeat = source.block.schema.repeat_domain
+    reordered_schema = replace(source.block.schema, repeat_domain=DomainSpec(
+        repeat.shape, repeat.axes, (tuple(reversed(range(repeat.size))),),
+    ))
+    reordered = make_snapshot(reordered_schema, source.block.values, revision=3,
+                              validity=source.expanded_validity())
+    changed_order = DataView(reordered, axis_display_units=overrides, inherit_domains_from=second)
+    assert changed_order._resolve(x) is not resolved
+    _assert_curve_arrays_exact(changed_order.curve(x, group_by=groups),
+                              DataView(reordered, axis_display_units=overrides).curve(x, group_by=groups))
+
+    scoped = restrict_snapshot(source, Selection.index_range(repeat.axes[0].axis_id, 2, 9),
+        reference_for=lambda schema: DatasetRevisionRef(
+            BlockId("scoped-cache-context"), source.ref.stream_generation,
+            schema.fingerprint, source.ref.revision))
+    changed_scope = DataView(scoped, axis_display_units=overrides, inherit_domains_from=second)
+    assert changed_scope._resolve(x) is not resolved
+    _assert_curve_arrays_exact(changed_scope.curve(x, group_by=groups),
+                              DataView(scoped, axis_display_units=overrides).curve(x, group_by=groups))
+
+    registry = UnitRegistry((DEFAULT_UNITS.resolve("s"), DEFAULT_UNITS.resolve("1")))
+    registered = DataView(source, unit_registry=registry, inherit_domains_from=second)
+    registered_axis = registered._resolve(x)
+    assert registered_axis is not resolved
+    registered.curve(x, group_by=groups)
+    registry.register(DEFAULT_UNITS.resolve("V"))
+    revised = DataView(source, unit_registry=registry, inherit_domains_from=registered)
+    assert revised._resolve(x) is not registered_axis
+    _assert_curve_arrays_exact(revised.curve(x, group_by=groups),
+                              DataView(source, unit_registry=registry).curve(x, group_by=groups))
 
 @pytest.mark.parametrize("holes", [0.0, 0.3])
 @pytest.mark.parametrize(

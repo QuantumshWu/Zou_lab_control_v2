@@ -571,6 +571,46 @@ def fused_masked_leading_float64(
     return out.reshape(shape), counts.reshape(shape)
 
 # ------------------------------------------------------------------ extrema
+@njit(cache=True, nogil=True)
+def prepare_curve_summary(x, y, source_valid, lower, upper, has_band, valid, out):
+    """Prepare validity, display bounds and singleton presence in one pass.
+
+    Only derived frame facts are produced: no reordering, thinning or change
+    to values/SEM. This serial pass avoids an OpenMP launch for each cell.
+    """
+
+    xmin, xmax = np.inf, -np.inf
+    ymin, ymax = np.inf, -np.inf
+    pooled_min, pooled_max = np.inf, -np.inf
+    isolated = False
+    previous = False
+    for point in range(x.size):
+        xv, yv = x[point], y[point]
+        usable = source_valid[point] and np.isfinite(xv) and np.isfinite(yv)
+        valid[point] = usable
+        if usable:
+            low = lower[point] if has_band else yv
+            high = upper[point] if has_band else yv
+            if not np.isfinite(low):
+                low = yv
+            if not np.isfinite(high):
+                high = yv
+            xmin, xmax = min(xmin, xv), max(xmax, xv)
+            ymin, ymax = min(ymin, low), max(ymax, high)
+            pooled_min = min(pooled_min, yv, low, high)
+            pooled_max = max(pooled_max, yv, low, high)
+            if not previous:
+                following = (point + 1 < x.size and source_valid[point + 1]
+                             and np.isfinite(x[point + 1]) and np.isfinite(y[point + 1]))
+                if not following:
+                    isolated = True
+        previous = usable
+    out[0], out[1] = xmin, xmax
+    out[2], out[3] = ymin, ymax
+    out[4] = 1.0 if isolated else 0.0
+    out[5], out[6] = pooled_min, pooled_max
+
+
 @njit(cache=True, parallel=True, nogil=True)
 def finite_extrema(values, valid, use_valid, out):
     """One pass for ``(finite count, min, max)`` over a masked pool.
@@ -1133,6 +1173,46 @@ def raster_fit_ellipses(
                             min(255.0, np.floor(value + 0.5))
                         )
                     out[row, column, 3] = np.uint8(255)
+
+
+@njit(cache=True, nogil=True)
+def replay_foreground_masks(static_masks, static_rows, static_colors,
+                            text_masks, text_rows, text_colors, text_offsets, order, out):
+    """Replay independent Agg coverage masks in their original painter order.
+
+    Match Matplotlib's fixed_blender_rgba_plain integer arithmetic, including
+    pixfmt's opaque copy shortcut. Coverage is Agg's, never a layer union.
+    """
+    for entry in range(order.shape[0]):
+        kind, index = order[entry]
+        if kind == 0:
+            masks, rows, colors = static_masks, static_rows, static_colors
+            start, stop = index, index + 1
+        else:
+            masks, rows, colors = text_masks, text_rows, text_colors
+            start, stop = text_offsets[index], text_offsets[index + 1]
+        for primitive in range(start, stop):
+            offset, top, left, height, width = rows[primitive]
+            for y in range(height):
+                for x in range(width):
+                    cover = int(masks[offset + y * width + x])
+                    product = int(colors[primitive, 3]) * cover + 128
+                    alpha = ((product >> 8) + product) >> 8
+                    if alpha == 0:
+                        continue
+                    py, px = top + y, left + x
+                    if alpha == 255:
+                        for channel in range(3):
+                            out[py, px, channel] = colors[primitive, channel]
+                        out[py, px, 3] = 255
+                        continue
+                    old_alpha = int(out[py, px, 3])
+                    denominator = ((alpha + old_alpha) << 8) - alpha * old_alpha
+                    for channel in range(3):
+                        premultiplied = int(out[py, px, channel]) * old_alpha
+                        out[py, px, channel] = (premultiplied * (256 - alpha)
+                            + (int(colors[primitive, channel]) << 8) * alpha) // denominator
+                    out[py, px, 3] = denominator >> 8
 
 
 @njit(cache=True, parallel=True, nogil=True)

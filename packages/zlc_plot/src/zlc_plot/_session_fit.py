@@ -4,11 +4,9 @@ from __future__ import annotations
 
 from concurrent.futures import Future
 from dataclasses import dataclass, field, replace
-import math
 from threading import Event
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
-import warnings
 
 import numpy as np
 
@@ -32,8 +30,6 @@ from .fit import (
     FitModelSpec,
     FitOptions,
     FitResult,
-    ParameterDomain,
-    UnitRelation,
     _bimodal_classifier_metrics,
 )
 from .parameters import RenderEffect
@@ -60,40 +56,7 @@ FitCallback = Callable[[FitEvent | None], object]
 # seeds survive data revisions independently of user fit requests.
 _CLASSIFIER_REQUEST_GENERATION = -1
 
-# Warm-seed memory hardening: a degenerate accepted solve must never seed
-# later revisions (one poisoned seed used to replicate itself into every
-# following frame).  Thresholds, in order of application:
-# * an image radius beyond half its axis span leaves no curvature inside the
-#   frame, so the fitted center is unconstrained (degenerate accepts observed
-#   in the wild pinned the center at a frame edge with a radius tens of
-#   frames wide);
-# * an image amplitude under 0.1% of the observed value range is
-#   indistinguishable from a flat frame, so the geometry parameters carry no
-#   information;
-# * a reduced chi-square two orders of magnitude above the remembered seed's
-#   (and above the data's own noise floor, so exact synthetic fits with
-#   near-zero chi-square never trip the ratio) means the scene no longer
-#   resembles the one the seed described: the memory is dropped entirely and
-#   the next solve runs cold rather than descending from suspect parameters.
-# A rejected seed costs exactly one cold seed search on the next revision
-# (tens of milliseconds), so false positives are cheap.
-_WARM_SEED_MAX_RADIUS_SPAN_FRACTION = 0.5
-_WARM_SEED_MIN_AMPLITUDE_FRACTION = 1e-3
-_WARM_SEED_CHI_SQUARE_BLOWUP = 100.0
-_WARM_SEED_NOISE_FLOOR_RANGE_FRACTION = 1e-6
-
 _UNRESOLVED_WARM_START: Any = object()
-
-
-@dataclass(frozen=True, slots=True)
-class _WarmSeed:
-    """One accepted solution remembered as the next revision's warm seed."""
-
-    parameters: tuple[float, ...]
-    reduced_chi_square: float
-    # (range * _WARM_SEED_NOISE_FLOOR_RANGE_FRACTION)**2 of the accept's own
-    # data; the chi-square blow-up ratio is measured above this floor.
-    noise_floor: float
 
 
 class _LiveSelectionCell:
@@ -307,92 +270,17 @@ class FitSessionMixin:
         if request_generation is None:
             return requested
         with self._lock:
-            warm = self._fit_warm_starts.get(
+            return self._fit_warm_starts.get(
                 (request_generation, model.model_id, facet_index)
             )
-        return None if warm is None else warm.parameters
-
-    @staticmethod
-    def _observed_value_range(selection: FitSelection | None) -> float | None:
-        """Span of the finite observed values behind one fit selection."""
-
-        if selection is None:
-            return None
-        observations = np.asarray(selection.observations)
-        if observations.size == 0:
-            return None
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)
-            low = float(np.nanmin(observations))
-            high = float(np.nanmax(observations))
-        if not math.isfinite(low) or not math.isfinite(high):
-            return None
-        return high - low
-
-    @classmethod
-    def _propose_warm_seed(
-        cls,
-        fit: FitResult | None,
-        selection: FitSelection | None,
-    ) -> _WarmSeed | None:
-        """Build the seed one accepted result may leave for the next revision.
-
-        Returns None for failed results and for regular-image accepts that
-        cannot localize a blob (radius beyond half the axis span, or
-        amplitude lost in the value range); see the threshold notes above.
-        """
-
-        if fit is None or not fit.success:
-            return None
-        value_range = cls._observed_value_range(selection)
-        regular = None if selection is None else selection.regular_image
-        if regular is not None:
-            parameters = fit.parameters
-            spans = {
-                UnitRelation.AXIS_0: float(np.ptp(regular.x_coordinates)),
-                UnitRelation.AXIS_1: float(np.ptp(regular.y_coordinates)),
-            }
-            for spec in fit.model.parameters:
-                span = spans.get(spec.unit_relation)
-                if (
-                    spec.domain is ParameterDomain.POSITIVE
-                    and span is not None
-                    and float(parameters[spec.name])
-                    > span * _WARM_SEED_MAX_RADIUS_SPAN_FRACTION
-                ):
-                    return None
-            amplitude = parameters.get("amplitude")
-            if (
-                amplitude is not None
-                and value_range is not None
-                and abs(amplitude)
-                < value_range * _WARM_SEED_MIN_AMPLITUDE_FRACTION
-            ):
-                return None
-        noise_floor = (
-            0.0
-            if value_range is None
-            else (value_range * _WARM_SEED_NOISE_FLOOR_RANGE_FRACTION) ** 2
-        )
-        return _WarmSeed(
-            tuple(float(value) for value in fit.parameter_values),
-            float(fit.reduced_chi_square),
-            noise_floor,
-        )
 
     def _remember_fit_warm_starts(
         self,
         result: FitResult | FacetFitBatchResult,
         *,
         request_generation: int,
-        selections: Sequence[FitSelection | None] = (),
     ) -> None:
-        """Publish only credible accepted results as seeds for the next revision.
-
-        ``_propose_warm_seed`` rejects degenerate accepts outright, and an
-        accept whose reduced chi-square blew up against the remembered
-        seed's drops the memory entirely (see the threshold notes above).
-        """
+        """Remember successful parameters; they still compete with cold seeds."""
 
         if isinstance(result, FacetFitBatchResult):
             fits: tuple[FitResult | None, ...] = result.results
@@ -403,31 +291,14 @@ class FitSessionMixin:
         else:
             fits = (result,)
             keys = ((request_generation, result.model.model_id, None),)
-        padded = tuple(selections)[: len(fits)]
-        padded += (None,) * (len(fits) - len(padded))
-        # The degeneracy inspection touches the selection's observations, so
-        # it runs before the session lock is taken.
-        proposed = tuple(
-            self._propose_warm_seed(fit, selection)
-            for fit, selection in zip(fits, padded, strict=True)
-        )
         with self._lock:
             if request_generation != self._fit_request_generation:
                 return
-            for key, seed in zip(keys, proposed, strict=True):
-                if seed is None:
+            for key, fit in zip(keys, fits, strict=True):
+                if fit is None or not fit.success:
                     self._fit_warm_starts.pop(key, None)
                     continue
-                remembered = self._fit_warm_starts.get(key)
-                if (
-                    remembered is not None
-                    and seed.reduced_chi_square
-                    > _WARM_SEED_CHI_SQUARE_BLOWUP
-                    * max(remembered.reduced_chi_square, seed.noise_floor)
-                ):
-                    self._fit_warm_starts.pop(key, None)
-                    continue
-                self._fit_warm_starts[key] = seed
+                self._fit_warm_starts[key] = tuple(fit.parameter_values)
 
     def fit_selection(
         self,
@@ -827,7 +698,7 @@ class FitSessionMixin:
                 for result in results
                 if result is not None and result.parameter_units
             ),
-            projection._fit_parameter_units(model),
+            parameter_units,
         )
         batch = FacetFitBatchResult(
             model=model,
@@ -1499,11 +1370,10 @@ class FitSessionMixin:
                     model.model_id,
                     index if facet else None,
                 )
-                seed = self._propose_warm_seed(result, None)
-                if seed is None:
+                if result is None or not result.success:
                     self._fit_warm_starts.pop(key, None)
                 else:
-                    self._fit_warm_starts[key] = seed
+                    self._fit_warm_starts[key] = tuple(result.parameter_values)
 
     @staticmethod
     def _fitted_classifier_threshold(result: object) -> float | None:
@@ -2009,7 +1879,6 @@ class FitSessionMixin:
         self._remember_fit_warm_starts(
             result,
             request_generation=started.request_generation,
-            selections=selections,
         )
         return _FitPresentation(
             self._fit_event(accepted),

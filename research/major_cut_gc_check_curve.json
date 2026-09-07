@@ -1,0 +1,4705 @@
+{
+  "scenario": "mot-roi-history-four-panel",
+  "provenance": "root      C:\\Users\\eadri\\WorkCode\\zlc_v2_perf_limits_20260906\nzlc_plot  C:\\Users\\eadri\\WorkCode\\zlc_v2_perf_limits_20260906\\packages\\zlc_plot\\src\\zlc_plot\\__init__.py\nzlc_data  C:\\Users\\eadri\\WorkCode\\zlc_v2_perf_limits_20260906\\packages\\zlc_data\\src\\zlc_data\\__init__.py",
+  "requested": {
+    "camera": "mot_camera",
+    "exposure_seconds": 0.1,
+    "roi_yx": [
+      40,
+      500
+    ],
+    "history_window": 40,
+    "panel_size": "2x2",
+    "panel3": "curve",
+    "fit": "gaussian_offset",
+    "numba_threads": 16,
+    "numba_worker_threads": 4
+  },
+  "roi": {
+    "signal": "@logic/panel-1/roi_frame",
+    "peak_index_yx": [
+      600,
+      960
+    ],
+    "bounds_xy": [
+      [
+        710.0,
+        1209.0
+      ],
+      [
+        580.0,
+        619.0
+      ]
+    ],
+    "shape": [
+      1,
+      1,
+      43,
+      502
+    ]
+  },
+  "history_edit": {
+    "section": "display",
+    "values": {
+      "window": 40
+    },
+    "refused": null,
+    "answered": true,
+    "to_next_front_ms": 85.21
+  },
+  "grid_roles": {
+    "source index": "facet",
+    "spatial-x": "x",
+    "spatial-y": "reduce"
+  },
+  "curve_roles": {
+    "source index": "x",
+    "spatial-x": "reduce",
+    "spatial-y": "group"
+  },
+  "fit_activation": {
+    "section": "fit",
+    "values": {
+      "model": "gaussian_offset"
+    },
+    "refused": null,
+    "answered": true,
+    "to_next_front_ms": 375.33
+  },
+  "density": {
+    "panel1 camera-grid": {
+      "figure_px": [
+        1470,
+        1071
+      ],
+      "device_pixel_ratio": 3.0,
+      "dpi": 630.0,
+      "megapixels": 1.57
+    },
+    "panel2 histogram-40": {
+      "figure_px": [
+        1470,
+        1071
+      ],
+      "device_pixel_ratio": 3.0,
+      "dpi": 630.0,
+      "megapixels": 1.57
+    },
+    "panel3 facet-curve-fit-40": {
+      "figure_px": [
+        1470,
+        1071
+      ],
+      "device_pixel_ratio": 3.0,
+      "dpi": 630.0,
+      "megapixels": 1.57
+    },
+    "panel4 curve-40": {
+      "figure_px": [
+        1470,
+        1071
+      ],
+      "device_pixel_ratio": 3.0,
+      "dpi": 630.0,
+      "megapixels": 1.57
+    }
+  },
+  "actual_panel_state": {
+    "panel1 camera-grid": {
+      "kind": "facet_grid",
+      "cell_kind": "",
+      "signal": "@logic/camera_measurement/frames",
+      "semantic": {
+        "fate:repeat:camera_measurement.frames.repeat": "reduce",
+        "fate:point:camera_measurement.frames.frame": "facet",
+        "fate:cell_data:camera_measurement.frames.0.spatial-y": "y",
+        "fate:cell_data:camera_measurement.frames.1.spatial-x": "x",
+        "reduction": "mean"
+      },
+      "display": {
+        "title": null,
+        "x_label": null,
+        "y_label": null,
+        "value_label": null,
+        "show_grid": false,
+        "x_display_unit": null,
+        "y_display_unit": null,
+        "facet_display_unit": null,
+        "facet_fit_parameter": "model headline",
+        "value_display_unit": null,
+        "relim_mode": "tight",
+        "colormap": "gray",
+        "color_min": null,
+        "color_max": null,
+        "show_colorbar": true,
+        "presentation": "heatmap",
+        "camera_azimuth": 55.0,
+        "camera_elevation": 30.0,
+        "camera_zoom": 1.0,
+        "show_point_labels": true
+      },
+      "fit": {}
+    },
+    "panel2 histogram-40": {
+      "kind": "histogram",
+      "cell_kind": "",
+      "signal": "@logic/panel-1/roi_frame",
+      "semantic": {
+        "fate:repeat:camera_measurement.frames.repeat": "pool",
+        "fate:point:zlc_data.primary-index": "pool",
+        "fate:point:camera_measurement.frames.frame": "pool",
+        "fate:cell_data:camera_measurement.frames.0.spatial-y": "pool",
+        "fate:cell_data:camera_measurement.frames.1.spatial-x": "pool",
+        "reduction": "mean"
+      },
+      "display": {
+        "title": null,
+        "x_label": null,
+        "y_label": null,
+        "value_label": null,
+        "show_grid": false,
+        "value_display_unit": null,
+        "bin_count": 60,
+        "threshold_classifier": false,
+        "density": false,
+        "cumulative": false,
+        "relim_mode": "normal",
+        "y_min": null,
+        "y_max": null,
+        "log_y": false,
+        "x_relim_mode": "normal",
+        "x_min": null,
+        "x_max": null,
+        "window": 40
+      },
+      "fit": {}
+    },
+    "panel3 facet-curve-fit-40": {
+      "kind": "facet_grid",
+      "cell_kind": "curve",
+      "signal": "@logic/panel-1/roi_frame",
+      "semantic": {
+        "fate:repeat:camera_measurement.frames.repeat": "reduce",
+        "fate:point:zlc_data.primary-index": "facet",
+        "fate:point:camera_measurement.frames.frame": "reduce",
+        "fate:cell_data:camera_measurement.frames.0.spatial-y": "reduce",
+        "fate:cell_data:camera_measurement.frames.1.spatial-x": "x",
+        "reduction": "mean"
+      },
+      "display": {
+        "title": null,
+        "x_label": null,
+        "y_label": null,
+        "value_label": null,
+        "show_grid": false,
+        "x_display_unit": null,
+        "facet_display_unit": null,
+        "facet_fit_parameter": "model headline",
+        "value_display_unit": null,
+        "relim_mode": "normal",
+        "y_min": null,
+        "y_max": null,
+        "uncertainty": true
+      },
+      "fit": {
+        "model": "gaussian_offset",
+        "fit_all_facets": true
+      }
+    },
+    "panel4 curve-40": {
+      "kind": "curve",
+      "cell_kind": "",
+      "signal": "@logic/panel-1/roi_frame",
+      "semantic": {
+        "fate:repeat:camera_measurement.frames.repeat": "reduce",
+        "fate:point:zlc_data.primary-index": "x",
+        "fate:point:camera_measurement.frames.frame": "reduce",
+        "fate:cell_data:camera_measurement.frames.0.spatial-y": "group",
+        "fate:cell_data:camera_measurement.frames.1.spatial-x": "reduce",
+        "reduction": "mean"
+      },
+      "display": {
+        "title": null,
+        "x_label": null,
+        "y_label": null,
+        "value_label": null,
+        "show_grid": false,
+        "x_display_unit": null,
+        "value_display_unit": null,
+        "relim_mode": "normal",
+        "y_min": null,
+        "y_max": null,
+        "uncertainty": true
+      },
+      "fit": {}
+    }
+  },
+  "baseline_uninstrumented": {
+    "window_s": 6.001401900080964,
+    "process_cpu": {
+      "B": {
+        "cpu_seconds": 2.859375,
+        "window_s": 6.00158889987506,
+        "cpu_percent_of_one_core": 47.643633172867375
+      },
+      "A": {
+        "cpu_seconds": 8.125,
+        "window_s": 6.001605299999937,
+        "cpu_percent_of_one_core": 135.38044562844019
+      },
+      "C": {
+        "cpu_seconds": 0.0,
+        "window_s": 6.001619599992409,
+        "cpu_percent_of_one_core": 0.0
+      }
+    },
+    "panels": [
+      {
+        "panel": "panel1 camera-grid",
+        "frames": 46,
+        "frames_per_second": 7.7,
+        "frame_gap": {
+          "n": 45,
+          "median_ms": 131.68,
+          "p90_ms": 138.97,
+          "p99_ms": 145.52,
+          "max_ms": 146.9,
+          "best_ms": 119.21
+        },
+        "stalls_over_two_beats": 0,
+        "timeline": {
+          "first_frame_ms": 22.5,
+          "gaps_ms": [
+            135.9,
+            131.7,
+            136.5,
+            132.8,
+            127.1,
+            134.3,
+            131.7,
+            135.7,
+            132.8,
+            126.9,
+            127.3,
+            128.8,
+            133.2,
+            131.7,
+            137.8,
+            119.4,
+            124.2,
+            132.7,
+            121.1,
+            131.9,
+            136.0,
+            127.3,
+            143.8,
+            124.1,
+            137.9,
+            131.0,
+            125.4,
+            126.0,
+            126.8,
+            139.7,
+            134.9,
+            133.5,
+            131.1,
+            133.9,
+            126.8,
+            141.2,
+            119.2,
+            146.9,
+            120.6,
+            125.6,
+            129.3,
+            136.5,
+            120.6,
+            126.1,
+            140.9
+          ]
+        }
+      },
+      {
+        "panel": "panel2 histogram-40",
+        "frames": 46,
+        "frames_per_second": 7.7,
+        "frame_gap": {
+          "n": 45,
+          "median_ms": 131.68,
+          "p90_ms": 138.97,
+          "p99_ms": 145.52,
+          "max_ms": 146.9,
+          "best_ms": 119.21
+        },
+        "stalls_over_two_beats": 0,
+        "timeline": {
+          "first_frame_ms": 22.5,
+          "gaps_ms": [
+            135.9,
+            131.7,
+            136.5,
+            132.8,
+            127.1,
+            134.3,
+            131.7,
+            135.7,
+            132.8,
+            126.9,
+            127.3,
+            128.8,
+            133.2,
+            131.7,
+            137.8,
+            119.4,
+            124.2,
+            132.7,
+            121.1,
+            131.9,
+            136.0,
+            127.3,
+            143.8,
+            124.1,
+            137.9,
+            131.0,
+            125.4,
+            126.0,
+            126.8,
+            139.7,
+            134.9,
+            133.5,
+            131.1,
+            133.9,
+            126.8,
+            141.2,
+            119.2,
+            146.9,
+            120.6,
+            125.6,
+            129.3,
+            136.5,
+            120.6,
+            126.1,
+            140.9
+          ]
+        }
+      },
+      {
+        "panel": "panel3 facet-curve-fit-40",
+        "frames": 46,
+        "frames_per_second": 7.7,
+        "frame_gap": {
+          "n": 45,
+          "median_ms": 131.68,
+          "p90_ms": 138.97,
+          "p99_ms": 145.52,
+          "max_ms": 146.91,
+          "best_ms": 119.2
+        },
+        "stalls_over_two_beats": 0,
+        "timeline": {
+          "first_frame_ms": 22.6,
+          "gaps_ms": [
+            135.9,
+            131.7,
+            136.5,
+            132.8,
+            127.1,
+            134.3,
+            131.7,
+            135.7,
+            132.8,
+            126.9,
+            127.3,
+            128.8,
+            133.2,
+            131.7,
+            137.8,
+            119.4,
+            124.2,
+            132.7,
+            121.1,
+            131.9,
+            136.0,
+            127.3,
+            143.8,
+            124.1,
+            137.9,
+            131.0,
+            125.4,
+            126.0,
+            126.8,
+            139.7,
+            134.9,
+            133.5,
+            131.1,
+            133.8,
+            126.8,
+            141.2,
+            119.2,
+            146.9,
+            120.6,
+            125.6,
+            129.3,
+            136.5,
+            120.6,
+            126.1,
+            140.9
+          ]
+        }
+      },
+      {
+        "panel": "panel4 curve-40",
+        "frames": 46,
+        "frames_per_second": 7.7,
+        "frame_gap": {
+          "n": 45,
+          "median_ms": 131.68,
+          "p90_ms": 138.97,
+          "p99_ms": 145.52,
+          "max_ms": 146.91,
+          "best_ms": 119.2
+        },
+        "stalls_over_two_beats": 0,
+        "timeline": {
+          "first_frame_ms": 22.6,
+          "gaps_ms": [
+            135.9,
+            131.7,
+            136.5,
+            132.8,
+            127.1,
+            134.3,
+            131.7,
+            135.7,
+            132.8,
+            126.9,
+            127.3,
+            128.8,
+            133.2,
+            131.7,
+            137.8,
+            119.4,
+            124.2,
+            132.7,
+            121.1,
+            131.9,
+            136.0,
+            127.3,
+            143.8,
+            124.1,
+            137.9,
+            131.0,
+            125.4,
+            126.0,
+            126.8,
+            139.7,
+            134.9,
+            133.5,
+            131.1,
+            133.8,
+            126.8,
+            141.2,
+            119.2,
+            146.9,
+            120.6,
+            125.6,
+            129.3,
+            136.5,
+            120.6,
+            126.1,
+            140.9
+          ]
+        }
+      }
+    ],
+    "beat_ms": 100.0,
+    "cpu_percent_of_one_core": 48.0,
+    "rss_mb_before": 427.5,
+    "rss_mb_after": 427.4,
+    "seams": [],
+    "source_rate": {
+      "start_revision": 197,
+      "stop_revision": 243,
+      "revisions": 46,
+      "per_second": 7.66
+    },
+    "causal_timeline": {
+      "causal_roots_seen": 47,
+      "complete_four_panel_roots": 45,
+      "panel_prepare_to_accept": {
+        "panel1 camera-grid": {
+          "n": 45,
+          "median_ms": 84.18,
+          "p90_ms": 87.21,
+          "p99_ms": 89.21,
+          "max_ms": 89.5,
+          "best_ms": 76.83
+        },
+        "panel2 histogram-40": {
+          "n": 45,
+          "median_ms": 84.26,
+          "p90_ms": 87.29,
+          "p99_ms": 89.29,
+          "max_ms": 89.59,
+          "best_ms": 76.91
+        },
+        "panel3 facet-curve-fit-40": {
+          "n": 45,
+          "median_ms": 84.03,
+          "p90_ms": 87.02,
+          "p99_ms": 89.04,
+          "max_ms": 89.35,
+          "best_ms": 76.68
+        },
+        "panel4 curve-40": {
+          "n": 45,
+          "median_ms": 84.59,
+          "p90_ms": 87.54,
+          "p99_ms": 89.58,
+          "max_ms": 89.88,
+          "best_ms": 77.17
+        }
+      },
+      "four_panel_critical_path": {
+        "n": 45,
+        "median_ms": 84.72,
+        "p90_ms": 87.68,
+        "p99_ms": 89.72,
+        "max_ms": 90.02,
+        "best_ms": 77.31
+      },
+      "prepare_start_skew": {
+        "n": 45,
+        "median_ms": 0.14,
+        "p90_ms": 0.16,
+        "p99_ms": 0.29,
+        "max_ms": 0.33,
+        "best_ms": 0.12
+      },
+      "accept_finish_skew": {
+        "n": 45,
+        "median_ms": 0.64,
+        "p90_ms": 0.74,
+        "p99_ms": 0.85,
+        "max_ms": 0.85,
+        "best_ms": 0.61
+      },
+      "matched_inputs": [
+        {
+          "cohort": 0,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "accept": 1999725.0108636,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 172,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "accept": 1999725.0110837,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 197,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "accept": 1999725.0112019,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 172,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "accept": 1999725.0115053,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 172,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 1,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999725.0580223,
+              "accept": 1999725.147368,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 173,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999725.0580858,
+              "accept": 1999725.1475897,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 198,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999725.0581254,
+              "accept": 1999725.1477132,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 173,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999725.0581606,
+              "accept": 1999725.1480406,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 173,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 2,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999725.1939933,
+              "accept": 1999725.2786096,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 174,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999725.194061,
+              "accept": 1999725.2788264,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 199,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999725.1940993,
+              "accept": 1999725.2789308,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 174,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999725.1941331,
+              "accept": 1999725.2792218,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 174,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 3,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999725.3296083,
+              "accept": 1999725.4153166,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 175,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999725.3296893,
+              "accept": 1999725.4156496,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 200,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999725.3297355,
+              "accept": 1999725.4157745,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 175,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999725.3297756,
+              "accept": 1999725.4160728,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 175,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 4,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999725.4614416,
+              "accept": 1999725.5485023,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 176,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999725.4615059,
+              "accept": 1999725.5487164,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 201,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999725.4615436,
+              "accept": 1999725.5488319,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 176,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999725.4615776,
+              "accept": 1999725.5491307,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 176,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 5,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999725.5900501,
+              "accept": 1999725.6746602,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 177,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999725.5901172,
+              "accept": 1999725.6749064,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 202,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999725.5901543,
+              "accept": 1999725.6750185,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 177,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999725.5901865,
+              "accept": 1999725.6753234,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 177,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 6,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999725.7258705,
+              "accept": 1999725.8093736,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 178,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999725.7259642,
+              "accept": 1999725.8095837,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 203,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999725.7260224,
+              "accept": 1999725.8096943,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 178,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999725.7260726,
+              "accept": 1999725.8099907,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 178,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 7,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999725.8555748,
+              "accept": 1999725.9407835,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 179,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999725.8556395,
+              "accept": 1999725.9410123,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 204,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999725.8556765,
+              "accept": 1999725.9411273,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 179,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999725.855708,
+              "accept": 1999725.9414303,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 179,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 8,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999725.9931919,
+              "accept": 1999726.0751121,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 180,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999725.9932885,
+              "accept": 1999726.0753592,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 205,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999725.9933466,
+              "accept": 1999726.075473,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 180,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999725.9933983,
+              "accept": 1999726.0757681,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 180,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 9,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999726.1223709,
+              "accept": 1999726.2087555,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 181,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999726.1224373,
+              "accept": 1999726.2089974,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 206,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999726.1224741,
+              "accept": 1999726.2091129,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 181,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999726.1225063,
+              "accept": 1999726.2094149,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 181,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 10,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999726.2529758,
+              "accept": 1999726.3358461,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 182,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999726.2530421,
+              "accept": 1999726.336056,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 207,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999726.2530791,
+              "accept": 1999726.336165,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 182,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999726.2531104,
+              "accept": 1999726.3364557,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 182,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 11,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999726.3740439,
+              "accept": 1999726.4627042,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 183,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999726.3741101,
+              "accept": 1999726.462935,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 208,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999726.3741484,
+              "accept": 1999726.4630571,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 183,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999726.3741839,
+              "accept": 1999726.4633739,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 183,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 12,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999726.5098993,
+              "accept": 1999726.5914425,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 184,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999726.5099662,
+              "accept": 1999726.5916521,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 209,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999726.5100042,
+              "accept": 1999726.5917601,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 184,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999726.5100367,
+              "accept": 1999726.5920569,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 184,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 13,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999726.6417614,
+              "accept": 1999726.725683,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 185,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999726.6418275,
+              "accept": 1999726.7259685,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 210,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999726.641865,
+              "accept": 1999726.7260875,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 185,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999726.6418981,
+              "accept": 1999726.7264846,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 185,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 14,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999726.7745103,
+              "accept": 1999726.8564531,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 186,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999726.7745757,
+              "accept": 1999726.8566716,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 211,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999726.7746131,
+              "accept": 1999726.856779,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 186,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999726.7746464,
+              "accept": 1999726.8570715,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 186,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 15,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999726.9075551,
+              "accept": 1999726.9930839,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 187,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999726.907622,
+              "accept": 1999726.9932846,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 212,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999726.9076575,
+              "accept": 1999726.993391,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 187,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999726.9076893,
+              "accept": 1999726.9937624,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 187,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 16,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999727.0349291,
+              "accept": 1999727.1153345,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 188,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999727.0349915,
+              "accept": 1999727.115545,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 213,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999727.0350275,
+              "accept": 1999727.1156517,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 188,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999727.0350595,
+              "accept": 1999727.1160321,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 188,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 17,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999727.1555366,
+              "accept": 1999727.2385936,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 189,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999727.1555979,
+              "accept": 1999727.2388154,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 214,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999727.1556337,
+              "accept": 1999727.2389252,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 189,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999727.1556655,
+              "accept": 1999727.2392238,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 189,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 18,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999727.2846272,
+              "accept": 1999727.3714518,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 190,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999727.2847008,
+              "accept": 1999727.3716642,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 215,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999727.2847435,
+              "accept": 1999727.3717765,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 190,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999727.2847772,
+              "accept": 1999727.3720736,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 190,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 19,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999727.4085789,
+              "accept": 1999727.4919402,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 191,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999727.4086425,
+              "accept": 1999727.4921846,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 216,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999727.4086793,
+              "accept": 1999727.4922966,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 191,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999727.4087158,
+              "accept": 1999727.4925634,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 191,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 20,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999727.5402051,
+              "accept": 1999727.6240888,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 192,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999727.5402685,
+              "accept": 1999727.6243101,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 217,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999727.5403027,
+              "accept": 1999727.6244198,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 192,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999727.5403339,
+              "accept": 1999727.6247098,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 192,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 21,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999727.6748673,
+              "accept": 1999727.760344,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 193,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999727.6749321,
+              "accept": 1999727.7605746,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 218,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999727.6749661,
+              "accept": 1999727.7606856,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 193,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999727.6749984,
+              "accept": 1999727.7609832,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 193,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 22,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999727.8066072,
+              "accept": 1999727.8876313,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 194,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999727.8066739,
+              "accept": 1999727.887849,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 219,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999727.8067135,
+              "accept": 1999727.8879645,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 194,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999727.8067477,
+              "accept": 1999727.8882778,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 194,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 23,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999727.9463094,
+              "accept": 1999728.0321478,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 195,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999727.9464535,
+              "accept": 1999728.0323806,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 220,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999727.9465486,
+              "accept": 1999728.0324965,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 195,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999727.9466388,
+              "accept": 1999728.0327803,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 195,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 24,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999728.0722308,
+              "accept": 1999728.1545439,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 196,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999728.0722947,
+              "accept": 1999728.1547884,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 221,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999728.0723282,
+              "accept": 1999728.1549018,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 196,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999728.0723602,
+              "accept": 1999728.1551786,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 196,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 25,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999728.2095397,
+              "accept": 1999728.2938466,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 197,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999728.2096041,
+              "accept": 1999728.29409,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 222,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999728.2096411,
+              "accept": 1999728.2942021,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 197,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999728.2096755,
+              "accept": 1999728.2945038,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 197,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 26,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999728.3366371,
+              "accept": 1999728.4231374,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 198,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999728.3366988,
+              "accept": 1999728.4233478,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 223,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999728.3367342,
+              "accept": 1999728.4234576,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 198,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999728.3367662,
+              "accept": 1999728.4237454,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 198,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 27,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999728.461895,
+              "accept": 1999728.5497472,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 199,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999728.4619612,
+              "accept": 1999728.5499537,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 224,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999728.4619985,
+              "accept": 1999728.5500641,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 199,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999728.4620298,
+              "accept": 1999728.5503547,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 199,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 28,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999728.5897622,
+              "accept": 1999728.674939,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 200,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999728.5898281,
+              "accept": 1999728.6751754,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 225,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999728.5898623,
+              "accept": 1999728.6752865,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 200,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999728.5898945,
+              "accept": 1999728.6755833,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 200,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 29,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999728.723655,
+              "accept": 1999728.8029834,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 201,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999728.7237186,
+              "accept": 1999728.8032147,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 226,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999728.7237552,
+              "accept": 1999728.8033238,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 201,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999728.723788,
+              "accept": 1999728.8035969,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 201,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 30,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999728.8577962,
+              "accept": 1999728.941827,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 202,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999728.8578619,
+              "accept": 1999728.942042,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 227,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999728.8578974,
+              "accept": 1999728.9421565,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 202,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999728.8579303,
+              "accept": 1999728.9424509,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 202,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 31,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999728.989844,
+              "accept": 1999729.0761958,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 203,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999728.9899052,
+              "accept": 1999729.0764103,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 228,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999728.9899468,
+              "accept": 1999729.076521,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 203,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999728.9899787,
+              "accept": 1999729.0768163,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 203,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 32,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999729.1237041,
+              "accept": 1999729.2095926,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 204,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999729.1237664,
+              "accept": 1999729.2098058,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 229,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999729.1238022,
+              "accept": 1999729.2099168,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 204,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999729.1238336,
+              "accept": 1999729.2102171,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 204,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 33,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999729.2575596,
+              "accept": 1999729.3409499,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 205,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999729.257625,
+              "accept": 1999729.3413898,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 230,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999729.2576601,
+              "accept": 1999729.3415166,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 205,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999729.2576917,
+              "accept": 1999729.3417977,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 205,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 34,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999729.3870852,
+              "accept": 1999729.4740355,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 206,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999729.3871585,
+              "accept": 1999729.474363,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 231,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999729.3871963,
+              "accept": 1999729.4744792,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 206,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999729.3872311,
+              "accept": 1999729.4747456,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 206,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 35,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999729.5258288,
+              "accept": 1999729.6025074,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 207,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999729.5258917,
+              "accept": 1999729.6027241,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 232,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999729.5259274,
+              "accept": 1999729.6028348,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 207,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999729.5259614,
+              "accept": 1999729.6031339,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 207,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 36,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999729.6584917,
+              "accept": 1999729.7441559,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 208,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999729.6585518,
+              "accept": 1999729.744374,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 233,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999729.6585839,
+              "accept": 1999729.7444843,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 208,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999729.6586131,
+              "accept": 1999729.7447961,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 208,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 37,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999729.7830485,
+              "accept": 1999729.8634709,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 209,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999729.7831148,
+              "accept": 1999729.8637292,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 234,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999729.783153,
+              "accept": 1999729.8638556,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 209,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999729.7831859,
+              "accept": 1999729.8641711,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 209,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 38,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999729.921248,
+              "accept": 1999730.0050989,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 210,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999729.9213154,
+              "accept": 1999730.0053463,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 235,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999729.9213523,
+              "accept": 1999730.0055842,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 210,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999729.9213887,
+              "accept": 1999730.0059516,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 210,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 39,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999730.0476715,
+              "accept": 1999730.1311007,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 211,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999730.0477372,
+              "accept": 1999730.1313512,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 236,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999730.0477744,
+              "accept": 1999730.1314636,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 211,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999730.0478077,
+              "accept": 1999730.1317673,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 211,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 40,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999730.1743844,
+              "accept": 1999730.2555487,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 212,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999730.1744463,
+              "accept": 1999730.2557757,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 237,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999730.1744811,
+              "accept": 1999730.2558872,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 212,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999730.1745105,
+              "accept": 1999730.2561795,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 212,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 41,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999730.3052658,
+              "accept": 1999730.3843742,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 213,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999730.3053321,
+              "accept": 1999730.3845906,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 238,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999730.3053698,
+              "accept": 1999730.3846955,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 213,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999730.3054018,
+              "accept": 1999730.3850133,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 213,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 42,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999730.4342239,
+              "accept": 1999730.5207798,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 214,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999730.4342896,
+              "accept": 1999730.5209928,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 239,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999730.4343272,
+              "accept": 1999730.521109,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 214,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999730.4343584,
+              "accept": 1999730.5214073,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 214,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 43,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999730.5596625,
+              "accept": 1999730.6428916,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 215,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999730.5597735,
+              "accept": 1999730.6431199,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 240,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999730.5598415,
+              "accept": 1999730.6432339,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 215,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999730.5599034,
+              "accept": 1999730.6435346,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 215,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 44,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999730.6862129,
+              "accept": 1999730.768225,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 216,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999730.6862782,
+              "accept": 1999730.7684677,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 241,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999730.6863147,
+              "accept": 1999730.7685789,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 216,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999730.6863473,
+              "accept": 1999730.7688532,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 216,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 45,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999730.8202434,
+              "accept": 1999730.9084077,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 217,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999730.8203073,
+              "accept": 1999730.9087916,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 242,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999730.8203444,
+              "accept": 1999730.9089094,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 217,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999730.8203777,
+              "accept": 1999730.9092183,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 217,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 46,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999730.9526128
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999730.9526765
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999730.9527163
+            },
+            "panel4 curve-40": {
+              "prepare": 1999730.9527502
+            }
+          }
+        }
+      ]
+    }
+  },
+  "process_memory": {
+    "B": {
+      "pid": 168856,
+      "rss_start_mib": 429.02,
+      "rss_end_mib": 462.43,
+      "rss_peak_mib": 462.43,
+      "cpu_percent_of_one_core": 45.9,
+      "cpu_scope": "measurement windows only; excludes warmup"
+    },
+    "A": {
+      "pid": 135652,
+      "rss_start_mib": 470.23,
+      "rss_end_mib": 471.65,
+      "rss_peak_mib": 480.84,
+      "cpu_percent_of_one_core": 134.5,
+      "cpu_scope": "measurement windows only; excludes warmup"
+    },
+    "C": {
+      "pid": 157248,
+      "rss_start_mib": 145.64,
+      "rss_end_mib": 145.64,
+      "rss_peak_mib": 145.64,
+      "cpu_percent_of_one_core": 0.0,
+      "cpu_scope": "measurement windows only; excludes warmup"
+    },
+    "total": {
+      "rss_start_mib": 1044.89,
+      "rss_end_mib": 1079.73,
+      "rss_peak_mib": 1079.73
+    }
+  },
+  "instrumented_bindings": {
+    "panel1 camera-grid": {
+      "port": [
+        "prepare",
+        "accept",
+        "_put_on_screen"
+      ],
+      "port_callbacks": [
+        "_project_input",
+        "_present"
+      ],
+      "qt": [
+        "present_front",
+        "_install_front"
+      ]
+    },
+    "panel2 histogram-40": {
+      "port": [
+        "prepare",
+        "accept",
+        "_put_on_screen"
+      ],
+      "port_callbacks": [
+        "_project_input",
+        "_present"
+      ],
+      "qt": [
+        "present_front",
+        "_install_front"
+      ]
+    },
+    "panel3 facet-curve-fit-40": {
+      "port": [
+        "prepare",
+        "accept",
+        "_put_on_screen"
+      ],
+      "port_callbacks": [
+        "_project_input",
+        "_present"
+      ],
+      "qt": [
+        "present_front",
+        "_install_front"
+      ]
+    },
+    "panel4 curve-40": {
+      "port": [
+        "prepare",
+        "accept",
+        "_put_on_screen"
+      ],
+      "port_callbacks": [
+        "_project_input",
+        "_present"
+      ],
+      "qt": [
+        "present_front",
+        "_install_front"
+      ]
+    }
+  },
+  "measured": {
+    "window_s": 6.004630599869415,
+    "process_cpu": {
+      "B": {
+        "cpu_seconds": 2.65625,
+        "window_s": 6.006007999880239,
+        "cpu_percent_of_one_core": 44.226547817668006
+      },
+      "A": {
+        "cpu_seconds": 8.03125,
+        "window_s": 6.006014500046149,
+        "cpu_percent_of_one_core": 133.72012338528802
+      },
+      "C": {
+        "cpu_seconds": 0.0,
+        "window_s": 6.006028400035575,
+        "cpu_percent_of_one_core": 0.0
+      }
+    },
+    "panels": [
+      {
+        "panel": "panel1 camera-grid",
+        "frames": 46,
+        "frames_per_second": 7.7,
+        "frame_gap": {
+          "n": 45,
+          "median_ms": 129.97,
+          "p90_ms": 141.43,
+          "p99_ms": 212.06,
+          "max_ms": 259.49,
+          "best_ms": 72.07
+        },
+        "stalls_over_two_beats": 1,
+        "timeline": {
+          "first_frame_ms": 90.2,
+          "gaps_ms": [
+            128.2,
+            123.7,
+            134.6,
+            136.1,
+            133.9,
+            259.5,
+            79.8,
+            72.1,
+            115.8,
+            124.6,
+            131.5,
+            132.5,
+            125.8,
+            143.0,
+            130.4,
+            127.9,
+            122.9,
+            135.7,
+            130.0,
+            132.9,
+            136.7,
+            129.2,
+            123.8,
+            142.5,
+            126.1,
+            117.4,
+            144.8,
+            130.9,
+            127.7,
+            134.0,
+            139.8,
+            128.9,
+            129.8,
+            127.8,
+            127.7,
+            136.5,
+            129.6,
+            115.5,
+            134.1,
+            137.9,
+            132.6,
+            132.7,
+            128.0,
+            127.8,
+            151.7
+          ]
+        }
+      },
+      {
+        "panel": "panel2 histogram-40",
+        "frames": 46,
+        "frames_per_second": 7.7,
+        "frame_gap": {
+          "n": 45,
+          "median_ms": 129.97,
+          "p90_ms": 141.43,
+          "p99_ms": 212.05,
+          "max_ms": 259.48,
+          "best_ms": 72.08
+        },
+        "stalls_over_two_beats": 1,
+        "timeline": {
+          "first_frame_ms": 90.3,
+          "gaps_ms": [
+            128.2,
+            123.7,
+            134.6,
+            136.1,
+            134.0,
+            259.5,
+            79.8,
+            72.1,
+            115.8,
+            124.6,
+            131.5,
+            132.5,
+            125.8,
+            143.0,
+            130.4,
+            127.9,
+            122.9,
+            135.7,
+            130.0,
+            132.9,
+            136.7,
+            129.2,
+            123.8,
+            142.5,
+            126.1,
+            117.4,
+            144.8,
+            130.9,
+            127.7,
+            134.0,
+            139.8,
+            128.9,
+            129.8,
+            127.8,
+            127.7,
+            136.5,
+            129.6,
+            115.5,
+            134.1,
+            137.9,
+            132.6,
+            132.7,
+            128.0,
+            127.8,
+            151.7
+          ]
+        }
+      },
+      {
+        "panel": "panel3 facet-curve-fit-40",
+        "frames": 46,
+        "frames_per_second": 7.7,
+        "frame_gap": {
+          "n": 45,
+          "median_ms": 129.97,
+          "p90_ms": 141.43,
+          "p99_ms": 212.07,
+          "max_ms": 259.52,
+          "best_ms": 72.1
+        },
+        "stalls_over_two_beats": 1,
+        "timeline": {
+          "first_frame_ms": 90.3,
+          "gaps_ms": [
+            128.2,
+            123.7,
+            134.6,
+            136.1,
+            134.0,
+            259.5,
+            79.8,
+            72.1,
+            115.8,
+            124.6,
+            131.5,
+            132.5,
+            125.8,
+            143.0,
+            130.4,
+            127.9,
+            122.9,
+            135.7,
+            130.0,
+            132.9,
+            136.7,
+            129.2,
+            123.8,
+            142.5,
+            126.1,
+            117.4,
+            144.8,
+            130.9,
+            127.8,
+            134.0,
+            139.8,
+            128.9,
+            129.8,
+            127.8,
+            127.7,
+            136.6,
+            129.6,
+            115.5,
+            134.1,
+            137.9,
+            132.6,
+            132.7,
+            128.0,
+            127.8,
+            151.7
+          ]
+        }
+      },
+      {
+        "panel": "panel4 curve-40",
+        "frames": 46,
+        "frames_per_second": 7.7,
+        "frame_gap": {
+          "n": 45,
+          "median_ms": 129.97,
+          "p90_ms": 141.43,
+          "p99_ms": 212.1,
+          "max_ms": 259.56,
+          "best_ms": 72.1
+        },
+        "stalls_over_two_beats": 1,
+        "timeline": {
+          "first_frame_ms": 90.3,
+          "gaps_ms": [
+            128.2,
+            123.7,
+            134.6,
+            136.1,
+            134.0,
+            259.6,
+            79.8,
+            72.1,
+            115.8,
+            124.6,
+            131.5,
+            132.4,
+            125.8,
+            143.0,
+            130.4,
+            127.9,
+            122.9,
+            135.7,
+            130.0,
+            132.9,
+            136.7,
+            129.2,
+            123.8,
+            142.5,
+            126.1,
+            117.4,
+            144.8,
+            130.9,
+            127.8,
+            134.0,
+            139.8,
+            128.9,
+            129.8,
+            127.8,
+            127.7,
+            136.6,
+            129.6,
+            115.5,
+            134.1,
+            137.9,
+            132.6,
+            132.7,
+            128.0,
+            127.8,
+            151.7
+          ]
+        }
+      }
+    ],
+    "beat_ms": 100.0,
+    "cpu_percent_of_one_core": 44.0,
+    "rss_mb_before": 428.4,
+    "rss_mb_after": 429.6,
+    "seams": [
+      {
+        "seam": "PanelPort[panel3 facet-curve-fit-40]._project_input",
+        "calls": 45,
+        "self_ms_total": 72.0,
+        "self_ms_per_call": 1.6,
+        "cpu_ms_per_call": 0.35,
+        "gross_ms_total": 72.0,
+        "gross_ms_per_call": 1.6,
+        "gross_cpu_ms_per_call": 0.35,
+        "cpu_share": 0.22,
+        "per_second": 7.5
+      },
+      {
+        "seam": "PanelPort[panel2 histogram-40]._project_input",
+        "calls": 46,
+        "self_ms_total": 39.9,
+        "self_ms_per_call": 0.87,
+        "cpu_ms_per_call": 0.34,
+        "gross_ms_total": 39.9,
+        "gross_ms_per_call": 0.87,
+        "gross_cpu_ms_per_call": 0.34,
+        "cpu_share": 0.39,
+        "per_second": 7.7
+      },
+      {
+        "seam": "PanelPort[panel1 camera-grid]._project_input",
+        "calls": 45,
+        "self_ms_total": 39.7,
+        "self_ms_per_call": 0.88,
+        "cpu_ms_per_call": 0.69,
+        "gross_ms_total": 39.7,
+        "gross_ms_per_call": 0.88,
+        "gross_cpu_ms_per_call": 0.69,
+        "cpu_share": 0.79,
+        "per_second": 7.5
+      },
+      {
+        "seam": "PanelPort[panel4 curve-40]._project_input",
+        "calls": 46,
+        "self_ms_total": 33.5,
+        "self_ms_per_call": 0.73,
+        "cpu_ms_per_call": 0.68,
+        "gross_ms_total": 33.5,
+        "gross_ms_per_call": 0.73,
+        "gross_cpu_ms_per_call": 0.68,
+        "cpu_share": 0.93,
+        "per_second": 7.7
+      },
+      {
+        "seam": "PanelPort[panel4 curve-40].accept",
+        "calls": 46,
+        "self_ms_total": 12.4,
+        "self_ms_per_call": 0.27,
+        "cpu_ms_per_call": 0.34,
+        "gross_ms_total": 14.0,
+        "gross_ms_per_call": 0.3,
+        "gross_cpu_ms_per_call": 0.34,
+        "cpu_share": 1.26,
+        "per_second": 7.7
+      },
+      {
+        "seam": "PanelPort[panel1 camera-grid].accept",
+        "calls": 46,
+        "self_ms_total": 8.8,
+        "self_ms_per_call": 0.19,
+        "cpu_ms_per_call": 0.0,
+        "gross_ms_total": 11.3,
+        "gross_ms_per_call": 0.25,
+        "gross_cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 7.7
+      },
+      {
+        "seam": "PanelPort[panel3 facet-curve-fit-40].accept",
+        "calls": 46,
+        "self_ms_total": 7.7,
+        "self_ms_per_call": 0.17,
+        "cpu_ms_per_call": 0.0,
+        "gross_ms_total": 14.9,
+        "gross_ms_per_call": 0.32,
+        "gross_cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 7.7
+      },
+      {
+        "seam": "QtWidget[panel3 facet-curve-fit-40]._install_front",
+        "calls": 46,
+        "self_ms_total": 4.1,
+        "self_ms_per_call": 0.09,
+        "cpu_ms_per_call": 0.0,
+        "gross_ms_total": 4.1,
+        "gross_ms_per_call": 0.09,
+        "gross_cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 7.7
+      },
+      {
+        "seam": "PanelPort[panel2 histogram-40].accept",
+        "calls": 46,
+        "self_ms_total": 3.7,
+        "self_ms_per_call": 0.08,
+        "cpu_ms_per_call": 0.0,
+        "gross_ms_total": 5.4,
+        "gross_ms_per_call": 0.12,
+        "gross_cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 7.7
+      },
+      {
+        "seam": "PanelPort[panel3 facet-curve-fit-40].prepare",
+        "calls": 45,
+        "self_ms_total": 2.8,
+        "self_ms_per_call": 0.06,
+        "cpu_ms_per_call": 0.0,
+        "gross_ms_total": 2.8,
+        "gross_ms_per_call": 0.06,
+        "gross_cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 7.5
+      },
+      {
+        "seam": "PanelPort[panel3 facet-curve-fit-40]._present",
+        "calls": 46,
+        "self_ms_total": 2.4,
+        "self_ms_per_call": 0.05,
+        "cpu_ms_per_call": 0.0,
+        "gross_ms_total": 7.1,
+        "gross_ms_per_call": 0.15,
+        "gross_cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 7.7
+      },
+      {
+        "seam": "PanelPort[panel1 camera-grid].prepare",
+        "calls": 45,
+        "self_ms_total": 1.5,
+        "self_ms_per_call": 0.03,
+        "cpu_ms_per_call": 0.0,
+        "gross_ms_total": 1.5,
+        "gross_ms_per_call": 0.03,
+        "gross_cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 7.5
+      },
+      {
+        "seam": "PanelPort[panel2 histogram-40].prepare",
+        "calls": 45,
+        "self_ms_total": 1.3,
+        "self_ms_per_call": 0.03,
+        "cpu_ms_per_call": 0.0,
+        "gross_ms_total": 1.3,
+        "gross_ms_per_call": 0.03,
+        "gross_cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 7.5
+      },
+      {
+        "seam": "PanelPort[panel4 curve-40].prepare",
+        "calls": 45,
+        "self_ms_total": 1.2,
+        "self_ms_per_call": 0.03,
+        "cpu_ms_per_call": 0.0,
+        "gross_ms_total": 1.2,
+        "gross_ms_per_call": 0.03,
+        "gross_cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 7.5
+      },
+      {
+        "seam": "PanelPort[panel1 camera-grid]._present",
+        "calls": 46,
+        "self_ms_total": 1.2,
+        "self_ms_per_call": 0.03,
+        "cpu_ms_per_call": 0.0,
+        "gross_ms_total": 2.4,
+        "gross_ms_per_call": 0.05,
+        "gross_cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 7.7
+      },
+      {
+        "seam": "QtWidget[panel1 camera-grid]._install_front",
+        "calls": 46,
+        "self_ms_total": 0.7,
+        "self_ms_per_call": 0.02,
+        "cpu_ms_per_call": 0.0,
+        "gross_ms_total": 0.7,
+        "gross_ms_per_call": 0.02,
+        "gross_cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 7.7
+      },
+      {
+        "seam": "PanelPort[panel2 histogram-40]._present",
+        "calls": 46,
+        "self_ms_total": 0.7,
+        "self_ms_per_call": 0.02,
+        "cpu_ms_per_call": 0.0,
+        "gross_ms_total": 1.7,
+        "gross_ms_per_call": 0.04,
+        "gross_cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 7.7
+      },
+      {
+        "seam": "QtWidget[panel3 facet-curve-fit-40].present_front",
+        "calls": 46,
+        "self_ms_total": 0.7,
+        "self_ms_per_call": 0.02,
+        "cpu_ms_per_call": 0.0,
+        "gross_ms_total": 4.8,
+        "gross_ms_per_call": 0.1,
+        "gross_cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 7.7
+      },
+      {
+        "seam": "PanelPort[panel4 curve-40]._present",
+        "calls": 46,
+        "self_ms_total": 0.6,
+        "self_ms_per_call": 0.01,
+        "cpu_ms_per_call": 0.0,
+        "gross_ms_total": 1.5,
+        "gross_ms_per_call": 0.03,
+        "gross_cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 7.7
+      },
+      {
+        "seam": "QtWidget[panel2 histogram-40]._install_front",
+        "calls": 46,
+        "self_ms_total": 0.5,
+        "self_ms_per_call": 0.01,
+        "cpu_ms_per_call": 0.0,
+        "gross_ms_total": 0.5,
+        "gross_ms_per_call": 0.01,
+        "gross_cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 7.7
+      },
+      {
+        "seam": "QtWidget[panel1 camera-grid].present_front",
+        "calls": 46,
+        "self_ms_total": 0.4,
+        "self_ms_per_call": 0.01,
+        "cpu_ms_per_call": 0.0,
+        "gross_ms_total": 1.2,
+        "gross_ms_per_call": 0.03,
+        "gross_cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 7.7
+      },
+      {
+        "seam": "QtWidget[panel4 curve-40]._install_front",
+        "calls": 46,
+        "self_ms_total": 0.4,
+        "self_ms_per_call": 0.01,
+        "cpu_ms_per_call": 0.0,
+        "gross_ms_total": 0.4,
+        "gross_ms_per_call": 0.01,
+        "gross_cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 7.7
+      },
+      {
+        "seam": "QtWidget[panel4 curve-40].present_front",
+        "calls": 46,
+        "self_ms_total": 0.4,
+        "self_ms_per_call": 0.01,
+        "cpu_ms_per_call": 0.0,
+        "gross_ms_total": 0.9,
+        "gross_ms_per_call": 0.02,
+        "gross_cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 7.7
+      },
+      {
+        "seam": "QtWidget[panel2 histogram-40].present_front",
+        "calls": 46,
+        "self_ms_total": 0.4,
+        "self_ms_per_call": 0.01,
+        "cpu_ms_per_call": 0.0,
+        "gross_ms_total": 0.9,
+        "gross_ms_per_call": 0.02,
+        "gross_cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 7.7
+      },
+      {
+        "seam": "PanelPort[panel3 facet-curve-fit-40]._put_on_screen",
+        "calls": 46,
+        "self_ms_total": 0.1,
+        "self_ms_per_call": 0.0,
+        "cpu_ms_per_call": 0.0,
+        "gross_ms_total": 7.2,
+        "gross_ms_per_call": 0.16,
+        "gross_cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 7.7
+      },
+      {
+        "seam": "PanelPort[panel1 camera-grid]._put_on_screen",
+        "calls": 46,
+        "self_ms_total": 0.1,
+        "self_ms_per_call": 0.0,
+        "cpu_ms_per_call": 0.0,
+        "gross_ms_total": 2.5,
+        "gross_ms_per_call": 0.05,
+        "gross_cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 7.7
+      },
+      {
+        "seam": "PanelPort[panel4 curve-40]._put_on_screen",
+        "calls": 46,
+        "self_ms_total": 0.1,
+        "self_ms_per_call": 0.0,
+        "cpu_ms_per_call": 0.0,
+        "gross_ms_total": 1.6,
+        "gross_ms_per_call": 0.03,
+        "gross_cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 7.7
+      },
+      {
+        "seam": "PanelPort[panel2 histogram-40]._put_on_screen",
+        "calls": 46,
+        "self_ms_total": 0.1,
+        "self_ms_per_call": 0.0,
+        "cpu_ms_per_call": 0.0,
+        "gross_ms_total": 1.8,
+        "gross_ms_per_call": 0.04,
+        "gross_cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 7.7
+      }
+    ],
+    "source_rate": {
+      "start_revision": 251,
+      "stop_revision": 296,
+      "revisions": 45,
+      "per_second": 7.49
+    },
+    "causal_timeline": {
+      "causal_roots_seen": 46,
+      "complete_four_panel_roots": 45,
+      "panel_prepare_to_accept": {
+        "panel1 camera-grid": {
+          "n": 45,
+          "median_ms": 85.5,
+          "p90_ms": 88.52,
+          "p99_ms": 154.49,
+          "max_ms": 204.34,
+          "best_ms": 73.29
+        },
+        "panel2 histogram-40": {
+          "n": 45,
+          "median_ms": 85.52,
+          "p90_ms": 88.62,
+          "p99_ms": 154.67,
+          "max_ms": 204.6,
+          "best_ms": 73.35
+        },
+        "panel3 facet-curve-fit-40": {
+          "n": 45,
+          "median_ms": 85.42,
+          "p90_ms": 88.31,
+          "p99_ms": 154.17,
+          "max_ms": 203.91,
+          "best_ms": 73.15
+        },
+        "panel4 curve-40": {
+          "n": 45,
+          "median_ms": 85.73,
+          "p90_ms": 88.97,
+          "p99_ms": 155.05,
+          "max_ms": 205.05,
+          "best_ms": 73.59
+        }
+      },
+      "four_panel_critical_path": {
+        "n": 45,
+        "median_ms": 86.09,
+        "p90_ms": 89.12,
+        "p99_ms": 155.2,
+        "max_ms": 205.2,
+        "best_ms": 73.83
+      },
+      "prepare_start_skew": {
+        "n": 45,
+        "median_ms": 0.16,
+        "p90_ms": 0.22,
+        "p99_ms": 0.33,
+        "max_ms": 0.36,
+        "best_ms": 0.14
+      },
+      "accept_finish_skew": {
+        "n": 45,
+        "median_ms": 0.7,
+        "p90_ms": 0.78,
+        "p99_ms": 1.21,
+        "max_ms": 1.29,
+        "best_ms": 0.58
+      },
+      "matched_inputs": [
+        {
+          "cohort": 0,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "accept": 1999732.0855034,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 226,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "accept": 1999732.0858383,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 251,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "accept": 1999732.0859742,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 226,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "accept": 1999732.0862648,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 226,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 1,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999732.1271833,
+              "accept": 1999732.2125988,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 227,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999732.1273517,
+              "accept": 1999732.2128478,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 252,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999732.1274539,
+              "accept": 1999732.2129725,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 227,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999732.1275447,
+              "accept": 1999732.2132761,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 227,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 2,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999732.252785,
+              "accept": 1999732.3364467,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 228,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999732.2528628,
+              "accept": 1999732.3367055,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 253,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999732.2529057,
+              "accept": 1999732.3368318,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 228,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999732.2529448,
+              "accept": 1999732.3371293,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 228,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 3,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999732.3899524,
+              "accept": 1999732.47153,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 229,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999732.3900306,
+              "accept": 1999732.4717686,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 254,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999732.3900772,
+              "accept": 1999732.4718934,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 229,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999732.39012,
+              "accept": 1999732.4722005,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 229,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 4,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999732.5226146,
+              "accept": 1999732.6073413,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 230,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999732.5226875,
+              "accept": 1999732.6076351,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 255,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999732.5227287,
+              "accept": 1999732.6077644,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 230,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999732.5227647,
+              "accept": 1999732.6080775,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 230,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 5,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999732.655213,
+              "accept": 1999732.7413631,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 231,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999732.6552856,
+              "accept": 1999732.7416638,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 256,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999732.6553264,
+              "accept": 1999732.7417933,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 231,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999732.6553632,
+              "accept": 1999732.7421097,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 231,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 6,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999732.7868428,
+              "accept": 1999732.9907526,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 232,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999732.7869167,
+              "accept": 1999732.99126,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 257,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999732.7869568,
+              "accept": 1999732.9915596,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 232,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999732.7869931,
+              "accept": 1999732.9920422,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 232,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 7,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999732.9922566,
+              "accept": 1999733.0735608,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 233,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999732.9923586,
+              "accept": 1999733.0738647,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 258,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999732.992421,
+              "accept": 1999733.074,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 233,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999732.9924796,
+              "accept": 1999733.0743307,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 233,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 8,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999733.0744605,
+              "accept": 1999733.1523796,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 234,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999733.0745261,
+              "accept": 1999733.1527916,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 259,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999733.0745639,
+              "accept": 1999733.1529861,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 234,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999733.0745961,
+              "accept": 1999733.1533204,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 234,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 9,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999733.1830589,
+              "accept": 1999733.2681611,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 235,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999733.1831295,
+              "accept": 1999733.2684204,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 260,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999733.1831697,
+              "accept": 1999733.2685466,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 235,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999733.1832069,
+              "accept": 1999733.2688623,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 235,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 10,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999733.305006,
+              "accept": 1999733.3923278,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 236,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999733.3050806,
+              "accept": 1999733.3925613,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 261,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999733.3051232,
+              "accept": 1999733.3926847,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 236,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999733.3051626,
+              "accept": 1999733.3930042,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 236,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 11,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999733.4385283,
+              "accept": 1999733.5235124,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 237,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999733.4386101,
+              "accept": 1999733.5237413,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 262,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999733.4386537,
+              "accept": 1999733.5238756,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 237,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999733.4386945,
+              "accept": 1999733.5242172,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 237,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 12,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999733.5725888,
+              "accept": 1999733.6559115,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 238,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999733.5726898,
+              "accept": 1999733.6561764,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 263,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999733.5727534,
+              "accept": 1999733.6563121,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 238,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999733.5728128,
+              "accept": 1999733.6566209,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 238,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 13,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999733.6980887,
+              "accept": 1999733.7824675,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 239,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999733.6981638,
+              "accept": 1999733.7827264,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 264,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999733.6982067,
+              "accept": 1999733.7828524,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 239,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999733.6982453,
+              "accept": 1999733.7831655,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 239,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 14,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999733.8395618,
+              "accept": 1999733.9264992,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 240,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999733.8396386,
+              "accept": 1999733.9267947,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 265,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999733.8396822,
+              "accept": 1999733.9270163,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 240,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999733.8397219,
+              "accept": 1999733.9274042,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 240,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 15,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999733.9721395,
+              "accept": 1999734.0566112,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 241,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999733.9722097,
+              "accept": 1999734.0568653,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 266,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999733.9722496,
+              "accept": 1999734.0569948,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 241,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999733.9722861,
+              "accept": 1999734.057316,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 241,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 16,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999734.096521,
+              "accept": 1999734.1844404,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 242,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999734.0966005,
+              "accept": 1999734.1846816,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 267,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999734.0966434,
+              "accept": 1999734.1848063,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 242,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999734.0966816,
+              "accept": 1999734.1851324,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 242,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 17,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999734.2230142,
+              "accept": 1999734.3076144,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 243,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999734.2230977,
+              "accept": 1999734.3079306,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 268,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999734.2231377,
+              "accept": 1999734.3080556,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 243,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999734.2231745,
+              "accept": 1999734.3083459,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 243,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 18,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999734.3547585,
+              "accept": 1999734.4436226,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 244,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999734.3548403,
+              "accept": 1999734.443954,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 269,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999734.3548827,
+              "accept": 1999734.4440867,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 244,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999734.3549204,
+              "accept": 1999734.4444063,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 244,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 19,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999734.486404,
+              "accept": 1999734.5723483,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 245,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999734.4864796,
+              "accept": 1999734.5725875,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 270,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999734.486521,
+              "accept": 1999734.5727056,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 245,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999734.4865594,
+              "accept": 1999734.5731248,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 245,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 20,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999734.6195252,
+              "accept": 1999734.7060487,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 246,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999734.6196012,
+              "accept": 1999734.7062818,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 271,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999734.6196421,
+              "accept": 1999734.7063991,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 246,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999734.6196803,
+              "accept": 1999734.7067015,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 246,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 21,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999734.7572282,
+              "accept": 1999734.8435503,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 247,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999734.7573042,
+              "accept": 1999734.8438213,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 272,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999734.7573458,
+              "accept": 1999734.8439536,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 247,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999734.7573831,
+              "accept": 1999734.8442688,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 247,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 22,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999734.884734,
+              "accept": 1999734.970566,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 248,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999734.8848107,
+              "accept": 1999734.9708299,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 273,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999734.8848517,
+              "accept": 1999734.9709584,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 248,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999734.8848869,
+              "accept": 1999734.9712503,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 248,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 23,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999735.0226505,
+              "accept": 1999735.0958005,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 249,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999735.0227584,
+              "accept": 1999735.0960441,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 274,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999735.0228227,
+              "accept": 1999735.0961684,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 249,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999735.0228816,
+              "accept": 1999735.0964759,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 249,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 24,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999735.1540235,
+              "accept": 1999735.2384261,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 250,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999735.1540976,
+              "accept": 1999735.238671,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 275,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999735.154141,
+              "accept": 1999735.238796,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 250,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999735.1541816,
+              "accept": 1999735.2391016,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 250,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 25,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999735.2764307,
+              "accept": 1999735.3634576,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 251,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999735.2765288,
+              "accept": 1999735.3637079,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 276,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999735.2765814,
+              "accept": 1999735.363831,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 251,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999735.2766284,
+              "accept": 1999735.3641519,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 251,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 26,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999735.4080207,
+              "accept": 1999735.4813581,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 252,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999735.4080937,
+              "accept": 1999735.4816066,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 277,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999735.4081356,
+              "accept": 1999735.4817464,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 252,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999735.4081742,
+              "accept": 1999735.482072,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 252,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 27,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999735.5398183,
+              "accept": 1999735.6256706,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 253,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999735.5398909,
+              "accept": 1999735.6259443,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 278,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999735.539931,
+              "accept": 1999735.6260789,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 253,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999735.5399676,
+              "accept": 1999735.6263748,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 253,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 28,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999735.6721501,
+              "accept": 1999735.7577229,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 254,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999735.6722808,
+              "accept": 1999735.7579671,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 279,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999735.672363,
+              "accept": 1999735.7580937,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 254,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999735.6724376,
+              "accept": 1999735.7584031,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 254,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 29,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999735.8031517,
+              "accept": 1999735.885071,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 255,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999735.8032277,
+              "accept": 1999735.8853182,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 280,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999735.8032669,
+              "accept": 1999735.8854416,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 255,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999735.803303,
+              "accept": 1999735.8857494,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 255,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 30,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999735.9382368,
+              "accept": 1999736.0185861,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 256,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999735.9383136,
+              "accept": 1999736.0188264,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 281,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999735.938353,
+              "accept": 1999736.0189516,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 256,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999735.9383886,
+              "accept": 1999736.0192609,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 256,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 31,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999736.0731458,
+              "accept": 1999736.1588495,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 257,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999736.0732333,
+              "accept": 1999736.159117,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 282,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999736.0732883,
+              "accept": 1999736.1592365,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 257,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999736.0733362,
+              "accept": 1999736.1595381,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 257,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 32,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999736.2040244,
+              "accept": 1999736.2867761,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 258,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999736.204099,
+              "accept": 1999736.2870941,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 283,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999736.2041394,
+              "accept": 1999736.2872213,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 258,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999736.2041763,
+              "accept": 1999736.2875143,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 258,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 33,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999736.3319573,
+              "accept": 1999736.4169872,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 259,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999736.332031,
+              "accept": 1999736.4172396,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 284,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999736.3320745,
+              "accept": 1999736.4173684,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 259,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999736.332113,
+              "accept": 1999736.4176849,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 259,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 34,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999736.4569209,
+              "accept": 1999736.5462727,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 260,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999736.4569937,
+              "accept": 1999736.5465068,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 285,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999736.4570343,
+              "accept": 1999736.5466291,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 260,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999736.4570709,
+              "accept": 1999736.5469413,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 260,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 35,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999736.5887235,
+              "accept": 1999736.6725491,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 261,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999736.5888039,
+              "accept": 1999736.6728005,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 286,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999736.5888501,
+              "accept": 1999736.6729253,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 261,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999736.5888923,
+              "accept": 1999736.6732559,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 261,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 36,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999736.7215043,
+              "accept": 1999736.8096989,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 262,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999736.7215766,
+              "accept": 1999736.8099643,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 287,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999736.7216183,
+              "accept": 1999736.8101059,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 262,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999736.7216544,
+              "accept": 1999736.8104667,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 262,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 37,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999736.850324,
+              "accept": 1999736.9372003,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 263,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999736.8504416,
+              "accept": 1999736.937447,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 288,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999736.8505149,
+              "accept": 1999736.9375674,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 263,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999736.8505797,
+              "accept": 1999736.9378594,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 263,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 38,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999736.9727137,
+              "accept": 1999737.0537196,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 264,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999736.9727885,
+              "accept": 1999737.0539157,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 289,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999736.9728296,
+              "accept": 1999737.0540185,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 264,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999736.9728671,
+              "accept": 1999737.0543032,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 264,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 39,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999737.1009911,
+              "accept": 1999737.188638,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 265,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999737.1010685,
+              "accept": 1999737.1888838,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 290,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999737.1011129,
+              "accept": 1999737.189008,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 265,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999737.1011535,
+              "accept": 1999737.189308,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 265,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 40,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999737.2385874,
+              "accept": 1999737.3269753,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 266,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999737.2386624,
+              "accept": 1999737.327237,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 291,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999737.2387033,
+              "accept": 1999737.3273646,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 266,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999737.2387414,
+              "accept": 1999737.3276911,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 266,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 41,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999737.3714516,
+              "accept": 1999737.4594829,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 267,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999737.371524,
+              "accept": 1999737.4599573,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 292,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999737.3715659,
+              "accept": 1999737.4601287,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 267,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999737.3716045,
+              "accept": 1999737.4605861,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 267,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 42,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999737.5066594,
+              "accept": 1999737.5929838,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 268,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999737.5067401,
+              "accept": 1999737.5932684,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 293,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999737.506781,
+              "accept": 1999737.5934007,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 268,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999737.5068191,
+              "accept": 1999737.5937056,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 268,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 43,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999737.6377445,
+              "accept": 1999737.7190286,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 269,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999737.6378197,
+              "accept": 1999737.7192801,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 294,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999737.6378609,
+              "accept": 1999737.7194021,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 269,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999737.6378977,
+              "accept": 1999737.7196855,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 269,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 44,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999737.7667836,
+              "accept": 1999737.848381,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 270,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999737.7668595,
+              "accept": 1999737.8486368,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 295,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999737.7668999,
+              "accept": 1999737.8487627,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 270,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999737.7669355,
+              "accept": 1999737.8490738,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 270,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        },
+        {
+          "cohort": 45,
+          "panels": {
+            "panel3 facet-curve-fit-40": {
+              "prepare": 1999737.9080178,
+              "accept": 1999737.9988791,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 271,
+              "host": "395ef1c9ef6145f188ca56ca4fb9129b"
+            },
+            "panel1 camera-grid": {
+              "prepare": 1999737.9080997,
+              "accept": 1999737.9991384,
+              "generation": "625abf7a0bcb441db034a90a4fb86334",
+              "revision": 296,
+              "host": "ae189b38b75840a9abd01a94b69d577b"
+            },
+            "panel2 histogram-40": {
+              "prepare": 1999737.9081439,
+              "accept": 1999737.999267,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 271,
+              "host": "8c118157fe6043c9914aca251ae8d435"
+            },
+            "panel4 curve-40": {
+              "prepare": 1999737.9081835,
+              "accept": 1999737.9995909,
+              "generation": "3d2472196cbf4aca815df12c94835551",
+              "revision": 271,
+              "host": "f4314885970e4c7ebf6e2845dd65505b"
+            }
+          }
+        }
+      ]
+    },
+    "render_cost": [],
+    "stage_summary": [
+      {
+        "panel": "panel1 camera-grid",
+        "frames": 46,
+        "stages": {
+          "route_materialize": {
+            "calls": 45,
+            "wall_ms_per_call": 0.88,
+            "cpu_ms_per_call": 0.69,
+            "self_ms_per_call": 0.88
+          },
+          "qt_accept": {
+            "calls": 46,
+            "wall_ms_per_call": 0.05,
+            "cpu_ms_per_call": 0.0,
+            "self_ms_per_call": 0.0
+          },
+          "qt_widget": {
+            "calls": 46,
+            "wall_ms_per_call": 0.03,
+            "cpu_ms_per_call": 0.0,
+            "self_ms_per_call": 0.01
+          }
+        },
+        "render_self_rollup": null
+      },
+      {
+        "panel": "panel2 histogram-40",
+        "frames": 46,
+        "stages": {
+          "route_materialize": {
+            "calls": 46,
+            "wall_ms_per_call": 0.87,
+            "cpu_ms_per_call": 0.34,
+            "self_ms_per_call": 0.87
+          },
+          "qt_accept": {
+            "calls": 46,
+            "wall_ms_per_call": 0.04,
+            "cpu_ms_per_call": 0.0,
+            "self_ms_per_call": 0.0
+          },
+          "qt_widget": {
+            "calls": 46,
+            "wall_ms_per_call": 0.02,
+            "cpu_ms_per_call": 0.0,
+            "self_ms_per_call": 0.01
+          }
+        },
+        "render_self_rollup": null
+      },
+      {
+        "panel": "panel3 facet-curve-fit-40",
+        "frames": 46,
+        "stages": {
+          "route_materialize": {
+            "calls": 45,
+            "wall_ms_per_call": 1.6,
+            "cpu_ms_per_call": 0.35,
+            "self_ms_per_call": 1.6
+          },
+          "qt_accept": {
+            "calls": 46,
+            "wall_ms_per_call": 0.16,
+            "cpu_ms_per_call": 0.0,
+            "self_ms_per_call": 0.0
+          },
+          "qt_widget": {
+            "calls": 46,
+            "wall_ms_per_call": 0.1,
+            "cpu_ms_per_call": 0.0,
+            "self_ms_per_call": 0.02
+          }
+        },
+        "render_self_rollup": null
+      },
+      {
+        "panel": "panel4 curve-40",
+        "frames": 46,
+        "stages": {
+          "route_materialize": {
+            "calls": 46,
+            "wall_ms_per_call": 0.73,
+            "cpu_ms_per_call": 0.68,
+            "self_ms_per_call": 0.73
+          },
+          "qt_accept": {
+            "calls": 46,
+            "wall_ms_per_call": 0.03,
+            "cpu_ms_per_call": 0.0,
+            "self_ms_per_call": 0.0
+          },
+          "qt_widget": {
+            "calls": 46,
+            "wall_ms_per_call": 0.02,
+            "cpu_ms_per_call": 0.0,
+            "self_ms_per_call": 0.01
+          }
+        },
+        "render_self_rollup": null
+      }
+    ]
+  },
+  "problems": [],
+  "threads_left_running": [
+    "signal-latest-processor_0"
+  ],
+  "measurement_windows": [
+    {
+      "window": 0,
+      "scope": "real TaskConsole; installed fronts, not display scanout",
+      "begin_ns": 1999724999482500,
+      "hosts": {
+        "ae189b38b75840a9abd01a94b69d577b": "panel1 camera-grid",
+        "8c118157fe6043c9914aca251ae8d435": "panel2 histogram-40",
+        "395ef1c9ef6145f188ca56ca4fb9129b": "panel3 facet-curve-fit-40",
+        "f4314885970e4c7ebf6e2845dd65505b": "panel4 curve-40"
+      },
+      "end_ns": 1999731001992600,
+      "wall_s": 6.001401900080964,
+      "visibility": [
+        {
+          "panel": "panel-1",
+          "visible": true,
+          "widget_wh": [
+            490,
+            357
+          ],
+          "visible_rect": [
+            0,
+            0,
+            490,
+            357
+          ],
+          "dpr": 3.0
+        },
+        {
+          "panel": "panel-2",
+          "visible": true,
+          "widget_wh": [
+            490,
+            357
+          ],
+          "visible_rect": [
+            0,
+            0,
+            490,
+            357
+          ],
+          "dpr": 3.0
+        },
+        {
+          "panel": "panel-3",
+          "visible": true,
+          "widget_wh": [
+            490,
+            357
+          ],
+          "visible_rect": [
+            0,
+            0,
+            490,
+            12
+          ],
+          "dpr": 3.0
+        },
+        {
+          "panel": "panel-4",
+          "visible": true,
+          "widget_wh": [
+            490,
+            357
+          ],
+          "visible_rect": [
+            0,
+            0,
+            490,
+            12
+          ],
+          "dpr": 3.0
+        }
+      ]
+    },
+    {
+      "window": 1,
+      "scope": "real TaskConsole; installed fronts, not display scanout",
+      "begin_ns": 1999732005857500,
+      "hosts": {
+        "ae189b38b75840a9abd01a94b69d577b": "panel1 camera-grid",
+        "8c118157fe6043c9914aca251ae8d435": "panel2 histogram-40",
+        "395ef1c9ef6145f188ca56ca4fb9129b": "panel3 facet-curve-fit-40",
+        "f4314885970e4c7ebf6e2845dd65505b": "panel4 curve-40"
+      },
+      "end_ns": 1999738012820000,
+      "wall_s": 6.004630599869415,
+      "visibility": [
+        {
+          "panel": "panel-1",
+          "visible": true,
+          "widget_wh": [
+            490,
+            357
+          ],
+          "visible_rect": [
+            0,
+            0,
+            490,
+            357
+          ],
+          "dpr": 3.0
+        },
+        {
+          "panel": "panel-2",
+          "visible": true,
+          "widget_wh": [
+            490,
+            357
+          ],
+          "visible_rect": [
+            0,
+            0,
+            490,
+            357
+          ],
+          "dpr": 3.0
+        },
+        {
+          "panel": "panel-3",
+          "visible": true,
+          "widget_wh": [
+            490,
+            357
+          ],
+          "visible_rect": [
+            0,
+            0,
+            490,
+            12
+          ],
+          "dpr": 3.0
+        },
+        {
+          "panel": "panel-4",
+          "visible": true,
+          "widget_wh": [
+            490,
+            357
+          ],
+          "visible_rect": [
+            0,
+            0,
+            490,
+            12
+          ],
+          "dpr": 3.0
+        }
+      ],
+      "screenshot_result": "C:\\Users\\eadri\\WorkCode\\zlc_v2_perf_limits_20260906\\research\\major_cut_gc_check_curve.png",
+      "screenshot": "C:\\Users\\eadri\\WorkCode\\zlc_v2_perf_limits_20260906\\research\\major_cut_gc_check_curve.png"
+    }
+  ],
+  "B_gc_events": [
+    [
+      "start",
+      1999737052602600,
+      {
+        "generation": 0,
+        "collected": 0,
+        "uncollectable": 0
+      }
+    ],
+    [
+      "stop",
+      1999737053217000,
+      {
+        "generation": 0,
+        "collected": 0,
+        "uncollectable": 0
+      }
+    ]
+  ],
+  "research_counterfactual": null,
+  "child_switch_ms": null,
+  "diagnostic_bench_changes": [
+    "ProductBeat and accepted edit condition; no tight manual beat",
+    "A/B/C CPU sampled within matched windows, excluding warmup"
+  ]
+}

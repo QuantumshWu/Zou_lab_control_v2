@@ -28,7 +28,7 @@ import weakref
 import numpy as np
 from matplotlib.collections import LineCollection
 
-from ._image_raster import ImageFrontStore, PreparedImageFront
+from ._image_raster import ImageFrontStore, PreparedImageFront, _all_true
 from ._fit_scene import FitOverlay, FitPolyline
 from . import _raster_kernels as kernels
 from .data_view import aligned_histogram_edges, histogram_counts
@@ -176,6 +176,13 @@ def _install_text_raster_memo(renderer: Any) -> None:
         ismath: bool = False,
         mtext: Any = None,
     ) -> Any:
+        capture = getattr(renderer, "_zlc_text_capture", None)
+        if capture is not None and ismath:
+            ox, oy, _width, _height, descent, mask = renderer.mathtext_parser.parse(
+                s, renderer.dpi, prop, antialiased=gc.get_antialiased()
+            )
+            capture(np.asarray(mask), round(x + ox), round(y - oy + descent) + 1, gc)
+            return None
         if ismath or not s:
             return original(gc, x, y, s, prop, angle, ismath=ismath, mtext=mtext)
         angle = float(angle)
@@ -202,6 +209,9 @@ def _install_text_raster_memo(renderer: Any) -> None:
         mask, offset_x, offset_y, shift_x, shift_y = entry
         column = round(x + offset_x) + shift_x
         row = round(y + offset_y) + 1 + shift_y
+        if capture is not None:
+            capture(mask, column, row, gc)
+            return None
         backend.draw_text_image(mask, column, row, 0.0, gc)
         return None
 
@@ -441,6 +451,8 @@ class _PreparedSeries:
     #: Bounds, not sigma: converting y+/-sem keeps affine display units
     #: honest where converting a difference would not be.
     band: tuple[np.ndarray, np.ndarray] | None = None
+    #: Fused pass: xmin/xmax, low/high bounds, isolated, pooled value+SEM bounds.
+    summary: tuple[float, float, float, float, bool, float, float] | None = None
 
 
 def _display_array(value: Any) -> np.ndarray:
@@ -454,9 +466,13 @@ def _series_band(item: Any) -> tuple[np.ndarray, np.ndarray] | None:
     sem = getattr(item, "sem", None)
     if sem is None:
         return None
+    spread = np.asarray(sem, dtype=float).reshape(-1)
+    # An unknown SEM has no bounds to prepare or transform.  A single
+    # observation can still carry a finite stated error; counts do not decide.
+    if not bool(np.any(np.isfinite(spread))):
+        return None
     quantity = item.y
     canonical = np.asarray(quantity.canonical, dtype=float).reshape(-1)
-    spread = np.asarray(sem, dtype=float).reshape(-1)
     unit = quantity.canonical_unit
     low = unit.convert_value_to(canonical - spread, quantity.display_unit)
     high = unit.convert_value_to(canonical + spread, quantity.display_unit)
@@ -1246,10 +1262,9 @@ def _envelope_decimated(
     )
 
 
-def _isolated_curve_mask(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+def _isolated_curve_mask(finite: np.ndarray) -> np.ndarray:
     """Valid curve vertices with no valid neighbour on either side."""
 
-    finite = np.isfinite(x) & np.isfinite(y)
     connected = np.zeros(finite.shape, dtype=bool)
     if finite.size > 1:
         adjacent = finite[:-1] & finite[1:]
@@ -1271,7 +1286,7 @@ def _bounded_isolated_curve_points(
     stop = min(x.size, int(np.searchsorted(x, high, side="right")) + 1)
     visible_x = x[start:stop]
     visible_y = y[start:stop]
-    isolated = _isolated_curve_mask(visible_x, visible_y)
+    isolated = _isolated_curve_mask(np.isfinite(visible_x) & np.isfinite(visible_y))
     if not bool(np.any(isolated)):
         return np.asarray([], dtype=float), np.asarray([], dtype=float)
     isolated &= (visible_x >= low) & (visible_x <= high)
@@ -1668,6 +1683,8 @@ class MatplotlibRenderer:
         self._boundary_chrome_commands: dict[
             int, tuple[tuple[str, Any, tuple[Any, ...], dict[str, Any]], ...]
         ] = {}
+        self._foreground_batches: dict[bool, tuple[tuple[Any, ...], list[Any]]] = {}
+        self._foreground_scratch: Any = None
         #: The DYNAMIC axes -- a colour scale's, a distribution rail's, whose
         #: ticks move with the data -- keyed by the facts their draw is a
         #: function of.  A key seen once is drawn plainly; seen twice
@@ -2483,12 +2500,6 @@ class MatplotlibRenderer:
             self._forget_chrome_commands()
             self._boundary_chrome_signature = signature
         commands_to_record: list[Any] = []
-        facet_overview_axes = (
-            set(self._axes.get("facet_cell", ()))
-            if isinstance(self.spec, FacetGridPlot)
-            and self._facet_focus_index is None
-            else set()
-        )
         for axes in {entry[1].axes for entry in tuple(collected)}:
             if not axes.get_visible():
                 continue
@@ -2509,9 +2520,6 @@ class MatplotlibRenderer:
                 else self._boundary_chrome_cache.get(id(axes))
             )
             if cached is not None:
-                if axes not in facet_overview_axes:
-                    for artist, _owner, _zorder in cached:
-                        self._boundary_chrome_commands.pop(id(artist), None)
                 for artist, owner, zorder in cached:
                     keyed(artist, owner, zorder)
                 continue
@@ -2562,10 +2570,7 @@ class MatplotlibRenderer:
             entries.extend(self._text_chrome_above(axes, entries))
             self._boundary_chrome_cache[id(axes)] = tuple(entries)
             for artist, owner, zorder in entries:
-                if (
-                    axes in facet_overview_axes
-                    and id(artist) not in self._boundary_chrome_commands
-                ):
+                if id(artist) not in self._boundary_chrome_commands:
                     commands_to_record.append(artist)
                 keyed(artist, owner, zorder)
         if commands_to_record:
@@ -2582,6 +2587,8 @@ class MatplotlibRenderer:
 
         self._boundary_chrome_commands.clear()
         self._dynamic_axis_commands.clear()
+        self._foreground_batches.clear()
+        self._foreground_scratch = None
 
     def _record_boundary_chrome_commands(self, artists: Sequence[Any]) -> None:
         """Freeze Agg path commands for stable tick marks and spines."""
@@ -2595,6 +2602,193 @@ class MatplotlibRenderer:
             commands = _record_artist_draw(artist, recorder)
             if commands:
                 self._boundary_chrome_commands[id(artist)] = commands
+
+    def _foreground_text(self, artist: Any, renderer: Any, commands: Any = None) -> Any:
+        """Capture the original Text/MathText glyph masks, without a scratch draw."""
+        if (artist.get_rotation() != 0.0 or artist.get_usetex() or artist.get_path_effects() or artist.get_bbox_patch() is not None
+                or (commands is not None and any(name != "draw_text" or args[4] != 0.0
+                                                for name, _gc, args, _kw in commands))):
+            return None
+        masks = []
+        supported = True
+        height, width = np.asarray(renderer.buffer_rgba()).shape[:2]
+
+        def capture(mask: Any, left: int, bottom: int, gc: Any) -> None:
+            nonlocal supported
+            if gc.get_clip_path()[0] is not None:
+                supported = False
+                return
+            mask = np.asarray(mask, dtype=np.uint8)
+            top = bottom - mask.shape[0]
+            x0, y0, x1, y1 = 0, 0, width, height
+            clip = gc.get_clip_rectangle()
+            if clip is not None and any(clip.extents):
+                # Agg's unrotated text clips to integer device pixels.
+                x0 = max(x0, int(math.floor(clip.x0 + 0.5)))
+                x1 = min(x1, int(math.floor(clip.x1 + 0.5)))
+                y0 = max(y0, int(math.floor(height - clip.y1 + 0.5)))
+                y1 = min(y1, int(math.floor(height - clip.y0 + 0.5)))
+            sx, sy = max(0, x0 - left), max(0, y0 - top)
+            ex, ey = min(mask.shape[1], x1 - left), min(mask.shape[0], y1 - top)
+            if ex <= sx or ey <= sy:
+                return
+            rgba = tuple(gc.get_rgb())
+            if len(rgba) == 3:
+                rgba += (gc.get_alpha(),)
+            color = np.floor(np.clip(rgba, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+            masks.append((np.array(mask[sy:ey, sx:ex], copy=True, order="C"), top + sy, left + sx, color))
+
+        renderer._zlc_text_capture = capture
+        try:
+            if commands is None:
+                artist.draw(renderer)
+            else:
+                _replay_draw(commands, renderer)
+        finally:
+            renderer._zlc_text_capture = None
+        return masks if supported else None
+
+    def _foreground_strokes(self, commands: _RecordedDraw, renderer: Any) -> Any:
+        """Lower independent Agg strokes/ticks once; compound paints stay public."""
+        from matplotlib.backends.backend_agg import RendererAgg
+        from matplotlib.transforms import Bbox
+
+        height, width = np.asarray(renderer.buffer_rgba()).shape[:2]
+        if self._foreground_scratch is None:
+            scratch = RendererAgg(width, height, self._figure.dpi)
+            pixels = np.asarray(scratch.buffer_rgba())
+            pixels.fill(0)
+            self._foreground_scratch = [scratch, pixels, None]
+        scratch, pixels, dirty = self._foreground_scratch
+        masks = []
+        for name, gc, args, kwargs in commands:
+            if (kwargs or gc.get_hatch() is not None or gc.get_clip_path()[0] is not None
+                    or name not in {"draw_path", "draw_markers"}):
+                return None
+            if name == "draw_path":
+                if len(args) != 3 or args[2] is not None or len(args[0].vertices) != 2:
+                    return None
+                box = args[0].get_extents(args[1])
+            else:
+                if len(args) != 5 or len(args[0].vertices) != 2 or len(args[2].vertices) != 1:
+                    return None
+                points = args[3].transform(args[2].vertices)
+                marker = args[0].get_extents(args[1])
+                box = Bbox.from_extents(points[0, 0] + marker.x0, points[0, 1] + marker.y0,
+                                        points[0, 0] + marker.x1, points[0, 1] + marker.y1)
+            if dirty is not None:
+                top, bottom, left, right = dirty
+                pixels[top:bottom, left:right] = 0
+            pad = int(math.ceil(gc.get_linewidth() * self._figure.dpi / 72.0)) + 4
+            left, right = max(0, int(math.floor(box.x0)) - pad), min(width, int(math.ceil(box.x1)) + pad)
+            top, bottom = max(0, height - int(math.ceil(box.y1)) - pad), min(height, height - int(math.floor(box.y0)) + pad)
+            dirty = top, bottom, left, right
+            white = scratch.new_gc()
+            white.copy_properties(gc)
+            white.set_alpha(1.0)
+            white.set_foreground((1.0, 1.0, 1.0, 1.0), isRGBA=True)
+            draw_args = (*args[:4], (1.0, 1.0, 1.0, 1.0)) if name == "draw_markers" and args[4] is not None else args
+            getattr(scratch, name)(white, *draw_args)
+            self._foreground_scratch[2] = dirty
+            alpha = pixels[top:bottom, left:right, 3]
+            ys, xs = np.flatnonzero(alpha.any(axis=1)), np.flatnonzero(alpha.any(axis=0))
+            if not ys.size or not xs.size:
+                continue
+            rgba = tuple(gc.get_rgb())
+            if len(rgba) == 3:
+                rgba += (gc.get_alpha(),)
+            color = np.floor(np.clip(rgba, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+            masks.append((np.array(alpha[ys[0]:ys[-1] + 1, xs[0]:xs[-1] + 1], copy=True, order="C"),
+                          top + int(ys[0]), left + int(xs[0]), color))
+        return masks
+
+    @staticmethod
+    def _pack_foreground(masks: Sequence[Any]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        data, rows, colors = [], [], []
+        offset = 0
+        for mask, top, left, color in masks:
+            data.append(mask.reshape(-1))
+            rows.append((offset, top, left, *mask.shape))
+            colors.append(color)
+            offset += mask.size
+        return (kernels.readable(np.concatenate(data) if data else np.empty(0, dtype=np.uint8)),
+                kernels.readable(np.asarray(rows, dtype=np.int64).reshape(-1, 5)),
+                kernels.readable(np.asarray(colors, dtype=np.uint8).reshape(-1, 4)))
+
+    def _paint_foreground(self, entries: Sequence[Any], renderer: Any, canvas: Any, phase: bool) -> None:
+        """Execute flat paint ranges, refreshing only their Text slots per frame."""
+        from matplotlib.text import Text
+
+        artists = tuple(entry[1][1] for entry in entries)
+        cached = self._foreground_batches.get(phase)
+        if cached is None or cached[0] != artists:
+            plan, masks, texts, order, group = [], [], [], [], []
+
+            def flush() -> None:
+                if group:
+                    plan.append((*self._pack_foreground(masks), kernels.readable(np.asarray(order, dtype=np.int64).reshape(-1, 2)),
+                                 list(texts), tuple(group)))
+                    masks.clear(); texts.clear(); order.clear(); group.clear()
+
+            for artist in artists:
+                commands = self._boundary_chrome_commands.get(id(artist))
+                if isinstance(artist, Text) and commands is None:
+                    if artist.get_rotation() == 0.0 and not artist.get_usetex() and not artist.get_path_effects():
+                        order.append((1, len(texts)))
+                        texts.append([artist, None, ()])
+                        group.append(artist)
+                        continue
+                    layers = None
+                elif commands is not None:
+                    layers = (self._foreground_text(artist, renderer, commands) if isinstance(artist, Text)
+                              else self._foreground_strokes(commands, renderer)) if artist.get_visible() else []
+                else:
+                    layers = None
+                if layers is None:
+                    flush()
+                    plan.append(artist)
+                else:
+                    order.extend((0, len(masks) + index) for index in range(len(layers)))
+                    masks.extend(layers)
+                    group.append(artist)
+            flush()
+            self._foreground_batches[phase] = (artists, plan)
+        else:
+            plan = cached[1]
+        target = np.asarray(canvas.buffer_rgba())
+        for batch in plan:
+            if not isinstance(batch, tuple):
+                if batch.get_visible():
+                    self._draw_dynamic_artist(batch, renderer, canvas)
+                continue
+            static_data, static_rows, static_colors, order, texts, group = batch
+            masks, offsets = [], [0]
+            supported = True
+            for entry in texts:
+                artist = entry[0]
+                clip = artist.get_clip_box()
+                key = (artist.get_text(), artist.get_visible(), artist.get_position(), artist.get_rotation(),
+                       str(artist.get_color()), artist.get_alpha(), hash(artist.get_fontproperties()),
+                       id(artist.get_transform()), artist.get_clip_on(), None if clip is None else tuple(clip.bounds),
+                       id(artist.get_clip_path()), id(artist.get_bbox_patch()), artist.get_usetex(),
+                       tuple(map(id, artist.get_path_effects())), artist.get_antialiased())
+                if entry[1] != key:
+                    entry[1] = key
+                    entry[2] = self._foreground_text(artist, renderer) if artist.get_visible() else []
+                if entry[2] is None:
+                    supported = False
+                    break
+                masks.extend(entry[2])
+                offsets.append(len(masks))
+            if not supported:
+                self._foreground_batches.pop(phase, None)
+                for artist in group:
+                    if artist.get_visible():
+                        self._draw_dynamic_artist(artist, renderer, canvas)
+                continue
+            text_data, text_rows, text_colors = self._pack_foreground(masks)
+            kernels.replay_foreground_masks(static_data, static_rows, static_colors, text_data, text_rows, text_colors,
+                                            kernels.readable(np.asarray(offsets, dtype=np.int64)), order, target)
 
     def _draw_dynamic_artist(
         self,
@@ -2868,6 +3062,7 @@ class MatplotlibRenderer:
         clips: list[tuple[int, int, int, int]] = []
         lane_offsets = [0]
         cycle = self.style.palette.line_cycle
+        slot_colours: dict[int, np.ndarray] = {}
         policy = self.style.render
         bar_width = max(
             1.0,
@@ -2894,14 +3089,16 @@ class MatplotlibRenderer:
             lows.append(np.ascontiguousarray(np.minimum(low_y, high_y)))
             highs.append(np.ascontiguousarray(np.maximum(low_y, high_y)))
             offsets.append(offsets[-1] + group_x.size)
-            rgba = np.asarray(
-                to_rgba(cycle[_series_slot(item.identity, len(cycle))]),
-                dtype=float,
-            )
-            rgba[3] *= float(policy.uncertainty_bar_alpha)
-            colours.append(
-                np.clip(np.rint(rgba * 255.0), 0, 255).astype(np.uint8)
-            )
+            slot = _series_slot(item.identity, len(cycle))
+            packed_colour = slot_colours.get(slot)
+            if packed_colour is None:
+                rgba = np.asarray(to_rgba(cycle[slot]), dtype=float)
+                rgba[3] *= float(policy.uncertainty_bar_alpha)
+                packed_colour = np.clip(
+                    np.rint(rgba * 255.0), 0, 255
+                ).astype(np.uint8)
+                slot_colours[slot] = packed_colour
+            colours.append(packed_colour)
             widths.append(bar_width)
             cap_widths.append(cap_width)
             clips.append(clip)
@@ -2974,6 +3171,8 @@ class MatplotlibRenderer:
                             clip,
                         )
             else:
+                transform = axes.transData
+                affine = transform.get_affine().to_values() if transform.is_affine else None
                 for item in band_items:
                     low, high = item.band
                     usable = (
@@ -2984,20 +3183,28 @@ class MatplotlibRenderer:
                     )
                     if not bool(np.any(usable)):
                         continue
-                    x = item.x[usable]
-                    low_points = axes.transData.transform(
-                        np.column_stack((x, low[usable]))
-                    )
-                    high_points = axes.transData.transform(
-                        np.column_stack((x, high[usable]))
-                    )
+                    x = item.x
+                    if not bool(np.all(usable)):
+                        x, low, high = x[usable], low[usable], high[usable]
+                    if affine is not None:
+                        # The same operand order as the shared affine curve
+                        # path; x and its y contribution serve both endpoints.
+                        a, b, c, d, e, f = affine
+                        group_x = a * x + c * low + e
+                        y_from_x = b * x
+                        low_y = float(height) - (y_from_x + d * low + f)
+                        high_y = float(height) - (y_from_x + d * high + f)
+                    else:
+                        low_points = transform.transform(np.column_stack((x, low)))
+                        high_points = transform.transform(np.column_stack((x, high)))
+                        group_x = np.asarray(low_points[:, 0], dtype=np.float64)
+                        low_y = float(height) - np.asarray(low_points[:, 1], dtype=np.float64)
+                        high_y = float(height) - np.asarray(high_points[:, 1], dtype=np.float64)
                     append_group(
                         item,
-                        np.asarray(low_points[:, 0], dtype=np.float64),
-                        float(height)
-                        - np.asarray(low_points[:, 1], dtype=np.float64),
-                        float(height)
-                        - np.asarray(high_points[:, 1], dtype=np.float64),
+                        group_x,
+                        low_y,
+                        high_y,
                         clip,
                     )
             if len(xs) != lane_start:
@@ -3863,6 +4070,9 @@ class MatplotlibRenderer:
             """
 
             nonlocal captured, blocked
+            if kernels.engaged() and self._selector_gesture_kind is None and self._confined_gesture_axes is None:
+                self._paint_foreground(entries, renderer, canvas, at_split)
+                return
             capturing = (
                 at_split and split is not None and not captured and not blocked
             )
@@ -3899,8 +4109,8 @@ class MatplotlibRenderer:
             # rail fill and the colorbar gradient over the inner half of
             # those black frames, which is exactly the console's missing
             # borders.
-            forward_ids = set(self._boundary_chrome_commands)
-            image_axis_ids = {id(axis) for axis in self._axes.get("image", ())}
+            forward_ids: set[int] = set()
+            image_axis_ids = {id(axis) for _key, axis, _index in self.painted_surfaces}
             for axis_id, entries in self._boundary_chrome_cache.items():
                 if axis_id in image_axis_ids:
                     forward_ids.update(
@@ -4078,16 +4288,26 @@ class MatplotlibRenderer:
         leave the 0..255 the check is looking for -- and together they cost
         more per frame than colouring the picture did.  The three
         attributes assigned here are exactly the three ``set_data`` writes.
+        A two-dimensional masked scalar front is already normalized by the
+        Image owner too; retain its real values and validity without a second
+        copy/finite scan when native drawing is the pixel consumer.
         """
 
-        if (
+        rgba = (
             type(front) is np.ndarray
             and front.dtype == np.uint8
             and front.dtype.isnative
             and front.ndim == 3
             and front.shape[2] == 4
             and front.flags.c_contiguous
-        ):
+        )
+        scalar = (
+            isinstance(front, np.ma.MaskedArray)
+            and front.ndim == 2
+            and front.dtype.kind in "biuf"
+            and front.dtype.isnative
+        )
+        if rgba or scalar:
             image._A = front
             image._imcache = None
             image.stale = True
@@ -4495,7 +4715,27 @@ class MatplotlibRenderer:
         for item in source:
             x = np.asarray(_display_array(item.x), dtype=float).reshape(-1)
             y = np.asarray(_display_array(item.y), dtype=float).reshape(-1)
-            valid = _valid_array(item, x.shape) & np.isfinite(x) & np.isfinite(y)
+            band = _series_band(item)
+            summary = None
+            if kernels.engaged():
+                valid = np.empty(x.shape, dtype=bool)
+                values = np.empty(7, dtype=np.float64)
+                kernel_x, kernel_y = x.view(), y.view()
+                source_valid = _valid_array(item, x.shape).view()
+                low, high = ((kernel_x[:0], kernel_x[:0]) if band is None else
+                             (band[0].view(), band[1].view()))
+                # This serial scan accepts strided series directly. A grouped
+                # y column must not be copied merely to reach the kernel.
+                for array in (kernel_x, kernel_y, source_valid, low, high):
+                    array.setflags(write=False)
+                kernels.prepare_curve_summary(
+                    kernel_x, kernel_y, source_valid,
+                    low, high, band is not None, valid, values,
+                )
+                summary = (float(values[0]), float(values[1]), float(values[2]),
+                           float(values[3]), bool(values[4]), float(values[5]), float(values[6]))
+            else:
+                valid = _valid_array(item, x.shape) & np.isfinite(x) & np.isfinite(y)
             label = getattr(item, "label", None)
             if label is None:
                 group_key = getattr(item, "group_key", ())
@@ -4508,7 +4748,8 @@ class MatplotlibRenderer:
                     str(label),
                     _series_identity(item),
                     x_labels=getattr(item, "x_labels", None),
-                    band=_series_band(item),
+                    band=band,
+                    summary=summary,
                 )
             )
         return tuple(prepared)
@@ -4522,8 +4763,9 @@ class MatplotlibRenderer:
         if not series:
             return False
         for item in series:
-            plotted = np.where(item.valid, item.y, np.nan)
-            if bool(np.any(_isolated_curve_mask(item.x, plotted))):
+            isolated = (item.summary[4] if item.summary is not None
+                        else bool(np.any(_isolated_curve_mask(item.valid))))
+            if isolated:
                 return False
         return True
 
@@ -4579,6 +4821,13 @@ class MatplotlibRenderer:
         if native_direct:
             extremes = np.array([np.inf, -np.inf, np.inf, -np.inf])
             for item in series:
+                if item.summary is not None:
+                    xlow, xhigh, ylow, yhigh = item.summary[:4]
+                    extremes[0] = min(extremes[0], xlow)
+                    extremes[1] = max(extremes[1], xhigh)
+                    extremes[2] = min(extremes[2], ylow)
+                    extremes[3] = max(extremes[3], yhigh)
+                    continue
                 if not bool(np.any(item.valid)):
                     continue
                 extremes[0] = min(
@@ -4823,7 +5072,13 @@ class MatplotlibRenderer:
                         colour,
                         lines[index].get_zorder() - 0.1,
                     )
-            if limits is None and bool(np.any(item.valid)):
+            if limits is None and item.summary is not None:
+                xlow, xhigh, ylow, yhigh = item.summary[:4]
+                extremes[0] = min(extremes[0], xlow)
+                extremes[1] = max(extremes[1], xhigh)
+                extremes[2] = min(extremes[2], ylow)
+                extremes[3] = max(extremes[3], yhigh)
+            elif limits is None and bool(np.any(item.valid)):
                 extremes[0] = min(
                     extremes[0],
                     float(np.min(item.x, where=item.valid, initial=np.inf)),
@@ -4962,10 +5217,24 @@ class MatplotlibRenderer:
                 artist.set_visible(True)
 
     def _materialize_prepared_images(self) -> None:
-        """Build public Image artists from a prepared Facet scene."""
+        """Materialize the same accepted scalar scene only for a draw fallback."""
 
         command = self._artists.pop("image:prepared", None)
         if not isinstance(command, dict):
+            return
+        key = command.get("key")
+        if key is not None:
+            image = self._artists[key]
+            self._update_image_artist(
+                image.axes,
+                command["values"][0],
+                command["valid"][0],
+                tuple(command["extents"][0]),
+                command["state"],
+                key,
+                command["limits"],
+                coordinate_aspect=command["coordinate_aspect"],
+            )
             return
         cells = command.get("cells")
         options = command.get("options")
@@ -5059,7 +5328,7 @@ class MatplotlibRenderer:
                     if identity == current:
                         return hit
             singleton = (
-                _isolated_curve_mask(x, y)
+                _isolated_curve_mask(np.isfinite(x) & np.isfinite(y))
                 if isolated_glyphs
                 else finite if not starts.size and finite.sum() == 1
                 else np.zeros(finite.shape, dtype=bool)
@@ -5728,6 +5997,7 @@ class MatplotlibRenderer:
         *,
         coordinate_aspect: float | None,
         valid_identity: object = None,
+        materialize: bool = True,
     ) -> tuple[Any, Any]:
         policy = self.style.render
         cmap_name, cmap = self._resolved_image_colormap(state)
@@ -5814,98 +6084,113 @@ class MatplotlibRenderer:
                 max(1, round(float(axes.bbox.height))),
             )
             self._artists[aspect_key] = (aspect_signature, display_pixel_shape)
-        store_key = f"{key}:front_store"
-        store = self._artists.get(store_key)
-        if not isinstance(store, ImageFrontStore):
-            store = ImageFrontStore()
-            self._artists[store_key] = store
-        # The PICTURE's pixels, not the box's.  Told the box, the store
-        # reduced only the axis the box happened to crowd; the source picture
-        # was then nearest-decimated again on its other axis.  One picture
-        # filtered two different ways and repeated part of the reduction.
-        display_width = max(display_pixel_shape[0], 1)
-        display_height = max(display_pixel_shape[1], 1)
-        column_sampling = _view_nearest_map(
-            display_width,
-            values.shape[1],
-            float(x_limits[0]),
-            float(x_limits[1]),
-            float(extent[0]),
-            float(extent[1]),
-        )
-        row_view = (
-            (float(y_limits[1]), float(y_limits[0]))
-            if policy.image_origin == "upper"
-            else (float(y_limits[0]), float(y_limits[1]))
-        )
-        row_source = (
-            (float(extent[3]), float(extent[2]))
-            if policy.image_origin == "upper"
-            else (float(extent[2]), float(extent[3]))
-        )
-        row_sampling = _view_nearest_map(
-            display_height,
-            values.shape[0],
-            *row_view,
-            *row_source,
-        )
-        picture_shape = (
-            None
-            if column_sampling is None or row_sampling is None
-            else (
-                column_sampling[1] - column_sampling[0],
-                row_sampling[1] - row_sampling[0],
+        if materialize:
+            store_key = f"{key}:front_store"
+            store = self._artists.get(store_key)
+            if not isinstance(store, ImageFrontStore):
+                store = ImageFrontStore()
+                self._artists[store_key] = store
+            # The PICTURE's pixels, not the box's.  Told the box, the store
+            # reduced only the axis the box happened to crowd; the source picture
+            # was then nearest-decimated again on its other axis.  One picture
+            # filtered two different ways and repeated part of the reduction.
+            display_width = max(display_pixel_shape[0], 1)
+            display_height = max(display_pixel_shape[1], 1)
+            column_sampling = _view_nearest_map(
+                display_width,
+                values.shape[1],
+                float(x_limits[0]),
+                float(x_limits[1]),
+                float(extent[0]),
+                float(extent[1]),
             )
-        )
-        prepared: PreparedImageFront = store.prepare(
-            values,
-            valid,
-            extent,
-            x_limits=tuple(map(float, x_limits)),
-            y_limits=tuple(map(float, y_limits)),
-            display_pixel_shape=(
-                display_pixel_shape
-                if picture_shape is None
-                else picture_shape
-            ),
-            policy=policy.image_front,
-            revision_token=(
-                self._data_revision,
-                id(values),
-                values.shape,
-                values.strides,
-                values.dtype.str,
-            ),
-        )
+            row_view = (
+                (float(y_limits[1]), float(y_limits[0]))
+                if policy.image_origin == "upper"
+                else (float(y_limits[0]), float(y_limits[1]))
+            )
+            row_source = (
+                (float(extent[3]), float(extent[2]))
+                if policy.image_origin == "upper"
+                else (float(extent[2]), float(extent[3]))
+            )
+            row_sampling = _view_nearest_map(
+                display_height,
+                values.shape[0],
+                *row_view,
+                *row_source,
+            )
+            picture_shape = (
+                None
+                if column_sampling is None or row_sampling is None
+                else (
+                    column_sampling[1] - column_sampling[0],
+                    row_sampling[1] - row_sampling[0],
+                )
+            )
+            prepared: PreparedImageFront = store.prepare(
+                values,
+                valid,
+                extent,
+                x_limits=tuple(map(float, x_limits)),
+                y_limits=tuple(map(float, y_limits)),
+                display_pixel_shape=(
+                    display_pixel_shape
+                    if picture_shape is None
+                    else picture_shape
+                ),
+                policy=policy.image_front,
+                revision_token=(
+                    self._data_revision,
+                    id(values),
+                    values.shape,
+                    values.strides,
+                    values.dtype.str,
+                ),
+            )
 
-        # Precomposed RGBA sidesteps Matplotlib's per-draw normalize + LUT +
-        # second mask-resample machinery: the same 256-level quantization is
-        # applied once per (front, colormap, limits) here instead of on every
-        # draw.  Nearest resampling commutes with colormapping exactly; masked
-        # fronts and unresolved limits keep the scalar path.
-        self._artists[f"{key}:prepared_current"] = prepared
-        rgba_front = (
-            self._image_rgba_front(key, prepared, cmap_name, cmap, color_limits)
-            if color_limits is not None
-            and not isinstance(prepared.values, np.ma.MaskedArray)
-            else None
-        )
-        self._artists[f"{key}:color_mode"] = (
-            "scalar" if rgba_front is None else "rgba"
-        )
-        drawn_extent = prepared.extent
-        if rgba_front is not None:
-            composed = self._view_filling_rgba_front(
-                key,
-                rgba_front,
-                prepared.extent,
-                x_limits,
-                y_limits,
-                axes,
+            # Precomposed RGBA sidesteps Matplotlib's per-draw normalize + LUT +
+            # second mask-resample machinery: the same 256-level quantization is
+            # applied once per (front, colormap, limits) here instead of on every
+            # draw.  Nearest resampling commutes with colormapping exactly; masked
+            # fronts and unresolved limits keep the scalar path.
+            self._artists[f"{key}:prepared_current"] = prepared
+            rgba_front = (
+                self._image_rgba_front(key, prepared, cmap_name, cmap, color_limits)
+                if color_limits is not None
+                and not isinstance(prepared.values, np.ma.MaskedArray)
+                else None
             )
-            if composed is not None:
-                rgba_front, drawn_extent = composed
-        shown: Any = prepared.values if rgba_front is None else rgba_front
+            self._artists[f"{key}:color_mode"] = (
+                "scalar" if rgba_front is None else "rgba"
+            )
+            drawn_extent = prepared.extent
+            if rgba_front is not None:
+                composed = self._view_filling_rgba_front(
+                    key,
+                    rgba_front,
+                    prepared.extent,
+                    x_limits,
+                    y_limits,
+                    axes,
+                )
+                if composed is not None:
+                    rgba_front, drawn_extent = composed
+            shown: Any = prepared.values if rgba_front is None else rgba_front
+        else:
+            # Native draws the accepted scalar scene directly. Keep the real
+            # source on the style/geometry artist, but do not also rasterize
+            # a fallback picture that this frame will never paint.
+            mask = np.ma.nomask if _all_true(valid) else np.logical_not(valid)
+            if values.dtype.kind == "f":
+                finite = np.isfinite(values)
+                if not bool(np.all(finite)):
+                    mask = np.logical_or(mask, np.logical_not(finite))
+            shown = np.ma.array(values, mask=mask, copy=False)
+            rgba_front, drawn_extent = None, extent
+            self._artists[f"{key}:color_mode"] = "scalar"
+            for suffix in ("front_store", "prepared_current", "rgba_front", "view_front"):
+                self._artists.pop(f"{key}:{suffix}", None)
         applied_key = f"{key}:applied_front"
         image = self._artists.get(key)
         if image is None:
@@ -7570,6 +7855,7 @@ class MatplotlibRenderer:
             key,
             (vmin, vmax),
             coordinate_aspect=coordinate_aspect,
+            materialize=not native_primary,
             valid_identity=(
                 None
                 if source_valid is None
@@ -7583,6 +7869,8 @@ class MatplotlibRenderer:
             cmap_name, cmap = self._resolved_image_colormap(state)
             self._artists["image:prepared"] = {
                 "key": key,
+                "state": state,
+                "coordinate_aspect": coordinate_aspect,
                 "values": z[np.newaxis, ...],
                 "valid": valid[np.newaxis, ...],
                 "extents": np.asarray((extent,), dtype=np.float64),
@@ -7835,38 +8123,7 @@ class MatplotlibRenderer:
         # A rolling plot's one surface IS its history axes.
         history = axes
         series = self._series(payload)
-        sliced: list[_PreparedSeries] = []
-        # Every rolling series shares ONE x -- the payload hands all of
-        # them the same shots-from-latest array object -- so its float
-        # view and finite mask are facts about the payload, not about any
-        # series, and computing them per series walked the same window
-        # thirty-five times over.
-        prepared_x: dict[int, tuple[np.ndarray, np.ndarray]] = {}
-        for item in series:
-            y_values = np.asarray(_display_array(item.y), dtype=float).reshape(-1)
-            x_source = _display_array(item.x)
-            cached_x = prepared_x.get(id(x_source))
-            if cached_x is None:
-                x_values = np.asarray(x_source, dtype=float).reshape(-1)
-                cached_x = (x_values, np.isfinite(x_values))
-                prepared_x[id(x_source)] = cached_x
-            x_values, x_finite = cached_x
-            valid = (
-                _valid_array(item, x_values.shape)
-                & x_finite
-                & np.isfinite(y_values)
-            )
-            label = getattr(item, "label", "")
-            if label is None:
-                label = ""
-            sliced.append(_PreparedSeries(
-                x_values,
-                y_values,
-                valid,
-                str(label),
-                _series_identity(item),
-                band=_series_band(item),
-            ))
+        sliced = self._prepare_curve_series(series)
 
         labels = self.spec.labels
         explicit_y = _state_label(state, "y_label", None)
@@ -7909,6 +8166,10 @@ class MatplotlibRenderer:
             # ~0.5 s PER SHOT stroking one panel's history.
             extremes = np.array([np.inf, -np.inf])
             for item in sliced:
+                if item.summary is not None:
+                    extremes[0] = min(extremes[0], item.summary[2])
+                    extremes[1] = max(extremes[1], item.summary[3])
+                    continue
                 if not bool(np.any(item.valid)):
                     continue
                 if item.band is None:
@@ -8434,6 +8695,11 @@ class MatplotlibRenderer:
             y_groups: list[np.ndarray] = []
             for series in curve_series:
                 for item in series:
+                    if item.summary is not None:
+                        if math.isfinite(item.summary[0]):
+                            x_groups.append(np.asarray(item.summary[:2]))
+                            y_groups.append(np.asarray(item.summary[5:]))
+                        continue
                     if bool(np.any(item.valid)):
                         x_groups.append(item.x[item.valid])
                         y_groups.append(item.y[item.valid])
@@ -9068,7 +9334,10 @@ class MatplotlibRenderer:
                 axis.grid(show_grid)
 
     def _remove_artists(self, artists: Iterable[Any]) -> None:
-        for artist in tuple(artists):
+        artists = tuple(artists)
+        if artists:
+            self._foreground_batches.clear()
+        for artist in artists:
             self._line_sources.pop(id(artist), None)
             try:
                 artist.remove()
@@ -9777,6 +10046,7 @@ class MatplotlibRenderer:
     ) -> None:
         from matplotlib.patches import Ellipse
 
+        self._foreground_batches.clear()
         self._fit_axis = axis
         self._fit_family = family
         if family == "failure":
@@ -10309,11 +10579,13 @@ class MatplotlibRenderer:
                 # knows nothing of the native prepared scene -- and that scene
                 # keeps its series artists HIDDEN and empty.  An export of a
                 # natively stroked Curve or Rolling panel was a complete frame
-                # of axes and chrome with NO data on it.  Image is unaffected:
-                # its artist always carries the picture.  The final draw()
+                # of axes and chrome with NO data on it. Images materialize
+                # their accepted scalar scene through the same front owner.
+                # The final draw()
                 # below composes from the materialized artists, and the next
                 # data update reinstalls the native scene.
                 self._materialize_prepared_curve()
+                self._materialize_prepared_images()
                 # ``savefig`` creates a private renderer internally, so the
                 # live-draw hook cannot wrap that renderer's mathtext parser.
                 # It must join the same process-global parser lane here or a
