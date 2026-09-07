@@ -131,13 +131,16 @@ from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.fluent import FluentComboBox, FluentTreeComboBox, scaled_px
 app = ensure_qt_app(['combo-lifecycle'])
-flat = FluentComboBox()
+page = QtWidgets.QWidget()
+row = QtWidgets.QHBoxLayout(page)
+flat = FluentComboBox(page)
 flat.addItems((
     'short', 'a considerably longer choice',
     'Measurement: Camera Measurement',
     *(f'choice {index}' for index in range(9)),
 ))
-tree = FluentTreeComboBox()
+tree = FluentTreeComboBox(page)
+row.addWidget(flat); row.addWidget(tree)
 tree.set_choice_tree((
     ('camera', (('frames', '@logic/camera/frames', 'camera · frames'),)),
 ), current='@logic/camera/frames')
@@ -151,7 +154,7 @@ font = flat.font(); font.setPointSize(font.pointSize() + 2); flat.setFont(font)
 assert flat.sizeHint().width() > initial_width
 flat.setFixedWidth(scaled_px(170, minimum=130))
 
-flat.show(); tree.show(); app.processEvents()
+page.show(); app.processEvents()
 assert not flat.findChildren(QtWidgets.QAbstractItemView)
 assert not tree.findChildren(QtWidgets.QAbstractItemView)
 flat.showPopup(); app.processEvents()
@@ -165,6 +168,31 @@ flat.activated.connect(flat_events.append)
 flat_view.setCurrentIndex(flat.model().index(1, 0))
 QtTest.QTest.keyClick(flat_view, QtCore.Qt.Key_Return)
 assert flat.currentIndex() == 1 and flat_events == [1]
+# Choosing a row does not make a subsequent operator click too early.
+QtTest.QTest.qWait(20)
+QtTest.QTest.mouseClick(flat, QtCore.Qt.LeftButton)
+app.processEvents()
+assert flat._popup.isVisible(), 'row selection suppressed a new open'
+
+# QWindow delivery exercises Qt's popup routing, not a direct button call.
+QtTest.QTest.mouseClick(page.windowHandle(), QtCore.Qt.LeftButton,
+                       pos=flat.mapTo(page, flat.rect().center()))
+app.processEvents()
+assert not flat._popup.isVisible(), 'outside anchor press reopened the popup'
+assert flat._popup.testAttribute(QtCore.Qt.WA_NoMouseReplay)
+
+QtTest.QTest.mouseClick(flat, QtCore.Qt.LeftButton)
+app.processEvents()
+assert flat._popup.isVisible()
+QtTest.QTest.mouseClick(page.windowHandle(), QtCore.Qt.LeftButton,
+                       pos=tree.mapTo(page, tree.rect().center()))
+app.processEvents()
+assert not flat._popup.isVisible()
+assert not flat._popup.testAttribute(QtCore.Qt.WA_NoMouseReplay)
+
+# Offscreen has no platform popup grab/replay: the checks above concern
+# the per-press flag, not native forwarding. Open the tree independently
+# for the existing content checks. Real-window forwarding is separate evidence.
 tree.showPopup(); app.processEvents()
 tree_view = tree.view()
 assert type(tree_view).__name__ == '_ExpandableTreeView'
@@ -217,6 +245,7 @@ assert capped.view().horizontalScrollBar().isVisible()
 
 flat.hidePopup(); tree.hidePopup(); twelve.hidePopup(); capped.hidePopup()
 flat.close(); tree.close(); twelve.close(); capped.close()
+page.close()
 """
     )
 

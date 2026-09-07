@@ -13,7 +13,6 @@ import sys
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 import math
 import re
-import time
 import weakref
 
 from PyQt5 import QtCore, QtGui, QtWidgets
@@ -645,7 +644,7 @@ class FluentPopup(QtWidgets.QFrame):
     #: of a Qt filter, which is not a traceback but the end of the process.
     #: Declared here, there is no instant in which they are missing.
     _owner_window = None
-    _on_hidden = None
+    _toggle_anchor_ref = None
 
     def __init__(self, parent=None, *, radius: float | None = None,
                  border: str = DIVIDER, fill: str = "white"):
@@ -655,11 +654,6 @@ class FluentPopup(QtWidgets.QFrame):
         self._radius = None if radius is None else float(radius)
         self._border = QtGui.QColor(border)
         self._fill = QtGui.QColor(fill)
-        # A Qt.Popup auto-closes on ANY outside mouse PRESS -- including the press on
-        # the very button that toggles it.  An anchor button therefore needs to know
-        # the popup was just auto-dismissed so its release does not RE-open it; set
-        # this hook to be notified on every hide (auto or explicit).
-        self._on_hidden = None
         self._owner_window = (
             parent.window() if isinstance(parent, QtWidgets.QWidget) else None
         )
@@ -690,10 +684,25 @@ class FluentPopup(QtWidgets.QFrame):
                 self.hide()
         return super().eventFilter(watched, event)
 
-    def hideEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        if callable(self._on_hidden):
-            self._on_hidden()
-        super().hideEvent(event)
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        # Qt clears WA_NoMouseReplay before each mouse event. Suppress only
+        # the outside press on our own toggle, before QWidget closes us;
+        # another control must still receive Qt's normal replayed click.
+        reference = self._toggle_anchor_ref
+        anchor = None if reference is None else reference()
+        if (
+            self.windowType() == QtCore.Qt.Popup
+            and event.button() == QtCore.Qt.LeftButton
+            and not self.rect().contains(event.pos())
+            and anchor is not None
+        ):
+            hit = QtWidgets.QApplication.widgetAt(event.globalPos())
+            while hit is not None:
+                if hit is anchor:
+                    self.setAttribute(QtCore.Qt.WA_NoMouseReplay)
+                    break
+                hit = hit.parentWidget()
+        super().mousePressEvent(event)
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         _paint_fluent_card(self, self._radius, self._border, self._fill)
@@ -742,15 +751,7 @@ class FluentOverlayFrame(QtWidgets.QWidget):
         self._radius = None if radius is None else float(radius)
         self._border = QtGui.QColor(border)
         self._fill = QtGui.QColor(fill)
-        #: Same hide notification hook as a popup; this page-owned frame
-        #: has no outside-press auto-dismiss and needs no reopen debounce.
-        self._on_hidden = None
         self.hide()
-
-    def hideEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        if callable(self._on_hidden):
-            self._on_hidden()
-        super().hideEvent(event)
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         _paint_fluent_card(self, self._radius, self._border, self._fill)
@@ -963,37 +964,24 @@ def show_fluent_popup_for_anchor(
 class FluentSettingsPopupAnchor:
     """Own the true-toggle contract between one Setting button and its popup.
 
-    ``Qt.Popup`` auto-dismiss plus button release otherwise reopens the popup.
-    This owner records that hide and centralises the debounce. ``prepare`` runs
-    only before showing; an optional ``present`` preserves a component-specific
-    placement contract while leaving toggle ownership here.
+    The popup itself prevents replay of the one outside press on this anchor;
+    closing a row or pressing Escape never delays a subsequent open. ``prepare``
+    runs only before showing; ``present`` preserves the caller's placement.
     """
 
     def __init__(
         self,
         popup: FluentPopup,
         anchor: QtWidgets.QWidget,
-        *,
-        reopen_debounce_s: float = 0.25,
     ) -> None:
         if not isinstance(popup, (FluentPopup, FluentOverlayFrame)):
             raise TypeError("popup must be FluentPopup or FluentOverlayFrame")
         if not isinstance(anchor, QtWidgets.QWidget):
             raise TypeError("anchor must be QWidget")
-        if isinstance(reopen_debounce_s, bool) or not isinstance(
-            reopen_debounce_s, (int, float)
-        ):
-            raise TypeError("reopen_debounce_s must be a real number")
-        if not math.isfinite(reopen_debounce_s) or reopen_debounce_s < 0.0:
-            raise ValueError("reopen_debounce_s must be finite and non-negative")
         self._popup = popup
         self._anchor = anchor
-        self._reopen_debounce_s = float(reopen_debounce_s)
-        self._dismissed_at = float("-inf")
-        popup._on_hidden = self._record_dismissed
-
-    def _record_dismissed(self) -> None:
-        self._dismissed_at = time.monotonic()
+        if isinstance(popup, FluentPopup):
+            popup._toggle_anchor_ref = weakref.ref(anchor)
 
     def toggle(
         self,
@@ -1017,11 +1005,6 @@ class FluentSettingsPopupAnchor:
         popup = self._popup
         if popup.isVisible():
             popup.hide()
-            return
-        if (
-            popup.windowType() == QtCore.Qt.Popup
-            and time.monotonic() - self._dismissed_at < self._reopen_debounce_s
-        ):
             return
         if prepare is not None:
             prepare()
