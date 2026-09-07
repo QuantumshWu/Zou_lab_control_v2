@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tomllib
 from types import SimpleNamespace
 
 from zlc_workbench.tools.check_environment import OWNED, check
@@ -23,10 +24,7 @@ from pathlib import Path
 import zou_lab_control
 print(zou_lab_control.__file__)
 root = Path(zou_lab_control.__file__).resolve().parent.parent
-for name in (
-    "zlc_data", "zlc_durable", "zlc_runtime", "zlc_plot",
-    "zlc_ui", "zlc_pulse", "zlc_atom", "zlc_workbench",
-):
+for name in zou_lab_control.entry_specs("zou_lab_control.layers"):
     module = __import__(name)
     origin = Path(module.__file__).resolve()
     print(origin)
@@ -57,6 +55,14 @@ def test_product_manifest_owns_all_commands_and_layers() -> None:
         "zlc_data", "zlc_durable", "zlc_runtime", "zlc_plot", "zlc_ui",
         "zlc_pulse", "zlc_atom", "zlc_workbench",
     }
+    # The manifest names the layers twice -- the entry-point group the
+    # bootstrap reads and the setuptools search list the wheel is built
+    # from -- and the two must be one list.
+    manifest = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    where = manifest["tool"]["setuptools"]["packages"]["find"]["where"]
+    assert set(where) == {"."} | {
+        f"packages/{name}/src" for name in entry_specs("zou_lab_control.layers")
+    }
     assert set(entry_specs("zou_lab_control.commands")) == {
         "capture", "check", "device_manager", "evidence", "figure_viewer", "fpga",
         "pulse_editor", "pulse_server", "slm_server", "task_console",
@@ -71,6 +77,42 @@ def test_product_manifest_owns_all_commands_and_layers() -> None:
     for spec in entry_specs("zou_lab_control.commands").values():
         module_name, attribute = spec.split(":", 1)
         assert callable(getattr(import_module(module_name), attribute))
+
+
+def test_a_command_that_takes_no_arguments_refuses_them(monkeypatch, capsys) -> None:
+    """Arguments a command cannot see are a usage error, not silence.
+
+    ``zlc check --not-an-option`` ran the environment check and reported
+    success: the dispatcher dropped whatever an argv-less entry could not
+    take, so a typo was indistinguishable from the command it meant.
+    """
+
+    import sys
+    import types
+
+    from zou_lab_control import __main__ as product_entry
+
+    calls: list[str] = []
+    module = types.ModuleType("zlc_test_argvless_command")
+    module.main = lambda: calls.append("ran") or 0
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setattr(
+        product_entry,
+        "entry_specs",
+        lambda group: (
+            {"quiet": f"{module.__name__}:main"}
+            if group == product_entry._COMMAND_GROUP
+            else {}
+        ),
+    )
+
+    assert product_entry.main(["quiet", "--not-an-option"]) == 2
+    assert calls == []
+    output = capsys.readouterr().out
+    assert "quiet takes no arguments" in output and "--not-an-option" in output
+
+    assert product_entry.main(["quiet"]) == 0
+    assert calls == ["ran"]
 
 
 def test_manual_evidence_never_prepares_an_automated_lane(monkeypatch, capsys) -> None:

@@ -29,8 +29,9 @@ The top-level facade contains only these names:
 | `readable_json_bytes`, `write_readable_json` | validate a plain JSON tree and encode or durably write its readable UTF-8 representation |
 | `durable_makedirs` | durably create every missing level of a directory tree |
 | `day_folder` | create or open one calendar-day folder beneath an existing save root |
+| `day_folder_path` | name that calendar-day folder without creating, stat'ing or resolving anything -- the pure question a form, a title or a dialog asks |
 | `unique_path` | atomically publish a complete file at the first free numbered name, or exclusively create a uniquely named run directory |
-| `DirectoryDurabilityError` | report that a directory entry could not be made crash-durable |
+| `DirectoryDurabilityError` | report that a directory entry could not be made crash-durable; its `published` names the file or directory that is already complete and visible when the flush after publication was what failed |
 
 ## Where things live
 

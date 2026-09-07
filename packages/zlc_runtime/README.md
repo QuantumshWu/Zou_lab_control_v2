@@ -50,15 +50,21 @@ and terminal fit output is rejected if it trails the finished source generation.
 
 `NodeHost` enforces the descriptor-selected worker/processor role, live commit,
 Task progress, Stop, and terminal contracts. Every hosted Task allocates one
-unique run directory only when `start()` actually begins it. One atomically
-replaced `run.json` is the identity, normalized input summary, current status,
-latest progress, explicit artifact inventory, and failure record. Runtime never
-dumps live or intermediate data: a domain Task writes a selected complete file
-inside its run directory and then registers it through the execution context.
-Declared final artifacts must be registered with their semantic contract before
-the Task can complete. Stop and failure keep the directory and every registered
-file. A Task may explicitly accept Stop before its irreversible terminal work;
-any later exception is still a failure.
+unique run directory only when `start()` actually begins it. A run writes two
+records about itself, each created once and never replaced: `start.json` at
+Start (identity, normalized input summary, `started_at`) before any irreversible
+work, and `run.json` when the run is over (terminal state, stop reason, last
+progress, explicit artifact inventory, failure record). Nothing is written in
+between -- progress and artifact registration stay in the process -- so a run
+directory holding `start.json` and no `run.json` is a run that did not finish.
+Runtime never dumps live or intermediate data: a domain Task writes a selected
+complete file inside its run directory and then registers it through the
+execution context. Declared final artifacts must be registered with their
+semantic contract before the Task can complete. Stop and failure keep the
+directory and every registered file; a partial-exit writer that fails during
+Stop is reported as the observation's and the stopped record's error while the
+state stays stopped. A Task may explicitly accept Stop before its irreversible
+terminal work; any later exception is still a failure.
 
 A hosted Task may expose one active `OperatorInputRequest` through `NodeHost`
 and wait in its worker without polling. The response names that exact request;

@@ -112,18 +112,30 @@ writes a GUI image, and Panel Save Fig writes only that panel's frozen data/imag
 plus actual run/device provenance.
 
 Every hosted Task allocates its unique run folder only when execution actually
-starts. An atomically replaced `run.json` records inputs, progress, registered
-artifacts, terminal status and failure. Tasks save only curated domain outputs;
-Runtime does not dump all live data or intermediate shots. Calibration,
-Temperature and SLM Feedback use this same lifecycle.
+starts. A run writes two records about itself, each created once and never
+replaced: `start.json` at Start (identity, normalized inputs, `started_at`) and
+`run.json` when the run is over (terminal status, stop reason, last progress,
+registered artifacts, failure). Nothing is written in between, so a folder
+holding `start.json` and no `run.json` is a run that did not finish. Tasks save
+only curated domain outputs; Runtime does not dump all live data or
+intermediate shots. Calibration, Temperature and SLM Feedback use this same
+lifecycle.
 
-Calibration defaults to an analytic equal-prior Gaussian threshold fitted from
-all labelled dark/bright shots; an individual failed Gaussian fit falls
-back to the empirical balanced-fidelity threshold, while explicitly selecting
-Empirical uses it for every site. Histogram threshold lines always show the
-final deployed classifier. Separate report Curves show actual fidelity on all
-Calibration data at that final threshold and Gaussian-model fidelity at the
-analytic threshold.
+Calibration's threshold method is the operator's choice and defaults to
+`gaussian`: every site fits an unlabelled two-component Gaussian mixture to all
+of its finite short-shot signals, keeps the fitted population weights, and takes
+as threshold the analytic crossing of the two weighted component curves between
+their means -- the point that minimises the fitted populations' total
+misclassification. Reference labels never enter the Gaussian parameters,
+weights or threshold; they serve only the Empirical threshold and the reported
+actual fidelity. A site whose fit, populations or crossing is invalid uses the
+empirical threshold that maximises actual accuracy over its labelled samples,
+and selecting `empirical` explicitly uses that for every site. Histogram
+threshold lines always show the final deployed classifier, and the drawn
+Gaussian curves reuse the saved parameters and weights rather than a second
+fit. The report saves the overall actual fidelity at the final threshold on all
+valid labelled data (with dark/bright conditional values) and, for Gaussian
+sites, the theoretical fidelity integrated from the fitted population weights.
 
 Calibration can optionally pause once after site detection for operator review.
 TaskConsole shows the detected SiteMap over the reference average; the operator
@@ -167,14 +179,21 @@ version; unsupported files are refused.
 
 Calibration remains an SLM-independent camera/readout artifact and supplies only
 registered site BOX geometry to Feedback. Feedback uses one canonical single-
-frame Camera Measurement batch per candidate (100 authored shots by default).
-Finite single/double Gaussian fits are valid; dark-only sites receive the
-authored absolute boost, loaded sites change relatively under feedback gain and
-maximum-step bounds, invalid sites hold, and history protects the learned loading
-floor. Every next acquisition requires a confirmed different phase. The task
-runs all authored updates (12 by default), then keeps the best measured
-candidate; it has no built-in uniformity magic-number stop and no hidden retry or
-validation batch.
+frame Camera Measurement batch per candidate (100 authored shots by default). A
+site is observable only when the constrained two-Gaussian fit of its whole batch
+is numerically valid, meets the component and separation conditions and wins by
+full-data ΔBIC > 10; an ordinary fit that does not is a single (not loaded), and
+a numeric or acquisition failure is invalid and holds its share. A dark site
+moves toward the loading edge by bracketed bisection, or one resolution step
+along its probed direction, funded by the loaded sites through one common
+factor at no more than one resolution step per site per candidate; a loaded site
+on the loading ramp (bright fraction below half the array median) holds; only
+formal double updates use `feedback_gain`. Every next acquisition requires a
+confirmed different phase. The task stops when three consecutive formal
+candidates have a split-half variance indistinguishable from zero, or at the
+authored update limit (12 by default), and keeps the completely measured
+candidate with the smallest split-half variance plus its standard error; it has
+no built-in uniformity-ratio stop and no hidden retry or validation batch.
 
 Feedback stores a stable site table and curated per-candidate BOX samples,
 fit/classification, weights, actions, metrics, phase-change facts and command

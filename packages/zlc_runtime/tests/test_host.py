@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import threading
 from threading import Event
 import time
@@ -530,6 +533,74 @@ def test_task_stop_keeps_run_and_process_artifact(tmp_path: Path) -> None:
             "partial",
             "stop_report",
         }
+    finally:
+        host.shutdown()
+        plane.close()
+
+
+@pytest.mark.parametrize("ending", ("interrupted", "returned", "failed"))
+def test_a_partial_writer_that_fails_on_the_way_out_is_reported_not_dropped(
+    tmp_path: Path, ending: str
+) -> None:
+    """What the exit writer could not save is part of how the run ended.
+
+    On a Stop -- whether the worker was interrupted mid-step or returned
+    after seeing the request -- the state stays stopped/cancelled, and the
+    save failure is the observation's error and the record's error.  It
+    used to be a note on the interruption, which the cancelled ending
+    discards, so the bench and run.json both showed a clean stop and the
+    report that was never written went unmentioned.  On a failure it is a
+    note on the failure, in the record's traceback.
+    """
+
+    running = Event()
+    wake = Event()
+    plane = SignalDataPlane()
+
+    class Node:
+        def execute(self, context):
+            def save_partial(status, _error):
+                raise PermissionError("report.npz is held open by another process")
+
+            context.register_partial_exit_writer(save_partial)
+            checkpoint = context.run_directory / "partial.json"
+            checkpoint.write_text("{}", encoding="utf-8")
+            context.register_artifact("partial", checkpoint, role="process")
+            context.report_progress("waiting")
+            if ending == "failed":
+                raise ValueError("fit exploded")
+            running.set()
+            while not context.cancel_requested():
+                time.sleep(0.001)
+            if ending == "interrupted":
+                raise InterruptedError("interrupted mid-step")
+
+    host = _host(Node(), plane, wake, instance_id="long-task", kind="task")
+    try:
+        host.start(run_root=tmp_path, input_summary={})
+        if ending != "failed":
+            assert running.wait(2.0)
+            host.cancel("operator Stop")
+        observation = _wait(host, wake)
+        document = json.loads((host.run_directory / "run.json").read_text())
+        assert host.artifacts[0].path.is_file()
+        assert [item["name"] for item in document["artifacts"]] == ["partial"]
+        if ending == "failed":
+            assert observation.phase == "failed"
+            assert observation.error == "ValueError: fit exploded"
+            assert document["status"]["state"] == "failed"
+            assert document["error"]["type"].endswith("ValueError")
+            assert "PermissionError: report.npz is held open" in document["error"]["traceback"]
+            return
+        assert observation.phase == "cancelled"
+        assert observation.error == (
+            "Task partial artifacts could not be saved: "
+            "PermissionError: report.npz is held open by another process"
+        )
+        assert document["status"]["state"] == "stopped"
+        assert document["status"]["stop_reason"] == "operator Stop"
+        assert document["error"]["type"].endswith("PermissionError")
+        assert document["error"]["message"] == "report.npz is held open by another process"
     finally:
         host.shutdown()
         plane.close()
@@ -1127,21 +1198,22 @@ def test_an_exact_processor_starts_on_an_armed_silent_source() -> None:
 
 
 def test_a_run_record_is_written_once_when_the_run_is_over(tmp_path) -> None:
-    """Liveness is not a disk fact, and a record is not rewritten.
+    """Two records, each created once: one at Start, one when the run is over.
 
-    The file used to carry ``status.state`` and be replaced on every
-    transition, every progress report and every artifact -- hundreds of
-    times in a long calibration, each one an ``os.replace`` over a path
-    another handle may hold, which is the PermissionError the bench hit on
-    the last write of a run.  Nothing ever read it while the run was
-    going.  So: nothing on disk while running, and exactly one write --
-    a creation, never a replacement -- when the run ends.
+    ``start.json`` is written when the run begins and never touched again;
+    ``run.json`` is created when the run ends and never replaced; nothing
+    is written in between.  A file replaced on every progress report and
+    every artifact -- hundreds of times in a long calibration, each one an
+    ``os.replace`` over a path another handle may hold -- is the
+    PermissionError the bench hit on the last write of a run, and nothing
+    reads it while the run is going.
     """
 
     from zlc_runtime.task_run import TaskRun
 
     directory = tmp_path / "run-0001"
     directory.mkdir()
+    start = directory / "start.json"
     record = directory / "run.json"
     run = TaskRun(
         directory=directory,
@@ -1149,23 +1221,40 @@ def test_a_run_record_is_written_once_when_the_run_is_over(tmp_path) -> None:
         instance_id="cal-1",
         input_summary={"repeats": 3},
     )
-    assert not record.exists(), "a starting run wrote a live state to disk"
+    assert list(directory.iterdir()) == [], "a run wrote to disk before it started"
 
     run.mark_running()
+    assert list(directory.iterdir()) == [start]
+    begun = json.loads(start.read_text(encoding="utf-8"))
+    assert begun["schema"] == "zlc.task-start"
+    assert begun["run_id"] == "run-0001"
+    assert begun["task"] == {"api_name": "calibration", "instance_id": "cal-1"}
+    assert begun["input"] == {"repeats": 3}
+    assert begun["started_at"].endswith("Z")
+    started_at = start.stat().st_mtime_ns
+
     for cycle in range(200):
         run.report_progress("Capturing", current=cycle, total=200)
     produced = directory / "frame.json"
     produced.write_text("{}", encoding="utf-8")
     run.register_artifact("frame", produced, role="summary")
-    assert not record.exists(), (
-        "a running task published its progress to disk; the file exists to "
-        "record what the run WAS, not to broadcast what it is doing"
+    assert sorted(directory.iterdir()) == sorted((start, produced)), (
+        "a running task published its progress to disk; the records exist to "
+        "say what the run WAS, not to broadcast what it is doing"
     )
+    assert start.stat().st_mtime_ns == started_at
 
     run.mark_completed()
     document = json.loads(record.read_text(encoding="utf-8"))
     assert document["status"]["state"] == "completed"
+    assert document["status"]["started_at"] == begun["started_at"]
+    assert document["status"]["progress"] == {
+        "message": "Capturing",
+        "current": 199,
+        "total": 200,
+    }
     assert [item["name"] for item in document["artifacts"]] == ["frame"]
+    assert start.stat().st_mtime_ns == started_at
 
     # And the record is final: a later terminal report never replaces the
     # file, because replacing it is the failure this design avoids.
@@ -1173,6 +1262,119 @@ def test_a_run_record_is_written_once_when_the_run_is_over(tmp_path) -> None:
     run.mark_failed(RuntimeError("after the fact"))
     assert record.stat().st_mtime_ns == written_at
     assert json.loads(record.read_text(encoding="utf-8"))["error"] is None
+    # Neither record is a Task artifact.
+    for own in (start, record):
+        with pytest.raises(ValueError, match="run's own record"):
+            run.register_artifact(own.name, own, role="summary")
+
+
+def test_a_process_that_dies_after_start_leaves_the_start_record(tmp_path) -> None:
+    """The start record is the provenance a crash cannot take away.
+
+    A run whose process dies before its terminal write leaves ``start.json``
+    -- identity, normalized input, when it began -- and no ``run.json``,
+    which is what "did not finish" looks like.  Without the start record
+    such a run was an empty directory: no input, no identity, nothing to
+    say what the run had been.
+    """
+
+    script = """
+import os, sys
+from zlc_runtime.task_run import TaskRun
+run = TaskRun.create(sys.argv[1], task_name="calibration", instance_id="cal-1",
+                     input_summary={"exposure_seconds": 0.023, "repeats": 400})
+run.mark_running()
+run.report_progress("captured", current=3, total=400)
+os._exit(42)
+"""
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = os.pathsep.join(path for path in sys.path if path)
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path)],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert completed.returncode == 42, completed.stderr
+    (run_directory,) = tmp_path.iterdir()
+    assert run_directory.name == "calibration"
+    assert [path.name for path in run_directory.iterdir()] == ["start.json"]
+    begun = json.loads((run_directory / "start.json").read_text(encoding="utf-8"))
+    assert begun["task"] == {"api_name": "calibration", "instance_id": "cal-1"}
+    assert begun["input"] == {"exposure_seconds": 0.023, "repeats": 400}
+
+
+def test_a_terminal_record_that_could_not_be_written_is_not_claimed(
+    tmp_path, monkeypatch
+) -> None:
+    """A record that could not be written is a terminal state not entered.
+
+    The failed ``mark_completed`` leaves the run open, so the caller's
+    ``mark_failed`` ends it with the write error -- the outcome reaches the
+    disk on the second attempt.  Claiming "recorded" before the write
+    turned the first failure into a run with no record at all, silently:
+    the failure path found the run already terminal and returned.
+    """
+
+    import zlc_runtime.task_run as task_run
+
+    directory = tmp_path / "run-0001"
+    directory.mkdir()
+    run = task_run.TaskRun(
+        directory=directory,
+        task_name="calibration",
+        instance_id="cal-1",
+        input_summary={},
+    )
+    run.mark_running()
+    real_write = task_run.write_readable_json
+    refusals = []
+
+    def write(path, tree, **options):
+        if not refusals:
+            refusals.append(path)
+            raise PermissionError("run.json is held open by another process")
+        return real_write(path, tree, **options)
+
+    monkeypatch.setattr(task_run, "write_readable_json", write)
+    with pytest.raises(PermissionError, match="held open") as caught:
+        run.mark_completed()
+    assert not (directory / "run.json").exists()
+    run.report_progress("still open")
+    run.mark_failed(caught.value)
+    document = json.loads((directory / "run.json").read_text(encoding="utf-8"))
+    assert document["status"]["state"] == "failed"
+    assert document["status"]["progress"]["message"] == "still open"
+    assert document["error"]["type"].endswith("PermissionError")
+    assert refusals == [directory.resolve() / "run.json"]
+
+
+def test_a_run_refused_for_its_input_leaves_no_directory(tmp_path) -> None:
+    """Input the records cannot hold is refused before the directory is taken.
+
+    A non-finite float or an arbitrary object would have been found at the
+    record's write, after the run directory existed: an empty run left
+    behind by a run that never began.
+    """
+
+    from zlc_runtime.task_run import TaskRun
+
+    with pytest.raises(ValueError, match=r"Task input\.gain must be finite"):
+        TaskRun.create(
+            tmp_path,
+            task_name="calibration",
+            instance_id="cal-1",
+            input_summary={"gain": float("nan")},
+        )
+    with pytest.raises(TypeError, match=r"Task input\.camera contains unsupported object"):
+        TaskRun.create(
+            tmp_path,
+            task_name="calibration",
+            instance_id="cal-1",
+            input_summary={"camera": object()},
+        )
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_a_schema_advance_ends_a_processor_cancelled_not_failed() -> None:

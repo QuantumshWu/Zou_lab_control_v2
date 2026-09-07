@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import math
 from pathlib import Path
 from threading import RLock
 import traceback
@@ -23,6 +24,11 @@ _TERMINAL_STATES = frozenset(("completed", "stopped", "failed"))
 _ARTIFACT_ROLES = frozenset(
     ("checkpoint", "process", "final", "figure", "summary", "preview")
 )
+#: The two files a run writes about itself, each created once and never
+#: replaced: the start record when the run begins, the run record when it
+#: is over.  Neither is a Task artifact.
+_START_RECORD = "start.json"
+_RUN_RECORD = "run.json"
 
 
 def _now() -> str:
@@ -41,7 +47,19 @@ def _text(value: object, name: str) -> str:
 
 
 def _plain_input(value: object, path: str) -> object:
-    if value is None or type(value) in (str, bool, int, float):
+    """Normalize one Task input into the plain JSON the run's records hold.
+
+    What the records cannot hold -- a non-finite float, a non-text key, an
+    arbitrary object -- is refused here, at the input, so that ``create``
+    can refuse a run before its directory exists and the start record never
+    meets a surprise at the moment the run begins.
+    """
+
+    if value is None or type(value) in (str, bool, int):
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError(f"{path} must be finite")
         return value
     if isinstance(value, Path):
         return str(value.expanduser().resolve())
@@ -74,9 +92,24 @@ class TaskArtifact:
 class TaskRun:
     """The durable lifecycle and explicit artifact index of one Task run.
 
-    ``run.json`` is the only metadata truth.  This owner never inspects or
-    saves scientific data: a domain Task writes a complete chosen file and
-    then registers that file here.
+    A run writes two files about itself, each created once and never
+    replaced.  ``start.json`` is written when the run begins -- its identity,
+    its normalized input, when it started -- so a process that dies mid-run
+    still leaves what the run WAS.  ``run.json`` is written when the run is
+    over: how it ended, what it registered, what went wrong.  Nothing is
+    written in between: progress and artifact registration stay in the
+    process.  A record rewritten on every one of them is, for a two-hundred-
+    repeat calibration, two hundred fsyncs and two hundred ``os.replace``
+    calls over a path something else may hold open -- on Windows, a
+    PermissionError waiting for the last write of a long run -- and nothing
+    reads it while the run is going.  Liveness belongs to the process that
+    has it; a "running" left in a file by a process that has since died is
+    not stale information, it is false information.  So a run directory
+    with a start record and no run record is a run that did not finish,
+    which is exactly what it means.
+
+    This owner never inspects or saves scientific data: a domain Task writes
+    a complete chosen file and then registers that file here.
     """
 
     def __init__(
@@ -101,7 +134,6 @@ class TaskRun:
         self._error: dict[str, object] | None = None
         self._artifacts: dict[str, TaskArtifact] = {}
         self._lock = RLock()
-        self._recorded = False
 
     @classmethod
     def create(
@@ -112,17 +144,27 @@ class TaskRun:
         instance_id: str,
         input_summary: Mapping[str, object],
     ) -> "TaskRun":
+        """Allocate a run directory for input the run's records can hold.
+
+        The input is normalized before the directory is taken: a run refused
+        for its input must not leave an empty run directory behind, and the
+        refusal belongs at Start, not at the start record's write.
+        """
+
         if not isinstance(input_summary, Mapping):
             raise TypeError("Task input summary must be a mapping")
+        name = _text(task_name, "task name")
+        identity = _text(instance_id, "task instance_id")
+        plain = _plain_input(input_summary, "Task input")
         root = Path(run_root).expanduser().resolve()
         if not root.is_dir():
             raise NotADirectoryError(f"Task run root does not exist: {root}")
-        selected = unique_path(root, _text(task_name, "task name"), "")
+        selected = unique_path(root, name, "")
         return cls(
             selected,
-            task_name=task_name,
-            instance_id=instance_id,
-            input_summary=input_summary,
+            task_name=name,
+            instance_id=identity,
+            input_summary=plain,
         )
 
     @property
@@ -135,7 +177,30 @@ class TaskRun:
             return self._artifacts.get(str(name))
 
     def mark_running(self) -> None:
-        self._transition("running", allowed=("starting",))
+        """Begin the run: write its start record, once, then run.
+
+        The record is written before the state changes, so a record that
+        could not be written is a run that did not begin: the caller ends
+        it as failed with the write error, and nothing irreversible has
+        happened yet.
+        """
+
+        with self._lock:
+            self._require("running", allowed=("starting",))
+            write_readable_json(
+                self.directory / _START_RECORD,
+                {
+                    "schema": "zlc.task-start",
+                    "run_id": self.directory.name,
+                    "task": {
+                        "api_name": self.task_name,
+                        "instance_id": self.instance_id,
+                    },
+                    "input": self._input,
+                    "started_at": self._started_at,
+                },
+            )
+            self._state = "running"
 
     def mark_stopping(self, reason: str) -> None:
         with self._lock:
@@ -147,10 +212,25 @@ class TaskRun:
             self._stop_reason = _text(reason, "Task stop reason")
 
     def mark_completed(self) -> None:
-        self._transition("completed", allowed=("running",))
+        with self._lock:
+            self._require("completed", allowed=("running",))
+            self._end_locked("completed", None)
 
-    def mark_stopped(self) -> None:
-        self._transition("stopped", allowed=("starting", "running", "stopping"))
+    def mark_stopped(self, error: BaseException | None = None) -> None:
+        """End the run as stopped, recording what the ending itself could not do.
+
+        Stopping is not failing: the state is ``stopped`` whatever ``error``
+        says.  ``error`` is the ending's own trouble -- the partial artifacts
+        the Task's exit writer was asked to save and could not -- and a
+        record that said nothing of it left the operator a run that looked
+        cleanly stopped and a report that was never written.
+        """
+
+        if error is not None and not isinstance(error, BaseException):
+            raise TypeError("Task stop error must be an exception")
+        with self._lock:
+            self._require("stopped", allowed=("starting", "running", "stopping"))
+            self._end_locked("stopped", error)
 
     def mark_failed(self, error: BaseException) -> None:
         if not isinstance(error, BaseException):
@@ -158,11 +238,7 @@ class TaskRun:
         with self._lock:
             if self._state in _TERMINAL_STATES:
                 return
-            self._state = "failed"
-            self._ended_at = _now()
-            self._progress = None
-            self._error = self._error_document(error)
-            self._record_locked()
+            self._end_locked("failed", error)
 
     def execute(self, work: Callable[["TaskRun"], _Result]) -> _Result:
         """Run direct/notebook Task work through this same durable lifecycle."""
@@ -215,8 +291,10 @@ class TaskRun:
         except ValueError as error:
             raise ValueError("Task artifacts must stay inside their run directory") from error
         relative_text = relative.as_posix()
-        if relative_text == "run.json":
-            raise ValueError("run.json cannot be registered as a Task artifact")
+        if relative_text in (_START_RECORD, _RUN_RECORD):
+            raise ValueError(
+                f"{relative_text} is the run's own record, not a Task artifact"
+            )
         if not resolved.is_file():
             raise FileNotFoundError(f"Task artifact is not a file: {resolved}")
         artifact = TaskArtifact(
@@ -245,78 +323,63 @@ class TaskRun:
             self._artifacts[selected_name] = artifact
         return artifact
 
-    def _transition(self, state: str, *, allowed: tuple[str, ...]) -> None:
-        with self._lock:
-            if self._state not in allowed:
-                raise RuntimeError(
-                    f"Task run cannot enter {state} from {self._state}"
-                )
-            self._state = state
-            if state in _TERMINAL_STATES:
-                self._ended_at = _now()
-                self._progress = None
-                self._record_locked()
+    def _require(self, state: str, *, allowed: tuple[str, ...]) -> None:
+        if self._state not in allowed:
+            raise RuntimeError(
+                f"Task run cannot enter {state} from {self._state}"
+            )
 
-    def _record_locked(self) -> None:
-        """Write the run's record, once, when the run is over.
+    def _end_locked(self, state: str, error: BaseException | None) -> None:
+        """Enter a terminal state by writing the run record, once.
 
-        A record is written when there is something to record.  This file
-        used to be rewritten on every state change, every progress report
-        and every artifact -- a two-hundred-repeat calibration replaced it
-        two hundred times, each replacement an fsync and an ``os.replace``
-        over a path something else might have open, which on Windows is a
-        PermissionError landing on the last write of a long run.  Nothing
-        ever read it while the run was going.
-
-        It was doing two jobs and only one of them is a file's: what the
-        run WAS -- its input, its artifacts, how it ended -- is a durable
-        fact worth keeping, and whether it is running right now is not.
-        Liveness belongs to the process that has it; a "running" left in a
-        file by a process that has since died is not stale information,
-        it is false information.  So a run directory without this file is
-        a run that did not finish, which is exactly what it means.
-
-        Written once also means the path is created, never replaced: there
-        is no destination for an open handle to hold, so the failure that
-        started this cannot happen.
+        The record is the state: a record that could not be written is a
+        terminal state that was not entered, so the run is still open for
+        the caller's ``mark_failed`` to end it with the write error as its
+        error -- the outcome reaches the disk unless the disk refuses
+        twice, and a refusal is never silent.  A terminal state is reached
+        once, and its record is created, never replaced: there is no
+        destination for an open handle to hold.
         """
 
-        if self._recorded:
-            # A terminal state is reached once.  Recording twice would be
-            # the replace this design exists to avoid.
-            return
-        self._recorded = True
-        write_readable_json(
-            self.directory / "run.json",
-            {
-                "schema": "zlc.task-run",
-                "run_id": self.directory.name,
-                "task": {
-                    "api_name": self.task_name,
-                    "instance_id": self.instance_id,
+        previous = (self._state, self._ended_at, self._error)
+        self._state = state
+        self._ended_at = _now()
+        if error is not None:
+            self._error = self._error_document(error)
+        try:
+            write_readable_json(
+                self.directory / _RUN_RECORD,
+                {
+                    "schema": "zlc.task-run",
+                    "run_id": self.directory.name,
+                    "task": {
+                        "api_name": self.task_name,
+                        "instance_id": self.instance_id,
+                    },
+                    "input": self._input,
+                    "status": {
+                        "state": self._state,
+                        "started_at": self._started_at,
+                        "ended_at": self._ended_at,
+                        "progress": self._progress,
+                        "stop_reason": self._stop_reason,
+                    },
+                    "artifacts": [
+                        {
+                            "name": artifact.name,
+                            "path": artifact.relative_path,
+                            "role": artifact.role,
+                            "contract_id": artifact.contract_id,
+                            "size_bytes": artifact.size_bytes,
+                        }
+                        for artifact in self._artifacts.values()
+                    ],
+                    "error": self._error,
                 },
-                "input": self._input,
-                "status": {
-                    "state": self._state,
-                    "started_at": self._started_at,
-                    "updated_at": _now(),
-                    "ended_at": self._ended_at,
-                    "progress": self._progress,
-                    "stop_reason": self._stop_reason,
-                },
-                "artifacts": [
-                    {
-                        "name": artifact.name,
-                        "path": artifact.relative_path,
-                        "role": artifact.role,
-                        "contract_id": artifact.contract_id,
-                        "size_bytes": artifact.size_bytes,
-                    }
-                    for artifact in self._artifacts.values()
-                ],
-                "error": self._error,
-            },
-        )
+            )
+        except BaseException:
+            self._state, self._ended_at, self._error = previous
+            raise
 
     @staticmethod
     def _error_document(error: BaseException) -> dict[str, object]:

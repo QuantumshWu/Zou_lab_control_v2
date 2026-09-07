@@ -546,6 +546,12 @@ def scan_table_template(kind: str, columns: Sequence[ScanColumnSpec]) -> str:
     sweeps every combination of the per-slot axes and reports the shape so the
     result can be read as a map.  Both assign ``scan_table``; that name is the
     contract with whoever runs the program.
+
+    The per-slot axes are the program's own names, ``a0``, ``a1``, ... in slot
+    order, with the slot id in the comment above each.  A slot id lives in the
+    pulse's namespace, not Python's: ``np``, ``N`` and ``for`` are all legal
+    ids, and a program that spelled its axes after them shadowed its import,
+    its point count or its syntax.
     """
 
     cols = list(columns)
@@ -614,12 +620,14 @@ def scan_table_template(kind: str, columns: Sequence[ScanColumnSpec]) -> str:
         "# number of scan points",
         "N = 21",
     ]
-    for spec in cols:
+    for index, spec in enumerate(cols):
         lines.append("")
         lines.append(f"# {_note(spec)}")
-        lines.append(f"{spec.name} = {_sweep(spec, 'N')}")
+        lines.append(f"a{index} = {_sweep(spec, 'N')}")
     lines.append("")
     lines.append(
-        "scan_table = np.column_stack([" + ", ".join(spec.name for spec in cols) + "])"
+        "scan_table = np.column_stack(["
+        + ", ".join(f"a{index}" for index in range(count))
+        + "])"
     )
     return "\n".join(lines) + "\n"

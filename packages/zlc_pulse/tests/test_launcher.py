@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 import subprocess
+import sys
+import types
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +18,8 @@ ESTIMATE_LAUNCHER = ROOT.parents[1] / "bin" / "estimate_resources.bat"
 INSTALL_LAUNCHER = ROOT.parents[1] / "bin" / "install_requirements.bat"
 TOOLS_RESOLVER = ROOT / "fpga" / "_resolve_tools.bat"
 FPGA_SOURCES = ROOT / "fpga" / "pulse_streamer"
+ADD_CHANNEL_LAUNCHER = ROOT.parents[1] / "bin" / "add_pulse_channel.bat"
+EMBEDDED_MARKER = "### ZLC-EMBEDDED-PYTHON ###"
 
 
 def _fake_python(path: Path) -> Path:
@@ -61,25 +66,23 @@ def test_real_batch_wrapper_forwards_exact_modes_without_inner_argument(tmp_path
     shared = SHARED_LAUNCHER.read_text(encoding="utf-8")
     resolver = TOOLS_RESOLVER.read_text(encoding="utf-8")
     # The resolver is the one owner of "a launched command imports THIS
-    # checkout": it injects the repository root and every layer's src.  The
-    # layer list is read from packages/ itself, so a new layer that the
-    # resolver forgets is a red test, not a silent import of whatever
-    # editable install the interpreter happens to carry.
-    layers = sorted(
-        path.name
-        for path in (ROOT.parents[1] / "packages").iterdir()
-        if (path / "src").is_dir()
-    )
-    assert layers, "packages/ must hold at least one layer with a src tree"
-    for layer in layers:
-        assert rf"%ZLC_TOOL_REPO_ROOT%\packages\{layer}\src" in resolver, layer
-    assert 'set "PYTHONPATH=%ZLC_CHECKOUT_PYTHONPATH%;%PYTHONPATH%"' in resolver
-    assert 'set "PYTHONPATH=%ZLC_CHECKOUT_PYTHONPATH%"' in resolver
+    # checkout", and what it injects is the repository root alone: the
+    # bootstrap at the root reads the layers from the product manifest and
+    # puts every packages/<layer>/src first on sys.path, so a layer list in
+    # the resolver would be a second owner of what the product is made of.
+    assert r"\packages\zlc_" not in resolver
+    assert 'set "PYTHONPATH=%ZLC_TOOL_REPO_ROOT%;%PYTHONPATH%"' in resolver
+    assert 'set "PYTHONPATH=%ZLC_TOOL_REPO_ROOT%"' in resolver
     assert "PYTHONPATH=" not in shared
-    seen = no_args.stdout.split("FAKE_PYTHONPATH=", 1)[1]
-    assert str(ROOT.parents[1]) in seen
-    for layer in layers:
-        assert str(ROOT.parents[1] / "packages" / layer / "src") in seen, layer
+    seen = no_args.stdout.split("FAKE_PYTHONPATH=", 1)[1].splitlines()[0]
+    assert seen.split(";")[0] == str(ROOT.parents[1]), seen
+    assert "packages" not in seen
+    # Which is why every launcher's Python enters through the bootstrap:
+    # "-m zou_lab_control", or "import zou_lab_control" ahead of any zlc_
+    # name.  A one-liner that imported a layer first would get whichever
+    # editable install the interpreter carries.
+    for launcher in sorted((ROOT.parents[1] / "bin").glob("*.bat")):
+        _assert_every_python_line_enters_through_the_bootstrap(launcher)
     installer = INSTALL_LAUNCHER.read_text(encoding="utf-8")
     assert "/installed" in installer
     assert installer.rfind(
@@ -131,6 +134,151 @@ def test_real_batch_wrapper_forwards_exact_modes_without_inner_argument(tmp_path
     assert "failed with code 7" in failed.stdout
 
 
+def _embedded_script(source: str) -> str:
+    """What the launcher extracts: every line after the marker LINE.
+
+    The launcher finds its marker with ``findstr /b`` -- at the start of a
+    line -- because the command that searches for it names it too.
+    """
+
+    marker = re.search(rf"^{re.escape(EMBEDDED_MARKER)}$", source, re.MULTILINE)
+    assert marker is not None, "the add-channel launcher lost its embedded-script marker"
+    return source[marker.end():]
+
+
+def _assert_every_python_line_enters_through_the_bootstrap(launcher: Path) -> None:
+    """Each ``%ZLC_PY_CMD%`` line of one launcher imports ``zou_lab_control`` first."""
+
+    source = launcher.read_text(encoding="utf-8")
+    for line in source.splitlines():
+        text = line.strip()
+        if "%ZLC_PY_CMD%" not in text or text.lower().startswith(("echo", "rem")):
+            continue
+        if "-m zou_lab_control" in text or "-m pip" in text:
+            continue
+        if ' -c "' in text:
+            payload = text.split(' -c "', 1)[1].split('"', 1)[0]
+            if "zlc_" in payload:
+                assert "import zou_lab_control" in payload, (launcher.name, text)
+                assert payload.index("import zou_lab_control") < payload.index(
+                    "zlc_"
+                ), (launcher.name, text)
+            continue
+        if '"%ZLC_PY_SCRIPT%"' in text:
+            script = _embedded_script(source)
+            first_layer = re.search(r"^\s*(from|import) zlc_", script, re.MULTILINE)
+            assert first_layer is not None, launcher.name
+            assert script.index("import zou_lab_control") < first_layer.start(), (
+                launcher.name
+            )
+            continue
+        raise AssertionError(f"{launcher.name}: unrecognised Python invocation: {text}")
+
+
+def _embedded_add_channel_tool() -> types.ModuleType:
+    """The Python the add-channel launcher extracts after its marker, as a module."""
+
+    script = _embedded_script(ADD_CHANNEL_LAUNCHER.read_text(encoding="utf-8"))
+    module = types.ModuleType("zlc_add_pulse_channel_embedded")
+    module.__file__ = str(ADD_CHANNEL_LAUNCHER)
+    exec(compile(script, str(ADD_CHANNEL_LAUNCHER), "exec"), module.__dict__)
+    return module
+
+
+def test_a_board_change_that_fails_its_own_check_is_put_back(tmp_path, capsys) -> None:
+    """The edited files and the regenerated header go back as they were found.
+
+    The change is one set -- manifest, XDC, top, bench and the header derived
+    from them -- and a reconciliation that failed left all of them written
+    with only the .bak files behind: a board no tool could reconcile, for the
+    operator to reassemble by hand.  A file that cannot go back is named, a
+    run that wrote nothing says so, and an over-budget estimate is its own
+    outcome (4, "the board change is IN") rather than the refusal (1,
+    "nothing was written") the wrapper reported for it.
+    """
+
+    tool = _embedded_add_channel_tool()
+    manifest = tmp_path / "streamer_config.json"
+    header = tmp_path / "zlc_geometry.vh"
+    originals = {manifest: b'{"lanes": 1}\r\n', header: None}
+    manifest.write_bytes(b'{"lanes": 2}\r\n')
+    header.write_bytes(b"`define ZLC_NEW\n")
+    tool.put_back(originals)
+    assert manifest.read_bytes() == b'{"lanes": 1}\r\n'
+    assert not header.exists()
+    assert "every edited file was put back" in capsys.readouterr().out
+
+    stuck = tmp_path / "board.xdc"
+    stuck.mkdir()  # a directory where the file was: no byte can go back
+    tool.put_back({stuck: b"set_property PACKAGE_PIN P19\n"})
+    told = capsys.readouterr().out
+    assert "could NOT put back: board.xdc" in told and ".bak files" in told
+
+    tool.put_back({})
+    assert "nothing was written by this run" in capsys.readouterr().out
+
+    source = ADD_CHANNEL_LAUNCHER.read_text(encoding="utf-8")
+    failure = source[source.index("except Exception as error:", source.index("target = pulse_target_from_xdc()")):]
+    assert failure.index("put_back(originals)") < failure.index("return 2")
+    over_budget = source[source.index("if estimate.returncode == 1:"):]
+    assert over_budget.index("return 4") < over_budget.index("return 3 if problems else 0")
+    wrapper = source[:len(source) - len(_embedded_script(source))]
+    refused = wrapper[wrapper.index('if "%ZLC_STATUS%"=="1"'):]
+    assert "REFUSED -- nothing was written" in refused[:refused.index(") else if")]
+    budget = wrapper[wrapper.index('if "%ZLC_STATUS%"=="4"'):]
+    assert "the board change is IN" in budget[:budget.index(") else")]
+    assert "OVER" in budget[:budget.index(") else")]
+
+
+def test_a_stored_python_path_is_honoured_under_either_expansion_mode(tmp_path) -> None:
+    """``.zlc_python_path`` names the interpreter whatever the caller's expansion.
+
+    The launchers in ``bin\\`` disable delayed expansion (a path may contain
+    ``!``); the build launcher enables it.  A resolver that tested the stored
+    path as ``!ZLC_STORED_PY!`` read the literal text under the first and
+    reported every stored path stale, so the ordinary launchers fell through
+    to PATH -- another interpreter, or none.
+    """
+
+    # A real interpreter, as a stored path names one: the resolver asks a
+    # candidate to run before believing it.
+    stored = Path(sys.executable).resolve()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".zlc_python_path").write_text(f"{stored}\n", encoding="utf-8")
+    env = os.environ.copy()
+    env.update({"ZLC_NO_PAUSE": "1", "PYTHONPATH": ""})
+    for name in ("ZLC_PY_CMD", "ZLC_PY_PATH", "ZLC_FPGA_PYTHON"):
+        env.pop(name, None)
+    for expansion in ("/v:off", "/v:on"):
+        result = subprocess.run(
+            f'cmd.exe /d /s {expansion} /c ""{TOOLS_RESOLVER}" python "{repo}""',
+            cwd=tmp_path,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=20,
+            check=False,
+        )
+        assert result.returncode == 0, expansion + result.stdout + result.stderr
+        assert f"ZLC Python: {stored}" in result.stdout, expansion + result.stdout
+        assert "Ignoring stale" not in result.stdout, expansion + result.stdout
+        assert "!ZLC_STORED_PY!" not in result.stdout, expansion + result.stdout
+
+    # A stored path that no longer exists is said to be stale, by name.
+    (repo / ".zlc_python_path").write_text(f"{tmp_path / 'gone.bat'}\n", encoding="utf-8")
+    stale = subprocess.run(
+        f'cmd.exe /d /s /v:off /c ""{TOOLS_RESOLVER}" python "{repo}""',
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+    assert f"Ignoring stale .zlc_python_path: {tmp_path / 'gone.bat'}" in stale.stdout
+
+
 def test_create_project_deletes_only_its_project_child_and_requires_geometry() -> None:
     source = (FPGA_SOURCES / "create_project.tcl").read_text(encoding="utf-8")
     delete_at = source.index("file delete -force $project_dir")
@@ -170,8 +318,23 @@ def test_build_launcher_fails_closed_and_programs_by_default() -> None:
     program_at = source.index(":zlc_program")
     flash_at = source.index('if /I "%MODE%"=="flash"')
     assert require_at < program_at and require_at < flash_at
-    assert "duplicate key" in source
+    # The strict grammar is the config owner's, not a one-liner of the launcher's.
+    assert "require_streamer_config(sys.argv[1])" in source
+    assert "load_streamer_config" not in source
     assert "if errorlevel 1 exit /b 1" in source[require_at:]
+    # The capacity estimate gates the build with its own answer: a fixed
+    # ``exit /b 0`` under it left the caller's ``if errorlevel 1`` dead and
+    # every over-budget geometry building anyway.
+    # The labels, not the calls that precede them.
+    estimate_at = source.index("\n:zlc_print_capacity_estimate")
+    estimate_block = source[estimate_at:source.index("\n:zlc_default_paths", estimate_at)]
+    assert 'set "ZLC_EST_STATUS=%ERRORLEVEL%"' in estimate_block
+    assert "exit /b %ZLC_EST_STATUS%" in estimate_block
+    assert "exit /b 0" not in estimate_block
+    assert (
+        "call :zlc_print_capacity_estimate\nif errorlevel 1 exit /b 1"
+        in source.replace("\r\n", "\n")
+    )
     vivado_call = source.index('call "%ZLC_PS_VIVADO_BIN%" -mode batch')
     assert source.rfind('pushd "!ZLC_PS_BUILD_ROOT!"', 0, vivado_call) >= 0
     assert 'set "ZLC_TCL_STATUS=!ERRORLEVEL!"' in source[vivado_call:]

@@ -1468,6 +1468,72 @@ def _process_qt_until(application, predicate, seconds: float = 2.0) -> None:
     assert predicate(), "timed out waiting for the Pulse Editor owner turn"
 
 
+def test_a_config_file_is_decoded_before_anything_is_dialled(tmp_path, monkeypatch) -> None:
+    """A standalone Connect opens no connection it cannot hand over.
+
+    The presenter only ever receives the streamer or the error, so a board
+    dialled before the config file failed to decode was open and owned by
+    nobody.  The file is decoded first -- a refusal with no connection behind
+    it -- and a board that refuses the decoded entries after the dial is
+    closed by the one who opened it.
+    """
+
+    from zlc_atom.pulse_values import write_config_values
+    from zlc_workbench.apps import pulse_editor as application_module
+
+    dials: list[tuple[str, str]] = []
+
+    class _Board:
+        closed = False
+        refuse = False
+        loaded = None
+
+        def load_config_values(self, entries, *, source):
+            if self.refuse:
+                raise RuntimeError("board refused the entries")
+            self.loaded = (dict(entries), source)
+
+        def close(self):
+            self.closed = True
+
+    board = _Board()
+
+    def fake_dial(mode, endpoint):
+        dials.append((mode, endpoint))
+        return board
+
+    monkeypatch.setattr(application_module, "dial", fake_dial)
+    values = tmp_path / "config_values" / "current.json"
+    values.parent.mkdir()
+    values.write_text("{not json", encoding="utf-8")
+    presenter = application_module.build(
+        _EditorView(),
+        PulseEditorState(sequence=_ordinary_sequence()),
+        config_values=str(values),
+        run_off_thread=_run_preview_immediately,
+    )
+    try:
+        with pytest.raises(ValueError):
+            presenter._dial("virtual", "")
+        assert dials == [], "a board was dialled for a config file that does not decode"
+
+        write_config_values(values, {"hold": (2.0, "ms")})
+        board.refuse = True
+        with pytest.raises(RuntimeError, match="refused the entries"):
+            presenter._dial("virtual", "")
+        assert dials == [("virtual", "")]
+        assert board.closed, "a board that refused the entries was left open"
+
+        board.refuse = False
+        board.closed = False
+        assert presenter._dial("virtual", "") is board
+        assert not board.closed
+        entries, source = board.loaded
+        assert entries["hold"][0] == 2.0 and source == str(values)
+    finally:
+        presenter.close()
+
+
 def _formal_pulse_window(
     tmp_path, monkeypatch, *, sequence, board=None, bound: bool = False, path: str = ""
 ):
@@ -2140,6 +2206,45 @@ def test_a_dac_trace_is_drawable_at_all(sequence) -> None:
         presenter.close()
 
 
+def test_a_ramp_is_previewed_as_the_staircase_the_board_plays(sequence) -> None:
+    """An edge and a ramp to the same level are two different pictures.
+
+    The board plays an edge as one change at the period start and a ramp as
+    a staircase from the level carried in to the target at the period end.
+    A preview that read only ``step.value`` drew the target from the period
+    start in both modes, so the two instructions could not be told apart on
+    screen.
+    """
+
+    from zlc_pulse import AnalogStep
+
+    dac = next(port for port in sequence.target.ports if port.kind == "dac")
+
+    def with_step(mode: str) -> object:
+        periods = list(sequence.periods)
+        periods[1] = replace(periods[1], analog_steps=(AnalogStep(dac.key, mode, 3),))
+        return replace_sequence(sequence, periods=tuple(periods))
+
+    edge = next(
+        item for item in timeline_of(with_step("edge")).analog_traces if item.name == dac.key
+    )
+    ramp = next(
+        item for item in timeline_of(with_step("ramp")).analog_traces if item.name == dac.key
+    )
+    assert edge != ramp
+    total = timeline_of(sequence, include_off=True).total_duration
+    assert edge.values == (0.0, 3.0)
+    assert edge.starts[0] == 0.0 and edge.starts[-1] == total
+    # The edge changes where its period starts; the ramp's first code comes
+    # later, and its three codes climb to the target where the next period
+    # begins -- every start strictly after the one before, ending at the total.
+    period_start = edge.starts[1]
+    assert ramp.values == (0.0, 1.0, 2.0, 3.0)
+    assert ramp.starts[0] == 0.0 and ramp.starts[-1] == total
+    assert ramp.starts[1] > period_start
+    assert all(left < right for left, right in zip(ramp.starts, ramp.starts[1:]))
+
+
 def test_the_target_page_says_which_pins_an_output_reaches(presenter, sequence) -> None:
     """The page had no listener at all, so it showed nothing.
 
@@ -2221,6 +2326,84 @@ def test_offline_the_target_is_the_pulse_file_and_is_editable(presenter) -> None
     view = presenter.view.target_view
     assert view.editable is True
     assert "Offline" in view.status
+
+
+def test_offline_apply_takes_the_wiring_the_page_offers(presenter, sequence) -> None:
+    """Offline, Apply takes the whole record -- wires, widths, ports -- not just names.
+
+    The page opens endpoints, clocks, widths and Add/Remove for an offline
+    pulse, and Apply read only the label: a reversed DAC bus came back as
+    "nothing to rename" with the wiring untouched.  Levels follow their
+    output through a re-wiring, an output still in use is refused by name
+    rather than dropped with its levels, and applying the page unchanged
+    changes nothing.
+    """
+
+    from zlc_ui import TargetPortRecord
+
+    view = presenter.view.target_view
+    assert view.editable
+
+    def levels(pulse):
+        lanes = {port.key: port.lanes[0] for port in pulse.target.ports if port.kind == "digital"}
+        return {
+            key: tuple(period.states[pulse.target.raw_lanes.index(lane)] for period in pulse.periods)
+            for key, lane in lanes.items()
+        }
+
+    before = presenter.sequence
+    presenter.view.target_apply_requested.emit(tuple(view.records))
+    assert presenter.sequence is before
+    assert "nothing to change" in view.feedback
+
+    dac = next(record for record in view.records if record.kind == "dac")
+    spec = before.target.by_key[dac.key]
+    reversed_bus = tuple(
+        replace(record, endpoints=tuple(reversed(record.endpoints)))
+        if record.key == dac.key
+        else record
+        for record in view.records
+    )
+    presenter.view.target_apply_requested.emit(reversed_bus)
+    rewired = presenter.sequence
+    assert rewired is not before, view.feedback
+    assert rewired.target.by_key[dac.key].lanes == tuple(reversed(spec.lanes))
+    assert rewired.target.by_key[dac.key].latch_clock == spec.latch_clock
+    assert rewired.target.by_key[dac.key].bus_index == spec.bus_index
+    assert dict(rewired.target.package_pins) == dict(before.target.package_pins)
+    assert levels(rewired) == levels(before)
+
+    driven = levels(before)
+    (busy,) = [key for key in driven if key == "cooling"]
+    presenter.view.target_apply_requested.emit(
+        tuple(record for record in view.records if record.key != busy)
+    )
+    assert presenter.sequence is rewired
+    assert busy in view.feedback and "high in load" in view.feedback
+
+    spare = next(
+        record.key
+        for record in view.records
+        if record.kind == "digital" and not any(driven[record.key])
+    )
+    presenter.view.target_apply_requested.emit(
+        tuple(record for record in view.records if record.key != spare)
+    )
+    shrunk = presenter.sequence
+    assert spare not in shrunk.target.by_key, view.feedback
+    assert len(shrunk.target.raw_lanes) == len(rewired.target.raw_lanes) - 1
+    assert levels(shrunk) == {key: value for key, value in driven.items() if key != spare}
+
+    # A new output on a pin the board has not named yet.
+    pin = "ZZ1"
+    assert pin not in shrunk.target.package_pins.values()
+    added = tuple(view.records) + (TargetPortRecord("aux", "digital", "aux", (pin,)),)
+    presenter.view.target_apply_requested.emit(added)
+    grown = presenter.sequence
+    assert grown.target.by_key["aux"].lanes == ("aux",), view.feedback
+    assert grown.target.package_pins["aux"] == pin
+    assert levels(grown)["aux"] == (0,) * len(grown.periods)
+    assert levels(grown) == {**levels(shrunk), "aux": (0,) * len(grown.periods)}
 
 
 def test_toggling_one_lane_updates_one_card_and_rebuilds_nothing(presenter, sequence) -> None:
@@ -3592,7 +3775,10 @@ class _DeviceWorker:
             try:
                 result = work()
             except BaseException as error:
-                self._outcomes.put(lambda: failed(error))
+                # Bound now: the name ``error`` is cleared when the except
+                # block ends, and a lambda that read it on delivery raised a
+                # NameError instead of handing the failure to ``failed``.
+                self._outcomes.put(lambda error=error: failed(error))
             else:
                 self._outcomes.put(lambda: delivered(result))
 
@@ -3829,24 +4015,40 @@ def test_a_second_command_while_one_runs_is_refused_not_queued(sequence) -> None
 
 
 def test_a_rebuild_never_silently_unbinds_a_config_parameter(presenter, sequence) -> None:
-    """A rebuild lists the fields it keeps, so a new one is a field it drops.
+    """A rebuild carries every field the model has, so no edit can drop one.
 
-    Hiding a port rebuilds the whole pulse from a named list.  A category the
-    list forgot would vanish on the next unrelated edit -- the binding gone,
-    nothing said -- which is how a pulse would quietly stop refreshing.
+    A rename and a typed duration rebuild the pulse through the one rebuild
+    path.  Built from a list of fields written in the editor, that path
+    forgot the category added after the list was -- the config parameters --
+    and an ordinary rename unbound a board calibration with nothing said: the
+    pulse compiled as plain authored values and the next config set no longer
+    reached the field.
     """
 
     period = sequence.periods[3].period_id
     presenter.cycle_binding("duration", period, None)   # -> scan
     presenter.cycle_binding("duration", period, None)   # -> api
     presenter.cycle_binding("duration", period, None)   # -> config
-    assert len(presenter.sequence.config_parameters) == 1
+    (bound,) = presenter.sequence.config_parameters
 
-    visible = {port.key for port in presenter.sequence.target.ports}
-    presenter.set_visible_ports(sorted(visible))
-    assert len(presenter.sequence.config_parameters) == 1, (
-        "a rebuild dropped the config binding"
+    presenter.set_document_name("renamed")
+    assert presenter.sequence.name == "renamed"
+    assert presenter.sequence.config_parameters == (bound,), (
+        "a rename dropped the config binding"
     )
+
+    presenter.set_duration(period, 6, "ms")
+    assert presenter.sequence.period_by_id[period].duration == 6
+    assert presenter.sequence.config_parameters == (bound,), (
+        "a typed duration dropped the config binding"
+    )
+
+    # The rebuild helper itself carries every model field through an
+    # unrelated change.
+    rebuilt = replace_sequence(presenter.sequence, run_repeats=3)
+    assert rebuilt.run_repeats == 3
+    assert rebuilt.config_parameters == (bound,)
+    assert rebuilt == replace(presenter.sequence, run_repeats=3)
 
 
 

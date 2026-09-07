@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
@@ -131,6 +132,46 @@ def test_deployed_config_is_the_default_geometry_source(monkeypatch, tmp_path) -
     loaded = load_streamer_config()
     assert loaded["source"].resolve() == expected
     assert loaded["params"] == default_params()
+
+
+def test_a_build_reads_the_config_as_one_exact_grammar(tmp_path: Path) -> None:
+    """The build's strict reader is the config owner's, and forgives nothing.
+
+    The runtime loader answers a missing member or file with defaults and a
+    warning, which a window must survive and a build must not: a bitstream
+    made from a default the operator never saw is a board that later refuses
+    the host.  With the grammar restated in a launcher one-liner, nothing
+    could test it.
+    """
+
+    from zlc_pulse.fpga import require_streamer_config
+
+    deployed = require_streamer_config(DEFAULT_CONFIG_PATH)
+    assert deployed["source"].resolve() == DEFAULT_CONFIG_PATH.resolve()
+    assert deployed["params"] == default_params()
+    assert deployed["warnings"] == []
+    document = json.loads(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+
+    def written(text: str) -> Path:
+        target = tmp_path / "streamer_config.json"
+        target.write_text(text, encoding="utf-8")
+        return target
+
+    with pytest.raises(FileNotFoundError):
+        require_streamer_config(tmp_path / "absent.json")
+    with pytest.raises(ValueError, match="fields are not exact"):
+        require_streamer_config(written(json.dumps({**document, "extra": 1})))
+    fewer = {key: value for key, value in document["params"].items() if key != "max_edges"}
+    with pytest.raises(ValueError, match="params fields are not exact"):
+        require_streamer_config(written(json.dumps({**document, "params": fewer})))
+    with pytest.raises(ValueError, match="duplicate key"):
+        require_streamer_config(written('{"fpga_part": "a", "fpga_part": "b"}'))
+    with pytest.raises(ValueError, match="non-finite JSON constant NaN"):
+        require_streamer_config(written('{"target_pct": NaN}'))
+    with pytest.raises(ValueError, match="board must be an object"):
+        require_streamer_config(written(json.dumps({**document, "board": []})))
+    with pytest.raises(ValueError, match="fpga_part must be non-empty text"):
+        require_streamer_config(written(json.dumps({**document, "fpga_part": " "})))
 
 
 def test_frozen_35t_uses_98_percent_without_weakening_the_90_percent_default() -> None:

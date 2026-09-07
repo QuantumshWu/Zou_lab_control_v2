@@ -147,12 +147,12 @@ Node new chunk
 ### 4.4 TaskRun与durable artifacts
 
 - 只有实际`Start`进入NodeHost worker时才分配唯一run directory；打开Editor、draft validation或build failure不得留下空run。
-- 每个run在任何不可逆工作前原子写`run.json`。它是run identity、normalized inputs、状态、latest progress、artifact inventory、terminal result和failure的唯一lifecycle记录。
+- 每个run只写两份记录，各自原子建立一次、从不替换：Start时在任何不可逆工作前写不可变的`start.json`（run identity、normalized inputs、started_at）；结束时写`run.json`（terminal状态、stop reason、last progress、artifact inventory、failure）。两者之间不写盘——progress与artifact registration只在进程内；每次都重写记录意味着一次长Calibration上百次fsync与`os.replace`落在别的句柄可能持有的路径上，Windows上就是最后一次写的PermissionError，而运行期间没有任何读者。
 - Task只保存由domain owner挑选的重要、可复算或不可替代artifact；Runtime不得自动dump live Dataset、全部shot或所有中间状态。
 - Artifact必须先完整原子写入run directory，再按semantic contract注册；`run.json`只列已存在、已注册的文件。声明的final artifact未注册时Task不得成功。
 - Run根保存`run.json`与summary；domain final进入`final/`，重要图进入`figures/`，精选candidate/site数据进入`data/`。
 - Figure始终成对保存：同stem `zlc.figure` NPZ为primary data artifact，PNG为无science contract的preview。Calibration、Temperature和SLM Feedback遵守同一TaskRun规则。
-- Stop保留已完成的精选artifact和明确partial状态；failure保留错误、last progress、已注册artifact与rollback outcome。进程异常终止留下非terminal `run.json`，不得清理或伪装成功。
+- Stop保留已完成的精选artifact和明确partial状态；failure保留错误、last progress、已注册artifact与rollback outcome。进程异常终止只留下`start.json`而没有`run.json`——这就是「没有结束的run」，不得清理或伪装成功。
 
 ### 4.5 Task运行中冻结
 
@@ -261,7 +261,7 @@ Node new chunk
 - Active apparatus变更走同一个`ExperimentSession`内的差量reconcile：相同key/type/canonical parameters的leaf、SignalPlane、TaskConsole与Panel继续复用；新增只build新增leaf，remove/change/Close只处理受影响leaf、world-bound closure及factory dependants。只有完全相同的draft/live集合才把主按钮解释为Shutdown。
 - Reconcile前以device-key maintenance barrier阻止新Logic/command，停止并等待受影响Logic lease，关闭对应Control；已有不可取消command时loud拒绝。partial close/factory cleanup失败后，所有仍open的leaf必须继续由Session或recovery owner强持有，effective live config与TaskConsole device projection同步后才允许下一次操作。
 - Device operation或projection-refresh pending期间Control、Close、TaskConsole X和root close不得越过owner状态；失败保持window/session可达并提供只刷新projection的retry，不重复hardware work。
-- Hosted Task可登记且只能登记一个domain-owned partial-exit writer；Runtime在worker线程、撤回Dataset及把TaskRun标为stopped/failed之前恰好调用一次。Writer只能从已经完成的数据原子写并登记checkpoint/process/Figure/preview/summary，不得制造required final；writer失败只附注原始错误，不能覆盖原始hardware/science failure。Calibration、Temperature与SLM Feedback都必须使用该边界保存各自可证明的partial报告。
+- Hosted Task可登记且只能登记一个domain-owned partial-exit writer；Runtime在worker线程、撤回Dataset及把TaskRun标为stopped/failed之前恰好调用一次。Writer只能从已经完成的数据原子写并登记checkpoint/process/Figure/preview/summary，不得制造required final；writer失败不能覆盖原始hardware/science failure：failure时附注在原始错误上（进入记录的traceback），Stop时成为observation的error与stopped记录的error而状态仍是stopped/cancelled——Stop不因保存失败变成failure，保存失败也不得被当作从未发生。Calibration、Temperature与SLM Feedback都必须使用该边界保存各自可证明的partial报告。
 - Device Control只显示adapter声明的`TunableField`：稳定表单metadata、authoritative current、当前是否live-write及dependency group。每行统一为Current、Desired、Live apply、Apply和Status；打开/显式Refresh及成功Apply后的readback只走session-owned串行device worker，Qt不碰SDK，也不做周期hardware polling。
 - RF frequency/power policy window的四个edge是Init与Device Control共享的optional `TunableField`；`None`唯一表示该侧没有bench policy limit。Init省略全部edge不得移动硬件；Control可设置或清回`None`。仪器自身的frequency/power limits在Init连接时从设备读出，并以`TunableField.device_limits`只读投影给Device Control显示；UI control、外部`tune`与Scan共用同一个有效范围＝policy window与device limits逐侧取更紧者，因此只要device limits存在knob就向Scan暴露有限range，缺失的policy edge不阻止扫描；window与仪器范围无交集时Init与Control都loud拒绝。
 - Logic在实际Start lease中声明protected fields；运行时才选出的device scan ports以nonexclusive resolved field claim加入同一lease。Device Manager按所有active claim与dependency closure锁字段，不按camera type或字段名特判；无owner时正常写，有owner时只有未claim且adapter确认live-safe的字段可在operator接受风险后写。

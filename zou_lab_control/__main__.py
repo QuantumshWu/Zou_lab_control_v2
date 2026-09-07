@@ -34,6 +34,12 @@ def main(argv: list[str] | None = None) -> int:
         raise RuntimeError(f"invalid product command entry point {spec!r}")
     entry = getattr(import_module(module_name), attribute)
     takes_argv = bool(inspect.signature(entry).parameters)
+    if rest and not takes_argv:
+        # Arguments a command cannot see are a usage error, not silence: a
+        # mistyped option to an argv-less command ran the command as if the
+        # option had been understood.
+        print(f"{name} takes no arguments; got: {' '.join(rest)}")
+        return 2
     result = entry(rest) if takes_argv else entry()
     return int(result or 0)
 

@@ -60,7 +60,14 @@ def replace_pulse_field(
     *,
     field_name: str,
 ) -> PulseSequence:
-    """Return ``sequence`` with one referenced physical field replaced."""
+    """Return ``sequence`` with one referenced physical field replaced.
+
+    A duration lands on the clock grid the way the editor rounds a typed
+    number, but a zero or negative one is refused rather than rounded up to
+    one tick: no rounding of it is a value anybody meant, and a node form
+    that said ``-100`` would otherwise play the shortest pulse the board has
+    and call it the requested one.
+    """
 
     _check_inputs(sequence, reference)
     if reference.kind == FIELD_DELAY:
@@ -109,6 +116,10 @@ def replace_pulse_field(
     period = periods[index]
     if reference.kind == FIELD_DURATION:
         authored = convert_time(value, unit, period.unit)
+        if authored <= 0:
+            raise ValueError(
+                f"{field_name!r} must be a positive duration, not {value} {unit}"
+            )
         periods[index] = replace(
             period,
             duration=_number_for(

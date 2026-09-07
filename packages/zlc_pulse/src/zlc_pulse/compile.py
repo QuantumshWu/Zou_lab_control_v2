@@ -289,7 +289,16 @@ def _default_slot_value(sequence: PulseSequence, slot: PulseSlot) -> int:
         return 0
     if ref.kind == FIELD_DAC:
         period = sequence.period_by_id[ref.period_id]
-        step = next(item for item in period.analog_steps if item.port == ref.port)
+        step = next((item for item in period.analog_steps if item.port == ref.port), None)
+        if step is None:
+            # The model admits a binding whose step is gone -- taking a step
+            # away is a legal intermediate state of an edit, pruned afterwards
+            # -- so the compiler is where a pulse read as a whole says which
+            # binding has nothing to bind.
+            raise ValueError(
+                f"scan slot {slot.slot_id!r} names the DAC field {ref.port!r} of "
+                f"period {ref.period_id!r}, which has no step on that port"
+            )
         port = sequence.target.by_key[ref.port]
         return int(step.value - port.signed_range[0])
     raise ValueError(f"unsupported scan slot kind {ref.kind!r}")
@@ -438,6 +447,70 @@ def _bus_segments(
                 tuple(stop_coeff),
             ))
     return names, tuple(segments)
+
+
+def analog_levels(sequence: PulseSequence) -> dict[str, tuple[tuple[int, int], ...]]:
+    """The level each DAC port holds from every tick it changes, over one pass.
+
+    ``{port key: ((tick, value), ...)}`` on the pulse's own tick grid, in the
+    signed values the model authors, opening at ``(0, 0)`` -- the safe level
+    a bus rests at before its first step -- and listing each tick the level
+    changes.  An ``edge`` step takes its value at the start of its period.  A
+    ``ramp`` walks from the level carried into the period to the step's value
+    at the period's end exactly as the engine does, ``start ± floor(k·|delta|
+    / span)`` on the k-th tick, so the entries are the staircase of codes the
+    pin plays: at most ``min(|delta|, span)`` of them, never one per tick of a
+    long gentle ramp.  Two changes on one tick are one entry, the later one.
+
+    Published for previews.  One built from ``step.value`` alone drew the
+    target level from the period start in both modes, and two pulses the
+    board plays differently were one picture.
+    """
+
+    if not isinstance(sequence, PulseSequence):
+        raise TypeError("sequence must be PulseSequence")
+    boundaries = [0]
+    for period in sequence.periods:
+        boundaries.append(boundaries[-1] + exact_ticks(
+            period.duration,
+            period.unit,
+            sequence.time_step_ns,
+            f"period {period.period_id} duration",
+        ))
+    levels: dict[str, tuple[tuple[int, int], ...]] = {}
+    for port in sequence.target.ports:
+        if port.kind != PORT_DAC:
+            continue
+        points: list[tuple[int, int]] = [(0, 0)]
+
+        def change(tick: int, value: int) -> None:
+            if points[-1][0] == tick:
+                points[-1] = (tick, value)
+            elif points[-1][1] != value:
+                points.append((tick, value))
+
+        held = 0
+        for index, period in enumerate(sequence.periods):
+            step = next((item for item in period.analog_steps if item.port == port.key), None)
+            if step is None:
+                continue
+            start, stop = boundaries[index], boundaries[index + 1]
+            target = int(step.value)
+            if step.mode == "edge":
+                change(start, target)
+            else:
+                span = stop - start
+                distance = abs(target - held)
+                direction = 1 if target >= held else -1
+                if distance <= span:
+                    for level in range(1, distance + 1):
+                        change(start - (-level * span // distance), held + direction * level)
+                else:
+                    for k in range(1, span + 1):
+                        change(start + k, held + direction * (k * distance // span))
+            held = target
+        levels[port.key] = tuple(points)
+    return levels
 
 
 def _delay_values(sequence: PulseSequence) -> tuple[tuple[int, ...], tuple[TargetBusDelay, ...]]:

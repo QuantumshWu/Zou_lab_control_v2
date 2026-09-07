@@ -9,7 +9,21 @@ from typing import BinaryIO, Callable, Iterable
 
 
 class DirectoryDurabilityError(RuntimeError):
-    """The filesystem could not durably flush a directory entry."""
+    """The filesystem could not durably flush a directory entry.
+
+    ``published`` names the artifact that is already complete and visible
+    when the flush that would have made its directory entry crash-durable
+    is what failed: the file replaced or linked, the directory made.  It
+    stays on disk.  A save window that shows the error can then say where
+    the work landed instead of "cannot save", and a caller that retries
+    knows the name is taken by its own complete work rather than allocating
+    a numbered copy beside it.  ``None`` when nothing was published by the
+    call that failed.
+    """
+
+    def __init__(self, message: str, *, published: Path | None = None) -> None:
+        super().__init__(message)
+        self.published = published
 
 
 def _flush_windows_directory(directory: Path) -> None:
@@ -92,6 +106,27 @@ def flush_directory(directory: str | os.PathLike[str]) -> None:
         ) from exc
 
 
+def _flush_published(directory: Path, published: Path) -> None:
+    """Acknowledge the directory entry of an artifact that is already visible.
+
+    Publication -- the replace, the link, the mkdir -- is the irreversible
+    step; the flush after it is only the acknowledgement.  When just the
+    acknowledgement fails, the error says so and names the artifact.  An
+    error that named only the directory read as "nothing was saved": the
+    operator retried, and a second numbered copy landed beside a file that
+    had been complete on disk all along.
+    """
+
+    try:
+        flush_directory(directory)
+    except DirectoryDurabilityError as error:
+        raise DirectoryDurabilityError(
+            f"{published} is published and visible, but its directory entry "
+            f"could not be made crash-durable: {error}",
+            published=published,
+        ) from error
+
+
 def atomic_write_file(
     target: str | os.PathLike[str],
     writer: Callable[[BinaryIO], None],
@@ -117,7 +152,7 @@ def atomic_write_file(
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, destination)
-        flush_directory(parent)
+        _flush_published(parent, destination)
     except BaseException:
         try:
             temporary.unlink()
@@ -163,7 +198,7 @@ def _atomic_write_unique_path(
                 destination = next(choices)
                 continue
             temporary.unlink()
-            flush_directory(parent)
+            _flush_published(parent, destination)
             return destination
     finally:
         try:
@@ -234,27 +269,31 @@ def durable_mkdir(directory: str | os.PathLike[str]) -> Path:
 def durable_makedirs(directory: str | os.PathLike[str]) -> Path:
     """Durably create a caller-owned hierarchy from its first existing parent.
 
-    Each missing level is created through :func:`durable_mkdir`, top-down, so
-    every directory entry and its parent receive the same durability evidence
-    as a single-level creation.  This is the composition-root operation for a
-    fresh explicit workspace such as ``~/.zlc/device-manager``.
+    The first existing directory on the way up is re-acknowledged first --
+    flushed with its parent, as :func:`durable_mkdir` does on a retry -- and
+    then each missing level is created through :func:`durable_mkdir`,
+    top-down, so every directory entry and its parent receive the same
+    durability evidence as a single-level creation.  The anchor is not taken
+    on trust because a retry cannot tell it from the level a previous call
+    created and left behind when the flush of ITS parent failed: building
+    below it would complete the tree with the one entry whose durability was
+    never confirmed still unconfirmed.  This is the composition-root
+    operation for a fresh explicit workspace such as ``~/.zlc/device-manager``.
     """
 
     target = Path(directory).expanduser().resolve()
     missing: list[Path] = []
-    probe = target
-    while not probe.exists():
-        missing.append(probe)
-        parent = probe.parent
-        if parent == probe:
+    anchor = target
+    while not anchor.exists():
+        missing.append(anchor)
+        parent = anchor.parent
+        if parent == anchor:
             break
-        probe = parent
-    if not probe.is_dir():
-        raise NotADirectoryError(probe)
-    for level in reversed(missing):
+        anchor = parent
+    if not anchor.is_dir():
+        raise NotADirectoryError(anchor)
+    for level in (anchor, *reversed(missing)):
         durable_mkdir(level)
-    if not missing:
-        durable_mkdir(target)
     return target
 
 

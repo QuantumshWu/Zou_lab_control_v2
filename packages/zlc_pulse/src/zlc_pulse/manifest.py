@@ -21,6 +21,7 @@ _ASSIGN = re.compile(
     r"\bassign\s+(?P<port>[A-Za-z_][A-Za-z0-9_]*(?:\[\d+\])?)\s*=\s*"
     r"(?P<source>(?:out_final|bus_out_final)\[\d+\])\s*;"
 )
+_VERILOG_COMMENT = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
 _SYSTEM_PORT = re.compile(
     r"^(?:GND\d*|clk|reset|start|running|done|uart_rx|uart_tx|led(?:\[\d+\])?)$",
     re.I,
@@ -144,11 +145,28 @@ def _validate_xdc(path: Path, lanes: tuple[_Lane, ...]) -> None:
     )
 
 
+def _top_assignments(path: Path) -> dict[str, str]:
+    """Every ``assign <port> = out_final[i];`` the RTL top actually compiles.
+
+    Comments are dropped before matching: a commented-out assignment is text
+    the tool chain never sees, and a stale ``// assign cooling = out_final[0];``
+    left at the bottom of the file must not vouch for a live line that now
+    drives ``out_final[1]``.  A port assigned twice in live text is a wiring
+    error in its own right, not a tie the last match may settle.
+    """
+
+    source = _VERILOG_COMMENT.sub(" ", path.read_text(encoding="utf-8", errors="replace"))
+    actual: dict[str, str] = {}
+    for match in _ASSIGN.finditer(source):
+        port = match.group("port")
+        if port in actual:
+            raise ValueError(f"RTL top ({path}) assigns {port} more than once")
+        actual[port] = match.group("source")
+    return actual
+
+
 def _validate_top(path: Path, lanes: tuple[_Lane, ...], bus_width: int) -> None:
-    actual = {
-        match.group("port"): match.group("source")
-        for match in _ASSIGN.finditer(path.read_text(encoding="utf-8", errors="replace"))
-    }
+    actual = _top_assignments(path)
     errors = []
     for index, _logical, port, _pin, role, bus, bit in lanes:
         expected = (
@@ -185,13 +203,18 @@ def _target(lanes: tuple[_Lane, ...], params: StreamerParams) -> PulseTarget:
             if bus in emitted_buses:
                 continue
             data = by_bus[bus]
+            # The latch clock is named by the clock lane's LOGICAL signal: that
+            # is the key its own PulsePortSpec is built from below, and the
+            # target validates the reference against port keys.  The lane's
+            # rtl_port is the Verilog name, a separate field that only
+            # coincides with the logical one on a board that spells them alike.
             ports.append(PulsePortSpec(
                 logical,
                 PORT_DAC,
                 tuple(f"ch{item[0]:02d}" for item in data),
                 label=logical,
                 bus_index=bus,
-                latch_clock=clocks[bus][2],
+                latch_clock=clocks[bus][1],
             ))
             emitted_buses.add(bus)
         else:

@@ -93,6 +93,47 @@ def test_a_current_pulse_is_left_alone_and_keeps_no_backup(tmp_path: Path) -> No
     assert not path.with_name(path.name + BACKUP_SUFFIX).exists()
 
 
+def test_a_write_that_does_not_read_back_puts_the_original_back(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A rewrite refused by its own read-back leaves the file as it was found.
+
+    REFUSED used to mean "exactly as they were" while the file held the
+    rewrite and the original sat in the backup.  The original goes back and
+    the backup with it; if even that write fails, the outcome says so and
+    names the backup.
+    """
+
+    from zlc_workbench.tools import migrate_units
+
+    path = _write_spelled(tmp_path / "imaging.json", "us")
+    before = path.read_bytes()
+    backup = path.with_name(path.name + BACKUP_SUFFIX)
+
+    def write_another(target, _state):
+        write_pulse(target, PulseEditorState(sequence=ordinary_imaging_sequence(name="another")))
+
+    monkeypatch.setattr(migrate_units, "write_pulse", write_another)
+    outcome = migrate_file(path)
+
+    assert outcome.verdict == "REFUSED", outcome.detail
+    assert "put back" in outcome.detail
+    assert outcome.backup is None
+    assert path.read_bytes() == before
+    assert not backup.exists()
+
+    def refuse(_target, _payload):
+        raise PermissionError("imaging.json is held open")
+
+    monkeypatch.setattr(migrate_units, "atomic_write_bytes", refuse)
+    outcome = migrate_file(path)
+
+    assert outcome.verdict == "NOT RESTORED"
+    assert outcome.backup == backup and backup.read_bytes() == before
+    assert backup.name in outcome.detail and "PermissionError" in outcome.detail
+    assert path.read_bytes() != before
+
+
 def test_a_backup_is_never_the_thing_migrated_next_time(tmp_path: Path) -> None:
     path = _write_spelled(tmp_path / "imaging.json", "us")
     migrate_file(path)

@@ -184,16 +184,29 @@ def build(
         that knows where the workspace is; zlc_pulse is handed entries.
         """
 
-        streamer = dial(mode, endpoint)
-        if not config_values:
-            return streamer
-        from zlc_atom.pulse_values import read_config_values
+        # The file is decoded BEFORE anything is dialled: a config file that
+        # does not parse is a refusal with no connection behind it.  What can
+        # still fail after the dial is the board's own acceptance of the
+        # entries, and a connection that fails after it was opened is closed
+        # by the one who opened it -- the presenter only ever sees the error,
+        # never the streamer, so nobody else could.
+        entries = None
+        source = ""
+        if config_values:
+            from zlc_atom.pulse_values import read_config_values
 
-        path = Path(config_values)
-        if not path.is_file():
+            path = Path(config_values)
+            if path.is_file():
+                _name, _origin, entries = read_config_values(path)
+                source = str(path)
+        streamer = dial(mode, endpoint)
+        if entries is None:
             return streamer
-        _name, _origin, entries = read_config_values(path)
-        streamer.load_config_values(entries, source=str(path))
+        try:
+            streamer.load_config_values(entries, source=source)
+        except BaseException:
+            streamer.close()
+            raise
         return streamer
 
     return PulseEditorPresenter(

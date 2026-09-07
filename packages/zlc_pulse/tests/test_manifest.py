@@ -11,7 +11,13 @@ from zlc_pulse import pulse_target_from_xdc
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _write_fixture(tmp_path: Path, *, bad_top: bool = False, bad_pin: bool = False) -> tuple[Path, Path, Path]:
+def _write_fixture(
+    tmp_path: Path,
+    *,
+    bad_top: bool = False,
+    bad_pin: bool = False,
+    clock_signal: str = "bus_q_clk",
+) -> tuple[Path, Path, Path]:
     xdc = tmp_path / "fixture.xdc"
     xdc.write_text(
         "\n".join(
@@ -40,7 +46,7 @@ def _write_fixture(tmp_path: Path, *, bad_top: bool = False, bad_pin: bool = Fal
                         {"index": 1, "logical_signal": "sig_b", "rtl_port": "sig_b", "package_pin": "A2", "electrical_role": "digital"},
                         {"index": 2, "logical_signal": "bus_q", "rtl_port": "bus_q[0]", "package_pin": "B1", "electrical_role": "dac_data", "bus_index": 0, "bit_index": 0},
                         {"index": 3, "logical_signal": "bus_q", "rtl_port": "bus_q[1]", "package_pin": "B2", "electrical_role": "dac_data", "bus_index": 0, "bit_index": 1},
-                        {"index": 4, "logical_signal": "bus_q_clk", "rtl_port": "bus_q_clk", "package_pin": "C1", "electrical_role": "dac_clock", "bus_index": 0},
+                        {"index": 4, "logical_signal": clock_signal, "rtl_port": "bus_q_clk", "package_pin": "C1", "electrical_role": "dac_clock", "bus_index": 0},
                     ],
                 },
             }
@@ -94,3 +100,49 @@ def test_top_mapping_must_equal_the_explicit_board_manifest(tmp_path: Path) -> N
     xdc, config, top = _write_fixture(tmp_path, bad_top=True)
     with pytest.raises(ValueError, match=r"bus_q\[0\].*bus_out_final\[0\].*bus_out_final\[1\]"):
         pulse_target_from_xdc(xdc, config, top)
+
+
+def test_a_commented_out_assign_cannot_vouch_for_a_live_wiring_error(tmp_path: Path) -> None:
+    """Comments are not wiring: the RTL check reads only what compiles.
+
+    A stale ``// assign`` left behind an edit used to be matched like a live
+    one and, being later in the file, to win -- so a top that really drove
+    the wrong bit passed the three-way reconciliation.
+    """
+
+    xdc, config, top = _write_fixture(tmp_path, bad_top=True)
+    top.write_text(
+        top.read_text(encoding="utf-8")
+        + "\n// assign bus_q[0] = bus_out_final[0];\n"
+        + "/* assign bus_q[0] = bus_out_final[0]; */\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=r"bus_q\[0\].*bus_out_final\[0\].*bus_out_final\[1\]"):
+        pulse_target_from_xdc(xdc, config, top)
+
+
+def test_a_port_assigned_twice_in_live_rtl_is_refused(tmp_path: Path) -> None:
+    """Two live drivers of one port are an error, not a tie for the last one."""
+
+    xdc, config, top = _write_fixture(tmp_path)
+    top.write_text(
+        top.read_text(encoding="utf-8") + "\nassign sig_a = out_final[0];\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="assigns sig_a more than once"):
+        pulse_target_from_xdc(xdc, config, top)
+
+
+def test_a_dac_latches_on_its_clock_by_logical_name_not_rtl_port(tmp_path: Path) -> None:
+    """A lane's logical signal and its RTL port are two fields, and may differ.
+
+    The target is keyed by logical signals, so a DAC that named its latch
+    clock by the RTL port referenced a key the target does not have, and a
+    board wired exactly as declared was refused for a missing clock.
+    """
+
+    xdc, config, top = _write_fixture(tmp_path, clock_signal="latch_q")
+    target = pulse_target_from_xdc(xdc, config, top)
+    assert target.by_key["bus_q"].latch_clock == "latch_q"
+    assert target.by_key["latch_q"].lanes == ("ch04",)
+    assert "bus_q_clk" not in target.by_key

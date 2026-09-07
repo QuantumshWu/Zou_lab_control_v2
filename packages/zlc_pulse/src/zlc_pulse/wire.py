@@ -167,13 +167,19 @@ class StreamerParams:
     def ctrl_scratch_base(self) -> int:
         """First CTRL word above the command and clock-enable fields."""
         base = int(CtrlWords.CLK_ENABLE) + self.clk_enable_words
-        if base + 2 > CTRL_WORDS:
+        if base + 2 > int(CtrlWords.LAYOUT_ID):
             raise ValueError(
                 f"CTRL register file has no scratch room: defined words reach {base} "
-                f"but the file holds only {CTRL_WORDS} words; grow CTRL_WORDS / the RTL "
-                "ctrl_reg file in lock-step."
+                f"but word {int(CtrlWords.LAYOUT_ID)} holds the layout fingerprint; grow "
+                "CTRL_WORDS / the RTL ctrl_reg file in lock-step."
             )
         return base
+
+    @property
+    def ctrl_scratch_words(self) -> int:
+        """How many CTRL words are scratch: from the scratch base up to, not
+        including, the layout fingerprint word."""
+        return int(CtrlWords.LAYOUT_ID) - self.ctrl_scratch_base
 
     @property
     def coeff_bits(self) -> int:
@@ -1055,6 +1061,64 @@ def load_streamer_config(path: str | Path | None = None) -> dict:
         "source": source,
         "warnings": warnings,
     }
+
+#: The exact top-level members of ``streamer_config.json``, the two documentation
+#: members included.  A build reads the file as one grammar and refuses a member
+#: it does not know rather than a geometry it did not mean.
+CONFIG_TOP_LEVEL_FIELDS = frozenset(
+    ("_README", "_field_docs", "fpga_part", "clock_hz", "target_pct", "params", "board")
+)
+
+
+def require_streamer_config(path: str | Path) -> dict:
+    """Load ONE named config file with nothing forgiven.
+
+    :func:`load_streamer_config` forgives what a window must survive -- a
+    missing file, a member an old document lacks -- and answers with defaults
+    and warnings.  A build must not: a bitstream carries its geometry for
+    good, and one made from a default the operator never saw is a board that
+    later refuses the host.  So the file is read as one exact grammar -- no
+    duplicate keys, no non-finite constants, exactly the known top-level
+    members, exactly the deployed params members, a board object, a non-empty
+    part -- it must be the file asked for, and every warning the ordinary
+    loader would merely record is a refusal here.  This is the config owner's
+    strict door; a launcher calls it rather than restating the grammar.
+    """
+
+    source = Path(path).expanduser().resolve()
+    if not source.is_file():
+        raise FileNotFoundError(f"streamer config is missing: {source}")
+
+    def pairs(items: list[tuple[str, object]]) -> dict:
+        mapping = dict(items)
+        if len(mapping) != len(items):
+            raise ValueError("duplicate key in streamer_config.json")
+        return mapping
+
+    def constant(name: str) -> None:
+        raise ValueError(f"non-finite JSON constant {name} in streamer_config.json")
+
+    raw = json.loads(
+        source.read_text(encoding="utf-8"),
+        object_pairs_hook=pairs,
+        parse_constant=constant,
+    )
+    if not isinstance(raw, dict) or set(raw) != CONFIG_TOP_LEVEL_FIELDS:
+        raise ValueError("streamer_config.json fields are not exact")
+    expected = set(_PARAM_FIELD_NAMES) | {"slot_mul_width"}
+    if not isinstance(raw["params"], dict) or set(raw["params"]) != expected:
+        raise ValueError("streamer_config.json params fields are not exact")
+    if not isinstance(raw["board"], dict):
+        raise ValueError("streamer_config.json board must be an object")
+    if not isinstance(raw["fpga_part"], str) or not raw["fpga_part"].strip():
+        raise ValueError("fpga_part must be non-empty text")
+    config = load_streamer_config(source)
+    if config["source"] is None or Path(config["source"]).resolve() != source:
+        raise ValueError("build config fell back from the requested file")
+    if config["warnings"]:
+        raise ValueError("; ".join(config["warnings"]))
+    return config
+
 
 def default_params(path: str | Path | None = None) -> StreamerParams:
     """The configured runtime geometry (config-driven, defaults if the file is absent)."""

@@ -13,6 +13,7 @@ from zlc_durable.durability import (
     atomic_write_bytes,
     atomic_write_file,
     atomic_write_text,
+    durable_makedirs,
     durable_mkdir,
     flush_directory,
 )
@@ -137,6 +138,13 @@ def test_atomic_write_file_cleans_temporary_and_preserves_target_on_failure(
 
 
 def test_post_replace_flush_failure_reports_visible_new_content(tmp_path, monkeypatch) -> None:
+    """After the replace, the error names the file that now holds the new bytes.
+
+    The flush is only the acknowledgement of a publication that has already
+    happened.  An error that named just the directory read as "nothing was
+    saved", while the old record had in fact been replaced.
+    """
+
     import zlc_durable.durability as durability
 
     target = tmp_path / "record.json"
@@ -146,10 +154,16 @@ def test_post_replace_flush_failure_reports_visible_new_content(tmp_path, monkey
         raise durability.DirectoryDurabilityError("flush failed")
 
     monkeypatch.setattr(durability, "flush_directory", fail_flush)
-    with pytest.raises(durability.DirectoryDurabilityError, match="flush failed"):
+    with pytest.raises(durability.DirectoryDurabilityError, match="flush failed") as caught:
         atomic_write_text(target, "new")
 
     assert target.read_bytes() == b"new"
+    error = caught.value
+    assert error.published == target.resolve()
+    assert str(target.resolve()) in str(error)
+    assert "published and visible" in str(error)
+    assert isinstance(error.__cause__, durability.DirectoryDurabilityError)
+    assert error.__cause__.published is None
 
 
 def test_durable_mkdir_flushes_one_child_before_its_existing_parent(
@@ -197,6 +211,54 @@ def test_durable_mkdir_retry_reacknowledges_visible_child_and_parent(
     observed.clear()
     assert durable_mkdir(target) == target
     assert observed == [target, target.parent]
+
+
+def test_durable_makedirs_retry_reacknowledges_the_entry_whose_flush_failed(
+    tmp_path,
+    monkeypatch,
+):
+    """A retry re-flushes the level it finds, and that level's parent.
+
+    Creating ``root/workspace/device-manager``: ``workspace`` is made, then
+    the flush of ``root`` fails.  The retry finds ``workspace`` visible and
+    used to build below it without flushing ``root`` again, so the tree was
+    completed with the one entry whose durability was never confirmed still
+    unconfirmed.
+    """
+
+    import zlc_durable.durability as durability
+
+    root = (tmp_path / "root").resolve()
+    root.mkdir()
+    workspace = root / "workspace"
+    target = workspace / "device-manager"
+    observed = []
+    fail_root_once = True
+
+    def flush(directory):
+        # The flush of ``root`` as the parent of the freshly made ``workspace``.
+        nonlocal fail_root_once
+        resolved = directory.resolve()
+        observed.append(resolved)
+        if resolved == root and workspace.is_dir() and fail_root_once:
+            fail_root_once = False
+            raise durability.DirectoryDurabilityError("root flush failed")
+
+    monkeypatch.setattr(durability, "flush_directory", flush)
+    with pytest.raises(durability.DirectoryDurabilityError, match="root flush"):
+        durable_makedirs(target)
+    assert workspace.is_dir() and not target.exists()
+    assert observed == [root, root.parent, workspace, root]
+
+    observed.clear()
+    assert durable_makedirs(target) == target
+    assert target.is_dir()
+    assert observed == [workspace, root, target, workspace]
+
+    # With nothing missing, the target itself is the anchor: one level.
+    observed.clear()
+    assert durable_makedirs(target) == target
+    assert observed == [target, workspace]
 
 
 def test_durable_mkdir_rejects_a_missing_parent(tmp_path):
