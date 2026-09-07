@@ -74,12 +74,12 @@ def panel_data_shape(
     validity: object | None = None,
 ) -> dict[str, object]:
     """Canonical three-part Dataset shape, how many samples of each Repeat
-    axis have landed whole, plus accepted typed scope fates.
+    axis have landed, plus accepted typed scope fates.
 
     ``validity`` is the shown snapshot's, when there is one: the strip then
-    prints, for a repeat axis, how many of its samples have landed whole
-    instead of its size, because a repeat is a sample and the count that
-    means anything is the count of complete ones.  With no snapshot there is
+    prints, for a repeat axis, how many of its samples have landed instead
+    of its size, because a repeat is a sample and the count that means
+    anything is the count of landed ones.  With no snapshot there is
     no such count.  ``data_valid`` carries one count per Repeat axis in the
     order the Repeat group of ``data_structure`` lists them: a name is not
     an identity, and two axes may share one.

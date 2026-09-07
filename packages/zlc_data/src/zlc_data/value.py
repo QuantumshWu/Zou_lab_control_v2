@@ -374,15 +374,20 @@ def repeat_validity_counts(
     validity: Valid | Invalid | CellValidity | DatasetComponentValidity,
     schema: DatasetSchema,
 ) -> tuple[int, ...]:
-    """How many coordinates of each Repeat axis are wholly valid, one count
-    per axis in the schema's own order.
+    """How many coordinates of each Repeat axis have landed, one count per
+    axis in the schema's own order.
 
     A repeat is a sample, and the number a reader wants beside a repeat axis
-    is how many samples have LANDED whole: every point and every component
-    at that coordinate valid.  A coordinate the carrier does not hold yet,
-    or one with any invalid cell -- the repeat still being played, a shot
-    the pulse faulted on -- is not counted.  Decided on the compact form: a
-    dense expansion over a frame's pixels would be as large as the frames.
+    is how many samples have LANDED: a coordinate counts once anything of
+    it is valid -- one point, one component -- and not before.  A shot the
+    pulse faulted on lands nothing and is not counted, nor is a coordinate
+    the carrier does not hold yet.  A coordinate is not asked to be whole:
+    a seamless scan lands one point at a time across every run of a sweep,
+    so until the sweep is over no run is whole, and a count of whole
+    samples read "0 x 0" for the entire scan; and a site the readout could
+    not judge does not un-land the shot it was taken in.  Decided on the
+    compact form: a dense expansion over a frame's pixels would be as large
+    as the frames.
 
     By POSITION, never by name.  Only an axis's id is unique: two Repeat
     axes may both be called "repeat", and so may a Point axis, and a count
@@ -393,15 +398,14 @@ def repeat_validity_counts(
     _validate_dataset_validity(validity, schema)
     rows = schema.repeat_domain.size
     if isinstance(validity, (Valid, Invalid)):
-        row_valid = np.full(rows, isinstance(validity, Valid), dtype=bool)
+        row_landed = np.full(rows, isinstance(validity, Valid), dtype=bool)
     else:
-        row_valid = np.asarray(validity.mask).reshape(rows, -1).all(axis=1)
+        row_landed = np.asarray(validity.mask).reshape(rows, -1).any(axis=1)
     counts: list[int] = []
     for axis in schema.repeat_domain.axes:
         codes = schema.repeat_domain.codes(axis.axis_id)
-        present = np.bincount(codes, minlength=axis.size) > 0
-        broken = np.bincount(codes[~row_valid], minlength=axis.size) > 0
-        counts.append(int(np.count_nonzero(present & ~broken)))
+        landed = np.bincount(codes[row_landed], minlength=axis.size) > 0
+        counts.append(int(np.count_nonzero(landed)))
     return tuple(counts)
 
 

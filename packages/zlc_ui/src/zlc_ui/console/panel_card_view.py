@@ -127,7 +127,7 @@ def data_structure_fragments(
     ``valid`` is one landed count per axis of the Repeat group, in that
     group's own order, and that number is what the axis reads where the
     others read their size: a repeat is a sample, not a coordinate, and the
-    count a reader wants is the count of complete ones, which is also the
+    count a reader wants is the count of landed ones, which is also the
     number that moves while a run is playing.  By POSITION within the
     Repeat group, never by name: an axis is very often called "repeat", two
     Repeat axes may both be, and so may a Point axis, and a name lookup
