@@ -1403,12 +1403,20 @@ class FitProjection:
         selector_kind: SelectorKind | None = None,
         facet_index: int | None = None,
     ) -> FitSelection:
-        """Select the data one fit runs on.
+        """The single-cell call uses the same prepared selection as a batch."""
 
-        ``facet_index`` names the cell to compute; the focused facet is the
-        cell the operator is looking at, and so the one whose selectors may
-        define the domain.  A grid batch computes every cell over the single
-        region that was drawn, so the two differ there and nowhere else.
+        return self._prepare_fit_selection(model, selector_kind)(facet_index)
+
+    def _prepare_fit_selection(
+        self,
+        model: FitModelSpec,
+        selector_kind: SelectorKind | None,
+    ) -> Callable[[int | None], FitSelection]:
+        """Resolve one request's model, units and domain before its cell loop.
+
+        Only the computed cell changes within a batch. The focused cell still
+        identifies whose selector may define the shared region; the closure
+        is local to this request and is not retained by the projection.
         """
 
         if self._view is None:
@@ -1416,48 +1424,50 @@ class FitProjection:
         if not isinstance(model, FitModelSpec):
             raise TypeError("model must be FitModelSpec")
         self._require_fit_model_compatible(model)
-        if facet_index is None:
-            facet_index = self._focused_facet_index
-        payload = self._focused_payload(facet_index)
-        if isinstance(payload, CurveData):
-            return self._curve_fit_selection(
-                model,
-                selector_kind=selector_kind,
-                payload=payload,
-                facet_index=facet_index,
-            )
-        if isinstance(payload, ImageData) and (
-            model.capabilities & _REGULAR_IMAGE_CAPABILITIES
-        ):
-            return self._regular_image_fit_selection(
-                model,
-                selector_kind=selector_kind,
-                payload=payload,
-                facet_index=facet_index,
-            )
-        if self._is_histogram_plot():
-            if not isinstance(payload, HistogramData):
-                raise RuntimeError("histogram projection did not produce histogram data")
-            return self._histogram_fit_selection(
-                model,
-                selector_kind=selector_kind,
-                payload=payload,
-                facet_index=facet_index,
-            )
-        if not isinstance(payload, ImageData):
-            raise TypeError("unsupported fit projection payload")
-        return self._image_fit_selection(
-            model,
-            selector_kind=selector_kind,
-            payload=payload,
-            facet_index=facet_index,
+        authority = self._fit_selection_authority(selector_kind)
+        solver_units = tuple(
+            self._fit_relation_quantity(relation).canonical_unit
+            for relation in model.coordinate_relations
         )
+
+        def select(facet_index: int | None = None) -> FitSelection:
+            if facet_index is None:
+                facet_index = self._focused_facet_index
+            payload = self._focused_payload(facet_index)
+            if isinstance(payload, CurveData):
+                return self._curve_fit_selection(
+                    model, authority=authority, solver_units=solver_units,
+                    payload=payload, facet_index=facet_index,
+                )
+            if isinstance(payload, ImageData) and (
+                model.capabilities & _REGULAR_IMAGE_CAPABILITIES
+            ):
+                return self._regular_image_fit_selection(
+                    model, authority=authority, solver_units=solver_units,
+                    payload=payload, facet_index=facet_index,
+                )
+            if self._is_histogram_plot():
+                if not isinstance(payload, HistogramData):
+                    raise RuntimeError("histogram projection did not produce histogram data")
+                return self._histogram_fit_selection(
+                    model, authority=authority, solver_units=solver_units,
+                    payload=payload, facet_index=facet_index,
+                )
+            if not isinstance(payload, ImageData):
+                raise TypeError("unsupported fit projection payload")
+            return self._image_fit_selection(
+                model, authority=authority, solver_units=solver_units,
+                payload=payload, facet_index=facet_index,
+            )
+
+        return select
 
     def _curve_fit_selection(
         self,
         model: FitModelSpec,
         *,
-        selector_kind: SelectorKind | None,
+        authority: FitAuthority,
+        solver_units: tuple[Unit, ...],
         payload: CurveData,
         facet_index: int | None = None,
     ) -> FitSelection:
@@ -1479,7 +1489,6 @@ class FitProjection:
             & np.isfinite(y_canonical)
         )
 
-        authority = self._fit_selection_authority(selector_kind)
         active = authority.selector
         if active is not None:
             value = active.value
@@ -1515,7 +1524,7 @@ class FitProjection:
         coordinates = self._fit_coordinate_values_to_solver(
             x_canonical[valid],
             source.x,
-            model.coordinate_relations[0],
+            solver_units[0],
         )
         sem = getattr(source, "sem", None)
         return FitSelection(
@@ -1537,7 +1546,8 @@ class FitProjection:
         self,
         model: FitModelSpec,
         *,
-        selector_kind: SelectorKind | None,
+        authority: FitAuthority,
+        solver_units: tuple[Unit, ...],
         payload: HistogramData,
         facet_index: int | None = None,
     ) -> FitSelection:
@@ -1554,7 +1564,6 @@ class FitProjection:
         counts = np.asarray(payload.counts, dtype=float).reshape(-1)
         valid = np.isfinite(canonical) & np.isfinite(counts)
 
-        authority = self._fit_selection_authority(selector_kind)
         active = authority.selector
         if active is not None:
             if active.kind is SelectorKind.X_RANGE:
@@ -1586,7 +1595,7 @@ class FitProjection:
         model_centers = self._fit_coordinate_values_to_solver(
             canonical[valid],
             payload.centers,
-            model.coordinate_relations[0],
+            solver_units[0],
         )
         return FitSelection(
             data_revision=self.data_revision,
@@ -1602,7 +1611,8 @@ class FitProjection:
         self,
         model: FitModelSpec,
         *,
-        selector_kind: SelectorKind | None,
+        authority: FitAuthority,
+        solver_units: tuple[Unit, ...],
         payload: ImageData,
         facet_index: int | None = None,
     ) -> FitSelection:
@@ -1611,16 +1621,16 @@ class FitProjection:
         x_solver = self._fit_coordinate_values_to_solver(
             np.asarray(payload.x.canonical, dtype=float),
             payload.x,
-            model.coordinate_relations[0],
+            solver_units[0],
         ).reshape(-1)
         y_solver = self._fit_coordinate_values_to_solver(
             np.asarray(payload.y.canonical, dtype=float),
             payload.y,
-            model.coordinate_relations[1],
+            solver_units[1],
         ).reshape(-1)
         valid, observations, scope, active = self._image_fit_domain(
             payload,
-            selector_kind,
+            authority,
         )
         regular = RegularImageFitInput(
             x_solver,
@@ -1645,7 +1655,8 @@ class FitProjection:
         self,
         model: FitModelSpec,
         *,
-        selector_kind: SelectorKind | None,
+        authority: FitAuthority,
+        solver_units: tuple[Unit, ...],
         payload: ImageData,
         facet_index: int | None = None,
     ) -> FitSelection:
@@ -1656,16 +1667,16 @@ class FitProjection:
         x_solver = self._fit_coordinate_values_to_solver(
             np.asarray(payload.x.canonical, dtype=float),
             payload.x,
-            model.coordinate_relations[0],
+            solver_units[0],
         ).reshape(-1)
         y_solver = self._fit_coordinate_values_to_solver(
             np.asarray(payload.y.canonical, dtype=float),
             payload.y,
-            model.coordinate_relations[1],
+            solver_units[1],
         ).reshape(-1)
         valid, observations, scope, active = self._image_fit_domain(
             payload,
-            selector_kind,
+            authority,
         )
         finite_x = np.isfinite(x_solver)
         finite_y = np.isfinite(y_solver)
@@ -1702,7 +1713,7 @@ class FitProjection:
     def _image_fit_domain(
         self,
         payload: ImageData,
-        selector_kind: SelectorKind | None,
+        authority: FitAuthority,
     ) -> tuple[
         np.ndarray | None,
         np.ndarray,
@@ -1733,7 +1744,6 @@ class FitProjection:
         if not (bool(np.all(finite_x)) and bool(np.all(finite_y))):
             plane = finite_y[:, None] & finite_x[None, :]
             valid = plane if valid is None else valid & plane
-        authority = self._fit_selection_authority(selector_kind)
         active = authority.selector
         if active is not None:
             value = active.value
@@ -1797,17 +1807,11 @@ class FitProjection:
         self,
         values: np.ndarray,
         source_quantity: Any,
-        solver_relation: UnitRelation,
+        target_unit: Unit,
     ) -> np.ndarray:
         """Convert a painted coordinate's canonical values into model units."""
 
-        target_quantity = self._fit_relation_quantity(solver_relation)
-        if target_quantity is None:
-            raise ValueError(
-                "fit coordinate relations must identify a plot coordinate axis"
-            )
         source_unit = source_quantity.canonical_unit
-        target_unit = target_quantity.canonical_unit
         if not source_unit.compatible_with(target_unit):
             raise ValueError(
                 "fit model coordinate axes require compatible canonical units"
@@ -1836,7 +1840,7 @@ class FitProjection:
             canonical = self._fit_coordinate_values_to_solver(
                 np.asarray(centers.canonical, dtype=float).reshape(-1),
                 centers,
-                result.model.coordinate_relations[0],
+                self._fit_relation_quantity(result.model.coordinate_relations[0]).canonical_unit,
             )
             return self._clip_to_fitted_domain(
                 canonical,
@@ -1851,7 +1855,7 @@ class FitProjection:
         canonical = self._fit_coordinate_values_to_solver(
             np.asarray(x.canonical, dtype=float).reshape(-1),
             x,
-            result.model.coordinate_relations[0],
+            self._fit_relation_quantity(result.model.coordinate_relations[0]).canonical_unit,
         )
         return self._clip_to_fitted_domain(
             canonical,

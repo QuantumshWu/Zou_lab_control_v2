@@ -10,6 +10,7 @@
 
 ## 1. 当前实施范围
 
+- 2026-09-07 已完成拟合请求公共准备与逐帧临时闭包减量：Single/Facet共享同一选区、单位与输入准备语义，每个请求仅解析一次公共信息，保留初值竞争、最终精度、逐cell有效性及same-shot呈现；绘图遍历以同序迭代替代自引用递归闭包。不禁用垃圾回收、不调大阈值、不以手动回收移出计时窗口冒充改善；初始化/重布局图对象与稳态临时对象分别取证，不宣称所有长尾已消除。性能结果与报告只留本地ignored research，不纳入Git。
 - 2026-09-07 当前性能worktree实施要求：RegularImage single/Bn收敛为同一数值流程，内部规则轴不再展开成逐像素坐标；现有context贯通prepare/objective，以稳定中心化统计量减少重复整图扫描，并直接核对最终残差。前景文字/边框仍由Matplotlib语义生成，在同一有序compose owner内批量重放。最终是否保留必须由同输入正确性、single/Bn代价和真实四Panel结果裁决，不能将尚未通过的候选记为性能完成。
 - 该cut实现已提交为`971765ba`，并按用户裁决与master `d1b1d1e0`整合；保留master的候选裁决、有效性、交付顺序与公共bench机制。整合前四Panel Curve critical `89.85→84.69ms`、Image `98.08→83.27ms`；isolated B40 image fit `27.52→24.70ms`，single `19.32→26.70ms`是明确代价，不将这些时间冒充合并后的复测。无新production类/文件，性能cut本身净+71行（包括最后补齐的f32/f64预热样本）。带探针Curve的约205ms长尾在补测中定位到117.334ms gen2 GC，不归入renderer/solver正常耗时；无探针的发生频率尚未确定，不宣称物理极限或永不掉帧。细节及剩余大头以`research/FINAL_MAJOR_OPTIMIZATION_REPORT.md`为准。
 

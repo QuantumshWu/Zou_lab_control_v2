@@ -572,19 +572,19 @@ class FitSessionMixin:
 
         selections: list[FitSelection | None] = []
         selection_failures: list[str | None] = []
-        for index in range(len(cells)):
-            try:
-                selections.append(
-                    projection.fit_selection(
-                        model,
-                        selector_kind=selector_kind,
-                        facet_index=index,
-                    )
-                )
-                selection_failures.append(None)
-            except Exception as error:
-                selections.append(None)
-                selection_failures.append(str(error) or type(error).__name__)
+        try:
+            select_cell = projection._prepare_fit_selection(model, selector_kind)
+        except Exception as error:
+            selections = [None] * len(cells)
+            selection_failures = [str(error) or type(error).__name__] * len(cells)
+        else:
+            for index in range(len(cells)):
+                try:
+                    selections.append(select_cell(index))
+                    selection_failures.append(None)
+                except Exception as error:
+                    selections.append(None)
+                    selection_failures.append(str(error) or type(error).__name__)
 
         parameter_units = projection._fit_parameter_units(model)
         batch_results: list[FitResult | None] = [None] * len(cells)
@@ -1944,15 +1944,13 @@ class FitSessionMixin:
             raise TypeError("facet fit selections require FacetGridPlot")
         cells = tuple(getattr(projection.payload, "cells", ()))
         selections: list[FitSelection | None] = []
+        try:
+            select_cell = projection._prepare_fit_selection(model, selector_kind)
+        except (TypeError, ValueError, KeyError):
+            return (None,) * len(cells)
         for index, _cell in enumerate(cells):
             try:
-                selections.append(
-                    projection.fit_selection(
-                        model,
-                        selector_kind=selector_kind,
-                        facet_index=index,
-                    )
-                )
+                selections.append(select_cell(index))
             except (TypeError, ValueError, KeyError):
                 selections.append(None)
         return tuple(selections)

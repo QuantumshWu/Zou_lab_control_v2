@@ -2458,36 +2458,27 @@ class MatplotlibRenderer:
             )
 
         def add(value: Any) -> None:
-            if isinstance(value, dict):
-                # The height-bar chrome keeps its artists in a dict; its
-                # lines and TEXTS move with the camera, so they must be
-                # dynamic -- baked into the background they could only
-                # stay correct while something forced a full redraw
-                # between frames.
-                for item in value.values():
-                    add(item)
-                return
-            if isinstance(value, (tuple, list, set)):
-                for item in value:
-                    add(item)
-                return
-            # Mirror the full-draw contract at the one collection point: a
-            # full figure draw skips an INVISIBLE AXES together with
-            # everything on it, and never draws an axes that is no longer in
-            # the figure at all.  A focused FacetGrid is the layout that
-            # hides axes -- collecting their artists here made every hidden
-            # cell (and, through the tick loop below, its tick marks) ghost
-            # into the focused frame at the old cell boxes; a REMOVED axes
-            # (the focused image side chrome dies with its focus) reports
-            # visible forever, so figure membership is part of the mirror.
-            if (
-                isinstance(value, Artist)
-                and getattr(value, "axes", None) is not None
-                and id(value.axes) in axes_order
-                and value.axes.get_visible()
-                and touchable(value)
-            ):
-                keyed(value, value.axes, value.get_zorder())
+            # Keep the same depth-first insertion order without a recursive
+            # closure: its self-reference retained this frame's collected
+            # artists, ordering tuples and axes until cyclic GC ran.
+            pending = [value]
+            while pending:
+                value = pending.pop()
+                if isinstance(value, dict):
+                    # Height-bar chrome keeps its moving lines/text in a dict.
+                    pending.extend(reversed(tuple(value.values())))
+                elif isinstance(value, (tuple, list, set)):
+                    pending.extend(reversed(tuple(value)))
+                # Mirror full draw: hidden/removed axes do not contribute
+                # artists, even when their children still report visible.
+                elif (
+                    isinstance(value, Artist)
+                    and getattr(value, "axes", None) is not None
+                    and id(value.axes) in axes_order
+                    and value.axes.get_visible()
+                    and touchable(value)
+                ):
+                    keyed(value, value.axes, value.get_zorder())
 
         confined = self._confined_gesture_axes
         if confined is not None and confined not in figure_axes:
@@ -4250,16 +4241,13 @@ class MatplotlibRenderer:
         """Every artist the selector scene owns right now, by identity."""
 
         ids: set[int] = set()
-
-        def add(value: Any) -> None:
+        pending = list(self._selector_artists.values())
+        while pending:
+            value = pending.pop()
             if isinstance(value, (tuple, list, set)):
-                for item in value:
-                    add(item)
-                return
-            ids.add(id(value))
-
-        for values in self._selector_artists.values():
-            add(values)
+                pending.extend(value)
+            else:
+                ids.add(id(value))
         return frozenset(ids)
 
     def _forget_gesture_region(self) -> None:
