@@ -415,9 +415,18 @@ assert high == QtCore.QPoint(
     max(0, page.height() - popup.height()),
 ), high
 
-# A frame the operator CLOSED stays closed: nothing re-shows it but the
-# Setting button.
-card.retire_settings_popup()
+# A page frame has no Popup auto-dismiss. Closing its explicit button
+# must not suppress the next genuine Setting click within 250 ms.
+QtTest.QTest.mouseClick(card._settings_close_button, QtCore.Qt.LeftButton)
+app.processEvents()
+assert not popup.isVisible()
+QtTest.QTest.qWait(20)
+QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
+app.processEvents()
+assert popup.isVisible(), 'an explicit close suppressed the next Setting click'
+
+# A frame the operator CLOSED stays closed across tab changes.
+QtTest.QTest.mouseClick(card._settings_close_button, QtCore.Qt.LeftButton)
 app.processEvents()
 assert not popup.isVisible()
 tabs.setCurrentIndex(1)
@@ -426,7 +435,6 @@ tabs.setCurrentIndex(0)
 app.processEvents()
 assert not popup.isVisible(), 'a retired frame was resurrected by its tab'
 
-QtTest.QTest.qWait(300)
 QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
 app.processEvents()
 assert popup.isVisible()

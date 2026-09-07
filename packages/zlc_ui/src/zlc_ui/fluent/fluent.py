@@ -742,8 +742,8 @@ class FluentOverlayFrame(QtWidgets.QWidget):
         self._radius = None if radius is None else float(radius)
         self._border = QtGui.QColor(border)
         self._fill = QtGui.QColor(fill)
-        #: Same hide hook the popup offers: the Setting anchor's toggle
-        #: debounce reads it, whatever class stands behind the button.
+        #: Same hide notification hook as a popup; this page-owned frame
+        #: has no outside-press auto-dismiss and needs no reopen debounce.
         self._on_hidden = None
         self.hide()
 
@@ -1018,7 +1018,10 @@ class FluentSettingsPopupAnchor:
         if popup.isVisible():
             popup.hide()
             return
-        if time.monotonic() - self._dismissed_at < self._reopen_debounce_s:
+        if (
+            popup.windowType() == QtCore.Qt.Popup
+            and time.monotonic() - self._dismissed_at < self._reopen_debounce_s
+        ):
             return
         if prepare is not None:
             prepare()
