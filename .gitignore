@@ -33,3 +33,6 @@ packages/zlc_pulse/fpga/.Xil/
 # change on every run and nothing reads them back (bench/plot_perf/common.py
 # only writes).  Committing them made every measurement a diff.
 /bench/results/
+
+# Local profiling investigations, reports and measurements are not product source.
+/research/
