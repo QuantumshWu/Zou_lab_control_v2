@@ -1350,7 +1350,10 @@ class CalibrationTask:
             if not isinstance(sequencer_state, Mapping):
                 raise TypeError("sequencer snapshot must be a mapping")
             sequencer_snapshot = sequencer_archive_snapshot(
-                state=sequencer_state
+                state=sequencer_state,
+                program=pulse.program,
+                source=pulse.sequence,
+                run_repeats=count,
             )
             run_record = self._run_record(
                 actual,

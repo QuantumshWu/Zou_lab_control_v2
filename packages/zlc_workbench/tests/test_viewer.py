@@ -976,6 +976,25 @@ def test_existing_archive_manual_edit_saves_reopens_and_keeps_lineage(
     finally:
         _close_presenter(presenter)
 
+def test_a_played_pulse_is_named_on_the_device_tab_not_dumped() -> None:
+    """The Device tab says which pulse played and how many periods it has;
+    the document itself -- every period, slot and bracket -- and the scan
+    table are read where a pulse is drawn, not as hundreds of rows here."""
+
+    from zlc_workbench.viewer import _device_tab_snapshot
+
+    snapshot = {
+        "description": {"clock_hz": 5e7},
+        "program": {"digest": "abc", "duration_seconds": 0.5, "rows": [[1, 2], [3, 4]]},
+        "pulse": {"name": "scan", "periods": [{"name": "p1"}, {"name": "p2"}], "slots": []},
+    }
+    shown = _device_tab_snapshot(snapshot)
+    assert shown["pulse"] == {"name": "scan", "periods": 2}
+    assert shown["program"] == {"digest": "abc", "duration_seconds": 0.5, "rows": 2}
+    assert shown["description"] == {"clock_hz": 5e7}
+    assert snapshot["program"]["rows"] == [[1, 2], [3, 4]], "the record itself is untouched"
+
+
 def test_the_description_reports_only_facts_saved_in_the_archive(saved) -> None:
     path, _snapshot = saved
     info, arrays = read_archive(path)

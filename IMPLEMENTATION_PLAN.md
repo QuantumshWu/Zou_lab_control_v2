@@ -125,6 +125,7 @@
 - Summary位于run根，domain final位于`final/`，Figure pair位于`figures/`，精选
   candidate/site数据位于`data/`。Figure NPZ contract为`zlc.figure`；同stem PNG只登记为preview。
 - Task完成前必须注册所有声明的final artifacts；未注册、文件缺失或路径越出run root均失败。
+- run record的`pulse`是文件名与路径；`device_snapshots.sequencer`携带`program`（digest、时长、loop、scan表、repeats）与`pulse`（填好值的完整文档）。Pulse Editor保存时文档名跟随文件名。
 - Stop和failure保留run directory与已注册artifact；Stop时partial-exit writer的失败进入
   observation与stopped记录的error而状态仍是stopped。异常进程退出留下`start.json`而无
   `run.json`，不清理、不伪装成功。

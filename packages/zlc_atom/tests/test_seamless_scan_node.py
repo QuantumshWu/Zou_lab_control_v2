@@ -550,6 +550,21 @@ def test_the_table_is_the_plan_and_the_shots_are_run_repeats(monkeypatch) -> Non
     assert sequencer["layout_fingerprint"] > 0
     assert sequencer["target"]["raw_lanes"]
     assert "package_pins" in sequencer["target"]
+    # The pulse is the FILE the operator chose, and the board's snapshot
+    # carries what it played: the program the board loaded and the filled
+    # document it was compiled from.
+    assert run_record["pulse"] == {
+        "name": Path(TEMPLATE_NAME).stem,
+        "path": str(Path(TEMPLATE_NAME)),
+    }
+    played_program = run_record["device_snapshots"]["sequencer"]["program"]
+    assert played_program["digest"] == long_bench._loaded_program.digest
+    assert played_program["rows"] == [list(row) for row in long_bench._loaded_rows]
+    assert (played_program["run_repeats"], played_program["scan_repeats"]) == (1, 1)
+    document = run_record["device_snapshots"]["sequencer"]["pulse"]
+    assert [period["name"] for period in document["periods"]] == [
+        period.name for period in long_bench.loaded_sources[-1].periods
+    ]
 
 
 def test_an_authored_whole_bracket_stays_independent_of_run_repeats() -> None:
@@ -1236,6 +1251,7 @@ def _device_seamless(knob: _Knob, sequencer: _FakeSequencer, source: _FakeSource
         sequencer=sequencer,
         source=source,
         sequence=sequence,
+        pulse_path=Path(TEMPLATE_NAME),
         plan=ScanPlan(
             (
                 ScanAxis(device_port.port, (1.0, 2.0)),

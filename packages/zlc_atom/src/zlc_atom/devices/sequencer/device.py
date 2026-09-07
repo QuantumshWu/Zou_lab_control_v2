@@ -7,6 +7,7 @@ from dataclasses import fields
 import math
 from typing import TypeAlias
 
+from zlc_pulse.codec import sequence_to_tree
 from zlc_pulse.compile import CompiledProgram
 from zlc_pulse.device import (
     AppliedState,
@@ -63,17 +64,34 @@ def sequencer_archive_snapshot(
     description: BoardDescription | None = None,
     state: Mapping[str, object] | None = None,
     config: Mapping[str, tuple[float, str]] | None = None,
+    program: CompiledProgram | None = None,
+    source: PulseSequence | None = None,
+    rows: Sequence[Sequence[int]] = (),
+    run_repeats: int | None = None,
+    scan_repeats: int | None = None,
 ) -> dict[str, object]:
-    """Canonical archive snapshot of proven board facts and/or runtime state.
+    """Canonical archive snapshot of proven board facts, runtime state and
+    what the board played.
 
     ``config`` is the calibrated set that was filling config parameters when
     this ran.  It belongs with the board's own facts, not with the pulse: the
     file it came from is overwritten by the next calibration, so naming the
     pulse says nothing about which numbers played.
+
+    ``program`` and ``source`` are the play itself: the compiled program's
+    facts -- its digest, duration and loop -- and the filled pulse document
+    it was compiled from, every period's duration and levels, every slot and
+    bracket, the API and config values in force.  The same argument holds for
+    the pulse as for the config: its file is edited after the run, so a
+    record that only names it does not say what timing ran.  ``rows`` is the
+    scan table the program walked and ``run_repeats``/``scan_repeats`` how the
+    fire repeated it; both are facts of the program, not of a document.
     """
 
-    if description is None and state is None and config is None:
-        raise ValueError("a sequencer archive snapshot needs description, state or config")
+    if description is None and state is None and config is None and program is None and source is None:
+        raise ValueError(
+            "a sequencer archive snapshot needs description, state, config, program or source"
+        )
     result: dict[str, object] = {}
     if description is not None:
         result["description"] = _description_snapshot(description)
@@ -115,6 +133,29 @@ def sequencer_archive_snapshot(
                     f"sequencer state {name!r} is not archive-ready"
                 )
         result["state"] = selected
+    if program is not None:
+        if not isinstance(program, CompiledProgram):
+            raise TypeError("sequencer program must be CompiledProgram")
+        played: dict[str, object] = {
+            "digest": str(program.digest),
+            "clock_hz": float(program.clock_hz),
+            "duration_seconds": float(program.duration_seconds),
+            "loop_start_index": int(program.loop_start_index),
+            "loop_end_tick": int(program.loop_end_tick),
+            "loop_count": int(program.loop_count),
+            "rows": [[int(value) for value in row] for row in rows],
+        }
+        if run_repeats is not None:
+            played["run_repeats"] = int(run_repeats)
+        if scan_repeats is not None:
+            played["scan_repeats"] = int(scan_repeats)
+        result["program"] = played
+    elif rows or run_repeats is not None or scan_repeats is not None:
+        raise ValueError("scan rows and repeats describe a program; give the program")
+    if source is not None:
+        if not isinstance(source, PulseSequence):
+            raise TypeError("sequencer source must be PulseSequence")
+        result["pulse"] = sequence_to_tree(source)
     return result
 
 

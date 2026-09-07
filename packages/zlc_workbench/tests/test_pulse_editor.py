@@ -1178,7 +1178,9 @@ def test_a_pulse_can_be_saved_and_opened_again(sequence, tmp_path) -> None:
         assert presenter.ask_for_pulse() is True
         assert presenter._state == decoded
         assert presenter._saved_state == decoded
-        assert presenter.sequence.name == "kept" and len(presenter.sequence.periods) == expected
+        # The file names the pulse: saved as mine.json, it is "mine" -- the
+        # name typed before the save only proposed a file name.
+        assert presenter.sequence.name == "mine" and len(presenter.sequence.periods) == expected
     finally:
         presenter.close()
 

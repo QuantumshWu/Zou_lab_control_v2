@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 
 from zlc_pulse import (
     PulseSequence,
@@ -81,6 +82,7 @@ class SteppedScanMeasurement:
         sequencer_key: str = "sequencer",
         source: object,
         sequence: PulseSequence,
+        pulse_path: Path,
         plan: ScanPlan,
         ports: tuple[ScanPort, ...],
         repeats: int,
@@ -97,6 +99,9 @@ class SteppedScanMeasurement:
         self.sequencer_key = str(sequencer_key)
         self.source = source
         self.sequence = sequence
+        #: The file the operator chose; the pulse is named by it wherever a
+        #: record names the pulse, never by the name the document carries.
+        self.pulse_path = Path(pulse_path)
         self.plan = plan
         self.ports = ports
         self.repeats = int(repeats)
@@ -217,11 +222,21 @@ class SteppedScanMeasurement:
             },
             "device_snapshots": {
                 "sequencer": sequencer_archive_snapshot(
-                    description=board, config=self.sequencer.config_values()
+                    description=board,
+                    config=self.sequencer.config_values(),
+                    # The template the points are compiled from, at its
+                    # authored API values and filled with the board's config
+                    # values: every point plays it with its own API values,
+                    # which the plan records.
+                    source=self.sequencer.compile_pulse(
+                        resolve_api_parameters(self.sequence),
+                        board.geometry,
+                        board.clock_hz,
+                    )[0],
                 ),
                 **tunable_snapshots,
             },
-            "pulse": self.sequence.name,
+            "pulse": {"name": self.pulse_path.stem, "path": str(self.pulse_path)},
             "plan": self.plan.to_tree(),
             "scan_shape": self.plan.shape,
             "scan_repeats": self.repeats,

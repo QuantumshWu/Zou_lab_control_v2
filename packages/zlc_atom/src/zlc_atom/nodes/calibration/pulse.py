@@ -117,8 +117,10 @@ def resolve_pulse(
     resolved, program = sequencer.compile_pulse(
         resolved, board.geometry, board.clock_hz
     )
+    # Named by its file: the operator chose the file, and a document's own
+    # name is whatever it was called when first drawn.
     return ResolvedPulse(
-        sequence.name,
+        Path(source).stem,
         source,
         resolved,
         program,

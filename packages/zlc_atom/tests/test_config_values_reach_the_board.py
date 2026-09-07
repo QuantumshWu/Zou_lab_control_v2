@@ -60,6 +60,51 @@ def test_the_archive_records_the_set_that_was_in_force() -> None:
         sequencer.close()
 
 
+def test_the_archive_carries_the_program_and_the_pulse_that_played() -> None:
+    """Beside the board's facts: what it PLAYED, as timing, not as a file name.
+
+    A record that only named the pulse's file said nothing once that file
+    was edited, and named it by the document's own name -- "untitled" for
+    any pulse drawn in the editor and never renamed on screen.
+    """
+
+    from zlc_pulse import resolve_api_parameters
+    from tests.pulse_fixture import pulse_sequence
+
+    sequencer = VirtualSequencer(world=SimulationWorld())
+    sequencer.open()
+    try:
+        board = sequencer.describe()
+        filled, program = sequencer.compile_pulse(
+            resolve_api_parameters(pulse_sequence("imaging_template.json")),
+            board.geometry,
+            board.clock_hz,
+        )
+        snapshot = sequencer_archive_snapshot(
+            description=board,
+            program=program,
+            source=filled,
+            rows=((1, 2), (3, 4)),
+            run_repeats=5,
+            scan_repeats=2,
+        )
+        played = snapshot["program"]
+        assert played["digest"] == program.digest
+        assert played["duration_seconds"] == pytest.approx(program.duration_seconds)
+        assert played["loop_count"] == program.loop_count
+        assert played["rows"] == [[1, 2], [3, 4]]
+        assert (played["run_repeats"], played["scan_repeats"]) == (5, 2)
+        document = snapshot["pulse"]
+        assert document["name"] == filled.name
+        assert [period["name"] for period in document["periods"]] == [
+            period.name for period in filled.periods
+        ]
+        with pytest.raises(ValueError, match="give the program"):
+            sequencer_archive_snapshot(description=board, rows=((1,),))
+    finally:
+        sequencer.close()
+
+
 def test_the_archive_keeps_config_source_in_its_whitelist() -> None:
     """The snapshot drops any state key it was not told about, silently.
 

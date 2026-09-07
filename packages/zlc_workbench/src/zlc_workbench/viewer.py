@@ -2076,7 +2076,7 @@ def _device_rows(
                 "logic": logic,
                 "scope": scope,
                 **({} if sequence is None else {"sequence": sequence}),
-                "snapshot": dict(snapshot),
+                "snapshot": _device_tab_snapshot(snapshot),
             }
             if candidate not in snapshots:
                 snapshots.append(candidate)
@@ -2109,6 +2109,30 @@ def _device_rows(
             )
         )
     return tuple(rows)
+
+
+def _device_tab_snapshot(snapshot: Mapping[str, object]) -> dict[str, object]:
+    """The snapshot as the Device tab reads it.
+
+    A sequencer's snapshot carries the pulse document that played -- every
+    period, slot and bracket -- and the scan table its program walked.  The
+    Device tab is the place to see WHICH pulse played and how long, not to
+    read hundreds of rows of timing; the document is named and measured
+    here and is read whole where a pulse is drawn.
+    """
+
+    shown = dict(snapshot)
+    document = shown.get("pulse")
+    if isinstance(document, Mapping):
+        periods = document.get("periods", ())
+        shown["pulse"] = {
+            "name": document.get("name"),
+            "periods": len(periods) if isinstance(periods, (list, tuple)) else 0,
+        }
+    program = shown.get("program")
+    if isinstance(program, Mapping) and isinstance(program.get("rows"), (list, tuple)):
+        shown["program"] = {**program, "rows": len(program["rows"])}
+    return shown
 
 
 def _flatten(value: Any, prefix: str = "") -> Rows:

@@ -915,7 +915,7 @@ class ExperimentSession:
             lease.release()
         self._pulse_sequence = sequence
         self._pulse_path = path
-        self._pulse = {"name": sequence.name}
+        self._pulse = {"name": path.stem}
         return self._pulse
 
     @property

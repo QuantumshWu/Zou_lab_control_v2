@@ -3240,6 +3240,15 @@ class PulseEditorPresenter:
                 f"{target.name} is not a JSON pulse; save with a .json suffix"
             )
             return ""
+        # The file names the pulse.  A document saved as scan.json is "scan"
+        # in every record that names it; the name on screen before the first
+        # save only proposes the file name.
+        if self.sequence.name != target.stem:
+            named = self._rebuilt(name=target.stem)
+            if named is None:
+                return ""
+            self._edit_state(sequence=named)
+            self.view.set_title(f"PulseGUI - {named.name}")
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             write_pulse(target, self._state)

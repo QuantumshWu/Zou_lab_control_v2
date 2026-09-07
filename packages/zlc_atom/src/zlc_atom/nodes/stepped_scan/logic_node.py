@@ -165,6 +165,7 @@ def _build(
         sequencer_key=sequencer_key,
         source=watched_signal_source(signal_plane, source_signal),
         sequence=sequence,
+        pulse_path=pulse_resource.path,
         plan=parsed,
         ports=ports,
         repeats=int(repeats),

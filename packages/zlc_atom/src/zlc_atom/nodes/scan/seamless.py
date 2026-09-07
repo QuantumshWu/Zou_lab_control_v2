@@ -60,6 +60,7 @@ from __future__ import annotations
 import itertools
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
+from pathlib import Path
 
 from zlc_pulse import (
     PulseSequence,
@@ -96,6 +97,7 @@ class SeamlessScanMeasurement:
         sequencer_key: str = "sequencer",
         source: object,
         sequence: PulseSequence,
+        pulse_path: Path,
         plan: ScanPlan,
         ports: tuple[ScanPort, ...],
         tunables: Mapping[str, object] | None = None,
@@ -110,6 +112,10 @@ class SeamlessScanMeasurement:
         self.sequencer_key = str(sequencer_key)
         self.source = source
         self.sequence = sequence
+        #: The file the operator chose; the pulse is named by it wherever a
+        #: record names the pulse.  A document's own name is whatever it was
+        #: called when it was first drawn -- "untitled", for most.
+        self.pulse_path = Path(pulse_path)
         self.plan = plan
         #: The host's axes and the board's, split once: who moves an axis
         #: decides where its loop lives, and that never changes for the
@@ -313,6 +319,7 @@ class SeamlessScanMeasurement:
         *,
         board: object,
         streamed: PulseSequence,
+        program: object,
         wire: object,
         slot_tick_scales: Sequence[int],
         writer: ScanDatasetWriter,
@@ -339,16 +346,6 @@ class SeamlessScanMeasurement:
         settle(context, self.settle_seconds)
         self.source.open(context, cycles=readouts)
         try:
-            # Filled by the board, then compiled: a config parameter is the
-            # apparatus's calibrated number, and it is baked in HERE.  The
-            # filled sequence is what goes back as ``source=``, so the applied
-            # state and the archive describe what actually played.
-            streamed, program = self.sequencer.compile_pulse(
-                streamed,
-                board.geometry,
-                board.clock_hz,
-                slot_tick_scales=slot_tick_scales,
-            )
             self.source.validate(
                 program,
                 wire,
@@ -450,6 +447,17 @@ class SeamlessScanMeasurement:
             slot_rows,
             params=board.geometry,
         )
+        # Filled by the board, then compiled, ONCE: a config parameter is the
+        # apparatus's calibrated number and it is baked in here.  The filled
+        # sequence is what every fire loads as ``source=`` and what the run
+        # record carries as the pulse that played -- one object, so the
+        # record cannot say one thing and the board another.
+        streamed, program = self.sequencer.compile_pulse(
+            streamed,
+            board.geometry,
+            board.clock_hz,
+            slot_tick_scales=slot_tick_scales,
+        )
         effective_inner = self._plan_ordered_rows(
             effective_slot_rows,
             columns,
@@ -473,6 +481,9 @@ class SeamlessScanMeasurement:
             effective_rows=effective_rows,
             slot_tick_scales=slot_tick_scales,
             board=board,
+            program=program,
+            source=streamed,
+            wire=wire,
         )
         self._last_run_record = dict(run_record)
         writer = ScanDatasetWriter(
@@ -486,6 +497,7 @@ class SeamlessScanMeasurement:
         segment = dict(
             board=board,
             streamed=streamed,
+            program=program,
             wire=wire,
             slot_tick_scales=slot_tick_scales,
             writer=writer,
@@ -571,8 +583,13 @@ class SeamlessScanMeasurement:
         effective_rows: Sequence[Sequence[float]],
         slot_tick_scales: Sequence[int],
         board: object,
+        program: object,
+        source: PulseSequence,
+        wire: Sequence[Sequence[int]],
     ) -> dict[str, object]:
-        """What this run WAS, in the words of the plan that drove it."""
+        """What this run WAS: the plan that drove it, the file it played and,
+        on the board's own snapshot, the program and the filled pulse that
+        played."""
 
         requested_rows = self.plan.rows()
         played_rows = tuple(tuple(float(value) for value in row) for row in effective_rows)
@@ -613,7 +630,13 @@ class SeamlessScanMeasurement:
             "named_devices": named_devices,
             "device_snapshots": {
                 "sequencer": sequencer_archive_snapshot(
-                    description=board, config=self.sequencer.config_values()
+                    description=board,
+                    config=self.sequencer.config_values(),
+                    program=program,
+                    source=source,
+                    rows=wire,
+                    run_repeats=self.shots_per_point,
+                    scan_repeats=self.repeats,
                 ),
                 **{
                     f"tunable:{key}": {
@@ -629,7 +652,7 @@ class SeamlessScanMeasurement:
                     )
                 },
             },
-            "pulse": self.sequence.name,
+            "pulse": {"name": self.pulse_path.stem, "path": str(self.pulse_path)},
             "plan": {"axes": axes},
             "scan_shape": list(self.plan.shape),
             "scan_repeats": self.repeats,

@@ -502,6 +502,7 @@ def test_device_scan_refuses_an_effective_value_different_from_its_coordinate() 
         sequencer=SimpleNamespace(safe=lambda: None),
         source=object(),
         sequence=_template_sequence(),
+        pulse_path=Path("scan_template.json"),
         plan=ScanPlan((ScanAxis(port_name, (3.0,)),)),
         ports=(ScanPort(port_name, "camera.gain_db", "", 0.0, 24.0),),
         repeats=1,
@@ -522,6 +523,7 @@ def _device_stepped(knob: _Knob, sequencer: _FakeSequencer, source: _FakeSource)
         sequencer=sequencer,
         source=source,
         sequence=_template_sequence(),
+        pulse_path=Path("scan_template.json"),
         plan=ScanPlan((ScanAxis(port.port, (1.0, 2.0)),)),
         ports=(port,),
         repeats=1,
@@ -692,6 +694,11 @@ def test_scanning_a_device_port_moves_the_camera_exposure() -> None:
         assert published is not None
         role = "tunable:mot_camera"
         assert published.run_record["named_devices"][role] == "mot_camera"
+        # The file names the pulse; the board's snapshot carries the filled
+        # template every point was compiled from.
+        assert published.run_record["pulse"]["name"] == Path(TEMPLATE_NAME).stem
+        document = published.run_record["device_snapshots"]["sequencer"]["pulse"]
+        assert document["periods"], "the played timing travels with the record"
         assert published.run_record["device_snapshots"][role]["fields"][
             "exposure_seconds"
         ]["scan_values"] == exposures
