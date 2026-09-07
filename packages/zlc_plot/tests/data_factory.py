@@ -173,8 +173,13 @@ def make_snapshot(
     *,
     validity: Any | None = None,
     sigma: Any | None = None,
+    generation: str | None = None,
 ) -> OwnedSnapshot:
-    """Build one production snapshot, accepting scalar values without the carrier."""
+    """Build one production snapshot, accepting scalar values without the carrier.
+
+    ``generation`` names the stream the snapshot belongs to; a test about
+    what a new run's revision is reported AS needs two of them.
+    """
 
     array = np.asarray(values)
     physical_shape = schema.physical_shape
@@ -195,6 +200,7 @@ def make_snapshot(
         revision=revision,
         validity=validity,
         sigma=sigma,
+        stream_generation=generation,
     )
 
 

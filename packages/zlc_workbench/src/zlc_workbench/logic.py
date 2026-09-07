@@ -41,6 +41,7 @@ __all__ = [
     "build_arguments",
     "device_key_options",
     "finalize_logic_draft",
+    "split_signal_key",
     "stable_signal_key",
     "task_input_summary",
 ]
@@ -176,10 +177,30 @@ class LogicBinding:
     operator_request_id: str = ""
 
 
+_SIGNAL_KEY_PREFIX = "@logic/"
+
+
 def stable_signal_key(node_id: str, output_name: str) -> str:
     """The stable signal spelling shared by stopped drafts and NodeHost."""
 
-    return f"@logic/{str(node_id)}/{str(output_name)}"
+    return f"{_SIGNAL_KEY_PREFIX}{str(node_id)}/{str(output_name)}"
+
+
+def split_signal_key(signal: str) -> tuple[str, str] | None:
+    """The ``(producer, output)`` a stable signal key spells, else None.
+
+    The inverse of :func:`stable_signal_key`, and the one reader of its
+    grammar: a producer is everything between the prefix and the last
+    slash, so an output name never has to be guessed at from the middle.
+    """
+
+    text = str(signal)
+    if not text.startswith(_SIGNAL_KEY_PREFIX):
+        return None
+    producer, separator, output = text[len(_SIGNAL_KEY_PREFIX):].rpartition("/")
+    if not separator or not producer or not output:
+        return None
+    return producer, output
 
 
 def task_input_summary(

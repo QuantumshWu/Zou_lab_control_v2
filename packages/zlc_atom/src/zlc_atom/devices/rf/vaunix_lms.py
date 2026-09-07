@@ -94,7 +94,16 @@ class CtypesLmsLibrary:
         raise LookupError(f"no Vaunix LMS with serial {serial} is attached")
 
     def close_device(self, handle: int) -> None:
-        self._dll.fnLMS_CloseDevice(handle)
+        # The SDK answers close with a status like every other call, and a
+        # non-zero one (BAD_HID_IO, say) means the handle is still open.
+        # Swallowing it let the installation believe the brick released
+        # and drop the only reference that could retry.
+        status = int(self._dll.fnLMS_CloseDevice(handle))
+        if status != 0:
+            raise RuntimeError(
+                f"fnLMS_CloseDevice refused to close device {handle} "
+                f"(status {status})"
+            )
 
     def set_frequency(self, handle: int, frequency_units: int) -> None:
         status = int(self._dll.fnLMS_SetFrequency(handle, int(frequency_units)))
@@ -150,6 +159,14 @@ class VaunixLmsConfig:
 class VaunixLmsRfSource(RfSourceBase):
     def __init__(self, config: VaunixLmsConfig, *, library: LmsLibrary | None = None) -> None:
         self.config = config
+        # The authored half first, with nothing open: a window that cannot
+        # be honoured is refused before a USB handle exists to leak.
+        super().__init__(
+            frequency_low_hz=config.frequency_low_hz,
+            frequency_high_hz=config.frequency_high_hz,
+            power_low_dbm=config.power_low_dbm,
+            power_high_dbm=config.power_high_dbm,
+        )
         self._library = (
             library
             if library is not None
@@ -162,13 +179,19 @@ class VaunixLmsRfSource(RfSourceBase):
             )
         )
         self._handle = self._library.open_device(int(config.serial))
-        super().__init__(
-            identity=f"vaunix-lms:{int(config.serial)}",
-            frequency_low_hz=config.frequency_low_hz,
-            frequency_high_hz=config.frequency_high_hz,
-            power_low_dbm=config.power_low_dbm,
-            power_high_dbm=config.power_high_dbm,
-        )
+        # From here on the handle is this object's to close: a failure
+        # before the constructor returns has no other owner to hand it to.
+        try:
+            self._attach(f"vaunix-lms:{int(config.serial)}")
+        except BaseException as error:
+            try:
+                self._library.close_device(self._handle)
+            except BaseException as close_error:
+                error.add_note(
+                    "closing the brick also reported: "
+                    f"{type(close_error).__name__}: {close_error}"
+                )
+            raise
 
     # ------------------------------------------------------- transport verbs
     # A Lab Brick has one output, so the channel is always the bare "".

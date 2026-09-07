@@ -200,7 +200,10 @@ class Installation:
                 missing = wanted - set(ordered)
                 if missing:
                     raise KeyError(f"source installation has no leaves {sorted(missing)}")
-                occupied = wanted.intersection(target._devices, target._failures)
+                # A key the target holds as a device OR remembers as a failure
+                # is taken: moving a leaf onto either would leave two owners of
+                # one key, and the source would already have let go of it.
+                occupied = wanted & (set(target._devices) | set(target._failures))
                 if occupied:
                     raise ValueError(
                         f"target installation already owns keys {sorted(occupied)}"
@@ -521,14 +524,17 @@ class InstallationCompositionError(BaseExceptionGroup):
         )
 
 
-_BLUEPRINT_TOKEN = object()
-
-
 @dataclass(frozen=True)
 class InstallationBlueprint:
-    """Side-effect-free, dependency-ordered input to device factory execution."""
+    """Side-effect-free, dependency-ordered input to device factory execution.
 
-    _token: object
+    What makes a blueprint trustworthy is the data it carries -- the ordered
+    specs, the catalog they were checked against, the resolved world and the
+    borrow snapshot -- every one of which ``create_installation`` re-verifies
+    against the live owners before a factory runs.  ``preflight_installation``
+    is the function that produces one.
+    """
+
     specs: tuple[DeviceSpec, ...]
     catalog: DeviceCatalogSnapshot
     world: object | None
@@ -536,12 +542,6 @@ class InstallationBlueprint:
     borrowed_revision: int | None = None
     borrowed_keys: tuple[str, ...] = ()
     borrowed_types: frozenset[str] = frozenset()
-
-    def __post_init__(self) -> None:
-        if self._token is not _BLUEPRINT_TOKEN:
-            raise PermissionError(
-                "InstallationBlueprint can only be minted by preflight_installation"
-            )
 
     def dependent_keys(self, affected_types: Iterable[str]) -> frozenset[str]:
         """Target leaves transitively constructed from any affected type."""
@@ -662,7 +662,6 @@ def preflight_installation(
             borrowed_types=borrowed_types,
         )
         return InstallationBlueprint(
-            _BLUEPRINT_TOKEN,
             ordered,
             snapshot,
             resolved_world,
@@ -817,14 +816,19 @@ def create_installation(
                     )
                 cleanup = _close_factory_leaf(candidate)
                 if cleanup:
-                    rollback, rollback_remaining = _rollback_factory_leaves(installed)
+                    # The candidate is still open, and its retry may need every
+                    # leaf built before it -- the same reason a failed close
+                    # keeps its earlier possible dependencies.  Nothing is
+                    # rolled back here: recovery owns the intact prefix and the
+                    # candidate, and closes them in reverse order, candidate
+                    # first.
+                    prefix = tuple(installed.values())
                     installed.clear()
                     _raise_composition_failure(
                         f"device {spec.key!r} admission and cleanup failed",
                         original,
                         cleanup,
-                        rollback,
-                        recovery_leaves=(*rollback_remaining, candidate),
+                        recovery_leaves=(*prefix, candidate),
                     )
                 failures[spec.key] = original
                 continue

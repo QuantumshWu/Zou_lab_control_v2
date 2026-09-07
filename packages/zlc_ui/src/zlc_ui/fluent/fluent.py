@@ -10,7 +10,7 @@ import contextlib
 from collections.abc import Callable, Sequence
 import logging
 import sys
-from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 import math
 import re
 import time
@@ -81,6 +81,13 @@ _FLUENT_SCALE = 1.0
 _FLUENT_SCALE_INITIALIZED = False
 # Matches one float token; used by align_to_resolution to snap numbers inside a value.
 _FLOAT_TOKEN_RE = re.compile(r"(?<![A-Za-z_])[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?")
+
+#: The integers Qt's own integer controls and validators can hold.  A Python
+#: int has no width; this is the one place that says where Qt's ends, so a
+#: form choosing between a spin box and a text field and a validator choosing
+#: between Qt's bound check and its own agree about it.
+QT_INT_RANGE = (-(2**31), 2**31 - 1)
+_INT_TEXT_RE = QtCore.QRegularExpression(r"[+-]?\d*")
 
 
 # The fluent design-basis window: the automatic scale fits this logical size
@@ -478,13 +485,18 @@ def signals_blocked(*widgets: QtWidgets.QWidget | None):
     a form from a model) without each ``setText`` / ``setCurrentText`` firing a
     feedback signal -- the standard alternative to destroying + rebuilding the
     widgets.
+
+    Restored LAST BLOCKED FIRST.  A widget named twice in one call is blocked
+    twice, and the second block records "already blocked" as the state to
+    restore; restoring in the order of blocking put that stale True back
+    after the genuine False and left the widget silent for good.
     """
 
     saved = [(w, w.blockSignals(True)) for w in widgets if w is not None]
     try:
         yield
     finally:
-        for widget, previous in saved:
+        for widget, previous in reversed(saved):
             widget.blockSignals(previous)
 
 
@@ -1180,14 +1192,23 @@ def _apply_fluent_context_menu(widget, event) -> None:
     via ``setParent`` before the throwaway standard menu is disposed, so its teardown cannot delete them
     out from under the Fluent menu).  A read-only widget's standard menu is just Copy / Select-All; it is
     styled identically -- no widget special-cases the menu.  ``_FluentRoundedMenu`` resolves at call time,
-    so this may sit above its definition."""
+    so this may sit above its definition.
+
+    The menu is a ONE-SHOT object: built for this click, gone after it.  It is
+    parented to the widget so it inherits the widget's screen and stacking,
+    and a parented QObject outlives the Python name that made it -- every
+    right-click used to leave one more menu, and its actions, on the widget
+    until the window died."""
     std = widget.createStandardContextMenu()
     menu = _FluentRoundedMenu(widget)
     for act in list(std.actions()):
         act.setParent(menu)
         menu.addAction(act)
     std.deleteLater()
-    menu.exec_(event.globalPos())
+    try:
+        menu.exec_(event.globalPos())
+    finally:
+        retire_widget(menu)
     event.accept()
 
 
@@ -1266,11 +1287,22 @@ class FluentLineEdit(QtWidgets.QLineEdit):
 
         self._numeric_bounds = (bottom, top, kind)
         if kind == "int":
-            validator: QtGui.QValidator = QtGui.QIntValidator(self)
-            if bottom is not None:
-                validator.setBottom(int(bottom))
-            if top is not None:
-                validator.setTop(int(top))
+            low, high = QT_INT_RANGE
+            if all(
+                edge is None or low <= int(edge) <= high for edge in (bottom, top)
+            ):
+                validator: QtGui.QValidator = QtGui.QIntValidator(self)
+                if bottom is not None:
+                    validator.setBottom(int(bottom))
+                if top is not None:
+                    validator.setTop(int(top))
+            else:
+                # A Python int has no width, and an owner may bound one
+                # beyond what Qt's integer validator can hold; that validator
+                # raises for such a bound, so the keystroke check is only
+                # "digits and a sign" and the bound is applied exactly, by
+                # the clamp below, when the operator is done.
+                validator = QtGui.QRegularExpressionValidator(_INT_TEXT_RE, self)
         else:
             validator = QtGui.QDoubleValidator(self)
             validator.setNotation(QtGui.QDoubleValidator.ScientificNotation)
@@ -1298,9 +1330,14 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         rather than compared across two different scales.
         """
 
-        self._numeric_bounds = (bottom, top, "quantity")
-        self._quantity_unit = str(unit).strip() or "1"
-        self._shown_quantity_unit = self._quantity_unit
+        wanted = str(unit).strip() or "1"
+        if wanted != self._quantity_unit:
+            # A DIFFERENT unit is a different quantity, read in its own
+            # spelling.  The same unit re-declared -- every projection
+            # re-declares the bounds of the field it keeps -- leaves the
+            # spelling the operator chose on screen where it is.
+            self._quantity_unit = wanted
+            self._shown_quantity_unit = wanted
         self.set_numeric_validator("float", bottom=None, top=None)
         self._numeric_bounds = (bottom, top, "quantity")
 
@@ -1363,6 +1400,21 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         text = self.text().strip()
         if not text:
             return
+        if kind == "int":
+            # In integers, exactly: a bound past 2**53 read through a float
+            # is a different number.
+            try:
+                value = int(text, 10)
+            except ValueError:
+                return
+            clamped = value
+            if bottom is not None:
+                clamped = max(clamped, int(bottom))
+            if top is not None:
+                clamped = min(clamped, int(top))
+            if clamped != value:
+                self.setText(str(clamped))
+            return
         try:
             shown = float(text)
             # The bounds are the owner's, in the owner's unit; the text is in
@@ -1397,7 +1449,7 @@ class FluentLineEdit(QtWidgets.QLineEdit):
                 )
             )
             return
-        self.setText(str(int(clamped)) if kind == "int" else str(clamped))
+        self.setText(str(clamped))
 
     def _snap_to_resolution(self) -> None:
         if not self._res_step:
@@ -2119,8 +2171,18 @@ def retire_pending_widgets() -> None:
 def fluent_message(parent, title: str, text: str, *, kind: str = "info") -> None:
     """Show a modal Fluent message dialog (``kind`` = ``"info"`` | ``"warning"``) -- the ONE on-brand
     replacement for ``QMessageBox.information`` / ``.warning`` (no native frame, no stray app icon).
-    Centres on ``parent``.  Blocks until the user clicks OK (or presses Escape)."""
-    _FluentMessageDialog(parent, title, text, kind=kind).exec_()
+    Centres on ``parent``.  Blocks until the user clicks OK (or presses Escape).
+
+    The dialog is made for this one message and retired the moment it has
+    been answered.  It is parented to ``parent`` so it centres on it, and a
+    parented dialog is kept alive by that parent, not by the local name here:
+    left as it was, every message a window ever showed stayed in its object
+    tree until the window itself was destroyed."""
+    dialog = _FluentMessageDialog(parent, title, text, kind=kind)
+    try:
+        dialog.exec_()
+    finally:
+        retire_widget(dialog)
 
 
 def stamped_file_name(stem: str, extension: str, *, stamp: str | None = None) -> str:
@@ -2173,7 +2235,10 @@ def fluent_confirm(
     cancel_text: str = "Cancel",
     kind: str = "warning",
 ) -> bool:
-    """Ask one modal yes/no question with the shared Fluent chrome."""
+    """Ask one modal yes/no question with the shared Fluent chrome.
+
+    One question, one dialog: it is retired once the answer has been read,
+    for the reason :func:`fluent_message` gives."""
     dlg = _FluentMessageDialog(
         parent,
         title,
@@ -2183,7 +2248,10 @@ def fluent_confirm(
         confirm_text=confirm_text,
         cancel_text=cancel_text,
     )
-    return dlg.exec_() == QtWidgets.QDialog.Accepted
+    try:
+        return dlg.exec_() == QtWidgets.QDialog.Accepted
+    finally:
+        retire_widget(dlg)
 
 
 #: Max rows a Fluent drop-down shows before it SCROLLS (the shared fluent scrollbar) -- one source for
@@ -2990,7 +3058,10 @@ class FluentCycleComboBox(FluentComboBox):
         dropdown and swallowed the click already travelling to it, once
         per shot.  The action keeps its row; only what it cycles through
         changes, and a position already chosen is kept where it still
-        exists.
+        exists -- looked for at that POSITION first, because an axis that
+        grew by one shot still holds the same coordinate where it held it,
+        and a domain of a million coordinates is only scanned when the
+        coordinate really moved.
         """
 
         if not isinstance(label, str) or not label.strip():
@@ -3001,19 +3072,43 @@ class FluentCycleComboBox(FluentComboBox):
         if self._cycle_row >= 0 and self._cycle_choices is not None:
             if 0 <= self._cycle_position < len(self._cycle_choices):
                 previous = self._cycle_choices[self._cycle_position]
+        held = self._cycle_position
         self._cycle_choices = choices
         self._cycle_label = label.strip()
         self._cycle_position = 0
         if previous is not None:
-            for position in range(len(choices)):
-                if self._typed_equal(self._cycle_choice(position)[0], previous[0]):
-                    self._cycle_position = position
-                    break
+            self._cycle_position = max(0, self._position_of(previous[0], first=held))
         if self._cycle_row < 0:
             self._cycle_row = self.count()
             self.addItem(self._cycle_label)
         elif self.itemText(self._cycle_row) != self._cycle_label:
-            self.setItemText(self._cycle_row, self._cycle_label)
+            self.setItemData(self._cycle_row, self._cycle_label, QtCore.Qt.DisplayRole)
+
+    def _position_of(self, value: object, *, first: int = -1) -> int:
+        """Where ``value`` sits in the lazy domain, or -1 when it does not.
+
+        ``first`` is a position to try before scanning -- the one the value
+        held a moment ago.  The domain is a lazy sequence, each read of which
+        may reach into the data, so the common questions ("is it still where
+        it was", "select the value already selected") must cost one read and
+        not the whole axis.
+        """
+
+        choices = self._cycle_choices
+        if choices is None:
+            raise RuntimeError("cycle choices are not configured")
+        if 0 <= first < len(choices) and self._typed_equal(
+            self._cycle_choice(first)[0], value
+        ):
+            return first
+        return next(
+            (
+                position
+                for position in range(len(choices))
+                if self._typed_equal(self._cycle_choice(position)[0], value)
+            ),
+            -1,
+        )
 
     def _cycle_choice(self, position: int) -> tuple[object, str]:
         choices = self._cycle_choices
@@ -3032,26 +3127,12 @@ class FluentCycleComboBox(FluentComboBox):
         return choice[0], choice[1]
 
     def setCycleValue(self, value: object) -> None:  # noqa: N802 - Qt API name
-        choices = self._cycle_choices
-        if choices is None:
-            raise RuntimeError("cycle choices are not configured")
-        selected = next(
-            (
-                position
-                for position in range(len(choices))
-                if self._typed_equal(self._cycle_choice(position)[0], value)
-            ),
-            -1,
-        )
+        """Select one lazy sub-domain value, asking the selected position first."""
+
+        selected = self._position_of(value, first=self._cycle_position)
         if selected < 0:
             raise ValueError("value is not in the cycle choices")
-        changed_value = selected != self._cycle_position
-        self._cycle_position = selected
-        changed_row = self.currentIndex() != self._cycle_row
-        super().setCurrentIndex(self._cycle_row)
-        if changed_value and not changed_row:
-            self.currentTextChanged.emit(self.currentText())
-            self.update()
+        self.setCyclePosition(selected)
 
     def setCyclePosition(self, position: int) -> None:  # noqa: N802 - Qt API name
         """Select one lazy sub-domain position without scanning its values."""
@@ -3932,10 +4013,17 @@ class FluentTabWidget(QtWidgets.QTabWidget):
         that the combo drop-down / Setting popup use below THEIR anchor, so the overflow list reads as
         one of the family instead of flush against the tab strip.  (A ``QMenu.exec_`` position is the
         top-left Qt honours as-is -- unlike a combo popup, it is NOT re-flushed -- so the gap goes
-        straight into the anchor point; no Move-event filter is needed here.)"""
+        straight into the anchor point; no Move-event filter is needed here.)
+
+        The menu is built for this click and retired after it: it lists the
+        tabs as they are NOW, and one that stayed parented here would be one
+        more stale list per click for the life of the tab widget."""
         menu = self._overflow_menu()
         btn = self._overflow_btn
-        menu.exec_(btn.mapToGlobal(QtCore.QPoint(0, btn.height() + popup_gap())))
+        try:
+            menu.exec_(btn.mapToGlobal(QtCore.QPoint(0, btn.height() + popup_gap())))
+        finally:
+            retire_widget(menu)
 
     def resizeEvent(self, event):  # noqa: N802 - Qt naming
         super().resizeEvent(event)
@@ -4459,6 +4547,15 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
     _shown_unit = "1"
     _value = Decimal(0)
     _step = Decimal(1)
+    #: The owner's bounds, None on a side nobody declared.  Qt cannot say
+    #: "no bound": with none declared its double range is the whole double
+    #: line, and that placeholder is not a number anyone asked for.  Read
+    #: back as one it did no harm as a clamp, but converted into a shown
+    #: unit it did: the top of a dBm box read in milliwatts is 10**(DBL_MAX
+    #: / 10), which is not finite, and a step that converted both ends before
+    #: moving refused to move at all.
+    _low: Decimal | None = None
+    _high: Decimal | None = None
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -4520,18 +4617,54 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         """``number`` inside the owner's range: a box never holds a value
         outside the bound its owner declared, whoever named it."""
 
-        try:
-            low, high = _finite_decimal(self.minimum()), _finite_decimal(self.maximum())
-        except ValueError:
-            return number
-        return min(max(number, low), high)
+        if self._low is not None and number < self._low:
+            return self._low
+        if self._high is not None and number > self._high:
+            return self._high
+        return number
 
     def setRange(self, minimum: float, maximum: float) -> None:  # noqa: N802
-        """The owner's range -- applied when it changes, see FluentSpinBox."""
+        """The owner's range -- applied when it changes, see FluentSpinBox.
 
-        if (float(minimum), float(maximum)) == (self.minimum(), self.maximum()):
+        The value it holds is moved inside the new range BEFORE Qt is told:
+        Qt clamps its own double inside setRange and emits valueChanged from
+        there, and a slot reading ``decimalValue`` during that emission must
+        see the same number the signal carries.  Left to Qt alone, the shadow
+        was clamped and the decimal was not, so a box showing 5 still stepped
+        from a hidden 7 -- the first notch down went nowhere.
+        """
+
+        low, high = float(minimum), float(maximum)
+        # Qt's reading of an inverted range: the top is raised to the bottom.
+        high = max(low, high)
+        if (low, high) == (self.minimum(), self.maximum()):
             return
-        super().setRange(float(minimum), float(maximum))
+        # The whole double line is Qt's way of saying "no bound", and the form
+        # says it the same way for a side its owner left open.
+        # From what was GIVEN, not from its float: an integer bound past
+        # 2**53 read through a double is a different number.
+        self._low = None if low <= -sys.float_info.max else _finite_decimal(minimum)
+        self._high = None if high >= sys.float_info.max else _finite_decimal(maximum)
+        self._value = self._bounded(self._value)
+        super().setRange(low, high)
+        self.lineEdit().setText(self.textFromValue(float(self._value)))
+
+    def setMinimum(self, minimum: float) -> None:  # noqa: N802 - Qt API name
+        self.setRange(minimum, self.maximum())
+
+    def setMaximum(self, maximum: float) -> None:  # noqa: N802 - Qt API name
+        self.setRange(self.minimum(), maximum)
+
+    def setDecimals(self, places: int) -> None:  # noqa: N802 - Qt API name
+        """The owner's resolution.  The value is quantized to it before Qt
+        re-rounds its shadow, for the reason ``setRange`` gives."""
+
+        places = int(places)
+        if places == self.decimals():
+            return
+        self._value = self._quantized(self._value, places)
+        super().setDecimals(places)
+        self.lineEdit().setText(self.textFromValue(float(self._value)))
 
     def setSingleStep(self, step: float) -> None:  # noqa: N802 - Qt API name
         try:
@@ -4561,13 +4694,22 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         # from the float.
         self.lineEdit().setText(self.textFromValue(float(number)))
 
-    def _quantized(self, number: Decimal) -> Decimal:
-        """``number`` at the resolution the owner declared, when it did."""
+    def _quantized(self, number: Decimal, places: int | None = None) -> Decimal:
+        """``number`` at the resolution the owner declared, when it did.
 
-        places = int(self.decimals())
+        Never signals: Qt asks this box for the text of its range ends, and
+        with no bound declared those are the ends of the double line, which
+        have more digits than the default decimal context holds.
+        """
+
+        places = int(self.decimals()) if places is None else int(places)
         if places >= 323 or not number.is_finite():
             return number
-        return number.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_EVEN)
+        if places == 0:
+            return number.to_integral_value(rounding=ROUND_HALF_EVEN)
+        with localcontext() as context:
+            context.prec = max(context.prec, number.adjusted() + places + 2)
+            return number.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_EVEN)
 
     # ------------------------------------------------------------- the unit
 
@@ -4645,6 +4787,18 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
             float(DEFAULT_UNITS.convert(float(number), self._shown_unit, self._unit))
         )
 
+    def _shown_bound(self, edge: Decimal | None) -> Decimal | None:
+        """One declared bound in the unit on screen, or None where there is
+        none there: 0 W has no dBm to be, so a floor of 0 W is no floor in
+        dBm, and an undeclared side has no bound in any unit."""
+
+        if edge is None:
+            return None
+        try:
+            return self._shown_from_value(edge)
+        except (UnitError, ValueError, ArithmeticError):
+            return None
+
     # ------------------------------------------------------------- stepping
 
     def stepBy(self, steps: int) -> None:  # noqa: N802 - Qt API name
@@ -4656,11 +4810,12 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         try:
             shown = self._shown_from_value(self._value)
             moved = _grid_step(shown, self._step, steps)
-            low = self._shown_from_value(_finite_decimal(self.minimum()))
-            high = self._shown_from_value(_finite_decimal(self.maximum()))
         except (UnitError, ValueError, ArithmeticError):
             return
-        moved = _last_grid_point_inside(moved, self._step, min(low, high), max(low, high))
+        low, high = self._shown_bound(self._low), self._shown_bound(self._high)
+        if low is not None and high is not None and low > high:
+            low, high = high, low
+        moved = _last_grid_point_inside(moved, self._step, low, high)
         if moved == shown:
             return
         try:
@@ -4682,9 +4837,8 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
             number = self._value if float(self._value) == float(value) else _finite_decimal(value)
         except ValueError:
             return str(value)
-        if self.decimals() == 0:
-            number = number.quantize(Decimal(1), rounding=ROUND_HALF_EVEN)
         try:
+            number = self._quantized(number)
             # DIGITS ONLY.  A box is for the number; which unit that number
             # is read in is said once, beside it, by the row that owns it --
             # printing the symbol in here as well put the same fact in two
@@ -4727,6 +4881,11 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         """
 
         stripped = str(text).strip()
+        if self.decimals() == 0 and "." in stripped:
+            # A box at zero decimals holds whole numbers, and a decimal
+            # point is not a digit it takes -- the way Qt's own integer
+            # box refuses one, rather than rounding what was typed.
+            return QtGui.QValidator.Invalid, text, position
         if not stripped or stripped in ("+", "-", ".", "+.", "-."):
             return QtGui.QValidator.Intermediate, text, position
         try:
@@ -4785,34 +4944,52 @@ def _grid_step(value: Decimal, step: Decimal, steps: int) -> Decimal:
     return (Decimal(index) * step).normalize() + Decimal(0)
 
 
-def _last_grid_point_inside(value: Decimal, step: Decimal, low: Decimal, high: Decimal) -> Decimal:
-    """``value``, or the last multiple of ``step`` still inside ``[low, high]``."""
+def _last_grid_point_inside(
+    value: Decimal, step: Decimal, low: Decimal | None, high: Decimal | None
+) -> Decimal:
+    """``value``, or the last multiple of ``step`` still inside ``[low, high]``.
 
-    if value > high:
+    A side that is None has no bound, so it stops nothing."""
+
+    if high is not None and value > high:
         return (Decimal(int((high / step).to_integral_value(rounding=ROUND_FLOOR))) * step).normalize() + Decimal(0)
-    if value < low:
+    if low is not None and value < low:
         return (Decimal(int((low / step).to_integral_value(rounding=ROUND_CEILING))) * step).normalize() + Decimal(0)
     return value
 
 
-def fluent_count_box(
-    *, minimum: int = 0, maximum: int = (1 << 32) - 1, parent=None
+def fluent_integer_box(
+    *, minimum: int | None = None, maximum: int | None = None, parent=None
 ) -> FluentDoubleSpinBox:
-    """A box for a whole number of things the board counts in 32 bits.
+    """A box for a whole number, bounded only where its owner bounded it.
 
-    Qt's integer spin stops at signed 31 bits; a zero-decimal decimal box
-    holds every uint32 exactly, so the control and the hardware count share
-    one domain.  One factory, because three pages each spelled these four
-    settings by hand -- and the step button, which is for choosing a step
-    size, means nothing on a count that moves one at a time.
+    Qt's integer spin stops at signed 31 bits and cannot say "no bound"; a
+    zero-decimal decimal box holds every Python int exactly and a side left
+    None is a side with no bound, so the control's domain IS the owner's.
+    The step button, which is for choosing a step size, means nothing on a
+    number that moves one at a time.
     """
 
     box = FluentDoubleSpinBox(parent)
     box._step_btn.hide()
     box.setDecimals(0)
     box.setSingleStep(1)
-    box.setRange(float(minimum), float(maximum))
+    box.setRange(
+        -sys.float_info.max if minimum is None else int(minimum),
+        sys.float_info.max if maximum is None else int(maximum),
+    )
     return box
+
+
+def fluent_count_box(
+    *, minimum: int = 0, maximum: int = (1 << 32) - 1, parent=None
+) -> FluentDoubleSpinBox:
+    """A box for a whole number of things the board counts in 32 bits: the
+    integer box with the hardware's own uint32 domain, so the control and
+    the count share one.  One factory, because three pages each spelled
+    these settings by hand."""
+
+    return fluent_integer_box(minimum=int(minimum), maximum=int(maximum), parent=parent)
 
 
 class FluentCheckBox(QtWidgets.QCheckBox):
@@ -5226,7 +5403,12 @@ class FluentTableView(QtWidgets.QTableView):
         copy.triggered.connect(self.copy_selection)
         paste.triggered.connect(self.paste_clipboard)
         clear.triggered.connect(self.clear_selection)
-        menu.exec_(event.globalPos())
+        # One click, one menu: retired once it has been used, so a table that
+        # is right-clicked for a session does not keep every menu it showed.
+        try:
+            menu.exec_(event.globalPos())
+        finally:
+            retire_widget(menu)
         event.accept()
 
 

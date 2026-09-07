@@ -27,7 +27,6 @@ class PulsePreviewView(QtWidgets.QWidget):
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self.setStyleSheet("background: transparent;")
-        self._preview_size_pinned = False
         self._content_widget: QtWidgets.QWidget | None = None
         self._wheel_target: QtWidgets.QWidget | None = None
         layout = QtWidgets.QVBoxLayout(self)
@@ -80,10 +79,6 @@ class PulsePreviewView(QtWidgets.QWidget):
         layout.addWidget(self.preview_scroll, 1)
 
     @property
-    def preview_size_pinned(self) -> bool:
-        return self._preview_size_pinned
-
-    @property
     def preview_size(self) -> str:
         return self.preview_size_combo.currentText()
 
@@ -102,21 +97,18 @@ class PulsePreviewView(QtWidgets.QWidget):
             self.preview_size_combo.setCurrentIndex(0)
 
     def _include_off_changed(self, checked: bool) -> None:
-        self._preview_size_pinned = False
         self.include_off_toggled.emit(bool(checked))
 
     def _size_picked(self, _index: int) -> None:
-        self._preview_size_pinned = True
         self.size_committed.emit(self.preview_size_combo.currentText())
 
-    def set_preview_size(self, size: str, *, pinned: bool | None = None) -> None:
+    def set_preview_size(self, size: str) -> None:
+        """Show the size the presenter settled on.  Whether that size is the
+        operator's pin or the content's choice is the presenter's fact; the
+        view shows the size and keeps no copy of why."""
+
         with signals_blocked(self.preview_size_combo):
             self.preview_size_combo.setCurrentText(str(size))
-        if pinned is not None:
-            self._preview_size_pinned = bool(pinned)
-
-    def reset_preview_size_pin(self) -> None:
-        self._preview_size_pinned = False
 
     def set_status(self, text: str) -> None:
         self.preview_status.setText(str(text))

@@ -19,6 +19,7 @@ import sys
 import time
 from pathlib import Path
 from threading import Event
+import warnings
 
 import numpy as np
 import pytest
@@ -178,6 +179,51 @@ def test_a_finished_measurement_keeps_extent_while_runtime_owns_terminal(bench) 
     assert isinstance(value.coverage, DatasetCoverage) and value.coverage.complete
     assert not plane.is_generation_live(signal)
     assert plane.current_dataset(signal) is result.snapshot
+
+
+def test_a_count_the_readout_cannot_judge_is_invalid_not_empty() -> None:
+    """No number, no verdict.
+
+    ``classify_threshold`` answers False for a count that is not a finite
+    number, and the processor published that False as a VALID empty site:
+    a frame with NaN in the box, or a sum beyond single precision, became an
+    atom lost to every survival and agreement panel downstream.  The
+    validity of a site is the validity of its count, and a cast that
+    overflows is judged there rather than warned about.
+    """
+
+    site_ids = ("site-1",)
+    calibration = TrapCalibration(
+        SiteMap(site_ids, np.asarray([[1.0, 1.0]]), [True], [1.0]),
+        (ReadoutModel(site_ids, [0.0], [-1.0], [1.0], [True], [1.0]),),
+        ReadoutModelKind.BOX,
+        FrameContract((3, 3)),
+    )
+    processor = OccupancyProcessor(calibration)
+
+    def judged(pixel: float):
+        image = np.full((3, 3), pixel, dtype=np.float64)
+        frames = frames_snapshot(
+            ((CameraFrameRecord(image, 0),),),
+            producer="camera",
+            generation="g",
+            revision=1,
+            value_unit="count",
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            return processor.process(frames)
+
+    for pixel in (np.nan, 1e40):
+        result = judged(pixel)
+        assert not result.artifacts["occupied"].expanded_validity().any()
+        assert not result.artifacts["counts"].expanded_validity().any()
+        assert np.isnan(result.counts).all()
+        assert not result.occupied.any()
+
+    bright = judged(5.0)
+    assert bright.artifacts["occupied"].expanded_validity().all()
+    assert bright.occupied.all()
 
 
 def test_occupancy_classifies_only_event_cells_and_runtime_owns_full_history(

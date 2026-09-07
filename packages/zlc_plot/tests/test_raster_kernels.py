@@ -8,10 +8,10 @@ comparison turns.
 
 ONE kernel cannot promise that, and says so where it is tested: summing a
 floating plane in a different order is a different answer in the last
-bits, always.  Its contract is the stronger one that bit equality was
-standing in for -- it must be at least as close to a float64 reduction as
-the reference is -- because the reference accumulates float32 planes in
-float32, and the kernel does not.
+bits, always.  Its contract is the one bit equality was standing in for:
+both engines accumulate a floating plane in float64 and narrow only the
+quotient, so each lands within float32 rounding of a float64 reduction,
+and a finite plane near float32's range comes back finite.
 """
 from __future__ import annotations
 
@@ -272,11 +272,16 @@ def test_the_extrema_kernel_matches_the_masked_reductions() -> None:
 
     pytest.importorskip("numba")
     rng = np.random.default_rng(17)
+    whole_but_last = np.zeros(200_003)
+    whole_but_last[-1] = 0.5
     pools = (
         rng.normal(size=200_003),
         np.concatenate([rng.normal(size=1000), [np.nan, np.inf, -np.inf]]),
         np.full(500, np.nan),
         np.array([3.5]),
+        np.arange(300.0),
+        whole_but_last,
+        np.concatenate([np.arange(64.0), [np.nan, np.inf, 7.0, -12.0]]),
     )
     for pool in pools:
         for mask in (None, rng.random(pool.size) > 0.3, np.zeros(pool.size, bool)):
@@ -287,6 +292,7 @@ def test_the_extrema_kernel_matches_the_masked_reductions() -> None:
                 int(finite.sum()),
                 float(np.min(pool, where=finite, initial=np.inf)),
                 float(np.max(pool, where=finite, initial=-np.inf)),
+                bool(np.all(pool == np.floor(pool), where=finite)),
             )
             got = kernels.masked_finite_extrema(pool, mask)
             assert got is not None
@@ -294,6 +300,9 @@ def test_the_extrema_kernel_matches_the_masked_reductions() -> None:
             if expected[0]:
                 assert got[1] == expected[1]
                 assert got[2] == expected[2]
+            # Whether every finite sample is whole is a fact about every
+            # sample: a pool whole but for its last value is not whole.
+            assert got[3] is expected[3], (pool.size, mask is None)
 
             # The Curve pass also writes its exact validity plane and records
             # singleton runs while reading these same bounds, not a second scan.
@@ -332,30 +341,16 @@ def test_the_extrema_kernel_matches_the_masked_reductions() -> None:
                 ))
 
 
-def test_the_finite_probe_takes_the_same_leading_values() -> None:
-    """Block-built masks pick the same values, in the same order."""
+def test_the_float_block_mean_is_within_float32_rounding_on_both_engines() -> None:
+    """A floating plane cannot promise bit equality, so it promises this.
 
-    from zlc_plot.data_view import _finite_probe, finite_probe
-
-    rng = np.random.default_rng(19)
-    pool = rng.normal(size=200_000)
-    pool[::997] = np.nan
-    mask = rng.random(pool.size) > 0.2
-    finite = np.isfinite(pool) & mask
-    np.testing.assert_array_equal(
-        _finite_probe(pool, finite), finite_probe(pool, mask)
-    )
-
-
-def test_the_float_block_mean_is_no_further_from_the_truth_than_reduceat() -> None:
-    """A floating plane cannot promise bit equality, so it promises more.
-
-    ``np.add.reduceat`` on a float32 plane accumulates in float32 and lands
-    about 1e-7 relative away from a float64 reduction of the same numbers.
-    The kernel accumulates in float64 and lands on it.  Asserting closeness
-    alone would let a future kernel get worse and still pass, so the
-    assertion is the comparison itself: for every case, the compiled answer
-    is at least as near the float64 truth as the reference answer is.
+    Both engines accumulate a floating plane in float64 and narrow only
+    the quotient, so each answer is within a few ulps of its own dtype
+    from a float64 reduction -- for a float32 plane the rounding of the
+    quotient, for a float64 plane the summation order -- and the two
+    engines agree to the same.  A reference that accumulated a float32
+    plane in float32 landed 1e-7 relative away from the truth, and turned
+    a finite plane near float32's range into infinite means.
     """
 
     pytest.importorskip("numba")
@@ -367,7 +362,6 @@ def test_the_float_block_mean_is_no_further_from_the_truth_than_reduceat() -> No
         (np.float64, 512, 378),
         (np.float64, 300, 97),
     )
-    improved = 0
     for dtype, source, target in cases:
         values = (rng.random((source, source)) * 4000.0).astype(dtype)
         starts = _reduction_starts(source, target, 1.25)
@@ -375,31 +369,56 @@ def test_the_float_block_mean_is_no_further_from_the_truth_than_reduceat() -> No
         reference, compiled = _both_engines(
             lambda: _area_mean(values, valid, starts, starts)
         )
-        assert reference.dtype == compiled.dtype
+        assert reference.dtype == compiled.dtype == np.result_type(dtype, np.float32)
         truth = _area_mean(
             values.astype(np.float64), valid, starts, starts
         )
-        reference_error = np.abs(np.asarray(reference, dtype=np.float64) - truth)
-        compiled_error = np.abs(np.asarray(compiled, dtype=np.float64) - truth)
-        assert compiled_error.max() <= reference_error.max(), (
-            "%s %d->%d: the kernel is further from a float64 reduction "
-            "(%.3e) than reduceat is (%.3e)"
-            % (np.dtype(dtype).name, source, target,
-               compiled_error.max(), reference_error.max())
-        )
-        if compiled_error.max() < reference_error.max():
-            improved += 1
-        # And still the same picture: a relative difference far below
-        # anything a colour LUT or a bar height can show.
-        scale = np.abs(truth).max()
+        tolerance = 4 * np.finfo(reference.dtype).eps * np.abs(truth).max()
+        for engine, answer in (("reference", reference), ("compiled", compiled)):
+            error = np.abs(np.asarray(answer, dtype=np.float64) - truth).max()
+            assert error <= tolerance, (
+                "%s %d->%d: the %s answer is %.3e from a float64 reduction, "
+                "past float32 rounding (%.3e)"
+                % (np.dtype(dtype).name, source, target, engine, error, tolerance)
+            )
         assert np.abs(
             np.asarray(compiled, dtype=np.float64) - np.asarray(reference,
                                                                 dtype=np.float64)
-        ).max() <= 1e-6 * scale
-    assert improved, (
-        "no case improved: the float32 comparison is not exercising the "
-        "float32 accumulator this kernel exists to beat"
+        ).max() <= tolerance
+
+
+def test_a_finite_float32_plane_near_its_range_has_a_finite_mean() -> None:
+    """The block SUM is never narrowed to float32 before the division.
+
+    Four finite float32 samples of 3e38 have a block total of 1.2e39,
+    past float32; written back as float32 on the way to the mean, the
+    mean of finite samples came out infinite on both engines.  The mean
+    itself, 3e38, is a float32 number, and that is the answer.
+    """
+
+    pytest.importorskip("numba")
+    values = np.full((2, 2), 3.0e38, dtype=np.float32)
+    values[0, 1] = np.float32(3.0000001e38)
+    valid = np.broadcast_to(np.True_, values.shape)
+    starts = np.array([0], dtype=np.intp)
+    truth = np.float32(np.mean(values.astype(np.float64)))
+    reference, compiled = _both_engines(
+        lambda: _area_mean(values, valid, starts, starts)
     )
+    for answer in (reference, compiled):
+        assert answer.dtype == np.float32
+        assert np.isfinite(answer).all()
+        assert answer[0, 0] == truth
+    # With a hole the same total flows through the masked face.
+    holed = np.ones(values.shape, dtype=bool)
+    holed[1, 1] = False
+    truth = np.float32(np.mean(values[holed].astype(np.float64)))
+    reference, compiled = _both_engines(
+        lambda: _area_mean(values, holed, starts, starts)
+    )
+    for answer in (reference, compiled):
+        assert np.isfinite(np.asarray(answer)).all()
+        assert np.asarray(answer)[0, 0] == truth
 
 
 def test_the_masked_block_mean_counts_what_it_summed() -> None:
@@ -477,6 +496,29 @@ def test_the_kernel_cache_is_a_plainly_named_folder_in_the_checkout() -> None:
             os.environ.pop("NUMBA_CACHE_DIR", None)
         else:
             os.environ["NUMBA_CACHE_DIR"] = previous
+
+
+def test_an_installed_wheel_has_no_checkout_to_cache_in(monkeypatch, tmp_path) -> None:
+    """Four parents up from site-packages is nobody's folder.
+
+    ``C:/Python313/Lib/site-packages/zlc_plot/_kernel_cache.py`` counted up
+    to ``C:/`` and named ``C:/numba_cache`` the checkout's cache.  Outside a
+    checkout the answer is numba's own default beside the module, and
+    ``install`` sets nothing so numba keeps its read-only fallback.
+    """
+
+    import os
+
+    from zlc_plot import _kernel_cache
+
+    installed = tmp_path / "Lib" / "site-packages" / "zlc_plot" / "_kernel_cache.py"
+    installed.parent.mkdir(parents=True)
+    installed.write_text("", encoding="utf-8")
+    monkeypatch.setattr(_kernel_cache, "__file__", str(installed))
+    monkeypatch.delenv("NUMBA_CACHE_DIR", raising=False)
+    assert _kernel_cache.kernel_cache_dir() == installed.parent / "__pycache__"
+    assert _kernel_cache.install() == ""
+    assert "NUMBA_CACHE_DIR" not in os.environ
 
 
 def test_no_module_keeps_its_own_copy_of_the_cache_path() -> None:
@@ -613,6 +655,14 @@ def test_an_input_s_mutability_is_not_an_accident_of_where_it_came_from() -> Non
     assert not kernels.readable(writable).flags.writeable
     assert np.array_equal(kernels.readable(strided), strided)
 
+    # The stand-in a maskless call hands the extrema kernel is sealed like
+    # a mask, so with and without a mask are ONE signature.
+    pool = np.arange(8.0)
+    assert kernels.masked_finite_extrema(pool, None) is not None
+    assert kernels.masked_finite_extrema(pool, pool > 2.0) is not None
+    mask_types = {str(signature[1]) for signature in kernels.finite_extrema.signatures}
+    assert len(mask_types) == 1 and "readonly" in mask_types.pop(), mask_types
+
 
 def test_masked_leading_tensor_matrix_matches_numpy_bit_for_bit() -> None:
     """Pool size, reducer and holes never select different arithmetic."""
@@ -691,3 +741,127 @@ def test_masked_leading_tensor_matrix_matches_numpy_bit_for_bit() -> None:
                 np.testing.assert_array_equal(compiled[1], reference[1])
     finally:
         kernels.ENGINE = previous
+
+
+def test_a_float32_stack_reduces_in_float64_on_both_engines() -> None:
+    """Three float32 samples 1e8, 1, -1e8 sum to 1, and their mean is 1/3.
+
+    Every sample is a float32 number; only the accumulation can lose the
+    1, and the plain leading-axis reduction did, in float32, while the
+    bucket path beside it accumulated in float64: the same public curve
+    answered 0 or 1/3 by which layout the data took.
+    """
+
+    values = np.asarray(
+        [[1e8, 2e8], [1.0, 2.0], [-1e8, -2e8]], dtype=np.float32
+    )
+    all_valid = np.broadcast_to(np.asarray(True), values.shape)
+    holey = np.ones(values.shape, dtype=np.bool_)
+    holey[1, 1] = False
+    for valid, mean, total in (
+        (all_valid, [1 / 3, 2 / 3], [1.0, 2.0]),
+        (holey, [1 / 3, 0.0], [1.0, 0.0]),
+    ):
+        for aggregation, expected in (
+            (Reduction.MEAN, mean), (Reduction.SUM, total)
+        ):
+            reference, compiled = _both_engines(
+                lambda: _masked_leading_reduce(values, valid, aggregation)
+            )
+            for answer, _counts in (reference, compiled):
+                np.testing.assert_allclose(
+                    np.asarray(answer, dtype=np.float64), expected, rtol=1e-12
+                )
+
+
+def _ellipse_distance_reference(dx, dy, radius_x, radius_y):
+    """Brute force: the nearest of many boundary samples."""
+
+    theta = np.linspace(0.0, 2.0 * np.pi, 65537)
+    boundary_x = radius_x * np.cos(theta)
+    boundary_y = radius_y * np.sin(theta)
+    return float(np.min(np.hypot(boundary_x - dx, boundary_y - dy)))
+
+
+def _ellipse_distance_map(center_x, center_y, radius_x, radius_y, height, width):
+    """Brute force for every pixel centre at once."""
+
+    theta = np.linspace(0.0, 2.0 * np.pi, 16385)
+    boundary_x = radius_x * np.cos(theta) + center_x
+    boundary_y = radius_y * np.sin(theta) + center_y
+    centres_x = np.arange(width) + 0.5
+    centres_y = np.arange(height) + 0.5
+    distance = np.empty((height, width))
+    for row in range(height):
+        dx = centres_x[:, None] - boundary_x[None, :]
+        dy = centres_y[row] - boundary_y[None, :]
+        distance[row] = np.min(np.hypot(dx, dy), axis=1)
+    return distance
+
+
+def test_the_ring_is_stroked_at_the_distance_to_the_ellipse() -> None:
+    """A stroke of width w covers the pixels whose centres lie within w/2
+    of the ELLIPSE, which is not ``|n - 1| * min(rx, ry)`` unless the
+    ellipse is a circle.
+
+    On a 20 x 4 ring, the pixel centred 18 px along the major axis is
+    1.58 px from the boundary -- its whole square clear of a 1 px stroke
+    -- and that distance formula called it 0.4 and painted it 60 % red.
+    The kernel's distance helper is held to a brute-force nearest-point
+    search, and the painted set to the exact rule, for rings a fit can
+    produce: round, wide, tall and a 8:1 needle.
+    """
+
+    pytest.importorskip("numba")
+    rng = np.random.default_rng(23)
+    rings = ((20.0, 4.0), (4.0, 20.0), (6.0, 4.0), (5.0, 5.0), (8.0, 1.0))
+    for radius_x, radius_y in rings:
+        for dx, dy in (
+            (18.0, 0.0), (0.0, 0.0), (0.0, 3.0), (21.0, 1.0), (0.3, 0.2),
+            *((float(px), float(py)) for px, py in
+              rng.uniform(-25.0, 25.0, size=(40, 2))),
+        ):
+            expected = _ellipse_distance_reference(dx, dy, radius_x, radius_y)
+            got = kernels.ellipse_boundary_distance(dx, dy, radius_x, radius_y)
+            assert abs(got - expected) <= 1e-6 + 1e-9 * expected, (
+                (radius_x, radius_y, dx, dy, got, expected)
+            )
+
+    height, width = 40, 64
+    center_x, center_y = 32.5, 20.5
+    for radius_x, radius_y in rings:
+        for ring_width in (1.0, 3.0):
+            out = np.full((height, width, 4), 255, dtype=np.uint8)
+            kernels.raster_fit_ellipses(
+                kernels.readable(np.asarray(
+                    ((center_x, center_y, radius_x, radius_y),), dtype=np.float64
+                )),
+                kernels.readable(np.asarray(((255, 0, 0, 255),), dtype=np.uint8)),
+                kernels.readable(np.asarray((ring_width,), dtype=np.float64)),
+                kernels.readable(np.asarray(((0, 0, 0, 0),), dtype=np.uint8)),
+                kernels.readable(np.asarray((0.5,), dtype=np.float64)),
+                kernels.readable(np.asarray(((0, 0, width, height),), dtype=np.int32)),
+                out,
+            )
+            painted = np.any(out[:, :, :3] != 255, axis=2)
+            half = ring_width / 2.0 + 0.5
+            distance = _ellipse_distance_map(
+                center_x, center_y, radius_x, radius_y, height, width
+            )
+            decided = np.abs(distance - half) > 2e-3
+            np.testing.assert_array_equal(
+                painted[decided], (distance < half)[decided],
+                err_msg=str((radius_x, radius_y, ring_width)),
+            )
+    # The finding's own pixel, on a 20 x 4 ring with a 1 px stroke.
+    out = np.full((height, width, 4), 255, dtype=np.uint8)
+    kernels.raster_fit_ellipses(
+        kernels.readable(np.asarray(((center_x, center_y, 20.0, 4.0),), dtype=np.float64)),
+        kernels.readable(np.asarray(((255, 0, 0, 255),), dtype=np.uint8)),
+        kernels.readable(np.asarray((1.0,), dtype=np.float64)),
+        kernels.readable(np.asarray(((0, 0, 0, 0),), dtype=np.uint8)),
+        kernels.readable(np.asarray((0.5,), dtype=np.float64)),
+        kernels.readable(np.asarray(((0, 0, width, height),), dtype=np.int32)),
+        out,
+    )
+    assert tuple(out[20, 50]) == (255, 255, 255, 255)

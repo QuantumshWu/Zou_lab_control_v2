@@ -123,6 +123,12 @@ def snapshot_from_array(
 
     ``generation`` and ``revision`` are facts of the run, not of the array,
     and therefore remain required.
+
+    ``validity`` is a bool mask over the same dense shape as ``values``, or
+    None for all valid.  It is handed to the Dataset with its dtype intact,
+    so the one Data validity contract refuses anything else: an SDK status
+    code or a count passed as a mask has no bool meaning, and truthing it
+    here would let every non-zero status through as a valid sample.
     """
 
     producer = str(producer).strip()
@@ -178,7 +184,7 @@ def snapshot_from_array(
 
     validity_tensor = None
     if validity is not None:
-        validity_array = np.asarray(validity, dtype=bool)
+        validity_array = np.asarray(validity)
         if validity_array.shape != array.shape:
             raise ValueError("validity must have the same dense shape as values")
         validity_tensor = validity_array.reshape(tensor.shape)

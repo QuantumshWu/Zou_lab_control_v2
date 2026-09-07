@@ -201,6 +201,27 @@ def test_the_starter_program_builds_one_table_of_the_right_width() -> None:
     assert np.all(table[:, 1] == np.round(table[:, 1]))
 
 
+def test_a_slot_id_is_never_a_name_in_the_starter_program() -> None:
+    """Slot ids live in the pulse's namespace; the program has its own.
+
+    ``np``, ``for`` and ``N`` are all legal slot ids.  A starter that spelled
+    its axes after them shadowed its own import, was a syntax error, or made
+    the point count an array -- the product's own template could not run.
+    """
+
+    for names in (("np",), ("for",), ("N", "other")):
+        columns = tuple(ScanColumnSpec(name, 20.0, 200.0) for name in names)
+        for kind in ("column_stack", "grid"):
+            source = scan_table_template(kind, columns)
+            # The id is still said, where a person reads it.
+            assert all(name in source for name in names), source
+            namespace: dict = {}
+            exec(source, namespace)  # noqa: S102
+            table = np.asarray(namespace["scan_table"])
+            assert table.ndim == 2 and table.shape[1] == len(columns), (kind, names)
+            assert table.shape[0] > 1
+
+
 def test_a_grid_sweeps_every_combination_and_says_its_shape() -> None:
     columns = (ScanColumnSpec("a", 0.0, 4.0), ScanColumnSpec("b", 0.0, 3.0))
     namespace: dict = {}

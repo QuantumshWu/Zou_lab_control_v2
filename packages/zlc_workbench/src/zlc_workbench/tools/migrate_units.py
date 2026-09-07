@@ -23,6 +23,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
+from zlc_durable import atomic_write_bytes
 from zlc_pulse.codec import PULSE_TREE_FORMAT, parse_pulse_tree_json
 
 from ..pulse_state import read_pulse, write_pulse
@@ -50,6 +51,40 @@ class Outcome:
         self.verdict = verdict
         self.detail = detail
         self.backup = backup
+
+
+def _put_back(path: Path, raw: bytes, backup: Path, reason: str) -> Outcome:
+    """The file as it was found, after a write that did not read back.
+
+    The original is in hand -- it is what the backup holds -- so a written
+    file that fails its own read-back is put back rather than left as a
+    pulse the editor will refuse, and the backup goes with it: the file IS
+    the original again, and a backup left behind would refuse the next run.
+    Only when even that write fails is the file left as written, and the
+    outcome says so and names the backup that holds the original.
+    """
+
+    try:
+        atomic_write_bytes(path, raw)
+    except OSError as error:
+        return Outcome(
+            path,
+            "NOT RESTORED",
+            f"{reason}; the original could not be put back "
+            f"({type(error).__name__}: {error}) and is in {backup.name}",
+            backup,
+        )
+    try:
+        backup.unlink()
+    except OSError:
+        return Outcome(
+            path,
+            "REFUSED",
+            f"{reason}; the original was put back, and its copy {backup.name} "
+            "could not be removed",
+            backup,
+        )
+    return Outcome(path, "REFUSED", f"{reason}; the original was put back")
 
 
 def migrate_file(path: Path) -> Outcome:
@@ -89,8 +124,8 @@ def migrate_file(path: Path) -> Outcome:
         backup.unlink()
         return Outcome(path, "already current")
     if read_pulse(path) != state:
-        return Outcome(
-            path, "REFUSED", "the written file does not read back the same", backup
+        return _put_back(
+            path, raw, backup, "the written file does not read back the same"
         )
     changed = tuple(
         sorted({period.unit for period in state.sequence.periods})
@@ -146,7 +181,7 @@ def main(argv: "list[str] | None" = None) -> int:
         detail = f": {outcome.detail}" if outcome.detail else ""
         print(f"  {path.name}")
         print(f"      {outcome.verdict}{detail}")
-        if outcome.verdict == "rewritten" and outcome.backup is not None:
+        if outcome.backup is not None:
             print(f"      original kept as {outcome.backup.name}")
 
     print()
@@ -164,7 +199,14 @@ def main(argv: "list[str] | None" = None) -> int:
         print(
             f"{refused} file(s) were NOT changed. They are exactly as they were."
         )
-    return 1 if refused else 0
+    unrestored = counts.get("NOT RESTORED", 0)
+    if unrestored:
+        print(
+            f"{unrestored} file(s) were written, failed to read back, and could "
+            f"NOT be put back. Their originals are the {BACKUP_SUFFIX} files "
+            "named above: restore them by hand before opening those pulses."
+        )
+    return 1 if refused or unrestored else 0
 
 
 if __name__ == "__main__":

@@ -38,7 +38,7 @@ from .model import (
     PulseSlot,
     PulseTarget,
 )
-from .compile import compile_sequence  # noqa: E402
+from .compile import analog_levels, compile_sequence  # noqa: E402
 from .binding import (  # noqa: E402
     apply_api_values,
     apply_config_values,
@@ -110,6 +110,7 @@ __all__ = [
     "nanoseconds_per",
     "ANALOG_MODE_CHOICES",
     "align_to_grid",
+    "analog_levels",
     "cycle_binding_kind",
     "resolve_scan_point",
     "CONFIG_VALUES_FORMAT",

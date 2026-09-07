@@ -100,7 +100,9 @@ class OccupancyAgreementProcessor:
         ):
             raise ValueError("occupancy counts and verdicts do not share one geometry")
         axes = count_schema.cell_domain.axes
-        if len(axes) != 1 or axes[0].role is not SITE:
+        # By value: a role that crossed a serialization boundary is an equal
+        # AxisRoleId, not the same object.
+        if len(axes) != 1 or axes[0].role != SITE:
             raise ValueError("occupancy agreement requires one complete site axis")
         if count_schema.value_schema.dtype.kind not in "iuf":
             raise TypeError("occupancy counts must be real numeric values")

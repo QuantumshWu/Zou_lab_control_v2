@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import date
+from pathlib import Path
 from threading import Barrier
 
 import pytest
@@ -154,6 +155,46 @@ def test_unique_file_writer_failure_publishes_nothing(tmp_path) -> None:
 
     assert not tuple(tmp_path.glob("shot*.npz"))
     assert not tuple(tmp_path.glob(".shot.*.npz"))
+
+
+def test_a_flush_failure_after_publication_names_what_landed(tmp_path, monkeypatch) -> None:
+    """The error after a publish says the artifact is there, and where.
+
+    Once the link or the mkdir has happened the work is complete and visible;
+    only its directory entry's durability is unconfirmed.  An error that named
+    just the directory read as "cannot save", and an operator who retried got
+    ``shot-2.json`` beside a ``shot.json`` that was already whole.
+    """
+
+    import zlc_durable.durability as durability
+
+    real_flush = durability.flush_directory
+    folder = tmp_path.resolve()
+
+    def flush(directory):
+        if Path(directory).resolve() == folder:
+            raise durability.DirectoryDurabilityError("scripted flush failure")
+        real_flush(directory)
+
+    monkeypatch.setattr(durability, "flush_directory", flush)
+    with pytest.raises(durability.DirectoryDurabilityError, match="scripted flush failure") as caught:
+        unique_path(
+            tmp_path,
+            "shot",
+            ".json",
+            writer=lambda temporary: temporary.write_text('{"complete": true}', encoding="utf-8"),
+        )
+    shot = folder / "shot.json"
+    assert caught.value.published == shot
+    assert shot.read_text(encoding="utf-8") == '{"complete": true}'
+    assert str(shot) in str(caught.value) and "published and visible" in str(caught.value)
+    assert not tuple(folder.glob(".shot.*.json"))
+
+    with pytest.raises(durability.DirectoryDurabilityError, match="scripted flush failure") as caught:
+        unique_path(tmp_path, "calibration", "")
+    run = folder / "calibration"
+    assert caught.value.published == run and run.is_dir()
+    assert str(run) in str(caught.value)
 
 
 def test_a_run_folder_takes_a_free_name_and_is_created(tmp_path) -> None:

@@ -3,18 +3,21 @@
 The module defines the subset of the Hamamatsu ABI that the current adapter
 actually consumes.  Importing it does not load ``dcamapi.dll``; the library is
 opened only when :class:`DcamSdkDriver` is constructed by a hardware
-composition root.
+composition root, and it is found the way every vendor artifact on this
+bench is found: in the camera family's own ``vendor/`` folder, or at the
+absolute path ``vendor/vendor.json`` names for it.
 """
 
 from __future__ import annotations
 
 import atexit
 import ctypes
-import os
 import platform
 from enum import IntEnum
 
 import numpy as np
+
+from zlc_atom.devices.vendor import resolve_vendor_file
 
 
 #: The DCAM runtime belongs to the PROCESS, not to whoever happened to want
@@ -219,16 +222,26 @@ def _checked(operation: str, code: object) -> int:
 
 
 class DcamSdkDriver:
-    """Thin ctypes owner for the production DCAM library."""
+    """Thin ctypes owner for the production DCAM library.
 
-    def __init__(self, library_path: str | os.PathLike[str] | None = None) -> None:
+    The library is the family's vendor artifact and is resolved through the
+    one bench-wide rule: ``dcamapi.dll`` inside ``camera/vendor/``, or the
+    absolute path ``vendor/vendor.json`` gives for it.  Nothing here consults
+    PATH or the system folders -- a DLL the operating system's search happens
+    to find is one the operator can neither see nor replace, and the error
+    for a missing one says exactly which file goes into which folder.
+    """
+
+    def __init__(self) -> None:
         if platform.system() != "Windows":
             raise RuntimeError("the deployed qCMOS DCAM driver requires Windows")
-        requested = "dcamapi.dll" if library_path is None else os.fspath(library_path)
+        library = resolve_vendor_file(
+            __file__, "dcamapi.dll", what="the Hamamatsu DCAM-API runtime"
+        )
         try:
-            self._dll = ctypes.WinDLL(requested)
+            self._dll = ctypes.WinDLL(library)
         except OSError as exc:
-            raise RuntimeError(f"could not load DCAM library {requested!r}") from exc
+            raise RuntimeError(f"could not load DCAM library {library!r}") from exc
         self._device_count: int | None = None
         self._bind()
 

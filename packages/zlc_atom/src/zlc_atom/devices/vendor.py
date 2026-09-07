@@ -28,6 +28,11 @@ def resolve_vendor_file(anchor_file: str, filename: str, *, what: str) -> str:
     Resolution order: an explicit path in ``vendor/vendor.json`` (keyed by
     the file name), then the file itself inside ``vendor/``.  ``what`` names
     the vendor package in the operator's terms ("the Vaunix LMS SDK").
+
+    A manifest entry must be an absolute path.  A relative one would resolve
+    against whichever working directory the launcher happened to have, so
+    the same manifest would name a different file per launch -- the very
+    thing the manifest exists to rule out.
     """
 
     directory = vendor_directory(anchor_file)
@@ -42,6 +47,12 @@ def resolve_vendor_file(anchor_file: str, filename: str, *, what: str) -> str:
         entry = mapping.get(filename) if isinstance(mapping, dict) else None
         if entry:
             path = Path(str(entry)).expanduser()
+            if not path.is_absolute():
+                raise FileNotFoundError(
+                    f"{manifest} points {filename!r} at the relative path "
+                    f"{str(entry)!r}: write the absolute path of {filename}, "
+                    f"or copy the file into {directory}"
+                )
             if not path.is_file():
                 raise FileNotFoundError(
                     f"{manifest} points {filename!r} at {path}, which does "

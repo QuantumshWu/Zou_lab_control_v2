@@ -15,16 +15,6 @@ __all__ = ["DISTRIBUTION_NAME", "ROOT", "entry_specs"]
 DISTRIBUTION_NAME = "zou-lab-control"
 # In a checkout this is the repository root; in a wheel it is site-packages.
 ROOT = Path(__file__).resolve().parent.parent
-_LAYERS = (
-    "zlc_data",
-    "zlc_durable",
-    "zlc_runtime",
-    "zlc_plot",
-    "zlc_ui",
-    "zlc_pulse",
-    "zlc_atom",
-    "zlc_workbench",
-)
 
 
 def _configure_compiled_worker_threads() -> None:
@@ -72,11 +62,20 @@ _configure_compiled_worker_threads()
 
 
 def _activate_checkout() -> None:
-    """Make this checkout authoritative when its bootstrap was imported."""
+    """Make this checkout authoritative when its bootstrap was imported.
+
+    The layers are the manifest's ``zou_lab_control.layers`` group, read from
+    the checkout's own ``pyproject.toml``: the one list of what this product
+    is made of, so a layer added to the manifest is on ``sys.path`` without a
+    second list here to forget it.
+    """
 
     if not (ROOT / "pyproject.toml").is_file():
         return
-    sources = tuple(ROOT / "packages" / name / "src" for name in _LAYERS)
+    sources = tuple(
+        ROOT / "packages" / name / "src"
+        for name in entry_specs("zou_lab_control.layers")
+    )
     missing = tuple(path for path in sources if not path.is_dir())
     if missing:
         raise ImportError(
@@ -102,9 +101,6 @@ def _activate_checkout() -> None:
         if text in sys.path:
             sys.path.remove(text)
         sys.path.insert(0, text)
-
-
-_activate_checkout()
 
 
 def entry_specs(group: str) -> Mapping[str, str]:
@@ -136,3 +132,6 @@ def entry_specs(group: str) -> Mapping[str, str]:
     if not entries:
         raise RuntimeError(f"installed product has no {group!r} entry-point group")
     return dict(sorted(entries.items()))
+
+
+_activate_checkout()

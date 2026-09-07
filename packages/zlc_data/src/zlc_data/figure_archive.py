@@ -129,7 +129,12 @@ def _compression_sample(array: np.ndarray) -> bytes:
             max(1, wanted // max(1, int(array.dtype.itemsize))),
         )
         indices = np.linspace(0, max(0, array.size - 1), count, dtype=np.intp)
-        return np.take(array, indices).tobytes(order="C")
+        # Gathered through the flat iterator, which walks the strided view
+        # in logical C order and materializes only the elements asked for.
+        # ``np.take`` without an axis flattens its input first, and for a
+        # strided view that is a contiguous copy of the whole plane -- a
+        # probe meant to cost one mebibyte cost the size of the dataset.
+        return array.flat[indices].tobytes(order="C")
     if len(raw) <= wanted:
         return bytes(raw)
     chunk = max(1, wanted // 3)
@@ -378,7 +383,13 @@ def read_archive(path: object) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
             raise ValueError(f"figure contains duplicate NPZ members {duplicates!r}")
         if _INFO_KEY not in names:
             raise ValueError(f"figure carries no {_INFO_KEY} document")
-        info = _validate_current_info(_parse_info(np.asarray(archive[_INFO_KEY])))
+        # Every member is read by its own PHYSICAL name.  Asked for a logical
+        # key, NpzFile first tries that key as a physical name and only then
+        # appends ".npy": a member "signal.npy" beside a member "signal" --
+        # both legal array keys, both written -- read back as "signal".
+        info = _validate_current_info(
+            _parse_info(np.asarray(archive[f"{_INFO_KEY}.npy"]))
+        )
         expected = {_INFO_KEY, *info["members"]}
         actual = set(names)
         if actual != expected:
@@ -389,7 +400,7 @@ def read_archive(path: object) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
             )
         member_names = tuple(info["members"])
         arrays: dict[str, np.ndarray] = {
-            name: np.asarray(archive[name]) for name in member_names
+            name: np.asarray(archive[f"{name}.npy"]) for name in member_names
         }
         for name, descriptor in info["members"].items():
             array = arrays[name]

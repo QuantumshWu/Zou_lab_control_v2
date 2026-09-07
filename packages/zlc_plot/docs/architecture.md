@@ -14,7 +14,7 @@
 | --- | --- |
 | `(R, P, *cell_shape)` geometry, dtype, validity | `zlc-data` domain schema and `OwnedSnapshot` |
 | Repeat/Point row codes and dense Cell axes | data producer + `zlc-data` validation |
-| Canonical unit annotations | `zlc-data`; display conversion is `zlc_plot.units` |
+| Unit definitions, prefixes and conversion | `zlc_data.units`; the display unit chosen per axis is `PlotSession` state |
 | NPZ save/load | `zlc_data.save_npz` / `zlc_data.load_npz` |
 | Plot kind, axes roles, reduction, facet choice | `zlc_plot` specifications |
 | Runtime viewport, display parameters, selectors, fixed size | `PlotSession` |
@@ -65,10 +65,10 @@ its coordinate domain; Cell axes map positionally to dense tensor dimensions.
 This is the only geometry truth. Plot never reconstructs a grid from repeated
 values and never maintains a second coordinate/topology representation.
 
-FacetGrid may facet along any declared Repeat, Point or Cell-data axis. `facet_rows` and optional
-`facet_cols` form an explicit row-major grid; every cell in one FacetGrid uses
-the same cell kind. Sparse, partial and arrival-ordered Point layouts remain
-explicit in their axis codes rather than being inferred by Plot.
+FacetGrid may facet along any one declared Repeat, Point or Cell-data axis, laid
+out row-major; with no facet axis it is one complete cell. Every cell in one
+FacetGrid uses the same cell kind. Sparse, partial and arrival-ordered Point
+layouts remain explicit in their axis codes rather than being inferred by Plot.
 
 ## Six formal plot kinds
 
@@ -245,16 +245,19 @@ payload、renderer 更新和 fit target。`PlotSession` 仍是唯一公开 facad
 同时注册完整的 spec type、payload builder、renderer handler 和 fit target，缺件会在
 registry contract test 中失败。
 
-Image limits and aspect also have one authority. Pan, wheel zoom, API viewport
-and reset mutate the same canonical limits. Equal aspect is resolved from the
-physical scale of compatible canonical x/y units, so different display prefixes
-do not turn a physical circle into an ellipse; incompatible dimensions fall
-back to numeric aspect and reject the radial fit model.
+Image limits and geometry also have one authority. Pan, wheel zoom, API viewport
+and reset mutate the same canonical limits. The image box is a fixed square and
+every data point a square screen cell: a regular grid is normalised to lattice
+geometry by its x/y cell pitch, canonical steps drive only the tick, selector,
+overlay and fit coordinate mapping, and non-square data are letterboxed inside
+the square. Incompatible x/y dimensions reject the radial fit model; they do
+not change the geometry.
 
 Histogram bins likewise have one session-owned canonical domain. `tight`
-recomputes it for each revision; `normal` and `fixed` retain the existing edges
-while data remain inside them and only expand a breached side. They never shrink
-or recenter on alternating live frames, so the x limits do not oscillate.
+recomputes it for each revision; `normal` retains the existing edges while data
+remain inside them and only expands a breached side; `fixed` keeps its authored
+bounds whatever the data do. Neither shrinks or recenters on alternating live
+frames, so the x limits do not oscillate.
 
 PulseTimeline creates all dynamic lines, rectangles and annotations through
 clipped artist factories. Pan/zoom/reset therefore cannot leave scan badges,

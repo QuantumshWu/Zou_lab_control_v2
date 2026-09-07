@@ -8,6 +8,9 @@ or library that answers from memory.
 
 from __future__ import annotations
 
+import math
+from types import SimpleNamespace
+
 import pytest
 
 from zlc_atom.devices.rf.contract import (
@@ -16,17 +19,30 @@ from zlc_atom.devices.rf.contract import (
     POWER_FIELD,
 )
 from zlc_atom.devices.rf.rigol_dg4000 import RigolDg4000Config, RigolDg4000RfSource
-from zlc_atom.devices.rf.vaunix_lms import VaunixLmsConfig, VaunixLmsRfSource
+from zlc_atom.devices.rf.vaunix_lms import (
+    CtypesLmsLibrary,
+    VaunixLmsConfig,
+    VaunixLmsRfSource,
+)
 from zlc_atom.devices.simulation.rf import InMemoryLmsLibrary, virtual_rf_source
 
 
 class _ScpiInstrument:
-    """A DG4000's worth of SCPI, answered from per-channel register dicts."""
+    """A DG4000's worth of SCPI, answered from per-channel register dicts.
+
+    The amplitude cap steps down with frequency the way a DG4162's does
+    (10 Vpp to 20 MHz, 5 Vpp to 60 MHz, 2.5 Vpp above), and a frequency
+    write lowers a standing amplitude the new frequency cannot carry --
+    the instrument's own behaviour, not the driver's.
+    """
+
+    _AMPLITUDE_CAPS_VPP = ((20e6, 10.0), (60e6, 5.0), (math.inf, 2.5))
 
     def __init__(self) -> None:
-        # A channel's amplitude UNIT and output LOAD are settings of the
-        # instrument like any other: the driver reads them, and a test
-        # that could not spell them could not tell whether it wrote them.
+        # A channel's amplitude UNIT, output LOAD and WAVEFORM are settings
+        # of the instrument like any other: the driver reads them, and a
+        # test that could not spell them could not tell whether it wrote
+        # them.
         self.registers = {
             channel: {
                 "FREQ": 1000.0,
@@ -34,6 +50,7 @@ class _ScpiInstrument:
                 "OUT": "OFF",
                 "UNIT": "DBM",
                 "LOAD": 50.0,
+                "FUNC": "SIN",
             }
             for channel in ("1", "2")
         }
@@ -48,12 +65,28 @@ class _ScpiInstrument:
                 return upper[at + len(token)]
         raise AssertionError(f"no channel in {command!r}")
 
+    @classmethod
+    def _amplitude_cap(cls, registers: dict) -> float:
+        """The most this channel may output at its frequency, in its unit."""
+
+        vpp = next(
+            cap for ceiling, cap in cls._AMPLITUDE_CAPS_VPP if registers["FREQ"] <= ceiling
+        )
+        if registers["UNIT"] == "VPP":
+            return vpp
+        vrms = vpp / (2.0 * math.sqrt(2.0))
+        if registers["UNIT"] == "VRMS":
+            return vrms
+        # dBm into the channel's load, to the two decimals the panel shows.
+        return round(10.0 * math.log10(vrms * vrms / registers["LOAD"] / 1e-3), 2)
+
     def write(self, command: str) -> None:
         self.log.append(command)
         upper = command.upper()
         registers = self.registers[self._channel(command)]
         if ":FREQUENCY " in upper:
             registers["FREQ"] = float(command.split()[-1])
+            registers["VOLT"] = min(registers["VOLT"], self._amplitude_cap(registers))
         elif ":VOLTAGE:UNIT " in upper:
             registers["UNIT"] = command.split()[-1].upper()
         elif ":VOLTAGE " in upper:
@@ -63,6 +96,8 @@ class _ScpiInstrument:
             registers["LOAD"] = (
                 float("inf") if tail.startswith("INF") else float(tail)
             )
+        elif ":FUNCTION " in upper:
+            registers["FUNC"] = command.split()[-1].upper()
         elif upper.startswith(":OUTPUT"):
             registers["OUT"] = command.split()[-1].upper()
 
@@ -80,11 +115,13 @@ class _ScpiInstrument:
         if ":VOLTAGE? MIN" in upper:
             return "-6.0000E+01" if registers["UNIT"] == "DBM" else "1.0000E-03"
         if ":VOLTAGE? MAX" in upper:
-            return "2.3980E+01" if registers["UNIT"] == "DBM" else "1.0000E+01"
+            return f"{self._amplitude_cap(registers):.4E}"
         if ":FREQUENCY?" in upper:
             return f"{registers['FREQ']:.6E}"
         if ":VOLTAGE:UNIT?" in upper:
             return registers["UNIT"]
+        if ":FUNCTION?" in upper:
+            return registers["FUNC"]
         if ":VOLTAGE?" in upper:
             return f"{registers['VOLT']:.4E}"
         if ":IMPEDANCE?" in upper:
@@ -159,14 +196,46 @@ def test_bounds_are_bench_policy_and_refuse_before_writing() -> None:
     assert instrument.registers == written, "a refusal must not touch hardware"
 
 
-def test_every_accepted_tune_advances_the_settings_epoch() -> None:
+def test_only_an_effective_change_advances_the_settings_epoch() -> None:
+    """The epoch counts changes of the instrument's state, and the session
+    id names THIS connection.
+
+    A tune to the value a knob already stood at advanced the epoch, so a
+    control panel re-projected and a settings record grew a revision for a
+    setting that had not moved.  And the session id was the ``*IDN?``
+    string: a generator closed and reopened with its knobs elsewhere came
+    back under the same id, so nothing downstream could tell a risk
+    acceptance bound to the first session from one bound to the second.
+    """
+
     source, _instrument = _rigol()
     first = source.settings_provenance()
-    source.tune("ch1_frequency_hz", 10e6)
+    assert source.tune("ch1_frequency_hz", 10e6) == 10e6
     second = source.settings_provenance()
     assert second["settings_epoch"] == first["settings_epoch"] + 1
     assert second["device_session_id"] == first["device_session_id"]
-    assert "DG4162" in str(second["device_session_id"])
+
+    assert source.tune("ch1_frequency_hz", 10e6) == 10e6
+    assert source.settings_provenance() == second, (
+        "landing where the knob already stands is not a settings change"
+    )
+    assert source.tune("ch1_output_enabled", False) is False
+    assert source.settings_provenance() == second
+    assert source.tune("ch1_output_enabled", True) is True
+    assert source.settings_provenance()["settings_epoch"] == (
+        second["settings_epoch"] + 1
+    )
+
+    # The instrument's name is a label; the session is this connection.
+    assert "DG4162" in source.identity
+    assert "DG4162" not in str(second["device_session_id"])
+    source.close()
+    reopened, _instrument = _rigol()
+    assert (
+        reopened.settings_provenance()["device_session_id"]
+        != second["device_session_id"]
+    )
+    assert reopened.settings_provenance()["settings_epoch"] == 0
 
 
 def test_the_scan_facing_fields_carry_bounds_and_units() -> None:
@@ -183,26 +252,38 @@ def test_the_scan_facing_fields_carry_bounds_and_units() -> None:
         assert frequency.unit == "Hz"
         assert frequency.label.startswith(channel.upper())
         assert by_name[f"{channel}_power_dbm"].metadata.unit == "dBm"
+        # The instrument's own limits ride beside the effective bounds, so
+        # a panel can show which fence is the binding one: here the bench
+        # authored the low edge and the instrument owns the high one.
+        assert by_name[f"{channel}_frequency_hz"].device_limits == (1e-6, 160e6)
+        assert by_name[f"{channel}_power_dbm"].device_limits == (-60.0, 23.98)
         # The output switch is a control, not an axis: unbounded on purpose,
         # so scan_ports_for_devices never offers it.
-        output = by_name[f"{channel}_output_enabled"].metadata
-        assert output.minimum is None and output.maximum is None
+        output = by_name[f"{channel}_output_enabled"]
+        assert output.metadata.minimum is None and output.metadata.maximum is None
+        assert output.device_limits is None
         assert by_name[f"{channel}_frequency_hz"].live_write
+    for name in ("frequency_low_hz", "frequency_high_hz", "power_low_dbm", "power_high_dbm"):
+        assert by_name[name].device_limits is None, "a policy edge has no instrument limit"
     for field in by_name.values():
         assert field.dependency_group == (field.metadata.name,)
 
 
 def test_optional_window_is_one_init_and_control_policy() -> None:
-    """The bench's safety window moved to the control panel, off Init.
+    """Two fences, one range: the instrument's limits and the bench's window.
 
-    It is adjusted with plain Apply (never live), or through the same
-    ``tune`` API -- and the scan add-axis combo must never offer it: the
-    window fields are non-live and unbounded, which is exactly what
-    scan_ports_for_devices excludes.  The knobs themselves are always
-    offered: with no window set, a knob's scan range is the instrument's
-    own limit, and an edge that IS set narrows it.  Tightening an edge past
-    a channel's CURRENT value is refused by name: policy may fence a knob
-    in, never silently drag a set output to a new value.
+    The window is adjusted on the control panel with plain Apply (never
+    live), or through the same ``tune`` API -- and the scan add-axis combo
+    must never offer it: the window fields are non-live and unbounded,
+    which is exactly what scan_ports_for_devices excludes.  The knobs
+    themselves are always offered, over the TIGHTER of the instrument's
+    own limits and the window on each side -- the one range the panel, an
+    external ``tune`` and a scan all obey -- so a knob is sweepable as soon
+    as the instrument states a range, and an edge nobody authored forbids
+    nothing.  Tightening an edge past a channel's CURRENT value is refused
+    by name: policy may fence a knob in, never silently drag a set output
+    to a new value; so is a window that leaves nothing of the instrument's
+    range, because no knob position could ever satisfy it.
     """
 
     from zlc_atom.nodes.scan.plan import scan_ports_for_devices
@@ -229,6 +310,11 @@ def test_optional_window_is_one_init_and_control_policy() -> None:
     assert not any("FREQuency " in command for command in instrument.log), (
         "omitting all policy edges must not move hardware at open"
     )
+    # With no window at all, the instrument's own limit fences direct
+    # control too -- refused by name before anything is written.
+    with pytest.raises(ValueError, match="ch1_frequency_hz must lie in"):
+        source.tune("ch1_frequency_hz", 200e6)
+    assert instrument.registers["1"]["FREQ"] == 1000.0
 
     assert source.tune("frequency_low_hz", 1e3) == 1e3
     assert source.tune("frequency_high_hz", 80e6) == 80e6
@@ -251,16 +337,44 @@ def test_optional_window_is_one_init_and_control_policy() -> None:
     assert (cleared.lo, cleared.hi) == (1e3, 160e6), (
         "clearing an edge hands that side back to the instrument's own limit"
     )
+    # A window looser than the instrument on one side widens nothing: the
+    # tighter fence is the range, whichever of the two it is.
+    assert source.tune("frequency_high_hz", 200e6) == 200e6
+    loose = next(
+        port for port in scan_ports_for_devices({"rf": source})
+        if port.port.endswith(":ch1_frequency_hz")
+    )
+    assert (loose.lo, loose.hi) == (1e3, 160e6)
+    with pytest.raises(ValueError, match="ch1_frequency_hz must lie in"):
+        source.tune("ch1_frequency_hz", 170e6)
     assert source.tune("frequency_high_hz", 80e6) == 80e6
     # The channel knobs' own scan bounds follow the window immediately.
     by_name = {field.metadata.name: field for field in source.tunable_fields()}
     assert by_name["ch1_frequency_hz"].metadata.maximum == 80e6
+    assert by_name["ch1_frequency_hz"].device_limits == (1e-6, 160e6)
 
     source.tune("ch1_frequency_hz", 50e6)
     with pytest.raises(ValueError, match="strand ch1_frequency_hz at 5e"):
         source.tune("frequency_high_hz", 20e6)
     with pytest.raises(ValueError, match="empty window"):
         source.tune("frequency_low_hz", 90e6)
+
+    # A window entirely outside the instrument's range is a contradiction,
+    # refused on the panel and at Init alike -- and Init opens no session
+    # for it.
+    fresh, _instrument = _rigol()
+    with pytest.raises(ValueError, match="leaves nothing of the instrument"):
+        fresh.tune("frequency_low_hz", 200e6)
+    assert fresh.tunable_values()["frequency_low_hz"] is None
+    refused = _ScpiInstrument()
+    with pytest.raises(ValueError, match="leaves nothing of the instrument"):
+        RigolDg4000RfSource(
+            RigolDg4000Config(
+                resource="TCPIP0::198.51.100.7::INSTR", frequency_low_hz=200e6
+            ),
+            link=refused,
+        )
+    assert refused.log[-1] == "<closed>"
 
 
 def test_connecting_reads_the_instrument_and_moves_nothing() -> None:
@@ -293,8 +407,10 @@ def test_connecting_reads_the_instrument_and_moves_nothing() -> None:
         link=instrument,
     )
     assert instrument.registers == before, "connecting moved the instrument"
+    # Questions only: the instrument's limits are read at connect, and a
+    # read is not a write.
     assert not any(
-        command.startswith(":SOURce") and " " in command
+        command.startswith(":SOURce") and "?" not in command
         for command in instrument.log
     ), instrument.log
 
@@ -348,20 +464,222 @@ def test_a_channel_in_volts_is_converted_through_its_own_load() -> None:
 
 
 def test_volts_into_a_high_z_load_is_named_not_guessed() -> None:
-    """Delivered power is not defined there, so no number is offered."""
+    """Delivered power is not defined there, so no number is offered.
+
+    The instrument's power range is read when the connection opens, so a
+    channel whose power cannot be stated in dBm is refused at connect --
+    with the way out named, and the session released -- rather than as a
+    generator whose every panel and scan later fails on the same read.
+    """
 
     instrument = _ScpiInstrument()
     instrument.registers["1"]["UNIT"] = "VPP"
     instrument.registers["1"]["LOAD"] = float("inf")
+    with pytest.raises(RuntimeError, match="high-Z load"):
+        RigolDg4000RfSource(
+            RigolDg4000Config(resource="TCPIP0::198.51.100.7::INSTR"),
+            link=instrument,
+        )
+    assert instrument.log[-1] == "<closed>", "a refused connection is released"
+    assert instrument.registers["1"]["VOLT"] == -30.0, "a refusal wrote nothing"
+
+
+def test_peak_to_peak_volts_are_converted_only_for_a_sine() -> None:
+    """Vpp over RMS is a property of the waveform, and only a sine's is known.
+
+    A channel left on a square wave by the previous experiment, in Vpp into
+    50 ohms, was read through the sine ratio: 2 Vpp reported as 10 dBm where
+    a symmetric square wave delivers 13 dBm.  The driver asks the waveform
+    and refuses a shape it cannot convert, naming the way out; RMS and dBm
+    channels need no shape and are unaffected.
+    """
+
+    instrument = _ScpiInstrument()
+    instrument.registers["1"].update(UNIT="VPP", VOLT=2.0, LOAD=50.0, FUNC="SQU")
+    with pytest.raises(RuntimeError, match="SQU waveform"):
+        RigolDg4000RfSource(
+            RigolDg4000Config(resource="TCPIP0::198.51.100.7::INSTR"),
+            link=instrument,
+        )
+    assert instrument.log[-1] == "<closed>"
+
+    instrument = _ScpiInstrument()
+    instrument.registers["1"].update(UNIT="VRMS", VOLT=1.0, LOAD=50.0, FUNC="SQU")
     source = RigolDg4000RfSource(
         RigolDg4000Config(resource="TCPIP0::198.51.100.7::INSTR"),
         link=instrument,
     )
-    with pytest.raises(RuntimeError, match="high-Z load"):
-        source.tunable_values()
-    with pytest.raises(RuntimeError, match="high-Z load"):
+    # 1 Vrms into 50 ohms is 20 mW whatever the shape.
+    assert source.tunable_values()["ch1_power_dbm"] == pytest.approx(13.0103, abs=1e-3)
+
+    # A sine in Vpp converts through 2*sqrt(2); a shape changed under a
+    # live connection is caught at the next read or write, and the write
+    # never happens.
+    instrument.registers["1"].update(UNIT="VPP", VOLT=0.632456, FUNC="SIN")
+    assert source.tunable_values()["ch1_power_dbm"] == pytest.approx(0.0, abs=1e-3)
+    instrument.registers["1"]["FUNC"] = "RAMP"
+    with pytest.raises(RuntimeError, match="RAMP waveform"):
         source.tune("ch1_power_dbm", -6.0)
-    assert instrument.registers["1"]["VOLT"] == -30.0, "a refusal wrote nothing"
+    assert instrument.registers["1"]["VOLT"] == 0.632456, "a refusal wrote nothing"
+
+
+def test_a_frequency_the_standing_amplitude_cannot_follow_is_refused() -> None:
+    """The power knob is independent of the frequency knob only if a
+    frequency write can never move the amplitude.
+
+    A DG4162 caps its amplitude lower as the frequency rises and lowers a
+    standing amplitude the new frequency cannot carry, so a frequency tune
+    used to change the delivered power with nothing said -- past a Logic
+    protecting the power, and past the singleton dependency group that
+    lets each knob be a scan axis alone.  The driver takes such a write
+    back and refuses it by name: the bench is as it was, and nothing
+    advanced the epoch.
+    """
+
+    source, instrument = _rigol()
+    assert source.tune("ch1_power_dbm", 20.0) == 20.0
+    provenance = source.settings_provenance()
+    with pytest.raises(RuntimeError, match="caps its amplitude at 17.96 DBM.*lower ch1_power_dbm first"):
+        source.tune("ch1_frequency_hz", 50e6)
+    assert instrument.registers["1"]["FREQ"] == 1000.0
+    assert instrument.registers["1"]["VOLT"] == 20.0
+    assert source.settings_provenance() == provenance
+    assert all(
+        field.dependency_group == (field.metadata.name,)
+        for field in source.tunable_fields()
+    ), "each knob stays its own group, because the driver keeps that true"
+
+    # Under the cap a frequency write is an ordinary write, and the
+    # amplitude stays where it was set.
+    assert source.tune("ch1_power_dbm", 10.0) == 10.0
+    assert source.tune("ch1_frequency_hz", 50e6) == 50e6
+    assert instrument.registers["1"]["VOLT"] == 10.0
+    assert source.tunable_values()["ch1_power_dbm"] == 10.0
+
+
+def test_what_a_constructor_acquired_the_constructor_releases(monkeypatch) -> None:
+    """A source that fails to build has no owner but itself.
+
+    The Rigol opened its VISA session and then failed on ``*IDN?``; the
+    Lab Brick opened its USB handle and then failed on a limits read.
+    Neither closed what it had opened, and no leaf ever existed to retry
+    the close through.  A window the driver cannot honour is refused
+    before either transport is opened at all.
+    """
+
+    import zlc_atom.devices.rf.rigol_dg4000 as module
+
+    opened: list[str] = []
+    instrument = _ScpiInstrument()
+
+    def no_identity(command: str) -> str:
+        instrument.log.append(command)
+        raise TimeoutError("no answer")
+
+    instrument.query = no_identity
+    manager = SimpleNamespace(
+        open_resource=lambda resource: opened.append(resource) or instrument
+    )
+    monkeypatch.setattr(module, "visa_resources", lambda: manager)
+    with pytest.raises(TimeoutError, match="no answer"):
+        RigolDg4000RfSource(RigolDg4000Config(resource="TCPIP0::198.51.100.7::INSTR"))
+    assert opened == ["TCPIP0::198.51.100.7::INSTR"]
+    assert instrument.log[-1] == "<closed>", "the session the constructor opened"
+
+    opened.clear()
+    with pytest.raises(ValueError, match="frequency bounds must be ordered"):
+        RigolDg4000RfSource(
+            RigolDg4000Config(
+                resource="TCPIP0::198.51.100.7::INSTR",
+                frequency_low_hz=2e9,
+                frequency_high_hz=1e9,
+            )
+        )
+    assert opened == [], "a window the driver cannot honour opens no session"
+
+    class _LimitsRefused(InMemoryLmsLibrary):
+        def get_power_limits(self, handle: int) -> tuple[int, int]:
+            raise RuntimeError("firmware refused")
+
+    library = _LimitsRefused((77,))
+    with pytest.raises(RuntimeError, match="firmware refused"):
+        VaunixLmsRfSource(VaunixLmsConfig(serial=77), library=library)
+    with pytest.raises(RuntimeError, match="not open"):
+        library.get_frequency(77)
+
+    untouched = InMemoryLmsLibrary((77,))
+    with pytest.raises(ValueError, match="frequency bounds must be ordered"):
+        VaunixLmsRfSource(
+            VaunixLmsConfig(serial=77, frequency_low_hz=2e9, frequency_high_hz=1e9),
+            library=untouched,
+        )
+    assert untouched._open == set(), "a bad window opens no handle"
+
+
+def test_a_brick_the_sdk_refuses_to_close_stays_owned() -> None:
+    """A close status is an answer, and a non-zero one means "still open".
+
+    ``fnLMS_CloseDevice`` returns a status like every other SDK call.  It
+    was discarded, so the installation heard "closed", dropped the leaf and
+    unbound the brick -- while the SDK still held the handle and nothing
+    was left that could retry.  The status is raised now, and the leaf
+    stays owned so ``close`` can be tried again.
+    """
+
+    from zlc_atom.devices.rf.binding import bind_rf_source
+    from zlc_atom.execution import DeviceBroker
+    from zlc_atom.install import Installation, InstallationFactoryContext
+
+    physical = {"open": False, "close_attempts": 0}
+
+    def devices(identifiers) -> int:
+        identifiers[0] = 7
+        return 1
+
+    def opened(_identifier) -> int:
+        physical["open"] = True
+        return 0
+
+    def refused_close(_identifier) -> int:
+        physical["close_attempts"] += 1
+        return -2147352576  # the SDK's BAD_HID_IO, a status and not an exception
+
+    library = object.__new__(CtypesLmsLibrary)
+    library._dll = SimpleNamespace(
+        fnLMS_GetNumDevices=lambda: 1,
+        fnLMS_GetDevInfo=devices,
+        fnLMS_GetSerialNumber=lambda _identifier: 77,
+        fnLMS_InitDevice=opened,
+        fnLMS_CloseDevice=refused_close,
+        fnLMS_GetMinFreq=lambda _handle: 50_000_000,
+        fnLMS_GetMaxFreq=lambda _handle: 800_000_000,
+        fnLMS_GetMinPwr=lambda _handle: -160,
+        fnLMS_GetMaxPwr=lambda _handle: 40,
+        fnLMS_GetFrequency=lambda _handle: 100_000_000,
+        fnLMS_GetAbsPowerLevel=lambda _handle: 0,
+        fnLMS_GetRF_On=lambda _handle: False,
+    )
+    source = VaunixLmsRfSource(VaunixLmsConfig(serial=77), library=library)
+    with pytest.raises(RuntimeError, match="status -2147352576"):
+        source.close()
+    assert physical == {"open": True, "close_attempts": 1}
+
+    broker = DeviceBroker()
+    leaf = bind_rf_source(
+        InstallationFactoryContext(None, broker, {}),
+        "rf",
+        source,
+        "vaunix-lms:77",
+        "rf.vaunix_lms",
+    )
+    installation = Installation({"rf": leaf}, world=None, broker=broker)
+    with pytest.raises(BaseExceptionGroup, match="installation close failed"):
+        installation.close()
+    assert tuple(installation.devices) == ("rf",), (
+        "a device that did not close stays owned, so close can be retried"
+    )
+    assert physical["close_attempts"] == 2
+    broker.verify_capability(leaf.binding)
 
 
 def test_the_lab_brick_speaks_its_own_units_and_refuses_off_grid() -> None:
@@ -492,6 +810,16 @@ def test_vendor_files_live_with_the_family_and_missing_means_instructions(
     assert resolve_vendor_file(
         str(anchor), "thing.dll", what="the Thing SDK"
     ) == str(elsewhere)
+
+    # A relative manifest path would name a different file per launcher
+    # working directory; it is refused with the instruction, even when it
+    # happens to resolve from here.
+    monkeypatch.chdir(tmp_path)
+    (vendor / "vendor.json").write_text(
+        json.dumps({"thing.dll": "elsewhere.dll"}), encoding="utf-8"
+    )
+    with pytest.raises(FileNotFoundError, match="absolute path"):
+        resolve_vendor_file(str(anchor), "thing.dll", what="the Thing SDK")
 
     # The Lab Brick scan surfaces that instruction rather than shrugging.
     import zlc_atom.devices.vendor as vendor_module

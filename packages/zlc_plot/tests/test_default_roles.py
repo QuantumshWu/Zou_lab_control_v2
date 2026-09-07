@@ -23,10 +23,16 @@ from zlc_data import (
     PRIMARY_INDEX,
     READOUT_EVENT,
     REPEAT,
+    SCALAR_DOMAIN,
     SCAN_POINT,
     SITE,
     SPATIAL_X,
     SPATIAL_Y,
+    AxisId,
+    AxisSpec,
+    DatasetSchema,
+    DomainSpec,
+    ValueSchema,
 )
 from zlc_plot._kinds import default_spec, fitting_spec
 from zlc_plot._kinds.defaults import chosen_spec
@@ -289,4 +295,78 @@ def test_point_axes_keep_the_producers_declaration_order() -> None:
     )
     assert fitting_spec(schema, PlotKind.FACET_GRID, cell=PlotKind.CURVE) == (
         FacetGridPlot(P("x"), CurvePlot(P("row")))
+    )
+
+
+def _unnamed_row() -> DomainSpec:
+    """A physical domain of one row and no logical axis: the last authored
+    axis deleted, which the Data contract allows."""
+
+    return DomainSpec((1,), (), ())
+
+
+def test_a_scalar_with_no_axis_has_no_curve_and_no_grid_but_still_a_histogram() -> None:
+    """The entry points promise ``None`` where a kind has nothing to draw.
+
+    The repeat and point domains may each be one unnamed row and the cell
+    a scalar.  The curve table read ``families.repeat[0]`` on the way to
+    its x of last resort and raised IndexError out of ``fitting_spec``,
+    the Workbench catalog and every Add Panel behind them.  A histogram
+    needs no axis and answers as before.
+    """
+
+    bare = DatasetSchema(
+        _unnamed_row(), _unnamed_row(), SCALAR_DOMAIN,
+        ValueSchema.scalar(np.dtype("<f8")),
+    )
+    assert default_spec(bare, PlotKind.CURVE) is None
+    assert default_spec(bare, PlotKind.FACET_GRID) is None
+    assert fitting_spec(bare) is None
+    assert fitting_spec(bare, PlotKind.FACET_GRID, cell=PlotKind.CURVE) is None
+    assert default_spec(bare, PlotKind.HISTOGRAM) == HistogramPlot()
+    assert fitting_spec(bare, PlotKind.FACET_GRID, cell=PlotKind.HISTOGRAM) == (
+        FacetGridPlot(None, HistogramPlot())
+    )
+
+
+def test_a_degenerate_default_x_moves_to_the_next_axis_with_variation() -> None:
+    """One rule, in the table, read by both entry points.
+
+    Two repeat axes, the first of one value and the second of five, over
+    an unnamed point row and a scalar cell: nothing but the second repeat
+    axis varies, so it is the curve's x.  The Workbench used to re-point a
+    degenerate x by a rule of its own and answered ``r2`` where the
+    library answered ``r1`` -- two default pictures of one dataset.
+    """
+
+    repeat = DomainSpec(
+        (5,),
+        (
+            AxisSpec(AxisId("r1"), "r1", REPEAT, 1, (0,)),
+            AxisSpec(AxisId("r2"), "r2", REPEAT, 5, (0, 1, 2, 3, 4)),
+        ),
+        ((0,) * 5, (0, 1, 2, 3, 4)),
+    )
+    schema = DatasetSchema(
+        repeat, _unnamed_row(), SCALAR_DOMAIN, ValueSchema.scalar(np.dtype("<f8"))
+    )
+    assert default_spec(schema, PlotKind.CURVE) == CurvePlot(AxisRef.repeat("r2"))
+    assert default_spec(schema, PlotKind.FACET_GRID) == FacetGridPlot(
+        None, CurvePlot(AxisRef.repeat("r2"))
+    )
+    # With nothing varying at all the first axis there is, degenerate as
+    # it is, is drawn as one point.
+    assert default_spec(_scan({"a": 1}), PlotKind.CURVE) == CurvePlot(DIM("a"))
+
+
+def test_the_facet_a_grid_faces_is_never_the_cells_x() -> None:
+    """A one-frame scalar cycle: the frame names the cell, by the table's
+    one deliberate exception, and the curve inside walks what is left --
+    the degenerate repeat axis, as one point.  The fallback used to hand
+    the facet itself back as x and build a grid that refused itself."""
+
+    schema = _cycle(1)
+    assert default_spec(schema, PlotKind.CURVE) == CurvePlot(P("frame"))
+    assert default_spec(schema, PlotKind.FACET_GRID) == FacetGridPlot(
+        P("frame"), CurvePlot(AxisRef.repeat("repeat"))
     )

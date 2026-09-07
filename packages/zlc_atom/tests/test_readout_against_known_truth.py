@@ -260,6 +260,119 @@ def test_a_threshold_is_the_weighted_crossing_of_the_unlabelled_fit() -> None:
     ) == 5.0
 
 
+def test_the_crossing_is_stable_when_the_two_widths_nearly_agree() -> None:
+    """The threshold is where the weighted curves cross, whatever the widths.
+
+    With nearly equal widths the quadratic's leading coefficient vanishes
+    and the relevant root was formed by subtracting two nearly equal
+    numbers: means 0 and 4, widths 1 and 1+1e-15, weights 0.4/0.6 answered
+    1.80 where the curves cross at 1.8986 -- a threshold the caller accepted
+    because it lay between the means -- while exactly equal widths took the
+    linear branch and were right.  The crossing must vary continuously
+    through equal widths.
+    """
+
+    from zlc_atom.nodes.calibration.bimodal import optimal_gaussian_threshold
+
+    equal, above = optimal_gaussian_threshold(0.0, 1.0, 4.0, 1.0, 0.4, 0.6)
+    assert above
+    assert equal == pytest.approx(1.8986337229729588, abs=1e-12)
+    for delta in (1e-10, 1e-12, 1e-14, 1e-15):
+        threshold, above = optimal_gaussian_threshold(
+            0.0, 1.0, 4.0, 1.0 + delta, 0.4, 0.6
+        )
+        assert above
+        assert threshold == pytest.approx(equal, abs=1e-8), delta
+        width = 1.0 + delta
+        dark_log_curve = np.log(0.4) - 0.5 * threshold**2
+        bright_log_curve = (
+            np.log(0.6) - np.log(width) - 0.5 * ((threshold - 4.0) / width) ** 2
+        )
+        assert dark_log_curve == pytest.approx(bright_log_curve, abs=1e-9), delta
+
+
+def test_a_crop_whose_boxes_are_wholly_readable_is_accepted() -> None:
+    """Rebase asks the one box rule the readout itself asks.
+
+    The readout rounds a centre to its pixel and reads the box round it;
+    rebase judged the continuous centre against a continuous bound, so a
+    site at x=0.8 with radius 1 -- whose 3x3 box, x=0..2, the readout reads
+    in full -- was refused as uncovered by a crop that covers it.
+    """
+
+    from zlc_atom.nodes.calibration.calibration import (
+        FrameContract,
+        ReadoutModel,
+        ReadoutModelKind,
+        SiteMap,
+        TrapCalibration,
+        box_fits,
+        extract_box_signals,
+    )
+
+    sites = SiteMap(("site_0000",), [[3.8, 4.0]], [True], [1.0])
+    model = ReadoutModel(
+        sites.site_ids, [5.0], [0.0], [10.0], [True], [1.0], integration_half_width=1
+    )
+    source = TrapCalibration(
+        sites,
+        (model,),
+        ReadoutModelKind.BOX,
+        FrameContract((10, 10), sensor_shape=(10, 10), roi_xywh=(0, 0, 10, 10)),
+    )
+    assert box_fits((0.8, 4.0), 1, (10, 7))
+    assert extract_box_signals(np.ones((10, 7)), [[0.8, 4.0]], radius=1).tolist() == [9.0]
+    moved = source.rebased((3, 0, 7, 10), (1, 1), (10, 7))
+    assert moved.site_map.centers_xy.tolist() == [[pytest.approx(0.8), 4.0]]
+    with pytest.raises(ValueError, match="does not cover"):
+        source.rebased((4, 0, 6, 10), (1, 1), (10, 6))
+
+
+def test_no_model_is_recommended_when_none_read_a_site() -> None:
+    """A summary with nothing to compare names nothing.
+
+    Two shots of zero signal give a BOX model with no usable site and no
+    fidelity; the summary still crowned it ``best_model`` and starred it in
+    the progress lines, which reads as advice to use it.
+    """
+
+    from zlc_atom.nodes.calibration.calibration import (
+        CalibrationResult,
+        FrameContract,
+        ReadoutModelKind,
+        SiteMap,
+        TrapCalibration,
+        _fit_readout_model,
+    )
+    from zlc_atom.nodes.calibration.summary import readout_summary, summary_lines
+
+    sites = SiteMap(("site_0000",), [[1.0, 1.0]], [True], [1.0])
+    occupied = np.array([[False], [True]])
+    valid = np.ones((2, 1), dtype=bool)
+    model, model_report = _fit_readout_model(
+        kind=ReadoutModelKind.BOX,
+        site_map=sites,
+        short_signals=np.array([[0.0], [0.0]]),
+        labels_occupied=occupied,
+        labels_valid=valid,
+        threshold_method="gaussian",
+        model_parameters={"integration_half_width": 1},
+    )
+    assert not model.usable_sites.any()
+    summary = readout_summary(
+        CalibrationResult(
+            TrapCalibration(sites, (model,), ReadoutModelKind.BOX, FrameContract((3, 3))),
+            {
+                "labels_occupied": occupied,
+                "labels_valid": valid,
+                "models": {"box": model_report},
+            },
+        )
+    )
+    assert summary["best_model"] is None
+    assert summary["models"]["box"]["usable_sites"] == 0
+    assert not any(line.startswith("*") for line in summary_lines(summary))
+
 
 def test_a_psf_kernel_is_the_spot_it_was_measured_from() -> None:
     """Amplitude-scaled, peaked on the site, concentrated where the light is.
@@ -416,10 +529,10 @@ def test_target_registration_keeps_a_never_loaded_site_as_unresolved(
     saved = result.calibration.save(tmp_path / "generic-calibration.json")
     calibration = type(result.calibration).load(saved)
     assert calibration.site_map.n_sites == 8
-    rows, columns, registered, source_index = _support(
+    rows, columns, registered = _support(
         target,
         calibration,
-        calibration.select_model(),
+        box_half_width=1,
         science_context_path=context_path,
         command_receipt=receipt,
     )
@@ -428,4 +541,5 @@ def test_target_registration_keeps_a_never_loaded_site_as_unresolved(
         registered.centers_xy[missing], camera_centers[missing], atol=0.1
     )
     assert (rows[missing], columns[missing]) == (10, 9)
-    assert source_index[missing] == -1
+    assert not registered.topology["observed_sites"][missing]
+    assert not registered.valid_sites[missing]

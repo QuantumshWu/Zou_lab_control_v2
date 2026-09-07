@@ -11,10 +11,20 @@ changes nothing, so every read and write asks which unit the channel is
 in and speaks it.  A channel already in dBm costs one extra query and
 nothing else; a channel in volts is converted through its own output
 load, and a channel in volts into a high-Z load -- where delivered power
-is not defined -- is a named refusal rather than a number.  ``tune``
-returns what the instrument reports back, never what was asked, which is
-how a mistyped bound or a loading-dependent amplitude shows up as a named
-error instead of a wrong dataset column.
+is not defined -- is a named refusal rather than a number.  Peak-to-peak
+volts are converted through the channel's WAVEFORM as well: the
+Vpp-to-RMS ratio is a property of the shape, and only a sine's is known
+here, so a Vpp channel playing anything else is refused by name rather
+than read through the sine ratio.  ``tune`` returns what the instrument
+reports back, never what was asked, which is how a mistyped bound or a
+loading-dependent amplitude shows up as a named error instead of a wrong
+dataset column.
+
+The frequency knob and the power knob are each their own dependency group,
+and the driver keeps that true: the instrument caps its amplitude lower as
+the frequency rises and lowers a standing amplitude the new frequency
+cannot carry, so a frequency write that would move the amplitude is taken
+back and refused by name instead of quietly changing the power.
 """
 
 from __future__ import annotations
@@ -23,7 +33,7 @@ import math
 from dataclasses import dataclass
 from typing import Protocol
 
-from zlc_atom.devices.rf.contract import RfSourceBase
+from zlc_atom.devices.rf.contract import POWER_FIELD, RfSourceBase, channel_field
 
 
 class ScpiLink(Protocol):
@@ -133,6 +143,10 @@ _VRMS = "VRMS"
 _VPP = "VPP"
 #: One milliwatt, the reference the "dB" in dBm is measured from.
 _MILLIWATT = 1e-3
+#: The one waveform whose peak-to-peak/RMS ratio (2*sqrt(2)) this driver
+#: knows; ``:FUNCtion?`` answers it as SIN (or its long form).
+_SINE = "SIN"
+_SINE_VPP_PER_VRMS = 2.0 * math.sqrt(2.0)
 #: The instrument spells high-Z as this out-of-range ohm count.
 _HIGH_Z_OHMS = 1e6
 
@@ -252,20 +266,34 @@ def discover_dg4000(
 class RigolDg4000RfSource(RfSourceBase):
     def __init__(self, config: RigolDg4000Config, *, link: ScpiLink | None = None) -> None:
         self.config = config
-        self._link = link if link is not None else VisaScpiLink(
-            config.resource, timeout_seconds=config.timeout_seconds
-        )
-        identity = self._link.query("*IDN?").strip()
-        if not identity:
-            raise RuntimeError("the instrument answered *IDN? with nothing")
+        # The authored half first, with nothing open: a window that cannot
+        # be honoured is refused before a VISA session exists to leak.
         super().__init__(
-            identity=identity,
             channels=_CHANNELS,
             frequency_low_hz=config.frequency_low_hz,
             frequency_high_hz=config.frequency_high_hz,
             power_low_dbm=config.power_low_dbm,
             power_high_dbm=config.power_high_dbm,
         )
+        self._link = link if link is not None else VisaScpiLink(
+            config.resource, timeout_seconds=config.timeout_seconds
+        )
+        # From here on the session is this object's to close: a failure
+        # before the constructor returns has no other owner to hand it to.
+        try:
+            identity = self._link.query("*IDN?").strip()
+            if not identity:
+                raise RuntimeError("the instrument answered *IDN? with nothing")
+            self._attach(identity)
+        except BaseException as error:
+            try:
+                self._link.close()
+            except BaseException as close_error:
+                error.add_note(
+                    "closing the VISA session also reported: "
+                    f"{type(close_error).__name__}: {close_error}"
+                )
+            raise
 
     @staticmethod
     def _source(channel: str) -> str:
@@ -277,8 +305,37 @@ class RigolDg4000RfSource(RfSourceBase):
 
     # ------------------------------------------------------- transport verbs
     def _write_frequency(self, channel: str, value_hz: float) -> float:
-        self._link.write(f"{self._source(channel)}:FREQuency {value_hz:.6f}")
-        return self._read_frequency(channel)
+        """Set the frequency, and only the frequency.
+
+        The instrument's amplitude cap steps down with frequency -- a
+        DG4162 allows 10 Vpp to 20 MHz, 5 Vpp to 60 MHz, 2.5 Vpp to
+        100 MHz -- and at a frequency the standing amplitude cannot carry
+        the instrument lowers the amplitude itself.  The power knob is
+        declared independent of the frequency knob, which is what lets
+        each be a scan axis on its own and what a Logic protecting the
+        power relies on, so a frequency write the amplitude would not
+        survive is taken back -- frequency first, then the amplitude it
+        allowed -- and refused by name: the operator lowers the power
+        first, and no dataset carries a power the instrument changed on
+        its own.
+        """
+
+        source = self._source(channel)
+        standing_frequency = self._read_frequency(channel)
+        standing_amplitude = float(self._link.query(f"{source}:VOLTage?"))
+        self._link.write(f"{source}:FREQuency {value_hz:.6f}")
+        effective = self._read_frequency(channel)
+        amplitude = float(self._link.query(f"{source}:VOLTage?"))
+        if amplitude != standing_amplitude:
+            self._link.write(f"{source}:FREQuency {standing_frequency:.6f}")
+            self._link.write(f"{source}:VOLTage {standing_amplitude:.6f}")
+            unit = self._amplitude_unit(channel)
+            raise RuntimeError(
+                f"channel {channel} at {value_hz:g} Hz caps its amplitude at "
+                f"{amplitude:g} {unit}, below the {standing_amplitude:g} {unit} "
+                f"it stands at; lower {channel_field(channel, POWER_FIELD)} first"
+            )
+        return effective
 
     def _write_power(self, channel: str, value_dbm: float) -> float:
         unit = self._amplitude_unit(channel)
@@ -378,9 +435,34 @@ class RigolDg4000RfSource(RfSourceBase):
             )
         return load
 
+    def _vpp_per_vrms(self, channel: str) -> float:
+        """The channel's peak-to-peak/RMS ratio, which is its waveform's.
+
+        Asked every time, like the unit: the waveform is a setting of the
+        instrument.  Only a sine's ratio is known here; a square wave's
+        depends on its duty cycle, a ramp's on its symmetry, and reading
+        either through the sine ratio would state a power the channel is
+        not delivering (3 dB off for a symmetric square wave).
+        """
+
+        answer = self._link.query(
+            f"{self._source(channel)}:FUNCtion?"
+        ).strip().upper()
+        if answer.startswith(_SINE):
+            return _SINE_VPP_PER_VRMS
+        raise RuntimeError(
+            f"channel {channel} states its amplitude in {_VPP} while playing "
+            f"a {answer or 'unknown'} waveform, whose peak-to-peak/RMS ratio "
+            "this driver does not know; set the channel's amplitude unit to "
+            f"{_VRMS} or {_DBM}, or its waveform to sine"
+        )
+
+    def _rms_from_volts(self, channel: str, amplitude: float, unit: str) -> float:
+        return amplitude if unit == _VRMS else amplitude / self._vpp_per_vrms(channel)
+
     def _dbm_from_volts(self, channel: str, amplitude: float, unit: str) -> float:
         load = self._delivering_load(channel, unit)
-        rms = amplitude if unit == _VRMS else amplitude / (2.0 * math.sqrt(2.0))
+        rms = self._rms_from_volts(channel, amplitude, unit)
         watts = rms * rms / load
         if watts <= 0.0:
             raise RuntimeError(
@@ -393,7 +475,7 @@ class RigolDg4000RfSource(RfSourceBase):
         load = self._delivering_load(channel, unit)
         watts = _MILLIWATT * 10.0 ** (value_dbm / 10.0)
         rms = math.sqrt(watts * load)
-        return rms if unit == _VRMS else rms * 2.0 * math.sqrt(2.0)
+        return rms if unit == _VRMS else rms * self._vpp_per_vrms(channel)
 
     def _read_output(self, channel: str) -> bool:
         answer = self._link.query(f"{self._output(channel)}?").strip().upper()

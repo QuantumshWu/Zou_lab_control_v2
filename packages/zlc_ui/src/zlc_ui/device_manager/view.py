@@ -13,6 +13,7 @@ from zlc_ui.fluent import (
     ORANGE,
     RED,
     ElidedLabel,
+    FluentLabel,
     FluentButton,
     FluentComboBox,
     FluentFrame,
@@ -24,6 +25,7 @@ from zlc_ui.fluent import (
     FluentSwitch,
     FluentTabWidget,
     muted_note_label,
+    retire_widget,
     signals_blocked,
     window_pad,
 )
@@ -72,10 +74,19 @@ class _DeviceCard(FluentFrame):
         self.remove_button.clicked.connect(lambda: self.remove_requested.emit(self.instance_id))
 
     def set_record(self, role: str, type_key: str) -> None:
+        """Project the host's record; a projection is never a pick.
+
+        ``type_picked`` is the operator choosing a type.  Selecting the
+        projected type here with signals live emitted it too, so every
+        ``set_devices`` told the host that the operator had just asked for
+        the type the host itself had sent.
+        """
+
         self.role_edit.setText(str(role))
         index = self.type_combo.findData(str(type_key))
         if index >= 0:
-            self.type_combo.setCurrentIndex(index)
+            with signals_blocked(self.type_combo):
+                self.type_combo.setCurrentIndex(index)
         self.name_label.setToolTip(self.instance_id)
 
     def set_choices(self, choices: tuple[tuple[str, str], ...]) -> None:
@@ -201,8 +212,31 @@ def _readable_value(value: object, unit: str, shown: str = "") -> str:
         return str(value)
 
 
+def _readable_limits(limits: object, unit: str, shown: str = "") -> str:
+    """The instrument's own range for a knob, read the way its row is read.
+
+    ``limits`` is the ``(low, high)`` pair a device reports for the field,
+    or None when it states none (a switch, a policy edge); it comes in the
+    field's own unit and is printed in whichever spelling the operator chose
+    for the row, so the fence and the number it fences share one scale.
+    """
+
+    if limits is None:
+        return ""
+    low, high = limits
+    return f"{_readable_value(low, unit, shown)} to {_readable_value(high, unit, shown)}"
+
+
 class DeviceControlView(QtWidgets.QWidget):
-    """Projection-only control surface for one loaded device."""
+    """Projection-only control surface for one loaded device.
+
+    Each field of the projection carries, beside the reading and the desired
+    value, ``device_limits``: the instrument's own range as the device
+    reports it, or None.  It is SHOWN, read-only, in its own column beside
+    the editable window -- an operator setting a bench window has to see
+    which of the two fences is biting -- and never edited: the device's
+    limit is the device's fact.
+    """
 
     refresh_requested = QtCore.pyqtSignal()
     risk_toggled = QtCore.pyqtSignal(bool)
@@ -217,7 +251,10 @@ class DeviceControlView(QtWidgets.QWidget):
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self._field_rows: dict[str, tuple[ElidedLabel, FluentSwitch, FluentButton, FluentStatusDot, ElidedLabel]] = {}
+        self._field_rows: dict[
+            str,
+            tuple[ElidedLabel, ElidedLabel, FluentSwitch, FluentButton, FluentStatusDot, ElidedLabel],
+        ] = {}
         self._field_states: dict[str, Mapping[str, object]] = {}
         self._live_timers: dict[str, QtCore.QTimer] = {}
         outer = QtWidgets.QVBoxLayout(self)
@@ -248,6 +285,7 @@ class DeviceControlView(QtWidgets.QWidget):
         self.field_heading = muted_note_label("Field")
         self.current_heading = muted_note_label("Current")
         self.desired_heading = muted_note_label("Desired")
+        self.limits_heading = muted_note_label("Device limits")
         self.live_heading = muted_note_label("Live")
         self.apply_heading = muted_note_label("Apply")
         self.status_heading = muted_note_label("Status")
@@ -261,6 +299,7 @@ class DeviceControlView(QtWidgets.QWidget):
         columns.addWidget(self.field_heading)
         columns.addWidget(self.current_heading)
         columns.addWidget(self.desired_heading, 1)
+        columns.addWidget(self.limits_heading)
         columns.addWidget(self.live_heading)
         columns.addWidget(self.apply_heading)
         columns.addWidget(self.status_heading, 1)
@@ -309,9 +348,25 @@ class DeviceControlView(QtWidgets.QWidget):
         live = FluentSwitch("", live_host)
         live_layout.addWidget(live, 0, QtCore.Qt.AlignCenter)
         live_host.setFixedWidth(max(1, live.sizeHint().width()))
+        # The device's own range, a VALUE beside the editable window, never
+        # a control.  A plain label, not an eliding one: a fence the operator
+        # cannot read whole tells them nothing, so the text asks for its
+        # full width and the column (and the snug window) grow to it.
+        limits = FluentLabel("")
+        limits.setStyleSheet(f"color: {GREY}; background: transparent; border: none;")
+        limits.setToolTip(
+            "The instrument's own range for this field; the editable window "
+            "is the tighter of it and the bench policy"
+        )
         apply = FluentButton("Apply", color=ACCENT)
         dot = FluentStatusDot(size=12)
         status = ElidedLabel("")
+        # The status column stretches, and elides a long sentence behind its
+        # tooltip; it still asks for the width of an ordinary one, so a row
+        # never opens with its dot and no words beside it.
+        status.setMinimumWidth(
+            status.fontMetrics().horizontalAdvance("Applying; latest queued")
+        )
         status_host = QtWidgets.QWidget()
         status_layout = QtWidgets.QHBoxLayout(status_host)
         status_layout.setContentsMargins(0, 0, 0, 0)
@@ -326,9 +381,9 @@ class DeviceControlView(QtWidgets.QWidget):
             lambda checked, value=key: self._live_toggled(value, checked)
         )
         apply.clicked.connect(lambda _checked=False, value=key: self._emit_apply(value))
-        self._field_rows[key] = current, live, apply, dot, status
+        self._field_rows[key] = current, limits, live, apply, dot, status
         self._live_timers[key] = timer
-        return (current,), ((live_host, 0), (apply, 0), (status_host, 1))
+        return (current,), ((limits, 0), (live_host, 0), (apply, 0), (status_host, 1))
 
     def _prune_rows(self) -> None:
         """Forget the cells of rows the form no longer has."""
@@ -364,17 +419,18 @@ class DeviceControlView(QtWidgets.QWidget):
             headings.setContentsMargins(layout.contentsMargins())
         if headings.spacing() != layout.spacing():
             headings.setSpacing(layout.spacing())
-        if layout.count() < 6:
+        if layout.count() < 7:
             return
-        # label, current, editor, live cell, apply, status.  A column is as
-        # wide as the widest thing IN it, heading included -- sized to the
-        # widget alone, "Live apply" was clipped by its own switch.  The
-        # stretched columns (editor, status) resolve equally once the fixed
-        # ones agree.
+        # label, current, editor, limits, live cell, apply, status.  A
+        # column is as wide as the widest thing IN it, heading included --
+        # sized to the widget alone, "Live apply" was clipped by its own
+        # switch.  The stretched columns (editor, status) resolve equally
+        # once the fixed ones agree.
         for index, heading in (
             (0, self.field_heading),
-            (3, self.live_heading),
-            (4, self.apply_heading),
+            (3, self.limits_heading),
+            (4, self.live_heading),
+            (5, self.apply_heading),
         ):
             cells = [
                 row.layout().itemAt(index).widget()
@@ -391,6 +447,45 @@ class DeviceControlView(QtWidgets.QWidget):
             for widget in (heading, *cells):
                 if widget.width() != width or widget.minimumWidth() != width:
                     widget.setFixedWidth(width)
+
+    def align_columns(self) -> None:
+        """Give every fixed column its width and let the layout settle.
+
+        The width a control needs is only known once its columns agree:
+        before that, a row's size hint is the sum of its widgets' own
+        hints, which an eliding label keeps small, and a window opened on
+        that hint has its fixed columns overlapping the stretched ones the
+        moment they are aligned.  So whoever decides the opening size asks
+        for this first.
+        """
+
+        self._align_headings()
+        layout = self.layout()
+        if layout is not None:
+            layout.activate()
+
+    def sizeHint(self) -> QtCore.QSize:  # noqa: N802 - Qt naming
+        """The width the control needs is its widest aligned row.
+
+        A parameter form is built to take the width it is given and never
+        to widen the page it sits on, so its own hint says nothing about
+        how wide its rows want to be -- and a window sized by content that
+        read it opened at half the standard width whatever the columns
+        held, the fixed columns then overlapping the stretched ones.
+        """
+
+        hint = super().sizeHint()
+        rows = tuple(self.form._rows.values())
+        if not rows:
+            return hint
+        widest = max(
+            row.layout().sizeHint().width() for row in rows if row.layout() is not None
+        )
+        margins = [self.layout().contentsMargins()] if self.layout() else []
+        if self.form.layout() is not None:
+            margins.append(self.form.layout().contentsMargins())
+        width = widest + sum(margin.left() + margin.right() for margin in margins)
+        return QtCore.QSize(max(hint.width(), width), hint.height())
 
     def resizeEvent(self, event):  # noqa: N802 - Qt naming
         super().resizeEvent(event)
@@ -416,7 +511,7 @@ class DeviceControlView(QtWidgets.QWidget):
         self._units = units
         for key in spec.keys:
             field = fields[key]
-            current, live, apply, dot, status = self._field_rows[key]
+            current, limits, live, apply, dot, status = self._field_rows[key]
             shown = field.get("current")
             # The presenter hands over the device's own number; what it is IN
             # is on the field beside it.  This printed str(value), so a
@@ -427,6 +522,11 @@ class DeviceControlView(QtWidgets.QWidget):
                 "—"
                 if shown is None
                 else _readable_value(shown, units[key], self.form.shown_unit_for(key))
+            )
+            limits.setText(
+                _readable_limits(
+                    field.get("device_limits"), units[key], self.form.shown_unit_for(key)
+                )
             )
             editor = self.form.widget_for(key)
             self._set_editable(key, bool(field.get("editable", False)))
@@ -457,13 +557,14 @@ class DeviceControlView(QtWidgets.QWidget):
         state = self._field_states.get(str(key))
         if widgets is None or state is None:
             return
+        unit = self._units.get(str(key), "")
+        spelling = self.form.shown_unit_for(str(key))
         shown = state.get("current")
         widgets[0].setText(
-            "—"
-            if shown is None
-            else _readable_value(
-                shown, self._units.get(str(key), ""), self.form.shown_unit_for(str(key))
-            )
+            "—" if shown is None else _readable_value(shown, unit, spelling)
+        )
+        widgets[1].setText(
+            _readable_limits(state.get("device_limits"), unit, spelling)
         )
 
     def _desired_changed(self, key: str) -> None:
@@ -474,7 +575,8 @@ class DeviceControlView(QtWidgets.QWidget):
         for name, state in self._field_states.items():
             self._set_editable(name, bool(state.get("editable", False)))
         self.field_desired_changed.emit(str(key), value)
-        live = self._field_rows.get(str(key), (None, None))[1]
+        row = self._field_rows.get(str(key))
+        live = None if row is None else row[2]
         if live is not None and live.isChecked() and live.isEnabled():
             self._live_timers[str(key)].start()
 
@@ -507,6 +609,10 @@ class _ServerLogView(QtWidgets.QPlainTextEdit):
     The widget polls a snapshot callable instead of being pushed lines:
     server threads may narrate at any moment, and a poll on the GUI clock is
     the one crossing that never needs marshalling.
+
+    It polls only while it is on screen.  The clock follows the widget's
+    own show and hide, so a log window that was closed -- which hides it --
+    stops asking for the snapshot, and one shown again catches up at once.
     """
 
     def __init__(self, snapshot, parent=None) -> None:
@@ -519,8 +625,16 @@ class _ServerLogView(QtWidgets.QPlainTextEdit):
         self._timer = QtCore.QTimer(self)
         self._timer.setInterval(500)
         self._timer.timeout.connect(self.refresh)
-        self._timer.start()
         self.refresh()
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        super().showEvent(event)
+        self.refresh()
+        self._timer.start()
+
+    def hideEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        self._timer.stop()
+        super().hideEvent(event)
 
     def refresh(self) -> None:
         total, lines = self._snapshot()
@@ -842,11 +956,21 @@ class DeviceManagerView(QtWidgets.QWidget):
             return
         from zlc_ui.fluent import open_fluent_window
 
-        windows[key] = open_fluent_window(
+        window = windows[key] = open_fluent_window(
             lambda: _ServerLogView(snapshot),
             title=f"{key} log@Zou lab",
             window_ratio=0.45,
         )
+
+        def forget() -> None:
+            # A closed log window is over: the next request builds a new
+            # one, and a window this view no longer names is retired rather
+            # than kept, hidden, for the life of the manager.
+            if windows.get(key) is window:
+                del windows[key]
+            retire_widget(window)
+
+        window.closed.connect(forget)
 
     def set_remoted(self, instance_ids) -> None:
         """Mark which loaded devices are currently published on the fabric."""

@@ -25,11 +25,20 @@ the pulse author's internal loop and never stands in for either fact.
 
 Neither is guessed from the publisher and neither probes the board.  The two
 are different apparatus, and only the operator knows which one is wired up.
+
+STOP IS READ BEFORE ANYTHING NEW IS DONE TO THE BENCH.  The settle is slept
+in slices with the flag read between them, and the flag is read again before
+a knob is moved and before a point is fired: a Stop that arrived while the
+board was acknowledging SAFE used to be noticed only by the next read-out
+loop, after the next point had already been tuned, loaded and fired.
+
+THE BENCH IS HANDED BACK AS IT WAS FOUND.  Every device knob the plan moved is
+put back at its pre-run value when the scan ends -- complete, stopped or
+failed -- through the same verified ``tune`` that moved it.
 """
 
 from __future__ import annotations
 
-import math
 import time
 from collections.abc import Mapping, Sequence
 
@@ -48,6 +57,12 @@ from zlc_atom.nodes.scan import (
     check_cancelled,
     wait_for_board,
 )
+from zlc_atom.nodes.scan.devices import (
+    ScanDeviceKnobs,
+    device_port_parts,
+    release_after_scan,
+)
+from zlc_atom.nodes.scan.source import settle
 from zlc_atom.devices.sequencer import sequencer_archive_snapshot
 from zlc_atom.nodes._framework.descriptor import ResolvedDeviceClaim
 
@@ -114,10 +129,8 @@ class SteppedScanMeasurement:
         for port in self.ports:
             if not port.port.startswith(DEVICE_PARAM_FAMILY):
                 continue
-            key, separator, field = port.port[
-                len(DEVICE_PARAM_FAMILY):
-            ].partition(":")
-            if not separator or key not in self._tunables:
+            key, field = device_port_parts(port.port)
+            if key not in self._tunables:
                 raise RuntimeError("bound device scan port lost its installed device")
             selected.setdefault(key, []).append(field)
         return tuple(
@@ -127,7 +140,7 @@ class SteppedScanMeasurement:
 
     def _split_row(
         self, row: Sequence[float]
-    ) -> tuple[dict[str, float], tuple[tuple[object, str, float], ...]]:
+    ) -> tuple[dict[str, float], tuple[tuple[str, float], ...]]:
         """One plan row, split by port family: what a step DOES per axis.
 
         A ``pulse:param:`` axis lands in the parameter mapping the template
@@ -137,19 +150,12 @@ class SteppedScanMeasurement:
         """
 
         pulse_values: dict[str, float] = {}
-        device_moves: list[tuple[object, str, float]] = []
+        device_moves: list[tuple[str, float]] = []
         for port, value in zip(self.ports, row, strict=True):
             if port.port.startswith(PULSE_PARAM_FAMILY):
                 pulse_values[port.port[len(PULSE_PARAM_FAMILY):]] = float(value)
             elif port.port.startswith(DEVICE_PARAM_FAMILY):
-                key, _, field = port.port[len(DEVICE_PARAM_FAMILY):].partition(":")
-                device = self._tunables.get(key)
-                if device is None:
-                    raise ValueError(
-                        f"this bench offers no tunable device {key!r} for "
-                        f"port {port.port!r}"
-                    )
-                device_moves.append((device, field, float(value)))
+                device_moves.append((port.port, float(value)))
             else:
                 raise ValueError(
                     f"no executor advances ports of {port.port!r}'s family yet"
@@ -183,17 +189,13 @@ class SteppedScanMeasurement:
             f"tunable:{key}": key
             for port in self.ports
             if port.port.startswith(DEVICE_PARAM_FAMILY)
-            for key in (port.port[len(DEVICE_PARAM_FAMILY):].partition(":")[0],)
+            for key in (device_port_parts(port.port)[0],)
         }
         tunable_snapshots: dict[str, dict[str, object]] = {}
         for axis in self.plan.axes:
             if not axis.port.startswith(DEVICE_PARAM_FAMILY):
                 continue
-            key, separator, field = axis.port[
-                len(DEVICE_PARAM_FAMILY):
-            ].partition(":")
-            if not separator:
-                raise ValueError("device scan axis has no field")
+            key, field = device_port_parts(axis.port)
             fields = tunable_snapshots.setdefault(
                 f"tunable:{key}",
                 {
@@ -235,7 +237,16 @@ class SteppedScanMeasurement:
             run_repeats=shots,
             run_record=run_record,
         )
+        knobs = ScanDeviceKnobs(self._tunables)
         self.source.open(context, cycles=self.repeats * len(rows) * shots)
+        # What ending the scan owes the bench, in the order the bench needs
+        # it: the source released, the board safe, then the knobs back where
+        # they were -- whether the plan finished, was stopped, or failed.
+        release = (
+            ("closing the scan source", self.source.close),
+            ("driving the board safe", self.sequencer.safe),
+            ("restoring the scanned device fields", knobs.restore),
+        )
         try:
             # Sweeps are the OUTERMOST host loop. Shots are one fire's finite
             # Run repeats, so one point is loaded once while the board plays
@@ -244,7 +255,7 @@ class SteppedScanMeasurement:
             for sweep in range(self.repeats):
                 for index, row in enumerate(rows):
                     check_cancelled(context)
-                    source, program = self._apply(row, board)
+                    source, program = self._apply(context, knobs, row, board)
                     self.source.validate(
                         program,
                         run_repeats=shots,
@@ -260,37 +271,27 @@ class SteppedScanMeasurement:
                         sweep,
                         total_shots,
                     )
-        finally:
-            try:
-                self.source.close()
-            finally:
-                self.sequencer.safe()
-        check_cancelled(context)
+            check_cancelled(context)
+        except BaseException as error:
+            release_after_scan(release, error)
+            raise
+        release_after_scan(release, None)
         return context.current_dataset(SCAN_OUTPUT.name)
 
-    def _apply(self, row: Sequence[float], board: object):
+    def _apply(
+        self,
+        context: object,
+        knobs: ScanDeviceKnobs,
+        row: Sequence[float],
+        board: object,
+    ):
         """Stop the pulse, settle, move the knobs, load this point's program."""
 
         pulse_values, device_moves = self._split_row(row)
         self.sequencer.safe()
-        time.sleep(self.settle_seconds)
-        for device, field, value in device_moves:
-            effective = device.tune(field, value)
-            if isinstance(effective, bool):
-                raise TypeError("device tune must return its effective numeric value")
-            try:
-                actual = float(effective)
-            except (TypeError, ValueError) as error:
-                raise TypeError(
-                    "device tune must return its effective numeric value"
-                ) from error
-            if not math.isfinite(actual):
-                raise ValueError("device tune returned a non-finite effective value")
-            if actual != value:
-                raise RuntimeError(
-                    f"device field {field!r} applied {actual!r}, not the scan "
-                    f"coordinate {value!r}"
-                )
+        settle(context, self.settle_seconds)
+        for port, value in device_moves:
+            knobs.move(port, value)
         resolved = resolve_api_parameters(
             self.sequence, self._api_values(pulse_values)
         )
@@ -315,6 +316,7 @@ class SteppedScanMeasurement:
         """Fire one point and retain every outer pulse iteration."""
 
         shots = self.shots_per_point
+        check_cancelled(context)
         self.sequencer.fire(run_repeats=shots, scan_repeats=1)
         fired_at = time.monotonic()
         if self.gating == "sw_gated":

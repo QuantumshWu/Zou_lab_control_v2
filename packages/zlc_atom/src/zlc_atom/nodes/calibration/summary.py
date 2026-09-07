@@ -187,15 +187,19 @@ def readout_summary(
     # Ranked by how often it is right, and where that ties -- fidelity
     # saturates, and three models all reading 100% of a well-loaded lattice
     # correctly is the normal case -- by how far apart it holds the two
-    # populations, which does not saturate.
+    # populations, which does not saturate.  Only a model with a measured
+    # fidelity is in the running: a run where no model read any site is a
+    # run with nothing to recommend, and naming one anyway told the
+    # operator to use it.
     ranked = sorted(
         (
             (
-                entry["fidelity"]["mean"] if entry["fidelity"]["mean"] is not None else float("-inf"),
+                entry["fidelity"]["mean"],
                 entry["separation"]["median"] if entry["separation"]["median"] is not None else float("-inf"),
                 name,
             )
             for name, entry in models.items()
+            if entry["fidelity"]["mean"] is not None
         ),
         reverse=True,
     )

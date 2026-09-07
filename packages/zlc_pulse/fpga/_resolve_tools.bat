@@ -39,14 +39,8 @@ rem enumeration raised ModuleNotFoundError, the UART probe never ran, and auto
 rem resolved to jtag-axi whether or not the USB-UART cable was plugged in.  This
 rem project installs its dependencies globally; the global interpreter is the
 rem one that has them.
-if exist "%ZLC_TOOL_REPO_ROOT%\.zlc_python_path" (
-  set /p "ZLC_STORED_PY="<"%ZLC_TOOL_REPO_ROOT%\.zlc_python_path"
-  if exist "!ZLC_STORED_PY!" (
-    call :zlc_python_try "!ZLC_STORED_PY!"
-    if defined ZLC_PY_PATH goto zlc_python_executable
-  )
-  echo Ignoring stale .zlc_python_path: !ZLC_STORED_PY!
-)
+if exist "%ZLC_TOOL_REPO_ROOT%\.zlc_python_path" call :zlc_python_stored "%ZLC_TOOL_REPO_ROOT%\.zlc_python_path"
+if defined ZLC_PY_PATH goto zlc_python_executable
 rem A name on PATH is not an interpreter.  Windows ships a python.exe under
 rem WindowsApps that only opens the Store and answers 9009 -- the very code a
 rem launcher then reports with nothing an operator can act on.  Every candidate
@@ -91,6 +85,22 @@ echo            setx ZLC_PY_CMD "C:\Users\you\anaconda3\python.exe"
 set "ZLC_TOOL_REPO_ROOT="
 exit /b 1
 
+:zlc_python_stored
+rem The stored path is read in a call of its own so that the line testing it
+rem runs AFTER the line that set it.  Inside one parenthesised block every
+rem %variable% is expanded when the block is parsed, before set /p has run,
+rem and the !variable! form exists only for a caller that enabled delayed
+rem expansion -- the launchers in bin\ disable it, because a path may contain
+rem "!" -- so a stored path tested in the same block reads as the literal
+rem text !ZLC_STORED_PY! and is reported stale on the very machine that set it.
+set "ZLC_STORED_PY="
+set /p "ZLC_STORED_PY="<"%~1"
+if not defined ZLC_STORED_PY exit /b 0
+if exist "%ZLC_STORED_PY%" call :zlc_python_try "%ZLC_STORED_PY%"
+if not defined ZLC_PY_PATH echo Ignoring stale .zlc_python_path: %ZLC_STORED_PY%
+set "ZLC_STORED_PY="
+exit /b 0
+
 :zlc_python_try
 rem One candidate: keep it only if it actually starts.  A name that exists is
 rem not an interpreter -- Windows ships a python.exe under WindowsApps that
@@ -133,10 +143,14 @@ exit /b 0
 :zlc_python_product_environment
 rem Every human-facing command launched from a checkout must import THAT
 rem checkout, independently of the caller's working directory and of editable
-rem installs left in the selected interpreter.  The product dispatcher lives at
-rem the root, while each layer deliberately lives under packages/<layer>/src;
-rem injecting only the root leaves those layers to whichever unrelated editable
-rem install happens to be registered in site-packages.
+rem installs left in the selected interpreter.  The repository root is all
+rem this injects: the bootstrap at the root (zou_lab_control) reads the
+rem product manifest and puts every layer's packages/<layer>/src first on
+rem sys.path, refusing a layer that was imported before it.  A launcher's
+rem Python therefore enters through the bootstrap -- "-m zou_lab_control", or
+rem "import zou_lab_control" ahead of any zlc_ name -- and a second list of
+rem the layers here would be one more owner of what the product is made of,
+rem to forget when a layer is added.
 rem The installer is the sole exception: /installed clears source injection so
 rem its final check proves the installed distribution rather than the checkout.
 if /I "%~1"=="/installed" (
@@ -145,13 +159,11 @@ if /I "%~1"=="/installed" (
   exit /b 0
 )
 if defined ZLC_CHECKOUT_PRODUCT_ROOT if /I "%ZLC_CHECKOUT_PRODUCT_ROOT%"=="%ZLC_TOOL_REPO_ROOT%" exit /b 0
-set "ZLC_CHECKOUT_PYTHONPATH=%ZLC_TOOL_REPO_ROOT%;%ZLC_TOOL_REPO_ROOT%\packages\zlc_data\src;%ZLC_TOOL_REPO_ROOT%\packages\zlc_durable\src;%ZLC_TOOL_REPO_ROOT%\packages\zlc_runtime\src;%ZLC_TOOL_REPO_ROOT%\packages\zlc_plot\src;%ZLC_TOOL_REPO_ROOT%\packages\zlc_ui\src;%ZLC_TOOL_REPO_ROOT%\packages\zlc_pulse\src;%ZLC_TOOL_REPO_ROOT%\packages\zlc_atom\src;%ZLC_TOOL_REPO_ROOT%\packages\zlc_workbench\src"
 if defined PYTHONPATH (
-  set "PYTHONPATH=%ZLC_CHECKOUT_PYTHONPATH%;%PYTHONPATH%"
+  set "PYTHONPATH=%ZLC_TOOL_REPO_ROOT%;%PYTHONPATH%"
 ) else (
-  set "PYTHONPATH=%ZLC_CHECKOUT_PYTHONPATH%"
+  set "PYTHONPATH=%ZLC_TOOL_REPO_ROOT%"
 )
-set "ZLC_CHECKOUT_PYTHONPATH="
 set "ZLC_CHECKOUT_PRODUCT_ROOT=%ZLC_TOOL_REPO_ROOT%"
 exit /b 0
 

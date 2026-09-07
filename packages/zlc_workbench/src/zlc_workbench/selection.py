@@ -67,7 +67,6 @@ __all__ = [
     "panel_selection_binds_a_revision",
     "panel_selection_output_catalog",
     "observation_matches_plot_input",
-    "observation_predates_plot_input",
     "same_plot_run",
     "plot_generation_matches_plot_input",
     "plot_identity_matches_plot_input",
@@ -145,39 +144,6 @@ def plot_generation_matches_plot_input(
     return generation is not None and generation == str(data_generation)
 
 
-def observation_predates_plot_input(
-    observation: object,
-    plot_input: object,
-) -> bool:
-    """Whether a region was drawn on an OLDER picture than this Dataset.
-
-    Staleness is being older, not being different.  A host renders every
-    revision it is handed, while the bookkeeping that ACCEPTS a surface
-    runs on the board's beat -- so the picture a hand draws on is routinely
-    AHEAD of the one the panel has accepted.  Measured on a live camera
-    panel, every single committed region arrived exactly one revision
-    ahead, idle and streaming alike.
-
-    Demanding the exact revision therefore refused every region an operator
-    committed on a live panel, for ever: the mark appeared on the plot, the
-    panel never heard of it, nothing was cut from the new region, and the
-    remembered old one was re-applied over the top -- which is what "I
-    moved it and it went back" looks like from the outside, and why the
-    published ROI never changed shape again after the first one.
-    """
-
-    snapshot = getattr(plot_input, "snapshot", plot_input)
-    ref = getattr(snapshot, "ref", None)
-    revision = getattr(getattr(ref, "revision", None), "value", None)
-    try:
-        drawn_on = int(getattr(observation, "data_revision", None))
-        accepted = int(revision)
-    except (TypeError, ValueError):
-        # Nothing to compare is not evidence of currency.
-        return True
-    return drawn_on < accepted
-
-
 def same_plot_generation(observation: object, plot_input: object) -> bool:
     """Whether an observation was drawn on the same RUN as this Dataset.
 
@@ -216,7 +182,6 @@ _NON_AXIS_DOMAINS = frozenset({"value", "shot"})
 
 
 def _rolling_ranges(
-    selector_kind: str,
     x_bounds: object,
     y_bounds: object = None,
 ) -> tuple[SelectionRange, ...]:
@@ -466,27 +431,18 @@ def panel_selection_matches_subject(
     if plot_kind is None or selection.plot_kind != plot_kind:
         return False
     dummy = NumericRange(0.0, 1.0)
-    if plot_kind == "rolling":
-        # Same rule that built it, so a rolling region is recognised on the
-        # surface that drew it instead of being dropped one frame later.
-        expected = _rolling_ranges(
-            selection.selector_kind,
-            dummy,
-            dummy if selection.selector_kind == "area" else None,
-        )
-        expected_facets = _subject_scope(subject)
-        return bool(
-            tuple(
-                (item.domain, item.axis, item.coordinate_frame)
-                for item in selection.ranges
-            )
-            == tuple(
-                (item.domain, item.axis, item.coordinate_frame)
-                for item in expected
-            )
-        )
     try:
-        if selection.selector_kind == "x_range":
+        if plot_kind == "rolling":
+            # Same rule that built it, so a rolling region is recognised on
+            # the surface that drew it instead of being dropped one frame
+            # later.  Only its RANGES are its own; its scope is the
+            # panel's, compared below like every other kind's -- a region
+            # drawn at frame 0 does not name the surface showing frame 2.
+            expected_ranges = _rolling_ranges(
+                dummy,
+                dummy if selection.selector_kind == "area" else None,
+            )
+        elif selection.selector_kind == "x_range":
             expected_ranges = (
                 _range(
                     subject.x,
@@ -870,6 +826,11 @@ class PlotSelectionSource:
                     return
                 active = False
                 release, installed = installed, None
+                # A retired subscription is not this source's to release
+                # at close: left listed, every subscribe/unsubscribe pair
+                # kept an inert record until the source closed.
+                if _once in self._releases:
+                    self._releases.remove(_once)
             if release is not None:
                 settle_release(release)
 
@@ -932,11 +893,9 @@ class PlotSelectionSource:
             # the order the surfaces apply them, so the mark the card shows
             # and the mark the Setting editor shows are the same mark.
             ranges = (
-                _rolling_ranges(
-                    selector_kind, selector.value.x, selector.value.y
-                )
+                _rolling_ranges(selector.value.x, selector.value.y)
                 if selector_kind == "area"
-                else _rolling_ranges(selector_kind, selector.value)
+                else _rolling_ranges(selector.value)
             )
             facets = _subject_scope(subject)
             return SelectionState(

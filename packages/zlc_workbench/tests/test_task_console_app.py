@@ -1506,3 +1506,82 @@ def test_device_control_risk_unlock_is_field_scoped_and_owner_scoped(
     assert changed["fields"]["gain_db"]["editable"] is False
     replacement.release()
 
+
+
+class _RecordingControl:
+    """A control that remembers every projection it was handed."""
+
+    def __init__(self) -> None:
+        self.projections: list[dict] = []
+
+    def set_projection(self, _spec, projection) -> None:
+        self.projections.append(projection)
+
+
+def _bare_flow(workspace):
+    from zlc_workbench.apps.task_console import ExperimentGuiFlow
+
+    return ExperimentGuiFlow(workspace=workspace)
+
+
+def test_a_control_still_being_read_holds_the_device_worker(workspace) -> None:
+    """A first reading in flight is device work like a refresh or a tune.
+
+    The worker used to count only refreshes and tunes as busy, so a session
+    retired while a control's first reading was on the worker handed that
+    reading a control over devices that were gone; and a reading that lands
+    while the session is being retired opens nothing.
+    """
+
+    flow = _bare_flow(workspace)
+    reports: list[tuple[str, str]] = []
+    flow.devices = type("_Devices", (), {"show_status": staticmethod(lambda text, severity: reports.append((text, severity)))})()
+    assert flow._device_tune_idle()
+    flow._device_control_opening.add("rf")
+    assert not flow._device_tune_idle()
+    assert reports == [("rf: a device control is still being read", "warning")]
+    flow._device_control_opening.clear()
+
+    class _Device:
+        def tunable_fields(self):
+            return ()
+
+    session = object()
+    flow.session = session
+    flow._device_worker_run = lambda work, done: done(work())
+    flow._device_shutdown_pending = True
+    flow._open_generic_control("rf", _Device())
+    assert "rf" not in flow._device_control_opening
+    assert flow.device_controls == {}
+    assert flow._device_control_models == {}
+
+
+def test_a_policy_change_projects_each_control_once(workspace) -> None:
+    """One projection per control per policy change, two only when a pending
+    tune was cancelled by the new policy and the status it shows changed."""
+
+    flow = _bare_flow(workspace)
+    control = _RecordingControl()
+    flow._device_control_models["rf"] = {"control": control, "spec": object(), "status": {}}
+    computed: list[str] = []
+
+    def projection(key: str) -> dict:
+        computed.append(key)
+        editable = len(computed) > 1
+        return {"fields": {"frequency_hz": {"editable": editable}}}
+
+    flow._device_control_projection = projection
+    flow._refresh_device_control_policies()
+    assert computed == ["rf"]
+    assert len(control.projections) == 1
+    assert control.projections[0] is not None
+
+    computed.clear()
+    flow._device_tune_pending[("rf", "frequency_hz")] = 1.0e9
+    flow._refresh_device_control_policies()
+    assert computed == ["rf", "rf"]
+    assert ("rf", "frequency_hz") not in flow._device_tune_pending
+    assert flow._device_control_models["rf"]["status"] == {
+        "frequency_hz": ("Cancelled because field ownership changed", "warning")
+    }
+    assert len(control.projections) == 2

@@ -36,14 +36,16 @@ from threading import Event
 from typing import Any
 
 from zlc_pulse import (
+    analog_levels,
     ANALOG_MODE_CHOICES,
-    MINIMUM_BRACKET_COUNT,
     AnalogStep,
+    cycle_binding_kind,
+    MINIMUM_BRACKET_COUNT,
     OutputDelay,
     PulseBracket,
     PulsePeriod,
     PulseSequence,
-    cycle_binding_kind,
+    PulseTarget,
 )
 from zlc_pulse import (
     TIME_UNIT_CHOICES,
@@ -768,19 +770,26 @@ def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
         channels.append(PulseChannel(port.key, port.label or port.key))
         blocks.extend(PulseBlock(port.key, start, stop) for start, stop in spans)
 
+    # The DAC levels the board plays, from the pulse's own compiler: an edge
+    # is one change at its period start and a ramp is the engine's staircase
+    # from the level carried in to the target at the period end.  A trace read
+    # off ``step.value`` alone drew both as the target level from the period
+    # start, and two pulses the board plays differently were one picture.
     traces: list[Any] = []
+    levels = analog_levels(sequence)
+    tick_seconds = sequence.time_step_ns * 1e-9
     for port in target.ports:
         if port.kind != "dac":
             continue
         low, high = port.signed_range
-        values: list[float] = []
-        held = 0.0
-        for period in sequence.periods:
-            step = next((item for item in period.analog_steps if item.port == port.key), None)
-            if step is not None:
-                held = float(step.value)
-            values.append(held)
-        if not any(values) and not include_off:
+        # A change on the pulse's last tick has nothing to hold: the trace
+        # ends where the pulse does.
+        points = [
+            (tick * tick_seconds, float(value))
+            for tick, value in levels[port.key]
+            if tick * tick_seconds < total
+        ]
+        if not any(value for _, value in points) and not include_off:
             continue
         # A step trace is N values over N+1 boundaries: the last start is where
         # the final hold ENDS.  Passing equal-length arrays meant no DAC trace
@@ -791,8 +800,8 @@ def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
                 label=port.label or port.key,
                 minimum=float(low),
                 maximum=float(high),
-                starts=tuple(starts) + (total,),
-                values=tuple(values),
+                starts=tuple(at for at, _ in points) + (total,),
+                values=tuple(value for _, value in points),
             )
         )
 
@@ -3283,20 +3292,26 @@ class PulseEditorPresenter:
         return self._board_target
 
     def apply_target(self, records: object) -> bool:
-        """Take the edited names, and refuse anything that would re-wire a board.
+        """Take the edited target, and refuse anything that would re-wire a board.
 
-        Renaming is display metadata and safe.  Changing lanes, widths or the
-        set of ports while a board is attached would make the editor disagree
-        with the hardware it is pointed at, and the disagreement would only
-        surface as a pulse that fires the wrong outputs.
+        Attached, only display names may change: changing lanes, widths or
+        the set of ports would make the editor disagree with the hardware it
+        is pointed at, and the disagreement would only surface as a pulse that
+        fires the wrong outputs.  Offline the target is the pulse file's and
+        authoring it is the point, so the page's records ARE the target --
+        ports, widths, wires, latch clocks -- and the pulse is carried onto it
+        output by output.  What the new wiring has no place for is refused by
+        name, never dropped: an output still driven, stepped, delayed or bound
+        stays until the operator clears it.
         """
 
         target = self._current_target()
         if target is None:
             self.view.set_target_feedback("there is no target to apply to")
             return False
-        wanted = {str(record.key): str(record.signal).strip() for record in records}
+        records = tuple(records)
         if self.board is not None:
+            wanted = {str(record.key): str(record.signal).strip() for record in records}
             keys = {port.key for port in programmable_ports(target)}
             if set(wanted) != keys:
                 self.view.set_target_feedback(
@@ -3304,19 +3319,38 @@ class PulseEditorPresenter:
                     "removed here, only renamed"
                 )
                 return False
-        renamed = self._retarget_labels(target, wanted)
-        if renamed is None:
-            self.view.set_target_feedback("nothing to rename")
-            return False
-        if self.sequence is not None:
-            self._apply(self._rebuilt(target=renamed))
+            renamed = self._retarget_labels(target, wanted)
+            if renamed is None:
+                self.view.set_target_feedback("nothing to rename")
+                return False
+            changes: dict[str, Any] = {"target": renamed}
+            feedback = f"renamed {sum(1 for name in wanted.values() if name)} output(s)"
         else:
-            self._board_target = renamed
+            try:
+                rewired = _target_from_records(target, records)
+                if (
+                    rewired == target
+                    and dict(rewired.package_pins) == dict(target.package_pins)
+                ):
+                    self.view.set_target_feedback("nothing to change")
+                    return False
+                changes = {"target": rewired}
+                if self.sequence is not None:
+                    changes.update(_carried_onto(self.sequence, rewired))
+            except ValueError as error:
+                self.view.set_target_feedback(str(error))
+                return False
+            feedback = f"applied {len(records)} output(s)"
+        if self.sequence is not None:
+            candidate = self._rebuilt(**changes)
+            if candidate is None:
+                return False
+            self._apply(candidate)
+        else:
+            self._board_target = changes["target"]
             self.revision += 1
             self.refresh()
-        self.view.set_target_feedback(
-            f"renamed {sum(1 for key, name in wanted.items() if name)} output(s)"
-        )
+        self.view.set_target_feedback(feedback)
         self.refresh_target()
         return True
 
@@ -4278,7 +4312,7 @@ class PulseEditorPresenter:
 
         view = self.view
         view.set_preview_size_names(PANEL_SIZE_NAMES)
-        view.set_preview_size(size, pinned=bool(self._pinned_size))
+        view.set_preview_size(size)
         view.set_preview_status(
             f"{periods} period(s), "
             f"{rows} channel(s), "
@@ -4616,21 +4650,207 @@ def replace_sequence(sequence: PulseSequence, **changes: Any) -> PulseSequence:
     so a refused value escaped through a Qt slot instead: PyQt5 ends the process
     on an exception out of a slot, so typing a duration the model rejects closed
     the window with no message at all.
+
+    ``dataclasses.replace`` carries every field the model has, so the model is
+    the one list of what a pulse is made of.  A list written here forgets the
+    field added after it was written -- the config parameters were -- and a
+    rename or a typed duration then rebuilt the pulse without them: a board
+    calibration silently unbound by an edit that never mentioned it.
     """
 
-    fields = {
-        "name": sequence.name,
-        "target": sequence.target,
-        "time_step_ns": sequence.time_step_ns,
-        "periods": sequence.periods,
-        "slots": sequence.slots,
-        "api_parameters": sequence.api_parameters,
-        "delays": sequence.delays,
-        "bracket": sequence.bracket,
-        "run_repeats": sequence.run_repeats,
+    return replace(sequence, **changes)
+
+
+def _target_from_records(target: object, records: Sequence[object]) -> PulseTarget:
+    """The target the Offline page's records describe.
+
+    An endpoint is what the page shows for one wire: its package pin when the
+    target carries a pin map, otherwise its lane name.  A wire keeps the lane
+    it has -- found by its pin, or by the output and bit it sits at -- so an
+    output re-pinned or reordered carries its levels with it; a wire the
+    target never had is a new lane, named by its output and bit when only its
+    pin is known.  Without a pin map an endpoint has to be a lane name, so the
+    page's ``endpoint:...`` placeholder is refused in the model's words rather
+    than turned into a wire nobody named.
+
+    Lanes and ports keep the order the target had, new ones after them, and
+    DAC buses keep their numbers, so applying the page unchanged yields the
+    same target -- the ABI fingerprint is made of exactly those orders.
+    """
+
+    from zlc_pulse import PulsePortSpec
+
+    pins = dict(target.package_pins)
+    lane_of_pin = {pin: lane for lane, pin in pins.items()}
+    old = {port.key: port for port in target.ports}
+    lanes: list[str] = []
+    new_pins: dict[str, str] = {}
+
+    def wire(endpoint: object, key: str, bit: int, fallback: str) -> str:
+        text = str(endpoint).strip()
+        if not text:
+            raise ValueError(f"{key}: every wire needs an endpoint")
+        if pins:
+            lane = lane_of_pin.get(text)
+            if lane is None:
+                previous = old.get(key)
+                lane = (
+                    previous.lanes[bit]
+                    if previous is not None and bit < len(previous.lanes)
+                    else fallback
+                )
+            new_pins[lane] = text
+        else:
+            lane = text
+        if lane in lanes:
+            raise ValueError(f"{key}: wire {text!r} is already used by another output")
+        lanes.append(lane)
+        return lane
+
+    def port_spec(key: str, *parts: object, **fields: object) -> PulsePortSpec:
+        try:
+            return PulsePortSpec(key, *parts, **fields)
+        except ValueError as error:
+            raise ValueError(f"{key}: {error}") from error
+
+    dac_records = [record for record in records if str(record.kind) == "dac"]
+    dac_order = sorted(
+        range(len(dac_records)),
+        key=lambda index: (
+            old[str(dac_records[index].key)].bus_index
+            if str(dac_records[index].key) in old
+            and old[str(dac_records[index].key)].kind == "dac"
+            else len(old),
+            index,
+        ),
+    )
+    bus_of = {
+        str(dac_records[index].key): bus for bus, index in enumerate(dac_order)
     }
-    fields.update(changes)
-    return PulseSequence(**fields)
+    ports: list[PulsePortSpec] = []
+    for record in records:
+        key = str(record.key)
+        kind = str(record.kind)
+        label = str(record.signal).strip()
+        endpoints = tuple(record.endpoints)
+        previous = old.get(key)
+        if kind == "digital":
+            if len(endpoints) != 1:
+                raise ValueError(f"{key}: a digital output has one wire, not {len(endpoints)}")
+            ports.append(port_spec(key, "digital", (wire(endpoints[0], key, 0, key),), label=label))
+        elif kind == "dac":
+            data = tuple(
+                wire(endpoint, key, bit, f"{key}_{bit}")
+                for bit, endpoint in enumerate(endpoints)
+            )
+            clock_key = str(record.clock_key or f"{key}_clock")
+            clock_lane = wire(record.clock_endpoint, clock_key, 0, clock_key)
+            same_width = (
+                previous is not None
+                and previous.kind == "dac"
+                and len(previous.lanes) == len(data)
+            )
+            ports.append(port_spec(
+                key,
+                "dac",
+                data,
+                label=label,
+                bus_index=bus_of[key],
+                encoding=previous.encoding if same_width else None,
+                safe_value=previous.safe_value if same_width else None,
+                latch_clock=clock_key,
+            ))
+            clock = old.get(clock_key)
+            ports.append(port_spec(
+                clock_key,
+                "clock",
+                (clock_lane,),
+                label=clock.label if clock is not None else "",
+            ))
+        else:
+            raise ValueError(f"{key}: unknown output kind {kind!r}")
+    position = {port.key: index for index, port in enumerate(target.ports)}
+    ports.sort(key=lambda port: position.get(port.key, len(position)))
+    raw_lanes = tuple(lane for lane in target.raw_lanes if lane in lanes) + tuple(
+        lane for lane in lanes if lane not in target.raw_lanes
+    )
+    return PulseTarget(raw_lanes, tuple(ports), package_pins=new_pins or None)
+
+
+def _carried_onto(sequence: PulseSequence, target: PulseTarget) -> dict[str, Any]:
+    """The pulse's periods and delays on a re-wired target, or why it cannot go.
+
+    Levels belong to outputs, not to lanes: each period's states follow the
+    output and bit they were authored on, so a re-pinned or reordered output
+    plays what it played.  An output the new target has no place for -- gone,
+    or of another kind -- is refused while anything is authored on it, a
+    level, a step, a delay or a binding, and nothing is dropped on the way.
+    """
+
+    old = sequence.target
+    old_index = {lane: index for index, lane in enumerate(old.raw_lanes)}
+    new_index = {lane: index for index, lane in enumerate(target.raw_lanes)}
+    kept = {
+        key: port
+        for key, port in target.by_key.items()
+        if key in old.by_key and old.by_key[key].kind == port.kind
+    }
+    bindings = (*sequence.slots, *sequence.api_parameters, *sequence.config_parameters)
+    blocked: list[str] = []
+    for port in old.ports:
+        if port.key in kept or port.kind == "clock":
+            continue
+        uses: list[str] = []
+        if port.kind == "digital":
+            high = [
+                period.period_id
+                for period in sequence.periods
+                if period.states[old_index[port.lanes[0]]]
+            ]
+            if high:
+                uses.append("high in " + ", ".join(high))
+        else:
+            stepped = [
+                period.period_id
+                for period in sequence.periods
+                if any(step.port == port.key for step in period.analog_steps)
+            ]
+            if stepped:
+                uses.append("stepped in " + ", ".join(stepped))
+        if any(delay.port == port.key for delay in sequence.delays):
+            uses.append("delayed")
+        bound = [
+            getattr(binding, "slot_id", None) or getattr(binding, "parameter_id")
+            for binding in bindings
+            if binding.field_ref.port == port.key
+        ]
+        if bound:
+            uses.append("bound as " + ", ".join(bound))
+        if uses:
+            blocked.append(f"{port.label or port.key} is {'; '.join(uses)}")
+    if blocked:
+        raise ValueError(
+            "clear these outputs before removing them: " + " | ".join(blocked)
+        )
+    periods = []
+    for period in sequence.periods:
+        states = [0] * len(target.raw_lanes)
+        for key, port in kept.items():
+            if port.kind == "digital":
+                states[new_index[port.lanes[0]]] = period.states[
+                    old_index[old.by_key[key].lanes[0]]
+                ]
+        periods.append(replace(
+            period,
+            states=tuple(states),
+            analog_steps=tuple(
+                step for step in period.analog_steps if step.port in kept
+            ),
+        ))
+    return {
+        "periods": tuple(periods),
+        "delays": tuple(delay for delay in sequence.delays if delay.port in kept),
+    }
 
 
 def _unique_id(existing: Sequence[str], stem: str) -> str:

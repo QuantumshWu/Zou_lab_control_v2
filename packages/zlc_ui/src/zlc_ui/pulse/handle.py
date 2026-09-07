@@ -289,18 +289,11 @@ class PulseEditorHandle(QtCore.QObject):
     def preview_size(self) -> str:
         return str(self._view.preview_view.preview_size)
 
-    @property
-    def preview_size_pinned(self) -> bool:
-        return bool(self._view.preview_view.preview_size_pinned)
-
-    def set_preview_size(self, size: str, *, pinned: bool | None = None) -> None:
-        self._view.preview_view.set_preview_size(size, pinned=pinned)
+    def set_preview_size(self, size: str) -> None:
+        self._view.preview_view.set_preview_size(size)
 
     def set_preview_size_names(self, names: tuple[str, ...]) -> None:
         self._view.preview_view.set_size_names(names)
-
-    def reset_preview_size_pin(self) -> None:
-        self._view.preview_view.reset_preview_size_pin()
 
     def set_preview_status(self, text: str) -> None:
         self._view.preview_view.set_status(text)

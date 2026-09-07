@@ -17,8 +17,9 @@ rem beside each file as <name>.json.pre-units, and a file that was already
 rem current keeps no backup at all.
 rem
 rem A TOOL, not a product command: it is imported from the checkout this
-rem launcher sits in, which _resolve_tools.bat puts on PYTHONPATH, so it runs
-rem on a bench machine without reinstalling anything first.
+rem launcher sits in -- the bootstrap at its root binds the layers, which is
+rem why that is imported first -- so it runs on a bench machine without
+rem reinstalling anything.
 setlocal EnableExtensions DisableDelayedExpansion
 
 for %%I in ("%~dp0..") do set "ZLC_HOME=%%~fI"
@@ -30,7 +31,7 @@ if errorlevel 1 (
   exit /b 1
 )
 
-%ZLC_PY_CMD% -c "from zlc_workbench.tools.migrate_units import main; raise SystemExit(main())" %*
+%ZLC_PY_CMD% -c "import zou_lab_control; from zlc_workbench.tools.migrate_units import main; raise SystemExit(main())" %*
 set "ZLC_RC=%ERRORLEVEL%"
 echo.
 rem Always pause: this window IS the report, and it is double-clicked.

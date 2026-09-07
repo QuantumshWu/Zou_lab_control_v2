@@ -231,3 +231,31 @@ def test_a_reduced_histogram_is_binned_over_its_own_values() -> None:
     finally:
         pooled.close()
         reduced.close()
+
+
+def test_a_density_peak_that_breaches_its_bound_expands_to_its_own_headroom() -> None:
+    """Expansion headroom scales with the peak that breached, whatever a
+    count means.
+
+    A density histogram peaks near 1e-2.  Its first frame already fitted
+    the axis to that; when a later revision's peak breached the held
+    bound, the expansion branch still floored the new bound at 1.0 -- the
+    integer-count policy -- and the whole histogram sat in the bottom
+    hundredth of the axis until a shrink happened to fire.
+    """
+
+    session = PlotSession(
+        _snapshot(0, 100.0),
+        HistogramPlot(),
+        parameters={"density": True, "relim_mode": "normal", "bin_count": 10},
+    )
+    try:
+        axes = session._renderer.primary_axes
+        session.update_data(_snapshot(1, 80.0))
+        counts = np.asarray(session._renderer._artists["histogram:projection"][1])
+        peak = float(np.max(counts))
+        assert 0.0 < peak < 0.1
+        _low, high = (float(value) for value in axes.get_ylim())
+        assert high == pytest.approx(peak * 1.25)
+    finally:
+        session.close()

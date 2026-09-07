@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 from zlc_data import (
@@ -70,6 +72,25 @@ def test_a_scan_dataset_carries_no_repeat_axis_but_its_own() -> None:
         "run repeat",
     )
     assert schema.repeat_domain.size == 8
+
+
+def test_a_source_axis_already_named_like_a_scan_axis_is_refused() -> None:
+    """A scan's axis ids come from the plan alone, so a selection can name
+    them back without the source in hand; a source that already carries
+    one of them is a collision to refuse, not to rename around."""
+
+    schema = _source_schema(shots=1)
+    taken = replace(
+        schema.point_domain.axes[0], axis_id=AxisId("scan.bias")
+    )
+    colliding = DatasetSchema(
+        schema.repeat_domain,
+        DomainSpec((1,), (taken,), ((0,),)),
+        schema.cell_domain,
+        schema.value_schema,
+    )
+    with pytest.raises(ValueError, match="collide with scan axes: scan.bias"):
+        scan_dataset_schema(colliding, ((0.0,), (1.0,)), (("bias", "code"),))
 
 
 def test_a_source_publishing_more_than_one_shot_is_refused_by_name() -> None:

@@ -36,7 +36,7 @@ import socket
 import socketserver
 import struct
 import threading
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 
 FABRIC_VERSION = 1
 DEFAULT_FABRIC_PORT = 18859
@@ -267,6 +267,11 @@ class DeviceAnnouncer:
                         "current": field.current,
                         "live_write": field.live_write,
                         "dependency_group": list(field.dependency_group),
+                        "device_limits": (
+                            None
+                            if field.device_limits is None
+                            else list(field.device_limits)
+                        ),
                     }
                     for field in fields
                 ]
@@ -376,45 +381,26 @@ class RemoteTunableDevice:
 
     It speaks exactly what every local tunable device speaks, so the scan
     axis combo, the generic control panel and the device-axis executor use
-    it without knowing it is remote.  Field metadata is fetched once at
-    open -- device facts, stable for the session -- while values, tunes and
-    provenance go to the wire every time, because the truth lives on the
-    other machine.
+    it without knowing it is remote.  Nothing is remembered between calls:
+    fields, values, tunes and provenance all go to the wire every time,
+    because the truth lives on the other machine -- and a field's bounds
+    are part of that truth.  An RF source moves its commandable window
+    when a policy edge is tuned, so a Refresh that kept the bounds seen at
+    open would keep offering Control and Scan a range the device no longer
+    accepts, until the proxy was rebuilt.
     """
 
     def __init__(self, *, host: str, port: int, instance_id: str) -> None:
-        from zlc_atom.authoring import AuthoringField, TunableField
-
         self._host = str(host)
         self._port = int(port)
         self._instance = str(instance_id)
         #: How this proxy's OWN log lines are tagged on the consuming bench;
         #: the serving machine tags the same actions with its instance id.
         self.identity = f"fabric:{self._instance}@{self._host}:{self._port}"
-        described = _call(
-            self._host,
-            self._port,
-            {"method": "fields", "instance": self._instance},
-        )["fields"]
-        fields = []
-        for entry in described:
-            fields.append(
-                (
-                    AuthoringField(
-                        str(entry["name"]),
-                        str(entry["value_type"]),
-                        str(entry["label"]),
-                        entry.get("default"),
-                        minimum=entry.get("minimum"),
-                        maximum=entry.get("maximum"),
-                        unit=entry.get("unit"),
-                    ),
-                    bool(entry["live_write"]),
-                    tuple(str(name) for name in entry["dependency_group"]),
-                )
-            )
-        self._field_shapes = tuple(fields)
-        self._tunable_field = TunableField
+        # Opening is asking: the record must exist, and be one the fabric's
+        # generic plane serves -- a device with its own protocol refuses
+        # here, by name, rather than at the first tune.
+        self.tunable_fields()
 
     def _call(self, method: str, **extra: Any) -> dict[str, Any]:
         return _call(
@@ -424,15 +410,31 @@ class RemoteTunableDevice:
         )
 
     def tunable_fields(self):
-        current = self.tunable_values()
+        from zlc_atom.authoring import AuthoringField, TunableField
+
         return tuple(
-            self._tunable_field(
-                metadata=metadata,
-                current=current.get(metadata.name, metadata.default),
-                live_write=live_write,
-                dependency_group=group,
+            TunableField(
+                metadata=AuthoringField(
+                    str(entry["name"]),
+                    str(entry["value_type"]),
+                    str(entry["label"]),
+                    entry.get("default"),
+                    minimum=entry.get("minimum"),
+                    maximum=entry.get("maximum"),
+                    unit=entry.get("unit"),
+                ),
+                current=entry.get("current"),
+                live_write=bool(entry["live_write"]),
+                dependency_group=tuple(
+                    str(name) for name in entry["dependency_group"]
+                ),
+                device_limits=(
+                    None
+                    if entry.get("device_limits") is None
+                    else tuple(float(edge) for edge in entry["device_limits"])
+                ),
             )
-            for metadata, live_write, group in self._field_shapes
+            for entry in self._call("fields")["fields"]
         )
 
     def tune(self, name: str, value: Any) -> Any:

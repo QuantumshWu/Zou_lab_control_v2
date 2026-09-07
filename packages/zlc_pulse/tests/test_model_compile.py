@@ -15,8 +15,10 @@ from zlc_pulse import (
     PulseSequence,
     PulseSlot,
     PulseTarget,
+    analog_levels,
     apply_config_values,
     compile_sequence,
+    resolve_api_parameters,
     sequence_from_tree,
     sequence_to_tree,
 )
@@ -282,6 +284,115 @@ def test_a_declared_config_parameter_needs_no_resolving_to_compile() -> None:
     )
     assert program.ticks == bare.ticks
     assert program.masks == bare.masks
+
+
+def test_a_dac_slot_whose_step_is_gone_is_named_by_the_compiler() -> None:
+    """The model admits the binding; the compiler says which one has no field.
+
+    Taking a step away is a legal intermediate state of an edit, pruned
+    afterwards, so the model and the file reader accept a DAC slot on a
+    period with no step on that port.  Compiling such a pulse used to end in
+    ``generator raised StopIteration`` -- true, and naming nothing.
+    """
+
+    base = _sequence()
+    periods = (replace(base.periods[0], analog_steps=()), *base.periods[1:])
+    sequence = replace(
+        base,
+        periods=periods,
+        slots=(PulseSlot("dac", PulseFieldRef("dac", "p0", "dac"), "value", "bias"),),
+    )
+    assert sequence_from_tree(sequence_to_tree(sequence)) == sequence
+    with np.testing.assert_raises_regex(ValueError, "'bias'.*'dac'.*'p0'.*no step"):
+        compile_sequence(sequence, StreamerParams(max_edges=8, bank_size=2), 50e6)
+
+
+def test_a_named_duration_that_is_not_positive_is_refused_not_rounded_up() -> None:
+    """Zero and negative durations are not on any grid.
+
+    A value rounds to the nearest legal tick, the way the editor rounds a
+    typed number; ``0`` and ``-100`` used to round UP to one tick, so a node
+    form that said either played a 20 ns period and called it the request.
+    """
+
+    sequence = replace(
+        _sequence(first_duration=100),
+        api_parameters=(
+            PulseApiParameter("duration", PulseFieldRef("duration", "p0"), "ns"),
+        ),
+    )
+    for value in (0, -100):
+        with np.testing.assert_raises_regex(
+            ValueError, "'duration' must be a positive duration"
+        ):
+            resolve_api_parameters(sequence, {"duration": value})
+    assert resolve_api_parameters(sequence, {"duration": 10}).periods[0].duration == 20
+    assert resolve_api_parameters(sequence, {"duration": 100}).periods[0].duration == 100
+
+
+def test_analog_levels_walk_a_ramp_the_way_the_engine_does() -> None:
+    """An edge is one change at the period start; a ramp is the engine's staircase.
+
+    ``start ± floor(k·|delta|/span)`` on the k-th tick, ending on the target
+    exactly where the next period begins.  A preview that read only
+    ``step.value`` drew both modes as the same edge.
+    """
+
+    # A four-lane DAC, so the codes -8..7 leave room for a staircase.
+    wide = PulseTarget(
+        lanes=("d0", "d1", "a0", "a1", "a2", "a3"),
+        ports=(
+            PulsePortSpec("d0", "digital", ("d0",)),
+            PulsePortSpec("d1", "digital", ("d1",)),
+            PulsePortSpec("dac", "dac", ("a0", "a1", "a2", "a3"), bus_index=0),
+        ),
+    )
+    base = PulseSequence(
+        name="levels",
+        target=wide,
+        time_step_ns=20,
+        periods=tuple(
+            replace(period, states=period.states + (0, 0))
+            for period in _sequence().periods
+        ),
+    )
+
+    def with_step(mode: str, value: int, duration: int = 100) -> PulseSequence:
+        return replace(base, periods=(
+            base.periods[0],
+            replace(
+                base.periods[1],
+                duration=duration,
+                analog_steps=(AnalogStep("dac", mode, value),),
+            ),
+            base.periods[2],
+        ))
+
+    assert analog_levels(with_step("edge", 3))["dac"] == ((0, 0), (1, 3))
+    # Three codes over five ticks from tick 1: level j first holds on the
+    # tick k = ceil(j * 5 / 3), so ticks 3, 5 and 6 -- the last being where
+    # p2 starts.
+    assert analog_levels(with_step("ramp", 3))["dac"] == ((0, 0), (3, 1), (5, 2), (6, 3))
+    # Seven codes over two ticks move by floor(k * 7 / 2): 3, then 7.
+    assert analog_levels(with_step("ramp", 7, duration=40))["dac"] == ((0, 0), (2, 3), (3, 7))
+    # A ramp carries the level it starts from, and two changes on one tick
+    # are the later one: the ramp reaches 3 on the tick p2's edge takes 5.
+    down = replace(
+        with_step("ramp", 3),
+        periods=(
+            *with_step("ramp", 3).periods[:2],
+            replace(base.periods[2], analog_steps=(AnalogStep("dac", "edge", 5),)),
+        ),
+    )
+    assert analog_levels(down)["dac"] == ((0, 0), (3, 1), (5, 2), (6, 5))
+    falling = replace(
+        down,
+        periods=(
+            *down.periods,
+            PulsePeriod("p3", 60, "ns", (0,) * 6, (AnalogStep("dac", "ramp", 2),)),
+        ),
+    )
+    assert analog_levels(falling)["dac"][-3:] == ((8, 4), (9, 3), (10, 2))
 
 
 def test_one_field_carries_one_binding_and_one_id_namespace() -> None:

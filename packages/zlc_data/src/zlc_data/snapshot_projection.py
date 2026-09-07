@@ -17,6 +17,7 @@ from .axis import (
 )
 from .schema import DatasetSchema, DomainSpec
 from .selection import (
+    EmptySelection,
     IndexSelection,
     Selection,
     resolve_selection_indices,
@@ -67,9 +68,10 @@ class IndexedHistoryLayout:
     """The one reading of a Runtime indexed history's Point domain.
 
     Its rows are ``shots x event rows``: the primary-index column holds each
-    shot's relative offset (oldest first, the latest is 0) repeated once per
-    event row, and every other point-axis code repeats the event's own rows
-    under each shot. That structure is derived here ONCE
+    shot's relative offset (oldest first; the latest shot the source holds is
+    0, and a restriction that keeps only earlier shots keeps their negative
+    offsets) repeated once per event row, and every other point-axis code
+    repeats the event's own rows under each shot. That structure is derived here ONCE
     per schema and read by every consumer: the plot's window mask and shot
     codes, the compatibility gate that lets a sliding window keep its host,
     and the title's shot count.  None of them walks the rows again -- the
@@ -77,7 +79,7 @@ class IndexedHistoryLayout:
     thousand rows.
     """
 
-    #: Each shot's relative offset, oldest first; the last is 0.  Holes are
+    #: Each shot's relative offset, oldest first; none is above 0.  Holes are
     #: legal: a shot the history never received is simply absent.
     cells: np.ndarray
     #: Event rows under every shot.
@@ -122,9 +124,14 @@ def indexed_history_layout(schema: DatasetSchema) -> IndexedHistoryLayout | None
     """The indexed-history layout of ``schema``, or None without a shot index.
 
     A schema that names the primary index but breaks its contract -- a
-    non-integer or unordered offset, a latest offset other than 0, shots of
-    unequal size, or event-axis codes that do not repeat under every shot --
-    is a producer error and is refused, not read leniently.
+    non-integer or unordered offset, an offset above 0 (an absolute ordinal,
+    never a relative coordinate), shots of unequal size, or event-axis codes
+    that do not repeat under every shot -- is a producer error and is
+    refused, not read leniently.  A last offset BELOW 0 is not a broken
+    index: Runtime materializes the latest shot as 0, and a restriction of
+    that Dataset to past shots -- a Scope on the source index, like a Scope
+    on any other axis -- keeps their coordinates, so what reaches this reader
+    is the same history over fewer shots.
     """
 
     if not isinstance(schema, DatasetSchema):
@@ -156,8 +163,10 @@ def indexed_history_layout(schema: DatasetSchema) -> IndexedHistoryLayout | None
     if np.any(steps <= 0):
         raise ValueError("primary-index offsets must form ordered cells")
     cells = offsets
-    if int(cells[-1]) != 0:
-        raise ValueError("relative primary-index coordinates must end at latest offset 0")
+    if int(cells[-1]) > 0:
+        raise ValueError(
+            "relative primary-index coordinates are at most the latest offset 0"
+        )
     primary_codes = point_domain.codes(PRIMARY_INDEX_AXIS_ID)
     code_steps = np.diff(primary_codes)
     if (
@@ -350,8 +359,6 @@ def selection_indices(
         if selected is None:
             return range(axis.size)
         resolved, _removes_axis = resolve_selection_indices(axis, selected)
-        if not len(resolved):
-            raise ValueError(f"selection for axis {axis_id} is empty")
         return resolved
 
     def physical_rows(domain: DomainSpec) -> range | tuple[int, ...]:
@@ -368,7 +375,14 @@ def selection_indices(
                 keep &= np.isin(codes, np.asarray(logical, dtype=np.int64))
         rows = np.flatnonzero(keep)
         if rows.size == 0:
-            raise ValueError("selection removed every source domain row")
+            # Each axis named a coordinate it has, and no row holds them all:
+            # a sparse Point mapping carries only the pairs that were taken.
+            # That is the same fact as a box beside the picture -- the region
+            # holds no sample -- and it is told the same way, so the consumer
+            # that clears its region for one clears it for the other.
+            raise EmptySelection(
+                "selection names coordinates no source domain row holds together"
+            )
         start = int(rows[0])
         stop = int(rows[-1]) + 1
         if stop - start == rows.size:

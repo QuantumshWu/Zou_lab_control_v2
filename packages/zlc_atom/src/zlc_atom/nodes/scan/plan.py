@@ -166,14 +166,27 @@ def host_advanced_port(port: str) -> bool:
     )
 
 
-def scan_axis_id(label: str) -> str:
-    """What the dataset calls the axis a scan sweeps under ``label``.
+def scan_axis_ids(labels: Sequence[str]) -> tuple[str, ...]:
+    """What the dataset calls each axis a plan sweeps, from the plan alone.
 
-    One spelling, shared by the writer that names the axis and by anyone --
-    a selection, say -- reading a name back off a published dataset.
+    One spelling, shared by the writer that names the axes and by the
+    selection that reads a name back off a published dataset.  Two ports
+    may carry one human name -- a manual knob and a pulse parameter both
+    called ``bias`` -- so the second and later namesakes take their rank
+    among the namesakes as a suffix.  The ids are a pure function of the
+    plan's labels in order, which is what lets a range drawn on
+    ``scan.bias.2`` land on the axis the picture drew and not on the first
+    axis that happened to share the word.
     """
 
-    return f"scan.{label}"
+    seen: dict[str, int] = {}
+    ids = []
+    for label in labels:
+        base = f"scan.{label}"
+        rank = seen.get(base, 0) + 1
+        seen[base] = rank
+        ids.append(base if rank == 1 else f"{base}.{rank}")
+    return tuple(ids)
 
 
 def _ports_from_columns(columns) -> tuple[ScanPort, ...]:
@@ -239,9 +252,11 @@ def scan_ports_for_devices(tunables: Mapping | None) -> tuple[ScanPort, ...]:
     A device volunteers through ``tunable_fields()``.  A scan exposes only a
     bounded, live-writable field whose dependency group is that field alone:
     this executor advances one scalar port at a time and cannot pretend a
-    coupled hardware transaction is atomic.  The port's unit is the field's
-    own declared unit -- an RF frequency axis publishes hertz -- and its
-    label names the device and the knob.
+    coupled hardware transaction is atomic.  A field whose bounds leave no
+    interval -- a knob pinned to one value by policy -- is a control, not
+    an axis, and is passed over rather than failing the whole projection.
+    The port's unit is the field's own declared unit -- an RF frequency
+    axis publishes hertz -- and its label names the device and the knob.
     """
 
     ports: list[ScanPort] = []
@@ -255,6 +270,8 @@ def scan_ports_for_devices(tunables: Mapping | None) -> tuple[ScanPort, ...]:
                 raise TypeError("device tunable_fields must contain TunableField values")
             field = tunable.metadata
             if field.minimum is None or field.maximum is None:
+                continue
+            if float(field.minimum) >= float(field.maximum):
                 continue
             if not tunable.live_write or tunable.dependency_group != (field.name,):
                 continue
@@ -655,9 +672,10 @@ def _selected_plan(
         str(getattr(item, "axis", "")): item
         for item in getattr(selection, "ranges", ())
     }
+    axis_ids = scan_axis_ids([port_label(axis.port) for axis in plan.axes])
     axes: list[ScanAxis] = []
-    for axis in plan.axes:
-        chosen = wanted.get(scan_axis_id(port_label(axis.port)))
+    for axis, axis_id in zip(plan.axes, axis_ids, strict=True):
+        chosen = wanted.get(axis_id)
         if chosen is None or len(axis.values) < 2:
             axes.append(axis)
             continue

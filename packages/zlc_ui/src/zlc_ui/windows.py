@@ -56,6 +56,10 @@ def open_device_control(
         # every opened control made.  It stays resizable: this is the
         # OPENING size, not a fixed one.
         standard = screen_fit_window_size(fraction)
+        # The columns are aligned before the hint is read: a control's
+        # width is the width of its agreed columns, not of its widgets'
+        # first guesses.
+        view.align_columns()
         hint = view.sizeHint()
         chrome = max(0, window.sizeHint().height() - hint.height())
         width = max(standard.width() // 2, hint.width())
@@ -106,8 +110,16 @@ def open_figure_viewer(
     title: str = "FigureViewer@Zou lab",
     window_ratio: float | None = None,
     path_base_dir: str = "",
+    plot_surface: Any | None = None,
 ) -> Any:
-    """Open the figure viewer and return the handle that drives it."""
+    """Open the figure viewer and return the handle that drives it.
+
+    ``plot_surface`` is the composition root's panel-widget policy, the
+    same one ``open_task_console`` takes: called with a plotting host, it
+    returns the QWidget that shows it.  The viewer's board is a console
+    board, so it is handed the same staging widget and the board presents
+    every panel front.  ``None`` keeps the host's own default widget.
+    """
 
     from .figure_viewer.handle import FigureViewerHandle
     from .figure_viewer.view import FigureViewerView
@@ -126,7 +138,7 @@ def open_figure_viewer(
             WINDOW_SCREEN_FRACTION if window_ratio is None else float(window_ratio)
         ),
     )
-    return FigureViewerHandle(window, held["view"])
+    return FigureViewerHandle(window, held["view"], plot_surface=plot_surface)
 
 
 def open_device_manager(

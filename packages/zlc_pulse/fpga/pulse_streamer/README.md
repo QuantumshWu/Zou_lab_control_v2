@@ -47,14 +47,16 @@ Target FPGA is the Artix-7 35T `xc7a35tfgg484-2`. The default board XDC is
 `ZLC_PS_XDC` for the Vivado build). Explicit `streamer_config.board.lanes`
 indices own lane identity; XDC and top-level ports are unordered validated
 projections. The bitstream is fixed; every
-`On Pulse` packs a fresh program image and uploads it over JTAG-to-AXI through
-`axi_bram_ctrl`, then drives the CTRL mailbox. One edge row means "at this
+`On Pulse` packs a fresh program image and uploads it over the server's
+transport into `axi_bram_ctrl`, then drives the CTRL mailbox. One edge row means "at this
 absolute FPGA tick, set all outputs to this mask".
 
-JTAG-to-AXI is the current default transport. The optional UART path is for a
-controlled repository host: its encoder splits every request to at most 256
-words, and RTL rejects zero/oversize counts and address overflow before commit.
-It is still a trusted-laboratory transport rather than an authentication or
+The server's `auto` backend selects the transport: it enumerates COM ports,
+tries USB VID/PID descriptors first, and takes a UART only after the word-63
+fingerprint matches; when no port matches it falls back to JTAG-to-AXI (see
+`../README.md`). The UART encoder splits every request to at most 256 words,
+and RTL rejects zero/oversize counts and address overflow before commit. Both
+are trusted-laboratory transports rather than an authentication or
 authorization boundary.
 
 Scans use named slots: each edge row stores a base tick plus `NUM_SLOTS`

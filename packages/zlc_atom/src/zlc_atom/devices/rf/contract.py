@@ -16,6 +16,15 @@ prefixes them with its own channel names (``ch1_frequency_hz``), so the
 add-axis combo and the control panel show every knob of the one instrument
 under its one card.
 
+TWO FENCES, ONE RANGE.  A knob is bounded by the instrument's own limits,
+read from the device when the connection opens, and by an optional bench
+policy window, authored at Init and adjustable on the control panel.  What
+may be COMMANDED -- by the panel, by a notebook, by a scan -- is the
+tighter of the two on each side, so a scan range exists whenever the
+instrument has a range, and a missing policy edge never forbids a sweep.
+The instrument's limits are exposed beside the effective bounds
+(``TunableField.device_limits``) so the panel can show which fence bites.
+
 What varies between instruments is the transport underneath (SCPI text over
 VISA for a bench generator, a vendor DLL for a Lab Brick) and the value grid
 the hardware quantizes to.  Both live in the concrete drivers; the shared
@@ -26,8 +35,9 @@ plumbing here owns the rules that must not fork per driver:
 * a value the instrument would silently round is REFUSED before it is
   written, naming the grid -- a scan coordinate must mean exactly what its
   dataset column says (the same law the pulse DAC axes obey);
-* every accepted change advances ``settings_epoch``, so a control panel and
-  a running scan can see each other's writes.
+* ``settings_epoch`` advances only when a write actually changed the
+  instrument's effective state, so a control panel and a running scan can
+  see each other's writes without counting no-ops as changes.
 """
 
 from __future__ import annotations
@@ -36,6 +46,7 @@ import logging
 import math
 import threading
 from typing import Any, Mapping, Protocol, runtime_checkable
+from uuid import uuid4
 
 from zlc_atom.authoring import AuthoringField, TunableField
 
@@ -135,12 +146,20 @@ class RfSourceBase:
     transport verbs, each taking the channel and returning the instrument's
     own read-back.  Everything the consumers see -- the tunable quartet --
     lives here once.
+
+    Construction is two steps, because they are two different facts.
+    ``__init__`` takes the AUTHORED half -- channels and the bench's policy
+    window -- and touches no transport, so a window that cannot be honoured
+    is refused before any instrument is opened.  Once the driver's transport
+    is open it calls ``_attach`` with the instrument's own name, which reads
+    the hardware limits and records the session; a driver whose attach
+    fails closes its transport and raises, so nothing it opened is left
+    without an owner.
     """
 
     def __init__(
         self,
         *,
-        identity: str,
         channels: tuple[str, ...] = ("",),
         frequency_low_hz: float | None,
         frequency_high_hz: float | None,
@@ -162,12 +181,21 @@ class RfSourceBase:
             raise ValueError("rf channels must be non-empty and unique")
         if len(names) > 1 and any(not name for name in names):
             raise ValueError("a multi-channel source names every channel")
-        self._identity = str(identity)
+        self._identity = ""
         self._channels = names
         self._frequency_bounds = frequency_bounds
         self._power_bounds = power_bounds
+        #: channel -> (frequency limits, power limits), the instrument's own,
+        #: read once by ``_attach``.
+        self._device_limits: dict[
+            str, tuple[tuple[float, float], tuple[float, float]]
+        ] = {}
         self._condition = threading.Condition()
         self._settings_epoch = 0
+        # Minted per connection, never derived from the instrument: two
+        # sessions over the same brick are two histories of settings, and a
+        # risk acceptance bound to one must not survive into the other.
+        self._device_session_id = uuid4().hex
         #: field name -> (channel, kind); the ONE table tune() resolves by,
         #: so a field's spelling cannot drift from its routing.
         self._routing: dict[str, tuple[str, str]] = {}
@@ -184,6 +212,45 @@ class RfSourceBase:
         # the rest of this class answers by refusing.  A knob idling
         # outside policy is now a reading the panel shows, which is the
         # only way the operator can find out.
+
+    def _attach(self, identity: str) -> None:
+        """Take charge of the instrument the transport now reaches.
+
+        The instrument's own limits are facts about its model and firmware,
+        learned once per connection and answered from memory afterwards;
+        every bound check -- the panel's, a notebook's, a scan's -- reads
+        the same numbers without a round trip.  A bench window that leaves
+        nothing of the instrument's range is refused here, by name, instead
+        of surfacing later as a knob with an empty scan range.
+        """
+
+        limits: dict[str, tuple[tuple[float, float], tuple[float, float]]] = {}
+        for channel in self._channels:
+            frequency_limits = self._instrument_limits(
+                self._read_frequency_limits(channel),
+                name=channel_field(channel, FREQUENCY_FIELD),
+                unit="Hz",
+            )
+            power_limits = self._instrument_limits(
+                self._read_power_limits(channel),
+                name=channel_field(channel, POWER_FIELD),
+                unit="dBm",
+            )
+            self._effective_range(
+                self._frequency_bounds,
+                frequency_limits,
+                name=channel_field(channel, FREQUENCY_FIELD),
+                unit="Hz",
+            )
+            self._effective_range(
+                self._power_bounds,
+                power_limits,
+                name=channel_field(channel, POWER_FIELD),
+                unit="dBm",
+            )
+            limits[channel] = (frequency_limits, power_limits)
+        self._identity = str(identity)
+        self._device_limits = limits
 
     @staticmethod
     def _optional_edge(value: object, *, name: str) -> float | None:
@@ -209,6 +276,64 @@ class RfSourceBase:
         if lower is not None and upper is not None and lower >= upper:
             raise ValueError(f"{name} bounds must be ordered when both are set")
         return lower, upper
+
+    @staticmethod
+    def _instrument_limits(
+        limits: tuple[float, float], *, name: str, unit: str
+    ) -> tuple[float, float]:
+        """The instrument's answer, checked to be a range at all."""
+
+        low, high = (float(edge) for edge in limits)
+        if not (math.isfinite(low) and math.isfinite(high)) or low > high:
+            raise RuntimeError(
+                f"the instrument reports {name} limits [{low!r}, {high!r}] "
+                f"{unit}, which is not a range"
+            )
+        return low, high
+
+    @staticmethod
+    def _effective_range(
+        window: tuple[float | None, float | None],
+        limits: tuple[float, float],
+        *,
+        name: str,
+        unit: str,
+    ) -> tuple[float, float]:
+        """What may be commanded: the tighter of window and limits, per side.
+
+        The bench's window narrows what the instrument allows; it never has
+        to exist for the instrument's range to, and it cannot widen it.  A
+        window that excludes the whole instrument range is a contradiction,
+        not a narrow fence, and is refused by name.
+        """
+
+        low, high = window
+        limit_low, limit_high = limits
+        lower = limit_low if low is None else max(float(low), limit_low)
+        upper = limit_high if high is None else min(float(high), limit_high)
+        if lower > upper:
+            raise ValueError(
+                f"{name}: the bench window [{low!r}, {high!r}] {unit} leaves "
+                f"nothing of the instrument's own range "
+                f"[{limit_low!r}, {limit_high!r}] {unit}"
+            )
+        return lower, upper
+
+    def _frequency_range(self, channel: str) -> tuple[float, float]:
+        return self._effective_range(
+            self._frequency_bounds,
+            self._device_limits[channel][0],
+            name=channel_field(channel, FREQUENCY_FIELD),
+            unit="Hz",
+        )
+
+    def _power_range(self, channel: str) -> tuple[float, float]:
+        return self._effective_range(
+            self._power_bounds,
+            self._device_limits[channel][1],
+            name=channel_field(channel, POWER_FIELD),
+            unit="dBm",
+        )
 
     # ------------------------------------------------------- transport verbs
     def _write_frequency(self, channel: str, value_hz: float) -> float:
@@ -242,47 +367,19 @@ class RfSourceBase:
     def close(self) -> None:
         raise NotImplementedError
 
-    def _scan_range(
-        self,
-        window: tuple[float | None, float | None],
-        limits: tuple[float, float],
-    ) -> tuple[float, float]:
-        """What a knob may be swept over: the bench's window where the bench
-        set an edge, the instrument's own limit everywhere else.
-
-        A knob with no bench window used to have no scan range at all, and
-        so no axis in the seamless scan -- an operator who had not authored
-        a safety window could not sweep the frequency the instrument was
-        perfectly able to sweep.  The window narrows what the instrument
-        allows; it never has to exist for the instrument's range to.
-        """
-
-        low, high = window
-        limit_low, limit_high = limits
-        return (
-            limit_low if low is None else max(float(low), limit_low),
-            limit_high if high is None else min(float(high), limit_high),
-        )
-
     # -------------------------------------------------------------- contract
     def _channel_label(self, channel: str) -> str:
         return f"{channel.upper()} · " if channel else ""
 
     def tunable_fields(self) -> tuple[TunableField, ...]:
-        frequency_low, frequency_high = self._frequency_bounds
-        power_low, power_high = self._power_bounds
         fields: list[TunableField] = []
         with self._condition:
             for channel in self._channels:
                 label = self._channel_label(channel)
                 frequency = float(self._read_frequency(channel))
-                frequency_range = self._scan_range(
-                    (frequency_low, frequency_high),
-                    self._read_frequency_limits(channel),
-                )
-                power_range = self._scan_range(
-                    (power_low, power_high), self._read_power_limits(channel)
-                )
+                frequency_limits, power_limits = self._device_limits[channel]
+                frequency_range = self._frequency_range(channel)
+                power_range = self._power_range(channel)
                 fields.append(
                     TunableField(
                         metadata=AuthoringField(
@@ -304,6 +401,7 @@ class RfSourceBase:
                         dependency_group=(
                             channel_field(channel, FREQUENCY_FIELD),
                         ),
+                        device_limits=frequency_limits,
                     )
                 )
                 power = float(self._read_power(channel))
@@ -321,6 +419,7 @@ class RfSourceBase:
                         current=power,
                         live_write=True,
                         dependency_group=(channel_field(channel, POWER_FIELD),),
+                        device_limits=power_limits,
                     )
                 )
                 # No bounds on purpose: a bool is a switch, not a scan axis,
@@ -380,7 +479,7 @@ class RfSourceBase:
     def settings_provenance(self) -> dict[str, object]:
         with self._condition:
             return {
-                "device_session_id": self._identity,
+                "device_session_id": self._device_session_id,
                 "settings_epoch": self._settings_epoch,
             }
 
@@ -420,7 +519,10 @@ class RfSourceBase:
         A change that would strand a channel's CURRENT value outside the
         new window is refused by name: policy may fence a knob in, but
         silently dragging a set output to a new frequency is an output
-        change nobody commanded.  Move the knob first, then the fence.
+        change nobody commanded.  Move the knob first, then the fence.  An
+        edge that would leave nothing of the instrument's own range is
+        refused the same way, because there is no knob position that
+        could ever satisfy it.
         """
 
         requested = self._optional_edge(value, name=selected)
@@ -430,13 +532,9 @@ class RfSourceBase:
             window = {
                 "frequency_low_hz": (requested, frequency_high),
                 "frequency_high_hz": (frequency_low, requested),
-                "power_low_dbm": (power_low, power_high),
-                "power_high_dbm": (power_low, power_high),
+                "power_low_dbm": (requested, power_high),
+                "power_high_dbm": (power_low, requested),
             }
-            if selected == "power_low_dbm":
-                window[selected] = (requested, power_high)
-            elif selected == "power_high_dbm":
-                window[selected] = (power_low, requested)
             low, high = window[selected]
             if low is not None and high is not None and low >= high:
                 raise ValueError(
@@ -444,7 +542,16 @@ class RfSourceBase:
                     f"[{low!r}, {high!r}]"
                 )
             frequency_window = selected.startswith("frequency")
+            unit = "Hz" if frequency_window else "dBm"
+            kind = FREQUENCY_FIELD if frequency_window else POWER_FIELD
             for channel in self._channels:
+                knob = channel_field(channel, kind)
+                self._effective_range(
+                    (low, high),
+                    self._device_limits[channel][0 if frequency_window else 1],
+                    name=knob,
+                    unit=unit,
+                )
                 current = float(
                     self._read_frequency(channel)
                     if frequency_window
@@ -453,8 +560,6 @@ class RfSourceBase:
                 below = low is not None and current < low
                 above = high is not None and current > high
                 if below or above:
-                    kind = FREQUENCY_FIELD if frequency_window else POWER_FIELD
-                    knob = channel_field(channel, kind)
                     raise ValueError(
                         f"{selected}={requested!r} would strand {knob} at "
                         f"{current:g}; move the knob inside the new window "
@@ -483,32 +588,36 @@ class RfSourceBase:
             )
         channel, kind = routed
         with self._condition:
+            # The epoch counts CHANGES of effective state, so the instrument
+            # is read before as well as after: a tune that lands where the
+            # knob already stood is a success and not a change, and a panel
+            # that treated it as one would re-project for nothing.
             if kind == FREQUENCY_FIELD:
                 requested = float(value)
-                low, high = self._frequency_bounds
-                if (low is not None and requested < low) or (
-                    high is not None and requested > high
-                ):
+                low, high = self._frequency_range(channel)
+                if not low <= requested <= high:
                     raise ValueError(
                         f"{selected} must lie in [{low!r}, {high!r}] Hz"
                     )
-                effective = float(self._write_frequency(channel, requested))
+                before: Any = float(self._read_frequency(channel))
+                effective: Any = float(self._write_frequency(channel, requested))
             elif kind == POWER_FIELD:
                 requested = float(value)
-                low, high = self._power_bounds
-                if (low is not None and requested < low) or (
-                    high is not None and requested > high
-                ):
+                low, high = self._power_range(channel)
+                if not low <= requested <= high:
                     raise ValueError(
                         f"{selected} must lie in [{low!r}, {high!r}] dBm"
                     )
+                before = float(self._read_power(channel))
                 effective = float(self._write_power(channel, requested))
             else:
                 if type(value) is not bool:
                     raise TypeError(f"{selected} takes a bool")
+                before = bool(self._read_output(channel))
                 effective = bool(self._write_output(channel, value))
-            self._settings_epoch += 1
-            self._condition.notify_all()
+            if effective != before:
+                self._settings_epoch += 1
+                self._condition.notify_all()
             return effective
 
 

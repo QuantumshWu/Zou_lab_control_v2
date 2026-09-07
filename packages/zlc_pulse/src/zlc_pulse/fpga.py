@@ -32,6 +32,7 @@ from .wire import (
     load_streamer_config,
     params_from_config,
     part_profile,
+    require_streamer_config,
     solve_capacity,
 )
 
@@ -57,6 +58,7 @@ __all__ = [
     "load_streamer_config",
     "params_from_config",
     "part_profile",
+    "require_streamer_config",
     "solve_capacity",
 ]
 

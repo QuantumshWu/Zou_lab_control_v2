@@ -23,12 +23,21 @@ class InMemoryLmsLibrary:
     it was emitting when the software let go of it -- and a simulation
     that forgets on open cannot express the one state that matters here:
     an instrument already set up, which connecting must not disturb.
+
+    It powers up standing INSIDE its own range -- at the bottom of it, RF
+    off -- as a real brick does: a synthesizer cannot stand at 0 Hz, and a
+    scan that promises to hand every knob back where it found it refuses a
+    knob it could never command back there.
     """
 
     def __init__(self, serials: tuple[int, ...] = (1001,)) -> None:
         self._serials = tuple(int(serial) for serial in serials)
         self._registers_by_serial: dict[int, dict[str, int | bool]] = {
-            serial: {"frequency": 0, "power": 0, "rf_on": False}
+            serial: {
+                "frequency": self.FREQUENCY_LIMIT_UNITS[0],
+                "power": 0,
+                "rf_on": False,
+            }
             for serial in self._serials
         }
         self._open: set[int] = set()

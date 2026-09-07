@@ -224,3 +224,64 @@ def test_safe_is_answerable_at_any_time(sequencer) -> None:
     streamer.load(program)
     streamer.fire(run_repeats=1, scan_repeats=1)
     assert streamer.safe() is not None
+
+
+def test_a_streamer_the_broker_refuses_is_closed_by_the_factory() -> None:
+    """A device that never became a leaf has nobody else to close it.
+
+    The hardware factory dialled (or was handed) a streamer, opened it and
+    asked the broker to bind it; the broker refused -- the same physical
+    identity was already bound -- and the open connection was dropped on
+    the floor: not in any leaf, not in the returned Installation, not
+    closable by anyone.  The factory owns what it opened until a leaf
+    does.
+    """
+
+    from zlc_atom.devices.sequencer.binding import bind_sequencer
+    from zlc_atom.devices.sequencer.device_types import DEVICE_TYPES
+    from zlc_atom.execution import DeviceBroker
+    from zlc_atom.install import (
+        DeviceCatalogSnapshot,
+        DeviceSpec,
+        Installation,
+        InstallationFactoryContext,
+        create_installation,
+    )
+
+    first, _program = _real_streamer()
+    second, _program = _real_streamer()
+    broker = DeviceBroker()
+    existing = Installation(
+        {
+            "seq": bind_sequencer(
+                InstallationFactoryContext(None, broker, {}),
+                "seq",
+                SequencerDevice(first),
+                "sequencer:seq",
+                "sequencer.hardware",
+            )
+        },
+        world=None,
+        broker=broker,
+    )
+    descriptor = next(
+        item for item in DEVICE_TYPES if item.type_id == "sequencer.hardware"
+    )
+    try:
+        assert second.snapshot()["opened"] is True
+        refused = create_installation(
+            (DeviceSpec("seq", "sequencer.hardware"),),
+            world=object(),
+            broker=broker,
+            catalog=DeviceCatalogSnapshot((descriptor,), ()),
+            connect_pulse=lambda *_args, **_kwargs: second,
+        )
+        try:
+            assert "already bound" in str(refused.failures["seq"])
+            assert second.snapshot()["opened"] is False, (
+                "the refused streamer was left open with no owner"
+            )
+        finally:
+            refused.close()
+    finally:
+        existing.close()

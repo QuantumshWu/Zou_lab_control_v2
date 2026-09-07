@@ -67,12 +67,20 @@ def test_continuous_column_sem_matches_sample_standard_error() -> None:
 
 
 def test_dense_and_generic_paths_agree_on_sem() -> None:
-    """The dense tensor path and the position path are the same statistic."""
+    """The dense tensor path and the position path are the same statistic.
+
+    Grouping by a point column that takes one value over every point keeps
+    every bucket whole -- the same 24 samples per scan value -- but a group
+    that is not a tensor dimension is no dense reduction, so the same
+    numbers have to come out of the generic machinery.  Spelling the
+    defaults out instead ran the dense path twice and compared it with
+    itself.
+    """
 
     rng = np.random.default_rng(3)
     repeats = 12
     scan = axis("scan", values=[10.0, 20.0, 30.0])
-    point_domain = mapped_domain_from_columns({"x": [0.0, 1.0]})
+    point_domain = mapped_domain_from_columns({"x": [0.0, 1.0], "tag": [1.0, 1.0]})
     schema = make_dataset_schema(
         repeat_domain(size=repeats),
         point_domain,
@@ -82,13 +90,13 @@ def test_dense_and_generic_paths_agree_on_sem() -> None:
     values = rng.normal(size=schema.physical_shape)
     snapshot = make_snapshot(schema, values, revision=0)
     view = DataView(snapshot)
-    dense = view.curve(AxisRef.cell_data("scan"), uncertainty=True).series[0]
-    generic = view.curve(
-        AxisRef.cell_data("scan"), group_by=(), aggregation=Reduction.MEAN,
-        uncertainty=True,
-    )
-    # Force the generic path via a grouped projection over a single-value
-    # group: same buckets, generic machinery.
+    x = AxisRef.cell_data("scan")
+    single_value_group = (AxisRef.point("tag"),)
+    dense = view.curve(x, uncertainty=True).series[0]
+    # The claim is that two paths agree, so the second input must really
+    # leave the dense owner: it answers None for this group.
+    assert view._dense_data_curve(x, single_value_group, Reduction.MEAN, True) is None
+    generic = view.curve(x, group_by=single_value_group, uncertainty=True)
     np.testing.assert_allclose(
         dense.sem,
         [

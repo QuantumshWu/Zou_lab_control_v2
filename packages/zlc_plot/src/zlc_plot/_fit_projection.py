@@ -17,6 +17,7 @@ from zlc_data.snapshot_projection import restrict_snapshot, value_selection
 
 from .data_contract import (
     DEFAULT_UNITS,
+    Unit,
     UnitRegistry,
     resolve_unit,
     resolve_axis,
@@ -34,9 +35,7 @@ from .data_view import (
     ImageData,
     QuantityArray,
     RollingHistory,
-    aligned_histogram_edges,
-    _finite_probe,
-    finite_probe,
+    histogram_edges,
     _sem_reference,
 )
 from .fit import (
@@ -192,11 +191,66 @@ _DEFAULT_FIT_SELECTOR_PRIORITY = (
 )
 
 
+class _Crossing(Enum):
+    """How a fit parameter's number crosses between solver and painted units."""
+
+    POINT = "point"
+    SPAN = "span"
+    INVERSE = "inverse"
+
+
+@dataclass(frozen=True, slots=True)
+class _FitParameterConversion:
+    """One fit parameter's unit crossing, the same object read both ways.
+
+    A POINT (a centre, an offset) is a coordinate and converts like one:
+    exactly, through the unit's own conversion, so a level such as dBm
+    crosses as the power it names.  A SPAN (a width, an amplitude, a
+    standard error) or an INVERSE (a frequency read against a time axis)
+    has no position and crosses by the ratio of two linear scales; across a
+    logarithmic unit it has no value at all -- a width in dBm is not any
+    width in watts -- and asking is refused rather than answered with a
+    number.  Units of ``None`` mean the number is already on screen.
+    """
+
+    parameter: str
+    canonical_unit: Unit | None
+    display_unit: Unit | None
+    symbol: str
+    crossing: _Crossing
+
+    def to_display(self, value: float) -> float:
+        return self._convert(value, self.canonical_unit, self.display_unit)
+
+    def to_canonical(self, value: float) -> float:
+        return self._convert(value, self.display_unit, self.canonical_unit)
+
+    def _convert(self, value: float, source: Unit | None, target: Unit | None) -> float:
+        if source is None or target is None or source == target:
+            return value
+        if self.crossing is _Crossing.POINT:
+            return float(
+                np.asarray(
+                    source.convert_value_to((value,), target),
+                    dtype=float,
+                ).reshape(-1)[0]
+            )
+        if not (source.is_linear and target.is_linear):
+            raise ValueError(
+                f"fit parameter {self.parameter!r} is a {self.crossing.value} and has "
+                f"no value between {source.symbol!r} and {target.symbol!r}; only a "
+                "position crosses a logarithmic unit"
+            )
+        ratio = float(source.scale) / float(target.scale)
+        return value * (ratio if self.crossing is _Crossing.SPAN else 1.0 / ratio)
+
+
 @dataclass(frozen=True, slots=True)
 class FitAuthority:
+    """What defines a fit's domain: the committed selector, else the viewport."""
+
     selector: SelectorState | None
     viewport: RectangleRange | None
-    focused_facet_index: int | None
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -214,7 +268,6 @@ class FitSelection:
     facet_index: int | None = None
     selector_kind: SelectorKind | None = None
     regular_image: RegularImageFitInput | None = None
-    _authority: FitAuthority | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.scope, FitScope):
@@ -257,6 +310,15 @@ class FitSelection:
         elif regular_image is None:
             raise ValueError("non-image fit selections require selected_indices")
         object.__setattr__(self, "selected_indices", selected)
+        # The sigma plane is replayed to late subscribers with the other
+        # three; it is sealed like them, or it is the one plane through
+        # which what the solver weighted by could be rewritten afterwards.
+        sigma = self.observation_sigma
+        if sigma is not None:
+            sigma = readonly_copy(sigma, dtype=float)
+            if sigma.shape != observations.shape:
+                raise ValueError("observation_sigma must align with the observations")
+        object.__setattr__(self, "observation_sigma", sigma)
         object.__setattr__(
             self,
             "facet_index",
@@ -841,10 +903,6 @@ class FitProjection:
             if has_values:
                 data_low = float(offset + int(occupied[0]))
                 data_high = float(offset + int(occupied[-1]))
-            edge_values = np.empty(
-                0,
-                dtype=canonical.dtype if has_values else float,
-            )
         elif binned_values is None:
             canonical = np.asarray(samples.value.canonical)
             valid = np.asarray(samples.valid_mask, dtype=bool)
@@ -873,16 +931,14 @@ class FitProjection:
                 data_high = float(
                     np.max(canonical, where=valid, initial=limits[1])
                 )
-            # The edge helper only needs the dtype to choose integer-aligned
-            # bins once exact native min/max have been found.
-            edge_values = np.empty(
-                0,
-                dtype=canonical.dtype if has_values else float,
-            )
         else:
-            # Masked extrema and a bounded probe, never a full finite
-            # gather: the copy of a two-million-value pool cost more per
-            # revision than the whole binning it fed.
+            # Masked extrema in one pass, never a full finite gather: the
+            # copy of a two-million-value pool cost more per revision than
+            # the whole binning it fed.  The same pass says whether every
+            # finite sample is a whole number, which is the edge owner's
+            # question and a fact about EVERY sample -- a bounded prefix
+            # once answered it for the whole pool and binned the same
+            # multiset differently by storage order.
             flat = np.asarray(canonical).reshape(-1)
             mask = (
                 None
@@ -897,12 +953,11 @@ class FitProjection:
 
             extrema = kernels.masked_finite_extrema(flat, mask)
             if extrema is not None:
-                finite_count, kernel_low, kernel_high = extrema
+                finite_count, kernel_low, kernel_high, integral = extrema
                 has_values = finite_count > 0
                 if has_values:
                     data_low = kernel_low
                     data_high = kernel_high
-                edge_values = finite_probe(flat, mask)
             else:
                 finite = np.isfinite(flat)
                 if mask is not None:
@@ -913,7 +968,9 @@ class FitProjection:
                     data_high = float(
                         np.max(flat, where=finite, initial=-np.inf)
                     )
-                edge_values = _finite_probe(flat, finite)
+                integral = bool(
+                    np.all(flat == np.floor(flat), where=finite)
+                )
         previous = self._histogram_projection
         # The VALUE axis's own mode.  It used to read the count axis's, so
         # an operator asking for a steady count scale silently also asked
@@ -986,7 +1043,7 @@ class FitProjection:
                 low -= padding
                 high += padding
 
-        edges = aligned_histogram_edges(edge_values, count, limits=(low, high))
+        edges = histogram_edges(low, high, count, integral=integral and has_values)
         selected = HistogramProjection(
             len(edges) - 1,
             count,
@@ -1337,11 +1394,7 @@ class FitProjection:
                 if self._view is not None
                 else self._viewport
             )
-        return FitAuthority(
-            selector,
-            viewport,
-            self._focused_facet_index,
-        )
+        return FitAuthority(selector, viewport)
 
     def fit_selection(
         self,
@@ -1478,7 +1531,6 @@ class FitProjection:
             ),
             facet_index=facet_index,
             selector_kind=None if active is None else active.kind,
-            _authority=authority,
         )
 
     def _histogram_fit_selection(
@@ -1544,7 +1596,6 @@ class FitProjection:
             selected_indices=indices,
             facet_index=facet_index,
             selector_kind=None if active is None else active.kind,
-            _authority=authority,
         )
 
     def _regular_image_fit_selection(
@@ -1567,7 +1618,7 @@ class FitProjection:
             payload.y,
             model.coordinate_relations[1],
         ).reshape(-1)
-        valid, observations, scope, active, authority = self._image_fit_domain(
+        valid, observations, scope, active = self._image_fit_domain(
             payload,
             selector_kind,
         )
@@ -1588,7 +1639,6 @@ class FitProjection:
             facet_index=facet_index,
             selector_kind=None if active is None else active.kind,
             regular_image=regular,
-            _authority=authority,
         )
 
     def _image_fit_selection(
@@ -1613,7 +1663,7 @@ class FitProjection:
             payload.y,
             model.coordinate_relations[1],
         ).reshape(-1)
-        valid, observations, scope, active, authority = self._image_fit_domain(
+        valid, observations, scope, active = self._image_fit_domain(
             payload,
             selector_kind,
         )
@@ -1647,7 +1697,6 @@ class FitProjection:
             selected_indices=selected_indices,
             facet_index=facet_index,
             selector_kind=None if active is None else active.kind,
-            _authority=authority,
         )
 
     def _image_fit_domain(
@@ -1659,7 +1708,6 @@ class FitProjection:
         np.ndarray,
         FitScope,
         SelectorState | None,
-        FitAuthority,
     ]:
         """Resolve one canonical mask over the already projected image.
 
@@ -1715,7 +1763,7 @@ class FitProjection:
             scope = FitScope.VIEWPORT
         else:
             scope = FitScope.ALL
-        return valid, observations, scope, active, authority
+        return valid, observations, scope, active
 
     def _viewport_in_canonical(self) -> RectangleRange:
         assert self._viewport is not None
@@ -2069,24 +2117,38 @@ class FitProjection:
         symbol = quantity.canonical_unit.symbol
         return "" if symbol == "1" else symbol
 
-    def _display_fit_parameter_value(
+    def _fit_parameter_conversion(
         self,
         spec: Any,
-        value: float,
         *,
         difference: bool = False,
         display_relation: UnitRelation | None = None,
-    ) -> tuple[float, str]:
+    ) -> _FitParameterConversion:
+        """Resolve where one fit parameter's number lives on screen.
+
+        ``difference`` reads a value as a span even for a point parameter --
+        a centre's standard error is a distance, not a place.
+        ``display_relation`` reads it against another axis, for a glyph
+        drawn where the parameter is not painted.
+        """
+
         relation = spec.unit_relation if display_relation is None else display_relation
         solver_relation = spec.solver_unit_relation
+        name = spec.name
         if relation in {UnitRelation.DIMENSIONLESS, UnitRelation.RADIAN}:
             if solver_relation is not relation:
                 raise ValueError("unit-free fit parameters cannot cross unit relations")
-            return value, "rad" if relation is UnitRelation.RADIAN else ""
+            return _FitParameterConversion(
+                name,
+                None,
+                None,
+                "rad" if relation is UnitRelation.RADIAN else "",
+                _Crossing.POINT,
+            )
         if relation is UnitRelation.VALUE and self._is_histogram_plot():
             if solver_relation is not UnitRelation.VALUE:
                 raise ValueError("histogram count parameters require value solver units")
-            return value, "count"
+            return _FitParameterConversion(name, None, None, "count", _Crossing.POINT)
         if isinstance(self._spec, RollingPlot) and relation in {
             UnitRelation.AXIS_0,
             UnitRelation.INVERSE_AXIS_0,
@@ -2095,45 +2157,73 @@ class FitProjection:
                 raise ValueError("rolling fit parameters cannot cross unit relations")
             # The rolling shot axis is a plain ordinal (canonical == display
             # == absolute shot index), so fit parameters cross unchanged.
-            if relation is UnitRelation.INVERSE_AXIS_0:
-                return value, "1/point"
-            return value, "point"
+            return _FitParameterConversion(
+                name,
+                None,
+                None,
+                "1/point" if relation is UnitRelation.INVERSE_AXIS_0 else "point",
+                _Crossing.POINT,
+            )
 
         if relation is UnitRelation.INVERSE_AXIS_0:
             if solver_relation is not UnitRelation.INVERSE_AXIS_0:
                 raise ValueError("inverse-axis parameters cannot cross unit relations")
             quantity = self._fit_relation_quantity(UnitRelation.AXIS_0)
             if quantity is None:
-                return value, ""
+                return _FitParameterConversion(name, None, None, "", _Crossing.INVERSE)
             canonical_unit = quantity.canonical_unit
             display_unit = quantity.display_unit
-            converted = value * float(display_unit.scale) / float(canonical_unit.scale)
             registry = self._unit_registry or DEFAULT_UNITS
             inverse = registry.inverse_for(display_unit)
             if inverse is not None:
-                return converted, inverse.symbol
-            symbol = display_unit.symbol
-            return converted, "" if symbol == "1" else f"1/{symbol}"
+                symbol = inverse.symbol
+            else:
+                symbol = "" if display_unit.symbol == "1" else f"1/{display_unit.symbol}"
+            return _FitParameterConversion(
+                name, canonical_unit, display_unit, symbol, _Crossing.INVERSE
+            )
 
         source_quantity = self._fit_relation_quantity(solver_relation)
         target_quantity = self._fit_relation_quantity(relation)
         if source_quantity is None or target_quantity is None:
-            return value, ""
+            return _FitParameterConversion(name, None, None, "", _Crossing.POINT)
         canonical_unit = source_quantity.canonical_unit
         display_unit = target_quantity.display_unit
         if not canonical_unit.compatible_with(display_unit):
             raise ValueError("fit parameter solver and display units are incompatible")
-        if spec.affine_point and not difference:
-            converted = float(
-                np.asarray(
-                    canonical_unit.convert_value_to((value,), display_unit),
-                    dtype=float,
-                ).reshape(-1)[0]
-            )
-        else:
-            converted = value * float(canonical_unit.scale) / float(display_unit.scale)
-        unit = "" if display_unit.symbol == "1" else display_unit.symbol
-        return converted, unit
+        return _FitParameterConversion(
+            name,
+            canonical_unit,
+            display_unit,
+            "" if display_unit.symbol == "1" else display_unit.symbol,
+            _Crossing.POINT if spec.affine_point and not difference else _Crossing.SPAN,
+        )
+
+    def _display_fit_parameter_value(
+        self,
+        spec: Any,
+        value: float,
+        *,
+        difference: bool = False,
+        display_relation: UnitRelation | None = None,
+    ) -> tuple[float, str]:
+        """A solver value in the painted unit, with that unit's symbol."""
+
+        conversion = self._fit_parameter_conversion(
+            spec,
+            difference=difference,
+            display_relation=display_relation,
+        )
+        return conversion.to_display(value), conversion.symbol
+
+    def _canonical_fit_parameter_value(self, spec: Any, displayed: float) -> float:
+        """The solver's number for a value typed in the painted unit.
+
+        The exact inverse of ``_display_fit_parameter_value``: the same
+        crossing read the other way, so what is typed reads back as typed.
+        """
+
+        return self._fit_parameter_conversion(spec).to_canonical(displayed)
 
     def fit_expression_target(
         self,
@@ -2181,9 +2271,7 @@ class FitProjection:
                 displayed = float(raw[6:-1] if guessed else raw)
             except ValueError as error:
                 raise ValueError("use name=value or name=guess(value)") from error
-            offset = self._display_fit_parameter_value(parameter, 0.0)[0]
-            scale = self._display_fit_parameter_value(parameter, 1.0)[0] - offset
-            converted = (displayed - offset) / scale
+            converted = self._canonical_fit_parameter_value(parameter, displayed)
             lower, upper = parameter.bounds
             if not math.isfinite(converted) or not lower <= converted <= upper:
                 raise ValueError(f"fit parameter {symbol!r} is outside its domain")

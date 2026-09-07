@@ -7,7 +7,8 @@ Every query walks one table in hardware order: each row holds for
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
+from itertools import chain
 from numbers import Integral
 
 import numpy as np
@@ -100,6 +101,7 @@ def trigger_edge_ticks(
     *,
     run_repeats: int = 1,
     scan_repeats: int = 1,
+    bracket_bodies: int | None = None,
 ) -> dict[str, tuple[int, ...]]:
     """Return the tick of every edge each named lane plays.
 
@@ -110,6 +112,11 @@ def trigger_edge_ticks(
     already in, to recover exactly the stream below.  Asking the exposure
     question also meant refusing a program for an exposure-shaped reason (a
     lane still high at the end) from inside a FIFO-capacity check.
+
+    ``bracket_bodies`` walks only the first and last that many replays of the
+    Bracket in every Pulse, at their true ticks -- see
+    :func:`bracket_iterations` -- which is what bounds a capacity check over
+    a loop that replays a body a billion times.
     """
 
     names = tuple(channels)
@@ -122,9 +129,30 @@ def trigger_edge_ticks(
                 table,
                 run_repeats,
                 scan_repeats,
+                bracket_bodies,
             ),
         )
     )
+
+
+def bracket_iterations(loop_count: int, bodies: int | None) -> Iterable[int]:
+    """Which replays of a Bracket to walk: every one, or a bounded first-and-last.
+
+    A delay-FIFO check needs the TRUE elapsed time of a Pulse -- so the
+    Pulses after it land where they really land -- but not every body of a
+    Bracket that replays a billion times.  The bodies are identical, so once
+    ``bodies`` of them have played a queue has either overflowed or repeats
+    its state, and the last ``bodies`` see the loop out exactly the way the
+    first saw it in; the ones between are the same again at ticks no window
+    can tell apart from those.  Walking a SHORTENED loop instead moved every
+    later Pulse earlier, and a body that changed no level at all -- which
+    adds no entry to any queue -- was refused for crowding runs together
+    that the board plays comfortably apart.  ``None`` walks every replay.
+    """
+
+    if bodies is None or loop_count <= 2 * bodies:
+        return range(loop_count)
+    return chain(range(bodies), range(loop_count - bodies, loop_count))
 
 
 def _windows_of(edges: tuple[int, ...]) -> tuple[tuple[int, int], ...]:
@@ -161,6 +189,7 @@ def _channel_edges(
     table: np.ndarray | None,
     run_repeats: int,
     scan_repeats: int,
+    bracket_bodies: int | None = None,
 ) -> tuple[tuple[int, ...], ...]:
     """Project the tick of every edge each named lane plays, in playback order.
 
@@ -234,7 +263,7 @@ def _channel_edges(
                 if level != previous:
                     previous = level
                     ticks.append(run_offset + effective[index] + delay)
-            for iteration in range(loop_count):
+            for iteration in bracket_iterations(loop_count, bracket_bodies):
                 offset = run_offset + iteration * span
                 for index in body:
                     level = levels[index]
@@ -335,6 +364,7 @@ def _point_timing(
 
 
 __all__ = [
+    "bracket_iterations",
     "run_duration_seconds",
     "trigger_times",
     "trigger_windows",

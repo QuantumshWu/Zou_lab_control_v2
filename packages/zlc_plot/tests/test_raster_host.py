@@ -70,6 +70,13 @@ def _site_distribution_snapshot() -> OwnedSnapshot:
     return make_snapshot(schema, values, revision=0)
 
 def _fit_curve_series(generation: str, *, offset: float = 0.0):
+    """Revisions of one Gaussian stream, each stamped with its generation.
+
+    ``generation`` is the stream every revision belongs to unless a call
+    names another one: a snapshot that opens a NEW run on the same signal
+    is the same schema under a different name.
+    """
+
     x = np.linspace(-4.0, 4.0, 81)
     schema = make_dataset_schema(
         repeat_domain(size=1),
@@ -77,10 +84,17 @@ def _fit_curve_series(generation: str, *, offset: float = 0.0):
         dtype=np.float64,
     )
 
-    def snapshot(revision: int, center: float | None = None) -> OwnedSnapshot:
+    def snapshot(
+        revision: int,
+        center: float | None = None,
+        *,
+        generation: str = generation,
+    ) -> OwnedSnapshot:
         selected = revision * 0.05 if center is None else center
         values = 2.0 * np.exp(-0.5 * ((x - selected) / 0.9) ** 2) + offset
-        return make_snapshot(schema, values.reshape(1, -1), revision=revision)
+        return make_snapshot(
+            schema, values.reshape(1, -1), revision=revision, generation=generation
+        )
 
     return snapshot
 
@@ -381,6 +395,7 @@ def test_render_process_restarts_after_child_failure_without_reusing_old_pixels(
         retained = first.buffer.as_rgba()
         retained_pixels = retained.copy()
         first_pid = service.pid
+        first_writer = service._writer
 
         service._process.terminate()
         service._process.join(timeout=10)
@@ -393,10 +408,17 @@ def test_render_process_restarts_after_child_failure_without_reusing_old_pixels(
         assert first_host.startup_failure is not None
         assert first_host.service_failure is True
         assert service._reader_stopped.is_set()
+        # The dead child's request writer retires WITH its pipe.  Left
+        # blocked on the old outbox while the restart replaced the handles,
+        # it could never be reached again: one thread per crash, alive for
+        # the life of the process, holding the old callbacks.
+        first_writer.join(timeout=5.0)
+        assert not first_writer.is_alive()
 
         replacement = service.build_host(snapshot, spec)
         replacement.wait_for_front(timeout=30)
         assert service.pid != first_pid
+        assert service._writer is not first_writer
         for index in range(5):
             replacement.set_parameter(
                 "title", f"replacement {index}"
@@ -408,6 +430,139 @@ def test_render_process_restarts_after_child_failure_without_reusing_old_pixels(
         if first_host is not None:
             first_host.close(timeout=30)
         assert service.close(timeout=30)
+        # And an ordinary close leaves no writer behind either.
+        service._writer.join(timeout=5.0)
+        assert not service._writer.is_alive()
+
+
+def test_an_input_token_is_published_only_with_its_upload_enqueued() -> None:
+    """A token another caller can see names an upload already in the outbox.
+
+    Publication and enqueueing are one step under one lock.  Published
+    first and uploaded after, a concurrent Host built from the same
+    Dataset saw the token, enqueued its ``create_host`` AHEAD of the upload
+    it named, and the child refused it as an input released before use:
+    the second of two ordinary Hosts failed to start.
+    """
+
+    from zlc_plot import RenderProcess
+
+    service = RenderProcess("raster-input-order-test")
+    snapshot = _snapshot()
+    key = service._input_key(snapshot)
+    enqueued: list[tuple[str, dict]] = []
+
+    def enqueue(message: object) -> None:
+        # What every other caller can see at the moment the upload joins the
+        # outbox: no token for this input yet.
+        enqueued.append((str(message[0]), dict(service._input_tokens)))
+
+    try:
+        service._send = enqueue
+        used: set[int] = set()
+        kind, token = service._input_reference(snapshot, used)
+        assert enqueued and enqueued[0][0] == "input"
+        assert key not in enqueued[0][1]
+        assert service._input_tokens[key] == token
+        assert used == {token}
+        # A second caller reuses the published token and uploads nothing.
+        again = service._input_reference(snapshot, set())
+        assert again == (kind, token)
+        assert len(enqueued) == 1
+        assert service._input_refcounts[token] == 2
+    finally:
+        del service._send
+        assert service.close(timeout=30)
+
+
+def test_an_owned_input_keeps_the_producer_s_indexed_window() -> None:
+    """The child's rebuilt DataBlock carries the block's IndexedWindow.
+
+    The window is the producer's own statement of which shots the block
+    holds, and the admission ticket for the incremental integer-history
+    frequency path.  The rebuild copied values, validity, schema and sigma
+    and dropped it, so every window histogram behind the process boundary
+    recounted the whole window on every shot.
+    """
+
+    from collections import OrderedDict
+
+    from zlc_data import PRIMARY_INDEX, IndexedWindow, owned_snapshot_from_arrays
+    from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
+    from zlc_plot.render_process import _owned_input
+
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns(
+            {"source index": [-2, -1, 0]},
+            ids={"source index": str(PRIMARY_INDEX_AXIS_ID)},
+            roles={"source index": PRIMARY_INDEX},
+        ),
+        cell_axes=(axis("y", size=2), axis("x", size=3)),
+        dtype=np.uint16,
+    )
+    source = owned_snapshot_from_arrays(
+        schema=schema,
+        values=np.arange(18, dtype=np.uint16).reshape(1, 3, 2, 3),
+        revision=3,
+        block_id="roi.indexed",
+        stream_generation="roi",
+        window=IndexedWindow(0, 2, 0),
+    )
+    restored = _owned_input(source, OrderedDict())
+    assert restored.block.window == source.block.window
+    assert restored.block.window is not None
+    np.testing.assert_array_equal(restored.block.values, source.block.values)
+
+
+def test_a_configure_does_not_overtake_the_control_work_queued_before_it() -> None:
+    """What goes first is POINTER work, by that mark alone.
+
+    ``configure`` publishes adaptively -- a no-op must not re-send a front
+    -- and ranked by publish mode it was taken ahead of every queued
+    CONTROL task.  A settled Save submitted first, its recipe frozen, then
+    ran against a host a later configure had already changed and refused
+    itself.  Arrival order holds between a configure and the control work
+    before it; a pointer still goes first.
+    """
+
+    host = RasterPlotHost.from_plot(_snapshot(), CurvePlot(AxisRef.point("x")))
+    entered, release = Event(), Event()
+    seen: list[tuple[str, bool, bool]] = []
+    futures: dict[str, Future] = {}
+
+    def gate() -> None:
+        entered.set()
+        assert release.wait(5.0)
+
+    def control() -> None:
+        seen.append(
+            (
+                "control",
+                futures["configured"].done(),
+                futures["pointer"].done(),
+            )
+        )
+
+    try:
+        host.wait_for_front(timeout=10)
+        host.dispatch_control(gate)
+        assert entered.wait(5.0)
+        futures["control"] = host.dispatch_control(control)
+        futures["configured"] = host.configure(
+            parameters={"title": "later configure"}
+        )
+        futures["pointer"] = host.pointer_event("key", 0.0, 0.0, key="escape")
+        release.set()
+        futures["control"].result(timeout=10)
+        futures["configured"].result(timeout=10)
+        futures["pointer"].result(timeout=10)
+        # When the control task ran, the pointer had gone before it and the
+        # configure had not.
+        assert seen == [("control", False, True)]
+    finally:
+        release.set()
+        host.close(timeout=10)
 
 
 def test_close_cancels_queued_tasks() -> None:
@@ -751,6 +906,46 @@ def test_active_fit_times_out_without_a_successor_and_recovers(
         assert time.monotonic() - close_started < 2.0
     finally:
         release_first.set()
+        if release_subscription is not None:
+            release_subscription().result(timeout=10)
+
+def test_a_timed_out_fit_is_reported_against_the_frame_that_timed_out(
+    blocked_fit_host,
+) -> None:
+    """The failed FitEvent's generation is the timed-out input's own.
+
+    The solver-failure path publishes its gap with the prepared frame's
+    projection; the timeout path published only a revision and an error,
+    and the session filled the identity in from its COMMITTED projection.
+    The first revision of run-b, timing out, was reported as a failure of
+    run-a.
+    """
+
+    snapshot, host, started, release, _solved = blocked_fit_host(
+        "run-a", block_revision=1
+    )
+    events: list = []
+    release_subscription = None
+    try:
+        host.wait_for_front(timeout=10)
+        host.fit("gaussian_offset", live=True).result(timeout=30)
+        release_subscription = host.subscribe_fit(events.append).result(
+            timeout=10
+        ).value
+        timed_out = host.update_data(snapshot(1, generation="run-b"))
+        assert started.wait(2.0)
+        with pytest.raises(RuntimeError, match="active deadline"):
+            timed_out.result(timeout=3.0)
+        deadline = time.monotonic() + 5.0
+        while not events and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert events, "the timeout published no fit event"
+        failed = events[-1]
+        assert failed.result.success is False
+        assert failed.result.source_revision == 1
+        assert failed.source_generation == "run-b"
+    finally:
+        release.set()
         if release_subscription is not None:
             release_subscription().result(timeout=10)
 
@@ -1240,6 +1435,35 @@ def test_a_host_that_could_not_start_says_why_not_that_it_is_closing() -> None:
     finally:
         host.close()
 
+
+def test_a_refused_worker_thread_configuration_is_a_startup_failure(
+    monkeypatch,
+) -> None:
+    """Worker initialisation fails inside the startup boundary, not outside it.
+
+    ``ZLC_NUMBA_WORKER_THREADS='not-an-integer'`` is a configuration error
+    the operator must be told about.  Raised before the startup ``try``,
+    it killed the worker thread with nothing recorded: the initial Future
+    stayed pending, ``wait_for_front`` timed out, and the host looked like
+    one that had never started.
+    """
+
+    from zlc_plot import raster as raster_module
+
+    def refuse() -> int:
+        raise ValueError("invalid literal for int() with base 10: 'not-an-integer'")
+
+    monkeypatch.setattr(raster_module.kernels, "configure_worker_threads", refuse)
+    host = RasterPlotHost.from_plot(_snapshot(), CurvePlot(AxisRef.point("x")))
+    try:
+        with pytest.raises(RuntimeError) as raised:
+            host.wait_for_front(timeout=10)
+        assert "failed to start" in str(raised.value), str(raised.value)
+        assert isinstance(raised.value.__cause__, ValueError)
+        assert isinstance(host.startup_failure, ValueError)
+    finally:
+        assert host.close(timeout=10)
+
 def test_host_save_preserves_existing_file_when_renderer_fails_after_partial_write(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1334,6 +1558,20 @@ def test_envelope_preserves_column_extremes_and_gaps() -> None:
     # columns is NaN.
     gap_zone = (out_x >= x[20_000]) & (out_x <= x[20_399])
     assert bool(np.any(~np.isfinite(out_y[gap_zone])))
+    # Two runs at two levels with ONE invalid sample between them, inside a
+    # single pixel column: the envelope never joins them.  Aggregating the
+    # column across the NaN drew a vertical 0 -> 100 segment that no pair
+    # of neighbouring samples supports.
+    n = 4096
+    x = np.linspace(0.0, 1.0, n)
+    y = np.zeros(n)
+    y[2049:] = 100.0
+    y[2048] = np.nan
+    out_x, out_y = _envelope_decimated(x, y, (0.0, 1.0), 256)
+    joined = np.isfinite(out_y[:-1]) & np.isfinite(out_y[1:])
+    assert not bool(np.any(np.abs(np.diff(out_y))[joined] > 50.0))
+    assert float(np.nanmin(out_y)) == 0.0 and float(np.nanmax(out_y)) == 100.0
+    assert bool(np.all(np.diff(out_x[np.isfinite(out_x)]) >= 0.0))
 
 def test_envelope_declines_sparse_windows() -> None:
     from zlc_plot.rendering import _envelope_decimated
@@ -2016,18 +2254,108 @@ def test_a_dollar_sign_in_a_name_cannot_take_the_frame_down() -> None:
         r"$\notacommand$",
         "$a_b_c$",
     ):
+        escaped = label.replace("$", "\\$")
         session = PlotSession(
             make_snapshot(schema, values, 1),
             CurvePlot(
                 AxisRef.point("x"),
-                labels=PlotLabels(value=label, title=label, y=label),
+                labels=PlotLabels(value=label, title=label, x=label, y=label),
             ),
         )
         try:
             session.set_size("2x2")
             session.rgba()
+            axes = session._renderer.primary_axes
+            # The name is PAINTED on the first frame, escaped exactly once --
+            # neither the raw spec text (a mathtext parse) nor twice.
+            assert axes.get_title() == escaped
+            assert axes.get_xlabel() == escaped
+            # The operator's edit of the same text paints the same text as
+            # the authored spec did.
+            session.set_labels(x=label, title="a safe title")
+            session.rgba()
+            assert axes.get_xlabel() == escaped
+            assert axes.get_title() == "a safe title"
+            # Resetting the title to its authored default is the same name
+            # again, drawn -- not the raw spec text handed to the parser.
+            session.set_labels(title=None)
+            session.rgba()
+            assert axes.get_title() == escaped
         finally:
             session.close()
+
+def test_a_rebuilt_surface_paints_its_accepted_title_and_grid() -> None:
+    """Fresh axes carry the accepted text and chrome, whatever the frame says.
+
+    The first frame and every relayout build axes with no title and no grid
+    on them; the effect bits of those frames name LAYOUT, not TEXT or
+    CHROME, so the accepted state and the pixels came apart: a session
+    constructed with a title and a grid painted neither, and a resize threw
+    away the title and grid the operator had just edited on.
+    """
+
+    session = PlotSession(
+        _snapshot(),
+        CurvePlot(AxisRef.point("x")),
+        parameters={"title": "authored initial", "show_grid": True},
+    )
+    try:
+
+        def painted() -> tuple[str, bool]:
+            session.rgba()
+            axes = session._renderer.primary_axes
+            return (
+                axes.get_title(),
+                any(line.get_visible() for line in axes.get_xgridlines()),
+            )
+
+        assert painted() == ("authored initial", True)
+        session.set_labels(title="edited title")
+        assert painted() == ("edited title", True)
+        previous = session.surface_plan.preset
+        session.set_size("4x4" if previous != "4x4" else "2x2")
+        assert session.surface_plan.preset != previous
+        assert painted() == ("edited title", True)
+    finally:
+        session.close()
+
+def test_a_marker_only_curve_style_is_not_stroked_as_a_line() -> None:
+    """The native stroke paints solid polylines and nothing else.
+
+    Admission to the native path is a question about the STYLE before it is
+    a question about the geometry: a curve token of ``linestyle='None',
+    marker='o'`` was admitted on geometry alone and drawn as a connected
+    line live, while the export -- generic artists, which honour the token
+    -- drew unconnected markers.  Such a style belongs to the generic
+    artists on every path.
+    """
+
+    from dataclasses import replace
+
+    from zlc_plot.config import DEFAULTS
+
+    artists = replace(
+        DEFAULTS.style.artists,
+        curve=replace(DEFAULTS.style.artists.curve, linestyle="None", marker="o"),
+    )
+    defaults = replace(DEFAULTS, style=replace(DEFAULTS.style, artists=artists))
+    session = PlotSession(
+        _snapshot(),
+        CurvePlot(AxisRef.point("x")),
+        defaults=defaults,
+        parameters={"show_grid": False, "uncertainty": False},
+    )
+    try:
+        renderer = session._renderer
+        assert "curve:prepared" not in renderer._artists
+        live = np.asarray(renderer.rgba())
+        axes = renderer.primary_axes
+        px, py = axes.transData.transform((0.5, 1.5))
+        # Halfway between two samples nothing is drawn: no line joins them.
+        midpoint = live[int(live.shape[0] - py), int(px)]
+        assert tuple(int(value) for value in midpoint[:3]) == (255, 255, 255)
+    finally:
+        session.close()
 
 def test_a_formula_that_cannot_be_drawn_is_shown_as_characters() -> None:
     """Mathtext is decoration; it may not cost the plot.

@@ -26,6 +26,7 @@ from zlc_atom.install.configuration import (
 )
 from zlc_workbench.authoring_form import project_schema
 from zlc_workbench.device_manager import DeviceManagerPresenter
+from zlc_workbench.device_use import DeviceClaim, DeviceUseBusy, DeviceUseCoordinator
 
 
 class _Signal:
@@ -227,6 +228,19 @@ def test_two_devices_cannot_share_one_name(manager) -> None:
     manager.view.role_committed.emit("camera2", "qCMOS")
     assert manager.devices[1].instance_id == "camera2"
     assert manager.devices[1].role == "qCMOS"
+
+    # A renamed card still holds its instance id, so the next Add must
+    # avoid it: naming the third card ``camera2`` would collide in the
+    # file (duplicate instance_id) while looking free on the screen.
+    manager.view.role_committed.emit("camera", "reference")
+    assert manager.add_device("camera.virtual") == "camera3"
+    assert [(item.instance_id, item.role) for item in manager.devices] == [
+        ("camera", "reference"),
+        ("camera2", "qCMOS"),
+        ("camera3", "camera3"),
+    ]
+    # The apparatus grammar (duplicate instance ids refused) accepts the draft.
+    assert InstallationConfig(tuple(manager.devices)).devices == tuple(manager.devices)
 
 
 def test_changing_device_type_starts_from_that_types_own_defaults(manager) -> None:
@@ -1026,7 +1040,8 @@ def test_remote_toggle_publishes_and_withdraws_on_the_fabric(tmp_path) -> None:
     session = SimpleNamespace(
         installation=SimpleNamespace(
             devices={"rf": SimpleNamespace(device=source)}, failures={}
-        )
+        ),
+        device_use=DeviceUseCoordinator(),
     )
     view = _ManagerView()
     manager = DeviceManagerPresenter(
@@ -1092,7 +1107,8 @@ def test_a_published_device_refuses_local_control_until_withdrawn(tmp_path) -> N
     session = SimpleNamespace(
         installation=SimpleNamespace(
             devices={"rf": SimpleNamespace(device=source)}, failures={}
-        )
+        ),
+        device_use=DeviceUseCoordinator(),
     )
     view = _ManagerView()
     opened: list[str] = []
@@ -1129,6 +1145,11 @@ def test_a_self_serving_type_is_published_as_its_client_shape(tmp_path) -> None:
     the CLIENT's (host, port).  The family's announce hook does that
     mapping, and the presenter substitutes this machine's LAN address for
     the loopback the hook returns.
+
+    What is announced is where the server IS -- the accepted apparatus the
+    loaded device was built from.  A port edited on the form but not yet
+    applied is a draft; announcing it would send the peer to a server
+    that does not exist.
     """
 
     from zlc_atom.devices.remote.fabric import list_remote_devices, local_lan_ip
@@ -1154,7 +1175,8 @@ def test_a_self_serving_type_is_published_as_its_client_shape(tmp_path) -> None:
     session = SimpleNamespace(
         installation=SimpleNamespace(
             devices={"board": SimpleNamespace(device=object())}, failures={}
-        )
+        ),
+        device_use=DeviceUseCoordinator(),
     )
     view = _ManagerView()
     manager = DeviceManagerPresenter(
@@ -1165,6 +1187,12 @@ def test_a_self_serving_type_is_published_as_its_client_shape(tmp_path) -> None:
     )
     assert manager.toggle_lifecycle() is True
     try:
+        # Edited on the form, committed to the draft, NOT applied.
+        view.values["board"]["port"] = 18999
+        assert manager.commit_parameters("board", "port") is True
+        assert manager.devices[0].parameters["port"] == 18999
+        assert view.lifecycle[0] == "Apply device changes"
+
         assert manager.toggle_remote("board") is True
         announcer = manager._announcer
         assert announcer is not None
@@ -1175,7 +1203,10 @@ def test_a_self_serving_type_is_published_as_its_client_shape(tmp_path) -> None:
         assert record["parameters"] == {
             "host": local_lan_ip(),
             "port": 18899,
-        }
+        }, "the accepted apparatus is announced, never the draft"
+        assert manager.devices[0].parameters["port"] == 18999, (
+            "the draft stays on the form"
+        )
     finally:
         if manager._announcer is not None:
             manager._announcer.close()
@@ -1216,7 +1247,8 @@ def test_each_published_device_reads_only_its_own_log(tmp_path) -> None:
     session = SimpleNamespace(
         installation=SimpleNamespace(
             devices={"rf": SimpleNamespace(device=source)}, failures={}
-        )
+        ),
+        device_use=DeviceUseCoordinator(),
     )
     view = _ManagerView()
     manager = DeviceManagerPresenter(
@@ -1302,7 +1334,8 @@ def test_a_local_server_device_s_log_includes_its_declared_channels(tmp_path) ->
     session = SimpleNamespace(
         installation=SimpleNamespace(
             devices={"board": SimpleNamespace(device=object())}, failures={}
-        )
+        ),
+        device_use=DeviceUseCoordinator(),
     )
     view = _ManagerView()
     manager = DeviceManagerPresenter(
@@ -1466,4 +1499,200 @@ def test_a_discovery_authored_type_is_not_in_the_hand_add_picker(tmp_path) -> No
             "the type stays in the catalog for discovery to author"
         )
     finally:
+        manager.close()
+
+
+class _Tunable:
+    """The tunable quartet in memory: what the fabric's generic plane serves."""
+
+    def __init__(self, value: int) -> None:
+        self.value = value
+        self.closed = False
+
+    def tunable_fields(self):
+        return ()
+
+    def tune(self, name, value):
+        if self.closed:
+            raise RuntimeError("closed device")
+        self.value = value
+        return value
+
+    def tunable_values(self):
+        return {"value": self.value}
+
+    def settings_provenance(self):
+        return {"device_session_id": "memory", "settings_epoch": 0}
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _tunable_catalog():
+    """One tunable type whose factory builds a fresh object per (re)build."""
+
+    from zlc_atom.authoring import AuthoringField, AuthoringSchema
+    from zlc_atom.install import (
+        DeviceCatalogSnapshot,
+        DeviceTypeDescriptor,
+        InstalledLeaf,
+    )
+
+    schema = AuthoringSchema((AuthoringField("value", "int", "Value", 1),))
+
+    def factory(_context, key, config):
+        device = _Tunable(schema.project_values(config)["value"])
+        return InstalledLeaf(key, "test.tunable", device, {}, closer=device.close)
+
+    return DeviceCatalogSnapshot(
+        (DeviceTypeDescriptor("test.tunable", "test", schema, (), factory=factory),),
+        (),
+    )
+
+
+def _tunable_apparatus(value: int = 1) -> InstallationConfig:
+    return InstallationConfig(
+        (DeviceInstanceConfig("rf", "detuning", "test.tunable", {"value": value}),)
+    )
+
+
+def _app_reconcile(session, candidate, keys):
+    """The embedding's reconcile contract: a maintenance barrier over the
+    plan's affected keys before any device closes (ARCHITECTURE_DESIGN §6)."""
+
+    plan = session.plan_device_reconcile(candidate, close_keys=frozenset(keys))
+    barrier = session.device_use.begin_maintenance(
+        object(), "Device Manager change", tuple(sorted(plan.affected_keys))
+    )
+
+    def work():
+        try:
+            session.reconcile_devices(plan)
+            return session
+        finally:
+            barrier.release()
+
+    return work
+
+
+def test_publication_and_local_use_exclude_each_other_device_wide(tmp_path) -> None:
+    """Published means handed over, in both directions.
+
+    Publishing a device a local Logic occupies would put two hands on one
+    knob -- the peer's tune landing on a field the scan protects -- so it
+    is refused by name and nothing is announced.  Once published, no local
+    Logic or command may take the device until Remote is withdrawn; the
+    exclusion is the device, not a field, and it lives in the session's own
+    DeviceUse rather than in a second owner table.
+    """
+
+    from zlc_atom.devices.remote.fabric import RemoteTunableDevice
+    from zlc_workbench.session import ExperimentSession
+
+    catalog = _tunable_catalog()
+    initial = _tunable_apparatus()
+    session = ExperimentSession.from_config(tmp_path, initial, catalog=catalog)
+    view = _ManagerView()
+    manager = DeviceManagerPresenter(
+        view,
+        tmp_path / "apparatus.json",
+        catalog=catalog,
+        initial_config=initial,
+        initialize_session=lambda _candidate: session,
+    )
+    assert manager.toggle_lifecycle() is True
+    device = session.installation.device("rf")
+
+    def logic(label: str):
+        return session.device_use.prepare_logic(
+            object(),
+            label,
+            (DeviceClaim("rf", "rf", device, ("value",), exclusive=False),),
+            stop=lambda _reason: None,
+            superseded=lambda: None,
+        ).commit()
+
+    try:
+        scan = logic("active scan")
+        assert manager.toggle_remote("rf") is False
+        assert "active scan" in view.status[-1][1]
+        assert manager._announcer is None, "nothing was announced"
+        assert view.remoted == ()
+        assert scan.release() is True
+
+        assert manager.toggle_remote("rf") is True
+        with pytest.raises(DeviceUseBusy, match="remote publication of rf"):
+            logic("new scan")
+        with pytest.raises(DeviceUseBusy, match="remote publication of rf"):
+            session.acquire_device_command(object(), "local control", "rf", device)
+        # The peer, meanwhile, is the one on the knob.
+        peer = RemoteTunableDevice(
+            host="127.0.0.1", port=manager._announcer.port, instance_id="rf"
+        )
+        assert peer.tune("value", 5) == 5
+        assert device.value == 5
+
+        assert manager.toggle_remote("rf") is True
+        assert logic("scan after withdraw").release() is True
+        session.device_use.assert_idle()
+    finally:
+        if manager._announcer is not None:
+            manager._announcer.close()
+        manager.close()
+
+
+def test_a_published_device_is_not_rebuilt_under_its_peer(tmp_path) -> None:
+    """A rebuild of a published device is refused by name until Remote is withdrawn.
+
+    The publication holds the device the way a local command does, so the
+    reconcile's maintenance barrier over the affected leaf is refused --
+    the fabric never serves a closed object, and the peer never lands on a
+    device this machine has replaced behind its back.  Withdrawn, applied,
+    published again: the fabric serves the CURRENT device.
+    """
+
+    from zlc_atom.devices.remote.fabric import RemoteTunableDevice
+    from zlc_workbench.session import ExperimentSession
+
+    catalog = _tunable_catalog()
+    initial = _tunable_apparatus()
+    session = ExperimentSession.from_config(tmp_path, initial, catalog=catalog)
+    view = _ManagerView()
+    manager = DeviceManagerPresenter(
+        view,
+        tmp_path / "apparatus.json",
+        catalog=catalog,
+        initial_config=initial,
+        initialize_session=lambda _candidate: session,
+        prepare_reconcile=_app_reconcile,
+    )
+    assert manager.toggle_lifecycle() is True
+    original = session.installation.device("rf")
+    try:
+        assert manager.toggle_remote("rf") is True
+        view.values["rf"]["value"] = 2
+        assert manager.commit_parameters("rf", "value") is True
+        assert view.lifecycle[0] == "Apply device changes"
+
+        assert manager.toggle_lifecycle() is False
+        assert "remote publication of rf" in view.status[-1][1]
+        assert session.installation.device("rf") is original
+        assert not original.closed
+        peer = RemoteTunableDevice(
+            host="127.0.0.1", port=manager._announcer.port, instance_id="rf"
+        )
+        assert peer.tune("value", 7) == 7
+        assert original.value == 7, "the fabric still serves the live device"
+
+        assert manager.toggle_remote("rf") is True
+        assert manager.toggle_lifecycle() is True
+        current = session.installation.device("rf")
+        assert current is not original
+        assert original.closed
+        assert manager.toggle_remote("rf") is True
+        assert peer.tune("value", 9) == 9
+        assert current.value == 9, "published again, the fabric serves the new device"
+    finally:
+        if manager._announcer is not None:
+            manager._announcer.close()
         manager.close()

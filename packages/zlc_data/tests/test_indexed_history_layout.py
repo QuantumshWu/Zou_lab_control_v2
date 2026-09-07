@@ -12,15 +12,22 @@ from zlc_data import (
     SITE,
     AxisId,
     AxisSpec,
+    BlockId,
+    DatasetRevision,
+    DatasetRevisionRef,
     DatasetSchema,
     DomainSpec,
+    StreamGenerationId,
     ValidityContract,
     ValueSchema,
+    owned_snapshot_from_arrays,
 )
 from zlc_data.snapshot_projection import (
     PRIMARY_INDEX_AXIS_ID,
     indexed_history_layout,
     indexed_schemas_compatible,
+    restrict_snapshot,
+    value_selection,
 )
 
 
@@ -109,7 +116,7 @@ def test_a_schema_without_a_shot_index_has_no_layout() -> None:
         ((-1.5, 0.0), (0, 1), "integer"),
         ((0, -1), (0, 1), "ordered"),
         ((-1, 0), (0, 0, 1), "same event rows"),
-        ((-2, -1), (0, 1), "latest offset 0"),
+        ((-1, 1), (0, 1), "latest offset 0"),
     ),
 )
 def test_a_broken_shot_index_is_refused_not_read_leniently(
@@ -117,6 +124,50 @@ def test_a_broken_shot_index_is_refused_not_read_leniently(
 ) -> None:
     with pytest.raises(ValueError, match=reason):
         indexed_history_layout(_schema(offsets, codes))
+
+
+def test_a_history_restricted_to_past_shots_keeps_their_coordinates() -> None:
+    """A Scope on the source index is a Scope like any other.
+
+    Runtime materializes the latest shot as 0, and restricting that Dataset
+    to an earlier shot keeps the shot's coordinate, -1, the way restricting
+    a site axis keeps the site's.  The reader took "the last offset is 0"
+    for part of the contract and refused the cropped history as a broken
+    producer, so a Curve scoped to a past shot the history fully held could
+    not be drawn.  What it refuses is an offset ABOVE 0: an absolute
+    ordinal that never became a relative coordinate.
+    """
+
+    schema = _schema(
+        (-2, -1, 0),
+        (0, 0, 1, 1, 2, 2),
+        frame_coordinates=(0, 1),
+        frame_codes=(0, 1, 0, 1, 0, 1),
+    )
+    source = owned_snapshot_from_arrays(
+        schema,
+        np.arange(12.0).reshape(1, 6, 2),
+        7,
+        block_id="history",
+        stream_generation="g",
+    )
+    past = restrict_snapshot(
+        source,
+        value_selection(schema, {PRIMARY_INDEX_AXIS_ID: -1}),
+        reference_for=lambda derived: DatasetRevisionRef(
+            BlockId("past"),
+            StreamGenerationId("g"),
+            derived.fingerprint,
+            DatasetRevision(7),
+        ),
+    )
+    np.testing.assert_array_equal(past.block.values, [[[4.0, 5.0], [6.0, 7.0]]])
+
+    layout = indexed_history_layout(past.block.schema)
+    assert layout is not None
+    assert layout.cells.tolist() == [-1]
+    assert layout.inner_count == 2
+    assert indexed_schemas_compatible(schema, past.block.schema)
 
 
 def test_the_event_codes_must_repeat_under_every_shot() -> None:

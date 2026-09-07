@@ -1,8 +1,10 @@
 """Figure archives round-trip the uncertainty display parameters.
 
-The band and the cumulative trace are panel parameters, so they travel in
-the recipe's parameters block: a figure saved with the band on reopens with
-it on, and archives from before the parameters existed complete to off.
+The band and the trailing span are panel parameters, so they travel in the
+recipe's parameters block: a figure saved with them reopens with them, and
+a recipe that omits one is completed from the parameter schema's own
+default -- the band ON, the span one -- by the writer, never by a second
+default kept here.
 """
 from __future__ import annotations
 

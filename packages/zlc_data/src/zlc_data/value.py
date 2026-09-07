@@ -373,8 +373,9 @@ def expand_dataset_validity(
 def repeat_validity_counts(
     validity: Valid | Invalid | CellValidity | DatasetComponentValidity,
     schema: DatasetSchema,
-) -> dict[str, int]:
-    """How many coordinates of each Repeat axis are wholly valid, by axis name.
+) -> tuple[int, ...]:
+    """How many coordinates of each Repeat axis are wholly valid, one count
+    per axis in the schema's own order.
 
     A repeat is a sample, and the number a reader wants beside a repeat axis
     is how many samples have LANDED whole: every point and every component
@@ -382,6 +383,11 @@ def repeat_validity_counts(
     or one with any invalid cell -- the repeat still being played, a shot
     the pulse faulted on -- is not counted.  Decided on the compact form: a
     dense expansion over a frame's pixels would be as large as the frames.
+
+    By POSITION, never by name.  Only an axis's id is unique: two Repeat
+    axes may both be called "repeat", and so may a Point axis, and a count
+    keyed by name silently overwrote the first with the second and lent a
+    Repeat axis's count to a Point axis of the same name.
     """
 
     _validate_dataset_validity(validity, schema)
@@ -390,13 +396,13 @@ def repeat_validity_counts(
         row_valid = np.full(rows, isinstance(validity, Valid), dtype=bool)
     else:
         row_valid = np.asarray(validity.mask).reshape(rows, -1).all(axis=1)
-    counts: dict[str, int] = {}
+    counts: list[int] = []
     for axis in schema.repeat_domain.axes:
         codes = schema.repeat_domain.codes(axis.axis_id)
         present = np.bincount(codes, minlength=axis.size) > 0
         broken = np.bincount(codes[~row_valid], minlength=axis.size) > 0
-        counts[str(axis.name)] = int(np.count_nonzero(present & ~broken))
-    return counts
+        counts.append(int(np.count_nonzero(present & ~broken)))
+    return tuple(counts)
 
 
 def compact_dataset_validity(

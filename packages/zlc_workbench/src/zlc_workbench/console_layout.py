@@ -4,17 +4,27 @@ The console owns composition, so its reusable pipeline belongs here rather
 than in the device, plot, or UI packages.  This module is the only JSON shell:
 the presenter deals in typed entries and asks this document to parse or write
 them.
+
+A panel is written down with the identity it had on the board.  A panel is a
+producer -- its Bridge publishes the ROI and fit outputs it derives under
+``@logic/<panel id>/<output>`` -- and a downstream panel or logic row names
+that producer by that spelling; a document that kept the downstream name and
+dropped the upstream identity could not say which panel it was reading.
+Loading never reuses a written identity: the console mints fresh ones and
+:func:`load_layout` respells every reference in the document to them.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 from typing import Any
 
 from zlc_durable import write_readable_json
+from zlc_plot.kinds import AxisDomain, AxisRef
+from zlc_plot.semantics import FATE_PREFIX, fate_field_name
 
 from .logic import (
     LogicBinding,
@@ -22,6 +32,7 @@ from .logic import (
     artifact_input_specs,
     dataset_inputs,
     device_key_options,
+    split_signal_key,
     stable_signal_key,
 )
 from .panel_state import PanelState
@@ -29,9 +40,62 @@ from .panel_state import PanelState
 
 LAYOUT_FORMAT = "zlc.console-board"
 
+#: How a panel's identity is spelled.  The console mints one from its
+#: monotonic serial; this module reads the same spelling back to tell a
+#: reference to a panel from a reference to a logic row.
+PANEL_ID_PREFIX = "panel-"
+
+#: Saved fate keys spelled in the axis vocabulary that preceded the unified
+#: Dataset domains, keyed by the prefix that identifies each: the axis a key
+#: names is kept as written, only its domain is respelled.
+_RENAMED_FATE_PREFIXES = {
+    f"{FATE_PREFIX}point_dimension:": f"{FATE_PREFIX}{AxisDomain.POINT.value}:",
+    f"{FATE_PREFIX}data:": f"{FATE_PREFIX}{AxisDomain.CELL_DATA.value}:",
+}
+#: The one old fate that named a whole domain rather than an axis.  Which
+#: Repeat axes a signal has is the data's to say, so this key survives the
+#: parse and is expanded onto today's axes when the board is loaded.
+REPEAT_DOMAIN_FATE = f"{FATE_PREFIX}{AxisDomain.REPEAT.value}"
+_FATE_DOMAINS = frozenset(domain.value for domain in AxisDomain)
+
 
 class LayoutError(ValueError):
     """A file cannot describe one current TaskConsole board."""
+
+
+def panel_id_for(serial: int) -> str:
+    """The identity of the panel minted from one console serial."""
+
+    return f"{PANEL_ID_PREFIX}{int(serial)}"
+
+
+def _names_a_panel(producer: str) -> bool:
+    return (
+        producer.startswith(PANEL_ID_PREFIX)
+        and producer[len(PANEL_ID_PREFIX):].isdigit()
+    )
+
+
+def current_fate_key(key: str) -> str:
+    """The current spelling of one saved semantic key.
+
+    A non-fate key is the plot kind's own vocabulary and passes through (the
+    projection checks it against the kind).  A fate key is respelled by its
+    old prefix, kept when it already reads in today's ``fate:<domain>:<axis>``
+    grammar, and refused by name otherwise: a saved fate nobody can read is
+    a saved fate silently lost, and the operator would only learn that from
+    a plot drawn along the wrong axis.
+    """
+
+    if not key.startswith(FATE_PREFIX) or key == REPEAT_DOMAIN_FATE:
+        return key
+    for old, new in _RENAMED_FATE_PREFIXES.items():
+        if key.startswith(old):
+            return new + key[len(old):]
+    domain, _separator, axis_id = key[len(FATE_PREFIX):].partition(":")
+    if domain in _FATE_DOMAINS and axis_id.strip():
+        return key
+    raise LayoutError(f"unknown fate key {key!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +150,12 @@ class LayoutDocument:
 
     panels: tuple[PanelState, ...]
     logic: tuple[LogicLayoutEntry, ...]
+    #: The identity each panel had on the board, in the order of ``panels``.
+    #: Required, not defaulted: a writer that does not know its panels'
+    #: identities would write ones that look right and are not, and the
+    #: file would mis-wire on load; only the reader may make identities up
+    #: (:meth:`from_tree`, for a file written before they were kept).
+    panel_ids: tuple[str, ...]
 
     def __post_init__(self) -> None:
         panels = tuple(self.panels)
@@ -97,8 +167,14 @@ class LayoutDocument:
         ids = tuple(item.node_id for item in logic)
         if len(set(ids)) != len(ids):
             raise LayoutError("logic node_id values must be unique")
+        panel_ids = tuple(str(item).strip() for item in self.panel_ids)
+        if len(panel_ids) != len(panels):
+            raise LayoutError("a layout names one panel_id per panel")
+        if any(not item for item in panel_ids) or len(set(panel_ids)) != len(panel_ids):
+            raise LayoutError("panel_id values must be non-empty and unique")
         object.__setattr__(self, "panels", panels)
         object.__setattr__(self, "logic", logic)
+        object.__setattr__(self, "panel_ids", panel_ids)
 
     @classmethod
     def from_tree(cls, tree: object) -> "LayoutDocument":
@@ -106,15 +182,24 @@ class LayoutDocument:
         if document.get("format") != LAYOUT_FORMAT:
             raise LayoutError("that file is not a saved board")
         _exact_fields(document, {"format", "panels", "logic"}, "layout")
-        panels = tuple(
+        entries = tuple(
             _panel_from_tree(entry, index)
             for index, entry in enumerate(_sequence(document["panels"], "panels"))
         )
+        named = tuple(panel_id for panel_id, _state in entries if panel_id is not None)
+        if named and len(named) != len(entries):
+            raise LayoutError("either every panel entry carries a panel_id or none does")
+        if not named:
+            # A board written before identities were kept: its panels were
+            # minted in saved order on a fresh console, so the first entry is
+            # the first identity that console ever minted -- which is all
+            # such a file can mean, and enough for its references to resolve.
+            named = tuple(panel_id_for(index + 1) for index in range(len(entries)))
         logic = tuple(
             _logic_from_tree(entry, index)
             for index, entry in enumerate(_sequence(document["logic"], "logic"))
         )
-        return cls(panels, logic)
+        return cls(tuple(state for _panel_id, state in entries), logic, named)
 
     @classmethod
     def read(cls, path: str | Path) -> "LayoutDocument":
@@ -124,7 +209,10 @@ class LayoutDocument:
     def to_tree(self) -> dict[str, Any]:
         return {
             "format": LAYOUT_FORMAT,
-            "panels": [state.document() for state in self.panels],
+            "panels": [
+                {"panel_id": panel_id, **state.document()}
+                for panel_id, state in zip(self.panel_ids, self.panels, strict=True)
+            ],
             "logic": [entry.to_tree() for entry in self.logic],
         }
 
@@ -134,10 +222,27 @@ class LayoutDocument:
 
 @dataclass(frozen=True, slots=True)
 class ResolvedLayout:
-    """All stopped row drafts after catalog/schema/contract resolution."""
+    """All stopped row drafts after catalog/schema/contract resolution.
+
+    The panels still carry the document's own identities and spellings;
+    :func:`load_layout` puts them onto the identities of one load.
+    """
 
     logic: tuple[LogicBinding, ...]
     panels: tuple[PanelState, ...]
+    panel_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedLayout:
+    """A resolved board on fresh panel identities, ready to prepare."""
+
+    logic: tuple[LogicBinding, ...]
+    panels: tuple[PanelState, ...]
+    panel_ids: tuple[str, ...]
+    #: One sentence per connection or fate the document had and this board
+    #: cannot carry, for the status strip: nothing is dropped silently.
+    notes: tuple[str, ...]
 
 
 def resolve_layout(
@@ -273,7 +378,122 @@ def resolve_layout(
             raise LayoutError(
                 f"panel {index + 1}: plot kind {state.kind!r} is not available"
             )
-    return ResolvedLayout(tuple(bindings), document.panels)
+    return ResolvedLayout(tuple(bindings), document.panels, document.panel_ids)
+
+
+def load_layout(
+    resolved: ResolvedLayout,
+    *,
+    panel_ids: Sequence[str],
+    schema_for: Callable[[str], object | None],
+) -> LoadedLayout:
+    """Put a resolved board onto fresh panel identities, on today's data.
+
+    ``panel_ids`` are the identities the console minted for this load, in
+    saved order.  Every ``@logic/<saved panel id>/<output>`` in the document
+    -- a panel's signal, its overlay, a logic row's source -- is respelled to
+    the fresh identity, because the producer behind such a signal is the
+    loaded panel's own Bridge, and it publishes under the fresh one.  A
+    reference to a panel the board does not carry cannot be resolved: it is
+    dropped (the field left blank, the panel or row kept for rewiring) and
+    said in ``notes``.
+
+    ``schema_for(signal)`` is what that signal publishes today, or None.  A
+    saved whole-domain repeat fate names an axis only the data can name, so
+    it is expanded onto every Repeat axis of that schema; with no schema, or
+    no Repeat axis, it is dropped and said.
+    """
+
+    fresh = tuple(str(panel_id).strip() for panel_id in panel_ids)
+    if len(fresh) != len(resolved.panels):
+        raise LayoutError("a load mints one fresh panel_id per saved panel")
+    renamed = dict(zip(resolved.panel_ids, fresh, strict=True))
+    notes: list[str] = []
+    panels: list[PanelState] = []
+    for state in resolved.panels:
+        who = f"panel {state.title!r}"
+        signal = _respelled_reference(state.signal, renamed, who, notes)
+        overlay_signal = _respelled_reference(
+            state.overlay_signal, renamed, f"{who} overlay", notes
+        )
+        panels.append(
+            replace(
+                state,
+                signal=signal,
+                overlay_signal=overlay_signal,
+                semantic=_repeat_fate_on_todays_axes(
+                    state.semantic, signal, schema_for, who, notes
+                ),
+            )
+        )
+    logic = tuple(
+        replace(
+            binding,
+            draft=replace(
+                binding.draft,
+                source_signal=_respelled_reference(
+                    binding.draft.source_signal,
+                    renamed,
+                    f"logic {binding.node_id}",
+                    notes,
+                ),
+            ),
+        )
+        for binding in resolved.logic
+    )
+    return LoadedLayout(logic, tuple(panels), fresh, tuple(notes))
+
+
+def _respelled_reference(
+    reference: str,
+    renamed: Mapping[str, str],
+    who: str,
+    notes: list[str],
+) -> str:
+    parts = split_signal_key(reference)
+    if parts is None:
+        return reference
+    producer, output = parts
+    if producer in renamed:
+        return stable_signal_key(renamed[producer], output)
+    if _names_a_panel(producer):
+        notes.append(
+            f"{who} read {reference}, a panel this board does not carry; "
+            "the connection was dropped"
+        )
+        return ""
+    return reference
+
+
+def _repeat_fate_on_todays_axes(
+    semantic: Mapping[str, Any],
+    signal: str,
+    schema_for: Callable[[str], object | None],
+    who: str,
+    notes: list[str],
+) -> Mapping[str, Any]:
+    if REPEAT_DOMAIN_FATE not in semantic:
+        return semantic
+    current = dict(semantic)
+    fate = current.pop(REPEAT_DOMAIN_FATE)
+    schema = schema_for(signal) if signal else None
+    axes = () if schema is None else tuple(schema.repeat_domain.axes)
+    if not axes:
+        reason = (
+            "it has no signal to name them"
+            if not signal
+            else f"nothing is publishing {signal} to name them"
+            if schema is None
+            else f"{signal} has no Repeat axis"
+        )
+        notes.append(
+            f"{who}: its saved repeat fate {fate!r} names the Repeat axes and "
+            f"{reason}; the fate was dropped"
+        )
+        return current
+    for axis in axes:
+        current.setdefault(fate_field_name(AxisRef.repeat(str(axis.axis_id))), fate)
+    return current
 
 
 def _mapping(value: object, where: str) -> Mapping[str, Any]:
@@ -335,13 +555,37 @@ def _logic_from_tree(value: object, index: int) -> LogicLayoutEntry:
     )
 
 
-def _panel_from_tree(value: object, index: int) -> PanelState:
+def _panel_from_tree(value: object, index: int) -> tuple[str | None, PanelState]:
     where = f"panel entry {index + 1}"
-    entry = _mapping(value, where)
+    entry = dict(_mapping(value, where))
+    panel_id = None
+    if "panel_id" in entry:
+        panel_id = _string(entry.pop("panel_id"), f"{where} panel_id").strip()
+        if not panel_id:
+            raise LayoutError(f"{where} panel_id must not be blank")
+    if isinstance(entry.get("semantic"), Mapping):
+        entry["semantic"] = _current_semantic(entry["semantic"], where)
     try:
-        return PanelState.from_document(entry)
+        return panel_id, PanelState.from_document(entry)
     except Exception as error:
         raise LayoutError(f"{where}: {error}") from error
+
+
+def _current_semantic(semantic: Mapping[str, Any], where: str) -> dict[str, Any]:
+    current: dict[str, Any] = {}
+    spelled: dict[str, str] = {}
+    for key, value in semantic.items():
+        try:
+            name = current_fate_key(str(key))
+        except LayoutError as error:
+            raise LayoutError(f"{where}: {error}") from error
+        if name in current:
+            raise LayoutError(
+                f"{where}: fate keys {spelled[name]!r} and {key!r} both mean {name!r}"
+            )
+        current[name] = value
+        spelled[name] = str(key)
+    return current
 
 
 def _string(value: object, where: str) -> str:
@@ -358,9 +602,15 @@ def _boolean(value: object, where: str) -> bool:
 
 __all__ = [
     "LAYOUT_FORMAT",
+    "PANEL_ID_PREFIX",
+    "REPEAT_DOMAIN_FATE",
     "LayoutDocument",
     "LayoutError",
+    "LoadedLayout",
     "LogicLayoutEntry",
     "ResolvedLayout",
+    "current_fate_key",
+    "load_layout",
+    "panel_id_for",
     "resolve_layout",
 ]

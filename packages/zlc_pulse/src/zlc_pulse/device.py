@@ -19,13 +19,12 @@ from .compile import (
     slot_operand_width,
 )
 from .model import MAXIMUM_REPEAT_COUNT, PORT_DAC, PulseSequence, PulseTarget
-from .schedule import trigger_edge_ticks
+from .schedule import bracket_iterations, trigger_edge_ticks
 from .transport.base import DEFAULT_OBSERVER_INTERVAL, RegisterTransport
 from .wire import (
     CMD_FIRE,
     CMD_LOAD,
     CMD_SAFE,
-    CTRL_WORDS,
     CtrlWords,
     STATUS_DONE,
     STATUS_ERROR,
@@ -37,7 +36,6 @@ from .wire import (
     build_fingerprint,
     pack_program,
     pack_scan_rows,
-    region_bases,
 )
 
 
@@ -460,10 +458,18 @@ class PulseStreamer(ConfigValueHolder):
             self._require_open()
             self._check_register_layout_locked()
     def transport_self_test(self, *, count: int = 16) -> None:
+        """Write, read back and clear a pattern over the CTRL scratch words.
+
+        The pattern stays inside the scratch extent the geometry declares:
+        the word above it is the layout fingerprint the board answers the
+        handshake with, and a test that wrote it read its own pattern back
+        happily while leaving the next layout check refusing the board.
+        """
+
         with self._lock:
             self._require_open()
             self._check_register_layout_locked()
-            length = max(2, min(int(count), CTRL_WORDS - self.geom.ctrl_scratch_base))
+            length = max(2, min(int(count), self.geom.ctrl_scratch_words))
             base = self.geom.ctrl_scratch_base
             pattern = tuple((base + i, (0xC0DE0000 + i) & 0xFFFFFFFF) for i in range(length))
             try:
@@ -1050,13 +1056,12 @@ class PulseStreamer(ConfigValueHolder):
             # sweep seam, ends on the real terminal row, and remains bounded by
             # one sweep plus ``depth`` whole-Pulse executions.
             execution_rows = warmup + one_sweep
-        # The same argument bounds an internal PulseBracket: depth+1 bodies are
-        # enough to prove overflow or periodic boundedness.
-        checked_program = (
-            program
-            if program.loop_count <= depth + 1
-            else replace(program, loop_count=depth + 1)
-        )
+        # The Bracket inside a Pulse is bounded the same way, but at its TRUE
+        # ticks: the first bodies -- the possibly different first replay and
+        # depth + 1 identical ones -- and the last, with the loop's real
+        # length between them, so every later Pulse still lands where the
+        # board plays it.  See bracket_iterations.
+        kept_bodies = depth + 2
 
         physical_to_logical = {
             physical: logical
@@ -1079,11 +1084,12 @@ class PulseStreamer(ConfigValueHolder):
         # already part of this schedule.  DAC state may end away from its safe
         # code, which is why its explicit terminal descriptor is added below.
         edges = trigger_edge_ticks(
-            checked_program,
+            program,
             asked,
             execution_rows,
             run_repeats=1,
             scan_repeats=1,
+            bracket_bodies=kept_bodies,
         )
         for (bit, delay), logical in zip(ttl, asked):
             self._check_delay_window(
@@ -1102,24 +1108,24 @@ class PulseStreamer(ConfigValueHolder):
                         base,
                         coefficients,
                         point,
-                        checked_program.scan_coeff_frac_bits,
+                        program.scan_coeff_frac_bits,
                     )
                     for base, coefficients in zip(
-                        checked_program.ticks,
-                        checked_program.tick_slot_coeffs,
+                        program.ticks,
+                        program.tick_slot_coeffs,
                     )
                 )
-                loop_start = effective[checked_program.loop_start_index]
+                loop_start = effective[program.loop_start_index]
                 loop_end = evaluate_affine_tick(
-                    checked_program.loop_end_tick,
-                    checked_program.loop_end_slot_coeffs,
+                    program.loop_end_tick,
+                    program.loop_end_slot_coeffs,
                     point,
-                    checked_program.scan_coeff_frac_bits,
+                    program.scan_coeff_frac_bits,
                 )
                 span = loop_end - loop_start
                 final = effective[-1]
-                total = final + (checked_program.loop_count - 1) * span
-                for segment in checked_program.bus_segments:
+                total = final + (program.loop_count - 1) * span
+                for segment in program.bus_segments:
                     bus = int(segment.bus_index)
                     if bus not in by_bus:
                         continue
@@ -1127,20 +1133,22 @@ class PulseStreamer(ConfigValueHolder):
                         segment.start_tick,
                         segment.start_tick_coeffs,
                         point,
-                        checked_program.scan_coeff_frac_bits,
+                        program.scan_coeff_frac_bits,
                     )
                     if start < loop_start:
                         by_bus[bus].append(run_offset + start)
                     elif start < loop_end:
                         by_bus[bus].extend(
                             run_offset + start + iteration * span
-                            for iteration in range(checked_program.loop_count)
+                            for iteration in bracket_iterations(
+                                program.loop_count, kept_bodies
+                            )
                         )
                     else:
                         by_bus[bus].append(
                             run_offset
                             + start
-                            + (checked_program.loop_count - 1) * span
+                            + (program.loop_count - 1) * span
                         )
                 run_offset += total
             # Finite completion captures one final SAFE descriptor per bus.

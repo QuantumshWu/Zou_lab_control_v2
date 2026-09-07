@@ -1,49 +1,19 @@
-"""Resolve a saved Workbench panel identity through zlc_plot's public API."""
+"""Resolve a saved Workbench panel identity through zlc_plot's public API.
+
+This layer fixes WHICH kind (and, for a grid, which cell kind) a saved
+panel is; what that kind shows for the data -- every axis choice -- is
+the one default table in ``zlc_plot._kinds.defaults``, read unaltered.  A
+second choice made here, however small, is a second answer to the same
+question, and the library's standalone picture and the console's diverged
+by exactly that much.
+"""
 
 from __future__ import annotations
 
-from zlc_plot import GRID_CELL_KINDS, PlotKind, fitting_spec, updated_spec
-from zlc_plot.semantics import axis_choices_for_schema, axis_size
-from zlc_plot.specs import semantic_spec
+from zlc_plot import GRID_CELL_KINDS, PlotKind, fitting_spec
 
 
 __all__ = ["fitting_panel_spec"]
-
-
-def _dense_series_x(schema: object, spec: object) -> object:
-    """Land a defaulted series x on an axis that can actually carry a series.
-
-    A camera frame's Point domain may have one row, and the library's curve default
-    walks the point domain -- so "1D vector on a camera signal" opened as one
-    invisible point.  The size authority is ``zlc_plot.semantics.axis_size``
-    (the same one the semantic editor's choices use), and the re-point goes
-    through ``updated_spec``, the one semantic composition authority, so no
-    second spec-editing path exists here.
-    """
-
-    semantic = semantic_spec(spec)
-    if getattr(semantic, "kind", None) is not PlotKind.CURVE:
-        return spec
-    x = getattr(semantic, "x", None)
-    if x is None or axis_size(schema, x) > 1:
-        return spec
-    taken = {
-        value
-        for value in (
-            getattr(semantic, "y", None),
-            getattr(semantic, "group", None),
-            getattr(spec, "facet", None),
-        )
-        if value is not None
-    }
-    for candidate in axis_choices_for_schema(schema):
-        if candidate in taken or axis_size(schema, candidate) <= 1:
-            continue
-        try:
-            return updated_spec(schema, spec, "x", candidate)
-        except Exception:
-            continue
-    return spec
 
 
 def fitting_panel_spec(
@@ -58,8 +28,7 @@ def fitting_panel_spec(
     if resolved is not PlotKind.FACET_GRID:
         if cell_text:
             raise ValueError("only a FacetGrid panel has a cell kind")
-        spec = fitting_spec(schema, resolved)
-        return None if spec is None else _dense_series_x(schema, spec)
+        return fitting_spec(schema, resolved)
 
     cell = None
     if cell_text:
@@ -71,9 +40,4 @@ def fitting_panel_spec(
             )
     # An empty cell kind means the DATA decides, and either way the grid and
     # its cell are composed once, in zlc_plot: this layer only says which.
-    outer_spec = fitting_spec(schema, PlotKind.FACET_GRID, cell=cell)
-    if outer_spec is None:
-        return None
-    return _dense_series_x(schema, outer_spec)
-
-
+    return fitting_spec(schema, PlotKind.FACET_GRID, cell=cell)

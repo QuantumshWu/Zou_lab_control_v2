@@ -32,7 +32,7 @@ from zlc_data import (
     REPEAT,
     SCAN_POINT,
 )
-from .plan import scan_axis_id
+from .plan import scan_axis_ids
 from zlc_runtime import (
     DatasetCoverage,
     DatasetOutputDeclaration,
@@ -164,24 +164,21 @@ def scan_dataset_schema(
     execution_axis_ids = {_SCAN_REPEAT_AXIS_ID, _RUN_REPEAT_AXIS_ID}
     if occupied_axis_ids & execution_axis_ids:
         raise ValueError("source Dataset axes collide with scan execution axes")
-    occupied_axis_ids.update(execution_axis_ids)
+    # The scan axes are named from the plan alone, so a selection can name
+    # them back without the source in hand; a source that already carries
+    # one of those names is a collision to refuse, not to rename around.
+    axis_ids = [AxisId(value) for value in scan_axis_ids([name for name, _unit in axes])]
+    taken = occupied_axis_ids.intersection(axis_ids)
+    if taken:
+        raise ValueError(
+            "source Dataset axes collide with scan axes: "
+            + ", ".join(sorted(axis_id.value for axis_id in taken))
+        )
 
-    def free_axis_id(base: str) -> AxisId:
-        suffix = 1
-        while True:
-            candidate = AxisId(base if suffix == 1 else f"{base}.{suffix}")
-            if candidate not in occupied_axis_ids:
-                occupied_axis_ids.add(candidate)
-                return candidate
-            suffix += 1
-
-    axis_ids: list[AxisId] = []
     axis_domains: list[tuple[float, ...]] = []
     per_axis_indices: list[tuple[int, ...]] = []
-    for index, (name, unit) in enumerate(axes):
-        axis_id = free_axis_id(scan_axis_id(name))
+    for index in range(len(axes)):
         domain, indices = _unique_domain(tuple(row[index] for row in rows))
-        axis_ids.append(axis_id)
         axis_domains.append(domain)
         per_axis_indices.append(indices)
     scan_axes = tuple(

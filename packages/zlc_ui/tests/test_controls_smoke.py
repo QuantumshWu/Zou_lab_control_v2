@@ -577,3 +577,18 @@ assert cell() == (2, 2), f'Shift+Tab must step left: {cell()}'
 assert table.findChild(QtWidgets.QSpinBox) is not None
 """
     )
+
+
+def test_a_widget_named_twice_is_unblocked_when_the_block_ends() -> None:
+    """The second block records "already blocked" as the state to restore;
+    restored in the order of blocking, that stale True went back after the
+    genuine False and the widget was silent for good."""
+
+    from PyQt5 import QtCore
+
+    from zlc_ui.fluent import signals_blocked
+
+    target = QtCore.QObject()
+    with signals_blocked(target, target):
+        assert target.signalsBlocked()
+    assert not target.signalsBlocked()

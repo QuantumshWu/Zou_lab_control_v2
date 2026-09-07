@@ -94,3 +94,21 @@ def test_the_style_declares_no_second_colour_for_absence() -> None:
         "a palette token for missing data is a second source of truth for "
         "what absence looks like"
     )
+
+def test_an_image_with_no_valid_pixel_has_an_empty_distribution() -> None:
+    """The side histogram of an all-invalid image counts nothing.
+
+    A sample invented at the lower limit to steady the rail's axis was a
+    real bar in a real bin: an image with no valid pixel showed one
+    measurement it never made.  The held range still lays out the bins;
+    every count is zero.
+    """
+
+    session = _empty_image_session()
+    try:
+        session._renderer.draw()
+        _key, counts, edges = session._renderer._artists["image:distribution_cache"]
+        assert int(np.sum(counts)) == 0
+        assert len(edges) == len(counts) + 1
+    finally:
+        session.close()

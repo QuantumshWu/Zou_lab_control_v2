@@ -40,10 +40,13 @@ _CALIBRATION_PULSE_RESOURCE = WorkspaceResourceSpec(
     argument_name="pulse_resource",
 )
 def _validate_calibration(values: dict[str, object]) -> None:
-    if float(values["readout_exposure_seconds"]) > float(
+    # The same relation the request enforces, so the form never accepts a
+    # draft the task will refuse: the readout frame is recognised in the
+    # compiled program by being the SHORT window, so equal is not enough.
+    if float(values["readout_exposure_seconds"]) >= float(
         values["reference_exposure_seconds"]
     ):
-        raise ValueError("readout exposure cannot exceed reference exposure")
+        raise ValueError("readout exposure must be shorter than the reference exposure")
 
 
 CALIBRATION_SCHEMA = AuthoringSchema(

@@ -911,3 +911,59 @@ def test_multidimensional_grid_status_requires_every_point_axis_to_resolve() -> 
                 assert _drawn_statuses(session, key) == statuses
         finally:
             session.close()
+
+def _two_cell_level_snapshot(level: float, revision: int) -> OwnedSnapshot:
+    table = mapped_domain_from_columns({"bias": [-1.0, 1.0]})
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        table,
+        cell_axes=_frame_axes(),
+        dtype=np.float64,
+    )
+    return make_snapshot(
+        schema, np.full((1, 2, 40, 60), level), revision=revision
+    )
+
+def test_a_reused_facet_image_grid_exports_the_revision_it_shows() -> None:
+    """A PNG of a live Facet image grid is the picture on the screen.
+
+    The native overview paints each revision from its prepared arrays and
+    refreshes the generic cell artists only when the STATE changes, so a
+    data-only revision left them one revision behind -- and ``savefig``
+    draws the generic artists.  An export after ``update_data`` was the
+    previous picture.  Export materializes the prepared scene first, as it
+    already did for curves.
+    """
+
+    from io import BytesIO
+
+    from PIL import Image
+
+    session = PlotSession(
+        _two_cell_level_snapshot(0.0, 1),
+        _FACET_SPEC,
+        parameters={
+            "relim_mode": "fixed",
+            "color_min": 0.0,
+            "color_max": 100.0,
+            "colormap": "viridis",
+        },
+    )
+    try:
+        renderer = session._renderer
+        renderer.draw()
+        session.update_data(_two_cell_level_snapshot(100.0, 2))
+        live = np.asarray(renderer.rgba())
+        axes = renderer.axes["facet_cell"][0]
+        px, py = axes.transData.transform((30.0, 20.0))
+        row, column = int(live.shape[0] - py), int(px)
+        # Viridis at the top of the scale is yellow (green channel high);
+        # at the bottom it is purple (green channel near zero).
+        assert int(live[row, column, 1]) > 128
+        stream = BytesIO()
+        renderer.save(stream, dpi=session.surface_plan.dpi, format="png")
+        png = np.asarray(Image.open(BytesIO(stream.getvalue())).convert("RGBA"))
+        assert png.shape == live.shape
+        assert int(png[row, column, 1]) > 128
+    finally:
+        session.close()

@@ -131,7 +131,6 @@ class PylonCameraAdapter:
         self._armed_total: int | None = None
         self._grabbed = 0
         self._armed = False
-        self._roi = _roi_request(config.roi_xywh)
         self._configured = False
         self._capture_incomplete = False
         self._monitor_mode = False
@@ -158,9 +157,9 @@ class PylonCameraAdapter:
                 self._attach()
             self._apply_pixel_format()
             self._apply_trigger(monitor=False)
-            self._apply_exposure()
+            self._apply_exposure(self.config.exposure_seconds)
             self._apply_gain()
-            self._apply_roi()
+            self._apply_roi(self.config.roi_xywh)
         except BaseException as primary:
             try:
                 self.close()
@@ -245,10 +244,10 @@ class PylonCameraAdapter:
 
         return _Pause()
 
-    def _apply_exposure(self) -> None:
+    def _apply_exposure(self, seconds: float) -> None:
         # Basler exposes ExposureTime in microseconds, and it is legal to change
         # while grabbing -- no stream pause needed.
-        self._camera.ExposureTime.SetValue(float(self.config.exposure_seconds) * 1e6)
+        self._camera.ExposureTime.SetValue(float(seconds) * 1e6)
 
     def _apply_gain(self) -> None:
         # Analog gain, like the exposure above it: legal to change while
@@ -388,27 +387,26 @@ class PylonCameraAdapter:
         if primary is not None:
             raise primary
 
-    def _apply_roi(self) -> None:
+    def _apply_roi(self, roi_xywh: tuple[int, int, int, int] | None) -> None:
         """Push the ROI in the GenICam-safe order.
 
         Zero the offsets, size the window, then place it.  Setting Width while a
         stale OffsetX is still active can violate ``offset + width <= sensor``
         and the camera rejects the write outright -- the same zero-offsets-first
-        dance the qCMOS subarray code does.
+        dance the qCMOS subarray code does.  What the sensor granted is read
+        back by ``working_point``, never remembered here.
         """
 
         camera = self._camera
-        if camera is None:
-            return
         with self._paused_stream():
             camera.OffsetX.SetValue(int(camera.OffsetX.GetMin()))
             camera.OffsetY.SetValue(int(camera.OffsetY.GetMin()))
-            if self._roi is None:
+            if roi_xywh is None:
                 # Blank means the FULL sensor, never a stale window.
                 camera.Width.SetValue(int(camera.WidthMax.GetValue()))
                 camera.Height.SetValue(int(camera.HeightMax.GetValue()))
                 return
-            x, y, width, height = self._roi
+            x, y, width, height = roi_xywh
             sensor_width = int(camera.WidthMax.GetValue())
             sensor_height = int(camera.HeightMax.GetValue())
             # The hardware owns the grid; which way a request is rounded onto
@@ -437,13 +435,6 @@ class PylonCameraAdapter:
             camera.Height.SetValue(height)
             camera.OffsetX.SetValue(x)
             camera.OffsetY.SetValue(y)
-            # Record what the sensor actually granted, not what we asked for.
-            self._roi = (
-                int(camera.OffsetX.GetValue()),
-                int(camera.OffsetY.GetValue()),
-                int(camera.Width.GetValue()),
-                int(camera.Height.GetValue()),
-            )
 
     # -------------------------------------------------------------- contract
 
@@ -482,29 +473,48 @@ class PylonCameraAdapter:
             replace(self.config, roi_xywh=_roi_request(roi_xywh))
         )
 
-    def _reconfigure(self, candidate) -> CameraWorkingPoint:
-        """Apply one changed field and keep the config at what the sensor did."""
+    def _reconfigure(self, candidate: PylonCameraConfig) -> CameraWorkingPoint:
+        """Write the fields that changed, and keep the config at what the sensor did.
+
+        Only a changed field is written.  The exposure and the ROI have
+        different owners -- the run and the bench -- and re-sending the one
+        that did not change is how an exposure the sensor refused went on
+        refusing every later ROI change.  The config is never the candidate:
+        it is the sensor's readback, taken after the writes whether they
+        succeeded or not, so a refused value never becomes "current" and a
+        partially written ROI is recorded as the region the sensor holds.
+        """
 
         if self._armed:
             raise RuntimeError("pylon settings cannot change while armed")
         self.open()
-        self.config = candidate
-        self._roi = candidate.roi_xywh
-        self._apply_exposure()
-        self._apply_roi()
+        current = self.config
+        try:
+            if candidate.exposure_seconds != current.exposure_seconds:
+                self._apply_exposure(candidate.exposure_seconds)
+            if candidate.roi_xywh != current.roi_xywh:
+                self._apply_roi(candidate.roi_xywh)
+        except BaseException as primary:
+            try:
+                self._record_readback()
+            except BaseException as secondary:
+                primary.add_note(
+                    f"pylon readback after the refused setting also failed: {secondary}"
+                )
+            raise
+        return self._record_readback()
+
+    def _record_readback(self) -> CameraWorkingPoint:
+        """The sensor's own state, as the config.  The whole sensor is ``None``."""
+
         point = self.working_point()
-        actual_roi = None
-        if candidate.roi_xywh is not None:
-            actual_roi = (
-                point.roi_origin_yx[1],
-                point.roi_origin_yx[0],
-                point.roi_shape_yx[1],
-                point.roi_shape_yx[0],
-            )
+        top, left = point.roi_origin_yx
+        height, width = point.roi_shape_yx
+        whole_sensor = (top, left) == (0, 0) and (height, width) == point.sensor_shape_yx
         self.config = replace(
-            candidate,
+            self.config,
             exposure_seconds=point.exposure_seconds,
-            roi_xywh=actual_roi,
+            roi_xywh=None if whole_sensor else (left, top, width, height),
         )
         return point
 
@@ -680,6 +690,13 @@ class PylonCameraAdapter:
         Hardware-triggered with ``exact``, a missing frame means a trigger was
         lost, which corrupts the shot -- so it raises rather than returning a
         short cycle that downstream would treat as complete.
+
+        A frame read after a live tune carries both the old and the new
+        settings epoch, and so does every frame after it until this arm ends:
+        the SDK offers no boundary between frames exposed before and after the
+        change, and a read that happened to drain part of the old queue is no
+        proof that the rest of it is new.  Only a fresh arm starts from one
+        epoch again.
         """
 
         if not self._armed:
@@ -725,9 +742,6 @@ class PylonCameraAdapter:
                     settings_epochs=frame_epochs,
                 )
             )
-
-        if records:
-            self._settings_transition_epochs.clear()
 
         if exact and len(records) < int(n):
             raise RuntimeError(

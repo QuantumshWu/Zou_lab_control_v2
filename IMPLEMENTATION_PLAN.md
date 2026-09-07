@@ -11,7 +11,7 @@
 ## 1. 当前实施范围
 
 - 2026-09-07 当前性能worktree实施要求：RegularImage single/Bn收敛为同一数值流程，内部规则轴不再展开成逐像素坐标；现有context贯通prepare/objective，以稳定中心化统计量减少重复整图扫描，并直接核对最终残差。前景文字/边框仍由Matplotlib语义生成，在同一有序compose owner内批量重放。最终是否保留必须由同输入正确性、single/Bn代价和真实四Panel结果裁决，不能将尚未通过的候选记为性能完成。
-- 该cut最终已在worktree实现并验证，未提交/合并master：四Panel Curve critical `89.85→84.69ms`、Image `98.08→83.27ms`；isolated B40 image fit `27.52→24.70ms`，single `19.32→26.70ms`是明确代价。无新production类/文件，本轮净+71行（包括最后补齐的f32/f64预热样本）。带探针Curve的约205ms长尾在补测中定位到117.334ms gen2 GC，不归入renderer/solver正常耗时；无探针的发生频率尚未确定，不宣称物理极限或永不掉帧。细节及剩余大头以`research/FINAL_MAJOR_OPTIMIZATION_REPORT.md`为准。
+- 该cut实现已提交为`971765ba`，并按用户裁决与master `d1b1d1e0`整合；保留master的候选裁决、有效性、交付顺序与公共bench机制。整合前四Panel Curve critical `89.85→84.69ms`、Image `98.08→83.27ms`；isolated B40 image fit `27.52→24.70ms`，single `19.32→26.70ms`是明确代价，不将这些时间冒充合并后的复测。无新production类/文件，性能cut本身净+71行（包括最后补齐的f32/f64预热样本）。带探针Curve的约205ms长尾在补测中定位到117.334ms gen2 GC，不归入renderer/solver正常耗时；无探针的发生频率尚未确定，不宣称物理极限或永不掉帧。细节及剩余大头以`research/FINAL_MAJOR_OPTIMIZATION_REPORT.md`为准。
 
 - 所有项目内部持久化格式、Dataset contract和artifact contract改为稳定语义名；
   Figure、Calibration、Pulse、Target和Science Context不带数字版本。
@@ -20,8 +20,8 @@
   八个`zlc_*`目录只是同一distribution的依赖边界。
 - Science Context只保存16-bit circular Pattern模差分、Target和语义metadata；pupil/operator/composite均由SLM核心公式重建，Editor/Feedback在Send或shot前先固化Pattern。X15213 1024×1272 5×7同数据实测旧布局12.524→0.227 MiB（-98.19%），保存0.051 s、完整读取0.179 s；固化最大误差4.82e-5 rad，保存前后Pattern、composite phase和8-bit phase code逐元素一致，固化中位15.57 ms。
 - Hosted Task只在NodeHost worker真正Start时分配run directory，并在任何不可逆工作前
-  原子建立`run.json`。进度、artifact registration、Stop、failure和terminal result都写回
-  同一个lifecycle truth。
+  原子建立一次不可变的`start.json`；进度、artifact registration与Stop只在进程内，不写盘；
+  terminal result与failure在结束时一次性建立`run.json`。两份记录都只创建、从不替换。
 - Runtime不自动dump live/intermediate Dataset。Calibration、Temperature和SLM Feedback
   由各自domain owner保存精选artifact，并通过ExecutionContext注册已完成文件。
 - Figure NPZ是primary typed artifact，PNG只是preview。Figure保存exact Plot recipe、overlay、
@@ -92,7 +92,7 @@
 - Fluent Combo popup宽度根修：TaskConsole Add chooser恰有13项并首次触发vertical bar；旧实屏
   `popup/view/viewport/content=242/242/226/228 px`，手算native scrollbar chrome少2 px，产生
   `horizontal maximum=2`。现删除flat文字/QSS手算、Tree indentation手算及`_desired_popup_width`
-  三个重复owner；唯一popup在最终高度后用delegate column hint与真实viewport chrome最多四轮收敛。
+  三个重复owner；唯一popup在最终高度后由delegate column hint、frameWidth与共享scrollbar厚度一次定出宽度与scrollbar policy，不读回viewport chrome。
   同一实屏为`244/244/228/228 px`、horizontal maximum `0`、vertical正常；12/13行、Tree展开折叠、
   open model变宽及screen-cap真overflow均由现有Combo smoke覆盖，横向滚动没有被禁用或隐藏。
 - PanelState只保存authored target；Live、Frozen和FigureViewer都以Plot成功返回的完整accepted
@@ -118,13 +118,15 @@
 
 - Run directory由Runtime在actual Start边界分配；Editor打开、draft validation或build失败
   不创建run。
-- `run.json`包含run identity、normalized inputs、running/progress/terminal状态、artifact
-  inventory和failure信息，并采用原子替换。
+- `start.json`在Start时一次写入run identity、normalized inputs与started_at，之后不可变；
+  `run.json`在结束时一次建立（terminal状态、stop reason、last progress、artifact inventory、
+  failure）。两者都只创建、从不替换；运行期间不写盘。
 - Summary位于run根，domain final位于`final/`，Figure pair位于`figures/`，精选
   candidate/site数据位于`data/`。Figure NPZ contract为`zlc.figure`；同stem PNG只登记为preview。
 - Task完成前必须注册所有声明的final artifacts；未注册、文件缺失或路径越出run root均失败。
-- Stop和failure保留run directory与已注册artifact；异常进程退出留下非terminal记录，
-  不清理、不伪装成功。
+- Stop和failure保留run directory与已注册artifact；Stop时partial-exit writer的失败进入
+  observation与stopped记录的error而状态仍是stopped。异常进程退出留下`start.json`而无
+  `run.json`，不清理、不伪装成功。
 
 ### 2.3 Figure与Viewer
 
@@ -170,7 +172,7 @@
 - Calibration：每run一个folder，final Calibration JSON、summary JSON/text、精选报告Figure
   NPZ与PNG。默认不保存全部raw frames。
 - Calibration threshold method默认Gaussian、可显式选Empirical。Gaussian模式对每site全部finite short-shot values做无标签双Gaussian mixture fit，并在两均值间解析求拟合population-weighted分量曲线交点；真实reference labels不参与Gaussian fit/weight/threshold。fit或交点无效site才用全部有效labelled samples上最大化overall correct fraction的Empirical fallback；Empirical模式全部使用该empirical路径。Histogram线是最终classifier threshold，Gaussian曲线直接携带Calibration同一组分量而不在Plot二次拟合；fallback只有最终线而无伪造理论曲线。`actual_fidelity`是最终threshold在全部有效真实Calibration数据上的overall正确率，`gaussian_fidelity`是Gaussian threshold按其拟合population weights积分的理论正确率。
-- Calibration SiteMap detector使用真实相邻frame difference＋完整average两条证据并集。difference逐transition按自身背景噪声标准化；重复中等变化使用run-measured binomial bar，单次明显变化使用pixel×transition family-wise bar；steady/high-loading由average保留。两条路径都不能低于authored `detection_sigma`，candidate identity只来自average local maxima。旧even/odd half state、split veto、absolute per-frame sighting与global saddle owner全部删除。
+- Calibration SiteMap detector使用真实相邻frame difference＋完整average两条证据并集。difference逐transition按自身背景噪声标准化；重复中等变化使用run-measured binomial bar，单次明显变化使用pixel×transition family-wise bar；steady/high-loading由average保留。两条路径都不能低于authored `detection_sigma`，candidate identity只来自average local maxima。旧even/odd half state、split veto、absolute per-frame sighting、单帧亮度gate（max level z与其pixel×frame family-wise cut）与global saddle owner全部删除。difference候选按summed change magnitude相对spot尺度外环判定为峰（`_candidate_peaks`）：邻居暗环凹底的未加载cell不被admit，暗环里的弱trap仍被admit。
 - Calibration新增默认关闭的`Review detected sites`。开启时capture与detect各执行一次，候选SiteMap通过`calibration/review` companion signal同时进入Monitor和modal point review；operator可单点、列表或框选排除零到多个ghost sites，确认后最终SiteMap重新连续编号并只运行一次全部下游分析。review使用`FluentDialogWindow`和完整Fluent control family；`zlc_ui`拥有view，`zlc_plot`只拥有Image point gesture/overlay，Workbench组合。candidate/excluded/final映射进入Calibration report与summary，`site_review.npz/png`保存候选和排除结果；取消等同Stop。Runtime的唯一operator request/response lifecycle为未来人工Scan axis保留复用边界，但当前没有Scan consumer或UI。
 - Temperature：final JSON、summary和生存率Figure NPZ/PNG。
 - SLM Feedback：保存输入摘要、stable site table和逐candidate精选BOX samples、fit、weights、
@@ -182,7 +184,7 @@
   的per-site bimodal Gaussian fit，不加入Monitor preview。normal或Stop只产生一个final Science Context。
 - Feedback Monitor固定自动打开四张图：canonical Camera Measurement逐帧publication经mean reduction得到的带编号site map实时图、observable
   uniformity、site signal evolution和Target share evolution；phase保留为信号和最终Figure但不自动开panel。
-- Feedback每site只在完整shot batch上做受约束双高斯与full-data ΔBIC>10判定。dark site按bracket（最新观测优先）向loaded share二分或沿方向逐分辨率爬行，由loaded sites以公共因子出资、每site每candidate至多一个分辨率；bright fraction低于全阵中位数一半的loaded site视为在loading ramp上：hold、不出资、不被识别excitation扰动；probe episode每site一次，方向只由verdict改变。formal-double使用loop gain除以实测plant slope（前6个ordinary update携带±2%零和excitation识别），无adaptive scalar。`probe_combined`计入`maximum feedback updates`，diagnostic candidates不计。
+- Feedback每shot每site的信号是BOX读出（Calibration BOX几何内像素求和的真实光子计数；不用Calibration的matched-filter权重，也不为未观测site借uniform PSF）；每site只在完整shot batch上做受约束双高斯与full-data ΔBIC>10判定。dark site按bracket（最新观测优先）向loaded share二分或沿方向逐分辨率爬行，在share空间由本轮loop步不与之相反的loaded sites（loop送它同向、或对它无所求；hold的site除外）出资（总功率精确守恒、每site每candidate至多一个分辨率、绝不把任何site压向其自身方向的反面、hold的site份额不动）；bright fraction低于全阵中位数一半的loaded site视为在loading ramp上：hold、不出资、不被识别excitation扰动；probe episode每site一次，方向只由verdict改变。formal-double使用loop gain除以实测plant slope（前6个ordinary update携带±2%识别excitation：正负平衡的log图样在被激励site内平移一个公共对数保持总份额，未激励site绝对份额不变），无adaptive scalar。`probe_combined`计入`maximum feedback updates`，diagnostic candidates不计。
 - Grouped Curve与Grouped Rolling共用hover/lock/wheel contract：hover仅轻微加粗，lock才压暗其它lines；无框标签固定axes右上角，lock加`* `并接管滚轮逐series移动。standalone/Facet Curve的孤立valid点使用同一Line2D短横线glyph；invalid仍断线。
 - ImagePlot与FacetGrid image cell不再暴露interpolation参数；schema/style/Panel Setting/Edit均删除该字段，renderer唯一固定值为`nearest`。
 - Feedback failure与normal/Stop封存同一选择（最佳已完整测量candidate到SLM与`final/`），summary
@@ -191,11 +193,12 @@
 ### 2.5 Device Control与settings provenance
 
 - Generic Device Control只消费adapter的`TunableField` contract，显示Current、Desired、Live apply、Apply、Status、Refresh及active owners；已删除旧的edit-immediate `field_committed/read_values/set_form`路径和demo残余。
-- RF frequency/power四个policy edge已进入Rigol、Vaunix及Virtual RF的optional Init schema并复用同一Control tunable；空值表示无该侧policy、可随时清回空值。只有完整有限的low/high pair才形成Scan port范围，单侧edge只约束直接tune；全空Init不归一化或改写硬件当前值。
+- RF frequency/power四个policy edge已进入Rigol、Vaunix及Virtual RF的optional Init schema并复用同一Control tunable；空值表示无该侧policy、可随时清回空值。仪器自身limits在Init读出并以`TunableField.device_limits`只读投影；Scan port范围、Control与外部`tune`的有效范围都是policy与device limits逐侧取更紧者，缺失policy edge时该侧就是仪器limit；全空Init不归一化或改写硬件当前值。
 - Pylon公开`gain_db`的SDK bounds/current与grabbing-safe write；Virtual camera公开`exposure_seconds`。成功且effective实际改变才推进session-local epoch；Stepped Scan严格使用effective return，不能把hardware未接受的值写成Dataset coordinate。
 - Logic静态requirements与Stepped Scan运行时选择的device ports都形成field claim。DeviceUse按device-specific owner revision原子核风险授权、dependency closure与pending write；字段命令期间不能进入新Logic，owner变化取消尚未执行的write。
 - Device I/O只在现有串行worker/adapter command lane执行。Refresh去重合并且属于close guard；75 ms live input在相同policy projection及in-flight write期间保留每字段latest-only值，Qt owner只处理plain projection和已完成readback。
-- CameraFrameRecord在adapter边界冻结settings session/epoch；Pylon无法证明live tune前后buffer边界时首个read batch明确携带old+new，Virtual在trigger时冻结。Runtime使用event-varying record并保持generation-stable run record，finite/scan/indexed保留范围合并为压缩epoch ranges。
+- Device Manager的Remote公布是Session DeviceUse里该device的command claim：本地Logic/command占用时按名拒绝且不公布，已公布期间本地Logic、command、字段写入与rebuild按名拒绝直到撤回；公布的是accepted apparatus而非draft，远端proxy每次Refresh经fields RPC取当前完整字段投影、不缓存bounds。SLM Editor的device状态问句在其串行command executor上问、Qt线程只显示答案，command的交付带回它留下的状态；Qt从不等remote proxy的apply锁。
+- CameraFrameRecord在adapter边界冻结settings session/epoch；Pylon无法证明live tune前后的buffer边界，tune之后直到本次arm结束的每个read都明确携带old+new（一次read取走部分旧队列不证明其余帧是新设置），重新arm才回到单一epoch；Virtual在trigger时冻结。Runtime使用event-varying record并保持generation-stable run record，finite/scan/indexed保留范围合并为压缩epoch ranges。
 - Figure lineage当前grammar包含每个event record及只解析实际引用epoch的device settings；FigureViewer Device tab读取同一事实。无active Logic的调整不写历史，完整参数状态不复制到每frame。
 
 ### 2.6 Plot三进程边界
@@ -255,10 +258,10 @@
 - Pulse repeat三层根修：`PulseBracket/PulseSequence.bracket`只负责timeline内部连续区间；主界面新增持久化`run_repeats`（默认0=∞），Pulse Scan保留`scan_repeats`。无scan时Run repeats控制完整Pulse；有scan时每个row执行Run repeats次后才前进，整张table由Scan repeats重走。`shots_per_point`与Seamless `repeats`分别只做本次run_repeats/scan_repeats override，不改写Bracket或复制rows。Wire/RTL使用独立`LOOP_COUNT/RUN_REPEAT_COUNT/SCAN_COUNT/SCAN_REPEAT_COUNT`并在同一FIRE内完成全部seam，三层不再压平到一套execution count或保留旧兼容路径。Bracket左右post复用Schedule drag owner，可拖到任意合法gap。
 - Seamless duration scan根修当前证据：绝对period保留32-bit nominal base，25-bit signed slot只承载delta；整张table自动选择最小整数tick scale，最大127且DAC恒为1。实际量化rows统一进入compiler、wire、readback、Pulse Editor Run/Sync/Hold/Step、Seamless Dataset coordinates/run record与Temperature companion/artifact；distinct authored points若量化坍缩会在device前拒绝。三层repeat改造后已重跑Pulse/Editor/Seamless/Temperature纵向与RTL oracle，并以新ABI完成Vivado纯build；结果见第4节，不复用旧bitstream证据。
 - 通用Fit表达式减量候选：Panel Setting/Edit只提供单行`name=value`精确fixed与`name=guess(value)`初始猜测；fixed复用既有bounds请求通道的相等端点作为内部exact marker，但普通及regular-image solver都会把该维度真正移出optimizer，free-only计算DOF/Jacobian/covariance，all-fixed不启动optimizer。表达式按painted单位输入，PanelState/Figure只保存canonical fixed/initial；语法、unknown或domain错误只在DisplayDescription保留transient draft/warning并继续同model自动fit。Curve/Histogram/Image/Facet/Rolling共用FitSession请求，Console与Viewer共用同一Panel投影；fixed参数的误差publication为invalid。相对`17629d1`无新增production文件或类、production净增376行、test净增163行；此前临时`fit_target.py`与第二套canonical validator已删除。减量后直接聚焦`38 passed`，Plot全包`534 passed`、Console View全文件`31 passed`，另直接验证普通/regular all-fixed均返回`all parameters fixed`。Workbench全包在先运行36项后仍稳定暴露既有camera-restart selector顺序失败，目标test单独运行`1 passed`；该问题属于下一独立cut，不混入Fit提交。
-- Camera restart selector顺序根修：`_refresh_signal_choices`原来把“首个surface尚未accept、因此`binding.host is None`”误当成“panel尚未mount”，在已有initial `PlotPanelPort`忙于首帧时又启动第二个retarget port；后完成的候选会关闭已接受crosshair的port。恢复路径现在只在唯一生命周期真相`binding.port is None`时创建port，Board继续独占已有port的首帧accept；没有新增状态、helper、selector/restart特判或测试函数。原必现的auto-inference→camera-restart顺序`2 passed`；Workbench全包该缺陷已消失，结果`436 passed`，唯一剩余失败是当前master新增`warm_numba_cache.bat`直接运行layer module的launcher约束，与本cut无关。
+- Camera restart selector顺序根修：`_refresh_signal_choices`原来把“首个surface尚未accept、因此`binding.host is None`”误当成“panel尚未mount”，在已有initial `PlotPanelPort`忙于首帧时又启动第二个retarget port；后完成的候选会关闭已接受crosshair的port。恢复路径现在只在唯一生命周期真相`binding.port is None`时创建port，Board继续独占已有port的首帧accept；没有新增状态、helper、selector/restart特判或测试函数。原必现的auto-inference→camera-restart顺序`2 passed`；Workbench全包该缺陷已消失，结果`436 passed`。
 - 长Task partial artifacts：Runtime在worker failure/Stop边界调用domain writer；Feedback普通异常从最后完成candidate生成6组Figure后rollback，Temperature从已提交survival保存partial curve/Figure，Calibration从最新完整三帧cycle保存partial capture（分析完成则保存完整报告）。`run.json`只索引这些已完成文件，不再是失败run唯一内容。
 - Feedback的`candidates/candidate-XXXX.npz`现为标准Science Context；operator可在既有Science Context输入中手动选择它作为新run起点。过程数组移至`data/measurements/measurement-XXXX.npz`。新run从candidate 1开始并使用本次authored update预算；没有resume输入、自动旧run查找、续编号或旧run预算继承。
-- Pulse STATUS ABI当前为LOADED/RUNNING/DONE/ENGINE_ERROR/UNDERFLOW/LINK_ERROR；UART fault不再置engine ERROR，observer failure不再伪装成board error，Remote日志使用ERROR/DONE真实事件名并写status/cursor双读、observer exception与FIRE总elapsed。三层repeat register layout令layout fingerprint更新为`0x5A86511A`，实验板必须重build/program。
+- Pulse STATUS ABI当前为LOADED/RUNNING/DONE/ENGINE_ERROR/UNDERFLOW/LINK_ERROR；UART fault不再置engine ERROR，observer failure不再伪装成board error，Remote日志使用ERROR/DONE真实事件名并写status/cursor双读、observer exception与FIRE总elapsed。Remote client的`safe()`在command lane被LOAD/FIRE占着等回复时，先用`open`回复的cancel token在自己的一条连接上发一次`cancel`（server执行takeover/disconnect的第一步：command lane旁SAFE、stop event打断pending transport，owner/epoch不变），再在command lane上串行`safe`取最终readback；cancel连接从不claim、一问即关。三层repeat register layout令layout fingerprint更新为`0x5A86511A`，实验板必须重build/program。
 - 第一次installed software尝试曾在重负载下出现一次本地SLM测试TCP connect timeout；
   同一wheel的精确case随后连续5/5通过，第二次完整installed software lane通过，因此没有
   用该不可复现事件改动产品remote timeout或server逻辑。
@@ -298,12 +301,11 @@
 - typed Figure仍保存全部cells；页面只是显示状态。导出提供当前页、全部分页PNG或多页PDF，
   不生成一个包含数百微小Axes的单张巨图。
 
-## 7. 当前Goal进度（2026-08-27）
+## 7. Plot交互性能：基线与裁决（2026-08-27）
 
-> 本节只记录**当前状态、裁决、和仍然开着的事**。
+> 本节只记录**基线、裁决、和仍然开着的事**。
 > 每一次尝试的经过、被实测否决的方案、以及我自己的测量失误，写在**做那件事的
-> 那个 commit 的 message 里**——那才是不会过期的记录。计划文档不做 changelog；
-> 曾经把它当 changelog 用，导致 586 行里 317 行是一次 Goal 的流水账，已清除。
+> 那个 commit 的 message 里**——那才是不会过期的记录。计划文档不做 changelog。
 
 ### 七项清单：全部完成，不得重做
 
@@ -317,7 +319,7 @@
 | 6 | rolling 的 x 是**相对最新一发**（区域实测为负 shot 号）；四种 kind 都能从区域派生：image/curve **切片**、histogram **值带置无效**、rolling **shot 窗口** | `f809e4d` `a359bd8` |
 | 7 | 全 kind 矩阵、组合场景、逐环节 profiling，见下 | — |
 
-### 当前实测（master，4x4 单面板，free-running 生产者，`chain/matrix.py`）
+### 实测基线（2026-08-27，4x4 单面板，free-running 生产者）
 
 三列是三件不同的事：**live 帧**＝数据来了整幅重画；**手势帧**＝手势期间的帧；
 **hand→picture**＝按下到画面出现。
@@ -331,14 +333,14 @@
 | rolling | 14.1 / 16.3 | 10.1 / 17.7 | **8.1 / 13.6** |
 | facet grid | 20.7 / 23.7 | 11.1 / 45.3 | **8.6 / 14.4** |
 
-组合场景（`chain/combos.py`）：四面板并存 2x2 手势 image 7.2 / 3D 30.9 / curve 6.3 /
+组合场景：四面板并存 2x2 手势 image 7.2 / 3D 30.9 / curve 6.3 /
 rolling 6.3 ms；ROI 链 相机 9.0、ROI 3D 面板 38.5 ms；带 fit 的 rolling 6.3 ms。
 
 **同一杆秤的对照**：heatmap 的选框手势走 overlay（只重画矩形）4.4–7.3 ms；
 heatmap 的**中键 pan**（同样整幅重画）**30.3 ms**；静源 3D orbit **29.7 / 30.7 / 31.2 ms**。
 3D 与 heatmap 的整幅帧持平——那是这套系统重画一幅画的地板。
 
-### CPU 与内存（`chain/cpusplit2.py`，free-running）
+### CPU 与内存（free-running）
 
 | 阶段 | 修 `OMP_WAIT_POLICY` 前 | 后 |
 |---|---|---|
@@ -380,10 +382,3 @@ heatmap 的**中键 pan**（同样整幅重画）**30.3 ms**；静源 3D orbit *
   探针改成先进入单元格后，facet 是 **8.6 ms**，与其它 kind 同级。
 - **live rolling 刚挂 fit 时的 `fit requires more finite observations than free parameters`**
   只出现一次：窗口里的点还少于自由参数的那一刻。随后正常求解。是正确反馈。
-
-### 探针（`C:\Users\eadri\AppData\Local\Temp\claude\chain\`）
-
-`matrix.py` 全 kind × 手势｜`combos.py` 多面板/ROI 链/fit｜`verify3.py` selector 三症状｜
-`roikinds.py` 每种 kind 的区域派生｜`imgprof.py` live image 帧自时间｜
-`orbitqt.py` 3D orbit 自时间｜`kernelcheck.py` 场景光栅与 numpy 规范的逐位对照。
-`tap.py` 是它们共用的嵌套自时间探针（cProfile 会骗人）。

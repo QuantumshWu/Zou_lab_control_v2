@@ -255,14 +255,18 @@ def test_a_node_host_runs_a_camera_measurement_to_completion() -> None:
         host = _camera_host(node, plane, wake)
         host.start()
 
-        # The host arms the camera on its worker; the triggers are ours to supply.
+        # The host arms the camera on its worker; the triggers are ours to
+        # supply, and only once the adapter reports the arm -- a trigger that
+        # lands before it is dropped by every camera, and a run short of one
+        # frame times out for a reason that is the fixture's, not the node's.
         deadline = time.monotonic() + 10.0
-        fired = False
+        while not camera.capture_state() and time.monotonic() < deadline:
+            host.poll()
+            time.sleep(0.005)
+        assert camera.capture_state(), "the hosted worker did not arm the camera"
+        sequencer.fire(run_repeats=1, scan_repeats=1)
+        sequencer.wait_done(1.0)
         while time.monotonic() < deadline:
-            if not fired and camera.is_armed if hasattr(camera, "is_armed") else not fired:
-                sequencer.fire(run_repeats=1, scan_repeats=1)
-                sequencer.wait_done(1.0)
-                fired = True
             host.poll()
             if host.observation.terminal:
                 break
@@ -458,6 +462,12 @@ def test_a_finite_run_shows_its_dataset_filling_and_stops_when_asked() -> None:
         # the fixed authored geometry and invalid future cells.
         seen: list[tuple[tuple[int, ...], tuple[int, ...], int, int]] = []
         deadline = time.monotonic() + 20.0
+        # The first trigger waits for the adapter's own report of the arm:
+        # the host's Start only submits the worker that arms the camera.
+        while not camera.capture_state() and time.monotonic() < deadline:
+            host.poll()
+            time.sleep(0.005)
+        assert camera.capture_state(), "the hosted worker did not arm the camera"
         fired = 0
         while time.monotonic() < deadline and not host.observation.terminal:
             if fired < repeats:
@@ -575,7 +585,7 @@ def test_repeat_100_builds_only_one_cycle_per_camera_commit() -> None:
         actual_working_point=None,
         frame_value_unit=None,
         run_record={},
-        _camera_event_record=lambda _cycle, *, accumulate: {},
+        _camera_event_record=lambda _cycle: {},
     )
     payload = 0
     for index in range(100):
@@ -591,6 +601,75 @@ def test_repeat_100_builds_only_one_cycle_per_camera_commit() -> None:
         assert output.cell_origin == (index, 0)
         payload += output.snapshot.block.values.nbytes
     assert payload == 100 * np.empty(shape, dtype=np.uint16).nbytes
+
+
+def test_a_cycle_event_carries_only_the_settings_its_own_frames_were_taken_at() -> None:
+    """The event record travels with one cycle and describes that cycle.
+
+    The node used to accumulate every epoch it had seen since the arm and
+    write the whole set into each cycle's event, so a second cycle taken
+    entirely at epoch 2 claimed epochs 1..2 -- the canonical prefix's fact,
+    which the Runtime already merges, restated wrongly on one chunk.  The
+    device session still spans the acquisition: a camera that changes
+    identity between cycles is refused.
+    """
+
+    plane = SignalDataPlane()
+    installation = create_installation("virtual")
+    try:
+        node = CameraMeasurementNode(
+            camera=installation.capability("camera.adapter"),
+            request=CameraMeasurementRequest(
+                camera_key="camera",
+                exposure_seconds=0.02,
+                roi_xywh=None,
+                repeat=2,
+                frames_per_cycle=1,
+            ),
+            signal_plane=plane,
+            producer="epochs",
+        )
+        capture = node.prepare()
+        try:
+
+            def cycle(index: int, epoch: int, session: str = "camera-session"):
+                return (
+                    CameraFrameRecord(
+                        np.zeros((96, 128), dtype=np.uint16),
+                        index,
+                        settings_session_id=session,
+                        settings_epochs=(epoch,),
+                    ),
+                )
+
+            first = _finite_cycle_output(node, cycle(0, 1), 0)
+            second = _finite_cycle_output(node, cycle(1, 2), 1)
+            assert first.event_record == {
+                "device_settings": {
+                    "camera": {
+                        "device_session_id": "camera-session",
+                        "epoch_ranges": [[1, 1]],
+                        "mixed": False,
+                    }
+                }
+            }
+            assert second.event_record == {
+                "device_settings": {
+                    "camera": {
+                        "device_session_id": "camera-session",
+                        "epoch_ranges": [[2, 2]],
+                        "mixed": False,
+                    }
+                }
+            }, "the second cycle's event carried the first cycle's epoch"
+            with pytest.raises(RuntimeError, match="session changed during one acquisition"):
+                _finite_cycle_output(node, cycle(2, 2, session="another-camera"), 1)
+        finally:
+            capture.close()
+            plane.retire(node)
+    finally:
+        installation.close()
+        plane.close()
 
 
 def test_stop_partial_is_identical_whether_or_not_ui_freezes() -> None:
@@ -672,8 +751,34 @@ def test_finite_cycle_rejects_a_physical_ordinal_gap() -> None:
 
 
 def test_finite_capture_rejects_incomplete_terminal_evidence() -> None:
+    """The device must account for every frame the kept cycles hold.
+
+    A surplus is honest only for a capture that was asked to stop: the
+    frames of the cycle it walked away from.  A run that ended on its own
+    must match exactly, and a stopped one may never have fewer frames than
+    its completed cycles.
+    """
+
     with pytest.raises(RuntimeError, match="terminal count differs from completed cycles"):
         _strict_terminal(
             CameraCaptureTerminalRecord(2, True, True, True),
             expected_frames=3,
+        )
+    with pytest.raises(RuntimeError, match="terminal count differs from completed cycles"):
+        _strict_terminal(
+            CameraCaptureTerminalRecord(3, True, True, True),
+            expected_frames=2,
+        )
+    stopped = CameraCaptureTerminalRecord(3, True, True, True)
+    assert _strict_terminal(stopped, expected_frames=2, stopped=True) is stopped
+    with pytest.raises(RuntimeError, match="terminal count differs from completed cycles"):
+        _strict_terminal(
+            CameraCaptureTerminalRecord(1, True, True, True),
+            expected_frames=2,
+            stopped=True,
+        )
+    with pytest.raises(RuntimeError, match="did not stop, drain and join"):
+        _strict_terminal(
+            CameraCaptureTerminalRecord(2, True, False, True),
+            expected_frames=2,
         )

@@ -142,7 +142,10 @@ def _pylon_factory(context, key: str, values: dict) -> InstalledLeaf:
     """Open a Basler from a written-down configuration.
 
     An already-attached camera object may be injected for tests; otherwise the
-    serial in the configuration selects exactly one camera.
+    serial in the configuration selects exactly one camera.  That serial is
+    also the physical identity the broker guards: the logical key is what an
+    apparatus calls the device, and two keys naming one serial are one camera,
+    which the broker can only refuse if it is told the serial.
     """
 
     authored = PYLON_CAMERA_SCHEMA.project_values(
@@ -161,7 +164,13 @@ def _pylon_factory(context, key: str, values: dict) -> InstalledLeaf:
         camera=values.get("camera"),
     )
     camera.open()
-    return bind_camera(context, key, camera, f"pylon-camera:{key}", "camera.pylon")
+    return bind_camera(
+        context,
+        key,
+        camera,
+        f"pylon-camera:serial={camera.config.serial}",
+        "camera.pylon",
+    )
 
 
 def _dcam_factory(context, key: str, values: dict) -> InstalledLeaf:
@@ -172,25 +181,36 @@ def _dcam_factory(context, key: str, values: dict) -> InstalledLeaf:
     because a driver is not something a JSON file can hold.  With no driver the
     adapter opens the SDK itself from the authored device index, which is what a
     configuration is for.
+
+    DCAM addresses a camera by its index in the runtime's enumeration, so that
+    index -- scoped to this process's DCAM runtime -- is the physical identity
+    the broker guards; two keys opening one index are one camera.
     """
 
     driver = values.get("driver")
     authored = DCAM_CAMERA_SCHEMA.project_values(
         {name: value for name, value in values.items() if name != "driver"}
     )
+    device_index = int(authored["device_index"])
     camera = DcamCameraAdapter(
         DcamCameraConfig(
             exposure_seconds=float(authored["exposure_seconds"]),
             readout_speed=int(authored["readout_speed"]),
             binning=1,
             roi_xywh=_roi_xywh(authored),
-            device_index=int(authored["device_index"]),
+            device_index=device_index,
             offset_counts=authored["offset_counts"],
             electrons_per_count=authored["electrons_per_count"],
         ),
         driver=driver,
     )
-    return bind_camera(context, key, camera, f"dcam-camera:{key}", "camera.dcam")
+    return bind_camera(
+        context,
+        key,
+        camera,
+        f"dcam-camera:index={device_index}",
+        "camera.dcam",
+    )
 
 
 DEVICE_TYPES = (

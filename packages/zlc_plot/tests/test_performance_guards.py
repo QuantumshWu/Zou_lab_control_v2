@@ -362,17 +362,18 @@ def test_large_integer_histogram_domain_uses_native_statistics(
         column_ramp=True,
     )
     session = PlotSession(initial, HistogramPlot())
-    observed: list[tuple[np.dtype, int]] = []
-    original = fit_projection_module.aligned_histogram_edges
+    observed: list[bool] = []
+    original = fit_projection_module.histogram_edges
 
-    def observed_edges(values, *args, **kwargs):
-        array = np.asarray(values)
-        observed.append((array.dtype, int(array.size)))
-        return original(values, *args, **kwargs)
+    def observed_edges(low, high, bins, *, integral):
+        # The edge owner is handed the dtype's own proof of integrality,
+        # never a probe array cut from the frame.
+        observed.append(integral)
+        return original(low, high, bins, integral=integral)
 
     monkeypatch.setattr(
         fit_projection_module,
-        "aligned_histogram_edges",
+        "histogram_edges",
         observed_edges,
     )
     try:
@@ -389,7 +390,7 @@ def test_large_integer_histogram_domain_uses_native_statistics(
         )
         _current, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
-        assert observed == [(np.dtype(np.uint16), 0)]
+        assert observed == [True]
         assert peak < 48 << 20
     finally:
         if tracemalloc.is_tracing():

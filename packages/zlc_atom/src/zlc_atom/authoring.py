@@ -115,12 +115,32 @@ class TunableField:
     current: Any
     live_write: bool
     dependency_group: tuple[str, ...]
+    #: The instrument's own range for this knob, as the device reports it,
+    #: or None when the device states none (a switch, a policy edge).
+    #: ``metadata.minimum``/``maximum`` say what may be COMMANDED -- the
+    #: tighter, side by side, of these limits and any bench policy window --
+    #: and Device Control shows the limits beside them, read-only, so an
+    #: operator can see which of the two is fencing a knob.
+    device_limits: tuple[float, float] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.metadata, AuthoringField):
             raise TypeError("tunable metadata must be an AuthoringField")
         if type(self.live_write) is not bool:
             raise TypeError("tunable live_write must be bool")
+        if self.device_limits is not None:
+            limits = tuple(self.device_limits)
+            if len(limits) != 2 or any(isinstance(edge, bool) for edge in limits):
+                raise TypeError("tunable device_limits must be a (low, high) pair")
+            low, high = (float(edge) for edge in limits)
+            if not (math.isfinite(low) and math.isfinite(high)) or low > high:
+                raise ValueError("tunable device_limits must be a finite ordered pair")
+            for bound in (self.metadata.minimum, self.metadata.maximum):
+                if bound is not None and not low <= float(bound) <= high:
+                    raise ValueError(
+                        "tunable bounds must lie inside the device's own limits"
+                    )
+            object.__setattr__(self, "device_limits", (low, high))
         group = tuple(str(name).strip() for name in self.dependency_group)
         if (
             not group

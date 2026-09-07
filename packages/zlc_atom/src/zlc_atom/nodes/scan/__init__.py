@@ -53,6 +53,7 @@ from .plan import (
 from .source import (
     PublishedSignalSource,
     check_cancelled,
+    settle,
     wait_for_board,
     watched_signal_source,
 )
@@ -62,6 +63,7 @@ __all__ = [
     "PublishedSignalSource",
     "watched_signal_source",
     "check_cancelled",
+    "settle",
     "wait_for_board",
     "DEVICE_PARAM_FAMILY",
     "MANUAL_AXIS_REQUEST",

@@ -425,8 +425,9 @@ def semantic_spec(spec: PlotSpec) -> PlotSpec:
     return spec.cell if isinstance(spec, FacetGridPlot) else spec
 
 
-def _title_parameter(default: str | None) -> ParameterSpec[object]:
-    del default
+def _title_parameter() -> ParameterSpec[object]:
+    """The title override; ``None`` means the spec's own label stands."""
+
     return ParameterSpec(
         "title",
         str,
@@ -438,8 +439,9 @@ def _title_parameter(default: str | None) -> ParameterSpec[object]:
     )
 
 
-def _label_parameter(name: str, default: str | None, label: str) -> ParameterSpec[object]:
-    del default
+def _label_parameter(name: str, label: str) -> ParameterSpec[object]:
+    """An axis-label override; ``None`` means the spec's own label stands."""
+
     return ParameterSpec(
         name,
         str,
@@ -711,6 +713,24 @@ def _finite_number(value: object) -> float:
     return number
 
 
+def _camera_elevation(value: object) -> float:
+    """The elevation the camera will actually use.
+
+    The camera owns its range, so an accepted parameter is read back
+    through it: a written or wheeled value past the range would otherwise
+    be held as display state while the picture showed the clamp, and the
+    next wheel notch back would move the hidden number and not the scene.
+    """
+
+    return _HeightBarCamera(elevation_deg=_finite_number(value)).elevation_deg
+
+
+def _camera_zoom(value: object) -> float:
+    """The zoom the camera will actually use -- see :func:`_camera_elevation`."""
+
+    return _HeightBarCamera(zoom=_finite_number(value)).zoom
+
+
 def _image_parameters(style: PlotStyleConfig) -> tuple[ParameterSpec[object], ...]:
     policy = style.render
     entries: list[ParameterSpec[object]] = [
@@ -793,7 +813,7 @@ def _image_parameters(style: PlotStyleConfig) -> tuple[ParameterSpec[object], ..
                 (int, float),
                 RenderEffect.BASE_GEOMETRY,
                 default=_HOME_CAMERA.elevation_deg,
-                normalizer=_finite_number,
+                normalizer=_camera_elevation,
                 label="View elevation",
             ),
             ParameterSpec(
@@ -801,7 +821,7 @@ def _image_parameters(style: PlotStyleConfig) -> tuple[ParameterSpec[object], ..
                 (int, float),
                 RenderEffect.BASE_GEOMETRY,
                 default=_HOME_CAMERA.zoom,
-                normalizer=_finite_number,
+                normalizer=_camera_zoom,
                 label="View zoom",
             ),
         )
@@ -976,65 +996,41 @@ def history_window_requirement(
         return None
     if isinstance(semantic, HistogramPlot) and window == 1:
         return None
-    if isinstance(semantic, RollingPlot):
-        # A trailing mean reads shots the window may not show, so demand is
-        # whichever reaches further back.  Sizing retention by the visible
-        # window alone would leave the earliest points of a long trailing
-        # mean averaging a history that had already been released.
+    if isinstance(semantic, RollingPlot) and semantic.reduction is Reduction.MEAN:
+        # The window is how many points are shown; trailing is how many
+        # shots EACH of them averages, counted back from itself.  The
+        # earliest visible point therefore reaches ``trailing - 1`` shots
+        # behind the window, and retention must cover it or that point
+        # averages whatever history happens to remain.  Only a MEAN has a
+        # trailing span: the rolling handler forces it to one otherwise.
         trailing = display.get("trailing")
-        if type(trailing) is int and trailing > window:
-            return trailing
+        if type(trailing) is int and trailing > 1:
+            return window + trailing - 1
     return window
 
 
-@dataclass(frozen=True, slots=True)
-class _ParameterSchemaContext:
-    """The semantic facts that change a display-parameter schema."""
-
-    kind: PlotKind
-    semantic_kind: PlotKind
-    labels: PlotLabels
-    has_facet: bool
-
-
-def _parameter_schema_context(spec: PlotSpec) -> _ParameterSchemaContext:
-    if not isinstance(
-        spec,
-        (
-            CurvePlot,
-            ImagePlot,
-            HistogramPlot,
-            RollingPlot,
-            FacetGridPlot,
-            PulseTimelinePlot,
-        ),
-    ):
-        raise TypeError("unsupported plot specification")
-    return _ParameterSchemaContext(
-        spec.kind,
-        semantic_spec(spec).kind,
-        spec.labels,
-        not isinstance(spec, FacetGridPlot) or spec.facet is not None,
-    )
-
-
-def _parameter_schema_for_context(
-    context: _ParameterSchemaContext,
+def _build_parameter_schema(
+    kind: PlotKind,
+    semantic_kind: PlotKind,
     *,
+    has_facet: bool,
     style: PlotStyleConfig,
 ) -> ParameterSchema:
-    """Build the one schema used by bound sessions and unbound authoring UI."""
+    """Build the one schema used by bound sessions and unbound authoring UI.
+
+    Three facts decide the schema: the kind, the kind of the drawn surface
+    (a grid's cell) and whether a grid has a facet axis.  Labels are not
+    among them: the label parameters are overrides whose default is always
+    "none", and the spec's own labels stay the spec's.
+    """
 
     if not isinstance(style, PlotStyleConfig):
         raise TypeError("style must be PlotStyleConfig")
-    kind = context.kind
-    semantic_kind = context.semantic_kind
-    labels = context.labels
     entries: list[ParameterSpec[object]] = [
-        _title_parameter(labels.title),
-        _label_parameter("x_label", labels.x, "X label"),
-        _label_parameter("y_label", labels.y, "Y label"),
-        _label_parameter("value_label", labels.value, "Value label"),
+        _title_parameter(),
+        _label_parameter("x_label", "X label"),
+        _label_parameter("y_label", "Y label"),
+        _label_parameter("value_label", "Value label"),
         _show_grid_parameter(default=kind is PlotKind.PULSE_TIMELINE),
     ]
     if kind is PlotKind.PULSE_TIMELINE:
@@ -1044,7 +1040,7 @@ def _parameter_schema_for_context(
             entries.append(_unit_parameter("x_display_unit"))
         if semantic_kind is PlotKind.IMAGE:
             entries.append(_unit_parameter("y_display_unit"))
-        if kind is PlotKind.FACET_GRID and context.has_facet:
+        if kind is PlotKind.FACET_GRID and has_facet:
             entries.append(
                 _unit_parameter(
                     "facet_display_unit",
@@ -1173,8 +1169,22 @@ def _parameter_schema_for_context(
 def parameter_schema_for(spec: PlotSpec, *, style: PlotStyleConfig) -> ParameterSchema:
     """Return the introspectable, complete UI parameter contract for ``spec``."""
 
-    return _parameter_schema_for_context(
-        _parameter_schema_context(spec),
+    if not isinstance(
+        spec,
+        (
+            CurvePlot,
+            ImagePlot,
+            HistogramPlot,
+            RollingPlot,
+            FacetGridPlot,
+            PulseTimelinePlot,
+        ),
+    ):
+        raise TypeError("unsupported plot specification")
+    return _build_parameter_schema(
+        spec.kind,
+        semantic_spec(spec).kind,
+        has_facet=not isinstance(spec, FacetGridPlot) or spec.facet is not None,
         style=style,
     )
 
@@ -1231,9 +1241,8 @@ def parameter_schema_for_kind(
             )
     elif facet_cell_kind is not None:
         raise ValueError("facet_cell_kind is only valid for a facet grid")
-    return _parameter_schema_for_context(
-        _ParameterSchemaContext(resolved, semantic_kind, PlotLabels(), True),
-        style=style,
+    return _build_parameter_schema(
+        resolved, semantic_kind, has_facet=True, style=style
     )
 
 

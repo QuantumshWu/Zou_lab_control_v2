@@ -822,6 +822,80 @@ def test_pattern_wavefront_compose_and_science_phase_roundtrip(
         session.installation.close()
 
 
+def test_a_loaded_operator_keeps_its_precision_until_a_control_is_edited(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Load then Save must write the Context's operator back unchanged.
+
+    A Science Context may carry any finite coefficient; the wavefront spins
+    show five decimals.  Load put the coefficients into the spins and the
+    frozen phase on screen; Save then read the spins back, so a Context
+    saved straight after loading carried 0.12346 for 0.123456789 and
+    rebuilt a different phase on its next load.  The loaded operator stays
+    the file's fact until a control is actually edited.
+    """
+
+    import zlc_atom.devices.slm.editor as editor
+
+    app = ensure_qt_app()
+    session = _session(tmp_path)
+    monkeypatch.setattr(
+        editor,
+        "solve_phase",
+        lambda target, **_kwargs: (
+            canonical_phase(np.zeros(target.shape), target.shape),
+            {"method": "test", "iterations": 1},
+        ),
+    )
+    control = editor.SlmEditorControl(session, "slm")
+    try:
+        _pump(app, lambda: control.solver_idle)
+        control.set_phase(np.zeros(control.shape), {"source": "authored pattern"})
+        first = tmp_path / "first.npz"
+        control._save_context_operation(first)()
+        context = editor.load_science_context(first)
+        precise = tmp_path / "precise.npz"
+        coefficient = 0.123456789
+        editor.save_science_context(
+            precise,
+            context["pattern_phase"],
+            target_intensity=context["target_intensity"],
+            objective_kind=context["objective_kind"],
+            pupil=context["pupil"],
+            system_correction=None,
+            command_receipt=context["command_receipt"],
+            pattern_metadata=context["pattern_metadata"],
+            operator_metadata={
+                "enabled": True,
+                "carrier_waves_xy": [0.0, 0.0],
+                "zernike_noll_waves_rms": {"defocus": coefficient},
+            },
+        )
+        loaded = editor.load_science_context(precise)
+        control._set_context(loaded)
+        assert control._zernike["defocus"].value() == 0.12346, "five decimals on screen"
+        np.testing.assert_array_equal(control._phase, loaded["phase"])
+
+        saved = tmp_path / "saved.npz"
+        control._save_context_operation(saved)()
+        again = editor.load_science_context(saved)
+        assert again["operator_metadata"]["zernike_noll_waves_rms"]["defocus"] == coefficient
+        np.testing.assert_array_equal(again["phase"], loaded["phase"])
+
+        # An explicit edit hands the wavefront to the spins.
+        control._zernike["defocus"].setValue(0.25)
+        assert control._operator_settings()["zernike_noll_waves_rms"]["defocus"] == 0.25
+        edited = tmp_path / "edited.npz"
+        control._save_context_operation(edited)()
+        assert editor.load_science_context(edited)["operator_metadata"][
+            "zernike_noll_waves_rms"
+        ]["defocus"] == 0.25
+    finally:
+        _dispose(control, app)
+        session.device_use.assert_idle()
+        session.installation.close()
+
+
 def test_editor_keeps_the_original_plot_size_and_resizes_both_scrollable_surfaces(
     tmp_path: Path, monkeypatch,
 ) -> None:
@@ -1759,3 +1833,127 @@ def test_send_command_keeps_qt_responsive_holds_lease_and_close_retries(
         _dispose(control, app)
         session.device_use.assert_idle()
         session.installation.close()
+
+
+def test_the_status_poll_never_waits_behind_a_remote_apply(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """The Qt thread asks nothing of a device that may be mid round trip.
+
+    A remote SLM answers its cached state from behind the lock its apply
+    holds for the whole network exchange.  The editor's 100 ms status poll
+    used to read that state on the Qt thread, so a Send from a Task (or a
+    slow server) froze the event loop for as long as the apply took.  The
+    question now runs on the command executor and its answer is shown on
+    the Qt thread: the heartbeat keeps beating while an apply from another
+    thread holds the device, and the answer arrives once it lets go.  A
+    command of the editor's own is its next answer: the board it just
+    commanded is never shown as "changed externally" while the question
+    that follows the delivery is still on its way back.
+    """
+
+    import zlc_atom.devices.slm.device as device_module
+    import zlc_atom.devices.slm.editor as editor
+
+    app = ensure_qt_app()
+    physical_installation = create_installation((DeviceSpec("slm", "slm.virtual"),))
+    physical = physical_installation.device("slm")
+    server = device_module._open_slm_server(physical, "127.0.0.1", 0)
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    apply_started, apply_release = threading.Event(), threading.Event()
+    original_rpc = device_module._rpc_call
+
+    def gated_rpc(endpoint, method, arguments, timeout):
+        if method == "apply":
+            apply_started.set()
+            assert apply_release.wait(5.0)
+        return original_rpc(endpoint, method, arguments, timeout)
+
+    monkeypatch.setattr(device_module, "_rpc_call", gated_rpc)
+    installation = create_installation(
+        (
+            {
+                "key": "slm",
+                "type_id": "slm.hamamatsu_x15213",
+                "config": {"host": "127.0.0.1", "port": server.server_address[1]},
+            },
+        )
+    )
+    session = ExperimentSession(
+        installation=installation,
+        signal_plane=SimpleNamespace(close=lambda: None),
+        workspace=Workspace(tmp_path).prepare(),
+    )
+    device = session.installation.device("slm")
+    external_phase = canonical_phase(np.full(device.shape_yx, 1.25), device.shape_yx)
+    external = threading.Thread(target=device.apply_phase, args=(external_phase,))
+    heartbeat: list[float] = []
+    held = threading.Event()
+    timer = QtCore.QTimer()
+    timer.setInterval(5)
+    timer.timeout.connect(lambda: heartbeat.append(time.monotonic()))
+    control = None
+    try:
+        control = editor.SlmEditorControl(session, "slm")
+        assert "command r0" in control._device_status.text()
+        external.start()
+        assert apply_started.wait(1.0)
+        timer.start()
+        # Several 100 ms polls fire while the apply holds the device's
+        # lock; the event loop must keep beating through every one.
+        _pump(app, lambda: len(heartbeat) >= 60, timeout=1.5)
+        assert not apply_release.is_set()
+        assert "command r0" in control._device_status.text()
+
+        apply_release.set()
+        external.join(timeout=5.0)
+        assert not external.is_alive()
+        _pump(
+            app,
+            lambda: "command r1" in control._device_status.text(),
+            timeout=5.0,
+        )
+        assert "changed externally" in control._device_status.text()
+
+        # Adopt takes the external command as the draft; with the poll
+        # stopped, the reads after Send are exactly the question Send
+        # asks, the delivery's own read, and the question that follows the
+        # delivery -- held, so only the delivery can say what the board is.
+        control._adopt_device_command()
+        assert not control._device_diverged
+        control._device_poll.stop()
+        _pump(app, lambda: not control._device_state_in_flight)
+        reads: list[int] = []
+        original_read = control._read_device_state
+
+        def counted_read():
+            reads.append(len(reads))
+            if len(reads) == 3:
+                assert held.wait(5.0)
+            return original_read()
+
+        monkeypatch.setattr(control, "_read_device_state", counted_read)
+        assert control.send() is True
+        _pump(app, lambda: not control.command_active, timeout=5.0)
+        assert not held.is_set()
+        assert "command r2" in control._device_status.text()
+        assert "changed externally" not in control._device_status.text()
+        assert not control._device_diverged
+        assert control._send.isEnabled()
+        held.set()
+        _pump(app, lambda: not control._device_state_in_flight, timeout=5.0)
+        assert "command r2" in control._device_status.text()
+        assert not control._device_diverged
+    finally:
+        held.set()
+        apply_release.set()
+        external.join(timeout=5.0)
+        timer.stop()
+        if control is not None:
+            _dispose(control, app)
+        session.installation.close()
+        server.shutdown()
+        server.server_close()
+        serving.join(timeout=2.0)
+        physical_installation.close()

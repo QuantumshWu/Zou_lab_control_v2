@@ -32,9 +32,11 @@ import re
 from typing import Any
 
 import numpy as np
-from zlc_plot import read_figure_plot
+from zlc_plot import figure_plot_recipe, read_figure_plot
 
 from zlc_data.figure_archive import read_archive
+
+from .logic import split_signal_key
 
 
 __all__ = ["ArchiveDescription", "FigureViewerPresenter", "describe_archive"]
@@ -106,10 +108,7 @@ def _resized_coordinates(axis: object | None, length: int) -> tuple[object, ...]
     occupied = set(values)
     while len(values) < wanted:
         if values and all(type(value) in (int, float) for value in values):
-            step = values[-1] - values[-2] if len(values) >= 2 else 1
-            candidate: object = values[-1] + step
-            while candidate in occupied:
-                candidate = candidate + 1
+            candidate: object = _next_numeric_coordinate(values, occupied)
         else:
             serial = len(values)
             candidate = f"{axis.name}-{serial}"
@@ -119,6 +118,33 @@ def _resized_coordinates(axis: object | None, length: int) -> tuple[object, ...]
         values.append(candidate)
         occupied.add(candidate)
     return tuple(values)
+
+
+def _next_numeric_coordinate(values: list, occupied: set) -> object:
+    """Continue a numeric axis by its own last step.
+
+    The candidate is canonical before it is compared with what is already
+    there (an integral float IS an int on an axis, so ``1e20`` and
+    ``100000000000000000000`` are one coordinate), and a collision is left
+    by the same step again.  Retrying by one is not a retry at all once the
+    values are large: ``1e20 + 1 == 1e20``, and a loop that adds one there
+    never covers ground.  A step that does not move the candidate cannot
+    produce a coordinate either, so it is refused instead of spun on.
+    """
+
+    from zlc_data import canonical_coordinate_scalar
+
+    step = values[-1] - values[-2] if len(values) >= 2 else 1
+    candidate = canonical_coordinate_scalar(values[-1] + step, "axis value")
+    while candidate in occupied:
+        advanced = canonical_coordinate_scalar(candidate + step, "axis value")
+        if advanced == candidate:
+            raise ValueError(
+                f"cannot continue the axis past {candidate!r} in steps of "
+                f"{step!r}; enter the new coordinates by hand"
+            )
+        candidate = advanced
+    return candidate
 
 
 def _mapped_domain(axes: tuple[object, ...]) -> object:
@@ -268,6 +294,7 @@ def _draft_from_snapshot(
     snapshot: object,
     *,
     editor_id: str,
+    producer_serial: int,
     name: str,
     note: str,
     source_text: str,
@@ -279,6 +306,15 @@ def _draft_from_snapshot(
     described: object | None,
     overlay: object | None,
 ) -> dict[str, object]:
+    """One working copy, with the Runtime identity it will publish under.
+
+    ``producer_serial`` is the copy's own number from the moment it opens:
+    its owner id and data signal are spelled from it on every Apply, so two
+    copies open at once publish as two producers.  Read at Apply from a
+    shared "latest copy" counter instead, both would apply as the same one
+    and the second would overwrite the first's data under its own name.
+    """
+
     schema = snapshot.block.schema
     values, validity, sigma = _expand_snapshot_for_edit(snapshot)
     axes = tuple(
@@ -324,7 +360,7 @@ def _draft_from_snapshot(
         "modified": source_path is None,
         "unsaved": False,
         "message": "",
-        "producer_serial": None,
+        "producer_serial": int(producer_serial),
         "producer": None,
         "publication": None,
         "applied_snapshot": None,
@@ -540,6 +576,17 @@ def _axis_spec(
 
     coordinates = _resized_coordinates(previous, length)
     same_coordinates = previous is not None and int(previous.size) == int(length)
+    # An implicit axis counts from its origin, and that origin is a
+    # scientific coordinate (``coordinate_at`` adds it): renaming or
+    # resizing such an axis keeps it, so the same values stay bound to the
+    # same coordinates and a longer axis extends from where it started.
+    # Explicit coordinates carry their own values and take the Data
+    # contract's zero.
+    index_origin = (
+        0
+        if coordinates is not None or previous is None
+        else int(previous.index_origin)
+    )
     return AxisSpec(
         axis_id,
         str(name).strip(),
@@ -548,7 +595,7 @@ def _axis_spec(
         coordinates,
         str(unit).strip() or None,
         None if previous is None else previous.coordinate_frame,
-        0,
+        index_origin,
         previous.coordinate_labels if same_coordinates else None,
     )
 
@@ -658,43 +705,64 @@ def _edit_axis(
         previous=previous,
         preserve_role=old_domain == target_domain,
     )
-    old_storage = list(_storage_axes(draft))
+    # Every step below works on a scratch copy and the working copy takes
+    # the whole result at the end.  The array helpers replace arrays, they
+    # never write into one, so a refused step leaves the draft exactly as it
+    # was -- never with its axis lists already moved and its values not.
+    edited = dict(draft)
+    old_storage = list(_storage_axes(edited))
     old_dimension = next(
         index for index, axis in enumerate(old_storage) if str(axis.axis_id) == axis_id
     )
-    _resize_storage_axis(draft, old_dimension, int(length))
+    _resize_storage_axis(edited, old_dimension, int(length))
     if old_domain == target_domain:
         key = _domain_key(old_domain)
-        axes = list(draft[key])
+        axes = list(edited[key])
         axes[position] = replacement
-        draft[key] = axes
-        _normalize_table_axes(draft)
+        edited[key] = axes
+        _normalize_table_axes(edited)
+        draft.update(edited)
         return replacement != previous
     old_key = _domain_key(old_domain)
     target_key = _domain_key(target_domain)
-    old_axes = list(draft[old_key])
+    old_axes = list(edited[old_key])
     old_axes.pop(position)
-    draft[old_key] = old_axes
+    edited[old_key] = old_axes
     storage_ids = [str(axis.axis_id) for axis in old_storage]
     if old_key == "cell_axes" and not old_axes:
-        draft[old_key] = [SCALAR_AXIS]
-    target_axes = list(draft[target_key])
+        edited[old_key] = [SCALAR_AXIS]
+    target_axes = list(edited[target_key])
     if target_key == "cell_axes" and len(target_axes) == 1 and str(target_axes[0].role) == "scalar":
         scalar_dimension = storage_ids.index(str(target_axes[0].axis_id))
-        _take_storage_axis(draft, scalar_dimension)
+        _take_storage_axis(edited, scalar_dimension)
         storage_ids.pop(scalar_dimension)
         target_axes = []
     target_axes.append(replacement)
-    draft[target_key] = target_axes
+    edited[target_key] = target_axes
 
-    desired = [str(axis.axis_id) for axis in _storage_axes(draft) if str(axis.role) != "scalar"]
+    # The arrays are reordered by the axes they actually hold.  The scalar
+    # Cell-data carrier is one of those dimensions whenever it was there
+    # before and this edit did not just take it out (a Repeat axis moving to
+    # Point leaves it in place), and it is added only when this edit just
+    # put it in (the last Cell-data axis leaving its domain).
+    desired = [
+        str(axis.axis_id)
+        for axis in _storage_axes(edited)
+        if str(axis.axis_id) in storage_ids
+    ]
     order = [storage_ids.index(axis_id_value) for axis_id_value in desired]
     for key in ("values", "validity", "sigma"):
-        if draft[key] is not None:
-            draft[key] = np.transpose(np.asarray(draft[key]), order)
-    if any(str(axis.role) == "scalar" for axis in tuple(draft["cell_axes"])):
-        _insert_storage_axis(draft, len(desired), 1)
-    _normalize_table_axes(draft)
+        if edited[key] is not None:
+            edited[key] = np.transpose(np.asarray(edited[key]), order)
+    scalar_ids = {
+        str(axis.axis_id)
+        for axis in tuple(edited["cell_axes"])
+        if str(axis.role) == "scalar"
+    }
+    if scalar_ids - set(storage_ids):
+        _insert_storage_axis(edited, len(desired), 1)
+    _normalize_table_axes(edited)
+    draft.update(edited)
     return True
 
 
@@ -1359,7 +1427,7 @@ def describe_archive(
     signal = str(source.get("signal") or "").strip()
     label = f"{title} — {signal}" if title and signal and title != signal else title or signal
     datasets = tuple((key, label or key) for key in keys)
-    recipes = {key: read_figure_plot(info, arrays, key)[1] for key in keys}
+    recipes = {key: figure_plot_recipe(info, key) for key in keys}
     flow = _lineage_graph(sections["lineage"], source=source)
     return ArchiveDescription(
         name=str(info.get("name", "")),
@@ -1465,11 +1533,8 @@ def _logic_name(node: Mapping[str, Any]) -> str:
     if explicit:
         return explicit
     stream = str(node["event"]["stream"])
-    if stream.startswith("@logic/"):
-        owner, _separator, _output = stream[len("@logic/") :].rpartition("/")
-        if owner:
-            return owner
-    return stream
+    parts = split_signal_key(stream)
+    return stream if parts is None else parts[0]
 
 
 def _manual_lineage_needs_saved_source(
@@ -1500,7 +1565,8 @@ def _manual_lineage_needs_saved_source(
 
 def _signal_name(value: object) -> str:
     text = str(value)
-    return text.rpartition("/")[2] if text.startswith("@logic/") else text
+    parts = split_signal_key(text)
+    return text if parts is None else parts[1]
 
 
 def _source_run_record(
@@ -2402,6 +2468,7 @@ class FigureViewerPresenter:
         draft = _draft_from_snapshot(
             snapshot,
             editor_id=editor_id,
+            producer_serial=self._data_serial,
             name=f"Manual data {self._data_serial}",
             note="",
             source_text="New manual Dataset",
@@ -2423,6 +2490,7 @@ class FigureViewerPresenter:
         draft = _draft_from_snapshot(
             source["snapshot"],
             editor_id=editor_id,
+            producer_serial=self._data_serial,
             name=str(source["name"]),
             note="",
             source_text=f"Copy of {Path(source['path']).name} · {source['key']}",
@@ -2561,6 +2629,7 @@ class FigureViewerPresenter:
         restored = _draft_from_snapshot(
             snapshot,
             editor_id=str(draft["editor_id"]),
+            producer_serial=int(draft["producer_serial"]),
             name=str(name),
             note=str(note),
             source_text=str(draft["source_text"]),
@@ -2731,8 +2800,6 @@ class FigureViewerPresenter:
             draft["values"] = values
         snapshot = _manual_snapshot(draft)
         plot_input = _manual_plot_input(draft, snapshot)
-        if draft["producer_serial"] is None:
-            draft["producer_serial"] = self._data_serial
         serial = int(draft["producer_serial"])
         owner_id = f"manual-data-{serial}"
         signal = f"@figure/manual/{serial}/data"

@@ -459,6 +459,47 @@ _PANEL3_LABELS = {
 }
 
 
+class _ProcessCpu:
+    """CPU seconds of a set of processes, summed over measurement windows only.
+
+    ``begin`` is called where a window opens -- ``live_all``'s
+    ``window_start``, after its warm-up pump and probe reset -- and ``end``
+    when it returns.  The work between windows (the pump that warms the next
+    one, the probes installed between them) is nobody's load: it is outside
+    the denominator, so it stays outside the numerator.  Read once before
+    both windows and once after everything, two seconds of warm-up on a
+    busy core reported a 100 % process as 109 %.
+    """
+
+    def __init__(self, processes: dict) -> None:
+        self._processes = dict(processes)
+        self._open: dict[str, float] | None = None
+        self.seconds: dict[str, float] = {name: 0.0 for name in self._processes}
+
+    def _now(self) -> dict[str, float]:
+        import psutil
+
+        answer: dict[str, float] = {}
+        for name, process in self._processes.items():
+            try:
+                answer[name] = float(sum(process.cpu_times()[:2]))
+            except psutil.Error:
+                continue
+        return answer
+
+    def begin(self) -> None:
+        self._open = self._now()
+
+    def end(self) -> None:
+        if self._open is None:
+            return
+        now = self._now()
+        for name in self.seconds:
+            if name in now and name in self._open:
+                self.seconds[name] += max(0.0, now[name] - self._open[name])
+        self._open = None
+
+
 def run(
     *,
     seconds: float,
@@ -657,6 +698,7 @@ def run(
         except (ImportError, OSError):
             processes = {}
             memory_thread = None
+        cpu = _ProcessCpu(processes)
         payload.update(
             roi=roi,
             history_edit=history_edit,
@@ -687,9 +729,9 @@ def run(
         baseline = bench.live_all(
             panels,
             baseline_seconds,
-            window_start=baseline_begin,
-            process_ids=process_ids,
+            window_start=lambda: (baseline_begin(), cpu.begin()),
         )
+        cpu.end()
         baseline["source_rate"] = baseline_finish(baseline["window_s"])
         baseline["causal_timeline"] = timeline.summary(labels)
         timeline.close()
@@ -710,9 +752,9 @@ def run(
         measured = bench.live_all(
             panels,
             seconds,
-            window_start=main_begin,
-            process_ids=process_ids,
+            window_start=lambda: (main_begin(), cpu.begin()),
         )
+        cpu.end()
         measured["source_rate"] = main_finish(measured["window_s"])
         measured["causal_timeline"] = timeline.summary(labels)
         timeline.close()
@@ -727,9 +769,6 @@ def run(
         process_memory = {}
         for name, process in processes.items():
             samples = memory_samples[name]
-            cpu_windows = [
-                block["process_cpu"][name] for block in (baseline, measured)
-            ]
             process_memory[name] = {
                 "pid": process_ids[name],
                 "rss_start_mib": (
@@ -742,8 +781,8 @@ def run(
                     None if not samples else round(max(samples) / 2**20, 2)
                 ),
                 "cpu_percent_of_one_core": round(
-                    sum(window["cpu_seconds"] for window in cpu_windows)
-                    / sum(window["window_s"] for window in cpu_windows)
+                    cpu.seconds[name]
+                    / max(1.0e-9, baseline["window_s"] + measured["window_s"])
                     * 100.0,
                     1,
                 ),

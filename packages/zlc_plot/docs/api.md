@@ -126,19 +126,21 @@ Axis references are explicit:
 - `AxisRef.point("point_axis")`
 - `AxisRef.cell_data("cell_axis")`
 
-FacetGrid accepts a required `facet_rows` source and an optional `facet_cols`
-source, producing a row-major two-dimensional grid of homogeneous
-Curve/Image/Histogram cells. The row and column sources must differ from each
-other and from every cell axis, group, or histogram sample.
-One-dimensional facets expose `facet_display_unit`; two-dimensional facets
-expose independent `facet_row_display_unit` and `facet_col_display_unit`
-parameters so each facet axis can be converted and labelled separately.
-Histogram `samples` is an explicit pool contract: every repeat, point or trailing
-data axis that contributes observations must be listed (or consumed by the facet).
+FacetGrid takes one optional `facet` source -- any declared Repeat, Point or
+Cell-data axis -- and lays its homogeneous Curve/Image/Histogram cells out
+row-major; with no facet axis it is one complete cell titled `Facet 1`.  The
+facet axis must differ from every cell axis and group.  A faceted surface
+exposes `facet_display_unit` so the facet axis can be converted and labelled
+on its own.
+Histogram pools every observation its scope admits; what each remaining
+dataset axis contributes is that axis's fate -- pooled, reduced, pinned to a
+tagged Scope coordinate, or split into a group.
 Rolling owns its horizontal history ordinal inside `PlotSession`; it has no dataset
 `x` axis.  Change semantic roles on an existing surface with
-`session.replace_spec(new_spec)`, and use `session.fit(..., fit_all_facets=True)`
-for an ordered `zlc_plot.fit.FacetFitBatchResult`.
+`session.replace_spec(new_spec)`, and use
+`session.fit(..., live=False, fit_all_facets=True)` for an ordered
+`zlc_plot.fit.FacetFitBatchResult`: an all-facets batch is a one-shot fit and
+cannot be the live one.
 
 ## Image point overlays and PulseTimeline inputs
 
@@ -184,12 +186,14 @@ coordinate, and status-axis document returned by
 `image_point_overlay_geometry(...)` into its run record. The application
 validates and constructs the layer with
 `image_point_overlay_from_signal(geometry, status, image, revision=...)`.
-Status values express EMPTY/OCCUPIED and Dataset validity expresses INVALID.
-The status Dataset must share the image's Repeat/Point domains and have one
-complete trailing point axis. The renderer applies the Image/FacetGrid
-PlotSpec scope and facet to those leading axes; it draws a judgement only for
-one exact repeat/point cell, while a pooled surface remains UNKNOWN rather
-than inventing a consensus.
+Status values express EMPTY/OCCUPIED; a point the Dataset's validity marks
+invalid has no judgement. The status Dataset must share the image's
+Repeat/Point domains and have one complete trailing point axis. The renderer
+applies the Image/FacetGrid PlotSpec scope and facet to those leading axes; it
+draws a judgement ring only for one exact repeat/point cell, and draws none --
+rather than inventing a consensus -- where the surface still pools several
+cells or the point is invalid. Static `static_statuses` keep their explicit
+INVALID/UNKNOWN markers.
 
 An overlay-only update must have a strictly newer revision; it updates the
 point artists without changing or reprojecting the image snapshot. Point ring
@@ -327,7 +331,7 @@ Semantic roles are described by one registry-derived, frontend-neutral API:
 from zlc_plot import describe_semantics
 
 semantics = describe_semantics(
-    snapshot.schema, session.spec, layout=DEFAULTS.layout,
+    snapshot.block.schema, session.spec, layout=DEFAULTS.layout,
 )
 same_description = session.describe_semantics()
 print(semantics.values)
@@ -337,14 +341,14 @@ print(semantics.values)
 `zlc_plot.semantics.SemanticDescription`. Its `kind_choices` are the kinds whose registry
 handler admits the schema; `axis_choices` is the stable ordered set of
 `AxisRef` values declared by that schema; and `fields` contains the current
-`kind`, `x`, `y`, `group`, `reduction`, `samples`, `facet_rows` and
-`facet_cols` values that apply to the current kind. Every `zlc_plot.semantics.SemanticField` is
+`kind`, one `fate:<domain>:<axis id>` field per dataset axis -- along it as
+x, split by it as group, laid out by it as facet, pooled, reduced, or pinned
+to one tagged Scope coordinate, as the kind admits -- and `reduction`. Every `zlc_plot.semantics.SemanticField` is
 marked `rebuild=True`. A frontend that owns a complete form submits its whole
 semantic/display/size/overlay/fit target once through `configure()`; `zlc_plot`
 composes the typed spec and chooses the minimum render path. Code that already
-owns a complete typed spec may call `replace_spec()` directly. `facet_cols` is optional, must differ
-from `facet_rows`, and `facet_max_cells` is the layout-declared capacity for a
-grid. Histogram `samples` is a multi-choice field. `zlc_plot.ui.semantic_controls()`
+owns a complete typed spec may call `replace_spec()` directly. `facet_max_cells`
+is the layout-declared capacity for a grid. `zlc_plot.ui.semantic_controls()`
 projects this exact description into the same toolkit-neutral
 `zlc_plot.ui.ParameterControl` pipeline used by display controls; semantic controls carry
 `semantic=True` and `rebuild=True`.
@@ -371,7 +375,8 @@ in place and finish in the same complete-frame transaction. Grid and colorbar
 visibility use the separate chrome lane. The parameter schema associates every
 field with composable `RenderEffect` flags; one transaction resolves those
 effects and performs one final draw (or the image-only axis path). For Histogram,
-`normal` and `fixed` reuse the canonical bin domain and expand only a side breached by new live data;
+`normal` reuses the canonical bin domain and expands only a side breached by new
+live data, `fixed` keeps its authored bounds whatever the data do, and
 `tight` intentionally recomputes the domain every revision. Changing plot
 kind, semantic axes, reduction, grouping or facet structure is a rebuild on
 the same session surface: `replace_spec()` retains only independently
@@ -491,11 +496,14 @@ result = curve_session.fit("gaussian_offset")
 future = curve_session.fit_async("gaussian_offset")
 ```
 
-`fit(..., fixed={"offset": 0.0}, initial={"sigma": 1.0})` uses two distinct
-semantics: `fixed` parameters are removed from the optimizer exactly, while
-`initial` only replaces the corresponding starting guess. Those mappings are
-keyed by parameter *name*, which is also the published signal id and what a
-saved layout stores.
+`fit(..., bounds={"offset": (0.0, 0.0)}, initial={"sigma": 1.0})` uses two
+distinct semantics: equal `bounds` hold a parameter at that value exactly --
+it is removed from the optimizer -- while `initial` only replaces the
+corresponding starting guess. A configure target
+(`session.configure(fit={"model": ..., "fixed": {...}, "initial": {...}})`)
+records the same intent as `fixed` and `initial` mappings and turns `fixed`
+into equal bounds for the same solver. Those mappings are keyed by parameter
+*name*, which is also the published signal id and what a saved layout stores.
 
 The Panel editor projects the same contract as one display-unit expression,
 written in the *symbols the model's formula prints* rather than those names --
@@ -687,7 +695,10 @@ notebook save/reopen because a closed widget model cannot be resolved again.
 ipywidgets 的 DOMWidget 协议）。它把一个完整的 `RasterFront` 作为单个
 `frame_packet` buffer（包含 RGBA、尺寸、DPR 与 interaction map）原子交给浏览器
 的单一 canvas；`SelectorScene` 的提交态与拖拽候选都由 kernel 的同一套 Matplotlib
-renderer 烘焙，浏览器只负责 blit 与输入归一化。不加载 ipympl、不创建 Matplotlib
+renderer 烘焙，浏览器只负责 blit 与输入归一化。每个 pointer 消息都带回浏览器实际
+已绘制那一帧的 identity 与 axes，kernel 按这份几何解释坐标，而不是按最近发送、
+可能尚未画出的 front；未按键的 move 与 leave 同样转发，grouped series 的 hover
+与 Qt 一致。不加载 ipympl、不创建 Matplotlib
 widget，也不要求任何 `%matplotlib` magic。固定 size 与 DPR 变化只发布新的完整
 front，Notebook 与 Qt 使用同一套 host/session 协议。
 

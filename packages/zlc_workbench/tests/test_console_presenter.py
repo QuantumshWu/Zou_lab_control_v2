@@ -33,7 +33,7 @@ from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementRequest,
 )
 from zlc_workbench.console import ConsolePresenter
-from zlc_workbench.console_layout import LayoutDocument
+from zlc_workbench.console_layout import LayoutDocument, LayoutError
 from zlc_workbench.panel_catalog import task_console_fitting_spec
 from zlc_workbench.session import ExperimentSession, Workspace
 from zlc_workbench.topology import format_signal_shape
@@ -1516,6 +1516,68 @@ def test_a_contradictory_display_state_is_refused_at_the_write(
     assert binding.unapplied_display == ""
 
 
+def test_a_refused_configure_rolls_back_to_what_the_host_accepted(
+    presenter, session
+) -> None:
+    """A, then B cancelled before it ran, then C refused: the record returns
+    to A, the state the host actually holds.
+
+    The baseline of a refused configure was the previous AUTHORED state --
+    B, once B had been written into the record -- although B had been
+    cancelled before the host ever saw it.  The host rolled back to A and
+    the record claimed B: a setting the card said and the picture did not
+    show, with no gesture left that could reconcile them.
+    """
+
+    from threading import Event
+
+    node, snap = _one_shot(session)
+    panel = presenter.add_panel(node.signal_key("frames"), snap, kind="image")
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.host is not None
+        and panel.accepted_surface is not None
+        and panel.configuration is None,
+    )
+    host = panel.host
+    before = host.describe_display().result(timeout=10).value
+    name, original = next(
+        (name, value)
+        for name, value in before.display_state.values.items()
+        if type(value) is bool
+    )
+    entered, release = Event(), Event()
+
+    def hold() -> None:
+        entered.set()
+        assert release.wait(10), "the host gate was not released"
+
+    blocker = host.dispatch_control(hold)
+    try:
+        assert entered.wait(5)
+        assert presenter.update_panel_state(
+            panel.panel_id, {"display": {name: not original}}
+        )
+        queued = panel.configuration[1]
+        assert presenter.update_panel_state(
+            panel.panel_id, {"fit": {"model": "review_missing_model"}}
+        )
+        assert queued.cancelled(), "the queued edit was not cancelled"
+        refused = panel.configuration[1]
+    finally:
+        release.set()
+        blocker.result(timeout=10)
+    _settle_panel_hosts(presenter, lambda: panel.configuration is None)
+    with pytest.raises(Exception, match="unknown fit model"):
+        refused.result(timeout=10)
+    held = host.describe_display().result(timeout=10).value
+    assert held.display_state.values[name] == original
+    assert panel.state.display.get(name, original) == original, (
+        "the record rolled back to an edit the host never drew"
+    )
+    assert panel.accepted_display.display_state.values[name] == original
+
+
 def test_a_wedged_display_state_cannot_lock_the_editor_that_repairs_it(
     presenter, session
 ) -> None:
@@ -1789,7 +1851,7 @@ def test_panel_publisher_edit_owns_stable_output_selection(
     )
     assert session.signal_plane.freeze().value(roi_max) is not None
 
-    tree = LayoutDocument((binding.state,), ()).to_tree()
+    tree = LayoutDocument((binding.state,), (), (binding.panel_id,)).to_tree()
     restored = LayoutDocument.from_tree(tree).panels[0]
     assert restored.published_outputs == binding.state.published_outputs
 
@@ -3433,6 +3495,7 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
     assert document["format"] == presenter.LAYOUT_FORMAT
     assert [panel["title"] for panel in document["panels"]] == ["camera", "again"]
     assert document["panels"][0] == {
+        "panel_id": first.panel_id,
         "signal": signal, "title": "camera", "kind": "image",
         "cell_kind": "",
         "size": "4x4", "interval_ms": 800,
@@ -3445,8 +3508,13 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
         "classifier_thresholds": [],
         "focused_cell": None,
     }
-    # Nothing of this session's bookkeeping: ids are minted fresh on the way in.
-    assert not any("panel_id" in panel for panel in document["panels"])
+    # The identity each panel had is written -- a panel is a producer, and a
+    # downstream panel or row names it by that id -- while hosts and ports
+    # stay this session's bookkeeping.  Fresh ids are minted on the way in.
+    assert [panel["panel_id"] for panel in document["panels"]] == [
+        first.panel_id,
+        second.panel_id,
+    ]
     assert document["logic"] == [
         {
             "node_id": logic_id,
@@ -3614,8 +3682,10 @@ def test_a_board_naming_a_signal_nobody_publishes_keeps_the_blank_panel(
     signal = node.signal_key("frames")
     presenter.add_panel(signal, snapshot, title="here", kind="image")
     document = presenter.layout()
+    # A board file names every panel or none; this one names its panels.
     document["panels"].append(
-        {"signal": "nobody.publishes.this", "title": "gone", "kind": "image",
+        {"panel_id": "panel-99",
+         "signal": "nobody.publishes.this", "title": "gone", "kind": "image",
          "cell_kind": "", "size": "",
          "interval_ms": 200, "semantic": {}, "display": {}, "fit": {},
          "overlay_signal": "", "published_outputs": {},
@@ -3637,6 +3707,252 @@ def test_a_file_that_is_not_a_board_is_refused_by_name(presenter) -> None:
     invalid_layout = presenter.layout()
     invalid_layout["format"] = "not-a-console-board"
     assert presenter.apply_layout(invalid_layout) is False
+
+
+def _saved_panel(signal: str, title: str, **fields) -> dict:
+    """One panel entry as a board file spells it, with ``fields`` on top."""
+
+    entry = {
+        "signal": signal, "title": title, "kind": "image", "cell_kind": "",
+        "size": "2x2", "interval_ms": 200, "semantic": {}, "display": {},
+        "fit": {}, "overlay_signal": "", "published_outputs": {},
+        "selector": {}, "crosshair": {}, "classifier_thresholds": [],
+        "focused_cell": None,
+    }
+    entry.update(fields)
+    return entry
+
+
+def _loaded_board(tree: dict, fresh_ids: tuple[str, ...], schema_for=lambda _signal: None):
+    """Parse, resolve and load ``tree`` exactly as the console does."""
+
+    from zlc_workbench.console_layout import load_layout, resolve_layout
+    from zlc_workbench.logic import LogicCatalog
+
+    document = LayoutDocument.from_tree(tree)
+    resolved = resolve_layout(
+        document,
+        catalog=LogicCatalog(),
+        installation=SimpleNamespace(devices={}),
+        panel_kinds=("image",),
+    )
+    return document, load_layout(resolved, panel_ids=fresh_ids, schema_for=schema_for)
+
+
+def test_a_loaded_board_reads_its_panels_derived_signals_by_their_fresh_ids(
+    presenter, session, tmp_path
+) -> None:
+    """A panel that reads another panel's ROI still reads it after a Load.
+
+    A panel is a producer: its Bridge publishes what it derives under
+    ``@logic/<panel id>/<output>``, and a downstream panel, an image overlay
+    or a logic row names it by that spelling.  Writing the spelling while
+    dropping the identity, then minting fresh ids on the way in, left every
+    downstream side reading a producer that no longer existed -- and nothing
+    said so.  A reference to a panel the board does not carry is dropped
+    with a sentence on the strip.
+    """
+
+    from zlc_workbench.logic import stable_signal_key
+
+    node, snapshot = _one_shot(session)
+    upstream = presenter.add_panel(
+        node.signal_key("frames"), snapshot, title="camera", kind="image"
+    )
+    roi = stable_signal_key(upstream.panel_id, "roi_frame")
+    occupied = stable_signal_key(upstream.panel_id, "occupied")
+    occupancy_id = presenter.add_logic(
+        "occupancy",
+        source_signal=roi,
+        artifact_inputs={"calibration_path": str(tmp_path / "chosen.json")},
+        open_editor=False,
+    )
+    document = presenter.layout()
+    assert document["panels"][0]["panel_id"] == upstream.panel_id
+    unknown = stable_signal_key("panel-99", "roi_frame")
+    document["panels"] += [
+        _saved_panel(roi, "roi", panel_id="panel-40", overlay_signal=occupied),
+        _saved_panel(unknown, "orphan", panel_id="panel-41"),
+    ]
+
+    assert presenter.apply_layout(document) is True
+    restored = list(presenter.panels.values())
+    assert [binding.title for binding in restored] == ["camera", "roi", "orphan"]
+    fresh = restored[0].panel_id
+    assert fresh != upstream.panel_id, "an id is never handed out twice"
+    assert restored[1].state.signal == stable_signal_key(fresh, "roi_frame")
+    assert restored[1].state.overlay_signal == stable_signal_key(fresh, "occupied")
+    assert presenter.logic[occupancy_id].draft.source_signal == stable_signal_key(
+        fresh, "roi_frame"
+    )
+    assert restored[2].state.signal == ""
+    assert any(
+        unknown in text and "dropped" in text
+        for _severity, text in presenter.view.status
+    ), presenter.view.status
+
+
+def test_a_board_names_its_panels_and_a_load_respells_every_reference_to_them() -> None:
+    """The document keeps each panel's identity and puts it onto fresh ones.
+
+    Without the identity, ``@logic/<panel id>/<output>`` in a downstream
+    panel's signal, an image overlay or a logic row's source named nothing
+    a loaded board could satisfy.  With it, a load mints fresh ids and
+    respells every reference to the fresh id of the same saved panel; a
+    reference to a panel the board does not carry is blanked and said.
+    """
+
+    from zlc_workbench.logic import stable_signal_key
+
+    tree = {
+        "format": "zlc.console-board",
+        "panels": [
+            _saved_panel("@logic/cm/frames", "camera", panel_id="panel-7"),
+            _saved_panel(
+                stable_signal_key("panel-7", "roi_frame"),
+                "roi",
+                panel_id="panel-9",
+                overlay_signal=stable_signal_key("panel-7", "occupied"),
+            ),
+            _saved_panel(
+                stable_signal_key("panel-5", "roi_frame"), "orphan", panel_id="panel-12"
+            ),
+        ],
+        "logic": [
+            {
+                "node_id": "occ", "api_name": "occupancy",
+                "values": {"model_kind": "default"},
+                "source_signal": stable_signal_key("panel-9", "counts"),
+                "device_keys": {},
+                "artifact_inputs": {"calibration_path": "chosen.json"},
+                "auto_preview": True,
+            }
+        ],
+    }
+    document, loaded = _loaded_board(tree, ("panel-3", "panel-4", "panel-5"))
+    assert document.panel_ids == ("panel-7", "panel-9", "panel-12")
+    assert [entry["panel_id"] for entry in document.to_tree()["panels"]] == [
+        "panel-7", "panel-9", "panel-12",
+    ]
+    assert loaded.panel_ids == ("panel-3", "panel-4", "panel-5")
+    camera, roi, orphan = loaded.panels
+    assert camera.signal == "@logic/cm/frames", "a logic producer is not a panel"
+    assert roi.signal == stable_signal_key("panel-3", "roi_frame")
+    assert roi.overlay_signal == stable_signal_key("panel-3", "occupied")
+    assert loaded.logic[0].draft.source_signal == stable_signal_key("panel-4", "counts")
+    # "panel-5" is both the orphan's SAVED reference and a FRESH id handed
+    # out by this load: a saved reference resolves against saved ids only.
+    assert orphan.signal == ""
+    assert loaded.notes == (
+        "panel 'orphan' read @logic/panel-5/roi_frame, a panel this board does "
+        "not carry; the connection was dropped",
+    )
+    with pytest.raises(LayoutError, match="one fresh panel_id per saved panel"):
+        _loaded_board(tree, ("panel-3", "panel-4"))
+
+
+def test_a_board_written_without_ids_is_read_in_saved_order() -> None:
+    """A file from before identities were kept means its panels in order.
+
+    Such a board was minted on a fresh console, so its first entry was that
+    console's ``panel-1``; that is the only reading under which the
+    references it saved resolve.  A file naming ids for some entries only
+    is two files and refused, and a writer must always know its ids.
+    """
+
+    tree = {
+        "format": "zlc.console-board",
+        "panels": [
+            _saved_panel("@logic/cm/frames", "camera"),
+            _saved_panel("@logic/panel-1/roi_frame", "roi"),
+        ],
+        "logic": [],
+    }
+    document, loaded = _loaded_board(tree, ("panel-8", "panel-9"))
+    assert document.panel_ids == ("panel-1", "panel-2")
+    assert loaded.panels[1].signal == "@logic/panel-8/roi_frame"
+    assert loaded.notes == ()
+
+    tree["panels"][0]["panel_id"] = "panel-1"
+    with pytest.raises(LayoutError, match="every panel entry carries a panel_id or none"):
+        LayoutDocument.from_tree(tree)
+    with pytest.raises(TypeError, match="panel_ids"):
+        LayoutDocument((), ())
+
+
+def test_saved_fates_are_read_in_todays_vocabulary_or_refused_by_name() -> None:
+    """An old fate key is respelled by its prefix; an unknown one is refused.
+
+    ``fate:point_dimension:<axis>`` and ``fate:data:<axis>`` name the same
+    axes today's ``fate:point:`` and ``fate:cell_data:`` do.  The bare
+    ``fate:repeat`` named the whole Repeat domain, and which axes that is
+    only the data can say, so a load expands it onto the Repeat axes of
+    what the signal publishes today, or drops it and says so.  A key
+    nobody can read is refused naming the key: dropped silently it would
+    surface as a plot drawn along the wrong axis.
+    """
+
+    from zlc_workbench.console_layout import current_fate_key
+
+    tree = {
+        "format": "zlc.console-board",
+        "panels": [
+            _saved_panel(
+                "@logic/cm/frames",
+                "camera",
+                panel_id="panel-1",
+                semantic={
+                    "fate:point_dimension:cm.x": "x",
+                    "fate:data:cm.site": "reduce",
+                    "fate:repeat": "reduce",
+                    "fate:cell_data:cm.row": "y",
+                    "reduction": "mean",
+                },
+            )
+        ],
+        "logic": [],
+    }
+    repeat_axes = SimpleNamespace(
+        repeat_domain=SimpleNamespace(
+            axes=(SimpleNamespace(axis_id="cm.shot"), SimpleNamespace(axis_id="cm.cycle"))
+        )
+    )
+    document, loaded = _loaded_board(tree, ("panel-2",), lambda _signal: repeat_axes)
+    assert dict(document.panels[0].semantic) == {
+        "fate:point:cm.x": "x",
+        "fate:cell_data:cm.site": "reduce",
+        "fate:repeat": "reduce",
+        "fate:cell_data:cm.row": "y",
+        "reduction": "mean",
+    }
+    assert dict(loaded.panels[0].semantic) == {
+        "fate:point:cm.x": "x",
+        "fate:cell_data:cm.site": "reduce",
+        "fate:repeat:cm.shot": "reduce",
+        "fate:repeat:cm.cycle": "reduce",
+        "fate:cell_data:cm.row": "y",
+        "reduction": "mean",
+    }
+    assert loaded.notes == ()
+
+    _document, unpublished = _loaded_board(tree, ("panel-2",))
+    assert "fate:repeat" not in unpublished.panels[0].semantic
+    assert unpublished.notes == (
+        "panel 'camera': its saved repeat fate 'reduce' names the Repeat axes "
+        "and nothing is publishing @logic/cm/frames to name them; the fate was "
+        "dropped",
+    )
+
+    assert current_fate_key("fate:point:cm.x") == "fate:point:cm.x"
+    for unknown in ("fate:point_row", "fate:point_coordinate:cm.x", "fate:point:"):
+        with pytest.raises(LayoutError, match=repr(unknown)):
+            current_fate_key(unknown)
+        tree["panels"][0]["semantic"] = {unknown: "x"}
+        with pytest.raises(LayoutError, match=repr(unknown)):
+            LayoutDocument.from_tree(tree)
+    tree["panels"][0]["semantic"] = {"fate:point_dimension:cm.x": "x", "fate:point:cm.x": "y"}
+    with pytest.raises(LayoutError, match="both mean 'fate:point:cm.x'"):
+        LayoutDocument.from_tree(tree)
 
 
 def test_panel_edit_projects_the_direct_producer_link_and_ages(
@@ -4569,18 +4885,6 @@ def test_a_started_row_opens_its_declared_preview_only_when_asked_to(
         assert not presenter.panels, "nothing opens itself when the row says no"
 
 
-def _semantic_choice(binding, name: str):
-    """One offered value for a semantic field, as the Setting form offers it."""
-
-    for entry in binding.parameter_surface["semantic"]:
-        if str(entry["key"]) != name:
-            continue
-        for _label, value in tuple(entry["choices"]):
-            if value is not None:
-                return value
-    return None
-
-
 def _fate_row_offering(binding, fate: str) -> str | None:
     """The name of an axis row that can be given this fate."""
 
@@ -4844,16 +5148,17 @@ def test_a_panel_says_what_kind_of_data_it_is_drawing(presenter, session) -> Non
     pinned_text = (
         str(int(number)) if number.is_integer() else f"{number:g}"
     )
-    # The strip already says "Latest" for the default scope, so settling
-    # on any scope proves nothing: wait for the PINNED one.
+    # The strip lists every scope-fated axis, the default "Latest" ones
+    # included -- a singleton axis is pinnable like any other -- so settling
+    # on any scope proves nothing: wait for the PINNED one to appear.
     _settle_panel_hosts(
         presenter,
-        lambda: binding.parameter_surface.get("data_scope")
-        == ((str(fate["label"]), pinned_text),),
+        lambda: (str(fate["label"]), pinned_text)
+        in tuple(binding.parameter_surface.get("data_scope", ())),
     )
-    assert binding.parameter_surface["data_scope"] == (
-        (str(fate["label"]), pinned_text),
-    )
+    scope = dict(binding.parameter_surface["data_scope"])
+    assert scope[str(fate["label"])] == pinned_text
+    assert all(text == "Latest" for label, text in scope.items() if label != str(fate["label"]))
 
 
 def test_restored_live_selector_answers_displayed_shot_before_plane_latest(
@@ -4960,7 +5265,7 @@ def test_restored_live_selector_answers_displayed_shot_before_plane_latest(
             published_outputs={"roi_mean": True},
         )
         assert presenter.apply_layout(
-            LayoutDocument((restored_state,), ())
+            LayoutDocument((restored_state,), (), (original.panel_id,))
         ) is True
         (binding,) = tuple(presenter.panels.values())
         _settle_panel_hosts(
@@ -6006,8 +6311,15 @@ def test_refresh_adopts_the_card_when_the_derived_signal_retired(
     assert session.signal_plane.latest_publication(roi_signal) is None
 
     assert presenter.refresh_panel_snapshot(derived.panel_id) is True
-    assert derived.frozen_data is not opened, (
+    travelling = derived.editor_configuration
+    assert travelling is not None and travelling[4] is not opened, (
         "Refresh must adopt the picture the card is showing"
+    )
+    assert travelling[4].publication is card.publication
+    _settle_panel_hosts(
+        presenter,
+        lambda: derived.editor_configuration is None
+        and derived.frozen_data is not opened,
     )
     assert derived.frozen_data.publication is card.publication
     presenter.remove_logic(camera_id)
@@ -6057,10 +6369,17 @@ def test_refresh_adopts_a_card_that_is_ahead_even_with_a_newer_shot_pending(
     _one_shot(session, producer="cm")
 
     assert presenter.refresh_panel_snapshot(panel.panel_id) is True
-    assert panel.frozen_data is not opened, (
+    travelling = panel.editor_configuration
+    assert travelling is not None and travelling[4] is not opened, (
         "a card ahead of Edit must be adopted at once"
     )
-    assert panel.frozen_data.publication is card.publication
+    assert travelling[4].publication is card.publication
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.editor_configuration is None
+        and panel.frozen_data is not opened,
+    )
+    assert panel.frozen_data is not opened
 
 
 def test_a_replacement_host_mounts_the_view_the_operator_just_committed(
@@ -6445,13 +6764,18 @@ def test_refresh_advances_the_editors_own_host(presenter, session) -> None:
     )
     card = panel.accepted_surface
     assert presenter.refresh_panel_snapshot(panel.panel_id) is True
-    assert panel.frozen_data is not opened
-    assert panel.frozen_data.publication is card.publication
+    # the newer freeze travels to the editor; the record stays the picture
+    # the editor shows until that lands
+    assert panel.frozen_data is opened
+    travelling = panel.editor_configuration
+    assert travelling is not None
+    assert travelling[4].publication is card.publication
     _settle_panel_hosts(
         presenter,
         lambda: panel.editor_configuration is None
-        and panel.frozen_data.description is not opened.description,
+        and panel.frozen_data is not opened,
     )
+    assert panel.frozen_data.publication is card.publication
     assert panel.editor_host is host, "Refresh rebuilt the editor host"
     assert not host.closing, "settling the advanced host retired it"
     shown = getattr(card.plot_input, "snapshot", card.plot_input)
@@ -6490,7 +6814,7 @@ def test_refreshes_in_flight_supersede_on_the_same_host(
     host = panel.editor_host
     opened = panel.frozen_data
     for _ in range(2):
-        before = panel.frozen_data.publication
+        before = panel.accepted_surface.publication
         _one_shot(session, producer="cm")
         _settle_panel_hosts(
             presenter,
@@ -6499,14 +6823,104 @@ def test_refreshes_in_flight_supersede_on_the_same_host(
         )
         assert presenter.refresh_panel_snapshot(panel.panel_id) is True
     latest = panel.accepted_surface
-    assert panel.frozen_data.publication is latest.publication
+    travelling = panel.editor_configuration
+    assert travelling is not None
+    assert travelling[4].publication is latest.publication
     _settle_panel_hosts(
         presenter,
         lambda: panel.editor_configuration is None
-        and panel.frozen_data.description is not opened.description,
+        and panel.frozen_data.publication is latest.publication,
     )
     assert panel.editor_host is host and not host.closing
-    assert panel.frozen_data.publication is latest.publication
+    assert panel.frozen_data.description is not opened.description
+    assert not [
+        text for severity, text in presenter.view.status if severity == "error"
+    ]
+
+
+def test_a_refresh_still_travelling_leaves_save_the_editors_picture(
+    presenter, session, tmp_path
+) -> None:
+    """Refresh may ask Edit for newer data; it may not pretend Edit has it.
+
+    The new freeze used to be written into the panel record the moment
+    Refresh was pressed, while the editor host was still taking it.  A
+    Save pressed in that window read the record and wrote the revision
+    the operator had asked for, not the last complete picture the Editor
+    was showing -- and "data advanced" went dark for a picture Edit had
+    not reached.  The candidate lives in the editor entry until the
+    Editor accepts it; the record, Save and the mark stay with the Editor.
+    """
+
+    from threading import Event
+
+    from zlc_data.figure_archive import read_archive, read_dataset
+
+    node, snap = _one_shot(session)
+    panel = presenter.add_panel(node.signal_key("frames"), snap, kind="image")
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.host is not None and panel.accepted_surface is not None,
+    )
+    assert presenter.edit_panel(panel.panel_id)
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.editor_host is not None
+        and panel.editor_configuration is None
+        and panel.frozen_data is not None
+        and panel.frozen_data.description is not None,
+    )
+    editor = panel.editor_host
+    opened = panel.frozen_data
+    entered, release = Event(), Event()
+
+    def hold() -> None:
+        entered.set()
+        assert release.wait(10), "the editor gate was not released"
+
+    blocker = editor.dispatch_control(hold)
+    try:
+        assert entered.wait(5)
+        _one_shot(session, producer="cm")
+        _settle_panel_hosts(
+            presenter,
+            lambda: panel.accepted_surface is not None
+            and panel.accepted_surface.publication is not opened.publication,
+        )
+        card = panel.accepted_surface
+        assert presenter.refresh_panel_snapshot(panel.panel_id) is True
+        travelling = panel.editor_configuration
+        assert travelling is not None
+        assert travelling[4].publication is card.publication
+        assert panel.frozen_data is opened, (
+            "Refresh advanced the record before Edit accepted the picture"
+        )
+        assert panel.frozen_data_advanced is True
+        assert presenter.panel_editor_projection(panel.panel_id)[
+            "data_advanced"
+        ] is True
+        target = tmp_path / "pending-refresh.png"
+        assert presenter.save_panel_figure(panel.panel_id, str(target)) is True
+        _wait_for_panel_save(presenter, target)
+        info, arrays = read_archive(target.with_suffix(".npz"))
+        saved = read_dataset(info, arrays, "data")
+        assert saved.ref.revision == opened.snapshot.ref.revision, (
+            "Save wrote a picture Edit had not reached"
+        )
+        assert (
+            editor.front.identity.data_revision
+            == opened.snapshot.ref.revision.value
+        )
+    finally:
+        release.set()
+        blocker.result(timeout=10)
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.editor_configuration is None
+        and panel.frozen_data is not opened,
+    )
+    assert panel.frozen_data.publication is card.publication
+    assert panel.frozen_data_advanced is False
     assert not [
         text for severity, text in presenter.view.status if severity == "error"
     ]
@@ -6654,14 +7068,22 @@ def test_opening_edit_under_a_newer_shot_stages_one_host(
     assert panel.refresh_requested, "the pending shot was not owed to Edit"
     opened = panel.frozen_data
     deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline and panel.frozen_data is opened:
+    while time.monotonic() < deadline and (
+        panel.editor_configuration is None
+        or panel.editor_configuration[4] is opened
+    ):
         presenter.beat()
         time.sleep(0.005)
-    assert panel.frozen_data is not opened, "the newer shot was not adopted"
-    assert panel.frozen_data.publication is panel.accepted_surface.publication
+    entry = panel.editor_configuration
+    assert entry is not None and entry[4] is not opened, (
+        "the newer shot was not adopted"
+    )
+    assert entry[4].publication is panel.accepted_surface.publication
+    # the record is the picture Edit opened on until the staged host has
+    # taken the newer freeze
+    assert panel.frozen_data is opened
     assert len(built) == 1, "a second host was built for the newer freeze"
-    assert panel.editor_configuration is not None
-    assert panel.editor_configuration[0] is staged
+    assert entry[0] is staged
     hold_until[0] = 0.0
     _settle_panel_hosts(
         presenter,
@@ -6781,6 +7203,73 @@ def test_a_region_drawn_on_a_scan_axis_in_microseconds_is_the_region_the_hand_dr
     status, marked = presenter.view._cards[binding.panel_id].status
     assert not marked and "empty" not in status, status
     assert binding.port is None or binding.port.last_error is None
+
+
+def test_a_region_on_a_scan_curve_reaches_the_scan_as_its_next_sweep() -> None:
+    """Which gestures mean a producer's setting is the producer's declaration.
+
+    A box on a curve arrives as an x range -- a curve's y names no axis --
+    and the scan declares that x range as its next sweep.  The console let
+    only "area" through before asking the descriptor, so the declared
+    mapping was unreachable: the box the operator drew on their scan changed
+    nothing.  A gesture the producer declares nothing for still changes
+    nothing, because the descriptor says so.
+    """
+
+    import json
+
+    from zlc_atom.nodes.scan import ScanAxis, ScanPlan
+    from zlc_atom.nodes.seamless_scan import LOGIC_NODE
+    from zlc_runtime import SelectionRange, SelectionState
+
+    plan = ScanPlan((ScanAxis("pulse:param:bias", (0.0, 1.0, 2.0)),))
+    routed: list[tuple[str, dict]] = []
+    frozen = object()
+    console = SimpleNamespace(
+        _publication_value=lambda _publication, _signal: frozen,
+        _direct_producer_node_id=lambda _signal: "scan-owner",
+        logic={
+            "scan-owner": SimpleNamespace(
+                descriptor=LOGIC_NODE,
+                draft=SimpleNamespace(values={"plan": json.dumps(plan.to_tree())}),
+            )
+        },
+        _selection_context=lambda _publication: {},
+        update_logic_draft=lambda name, **patch: routed.append((name, patch)),
+    )
+    publication = SimpleNamespace(run_record={})
+
+    ConsolePresenter._route_exact_panel_selection(
+        console,
+        "panel-1",
+        "@logic/scan-owner/scan",
+        publication,
+        SelectionState(
+            "curve",
+            "x_range",
+            (SelectionRange("scan.bias", 0.2, 0.8, domain="point"),),
+        ),
+        expected_snapshot=frozen,
+    )
+    narrowed = ScanPlan((ScanAxis("pulse:param:bias", (0.2, 0.5, 0.8)),))
+    assert routed == [
+        ("scan-owner", {"values": {"plan": json.dumps(narrowed.to_tree())}})
+    ]
+
+    routed.clear()
+    ConsolePresenter._route_exact_panel_selection(
+        console,
+        "panel-1",
+        "@logic/scan-owner/scan",
+        publication,
+        SelectionState(
+            "histogram",
+            "x_range",
+            (SelectionRange("scan.bias", 0.2, 0.8, domain="point"),),
+        ),
+        expected_snapshot=frozen,
+    )
+    assert routed == [], "a gesture the scan declares nothing for changes nothing"
 
 
 def test_a_silent_plot_worker_cannot_hold_the_console_open(presenter) -> None:

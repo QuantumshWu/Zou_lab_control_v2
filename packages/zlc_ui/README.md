@@ -1,17 +1,22 @@
 # zlc_ui
 
-`zlc_ui` owns the reusable, domain-independent Qt view layer. It imports no
-laboratory, plotting, data, or storage layer even though all eight layers ship
-in one distribution. Its only non-standard UI dependency beyond PyQt5 is the reference
-`PyQt5-Frameless-Window` shell used by the Fluent layer.
+`zlc_ui` owns the reusable, domain-independent Qt view layer. It owns no
+laboratory, plotting, data, or storage MODEL and imports none of those
+layers, with one named exception: the unit vocabulary `zlc_data.units`,
+which every number on screen is formatted and parsed through so the view
+never keeps a second prefix table.  Its only non-standard UI dependency
+beyond PyQt5 is the reference `PyQt5-Frameless-Window` shell used by the
+Fluent layer.
 
 ## Ownership boundary
 
 1. A component enters this repository only when it depends on PyQt5, the
-   reference Qt-only `PyQt5-Frameless-Window` shell, and the Python standard
-   library, and its public vocabulary contains no experiment, plotting, or
-   data concepts such as `Dataset`, `Signal`, `Device`, `Pulse`, `Plot`,
-   `matplotlib`, or `numpy`.
+   reference Qt-only `PyQt5-Frameless-Window` shell, the Python standard
+   library and the unit vocabulary above, and it owns no experiment,
+   plotting or data computation: a `Dataset`, a `Signal`, a `Device` or a
+   `Plot` reaches it only as plain projected values.  Feature views are
+   named for what they show (`console`, `pulse`, `device_manager`,
+   `figure_viewer`); the names are not the models.
 2. This package owns the view layer only:
    - **Pure controls** (`fluent`, `form`, and `board`) are
      domain-independent building blocks.
@@ -153,8 +158,11 @@ application data.
 
 ## Domain boundaries
 
-Qt plot editors belong to `zlc_plot` because they edit plot-domain
-specifications. The pulse document/controller belongs to `zlc_pulse`, and plot
-rendering belongs to `zlc_plot`. `zlc_ui.pulse` contains only the Qt projection
-and its plain view-model seam; presentation runtime logic remains outside this
-package.
+`zlc_plot` owns what a plot's parameters MEAN -- the semantic declarations,
+their vocabularies and validation; `zlc_ui` owns every Qt widget that edits
+them, including the Fluent choice controls and the Scope wheel, and the two
+meet only through plain projections (`FormSpec`, field descriptors, typed
+values).  The pulse document/controller belongs to `zlc_pulse`, and plot
+rendering belongs to `zlc_plot`. `zlc_ui.pulse` contains only the Qt
+projection and its plain view-model seam; presentation runtime logic remains
+outside this package.

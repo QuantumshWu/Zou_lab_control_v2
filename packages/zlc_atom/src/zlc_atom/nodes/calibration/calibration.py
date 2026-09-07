@@ -8,8 +8,6 @@ from enum import Enum
 from functools import cached_property
 from math import isfinite, sqrt
 
-from scipy import ndimage
-from scipy.optimize import linear_sum_assignment
 import json
 from pathlib import Path
 from types import MappingProxyType
@@ -917,13 +915,15 @@ class TrapCalibration:
             return self
         centers = np.asarray(self.site_map.centers_xy, dtype=float) + (shift_x, shift_y)
         radius = max(model.integration_half_width for model in self.models)
+        # THE rule again, not a second one: the readout rounds a centre to
+        # its pixel before it reads the box, so whether the crop covers a
+        # site is whether that pixel box is wholly inside it.  A continuous
+        # bound refused a site at x=0.8 with radius 1 whose 3x3 box (x=0..2)
+        # the readout reads in full.
         outside = [
             self.site_map.site_ids[index]
             for index, (x, y) in enumerate(centers)
-            if not (
-                radius <= x <= shape[1] - 1 - radius
-                and radius <= y <= shape[0] - 1 - radius
-            )
+            if not box_fits((float(x), float(y)), radius, shape)
         ]
         if outside:
             raise ValueError(
@@ -1327,12 +1327,9 @@ class _RunEvidence:
 
     change_hits: np.ndarray
     max_change_z: np.ndarray
-    #: The brightest this place ever stood above its own frame's background,
-    #: in that frame's noise.  A CHANGE is unsigned by design -- loading and
-    #: unloading are both evidence -- so the change statistics alone cannot
-    #: tell a trap that lit up from a hole that went dark when its
-    #: neighbours lit up.  The level can, and only the level can.
-    max_level_z: np.ndarray
+    #: Every standardized change magnitude added up: the one map a trap's
+    #: own change peaks on, whatever its neighbours do around it.
+    total_change: np.ndarray
     total_response: np.ndarray
     transitions: int
     background_sigma: float
@@ -1348,9 +1345,8 @@ def _accumulate_run(
 
     One pass, because it is one pass: a run of two thousand large frames is
     not walked again for the sake of tidiness.  What it keeps is where two
-    neighbouring frames changed, how large those changes were, the brightest
-    any place ever stood on a single frame, and the light on every frame for
-    the independent average-image path.
+    neighbouring frames changed, how large those changes were, and the light
+    on every frame for the independent average-image path.
     """
 
     from scipy import ndimage
@@ -1359,7 +1355,7 @@ def _accumulate_run(
     background_sigma = max(4.0 * spot_sigma, spot_sigma + 2.0)
     change_hits = np.zeros(stack.shape[1:], dtype=np.int64)
     max_change_z = np.zeros(stack.shape[1:], dtype=float)
-    max_level_z = np.full(stack.shape[1:], -np.inf, dtype=float)
+    total_change = np.zeros(stack.shape[1:], dtype=float)
     #: Every frame added up: a highly loaded site may hardly change between
     #: neighbours, but it remains bright in the complete average.
     total_response = np.zeros(stack.shape[1:], dtype=float)
@@ -1381,22 +1377,6 @@ def _accumulate_run(
         baseline = np.median(response, axis=(1, 2), keepdims=True)
         response = response - baseline
         total_response += np.sum(response, axis=0)
-
-        # The BRIGHTEST single frame, in that frame's own noise.  Read the
-        # same robust way the change statistic below is, so the two bars are
-        # comparable, and kept as a maximum because one loaded frame out of a
-        # hundred is exactly the evidence this detector exists to catch.
-        level_noise = 1.4826 * np.median(
-            np.abs(response), axis=(1, 2), keepdims=True
-        )
-        level_noise = np.maximum(
-            level_noise,
-            np.finfo(float).eps
-            * np.maximum(1.0, np.max(np.abs(response), axis=(1, 2), keepdims=True)),
-        )
-        max_level_z = np.maximum(
-            max_level_z, np.max(response / level_noise, axis=0)
-        )
 
         # A low-loading site can appear on one frame only.  Its evidence is
         # therefore the spatially shaped CHANGE between neighbouring frames,
@@ -1427,11 +1407,12 @@ def _accumulate_run(
             max_change_z,
             np.max(standardized, axis=0),
         )
+        total_change += np.sum(standardized, axis=0)
         transitions += int(changes.shape[0])
     return _RunEvidence(
         change_hits,
         max_change_z,
-        np.where(np.isfinite(max_level_z), max_level_z, 0.0),
+        total_change,
         total_response,
         transitions,
         background_sigma,
@@ -1445,7 +1426,6 @@ class _Admission:
     average: np.ndarray
     required: int
     single_change_cut: float
-    single_level_cut: float
     average_z: np.ndarray
     average_cut: float
 
@@ -1537,22 +1517,6 @@ def _admission_thresholds(
         )
     )
 
-    # How bright a place must have stood, once, to be called a trap at all.
-    # The same family-wise rule the single-change bar uses, over the family
-    # this statistic is drawn from: every pixel of every FRAME, rather than
-    # of every transition.
-    single_level_cut = (
-        float("inf")
-        if not frames
-        else max(
-            detection_sigma,
-            float(
-                sqrt(2.0)
-                * erfcinv(expected_false_sites / float(pixels * frames))
-            ),
-        )
-    )
-
     average_z = (average - average_baseline) / average_noise
     # How high a place must stand in the average: never below the operator's
     # authored detection sigma, and raised further when this image's number of
@@ -1568,7 +1532,6 @@ def _admission_thresholds(
         average,
         required,
         single_change_cut,
-        single_level_cut,
         average_z,
         average_cut,
     )
@@ -1604,9 +1567,31 @@ def _candidate_peaks(
     # overlapping skirts from becoming extra sites merely because they change
     # on many pairs.  Temporal evidence may land one raster pixel beside that
     # maximum, so each average peak reads the strongest 3x3 neighbourhood.
-    nearby_hits = ndimage.maximum_filter(hits, size=3, mode="nearest")
+    #
+    # A CHANGE ADMITS THE PLACE WHERE THE CHANGE PEAKS.  A changing
+    # neighbour's band-pass dark ring changes with it, as much as a weak trap
+    # does, and the middle of an unloaded lattice cell -- the one place
+    # farthest from every neighbour -- is a local maximum of the average (the
+    # least dark point of the rings) while being a HOLLOW of the change,
+    # which grows towards whichever neighbour made it.  Judged on the summed
+    # change magnitude against the ring one spot out: a trap's own changes
+    # make a bump there on top of whatever its neighbours' rings do, a
+    # hollow is below its ring in every direction.  The sum, not the count
+    # of threshold crossings or the largest single change: those are
+    # noise-flat across a neighbourhood the rings keep above the cut.  A
+    # change that only ever grows away from a place is somebody else's.
+    total_change = evidence.total_change
+    outer, inner = peak_window ** 2, (peak_window - 2) ** 2
+    ring = (
+        outer * ndimage.uniform_filter(total_change, size=peak_window, mode="nearest")
+        - inner * ndimage.uniform_filter(total_change, size=peak_window - 2, mode="nearest")
+    ) / float(outer - inner)
+    change_peak = total_change >= ring
+    nearby_hits = ndimage.maximum_filter(
+        np.where(change_peak, hits, 0), size=3, mode="nearest"
+    )
     nearby_change_z = ndimage.maximum_filter(
-        max_change_z, size=3, mode="nearest"
+        np.where(change_peak, max_change_z, 0.0), size=3, mode="nearest"
     )
     # A site has to be a place the picture actually shows, and a place that
     # can be MEASURED: within a spot's reach of the border there is no
@@ -1626,29 +1611,15 @@ def _candidate_peaks(
     persistent = average == ndimage.maximum_filter(
         average, size=peak_window, mode="nearest"
     )
-    # A CHANGE IS NOT A DIRECTION.  ``magnitude`` is an absolute value on
-    # purpose -- an atom leaving is as much evidence as one arriving -- so the
-    # change bars alone admit any place that merely MOVES, including the
-    # centre of a lattice vacancy: its four neighbours' negative
-    # difference-of-Gaussians lobes breathe as they load, and the hole is the
-    # least-negative point of the bowl they make, hence a local maximum of the
-    # average.  Measured on a nine-site lattice with one site never loaded,
-    # that hole came back as a published trap at max|change|z 3.0 -- while
-    # standing 1.5 sigma of BRIGHTNESS above background, against 250 to 440
-    # for every real trap, including one loading on a single frame in a
-    # hundred.  So the change path now also asks the question only the level
-    # can answer: was this place ever actually bright?
-    #
-    # Not the average: a trap loading once in a hundred frames has an average
-    # dominated by its neighbours' lobes and can sit BELOW background there,
-    # which is the sensitivity this detector was built for.
-    nearby_level_z = ndimage.maximum_filter(
-        evidence.max_level_z, size=3, mode="nearest"
-    )
-    changed = (
-        persistent
-        & (nearby_level_z >= admission.single_level_cut)
-        & ((nearby_hits >= required) | (nearby_change_z >= single_change_cut))
+    # A CHANGE IS NOT A DIRECTION: ``magnitude`` is an absolute value on
+    # purpose, an atom leaving being as much evidence as one arriving, and a
+    # site whose one loaded frame is under its neighbours' band-pass dark
+    # ring never stands above the frame's background on any single frame.
+    # These two statistics and the average are the whole admission; any
+    # further bar on what a changing place must look like is an operator's
+    # call in the detected-site review, not the detector's.
+    changed = persistent & (
+        (nearby_hits >= required) | (nearby_change_z >= single_change_cut)
     )
     averaged = persistent & (average_z >= average_cut)
     candidates = np.argwhere((changed | averaged) & inside)
@@ -1742,13 +1713,9 @@ def detect_sites(
       shaped difference peak.  A site that loaded on only one frame therefore
       remains a possible site even when its complete average is weak.  The
       change threshold is measured on each difference image's own background.
-      A difference has no direction -- that is the point of it -- so this path
-      also asks the one question a difference cannot answer: was the place
-      ever actually BRIGHT?  Without that, the centre of a lattice vacancy
-      qualifies, because its neighbours' negative lobes breathe as they load
-      and leave the hole a local maximum of the average.  The brightness bar
-      is a single frame's, never the average's: a trap loading once in a
-      hundred frames has an average dominated by those same lobes.
+      A difference has no direction -- that is the point of it: a weak trap
+      in its bright neighbours' band-pass dark ring is never bright on any
+      one frame, and it is still a trap.
     * IN THE AVERAGE.  A site whose changes remain below threshold, or a highly
       loaded site that hardly changes between neighbours, can still be plain
       in the complete average.
@@ -2282,295 +2249,6 @@ def _fit_readout_model(
     }
     report.update(dict(diagnostics or {}))
     return readout_model, report
-
-
-def validate_target_registration(
-    site_map: SiteMap,
-    *,
-    frame_shape: tuple[int, int],
-    box_half_width: int,
-) -> tuple[np.ndarray, Mapping[str, Any]]:
-    """Validate and return one registered Target roster in stable site order."""
-
-    if not isinstance(site_map, SiteMap) or not isinstance(site_map.topology, Mapping):
-        raise ValueError("Calibration SiteMap has no registered Target topology")
-    topology = site_map.topology
-    if set(topology) != {
-        "kind", "target_support_yx", "target_site_intensity",
-        "observed_sites", "affine_target_xy_to_image_xy", "provenance",
-    } or topology.get("kind") != "slm_target_registration":
-        raise ValueError("Calibration SiteMap has invalid registered Target topology")
-    support = np.asarray(topology["target_support_yx"])
-    intensity = np.asarray(topology["target_site_intensity"])
-    observed = np.asarray(topology["observed_sites"])
-    affine = np.asarray(topology["affine_target_xy_to_image_xy"])
-    centers = np.asarray(site_map.centers_xy)
-    provenance = topology["provenance"]
-    shape = tuple(int(value) for value in frame_shape)
-    radius = int(box_half_width)
-    if (
-        support.ndim != 2
-        or support.shape[1:] != (2,)
-        or not len(support)
-        or support.dtype.kind not in "iu"
-        or np.any(support < 0)
-        or len({tuple(value) for value in support.tolist()}) != len(support)
-        or intensity.shape != (len(support),)
-        or intensity.dtype.kind not in "iuf"
-        or not np.all(np.isfinite(intensity))
-        or np.any(intensity <= 0.0)
-        or observed.shape != (len(support),)
-        or observed.dtype != np.dtype(bool)
-        or not np.any(observed)
-        or not np.array_equal(observed, site_map.valid_sites)
-        or site_map.site_ids
-        != tuple(f"site_{index:04d}" for index in range(len(support)))
-        or affine.shape != (3, 2)
-        or affine.dtype.kind not in "iuf"
-        or not np.all(np.isfinite(affine))
-        or centers.shape != (len(support), 2)
-        or centers.dtype.kind not in "iuf"
-        or not np.all(np.isfinite(centers))
-        or len(shape) != 2
-        or any(value <= 0 for value in shape)
-        or radius < 0
-    ):
-        raise ValueError("Calibration target registration fields are invalid")
-    if not isinstance(provenance, Mapping) or set(provenance) != {
-        "science_context_path", "command_receipt",
-    }:
-        raise ValueError("Calibration target registration provenance is invalid")
-    if (
-        not isinstance(provenance["science_context_path"], str)
-        or not provenance["science_context_path"]
-        or not isinstance(provenance["command_receipt"], Mapping)
-    ):
-        raise ValueError("Calibration target registration provenance is invalid")
-
-    target_xy = support[:, ::-1].astype(float, copy=False)
-    design = np.column_stack((target_xy, np.ones(len(support), dtype=float)))
-    predicted = design @ np.asarray(affine, dtype=float)
-    if not np.allclose(
-        centers[~observed], predicted[~observed], rtol=1e-12, atol=1e-9
-    ):
-        raise ValueError("unobserved SiteMap centers differ from registered prediction")
-    target_rank = int(
-        np.linalg.matrix_rank(target_xy - np.mean(target_xy, axis=0))
-    )
-    if int(np.sum(observed)) < target_rank + 1:
-        raise ValueError("too few observed sites span the registered Target geometry")
-    measured = centers[observed]
-    residuals = np.linalg.norm(predicted[observed] - measured, axis=1)
-    if len(measured) > 1:
-        separations = np.linalg.norm(
-            measured[:, np.newaxis, :] - measured[np.newaxis, :, :], axis=2
-        )
-        separations[np.diag_indices_from(separations)] = np.inf
-        spacing = float(np.min(separations))
-        if not np.isfinite(spacing) or spacing <= 0.0:
-            raise ValueError("Calibration SiteMap geometry is ambiguous")
-        if float(np.max(residuals)) > 0.25 * spacing:
-            raise ValueError("Calibration sites do not fit the authored Target geometry")
-        predicted_separation = np.linalg.norm(
-            predicted[:, np.newaxis, :] - predicted[np.newaxis, :, :], axis=2
-        )
-        predicted_separation[np.diag_indices_from(predicted_separation)] = np.inf
-        if float(np.min(predicted_separation)) + 1e-9 * spacing < 0.5 * spacing:
-            raise ValueError("predicted Target site separation is ambiguous")
-
-    target_spans = np.ptp(target_xy, axis=0)
-    measured_spans = np.ptp(measured, axis=0)
-    if target_spans[0] > 0.0 and target_spans[1] == 0.0:
-        tilted = measured_spans[1] / measured_spans[0] > 0.25
-    elif target_spans[0] == 0.0 and target_spans[1] > 0.0:
-        tilted = measured_spans[0] / measured_spans[1] > 0.25
-    else:
-        tilted = False
-    if tilted:
-        raise ValueError("Calibration differs from the trusted apparatus orientation")
-    normalized_target = np.zeros_like(target_xy)
-    normalized_measured = np.zeros_like(measured)
-    for axis in range(2):
-        if target_spans[axis] > 0.0:
-            measured_span = measured_spans[axis]
-            if measured_span == 0.0:
-                raise ValueError("Calibration geometry cannot register Target support")
-            normalized_target[:, axis] = (
-                target_xy[:, axis] - float(np.min(target_xy[:, axis]))
-            ) / target_spans[axis]
-            normalized_measured[:, axis] = (
-                measured[:, axis] - float(np.min(measured[:, axis]))
-            ) / measured_span
-    if target_rank == 2:
-        normalized_design = np.column_stack(
-            (normalized_target[observed], np.ones(int(np.sum(observed))))
-        )
-        normalized_affine, *_unused = np.linalg.lstsq(
-            normalized_design, normalized_measured, rcond=None
-        )
-        linear = normalized_affine[:2]
-        if (
-            float(np.linalg.det(linear)) <= 0.0
-            or float(np.linalg.cond(linear)) > 3.0
-            or float(np.max(np.abs(linear - np.eye(2)))) > 0.25
-            or float(np.linalg.cond(affine[:2])) > 1.75
-        ):
-            raise ValueError(
-                "Calibration differs from the trusted apparatus orientation"
-            )
-    for axis in range(2):
-        authored = target_xy[observed, axis]
-        if float(np.ptp(authored)) > 0.0 and float(
-            np.sum(
-                (authored - np.mean(authored))
-                * (measured[:, axis] - np.mean(measured[:, axis]))
-            )
-        ) <= 0.0:
-            raise ValueError("Calibration differs from the trusted Target orientation")
-    if any(not box_fits(tuple(center), radius, shape) for center in centers):
-        raise ValueError("a registered Target BOX lies outside the camera frame")
-    rounded = np.rint(centers).astype(int)
-    if len({tuple(center) for center in rounded.tolist()}) != len(rounded):
-        raise ValueError("registered Target BOX centers collide in camera pixels")
-    if radius > 0 and len(rounded) > 1:
-        delta = np.abs(rounded[:, np.newaxis, :] - rounded[np.newaxis, :, :])
-        overlaps = np.all(delta <= 2 * radius, axis=2)
-        overlaps[np.diag_indices_from(overlaps)] = False
-        if np.any(overlaps):
-            raise ValueError("registered Target BOX windows overlap in camera pixels")
-    return _immutable_array(support, "<i8"), provenance
-
-
-def _register_target_sites(
-    detected: SiteMap,
-    target_intensity: object,
-    provenance: Mapping[str, Any] | None,
-    *,
-    frame_shape: tuple[int, int],
-    measurement_radius: int,
-) -> SiteMap:
-    """Fit the authored SLM roster to detected camera sites without deleting gaps."""
-
-    target = np.asarray(target_intensity, dtype=np.float32)
-    if (
-        target.ndim != 2
-        or min(target.shape) < 2
-        or not np.all(np.isfinite(target))
-        or np.any(target < 0.0)
-    ):
-        raise ValueError("registration Target must be finite non-negative intensity")
-    rows, columns = np.nonzero(target > 0.0)
-    roster_count = len(rows)
-    measured_count = detected.n_sites
-    if not roster_count:
-        raise ValueError("registration Target support is empty")
-    if measured_count > roster_count:
-        raise ValueError("Calibration detected more sites than the authored Target roster")
-    if not isinstance(provenance, Mapping):
-        raise TypeError("registration provenance must be a mapping")
-
-    target_xy = np.column_stack((columns, rows)).astype(float, copy=False)
-    measured_xy = np.asarray(detected.centers_xy, dtype=float)
-    target_rank = int(
-        np.linalg.matrix_rank(target_xy - np.mean(target_xy, axis=0))
-    )
-    if measured_count < target_rank + 1:
-        raise ValueError("too few detected sites to register the authored Target roster")
-    if roster_count == measured_count == 1:
-        predicted = np.array(measured_xy, copy=True)
-        target_indices = calibration_indices = np.asarray([0], dtype=np.intp)
-        affine = np.zeros((3, 2), dtype=float)
-        affine[2] = measured_xy[0]
-    else:
-        normalized_target = np.zeros_like(target_xy)
-        normalized_measured = np.zeros_like(measured_xy)
-        for axis in range(2):
-            target_span = float(np.ptp(target_xy[:, axis]))
-            measured_span = float(np.ptp(measured_xy[:, axis]))
-            if target_span > 0.0:
-                if measured_span == 0.0:
-                    raise ValueError("Calibration geometry cannot register Target support")
-                normalized_target[:, axis] = (
-                    target_xy[:, axis] - float(np.min(target_xy[:, axis]))
-                ) / target_span
-                normalized_measured[:, axis] = (
-                    measured_xy[:, axis] - float(np.min(measured_xy[:, axis]))
-                ) / measured_span
-        cost = np.sum(
-            (
-                normalized_target[:, np.newaxis, :]
-                - normalized_measured[np.newaxis, :, :]
-            )
-            ** 2,
-            axis=2,
-        )
-        target_indices, calibration_indices = linear_sum_assignment(cost)
-        full_design = np.column_stack(
-            (target_xy, np.ones(roster_count, dtype=float))
-        )
-        for _iteration in range(6):
-            matched_design = full_design[target_indices]
-            if np.linalg.matrix_rank(matched_design) < target_rank + 1:
-                raise ValueError("detected sites do not span the authored Target geometry")
-            affine, *_unused = np.linalg.lstsq(
-                matched_design,
-                measured_xy[calibration_indices],
-                rcond=None,
-            )
-            predicted = full_design @ affine
-            cost = np.sum(
-                (predicted[:, np.newaxis, :] - measured_xy[np.newaxis, :, :])
-                ** 2,
-                axis=2,
-            )
-            updated_target, updated_calibration = linear_sum_assignment(cost)
-            if np.array_equal(updated_target, target_indices) and np.array_equal(
-                updated_calibration, calibration_indices
-            ):
-                break
-            target_indices, calibration_indices = (
-                updated_target,
-                updated_calibration,
-            )
-        matched_design = full_design[target_indices]
-        affine, *_unused = np.linalg.lstsq(
-            matched_design,
-            measured_xy[calibration_indices],
-            rcond=None,
-        )
-        predicted = full_design @ affine
-
-    source_indices = np.full(roster_count, -1, dtype=int)
-    source_indices[target_indices] = calibration_indices
-    observed = source_indices >= 0
-    centers = np.array(predicted, dtype="<f8", copy=True)
-    centers[observed] = measured_xy[source_indices[observed]]
-    valid = np.zeros(roster_count, dtype=bool)
-    valid[observed] = detected.valid_sites[source_indices[observed]]
-    quality = np.full(roster_count, np.nan, dtype="<f8")
-    quality[observed] = detected.quality[source_indices[observed]]
-    topology = {
-        "kind": "slm_target_registration",
-        "target_support_yx": np.column_stack((rows, columns)).astype(int).tolist(),
-        "target_site_intensity": target[rows, columns].astype(float).tolist(),
-        "observed_sites": observed.tolist(),
-        "affine_target_xy_to_image_xy": affine.astype(float).tolist(),
-        "provenance": dict(provenance),
-    }
-    result = SiteMap(
-        tuple(f"site_{index:04d}" for index in range(roster_count)),
-        centers,
-        valid,
-        quality,
-        detected.coordinate_frame,
-        topology,
-    )
-    validate_target_registration(
-        result,
-        frame_shape=frame_shape,
-        box_half_width=measurement_radius,
-    )
-    return result
 
 
 def calibrate(

@@ -598,11 +598,16 @@ def _scope_coordinates(
     *,
     include_latest: bool = False,
 ) -> SemanticCycleChoices | None:
-    """The real coordinate domain behind this axis's one Scope fate."""
+    """The real coordinate domain behind this axis's one Scope fate.
+
+    Every coordinate the axis has is pinnable, one included: Scope is an
+    action the operator takes, not a default the panel infers, and a live
+    domain that has reached only its first coordinate may be pinned to it
+    ahead of the rest.  Hiding a singleton domain left a legally authored
+    pin with no vocabulary to describe it.
+    """
 
     resolved = resolve_axis(schema, ref)
-    if resolved.size < 2 and not include_latest:
-        return None
     return SemanticCycleChoices(
         resolved.coordinates,
         resolved.coordinate_labels,
@@ -1089,25 +1094,11 @@ def describe_semantics(
     y = getattr(semantic, "y", None)
     group = getattr(semantic, "group", None)
     reduction = getattr(semantic, "reduction", None)
-    # A series is drawn ALONG its x and split BY its group; a size-1 axis can
-    # carry neither -- it yields one invisible point or one redundant split.
-    # Series-family kinds therefore never offer degenerate axes for those
-    # roles; the current value stays offered because it is the actual state.
     # EVERY axis may take every role its kind declares.  A size-one axis
     # draws one point or one group, which is a legitimate thing to ask for
     # -- provenance an operator wants on the x axis, a single frame they
     # want split out -- and refusing it left rows in the table that could
     # not be edited at all.
-    series_axes = axes
-
-    def _axes_with_current(
-        current: object,
-        values: tuple[AxisRef, ...] = axes,
-    ) -> tuple[SemanticChoice, ...]:
-        if isinstance(current, AxisRef) and current not in values:
-            values = (*values, current)
-        return _choice_pairs(values, lambda value: _axis_label(schema, value))
-
     declared = _field_names(spec)
     fields: list[SemanticField] = []
     # EVERY kind this dataset admits, listed.  Whether one of them has an

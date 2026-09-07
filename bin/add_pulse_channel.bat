@@ -55,6 +55,10 @@ if "%ZLC_STATUS%"=="0" (
   echo ZLC add-channel: the board change is IN, but one or more PULSE FILES were
   echo NOT migrated -- they are named above with the reason, and the board will
   echo refuse them until they are.  Do not skip this.
+) else if "%ZLC_STATUS%"=="4" (
+  echo ZLC add-channel: the board change is IN, but the configured part is OVER
+  echo BUDGET for it -- see the estimate above.  Raise target_pct in
+  echo streamer_config.json, or put the .bak files back, before you build.
 ) else (
   echo ZLC add-channel failed with code %ZLC_STATUS% -- read the messages above.
 )
@@ -141,6 +145,39 @@ class Refused(Exception):
 
 def say(message):
     print(message, flush=True)
+
+
+def put_back(originals):
+    """Every edited file as it was found, or the name of each one that is not.
+
+    The change is one set -- a manifest, an XDC, a top, and the header derived
+    from them -- and half of it on disk is a board no tool can reconcile.  So
+    a change that fails its own check is undone from the bytes read before
+    it was written, and the .bak files stay behind as the same bytes.  A run
+    that wrote nothing (the board change was already in) says so rather than
+    claim a put-back.
+    """
+
+    if not originals:
+        say("  nothing was written by this run.")
+        return
+    left = []
+    for target, data in originals.items():
+        try:
+            if data is None:
+                target.unlink(missing_ok=True)
+            else:
+                target.write_bytes(data)
+        except OSError as error:
+            left.append("%s (%s)" % (target.name, error))
+    if left:
+        say("  could NOT put back: " + ", ".join(left))
+        say("  the .bak files beside them hold the originals.")
+    else:
+        say(
+            "  every edited file was put back as it was found; the .bak files "
+            "hold the same bytes."
+        )
 
 
 def port_shape(port):
@@ -562,6 +599,13 @@ def main(argv):
         ]
         if new_bench is not None:
             edits.append((paths["bench"], new_bench))
+    # What the edits touch, as found, so a change that fails its own
+    # reconciliation can be put back; the header is regenerated from the
+    # manifest and goes back with it.
+    originals = {path: path.read_bytes() for path, _ in edits}
+    if edits:
+        header = paths["header"]
+        originals[header] = header.read_bytes() if header.exists() else None
     try:
         for path, text in edits:
             backup = path.with_name(path.name + ".bak")
@@ -587,31 +631,30 @@ def main(argv):
                 text=True,
             )
             if result.returncode not in (0, 1):
-                say("  regenerating the geometry header failed:")
-                say(result.stdout.strip() or result.stderr.strip())
-                return 2
+                raise RuntimeError(
+                    "regenerating the geometry header failed: "
+                    + (result.stdout.strip() or result.stderr.strip())
+                )
             say("  regenerated %s" % paths["header"].name)
 
         # The product's own three-way reconciliation.  A manifest, an XDC and a
         # top that disagree surface HERE, before any pulse file is touched.
         target = pulse_target_from_xdc()
         if signal not in target.by_key:
-            say("  the rebuilt board target has no port %r" % signal)
-            return 2
+            raise RuntimeError("the rebuilt board target has no port %r" % signal)
         driven = target.by_key[signal]
         if tuple(driven.lanes) != ("ch%02d" % new_index,):
-            say(
-                "  %r came back on %s, not on lane %d"
+            raise RuntimeError(
+                "%r came back on %s, not on lane %d"
                 % (signal, tuple(driven.lanes), new_index)
             )
-            return 2
         say(
             "  board target rebuilt: %d lanes, %d ports, %s owns ch%02d"
             % (len(target.raw_lanes), len(target.ports), signal, new_index)
         )
     except Exception as error:
         say("  %s: %s" % (type(error).__name__, error))
-        say("  the .bak files beside the edited files hold the originals.")
+        put_back(originals)
         return 2
 
     roots = [root] + extra
@@ -685,8 +728,9 @@ def main(argv):
         ):
             say("  " + stripped)
     if estimate.returncode == 1:
+        # The change is IN; this is not a refusal, and the wrapper says so.
         say("  the part is OVER BUDGET for this geometry -- see the lines above.")
-        return 1
+        return 4
     # A pulse file left behind is a failure of the job the operator asked for,
     # not a footnote: the board is changed and that file can no longer fire.
     return 3 if problems else 0

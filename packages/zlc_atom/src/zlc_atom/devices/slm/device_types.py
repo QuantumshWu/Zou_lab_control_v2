@@ -21,6 +21,7 @@ import numpy as np
 from PIL import Image
 
 from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
+from zlc_atom.devices.vendor import resolve_vendor_file
 from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
 
 from . import open_slm_control
@@ -108,12 +109,6 @@ X15213_SERVER_SCHEMA = AuthoringSchema(
             ),
         ),
         AuthoringField("display_name", "str", "DVI display name", ""),
-        AuthoringField(
-            "sdk_directory",
-            "folder",
-            "Hamamatsu SDK directory",
-            "",
-        ),
         AuthoringField(
             "device_profile",
             "str",
@@ -341,72 +336,48 @@ def _open_dvi_presenter(
     return present, close
 
 
-def _find_sdk_directory(authored: str = "") -> Path | None:
-    """Locate the primary SDK DLL without inventing a second dependency check."""
+def _sdk_library() -> Path:
+    """Where the vendor SDK is: this family's ``vendor/`` folder, or the
+    absolute path its ``vendor.json`` names, and nowhere else.
 
-    direct = [
-        authored,
-        # The family's own vendor folder outranks every ambient location:
-        # it is the ONE documented place the operator is told to use.
-        str(Path(__file__).resolve().parent / "vendor"),
-        os.environ.get("HAMAMATSU_SLM_SDK", ""),
-        *os.environ.get("PATH", "").split(os.pathsep),
-        str(Path.cwd()),
-        str(Path(__file__).resolve().parent),
-    ]
-    seen: set[Path] = set()
-    for text in direct:
-        if text:
-            path = Path(text).expanduser()
-            path = path.parent if path.is_file() else path
-            try:
-                resolved = path.resolve()
-            except OSError:
-                continue
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            if (resolved / _SDK_LIBRARY).is_file():
-                return resolved
-    for variable in ("ProgramFiles", "ProgramFiles(x86)"):
-        root_text = os.environ.get(variable, "")
-        if not root_text:
-            continue
-        root = Path(root_text)
-        for pattern in ("*Hamamatsu*", "*LCOS*", "*SLM*"):
-            for vendor in root.glob(pattern):
-                resolved = vendor.resolve()
-                if resolved in seen:
-                    continue
-                seen.add(resolved)
-                for dll in vendor.rglob(_SDK_LIBRARY):
-                    return dll.parent.resolve()
-    return None
+    The bench-wide vendor rule, through its one resolver: no authored
+    directory, environment variable, PATH walk or Program Files search --
+    every one of those is a second place to look, and a missing library
+    found "somewhere" is exactly the SDK nobody can account for on the
+    experiment machine.  Missing means the instruction naming the folder
+    and the file.
+    """
+
+    return Path(
+        resolve_vendor_file(__file__, _SDK_LIBRARY, what="the Hamamatsu SLM SDK")
+    )
 
 
-def _load_sdk(directory: Path | None):
-    """Load through an explicit SDK folder or the normal Windows DLL search."""
+def _load_sdk():
+    """Load the vendor SDK from where the vendor rule says it is.
+
+    The SDK's other DLLs sit beside the primary one, so that folder is
+    registered with the loader for the life of the returned handle.
+    """
 
     if not hasattr(ctypes, "WinDLL"):
         raise OSError("Hamamatsu X15213 USB control requires Windows")
+    library = _sdk_library()
     handle = (
-        os.add_dll_directory(str(directory))
-        if directory is not None and hasattr(os, "add_dll_directory")
+        os.add_dll_directory(str(library.parent))
+        if hasattr(os, "add_dll_directory")
         else None
     )
-    library = str(directory / _SDK_LIBRARY) if directory is not None else _SDK_LIBRARY
     try:
         # The repository and this development machine contain no official SDK
         # header. Do not manufacture ctypes signatures: experiment-machine
         # acceptance must bind them from the installed vendor header first.
-        return ctypes.WinDLL(library), handle
+        return ctypes.WinDLL(str(library)), handle
     except BaseException as error:
         if handle is not None:
             handle.close()
-        source = str(directory) if directory is not None else "the Windows DLL search path"
         raise OSError(
-            f"could not load {_SDK_LIBRARY} from {source}: "
-            f"{type(error).__name__}: {error}"
+            f"could not load {library}: {type(error).__name__}: {error}"
         ) from error
 
 
@@ -557,15 +528,12 @@ def _connect_usb(sdk, serial: str) -> tuple[int, str]:
     ) from last_error
 
 
-def _prepare_dvi_controller(sdk_directory: str, serial: str) -> bool:
+def _prepare_dvi_controller(serial: str) -> bool:
     """Switch a reachable controller to DVI; DVI itself does not require the SDK."""
 
-    directory = _find_sdk_directory(sdk_directory)
-    if directory is None:
-        return False
     try:
-        sdk, handle = _load_sdk(directory)
-    except OSError:
+        sdk, handle = _load_sdk()
+    except (FileNotFoundError, OSError):
         return False
     board_id: int | None = None
     try:
@@ -812,12 +780,11 @@ class X15213Adapter:
             geometry = _display(str(authored["display_name"]))
             self._display_name = str(geometry["name"]).strip()
             self._dvi_controller_mode_proven = _prepare_dvi_controller(
-                str(authored["sdk_directory"]), self._profile_serial
+                self._profile_serial
             )
             self.identity = f"hamamatsu-x15213:dvi-display:{self._display_name}"
         else:
-            directory = _find_sdk_directory(str(authored["sdk_directory"]))
-            self._sdk, self._dll_handle = _load_sdk(directory)
+            self._sdk, self._dll_handle = _load_sdk()
             try:
                 self._board_id, serial = _connect_usb(self._sdk, self._profile_serial)
             except BaseException:
@@ -1239,7 +1206,17 @@ def _local_factory(context, key: str, values: Mapping[str, object]) -> Installed
         name=f"slm-server:{port}",
         daemon=True,
     )
-    thread.start()
+    try:
+        thread.start()
+    except BaseException:
+        # A server that never started cannot be shut down (shutdown waits
+        # for serve_forever to notice); what was acquired so far -- the
+        # listening socket and the head -- is released directly.
+        try:
+            server.server_close()
+        finally:
+            adapter.close()
+        raise
 
     def _stop_server() -> None:
         server.shutdown()
@@ -1308,7 +1285,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--display-name", default=os.environ.get("ZLC_SLM_DISPLAY", "")
     )
-    parser.add_argument("--sdk-directory", default="")
     parser.add_argument("--device-profile", default="LSH0804382")
     parser.add_argument("--wavelength-nm", type=float, default=852.0)
     parser.add_argument("--correction-path", default="")
@@ -1328,7 +1304,6 @@ def main(argv: list[str] | None = None) -> int:
         {
             "transport": arguments.transport,
             "display_name": arguments.display_name,
-            "sdk_directory": arguments.sdk_directory,
             "device_profile": arguments.device_profile,
             "wavelength_nm": arguments.wavelength_nm,
             "correction_path": arguments.correction_path,
@@ -1353,12 +1328,12 @@ def main(argv: list[str] | None = None) -> int:
             display = _display(str(authored["display_name"]))
             detail = f"DVI display={display['name']}"
         else:
-            directory = _find_sdk_directory(str(authored["sdk_directory"]))
-            sdk, dll_handle = _load_sdk(directory)
+            library = _sdk_library()
+            sdk, dll_handle = _load_sdk()
             del sdk
             if dll_handle is not None:
                 dll_handle.close()
-            detail = f"USB SDK={directory if directory is not None else 'Windows loader'}"
+            detail = f"USB SDK={library}"
         print(
             "SLM server config OK: "
             f"{profile['serial']} at {arguments.host}:{arguments.port}; {detail}"

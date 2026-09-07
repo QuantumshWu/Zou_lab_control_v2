@@ -233,3 +233,111 @@ def test_the_schema_says_which_axes_are_the_image() -> None:
     for events, height, width in ((1, 60, 80), (2, 60, 80), (1, 1, 80)):
         spec = HANDLER.default_spec(_schema(events, height, width))
         assert spec is not None, (events, height, width)
+
+
+def _coordinate_image_snapshot(x: np.ndarray, y: np.ndarray) -> OwnedSnapshot:
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"sample": [0.0]}),
+        cell_axes=(
+            axis("y", values=y, role=SPATIAL_Y),
+            axis("x", values=x, role=SPATIAL_X),
+        ),
+        dtype=np.float64,
+        value_unit="1",
+    )
+    values = np.broadcast_to(np.linspace(0.0, 100.0, x.size), (y.size, x.size))
+    return make_snapshot(schema, np.array(values)[None, None], revision=0)
+
+
+def test_irregular_image_coordinates_are_refused_not_drawn_uniformly() -> None:
+    """An Image is a regular grid: one cell per pitch, drawn as one extent.
+
+    Centres ``0, 1, 10`` have no such extent.  Painted uniformly anyway,
+    the pixel at x=1 showed the first sample while the crosshair at x=1
+    read the second: two consumers of one dataset answering with
+    different cells.  The geometry is refused where every image owner
+    asks for it, loudly, instead of drawn as something it is not.
+    """
+
+    spec = ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y"))
+    with pytest.raises(ValueError, match="uniformly spaced"):
+        PlotSession(
+            _coordinate_image_snapshot(
+                np.array([0.0, 1.0, 10.0]), np.array([0.0, 1.0])
+            ),
+            spec,
+        )
+    # A producer's rounded coordinate table is still the regular grid it
+    # describes: a hundredth of a cell of drift is not irregularity.
+    session = PlotSession(
+        _coordinate_image_snapshot(
+            np.round(np.linspace(0.0, 1.0, 7), 3), np.array([0.0, 1.0])
+        ),
+        spec,
+    )
+    try:
+        assert session.rgba().size > 0
+    finally:
+        session.close()
+
+
+def test_a_narrow_colour_range_on_a_large_background_exports_its_contrast() -> None:
+    """The PNG shows the colour range the operator chose, wherever it sits.
+
+    A float64 image on a 1e10 background, coloured over [1e10, 1e10 + 1]:
+    every value is distinct in float64 and the live picture showed four
+    colours.  The export narrowed the values to float32 BEFORE taking the
+    background off -- where 1e10 + 0.25 and 1e10 + 1 are one number -- and
+    painted the whole chosen range as one colour.  The offset comes off and
+    the range is normalised at the values' own precision; only the
+    [0, 256) residue is narrowed for the lookup.
+    """
+
+    from io import BytesIO
+
+    from PIL import Image
+
+    background = 1.0e10
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"sample": [0.0]}),
+        cell_axes=(
+            axis("y", values=np.array([0.0, 1.0]), role=SPATIAL_Y),
+            axis("x", values=np.array([0.0, 1.0]), role=SPATIAL_X),
+        ),
+        dtype=np.float64,
+        value_unit="1",
+    )
+    values = background + np.array([[0.0, 0.25], [0.75, 1.0]])
+    session = PlotSession(
+        make_snapshot(schema, values[None, None], revision=0),
+        ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y")),
+        parameters={
+            "relim_mode": "fixed",
+            "color_min": background,
+            "color_max": background + 1.0,
+            "colormap": "viridis",
+        },
+    )
+    try:
+        renderer = session._renderer
+        live = np.asarray(renderer.rgba())
+        stream = BytesIO()
+        renderer.save(stream, dpi=session.surface_plan.dpi, format="png")
+        png = np.asarray(Image.open(BytesIO(stream.getvalue())).convert("RGBA"))
+        assert png.shape == live.shape
+        axes = renderer.primary_axes
+
+        def colour(image: np.ndarray, x: float, y: float) -> tuple[int, ...]:
+            px, py = axes.transData.transform((x, y))
+            return tuple(int(value) for value in image[int(image.shape[0] - py), int(px), :3])
+
+        cells = ((0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0))
+        exported = [colour(png, *cell) for cell in cells]
+        assert len(set(exported)) == 4, exported
+        for cell, saved in zip(cells, exported):
+            shown = colour(live, *cell)
+            assert max(abs(a - b) for a, b in zip(saved, shown)) <= 8, (cell, saved, shown)
+    finally:
+        session.close()

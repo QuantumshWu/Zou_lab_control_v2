@@ -18,7 +18,7 @@ directly to tensor dimensions:
 import numpy as np
 from zlc_data import (
     AxisId, AxisSpec, DatasetSchema, DomainSpec,
-    REPEAT, SCAN_POINT, COMPONENT, ValidityContract, ValueSchema,
+    REPEAT, SCAN_POINT, SCALAR_DOMAIN, ValidityContract, ValueSchema,
     owned_snapshot_from_arrays,
 )
 
@@ -26,19 +26,19 @@ repeat_axis = AxisSpec(AxisId("repeat"), "repeat", REPEAT, 2, (0, 1))
 repeat = DomainSpec((2,), (repeat_axis,), ((0, 1),))
 scan = AxisSpec(AxisId("scan"), "scan", SCAN_POINT, 3, (-1.0, 0.0, 1.0), "V")
 point = DomainSpec((3,), (scan,), ((0, 1, 2),))
-value_axis = AxisSpec(AxisId("value"), "value", COMPONENT, 1, (0,))
-cell = DomainSpec((1,), (value_axis,))
 value = ValueSchema(ValidityContract.value(), np.dtype("float64"), "V")
-schema = DatasetSchema(repeat, point, cell, value)
+schema = DatasetSchema(repeat, point, SCALAR_DOMAIN, value)
 snapshot = owned_snapshot_from_arrays(
     schema=schema, values=np.zeros((2, 3, 1)), revision=0,
 )
 ```
 
 The physical geometry is `schema.physical_shape == (R, P, *cell_shape)`.
-One scalar value still has a canonical trailing size-one Cell carrier, but
-that representation axis is automatically consumed and never appears in
-Plot fate/title vocabulary. `OwnedSnapshot`
+A scalar value declares `SCALAR_DOMAIN` as its Cell domain: its trailing
+size-one carrier axis is representation, consumed automatically, and never
+appears in Plot fate/title vocabulary.  A size-one `COMPONENT` axis is
+different -- it is an information axis with a fate of its own
+(`fate:cell_data:<id>`), offered like any other. `OwnedSnapshot`
 stores immutable arrays, a schema fingerprint, block id, stream generation and
 monotonic revision.  Validity is a typed data-layer contract and can be
 materialized as a dense physical mask with `snapshot.expanded_validity()`.
@@ -51,22 +51,24 @@ vectors by stride and never materializes a full coordinate plane merely to
 recover geometry. Axis references are correspondingly just
 `AxisRef.repeat(id)`, `AxisRef.point(id)`, or `AxisRef.cell_data(id)`.
 
-## Units are presentation-owned
+## Units are defined by Data and chosen for display by Plot
 
-`zlc_data` keeps unit annotations as strings.  The plotting package resolves
-those strings through its presentation registry and converts canonical values
-only for display, selectors and fit overlays; stored arrays are never mutated.
-The built-in registry accepts both `"1"` and `"arb"` for dimensionless data:
+`zlc_data` keeps unit annotations as strings and owns the registry that
+resolves them: `zlc_data.units` defines the units, their prefixes and the
+conversions between them.  The plotting package chooses a display unit per
+axis through that registry and converts canonical values only for display,
+selectors and fit overlays; stored arrays are never mutated.  The built-in
+registry accepts both `"1"` and `"arb"` for dimensionless data:
 
 ```python
-from zlc_plot import DEFAULT_UNITS, resolve_unit
+from zlc_data.units import DEFAULT_UNITS, resolve_unit
 display = resolve_unit("mV", DEFAULT_UNITS)
 assert resolve_unit("arb", DEFAULT_UNITS).compatible_with(resolve_unit("1"))
 ```
 
-Applications may pass a `UnitRegistry` to `PlotSession` when a producer uses a
-custom unit symbol.  Labels and selected display units are plot/session state,
-not data-schema state.
+Applications may pass a `zlc_data.units.UnitRegistry` to `PlotSession` when a
+producer uses a custom unit symbol.  Labels and selected display units are
+plot/session state, not data-schema state.
 
 ## Runtime handoff
 
@@ -89,5 +91,12 @@ restored = load_npz("run.npz")
 ```
 
 Project files, device calls, Logic routes, causal shot joins and archive
-manifests remain application responsibilities.  `zlc_plot` only saves a
-rendered raster/front through its public `PlotSession`/`RasterFront` APIs.
+manifests remain application responsibilities.  `zlc_plot` owns the exact Plot
+recipe of a figure: its public Figure API (`save_figure_artifact`,
+`encode_plot_recipe` / `decode_plot_recipe`, `read_figure_plot`,
+`build_figure_host` / `open_figure_host`) writes the typed archive first and
+the preview second, through `zlc_data`'s Figure NPZ grammar and
+`zlc_durable`'s atomic publication, and a rendered front is saved through the
+public `PlotSession` / `RasterFront` APIs.  An application adds its own
+workflow and provenance records beside that archive; it never rewrites the
+recipe.

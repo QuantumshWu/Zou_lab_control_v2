@@ -123,6 +123,15 @@ class SimulationGeometry:
         image = tuple(int(item) for item in self.image_shape_yx)
         if len(grid) != 2 or len(image) != 2 or any(item <= 0 for item in (*grid, *image)):
             raise ValueError("simulation geometry dimensions must be positive")
+        if any(item < 2 for item in grid):
+            # The camera picture of the traps is an affine image of the
+            # Fourier plane anchored on the startup grid's span in each axis;
+            # a single row or column has no span to anchor on, and a world
+            # built on it would place every trap at no camera position at all.
+            raise ValueError(
+                "simulation site grid needs at least two rows and two columns: "
+                "the camera mapping is anchored on the grid's span in each axis"
+            )
         object.__setattr__(self, "grid_shape_yx", grid)
         object.__setattr__(self, "image_shape_yx", image)
         spacing = float(self.site_spacing_pixels)

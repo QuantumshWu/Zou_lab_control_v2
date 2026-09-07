@@ -172,3 +172,32 @@ def test_the_math_font_is_this_library_s_decision() -> None:
     finally:
         logger.removeHandler(handler)
         logger.setLevel(previous_level)
+
+
+def test_a_nested_entry_of_the_same_style_leaves_the_outer_hold_in_force(
+    monkeypatch,
+) -> None:
+    """Leaving a nested entry restores what the thread held, not nothing.
+
+    The lane admits the same style twice on one thread.  Leaving the inner
+    entry cleared the thread's mark, so a DIFFERENT style entered next got
+    past the refusal by name and waited for a drain whose last reader was
+    the thread itself.
+    """
+
+    from zlc_plot import style as style_module
+
+    lane = style_module._MATPLOTLIB_COMPOSE_LANE
+
+    def never_wait(*_args, **_kwargs):
+        raise AssertionError("a holding thread reached the drain wait for itself")
+
+    monkeypatch.setattr(lane._condition, "wait", never_wait)
+    style = build_plot_style()
+    with style_context(style):
+        with style_context(style):
+            pass
+        with pytest.raises(RuntimeError, match="enter the style once"):
+            with style_context(style, {"lines.linewidth": 3.5}):
+                pass
+    assert matplotlib.rcParams["lines.linewidth"] != 3.5

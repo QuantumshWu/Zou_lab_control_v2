@@ -1,8 +1,11 @@
 """Backend-neutral pointer gesture state.
 
-The engine stores only immutable axis transforms and selector values.  Frontends
-translate their native pointer messages into this state through PlotSession;
-Matplotlib artists and widget objects never enter this module.
+A gesture holds the axes the session started it on -- a routing fact that
+says which surface receives the pointer -- together with immutable axis
+transforms and selector values.  Every numeric helper here works on the
+transforms and values alone: frontends translate their native pointer
+messages into this state through PlotSession, and nothing in this module
+reads or draws through an artist or a widget.
 """
 
 from __future__ import annotations

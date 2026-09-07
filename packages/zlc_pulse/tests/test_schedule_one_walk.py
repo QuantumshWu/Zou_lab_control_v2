@@ -154,6 +154,39 @@ def test_the_capacity_question_is_asked_of_edges_not_of_exposures() -> None:
         assert list(edges[lane]) == flattened == sorted(flattened)
 
 
+def test_a_bounded_bracket_walk_keeps_the_true_timeline() -> None:
+    """First and last bodies at their true ticks, and everything after them
+    exactly where the full walk puts it.
+
+    The capacity check bounds a loop this way.  Shortening the loop instead
+    pulled every later edge earlier, so the Pulses of a Run were judged at a
+    spacing the board never plays.
+    """
+
+    program = _program()
+    assert program.loop_count == 4
+    table = _table(2)
+    full = trigger_edge_ticks(program, _LANES, table, run_repeats=2)
+    bounded = trigger_edge_ticks(
+        program, _LANES, table, run_repeats=2, bracket_bodies=1
+    )
+    for lane in _LANES:
+        assert set(bounded[lane]) < set(full[lane])
+        assert bounded[lane][0] == full[lane][0]
+        assert bounded[lane][-1] == full[lane][-1]
+        # Every edge of the second Pulse is at its true tick.
+        second = [tick for tick in full[lane] if tick >= full[lane][-1] // 2]
+        assert [tick for tick in bounded[lane] if tick in second] == [
+            tick for tick in second if tick in bounded[lane]
+        ]
+    assert trigger_edge_ticks(
+        program, _LANES, table, run_repeats=2, bracket_bodies=2
+    ) == full
+    assert list(schedule.bracket_iterations(10, 3)) == [0, 1, 2, 7, 8, 9]
+    assert list(schedule.bracket_iterations(6, 3)) == list(range(6))
+    assert list(schedule.bracket_iterations(6, None)) == list(range(6))
+
+
 def test_run_repeats_hold_each_row_then_scan_repeats_replay_the_table() -> None:
     lane = _LANES[0]
     states = [0] * len(_TARGET.raw_lanes)

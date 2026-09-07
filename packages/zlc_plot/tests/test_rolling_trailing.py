@@ -391,3 +391,62 @@ def test_labelled_axis_ticks_by_name() -> None:
         assert series.sem is not None
     finally:
         session.close()
+
+def test_the_history_a_trailing_mean_needs_reaches_behind_the_window() -> None:
+    """A window of W points, each the mean of T shots, reads W + T - 1 shots.
+
+    The window says how many points are shown; trailing says how many
+    shots each averages, counted back from itself.  Asking Runtime for
+    ``max(W, T)`` fed the earliest visible point a truncated history: at
+    W=10, T=5 over the shots 0..19 it showed 10.0 (the shot alone) where
+    the mean of shots 6..10 is 8.0.  The last point was right either way,
+    which is why checking the latest value never saw it.
+    """
+
+    from zlc_plot.specs import history_window_requirement
+
+    mean = RollingPlot(reduction=Reduction.MEAN)
+    assert history_window_requirement(mean, {"window": 10, "trailing": 5}) == 14
+    assert history_window_requirement(mean, {"window": 10, "trailing": 1}) == 10
+    assert history_window_requirement(mean, {"window": 3, "trailing": 30}) == 32
+    # A non-MEAN reduction has no trailing span: the handler forces it to
+    # one, and the lease must not hold shots for a statistic not drawn.
+    total = RollingPlot(reduction=Reduction.SUM)
+    assert history_window_requirement(total, {"window": 10, "trailing": 5}) == 10
+
+    shots = np.arange(20.0).reshape(20, 1)
+    retained = history_window_requirement(mean, {"window": 10, "trailing": 5})
+    session = PlotSession(
+        _shots(shots[-retained:]),
+        mean,
+        parameters={"trailing": 5, "window": 10, "uncertainty": False},
+    )
+    try:
+        y = np.asarray(session._projection._payload.series[0].y.canonical)
+    finally:
+        session.close()
+    np.testing.assert_allclose(y, _trailing_mean(shots, 5)[-10:], rtol=1e-12)
+    assert y[0] == 8.0
+
+def test_a_window_with_no_valid_shot_has_an_empty_distribution() -> None:
+    """The rolling rail counts the samples in the window and nothing else.
+
+    With no valid sample the rail used to bin one invented value at the
+    history's lower limit -- a bar for a shot that never happened.
+    """
+
+    session = PlotSession(_shots(np.full((1, 3), np.nan)), RollingPlot())
+    try:
+        renderer = session._renderer
+        renderer.draw()
+        rail = next(
+            value
+            for key, value in renderer._artists.items()
+            if key.endswith(":distribution") and hasattr(value, "get_paths")
+        )
+        counts = [
+            float(np.max(path.vertices[:, 0])) for path in rail.get_paths()
+        ]
+        assert counts and max(counts) == 0.0
+    finally:
+        session.close()

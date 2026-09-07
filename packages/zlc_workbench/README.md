@@ -139,8 +139,12 @@ intermediate shot.
 ## Save boundaries
 
 - Header **Save Layout** writes stopped node drafts, named-device choices,
-  signal wiring and panel layout/state. It does not freeze datasets or save
-  running state/device snapshots.
+  signal wiring, panel layout/state and each panel's identity: a panel's
+  ROI/fit outputs are published under `@logic/<panel id>/<output>` and a
+  downstream panel or row names it so. Load mints fresh ids and respells
+  every such reference to them; one it cannot resolve is dropped with a
+  status message. It does not freeze datasets or save running
+  state/device snapshots.
 - Header **Save Screenshot** writes one ordinary image of the TaskConsole GUI,
   with no layout, data archive or provenance.
 - Panel Edit **Save Fig** writes only that panel's frozen typed data, exact Plot

@@ -284,6 +284,76 @@ def test_measurement_configuration_returns_sdk_readback_and_is_idle_only(fake_py
     adapter.finish_record_capture()
 
 
+def test_a_refused_setting_is_not_the_config_and_does_not_block_the_next_one(
+    fake_pypylon,
+) -> None:
+    """The config is what the sensor holds, never what it refused.
+
+    A refused exposure used to be recorded as the current exposure and then
+    re-sent -- and refused again -- by every later ROI change, so one bad
+    exposure request locked the ROI until the exposure was set to something
+    the sensor would take.
+    """
+
+    camera = _FakeCamera()
+    adapter = PylonCameraAdapter(_config(exposure_seconds=0.01), camera=camera)
+    adapter.open()
+    accepted = camera.ExposureTime.SetValue
+
+    def refuse_two_hundred_milliseconds(value):
+        if int(value) == 200_000:
+            raise RuntimeError("controlled SDK refuses 0.2 seconds")
+        accepted(value)
+
+    camera.ExposureTime.SetValue = refuse_two_hundred_milliseconds
+    with pytest.raises(RuntimeError, match="refuses 0.2"):
+        adapter.set_exposure_seconds(0.2)
+    assert adapter.config.exposure_seconds == pytest.approx(0.01)
+    assert camera.ExposureTime.GetValue() == 10_000
+
+    exposure_writes = len(camera.ExposureTime.writes)
+    point = adapter.set_roi((0, 0, 16, 16))
+    assert point.roi_shape_yx == (16, 16)
+    assert point.exposure_seconds == pytest.approx(0.01)
+    assert len(camera.ExposureTime.writes) == exposure_writes, (
+        "an unchanged exposure was re-sent with the ROI"
+    )
+    assert adapter.config.roi_xywh == (0, 0, 16, 16)
+
+
+def test_the_factory_identity_is_the_serial_not_the_logical_key() -> None:
+    """Two keys naming one serial are one camera, and the broker must know.
+
+    The identity used to be the logical key, so the same physical camera
+    under a second name was accepted as a second device.
+    """
+
+    from zlc_atom.devices.camera.device_types import DEVICE_TYPES
+    from zlc_atom.execution import DeviceBroker
+    from zlc_atom.install import InstallationFactoryContext
+
+    factory = next(item for item in DEVICE_TYPES if item.type_id == "camera.pylon").factory
+    broker = DeviceBroker()
+    context = InstallationFactoryContext(None, broker, {})
+    first = factory(
+        context, "first-name", {"serial": "SAME-SERIAL-001", "camera": _FakeCamera()}
+    )
+    try:
+        assert (
+            first.physical_identity.stable_device_identity
+            == "pylon-camera:serial=SAME-SERIAL-001"
+        )
+        with pytest.raises(RuntimeError, match="already bound"):
+            factory(
+                context,
+                "second-name",
+                {"serial": "SAME-SERIAL-001", "camera": _FakeCamera()},
+            )
+    finally:
+        first.close()
+        broker.unbind(first.binding)
+
+
 def test_monitor_arm_is_temporarily_free_running_then_restores_external_trigger(fake_pypylon) -> None:
     """Monitor mode is an arm policy, not the camera's permanent configuration."""
 
@@ -668,20 +738,34 @@ def test_live_gain_and_acquisition_readback_share_one_sdk_lane() -> None:
     assert "StopGrabbing" not in camera.grab_calls
 
 
-def test_live_gain_change_marks_the_first_read_as_a_conservative_transition(
+def test_a_live_gain_change_marks_every_later_read_of_the_arm_as_a_transition(
     fake_pypylon,
 ) -> None:
-    camera = _FakeCamera(frames=[np.zeros((4, 4), np.uint8)] * 3)
+    """Uncertainty about which frames saw the change lasts until the arm ends.
+
+    The SDK offers no boundary between frames exposed before and after a
+    tune.  Clearing the transition after the first read that returned
+    anything let a read that drained one frame of the old queue certify the
+    next old frame as pure new-epoch -- and the finite reader takes exactly
+    one frame per read.
+    """
+
+    camera = _FakeCamera(frames=[np.full((4, 4), 10, np.uint8), np.full((4, 4), 20, np.uint8)])
     adapter = PylonCameraAdapter(_config(), camera=camera)
     adapter.open()
     session_id = adapter.settings_provenance()["device_session_id"]
     adapter.arm(2, source_group_sizes=(2,), buffer_frame_count=2, timeout=0.5)
+    # Both frames were ready under epoch 0 before the tune.
     adapter.tune("gain_db", 8.0)
-    changed = adapter.read_frame_records(2, timeout=0.5, exact=True)
-    assert {record.settings_session_id for record in changed} == {session_id}
-    assert {record.settings_epochs for record in changed} == {(0, 1)}
+    first = adapter.read_frame_records(1, timeout=0.5, exact=True)[0]
+    second = adapter.read_frame_records(1, timeout=0.5, exact=True)[0]
+    assert (int(first.image[0, 0]), int(second.image[0, 0])) == (10, 20)
+    assert {first.settings_session_id, second.settings_session_id} == {session_id}
+    assert first.settings_epochs == (0, 1)
+    assert second.settings_epochs == (0, 1), "an old frame was certified as new"
     adapter.finish_record_capture()
 
+    camera._frames.append(np.zeros((4, 4), np.uint8))
     adapter.arm(1, source_group_sizes=(1,), buffer_frame_count=1, timeout=0.5)
     stable = adapter.read_frame_records(1, timeout=0.5, exact=True)
     assert stable[0].settings_epochs == (1,)

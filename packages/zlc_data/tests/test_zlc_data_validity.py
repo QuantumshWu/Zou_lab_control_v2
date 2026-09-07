@@ -76,11 +76,11 @@ def test_a_repeat_axis_counts_only_the_samples_that_landed_whole():
         DomainSpec((2,), (site,)),
         value_schema,
     )
-    assert repeat_validity_counts(VALID, schema) == {"repeat": 2, "run": 2}
-    assert repeat_validity_counts(INVALID, schema) == {"repeat": 0, "run": 0}
+    assert repeat_validity_counts(VALID, schema) == (2, 2)
+    assert repeat_validity_counts(INVALID, schema) == (0, 0)
     # Row 3 (repeat 1, run 1) has one point still to land.
     cells = CellValidity(np.array([[True, True], [True, True], [True, True], [True, False]]))
-    assert repeat_validity_counts(cells, schema) == {"repeat": 1, "run": 1}
+    assert repeat_validity_counts(cells, schema) == (1, 1)
     # A component mask reads the same way: any invalid site breaks its row.
     component_schema = DatasetSchema(
         schema.repeat_domain,
@@ -97,4 +97,28 @@ def test_a_repeat_axis_counts_only_the_samples_that_landed_whole():
             [[True, True], [True, True]],
         ]),
     )
-    assert repeat_validity_counts(components, component_schema) == {"repeat": 1, "run": 1}
+    assert repeat_validity_counts(components, component_schema) == (1, 1)
+
+
+def test_two_repeat_axes_of_one_name_keep_their_own_counts():
+    """A count belongs to an axis, and only its id is unique.
+
+    Keyed by name, the second "repeat" axis's count overwrote the first's,
+    and a Point axis called "repeat" would have read a Repeat count where
+    its size belongs.  The counts travel by position in the schema's order.
+    """
+
+    first = AxisSpec(AxisId("first"), "repeat", REPEAT, 2, (0, 1))
+    second = AxisSpec(AxisId("second"), "repeat", REPEAT, 3, (0, 1, 2))
+    point = AxisSpec(AxisId("point"), "repeat", SCAN_POINT, 2, (0, 1))
+    site = _axis("site", SPATIAL_X, 2)
+    schema = DatasetSchema(
+        DomainSpec((6,), (first, second), ((0, 0, 0, 1, 1, 1), (0, 1, 2, 0, 1, 2))),
+        DomainSpec((2,), (point,), ((0, 1),)),
+        DomainSpec((2,), (site,)),
+        ValueSchema(ValidityContract.value(), np.dtype(np.float64)),
+    )
+    assert repeat_validity_counts(VALID, schema) == (2, 3)
+    # The last row (first=1, second=2) still has a point to land.
+    cells = CellValidity(np.array([[True, True]] * 5 + [[True, False]]))
+    assert repeat_validity_counts(cells, schema) == (1, 2)

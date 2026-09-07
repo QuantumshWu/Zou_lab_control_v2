@@ -226,7 +226,7 @@ def _finite_cycle_output(
         node.run_record,
         canonical,
         (index, 0),
-        event_record=node._camera_event_record(cycle, accumulate=True),
+        event_record=node._camera_event_record(cycle),
     )
 
 
@@ -249,7 +249,7 @@ def _monitor_cycle_output(
         event,
         MonitorCoverage(frames, frames),
         node.run_record,
-        event_record=node._camera_event_record(cycle, accumulate=False),
+        event_record=node._camera_event_record(cycle),
     )
 
 
@@ -274,17 +274,29 @@ def _strict_terminal(
     terminal: CameraCaptureTerminalRecord,
     *,
     expected_frames: int,
+    stopped: bool = False,
 ) -> CameraCaptureTerminalRecord:
-    if (
-        terminal.produced_count != expected_frames
-        or not terminal.source_stopped
-        or not terminal.no_more_frames
-        or not terminal.joined
-    ):
+    """The device's terminal, checked against the cycles this capture kept.
+
+    The device must have stopped, drained and joined, and it must have
+    produced every frame the completed cycles account for.  A capture that was
+    asked to stop may have left a partial cycle behind: the frames of the
+    cycle it walked away from are the device's honest count, not a lie about
+    the cycles it kept, so a surplus is accepted only for a stop.  A run that
+    ended on its own must account for every frame exactly.
+    """
+
+    if not (terminal.source_stopped and terminal.no_more_frames and terminal.joined):
+        raise RuntimeError(
+            "camera terminal evidence is incomplete: the capture did not stop, "
+            "drain and join"
+        )
+    produced = terminal.produced_count
+    if produced < expected_frames or (produced != expected_frames and not stopped):
         raise RuntimeError(
             "camera terminal count differs from completed cycles: "
             f"completed cycles account for {expected_frames} frame(s), camera "
-            f"produced {terminal.produced_count} (a partial cycle may be present)"
+            f"produced {produced} (a partial cycle may be present)"
         )
     return terminal
 
@@ -463,9 +475,7 @@ class CameraCycleSource:
         )
         if not isinstance(camera_snapshot, Mapping):
             raise RuntimeError("camera cycle source lost its working point")
-        event_record = dict(
-            self.camera_node._camera_event_record(records, accumulate=True)
-        )
+        event_record = dict(self.camera_node._camera_event_record(records))
         event_record["device_snapshots"] = {
             "camera": dict(camera_snapshot)
         }
@@ -485,10 +495,18 @@ class CameraCycleSource:
         ), None
 
     def close(self) -> CameraCaptureTerminalRecord | None:
-        capture, self._capture = self._capture, None
-        if capture is None:
+        """Finish the capture; the handle is let go only once it has finished.
+
+        A capture whose finish the device refused is kept, so the owner that
+        closes this source again reaches the same capture and retries the same
+        finish, rather than finding nothing to close.
+        """
+
+        if self._capture is None:
             return None
-        return capture.close()
+        terminal = self._capture.close()
+        self._capture = None
+        return terminal
 
     def describe(self) -> dict[str, object]:
         request = self.camera_node.request
@@ -537,6 +555,10 @@ class FiniteCapture:
         self.closed = False
         self.collected: MeasurementResult | None = None
         self.completed_cycles = 0
+        #: Whether the owner asked this capture to stop, which is the one
+        #: reason a device may honestly report more frames than the completed
+        #: cycles account for: the cycle it was walking away from.
+        self.stopped = False
         self.terminal: CameraCaptureTerminalRecord | None = None
 
     def collect(
@@ -551,9 +573,12 @@ class FiniteCapture:
         ``commit_cycle`` receives only the newly completed cycle and its run
         index.  Runtime owns every prior cycle and the fixed authored shape;
         handing the whole prefix back to a plugin is the O(N^2) path this
-        method replaces.  A run
-        that is asked to stop keeps the cycles it took -- they were measured
-        -- while one stopped before its first cycle has nothing to publish.
+        method replaces.  A run that is asked to stop keeps the cycles it took
+        -- they were measured, verified and committed -- and is sealed short;
+        the partial cycle it was reading is the device's to count and nobody's
+        to publish.  A run stopped before its first cycle has nothing to
+        publish.  Only a device that failed its terminal, or a cycle that
+        failed its checks, withdraws the run.
         """
 
         if self.closed:
@@ -576,19 +601,14 @@ class FiniteCapture:
                 commit_cycle(cycle, index)
                 if keep:
                     retained.append(cycle)
-            terminal = self.camera.finish_record_capture()
-            _strict_terminal(
-                terminal,
-                expected_frames=self.completed_cycles * self.frames_per_cycle,
-            )
-            self.terminal = terminal
+            terminal = self.close()
         except BaseException:
-            self.camera.finish_record_capture()
-            self.closed = True
+            if not self.closed:
+                self.camera.finish_record_capture()
+                self.closed = True
             if self.owns_generation:
                 self.node.signal_plane.retire(self.node)
             raise
-        self.closed = True
         if not self.completed_cycles:
             if self.owns_generation:
                 self.node.signal_plane.retire(self.node)
@@ -637,6 +657,7 @@ class FiniteCapture:
         deadline = monotonic() + self.timeout
         while len(records) < self.frames_per_cycle:
             if self.should_stop is not None and self.should_stop():
+                self.stopped = True
                 return None
             arrived = self.node.read_records(
                 self.frames_per_cycle - len(records),
@@ -674,16 +695,26 @@ class FiniteCapture:
         return cycle
 
     def close(self) -> CameraCaptureTerminalRecord:
-        if self.closed:
-            if self.terminal is None:
-                raise RuntimeError("finite capture closed without terminal evidence")
+        """Finish the capture with the device's evidence, or not at all.
+
+        Only a finish the device completed and the count check accepted is
+        cached; a finish the device refused leaves the capture open so the
+        next close retries the same finish.  A capture that a failed collect
+        already closed has no terminal to hand out and says so.
+        """
+
+        if self.terminal is not None:
             return self.terminal
-        self.closed = True
-        self.terminal = _strict_terminal(
+        if self.closed:
+            raise RuntimeError("finite capture closed without terminal evidence")
+        terminal = _strict_terminal(
             self.camera.finish_record_capture(),
             expected_frames=self.completed_cycles * self.frames_per_cycle,
+            stopped=self.stopped,
         )
-        return self.terminal
+        self.closed = True
+        self.terminal = terminal
+        return terminal
 
 
 class MonitorCapture:
@@ -701,6 +732,7 @@ class MonitorCapture:
         self.node = node
         self.owns_generation = bool(owns_generation)
         self.closed = False
+        self.terminal: CameraCaptureTerminalRecord | None = None
         self.latest_record: CameraFrameRecord | None = None
         self._pending_records: list[CameraFrameRecord] = []
         self._revision = 0
@@ -762,29 +794,28 @@ class MonitorCapture:
             )
 
     def close(self) -> CameraCaptureTerminalRecord:
-        """Release this capture and always disarm the camera.
+        """Disarm the camera, then detach the generation.
 
-        A direct monitor detaches its own generation.  A hosted monitor leaves
-        detachment and slot closing to its host, which must keep owning the
-        plane generation through worker termination.  Either way, a detach
-        failure cannot skip the device disarm.
+        Only the terminal the device produced is cached and handed back: a
+        disarm the device refused is raised and left for the next close to
+        retry, never answered with a made-up all-clear over a camera that is
+        still armed.  A direct monitor detaches its own generation once the
+        device has stopped; a hosted monitor leaves detachment and slot
+        closing to its host, which keeps owning the plane generation through
+        worker termination.  The device disarm comes first, so a detach
+        failure cannot skip it.
         """
 
-        if self.closed:
-            return CameraCaptureTerminalRecord(0, True, True, True)
-        self.closed = True
-        sealed: BaseException | None = None
-        if self.owns_generation:
-            try:
-                if self._revision:
-                    self.node.signal_plane.seal_committed(self.node)
-                else:
-                    self.node.signal_plane.retire(self.node)
-            except BaseException as error:  # noqa: BLE001 - the camera still goes
-                sealed = error
+        if self.terminal is not None:
+            return self.terminal
         terminal = self.camera.finish_record_capture()
-        if sealed is not None:
-            raise sealed
+        self.closed = True
+        self.terminal = terminal
+        if self.owns_generation:
+            if self._revision:
+                self.node.signal_plane.seal_committed(self.node)
+            else:
+                self.node.signal_plane.retire(self.node)
         return terminal
 
 
@@ -808,7 +839,6 @@ class CameraMeasurementNode:
         self._actual_working_point: CameraWorkingPoint | None = None
         self._run_record: dict[str, object] | None = None
         self._settings_session_id: str | None = None
-        self._settings_epochs: set[int] = set()
         if signal_plane is None:
             raise TypeError("signal_plane must be supplied by the runtime owner")
         self.signal_plane = signal_plane
@@ -994,15 +1024,20 @@ class CameraMeasurementNode:
         }
         self._run_record = record
         self._settings_session_id = None
-        self._settings_epochs = set()
 
     def _camera_event_record(
         self,
         records: Sequence[CameraFrameRecord],
-        *,
-        accumulate: bool,
     ) -> dict[str, object]:
-        """Merge settings frozen on the actual frames, never current state."""
+        """The settings frozen on THESE frames, never current state.
+
+        An event record describes the chunk it travels with -- this cycle,
+        these frames -- and nothing before it: the Runtime merges the epoch
+        ranges of every retained chunk into the canonical prefix, so a cycle
+        that also carried the epochs of earlier cycles was the same fact stated
+        twice, once wrongly.  What does span the acquisition is the device
+        session: a camera that changed identity between cycles is refused.
+        """
 
         frames = tuple(records)
         references = tuple(
@@ -1020,18 +1055,12 @@ class CameraMeasurementNode:
         session_id = next(iter(session_ids))
         if self._settings_session_id not in (None, session_id):
             raise RuntimeError("camera device session changed during one acquisition")
-        observed = {
+        self._settings_session_id = session_id
+        ordered = sorted({
             epoch
             for _session_id, epochs in references
             for epoch in epochs
-        }
-        if accumulate:
-            self._settings_session_id = session_id
-            self._settings_epochs.update(observed)
-            selected = self._settings_epochs
-        else:
-            selected = observed
-        ordered = sorted(selected)
+        })
         ranges: list[list[int]] = []
         for epoch in ordered:
             if ranges and epoch == ranges[-1][1] + 1:

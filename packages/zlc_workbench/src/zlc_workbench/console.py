@@ -44,7 +44,6 @@ from zlc_plot.specs import semantic_spec, validate_authored_display
 from zlc_plot.ui import parameter_controls_for_kind
 from zlc_plot.specs import GRID_CELL_KINDS, non_portable_display_names
 from zlc_runtime import (
-    DatasetCoverage,
     IndexedHistoryLease,
     OperatorInputRequest,
     SelectionChange,
@@ -58,6 +57,8 @@ from .console_layout import (
     LayoutError,
     LogicLayoutEntry,
     ResolvedLayout,
+    load_layout,
+    panel_id_for,
     resolve_layout,
 )
 from .device_use import DeviceClaim, DeviceUseBusy
@@ -368,22 +369,28 @@ class PanelBinding:
         # Asking the port instead reads one beat behind -- at the moment a new
         # run replaces the host, the port still answers with the old run and
         # the stale mark would arrive a beat late, which is the whole defect.
-        shown = self.display_publication
-        if shown is None:
+        surface = self.accepted_surface
+        if surface is None:
             return False
-        if _run_of(frozen.publication) != _run_of(shown):
+        if _run_of(frozen.publication) != _run_of(surface.publication):
             return True
-        # Same run is not the whole story: an EXACT dataset GROWS point
-        # by point (a seamless scan commits one readout at a time), and a
-        # picture frozen at partial coverage is one column pretending to
-        # be the scan.  Growth is staleness too -- comparing run identity
-        # alone kept the badge dark while the live card filled in.
-        frozen_coverage = getattr(frozen.publication, "coverage", None)
-        shown_coverage = getattr(shown, "coverage", None)
+        # Same run is not the whole story: the exact Dataset the card shows
+        # moves under one run.  A seamless scan commits one readout at a
+        # time, and a picture frozen at partial coverage is one column
+        # pretending to be the scan; a Monitor keeps its one-cell coverage
+        # and simply publishes the next value.  Either is a new REVISION of
+        # the input on screen, and that is what Edit's freeze is compared
+        # with.  Coverage is a fact of the SignalValue, not of the
+        # publication: read off two publications it was None for both, so
+        # the same-run branch never fired and the badge stayed dark while
+        # the live card moved on.
+        shown = getattr(surface.plot_input, "snapshot", surface.plot_input)
+        shown_ref = getattr(shown, "ref", None)
+        frozen_ref = getattr(frozen.snapshot, "ref", None)
         return (
-            isinstance(frozen_coverage, DatasetCoverage)
-            and isinstance(shown_coverage, DatasetCoverage)
-            and shown_coverage.written_cells > frozen_coverage.written_cells
+            shown_ref is not None
+            and frozen_ref is not None
+            and shown_ref != frozen_ref
         )
 
     @property
@@ -410,6 +417,10 @@ class _LayoutCandidate:
     panel_serial: int
     missing_signals: tuple[str, ...] = ()
     incompatible_panels: tuple[tuple[str, str], ...] = ()
+    #: One sentence per reference or fate the document had and this board
+    #: cannot carry (from ``load_layout``): said on the strip, never dropped
+    #: silently.
+    notes: tuple[str, ...] = ()
 
 
 #: Where a defect that crossed the Qt boundary is written down.  A status
@@ -758,7 +769,7 @@ class ConsolePresenter:
             return None
 
         self._panel_serial += 1
-        panel_id = f"panel-{self._panel_serial}"
+        panel_id = panel_id_for(self._panel_serial)
         base_title = self._panel_kind_labels[wanted]
         used_titles = {binding.state.title for binding in self.panels.values()}
         generated_title = base_title
@@ -859,7 +870,7 @@ class ConsolePresenter:
             self._default_interval_ms if interval_ms is None else interval_ms
         )
         self._panel_serial += 1
-        panel_id = f"panel-{self._panel_serial}"
+        panel_id = panel_id_for(self._panel_serial)
         state = PanelState(
             signal=signal_name,
             kind=definition.kind.value,
@@ -1355,6 +1366,45 @@ class ConsolePresenter:
             event_record,
         )
 
+    @staticmethod
+    def _frozen_intent(binding: PanelBinding) -> PanelFrozenData | None:
+        """The freeze Edit is meant to show: the one travelling to its host
+        when one is, else the one it has accepted.
+
+        While a freeze travels, ``frozen_data`` stays the Editor's last
+        complete picture -- Save reads it, and so does the "data advanced"
+        mark -- and the candidate lives in the editor entry.  Everything
+        that re-stamps or restages the freeze starts from the candidate,
+        or a Refresh still on its way would be built over.
+        """
+
+        entry = binding.editor_configuration
+        if entry is not None and entry[4] is not None:
+            return entry[4]
+        return binding.frozen_data
+
+    def _freeze_panel(
+        self, binding: PanelBinding, frozen: PanelFrozenData
+    ) -> None:
+        """Give Edit a new freeze.
+
+        With an editor surface to show it on, the freeze is staged there
+        and the public record advances only when that surface has accepted
+        the new front (in ``_settle_panel_hosts``): a Save pressed while
+        the refresh travels then writes the picture the Editor shows, not
+        the one it was asked for, and "data advanced" stays lit until Edit
+        has caught up.  Writing the record first made Save write bytes the
+        Editor had never drawn.  Without an editor surface there is
+        nothing to wait for: the freeze is the record.
+        """
+
+        if binding.editor_open and callable(
+            getattr(self.view, "show_panel_editor", None)
+        ):
+            self._advance_panel_editor_host(binding, frozen)
+        else:
+            binding.frozen_data = frozen
+
     def _panel_frozen_data(
         self,
         binding: PanelBinding,
@@ -1453,25 +1503,25 @@ class ConsolePresenter:
                 self._publish_panel_state(binding)
             return
         binding.refresh_requested = False
-        previous = binding.frozen_data
-        binding.frozen_data = self._panel_frozen_data(
-            binding,
-            publication=publication,
-            plot_input=plot_input,
-            event_records=surface.event_records,
-            target=frozen_target,
-            description=description,
-        )
+        try:
+            self._freeze_panel(
+                binding,
+                self._panel_frozen_data(
+                    binding,
+                    publication=publication,
+                    plot_input=plot_input,
+                    event_records=surface.event_records,
+                    target=frozen_target,
+                    description=description,
+                ),
+            )
+        except Exception as error:
+            self._report(
+                f"cannot refresh {binding.state.title} plot editor: "
+                f"{_error_text(error)}",
+                severity="error",
+            )
         self._publish_panel_state(binding)
-        if binding.editor_open:
-            try:
-                self._advance_panel_editor_host(binding, previous)
-            except Exception as error:
-                self._report(
-                    f"cannot refresh {binding.state.title} plot editor: "
-                    f"{_error_text(error)}",
-                    severity="error",
-                )
 
     # ------------------------------------------------------------ presentation
     #
@@ -3028,6 +3078,7 @@ class ConsolePresenter:
                 self._refresh_console_projection()
                 return True
             if plot_changed:
+                predecessor = binding.configuration
                 self._cancel_panel_configuration(binding)
                 try:
                     self._sync_panel_history(
@@ -3096,7 +3147,7 @@ class ConsolePresenter:
                     # sixteen fields back, and the record on this side has to
                     # roll back with it or the panel permanently claims a
                     # setting nothing ever drew.
-                    current,
+                    self._configure_baseline(predecessor, current),
                 )
             else:
                 self._remount_panel_editor(binding)
@@ -3412,6 +3463,46 @@ class ConsolePresenter:
         except Exception:
             pass
 
+    @staticmethod
+    def _configure_baseline(predecessor: object, current: PanelState) -> object:
+        """What a new configure carries to go back to if the host refuses it.
+
+        The host rolls a refused configure back to the state it last
+        ACCEPTED, and the record here must land on that same state.  The
+        authored state is that state only when nothing was in flight.  A
+        configure still queued when this one is submitted never reaches
+        the host on its own -- it is cancelled here, and the host folds a
+        queued configure into its successor -- so its own baseline carries
+        forward; one the host was already executing settles by its real
+        result, known by the time this one is, so the entry itself is
+        carried and resolved then (``_settled_baseline``).  Taking the
+        authored state regardless rolled a refused edit back to a setting
+        the host had never drawn.
+        """
+
+        if predecessor is None or predecessor[0] != "configure":
+            return current
+        return predecessor
+
+    @staticmethod
+    def _settled_baseline(fallback: object) -> PanelState:
+        """The state the host last accepted, from a configure entry's baseline."""
+
+        while not isinstance(fallback, PanelState):
+            _kind, pending, _normalize, target, earlier = fallback
+            accepted = None
+            if pending.done() and not pending.cancelled():
+                try:
+                    accepted = pending.result()
+                except Exception:
+                    accepted = None
+            if accepted is None:
+                # Cancelled before it ran, or refused: the host never held it.
+                fallback = earlier
+                continue
+            return panel_state_from_description(target, accepted.value)
+        return fallback
+
     def _restore_refused_panel_state(
         self, binding: PanelBinding, fallback: object
     ) -> None:
@@ -3591,7 +3682,7 @@ class ConsolePresenter:
                     except Exception as error:
                         condition = _error_text(error)
                         self._restore_refused_panel_state(
-                            binding, refused_fallback
+                            binding, self._settled_baseline(refused_fallback)
                         )
                         if binding.reported_condition != condition:
                             binding.reported_condition = condition
@@ -3625,7 +3716,7 @@ class ConsolePresenter:
                         if normalize_state:
                             self._normalize_panel_interaction(binding)
                         self._publish_panel_state(binding)
-                        frozen = binding.frozen_data
+                        frozen = self._frozen_intent(binding)
                         if (
                             normalize_state
                             and frozen is not None
@@ -3689,18 +3780,19 @@ class ConsolePresenter:
                         if normalize_editor_state
                         else editor_target
                     )
-                    current_frozen = binding.frozen_data
                     mount = getattr(self.view, "show_panel_editor", None)
+                    # The entry IS the newest intent -- a superseded entry
+                    # is never settled, only ``binding.editor_configuration``
+                    # is read -- so its candidate is not compared with the
+                    # record, which while the candidate travels is the
+                    # Editor's LAST picture, not this one.
                     if (
                         not binding.editor_open
                         or editor_frozen is None
-                        or current_frozen is None
                         or not _same_panel_plot_target(
                             binding.state,
                             editor_target,
                         )
-                        or current_frozen.publication is not editor_frozen.publication
-                        or current_frozen.snapshot.ref != editor_frozen.snapshot.ref
                         or not callable(mount)
                     ):
                         raise RuntimeError(
@@ -3725,6 +3817,7 @@ class ConsolePresenter:
                         raise
                     binding.editor_host = editor_host
                     binding.editor_selections = selections
+                    record_moved = binding.frozen_data is not accepted_frozen
                     binding.frozen_data = accepted_frozen
                     self._accept_panel_display_state(
                         binding,
@@ -3760,6 +3853,11 @@ class ConsolePresenter:
                     # newer freeze in place.  Only a replaced one retires.
                     if old_host is not None and old_host is not editor_host:
                         self._retire_plot_host(old_host)
+                    if record_moved:
+                        # The freeze the Edit tab describes is this one from
+                        # now on: its signal, its snapshot, whether it is
+                        # stale or behind the card.
+                        self.refresh_panel_editor(binding.panel_id)
                 except Exception as error:
                     if editor_host is not binding.editor_host:
                         self._retire_plot_host(editor_host)
@@ -3972,7 +4070,7 @@ class ConsolePresenter:
             and getattr(binding.editor_host, "startup_failure", None) is None
         ):
             return
-        frozen = binding.frozen_data
+        frozen = self._frozen_intent(binding)
         if (
             frozen is None
             or frozen.signal != binding.state.signal
@@ -4000,7 +4098,7 @@ class ConsolePresenter:
     ) -> object:
         """Stage Edit completely; its old accepted surface stays visible."""
 
-        frozen = binding.frozen_data if frozen is None else frozen
+        frozen = self._frozen_intent(binding) if frozen is None else frozen
         if frozen is None:
             raise RuntimeError(f"{binding.panel_id} has no frozen plot input")
         plot_input = frozen.plot_input
@@ -4038,7 +4136,7 @@ class ConsolePresenter:
     def _advance_panel_editor_host(
         self,
         binding: PanelBinding,
-        previous: PanelFrozenData | None,
+        frozen: PanelFrozenData,
     ) -> None:
         """Show a newer freeze on the editor's own host, as the card shows a shot.
 
@@ -4050,7 +4148,8 @@ class ConsolePresenter:
         does, through the same prepare/solve/commit pair, and keeps its
         artists, caches and configuration.  The pending operation settles
         through the one editor-configuration path, so the frozen
-        description is the host's own.  A host that cannot take the data --
+        description is the host's own -- and only that settle makes
+        ``frozen`` the panel's record.  A host that cannot take the data --
         the target moved, the geometry changed -- is replaced, as before.
         """
 
@@ -4064,6 +4163,7 @@ class ConsolePresenter:
         host = binding.editor_host
         if host is None and entry is not None:
             host = entry[0]
+        previous = self._frozen_intent(binding)
         if (
             host is None
             or previous is None
@@ -4071,14 +4171,12 @@ class ConsolePresenter:
             or not _same_panel_plot_target(previous.target, binding.state)
         ):
             # No host at all, or a moved target: stage a complete host.
-            self._replace_panel_editor_host(binding)
+            self._replace_panel_editor_host(binding, frozen=frozen)
             return
-        frozen = binding.frozen_data
-        assert frozen is not None
         try:
             pending = host.update_data(frozen.plot_input)
         except Exception:
-            self._replace_panel_editor_host(binding)
+            self._replace_panel_editor_host(binding, frozen=frozen)
             return
         # A freeze still on its way to this host is superseded, not failed:
         # the host keeps only the latest waiting frame and cancels the rest
@@ -4214,16 +4312,22 @@ class ConsolePresenter:
                 severity="warning",
             )
             return False
-        previous = binding.frozen_data
+        accepted = binding.frozen_data
+        previous = self._frozen_intent(binding)
         # "Already frozen" means the same PICTURE under the same TARGET.
         # A record holding the right pixels for a configuration the panel
         # has since left still owes the operator a re-stamp: that is what
-        # a panel which crossed vocabularies asks Refresh for.
+        # a panel which crossed vocabularies asks Refresh for.  A freeze
+        # of this picture still travelling to Edit is stamped with the
+        # current target when it lands, so it is already what was asked.
         already_frozen = (
             previous is not None
             and previous.publication is shown_publication
             and previous.plot_input is shown_input
-            and _same_panel_plot_target(previous.target, binding.state)
+            and (
+                previous is not accepted
+                or _same_panel_plot_target(previous.target, binding.state)
+            )
         )
         # The one thing that would make adoption nonsense is a card
         # showing ANOTHER SIGNAL -- mid-retarget, before its replacement
@@ -4269,25 +4373,26 @@ class ConsolePresenter:
                 target=binding.state,
                 description=surface.description,
             )
-            binding.frozen_data = frozen
             binding.refresh_requested = False
-            if binding.editor_host is not None:
-                try:
-                    if previous is not None and previous.plot_input is shown_input:
+            try:
+                if accepted is not None and accepted.plot_input is shown_input:
+                    # The same pixels Edit already shows, under a
+                    # re-stamped target: the record moves and Edit's
+                    # gestures rebind to it; no new picture travels.
+                    binding.frozen_data = frozen
+                    if binding.editor_host is not None:
                         self._refresh_panel_editor_selection(binding)
-                    else:
-                        self._advance_panel_editor_host(binding, previous)
-                except Exception as error:
-                    # Frozen record and Frozen pixels are one transaction.
-                    # Restore the previous record if its replacement host
-                    # could not be mounted; never save new bytes through an
-                    # old surface merely because both belong to one run.
-                    binding.frozen_data = previous
-                    self._report(
-                        f"cannot mount {binding.state.title} plot "
-                        f"editor: {_error_text(error)}",
-                        severity="error",
-                    )
+                else:
+                    # Frozen record and Frozen pixels are one transaction:
+                    # the record follows the pixels onto Edit's surface,
+                    # never the other way round.
+                    self._freeze_panel(binding, frozen)
+            except Exception as error:
+                self._report(
+                    f"cannot mount {binding.state.title} plot "
+                    f"editor: {_error_text(error)}",
+                    severity="error",
+                )
             if binding.editor_open:
                 self.refresh_panel_editor(panel_id)
         if not newer_pending:
@@ -4487,7 +4592,7 @@ class ConsolePresenter:
         if schema is None:
             schema = self._panel_schema(binding)
         surface.update(
-            {"data_structure": (), "data_valid": {}, "data_scope": ()}
+            {"data_structure": (), "data_valid": (), "data_scope": ()}
             if schema is None
             else panel_data_shape(
                 schema,
@@ -4760,6 +4865,7 @@ class ConsolePresenter:
                 )
                 for binding in self.logic.values()
             ),
+            tuple(self.panels),
         )
 
     def layout(self) -> dict[str, Any]:
@@ -4771,8 +4877,13 @@ class ConsolePresenter:
         nothing here could say what it was.  Saving DATA is a different act and
         already had a button; this is the other one.
 
-        Only what an operator chose is written.  Panel ids, hosts and ports are
-        this session's bookkeeping and are rebuilt on the way back in.
+        Only what an operator chose is written, plus the identity each panel
+        had: a panel is a producer -- its Bridge publishes the ROI and fit
+        outputs it derives under ``@logic/<panel id>/<output>`` -- and a
+        downstream panel or logic row names it by that spelling.  Hosts and
+        ports are this session's bookkeeping and are rebuilt on the way back
+        in; ids are minted fresh on the way in and every reference is
+        respelled to them (``load_layout``).
         """
 
         return self._layout_document().to_tree()
@@ -4795,18 +4906,38 @@ class ConsolePresenter:
         return tuple(rows)
 
     def _prepare_layout_panels(self, resolved: ResolvedLayout) -> _LayoutCandidate:
-        """Build every drawable panel off-board before retiring current state."""
+        """Build every drawable panel off-board before retiring current state.
+
+        The fresh identities are minted first and the whole document is put
+        onto them (``load_layout``) before any panel is built, so a panel
+        that reads another panel's derived signal reads the fresh spelling
+        from its first frame.
+        """
 
         front = self.session.signal_plane.freeze()
         serial = self._panel_serial
+        fresh_ids = tuple(
+            panel_id_for(serial + offset + 1)
+            for offset in range(len(resolved.panels))
+        )
+        serial += len(resolved.panels)
+
+        def schema_for(signal: str):
+            value = front.value(signal)
+            if value is None:
+                return None
+            return (
+                getattr(value, "canonical_schema", None)
+                or value.snapshot.block.schema
+            )
+
+        loaded = load_layout(resolved, panel_ids=fresh_ids, schema_for=schema_for)
         panels: list[PanelBinding] = []
         missing: list[str] = []
         incompatible: list[tuple[str, str]] = []
         used_titles: set[str] = set()
         try:
-            for saved in resolved.panels:
-                serial += 1
-                panel_id = f"panel-{serial}"
+            for panel_id, saved in zip(loaded.panel_ids, loaded.panels, strict=True):
                 base_title = self._panel_kind_labels[saved.kind]
                 generated_title = base_title
                 suffix = 2
@@ -4840,11 +4971,6 @@ class ConsolePresenter:
                 if fitting is None:
                     incompatible.append((state.signal, state.kind))
                     continue
-                # state and parameter_surface were assigned again here with
-                # the very values the PanelBinding was constructed from a few
-                # lines above -- a second full kind-vocabulary build per panel
-                # on every saved-board load, and a reader who had to prove the
-                # two were equal before concluding nothing happened.
                 binding.port = self._make_panel_port(binding)
         except Exception as error:
             for binding in panels:
@@ -4853,13 +4979,13 @@ class ConsolePresenter:
                 f"cannot prepare the layout panels: {_error_text(error)}"
             ) from error
         return _LayoutCandidate(
-            resolved.logic,
+            loaded.logic,
             tuple(panels),
             serial,
             tuple(missing),
             tuple(incompatible),
+            loaded.notes,
         )
-
     def _build_layout_candidate(self, document: LayoutDocument) -> _LayoutCandidate:
         try:
             for state in document.panels:
@@ -4967,6 +5093,8 @@ class ConsolePresenter:
                 f"cannot draw {descriptions}; those panels remain available for rewiring",
                 severity="warning",
             )
+        for note in candidate.notes:
+            self._report(note, severity="warning")
         return True
 
     def save_layout(self) -> str:
@@ -5916,12 +6044,12 @@ class ConsolePresenter:
             return
 
         context = self._selection_context(publication)
-        if str(getattr(selection, "selector_kind", "")) != "area":
-            # A region is an area of the data; that is the only gesture whose
-            # coordinates mean a producer's setting.  A threshold line, an
-            # x range or a crosshair say something about the reading, not
-            # about how to take the next one.
-            return
+        # Which gestures mean a producer's setting is the producer's own
+        # declaration -- its selection mappings, matched by plot and
+        # selector kind -- and nothing here narrows it.  A box on a curve
+        # arrives as an x range, because a curve's y names no axis, and a
+        # scan declares that x range as its next sweep; a console rule that
+        # let only "area" through made that declared mapping unreachable.
         draft = dict(producer.draft.values)
         patch = producer.descriptor.selection_patch(
             selection,

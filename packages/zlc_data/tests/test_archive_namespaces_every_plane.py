@@ -19,7 +19,6 @@ from __future__ import annotations
 import io
 
 import numpy as np
-import pytest
 
 from zlc_data import (
     REPEAT,
@@ -38,8 +37,6 @@ from zlc_data import (
     ValueSchema,
 )
 from zlc_data.figure_archive import read_archive, write_figure_archive
-
-PNG = b"\x89PNG\r\n\x1a\n" + b"figure bytes"
 
 
 def _schema() -> DatasetSchema:

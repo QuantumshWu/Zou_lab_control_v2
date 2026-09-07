@@ -37,6 +37,7 @@ from pathlib import Path
 import sys
 from typing import Any, Callable
 
+from zlc_durable import atomic_write_bytes
 from zlc_pulse import PulseSequence
 from zlc_pulse.codec import PULSE_TREE_FORMAT, parse_pulse_tree_json
 
@@ -153,6 +154,40 @@ class Outcome:
         self.backup = backup
 
 
+def _put_back(path: Path, raw: bytes, backup: Path, reason: str) -> Outcome:
+    """The file as it was found, after a write that did not read back.
+
+    The original is in hand -- it is what the backup holds -- so a written
+    file that fails its own read-back is put back rather than left as a
+    pulse the editor will refuse, and the backup goes with it: the file IS
+    the original again, and a backup left behind would refuse the next run.
+    Only when even that write fails is the file left as written, and the
+    outcome says so and names the backup that holds the original.
+    """
+
+    try:
+        atomic_write_bytes(path, raw)
+    except OSError as error:
+        return Outcome(
+            path,
+            "NOT RESTORED",
+            f"{reason}; the original could not be put back "
+            f"({type(error).__name__}: {error}) and is in {backup.name}",
+            backup,
+        )
+    try:
+        backup.unlink()
+    except OSError:
+        return Outcome(
+            path,
+            "REFUSED",
+            f"{reason}; the original was put back, and its copy {backup.name} "
+            "could not be removed",
+            backup,
+        )
+    return Outcome(path, "REFUSED", f"{reason}; the original was put back")
+
+
 def migrate_file(path: Path) -> Outcome:
     """Migrate one pulse file in place, or explain why it was left alone."""
 
@@ -195,11 +230,11 @@ def migrate_file(path: Path) -> Outcome:
     write_pulse(path, migrated)
     # The file the operator will open, read by the reader that will open it.
     if read_pulse(path) != migrated:
-        return Outcome(
+        return _put_back(
             path,
-            "REFUSED",
-            "the written file does not read back as the migrated pulse",
+            raw,
             backup,
+            "the written file does not read back as the migrated pulse",
         )
     return Outcome(path, "migrated", ", ".join(notes), backup)
 
@@ -252,7 +287,7 @@ def main(argv: "list[str] | None" = None) -> int:
         detail = f": {outcome.detail}" if outcome.detail else ""
         print(f"  {path.name}")
         print(f"      {outcome.verdict}{detail}")
-        if outcome.verdict == "migrated" and outcome.backup is not None:
+        if outcome.backup is not None:
             print(f"      original kept as {outcome.backup.name}")
 
     print()
@@ -271,7 +306,14 @@ def main(argv: "list[str] | None" = None) -> int:
             f"{refused} file(s) were NOT changed, because this tool does not "
             "know how to bring them forward. They are exactly as they were."
         )
-    return 1 if refused else 0
+    unrestored = counts.get("NOT RESTORED", 0)
+    if unrestored:
+        print(
+            f"{unrestored} file(s) were written, failed to read back, and could "
+            f"NOT be put back. Their originals are the {BACKUP_SUFFIX} files "
+            "named above: restore them by hand before opening those pulses."
+        )
+    return 1 if refused or unrestored else 0
 
 
 if __name__ == "__main__":

@@ -237,3 +237,44 @@ def test_the_session_histogram_is_the_same_picture_shot_after_shot() -> None:
         assert live._view._frequency_carry is not None, "the session never used the table"
     finally:
         live.close()
+
+
+def test_a_uint64_history_past_int64_declines_the_table_and_still_draws() -> None:
+    """The table is addressed by an int64 difference from its offset.
+
+    Data allows uint64, whose upper half no int64 holds: three samples of
+    2**63 + k span three levels, the optimisation took them, and the
+    subtraction raised OverflowError out of ``window_frequency`` and out
+    of the histogram panel drawn from it.  A level int64 cannot hold is
+    declined -- by the fresh count and by a later shot that would widen a
+    table to it -- and the histogram counts the pool the ordinary way.
+    """
+
+    history = _History(capacity=3, dtype=np.uint64)
+    view = None
+    for index in range(3):
+        snapshot = history.publish(
+            index, frame=np.full((HEIGHT, WIDTH), 2**63 + index + 1, dtype=np.uint64)
+        )
+        view = DataView(snapshot) if view is None else DataView(
+            snapshot, inherit_domains_from=view
+        )
+    assert view.window_frequency(3) is None
+    session = PlotSession(snapshot, HistogramPlot(), parameters={"window": 3})
+    try:
+        payload = session._payload
+        assert int(np.sum(payload.counts)) == 3 * HEIGHT * WIDTH
+    finally:
+        session.close()
+
+    # A table that int64 holds is kept until a shot brings a level it
+    # cannot hold, and given up then rather than overflowed.
+    history = _History(capacity=3, dtype=np.uint64, high=50)
+    snapshot = history.publish(0)
+    view = DataView(snapshot)
+    assert view.window_frequency(3) is not None
+    previous, snapshot = view, history.publish(
+        1, frame=np.full((HEIGHT, WIDTH), 2**63 + 1, dtype=np.uint64)
+    )
+    view = DataView(snapshot, inherit_domains_from=previous)
+    assert view.window_frequency(3) is None

@@ -869,3 +869,288 @@ app.processEvents()
 assert label.isHidden() and label.text() == ''
 print('setting status ok')
 """)
+
+
+def _counted_domain(size: int):
+    """A lazy wheel domain that counts how often it is read."""
+
+    from collections.abc import Sequence
+
+    class Counted(Sequence):
+        def __init__(self) -> None:
+            self.reads = 0
+
+        def __len__(self) -> int:
+            return size
+
+        def __getitem__(self, index):
+            if not 0 <= index < size:
+                raise IndexError(index)
+            self.reads += 1
+            return index, str(index)
+
+    return Counted()
+
+
+def test_a_scope_that_did_not_move_is_read_not_searched_for() -> None:
+    """The wheel domain is DATA, read one position at a time.
+
+    Every beat repeated the same coordinate, and every beat the form walked
+    the whole axis three times to confirm it -- once to normalize, once to
+    write, once to read back -- for a value the widget already held.  What
+    the widget shows at its position IS a value of the domain; and a Scope
+    action relabelled in place must keep its row rather than raise.
+    """
+
+    from zlc_ui import ensure_qt_app
+    from zlc_ui.form import FormChoice, FormFieldProps, FormSpec
+    from zlc_ui.form.qt_form import FluentParameterForm
+
+    ensure_qt_app(["zlc-ui-tests"])
+
+    def spec(domain, label: str = "Scope") -> FormSpec:
+        return FormSpec(
+            (
+                FormFieldProps(
+                    "fate",
+                    "choice",
+                    "source index",
+                    choices=(FormChoice("Reduce", "reduce"),),
+                    cycle_label=label,
+                    cycle_choices=domain,
+                ),
+            )
+        )
+
+    domain = _counted_domain(1024)
+    form = FluentParameterForm(spec(domain), {"fate": 1023})
+    widget = form.widget_for("fate")
+    domain.reads = 0
+    assert form.read_value("fate") == 1023
+    assert domain.reads == 1, "the value at the held position needs no confirming"
+    domain.reads = 0
+    assert form.adopt_projection(spec(domain), {"fate": 1023})
+    assert domain.reads == 1, "the same projection is one read, not a walk"
+    grown = _counted_domain(1025)
+    domain.reads = grown.reads = 0
+    assert form.adopt_projection(spec(grown), {"fate": 1023})
+    assert grown.reads <= 3 and domain.reads <= 1, (grown.reads, domain.reads)
+    grown.reads = 0
+    form.populate({"fate": 1023})
+    assert grown.reads <= len(grown) + 1, "at most one walk, then the widget answers"
+    # A relabelled action keeps its row, its value and its widget.
+    form.reconcile(spec(grown, "Slice"), {"fate": 1023})
+    assert form.widget_for("fate") is widget
+    assert widget.itemText(widget.count() - 1) == "Slice"
+    assert widget.currentText() == "Slice: 1023"
+    assert form.read_value("fate") == 1023
+
+
+def test_a_coordinate_the_axis_just_grew_is_judged_by_the_vocabulary_it_came_with() -> None:
+    """One projection, one moment: a value that arrives with a longer axis
+    is judged against that axis.  Judged against the one already installed
+    it was "not one of the typed choices" -- an exception instead of the
+    False that hands the projection to reconcile, so the Card never reached
+    the reconcile that would have shown it."""
+
+    from dataclasses import replace
+
+    from zlc_ui import ensure_qt_app
+    from zlc_ui.form import FormChoice, FormFieldProps, FormSpec
+    from zlc_ui.form.qt_form import FluentParameterForm
+
+    ensure_qt_app(["zlc-ui-tests"])
+    scoped = FormFieldProps(
+        "fate", "choice", "Fate", default="reduce",
+        choices=(FormChoice("Reduced", "reduce"),),
+        cycle_label="Scope", cycle_choices=(("scope:0", "0"),),
+    )
+    form = FluentParameterForm(FormSpec((scoped,)), {"fate": "reduce"})
+    grown = replace(scoped, cycle_choices=(("scope:0", "0"), ("scope:1", "1")))
+    assert form.adopt_projection(FormSpec((grown,)), {"fate": "scope:1"}) is False
+    form.reconcile(FormSpec((grown,)), {"fate": "scope:1"})
+    assert form.read_value("fate") == "scope:1"
+    more = replace(
+        scoped, cycle_choices=(("scope:0", "0"), ("scope:1", "1"), ("scope:2", "2"))
+    )
+    assert form.adopt_projection(FormSpec((more,)), {"fate": "scope:2"}) is False
+    assert form.adopt_projection(FormSpec((more,)), {"fate": "scope:1"}) is True
+    assert form.read_value("fate") == "scope:1"
+
+
+def test_a_kept_edit_takes_the_bounds_its_owner_re_declared() -> None:
+    """A blank-or-number edit kept across a widened range held the OLD
+    validator and clamp: 50 in a 0..100 field was Intermediate and Return
+    put it back to 10.  The spelling the operator chose to read a quantity
+    in survives the re-declaration; a different unit is a different row."""
+
+    from dataclasses import replace
+
+    from PyQt5 import QtCore, QtGui, QtWidgets
+
+    from zlc_ui import ensure_qt_app
+    from zlc_ui.form import FormFieldProps, FormSpec
+    from zlc_ui.form.qt_form import FluentParameterForm
+
+    ensure_qt_app(["zlc-ui-tests"])
+    optional = FormFieldProps("bound", "float", "Bound", minimum=0.0, maximum=10.0)
+    form = FluentParameterForm(FormSpec((optional,)), {"bound": 5.0})
+    edit = form.widget_for("bound")
+    form.reconcile(FormSpec((replace(optional, maximum=100.0),)), {"bound": 50.0})
+    assert form.widget_for("bound") is edit, "same family: the control is kept"
+    assert edit.validator().validate("50", 2)[0] == QtGui.QValidator.Acceptable
+    QtWidgets.QApplication.sendEvent(
+        edit,
+        QtGui.QKeyEvent(QtCore.QEvent.KeyPress, QtCore.Qt.Key_Return, QtCore.Qt.NoModifier),
+    )
+    assert form.read_value("bound") == 50.0
+
+    floor = FormFieldProps("floor", "float", "Floor", unit="dBm", minimum=-120.0, maximum=30.0)
+    form = FluentParameterForm(FormSpec((floor,)), {"floor": -3.0})
+    power = form.widget_for("floor")
+    form._shown_unit_picked("floor", "mW")
+    form.reconcile(FormSpec((replace(floor, maximum=20.0),)), {"floor": -3.0})
+    assert form.widget_for("floor") is power
+    assert form.shown_unit_for("floor") == "mW", "the operator's spelling is theirs"
+    assert abs(form.read_value("floor") - -3.0) < 1e-9
+    form.reconcile(FormSpec((replace(floor, unit="Hz"),)), {"floor": 5.0})
+    assert form.widget_for("floor") is not power, "another unit is another row"
+    assert form.unit_picker_for("floor").unit() == "Hz"
+
+
+def test_an_auto_quantity_returns_to_editable_with_its_picker() -> None:
+    """The editor and its picker share a holder, and Auto disabled the
+    HOLDER while Manual re-enabled only the editor inside it: the field
+    could never be edited again."""
+
+    from zlc_ui import ensure_qt_app
+    from zlc_ui.form import FormFieldProps, FormSpec
+    from zlc_ui.form.qt_form import FluentParameterForm
+
+    ensure_qt_app(["zlc-ui-tests"])
+    auto = FormFieldProps("delay", "float", "Delay", automatic=True, unit="s")
+    form = FluentParameterForm(FormSpec((auto,)), {"delay": None})
+    assert form.auto_switch_for("delay").isChecked()
+    assert not form.widget_for("delay").isEnabled()
+    form.auto_switch_for("delay").setChecked(False)
+    assert form.widget_for("delay").isEnabled()
+    assert form.cell_for("delay").isEnabled()
+    assert form.unit_picker_for("delay") is not None
+    assert form.read_all() == {"delay": 0.0}
+
+
+def test_replacing_a_row_keeps_the_picker_it_built() -> None:
+    """A same-key row rebuilt in another family recorded its new cell and
+    picker, then retired the old row -- by key, erasing both records: the
+    picker was on screen and ``unit_picker_for`` said None."""
+
+    from dataclasses import replace
+
+    from PyQt5 import QtCore
+
+    from zlc_ui import ensure_qt_app
+    from zlc_ui.form import FormFieldProps, FormSpec
+    from zlc_ui.form.qt_form import FluentParameterForm
+
+    app = ensure_qt_app(["zlc-ui-tests"])
+    amount = FormFieldProps("amount", "float", "Amount", default=1.0, unit="s")
+    form = FluentParameterForm(FormSpec((amount,)), {"amount": 1.0})
+    first = form.unit_picker_for("amount")
+    form.reconcile(FormSpec((replace(amount, default=None),)), {"amount": None})
+    picker = form.unit_picker_for("amount")
+    assert picker is not None and picker is not first
+    assert form.cell_for("amount") is not form.widget_for("amount")
+    assert form.cell_for("amount").isAncestorOf(picker)
+    app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+    assert form.unit_picker_for("amount") is picker
+
+
+def test_the_same_values_enable_a_dependent_the_same_way_through_every_entry() -> None:
+    """Construction, populate, refresh, reconcile and a toggle each had a
+    formula of their own: the same values disabled a dependent through one
+    door and enabled it through the next, a governed field's Auto was
+    overwritten by its controller, and a controller mid-keystroke raised
+    inside the change slot."""
+
+    from zlc_ui import ensure_qt_app
+    from zlc_ui.form import FormFieldProps, FormSpec
+    from zlc_ui.form.qt_form import FluentParameterForm
+
+    ensure_qt_app(["zlc-ui-tests"])
+    toggle = FormFieldProps("on", "bool", "On", default=False)
+    dependent = FormFieldProps(
+        "dependent", "text", "Dependent", default="", enabled_when=("on", (True,))
+    )
+    spec = FormSpec((toggle, dependent))
+    form = FluentParameterForm(spec, {"on": False, "dependent": ""})
+    gated = form.widget_for("dependent")
+    assert not gated.isEnabled()
+    form.populate({"on": False, "dependent": ""})
+    assert not gated.isEnabled(), "populate re-enabled what its controller forbids"
+    form.refresh()
+    assert not gated.isEnabled()
+    form.populate({"on": True, "dependent": ""})
+    assert gated.isEnabled()
+    form.reconcile(spec, {"on": False, "dependent": ""})
+    assert not gated.isEnabled()
+
+    governed = FormFieldProps(
+        "gain", "float", "Gain", automatic=True, enabled_when=("on", (True,))
+    )
+    form = FluentParameterForm(FormSpec((toggle, governed)), {"on": True, "gain": None})
+    assert not form.widget_for("gain").isEnabled(), "Auto holds no value to edit"
+    form.auto_switch_for("gain").setChecked(False)
+    assert form.widget_for("gain").isEnabled()
+    form.populate({"on": False, "gain": 1.0})
+    assert not form.widget_for("gain").isEnabled()
+
+    count = FormFieldProps("count", "number", "Count", default=2)
+    flag = FormFieldProps("flag", "text", "Flag", default="", enabled_when=("count", (2,)))
+    form = FluentParameterForm(FormSpec((count, flag)), {"count": 2, "flag": ""})
+    assert form.widget_for("flag").isEnabled()
+    form.widget_for("count").setText("-")
+    assert not form.widget_for("flag").isEnabled(), "half-typed is not one of the values"
+    form.widget_for("count").setText("2")
+    assert form.widget_for("flag").isEnabled()
+
+
+def test_a_form_opens_on_the_values_it_is_given_and_an_int_has_no_width() -> None:
+    """A required field with no default could not be built with the value
+    it was handed, because the form was built on the default first.  A
+    Python int has no width: 2**40 overflowed the control meant to hold it,
+    and so did the validator of the edit meant to replace that control."""
+
+    from PyQt5 import QtCore, QtGui, QtWidgets
+
+    from zlc_ui import ensure_qt_app
+    from zlc_ui.form import FormFieldProps, FormSpec
+    from zlc_ui.form.qt_form import FluentParameterForm
+
+    ensure_qt_app(["zlc-ui-tests"])
+    required = FormFieldProps("n", "int", "N", required=True)
+    form = FluentParameterForm(FormSpec((required,)), {"n": 10})
+    assert form.read_all() == {"n": 10}
+
+    big = FormFieldProps("n", "int", "N", default=2**40)
+    form = FluentParameterForm(FormSpec((big,)), {"n": 2**40})
+    assert form.read_all() == {"n": 2**40}
+    box = form.widget_for("n")
+    box.stepBy(1)
+    assert form.read_value("n") == 2**40 + 1
+    assert box.validate("1.5", 3)[0] == QtGui.QValidator.Invalid, "a whole number"
+
+    wide = FormFieldProps("n", "int", "N", default=10, maximum=2**40)
+    form = FluentParameterForm(FormSpec((wide,)), {"n": 10})
+    assert form.read_all() == {"n": 10}
+    form.populate({"n": 2**40})
+    assert form.read_value("n") == 2**40
+
+    optional = FormFieldProps("n", "int", "N", maximum=2**40)
+    form = FluentParameterForm(FormSpec((optional,)), {"n": None})
+    edit = form.widget_for("n")
+    edit.setText(str(2**41))
+    QtWidgets.QApplication.sendEvent(
+        edit,
+        QtGui.QKeyEvent(QtCore.QEvent.KeyPress, QtCore.Qt.Key_Return, QtCore.Qt.NoModifier),
+    )
+    assert form.read_value("n") == 2**40, "clamped exactly, in integers"

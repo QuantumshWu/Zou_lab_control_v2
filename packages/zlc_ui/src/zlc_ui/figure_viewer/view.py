@@ -508,11 +508,36 @@ class _DataEditorView(QtWidgets.QWidget):
         self.axis_value_model.set_projection(
             {"shape": (1, 0), "values": ((),), "row_headers": ("Value",)}
         )
+        _fill_choice_combo(self.domain_combo, self._domain_choices, None)
         if self.domain_combo.count():
             self.domain_combo.setCurrentIndex(0)
         self.axis_mode_label.setText("New axis")
         self.apply_axis_button.setText("Create axis")
+        self._set_axis_mode_controls(has_axis=False)
         self.axis_name_edit.setFocus()
+
+    def _set_axis_mode_controls(self, *, has_axis: bool) -> None:
+        """Enable exactly the controls the current axis mode can use.
+
+        Add and a projection are two entries into one mode, so both come
+        through here.  Add has no presenter round trip of its own -- nothing
+        is authored until Create -- so it cannot wait for a projection to
+        do this: a New axis has a name, length, unit and domain to write
+        and nothing to delete or list values for, and a Dataset with no
+        axis yet still gets to create its first one.
+        """
+
+        editing = has_axis or self._adding_axis
+        for control in (
+            self.axis_name_edit,
+            self.axis_size_spin,
+            self.axis_unit_edit,
+            self.domain_combo,
+            self.apply_axis_button,
+        ):
+            control.setEnabled(editing)
+        self.remove_axis_button.setEnabled(has_axis and not self._adding_axis)
+        self.axis_value_table.setEnabled(has_axis and not self._adding_axis)
 
     def _commit_axis(self) -> None:
         name = self.axis_name_edit.text().strip()
@@ -694,17 +719,7 @@ class _DataEditorView(QtWidgets.QWidget):
             self._dirty = bool(data.get("dirty", False))
             self.save_button.set_dirty(self._dirty)
             self.discard_button.setEnabled(self._dirty)
-            has_axis = selected is not None
-            for control in (
-                self.axis_name_edit,
-                self.axis_size_spin,
-                self.axis_unit_edit,
-                self.domain_combo,
-                self.apply_axis_button,
-            ):
-                control.setEnabled(has_axis or self._adding_axis)
-            self.remove_axis_button.setEnabled(has_axis and not self._adding_axis)
-            self.axis_value_table.setEnabled(has_axis and not self._adding_axis)
+            self._set_axis_mode_controls(has_axis=selected is not None)
             self.apply_button.setEnabled(bool(data.get("can_apply", True)))
             self.save_button.setEnabled(bool(data.get("can_save", False)))
         finally:
@@ -1043,6 +1058,11 @@ class FigureViewerView(QtWidgets.QWidget):
         if widget is not None and not isinstance(widget, QtWidgets.QWidget):
             raise TypeError("figure surface must be QWidget or None")
         self._cards[str(panel_id)].set_surface(widget)
+
+    def panel_surface(self, panel_id: str) -> QtWidgets.QWidget | None:
+        """The surface a panel currently shows, so its owner can reuse it."""
+
+        return self._cards[str(panel_id)].surface
 
     def set_panel_status(self, panel_id: str, text: str, *, error: bool) -> None:
         self._cards[str(panel_id)].set_status(str(text), error=bool(error))

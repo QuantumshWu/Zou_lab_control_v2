@@ -132,6 +132,7 @@ class LiveSessionMixin:
                         revision=selected_revision,
                         context=self._projection_context(),
                     ),
+                    base_data_generation=self.data_generation,
                     base_data_revision=self.data_revision,
                     image_overlay=image_overlay,
                     image_overlay_authority=self._image_overlay,
@@ -172,6 +173,7 @@ class LiveSessionMixin:
             raise FitCancelled("live frame preparation was cancelled")
         return _PreparedLiveFrame(
             session_identity=self._session_identity,
+            base_data_generation=snapshot.base_data_generation,
             base_data_revision=snapshot.base_data_revision,
             image_overlay=snapshot.image_overlay,
             image_overlay_authority=snapshot.image_overlay_authority,
@@ -202,6 +204,21 @@ class LiveSessionMixin:
         with self._render_lock:
             with self._lock:
                 self._assert_open()
+                # A semantic edit replaces the SPEC, and no parameter-schema
+                # check can see that: a fate lands through replace_spec, not
+                # through the display bag.  An old-spec payload committed
+                # beside the new spec leaves the session holding a pair that
+                # was never one accepted view, and the first consumer to ask
+                # them a question -- a selector, wanting its subject --
+                # refuses to answer.  The producer's next revision projects
+                # through the current spec and the panel heals.
+                #
+                # Asked FIRST: the display fields below are the current
+                # spec's, and a frame prepared under another kind does not
+                # carry them -- reading them before this answer turned an
+                # ordinary refusal into a KeyError for ``bin_count``.
+                if prepared.projection.spec != self._spec:
+                    return None
                 prepared_state = prepared.projection.display_state
                 current_state = self.display_state
                 concurrent_parameter_changes = frozenset(
@@ -218,25 +235,20 @@ class LiveSessionMixin:
                         | RenderEffect.PAYLOAD_PROJECTION
                     )
                 )
+                # The base is a generation AND a revision: a new run
+                # restarts its numbers, so ``0 == 0`` alone let a frame
+                # prepared over the previous run land on top of the next.
                 data_base_current = (
                     self.data_revision == prepared.base_data_revision
+                    and str(self.data_generation)
+                    == str(prepared.base_data_generation)
                 )
-                # A semantic edit replaces the SPEC, and no parameter-schema
-                # check can see that: a fate lands through replace_spec, not
-                # through the display bag.  An old-spec payload committed
-                # beside the new spec leaves the session holding a pair that
-                # was never one accepted view, and the first consumer to ask
-                # them a question -- a selector, wanting its subject --
-                # refuses to answer.  The producer's next revision projects
-                # through the current spec and the panel heals.
-                spec_current = prepared.projection.spec == self._spec
                 image_overlay_current = (
                     prepared.image_overlay is None
                     or self._image_overlay is prepared.image_overlay_authority
                 )
                 if (
                     not projection_current
-                    or not spec_current
                     or not data_base_current
                     or not image_overlay_current
                 ):

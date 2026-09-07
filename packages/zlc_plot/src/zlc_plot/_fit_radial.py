@@ -1331,6 +1331,14 @@ def fit_regular_separable_images(
     def refinement_bounds(data: RegularImageFitInput) -> tuple[np.ndarray, np.ndarray]:
         lower = base_model_lower.copy()
         upper = base_model_upper.copy()
+        # A radius resolves nothing finer than half the pitch of the axes it
+        # spans, and it is decided ONCE per radius: the radial kernel's one
+        # radius spans both axes, so its floor is the finer pitch of the two
+        # -- the coarse axis does not stop the fine one from resolving the
+        # width, and the compiled proxy floor says the same.  Decided axis
+        # by axis, whichever axis comes last overwrites the other and a
+        # transposed image fits a different radius.
+        floors: dict[int, float] = {}
         for parameter_index, coordinates in (
             (kernel.x_radius_index, data.x_coordinates),
             (kernel.y_radius_index, data.y_coordinates),
@@ -1341,6 +1349,10 @@ def fit_regular_separable_images(
                 if differences.size
                 else np.finfo(np.float64).eps
             )
+            floors[parameter_index] = min(
+                floors.get(parameter_index, math.inf), resolution
+            )
+        for parameter_index, resolution in floors.items():
             lower[parameter_index] = max(
                 0.5 * resolution, np.finfo(np.float64).eps
             )

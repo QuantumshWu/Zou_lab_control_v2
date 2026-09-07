@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from threading import Thread
+from threading import Event, Thread
 import time
 
 import numpy as np
@@ -203,6 +203,41 @@ def test_snapshot_array_axes_are_positional_and_allow_repeated_roles() -> None:
         )
 
 
+def test_a_validity_mask_that_is_not_bool_is_refused_not_truthed() -> None:
+    """A status code is not a validity; Data's bool contract is the only door.
+
+    The wrapper cast whatever it was handed with ``dtype=bool`` before the
+    Dataset saw it, so an int mask of ``[0, 2]`` -- an SDK status, a count
+    handed over by mistake -- became ``[False, True]`` and status 2 entered
+    the valid data plane.  The mask now reaches the one Data constructor as
+    it is, and that constructor refuses anything but bool.
+    """
+
+    from zlc_data import SCAN_POINT
+
+    values = np.array([[10.0, 20.0]])
+    with pytest.raises(TypeError, match="validity mask dtype must be bool"):
+        snapshot_from_array(
+            values,
+            producer="p",
+            signal="s",
+            point_axes=(SCAN_POINT,),
+            generation="g",
+            revision=1,
+            validity=np.array([[0, 2]], dtype=np.int64),
+        )
+    accepted = snapshot_from_array(
+        values,
+        producer="p",
+        signal="s",
+        point_axes=(SCAN_POINT,),
+        generation="g",
+        revision=1,
+        validity=np.array([[False, True]]),
+    )
+    assert accepted.expanded_validity().reshape(-1).tolist() == [False, True]
+
+
 def test_direct_monitor_disarms_when_empty_generation_retire_fails() -> None:
     installation = create_installation("virtual")
     plane = FakePlane()
@@ -267,6 +302,192 @@ def test_finite_measurement_collects_only_external_triggers() -> None:
         assert len(result_box) == 1
         result = result_box[0]
         assert len(result.frames) == 3  # type: ignore[union-attr]
+    finally:
+        plane.close()
+        installation.close()
+
+
+def _refusing_once(camera: object) -> list[int]:
+    """Make the camera's next disarm fail once; later ones run the real one.
+
+    Set on the instance, so the adapter is still the same CameraAdapter the
+    node type-checked.  Returns the attempt log.
+    """
+
+    disarm = camera.finish_record_capture
+    attempts: list[int] = []
+
+    def refuse_once():
+        attempts.append(len(attempts))
+        if len(attempts) == 1:
+            raise OSError("controlled SDK could not disarm")
+        return disarm()
+
+    camera.finish_record_capture = refuse_once  # type: ignore[method-assign]
+    return attempts
+
+
+def test_a_monitor_disarm_the_device_refused_is_retried_and_never_made_up() -> None:
+    """Only a terminal the device produced is cached and handed back.
+
+    ``closed`` used to be set before the device was asked, so a disarm the
+    device refused left the second close answering ``(0, True, True, True)``
+    -- an all-clear over a camera still armed -- and the generation had been
+    detached before the device stopped.  A refused disarm keeps the capture
+    open and the generation live; the next close retries the same disarm and
+    detaches only once the device has stopped.
+    """
+
+    installation = create_installation("virtual")
+    plane = FakePlane()
+    camera = installation.device("camera")
+    try:
+        measurement = CameraMeasurementNode(
+            camera=camera,
+            request=CameraMeasurementRequest(
+                camera_key="camera",
+                exposure_seconds=0.02,
+                roi_xywh=None,
+                repeat=0,
+                frames_per_cycle=1,
+            ),
+            signal_plane=plane,
+        )
+        monitor = measurement.monitor()
+        attempts = _refusing_once(camera)
+
+        with pytest.raises(OSError, match="could not disarm"):
+            monitor.close()
+        assert monitor.terminal is None
+        assert camera.capture_state() is True, "reported closed over a camera still armed"
+        assert not any(call[0] == "retire" for call in plane.calls), (
+            "the generation was detached before the device had stopped"
+        )
+
+        terminal = monitor.close()
+        assert attempts == [0, 1], "the second close did not retry the disarm"
+        assert terminal.source_stopped and terminal.joined
+        assert terminal.produced_count == 0
+        assert camera.capture_state() is False
+        assert [call[0] for call in plane.calls].count("retire") == 1
+        assert monitor.close() is terminal
+        assert attempts == [0, 1]
+    finally:
+        camera.__dict__.pop("finish_record_capture", None)
+        plane.close()
+        installation.close()
+
+
+def test_a_finite_disarm_the_device_refused_leaves_the_capture_open_for_the_next_close() -> None:
+    """A finish the device refused is not a finish; the next close retries it.
+
+    The capture used to mark itself closed before asking the device, so the
+    second close raised "closed without terminal evidence" and no owner could
+    ever retry the disarm of a camera the device still held armed.
+    """
+
+    installation = create_installation("virtual")
+    plane = FakePlane()
+    camera = installation.device("camera")
+    measurement = None
+    try:
+        measurement = CameraMeasurementNode(
+            camera=camera,
+            request=CameraMeasurementRequest(
+                camera_key="camera",
+                exposure_seconds=0.02,
+                roi_xywh=None,
+                repeat=1,
+                frames_per_cycle=1,
+            ),
+            signal_plane=plane,
+        )
+        capture = measurement.prepare()
+        camera.trigger(1, frame=np.zeros((96, 128), dtype=np.uint16))
+        cycle = capture.next_cycle()
+        assert cycle is not None and len(cycle) == 1
+        attempts = _refusing_once(camera)
+
+        with pytest.raises(OSError, match="could not disarm"):
+            capture.close()
+        assert capture.terminal is None and not capture.closed
+        assert camera.capture_state() is True
+
+        terminal = capture.close()
+        assert attempts == [0, 1], "the second close did not retry the disarm"
+        assert terminal.produced_count == 1 and terminal.source_stopped
+        assert camera.capture_state() is False
+        assert capture.close() is terminal
+        assert attempts == [0, 1]
+    finally:
+        camera.__dict__.pop("finish_record_capture", None)
+        if measurement is not None:
+            plane.retire(measurement)
+        plane.close()
+        installation.close()
+
+
+def test_a_direct_stop_half_way_through_a_cycle_keeps_the_complete_cycles_it_took() -> None:
+    """Stop keeps the measured prefix, sealed short; the partial cycle is the device's.
+
+    A direct finite capture asked to stop after one complete cycle and one
+    frame of the next used to fail its terminal check -- the camera had
+    honestly produced three frames for two accounted -- and then withdrew
+    the complete cycle it had already published.
+    """
+
+    installation = create_installation("virtual")
+    plane = FakePlane()
+    try:
+        camera = installation.device("camera")
+        measurement = CameraMeasurementNode(
+            camera=camera,
+            request=CameraMeasurementRequest(
+                camera_key="camera",
+                exposure_seconds=0.02,
+                roi_xywh=None,
+                repeat=2,
+                frames_per_cycle=2,
+            ),
+            signal_plane=plane,
+        )
+        stop = Event()
+        capture = measurement.prepare(should_stop=stop.is_set)
+        result_box: list[object] = []
+        worker = Thread(
+            target=lambda: result_box.append(capture.collect()),
+            daemon=True,
+        )
+        worker.start()
+        signal_key = measurement.signal_key("frames")
+        frame = np.zeros((96, 128), dtype=np.uint16)
+        camera.trigger(2, frame=frame)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            plane.freeze()
+            if plane.latest_publication(signal_key) is not None:
+                break
+            time.sleep(0.005)
+        assert plane.latest_publication(signal_key) is not None
+        camera.trigger(1, frame=frame)
+        while camera.produced_count < 3 and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert camera.produced_count == 3
+        stop.set()
+        worker.join(timeout=5.0)
+        assert not worker.is_alive()
+        assert result_box, "the stopped capture raised instead of keeping its prefix"
+        result = result_box[0]
+        assert result is not None
+        assert result.cycle_count == 1  # type: ignore[union-attr]
+        assert result.terminal.produced_count == 3  # type: ignore[union-attr]
+        assert capture.stopped
+        plane.freeze()
+        assert plane.latest_publication(signal_key) is not None, (
+            "the complete cycle was withdrawn"
+        )
+        assert not plane.is_generation_live(signal_key)
+        assert not any(call[0] == "retire" for call in plane.calls)
     finally:
         plane.close()
         installation.close()

@@ -125,6 +125,25 @@ def build_panel_host(
     )
 
 
+def staged_panel_surface(host):
+    """A board panel's widget STAGES its fronts; the board presents them.
+
+    Auto-present would put each panel's pixels up the moment its own render
+    lands, so two panels of one causal group (a camera frame and the
+    occupancy derived from it) could show different shots.  With staging,
+    the presenter presents each same-shot batch atomically and routes every
+    non-batch render through the same present helpers.  Every window whose
+    panels a ConsolePresenter drives -- the console and the figure viewer --
+    mounts this one policy; a viewer panel is fed by the same Runtime/Panel
+    derivations (manual Apply, ROI, Fit) as a console panel and is not
+    exempt because its first Dataset came from an archive.
+    """
+
+    import zlc_plot as plot
+
+    return plot.Qt5PlotWidget(host, auto_present=False)
+
+
 def build_console(session, *, window_ratio=None, request_close=None):
     """One console presenter over one session, with the view it drives."""
 
@@ -139,23 +158,11 @@ def build_console(session, *, window_ratio=None, request_close=None):
     from ..console import ConsolePresenter
     from ..panel_catalog import task_console_fitting_spec
 
-    def _panel_surface(host):
-        """A board panel's widget STAGES its fronts; the board presents them.
-
-        Auto-present would put each panel's pixels up the moment its own
-        render lands, so two panels of one causal group (a camera frame and
-        the occupancy derived from it) could show different shots.  With
-        staging, the presenter presents each same-shot batch atomically and
-        routes every non-batch render through the same present helpers.
-        """
-
-        return plot.Qt5PlotWidget(host, auto_present=False)
-
     # One call, one handle: this layer never names a widget class.
     view = open_task_console(
         title="TaskConsole@Zou lab",
         window_ratio=window_ratio,
-        plot_surface=_panel_surface,
+        plot_surface=staged_panel_surface,
     )
     monitor_render = plot.RenderProcess("zlc-monitor-render")
     try:
@@ -282,6 +289,42 @@ def build_console(session, *, window_ratio=None, request_close=None):
         attach_qt_owner_turn(presenter.commit_surfaces)
     )
     return view, presenter
+
+
+def _stands_outside(metadata, value: object) -> bool:
+    """Whether a reading lies outside what the field may be commanded to.
+
+    Only a number can: a switch has no window, and a field with no declared
+    edge on a side cannot be outside it there.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    low, high = metadata.minimum, metadata.maximum
+    return (low is not None and value < float(low)) or (
+        high is not None and value > float(high)
+    )
+
+
+def _commandable(metadata, value: object) -> object:
+    """The reading where it may be commanded, else the nearest bound.
+
+    A Desired is a command the operator may send, and the field's bounds --
+    the bench window narrowed by the instrument's own limits -- are what may
+    be commanded.  An instrument found standing outside them (left there
+    before the window was authored) is shown as it stands in Current; its
+    Desired opens on the nearest value the bounds admit, because a Desired
+    the bounds refuse is not a value the operator can do anything with, and
+    a control that would not open at all took away the one place the knob
+    could be moved back inside.
+    """
+
+    if not _stands_outside(metadata, value):
+        return value
+    low, high = metadata.minimum, metadata.maximum
+    if low is not None and value < float(low):
+        return type(value)(low) if isinstance(value, int) else float(low)
+    return type(value)(high) if isinstance(value, int) else float(high)
 
 
 class ExperimentGuiFlow:
@@ -508,7 +551,11 @@ class ExperimentGuiFlow:
 
         def finish(result: object) -> None:
             self._device_control_opening.discard(key)
-            if self.session is not session or key in self.device_controls:
+            if (
+                self.session is not session
+                or self._device_shutdown_pending
+                or key in self.device_controls
+            ):
                 return
             try:
                 model: dict[str, object] = {
@@ -628,9 +675,6 @@ class ExperimentGuiFlow:
             field.metadata.name: field.current for field in fields
         }
         provenance = {} if not fields else dict(provenance_reader())
-        names = tuple(field.metadata.name for field in fields)
-        if set(current) != set(names):
-            raise ValueError("tunable current values differ from field metadata")
         session_id = str(provenance.get("device_session_id", "")).strip()
         epoch = provenance.get("settings_epoch")
         if fields and (
@@ -657,14 +701,18 @@ class ExperimentGuiFlow:
         model["spec"] = project_schema(
             AuthoringSchema(tuple(field.metadata for field in fields))
         )
+        commandable = {
+            field.metadata.name: _commandable(field.metadata, current[field.metadata.name])
+            for field in fields
+        }
         if previous_session != session_id:
-            model["desired"] = dict(current)
+            model["desired"] = commandable
             model["live"] = {name: False for name in names}
             self._device_control_risk[key] = None
         else:
             desired = dict(model.get("desired", {}))
             model["desired"] = {
-                name: desired.get(name, current[name]) for name in names
+                name: desired.get(name, commandable[name]) for name in names
             }
             live = dict(model.get("live", {}))
             model["live"] = {
@@ -775,11 +823,17 @@ class ExperimentGuiFlow:
                     ("Applying", "task") if applying else
                     ("Queued latest", "task") if queued else
                     ("Protected", "warning") if not editable else
+                    ("Stands outside its bounds", "warning")
+                    if _stands_outside(tunable.metadata, current.get(name)) else
                     ("Ready", "ready")
                 ),
             )
             fields[name] = {
                 "current": current.get(name),
+                # The instrument's own fence, read once at Init and shown
+                # read-only beside the bench window, so the operator can see
+                # which of the two bounds a refused value ran into.
+                "device_limits": tunable.device_limits,
                 "desired": desired.get(name, current.get(name)),
                 "editable": editable,
                 "live_apply": bool(live_values.get(name, False)),
@@ -820,18 +874,31 @@ class ExperimentGuiFlow:
         )
 
     def _refresh_device_control_policies(self) -> None:
+        """Re-project every open control after the field policies moved.
+
+        The projection is computed once per control and handed to it; only
+        a pending tune cancelled by the new policy changes what the control
+        should show, and only then is it computed again.  Computing it twice
+        on every beat of every control was the ordinary case.
+        """
+
         for key in tuple(self._device_control_models):
+            model = self._device_control_models[key]
             projection = self._device_control_projection(key)
+            cancelled = False
             for pending in tuple(self._device_tune_pending):
                 if pending[0] != key:
                     continue
                 field = projection["fields"].get(pending[1])
                 if not isinstance(field, dict) or not field.get("editable"):
                     self._device_tune_pending.pop(pending, None)
-                    self._device_control_models[key]["status"] = {
+                    model["status"] = {
                         pending[1]: ("Cancelled because field ownership changed", "warning")
                     }
-            self._project_device_control(key)
+                    cancelled = True
+            if cancelled:
+                projection = self._device_control_projection(key)
+            model["control"].set_projection(model["spec"], projection)
 
     def _set_device_control_risk(self, key: str, accepted: bool) -> None:
         model = self._device_control_models.get(str(key))
@@ -1094,6 +1161,21 @@ class ExperimentGuiFlow:
         return False
 
     def _device_tune_idle(self) -> bool:
+        """Whether nothing of the device worker's is still in flight.
+
+        A control being READ for the first time is in flight as much as a
+        refresh or a tune: its reading lands on the worker, and a session
+        retired underneath it would be handed a control over devices that
+        are gone.  There is no control window to say so on yet, so the
+        Device Manager -- where the press was made -- says it.
+        """
+
+        if self._device_control_opening:
+            key = next(iter(self._device_control_opening))
+            self._report_device(
+                f"{key}: a device control is still being read", "warning"
+            )
+            return False
         if self._device_refresh_active:
             key = next(iter(self._device_refresh_active))
             control = self.device_controls.get(key)

@@ -245,6 +245,53 @@ def _cycle_array(
     return images
 
 
+def _cycle_settings_record(
+    cycle: Sequence[CameraFrameRecord],
+) -> dict[str, object] | None:
+    """The settings these three frames were frozen with, as the event record
+    Runtime merges.
+
+    A frame carries the device session and epochs it was taken under, sealed
+    at the adapter's boundary; a cycle that straddles a live tune therefore
+    names two epochs, and only the frames can say so.  The publication used
+    to carry none of it, so a Figure's lineage could not tell which settings
+    the preview it showed was taken at.  A cycle whose frames are all
+    settings-unaware is an honest absence; one that mixes the two, or two
+    sessions, is a cycle nobody can account for.
+    """
+
+    references = tuple(
+        (record.settings_session_id, record.settings_epochs)
+        for record in cycle
+        if record.settings_session_id is not None
+    )
+    if not references:
+        return None
+    if len(references) != len(cycle):
+        raise ValueError(
+            "one calibration cycle mixed settings-aware and unaware frames"
+        )
+    sessions = {str(session_id) for session_id, _epochs in references}
+    if len(sessions) != 1:
+        raise ValueError("camera device session changed inside one calibration cycle")
+    epochs = sorted({epoch for _session_id, values in references for epoch in values})
+    ranges: list[list[int]] = []
+    for epoch in epochs:
+        if ranges and epoch == ranges[-1][1] + 1:
+            ranges[-1][1] = epoch
+        else:
+            ranges.append([epoch, epoch])
+    return {
+        "device_settings": {
+            "camera": {
+                "device_session_id": sessions.pop(),
+                "epoch_ranges": ranges,
+                "mixed": len(epochs) > 1,
+            }
+        }
+    }
+
+
 def cycle_snapshot(
     cycle: Sequence[CameraFrameRecord],
     *,
@@ -316,6 +363,7 @@ def capture_preview_output(
         snapshot,
         MonitorCoverage(_PREVIEW_FRAMES, _PREVIEW_FRAMES),
         run_record,
+        event_record=_cycle_settings_record(tuple(cycle)),
     )
 
 

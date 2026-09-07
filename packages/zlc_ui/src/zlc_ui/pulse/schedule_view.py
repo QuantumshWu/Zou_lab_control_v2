@@ -193,6 +193,20 @@ class PeriodCard(FluentGroupBox):
         for port in ports:
             if not port.visible:
                 continue
+            known = self._ports.get(port.key)
+            if known is not None and known.kind != port.kind:
+                # The same key with another KIND is another row: a digital
+                # checkbox cannot become a DAC mode-and-value editor by
+                # being told a new value.  Kept, a document that turned an
+                # output into a bus left the old checkbox in the card and
+                # no analog editor at all.
+                widget = self.port_rows.pop(port.key)
+                self._column.removeWidget(widget)
+                widget.hide()
+                widget.deleteLater()
+                self.checks.pop(port.key, None)
+                self.bus_mode_combos.pop(port.key, None)
+                self.bus_value_edits.pop(port.key, None)
             if port.key in self.port_rows:
                 if port.kind == "digital":
                     check = self.checks.get(port.key)
@@ -1044,6 +1058,11 @@ class PulseDragContainer(QtWidgets.QWidget):
         drag.exec_(QtCore.Qt.MoveAction)
 
     def eventFilter(self, obj, event):  # noqa: N802
+        # The gesture is measured in GLOBAL coordinates.  A press on a
+        # card's chrome reaches this filter once for the label and once for
+        # the card, each with its own local position; compared across the
+        # two frames, a pointer that had not moved measured a whole label's
+        # offset and started a drag from a click.
         card = self._card_of(obj)
         if card is not None:
             obj = card
@@ -1051,11 +1070,11 @@ class PulseDragContainer(QtWidgets.QWidget):
                 event.type() == QtCore.QEvent.MouseButtonPress
                 and event.button() == QtCore.Qt.LeftButton
             ):
-                self._pressed = ("card", obj.period_id, event.pos())
+                self._pressed = ("card", obj.period_id, event.globalPos())
                 self._dragging = False
             elif event.type() == QtCore.QEvent.MouseMove and self._pressed is not None:
                 if not self._dragging and (
-                    event.pos() - self._pressed[2]
+                    event.globalPos() - self._pressed[2]
                 ).manhattanLength() >= QtWidgets.QApplication.startDragDistance():
                     self._dragging = True
                     period_id = self._pressed[1]
@@ -1080,11 +1099,11 @@ class PulseDragContainer(QtWidgets.QWidget):
                 event.type() == QtCore.QEvent.MouseButtonPress
                 and event.button() == QtCore.Qt.LeftButton
             ):
-                self._pressed = ("bracket", post.kind, event.pos())
+                self._pressed = ("bracket", post.kind, event.globalPos())
                 self._dragging = False
             elif event.type() == QtCore.QEvent.MouseMove and self._pressed is not None:
                 if not self._dragging and (
-                    event.pos() - self._pressed[2]
+                    event.globalPos() - self._pressed[2]
                 ).manhattanLength() >= QtWidgets.QApplication.startDragDistance():
                     self._dragging = True
                     self._pressed = None
@@ -1608,6 +1627,19 @@ class PulseScheduleView(QtWidgets.QWidget):
         )
 
     def set_port_label(self, key: str, label: str) -> None:
+        """Rename one output everywhere it is shown, and in the model the
+        next rebuild reads: a label changed on the controls alone came back
+        as the old one at the next Hide/Show, which rebuilds from the model."""
+
+        if self._schedule is None:
+            return
+        self._schedule = replace(
+            self._schedule,
+            ports=tuple(
+                replace(port, label=str(label)) if port.key == key else port
+                for port in self._schedule.ports
+            ),
+        )
         self.names_panel.set_port_label(key, label)
         self.channel_panel.set_port_label(key, label)
         for card in self._cards.values():

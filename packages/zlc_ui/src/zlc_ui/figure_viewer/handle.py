@@ -15,6 +15,7 @@ from typing import Any
 
 from PyQt5 import QtCore
 
+from ..console.handle import panel_surface_for
 from .view import FigureViewerView
 
 
@@ -42,10 +43,22 @@ class FigureViewerHandle(QtCore.QObject):
     panel_plot_error = QtCore.pyqtSignal(str, str)
     save_image_requested = QtCore.pyqtSignal()
 
-    def __init__(self, window: Any, view: FigureViewerView) -> None:
+    def __init__(
+        self,
+        window: Any,
+        view: FigureViewerView,
+        *,
+        plot_surface: Any | None = None,
+    ) -> None:
         super().__init__()
         self._window = window
         self._view = view
+        # The composition root's panel-widget policy, the same one the
+        # console injects: the viewer's board is the console's board (one
+        # ConsolePresenter presents both), so its panels stage their fronts
+        # for the board too.  A host's own default widget presents each
+        # render as it lands, before the board has accepted it.
+        self._plot_surface = plot_surface if callable(plot_surface) else None
         dpr_target = window if window is not None else view
         self._device_pixel_ratio = float(dpr_target.devicePixelRatioF())
         native_window = dpr_target.windowHandle()
@@ -236,7 +249,12 @@ class FigureViewerHandle(QtCore.QObject):
 
     def show_panel(self, panel_id: str, host: Any | None) -> None:
         self._view.set_panel_surface(
-            panel_id, None if host is None else host.qt_widget()
+            panel_id,
+            None
+            if host is None
+            else panel_surface_for(
+                self._view.panel_surface(panel_id), host, self._plot_surface
+            ),
         )
 
     def open_panel_editor(

@@ -1753,150 +1753,146 @@ class CalibrationTask:
             raise RuntimeError(
                 "review_detected_sites requires a hosted TaskConsole run"
             )
-        try:
-            # TaskRun names the run's own folder BEFORE anything is acquired, so
-            # the frames can be written into it as they arrive rather than
-            # after a result exists.  A run that never produces one still
-            # leaves every sample it paid for.
-            #
-            # Everything a run leaves lives INSIDE that folder, the artifact
-            # included: one calibration is one directory an operator can
-            # copy, move or delete whole, rather than a file that has to be
-            # kept beside a folder of the same name.
-            run_folder = Path(
-                artifact_context.directory
-                if isinstance(artifact_context, TaskRun)
-                else artifact_context.run_directory
+        # TaskRun names the run's own folder BEFORE anything is acquired, so
+        # the frames can be written into it as they arrive rather than
+        # after a result exists.  A run that never produces one still
+        # leaves every sample it paid for.
+        #
+        # Everything a run leaves lives INSIDE that folder, the artifact
+        # included: one calibration is one directory an operator can
+        # copy, move or delete whole, rather than a file that has to be
+        # kept beside a folder of the same name.
+        run_folder = Path(
+            artifact_context.directory
+            if isinstance(artifact_context, TaskRun)
+            else artifact_context.run_directory
+        )
+        final_root = run_folder / "final"
+        artifact_path = final_root / "calibration.json"
+        if context is not None:
+            context.register_partial_exit_writer(
+                lambda status, error: self._save_partial_report(
+                    context,
+                    run_folder,
+                    status=status,
+                    error=error,
+                )
             )
-            final_root = run_folder / "final"
-            artifact_path = final_root / "calibration.json"
+        writer: SampleWriter | None = None
+        if self.request.frame_source == FRAMES_FROM_FOLDER:
             if context is not None:
-                context.register_partial_exit_writer(
-                    lambda status, error: self._save_partial_report(
-                        context,
-                        run_folder,
-                        status=status,
-                        error=error,
-                    )
+                context.report_progress("Reading saved frames")
+            capture, run_record, contract = self._replay_saved_frames(context)
+            self._partial_run_record = dict(run_record)
+            pulse_facts: Mapping[str, object] = dict(
+                run_record.get("pulse") or {}
+            )
+        else:
+            pulse = self._resolve_pulse()
+            pulse_facts = self._pulse_facts(pulse)
+            capture, run_record, writer = self._capture(
+                pulse,
+                context=context,
+                artifact_context=artifact_context,
+                pulse_facts=pulse_facts,
+                frames_folder=(
+                    run_folder / "figures"
+                    if self.request.save_frames
+                    else None
+                ),
+            )
+            actual = self._actual_working_point
+            if not isinstance(actual, CameraWorkingPoint):
+                raise TypeError(
+                    "the camera measurement must report its working point"
                 )
-            writer: SampleWriter | None = None
-            if self.request.frame_source == FRAMES_FROM_FOLDER:
-                if context is not None:
-                    context.report_progress("Reading saved frames")
-                capture, run_record, contract = self._replay_saved_frames(context)
-                self._partial_run_record = dict(run_record)
-                pulse_facts: Mapping[str, object] = dict(
-                    run_record.get("pulse") or {}
-                )
-            else:
-                pulse = self._resolve_pulse()
-                pulse_facts = self._pulse_facts(pulse)
-                capture, run_record, writer = self._capture(
-                    pulse,
-                    context=context,
-                    artifact_context=artifact_context,
-                    pulse_facts=pulse_facts,
-                    frames_folder=(
-                        run_folder / "figures"
-                        if self.request.save_frames
-                        else None
+            contract = self._frame_contract(actual, pulse_facts)
+        if writer is not None:
+            # The pictures, now that the camera is no longer waiting on
+            # this thread for its next trigger.
+            if context is not None:
+                context.report_progress("Drawing saved frames")
+            writer.render()
+        if context is not None:
+            context.report_progress("Analysing calibration")
+        analysis = self._analyse(capture, contract, context, run_record)
+        if self._site_review_record is not None:
+            analysis = CalibrationResult(
+                analysis.calibration,
+                {
+                    **dict(analysis.report),
+                    "site_review": dict(self._site_review_record),
+                },
+            )
+        artifact_report = dict(analysis.calibration.report)
+        artifact_report["run_record"] = run_record
+        if self._site_review_record is not None:
+            artifact_report["site_review"] = dict(self._site_review_record)
+        calibration = TrapCalibration(
+            analysis.calibration.site_map,
+            analysis.calibration.models,
+            analysis.calibration.default_model_kind,
+            analysis.calibration.frame_contract,
+            artifact_report,
+        )
+        if context is not None:
+            # Analysis remains cancellable.  Once artifact publication
+            # begins, Stop must not leave a successful-looking half report
+            # or relabel durable output as a cancelled run.
+            context.seal_terminal()
+            context.report_progress("Saving calibration")
+        durable_makedirs(final_root)
+        calibration.save(artifact_path)
+        artifact_context.register_artifact(
+            "artifact_path",
+            artifact_path,
+            role="final",
+            contract_id=TrapCalibration.CONTRACT_ID,
+        )
+        summary = readout_summary(analysis, run_chain=(run_record,))
+        if self._site_review_record is not None:
+            summary = {
+                **summary,
+                "site_review": {
+                    "detected_sites": len(
+                        self._site_review_record["candidate_site_ids"]
                     ),
-                )
-                actual = self._actual_working_point
-                if not isinstance(actual, CameraWorkingPoint):
-                    raise TypeError(
-                        "the camera measurement must report its working point"
-                    )
-                contract = self._frame_contract(actual, pulse_facts)
-            if writer is not None:
-                # The pictures, now that the camera is no longer waiting on
-                # this thread for its next trigger.
-                if context is not None:
-                    context.report_progress("Drawing saved frames")
-                writer.render()
-            if context is not None:
-                context.report_progress("Analysing calibration")
-            analysis = self._analyse(capture, contract, context, run_record)
-            if self._site_review_record is not None:
-                analysis = CalibrationResult(
-                    analysis.calibration,
-                    {
-                        **dict(analysis.report),
-                        "site_review": dict(self._site_review_record),
-                    },
-                )
-            artifact_report = dict(analysis.calibration.report)
-            artifact_report["run_record"] = run_record
-            if self._site_review_record is not None:
-                artifact_report["site_review"] = dict(self._site_review_record)
-            calibration = TrapCalibration(
-                analysis.calibration.site_map,
-                analysis.calibration.models,
-                analysis.calibration.default_model_kind,
-                analysis.calibration.frame_contract,
-                artifact_report,
+                    "excluded_site_ids": list(
+                        self._site_review_record["excluded_site_ids"]
+                    ),
+                    "retained_sites": calibration.n_sites,
+                },
+            }
+        result = CalibrationRunResult(
+            artifact_path,
+            calibration,
+            analysis.report,
+            capture,
+            pulse_facts,
+            run_record,
+            summary,
+        )
+        self._partial_result = result
+        if context is not None:
+            context.report_progress("Saving calibration report")
+        _save_report(
+            result,
+            artifact_context,
+            save_figure_artifact=self._save_figure_artifact,
+        )
+        self._result = result
+        if context is not None:
+            # What it found, not just that it finished: the operator's
+            # first question is which model to read out with and how well
+            # it does, and the answer is measured by the time we are here.
+            for line in summary_lines(result.summary):
+                context.report_progress(line)
+            context.report_progress(
+                "Calibration complete",
+                current=self.request.repeats,
+                total=self.request.repeats,
             )
-            if context is not None:
-                # Analysis remains cancellable.  Once artifact publication
-                # begins, Stop must not leave a successful-looking half report
-                # or relabel durable output as a cancelled run.
-                context.seal_terminal()
-                context.report_progress("Saving calibration")
-            durable_makedirs(final_root)
-            calibration.save(artifact_path)
-            artifact_context.register_artifact(
-                "artifact_path",
-                artifact_path,
-                role="final",
-                contract_id=TrapCalibration.CONTRACT_ID,
-            )
-            summary = readout_summary(analysis, run_chain=(run_record,))
-            if self._site_review_record is not None:
-                summary = {
-                    **summary,
-                    "site_review": {
-                        "detected_sites": len(
-                            self._site_review_record["candidate_site_ids"]
-                        ),
-                        "excluded_site_ids": list(
-                            self._site_review_record["excluded_site_ids"]
-                        ),
-                        "retained_sites": calibration.n_sites,
-                    },
-                }
-            result = CalibrationRunResult(
-                artifact_path,
-                calibration,
-                analysis.report,
-                capture,
-                pulse_facts,
-                run_record,
-                summary,
-            )
-            self._partial_result = result
-            if context is not None:
-                context.report_progress("Saving calibration report")
-            _save_report(
-                result,
-                artifact_context,
-                save_figure_artifact=self._save_figure_artifact,
-            )
-            self._result = result
-            if context is not None:
-                # What it found, not just that it finished: the operator's
-                # first question is which model to read out with and how well
-                # it does, and the answer is measured by the time we are here.
-                for line in summary_lines(result.summary):
-                    context.report_progress(line)
-                context.report_progress(
-                    "Calibration complete",
-                    current=self.request.repeats,
-                    total=self.request.repeats,
-                )
-            return result
-        except BaseException:
-            self._safe()
-            raise
+        return result
 
     def _save_partial_report(
         self,

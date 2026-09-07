@@ -680,23 +680,27 @@ def render_height_bars(
     z_key = (derived_key, float(ce))
     if render_cache is not None and render_cache.get("derived_z_key") == z_key:
         z_top32, z_bot32 = render_cache["derived_z_value"]
-    elif _scanline_selected():
-        from ._height3d_scanline import _derive_z_planes
-
-        z_top32 = np.empty(hz.shape, dtype=np.float32)
-        z_bot32 = np.empty(hz.shape, dtype=np.float32)
-        _derive_z_planes(hz, float(ce), z_top32, z_bot32)
     else:
-        # ``ce`` is positive (the elevation is clamped well inside a
-        # quarter turn), so scaling before the split is the same number as
-        # after it -- and it is one pass over the plane instead of two.
-        scaled = hz * ce
-        z_top32 = np.ascontiguousarray(
-            np.maximum(scaled, 0.0).astype(np.float32)
-        )
-        z_bot32 = np.ascontiguousarray(
-            np.minimum(scaled, 0.0).astype(np.float32)
-        )
+        if _scanline_selected():
+            from ._height3d_scanline import _derive_z_planes
+
+            z_top32 = np.empty(hz.shape, dtype=np.float32)
+            z_bot32 = np.empty(hz.shape, dtype=np.float32)
+            _derive_z_planes(hz, float(ce), z_top32, z_bot32)
+        else:
+            # ``ce`` is positive (the elevation is clamped well inside a
+            # quarter turn), so scaling before the split is the same
+            # number as after it -- and it is one pass over the plane
+            # instead of two.
+            scaled = hz * ce
+            z_top32 = np.ascontiguousarray(
+                np.maximum(scaled, 0.0).astype(np.float32)
+            )
+            z_bot32 = np.ascontiguousarray(
+                np.minimum(scaled, 0.0).astype(np.float32)
+            )
+        # Published only once both planes exist, whichever engine made
+        # them: the key names a finished pair, never one in preparation.
         if render_cache is not None:
             render_cache["derived_z_key"] = z_key
             render_cache["derived_z_value"] = (z_top32, z_bot32)

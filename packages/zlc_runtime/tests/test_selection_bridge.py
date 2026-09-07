@@ -47,6 +47,7 @@ from zlc_runtime.selection_bridge import (
     SelectionState,
     selection_output_catalog,
 )
+from test_signal_plane import _latest, _paused_lane
 from zlc_runtime.selection_bridge import _StaleFit
 
 
@@ -518,11 +519,11 @@ def test_close_does_not_wait_for_selection_materialization_or_publish_stale(
         events.emit_selection(SelectionChange.COMMITTED, selection)
     real_materialize = bridge._materialize_selection_outputs
 
-    def gated_materialize(snapshot, state):
+    def gated_materialize(snapshot, state, *, event_record):
         entered.set()
         if not release.wait(2.0):
             raise TimeoutError("selection materialization gate did not open")
-        return real_materialize(snapshot, state)
+        return real_materialize(snapshot, state, event_record=event_record)
 
     monkeypatch.setattr(
         bridge,
@@ -640,6 +641,87 @@ def test_selection_derives_from_the_canonical_repeat_prefix_not_the_event_chunk(
         )
     finally:
         _close(bridge, plane, source)
+
+
+def test_a_selection_over_the_canonical_prefix_carries_the_prefix_s_event_record() -> None:
+    """A derived signal's provenance is the data it consumed.
+
+    A publication's own record names only the LAST event; the canonical
+    prefix a region is cut from holds every event committed so far, and the
+    plane merges their records when it materializes that prefix.  The bridge
+    took the prefix and left its record behind, so an ROI over two frames
+    named the device epoch of the newest frame alone, and a Save of the
+    region could not find the first frame's device configuration.
+    """
+
+    event_schema = _image_schema()
+    canonical_schema = _with_repeat_size(event_schema, 2)
+    declaration = DatasetOutputDeclaration("frame", "test.camera.frame")
+    source = _Source(declaration)
+    plane = SignalDataPlane()
+    plane.begin_generation(source)
+    bridge = SelectionBridge(
+        plane, "camera/frame", _Events(), bridge_id="provenance"
+    )
+    try:
+        for index in (1, 2):
+            plane.commit_live(
+                source,
+                {
+                    "frame": LiveDatasetOutput(
+                        declaration,
+                        _snapshot(
+                            "frame",
+                            index,
+                            event_schema,
+                            np.full((1, 1, 4, 3), float(index)),
+                        ),
+                        DatasetCoverage(index, 2),
+                        canonical_schema=canonical_schema,
+                        cell_origin=(index - 1, 0),
+                        event_record={
+                            "device_settings": {
+                                "camera": {
+                                    "device_session_id": "session",
+                                    "epoch_ranges": ((index, index),),
+                                }
+                            }
+                        },
+                    )
+                },
+            )
+        parent = plane.latest_publication("camera/frame")
+        assert parent is not None
+        _prefix, prefix_record = plane.current_dataset_view("camera/frame", parent)
+        assert prefix_record["device_settings"]["camera"]["epoch_ranges"] == (
+            (1, 2),
+        )
+        bridge.start()
+        bridge.commit_selection(
+            SelectionState(
+                "image",
+                "area",
+                (
+                    SelectionRange("x", -1.0, 2.0, domain="cell_data"),
+                    SelectionRange("y", 10.0, 30.0, domain="cell_data"),
+                ),
+                revision=1,
+            ),
+            source_publication=parent,
+        )
+        publication = plane.latest_publication("@logic/provenance/roi_frame")
+        assert publication is not None, bridge.last_error
+        region, record = plane.current_dataset_view(
+            "@logic/provenance/roi_frame", publication
+        )
+        assert region.block.values[:, 0, 0, 0].tolist() == [1.0, 2.0]
+        for carried in (record, publication.event_record):
+            assert carried["device_settings"]["camera"]["epoch_ranges"] == (
+                (1, 2),
+            )
+    finally:
+        bridge.close()
+        plane.close()
 
 
 def test_restored_selection_starts_on_displayed_prefix_then_catches_live_latest() -> None:
@@ -780,18 +862,20 @@ def test_delayed_selection_of_publication_n_never_reads_publication_n_plus_one(
     entered = Event()
     release = Event()
     observed: list[OwnedSnapshot] = []
-    original_current_dataset = plane.current_dataset
+    original_current_dataset_view = plane.current_dataset_view
 
-    def delayed_current_dataset(name, publication=None):
+    def delayed_current_dataset_view(name, publication=None):
         if publication is not None and publication.event_ref.sequence == 2:
             entered.set()
             assert release.wait(2.0)
-        snapshot = original_current_dataset(name, publication)
+        view = original_current_dataset_view(name, publication)
         if publication is not None and publication.event_ref.sequence == 2:
-            observed.append(snapshot)
-        return snapshot
+            observed.append(view[0])
+        return view
 
-    monkeypatch.setattr(plane, "current_dataset", delayed_current_dataset)
+    monkeypatch.setattr(
+        plane, "current_dataset_view", delayed_current_dataset_view
+    )
     try:
         state["frame"] = LiveDatasetOutput(
             state["frame"].declaration,
@@ -963,6 +1047,44 @@ def test_a_value_band_and_a_shot_window_restrict_without_cutting_an_axis() -> No
         _close(bridge, plane, source)
 
 
+def test_a_value_band_applies_to_a_dataset_whose_repeat_domain_names_no_axis() -> None:
+    """A band restricts what COUNTS, so it needs no axis to name.
+
+    A Dataset whose Repeat domain is one unnamed row is legal -- it is what
+    the Viewer leaves behind when the last Repeat axis is removed -- and a
+    band drawn on its histogram used to be spelled as a full-range term on
+    the first Repeat axis, of which there is none: IndexError out of the
+    commit, where the band should simply apply.
+    """
+
+    schema = replace(_image_schema(), repeat_domain=DomainSpec((1,), (), ()))
+    values = np.arange(12, dtype=np.float64).reshape(1, 1, 4, 3)
+    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    events = _Events()
+    plane.set_front_signals({"camera/frame", "@logic/band/roi_frame"})
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="band")
+    bridge.start()
+    try:
+        events.emit_selection(
+            SelectionChange.COMMITTED,
+            SelectionState(
+                "histogram",
+                "x_range",
+                (SelectionRange("", 3.0, 7.0, domain="value"),),
+                revision=1,
+            ),
+        )
+        frame = plane.freeze().value("@logic/band/roi_frame")
+        assert frame is not None, bridge.last_error
+        np.testing.assert_array_equal(frame.snapshot.block.values, values)
+        np.testing.assert_array_equal(
+            _expanded_validity(frame.snapshot),
+            (values >= 3.0) & (values <= 7.0),
+        )
+    finally:
+        _close(bridge, plane, source)
+
+
 def test_a_fitted_parameter_is_published_carrying_its_own_error() -> None:
     """One signal, not two that nothing relates to each other.
 
@@ -1103,6 +1225,168 @@ def test_a_withdrawn_fit_takes_its_outputs_with_it() -> None:
         assert float(replayed.snapshot.block.values.reshape(-1)[0]) == 3.5
     finally:
         bridge.close()
+
+
+def test_a_region_cut_from_a_fitted_parameter_keeps_each_value_s_error() -> None:
+    """The uncertainty rides with the value through a restriction too.
+
+    A curve region on a published fit parameter kept the values and their
+    validity and dropped the sigma plane, so the cropped parameter reached
+    the next panel as numbers without the errors the fit had reported.
+    """
+
+    plane, source, _slot, _state, _initial = _source_setup(
+        _curve_schema(), np.zeros((1, 5, 1))
+    )
+    fit_events = _Events()
+    fit = SelectionBridge(plane, "camera/frame", fit_events, bridge_id="fit")
+    fit.start()
+    cropped = None
+    try:
+        fit_events.emit_fit(
+            replace(
+                _batch_fit_event(plane, source_revision=1),
+                sample_coordinates=np.asarray([0.0, 1.0, 2.0]),
+                sample_unit="",
+                parameter_errors={
+                    "center": np.asarray([0.1, np.nan, 0.3]),
+                    "width": np.asarray([0.05, np.nan, 0.07]),
+                },
+            )
+        )
+        fitted = plane.latest_publication("@logic/fit/center")
+        assert fitted is not None, fit.last_error
+        cropped = SelectionBridge(
+            plane, "@logic/fit/center", _Events(), bridge_id="cropped"
+        )
+        cropped.start()
+        cropped.commit_selection(
+            SelectionState(
+                "curve",
+                "x_range",
+                (SelectionRange("x", 0.0, 1.0, domain="point"),),
+                revision=1,
+            ),
+            source_publication=fitted,
+        )
+        region = plane.current_dataset("@logic/cropped/roi_frame")
+        np.testing.assert_array_equal(
+            region.block.values.reshape(-1), [1.0, np.nan]
+        )
+        assert region.block.sigma is not None, "the errors were dropped"
+        np.testing.assert_array_equal(
+            region.block.sigma.reshape(-1), [0.1, np.nan]
+        )
+    finally:
+        if cropped is not None:
+            cropped.close()
+        _close(fit, plane, source)
+
+
+def test_a_fit_whose_run_expired_takes_its_outputs_down_with_the_condition() -> None:
+    """Parameters derived from a run the plane no longer holds are not a
+    public value any more.
+
+    A Frozen panel keeps its fit over an OLD publication of a history the
+    plane is still producing.  When that publication rolls out of the
+    window, a fresh solve against it is answered with a condition -- and the
+    route must come down with it, as the selection branch's does.  It used
+    to stay: the previous solve stayed readable on the plane under the very
+    condition that said it derives nothing.
+    """
+
+    source_declaration = DatasetOutputDeclaration("frame", "test.camera.frame")
+    derived_declaration = DatasetOutputDeclaration(
+        "value", "test.value", index_by_source=True
+    )
+    source = _Source(source_declaration)
+    derived = _paused_lane("derived", derived_declaration)
+    plane = SignalDataPlane()
+    plane.begin_generation(source)
+    lease = None
+    bridge = None
+    try:
+        plane.commit_live(source, {"frame": _latest(source_declaration, 1.0)})
+        parent = plane.latest_publication("camera/frame")
+        plane.attach_latest_only_processor(
+            derived,
+            source_name="camera/frame",
+            initial_publication=parent,
+            paused=True,
+            coherent=False,
+        )
+        plane.commit_processor(
+            derived,
+            {"value": _latest(derived_declaration, 1.0)},
+            source_publication=parent,
+        )
+        lease = plane.acquire_indexed_history("derived/value", 2)
+        held = plane.latest_publication("derived/value")
+        assert held is not None
+        generation = str(
+            held.value("derived/value").snapshot.ref.stream_generation.value
+        )
+        events = _Events()
+        bridge = SelectionBridge(
+            plane,
+            "derived/value",
+            events,
+            bridge_id="expired",
+            source_publication_for=lambda requested, revision: (
+                held if (requested, revision) == (generation, 1) else None
+            ),
+        )
+        bridge.start()
+        event = FitEventValue(
+            parameter_names=("mean",),
+            parameter_units={"mean": ""},
+            parameter_values={"mean": np.asarray([8.0])},
+            parameter_errors={"mean": np.asarray([0.5])},
+            success=np.asarray([True]),
+            sample_axis_domain="",
+            sample_axis_id="",
+            sample_axis_name="",
+            sample_coordinates=np.asarray([0.0]),
+            sample_unit="",
+            sample_labels=None,
+            source_generation=generation,
+            source_revision=1,
+            batch_revision=1,
+        )
+        events.emit_fit(event)
+        assert plane.latest_publication("@logic/expired/mean") is not None, (
+            bridge.last_error
+        )
+        # Every source index exists; the history window simply rolls on.
+        for index in (2, 3):
+            plane.commit_live(
+                source, {"frame": _latest(source_declaration, float(index))}
+            )
+            plane.commit_processor(
+                derived,
+                {"value": _latest(derived_declaration, float(index))},
+                source_publication=plane.latest_publication("camera/frame"),
+            )
+        assert not plane.retains("derived/value", held)
+        events.emit_fit(
+            replace(
+                event,
+                batch_revision=2,
+                parameter_values={"mean": np.asarray([9.0])},
+            )
+        )
+        assert bridge.last_condition == (
+            "this run is no longer held, so its fit derives nothing"
+        )
+        assert plane.latest_publication("@logic/expired/mean") is None, (
+            "the previous solve stayed public under the condition"
+        )
+    finally:
+        if bridge is not None:
+            bridge.close()
+        if lease is not None:
+            lease.close()
+        plane.close()
 
 
 def test_fit_event_batch_publishes_vectors_with_units_validity_and_lineage() -> None:

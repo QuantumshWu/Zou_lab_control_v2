@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from zlc_atom.authoring import AuthoringSchema
+from zlc_atom.authoring import AuthoringField, AuthoringSchema
 from zlc_atom.install import (
     DeviceCatalogSnapshot,
     DeviceTypeDescriptor,
@@ -18,6 +18,11 @@ from zlc_workbench.session import ExperimentSession
 class _Device:
     key: str
     serial: int
+
+
+#: The one parameter these test types author: a device's settings are the
+#: fields its schema declares, which is also what a reconcile compares.
+_VALUE_SCHEMA = AuthoringSchema((AuthoringField("value", "int", "Value", 0),))
 
 
 def _catalog(events: list[str]) -> DeviceCatalogSnapshot:
@@ -53,14 +58,14 @@ def _catalog(events: list[str]) -> DeviceCatalogSnapshot:
             DeviceTypeDescriptor(
                 "test.base",
                 "test",
-                AuthoringSchema(()),
+                _VALUE_SCHEMA,
                 (),
                 factory=factory,
             ),
             DeviceTypeDescriptor(
                 "test.dependent",
                 "test",
-                AuthoringSchema(()),
+                _VALUE_SCHEMA,
                 (),
                 dependencies=("test.base",),
                 factory=dependent,
@@ -437,3 +442,108 @@ def test_composition_recovery_remains_session_owned_until_it_closes(
     session.close()
     assert events == ["close:base", "close:replacement", "close:other"]
     assert session._recovery_installations == []
+
+
+def test_reconcile_keeps_a_leaf_whose_canonical_setup_is_unchanged(tmp_path):
+    """The schema is the grammar of a device's settings, not the spelling.
+
+    ``"1"`` and ``1`` for an int field are one setup -- the factory reads the
+    same projection either way -- so a plan that compared the authored
+    spellings closed, rebuilt and interrupted a device nothing had changed
+    on.  A parameter the schema does not declare is not a setup at all and
+    is refused by name before any device is touched.
+    """
+
+    events: list[str] = []
+    catalog = _catalog(events)
+    initial = InstallationConfig(
+        (DeviceInstanceConfig("base", "base", "test.base", {"value": "1"}),)
+    )
+    session = ExperimentSession.from_config(tmp_path, initial, catalog=catalog)
+    original = session.installation.device("base")
+
+    plan = session.plan_device_reconcile(InstallationConfig((_device("base", value=1),)))
+    assert plan.retained_keys == ("base",)
+    assert plan.affected_keys == ()
+    assert plan.build_keys == ()
+    session.reconcile_devices(plan)
+    assert session.installation.device("base") is original
+    assert events == []
+
+    with pytest.raises(ValueError, match="unknown authoring fields"):
+        session.plan_device_reconcile(
+            InstallationConfig(
+                (
+                    DeviceInstanceConfig(
+                        "base", "base", "test.base", {"value": 1, "typo": 2}
+                    ),
+                )
+            )
+        )
+    assert session.installation.device("base") is original
+    assert events == []
+    session.close()
+    assert events == ["close:base"]
+
+
+def test_a_session_that_fails_after_its_devices_opened_closes_them(tmp_path):
+    """Between "devices open" and "session delivered" there is no owner.
+
+    The board's config-value load runs in the session constructor, after
+    every device has opened.  When it refuses, the devices were left open
+    with nobody holding them: the Device Manager saw an error, no session,
+    and a close that "succeeded".  The failure now closes what was opened,
+    and a device that will not close is reported beside the original error
+    rather than instead of it.
+    """
+
+    events: list[str] = []
+
+    class _Sequencer:
+        def __init__(self, *, close_fails: bool) -> None:
+            self.close_fails = close_fails
+            self.closed = False
+
+        def load_config_values(self, entries, *, source: str) -> None:
+            events.append("load config")
+            raise RuntimeError("sequencer rejected config load")
+
+        def close(self) -> None:
+            events.append("close")
+            if self.close_fails:
+                raise RuntimeError("vendor handle is still open")
+            self.closed = True
+
+    def catalog(*, close_fails: bool):
+        def factory(_context, key, _config):
+            device = _Sequencer(close_fails=close_fails)
+            devices.append(device)
+            events.append("opened")
+            return InstalledLeaf(key, "test.sequencer", device, {}, closer=device.close)
+
+        return DeviceCatalogSnapshot(
+            (
+                DeviceTypeDescriptor(
+                    "test.sequencer", "sequencer", AuthoringSchema(()), (),
+                    factory=factory,
+                ),
+            ),
+            (),
+        )
+
+    config = InstallationConfig(
+        (DeviceInstanceConfig("sequencer", "sequencer", "test.sequencer", {}),)
+    )
+    devices: list[_Sequencer] = []
+    with pytest.raises(RuntimeError, match="rejected config load"):
+        ExperimentSession.from_config(tmp_path, config, catalog=catalog(close_fails=False))
+    assert events == ["opened", "load config", "close"]
+    assert devices[0].closed
+
+    events.clear()
+    devices.clear()
+    with pytest.raises(BaseExceptionGroup, match="not everything it opened closed") as caught:
+        ExperimentSession.from_config(tmp_path, config, catalog=catalog(close_fails=True))
+    assert events == ["opened", "load config", "close"]
+    assert caught.group_contains(RuntimeError, match="rejected config load")
+    assert caught.group_contains(RuntimeError, match="vendor handle is still open")

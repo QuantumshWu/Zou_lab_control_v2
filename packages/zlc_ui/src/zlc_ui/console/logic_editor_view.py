@@ -402,9 +402,15 @@ class LogicEditorView(QtWidgets.QWidget):
         self.draft_changed.emit({"artifact_inputs": {str(key): value}})
 
     def _rebuild_artifact_results(self, rows: object) -> None:
-        while self._artifact_result_layout.rowCount():
-            self._artifact_result_layout.removeRow(0)
-        self._artifact_result_readouts.clear()
+        """Project the result rows, keyed by name.
+
+        A readout whose name is still listed is kept and re-told its path;
+        the rows are rebuilt only when the SET of names, or their order,
+        changed.  Torn down and rebuilt on every projection, the same
+        results destroyed every readout on every beat for nothing.
+        """
+
+        results: list[tuple[str, str, str]] = []
         for raw in tuple(rows or ()):  # type: ignore[arg-type]
             if not isinstance(raw, Mapping):
                 raise TypeError("logic artifact results must be mappings")
@@ -412,13 +418,24 @@ class LogicEditorView(QtWidgets.QWidget):
             path = str(raw.get("path") or "")
             if not name or not path:
                 raise ValueError("logic artifact results need name and path")
-            readout = FluentReadoutEdit(path)
-            readout.setToolTip(str(raw.get("contract_id") or ""))
-            self._artifact_result_readouts[name] = readout
-            self._artifact_result_layout.addRow(
-                name.replace("_", " ").title(),
-                readout,
-            )
+            results.append((name, path, str(raw.get("contract_id") or "")))
+        if [name for name, _path, _contract in results] != list(
+            self._artifact_result_readouts
+        ):
+            while self._artifact_result_layout.rowCount():
+                self._artifact_result_layout.removeRow(0)
+            self._artifact_result_readouts.clear()
+            for name, path, contract in results:
+                readout = FluentReadoutEdit(path)
+                self._artifact_result_readouts[name] = readout
+                self._artifact_result_layout.addRow(
+                    name.replace("_", " ").title(),
+                    readout,
+                )
+        for name, path, contract in results:
+            readout = self._artifact_result_readouts[name]
+            readout.setText(path)
+            readout.setToolTip(contract)
         self._artifact_result_frame.setVisible(
             bool(self._artifact_result_readouts)
         )

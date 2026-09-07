@@ -20,7 +20,7 @@ from pathlib import Path
 import re
 from typing import Callable, Iterator
 
-from .durability import _atomic_write_unique_path, durable_makedirs, flush_directory
+from .durability import _atomic_write_unique_path, _flush_published, durable_makedirs
 from .paths import resolve_under
 
 
@@ -128,8 +128,8 @@ def unique_path(
                 candidate.mkdir()
             except FileExistsError:
                 continue
-            flush_directory(candidate)
-            flush_directory(directory)
+            _flush_published(candidate, candidate)
+            _flush_published(directory, candidate)
             return candidate
 
     if _SUFFIX.fullmatch(suffix) is None:

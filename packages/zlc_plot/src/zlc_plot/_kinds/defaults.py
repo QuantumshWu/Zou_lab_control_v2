@@ -9,7 +9,9 @@ axes.  The table below says what each family is FOR, and it is the same
 answer whichever kind is asked:
 
 * R is a statistic.  It is reduced (the mean, with its standard error) or
-  pooled by a histogram, and is never a layout axis on its own.
+  pooled by a histogram, and is never a layout axis while anything else
+  has structure; a curve with nothing else to walk walks the first repeat
+  axis that varies.
 * H is a statistic too -- the mean over shots IS an occupation rate -- for
   every kind but the one that walks it, Rolling, and as a curve's x of
   last resort when nothing else has structure.
@@ -28,9 +30,14 @@ answer whichever kind is asked:
 Degenerate axes (one value) are provenance, not structure: they never
 decide a layout, with one deliberate exception -- an event axis of one
 (a one-frame cycle) still identifies a grid's cell, so the grid's meaning
-does not change with the frame count.  No axis is ever chosen by its
-name: only its role, its family and its place in the declaration order
-decide.  Every kind's ``default_spec`` is a reading of this one table.
+does not change with the frame count.  A curve whose x would be
+degenerate walks the next axis WITH variation in declaration order
+instead, whichever family holds it; only when nothing varies is a
+degenerate axis drawn, as one point, and a dataset with no axis at all
+has no curve (``None``).  No axis is ever chosen by its name: only its
+role, its family and its place in the declaration order decide.  Every
+kind's ``default_spec`` is a reading of this one table, and every entry
+point -- the library's, the Workbench's -- reads it unaltered.
 """
 
 from __future__ import annotations
@@ -80,23 +87,21 @@ def tellable_apart(count: int) -> bool:
 
 @dataclass(frozen=True)
 class _Plan:
-    """One cell's reading of the table: its roles, and what it consumed."""
+    """One cell's reading of the table: its roles.
+
+    What the cell consumed IS its roles: an axis is used by being x, y or
+    the group, and nothing else.
+    """
 
     x: AxisRef | None = None
     y: AxisRef | None = None
     group: AxisRef | None = None
-    #: Scan dimensions the cell walks, innermost first.
-    scan_used: tuple[AxisRef, ...] = ()
-    #: Whether the cell used an event axis as one of its roles.
-    event_used: AxisRef | None = None
 
     @property
     def consumed(self) -> tuple[AxisRef, ...]:
         return tuple(
-            ref
-            for ref in (self.x, self.y, self.group, self.event_used)
-            if ref is not None
-        ) + self.scan_used
+            ref for ref in (self.x, self.y, self.group) if ref is not None
+        )
 
 
 def default_spec(
@@ -105,8 +110,9 @@ def default_spec(
     """The specification ``kind`` shows for ``schema`` unasked, or ``None``.
 
     ``None`` means the kind has nothing to draw here (an image with nothing
-    to image, a cell kind the data cannot fill).  A grid never answers
-    ``None`` for want of a facet: with nothing left to face it is one cell.
+    to image, a curve with no axis to walk, a cell kind the data cannot
+    fill).  A grid never answers ``None`` for want of a facet: with nothing
+    left to face it is one cell.
     """
 
     if not isinstance(schema, DatasetSchema):
@@ -203,13 +209,15 @@ def _grid(families: AxisFamilies, cell_kind: PlotKind | None) -> FacetGridPlot |
     if len(live_scan) >= 2:
         facet: AxisRef | None = live_scan[0][0]
     elif live_scan:
-        facet = _first_live(families.live_events()) or _facetable_history(families)
+        facet = _first_any(families.live_events()) or _facetable_history(families)
         if facet is None:
             facet = _first_any(families.events)
     else:
         facet = _facet(families, _Plan())
     plan = _curve_plan(families, facet=facet)
     cell = _curve_spec(families, plan, scoped=False)
+    if cell is None:
+        return None
     return FacetGridPlot(
         facet, cell, scope=_latest_events(families, plan.consumed + (facet,))
     )
@@ -258,9 +266,7 @@ def _image_plan(families: AxisFamilies) -> _Plan | None:
         # Position before content.  The last live dimension is the
         # innermost loop: the horizontal axis of the heatmap, exactly as a
         # curve walks it; whatever content the point holds is reduced.
-        return _Plan(
-            x=scan[-1][0], y=scan[-2][0], scan_used=(scan[-1][0], scan[-2][0])
-        )
+        return _Plan(x=scan[-1][0], y=scan[-2][0])
     if len(content) >= 2:
         # Data axes are declared slowest-first, so the last is horizontal.
         return _Plan(x=content[-1][0], y=content[-2][0])
@@ -269,10 +275,10 @@ def _image_plan(families: AxisFamilies) -> _Plan | None:
         # coordinates: a scan of a per-site quantity IS a map of site
         # against what was scanned.
         if scan:
-            return _Plan(x=scan[-1][0], y=content[0][0], scan_used=(scan[-1][0],))
+            return _Plan(x=scan[-1][0], y=content[0][0])
         events = families.live_events()
         if events:
-            return _Plan(x=events[0][0], y=content[0][0], event_used=events[0][0])
+            return _Plan(x=events[0][0], y=content[0][0])
         history = _live_history(families)
         if history is not None:
             return _Plan(x=history, y=content[0][0])
@@ -291,22 +297,28 @@ def _image_spec(
 
 
 def _curve_plan(families: AxisFamilies, *, facet: AxisRef | None) -> _Plan:
-    """A curve walks position: the innermost scan loop, else the events,
-    else the shot history, else its own data, else the first Repeat axis."""
+    """A curve walks position: the innermost live scan loop, else the live
+    events, else its own live data, else the live shot history, else the
+    first repeat axis that varies; only then a degenerate axis, and with no
+    axis at all it has no x.
+
+    Every candidate but the last is live (more than one value) -- so the
+    only way x would be degenerate is that nothing varies at all.  That is
+    where a repeat axis that varies is taken: R is a statistic everywhere
+    above, but with nothing else to walk the statistic IS the series, and
+    one rule here is what keeps the library's default and the Workbench's
+    the same picture.  The facet a grid already faces is never x.
+    """
 
     taken = set() if facet is None else {facet}
     scan = [entry for entry in families.live_scan() if entry[0] not in taken]
     if scan:
         x = scan[-1][0]
-        return _Plan(
-            x=x,
-            group=_group(families, (x, facet)),
-            scan_used=(x,),
-        )
+        return _Plan(x=x, group=_group(families, (x, facet)))
     events = [entry for entry in families.live_events() if entry[0] not in taken]
     if events:
         x = events[0][0]
-        return _Plan(x=x, group=_group(families, (x, facet)), event_used=x)
+        return _Plan(x=x, group=_group(families, (x, facet)))
     data_innermost_first = tuple(reversed(families.live_data()))
     if data_innermost_first:
         x = data_innermost_first[0][0]
@@ -314,19 +326,25 @@ def _curve_plan(families: AxisFamilies, *, facet: AxisRef | None) -> _Plan:
     history = _live_history(families)
     if history is not None and history not in taken:
         return _Plan(x=history)
-    # Nothing has structure: the default x must still be an axis, so the
-    # first one there is, degenerate as it may be, is drawn as one point.
+    for ref, size in families.repeat:
+        if size > 1 and ref not in taken:
+            return _Plan(x=ref)
+    # Nothing varies: the default x is still an axis when there is one, so
+    # the first one there is, degenerate as it may be, is drawn as one
+    # point.  With none there is no curve, and the plan says so.
     return _Plan(
-        x=_first_any(families.scan)
-        or _first_any(families.events)
-        or families.first_data_axis()
-        or families.repeat[0][0]
+        x=_first_free(families.scan, taken)
+        or _first_free(families.events, taken)
+        or _first_free(families.data, taken)
+        or _first_free(families.repeat, taken)
     )
 
 
 def _curve_spec(
     families: AxisFamilies, plan: _Plan, *, scoped: bool = True
-) -> CurvePlot:
+) -> CurvePlot | None:
+    if plan.x is None:
+        return None
     return CurvePlot(
         plan.x,
         group=plan.group,
@@ -372,12 +390,14 @@ def _latest_events(
     )
 
 
-def _first_live(entries: tuple[_Entry, ...]) -> AxisRef | None:
-    return entries[0][0] if entries else None
-
-
 def _first_any(entries: tuple[_Entry, ...]) -> AxisRef | None:
     return entries[0][0] if entries else None
+
+
+def _first_free(
+    entries: tuple[_Entry, ...], taken: set[AxisRef]
+) -> AxisRef | None:
+    return next((ref for ref, _size in entries if ref not in taken), None)
 
 
 def _live_history(families: AxisFamilies) -> AxisRef | None:

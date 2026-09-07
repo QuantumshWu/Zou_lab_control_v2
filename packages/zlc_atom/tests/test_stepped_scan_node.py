@@ -17,9 +17,17 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from zlc_pulse import compile_sequence, resolve_api_parameters
+from zlc_data import owned_snapshot_from_arrays
+from zlc_pulse import (
+    compile_sequence,
+    load_streamer_config,
+    pulse_field_value,
+    resolve_api_parameters,
+)
+from zlc_pulse.device import BoardDescription, ConfigValueHolder
 from zlc_runtime import MonitorCoverage, NodeHost, SignalDataPlane, SignalValue
 
+from zlc_atom.authoring import AuthoringField, TunableField
 from zlc_atom.devices.simulation import DEFAULT_MOT_FIELD_OPTIMUM_DAC
 from zlc_atom.install import create_installation, tunable_devices
 from zlc_atom.nodes import (
@@ -36,7 +44,10 @@ from zlc_atom.nodes.scan import (
     ScanDatasetWriter,
     ScanPlan,
     ScanPort,
+    check_cancelled,
+    settle,
 )
+from zlc_atom.nodes.scan.devices import ScanDeviceKnobs
 from zlc_atom.nodes.stepped_scan import GATING_MODES, STEPPED_SCAN_SCHEMA
 from zlc_atom.nodes.stepped_scan.measurement import SteppedScanMeasurement
 
@@ -45,6 +56,154 @@ from tests.fakes import (
     ScriptedScanBench,
     camera_cycle_snapshot,
 )
+from test_scan_repeat_domain import _source_schema
+
+
+class _FakeSequencer(ConfigValueHolder):
+    """The board's surface with no board behind it: every command counted.
+
+    ``on_safe`` runs inside SAFE, which is where an operator's Stop lands
+    while the board is acknowledging: the one moment the engines used to
+    read too late.
+    """
+
+    def __init__(self, sequence) -> None:
+        self._init_config_values()
+        settings = load_streamer_config()
+        self.board = BoardDescription(
+            sequence.target, settings["params"], settings["clock_hz"]
+        )
+        self.load_config_values(
+            {
+                parameter.parameter_id: (
+                    pulse_field_value(sequence, parameter.field_ref, parameter.unit),
+                    parameter.unit,
+                )
+                for parameter in sequence.config_parameters
+            }
+        )
+        self.fires = 0
+        self.safe_calls = 0
+        self.on_safe = None
+
+    def describe(self):
+        return self.board
+
+    def safe(self) -> None:
+        self.safe_calls += 1
+        if self.on_safe is not None:
+            self.on_safe()
+
+    def load(self, program, **_kwargs) -> None:
+        self.program = program
+
+    def fire(self, **_kwargs) -> None:
+        self.fires += 1
+
+    def wait_done(self, _timeout):
+        return SimpleNamespace(fault=None)
+
+
+class _FakeSource:
+    """A point's value on demand; ``fail_at`` names the take that fails and
+    ``on_take`` sees every take, so a test can press Stop at a moment."""
+
+    def __init__(self, *, fail_at: int | None = None) -> None:
+        self.taken = 0
+        self.fail_at = fail_at
+        self.on_take = None
+
+    def open(self, *_args, **_kwargs) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+    def validate(self, *_args, **_kwargs) -> None:
+        pass
+
+    def arm(self) -> None:
+        pass
+
+    def discard_pending(self) -> None:
+        pass
+
+    def describe(self) -> dict:
+        return {"source_signal": "fake"}
+
+    def next_value(self, context):
+        self.taken += 1
+        check_cancelled(context)
+        if self.taken == self.fail_at:
+            raise RuntimeError("scripted source failed")
+        schema = _source_schema(shots=1)
+        snapshot = owned_snapshot_from_arrays(
+            schema,
+            np.zeros(schema.physical_shape),
+            self.taken,
+            stream_generation="fake-source",
+        )
+        if self.on_take is not None:
+            self.on_take(self.taken)
+        return SignalValue("fake-source", snapshot, MonitorCoverage(1, 1)), None
+
+
+class _Knob:
+    """One installed device with one field, remembering every tune.
+
+    ``refuse_restore`` answers the pre-run value with something else, the
+    way an instrument that will not go back there would.
+    """
+
+    def __init__(self, level: float = 0.25, *, refuse_restore: bool = False) -> None:
+        self.level = level
+        self.tunes: list[float] = []
+        self.refuse_restore = refuse_restore
+
+    def tune(self, field: str, value: float) -> float:
+        assert field == "level"
+        self.tunes.append(float(value))
+        if self.refuse_restore and value == 0.25:
+            return float(value) + 1.0
+        self.level = float(value)
+        return self.level
+
+    def tunable_fields(self) -> tuple[TunableField, ...]:
+        return (
+            TunableField(
+                AuthoringField("level", "float", "level", 0.25, minimum=0.0, maximum=3.0),
+                self.level,
+                True,
+                ("level",),
+            ),
+        )
+
+    def tunable_values(self) -> dict:
+        return {"level": self.level}
+
+    def settings_provenance(self) -> dict:
+        return {"device_session_id": "knob", "settings_epoch": 0}
+
+
+class _Context:
+    """The host's surface: Stop is a flag, commits are counted."""
+
+    def __init__(self) -> None:
+        self.cancelled = False
+        self.commits = 0
+
+    def cancel_requested(self) -> bool:
+        return self.cancelled
+
+    def commit_live(self, outputs, *, source_publication=None) -> None:
+        del outputs, source_publication
+        self.commits += 1
+
+    def report_progress(self, *_args, **_kwargs) -> None:
+        pass
+
+    def current_dataset(self, name: str) -> str:
+        return name
 
 
 TEMPLATE_NAME = "mot_field_template.json"
@@ -327,7 +486,18 @@ def test_device_scan_refuses_an_effective_value_different_from_its_coordinate() 
         def tune(self, _field: str, value: float) -> float:
             return float(value) + 0.5
 
+        def tunable_fields(self) -> tuple[TunableField, ...]:
+            return (
+                TunableField(
+                    AuthoringField("gain_db", "float", "gain", 0.0, minimum=0.0, maximum=24.0),
+                    0.0,
+                    True,
+                    ("gain_db",),
+                ),
+            )
+
     port_name = DEVICE_PARAM_FAMILY + "camera:gain_db"
+    tunables = {"camera": QuantizedDevice()}
     measurement = SteppedScanMeasurement(
         sequencer=SimpleNamespace(safe=lambda: None),
         source=object(),
@@ -339,11 +509,117 @@ def test_device_scan_refuses_an_effective_value_different_from_its_coordinate() 
         settle_seconds=0.0,
         gating="pulse_gated",
         free_run_delay_seconds=0.0,
-        tunables={"camera": QuantizedDevice()},
+        tunables=tunables,
     )
 
     with pytest.raises(RuntimeError, match="applied 3.5, not the scan coordinate 3.0"):
-        measurement._apply((3.0,), object())
+        measurement._apply(_Context(), ScanDeviceKnobs(tunables), (3.0,), object())
+
+
+def _device_stepped(knob: _Knob, sequencer: _FakeSequencer, source: _FakeSource):
+    port = ScanPort(DEVICE_PARAM_FAMILY + "knob:level", "knob.level", "1", 0.0, 3.0)
+    return SteppedScanMeasurement(
+        sequencer=sequencer,
+        source=source,
+        sequence=_template_sequence(),
+        plan=ScanPlan((ScanAxis(port.port, (1.0, 2.0)),)),
+        ports=(port,),
+        repeats=1,
+        shots_per_point=1,
+        settle_seconds=0.0,
+        gating="pulse_gated",
+        free_run_delay_seconds=0.0,
+        tunables={"knob": knob},
+    )
+
+
+def test_every_knob_the_scan_moved_is_put_back_however_the_scan_ends() -> None:
+    """The bench is handed back as it was found: complete, stopped or failed.
+
+    A device axis left the instrument standing at the last scan point --
+    2.0 here, whatever the operator had set before -- after a finished
+    scan, after Stop and after a source failure alike.  The pre-run value
+    is read from the device before the first move and written back, through
+    the same verified tune, when the scan ends; a refusal to go back is the
+    run's error when everything else succeeded, and a note on the original
+    error when it did not.
+    """
+
+    knob, sequencer, source = _Knob(), _FakeSequencer(_template_sequence()), _FakeSource()
+    _device_stepped(knob, sequencer, source).execute(_Context())
+    assert knob.tunes == [1.0, 2.0, 0.25]
+    assert knob.level == 0.25
+    assert sequencer.fires == 2
+    assert sequencer.safe_calls == 3, "SAFE before each point, and at the end"
+
+    knob, sequencer = _Knob(), _FakeSequencer(_template_sequence())
+    with pytest.raises(RuntimeError, match="scripted source failed") as failure:
+        _device_stepped(knob, sequencer, _FakeSource(fail_at=2)).execute(_Context())
+    assert knob.tunes == [1.0, 2.0, 0.25] and knob.level == 0.25
+    assert not getattr(failure.value, "__notes__", []), "a clean restore adds nothing"
+
+    knob, sequencer, source, context = (
+        _Knob(), _FakeSequencer(_template_sequence()), _FakeSource(), _Context()
+    )
+    source.on_take = lambda taken: setattr(context, "cancelled", taken == 1)
+    with pytest.raises(RuntimeError, match="cancelled"):
+        _device_stepped(knob, sequencer, source).execute(context)
+    assert knob.tunes == [1.0, 0.25] and knob.level == 0.25
+    assert sequencer.fires == 1, "Stop after the first point applied no second"
+
+    knob, sequencer = _Knob(refuse_restore=True), _FakeSequencer(_template_sequence())
+    with pytest.raises(RuntimeError, match="not its pre-run value 0.25"):
+        _device_stepped(knob, sequencer, _FakeSource()).execute(_Context())
+    assert sequencer.safe_calls == 3, "the board still went safe before the knobs"
+
+    knob, sequencer = _Knob(refuse_restore=True), _FakeSequencer(_template_sequence())
+    with pytest.raises(RuntimeError, match="scripted source failed") as failure:
+        _device_stepped(knob, sequencer, _FakeSource(fail_at=2)).execute(_Context())
+    assert any(
+        "restoring the scanned device fields also reported" in note
+        and "'level' of 'knob' was not put back to its pre-run value 0.25" in note
+        for note in failure.value.__notes__
+    ), "the original failure stays the failure; the restore refusal rides on it"
+
+    # A knob standing where no tune could put it back -- outside the range
+    # its device says may be commanded -- is refused before it is moved.
+    knob, sequencer = _Knob(level=5.0), _FakeSequencer(_template_sequence())
+    with pytest.raises(ValueError, match=r"stands at 5.0, outside \[0.0, 3.0\]"):
+        _device_stepped(knob, sequencer, _FakeSource()).execute(_Context())
+    assert knob.tunes == [] and sequencer.fires == 0
+
+
+def test_a_stop_received_while_the_board_goes_safe_fires_nothing_more() -> None:
+    """Stop is read before anything new is done to the bench.
+
+    Stop arrived while the board was acknowledging SAFE before a point;
+    the engine came back from SAFE, settled, moved the knob, loaded and
+    FIRED the point, and noticed the flag only in the read-out loop.  The
+    settle is now sliced with the flag read between slices, and the flag
+    is read again before a knob moves and before a fire.
+    """
+
+    knob, sequencer, source, context = (
+        _Knob(), _FakeSequencer(_template_sequence()), _FakeSource(), _Context()
+    )
+    sequencer.on_safe = lambda: setattr(context, "cancelled", True)
+    with pytest.raises(RuntimeError, match="cancelled"):
+        _device_stepped(knob, sequencer, source).execute(context)
+    assert sequencer.fires == 0
+    assert knob.tunes == [], "nothing moved after Stop"
+    assert knob.level == 0.25
+
+    class _StopOnThirdAsk:
+        asked = 0
+
+        def cancel_requested(self) -> bool:
+            self.asked += 1
+            return self.asked >= 3
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="cancelled"):
+        settle(_StopOnThirdAsk(), 30.0)
+    assert time.monotonic() - started < 1.0, "a settle stays stoppable while it sleeps"
 
 
 def test_scanning_a_device_port_moves_the_camera_exposure() -> None:

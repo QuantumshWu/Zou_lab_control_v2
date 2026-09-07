@@ -157,6 +157,42 @@ def _large_latest(
     )
 
 
+def _camera_epoch_record(epoch: int) -> dict[str, object]:
+    """The event record of one shot taken at one camera settings epoch."""
+
+    return {
+        "device_settings": {
+            "camera": {
+                "device_session_id": "camera-session",
+                "epoch_ranges": ((epoch, epoch),),
+            }
+        }
+    }
+
+
+def _paused_lane(instance_id: str, declaration: DatasetOutputDeclaration):
+    """A latest-lane node whose results are committed by the test itself.
+
+    The paused lane is the existing public contract for a display-paced
+    derivation that already holds its answers; evaluating is an error.
+    """
+
+    def refuse(*_arguments):
+        raise AssertionError("paused processor must not evaluate")
+
+    return SimpleNamespace(
+        instance_id=instance_id,
+        dataset_output_declarations=(declaration,),
+        signal_key=lambda name: f"{instance_id}/{name}",
+        validate_processor_source=lambda _source: None,
+        evaluate_processor=refuse,
+        accept_processor_result=lambda *_arguments: None,
+        accept_processor_failure=refuse,
+        accept_processor_cancelled=lambda: None,
+        request_processor_owner_wake=lambda: None,
+    )
+
+
 def test_derived_monitor_materializes_every_source_primary_index() -> None:
     source_declaration = DatasetOutputDeclaration("frame", "test.frame")
     derived_declaration = DatasetOutputDeclaration(
@@ -217,15 +253,6 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
     unsubscribe = plane.subscribe_publications(lambda: wakes.append(1))
     history = small_history = None
 
-    def settings(epoch: int) -> dict[str, object]:
-        return {
-            "device_settings": {
-                "camera": {
-                    "device_session_id": "camera-session",
-                    "epoch_ranges": ((epoch, epoch),),
-                }
-            }
-        }
     try:
         plane.begin_generation(source)
         plane.commit_live(source, {"frame": _latest(source_declaration, 1.0)})
@@ -255,10 +282,10 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
             derived,
             {
                 "value": _latest(
-                    derived_declaration, 22.0, event_record=settings(2)
+                    derived_declaration, 22.0, event_record=_camera_epoch_record(2)
                 ),
                 "latest": _latest(
-                    latest_declaration, 222.0, event_record=settings(2)
+                    latest_declaration, 222.0, event_record=_camera_epoch_record(2)
                 ),
             },
             source_publication=second,
@@ -285,10 +312,10 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
             derived,
             {
                 "value": _latest(
-                    derived_declaration, 44.0, event_record=settings(4)
+                    derived_declaration, 44.0, event_record=_camera_epoch_record(4)
                 ),
                 "latest": _latest(
-                    latest_declaration, 444.0, event_record=settings(4)
+                    latest_declaration, 444.0, event_record=_camera_epoch_record(4)
                 ),
             },
             source_publication=fourth,
@@ -322,10 +349,10 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
             derived,
             {
                 "value": _latest(
-                    derived_declaration, 55.0, event_record=settings(5)
+                    derived_declaration, 55.0, event_record=_camera_epoch_record(5)
                 ),
                 "latest": _latest(
-                    latest_declaration, 555.0, event_record=settings(5)
+                    latest_declaration, 555.0, event_record=_camera_epoch_record(5)
                 ),
             },
             source_publication=fourth,
@@ -470,6 +497,131 @@ def test_indexed_history_retains_only_the_requested_window() -> None:
         if history is not None:
             history.close()
         plane.close()
+
+
+def _indexed_lane(window: int, *, prefix: str):
+    """A source, a paused derivation of it holding index 1, and a lease."""
+
+    source_declaration = DatasetOutputDeclaration("frame", "test.frame")
+    derived_declaration = DatasetOutputDeclaration(
+        "value",
+        "test.value",
+        index_by_source=True,
+    )
+    source = _node(f"{prefix}-source", source_declaration)
+    derived = _paused_lane(f"{prefix}-derived", derived_declaration)
+    plane = SignalDataPlane()
+    plane.begin_generation(source)
+    plane.commit_live(source, {"frame": _latest(source_declaration, 1.0)})
+    parent = plane.latest_publication(f"{prefix}-source/frame")
+    assert parent is not None
+    plane.attach_latest_only_processor(
+        derived,
+        source_name=f"{prefix}-source/frame",
+        initial_publication=parent,
+        paused=True,
+    )
+    plane.commit_processor(
+        derived,
+        {
+            "value": _latest(
+                derived_declaration, 1.0, event_record=_camera_epoch_record(1)
+            )
+        },
+        source_publication=parent,
+    )
+    history = plane.acquire_indexed_history(f"{prefix}-derived/value", window)
+    return plane, source, source_declaration, derived, derived_declaration, history
+
+
+def test_a_source_that_jumped_past_the_cached_window_leaves_legal_holes() -> None:
+    """A cached basis is reused only where the new window overlaps it.
+
+    A display-paced derivation may skip source indices, and its last
+    materialization is the basis of the next.  Admitted on sequence and a
+    forward start alone, a basis that ended BEFORE the new window began was
+    still sliced for its overlap: an empty slice broadcast into two cells
+    of the three-wide window, and the skipped indices -- invalid slots by
+    contract -- came back as a materialization error instead.
+    """
+
+    plane, source, source_declaration, derived, derived_declaration, history = (
+        _indexed_lane(3, prefix="jump")
+    )
+    try:
+        cached = plane.current_dataset("jump-derived/value")
+        assert cached.block.values.reshape(-1).tolist() == [1.0]
+        for index in range(2, 6):
+            plane.commit_live(
+                source, {"frame": _latest(source_declaration, float(index))}
+            )
+        plane.commit_processor(
+            derived,
+            {"value": _latest(derived_declaration, 5.0)},
+            source_publication=plane.latest_publication("jump-source/frame"),
+        )
+        snapshot = plane.current_dataset("jump-derived/value")
+        assert snapshot.block.schema.point_domain.axis(
+            AxisId("zlc_data.primary-index")
+        ).coordinates == (-2, -1, 0)
+        np.testing.assert_allclose(
+            snapshot.block.values.reshape(-1), (0.0, 0.0, 5.0)
+        )
+        np.testing.assert_array_equal(
+            snapshot.expanded_validity().reshape(-1), (False, False, True)
+        )
+    finally:
+        history.close()
+        plane.close()
+
+
+def test_a_rolled_window_s_record_names_only_the_rows_it_kept() -> None:
+    """Provenance is a fact of the window, not of how often it was read.
+
+    Reading after every shot makes each materialization the basis of the
+    next.  The VALUES of a rolled window copy only the rows that stayed;
+    the record was merged from the basis's whole record plus the new
+    events -- a union of epoch ranges, which cannot subtract the rows that
+    left -- so a two-shot window read every shot claimed epochs 1 to 4
+    while the same window read once claimed 3 to 4.
+    """
+
+    records = {}
+    for read_every_shot in (True, False):
+        plane, source, source_declaration, derived, derived_declaration, history = (
+            _indexed_lane(2, prefix="roll")
+        )
+        try:
+            if read_every_shot:
+                plane.current_dataset_view("roll-derived/value")
+            for index in (2, 3, 4):
+                plane.commit_live(
+                    source, {"frame": _latest(source_declaration, float(index))}
+                )
+                plane.commit_processor(
+                    derived,
+                    {
+                        "value": _latest(
+                            derived_declaration,
+                            float(index),
+                            event_record=_camera_epoch_record(index),
+                        )
+                    },
+                    source_publication=plane.latest_publication(
+                        "roll-source/frame"
+                    ),
+                )
+                if read_every_shot:
+                    plane.current_dataset_view("roll-derived/value")
+            snapshot, record = plane.current_dataset_view("roll-derived/value")
+            assert snapshot.block.values.reshape(-1).tolist() == [3.0, 4.0]
+            records[read_every_shot] = record
+        finally:
+            history.close()
+            plane.close()
+    for record in records.values():
+        assert record["device_settings"]["camera"]["epoch_ranges"] == ((3, 4),)
+    assert records[True] == records[False]
 
 
 def _finite_grid_point(

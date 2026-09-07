@@ -364,8 +364,11 @@ def _render(
         # cropped view is strided, so making it contiguous COPIES, which
         # is where a writable plane came from before every input was
         # sealed.  Warming only the opening view left an operator's first
-        # wheel notch compiling.
-        height, width = _plane_shape(snapshot)
+        # wheel notch compiling.  The picture is the cell's trailing two
+        # dimensions of the (repeat, point, ..., y, x) block.
+        height, width = (
+            int(size) for size in np.asarray(snapshot.block.values).shape[-2:]
+        )
         span = float(width)
         for _ in range(zoom_steps):
             span /= 1.7
@@ -380,11 +383,6 @@ def _render(
             session.rgba()
     finally:
         session.close()
-
-
-def _plane_shape(snapshot: Any) -> tuple[int, int]:
-    shape = np.asarray(snapshot.block.values).shape
-    return int(shape[-3]), int(shape[-2])
 
 
 def representative_work(*, include_compiled_fit: bool = True) -> None:

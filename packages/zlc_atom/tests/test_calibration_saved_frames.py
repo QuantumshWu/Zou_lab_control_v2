@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 import json
 import time
 from dataclasses import replace
@@ -38,16 +40,27 @@ from tests.pulse_fixture import IMAGING_PULSE_RESOURCE
 from test_installation_and_nodes import _calibration_request
 
 
-def _task(request: CalibrationRequest) -> CalibrationTask:
+@contextmanager
+def _task(request: CalibrationRequest) -> Iterator[CalibrationTask]:
+    """A calibration task on a fresh virtual bench, closed when the block ends.
+
+    The installation is the owner of the devices the task borrows; a task
+    does not close them, so the helper that built the bench is the one that
+    takes it down again.
+    """
+
     installation = create_installation("virtual")
-    return CalibrationTask(
-        camera=installation.device("camera"),
-        sequencer=installation.device("sequencer"),
-        request=request,
-        pulse_sequence=IMAGING_PULSE_RESOURCE.value,
-        pulse_path=IMAGING_PULSE_RESOURCE.path,
-        signal_plane=FakePlane(),
-    )
+    try:
+        yield CalibrationTask(
+            camera=installation.device("camera"),
+            sequencer=installation.device("sequencer"),
+            request=request,
+            pulse_sequence=IMAGING_PULSE_RESOURCE.value,
+            pulse_path=IMAGING_PULSE_RESOURCE.path,
+            signal_plane=FakePlane(),
+        )
+    finally:
+        installation.close()
 
 
 def _sample_writer(folder: Path, *, run: str, generation: str) -> SampleWriter:
@@ -120,7 +133,8 @@ def test_saved_samples_are_written_as_they_arrive_and_calibrate_again(
     """
 
     request = replace(_calibration_request(repeats=12), save_frames=True)
-    first = _task(request).run(tmp_path)
+    with _task(request) as task:
+        first = task.run(tmp_path)
 
     folder = first.artifact_path.parents[1] / "figures"
     archives = sorted(folder.glob("sample_*.npz"))
@@ -152,7 +166,7 @@ def test_saved_samples_are_written_as_they_arrive_and_calibrate_again(
     # And calibrated again from that folder alone.  Same frames, same
     # settings, same answer -- to the pixel.
     def replay(**changes: object):
-        return _task(
+        with _task(
             replace(
                 request,
                 save_frames=False,
@@ -160,7 +174,8 @@ def test_saved_samples_are_written_as_they_arrive_and_calibrate_again(
                 saved_frames_path=str(folder),
                 **changes,
             ),
-        ).run(tmp_path)
+        ) as task:
+            return task.run(tmp_path)
 
     replayed = replay()
     assert replayed.calibration.site_map.n_sites == first.calibration.site_map.n_sites
@@ -197,64 +212,66 @@ def test_a_replay_publishes_what_the_node_declares(tmp_path: Path) -> None:
     """
 
     request = replace(_calibration_request(repeats=6), save_frames=True)
-    acquired = _task(request).run(tmp_path)
+    with _task(request) as task:
+        acquired = task.run(tmp_path)
     folder = acquired.artifact_path.parents[1] / "figures"
 
     plane = SignalDataPlane()
     host = None
-    try:
-        task = _task(
-            replace(
-                request,
-                save_frames=False,
-                frame_source=FRAMES_FROM_FOLDER,
-                saved_frames_path=str(folder),
-            ),
-        )
-        task.signal_plane = plane
-        host = NodeHost(
-            task,
-            plane,
-            Event().set,
-            instance_id="calibration-replay",
-            kind="task",
-            dataset_output_declarations=CALIBRATION_LOGIC_NODE.outputs,
-            required_artifacts={
-                "artifact_path": CALIBRATION_LOGIC_NODE.artifact_outputs[0].contract_id
-            },
-            task_name=CALIBRATION_LOGIC_NODE.api_name,
-        )
-        host.start(run_root=tmp_path, input_summary=request.to_dict())
-        deadline = time.monotonic() + 120.0
-        while time.monotonic() < deadline:
-            host.poll()
-            if host.observation.terminal:
-                break
-            time.sleep(0.01)
-        observation = host.observation
-        assert observation.phase == "done", (
-            f"replay ended in {observation.phase}: {observation.error}"
-        )
-        key = host.signal_key(CAPTURE_PREVIEW_DECLARATION.name)
-        # A successful Task proves every declared output committed at least
-        # once.  The preview stays Monitor/latest-only: its retained last
-        # sample is the picture a panel keeps after the task ends, never
-        # the calibration's scientific final dataset -- the saved report
-        # is that.  (It used to be withdrawn at terminal, which also made
-        # every derivation on a stopped preview answer "run no longer
-        # held".)
-        preview = plane.latest_publication(key)
-        assert preview is not None
-        assert not plane.is_generation_live(key)
-    finally:
-        if host is not None:
-            host.shutdown()
-        plane.close()
+    with _task(
+        replace(
+            request,
+            save_frames=False,
+            frame_source=FRAMES_FROM_FOLDER,
+            saved_frames_path=str(folder),
+        ),
+    ) as task:
+        try:
+            task.signal_plane = plane
+            host = NodeHost(
+                task,
+                plane,
+                Event().set,
+                instance_id="calibration-replay",
+                kind="task",
+                dataset_output_declarations=CALIBRATION_LOGIC_NODE.outputs,
+                required_artifacts={
+                    "artifact_path": CALIBRATION_LOGIC_NODE.artifact_outputs[0].contract_id
+                },
+                task_name=CALIBRATION_LOGIC_NODE.api_name,
+            )
+            host.start(run_root=tmp_path, input_summary=request.to_dict())
+            deadline = time.monotonic() + 120.0
+            while time.monotonic() < deadline:
+                host.poll()
+                if host.observation.terminal:
+                    break
+                time.sleep(0.01)
+            observation = host.observation
+            assert observation.phase == "done", (
+                f"replay ended in {observation.phase}: {observation.error}"
+            )
+            key = host.signal_key(CAPTURE_PREVIEW_DECLARATION.name)
+            # A successful Task proves every declared output committed at
+            # least once.  The preview stays Monitor/latest-only: its
+            # retained last sample is the picture a panel keeps after the
+            # task ends, never the calibration's scientific final dataset --
+            # the saved report is that.  (It used to be withdrawn at
+            # terminal, which also made every derivation on a stopped
+            # preview answer "run no longer held".)
+            preview = plane.latest_publication(key)
+            assert preview is not None
+            assert not plane.is_generation_live(key)
+        finally:
+            if host is not None:
+                host.shutdown()
+            plane.close()
 
 
 def test_site_review_filters_once_then_runs_the_complete_analysis(tmp_path: Path) -> None:
     acquired_request = replace(_calibration_request(repeats=8), save_frames=True)
-    acquired = _task(acquired_request).run(tmp_path)
+    with _task(acquired_request) as task:
+        acquired = task.run(tmp_path)
     folder = acquired.artifact_path.parents[1] / "figures"
     request = replace(
         acquired_request,
@@ -264,134 +281,135 @@ def test_site_review_filters_once_then_runs_the_complete_analysis(tmp_path: Path
         review_detected_sites=True,
     )
     plane = SignalDataPlane()
-    task = _task(request)
-    task.signal_plane = plane
-    wake = Event()
-    host = NodeHost(
-        task,
-        plane,
-        wake.set,
-        instance_id="calibration-review",
-        kind="task",
-        dataset_output_declarations=CALIBRATION_LOGIC_NODE.outputs,
-        required_artifacts={
-            "artifact_path": CALIBRATION_LOGIC_NODE.artifact_outputs[0].contract_id
-        },
-        task_name=CALIBRATION_LOGIC_NODE.api_name,
-    )
-    try:
-        host.start(run_root=tmp_path, input_summary=request.to_dict())
-        deadline = time.monotonic() + 60.0
-        while (
-            host.operator_request is None
-            and not host.terminal
-            and time.monotonic() < deadline
-        ):
-            host.poll()
-            wake.wait(0.01)
-            wake.clear()
-        review = host.operator_request
-        assert review is not None and review.kind == "point-selection", host.observation
-        point_ids = tuple(review.payload["point_ids"])
-        assert len(point_ids) > 1
-        publication = plane.latest_publication(
-            f"@logic/{host.instance_id}/review/{SITE_REVIEW_DECLARATION.name}"
+    with _task(request) as task:
+        task.signal_plane = plane
+        wake = Event()
+        host = NodeHost(
+            task,
+            plane,
+            wake.set,
+            instance_id="calibration-review",
+            kind="task",
+            dataset_output_declarations=CALIBRATION_LOGIC_NODE.outputs,
+            required_artifacts={
+                "artifact_path": CALIBRATION_LOGIC_NODE.artifact_outputs[0].contract_id
+            },
+            task_name=CALIBRATION_LOGIC_NODE.api_name,
         )
-        assert publication is not None
-        excluded = point_ids[-1:]
-        host.submit_operator_input(
-            review.request_id, {"excluded_point_ids": excluded}
-        )
-        while not host.terminal and time.monotonic() < deadline:
-            host.poll()
-            wake.wait(0.01)
-            wake.clear()
-        assert host.observation.phase == "done", host.observation
-        result = host.final_result
-        assert isinstance(result, CalibrationRunResult)
-        assert result.calibration.site_map.n_sites == len(point_ids) - 1
-        assert result.summary["site_review"] == {
-            "detected_sites": len(point_ids),
-            "excluded_site_ids": excluded,
-            "retained_sites": len(point_ids) - 1,
-        }
-        run_root = result.artifact_path.parents[1]
-        assert (run_root / "figures" / "site_review.npz").is_file()
-        assert (run_root / "figures" / "site_review.png").is_file()
-    finally:
-        if host.running:
-            host.cancel("test cleanup")
-            host.poll()
-        host.shutdown()
-        plane.close()
+        try:
+            host.start(run_root=tmp_path, input_summary=request.to_dict())
+            deadline = time.monotonic() + 60.0
+            while (
+                host.operator_request is None
+                and not host.terminal
+                and time.monotonic() < deadline
+            ):
+                host.poll()
+                wake.wait(0.01)
+                wake.clear()
+            review = host.operator_request
+            assert review is not None and review.kind == "point-selection", host.observation
+            point_ids = tuple(review.payload["point_ids"])
+            assert len(point_ids) > 1
+            publication = plane.latest_publication(
+                f"@logic/{host.instance_id}/review/{SITE_REVIEW_DECLARATION.name}"
+            )
+            assert publication is not None
+            excluded = point_ids[-1:]
+            host.submit_operator_input(
+                review.request_id, {"excluded_point_ids": excluded}
+            )
+            while not host.terminal and time.monotonic() < deadline:
+                host.poll()
+                wake.wait(0.01)
+                wake.clear()
+            assert host.observation.phase == "done", host.observation
+            result = host.final_result
+            assert isinstance(result, CalibrationRunResult)
+            assert result.calibration.site_map.n_sites == len(point_ids) - 1
+            assert result.summary["site_review"] == {
+                "detected_sites": len(point_ids),
+                "excluded_site_ids": excluded,
+                "retained_sites": len(point_ids) - 1,
+            }
+            run_root = result.artifact_path.parents[1]
+            assert (run_root / "figures" / "site_review.npz").is_file()
+            assert (run_root / "figures" / "site_review.png").is_file()
+        finally:
+            if host.running:
+                host.cancel("test cleanup")
+                host.poll()
+            host.shutdown()
+            plane.close()
 
 
 def test_failed_calibration_analysis_saves_partial_capture_figure(
     tmp_path: Path, monkeypatch
 ) -> None:
     request = replace(_calibration_request(repeats=3), save_frames=True)
-    acquired = _task(request).run(tmp_path)
+    with _task(request) as task:
+        acquired = task.run(tmp_path)
     folder = acquired.artifact_path.parents[1] / "figures"
-    task = _task(
+    with _task(
         replace(
             request,
             save_frames=False,
             frame_source=FRAMES_FROM_FOLDER,
             saved_frames_path=str(folder),
         )
-    )
-    monkeypatch.setattr(
-        task,
-        "_analyse",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            OSError("calibration analysis failed")
-        ),
-    )
-    plane = SignalDataPlane()
-    task.signal_plane = plane
-    host = NodeHost(
-        task,
-        plane,
-        Event().set,
-        instance_id="calibration-partial",
-        kind="task",
-        dataset_output_declarations=CALIBRATION_LOGIC_NODE.outputs,
-        required_artifacts={
-            "artifact_path": CALIBRATION_LOGIC_NODE.artifact_outputs[0].contract_id
-        },
-        task_name=CALIBRATION_LOGIC_NODE.api_name,
-    )
-    try:
-        host.start(run_root=tmp_path, input_summary=request.to_dict())
-        deadline = time.monotonic() + 60.0
-        while time.monotonic() < deadline and not host.observation.terminal:
-            host.poll()
-            time.sleep(0.01)
-        assert host.observation.phase == "failed"
-        run_root = host.run_directory
-        assert run_root is not None
-        assert (run_root / "figures" / "partial_capture.npz").is_file()
-        assert (run_root / "figures" / "partial_capture.png").is_file()
-        partial_info, _partial_arrays = read_archive(
-            run_root / "figures" / "partial_capture.npz"
+    ) as task:
+        monkeypatch.setattr(
+            task,
+            "_analyse",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("calibration analysis failed")
+            ),
         )
-        assert set(
-            partial_info["sections"]["source"]["run_record"]["actual_devices"]
-        ) == {"camera", "sequencer"}
-        summary = json.loads(
-            (run_root / "partial-summary.json").read_text(encoding="utf-8")
+        plane = SignalDataPlane()
+        task.signal_plane = plane
+        host = NodeHost(
+            task,
+            plane,
+            Event().set,
+            instance_id="calibration-partial",
+            kind="task",
+            dataset_output_declarations=CALIBRATION_LOGIC_NODE.outputs,
+            required_artifacts={
+                "artifact_path": CALIBRATION_LOGIC_NODE.artifact_outputs[0].contract_id
+            },
+            task_name=CALIBRATION_LOGIC_NODE.api_name,
         )
-        assert summary["cycles_completed"] == 3
-        assert summary["status"] == "failed"
-    finally:
-        host.shutdown()
-        plane.close()
+        try:
+            host.start(run_root=tmp_path, input_summary=request.to_dict())
+            deadline = time.monotonic() + 60.0
+            while time.monotonic() < deadline and not host.observation.terminal:
+                host.poll()
+                time.sleep(0.01)
+            assert host.observation.phase == "failed"
+            run_root = host.run_directory
+            assert run_root is not None
+            assert (run_root / "figures" / "partial_capture.npz").is_file()
+            assert (run_root / "figures" / "partial_capture.png").is_file()
+            partial_info, _partial_arrays = read_archive(
+                run_root / "figures" / "partial_capture.npz"
+            )
+            assert set(
+                partial_info["sections"]["source"]["run_record"]["actual_devices"]
+            ) == {"camera", "sequencer"}
+            summary = json.loads(
+                (run_root / "partial-summary.json").read_text(encoding="utf-8")
+            )
+            assert summary["cycles_completed"] == 3
+            assert summary["status"] == "failed"
+        finally:
+            host.shutdown()
+            plane.close()
 
 
 def test_nothing_is_written_unless_the_operator_asks(tmp_path: Path) -> None:
-    task = _task(_calibration_request(repeats=8))
-    assert list(tmp_path.iterdir()) == []
-    result = task.run(tmp_path)
+    with _task(_calibration_request(repeats=8)) as task:
+        assert list(tmp_path.iterdir()) == []
+        result = task.run(tmp_path)
     run_root = result.artifact_path.parents[1]
     assert not tuple((run_root / "figures").glob("sample_*.npz"))
 
@@ -544,7 +562,34 @@ def test_nothing_is_written_unless_the_operator_asks(tmp_path: Path) -> None:
 
 
 def test_calibration_run_result_deep_owns_nested_plain_truth(tmp_path: Path) -> None:
-    base = _task(_calibration_request(repeats=4)).run(tmp_path)
+    """Freezing is a fact about the result object, checked on a hand-built one.
+
+    The calibration and capture it carries are the smallest well-formed
+    ones there are; running a whole virtual acquisition to obtain them
+    coupled a pure ownership assertion to the bench, the physics and the
+    analysis, none of which this test is about.
+    """
+
+    from zlc_atom.devices.camera.contract import CameraCaptureTerminalRecord
+    from zlc_atom.nodes.calibration.calibration import (
+        FrameContract,
+        ReadoutModel,
+        ReadoutModelKind,
+        SiteMap,
+        TrapCalibration,
+    )
+    from zlc_atom.nodes.calibration.task import CalibrationCapture
+
+    sites = SiteMap(("site_0000",), [[1.0, 1.0]], [True], [1.0])
+    model = ReadoutModel(
+        sites.site_ids, [5.0], [0.0], [10.0], [True], [1.0], integration_half_width=1
+    )
+    calibration = TrapCalibration(
+        sites, (model,), ReadoutModelKind.BOX, FrameContract((2, 2))
+    )
+    capture = CalibrationCapture(
+        (_sample_cycle(),), CameraCaptureTerminalRecord(3, True, True, True)
+    )
     report = {
         "nested": {"values": [1, 2]},
         "array": np.asarray([3.0, 4.0]),
@@ -553,10 +598,10 @@ def test_calibration_run_result_deep_owns_nested_plain_truth(tmp_path: Path) -> 
     run_record = {"request": {"photoelectrons": False}}
     summary = {"headline": {"fidelity": [0.9]}}
     result = CalibrationRunResult(
-        base.artifact_path,
-        base.calibration,
+        tmp_path / "final" / "calibration.json",
+        calibration,
         report,
-        base.capture,
+        capture,
         pulse,
         run_record,
         summary,
@@ -587,6 +632,17 @@ def test_calibration_run_result_deep_owns_nested_plain_truth(tmp_path: Path) -> 
 
 
 def test_a_folder_with_no_samples_says_so(tmp_path: Path) -> None:
+    """And says so without touching the bench it never used.
+
+    A replay holds the sequencer only because the descriptor requires one;
+    reading a folder fires nothing, yet every failure in the task sent the
+    board SAFE from an outer catch-all -- an unrelated hardware command on
+    a read-only path, whose own failure then replaced the original error.
+    The acquisition path still drives the board safe on its own failures.
+    """
+
+    from types import SimpleNamespace
+
     empty = tmp_path / "empty"
     empty.mkdir()
     request = replace(
@@ -594,11 +650,134 @@ def test_a_folder_with_no_samples_says_so(tmp_path: Path) -> None:
         frame_source=FRAMES_FROM_FOLDER,
         saved_frames_path=str(empty),
     )
+    safe_calls: list[str] = []
+
+    def touched(*_args, **_kwargs):
+        raise AssertionError("a saved-frame replay must not drive the bench")
+
+    task = CalibrationTask(
+        camera=SimpleNamespace(
+            timeout=1.0,
+            photoelectron_conversion=None,
+            set_exposure_seconds=touched,
+            set_roi=touched,
+            working_point=touched,
+            arm=touched,
+            read_frame_records=touched,
+            finish_record_capture=touched,
+            capture_state=touched,
+        ),
+        sequencer=SimpleNamespace(
+            describe=touched,
+            load=touched,
+            fire=touched,
+            wait_done=touched,
+            snapshot=touched,
+            safe=lambda: safe_calls.append("SAFE"),
+        ),
+        request=request,
+        pulse_sequence=IMAGING_PULSE_RESOURCE.value,
+        pulse_path=IMAGING_PULSE_RESOURCE.path,
+        signal_plane=FakePlane(),
+    )
     with pytest.raises(ValueError, match="no saved calibration samples"):
-        _task(request).run(tmp_path)
+        task.run(tmp_path)
+    assert safe_calls == [], "reading a folder is not a reason to command the board"
     run = json.loads((tmp_path / "calibration" / "run.json").read_text())
     assert run["status"]["state"] == "failed"
     assert "no saved calibration samples" in run["error"]["message"]
+
+
+def test_the_form_and_the_request_agree_that_the_readout_frame_is_the_short_one() -> None:
+    """One relation, one owner's rule: equal exposures are refused at the
+    form exactly as the request refuses them.
+
+    The form validator allowed ``readout == reference`` and the request
+    then refused it, so a draft the form accepted could never start.
+    """
+
+    equal = {
+        "pulse_template": "imaging_template.json",
+        "reference_exposure_seconds": 0.02,
+        "readout_exposure_seconds": 0.02,
+    }
+    with pytest.raises(ValueError, match="shorter than the reference"):
+        CALIBRATION_LOGIC_NODE.authoring_schema.project_values(equal)
+    with pytest.raises(ValueError, match="shorter than the reference"):
+        replace(
+            _calibration_request(),
+            reference_exposure_seconds=0.02,
+            readout_exposure_seconds=0.02,
+        )
+    CALIBRATION_LOGIC_NODE.authoring_schema.project_values(
+        {**equal, "readout_exposure_seconds": 0.005}
+    )
+
+
+def test_a_preview_event_carries_the_settings_its_frames_were_frozen_with() -> None:
+    """The three-frame publication hands Runtime the frames' own settings.
+
+    Each frame carries the device session and epoch it was taken under,
+    sealed at the adapter; the preview event carried none of it, so the
+    lineage of a calibration picture could not say which settings it was
+    taken at -- a cycle straddling a live tune least of all.
+    """
+
+    from zlc_atom.nodes.calibration.outputs import capture_preview_output
+
+    def output(records):
+        return capture_preview_output(
+            records,
+            frame_shape=(2, 2),
+            origin_yx=(0, 0),
+            binning_yx=(1, 1),
+            generation="settings",
+            revision=1,
+            run_record={"request": {"camera_key": "camera"}},
+            value_unit="count",
+        )
+
+    straddling = tuple(
+        CameraFrameRecord(
+            np.full((2, 2), index, dtype="<u2"),
+            index,
+            settings_session_id="camera-session",
+            settings_epochs=(7 + index,),
+        )
+        for index in range(3)
+    )
+    assert output(straddling).event_record == {
+        "device_settings": {
+            "camera": {
+                "device_session_id": "camera-session",
+                "epoch_ranges": [[7, 9]],
+                "mixed": True,
+            }
+        }
+    }
+    steady = tuple(
+        CameraFrameRecord(
+            np.full((2, 2), index, dtype="<u2"),
+            index,
+            settings_session_id="camera-session",
+            settings_epochs=(3,),
+        )
+        for index in range(3)
+    )
+    assert output(steady).event_record == {
+        "device_settings": {
+            "camera": {
+                "device_session_id": "camera-session",
+                "epoch_ranges": [[3, 3]],
+                "mixed": False,
+            }
+        }
+    }
+    assert output(_sample_cycle()).event_record is None, (
+        "frames that carry no settings make no claim"
+    )
+    with pytest.raises(ValueError, match="mixed settings-aware and unaware"):
+        output((*steady[:2], _sample_cycle()[2]))
 
 
 def test_calibrating_from_a_folder_needs_the_folder() -> None:

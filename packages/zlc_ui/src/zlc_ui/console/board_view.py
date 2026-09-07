@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.board import (
     BoardMetrics,
@@ -49,13 +49,17 @@ class ConsoleBoardView(QtWidgets.QWidget):
                 raise TypeError("board cards must be PanelCardView instances")
 
         self._cancel_drag()
-        wanted_ids = {card.panel_id for card in incoming}
+        # A card is retired when its panel leaves the board AND when another
+        # object arrives under the same panel_id: the id is the key, and one
+        # key is one card.  Kept, the replaced object stayed a shown, wired
+        # child of the board behind the card that took its place.
+        arriving = {card.panel_id: card for card in incoming}
         for panel_id, card in tuple(self._cards.items()):
-            if panel_id not in wanted_ids:
+            if arriving.get(panel_id) is not card:
                 card.retire_settings_popup()
                 self._wired_cards.discard(card)
                 retire_widget(card)
-        self._cards = {card.panel_id: card for card in incoming}
+        self._cards = arriving
         if self._anchor_id not in self._cards:
             self._anchor_id = None
             self._anchor = None
@@ -65,9 +69,6 @@ class ConsoleBoardView(QtWidgets.QWidget):
             if card not in self._wired_cards:
                 card.drag_started.connect(
                     lambda point, current=card: self._card_drag_started(current, point)
-                )
-                card.drag_moved.connect(
-                    lambda point, current=card: self._card_drag_moved(current, point)
                 )
                 card.dropped.connect(
                     lambda point, current=card: self._card_dropped(current, point)
@@ -188,11 +189,6 @@ class ConsoleBoardView(QtWidgets.QWidget):
         card.raise_()
         # The card itself has already moved to the raw pointer position.  Do
         # not reflow the remaining cards or paint a dashed insertion ghost.
-
-    def _card_drag_moved(self, card: PanelCardView, local_point: tuple[int, int]) -> None:
-        # Kept as a signal seam for presenters; no live board layout runs
-        # work while the pointer is down.
-        return None
 
     def _card_dropped(self, card: PanelCardView, local_point: tuple[int, int]) -> None:
         # A drop now always follows a drag that crossed the window

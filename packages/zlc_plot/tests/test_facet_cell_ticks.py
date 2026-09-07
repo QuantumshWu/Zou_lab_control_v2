@@ -197,3 +197,53 @@ def test_boundary_label_gating_refires_after_focus_round_trip() -> None:
         _assert_shared_marks_boundary_labels(session)
     finally:
         session.close()
+
+def test_declared_coordinate_names_survive_the_overview_and_the_focus() -> None:
+    """A producer's coordinate labels tick the x axis BY NAME on every surface.
+
+    The native overview cell skipped the cell painter and the grid's tick
+    pass then put numbers where the dataset declared ``zero, one, two``; the
+    focused cell showed the names.  One tick entry serves the standalone
+    curve, the overview cell -- natively painted or not -- and the focused
+    cell, and no later pass replaces the names.
+    """
+
+    from dataclasses import replace
+
+    from zlc_plot import CurvePlot
+
+    points = mapped_domain_from_columns(
+        {"facet": np.repeat([0, 1], 3), "x": np.tile(np.arange(3), 2)}
+    )
+    points = replace(
+        points,
+        axes=tuple(
+            replace(item, coordinate_labels=("zero", "one", "two"))
+            if item.name == "x"
+            else item
+            for item in points.axes
+        ),
+    )
+    schema = make_dataset_schema(repeat_domain(size=1), points)
+    session = PlotSession(
+        make_snapshot(schema, np.arange(6.0)[None, :], revision=0),
+        FacetGridPlot(AxisRef.point("facet"), CurvePlot(AxisRef.point("x"))),
+    )
+    try:
+
+        def names(index: int) -> list[str]:
+            session._renderer.draw()
+            axis = session._renderer.axes["facet_cell"][index]
+            return [text.get_text() for text in axis.get_xticklabels()]
+
+        assert names(0) == ["zero", "one", "two"]
+        session.update_data(
+            make_snapshot(schema, np.arange(6.0)[None, :] + 1.0, revision=1)
+        )
+        assert names(0) == ["zero", "one", "two"]
+        session.focus_facet(0)
+        assert names(0) == ["zero", "one", "two"]
+        session.show_facet_overview()
+        assert names(1) == ["zero", "one", "two"]
+    finally:
+        session.close()

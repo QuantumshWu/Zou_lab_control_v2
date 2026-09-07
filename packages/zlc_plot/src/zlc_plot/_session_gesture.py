@@ -619,7 +619,7 @@ class GestureSessionMixin:
 
         extrema = masked_finite_extrema(values, None)
         if extrema is not None:
-            count, low, high = extrema
+            count, low, high, _integral = extrema
             if count:
                 return NumericRange(low, high)
         finite = np.isfinite(values)

@@ -138,6 +138,42 @@ def test_uart_open_failure_closes_handle_and_transport_start_is_idempotent(
     transport.close()
 
 
+def test_a_close_that_fails_keeps_the_handle_for_the_next_close() -> None:
+    """Closed means released.
+
+    A port whose close raises is still open.  The link used to forget it on
+    the way into the failing call and the transport to mark itself closed on
+    the way out, so the owner's retry -- the device keeps the connection open
+    for exactly that -- found nothing to close while the COM port stayed
+    open behind it.
+    """
+
+    closes: list[int] = []
+
+    class Port:
+        alive = True
+
+        def close(self) -> None:
+            closes.append(1)
+            if len(closes) == 1:
+                raise OSError("scripted close failure")
+            self.alive = False
+
+    port = Port()
+    link = PySerialLink("COM7")
+    link._serial = port
+    transport = UartRegisterTransport(link=link)
+    transport.start()
+    with pytest.raises(OSError, match="scripted close failure"):
+        transport.close()
+    assert port.alive and link._serial is port and not transport._closed
+
+    transport.close()
+    assert not port.alive and link._serial is None and transport._closed
+    transport.close()
+    assert len(closes) == 2
+
+
 def test_uart_crc_status_is_reported_as_crc_error(tmp_path) -> None:
     class FakeLink:
         def open(self):

@@ -180,6 +180,8 @@ def snapshot_from_manifest(
         raise NPZFormatError(f"unsupported data format {manifest['format']!r}")
     referenced: set[str] = set()
     schema = dataset_schema_from_tree(manifest["schema"])
+    if not isinstance(manifest["ref"], Mapping):
+        raise NPZFormatError("manifest.ref must be an object")
     ref_tree = dict(manifest["ref"])
     has_fingerprint = "schema_fingerprint" in ref_tree
     if embedded:
@@ -193,9 +195,11 @@ def snapshot_from_manifest(
     ref = dataset_revision_ref_from_tree(ref_tree)
     values = _array(arrays, manifest["values_key"], referenced, "manifest.values_key")
     validity = _validity_from_manifest(manifest["validity"], arrays, referenced)
+    # The writer omits sigma_key when there is no sigma plane and names a
+    # member when there is one; a present-but-null key is neither.
     sigma_key = manifest.get("sigma_key")
-    if sigma_key is not None and not isinstance(sigma_key, str):
-        raise NPZFormatError("manifest.sigma_key must be a string")
+    if "sigma_key" in manifest and (not isinstance(sigma_key, str) or not sigma_key):
+        raise NPZFormatError("manifest.sigma_key must be a non-empty string")
     sigma = (
         None
         if sigma_key is None
@@ -290,13 +294,27 @@ def load_npz(path: str | os.PathLike[str] | BinaryIO) -> OwnedSnapshot:
                 )
             except (json.JSONDecodeError, TypeError) as exc:
                 raise NPZFormatError(f"invalid manifest JSON: {exc}") from exc
-            members = {name: npz[name] for name in npz.files}
+            # Members by their PHYSICAL names, each exactly once.  A ZIP may
+            # carry two entries of one name, and NpzFile's logical lookup
+            # answers with whichever it finds first -- an ambiguous archive
+            # is refused, never guessed.  (See figure_archive.read_archive
+            # for the same boundary on figures.)
+            zip_names = npz.zip.namelist()
+            if any(not name.endswith(".npy") for name in zip_names):
+                raise NPZFormatError("dataset NPZ may contain only NPY members")
+            names = [name[:-4] for name in zip_names]
+            duplicates = sorted({name for name in names if names.count(name) > 1})
+            if duplicates:
+                raise NPZFormatError(
+                    f"dataset NPZ contains duplicate members {duplicates!r}"
+                )
+            members = {name: npz[f"{name}.npy"] for name in names}
             snapshot = snapshot_from_manifest(manifest, members)
             expected_keys = {_MANIFEST, *manifest_array_keys(manifest)}
-            if set(npz.files) != expected_keys:
+            if set(names) != expected_keys:
                 raise NPZFormatError(
-                    f"NPZ members mismatch; missing={sorted(expected_keys - set(npz.files))}, "
-                    f"extra={sorted(set(npz.files) - expected_keys)}"
+                    f"NPZ members mismatch; missing={sorted(expected_keys - set(names))}, "
+                    f"extra={sorted(set(names) - expected_keys)}"
                 )
             return snapshot
     except NPZFormatError:

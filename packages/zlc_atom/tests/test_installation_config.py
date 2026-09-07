@@ -150,8 +150,12 @@ def test_an_installation_without_simulation_is_refused(tmp_path) -> None:
         load_installation_config(path)
 
 
-def test_a_duplicate_key_or_a_nan_is_refused(tmp_path) -> None:
-    """Both are ways a file can look valid and mean something else."""
+def test_a_duplicate_key_a_nan_or_an_overflow_is_refused(tmp_path) -> None:
+    """All are ways a file can look valid and mean something else.
+
+    An exponent that overflows reads as infinity, which no writer can put
+    back: a configuration that loads and can never be saved again.
+    """
 
     duplicate = tmp_path / "duplicate.json"
     duplicate.write_text(
@@ -171,6 +175,18 @@ def test_a_duplicate_key_or_a_nan_is_refused(tmp_path) -> None:
     )
     with pytest.raises(ValueError, match="NaN"):
         load_installation_config(nan)
+
+    overflow = tmp_path / "overflow.json"
+    overflow.write_text(
+        '{"format":"zlc.installation","simulation":{},'
+        '"devices":[{"instance_id":"c","role":"c",'
+        '"type_id": "camera.virtual", "parameters": {"exposure_seconds": 1e309}}]}',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="finite"):
+        load_installation_config(overflow)
+    with pytest.raises(ValueError, match="finite"):
+        DeviceInstanceConfig("c", "c", "camera.virtual", {"exposure_seconds": float("inf")})
 
 
 def test_a_parameter_that_a_file_cannot_hold_is_refused() -> None:

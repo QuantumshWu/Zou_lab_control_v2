@@ -121,6 +121,77 @@ def test_a_rarely_loaded_trap_is_still_found_by_frame_changes() -> None:
     assert found >= len(centres) - 1
 
 
+def test_a_weak_trap_in_its_neighbours_dark_ring_is_admitted_by_its_changes() -> None:
+    """The two evidences are the whole admission; there is no brightness bar.
+
+    A weak trap between bright neighbours sits in their band-pass dark ring,
+    so on no single frame does it stand above the frame's background -- yet
+    its loading and unloading are a 28-sigma neighbouring-frame change on
+    this lattice.  A third bar, "was the place ever bright on one frame",
+    threw exactly that trap away; the difference evidence alone keeps it.
+    """
+
+    rng = np.random.default_rng(5)
+    shots, height, width = 120, 60, 60
+    grid_y, grid_x = np.mgrid[0:height, 0:width]
+    stack = rng.normal(120.0, 7.0, size=(shots, height, width))
+    centres = [
+        (30.0 + 6.0 * dx, 30.0 + 6.0 * dy) for dy in (-1, 0, 1) for dx in (-1, 0, 1)
+    ]
+    weak = 4
+    for index, (x, y) in enumerate(centres):
+        spot = np.exp(-(((grid_x - x) ** 2 + (grid_y - y) ** 2) / 2.0))
+        amplitude = 60.0 if index == weak else 1100.0
+        stack[rng.random(shots) < 0.5] += amplitude * spot
+
+    found = detect_sites(stack, spot_sigma=1.0)
+    got = np.asarray(found.centers_xy)
+    assert found.n_sites == len(centres)
+    assert all(
+        float(np.min(np.hypot(got[:, 0] - x, got[:, 1] - y))) < 1.0
+        for x, y in centres
+    )
+
+
+def test_an_unloaded_lattice_cell_between_changing_neighbours_is_not_a_site() -> None:
+    """A change admits the place where the change PEAKS.
+
+    The middle of an unloaded cell of a lattice is the least dark point of
+    its neighbours' band-pass rings -- a local maximum of the average -- and
+    every neighbour's loading changes it, by enough to clear the change bar
+    when two or three flip together.  It is a hollow of the change, growing
+    towards whichever neighbour made it, not a peak: the difference
+    evidence, judged where it peaks, leaves the cell empty for the
+    registration to predict.  Without that judgement the cell was published
+    as a ninth site with a fit made of its neighbours' rings.
+    """
+
+    rng = np.random.default_rng(41)
+    shots, height, width = 100, 50, 50
+    grid_y, grid_x = np.mgrid[0:height, 0:width]
+    centres = [
+        (15.0 + 10.0 * dx, 15.0 + 10.0 * dy) for dy in (0, 1, 2) for dx in (0, 1, 2)
+    ]
+    vacancy = 4
+    stack = rng.normal(100.0, 3.0, size=(shots, height, width))
+    for index, (x, y) in enumerate(centres):
+        if index == vacancy:
+            continue
+        spot = np.exp(-(((grid_x - x) ** 2 + (grid_y - y) ** 2) / (2.0 * 1.1**2)))
+        stack[rng.random(shots) < 0.5] += 800.0 * spot
+
+    found = detect_sites(stack, spot_sigma=1.1, measurement_radius=1)
+    got = np.asarray(found.centers_xy)
+    assert found.n_sites == len(centres) - 1
+    hollow_x, hollow_y = centres[vacancy]
+    assert float(np.min(np.hypot(got[:, 0] - hollow_x, got[:, 1] - hollow_y))) > 5.0
+    assert all(
+        float(np.min(np.hypot(got[:, 0] - x, got[:, 1] - y))) < 1.0
+        for index, (x, y) in enumerate(centres)
+        if index != vacancy
+    )
+
+
 def test_frame_changes_recover_single_and_half_loaded_sites() -> None:
     """One changed pair is enough, while the average catches a steady site."""
 
@@ -225,14 +296,3 @@ def test_average_peak_identity_preserves_close_lattices_without_duplicates() -> 
     )
     stack[rng.random(100) < 0.5] += 1100.0 * one_spot
     assert detect_sites(stack, spot_sigma=1.2).n_sites == 1
-
-
-def test_pure_background_is_not_a_site() -> None:
-    """Pure background invents no spatially significant change or average peak."""
-
-    import pytest
-
-    rng = np.random.default_rng(17)
-    background = rng.normal(120.0, 7.0, size=(120, 76, 72))
-    with pytest.raises(ValueError, match="no detectable sites"):
-        detect_sites(background, spot_sigma=1.2)

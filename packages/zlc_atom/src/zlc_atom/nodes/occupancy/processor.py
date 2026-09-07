@@ -312,18 +312,27 @@ class OccupancyProcessor:
         # verdict cannot be derived from two different values of the same
         # measurement.
         counts = np.full((flat.shape[0], n_sites), np.nan, dtype="<f4")
-        for index in np.flatnonzero(cell_valid):
-            counts[index] = self.readout.signals(
-                flat[index],
-                model_kind=self.model.kind,
-            )
+        # A signal single precision cannot hold overflows in this cast.  It
+        # is judged below, where every site whose count is not a finite
+        # number is marked invalid, so the cast need not also warn.
+        with np.errstate(over="ignore"):
+            for index in np.flatnonzero(cell_valid):
+                counts[index] = self.readout.signals(
+                    flat[index],
+                    model_kind=self.model.kind,
+                )
         model = self.model
         site_usable = (
             self.readout.site_map.valid_sites
             & model.usable_sites
             & np.isfinite(model.thresholds)
         )
-        valid = cell_valid[:, None] & site_usable[None, :]
+        # A verdict needs a number to read.  Where the readout produced none
+        # -- a frame with NaN in the box, a sum beyond single precision --
+        # there is no count and no verdict, and the site is INVALID for this
+        # cell: publishing it as a valid EMPTY would let a survival or
+        # agreement panel count an unjudgeable trial as an atom lost.
+        valid = cell_valid[:, None] & site_usable[None, :] & np.isfinite(counts)
         counts[~valid] = np.nan
         occupied = classify_threshold(counts, model.thresholds) & valid
         counts = counts.reshape((repeats, points, n_sites))

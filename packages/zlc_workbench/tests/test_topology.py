@@ -21,6 +21,7 @@ from pathlib import Path
 import time
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -30,13 +31,78 @@ from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementNode,
     CameraMeasurementRequest,
 )
+from zlc_data import (
+    REPEAT,
+    SCAN_POINT,
+    SITE,
+    AxisId,
+    AxisSpec,
+    DatasetSchema,
+    DomainSpec,
+    ValueSchema,
+    owned_snapshot_from_arrays,
+)
+from zlc_runtime import (
+    DatasetOutputDeclaration,
+    LiveDatasetOutput,
+    MonitorCoverage,
+    SignalDataPlane,
+)
+from zlc_workbench.logic import stable_signal_key
 from zlc_workbench.session import ExperimentSession
 from zlc_workbench.topology import SignalRow, format_signal_shape, project_signals
 from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, write_ordinary_pulse
 
 
 @pytest.fixture
+def plane():
+    """A bare plane: the projection reads its descriptions and nothing else."""
+
+    plane = SignalDataPlane()
+    try:
+        yield plane
+    finally:
+        plane.close()
+
+
+def _finished_frames(plane, producer: str = "cm") -> str:
+    """One sealed ``frames`` Dataset under ``producer``; its signal name.
+
+    What a finished camera run leaves on the plane is a sealed publication
+    with a shape.  Putting that there directly keeps the apparatus that
+    would have acquired it out of a test whose subject is how a description
+    is spelled for a person.
+    """
+
+    declaration = DatasetOutputDeclaration("frames", "camera.frames")
+    node = SimpleNamespace(
+        instance_id=producer,
+        dataset_output_declarations=(declaration,),
+        signal_key=lambda name: stable_signal_key(producer, name),
+    )
+    repeat = AxisSpec(AxisId(f"{producer}.repeat"), "repeat", REPEAT, 1, (0,))
+    point = AxisSpec(AxisId(f"{producer}.point"), "point", SCAN_POINT, 1, (0,))
+    site = AxisSpec(AxisId(f"{producer}.site"), "site", SITE, 3, (0, 1, 2))
+    schema = DatasetSchema(
+        DomainSpec((1,), (repeat,), ((0,),)),
+        DomainSpec((1,), (point,), ((0,),)),
+        DomainSpec((3,), (site,)),
+        ValueSchema.scalar(np.dtype("<f8")),
+    )
+    snapshot = owned_snapshot_from_arrays(schema, np.zeros((1, 1, 3)), 0)
+    plane.begin_generation(node)
+    plane.commit_live(
+        node,
+        {"frames": LiveDatasetOutput(declaration, snapshot, MonitorCoverage(1, 1), {})},
+    )
+    plane.seal_committed(node)
+    return node.signal_key("frames")
+
+
+@pytest.fixture
 def session(tmp_path):
+    """The virtual apparatus, for the one test about a run still arriving."""
+
     write_ordinary_pulse(tmp_path)
     session = ExperimentSession.open(tmp_path, template="virtual")
     try:
@@ -45,7 +111,7 @@ def session(tmp_path):
         session.close()
 
 
-def _measure(session, producer: str = "cm"):
+def _measure(session, producer: str):
     session.load_pulse(PULSE_NAME)
     node = CameraMeasurementNode(
         camera=session.camera,
@@ -59,14 +125,13 @@ def _measure(session, producer: str = "cm"):
     return node
 
 
-def test_a_finished_measurement_is_offerable_and_says_it_is_finished(session) -> None:
-    node = _measure(session)
-    rows = project_signals(session.signal_plane)
+def test_a_finished_measurement_is_offerable_and_says_it_is_finished(plane) -> None:
+    signal = _finished_frames(plane)
+    rows = project_signals(plane)
     assert rows, "a run that produced data offered nothing to look at"
-    row = next(row for row in rows if row.name == node.signal_key("frames"))
-    value = session.signal_plane.freeze().value(row.name)
-    assert value is not None
-    assert row.label == f"frames  [{format_signal_shape(value.shape)}]"
+    row = next(row for row in rows if row.name == signal)
+    assert row.label == f"frames  [{format_signal_shape((1, 1, 3))}]"
+    assert row.label == "frames  [1 × 1 × (3)]"
     assert row.producer == "cm"
     assert row.state == "finished"
     assert row.derived_from == ""
@@ -123,18 +188,17 @@ def test_a_live_monitor_is_offered_before_a_finished_run(session) -> None:
         monitor.close()
 
 
-def test_a_panel_already_showing_a_signal_says_so(session) -> None:
-    node = _measure(session)
-    signal = node.signal_key("frames")
-    rows = project_signals(session.signal_plane, shown={signal})
+def test_a_panel_already_showing_a_signal_says_so(plane) -> None:
+    signal = _finished_frames(plane)
+    rows = project_signals(plane, shown={signal})
     assert next(row for row in rows if row.name == signal).shown
 
 
-def test_only_plain_values_cross(session) -> None:
+def test_only_plain_values_cross(plane) -> None:
     """The rule that keeps a window from reading the plane directly."""
 
-    _measure(session)
-    for row in project_signals(session.signal_plane):
+    _finished_frames(plane)
+    for row in project_signals(plane):
         assert isinstance(row, SignalRow)
         assert isinstance(row.name, str)
         assert isinstance(row.label, str)

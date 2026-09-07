@@ -243,7 +243,8 @@ if not exist "%ZLC_CFG_JSON%" (
   exit /b 1
 )
 pushd "%TEMP%"
-%ZLC_PY_CMD% -c "import dataclasses,json,pathlib,sys;import zou_lab_control;from zlc_pulse.fpga import load_streamer_config;from zlc_pulse.wire import StreamerParams;p=pathlib.Path(sys.argv[1]).resolve();pairs=lambda x:dict(x) if len(x)==len(dict(x)) else (_ for _ in ()).throw(ValueError('duplicate key in streamer_config.json'));raw=json.loads(p.read_text(encoding='utf-8'),object_pairs_hook=pairs,parse_constant=lambda x:(_ for _ in ()).throw(ValueError('non-finite JSON constant '+x)));top={'_README','_field_docs','fpga_part','clock_hz','target_pct','params','board'};expected={f.name for f in dataclasses.fields(StreamerParams)}|{'slot_mul_width'};assert isinstance(raw,dict) and set(raw)==top,'streamer_config.json fields are not exact';assert isinstance(raw['params'],dict) and set(raw['params'])==expected,'streamer_config.json params fields are not exact';assert isinstance(raw['board'],dict),'streamer_config.json board must be an object';assert isinstance(raw['fpga_part'],str) and raw['fpga_part'].strip(),'fpga_part must be non-empty text';cfg=load_streamer_config(p);assert cfg['source'] is not None and pathlib.Path(cfg['source']).resolve()==p,'build config fell back from the requested file';assert not cfg['warnings'],'; '.join(cfg['warnings']);print(cfg['fpga_part'])" "%ZLC_CFG_JSON%"
+rem The config owner's strict door: one grammar, in zlc_pulse, not restated here.
+%ZLC_PY_CMD% -c "import sys;import zou_lab_control;from zlc_pulse.fpga import require_streamer_config;print(require_streamer_config(sys.argv[1])['fpga_part'])" "%ZLC_CFG_JSON%"
 set "ZLC_CONFIG_STATUS=%ERRORLEVEL%"
 popd
 if not "%ZLC_CONFIG_STATUS%"=="0" (
@@ -409,12 +410,17 @@ if errorlevel 1 (
 exit /b 0
 
 :zlc_print_capacity_estimate
+rem The estimate is the config's own budget: it answers 1 when a resource
+rem exceeds the target_pct the config declares, and a build that starts anyway
+rem spends an hour of Vivado on a geometry the config already refused.  The
+rem answer is passed up, and the caller stops on it.
 set "ZLC_EST_PART=%ZLC_PS_FPGA_PART%"
 if "%ZLC_EST_PART%"=="" set "ZLC_EST_PART=xc7a35tfgg484-2"
 pushd "%TEMP%"
 %ZLC_PY_CMD% -m zou_lab_control fpga --part "%ZLC_EST_PART%"
+set "ZLC_EST_STATUS=%ERRORLEVEL%"
 popd
-exit /b 0
+exit /b %ZLC_EST_STATUS%
 
 :zlc_default_paths
 if defined ZLC_PS_BUILD_ROOT if "!ZLC_PS_BUILD_ROOT: =!"=="" set "ZLC_PS_BUILD_ROOT="

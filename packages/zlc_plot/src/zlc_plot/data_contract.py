@@ -172,9 +172,6 @@ class AxisFamilies:
     def live_data(self) -> tuple[AxisEntry, ...]:
         return tuple(entry for entry in self.data if entry[1] > 1)
 
-    def first_data_axis(self) -> AxisRef | None:
-        return self.data[0][0] if self.data else None
-
 
 def classify_axes(schema: DatasetSchema) -> AxisFamilies:
     """Group a dataset's axes into :class:`AxisFamilies`.

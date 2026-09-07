@@ -429,6 +429,7 @@ class NodeHost:
         self._follow_tap: FollowTap[SignalPublication] | None = None
         self._task_run: TaskRun | None = None
         self._partial_exit_writer: Callable[[str, BaseException], None] | None = None
+        self._partial_exit_failure: BaseException | None = None
         self._operator_condition = threading.Condition()
         self._operator_request: OperatorInputRequest | None = None
         self._operator_response: Mapping[str, object] | object = _UNRESOLVED
@@ -634,6 +635,7 @@ class NodeHost:
         self._resolved_input_signals = None
         self._follow_tap = None
         self._task_run = None
+        self._partial_exit_failure = None
         with self._operator_condition:
             self._operator_request = None
             self._operator_response = _UNRESOLVED
@@ -793,8 +795,26 @@ class NodeHost:
         and then disposed of it as a failure.  A stopped scan therefore
         vanished from the bench, taking the panel watching it, its Edit
         snapshot and its Save with it.
+
+        What the Task's exit writer could not save is part of how the run
+        ended, whichever way it ended.  On a failure it is a note on the
+        failure, which the record's traceback carries.  A Stop has no
+        failure to note it on -- the interruption IS the stop, not a fault
+        -- so it is the observation's error and the stopped record's error
+        while the phase stays cancelled: a stopped run is not a failed one,
+        and a report that was never written is not a run that stopped
+        cleanly.
         """
 
+        unsaved = self._partial_exit_failure
+        unsaved_text = (
+            None
+            if unsaved is None
+            else (
+                "Task partial artifacts could not be saved: "
+                f"{type(unsaved).__name__}: {unsaved}"
+            )
+        )
         kept = False
         terminal_phase = phase
         terminal_exception = error
@@ -815,6 +835,10 @@ class NodeHost:
                 terminal_error_text = str(terminal_exception)
         if not kept:
             self._retire_plane_state()
+        if terminal_exception is None:
+            terminal_error_text = unsaved_text
+        elif unsaved_text is not None:
+            terminal_exception.add_note(unsaved_text)
         self._result = _UNRESOLVED
         self._phase = terminal_phase
         self._error = terminal_error_text
@@ -824,7 +848,7 @@ class NodeHost:
         if self._task_run is not None:
             try:
                 if terminal_phase == "cancelled":
-                    self._task_run.mark_stopped()
+                    self._task_run.mark_stopped(unsaved)
                 else:
                     assert terminal_exception is not None
                     self._task_run.mark_failed(terminal_exception)
@@ -993,16 +1017,19 @@ class NodeHost:
         status: str,
         error: BaseException,
     ) -> None:
+        """Call the Task's exit writer once, on the worker thread, and keep
+        its failure for the ending to report: the exception carried out of
+        the worker is not always the one the run ends with -- a Stop's
+        interruption is dropped, being the stop itself -- so a note on it
+        alone was a note nobody read."""
+
         writer, self._partial_exit_writer = self._partial_exit_writer, None
         if writer is None:
             return
         try:
             writer(str(status), error)
         except BaseException as artifact_error:
-            error.add_note(
-                "Task partial artifacts could not be saved: "
-                f"{type(artifact_error).__name__}: {artifact_error}"
-            )
+            self._partial_exit_failure = artifact_error
 
     def _mark_task_run_failed(self, error: BaseException) -> None:
         run = self._task_run

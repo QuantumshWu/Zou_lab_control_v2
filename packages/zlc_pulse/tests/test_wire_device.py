@@ -432,6 +432,78 @@ def test_delay_capacity_covers_load_repeat_seams_and_terminal_safe() -> None:
         terminal_streamer.fire(run_repeats=1, scan_repeats=2)
 
 
+def test_a_constant_bracket_body_does_not_crowd_the_runs_after_it() -> None:
+    """The capacity walk keeps a Pulse's true length however long its Bracket.
+
+    A body that changes no level adds no queue entry, so the Runs after it
+    are spaced by the loop's real length: three tick rise, 3 + 4 x 4 fall,
+    22 ticks per Pulse, never more than two edges in any closed 20-tick
+    window.  Walking a SHORTENED loop moved the later Runs closer and refused
+    the program for three entries in flight that never coexist.
+    """
+
+    geometry = replace(
+        StreamerParams(),
+        max_edges=8,
+        bank_size=2,
+        evt_fifo_depth=2,
+        bus_evt_fifo_depth=2,
+    )
+    low = (0,) * len(_BOARD_TARGET.raw_lanes)
+    high = list(low)
+    high[_BOARD_TARGET.raw_lanes.index(_DIGITAL_PORT.lanes[0])] = 1
+
+    def constant_body(count: int) -> PulseSequence:
+        return PulseSequence(
+            target=_BOARD_TARGET,
+            time_step_ns=20,
+            periods=(
+                PulsePeriod("pre", 60, "ns", low),
+                PulsePeriod("body", 80, "ns", tuple(high)),
+                PulsePeriod("post", 60, "ns", low),
+            ),
+            bracket=PulseBracket("body", "body", count),
+            delays=(OutputDelay(_DIGITAL_PORT.key, 400, "ns"),),
+        )
+
+    for count in (4, 100_000):
+        source = constant_body(count)
+        program = compile_sequence(source, geometry, 50e6)
+        transport = MemoryRegisterTransport(geom=geometry, auto_done=True)
+        streamer = PulseStreamer(transport, geometry, 50e6, target=_BOARD_TARGET)
+        streamer.open()
+        try:
+            streamer.load(program, source=source)
+            streamer.fire(run_repeats=3)
+            assert streamer.wait_done(1.0) is not None
+        finally:
+            streamer.close()
+
+    # A body whose edges really do crowd the queue is still refused, however
+    # deep in the loop the crowding would happen.
+    crowded = PulseSequence(
+        target=_BOARD_TARGET,
+        time_step_ns=20,
+        periods=(
+            PulsePeriod("pre", 60, "ns", low),
+            PulsePeriod("up", 40, "ns", tuple(high)),
+            PulsePeriod("down", 40, "ns", low),
+            PulsePeriod("post", 60, "ns", low),
+        ),
+        bracket=PulseBracket("up", "down", 100_000),
+        delays=(OutputDelay(_DIGITAL_PORT.key, 400, "ns"),),
+    )
+    program = compile_sequence(crowded, geometry, 50e6)
+    transport = MemoryRegisterTransport(geom=geometry, auto_done=True)
+    streamer = PulseStreamer(transport, geometry, 50e6, target=_BOARD_TARGET)
+    streamer.open()
+    try:
+        with pytest.raises(ValueError, match="channel .* needs"):
+            streamer.load(program, source=crowded)
+    finally:
+        streamer.close()
+
+
 def test_applied_state_round_trip_and_gui_sync() -> None:
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
     source = _sequence(slotted=True)
@@ -631,6 +703,15 @@ def test_layout_check_and_transport_self_test_use_the_frozen_ctrl_contract() -> 
     streamer.transport_self_test(count=3)
 
     assert all(transport.words.get(geom.ctrl_scratch_base + index, 0) == 0 for index in range(3))
+
+    # A count past the scratch extent stops short of the layout fingerprint:
+    # the handshake answer is not scratch, and a self-test that wrote it left
+    # the next layout check refusing the board it had just passed.
+    assert geom.ctrl_scratch_words == CtrlWords.LAYOUT_ID - geom.ctrl_scratch_base
+    fingerprint = transport.read_word(CtrlWords.LAYOUT_ID)
+    streamer.transport_self_test(count=geom.ctrl_scratch_words + 5)
+    assert transport.read_word(CtrlWords.LAYOUT_ID) == fingerprint
+    streamer.check_register_layout()
 
 
 def test_wait_done_uses_observer_owned_terminal_double_reads() -> None:

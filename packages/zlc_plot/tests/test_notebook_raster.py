@@ -29,6 +29,7 @@ from zlc_plot import (
 from zlc_plot.selectors import RectangleRange, SelectorState
 from zlc_plot.notebook import (
     _WIDGET_ESM,
+    _frame_context,
     _front_packet,
     _selector_state_to_dict,
     _snapshot_display_data,
@@ -123,6 +124,101 @@ def test_widget_esm_is_a_pure_frame_blitter_and_input_normalizer() -> None:
     # blurry and then jump once the environment report round-trips.
     assert "_acceptFrame" in _WIDGET_ESM
     assert "_graceDeadline" in _WIDGET_ESM
+    # A pointer is a point on the frame the view PAINTED, and that frame's
+    # identity and axes go back with every pointer message, untouched: the
+    # view computes no geometry of its own.
+    assert "this._painted = frame" in _WIDGET_ESM
+    assert "frame: {identity: painted.identity, axes: painted.axes}" in _WIDGET_ESM
+    # Hover and leave reach the kernel's series inspector, as they do from Qt.
+    assert "this._dragging ? this._button : null" in _WIDGET_ESM
+    assert "pointerleave" in _WIDGET_ESM
+
+
+def _echoed_frame(front) -> dict:
+    """What the browser sends back: the packet header's own frame context.
+
+    Through JSON both ways, exactly as the comm carries it.
+    """
+
+    packet = _front_packet(front)
+    (size,) = struct.unpack("<I", packet[:4])
+    header = json.loads(packet[4 : 4 + size].decode("utf-8"))
+    return json.loads(json.dumps({"identity": header["identity"], "axes": header["axes"]}))
+
+
+def test_a_pointer_is_read_through_the_frame_the_browser_painted() -> None:
+    """The kernel interprets a pointer through the frame the browser shows.
+
+    Sending a front and painting it are separate turns: the browser may
+    still show A (x over 0..10) while the kernel has already sent B (x over
+    0..100).  Read through the newest SENT front, a press on x=5 of A landed
+    at x=50 -- ten times off.  The browser echoes the painted frame's
+    identity and axes with every pointer, and the press is read through
+    those.
+    """
+
+    view = NotebookView(_session(), close_session_on_close=True)
+    try:
+        host = view.host
+        host.wait_for_front(timeout=5.0)
+        shown = host.set_x_limits(0.0, 10.0).result(timeout=5.0).front
+        view._publish_front(shown)
+        sent = host.set_x_limits(0.0, 100.0).result(timeout=5.0).front
+        view._publish_front(sent)
+        assert view._front is sent
+        painted = _echoed_frame(shown)
+        assert json.dumps(painted) == json.dumps(_frame_context(shown))
+        nx, ny = shown.interaction.axes[0].display_to_normalized(5.0, 2.0)
+        for action in ("press", "release"):
+            view._pointer_message(
+                {"action": action, "x": nx, "y": ny, "button": 3, "frame": painted}
+            )
+        host.dispatch_control(lambda: None).result(timeout=5.0)
+        state = view.session.selector_state(SelectorKind.CROSSHAIR)
+        assert state is not None
+        assert abs(state.value.x - 5.0) < 0.2, state.value
+    finally:
+        view.close()
+
+
+def test_the_notebook_forwards_hover_moves_and_leave_to_the_host(monkeypatch) -> None:
+    """An unheld move is a hover and a leave clears it; both reach the host.
+
+    The grouped-series inspector -- the highlighted line and its text -- is
+    fed by moves with no button down and cleared by leave.  The browser
+    forwarded moves only while dragging and never a leave, so the Notebook
+    had no hover at all.  A message naming no painted frame points at
+    nothing and reaches nobody.
+    """
+
+    view = NotebookView(_session(), close_session_on_close=True)
+    try:
+        host = view.host
+        front = host.wait_for_front(timeout=5.0)
+        painted = _echoed_frame(front)
+        calls: list[tuple[str, object, object, bool]] = []
+        original = host.pointer_event
+
+        def spy(action, x, y, **kwargs):
+            calls.append(
+                (action, kwargs.get("button"), kwargs.get("identity"), kwargs.get("held"))
+            )
+            return original(action, x, y, **kwargs)
+
+        monkeypatch.setattr(host, "pointer_event", spy)
+        view._pointer_message(
+            {"action": "move", "x": 0.5, "y": 0.5, "button": None, "frame": painted}
+        )
+        view._pointer_message({"action": "leave", "x": 0.99, "y": 0.5, "frame": painted})
+        view._pointer_message({"action": "move", "x": 0.5, "y": 0.5, "button": None})
+        host.dispatch_control(lambda: None).result(timeout=5.0)
+        assert [(action, button, held) for action, button, _identity, held in calls] == [
+            ("move", None, False),
+            ("leave", None, False),
+        ]
+        assert all(identity == front.identity for _a, _b, identity, _h in calls)
+    finally:
+        view.close()
 
 def test_session_mutation_republishes_front_and_keeps_pointer_compatible() -> None:
     """Every external setter publishes changed pixels through the host front."""
@@ -297,6 +393,61 @@ def test_pulse_selectors_paint_in_source_units_and_fit_catalogue_is_empty() -> N
     finally:
         host.close(timeout=5.0)
         session.close()
+
+def test_every_public_loop_bracket_stands_inside_the_timeline_axes() -> None:
+    """The outermost bracket's foot is drawn, not clipped at the axes edge.
+
+    ``PulseTimelineData`` accepts any number of nested loop markers, inner
+    to outer, and each deeper bracket's foot sits one step lower.  The
+    footer was a constant that cleared two feet, so a third bracket's
+    bottom rail stood outside the axes and the clip took it.  One or two
+    brackets draw exactly as before.
+    """
+
+    from zlc_plot import (
+        PulseBlock,
+        PulseChannel,
+        PulseLoopMarker,
+        PulseTimelineData,
+        pulse_timeline,
+    )
+
+    def timeline(count: int):
+        markers = tuple(
+            PulseLoopMarker(
+                (3.0 - depth) * 1.0e-6, (8.0 + depth) * 1.0e-6, f"×{depth + 2}"
+            )
+            for depth in range(count)
+        )
+        return pulse_timeline(
+            PulseTimelineData(
+                channels=(PulseChannel("laser", "Laser"),),
+                blocks=(PulseBlock("laser", 0.0, 4.0e-6, label="Init"),),
+                loop_markers=markers,
+                time_unit="s",
+                total_duration=12.0e-6,
+            )
+        )
+
+    bottoms: dict[int, float] = {}
+    authored = None
+    for count in (1, 2, 3):
+        session = timeline(count)
+        try:
+            renderer = session._renderer
+            authored = renderer.style.pulse.ylim_bottom
+            renderer.draw()
+            low, _high = (float(value) for value in renderer.primary_axes.get_ylim())
+            bottoms[count] = low
+            for key in ("pulse:loop_left", "pulse:loop_right"):
+                lines = [line for line in renderer._artists[key] if line.get_visible()]
+                assert len(lines) == count
+                for line in lines:
+                    assert float(np.min(line.get_ydata())) > low
+        finally:
+            session.close()
+    assert bottoms[1] == bottoms[2] == authored
+    assert bottoms[3] < bottoms[2]
 
 def test_environment_message_rescales_raster_to_reported_pixel_ratio() -> None:
     """The browser's pixel-density report must drive the kernel raster size."""
@@ -660,3 +811,19 @@ def test_fit_area_pointer_sequence_never_promotes_a_blank_front() -> None:
             assert np.count_nonzero(rgba) > 0
     finally:
         host.close(timeout=5.0)
+
+def test_the_device_pixel_ratio_has_one_entry() -> None:
+    """A DPR change goes through the public entry alone.
+
+    The private variant it wrapped preserved an attached native canvas that
+    no caller attaches any more; a flag every caller passed as False is a
+    branch nobody can reach.
+    """
+
+    session = _session()
+    try:
+        assert not hasattr(session, "_set_device_pixel_ratio")
+        assert session.set_device_pixel_ratio(2.0).device_pixel_ratio == 2.0
+        assert session.surface_plan.device_pixel_ratio == 2.0
+    finally:
+        session.close()

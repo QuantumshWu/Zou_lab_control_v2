@@ -78,7 +78,12 @@ class IndexRangeSelection:
 
 @dataclass(frozen=True)
 class CoordinateRangeSelection:
-    """Retain a numeric closed interval or one exact text/null coordinate."""
+    """Retain a numeric closed interval, or one exact coordinate of any type.
+
+    Equal numeric bounds name one coordinate exactly, the way a text or null
+    bound does; only unequal bounds ask for an ORDER, which exists solely on
+    an axis that is numeric throughout.
+    """
 
     axis_id: AxisId
     lower: CoordinateScalar
@@ -268,9 +273,13 @@ def resolve_selection_indices(
                 f"coordinate selection is empty on axis {axis.axis_id}"
             )
         return range(lower, upper + 1), False
-    if isinstance(term.lower, (int, float)) and isinstance(
-        term.upper, (int, float)
+    if (
+        isinstance(term.lower, (int, float))
+        and isinstance(term.upper, (int, float))
+        and term.lower != term.upper
     ):
+        # An interval asks which coordinates lie BETWEEN two numbers, and
+        # that order exists only on an axis that is numeric throughout.
         if any(
             value is not None
             and (isinstance(value, (bool, str)) or not isinstance(value, Real))
@@ -283,11 +292,13 @@ def resolve_selection_indices(
             if value is not None and term.lower <= value <= term.upper
         )
     else:
-        indices = tuple(
-            index
-            for index, value in enumerate(axis.coordinates)
-            if value == term.lower
-        )
+        # One exact coordinate -- a number, a text or null -- is an equality
+        # question every axis answers, whatever else it holds: an axis whose
+        # cells are ``0`` and ``"bright"`` can be scoped to either.  The
+        # axis's own coordinate index answers it; a Dataset axis holds each
+        # coordinate once, so the answer is one position.
+        position = axis.coordinate_position(term.lower)
+        indices = () if position is None else (position,)
     if not indices:
         raise EmptySelection(
             f"coordinate selection is empty on axis {axis.axis_id}"

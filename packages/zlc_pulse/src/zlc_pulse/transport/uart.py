@@ -60,9 +60,18 @@ class PySerialLink:
         self._serial = serial_port
 
     def close(self) -> None:
-        serial_port, self._serial = self._serial, None
-        if serial_port is not None:
-            serial_port.close()
+        """Release the port, and forget the handle only once it is released.
+
+        A close that raises has released nothing.  The handle stays here so
+        the owner's next close reaches the same port again, rather than
+        finding nothing to close while the COM port stays open behind it.
+        """
+
+        serial_port = self._serial
+        if serial_port is None:
+            return
+        serial_port.close()
+        self._serial = None
 
     def exchange(self, request: bytes, *, deadline: float, stop: threading.Event | None = None) -> bytes:
         if stop is not None and stop.is_set():
@@ -234,12 +243,18 @@ class UartRegisterTransport:
                 self._closed = False
 
     def close(self) -> None:
+        """Closed means released.
+
+        A link close that raises leaves the transport open, so the owner's
+        retry reaches the port again; marking it closed on the way out turned
+        an unreleased handle into one nothing could reach.
+        """
+
         with self._lock:
-            try:
-                if not self._closed:
-                    self._link.close()
-            finally:
-                self._closed = True
+            if self._closed:
+                return
+            self._link.close()
+            self._closed = True
 
     def write_words(
         self,

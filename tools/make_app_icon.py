@@ -99,7 +99,14 @@ def main(argv: list[str] | None = None) -> int:
     out = Path(arguments.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     frames = [render(side) for side in SIZES]
-    frames[-1].save(out, format="ICO", sizes=[(side, side) for side in SIZES])
+    # Every drawn size is handed to the encoder: a size it is not handed it
+    # resamples from the largest frame, which is the porridge this avoids.
+    frames[-1].save(
+        out,
+        format="ICO",
+        sizes=[(side, side) for side in SIZES],
+        append_images=frames[:-1],
+    )
     print("wrote %s (%s)" % (out, ", ".join(map(str, SIZES))))
     return 0
 

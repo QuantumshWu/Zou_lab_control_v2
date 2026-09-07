@@ -319,6 +319,13 @@ def test_the_gesture_measurement_asks_whether_the_picture_followed_the_hand() ->
     )
     # In the operator's scenario: zoomed past full, and all four directions.
     assert "_WALK" in body and "still_full_of_data" in body
+    # The orbit reads the camera the panel ACCEPTED, through the public
+    # description.  The product's three-process console hands the bench a
+    # process-isolated Host with no session and no renderer, so a bench
+    # that reached for ``host._session._renderer`` failed before the first
+    # press and produced no 3D gesture numbers at all.
+    assert "_session" not in body and "height_bars_camera" not in body
+    assert "camera_azimuth" in body and "describe_display" in body
 
 
 def test_the_console_is_driven_at_one_rate_and_it_is_the_product_s() -> None:
@@ -344,7 +351,10 @@ def test_the_console_is_driven_at_one_rate_and_it_is_the_product_s() -> None:
 
     from bench.plot_perf.run_console import ConsoleBench
 
-    for owner in (ConsoleBench._pump, ConsoleBench._until):
+    # ``edit_setting`` was the one wait left beating the console itself,
+    # once every two milliseconds, so what it timed was a Setting edit on a
+    # console driven fifty times faster than the product drives it.
+    for owner in (ConsoleBench._pump, ConsoleBench._until, ConsoleBench.edit_setting):
         # THE PARSED CODE, not the text: the docstring explaining why the
         # tight-loop beat is gone necessarily contains its name.
         tree = ast.parse(textwrap.dedent(inspect.getsource(owner)))
@@ -365,3 +375,202 @@ def test_the_console_is_driven_at_one_rate_and_it_is_the_product_s() -> None:
             node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
         }
         assert "ProductBeat" in names, owner
+
+
+def test_a_setting_edit_is_answered_by_its_own_presented_configuration() -> None:
+    """The edit's wait ends on the panel's transaction, not on any front.
+
+    A live card presents a new front whenever the producer delivers one.
+    Ending the wait at "one more front" therefore timed the producer's
+    phase and called it the Setting's cost -- the false answer ``_flows``
+    already refuses with the panel's own configuration and presentation
+    state, which is what this wait has to read too.
+    """
+
+    import inspect
+
+    from bench.plot_perf.run_console import ConsoleBench
+
+    body = inspect.getsource(ConsoleBench.edit_setting)
+    assert "panel.configuration is None" in body
+    assert "presentation_current" in body
+    assert "to_next_front_ms" not in body, "the key would name the wrong answer"
+
+
+def test_an_action_s_wall_clock_runs_from_the_call_to_the_visible_answer(
+    monkeypatch,
+) -> None:
+    """``wall_ms`` is the whole action: the synchronous trigger AND the wait.
+
+    The helper timed the trigger, then started a second clock for the wait
+    and reported that alone as "wall" -- so an Edit whose synchronous form
+    construction was the part the operator felt most was reported without
+    it, under a column called "whole action".
+    """
+
+    from contextlib import nullcontext
+
+    from bench.plot_perf import run_edit_actions as edits
+
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.delenv("ZLC_EDIT_PROFILE", raising=False)
+    monkeypatch.setattr(edits, "time", SimpleNamespace(perf_counter=lambda: clock.now))
+    monkeypatch.setattr(
+        edits, "_LoopClock",
+        lambda _app: SimpleNamespace(summary=lambda: {}, longest=(0.0, 0.0)),
+    )
+    monkeypatch.setattr(
+        edits, "_OwnerSampler",
+        lambda: nullcontext(
+            SimpleNamespace(summary=lambda: {}, during=lambda *_a, **_k: [])
+        ),
+    )
+    monkeypatch.setattr(
+        edits, "_HostTimeline",
+        lambda _bench: nullcontext(SimpleNamespace(new_hosts=lambda _since: [])),
+    )
+    monkeypatch.setattr(
+        edits, "_OwnerSteps",
+        lambda _bench: nullcontext(SimpleNamespace(summary=lambda: [])),
+    )
+
+    def trigger():
+        clock.now += 0.100
+        return True
+
+    def wait(_bench, _clock, predicate, _what, _timeout):
+        clock.now += 0.020
+        assert predicate()
+        return 0.020
+
+    monkeypatch.setattr(edits, "_wait", wait)
+    row = edits._timed_action(
+        SimpleNamespace(app=None), "fake action", trigger, lambda: True
+    )
+    assert row["trigger_ms"] == 100.0
+    assert row["wait_ms"] == 20.0
+    assert row["wall_ms"] == 120.0
+
+
+def test_no_qt_event_is_charged_the_time_until_the_next_one_entered() -> None:
+    """An event filter sees events ENTER; it never sees one return.
+
+    Charging each event the time until the next one entered handed an
+    outer event's remaining work to whatever nested event ran last inside
+    it: measured with a set clock, 90 ms of the outer event and 10 of the
+    nested one came out as 10 and 90.  Neither exclusive nor inclusive, it
+    was printed as "the slowest Qt events".  The owner-turn steps and the
+    relay timer wrap real calls and their returns; the entry-gap
+    attribution is gone.
+    """
+
+    import inspect
+
+    from bench.plot_perf import run_edit_actions as edits
+
+    assert not hasattr(edits, "_EventWatch")
+    source = inspect.getsource(edits)
+    assert "slowest_events" not in source
+    assert "eventFilter" not in source
+
+
+def test_the_isolated_bench_stands_on_its_own_numbers() -> None:
+    """The isolated run reports itself; it compares against nothing stale.
+
+    It read a console result file the chain no longer writes under that
+    name, then a child-renderer stage the product's three-process console
+    never has, and divided a median by a gross mean -- so after its own
+    expensive run it either crashed on a missing file, a missing key, or
+    printed a ratio of two different quantities.
+    """
+
+    import inspect
+
+    from bench.plot_perf import run_mot_roi_isolated as isolated
+
+    source = inspect.getsource(isolated)
+    assert "console-mot-roi-four-panel" not in source
+    assert '"comparison"' not in source
+    assert "console_over_isolated" not in source
+    # It reads no result file of another runner's at all.
+    assert "read_text" not in inspect.getsource(isolated.run)
+
+
+def test_process_cpu_is_counted_only_inside_the_measurement_windows() -> None:
+    """CPU seconds are summed between window edges, like the wall seconds.
+
+    Read once before both windows and once after everything, the numerator
+    held the warm-up pumps and the probe installation while the
+    denominator held only the two windows: a process at exactly one core
+    reported 109 %.
+    """
+
+    import inspect
+
+    from bench.plot_perf import run_mot_roi_chain as chain
+
+    class _Process:
+        def __init__(self) -> None:
+            self.user = 0.0
+
+        def cpu_times(self):
+            return (self.user, 0.0, 0.0, 0.0)
+
+    process = _Process()
+    cpu = chain._ProcessCpu({"A": process})
+    process.user += 2.0  # warm-up before the first window: nobody's load
+    cpu.begin()
+    process.user += 1.0
+    cpu.end()
+    process.user += 2.0  # probes installed between the windows
+    cpu.begin()
+    process.user += 1.5
+    cpu.end()
+    process.user += 2.0  # after everything
+    assert cpu.seconds == {"A": 2.5}
+    # And the chain samples at the window edges, never around them.
+    body = inspect.getsource(chain.run)
+    assert "cpu.begin()" in body and "cpu.end()" in body
+    assert "cpu_start" not in body
+
+
+def test_the_host_fps_window_ends_where_its_clock_stops() -> None:
+    """The presented count and the elapsed time are read at one instant.
+
+    Every host FPS took its elapsed time, then pumped, settled or released
+    -- delivering a latest frame still in flight and the front a release
+    produces -- and only then read the count: frames in the numerator that
+    the denominator's clock never saw.
+    """
+
+    import ast
+    import inspect
+    import textwrap
+
+    from bench.plot_perf.common import Presented
+    from bench.plot_perf.run_host import HostBench
+
+    widget = SimpleNamespace(presented_front=None)
+    presented = Presented(widget)
+    widget.presented_front = object()
+    presented.poll()  # before the window
+    window = presented.window()
+    widget.presented_front = object()
+    presented.poll()
+    widget.presented_front = object()  # presented, not yet polled: end() polls
+    elapsed, shown = window.end()
+    widget.presented_front = object()  # after the clock stopped: the drain
+    presented.poll()
+    assert shown == 2 and elapsed >= 0.0
+    assert presented.count == 4
+    # Every host rate reads its count through the window and nowhere else.
+    for owner in (HostBench.bench_live, HostBench._spray_moves, HostBench.bench_live_drag):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(owner)))
+        counts = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute) and node.attr == "count"
+        ]
+        assert not counts, owner
+        names = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+        assert {"window", "end"} <= names, owner

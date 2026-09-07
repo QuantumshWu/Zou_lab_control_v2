@@ -490,6 +490,21 @@ class FitSessionMixin:
         with self._lock:
             if live and self._live_fit_request == prepared:
                 return None
+            accepted = self._accepted_fit
+            if (
+                not live
+                and self._live_fit_request is None
+                and accepted is not None
+                and accepted.request == prepared
+                and accepted.context_generation == self._fit_context_generation
+                and accepted.result.source_revision == self.data_revision
+                and str(accepted.source_generation) == str(self.data_generation)
+            ):
+                # The same static target over the same data in the same
+                # selection context is the fit already painted: no solve,
+                # no render, no new batch revision.  A static target only
+                # ever re-solves when something it depends on moved.
+                return None
         started = self._begin_fit_request(
             prepared.model,
             selector_kind=None,
@@ -1088,9 +1103,16 @@ class FitSessionMixin:
             future = self._analysis_executor.submit(self._solve_started_fit, started)
         except Exception as error:
             self._forget_fit_warm_starts(started.request_generation)
-            if not live and logical_completion is not None:
+            # The request stays armed -- the next data revision is the only
+            # automatic live-fit retry -- but the explicit request that
+            # could not even be submitted is answered now, through the one
+            # owner of a live request's completion.
+            if live:
+                failed = self._retire_failed_live_presentation(started, error)
+                if failed is not None:
+                    self._resolve_fit_completion(failed)
+            elif logical_completion is not None:
                 logical_completion.set_exception(error)
-            # The next data revision is the only automatic live-fit retry.
             return None
         tracked = False
         if live:
@@ -1754,6 +1776,22 @@ class FitSessionMixin:
                     accepted_completion = None
             if accepted_completion is not None and result is not None:
                 resolution = _FitResolution(accepted_completion, result=result)
+            elif (
+                request_current
+                and not accepted
+                and error is not None
+                and not isinstance(error, FitCancelled)
+            ):
+                # The solve RAN and failed: that answers the explicit
+                # request, exactly as a failed data-frame pair answers it.
+                # The request stays armed for the next revision, but a
+                # Future left pending here had no other way to settle
+                # while the source stood still.  A cancellation is not an
+                # answer -- the frame it belonged to was superseded and
+                # the next one resolves the same request.
+                resolution = self._retire_failed_live_presentation(
+                    started, error
+                )
         elif logical_completion is not None:
             if error is not None:
                 resolution = _FitResolution(logical_completion, error=error)
@@ -1787,11 +1825,9 @@ class FitSessionMixin:
         if batch is None:
             if selection is None:
                 raise RuntimeError("single fit acceptance has no selection")
-            overlay = projection._make_fit_overlay(result, selection)
-            overlays = (overlay,)
+            overlays = (projection._make_fit_overlay(result, selection),)
             selections = (selection,)
         else:
-            overlay = None
             overlays = batch.overlays
             selections = tuple(facet_selections)
             if selections:
@@ -1817,7 +1853,6 @@ class FitSessionMixin:
             _AcceptedFit(
                 result=result,
                 selection=selection,
-                overlay=overlay,
                 overlays=overlays,
                 selections=selections,
                 context_generation=started.context_generation,

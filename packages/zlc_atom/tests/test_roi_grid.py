@@ -24,13 +24,17 @@ def test_every_adapter_reads_the_one_rule() -> None:
     assert pylon.snap_roi_axis is roi_grid.snap_roi_axis
 
 
-@pytest.mark.parametrize("origin_step", (1, 2, 4, 8))
-@pytest.mark.parametrize("extent_step", (1, 2, 4))
+@pytest.mark.parametrize("origin_step", (1, 2, 3, 4, 8))
+@pytest.mark.parametrize("extent_step", (1, 2, 3, 4))
 @pytest.mark.parametrize("origin", (0, 1, 7, 51, 101, 1917))
 @pytest.mark.parametrize("extent", (1, 3, 16, 481, 641))
 def test_the_applied_region_contains_the_requested_one(
     origin_step: int, extent_step: int, origin: int, extent: int
 ) -> None:
+    """Holds for steps that do not nest too: 3 against 4 walks the origin
+    back by more than the size step it retreated for, and the far edge must
+    still be covered."""
+
     sensor = 1920
     start, size = snap_roi_axis(
         origin,
@@ -65,3 +69,11 @@ def test_a_region_at_the_far_edge_stays_on_the_sensor() -> None:
     )
     assert start + size <= 1920
     assert size == 16 and start % 4 == 0
+
+
+def test_the_last_pixel_under_non_nested_steps_is_still_covered() -> None:
+    """Origin step 3, size step 4, pixel 19 of 20: (15, 4) reaches only 19."""
+
+    assert snap_roi_axis(
+        19, 1, origin_step=3, extent_step=4, sensor_extent=20
+    ) == (12, 8)

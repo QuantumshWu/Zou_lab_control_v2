@@ -68,9 +68,9 @@ non-primary `1280 x 1024` display at approximately 60 Hz, presents an exact
 native raster with the active `1272 x 1024` pixels and eight black trailing
 columns, and requires no vendor DLL. Multiple eligible displays require an
 explicit `--display-name`. USB frame memory remains available only through an
-explicit `--transport usb`; that mode locates the primary vendor library from
-an explicit directory, `HAMAMATSU_SLM_SDK`, `PATH`, a vendor installation, or
-the normal Windows loader. A new real adapter starts with unknown command
+explicit `--transport usb`; that mode loads the primary vendor library from
+the family's own `vendor/` folder or the absolute path its `vendor.json`
+names, and from nowhere else. A new real adapter starts with unknown command
 truth. A DVI command becomes known after presenter acknowledgement and the
 profile settle wait; USB additionally requires display-slot selection and exact
 active-frame readback.
@@ -190,10 +190,14 @@ files, so the composition framework and UI do not need edits. A device type is
 similarly declared in a discovered `device_types.py` module with a factory and
 authoring schema.
 
-The current device set is deliberately closed to camera, sequencer, and SLM
-capabilities. Virtual, DCAM, and Pylon camera adapters implement the same
-`CameraAdapter` contract; Workbench resolves any compatible named instance such as
-`camera` or `mot_camera` instead of hard-coding an instance name.
+The current device set is deliberately closed to the four capabilities the
+nodes consume: camera (`camera.adapter`), sequencer (`sequencer.streamer`), SLM
+(`slm.phase`) and RF source (`rf.source`). Virtual, DCAM, and Pylon camera
+adapters implement the same `CameraAdapter` contract; the Rigol DG4000
+(`rf.rigol_dg4000`), the Vaunix Lab Brick (`rf.vaunix_lms`) and the virtual
+brick (`rf.virtual`) implement the same RF source contract. Workbench resolves
+any compatible named instance such as `camera` or `mot_camera` instead of
+hard-coding an instance name.
 
 ## Leaf tutorial
 
@@ -276,18 +280,27 @@ creating a second image truth. There is no separate validity signal and no
 occupancy-rate output. The generic
 `zlc_plot` overlay declaration and same-run geometry document let any
 compatible presenter join `occupied` to `frame_judged` without knowing the
-Occupancy plugin. The concrete Temperature Task reuses the occupied values and
-their expanded validity for its authored before/trap-off/after cycles: only a
-valid, initially occupied pair is a survival trial. It publishes the binary
-per-site `survival` dataset only, with the frame pairs as a `READOUT_EVENT`
-Point-domain axis of the cycle (one row per pair, the sites in Cell-data): a scan
-folds them in as an event dimension ahead of its own axes, and the default
-plots treat them as they treat camera frames -- a grid faces them, anything
-else shows the latest pair. Its declared preview and artifact both pool
-that same dataset and its validity into survival rate against trap-off time;
-there is no second rate history. It does not fit a temperature or lifetime and
-does not derive a 1/e crossing. Its run retains one final JSON, summary and a
-typed survival-rate Figure NPZ with PNG preview.
+Occupancy plugin. Two small processors build on that classification without
+adding a second one: `occupancy_agreement` keeps the counts of one frame only
+where two other frames of the cycle agree on the occupancy (its form names the
+three frame indices), and `frame_survival` asks, for every forward frame pair
+of a multi-frame cycle, whether a site an earlier frame saw loaded is still
+seen by a later one -- the pairs form one labelled `READOUT_EVENT` Point axis
+(`0-1`, `0-2`, `1-2` for three frames), each pair's value is the later verdict
+and its validity is that pair's own denominator. The concrete Temperature Task
+keeps its own pairing: it reuses the occupied values and their expanded
+validity for its authored before/trap-off/after cycles, and only a valid,
+initially occupied pair is a survival trial. It publishes two datasets, the
+stepped scan's own output and the binary per-site `survival`: each landed
+cycle is one row on a `temperature.t_off` scan Point axis (the release time
+it was measured at), the sites are Cell-data, and the scan and run repeats
+form the repeat domain, so the default plots treat it as any other scan
+dataset. Its
+declared preview and artifact both pool that same dataset and its validity
+into survival rate against trap-off time; there is no second rate history. It
+does not fit a temperature or lifetime and does not derive a 1/e crossing. Its
+run retains one final JSON, summary and a typed survival-rate Figure NPZ with
+PNG preview.
 
 The `slm_feedback` Task takes one ordinary camera/readout Calibration and one
 strict Science Context. Calibration has no SLM or Science Context input.
@@ -310,21 +323,23 @@ reported after every trigger, or mid-batch so that the camera times out first
 (the board's report is read before the camera is blamed) -- repeats the whole
 batch once, and a second fault fails the candidate naming both. The candidate
 records the fault it was accepted with and the fault it was repeated after.
-The pulse program is loaded once per run: `fire` replays the board's resident
-image, and the board's own reported digest decides whether a LOAD is needed.
-The Pulse resource is an
+The pulse program is loaded for every shot batch, a repeated batch included,
+the way calibration loads it for every shot; nothing relies on the board's
+resident image being replayed. The Pulse resource is an
 explicit operator selection; camera exposure is a separate visible/editable
 field with a `0.1 s` default. Feedback neither derives one from the other nor
 reuses Calibration exposure.
 
-Calibration contributes registered site centers, its default readout model
-(the per-site matched filter, or the box) and image-coordinate geometry. It
-contributes no dark/bright level, threshold, exposure, photoelectron choice or
-camera working-point authority. For each candidate, Feedback reads every site
-on every shot with that default model -- a predicted site the Calibration never
-observed reads with the uniform PSF kernel, as the Calibration itself does for
-a site whose atoms it could not measure -- and fits the two Gaussian
-populations of empty (`dark`) and loaded (`bright`) shots. The metric is
+Calibration contributes registered site centers, its BOX half-width and
+image-coordinate geometry. It contributes no dark/bright level, threshold,
+exposure, photoelectron choice or camera working-point authority. For each
+candidate, Feedback reads every site on every shot with the BOX -- the sum of
+the pixels in the box round the registered centre, in the frame's own unit, so
+`bright - dark` is a photon count -- whatever model the Calibration itself reads
+occupancy with: its matched-filter weights never touch a Feedback frame, a
+predicted site the Calibration never observed needs no borrowed shape, and a
+Calibration without a BOX model cannot feed back. Feedback then fits the two
+Gaussian populations of empty (`dark`) and loaded (`bright`) shots. The metric is
 `bright_mean - dark_mean`; loading probability is reported as the mixture
 fraction but is not multiplied into that metric. Two populations are accepted
 only on decisive evidence -- a BIC gain over ten against one Gaussian; a batch
@@ -336,8 +351,11 @@ contrast, fit choice and action, and ONE plant slope for the whole array: the
 pooled regression of every site's change in log contrast on the applied change
 in log weight at lags 0, 1 and 2, instrumented by an identification
 excitation. The first six ordinary updates after the baseline carry a fresh
-zero-sum +-2% log-weight pattern on top of the controller's step (recorded per
-site as `excitation_log_step`; the control Target is the integrator and never
++-2% log-weight pattern of balanced signs on top of the controller's step,
+shifted by one common log so that the excited sites' total share is exactly
+where the control Target left it -- a site the excitation leaves alone keeps
+its absolute share (recorded per site as `excitation_log_step`, the shifted
+pattern the SLM actually saw; the control Target is the integrator and never
 absorbs it), and only transitions that pattern touches enter the regression --
 the excitation is the one thing in a closed loop that shares nothing with the
 plant's own per-candidate wander, which biased any instrument taken from the
@@ -362,10 +380,16 @@ closer side when both did, one clamp past the deepest dark share when
 neither), and a probed site is never probed again. Each candidate a dark site
 with a direction asks for one step: the geometric midpoint towards its loaded
 share while the bracket is wider than the 2% resolution, otherwise one
-resolution along its direction -- never a whole clamp. The loaded sites fund
-that step together by one common factor, each giving at most one resolution
-per candidate and never crossing its own bracket floor; what they cannot fund
-is scaled back, never reversed. Dark beyond its loaded share by more than a
+resolution along its direction -- never a whole clamp. The loaded sites the
+loop is not sending up -- their own step down, or nothing asked of them --
+fund that step together (a directed decrease is handed to those the loop is
+not sending down; a held site is neither), each giving at most one resolution
+per candidate and never crossing its own bracket bound, with total power
+conserved exactly; what
+they cannot fund is scaled back, never reversed, and no site is ever moved
+against its own direction -- every site's absolute share moves with the sign
+the controller gave it or stays, and a site with no direction keeps its
+share. Dark beyond its loaded share by more than a
 resolution retires that loaded share. The bright fraction is the
 loading-margin observable: a loaded site under half the lattice's typical
 fraction is on its loading ramp (`loading_edge`), so a step of its own that
@@ -411,12 +435,13 @@ The loop defaults to 100 shots and 12 updates. No max/min ratio threshold
 ends a run early; the simultaneous interval is recorded as uncertainty but
 never triggers an extra acquisition.
 
-The supported product path discovers seven logic descriptors: `calibration`,
-`camera_measurement`, `occupancy`, `seamless_scan`, `slm_feedback`,
-`stepped_scan`, and `temperature`. They are hosted through the real runtime
-plane: virtual Calibration writes a plain workspace JSON, Camera Measurement
-publishes finite or `Repeat = 0` infinite frames, and Occupancy consumes the
-frames key plus JSON path. Camera Measurement retains its per-row Auto preview:
+The supported product path discovers nine logic descriptors: `calibration`,
+`camera_measurement`, `frame_survival`, `occupancy`, `occupancy_agreement`,
+`seamless_scan`, `slm_feedback`, `stepped_scan`, and `temperature`. They are
+hosted through the real runtime plane: virtual Calibration writes a plain
+workspace JSON, Camera Measurement publishes finite or `Repeat = 0` infinite
+frames, Occupancy consumes the frames key plus JSON path, and the two
+occupancy-derived processors consume Occupancy's own outputs. Camera Measurement retains its per-row Auto preview:
 the cycle's `frames` signal uses `facet_grid`, with one or many readout-event
 rows as authored; switching Auto preview off only prevents the panel from
 opening automatically.

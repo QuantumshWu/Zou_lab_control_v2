@@ -31,7 +31,6 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 import math
-from numbers import Real
 import re
 from threading import RLock
 
@@ -89,8 +88,9 @@ _PREFIX_BY_SPELLING = {
 }
 _PREFIX_BY_EXPONENT = {prefix.exponent: prefix for prefix in PREFIXES}
 #: The identity step, for a caller that wants a number in EXACTLY the unit it
-#: names -- a value read in the megahertz the operator chose must not come
-#: back as kilo-megahertz because it happened to be large.
+#: names -- a reading converted into the hertz the operator chose for a row
+#: stays in hertz however large it is, because that row is the one place the
+#: operator said which scale they read.
 NO_PREFIX = _PREFIX_BY_EXPONENT[0]
 _SMALLEST_EXPONENT = min(prefix.exponent for prefix in PREFIXES)
 _LARGEST_EXPONENT = max(prefix.exponent for prefix in PREFIXES)
@@ -245,8 +245,11 @@ class Unit:
 
     A unit is either registered (``s``, ``dBm``, ``pixel``) or derived from a
     registered base by a prefix (``ms``, ``MHz``).  Derived units are built on
-    resolution and compare equal by value, so a dataset that stores a resolved
-    unit stays self-describing without storing a registry.
+    resolution and compare equal by value, so two resolutions of one spelling
+    are one unit.  A dataset never holds a Unit: an axis and a value schema
+    record the SPELLING (``AxisSpec.unit`` and ``ValueSchema.value_unit`` are
+    text, and the codec writes that text), and whoever reads the dataset
+    resolves it against a registry that knows the same spellings.
     """
 
     symbol: str
@@ -403,8 +406,10 @@ class UnitRegistry:
     """The registered base units, and every prefixed spelling they imply.
 
     A registry is mutable so an application can add a dimension its instruments
-    need.  Axes store resolved :class:`Unit` values, never registry keys, so a
-    saved dataset stays readable without one.
+    need.  A dataset carries unit symbols, not :class:`Unit` objects, so it is
+    understood only where a registry resolves the same spellings: an
+    application that registers its own dimension registers it again wherever
+    its datasets are read.
     """
 
     def __init__(self, units: Iterable[Unit] = ()) -> None:
@@ -520,13 +525,26 @@ class UnitRegistry:
         reads as one family is a fact about the symbols.
         """
 
+        return self.family_and_prefix(unit)[0]
+
+    def family_and_prefix(self, unit: UnitLike) -> tuple[Unit, Prefix]:
+        """The family this spelling belongs to and the prefix it carries.
+
+        ``(s, milli)`` for ``ms``, ``(Vpp, identity)`` for ``Vpp``.  A
+        registered spelling is its own family and carries no prefix even when
+        it begins with a prefix letter: ``m`` is the metre.  Two spellings of
+        one family differ by nothing but a decimal shift of the number written
+        in them, which is what lets a value be shown in one and read back from
+        the other without a float multiplication in between.
+        """
+
         resolved = self.resolve(unit)
         with self._lock:
             registered = self._units.get(resolved.symbol)
             if registered is not None:
-                return registered
-            base, _prefix = self._split_prefix(resolved.symbol)
-        return resolved if base is None else base
+                return registered, NO_PREFIX
+            base, prefix = self._split_prefix(resolved.symbol)
+        return (resolved, NO_PREFIX) if base is None else (base, prefix)
 
     def convert(
         self, values: ArrayLike, source: UnitLike, target: UnitLike
@@ -534,7 +552,13 @@ class UnitRegistry:
         return self.resolve(source).convert_value_to(values, self.resolve(target))
 
     def inverse_for(self, unit: UnitLike) -> Unit | None:
-        """The declared inverse-dimension unit with reciprocal scale."""
+        """The declared inverse-dimension unit with reciprocal scale, or None.
+
+        None when no rung of the inverse dimension's ladder IS the reciprocal:
+        a 500 MHz clock has a period of 2 ns, and ``ns`` is not that.  The
+        match is judged by ratio alone -- an absolute tolerance in base units
+        is a fixed number of seconds, which beside 1e-9 accepts anything.
+        """
 
         source = self.resolve(unit)
         dimension = source.inverse_dimension
@@ -550,7 +574,7 @@ class UnitRegistry:
         if prefix is None or not base.prefixable and exponent != 0:
             return None
         candidate = _prefixed(base, prefix)
-        return candidate if np.isclose(candidate.scale, wanted, rtol=1e-12) else None
+        return candidate if math.isclose(candidate.scale, wanted, rel_tol=1e-12) else None
 
     def symbols(self) -> tuple[str, ...]:
         """Every registered spelling, aliases included.
@@ -664,10 +688,13 @@ def decimal_of(value: object) -> Decimal | None:
 
     if isinstance(value, bool):
         return None
-    if isinstance(value, int):
+    if isinstance(value, (int, np.integer)):
         # A whole number has no decimals, and inventing "512.0" for a pixel
-        # count says the value is less certain than it is.
-        return Decimal(value)
+        # count says the value is less certain than it is.  A NumPy integer
+        # is read as the integer it is, never through a float: an int64 has
+        # digits a double cannot hold, and 9007199254740993 shown as
+        # 9007199254740992 is a count the dataset never held.
+        return Decimal(int(value))
     try:
         number = float(value)
     except (TypeError, ValueError):
@@ -687,38 +714,29 @@ def prefix_for(values: ArrayLike, unit: UnitLike, registry: UnitRegistry | None 
     each chose their own is a column that cannot be read down: 1 M above 900 k
     hides that the second is smaller.  The group is sized by its largest
     member, so nothing in it is shown with a leading zero it did not need.
+
+    Only a spelling that may carry a prefix is ever given one, and the unit
+    itself says whether it may: ``ms`` already carries one, ``deg`` and
+    ``count`` have no ladder, and for all of them the answer is the identity
+    step.  Asking the dimension instead -- "seconds take prefixes, so this
+    time unit does" -- is how ``2 kms`` was written for two seconds, a
+    spelling no resolver accepts and so a number nobody could type back.
     """
 
     resolved = resolve_unit(unit, registry)
-    if not resolved.is_linear or not _prefixable_symbol(resolved, registry):
-        return _PREFIX_BY_EXPONENT[0]
+    if not resolved.prefixable:
+        return NO_PREFIX
     magnitudes = [
         decimal.adjusted()
         for decimal in (decimal_of(value) for value in np.atleast_1d(np.asarray(values, dtype=object)).ravel())
         if decimal is not None and decimal != 0
     ]
     if not magnitudes:
-        return _PREFIX_BY_EXPONENT[0]
+        return NO_PREFIX
     largest = max(magnitudes)
     exponent = _PREFIX_STEP * (largest // _PREFIX_STEP)
     exponent = max(_SMALLEST_EXPONENT, min(_LARGEST_EXPONENT, exponent))
     return _PREFIX_BY_EXPONENT[int(exponent)]
-
-
-def _prefixable_symbol(unit: Unit, registry: UnitRegistry | None) -> bool:
-    """Whether this unit's symbol may carry a prefix in front of it.
-
-    A derived unit already has one (``ms``), and stacking a second is how
-    ``kms`` gets written.  So the question is really about the base.
-    """
-
-    if unit.prefixable:
-        return True
-    try:
-        base = (registry or DEFAULT_UNITS).base_for(unit)
-    except UnitError:
-        return False
-    return base.prefixable and unit.is_linear
 
 
 def _plain_digits(value: Decimal) -> str:
@@ -752,6 +770,11 @@ def format_quantity(
     the device is not holding, which is the failure this whole path exists to
     avoid; a caller that wants fewer digits should round the VALUE, where the
     decision is visible.
+
+    ``prefix`` fixes the step taken from ``unit`` instead of choosing one:
+    ``NO_PREFIX`` shows the number in exactly the unit named.  A step is only
+    ever taken from a spelling that may carry a prefix; ``2000 ms`` stays
+    ``2000 ms``, because ``kms`` is not a unit.
     """
 
     resolved = resolve_unit(unit, registry)
@@ -759,7 +782,7 @@ def format_quantity(
     if decimal is None:
         return f"{value} {resolved.symbol}".strip()
     step = prefix if prefix is not None else prefix_for([decimal], resolved, registry)
-    if step.exponent and not _prefixable_symbol(resolved, registry):
+    if step.exponent and not resolved.prefixable:
         raise UnitError(f"{resolved.symbol!r} cannot take the prefix {step.symbol!r}")
     shifted = decimal.scaleb(-step.exponent)
     symbol = f"{step.symbol}{resolved.symbol}" if resolved.symbol != "1" else step.symbol
@@ -813,11 +836,18 @@ def parse_quantity(
 
     Everything the formatter can produce is accepted, and so is everything a
     person reasonably types instead: a bare number in the field's own unit,
-    a prefix alone (``1.05M`` in a hertz field), a whole compatible unit
-    (``1.05 MHz``, ``1050 kHz``), and ``u`` wherever ``µ`` is shown.  The
-    result is in ``unit``, never in the base, because the field's stored value
-    is in its own unit and a parse that silently changed that would be the
-    base-for-canonical mistake again.
+    a prefix alone (``1.05M`` in a hertz field, a rung of the field's own
+    family), a whole compatible unit (``1.05 MHz``, ``1050 kHz``), and ``u``
+    wherever ``µ`` is shown.  The result is in ``unit``, never in the base,
+    because the field's stored value is in its own unit and a parse that
+    silently changed that would be the base-for-canonical mistake again.
+
+    What the formatter showed is read back as the number it showed, bit for
+    bit: between two spellings of one family the point is shifted back the
+    way it was shifted out, in decimal, and only a foreign unit (degrees
+    into radians, a level into watts) goes through float arithmetic.
+    ``0.1 ns`` multiplied out as ``0.1 * 1e-9`` is 1.0000000000000002e-10,
+    one ulp from the 1e-10 the box was showing.
     """
 
     resolved = resolve_unit(unit, registry)
@@ -826,24 +856,29 @@ def parse_quantity(
     match = _QUANTITY.match(text)
     if match is None:
         raise UnitError(f"not a number with an optional unit: {text.strip()!r}")
-    number = float(match.group("number"))
+    number = match.group("number")
     written = match.group("unit")
     if not written:
-        return number
+        return float(number)
+    units = registry or DEFAULT_UNITS
+    family, carried = units.family_and_prefix(resolved)
     spelled = resolve_unit(written, registry) if _is_known(written, registry) else None
     if spelled is None:
         prefix = _PREFIX_BY_SPELLING.get(written)
         if prefix is None:
             raise UnitError(f"unknown unit or prefix {written!r}")
-        if not _prefixable_symbol(resolved, registry):
+        if not family.prefixable:
             raise UnitError(f"{resolved.symbol!r} cannot take a prefix")
-        spelled = _prefixed((registry or DEFAULT_UNITS).base_for(resolved), prefix)
+        spelled = _prefixed(family, prefix)
     if not spelled.compatible_with(resolved):
         raise UnitError(
             f"{written!r} is {spelled.dimension}, and this value is "
             f"{resolved.dimension}"
         )
-    return float(np.asarray(spelled.convert_value_to(number, resolved)))
+    spelled_family, spelled_prefix = units.family_and_prefix(spelled)
+    if spelled_family == family:
+        return float(Decimal(number).scaleb(spelled_prefix.exponent - carried.exponent))
+    return float(np.asarray(spelled.convert_value_to(float(number), resolved)))
 
 
 def _is_known(text: str, registry: UnitRegistry | None) -> bool:
