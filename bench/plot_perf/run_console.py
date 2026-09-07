@@ -204,6 +204,7 @@ class ConsoleBench:
         camera: str = "mot_camera",
         exposure: float = 0.01,
         clear_preview_panels: bool = True,
+        frames_per_cycle: int = 1,
     ):
         from pulse_fixtures import PULSE_NAME, write_ordinary_pulse
         from zlc_workbench.apps.task_console import build_console
@@ -214,6 +215,7 @@ class ConsoleBench:
         write_ordinary_pulse(self._tmp)
         self.view, self.presenter = build_console(self.session)
         self.reports: list[tuple[str, str]] = []
+        self.report_events: list[dict] = []
         original_report = self.presenter._report
 
         def capture(message, severity="info", **kwargs):
@@ -222,6 +224,8 @@ class ConsoleBench:
             # a panel erroring every frame publishes almost nothing, and the
             # number that comes back looks like latency.
             self.reports.append((str(severity), str(message)))
+            self.report_events.append({"time_ns": time.perf_counter_ns(),
+                                       "severity": str(severity), "message": str(message)})
             return original_report(message, severity=severity, **kwargs)
 
         self.presenter._report = capture
@@ -235,7 +239,7 @@ class ConsoleBench:
                 "values": {
                     "exposure_seconds": exposure,
                     "repeat": 0,
-                    "frames_per_cycle": 1,
+                    "frames_per_cycle": frames_per_cycle,
                 },
             },
         )

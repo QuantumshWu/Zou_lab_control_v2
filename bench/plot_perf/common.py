@@ -367,7 +367,10 @@ class Pointer:
             QtCore.Qt.ScrollUpdate,
             False,
         )
-        self._app.sendEvent(self._widget, event)
+        if self.post:
+            self._app.postEvent(self._widget, event)
+        else:
+            self._app.sendEvent(self._widget, event)
 
 def axis_by_role(front, role: str, cell: int | None = None):
     for item in front.interaction.axes:
