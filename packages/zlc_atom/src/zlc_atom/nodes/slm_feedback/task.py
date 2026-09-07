@@ -5,10 +5,11 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping
 
 import numpy as np
 from scipy import special
+from scipy.optimize import linear_sum_assignment
 from zlc_data import (
     COMPONENT,
     SCAN_POINT,
@@ -52,18 +53,13 @@ from zlc_atom.devices.slm.solver import (
     validate_target,
 )
 from zlc_atom.nodes.calibration import (
-    ReadoutModel,
     ReadoutModelKind,
     SiteMap,
     TrapCalibration,
     extract_box_signals,
-    extract_psf_signals,
     fit_bimodal,
 )
-from zlc_atom.nodes.calibration.calibration import (
-    _register_target_sites,
-    validate_target_registration,
-)
+from zlc_atom.nodes.calibration.calibration import box_fits
 from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
 from zlc_atom.nodes.camera_measurement.measurement import (
     CAMERA_FRAMES_OUTPUT,
@@ -292,9 +288,11 @@ _PLANT_SLOPE_MINIMUM_CANDIDATES = 3
 _PLANT_SLOPE_RELATIVE_ERROR = 0.3
 _PLANT_SLOPE_BOUNDS = (0.3, 5.0)
 #: The identification excitation: the first this many formal updates after
-#: the baseline carry a fresh zero-sum +-2% log-weight pattern on top of the
-#: controller's own step, and that pattern is the only instrument the plant
-#: slope is read through.  Six at 2% resolve a unit-slope plant to under 30%
+#: the baseline carry a fresh +-2% log-weight pattern of balanced signs on
+#: top of the controller's own step, applied so that the excited sites'
+#: total share is unchanged (see ``_excited_target``), and that pattern is
+#: the only instrument the plant slope is read through.  Six at 2% resolve
+#: a unit-slope plant to under 30%
 #: in 95% of simulated runs at the archived run's 1.2% read noise; the
 #: archived plant itself (-3.3) needs three.  A fixed count, never "until
 #: trusted": stopping on the estimate's own size selects the runs where it
@@ -306,14 +304,16 @@ _PLANT_EXCITATION_LOG_STEP = 0.02
 def _excitation_pattern(
     rng: np.random.Generator, excitable: np.ndarray
 ) -> np.ndarray:
-    """One excited candidate's zero-sum +-δ log-weight pattern on the
-    ``excitable`` sites; a held site (invalid, unobservable) gets none, as it
-    would answer with no usable row and its share is to stay where it is.
+    """One excited candidate's +-δ log-weight pattern on the ``excitable``
+    sites, its signs balanced as evenly as their count allows; a held site
+    (invalid, unobservable, on its loading ramp) gets none, as it would
+    answer with no usable row and its share is to stay where it is.
 
     Fresh random signs every candidate: the three lag columns are then driven
     at every frequency and can be told apart.  A pattern that merely flipped
     each candidate would excite only the alternating response and measure
     ``s0 - s1 + s2`` -- 0.7 for the archived plant whose static slope is 3.3.
+    What the SLM actually sees is this pattern applied by ``_excited_target``.
     """
 
     mask = np.asarray(excitable, dtype=bool)
@@ -321,8 +321,7 @@ def _excitation_pattern(
     count = int(np.count_nonzero(mask))
     if count >= 2:
         signs = np.where(np.arange(count) % 2 == 0, 1.0, -1.0)
-        values = _PLANT_EXCITATION_LOG_STEP * rng.permutation(signs)
-        pattern[mask] = values - float(np.mean(values))
+        pattern[mask] = _PLANT_EXCITATION_LOG_STEP * rng.permutation(signs)
     return pattern
 
 
@@ -331,21 +330,40 @@ def _excited_target(
     excitation: np.ndarray,
     rows: np.ndarray,
     columns: np.ndarray,
-) -> np.ndarray:
-    """The Target the phase is solved for: the control Target times ``exp``
-    of this candidate's excitation on its sites.
+) -> tuple[np.ndarray, np.ndarray]:
+    """The Target the phase is solved for, and the log step every site got.
 
     The control Target stays the integrator the controller updates; the
-    excitation is applied on top for one candidate and is gone from the next
+    excitation rides on top for one candidate and is gone from the next
     one's Target unless a new pattern is drawn, so it is never integrated.
+
+    It is applied IN SHARE SPACE OVER THE EXCITED SITES: the pattern is
+    shifted by the one common log that keeps those sites' total intensity
+    where it was, so every other site -- invalid, unobservable, on its
+    loading ramp -- keeps its absolute share of the fixed total power to
+    the Target's own precision.  A pattern that merely summed to zero in
+    log did not do that: ``exp`` of it does not sum to one, the total
+    moved, and a held site lost 1% of its share to the renormalisation.
+    The returned step is the shifted pattern, the excitation the SLM
+    actually saw and therefore the only instrument the plant slope may be
+    read through (``_plant_slope``).
     """
 
+    raw = np.asarray(target[rows, columns], dtype=float)
+    pattern = np.asarray(excitation, dtype=float)
+    if pattern.shape != raw.shape or not np.all(np.isfinite(pattern)):
+        raise ValueError("excitation must be one finite log step per site")
+    excited = pattern != 0.0
+    applied = np.zeros(pattern.shape, dtype=float)
     updated = np.array(target, dtype=np.float32, copy=True)
-    updated[rows, columns] = (
-        np.asarray(target[rows, columns], dtype=float)
-        * np.exp(np.asarray(excitation, dtype=float))
-    ).astype(np.float32)
-    return validate_target(updated)
+    if np.any(excited):
+        weight = raw[excited]
+        common = float(np.sum(weight * np.exp(pattern[excited])) / np.sum(weight))
+        applied[excited] = pattern[excited] - np.log(common)
+        updated[rows[excited], columns[excited]] = (
+            weight * np.exp(applied[excited])
+        ).astype(np.float32)
+    return validate_target(updated), applied
 
 
 def _plant_slope(
@@ -772,6 +790,18 @@ def _allocate_requested_shares(
     lower: object | None = None,
     upper: object | None = None,
 ) -> tuple[np.ndarray, float, float, float]:
+    """The balanced trades: every requested step, in its own direction only.
+
+    Each site asks for ``current * exp(requested)`` inside its bounds; the
+    increases and the decreases are then scaled by one factor each so that
+    the smaller side is met in full and the larger side pro rata, and the
+    total is conserved exactly.  A site therefore moves only in the
+    direction it asked for, a site that asked for nothing is not touched
+    at all, and a side with nobody on the other side does not move: total
+    power is the hard constraint.  Returns the allocation, the share that
+    changed hands and the two scales.
+    """
+
     current = np.asarray(shares, dtype=float)
     requested = np.asarray(requested_log_step, dtype=float)
     if (
@@ -815,91 +845,396 @@ def _funded_shares(
     allocated: np.ndarray,
     directed: np.ndarray,
     desired: np.ndarray,
-    compensators: np.ndarray,
+    givers: np.ndarray,
+    takers: np.ndarray,
     *,
     lower: np.ndarray,
     upper: np.ndarray,
 ) -> np.ndarray:
-    """Fund the directed sites' unmet share from the loaded sites in common.
+    """Fund what the directed sites still lack from the loaded sites that
+    are going the other way anyway, and turn nobody round.
 
-    ``allocated`` is the ordinary allocation; what the directed sites still
-    lack of ``desired`` is taken from (or, for a directed decrease, given
-    to) every compensating site by ONE common factor, each compensator held
-    inside ONE RESOLUTION STEP (``_PLANT_EXCITATION_LOG_STEP``) of its
-    current share and inside its own bracket bound.  When the compensators
-    cannot cover the whole request within those bounds they give
-    everything the bounds allow and the directed sites receive that, pro
-    rata, in their own direction.
+    ``allocated`` is the balanced allocation.  What a directed site still
+    lacks of ``desired`` -- cut at its bracket bound on that side, so a
+    bound stops a step and never turns it round -- is drawn from the
+    ``givers`` -- the loaded sites whose own step this candidate is not UP:
+    down, or nothing asked of them -- each able to go down to ONE
+    RESOLUTION STEP (``_PLANT_EXCITATION_LOG_STEP``) below its current share
+    and never below its bracket floor; a directed decrease is handed to the
+    ``takers``, the loaded sites whose step is not DOWN, each able to rise
+    one resolution above its current share and never past its bracket
+    ceiling.  Every giver parts with the same fraction of
+    what it can give, so the cost is spread over all of them; when they
+    cannot cover the whole request the directed sites receive what there
+    is, pro rata, in their own direction.  The transfer is exact, so the
+    total is conserved to the last bit, and nothing here moves a site
+    against its own direction: a loaded site whose step is up is never
+    asked to pay for a dark site's rise, a held site is never touched.
+    The old rule, every loaded site by one common factor, took 2% from a
+    site the loop had just sent UP by 1% -- its recorded step said up, its
+    actual share went down -- and when the common factor had no root the
+    total itself moved and every held site with it.
 
-    The resolution, not ``maximum_weight_change``, bounds a compensator: a
-    loaded site's own loading margin is unknown until it has shown an edge,
-    and the clamp meant for a site's OWN correction (a third of its share)
-    is many times the margin a marginally loaded array has.  Measured on
-    the virtual lattice, where that margin is ~4%: funding ten dark sites
+    The resolution, not ``maximum_weight_change``, bounds a giver: a loaded
+    site's own loading margin is unknown until it has shown an edge, and
+    the clamp meant for a site's OWN correction (a third of its share) is
+    many times the margin a marginally loaded array has.  Measured on the
+    virtual lattice, where that margin is ~4%: funding ten dark sites
     under the clamp pressed twenty-two loaded ones dark in one candidate
     and the run crawled back at one bracket bisection per candidate; at
-    the resolution twenty-five loaded sites still hand over half a site's
-    share per candidate -- a dark site is lifted in a few candidates --
-    and none of them crosses its edge.
+    the resolution the loaded sites still hand over a good part of a
+    site's share per candidate -- a dark site is lifted in a few
+    candidates -- and none of them crosses its edge.
     """
 
     current = np.asarray(shares, dtype=float)
     result = np.array(allocated, dtype=float, copy=True)
     wants = np.asarray(directed, dtype=bool)
-    pays = np.asarray(compensators, dtype=bool)
-    unmet = np.where(wants, np.asarray(desired, dtype=float) - result, 0.0)
-    need = float(np.sum(unmet))
-    if need == 0.0 or not np.any(pays):
-        return result
+    floor = np.asarray(lower, dtype=float)
+    ceiling = np.asarray(upper, dtype=float)
+    goal = np.asarray(desired, dtype=float)
     cap = _PLANT_EXCITATION_LOG_STEP
-    floor = np.maximum(np.asarray(lower, dtype=float), current * np.exp(-cap))[pays]
-    ceiling = np.minimum(np.asarray(upper, dtype=float), current * np.exp(cap))[pays]
-    base = result[pays]
-    goal = float(np.sum(base)) - need
+    for sign, asks, reach, payers, limit in (
+        (
+            1.0,
+            wants & (goal > current),
+            np.minimum(goal, ceiling),
+            np.asarray(givers, dtype=bool) & ~wants,
+            np.maximum(floor, current * np.exp(-cap)),
+        ),
+        (
+            -1.0,
+            wants & (goal < current),
+            np.maximum(goal, floor),
+            np.asarray(takers, dtype=bool) & ~wants,
+            np.minimum(ceiling, current * np.exp(cap)),
+        ),
+    ):
+        # The goal is cut at the bound on the site's OWN side and the need
+        # is what remains in that direction: a bound can stop a step, it
+        # can never turn one round.
+        need = np.where(asks, np.maximum(sign * (reach - result), 0.0), 0.0)
+        capacity = np.where(payers, np.maximum(sign * (result - limit), 0.0), 0.0)
+        total_need = float(np.sum(need))
+        total_capacity = float(np.sum(capacity))
+        transfer = min(total_need, total_capacity)
+        if transfer <= 0.0:
+            continue
+        result += sign * need * (transfer / total_need)
+        result -= sign * capacity * (transfer / total_capacity)
+    return result
 
-    def total(log_factor: float) -> float:
-        return float(np.sum(np.clip(base * np.exp(log_factor), floor, ceiling)))
 
-    if need > 0.0:
-        reachable = float(np.sum(floor))
-        low, high = float(np.min(np.log(floor / base))), 0.0
-        short = reachable > goal
-        limit = floor
+def validate_target_registration(
+    site_map: SiteMap,
+    *,
+    frame_shape: tuple[int, int],
+    box_half_width: int,
+) -> tuple[np.ndarray, Mapping[str, Any]]:
+    """Validate and return one registered Target roster in stable site order."""
+
+    if not isinstance(site_map, SiteMap) or not isinstance(site_map.topology, Mapping):
+        raise ValueError("Calibration SiteMap has no registered Target topology")
+    topology = site_map.topology
+    if set(topology) != {
+        "kind", "target_support_yx", "target_site_intensity",
+        "observed_sites", "affine_target_xy_to_image_xy", "provenance",
+    } or topology.get("kind") != "slm_target_registration":
+        raise ValueError("Calibration SiteMap has invalid registered Target topology")
+    support = np.asarray(topology["target_support_yx"])
+    intensity = np.asarray(topology["target_site_intensity"])
+    observed = np.asarray(topology["observed_sites"])
+    affine = np.asarray(topology["affine_target_xy_to_image_xy"])
+    centers = np.asarray(site_map.centers_xy)
+    provenance = topology["provenance"]
+    shape = tuple(int(value) for value in frame_shape)
+    radius = int(box_half_width)
+    if (
+        support.ndim != 2
+        or support.shape[1:] != (2,)
+        or not len(support)
+        or support.dtype.kind not in "iu"
+        or np.any(support < 0)
+        or len({tuple(value) for value in support.tolist()}) != len(support)
+        or intensity.shape != (len(support),)
+        or intensity.dtype.kind not in "iuf"
+        or not np.all(np.isfinite(intensity))
+        or np.any(intensity <= 0.0)
+        or observed.shape != (len(support),)
+        or observed.dtype != np.dtype(bool)
+        or not np.any(observed)
+        or not np.array_equal(observed, site_map.valid_sites)
+        or site_map.site_ids
+        != tuple(f"site_{index:04d}" for index in range(len(support)))
+        or affine.shape != (3, 2)
+        or affine.dtype.kind not in "iuf"
+        or not np.all(np.isfinite(affine))
+        or centers.shape != (len(support), 2)
+        or centers.dtype.kind not in "iuf"
+        or not np.all(np.isfinite(centers))
+        or len(shape) != 2
+        or any(value <= 0 for value in shape)
+        or radius < 0
+    ):
+        raise ValueError("Calibration target registration fields are invalid")
+    if not isinstance(provenance, Mapping) or set(provenance) != {
+        "science_context_path", "command_receipt",
+    }:
+        raise ValueError("Calibration target registration provenance is invalid")
+    if (
+        not isinstance(provenance["science_context_path"], str)
+        or not provenance["science_context_path"]
+        or not isinstance(provenance["command_receipt"], Mapping)
+    ):
+        raise ValueError("Calibration target registration provenance is invalid")
+
+    target_xy = support[:, ::-1].astype(float, copy=False)
+    design = np.column_stack((target_xy, np.ones(len(support), dtype=float)))
+    predicted = design @ np.asarray(affine, dtype=float)
+    if not np.allclose(
+        centers[~observed], predicted[~observed], rtol=1e-12, atol=1e-9
+    ):
+        raise ValueError("unobserved SiteMap centers differ from registered prediction")
+    target_rank = int(
+        np.linalg.matrix_rank(target_xy - np.mean(target_xy, axis=0))
+    )
+    if int(np.sum(observed)) < target_rank + 1:
+        raise ValueError("too few observed sites span the registered Target geometry")
+    measured = centers[observed]
+    residuals = np.linalg.norm(predicted[observed] - measured, axis=1)
+    if len(measured) > 1:
+        separations = np.linalg.norm(
+            measured[:, np.newaxis, :] - measured[np.newaxis, :, :], axis=2
+        )
+        separations[np.diag_indices_from(separations)] = np.inf
+        spacing = float(np.min(separations))
+        if not np.isfinite(spacing) or spacing <= 0.0:
+            raise ValueError("Calibration SiteMap geometry is ambiguous")
+        if float(np.max(residuals)) > 0.25 * spacing:
+            raise ValueError("Calibration sites do not fit the authored Target geometry")
+        predicted_separation = np.linalg.norm(
+            predicted[:, np.newaxis, :] - predicted[np.newaxis, :, :], axis=2
+        )
+        predicted_separation[np.diag_indices_from(predicted_separation)] = np.inf
+        if float(np.min(predicted_separation)) + 1e-9 * spacing < 0.5 * spacing:
+            raise ValueError("predicted Target site separation is ambiguous")
+
+    target_spans = np.ptp(target_xy, axis=0)
+    measured_spans = np.ptp(measured, axis=0)
+    if target_spans[0] > 0.0 and target_spans[1] == 0.0:
+        tilted = measured_spans[1] / measured_spans[0] > 0.25
+    elif target_spans[0] == 0.0 and target_spans[1] > 0.0:
+        tilted = measured_spans[0] / measured_spans[1] > 0.25
     else:
-        reachable = float(np.sum(ceiling))
-        low, high = 0.0, float(np.max(np.log(ceiling / base)))
-        short = reachable < goal
-        limit = ceiling
-    if short:
-        paid = limit
-        scale = (float(np.sum(base)) - reachable) / need
+        tilted = False
+    if tilted:
+        raise ValueError("Calibration differs from the trusted apparatus orientation")
+    normalized_target = np.zeros_like(target_xy)
+    normalized_measured = np.zeros_like(measured)
+    for axis in range(2):
+        if target_spans[axis] > 0.0:
+            measured_span = measured_spans[axis]
+            if measured_span == 0.0:
+                raise ValueError("Calibration geometry cannot register Target support")
+            normalized_target[:, axis] = (
+                target_xy[:, axis] - float(np.min(target_xy[:, axis]))
+            ) / target_spans[axis]
+            normalized_measured[:, axis] = (
+                measured[:, axis] - float(np.min(measured[:, axis]))
+            ) / measured_span
+    if target_rank == 2:
+        normalized_design = np.column_stack(
+            (normalized_target[observed], np.ones(int(np.sum(observed))))
+        )
+        normalized_affine, *_unused = np.linalg.lstsq(
+            normalized_design, normalized_measured, rcond=None
+        )
+        linear = normalized_affine[:2]
+        if (
+            float(np.linalg.det(linear)) <= 0.0
+            or float(np.linalg.cond(linear)) > 3.0
+            or float(np.max(np.abs(linear - np.eye(2)))) > 0.25
+            or float(np.linalg.cond(affine[:2])) > 1.75
+        ):
+            raise ValueError(
+                "Calibration differs from the trusted apparatus orientation"
+            )
+    for axis in range(2):
+        authored = target_xy[observed, axis]
+        if float(np.ptp(authored)) > 0.0 and float(
+            np.sum(
+                (authored - np.mean(authored))
+                * (measured[:, axis] - np.mean(measured[:, axis]))
+            )
+        ) <= 0.0:
+            raise ValueError("Calibration differs from the trusted Target orientation")
+    if any(not box_fits(tuple(center), radius, shape) for center in centers):
+        raise ValueError("a registered Target BOX lies outside the camera frame")
+    rounded = np.rint(centers).astype(int)
+    if len({tuple(center) for center in rounded.tolist()}) != len(rounded):
+        raise ValueError("registered Target BOX centers collide in camera pixels")
+    if radius > 0 and len(rounded) > 1:
+        delta = np.abs(rounded[:, np.newaxis, :] - rounded[np.newaxis, :, :])
+        overlaps = np.all(delta <= 2 * radius, axis=2)
+        overlaps[np.diag_indices_from(overlaps)] = False
+        if np.any(overlaps):
+            raise ValueError("registered Target BOX windows overlap in camera pixels")
+    frozen = np.array(support, dtype="<i8", copy=True)
+    frozen.setflags(write=False)
+    return frozen, provenance
+
+
+def _register_target_sites(
+    detected: SiteMap,
+    target_intensity: object,
+    provenance: Mapping[str, Any] | None,
+    *,
+    frame_shape: tuple[int, int],
+    measurement_radius: int,
+) -> SiteMap:
+    """Fit the authored SLM roster to detected camera sites without deleting gaps.
+
+    Registration is the Feedback's own science, not the Calibration's:
+    the Calibration never sees a Target, and this roster, its provenance
+    and its receipt exist only for the run that measures it.
+    """
+
+    target = np.asarray(target_intensity, dtype=np.float32)
+    if (
+        target.ndim != 2
+        or min(target.shape) < 2
+        or not np.all(np.isfinite(target))
+        or np.any(target < 0.0)
+    ):
+        raise ValueError("registration Target must be finite non-negative intensity")
+    rows, columns = np.nonzero(target > 0.0)
+    roster_count = len(rows)
+    measured_count = detected.n_sites
+    if not roster_count:
+        raise ValueError("registration Target support is empty")
+    if measured_count > roster_count:
+        raise ValueError("Calibration detected more sites than the authored Target roster")
+    if not isinstance(provenance, Mapping):
+        raise TypeError("registration provenance must be a mapping")
+
+    target_xy = np.column_stack((columns, rows)).astype(float, copy=False)
+    measured_xy = np.asarray(detected.centers_xy, dtype=float)
+    target_rank = int(
+        np.linalg.matrix_rank(target_xy - np.mean(target_xy, axis=0))
+    )
+    if measured_count < target_rank + 1:
+        raise ValueError("too few detected sites to register the authored Target roster")
+    if roster_count == measured_count == 1:
+        predicted = np.array(measured_xy, copy=True)
+        target_indices = calibration_indices = np.asarray([0], dtype=np.intp)
+        affine = np.zeros((3, 2), dtype=float)
+        affine[2] = measured_xy[0]
     else:
-        for _ in range(200):
-            middle = 0.5 * (low + high)
-            if total(middle) < goal:
-                low = middle
-            else:
-                high = middle
-        paid = np.clip(base * np.exp(0.5 * (low + high)), floor, ceiling)
-        scale = 1.0
-    result[pays] = paid
-    result[wants] += scale * unmet[wants]
+        normalized_target = np.zeros_like(target_xy)
+        normalized_measured = np.zeros_like(measured_xy)
+        for axis in range(2):
+            target_span = float(np.ptp(target_xy[:, axis]))
+            measured_span = float(np.ptp(measured_xy[:, axis]))
+            if target_span > 0.0:
+                if measured_span == 0.0:
+                    raise ValueError("Calibration geometry cannot register Target support")
+                normalized_target[:, axis] = (
+                    target_xy[:, axis] - float(np.min(target_xy[:, axis]))
+                ) / target_span
+                normalized_measured[:, axis] = (
+                    measured_xy[:, axis] - float(np.min(measured_xy[:, axis]))
+                ) / measured_span
+        cost = np.sum(
+            (
+                normalized_target[:, np.newaxis, :]
+                - normalized_measured[np.newaxis, :, :]
+            )
+            ** 2,
+            axis=2,
+        )
+        target_indices, calibration_indices = linear_sum_assignment(cost)
+        full_design = np.column_stack(
+            (target_xy, np.ones(roster_count, dtype=float))
+        )
+        for _iteration in range(6):
+            matched_design = full_design[target_indices]
+            if np.linalg.matrix_rank(matched_design) < target_rank + 1:
+                raise ValueError("detected sites do not span the authored Target geometry")
+            affine, *_unused = np.linalg.lstsq(
+                matched_design,
+                measured_xy[calibration_indices],
+                rcond=None,
+            )
+            predicted = full_design @ affine
+            cost = np.sum(
+                (predicted[:, np.newaxis, :] - measured_xy[np.newaxis, :, :])
+                ** 2,
+                axis=2,
+            )
+            updated_target, updated_calibration = linear_sum_assignment(cost)
+            if np.array_equal(updated_target, target_indices) and np.array_equal(
+                updated_calibration, calibration_indices
+            ):
+                break
+            target_indices, calibration_indices = (
+                updated_target,
+                updated_calibration,
+            )
+        matched_design = full_design[target_indices]
+        affine, *_unused = np.linalg.lstsq(
+            matched_design,
+            measured_xy[calibration_indices],
+            rcond=None,
+        )
+        predicted = full_design @ affine
+
+    source_indices = np.full(roster_count, -1, dtype=int)
+    source_indices[target_indices] = calibration_indices
+    observed = source_indices >= 0
+    centers = np.array(predicted, dtype="<f8", copy=True)
+    centers[observed] = measured_xy[source_indices[observed]]
+    valid = np.zeros(roster_count, dtype=bool)
+    valid[observed] = detected.valid_sites[source_indices[observed]]
+    quality = np.full(roster_count, np.nan, dtype="<f8")
+    quality[observed] = detected.quality[source_indices[observed]]
+    topology = {
+        "kind": "slm_target_registration",
+        "target_support_yx": np.column_stack((rows, columns)).astype(int).tolist(),
+        "target_site_intensity": target[rows, columns].astype(float).tolist(),
+        "observed_sites": observed.tolist(),
+        "affine_target_xy_to_image_xy": affine.astype(float).tolist(),
+        "provenance": dict(provenance),
+    }
+    result = SiteMap(
+        tuple(f"site_{index:04d}" for index in range(roster_count)),
+        centers,
+        valid,
+        quality,
+        detected.coordinate_frame,
+        topology,
+    )
+    validate_target_registration(
+        result,
+        frame_shape=frame_shape,
+        box_half_width=measurement_radius,
+    )
     return result
 
 
 def _support(
     target: np.ndarray,
     calibration: TrapCalibration,
-    model: ReadoutModel,
     *,
+    box_half_width: int,
     science_context_path: str | Path,
     command_receipt: Mapping[str, object],
-) -> tuple[np.ndarray, np.ndarray, SiteMap, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, SiteMap]:
     """Register the Calibration's sites to this Feedback Target.
 
-    Returns the Target rows and columns, the registered roster, and for every
-    roster site the index of the Calibration site it was matched to (``-1``
-    for a site the Calibration never observed, whose centre is predicted).
+    Returns the Target rows and columns and the registered roster, whose
+    ``observed_sites`` topology says which roster sites the Calibration
+    measured and which have a predicted centre.  ``box_half_width`` is the
+    BOX every roster site must be able to carry inside the frame.
     """
 
     usable = np.asarray(calibration.site_map.valid_sites, dtype=bool)
@@ -924,41 +1259,19 @@ def _support(
             "command_receipt": dict(command_receipt),
         },
         frame_shape=calibration.frame_contract.image_shape,
-        measurement_radius=_readout_window_half_width(model),
+        measurement_radius=int(box_half_width),
     )
     support, provenance = validate_target_registration(
         registered,
         frame_shape=calibration.frame_contract.image_shape,
-        box_half_width=_readout_window_half_width(model),
+        box_half_width=int(box_half_width),
     )
     rows, columns = support.T
     if not np.array_equal(support, np.column_stack(np.nonzero(target > 0.0))):
         raise ValueError("registered Calibration support differs from Science Context")
     if provenance["command_receipt"] != dict(command_receipt):
         raise RuntimeError("Feedback registration lost its Science Context receipt")
-    observed = np.asarray(registered.topology["observed_sites"], dtype=bool)
-    lookup = {
-        tuple(center): int(source)
-        for center, source in zip(
-            np.asarray(source_map.centers_xy, dtype=float).tolist(),
-            source_indices.tolist(),
-            strict=True,
-        )
-    }
-    source_index = np.full(len(rows), -1, dtype=int)
-    for site in np.flatnonzero(observed):
-        source_index[site] = lookup[
-            tuple(np.asarray(registered.centers_xy, dtype=float)[site].tolist())
-        ]
-    return rows, columns, registered, source_index
-
-
-def _readout_window_half_width(model: ReadoutModel) -> int:
-    """Every pixel the model's readout touches around a site centre."""
-
-    if model.kind is ReadoutModelKind.BOX or model.background != "annulus":
-        return int(model.integration_half_width)
-    return int(model.integration_half_width) + int(model.psf_padding)
+    return rows, columns, registered
 
 
 def _relative_probe_target(
@@ -1285,6 +1598,25 @@ def _updated_target(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Update observable sites relatively; fund the dark sites' directions.
 
+    EVERY SITE'S ACTUAL SHARE MOVES WITH THE SIGN THE CONTROLLER GAVE IT.
+    The controller gives each site one direction for this candidate: the
+    sign of its loop step for a loaded site, the sign of its directed step
+    for a dark site with evidence, none for a site with no information --
+    an invalid readout, a single site waiting for its probe, a loaded site
+    held on its ramp or without a reference.  The update is then done in
+    SHARE space over the sites that have a direction: the balanced trades
+    (``_allocate_requested_shares``) and the funding (``_funded_shares``)
+    each conserve the total exactly and move a site only in its own
+    direction, and a held site is not written at all, so after
+    normalisation every site's absolute share of the fixed total power has
+    changed with its intended sign -- or, when the other side has nothing
+    to give, not at all: the step shrinks, it never turns.  A loaded site
+    the loop asks nothing of has no direction of its own and lends itself
+    to the funding either way; its recorded correction is then that
+    movement.  A site that is held keeps its absolute share to the
+    Target's precision, which is what "hold" means physically; a raw
+    weight that stayed put while the total moved was not holding anything.
+
     A loaded site on its loading ramp (``loading_edge``, see
     ``_loading_edge``) has no share to give: its own step is held at zero
     when it points shallower (``hold_loading_edge``) and neither the
@@ -1305,20 +1637,21 @@ def _updated_target(
     A dark site with a direction (``directed_log_step``: a probe verdict, a
     bracket bisection or an extrapolation) asks for that share outright --
     the request is not the loop's, so neither gain nor clamp applies to it.
-    THE LOADED SITES FUND IT, TOGETHER AND BOUNDED: whatever the ordinary
-    trades leave unmet is drawn from every loaded site by one common factor,
-    each site giving at most one resolution step in this candidate and never
-    past its own bracket boundary (``control_boundary``; see
-    ``_funded_shares``).  Total power
+    THE LOADED SITES NOT GOING THE OTHER WAY FUND IT, TOGETHER AND BOUNDED:
+    whatever the balanced trades leave unmet is drawn from the loaded sites
+    the loop is not sending up -- their own step down, or nothing asked of
+    them -- and handed, for a directed decrease, to the ones it is not
+    sending down; a held site is neither.  Each gives at most one
+    resolution step in this candidate and never crosses its own bracket
+    boundary (``control_boundary``; see ``_funded_shares``).  Total power
     is the hard constraint; how fast a dark site gets there is not.  Direct
     adoption of a winning probe share used to rescale the loaded sites by
     whatever it took (-40% at once), which pressed every one of them past
     its loading edge at 4% margin; and a bracket step with nobody assigned
     to pay for it moved ~1% per candidate, the crumbs of the loop's own
-    residual trades.  What cannot be funded this candidate is scaled back
-    towards the current share, never reversed, and asked for again next
-    candidate.  Without a directed site this is exactly the ordinary
-    allocation, arithmetic untouched.
+    residual trades.  What cannot be funded this candidate is asked for
+    again next candidate.  Without a directed site this is exactly the
+    balanced allocation.
     """
 
     values = np.asarray(contrast, dtype=float)
@@ -1383,12 +1716,17 @@ def _updated_target(
     raw_weights = np.asarray(target[rows, columns], dtype=float)
     log_correction = np.zeros(site_shape, dtype=float)
     decision = np.full(site_shape, "hold_invalid", dtype="<U32")
+    # The loaded sites the loop is stepping: the ones the funding may lend
+    # in whichever direction their own step does not forbid.  A held site
+    # is not one of them.
+    lends = np.zeros(site_shape, dtype=bool)
     for site in range(len(rows)):
         if control_valid[site] and np.isfinite(reference):
             residual = float(np.log(values[site] / reference))
             relative_error = max(float(errors[site]), 0.0) / values[site]
             quality = float(np.clip(1.0 - 4.0 * relative_error, 0.1, 1.0))
             decision[site] = feedback_decision
+            lends[site] = True
             log_correction[site] = float(
                 np.clip(
                     step_gain * quality * residual,
@@ -1399,6 +1737,7 @@ def _updated_target(
             if edge[site] and log_correction[site] < 0.0:
                 log_correction[site] = 0.0
                 decision[site] = "hold_loading_edge"
+                lends[site] = False
         elif direction[site] != 0.0:
             log_correction[site] = float(direction[site])
             decision[site] = (
@@ -1436,14 +1775,16 @@ def _updated_target(
             next_shares,
             directed,
             shares * np.exp(log_correction),
-            control_valid & ~directed,
+            lends & (log_correction <= 0.0),
+            lends & (log_correction >= 0.0),
             lower=lower,
             upper=upper,
         )
     log_correction = np.log(next_shares / shares)
+    moved = next_shares != shares
     updated = np.array(target, dtype=np.float32, copy=True)
-    updated[rows, columns] = (
-        next_shares * float(np.sum(raw_weights))
+    updated[rows[moved], columns[moved]] = (
+        next_shares[moved] * float(np.sum(raw_weights))
     ).astype(np.float32)
     return validate_target(updated), log_correction, decision
 
@@ -1513,22 +1854,27 @@ class SlmFeedbackTask:
         receipt = science_context.get("command_receipt")
         if not isinstance(receipt, Mapping):
             raise TypeError("Science Context command receipt must be a mapping")
-        # The readout is the Calibration's DEFAULT model -- the same matched
-        # filter (or box) that occupancy reads with, at the registered site
-        # centres.  The task no longer sums its own 3x3 box: that box caught
-        # 66% of a site's light and lost 1.25% of signal per quarter pixel
-        # of drift, the same size as the residuals the loop was correcting.
-        model = calibration.select_model()
+        # The readout is the BOX, at the Calibration's registered centres and
+        # its BOX half-width, whatever model the Calibration itself reads
+        # occupancy with.  A box total is the light the site's footprint
+        # collected, in the frame's own unit: bright minus dark is then a
+        # photon count, and the plant slope, the contrasts and the reference
+        # the loop compares them to are all photons.  A matched filter's
+        # number is a projection whose scale is the Calibration's, not the
+        # frame's, and a predicted site the Calibration never saw has no
+        # measured shape to project on; a box needs only a centre.
+        try:
+            model = calibration.select_model(ReadoutModelKind.BOX)
+        except KeyError:
+            raise ValueError(
+                "SLM feedback reads bright and dark counts with the "
+                "Calibration's BOX model, which this Calibration does not carry"
+            ) from None
         context_path = Path(science_context_path).expanduser().resolve()
-        (
-            self._rows,
-            self._columns,
-            self._registered_site_map,
-            source_index,
-        ) = _support(
+        self._rows, self._columns, self._registered_site_map = _support(
             frozen_target,
             calibration,
-            model,
+            box_half_width=model.integration_half_width,
             science_context_path=context_path,
             command_receipt=receipt,
         )
@@ -1537,35 +1883,6 @@ class SlmFeedbackTask:
             self._registered_site_map.centers_xy, dtype=float
         ).copy()
         self._site_centers_xy.setflags(write=False)
-        self._site_kernels: np.ndarray | None = None
-        if model.kind is not ReadoutModelKind.BOX:
-            observed = source_index >= 0
-            kernels = np.empty(
-                (self._site_count, *model.psf_weights.shape[1:]), dtype=float
-            )
-            kernels[observed] = model.psf_weights[source_index[observed]]
-            if not np.all(observed):
-                # A site the Calibration never saw has no measured shape; it
-                # reads with the shape the other sites agreed on, exactly as
-                # the Calibration itself treats a site whose atoms it could
-                # not measure.
-                try:
-                    uniform = calibration.select_model(ReadoutModelKind.UNIFORM_PSF)
-                except KeyError:
-                    raise ValueError(
-                        "predicted Target sites need the Calibration's uniform "
-                        "PSF model to read with"
-                    ) from None
-                if (
-                    uniform.psf_weights.shape[1:] != kernels.shape[1:]
-                    or uniform.integration_half_width != model.integration_half_width
-                ):
-                    raise ValueError(
-                        "Calibration uniform PSF differs in size from its default model"
-                    )
-                kernels[~observed] = uniform.psf_weights[0]
-            kernels.setflags(write=False)
-            self._site_kernels = kernels
         self.camera, self.sequencer, self.slm = camera, sequencer, slm
         self.camera_key, self.sequencer_key, self.slm_key = camera_key, sequencer_key, slm_key
         self.signal_plane, self.calibration, self.model = signal_plane, calibration, model
@@ -1613,6 +1930,10 @@ class SlmFeedbackTask:
         self._actual_exposure_seconds: float | None = None
         self._effective_photoelectrons: bool | None = None
         self._effective_count_unit: str | None = None
+        #: The digest of the compiled program the board plays this run: the
+        #: identity under which a prior run's response state is this
+        #: plant's (see ``execute``).
+        self._program_digest: str | None = None
         self._last_measured_phase: np.ndarray | None = None
         self._actual_device_snapshots: dict[str, Mapping[str, object]] = {}
         factors = tuple(float(value) for value in probe_factors)
@@ -1689,22 +2010,12 @@ class SlmFeedbackTask:
         }
 
     def _site_signals(self, image: np.ndarray) -> np.ndarray:
-        """One frame read with the Calibration's default model at every site."""
+        """One frame's BOX total at every registered site, in its own counts."""
 
-        model = self.model
-        if self._site_kernels is None:
-            return extract_box_signals(
-                image,
-                self._site_centers_xy,
-                radius=model.integration_half_width,
-            )
-        return extract_psf_signals(
+        return extract_box_signals(
             image,
             self._site_centers_xy,
-            kernels=self._site_kernels,
-            background=model.background,
-            radius=model.integration_half_width,
-            padding=model.psf_padding,
+            radius=self.model.integration_half_width,
         )
 
     def _device_event_record(
@@ -1767,6 +2078,7 @@ class SlmFeedbackTask:
             "calibration_path": str(self.calibration_path),
             "science_context_path": str(self.science_context_path),
             "pulse_path": str(self.pulse_path),
+            "program_digest": self._program_digest,
             "named_devices": {
                 "camera": self.camera_key,
                 "sequencer": self.sequencer_key,
@@ -3303,6 +3615,7 @@ class SlmFeedbackTask:
         self._actual_exposure_seconds = None
         self._effective_photoelectrons = None
         self._effective_count_unit = None
+        self._program_digest = None
         incoming = self._incoming_phase
         incoming_pattern = self._pattern_phase
         paths = self._prepare_artifacts(context)
@@ -3330,6 +3643,7 @@ class SlmFeedbackTask:
                 sequencer=self.sequencer,
                 api_values={},
             )
+            self._program_digest = str(pulse.program.digest)
             _check_cancelled(context)
             current_target = self.target
             # The Target on the SLM is the control Target with this
@@ -3346,11 +3660,16 @@ class SlmFeedbackTask:
             previous_contrast = np.full(self._site_count, np.nan, dtype=float)
             prior_measurement = self._prior_pattern_metadata.get("measurement")
             prior_probe_factors = self._prior_pattern_metadata.get("probe_factors")
+            # A prior run's double history is this plant's only if the board
+            # plays the same program, and the compiled program's own digest
+            # is what says so.  The Pulse file's path said nothing: the same
+            # file is edited in place, and a renamed period would have made
+            # an identical program look foreign.
             comparable_history = bool(
                 self._prior_pattern_metadata.get("feedback_controller")
                 == _CONTROLLER_CONTRACT
                 and self._prior_pattern_metadata.get("feedback_mode") == self.feedback_mode
-                and self._prior_pattern_metadata.get("pulse_path") == str(self.pulse_path)
+                and self._prior_pattern_metadata.get("program_digest") == self._program_digest
                 and type(self._prior_pattern_metadata.get("exposure_seconds"))
                 in (int, float)
                 and float(self._prior_pattern_metadata["exposure_seconds"])
@@ -4157,7 +4476,7 @@ class SlmFeedbackTask:
                     # ordinary updates only; a probe's Target is the probe's
                     # own statement and carries none, and a site on its
                     # loading ramp is not wiggled 2% towards dark.
-                    next_excitation = (
+                    next_pattern_draw = (
                         _excitation_pattern(
                             excitation_rng, feedback_valid & ~loading_edge
                         )
@@ -4165,15 +4484,11 @@ class SlmFeedbackTask:
                         and formal_updates <= _PLANT_EXCITATION_CANDIDATES
                         else np.zeros(self._site_count, dtype=float)
                     )
-                    next_solved_target = (
-                        _excited_target(
-                            next_target,
-                            next_excitation,
-                            self._rows,
-                            self._columns,
-                        )
-                        if np.any(next_excitation != 0.0)
-                        else next_target
+                    next_solved_target, next_excitation = _excited_target(
+                        next_target,
+                        next_pattern_draw,
+                        self._rows,
+                        self._columns,
                     )
                     if next_kind == "probe":
                         context.report_progress(

@@ -61,11 +61,9 @@ from zlc_atom.nodes.slm_feedback.task import (
     _single_bracket_step,
     _split_half_dispersion,
     _updated_brackets,
+    _register_target_sites,
     _updated_target,
     _usable_plant_slope,
-)
-from zlc_atom.nodes.calibration.calibration import (
-    _register_target_sites,
     validate_target_registration,
 )
 from tests.pulse_fixture import IMAGING_PULSE_RESOURCE
@@ -513,6 +511,15 @@ def _measured(task: SlmFeedbackTask, result):
     return (*result, "")
 
 
+_PROGRAM_DIGEST = "5e7c0f1a9b3d4e6f8a2c1b0d9e8f7a6c"
+
+
+def _resolved_pulse(*_args, **_kwargs) -> SimpleNamespace:
+    """A resolved pulse with the one program fact the task reads: its digest."""
+
+    return SimpleNamespace(program=SimpleNamespace(digest=_PROGRAM_DIGEST))
+
+
 def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
     descriptors = {item.api_name: item for item in discover_logic_nodes()}
     descriptor = descriptors["slm_feedback"]
@@ -709,8 +716,13 @@ def test_pooled_plant_slope_and_split_half_dispersion_see_through_loop_noise() -
         exogenous = reversion * exogenous + rng.normal(
             0.0, wander * np.sqrt(1.0 - reversion**2), sites
         )
+    # Every excited site gets +-delta with the signs as balanced as an odd
+    # count allows; the common log that keeps the excited sites' total
+    # share is `_excited_target`'s, applied on the SLM, not the drawing's.
     assert all(
-        np.count_nonzero(item) == sites and abs(np.sum(item)) < 1e-12
+        np.count_nonzero(item) == sites
+        and np.allclose(np.abs(item), feedback_module._PLANT_EXCITATION_LOG_STEP)
+        and abs(int(np.sum(np.sign(item)))) <= 1
         for item in excitations[1:7]
     )
     assert not any(np.any(item != 0.0) for item in excitations[7:])
@@ -1130,12 +1142,15 @@ def test_a_loaded_site_on_its_loading_ramp_is_held_and_gives_nothing() -> None:
         _control_weights(held[rows, columns])[3]
         >= _control_weights(target[rows, columns])[3] - 1e-6
     )
-    # A ramp site does not fund a dark neighbour either.
+    # A ramp site does not fund a dark neighbour either: the loaded sites
+    # the loop sends down do, and the ones it sends up keep their rise.
     directed = np.zeros(35)
     directed[0] = np.log(2.0)
     dark_valid = np.array(valid, copy=True)
     dark_valid[0] = False
     dark_contrast = np.array(contrast, copy=True)
+    dark_contrast[[1, 2, 5]] = 0.98
+    dark_contrast[[6, 7, 8]] = 1.02
     dark_contrast[0] = np.nan
     funded, _step, _decision = _updated_target(
         target,
@@ -1157,6 +1172,7 @@ def test_a_loaded_site_on_its_loading_ramp_is_held_and_gives_nothing() -> None:
     # Through the float32 Target: the floor holds to the Target's precision.
     assert after[3] >= before[3] - 1e-6
     assert np.all(after[[1, 2, 5]] < before[[1, 2, 5]] - 1e-3)
+    assert np.all(after[[4, 6, 7, 8]] >= before[[4, 6, 7, 8]])
     with pytest.raises(ValueError):
         wrong = np.zeros(35, dtype=bool)
         wrong[0] = True
@@ -1189,15 +1205,18 @@ def test_two_populations_need_decisive_evidence() -> None:
 
 
 def test_funding_a_dark_site_never_presses_a_loaded_one_past_its_edge() -> None:
-    """THE LOADED SITES FUND IT, TOGETHER AND BOUNDED.
+    """THE LOADED SITES GOING ITS WAY FUND IT, TOGETHER AND BOUNDED.
 
-    A directed dark site asks for its share outright; what the ordinary
-    trades leave unmet is drawn from every loaded site by one common
-    factor, each held inside ONE RESOLUTION STEP of its current share and
-    inside its own bracket floor.  What cannot be funded is scaled back
-    pro rata, never reversed.  Direct adoption at the clamp (-40% at once)
-    pressed twenty-two loaded sites dark on the virtual lattice; this is
-    the law that replaced it.
+    A directed dark site asks for its share outright; what the balanced
+    trades leave unmet is drawn from the loaded sites whose own step is
+    DOWN, each held inside ONE RESOLUTION STEP of its current share and
+    inside its own bracket floor, and a directed decrease is handed to the
+    loaded sites whose step is UP.  A site the loop sends the other way is
+    never drawn on, a bound stops a request and never turns it round, and
+    the total is conserved to the last bit.  Direct adoption at the clamp
+    (-40% at once) pressed twenty-two loaded sites dark on the virtual
+    lattice; one common factor over every loaded site took 2% from a site
+    the loop had just sent up by 1%.
     """
 
     resolution = _PLANT_EXCITATION_LOG_STEP
@@ -1206,26 +1225,27 @@ def test_funding_a_dark_site_never_presses_a_loaded_one_past_its_edge() -> None:
     directed = np.asarray((True, False, False, False, False, False))
     desired = np.array(shares, copy=True)
     desired[0] = 2.0
-    compensators = ~directed
+    givers = ~directed
+    nobody = np.zeros(6, dtype=bool)
     lower = np.zeros(6)
     upper = np.full(6, np.inf)
     funded = _funded_shares(
-        shares, allocated, directed, desired, compensators, lower=lower, upper=upper
+        shares, allocated, directed, desired, givers, nobody, lower=lower, upper=upper
     )
     assert np.sum(funded) == pytest.approx(np.sum(shares))
-    given = np.log(shares[compensators] / funded[compensators])
+    given = np.log(shares[givers] / funded[givers])
     np.testing.assert_allclose(given, resolution)
-    # Five compensators at one resolution step: that is all the dark site
-    # gets this candidate, and it is what they handed over.
-    assert funded[0] == pytest.approx(1.0 + float(np.sum(shares[compensators] - funded[compensators])))
+    # Five givers at one resolution step: that is all the dark site gets
+    # this candidate, and it is what they handed over.
+    assert funded[0] == pytest.approx(1.0 + float(np.sum(shares[givers] - funded[givers])))
     assert funded[0] < desired[0]
 
-    # A compensator on its bracket floor gives nothing; the others still
-    # give their step.
+    # A giver on its bracket floor gives nothing; the others still give
+    # their step.
     floored_lower = np.array(lower, copy=True)
     floored_lower[1] = 1.0
     floored = _funded_shares(
-        shares, allocated, directed, desired, compensators,
+        shares, allocated, directed, desired, givers, nobody,
         lower=floored_lower, upper=upper,
     )
     assert floored[1] == pytest.approx(1.0)
@@ -1234,22 +1254,253 @@ def test_funding_a_dark_site_never_presses_a_loaded_one_past_its_edge() -> None:
     )
     assert floored[0] < funded[0]
 
-    # A request the compensators can cover inside the step is met exactly.
+    # A request the givers can cover inside the step is met exactly.
     small = np.array(shares, copy=True)
     small[0] = 1.02
     met = _funded_shares(
-        shares, allocated, directed, small, compensators, lower=lower, upper=upper
+        shares, allocated, directed, small, givers, nobody, lower=lower, upper=upper
     )
     assert met[0] == pytest.approx(1.02)
-    assert np.all(np.log(shares[compensators] / met[compensators]) < resolution)
+    assert np.all(np.log(shares[givers] / met[givers]) < resolution)
     assert np.sum(met) == pytest.approx(np.sum(shares))
 
-    # Nothing directed: the ordinary allocation is returned untouched.
+    # Nothing directed: the balanced allocation is returned untouched.
     untouched = _funded_shares(
-        shares, allocated, np.zeros(6, dtype=bool), desired, compensators,
+        shares, allocated, nobody, desired, givers, nobody,
         lower=lower, upper=upper,
     )
     np.testing.assert_array_equal(untouched, allocated)
+
+    # A loaded site the loop sent UP keeps its rise: it is not a giver.  A
+    # giver already down 1% by its own step has only the rest of its
+    # resolution to give.
+    traded = np.array(shares, copy=True)
+    traded[1] = 1.01
+    traded[2] = 0.99
+    kept = _funded_shares(
+        shares, traded, directed, desired,
+        np.asarray((False, False, True, True, True, True)),
+        np.asarray((False, True, False, False, False, False)),
+        lower=lower, upper=upper,
+    )
+    assert kept[1] == pytest.approx(1.01)
+    np.testing.assert_allclose(np.log(shares[2:] / kept[2:]), resolution)
+    assert kept[0] == pytest.approx(1.0 + float(np.sum(traded[1:] - kept[1:])))
+    assert np.sum(kept) == pytest.approx(np.sum(traded))
+
+    # A directed DECREASE is handed to the sites the loop sends up, each at
+    # most one resolution above its current share.
+    lowered = np.array(shares, copy=True)
+    lowered[0] = 0.5
+    handed = _funded_shares(
+        shares, allocated, directed, lowered, nobody, givers, lower=lower, upper=upper
+    )
+    np.testing.assert_allclose(np.log(handed[givers] / shares[givers]), resolution)
+    assert handed[0] == pytest.approx(1.0 - float(np.sum(handed[givers] - shares[givers])))
+    assert handed[0] > lowered[0]
+    assert np.sum(handed) == pytest.approx(np.sum(shares))
+
+    # A bound on the far side of a request stops it; it never turns it round.
+    capped = np.array(upper, copy=True)
+    capped[0] = 0.8
+    stopped = _funded_shares(
+        shares, allocated, directed, desired, givers, nobody, lower=lower, upper=capped
+    )
+    np.testing.assert_array_equal(stopped, allocated)
+    raised_floor = np.array(lower, copy=True)
+    raised_floor[0] = 1.2
+    stopped = _funded_shares(
+        shares, allocated, directed, lowered, nobody, givers,
+        lower=raised_floor, upper=upper,
+    )
+    np.testing.assert_array_equal(stopped, allocated)
+
+
+def test_every_site_moves_with_its_own_sign_or_not_at_all_over_random_rosters() -> None:
+    """EVERY SITE'S ACTUAL SHARE MOVES WITH THE SIGN THE CONTROLLER GAVE IT.
+
+    Random rosters -- loaded sites with the sign of their loop step, directed
+    dark sites with the sign of their verdict, invalid sites with no verdict,
+    loaded sites on their loading ramp, bracket bounds on either side of the
+    current share -- at random magnitudes, gains, clamps and plant slopes.
+    After normalisation every site's absolute share of the fixed total power
+    has changed with its intended sign or not at all; a site with no
+    direction keeps its share to the Target's precision; the total is
+    conserved; and while the other side has anything to give, no site that
+    can move in its direction is left standing.  The old funding drew on
+    every loaded site by one common factor -- a site the loop had just sent
+    up went down -- and when that factor had no root the total itself
+    moved, and every held site's share with it.
+    """
+
+    rng = np.random.default_rng(2026)
+    for _ in range(300):
+        sites = int(rng.integers(3, 41))
+        rows, columns = np.divmod(rng.choice(48, sites, replace=False), 8)
+        weights = rng.uniform(0.4, 2.5, sites).astype(np.float32)
+        target = np.zeros((6, 8), dtype=np.float32)
+        target[rows, columns] = weights
+        # 0 loaded, 1 directed dark, 2 invalid without a verdict, 3 loaded
+        # on its loading ramp.
+        kind = rng.choice(4, sites, p=(0.5, 0.2, 0.15, 0.15))
+        kind[0] = 0
+        valid = (kind == 0) | (kind == 3)
+        edge = kind == 3
+        contrast = np.where(valid, np.exp(rng.normal(0.0, 0.3, sites)), np.nan)
+        if rng.random() < 0.15:
+            # An exact tie: the loop asks nothing of any loaded site, and
+            # the funding may lend them either way.
+            contrast[valid] = 1.0
+        error = np.where(
+            valid, rng.uniform(0.0, 0.2, sites) * np.nan_to_num(contrast), np.nan
+        )
+        direction = np.where(
+            kind == 1,
+            rng.choice((-1.0, 1.0), sites) * rng.uniform(0.005, 0.7, sites),
+            0.0,
+        )
+        shares = weights.astype(float) / float(np.sum(weights))
+        bounded = rng.random(sites) < 0.3
+        boundary = np.full(sites, np.nan)
+        boundary[bounded] = (
+            shares[bounded] * sites
+            * np.exp(rng.normal(0.0, 0.3, int(np.count_nonzero(bounded))))
+        )
+        boundary_direction = np.where(bounded, rng.choice((-1.0, 1.0), sites), 0.0)
+        gain = float(rng.uniform(0.05, 1.0))
+        clamp = float(rng.uniform(0.05, 1.0))
+        slope = None if rng.random() < 0.3 else float(rng.uniform(0.3, 5.0))
+        updated, log_correction, decision = _updated_target(
+            target,
+            contrast,
+            error,
+            valid,
+            rows,
+            columns,
+            reference_valid=valid,
+            feedback_gain=gain,
+            plant_slope=slope,
+            maximum_weight_change=clamp,
+            directed_log_step=direction,
+            control_boundary=boundary,
+            control_direction=boundary_direction,
+            loading_edge=edge,
+        )
+
+        reference = float(np.exp(np.mean(np.log(contrast[valid]))))
+        residual = np.where(
+            valid, np.log(np.where(valid, contrast, 1.0) / reference), 0.0
+        )
+        intended = np.sign(residual)
+        intended[edge & (intended < 0.0)] = 0.0
+        intended[kind == 1] = np.sign(direction[kind == 1])
+        intended[kind == 2] = 0.0
+        # A loaded site the loop asks nothing of has no direction of its own:
+        # the funding may lend it either way, and records which.
+        lent = valid & (residual == 0.0)
+        held = (intended == 0.0) & ~lent
+        boundary_share = boundary / sites
+        lower = np.where(
+            (boundary_direction > 0.0) & np.isfinite(boundary_share),
+            boundary_share,
+            0.0,
+        )
+        lower = np.where(edge, np.maximum(lower, shares), lower)
+        upper = np.where(
+            (boundary_direction < 0.0) & np.isfinite(boundary_share),
+            boundary_share,
+            np.inf,
+        )
+
+        after = np.asarray(updated[rows, columns], dtype=float)
+        after /= float(np.sum(after))
+        # Total power is the hard constraint, to the float32 Target's precision.
+        assert float(np.sum(updated)) == pytest.approx(float(np.sum(target)), rel=1e-5)
+        # The controller's own arithmetic: the sign it gave, or nothing.
+        assert np.all(
+            lent | (log_correction == 0.0) | (np.sign(log_correction) == intended)
+        )
+        np.testing.assert_array_equal(log_correction[held], 0.0)
+        assert np.all(decision[kind == 2] == "hold_invalid")
+        # The realised Target agrees with it: what moved moved by the
+        # recorded step, what did not keeps its absolute share.
+        np.testing.assert_allclose(after[held], shares[held], rtol=1e-5)
+        np.testing.assert_allclose(
+            np.log(after[~held] / shares[~held]), log_correction[~held], atol=2e-5
+        )
+        # Nobody starves while the other side can pay: the balanced trades
+        # serve every requested step while any step goes the other way, and
+        # the funding serves a directed site while a lent site can give.
+        can_rise = (intended > 0.0) & (shares < upper)
+        can_fall = (intended < 0.0) & (shares > lower)
+        if np.any(can_rise) and np.any(can_fall):
+            assert np.all(log_correction[can_rise] > 0.0)
+            assert np.all(log_correction[can_fall] < 0.0)
+        directed_up = (kind == 1) & (direction > 0.0) & (shares < upper)
+        directed_down = (kind == 1) & (direction < 0.0) & (shares > lower)
+        if np.any(lent & (shares > lower)):
+            assert np.all(log_correction[directed_up] > 0.0)
+        if np.any(lent & (shares < upper)):
+            assert np.all(log_correction[directed_down] < 0.0)
+
+
+def test_excitation_leaves_every_unexcited_share_where_it_was_over_random_rosters() -> None:
+    """The identification excitation is applied in share space over the
+    excited sites.
+
+    Random rosters and random excitable subsets: the drawn +-2% pattern of
+    balanced signs is shifted by one common log so that the excited sites'
+    total intensity is unchanged, every unexcited site -- invalid,
+    unobservable, on its loading ramp -- keeps its absolute share of the
+    fixed total power to the Target's precision, and the step recorded for
+    the plant slope is the shifted pattern the SLM actually saw.  A pattern
+    that merely summed to zero in log moved the total, and a held site lost
+    1% of its share to the renormalisation.
+    """
+
+    rng = np.random.default_rng(3)
+    for _ in range(200):
+        sites = int(rng.integers(1, 41))
+        rows, columns = np.divmod(rng.choice(48, sites, replace=False), 8)
+        weights = rng.uniform(0.4, 2.5, sites).astype(np.float32)
+        target = np.zeros((6, 8), dtype=np.float32)
+        target[rows, columns] = weights
+        excitable = rng.random(sites) < rng.uniform(0.0, 1.0)
+        drawn = _excitation_pattern(rng, excitable)
+        solved, applied = _excited_target(target, drawn, rows, columns)
+        raw = weights.astype(float)
+        excited = drawn != 0.0
+        assert np.all(excitable[excited])
+        assert float(np.sum(solved)) == pytest.approx(float(np.sum(target)), rel=1e-5)
+        before = raw / float(np.sum(raw))
+        after = np.asarray(solved[rows, columns], dtype=float)
+        after /= float(np.sum(after))
+        np.testing.assert_array_equal(applied[~excited], 0.0)
+        np.testing.assert_array_equal(
+            solved[rows[~excited], columns[~excited]], weights[~excited]
+        )
+        np.testing.assert_allclose(after[~excited], before[~excited], rtol=1e-5)
+        if not np.any(excited):
+            np.testing.assert_array_equal(solved, target)
+            continue
+        assert np.count_nonzero(excited) >= 2
+        assert abs(int(np.sum(np.sign(drawn[excited])))) <= 1
+        np.testing.assert_allclose(np.abs(drawn[excited]), _PLANT_EXCITATION_LOG_STEP)
+        shift = drawn[excited] - applied[excited]
+        np.testing.assert_allclose(shift, shift[0], atol=1e-12)
+        np.testing.assert_allclose(
+            np.sum(raw[excited] * np.exp(applied[excited])),
+            np.sum(raw[excited]),
+            rtol=1e-12,
+        )
+        np.testing.assert_allclose(
+            np.log(
+                np.asarray(solved[rows[excited], columns[excited]], dtype=float)
+                / raw[excited]
+            ),
+            applied[excited],
+            atol=1e-5,
+        )
 
 
 def test_probe_admission_excludes_observable_invalid_and_formal_history_sites() -> None:
@@ -1333,7 +1584,7 @@ def test_feedback_applies_science_context_then_measures_before_solving_update(
     )
     # The first update is solved for the control Target with the run's
     # first identification excitation on it, drawn from its seeded generator.
-    expected_solved = _excited_target(
+    expected_solved, _applied = _excited_target(
         expected_target,
         _excitation_pattern(np.random.default_rng(0), np.ones(35, dtype=bool)),
         *np.nonzero(frozen_target),
@@ -1356,7 +1607,7 @@ def test_feedback_applies_science_context_then_measures_before_solving_update(
     monkeypatch.setattr(
         feedback_module,
         "resolve_pulse",
-        lambda *args, **kwargs: SimpleNamespace(program=object()),
+        _resolved_pulse,
     )
     fits = iter((_fitted_result(first_contrast), _fitted_result(np.ones(35))))
     monkeypatch.setattr(
@@ -1474,7 +1725,7 @@ def test_arbitrary_sparse_geometry_matches_calibration_sites_before_updating_tar
     monkeypatch.setattr(
         feedback_module,
         "resolve_pulse",
-        lambda *args, **kwargs: SimpleNamespace(program=object()),
+        _resolved_pulse,
     )
     monkeypatch.setattr(feedback_module, "solve_phase", solve)
     monkeypatch.setattr(
@@ -1517,7 +1768,7 @@ def test_arbitrary_sparse_geometry_matches_calibration_sites_before_updating_tar
             plant_slope=None,
             maximum_weight_change=0.5,
         )
-        expected_solved = _excited_target(
+        expected_solved, _applied = _excited_target(
             expected,
             _excitation_pattern(
                 np.random.default_rng(0), np.ones(len(rows), dtype=bool)
@@ -1557,7 +1808,7 @@ def test_uniformity_history_is_one_latest_curve_paired_with_candidate_phase(
     monkeypatch.setattr(
         feedback_module,
         "resolve_pulse",
-        lambda *args, **kwargs: SimpleNamespace(program=object()),
+        _resolved_pulse,
     )
     phases = iter((0.25, 0.5))
     monkeypatch.setattr(
@@ -1718,6 +1969,99 @@ def test_regular_nine_by_nine_grid_registers_directly_with_one_missing_site() ->
     assert len(support) == 81
     assert np.flatnonzero(~registered.valid_sites).tolist() == [missing]
     np.testing.assert_allclose(registered.centers_xy[missing], centers[missing])
+    # Target registration is the Feedback's own science: the Calibration
+    # never sees a Target, so it neither owns nor exports the registration.
+    import zlc_atom.nodes.calibration.calibration as calibration_module
+
+    assert _register_target_sites.__module__ == feedback_module.__name__
+    assert validate_target_registration.__module__ == feedback_module.__name__
+    assert not hasattr(calibration_module, "_register_target_sites")
+    assert not hasattr(calibration_module, "validate_target_registration")
+
+
+def test_feedback_reads_every_site_with_the_calibration_box_not_its_matched_filter(
+    tmp_path: Path,
+) -> None:
+    """Bright and dark counts are photon counts: the BOX total at the centre.
+
+    A Calibration whose default readout is the per-site matched filter still
+    hands the Feedback only its BOX geometry -- the matched filter's weights
+    never touch a Feedback frame, so a predicted site the Calibration never
+    saw needs no borrowed shape -- and a Calibration without a BOX model
+    cannot feed back at all.
+    """
+
+    from zlc_atom.nodes.calibration import extract_box_signals, extract_psf_signals
+
+    target = _grid_target((17, 23))
+    rows, columns = np.nonzero(target)
+    centers = np.column_stack((10.0 + 2.0 * columns, 12.0 + 2.0 * rows))
+    ids = tuple(f"site_{index:04d}" for index in range(35))
+    site_map = SiteMap(ids, centers, np.ones(35, bool), np.ones(35))
+    levels = dict(
+        thresholds=np.full(35, 5.0),
+        dark_mean=np.zeros(35),
+        bright_mean=np.full(35, 10.0),
+        usable_sites=np.ones(35, bool),
+        quality=np.ones(35),
+    )
+    box = ReadoutModel(ids, **levels, kind=ReadoutModelKind.BOX, integration_half_width=1)
+    kernels = np.zeros((35, 3, 3))
+    kernels[:, 1, 1] = 1.0
+    matched = ReadoutModel(
+        ids,
+        **levels,
+        kind=ReadoutModelKind.PER_SITE_PSF,
+        integration_half_width=1,
+        psf_weights=kernels,
+        psf_boxes=np.column_stack(
+            (centers[:, 0] - 1, centers[:, 1] - 1, np.full(35, 3), np.full(35, 3))
+        ).astype(int),
+        background="none",
+        psf_padding=1,
+    )
+    contract = FrameContract((64, 64), exposure_seconds=0.020)
+    plane = SignalDataPlane()
+    try:
+        task = _task(
+            tmp_path,
+            slm=_Slm(target.shape),
+            camera=object(),
+            sequencer=object(),
+            plane=plane,
+            target=target,
+            calibration=TrapCalibration(
+                site_map, (box, matched), ReadoutModelKind.PER_SITE_PSF, contract
+            ),
+        )
+        assert task.model.kind is ReadoutModelKind.BOX
+        assert task._run_record()["readout_model_kind"] == "box"
+        image = np.random.default_rng(5).normal(100.0, 3.0, (64, 64))
+        read = task._site_signals(image)
+        np.testing.assert_array_equal(
+            read, extract_box_signals(image, task._site_centers_xy, radius=1)
+        )
+        assert not np.allclose(
+            read,
+            extract_psf_signals(
+                image, task._site_centers_xy, kernels=kernels,
+                background="none", radius=1, padding=1,
+            ),
+        )
+        with pytest.raises(ValueError, match="BOX model"):
+            _task(
+                tmp_path,
+                slm=_Slm(target.shape),
+                camera=object(),
+                sequencer=object(),
+                plane=plane,
+                target=target,
+                calibration=TrapCalibration(
+                    site_map, (matched,), ReadoutModelKind.PER_SITE_PSF, contract
+                ),
+            )
+    finally:
+        plane.close()
 
 
 def test_sparse_geometry_refuses_a_large_global_shear(
@@ -2098,7 +2442,7 @@ def test_electron_measurement_uses_current_conversion_and_saturation(
     run(recorded_offset, 0.6, True)
 
 
-def test_measure_keeps_observer_only_faults_repeats_board_faults_and_loads_once(
+def test_measure_keeps_observer_only_faults_repeats_board_faults_and_loads_every_batch(
     tmp_path: Path,
 ) -> None:
     """The real-run failure: one lost UART poll byte at shot 85 of 200.
@@ -2107,7 +2451,8 @@ def test_measure_keeps_observer_only_faults_repeats_board_faults_and_loads_once(
     board fault -- reported after every trigger, or mid-batch so that the
     camera times out first -- repeats the batch once with the first fault on
     record, and the second fault is fatal naming both; the program is loaded
-    once per run because the board reports still holding it.
+    for every batch, a repeat included, the way calibration loads it for
+    every shot (see ``_shoot``): one LOAD per FIRE.
     """
 
     def frame_source(ordinal: int, exposure: float) -> np.ndarray:
@@ -2222,8 +2567,8 @@ def test_measure_keeps_observer_only_faults_repeats_board_faults_and_loads_once(
             "batch repeated after a pulse fault: the board reported an error"
         )
         assert sequencer.fires == [10, 10, 10]
-        # The board still holds the program: no second LOAD in this run.
-        assert sequencer.loads == 1
+        # The repeat is a whole new batch: safe, LOAD, arm, fire.
+        assert sequencer.loads == 3
 
         # The board stops after three of ten triggers: the camera times out
         # first, the board's report is read before the camera is blamed,
@@ -2266,6 +2611,7 @@ def test_measure_keeps_observer_only_faults_repeats_board_faults_and_loads_once(
         ):
             task._measure(pulse, _Context(), 4)
         assert sequencer.fires == [10] * 8
+        assert sequencer.loads == len(sequencer.fires)
         assert not sequencer.reports
         assert not camera.capture_state()
     finally:
@@ -2296,7 +2642,7 @@ def test_single_population_sites_probe_both_sides_then_measure_combined_target(
     monkeypatch.setattr(
         feedback_module,
         "resolve_pulse",
-        lambda *args, **kwargs: SimpleNamespace(program=object()),
+        _resolved_pulse,
     )
 
     valid = np.ones(35, dtype=bool)
@@ -2468,25 +2814,21 @@ def test_single_population_sites_probe_both_sides_then_measure_combined_target(
 def test_baseline_single_with_formal_history_steps_to_bracket_midpoint_without_probe(
     tmp_path: Path, monkeypatch
 ) -> None:
+    """A prior run's double history is this plant's only under the same PROGRAM.
+
+    The history is restored when the board plays the same compiled program:
+    the program's own digest says so, and every candidate records it.  The
+    Pulse file's path said nothing -- the same file is edited in place, so a
+    Pulse that changed under an unchanged path handed a new run a double
+    history measured on another pulse, and a dark site with no evidence of
+    its own skipped the probe it needed.
+    """
+
     target = _grid_target((17, 23))
     rows, columns = np.nonzero(target > 0.0)
     slm = _Slm(target.shape)
-    context_mapping = _science_context(slm, target=target)
     previous_weights = np.ones(35)
     previous_weights[17] = 1.2
-    context_mapping["pattern_metadata"] = {
-        "feedback_controller": "slm-feedback.qcmos-bright-dark",
-        "feedback_mode": "qcmos_bright_dark",
-        "pulse_path": str(Path(IMAGING_PULSE_RESOURCE.path).resolve()),
-        "exposure_seconds": 0.020,
-        "probe_factors": [0.5, 2.0],
-        "feedback_gain": 0.25,
-        "maximum_weight_change": 0.5,
-        "measurement": {
-            "previous_double_control_weight": previous_weights.tolist(),
-            "previous_double_bright_minus_dark": np.ones(35).tolist(),
-        },
-    }
     valid = np.ones(35, dtype=bool)
     valid[17] = False
     single = np.zeros(35, dtype=bool)
@@ -2495,34 +2837,36 @@ def test_baseline_single_with_formal_history_steps_to_bracket_midpoint_without_p
     baseline_contrast[0] = 0.1
     baseline_error = 0.24 * baseline_contrast
     baseline_error[0] = 0.0
-    fits = iter((
-        _fitted_result(
-            np.where(valid, baseline_contrast, np.nan),
-            valid=valid,
-            single_population=single,
-            standard_error=baseline_error,
-        ),
-        _fitted_result(np.ones(35)),
-    ))
+    fits_served: list[int] = []
     solved_targets: list[np.ndarray] = []
-    monkeypatch.setattr(
-        feedback_module,
-        "resolve_pulse",
-        lambda *args, **kwargs: SimpleNamespace(program=object()),
-    )
+    monkeypatch.setattr(feedback_module, "resolve_pulse", _resolved_pulse)
     monkeypatch.setattr(
         feedback_module,
         "solve_phase",
         lambda candidate, **_kwargs: (
             solved_targets.append(np.array(candidate, copy=True))
-            or np.full(candidate.shape, 0.2, dtype=np.float32),
+            or np.full(
+                candidate.shape, 0.1 * (len(solved_targets) + 1), dtype=np.float32
+            ),
             {},
         ),
     )
     monkeypatch.setattr(
         feedback_module,
         "_fit_contrasts",
-        lambda samples, **_kwargs: next(fits),
+        lambda samples, **_kwargs: (
+            fits_served.append(1)
+            or (
+                _fitted_result(
+                    np.where(valid, baseline_contrast, np.nan),
+                    valid=valid,
+                    single_population=single,
+                    standard_error=baseline_error,
+                )
+                if len(fits_served) == 1
+                else _fitted_result(np.ones(35))
+            )
+        ),
     )
     monkeypatch.setattr(
         SlmFeedbackTask,
@@ -2537,31 +2881,64 @@ def test_baseline_single_with_formal_history_steps_to_bracket_midpoint_without_p
     monkeypatch.setattr(
         SlmFeedbackTask, "_save_figures", lambda *args, **kwargs: None
     )
-    plane = SignalDataPlane()
-    task = _task(
-        tmp_path,
-        slm=slm,
-        camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object()),
-        plane=plane,
-        calibration=_calibration_at(
-            np.column_stack((columns, rows)), shape=target.shape
-        ),
-        science_context=context_mapping,
-        updates=1,
-    )
-    try:
-        result = task.execute(_Context(tmp_path))
-        history = _load_history(result["artifact_path"])
-        assert [item["candidate_kind"] for item in history] == [
-            "baseline", "ordinary"
-        ]
-        assert history[0]["probe_sites"] == []
-        assert history[0]["decision"][17] == "single_bracket_midpoint"
-        assert history[1]["control_weight"][17] == pytest.approx(np.sqrt(1.2))
-        assert solved_targets
-    finally:
-        plane.close()
+    prior = {
+        "feedback_controller": "slm-feedback.qcmos-bright-dark",
+        "feedback_mode": "qcmos_bright_dark",
+        "pulse_path": str(Path(IMAGING_PULSE_RESOURCE.path).resolve()),
+        "program_digest": _PROGRAM_DIGEST,
+        "exposure_seconds": 0.020,
+        "probe_factors": [0.5, 2.0],
+        "feedback_gain": 0.25,
+        "maximum_weight_change": 0.5,
+        "measurement": {
+            "previous_double_control_weight": previous_weights.tolist(),
+            "previous_double_bright_minus_dark": np.ones(35).tolist(),
+        },
+    }
+
+    def run(name: str, metadata: dict[str, object]) -> list[dict[str, object]]:
+        fits_served.clear()
+        solved_targets.clear()
+        context_mapping = _science_context(slm, target=target)
+        context_mapping["pattern_metadata"] = metadata
+        run_directory = tmp_path / name
+        run_directory.mkdir()
+        plane = SignalDataPlane()
+        task = _task(
+            run_directory,
+            slm=slm,
+            camera=object(),
+            sequencer=SimpleNamespace(describe=lambda: object()),
+            plane=plane,
+            calibration=_calibration_at(
+                np.column_stack((columns, rows)), shape=target.shape
+            ),
+            science_context=context_mapping,
+            updates=1,
+        )
+        try:
+            result = task.execute(_Context(run_directory))
+            _phase, saved = _load_candidate(result["artifact_path"])
+            assert saved["program_digest"] == _PROGRAM_DIGEST
+            assert solved_targets
+            return _load_history(result["artifact_path"])
+        finally:
+            plane.close()
+
+    history = run("same-program", prior)
+    assert [item["candidate_kind"] for item in history] == [
+        "baseline", "ordinary"
+    ]
+    assert history[0]["probe_sites"] == []
+    assert history[0]["decision"][17] == "single_bracket_midpoint"
+    assert history[1]["control_weight"][17] == pytest.approx(np.sqrt(1.2))
+
+    # The same Pulse path now compiles to another program: that history was
+    # measured on another plant, and the dark site is probed like a new one.
+    history = run("other-program", {**prior, "program_digest": "0" * 32})
+    assert history[0]["candidate_kind"] == "baseline"
+    assert history[0]["probe_sites"] == [17]
+    assert history[0]["decision"][17] == "hold_for_probe"
 
 
 def test_probe_combined_counts_once_and_a_probed_site_is_never_probed_again(
@@ -2574,7 +2951,7 @@ def test_probe_combined_counts_once_and_a_probed_site_is_never_probed_again(
     monkeypatch.setattr(
         feedback_module,
         "resolve_pulse",
-        lambda *args, **kwargs: SimpleNamespace(program=object()),
+        _resolved_pulse,
     )
     def solve(candidate, **kwargs):
         solved_targets.append(np.array(candidate, copy=True))
@@ -2722,7 +3099,7 @@ def test_all_single_population_sites_stall_at_baseline_without_fake_probe(
     monkeypatch.setattr(
         feedback_module,
         "resolve_pulse",
-        lambda *args, **kwargs: SimpleNamespace(program=object()),
+        _resolved_pulse,
     )
     monkeypatch.setattr(
         feedback_module,
@@ -2789,7 +3166,7 @@ def test_unchanged_solved_phase_stops_without_a_second_shot_batch(
     monkeypatch.setattr(
         feedback_module,
         "resolve_pulse",
-        lambda *args, **kwargs: SimpleNamespace(program=object()),
+        _resolved_pulse,
     )
     monkeypatch.setattr(
         feedback_module,
@@ -2868,7 +3245,7 @@ def test_persistently_single_site_probes_both_sides_then_extrapolates_deeper(
     monkeypatch.setattr(
         feedback_module,
         "resolve_pulse",
-        lambda *args, **kwargs: SimpleNamespace(program=object()),
+        _resolved_pulse,
     )
     context = _Context(tmp_path)
     solved_targets: list[np.ndarray] = []
@@ -3122,7 +3499,7 @@ def test_completed_run_selects_best_candidate_without_extra_shots(
 
     def resolve_without_reauthoring(*args, **kwargs):
         resolved_api_values.append(dict(kwargs["api_values"]))
-        return SimpleNamespace(program=object())
+        return _resolved_pulse()
 
     monkeypatch.setattr(feedback_module, "resolve_pulse", resolve_without_reauthoring)
     monkeypatch.setattr(
@@ -3245,7 +3622,7 @@ def test_measured_plant_slope_sets_the_step_and_proven_uniformity_stops_the_run(
     monkeypatch.setattr(
         feedback_module,
         "resolve_pulse",
-        lambda *args, **kwargs: SimpleNamespace(program=object()),
+        _resolved_pulse,
     )
     monkeypatch.setattr(feedback_module, "solve_phase", solve)
     monkeypatch.setattr(feedback_module, "_fit_contrasts", fit)
@@ -3278,10 +3655,22 @@ def test_measured_plant_slope_sets_the_step_and_proven_uniformity_stops_the_run(
         excitation = np.asarray(
             [item["excitation_log_step"] for item in history], dtype=float
         )
+        control = np.asarray(
+            [item["control_weight"] for item in history], dtype=float
+        )
         assert not np.any(excitation[0]) and not np.any(excitation[7:])
         assert np.all(np.count_nonzero(excitation[1:7], axis=1) == 35)
-        np.testing.assert_allclose(np.sum(excitation[1:7], axis=1), 0.0, atol=1e-12)
-        assert np.all(np.abs(excitation[1:7]) < 0.021)
+        # +-2% of balanced signs, shifted by one common log per candidate so
+        # that the excited sites' total share -- here the whole array's --
+        # is exactly where the control Target left it.
+        for step, weight in zip(excitation[1:7], control[1:7], strict=True):
+            shift = step - _PLANT_EXCITATION_LOG_STEP * np.sign(step)
+            np.testing.assert_allclose(shift, shift[0], atol=1e-12)
+            assert abs(int(np.sum(np.sign(step)))) <= 1
+            np.testing.assert_allclose(
+                np.sum(weight * np.exp(step)), np.sum(weight), rtol=1e-12
+            )
+        assert np.all(np.abs(excitation[1:7]) < 0.03)
         # The SLM saw the control weights times the excitation (up to the
         # common-mode renormalisation, which no site can tell from another);
         # the control step alone is what the controller requested.
@@ -3380,7 +3769,7 @@ def test_stop_during_failed_first_checkpoint_retains_measured_candidate(
     monkeypatch.setattr(
         feedback_module,
         "resolve_pulse",
-        lambda *args, **kwargs: SimpleNamespace(program=object()),
+        _resolved_pulse,
     )
     monkeypatch.setattr(
         feedback_module,
@@ -3454,7 +3843,7 @@ def test_failure_after_a_completed_candidate_saves_figures_and_context(
     monkeypatch.setattr(
         feedback_module,
         "resolve_pulse",
-        lambda *args, **kwargs: SimpleNamespace(program=object()),
+        _resolved_pulse,
     )
     monkeypatch.setattr(
         feedback_module,
@@ -3583,7 +3972,7 @@ def test_stop_after_terminal_commit_keeps_host_success_and_artifact(
     monkeypatch.setattr(
         feedback_module,
         "resolve_pulse",
-        lambda *args, **kwargs: SimpleNamespace(program=object()),
+        _resolved_pulse,
     )
     phases = iter((first_phase, best))
     monkeypatch.setattr(
@@ -3692,7 +4081,7 @@ def test_terminal_save_failure_restores_incoming_and_fails_host(
     monkeypatch.setattr(
         feedback_module,
         "resolve_pulse",
-        lambda *args, **kwargs: SimpleNamespace(program=object()),
+        _resolved_pulse,
     )
     phases = iter((first_phase, best))
     monkeypatch.setattr(
@@ -3779,7 +4168,7 @@ def test_invalid_site_holds_weight_and_never_retries_the_same_phase(
     monkeypatch.setattr(
         feedback_module,
         "resolve_pulse",
-        lambda *args, **kwargs: SimpleNamespace(program=object()),
+        _resolved_pulse,
     )
     measured_phases: list[np.ndarray] = []
 
@@ -3836,6 +4225,16 @@ def test_invalid_site_holds_weight_and_never_retries_the_same_phase(
             for item in history
             if item["candidate_kind"] != "probe"
         )
+        # "Hold" is the absolute share of the fixed total power, not a raw
+        # number left alone while the rest is renormalised around it: the
+        # invalid site's fraction of the Target is the same in every
+        # candidate, the identification excitation included.
+        shares = [
+            float(item["target_weight"][4]) / float(np.sum(item["target_weight"]))
+            for item in history
+            if item["candidate_kind"] != "probe"
+        ]
+        np.testing.assert_allclose(shares, shares[0], rtol=1e-5)
     finally:
         plane.close()
 
@@ -3851,7 +4250,7 @@ def test_stop_before_first_candidate_accepts_incoming_as_formal_artifact(
     monkeypatch.setattr(
         feedback_module,
         "resolve_pulse",
-        lambda *args, **kwargs: SimpleNamespace(program=object()),
+        _resolved_pulse,
     )
     solve_calls = 0
 

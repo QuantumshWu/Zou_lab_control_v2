@@ -323,21 +323,23 @@ reported after every trigger, or mid-batch so that the camera times out first
 (the board's report is read before the camera is blamed) -- repeats the whole
 batch once, and a second fault fails the candidate naming both. The candidate
 records the fault it was accepted with and the fault it was repeated after.
-The pulse program is loaded once per run: `fire` replays the board's resident
-image, and the board's own reported digest decides whether a LOAD is needed.
-The Pulse resource is an
+The pulse program is loaded for every shot batch, a repeated batch included,
+the way calibration loads it for every shot; nothing relies on the board's
+resident image being replayed. The Pulse resource is an
 explicit operator selection; camera exposure is a separate visible/editable
 field with a `0.1 s` default. Feedback neither derives one from the other nor
 reuses Calibration exposure.
 
-Calibration contributes registered site centers, its default readout model
-(the per-site matched filter, or the box) and image-coordinate geometry. It
-contributes no dark/bright level, threshold, exposure, photoelectron choice or
-camera working-point authority. For each candidate, Feedback reads every site
-on every shot with that default model -- a predicted site the Calibration never
-observed reads with the uniform PSF kernel, as the Calibration itself does for
-a site whose atoms it could not measure -- and fits the two Gaussian
-populations of empty (`dark`) and loaded (`bright`) shots. The metric is
+Calibration contributes registered site centers, its BOX half-width and
+image-coordinate geometry. It contributes no dark/bright level, threshold,
+exposure, photoelectron choice or camera working-point authority. For each
+candidate, Feedback reads every site on every shot with the BOX -- the sum of
+the pixels in the box round the registered centre, in the frame's own unit, so
+`bright - dark` is a photon count -- whatever model the Calibration itself reads
+occupancy with: its matched-filter weights never touch a Feedback frame, a
+predicted site the Calibration never observed needs no borrowed shape, and a
+Calibration without a BOX model cannot feed back. Feedback then fits the two
+Gaussian populations of empty (`dark`) and loaded (`bright`) shots. The metric is
 `bright_mean - dark_mean`; loading probability is reported as the mixture
 fraction but is not multiplied into that metric. Two populations are accepted
 only on decisive evidence -- a BIC gain over ten against one Gaussian; a batch
@@ -349,8 +351,11 @@ contrast, fit choice and action, and ONE plant slope for the whole array: the
 pooled regression of every site's change in log contrast on the applied change
 in log weight at lags 0, 1 and 2, instrumented by an identification
 excitation. The first six ordinary updates after the baseline carry a fresh
-zero-sum +-2% log-weight pattern on top of the controller's step (recorded per
-site as `excitation_log_step`; the control Target is the integrator and never
++-2% log-weight pattern of balanced signs on top of the controller's step,
+shifted by one common log so that the excited sites' total share is exactly
+where the control Target left it -- a site the excitation leaves alone keeps
+its absolute share (recorded per site as `excitation_log_step`, the shifted
+pattern the SLM actually saw; the control Target is the integrator and never
 absorbs it), and only transitions that pattern touches enter the regression --
 the excitation is the one thing in a closed loop that shares nothing with the
 plant's own per-candidate wander, which biased any instrument taken from the
@@ -375,10 +380,16 @@ closer side when both did, one clamp past the deepest dark share when
 neither), and a probed site is never probed again. Each candidate a dark site
 with a direction asks for one step: the geometric midpoint towards its loaded
 share while the bracket is wider than the 2% resolution, otherwise one
-resolution along its direction -- never a whole clamp. The loaded sites fund
-that step together by one common factor, each giving at most one resolution
-per candidate and never crossing its own bracket floor; what they cannot fund
-is scaled back, never reversed. Dark beyond its loaded share by more than a
+resolution along its direction -- never a whole clamp. The loaded sites the
+loop is not sending up -- their own step down, or nothing asked of them --
+fund that step together (a directed decrease is handed to those the loop is
+not sending down; a held site is neither), each giving at most one resolution
+per candidate and never crossing its own bracket bound, with total power
+conserved exactly; what
+they cannot fund is scaled back, never reversed, and no site is ever moved
+against its own direction -- every site's absolute share moves with the sign
+the controller gave it or stays, and a site with no direction keeps its
+share. Dark beyond its loaded share by more than a
 resolution retires that loaded share. The bright fraction is the
 loading-margin observable: a loaded site under half the lattice's typical
 fraction is on its loading ramp (`loading_edge`), so a step of its own that
