@@ -70,6 +70,10 @@ SLM_FEEDBACK_SCHEMA = AuthoringSchema(
                     "qcmos_bright_dark",
                     "qCMOS fluorescence (bright - dark)",
                 ),
+                AuthoringChoice(
+                    "qcmos_loading_rate",
+                    "qCMOS loading rate (bright shots / all shots)",
+                ),
             ),
         ),
         AuthoringField(
