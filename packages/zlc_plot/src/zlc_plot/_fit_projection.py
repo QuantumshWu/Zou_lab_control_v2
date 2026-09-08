@@ -55,6 +55,7 @@ from ._fit_scene import (
     FitPolyline,
 )
 from ._kinds import handler_for
+from .semantics import projection_scope
 from .selectors import (
     CrosshairPoint,
     NumericRange,
@@ -669,7 +670,7 @@ class FitProjection:
         """
 
         assert isinstance(self._data, OwnedSnapshot)
-        scope = getattr(self._spec, "scope", ())
+        scope = projection_scope(self._data.block.schema, self._spec)
         if not scope:
             return self._data
         source = self._data

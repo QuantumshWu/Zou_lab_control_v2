@@ -38,7 +38,7 @@ def build_payload(projection: Any, view: Any, state: Any) -> None:
     uncertainty = bool(
         isinstance(cell, CurvePlot)
         and state["uncertainty"]
-        and cell.reduction is Reduction.MEAN
+        and cell.reduction.statistic is Reduction.MEAN
     )
     projection._payload = view.facet(
         spec, bins=bins, uncertainty=uncertainty, window=window

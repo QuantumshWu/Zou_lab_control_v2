@@ -285,7 +285,7 @@ def _assert_curve_arrays_exact(left, right) -> None:
 
 @pytest.mark.parametrize("grouped", [False, True])
 @pytest.mark.parametrize("holes", [False, True])
-@pytest.mark.parametrize("aggregation", tuple(Reduction))
+@pytest.mark.parametrize("aggregation", tuple(item for item in Reduction if item is not Reduction.LAST))
 def test_identity_tensor_buckets_match_every_array_exactly(
     grouped, holes, aggregation
 ) -> None:

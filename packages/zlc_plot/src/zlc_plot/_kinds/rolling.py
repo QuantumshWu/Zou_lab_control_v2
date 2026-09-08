@@ -16,7 +16,7 @@ def render(renderer: Any, payload: Any, state: Any, *, axes: Any, key: str) -> N
 def build_payload(projection: Any, view: Any, state: Any) -> None:
     spec = projection._spec
     uncertainty = (
-        bool(state["uncertainty"]) and spec.reduction is Reduction.MEAN
+        bool(state["uncertainty"]) and spec.reduction.statistic is Reduction.MEAN
     )
     history = view.rolling_history(
         group=spec.group,
@@ -27,7 +27,7 @@ def build_payload(projection: Any, view: Any, state: Any) -> None:
         history,
         window=int(state["window"]),
         trailing=(
-            int(state["trailing"]) if spec.reduction is Reduction.MEAN else 1
+            int(state["trailing"]) if spec.reduction.statistic is Reduction.MEAN else 1
         ),
         uncertainty=uncertainty,
     )

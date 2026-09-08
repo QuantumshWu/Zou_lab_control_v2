@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from dataclasses import replace
 
 from data_factory import (
     axis,
@@ -10,8 +11,8 @@ from data_factory import (
     mapped_domain_from_columns,
     repeat_domain,
 )
-from zlc_data import OwnedSnapshot, REPEAT
-from zlc_plot import DEFAULTS, AxisRef, CurvePlot, HistogramPlot
+from zlc_data import OwnedSnapshot, REPEAT, DomainSpec, LATEST_COORDINATE
+from zlc_plot import DEFAULTS, AxisRef, CurvePlot, HistogramPlot, ImagePlot, FacetGridPlot, RollingPlot, Reduction
 from zlc_plot._fit_projection import FitProjection, FitScope, ProjectionContext
 from zlc_plot.data_contract import DEFAULT_UNITS
 from zlc_plot.selectors import NumericRange, RectangleRange, SelectorKind, SelectorSnapshot, SelectorState
@@ -210,6 +211,93 @@ def test_histogram_fit_uses_painted_count_bins_only() -> None:
     density_projection._build_view_and_payload()
     with pytest.raises(ValueError, match="density=False"):
         density_projection.fit_selection(model)
+
+
+@pytest.mark.parametrize("kind", ("curve", "image", "histogram", "facet_curve", "facet_image", "facet_histogram", "rolling"))
+@pytest.mark.parametrize("hole", (False, True))
+def test_last_reduction_replays_the_same_scope_for_payload_and_selection(kind, hole) -> None:
+    repeat, slow, x, y = (AxisRef.repeat("repeat"), AxisRef.point("slow"),
+                           AxisRef.cell_data("x"), AxisRef.cell_data("y"))
+    # Declared descending order; the last coordinate is physical row 1,
+    # not the largest coordinate or the last row that arrived.
+    schema = make_dataset_schema(
+        repeat_domain(size=3),
+        DomainSpec((3,), (axis("slow", values=(9.0, 5.0, 1.0)),), ((0, 2, 1),)),
+        cell_axes=(axis("x", size=2), axis("y", size=2)),
+    )
+    values = np.arange(36.0).reshape(schema.physical_shape)
+    valid = np.ones(values.shape, dtype=bool)
+    valid[-1, 1] = not hole
+    snapshot = make_snapshot(schema, values, revision=7, validity=valid, sigma=np.full(values.shape, 0.25))
+    specs = {
+        "curve": (CurvePlot(x, group=y, reduction=Reduction.LAST), (repeat, slow)),
+        "image": (ImagePlot(x, y, reduction=Reduction.LAST), (repeat, slow)),
+        "histogram": (HistogramPlot(reduced=(repeat, slow), reduction=Reduction.LAST), (repeat, slow)),
+        "facet_curve": (FacetGridPlot(facet=x, cell=CurvePlot(y, reduction=Reduction.LAST)), (repeat, slow)),
+        "facet_image": (FacetGridPlot(facet=slow, cell=ImagePlot(x, y, reduction=Reduction.LAST)), (repeat,)),
+        "facet_histogram": (FacetGridPlot(facet=x, cell=HistogramPlot(reduced=(repeat, slow), reduction=Reduction.LAST)), (repeat, slow)),
+        "rolling": (RollingPlot(group=x, reduction=Reduction.LAST), (slow, y)),
+    }
+    spec, reduced = specs[kind]
+    scope = tuple((ref, LATEST_COORDINATE) for ref in reduced)
+    expected_spec = (
+        replace(spec, cell=replace(spec.cell, reduction=Reduction.MEAN,
+                                  **({"reduced": ()} if isinstance(spec.cell, HistogramPlot) else {})), scope=scope)
+        if isinstance(spec, FacetGridPlot) else replace(spec, reduction=Reduction.MEAN, scope=scope,
+                                                      **({"reduced": ()} if isinstance(spec, HistogramPlot) else {}))
+    )
+    actual = _projection(spec, snapshot=snapshot, display={"uncertainty": True} if kind in {"curve", "facet_curve", "rolling"} else None)
+    expected = _projection(expected_spec, snapshot=snapshot, display={"uncertainty": True} if kind in {"curve", "facet_curve", "rolling"} else None)
+    assert actual.spec == spec
+    assert actual._view._schema == expected._view._schema
+    for left, right in ((actual._view.samples.value.canonical, expected._view.samples.value.canonical),
+                        (actual._view.samples.valid_mask, expected._view.samples.valid_mask),
+                        (actual._view.samples.sigma, expected._view.samples.sigma)):
+        np.testing.assert_array_equal(left, right)
+    assert actual._view.selection_subject(spec, actual.payload).scope == expected._view.selection_subject(expected_spec, expected.payload).scope
+    from zlc_plot.semantics import describe_semantics
+    from zlc_plot.figure_artifact import encode_plot_recipe, decode_plot_recipe
+    assert Reduction.LAST in describe_semantics(schema, spec).field("reduction").choice_values
+    assert decode_plot_recipe(encode_plot_recipe(spec, parameters={}, size="2x2"))["spec"] == spec
+    if kind == "curve" and not hole:
+        selected = actual.fit_selection(FitEngine().registry.get("gaussian_offset"))
+        np.testing.assert_allclose(selected.observation_sigma, 0.25)
+    actual_cells = tuple(cell.payload for cell in actual.payload.cells) if isinstance(spec, FacetGridPlot) else (actual.payload,)
+    expected_cells = tuple(cell.payload for cell in expected.payload.cells) if isinstance(spec, FacetGridPlot) else (expected.payload,)
+    for left, right in zip(actual_cells, expected_cells, strict=True):
+        if hasattr(left, "series"):
+            for a, b in zip(left.series, right.series, strict=True):
+                np.testing.assert_array_equal(a.valid, b.valid)
+                np.testing.assert_array_equal(a.counts, b.counts)
+                np.testing.assert_array_equal(a.sem, b.sem)
+                np.testing.assert_allclose(np.where(a.valid, a.y.canonical, np.nan), np.where(b.valid, b.y.canonical, np.nan))
+        elif hasattr(left, "z"):
+            np.testing.assert_array_equal(left.valid, right.valid)
+            np.testing.assert_array_equal(left.z.canonical, right.z.canonical)
+        else:
+            np.testing.assert_array_equal(left.edges.canonical, right.edges.canonical)
+            np.testing.assert_array_equal(left.counts, right.counts)
+
+
+def test_last_on_a_missing_sparse_end_is_the_same_empty_scope() -> None:
+    from zlc_data import EmptySelection
+    from zlc_plot.data_view import DataView
+
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        DomainSpec((3,), (axis("a", size=2), axis("b", size=2)), ((0, 1, 0), (0, 0, 1))),
+        cell_axes=(axis("x", size=2),),
+    )
+    snapshot = make_snapshot(schema, np.arange(6.0).reshape(schema.physical_shape), revision=0)
+    spec = CurvePlot(AxisRef.cell_data("x"), reduction=Reduction.LAST)
+    for build in (
+        lambda: _projection(spec, snapshot=snapshot),
+        lambda: DataView(snapshot).curve(spec.x, aggregation=Reduction.LAST),
+        lambda: _projection(replace(spec, reduction=Reduction.MEAN, scope=(
+            (AxisRef.point("a"), LATEST_COORDINATE), (AxisRef.point("b"), LATEST_COORDINATE))), snapshot=snapshot),
+    ):
+        with pytest.raises(EmptySelection):
+            build()
 
 
 def _pulse_timeline_data():

@@ -118,6 +118,13 @@ class Reduction(str, Enum):
     MIN = "min"
     MAX = "max"
     FIRST = "first"
+    LAST = "last"
+
+    @property
+    def statistic(self) -> "Reduction":
+        """Last is Scope followed by the ordinary mean, including its sigma."""
+
+        return Reduction.MEAN if self is Reduction.LAST else self
 
 
 class RelimMode(str, Enum):
@@ -996,7 +1003,7 @@ def history_window_requirement(
         return None
     if isinstance(semantic, HistogramPlot) and window == 1:
         return None
-    if isinstance(semantic, RollingPlot) and semantic.reduction is Reduction.MEAN:
+    if isinstance(semantic, RollingPlot) and semantic.reduction.statistic is Reduction.MEAN:
         # The window is how many points are shown; trailing is how many
         # shots EACH of them averages, counted back from itself.  The
         # earliest visible point therefore reaches ``trailing - 1`` shots
