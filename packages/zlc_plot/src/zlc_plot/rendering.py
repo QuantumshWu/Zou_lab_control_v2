@@ -5154,7 +5154,7 @@ class MatplotlibRenderer:
                     & (band_high > band_low)
                 )
                 if bool(np.any(band_where)):
-                    bars_by_series[item.identity] = self._paint_error_bars(
+                    bars = self._paint_error_bars(
                         axes,
                         previous_bars.pop(item.identity, None),
                         item.x[band_where],
@@ -5164,6 +5164,14 @@ class MatplotlibRenderer:
                         colour,
                         lines[index].get_zorder() - 0.1,
                     )
+                    # Painted is shown.  A bar reused from a series the
+                    # native scene had withdrawn came back with the data
+                    # updated and the artist still hidden: a focused cell
+                    # opened after an export drew its curve without bars.
+                    for artist in bars:
+                        if not artist.get_visible():
+                            artist.set_visible(True)
+                    bars_by_series[item.identity] = bars
             if limits is None and item.summary is not None:
                 xlow, xhigh, ylow, yhigh = item.summary[:4]
                 extremes[0] = min(extremes[0], xlow)
@@ -5321,13 +5329,6 @@ class MatplotlibRenderer:
             paint_labels=True,
             isolated_glyphs=True,
         )
-        for line, _identity, _label in self._series_lines.get(
-            id(self.primary_axes), ()
-        ):
-            line.set_visible(True)
-        for artists in self._series_bars.get(id(self.primary_axes), {}).values():
-            for artist in artists:
-                artist.set_visible(True)
 
     def _materialize_prepared_images(self) -> None:
         """Materialize the same accepted scalar scene only for a draw fallback."""

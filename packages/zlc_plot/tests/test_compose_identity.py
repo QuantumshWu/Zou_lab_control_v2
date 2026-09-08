@@ -480,6 +480,43 @@ def test_a_colorbar_whose_limits_move_under_a_held_rail_repaints_its_labels() ->
         session.close()
 
 
+def test_a_cell_focused_after_a_materialization_draws_its_error_bars(tmp_path) -> None:
+    """A withdrawn bar comes back when its cell is drawn through artists again.
+
+    An export builds bars on every cell; the next native install withdraws
+    them.  Focusing a cell then draws it through artists, and the bars were
+    reused with their data updated and the artist still hidden: the focused
+    cell showed its curve and no error bars.  Painted is shown.
+    """
+
+    session, landed = _site_grid_session()
+    try:
+        session.configure(
+            fit={"model": "damped_sine", "fit_all_facets": True}, fit_live=True
+        )
+        renderer = session._renderer
+        session.rgba()
+        _live_advance(session, landed(3))
+        session.save(tmp_path / "grid.png", export_scale=1.0)
+        for count in (4, 5):
+            _live_advance(session, landed(count))
+        session.focus_facet(3)
+        session.rgba()
+        axis = renderer.painted_surfaces[0][1]
+        bars = [
+            artist
+            for artists in renderer._series_bars.get(id(axis), {}).values()
+            for artist in artists
+        ]
+        assert bars, "the focused cell has error bars"
+        assert all(artist.get_visible() for artist in bars)
+        _live_advance(session, landed(6))
+        assert all(artist.get_visible() for artist in bars)
+        assert _composed_matches_full_draw(session) == 0
+    finally:
+        session.close()
+
+
 def test_a_rolling_rails_count_labels_each_have_a_mark() -> None:
     """The side distribution printed its two declared labels with every
     mark on the rail hidden; a label without its mark is half a statement.
