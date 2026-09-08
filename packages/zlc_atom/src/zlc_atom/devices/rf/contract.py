@@ -385,7 +385,7 @@ class RfSourceBase:
                         metadata=AuthoringField(
                             channel_field(channel, FREQUENCY_FIELD),
                             "float",
-                            f"{label}Frequency (Hz)",
+                            f"{label}Frequency",
                             # A live knob has no draft default: what it is
                             # right now is ``current``, and repeating the
                             # reading here would make a knob idling outside
@@ -410,7 +410,7 @@ class RfSourceBase:
                         metadata=AuthoringField(
                             channel_field(channel, POWER_FIELD),
                             "float",
-                            f"{label}Power (dBm)",
+                            f"{label}Power",
                             None,
                             minimum=power_range[0],
                             maximum=power_range[1],
@@ -484,23 +484,28 @@ class RfSourceBase:
             }
 
     def tune(self, name: str, value: Any) -> Any:
+        return self._tune_logged(name, value)
+
+    def _tune_logged(self, name: str, value: Any, *, unit: str = "") -> Any:
         try:
-            effective = self._resolve_tune(name, value)
+            effective = self._resolve_tune(name, value, unit=unit)
         except Exception as error:
             _LOG.info(
-                "TUNE REFUSED field=%s value=%r error=%s: %s -- device=%s",
+                "TUNE REFUSED field=%s value=%r unit=%s error=%s: %s -- device=%s",
                 name,
                 value,
+                unit or "canonical",
                 type(error).__name__,
                 str(error).replace(chr(10), " "),
                 self._identity,
             )
             raise
         _LOG.info(
-            "TUNE field=%s value=%r effective=%r device=%s",
+            "TUNE field=%s value=%r effective=%r unit=%s device=%s",
             name,
             value,
             effective,
+            unit or "canonical",
             self._identity,
         )
         return effective
@@ -575,7 +580,7 @@ class RfSourceBase:
                 self._condition.notify_all()
             return requested
 
-    def _resolve_tune(self, name: str, value: Any) -> Any:
+    def _resolve_tune(self, name: str, value: Any, *, unit: str = "") -> Any:
         selected = str(name)
         if any(selected == entry[0] for entry in WINDOW_FIELDS):
             return self._tune_window(selected, value)
@@ -603,13 +608,20 @@ class RfSourceBase:
                 effective: Any = float(self._write_frequency(channel, requested))
             elif kind == POWER_FIELD:
                 requested = float(value)
-                low, high = self._power_range(channel)
+                reading = self.read_tunable_in_unit(selected, unit) if unit else None
+                low, high = (
+                    (reading.metadata.minimum, reading.metadata.maximum)
+                    if reading is not None else self._power_range(channel)
+                )
                 if not low <= requested <= high:
                     raise ValueError(
-                        f"{selected} must lie in [{low!r}, {high!r}] dBm"
+                        f"{selected} must lie in [{low!r}, {high!r}] {unit or 'dBm'}"
                     )
-                before = float(self._read_power(channel))
-                effective = float(self._write_power(channel, requested))
+                before = float(reading.current if reading is not None else self._read_power(channel))
+                effective = float(
+                    self._write_power_in_unit(channel, requested, unit)
+                    if unit else self._write_power(channel, requested)
+                )
             else:
                 if type(value) is not bool:
                     raise TypeError(f"{selected} takes a bool")

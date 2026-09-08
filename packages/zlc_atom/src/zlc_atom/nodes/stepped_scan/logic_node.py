@@ -157,7 +157,9 @@ def _build(
     # the union, so an axis is refused by name against everything offered.
     ports = bind_plan(
         parsed,
-        scan_ports_for(sequence) + scan_ports_for_devices(tunable_devices),
+        scan_ports_for(sequence) + scan_ports_for_devices(
+            tunable_devices, units={axis.port: axis.unit for axis in parsed.axes},
+        ),
     )
 
     return SteppedScanMeasurement(

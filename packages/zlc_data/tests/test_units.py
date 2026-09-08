@@ -292,20 +292,29 @@ def test_a_prefix_belongs_to_the_reference_of_a_family() -> None:
     never does; an amplitude such as Vpp is the reference of its own family
     although its dimension's base is the watt."""
 
-    from zlc_data.units import Decibel, PeakVoltageInto
+    from zlc_data.units import Decibel, VoltageIntoLoad
 
     with pytest.raises(UnitError, match="cannot take a prefix"):
         Unit("ms", "time", Scaled(1e-3), prefixable=True)
     with pytest.raises(UnitError, match="cannot take a prefix"):
         Unit("dBx", "power", Decibel(1.0), prefixable=True)
-    assert Unit("Vpk", "power", PeakVoltageInto(50.0), prefixable=True).prefixable
+    assert Unit("Vpp", "power", VoltageIntoLoad(50.0), prefixable=True).prefixable
+    assert float(DEFAULT_UNITS.convert(1.0, "Vrms", "W")) == 0.02
+    assert float(DEFAULT_UNITS.convert(135.0, "mVrms", "Vrms")) == 0.135
 
     # A fitted numerator multiplies the authored coordinate, not its power.
     product = resolve_unit("count*mVpp")
     assert product.symbol == "count*mVpp"
-    assert float(product.convert_value_to(-3000.0, resolve_unit("count*Vpp"))) == -3.0
+    assert float(product.convert_value_to(-3000.0, resolve_unit("count*Vpp"))) == pytest.approx(-3.0)
     assert float(product.convert_value_to(-3000.0, product)) == -3000.0
-    with pytest.raises(UnitError, match="incompatible"):
-        product.convert_value_to(-3000.0, resolve_unit("count*W"))
+    assert float(product.convert_value_to(-3000.0, resolve_unit("count*Vrms"))) == pytest.approx(-3 / np.sqrt(8))
+    voltage_scale = resolve_unit("Vpp").coordinate_scale
+    rms_scale = resolve_unit("mVrms").coordinate_scale
+    assert voltage_scale[0] == rms_scale[0]
+    assert voltage_scale[1] / rms_scale[1] == pytest.approx(1000 / np.sqrt(8))
+    assert not resolve_unit("Vpp").is_linear
+    for incompatible in ("W", "dBm"):
+        with pytest.raises(UnitError, match="incompatible"):
+            product.convert_value_to(-3000.0, resolve_unit(f"count*{incompatible}"))
     assert float(resolve_unit("count*s").convert_value_to(2.0, resolve_unit("count*ms"))) == 2000.0
     assert DEFAULT_UNITS.display_choices(product) == ("count*mVpp",)

@@ -88,9 +88,17 @@ class _ScpiInstrument:
             registers["FREQ"] = float(command.split()[-1])
             registers["VOLT"] = min(registers["VOLT"], self._amplitude_cap(registers))
         elif ":VOLTAGE:UNIT " in upper:
-            registers["UNIT"] = command.split()[-1].upper()
+            unit = command.split()[-1].upper()
+            registers["VOLT"] = self._convert_amplitude(registers["VOLT"], registers["UNIT"], unit, registers)
+            registers["UNIT"] = unit
         elif ":VOLTAGE " in upper:
-            registers["VOLT"] = float(command.split()[-1])
+            value = command.split()[-1]
+            for unit in ("VPP", "VRMS", "DBM"):
+                if value.upper().endswith(unit):
+                    registers["VOLT"] = self._convert_amplitude(float(value[:-len(unit)]), unit, registers["UNIT"], registers)
+                    break
+            else:
+                registers["VOLT"] = float(value)
         elif ":IMPEDANCE " in upper:
             tail = command.split()[-1].upper()
             registers["LOAD"] = (
@@ -100,6 +108,16 @@ class _ScpiInstrument:
             registers["FUNC"] = command.split()[-1].upper()
         elif upper.startswith(":OUTPUT"):
             registers["OUT"] = command.split()[-1].upper()
+
+    @staticmethod
+    def _convert_amplitude(value, source, target, registers):
+        if source == target:
+            return value
+        ratio = 2.0 * math.sqrt(2.0) if registers["FUNC"] == "SIN" else 2.0
+        rms = (math.sqrt(1e-3 * 10.0 ** (value / 10.0) * registers["LOAD"])
+               if source == "DBM" else value / ratio if source == "VPP" else value)
+        return (10.0 * math.log10(rms * rms / registers["LOAD"] / 1e-3)
+                if target == "DBM" else rms * ratio if target == "VPP" else rms)
 
     def query(self, command: str) -> str:
         self.log.append(command)
@@ -480,6 +498,123 @@ def test_a_channel_in_volts_is_converted_through_its_own_load() -> None:
         assert float(sent.split()[-1]) == expected_vpp
         assert actual == source.tunable_values()["ch1_power_dbm"]
     source.close()
+
+
+def test_selected_units_write_native_amplitude_and_restore_the_raw_pair() -> None:
+    from zlc_atom.authoring import read_tunable_in_unit, tune_in_unit
+    from zlc_atom.nodes.scan.devices import ScanDeviceKnobs
+
+    field = "ch1_power_dbm"
+    port = "device:rf:" + field
+    for old_unit, old_value, symbol in (
+        ("DBM", -20.123456789, "dBm"),
+        ("VRMS", 0.019123456789123, "Vrms"),
+        ("VPP", 0.055123456789123, "Vpp"),
+    ):
+        instrument = _ScpiInstrument()
+        instrument.registers["1"].update(UNIT=old_unit, VOLT=old_value, LOAD=75.0)
+        source = RigolDg4000RfSource(
+            RigolDg4000Config(resource="memory", power_low_dbm=-40, power_high_dbm=-10),
+            link=instrument,
+        )
+        try:
+            standing = read_tunable_in_unit(source, field)
+            assert standing.current == old_value and standing.metadata.unit == symbol
+            selected = read_tunable_in_unit(source, field, "mVpp")
+            assert selected.metadata.maximum == pytest.approx(math.sqrt(8 * 75 * 1e-4) * 1000)
+            assert selected.metadata.label.endswith("Power")
+            assert read_tunable_in_unit(source, "ch1_frequency_hz", "kHz").metadata.label.endswith("Frequency")
+            assert not any(":UNIT " in item for item in instrument.log)
+            before = {key: dict(value) for key, value in instrument.registers.items()}
+            provenance = source.settings_provenance()
+            writes = [item for item in instrument.log if "?" not in item]
+            assert source.convert_tunable_value(field, 0.0, "dBm", "mVpp") == pytest.approx(math.sqrt(8 * 75 * 1e-3) * 1000)
+            assert source.convert_tunable_value(field, (0.0, -10.0), "dBm", "Vpp") == pytest.approx((math.sqrt(8 * 75 * 1e-3), math.sqrt(8 * 75 * 1e-4)))
+            assert source.convert_tunable_value(field, [135.0, 247.0], "mVpp", "dBm") == pytest.approx(tuple(
+                10 * math.log10((value / 1000) ** 2 / (8 * 75) / 1e-3) for value in (135.0, 247.0)
+            ))
+            assert instrument.registers == before and source.settings_provenance() == provenance
+            assert [item for item in instrument.log if "?" not in item] == writes
+            # Policy edges cover both channels and have no unique load from
+            # which to define a voltage; actual channel fields above do.
+            for policy in ("power_low_dbm", "power_high_dbm"):
+                for voltage_unit in ("mVpp", "Vrms"):
+                    with pytest.raises(ValueError, match="no single channel load"):
+                        source.read_tunable_in_unit(policy, voltage_unit)
+                    with pytest.raises(ValueError, match="no single channel load"):
+                        source.convert_tunable_value(policy, -20.0, "dBm", voltage_unit)
+                    with pytest.raises(ValueError, match="no single channel load"):
+                        source.tune_in_unit(policy, 135.0, voltage_unit)
+            assert source.read_tunable_in_unit("power_high_dbm", "mW").current == pytest.approx(.1)
+            assert source.tune_in_unit("power_high_dbm", .1, "mW") == pytest.approx(.1)
+            assert source.tune_in_unit("power_low_dbm", None, "mVpp") is None
+            source.tune("power_low_dbm", -40.0)
+            assert [item for item in instrument.log if "?" not in item] == writes
+            # The actual instrument may quantize one amplitude. Keep its
+            # answer rather than comparing it to the authored coordinate.
+            write = instrument.write
+            quantized = False
+            def first_write_quantized(command):
+                nonlocal quantized
+                write(command)
+                if not quantized and command.startswith(":SOURce1:VOLTage ") and command.endswith("VPP"):
+                    instrument.registers["1"]["VOLT"] += 3e-9
+                    quantized = True
+            instrument.write = first_write_quantized
+            knobs = ScanDeviceKnobs({"rf": source})
+            actual = knobs.move(port, 135.0, "mVpp")
+            assert actual != 135.0 and actual == instrument.registers["1"]["VOLT"] / 0.001
+            sent = next(item for item in instrument.log if item.startswith(":SOURce1:VOLTage ") and item.endswith("VPP"))
+            assert float(sent.split()[-1][:-3]) == 135.0 / 1000
+            knobs.move(port, 220.0, "mVpp")  # legal at 75 ohm, above the 50-ohm policy edge
+            knobs.restore()
+            assert instrument.registers["1"]["UNIT"] == old_unit
+            assert instrument.registers["1"]["VOLT"] == old_value
+            mode_writes = [item for item in instrument.log if ":UNIT " in item]
+            assert mode_writes == ([] if old_unit == "VPP" else [
+                ":SOURce1:VOLTage:UNIT VPP", f":SOURce1:VOLTage:UNIT {old_unit}",
+            ])
+            instrument.log.clear()
+            tune_in_unit(source, field, 0.05, "mW")
+            assert instrument.registers["1"]["UNIT"] == old_unit
+            assert not any(":UNIT " in item for item in instrument.log)
+        finally:
+            source.close()
+
+    source, instrument = _rigol()
+    original = instrument.registers["1"]["VOLT"]
+    write = instrument.write
+    try:
+        for stage in ("unit", "amplitude"):
+            failed = False
+            def refused(command):
+                nonlocal failed
+                write(command)
+                selected = (command.endswith(":VOLTage:UNIT VPP") if stage == "unit"
+                            else ":VOLTage " in command and command.endswith("VPP"))
+                if not failed and selected:
+                    failed = True
+                    raise RuntimeError("instrument write failed")
+            instrument.write = refused
+            with pytest.raises(RuntimeError, match="instrument write failed"):
+                tune_in_unit(source, field, 135.0, "mVpp")
+            assert instrument.registers["1"]["UNIT"] == "DBM"
+            assert instrument.registers["1"]["VOLT"] == original
+        def restore_refused(command):
+            if command.endswith(":VOLTage:UNIT DBM"):
+                raise RuntimeError("unit restore failed")
+            if ":VOLTage " in command and command.endswith("DBM"):
+                raise RuntimeError("amplitude restore failed")
+            write(command)
+            if ":VOLTage " in command and command.endswith("VPP"):
+                raise RuntimeError("primary write failed")
+        instrument.write = restore_refused
+        with pytest.raises(RuntimeError, match="primary write failed") as failure:
+            tune_in_unit(source, field, 135.0, "mVpp")
+        assert any("unit restore failed" in note for note in failure.value.__notes__)
+        assert any("amplitude restore failed" in note for note in failure.value.__notes__)
+    finally:
+        source.close()
 
 
 def test_volts_into_a_high_z_load_is_named_not_guessed() -> None:

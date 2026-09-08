@@ -240,9 +240,10 @@ class DeviceControlView(QtWidgets.QWidget):
 
     refresh_requested = QtCore.pyqtSignal()
     risk_toggled = QtCore.pyqtSignal(bool)
-    field_desired_changed = QtCore.pyqtSignal(str, object)
+    field_desired_changed = QtCore.pyqtSignal(str, object, str)
+    field_unit_requested = QtCore.pyqtSignal(str, str)
     field_live_apply_toggled = QtCore.pyqtSignal(str, bool)
-    field_apply_requested = QtCore.pyqtSignal(str, object)
+    field_apply_requested = QtCore.pyqtSignal(str, object, str)
 
     def __init__(
         self,
@@ -550,22 +551,16 @@ class DeviceControlView(QtWidgets.QWidget):
         # first paint, which is the flicker every opened control showed.
         self._align_headings()
 
-    def _shown_unit_changed(self, key: str, _symbol: str) -> None:
-        """The row is being read in another spelling: so is its reading."""
-
-        widgets = self._field_rows.get(str(key))
-        state = self._field_states.get(str(key))
-        if widgets is None or state is None:
-            return
-        unit = self._units.get(str(key), "")
-        spelling = self.form.shown_unit_for(str(key))
-        shown = state.get("current")
-        widgets[0].setText(
-            "—" if shown is None else _readable_value(shown, unit, spelling)
-        )
-        widgets[1].setText(
-            _readable_limits(state.get("device_limits"), unit, spelling)
-        )
+    def _shown_unit_changed(self, key: str, symbol: str) -> None:
+        """Ask the device owner for a read-only unit projection."""
+        self._live_timers[str(key)].stop()
+        old_unit = self.form._field_for(str(key)).unit or "1"
+        # The shared form's conversion is not device-load-aware. Keep the
+        # previous complete row until its owner supplies the converted number,
+        # current reading and bounds together; no temporary 50-ohm value.
+        self.form.widget_for(str(key)).setShownUnit(old_unit)
+        self.form._unit_pickers[str(key)].select_choice_key(old_unit)
+        self.field_unit_requested.emit(str(key), symbol)
 
     def _desired_changed(self, key: str) -> None:
         try:
@@ -574,7 +569,7 @@ class DeviceControlView(QtWidgets.QWidget):
             return
         for name, state in self._field_states.items():
             self._set_editable(name, bool(state.get("editable", False)))
-        self.field_desired_changed.emit(str(key), value)
+        self.field_desired_changed.emit(str(key), value, self.form._field_for(key).unit or "")
         row = self._field_rows.get(str(key))
         live = None if row is None else row[2]
         if live is not None and live.isChecked() and live.isEnabled():
@@ -597,7 +592,7 @@ class DeviceControlView(QtWidgets.QWidget):
         except (TypeError, ValueError) as error:
             self.show_status(str(error), "error")
             return
-        self.field_apply_requested.emit(str(key), value)
+        self.field_apply_requested.emit(str(key), value, self.form._field_for(str(key)).unit or "")
 
     def show_status(self, text: str, severity: str) -> None:
         self.status_strip.show_status(str(text), str(severity))

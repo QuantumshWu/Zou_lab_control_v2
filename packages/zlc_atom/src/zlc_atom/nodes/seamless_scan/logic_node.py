@@ -154,7 +154,7 @@ def _build(
         ScanPlan(bindable),
         (
             *hardware_scan_ports_for(sequence),
-            *scan_ports_for_devices(tunable_devices),
+            *scan_ports_for_devices(tunable_devices, units={axis.port: axis.unit for axis in parsed.axes}),
         ),
     ) if bindable else ()
 

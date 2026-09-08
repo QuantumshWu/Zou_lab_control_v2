@@ -117,6 +117,7 @@ def test_release_recapture_units_and_fixed_expression_use_the_series_contract() 
 
 @pytest.mark.parametrize("x_unit, x_display, y_unit, y_display, factor", (
     ("mVpp", "Vpp", "count", "count", .001),
+    ("mVpp", "Vrms", "count", "count", .001 / np.sqrt(8)),
     ("s", "ms", "count", "count", 1000.0),
     ("s", "ms", "V", "mV", 1e6),
 ))
@@ -143,6 +144,21 @@ def test_product_fit_parameter_keeps_units_sign_and_expression_roundtrip(
     target = projection.fit_expression_target(model, f"B={value!r}")
     assert target["fixed"]["numerator"] == pytest.approx(-3.0)
     assert float(projection.fit_expression_text(model, target).split("=")[1]) == pytest.approx(value)
+    shift = next(item for item in model.parameters if item.name == "shift")
+    x_factor = float(DEFAULT_UNITS.convert(1.0, x_unit, x_display))
+    shift_value, shift_unit = projection._display_fit_parameter_value(shift, -.25)
+    assert shift_value == pytest.approx(-.25 * x_factor) and shift_unit == x_display
+    shift_error, _ = projection._display_fit_parameter_value(shift, .5, difference=True)
+    assert shift_error == pytest.approx(.5 * x_factor)
+    target = projection.fit_expression_target(model, f"C={shift_value!r}")
+    assert target["fixed"]["shift"] == pytest.approx(-.25)
+    assert float(projection.fit_expression_text(model, target).split("=")[1]) == pytest.approx(shift_value)
+    if x_unit == "mVpp":
+        for nonproportional in ("W", "dBm"):
+            nonlinear = _projection(CurvePlot(AxisRef.point("x")), snapshot=snapshot,
+                display={"x_display_unit": nonproportional, "value_display_unit": y_display})
+            with pytest.raises(ValueError, match="only a position crosses a logarithmic unit"):
+                nonlinear._display_fit_parameter_value(shift, -.25)
     # Published Fit vectors store this exact canonical unit string; consuming
     # that Dataset uses the ordinary unit resolver, not a fit-only catalog.
     published_schema = replace(schema, value_schema=replace(schema.value_schema, value_unit=canonical_unit))

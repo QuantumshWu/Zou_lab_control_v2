@@ -23,9 +23,10 @@ class DeviceControlHandle(QtCore.QObject):
 
     refresh_requested = QtCore.pyqtSignal()
     risk_toggled = QtCore.pyqtSignal(bool)
-    field_desired_changed = QtCore.pyqtSignal(str, object)
+    field_desired_changed = QtCore.pyqtSignal(str, object, str)
+    field_unit_requested = QtCore.pyqtSignal(str, str)
     field_live_apply_toggled = QtCore.pyqtSignal(str, bool)
-    field_apply_requested = QtCore.pyqtSignal(str, object)
+    field_apply_requested = QtCore.pyqtSignal(str, object, str)
     closed = QtCore.pyqtSignal()
 
     def __init__(self, window: Any, view: DeviceControlView) -> None:
@@ -36,6 +37,7 @@ class DeviceControlHandle(QtCore.QObject):
             "refresh_requested",
             "risk_toggled",
             "field_desired_changed",
+            "field_unit_requested",
             "field_live_apply_toggled",
             "field_apply_requested",
         ):

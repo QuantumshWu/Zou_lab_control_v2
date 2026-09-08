@@ -1309,7 +1309,7 @@ try:
     exposure.setValue(0.07)
     QtTest.QTest.qWait(110); application.processEvents()
     assert len(calls) == 1, 'latest-only write bypassed the active vendor call'
-    assert flow._device_tune_pending == {('camera', 'exposure_seconds'): 0.07}
+    assert flow._device_tune_pending == {('camera', 'exposure_seconds'): (0.07, '')}
     assert control._view.status_strip.current_severity == 'task'
     control.close(); application.processEvents()
     assert control.is_visible(), 'hung tune control claimed it had closed'
@@ -1424,6 +1424,88 @@ print('GENERIC_TUNE_OWNER_OK')
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "GENERIC_TUNE_OWNER_OK" in completed.stdout
 
+def test_control_apply_sends_the_authored_unit_and_keeps_canonical_provenance(workspace) -> None:
+    from types import SimpleNamespace
+    from zlc_atom.authoring import AuthoringField, TunableField
+    from zlc_data.units import DEFAULT_UNITS, UnitRegistry, Unit, VoltageIntoLoad
+    from zlc_workbench.apps.task_console import ExperimentGuiFlow
+    from zlc_workbench.device_use import DeviceUseCoordinator
+
+    state, calls, records = {"volts": .1, "epoch": 0}, [], []
+    registry = UnitRegistry(DEFAULT_UNITS.resolve(name) for name in DEFAULT_UNITS.distinct_symbols())
+    registry.register(Unit("Vpp", "power", VoltageIntoLoad(75.0), prefixable=True), replace=True)
+    def fields():
+        return (TunableField(AuthoringField("power_dbm", "float", "Power", unit="dBm",
+                    minimum=-50.0, maximum=20.0),
+                    float(registry.convert(state["volts"], "Vpp", "dBm")), True, ("power_dbm",)),)
+    def read(name, unit=""):
+        unit = unit or "Vpp"
+        return TunableField(AuthoringField(name, "float", "Power", unit=unit),
+                    float(registry.convert(state["volts"], "Vpp", unit)), True, (name,))
+    def tune(name, value, unit):
+        calls.append((name, value, unit))
+        state["volts"] = float(registry.convert(value + (.125 if unit == "mVpp" else 0.0), unit, "Vpp"))
+        state["epoch"] += 7
+        return value + .1  # A later read may differ from the command reply.
+    device = SimpleNamespace(tunable_fields=fields, read_tunable_in_unit=read,
+        tune=lambda _name, _value: pytest.fail("native unit write was bypassed"), tune_in_unit=tune,
+        convert_tunable_value=lambda _name, value, source, target: float(registry.convert(value, source, target)),
+        settings_provenance=lambda: {"device_session_id": "rf", "settings_epoch": state["epoch"]})
+    control = _RecordingControl()
+    control.show_status = lambda *_: None
+    flow = ExperimentGuiFlow(workspace=workspace)
+    flow.session = SimpleNamespace(device_use=DeviceUseCoordinator(),
+        record_device_tune=lambda **kwargs: records.append(kwargs))
+    flow._device_worker_run = lambda work, done, _failed: done(work())
+    model = {"device": device, "control": control, "device_session_id": "", "desired": {}, "live": {}}
+    flow._adopt_device_reading("rf", model, flow._read_device_controls(device))
+    flow._device_control_models["rf"] = model
+    flow.device_controls["rf"] = control
+    converting = []
+    flow._device_worker_run = lambda work, done, _failed: converting.append((work, done))
+    flow._set_device_control_unit("rf", "power_dbm", "mVpp")
+    pending_field = flow._device_control_projection("rf")["fields"]["power_dbm"]
+    assert pending_field["editable"]
+    assert not pending_field["apply_enabled"] and not pending_field["live_enabled"]
+    flow._queue_device_tune("rf", "power_dbm", 135.0, "mVpp")
+    assert calls == [], "Apply ran before its display unit conversion completed"
+    work, done = converting.pop()
+    done(work())
+    flow._device_worker_run = lambda work, done, _failed: done(work())
+    assert model["desired"]["power_dbm"][0] == pytest.approx(100.0)
+    flow._request_device_control_refresh("rf")
+    assert calls == []
+    assert flow._device_control_projection("rf")["fields"]["power_dbm"]["apply_enabled"]
+    flow._set_device_control_desired("rf", "power_dbm", 135.0, "mVpp")
+    flow._queue_device_tune("rf", "power_dbm", 135.0, "mVpp")
+    assert calls == [("power_dbm", 135.0, "mVpp")], model["status"]
+    assert model["status"]["power_dbm"] == ("Applied", "ready")
+    assert model["desired"]["power_dbm"][0] == pytest.approx(135.125)
+    assert model["desired"]["power_dbm"][1] == "mVpp"
+    assert model["tunables"][0].metadata.unit == "mVpp"
+    assert not model["unit_drafts"]
+    assert records[0]["requested"] == 135.0 and records[0]["requested_unit"] == "mVpp"
+    assert records[0]["new_effective"] == records[0]["current_values"]["power_dbm"]
+    assert records[0]["new_effective"] == pytest.approx(float(registry.convert(.135125, "Vpp", "dBm")))
+    standing = state["volts"]
+    flow._set_device_control_unit("rf", "power_dbm", "dBm")
+    assert len(calls) == 1 and state["volts"] == standing
+    flow._request_device_control_refresh("rf")
+    assert flow._device_control_projection("rf")["fields"]["power_dbm"]["apply_enabled"]
+    value, unit = model["desired"]["power_dbm"]
+    flow._queue_device_tune("rf", "power_dbm", value, unit)
+    assert state["volts"] == pytest.approx(standing), "unit-only Apply changed the 75-ohm working point"
+    pending = []
+    flow._device_worker_run = lambda work, done, _failed: pending.append((done, work()))
+    flow._set_device_control_desired("rf", "power_dbm", value + 1, unit)
+    flow._queue_device_tune("rf", "power_dbm", value + 1, unit)
+    flow._set_device_control_desired("rf", "power_dbm", value + 2, unit)
+    done, result = pending.pop()
+    done(result)
+    assert model["desired"]["power_dbm"] == (value + 2, unit), "an old Apply overwrote the newer draft"
+    flow.session.device_use.assert_idle()
+
+
 def test_device_control_risk_unlock_is_field_scoped_and_owner_scoped(
     workspace,
 ) -> None:
@@ -1470,7 +1552,7 @@ def test_device_control_risk_unlock_is_field_scoped_and_owner_scoped(
             ),
         ),
         "current": {"exposure_seconds": 0.1, "gain_db": 6.0},
-        "desired": {"exposure_seconds": 0.1, "gain_db": 6.0},
+        "desired": {"exposure_seconds": (0.1, ""), "gain_db": (6.0, "")},
         "live": {},
         "status": {},
     }

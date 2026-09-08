@@ -293,7 +293,7 @@ class SeamlessScanMeasurement:
             )
             axis = next(axis for axis in self.outer_axes if axis.port == port)
             bound = next(bound for bound in self.ports if bound.port == port)
-            knobs.move(port, axis.native_value(bound, value))
+            knobs.move(port, value, axis.unit or bound.unit)
 
     def _ask_for_setting(
         self,

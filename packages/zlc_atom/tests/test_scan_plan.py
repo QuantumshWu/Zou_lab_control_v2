@@ -176,6 +176,19 @@ def test_a_field_pinned_to_one_value_is_a_control_not_an_axis() -> None:
     )
     ports = scan_ports_for_devices({"device": device})
     assert [port.port for port in ports] == [DEVICE_PARAM_FAMILY + "device:level"]
+    from zlc_atom.authoring import read_tunable_in_unit, tune_in_unit
+
+    delay = TunableField(
+        AuthoringField("delay", "int", "Delay", 500, minimum=0, maximum=10000, unit="ns"),
+        500, True, ("delay",),
+    )
+    written = []
+    device = SimpleNamespace(tunable_fields=lambda: (delay,),
+                             tune=lambda name, value: (written.append(value), value)[1])
+    projected = read_tunable_in_unit(device, "delay", "us")
+    assert projected.current == 0.5 and projected.metadata.value_type == "float"
+    assert tune_in_unit(device, "delay", 2.0, "us") == 2.0
+    assert written == [2000] and type(written[0]) is int
 
 
 def test_a_region_lands_on_the_axis_the_picture_drew_when_two_ports_share_a_name() -> None:

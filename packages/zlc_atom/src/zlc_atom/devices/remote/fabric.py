@@ -251,9 +251,17 @@ class DeviceAnnouncer:
                 f"{device.instance_id!r} is served by its own protocol; the "
                 "fabric only lists it"
             )
-        if method == "fields":
+        if method in {"fields", "read_tunable_in_unit"}:
             with device.lock:
-                fields = device.tunable.tunable_fields()
+                if method == "fields":
+                    fields = device.tunable.tunable_fields()
+                else:
+                    from zlc_atom.authoring import read_tunable_in_unit
+
+                    fields = (read_tunable_in_unit(
+                        device.tunable, str(request.get("name", "")),
+                        str(request.get("unit", "")),
+                    ),)
             return {
                 "fields": [
                     {
@@ -276,12 +284,28 @@ class DeviceAnnouncer:
                     for field in fields
                 ]
             }
-        if method == "tune":
+        if method == "convert_tunable_value":
+            from zlc_atom.authoring import convert_tunable_value
+
+            with device.lock:
+                value = convert_tunable_value(
+                    device.tunable, str(request.get("name", "")), request.get("value"),
+                    str(request.get("source_unit", "")), str(request.get("target_unit", "")),
+                )
+            return {"value": value}
+        if method in {"tune", "tune_in_unit"}:
             name = str(request.get("name", ""))
             value = request.get("value")
             try:
                 with device.lock:
-                    effective = device.tunable.tune(name, value)
+                    if method == "tune":
+                        effective = device.tunable.tune(name, value)
+                    else:
+                        from zlc_atom.authoring import tune_in_unit
+
+                        effective = tune_in_unit(
+                            device.tunable, name, value, str(request.get("unit", ""))
+                        )
             except Exception as error:
                 _LOG.info(
                     "FABRIC TUNE REFUSED device=%s field=%s value=%r error=%s: %s",
@@ -410,6 +434,12 @@ class RemoteTunableDevice:
         )
 
     def tunable_fields(self):
+        return self._read_fields("fields")
+
+    def read_tunable_in_unit(self, name: str, unit: str = ""):
+        return self._read_fields("read_tunable_in_unit", name=str(name), unit=str(unit))[0]
+
+    def _read_fields(self, method: str, **arguments: Any):
         from zlc_atom.authoring import AuthoringField, TunableField
 
         return tuple(
@@ -434,12 +464,23 @@ class RemoteTunableDevice:
                     else tuple(float(edge) for edge in entry["device_limits"])
                 ),
             )
-            for entry in self._call("fields")["fields"]
+            for entry in self._call(method, **arguments)["fields"]
         )
 
-    def tune(self, name: str, value: Any) -> Any:
+    def tune_in_unit(self, name: str, value: Any, unit: str) -> Any:
+        return self.tune(name, value, unit=unit)
+
+    def convert_tunable_value(self, name: str, value: Any, source_unit: str, target_unit: str):
+        converted = self._call("convert_tunable_value", name=str(name), value=value,
+                               source_unit=source_unit, target_unit=target_unit)["value"]
+        return tuple(float(item) for item in converted) if isinstance(converted, (tuple, list)) else float(converted)
+
+    def tune(self, name: str, value: Any, *, unit: str | None = None) -> Any:
         try:
-            effective = self._call("tune", name=str(name), value=value)[
+            effective = self._call(
+                "tune" if unit is None else "tune_in_unit",
+                name=str(name), value=value, **({} if unit is None else {"unit": unit}),
+            )[
                 "effective"
             ]
         except Exception as error:

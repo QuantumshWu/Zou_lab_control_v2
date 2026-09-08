@@ -7,7 +7,7 @@ import math
 import re
 from typing import Any, Callable, Mapping
 
-from zlc_data.units import resolve_unit
+from zlc_data.units import parse_quantity, resolve_unit
 
 
 def _typed_equal(left: object, right: object) -> bool:
@@ -209,6 +209,72 @@ class TunableField:
         object.__setattr__(self, "dependency_group", group)
 
 
+def read_tunable_in_unit(device: object, name: str, unit: str = "") -> TunableField:
+    """Read a knob without changing it; blank requests its standing unit.
+
+    Native adapters own load/waveform-dependent conversion. Ordinary adapters
+    retain their declared unit and use the shared unit conversion at this edge.
+    """
+    native = getattr(device, "read_tunable_in_unit", None)
+    if callable(native):
+        return native(name, unit)
+    field = next((item for item in device.tunable_fields() if item.metadata.name == name), None)
+    if field is None:
+        raise ValueError(f"device has no tunable field {name!r}")
+    source = field.metadata.unit or "1"
+    target = unit or source
+    if target == source:
+        return field
+
+    def converted(value):
+        return None if value is None else parse_quantity(f"{value} {source}", target)
+
+    return replace(
+        field,
+        metadata=replace(field.metadata, unit=target,
+                         value_type="float" if field.metadata.value_type == "int" else field.metadata.value_type,
+                         default=converted(field.metadata.default),
+                         minimum=converted(field.metadata.minimum),
+                         maximum=converted(field.metadata.maximum)),
+        current=converted(field.current),
+        device_limits=(None if field.device_limits is None
+                       else tuple(converted(value) for value in field.device_limits)),
+    )
+
+
+def tune_in_unit(device: object, name: str, value: Any, unit: str) -> Any:
+    """Apply an authored quantity and return readback in the requested unit."""
+    if not unit or value is None:
+        return device.tune(name, value)
+    native = getattr(device, "tune_in_unit", None)
+    if callable(native):
+        return native(name, value, unit)
+    field = read_tunable_in_unit(device, name)
+    target = field.metadata.unit or "1"
+    source = unit or target
+    if source == target:
+        return device.tune(name, value)
+    requested = parse_quantity(f"{value} {source}", target)
+    if field.metadata.value_type == "int" and requested.is_integer():
+        requested = int(requested)
+    actual = device.tune(name, requested)
+    return parse_quantity(f"{actual} {target}", source)
+
+
+def convert_tunable_value(
+    device: object, name: str, value: Any, source_unit: str, target_unit: str,
+) -> Any:
+    """Read-only conversion of a desired quantity, never a device command."""
+    if value is None or source_unit == target_unit:
+        return value
+    native = getattr(device, "convert_tunable_value", None)
+    if callable(native):
+        return native(name, value, source_unit, target_unit)
+    if isinstance(value, (tuple, list)):
+        return tuple(parse_quantity(f"{item} {source_unit or '1'}", target_unit or "1") for item in value)
+    return parse_quantity(f"{value} {source_unit or '1'}", target_unit or "1")
+
+
 @dataclass(frozen=True)
 class AuthoringSchema:
     fields: tuple[AuthoringField, ...] = ()
@@ -407,4 +473,5 @@ def _project_integer(value: object, *, label: str) -> int:
     raise TypeError(f"{label} must be an integer or decimal integer text")
 
 
-__all__ = ["AuthoringChoice", "AuthoringField", "AuthoringSchema", "TunableField"]
+__all__ = ["AuthoringChoice", "AuthoringField", "AuthoringSchema", "TunableField",
+           "read_tunable_in_unit", "tune_in_unit", "convert_tunable_value"]

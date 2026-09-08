@@ -468,6 +468,7 @@ class ConsolePresenter:
         review_points: Callable[[Any, ImagePointOverlay, OperatorInputRequest], object]
         | None = None,
         manual_axis: Callable[[OperatorInputRequest], object] | None = None,
+        run_device_read: Callable[..., None] | None = None,
     ) -> None:
         if request_close is not None and not callable(request_close):
             raise TypeError("request_close must be callable or None")
@@ -505,6 +506,7 @@ class ConsolePresenter:
         self._request_close = request_close
         self._review_points = review_points
         self._manual_axis = manual_axis
+        self._run_device_read = run_device_read
         self._panel_only = panel_only
         self.logic: dict[str, LogicBinding] = {}
         self.catalog = LogicCatalog()
@@ -7069,6 +7071,7 @@ class ConsolePresenter:
             # The offer-relevant subset of what a start would bind: editors
             # project from these without the start-time side effects.
             "bench_extras": self._bench_offer_extras(),
+            "run_device_read": self._run_device_read,
         }
 
     def _open_logic_editor(self, binding: LogicBinding) -> bool:

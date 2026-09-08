@@ -20,6 +20,10 @@ reports back, never what was asked, which is how a mistyped bound or a
 loading-dependent amplitude shows up as a named error instead of a wrong
 dataset column.
 
+Explicit selected-unit Apply uses ``tune_in_unit``: it selects the channel's
+native amplitude unit only when needed and writes volts directly. A raw
+``read_tunable_in_unit`` snapshot lets Scan restore both number and unit.
+
 The frequency knob and the power knob are each their own dependency group,
 and the driver keeps that true: the instrument caps its amplitude lower as
 the frequency rises and lowers a standing amplitude the new frequency
@@ -30,10 +34,12 @@ back and refused by name instead of quietly changing the power.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
-from zlc_atom.devices.rf.contract import POWER_FIELD, RfSourceBase, channel_field
+from zlc_atom.devices.rf.contract import POWER_FIELD, WINDOW_FIELDS, RfSourceBase, channel_field
+from zlc_atom.authoring import AuthoringField, TunableField
+from zlc_data.units import DEFAULT_UNITS
 
 
 class ScpiLink(Protocol):
@@ -346,6 +352,147 @@ class RigolDg4000RfSource(RfSourceBase):
         )
         self._link.write(f"{self._source(channel)}:VOLTage {amplitude:.17g}")
         return self._read_power(channel)
+
+    @staticmethod
+    def _amplitude_unit_parts(unit: str) -> tuple[str | None, float]:
+        family, prefix = DEFAULT_UNITS.family_and_prefix(unit)
+        native = {"dBm": _DBM, "Vpp": _VPP, "Vrms": _VRMS}.get(family.symbol)
+        return native, 10.0 ** prefix.exponent
+
+    def _check_policy_units(self, name: str, *units: str) -> None:
+        policy_unit = next((unit for field, _label, unit in WINDOW_FIELDS if field == name), None)
+        if policy_unit is None or DEFAULT_UNITS.resolve(policy_unit).dimension != "power":
+            return
+        if any(unit and self._amplitude_unit_parts(unit)[0] in (_VPP, _VRMS) for unit in units):
+            raise ValueError(
+                f"{name}: shared power policy has no single channel load; use dBm or W/mW, not voltage units"
+            )
+
+    def _convert_amplitude(self, channel: str, value: float, source: str, target: str) -> float:
+        """Convert with the channel's load/waveform; prefixes never visit dBm."""
+        source_native, source_scale = self._amplitude_unit_parts(source)
+        target_native, target_scale = self._amplitude_unit_parts(target)
+        if source == target:
+            return float(value)
+        if source_native is None:
+            dbm = float(DEFAULT_UNITS.convert(value, source, "dBm"))
+            return self._convert_amplitude(channel, dbm, "dBm", target)
+        if target_native is None:
+            dbm = self._convert_amplitude(channel, value, source, "dBm")
+            return float(DEFAULT_UNITS.convert(dbm, "dBm", target))
+        raw = float(value) * source_scale
+        if source_native == target_native:
+            return raw / target_scale
+        if source_native == _DBM:
+            raw = self._volts_from_dbm(channel, raw, target_native)
+        elif target_native == _DBM:
+            raw = self._dbm_from_volts(channel, raw, source_native)
+        elif source_native == _VPP:
+            raw /= self._vpp_per_vrms(channel)
+        else:
+            raw *= self._vpp_per_vrms(channel)
+        return raw / target_scale
+
+    def convert_tunable_value(
+        self, name: str, value: float | tuple | list, source_unit: str, target_unit: str
+    ) -> float | tuple[float, ...]:
+        """Read-only conversion through the same channel facts used by Apply."""
+        routed = self._routing.get(str(name))
+        if routed is None and str(name) not in {field[0] for field in WINDOW_FIELDS}:
+            raise ValueError(f"device has no tunable field {name!r}")
+        self._check_policy_units(str(name), source_unit, target_unit)
+        with self._condition:
+            def converted(item):
+                if routed is not None and routed[1] == POWER_FIELD:
+                    return self._convert_amplitude(routed[0], float(item), source_unit, target_unit)
+                return float(DEFAULT_UNITS.convert(item, source_unit, target_unit))
+            return tuple(converted(item) for item in value) if isinstance(value, (tuple, list)) else converted(value)
+
+    def read_tunable_in_unit(self, name: str, unit: str = "") -> TunableField:
+        """Read a selected-unit view, retaining raw standing-unit readback."""
+        routed = self._routing.get(str(name))
+        self._check_policy_units(str(name), unit)
+        with self._condition:
+            if routed is None or routed[1] != POWER_FIELD:
+                field = next((item for item in self.tunable_fields() if item.metadata.name == name), None)
+                if field is None:
+                    raise ValueError(f"device has no tunable field {name!r}")
+                source = field.metadata.unit or "1"
+                target = unit or source
+                if source == target:
+                    return field
+                def converted(value):
+                    return None if value is None else float(DEFAULT_UNITS.convert(value, source, target))
+                return replace(field, metadata=replace(field.metadata, unit=target,
+                    default=converted(field.metadata.default), minimum=converted(field.metadata.minimum),
+                    maximum=converted(field.metadata.maximum)), current=converted(field.current),
+                    device_limits=None if field.device_limits is None else tuple(converted(v) for v in field.device_limits))
+            channel = routed[0]
+            source = self._source(channel)
+            native = self._amplitude_unit(channel)
+            standing_unit = {_DBM: "dBm", _VPP: "Vpp", _VRMS: "Vrms"}[native]
+            target = unit or standing_unit
+            raw = float(self._link.query(f"{source}:VOLTage?"))
+            current = raw if target == standing_unit else self._convert_amplitude(channel, raw, standing_unit, target)
+            limits = self._instrument_limits(tuple(
+                self._convert_amplitude(channel, float(self._link.query(f"{source}:VOLTage? {edge}")), standing_unit, target)
+                for edge in ("MINimum", "MAXimum")
+            ), name=str(name), unit=target)
+            policy = tuple(None if edge is None else self._convert_amplitude(channel, edge, "dBm", target)
+                           for edge in self._power_bounds)
+            low, high = self._effective_range(policy, limits, name=str(name), unit=target)
+            return TunableField(
+                AuthoringField(str(name), "float", f"{self._channel_label(channel)}Power", None,
+                               minimum=low, maximum=high, unit=target),
+                current, True, (str(name),), device_limits=limits,
+            )
+
+    def tune_in_unit(self, name: str, value: float, unit: str) -> float:
+        routed = self._routing.get(str(name))
+        if not unit or value is None:
+            return self.tune(name, value)
+        self._check_policy_units(str(name), unit)
+        if routed is not None and routed[1] == POWER_FIELD:
+            return self._tune_logged(name, value, unit=unit)
+        field = self.read_tunable_in_unit(name)
+        native = field.metadata.unit or "1"
+        if unit == native:
+            return self.tune(name, value)
+        requested = float(DEFAULT_UNITS.convert(value, unit, native))
+        actual = self.tune(name, requested)
+        return float(DEFAULT_UNITS.convert(actual, native, unit))
+
+    def _write_power_in_unit(self, channel: str, value: float, unit: str) -> float:
+        native, scale = self._amplitude_unit_parts(unit)
+        if native is None:
+            # W/mW have no DG4000 display mode. Keep its mode and use the
+            # existing canonical boundary, with this driver's load conversion.
+            actual = self._write_power(channel, float(DEFAULT_UNITS.convert(value, unit, "dBm")))
+            return float(DEFAULT_UNITS.convert(actual, "dBm", unit))
+        source = self._source(channel)
+        old_unit = self._amplitude_unit(channel)
+        old_value = float(self._link.query(f"{source}:VOLTage?"))
+        try:
+            if native != old_unit:
+                self._link.write(f"{source}:VOLTage:UNIT {native}")
+                if self._amplitude_unit(channel) != native:
+                    raise RuntimeError(f"channel {channel} refused amplitude unit {native}")
+            self._link.write(f"{source}:VOLTage {float(value) * scale:.17g}{native}")
+            actual_unit = {_DBM: "dBm", _VPP: "Vpp", _VRMS: "Vrms"}[self._amplitude_unit(channel)]
+            actual = float(self._link.query(f"{source}:VOLTage?"))
+            return self._convert_amplitude(channel, actual, actual_unit, unit)
+        except BaseException as error:
+            # Control Apply also owns a complete command: a failed write
+            # must not leave its temporary unit behind. Restore raw numbers,
+            # never a dBm round trip, and preserve both failures if it cannot.
+            commands = ([f"{source}:VOLTage:UNIT {old_unit}"] if native != old_unit else [])
+            commands.append(f"{source}:VOLTage {old_value:.17g}{old_unit}")
+            for command in commands:
+                try:
+                    self._link.write(command)
+                except BaseException as restore_error:
+                    error.add_note(f"restoring channel {channel} also failed: {restore_error}")
+            raise
 
     def _write_output(self, channel: str, enabled: bool) -> bool:
         self._link.write(

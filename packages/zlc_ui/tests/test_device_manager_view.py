@@ -17,7 +17,7 @@ REPO = ROOT.parents[1]
 #: silently tested a DIFFERENT zlc_plot than the one beside it.  The
 #: product bootstrap is what puts this checkout's layers on the path,
 #: and it is the same one every launcher uses.
-_BOOTSTRAP = "import zou_lab_control" + chr(10)
+_BOOTSTRAP = "import zou_lab_control; print(zou_lab_control.__file__)" + chr(10)
 
 
 def _run_qt(code: str) -> None:
@@ -442,6 +442,7 @@ def test_a_projected_type_is_not_a_pick() -> None:
 
     _run_qt(
         """import zlc_ui.device_manager.view as tested_module
+print(zou_lab_control.__file__)
 print(tested_module.__file__)
 from zlc_ui.device_manager import DeviceManagerView
 from zlc_ui.qt import ensure_qt_app
@@ -512,6 +513,9 @@ print(tested_module.__file__)
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.form.form import FormFieldProps, FormSpec
 from zlc_ui.device_manager.view import DeviceControlView
+from dataclasses import replace
+from zlc_data.units import DEFAULT_UNITS
+from PyQt5 import QtTest
 app = ensure_qt_app(['device-limits'])
 spec = FormSpec((
     FormFieldProps(key='power', kind='float', label='Power', unit='dBm',
@@ -530,6 +534,21 @@ limits = {key: row[1] for key, row in view._field_rows.items()}
 assert limits['power'].text() == '-120 dBm to 30 dBm', limits['power'].text()
 assert limits['output'].text() == '', 'a device that states no range shows none'
 assert view.form.widget_for('power') is not limits['power'], 'a value, not a control'
+def project_unit(key, unit):
+    # Stand in for the owner's complete read-only response, not a tune.
+    global spec, limits
+    old = next(field for field in spec.fields if field.key == key)
+    converted = lambda value: None if value is None else float(DEFAULT_UNITS.convert(value, old.unit, unit))
+    fields = {name: dict(value) for name, value in view._field_states.items()}
+    fields[key].update(current=converted(fields[key]['current']),
+        desired=converted(fields[key]['desired']), desired_unit=unit,
+        device_limits=tuple(converted(value) for value in fields[key]['device_limits']))
+    spec = FormSpec(tuple(replace(field, unit=unit, minimum=converted(field.minimum),
+        maximum=converted(field.maximum)) if field.key == key else field for field in spec.fields))
+    view.set_projection(spec, {'fields': fields, 'owners': (), 'reason': '',
+                              'risk_accepted': False, 'risk_enabled': False})
+    limits = {name: row[1] for name, row in view._field_rows.items()}
+view.field_unit_requested.connect(project_unit)
 view.form._shown_unit_picked('power', 'mW')
 assert limits['power'].text() == '0.000000000001 mW to 1000 mW', limits['power'].text()
 view.form._shown_unit_picked('power', 'dBm')
@@ -539,6 +558,28 @@ view.set_projection(spec, {
     'owners': (), 'reason': '', 'risk_accepted': False, 'risk_enabled': False,
 })
 assert limits['power'].text() == '-110 dBm to 20 dBm'
+# The unit gesture changes only the authored pair, even while Live is on.
+applies = []
+fields = {'power': state(-3.0, (-110.0, 20.0)), 'output': state(False, None)}
+fields['power']['live_apply'] = True
+projection = {'fields': fields, 'owners': (), 'reason': '',
+              'risk_accepted': False, 'risk_enabled': False}
+def desired(key, value, unit):
+    current = {name: dict(state) for name, state in view._field_states.items()}
+    current[key].update(desired=value, desired_unit=unit, apply_enabled=True)
+    view.set_projection(spec, {**projection, 'fields': current})
+view.field_desired_changed.connect(desired)
+view.field_apply_requested.connect(lambda key, value, unit: applies.append((key, value, unit)))
+view.set_projection(spec, projection)
+view.form._shown_unit_picked('power', 'mVpp')
+QtTest.QTest.qWait(110)
+assert applies == [], 'choosing a display unit is not a hardware command'
+assert not view._live_timers['power'].isActive()
+assert view.form.widget_for('power').valueUnit() == 'mVpp'
+view._field_rows['power'][2].setChecked(False)
+view.form.widget_for('power').setText('135')
+view._field_rows['power'][3].click()
+assert applies == [('power', 135.0, 'mVpp')], applies
 view.resize(1100, 300); view.show()
 for _ in range(3):
     app.processEvents()

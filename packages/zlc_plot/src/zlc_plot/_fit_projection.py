@@ -236,13 +236,14 @@ class _FitParameterConversion:
                     dtype=float,
                 ).reshape(-1)[0]
             )
-        if not (source.is_linear and target.is_linear):
+        source_scale, target_scale = source.coordinate_scale, target.coordinate_scale
+        if source_scale is None or target_scale is None or source_scale[0] != target_scale[0]:
             raise ValueError(
                 f"fit parameter {self.parameter!r} is a {self.crossing.value} and has "
                 f"no value between {source.symbol!r} and {target.symbol!r}; only a "
                 "position crosses a logarithmic unit"
             )
-        ratio = float(source.scale) / float(target.scale)
+        ratio = source_scale[1] / target_scale[1]
         return value * (ratio if self.crossing is _Crossing.SPAN else 1.0 / ratio)
 
 

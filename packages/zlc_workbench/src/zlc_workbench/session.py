@@ -434,6 +434,7 @@ class ExperimentSession:
         previous_values: Mapping[str, object],
         current_values: Mapping[str, object],
         active_logic_owners: tuple[str, ...],
+        requested_unit: str = "",
     ) -> dict[str, object] | None:
         """Record one worker-verified active-Logic delta without device I/O."""
 
@@ -481,12 +482,13 @@ class ExperimentSession:
             },
             "field": str(field),
             "requested": requested,
+            "requested_unit": str(requested_unit),
             "previous_effective": previous_effective,
             "new_effective": new_effective,
             "verified": bool(verified),
             "actor": "device_control_risk_override",
         }
-        if previous_effective != new_effective:
+        if after_epoch != before_epoch:
             with self._reconcile_lock:
                 self._device_setting_records.setdefault(
                     (before_session, before_epoch), before_record

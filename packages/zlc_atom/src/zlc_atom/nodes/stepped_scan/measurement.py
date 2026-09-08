@@ -308,7 +308,7 @@ class SteppedScanMeasurement:
         for port, value in device_moves:
             axis = next(axis for axis in self.plan.axes if axis.port == port)
             bound = next(bound for bound in self.ports if bound.port == port)
-            knobs.move(port, axis.native_value(bound, value))
+            knobs.move(port, value, axis.unit or bound.unit)
         resolved = resolve_api_parameters(
             self.sequence, self._api_values(pulse_values)
         )

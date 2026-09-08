@@ -26,6 +26,8 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 
+from zlc_atom.authoring import read_tunable_in_unit, tune_in_unit
+
 from .plan import DEVICE_PARAM_FAMILY
 
 
@@ -41,10 +43,10 @@ def device_port_parts(port: str) -> tuple[str, str]:
     return key, field
 
 
-def tune_value(device: object, field: str, value: float) -> float:
+def tune_value(device: object, field: str, value: float, unit: str = "") -> float:
     """Write a nominal setpoint and return the device's finite readback."""
 
-    effective = device.tune(field, value)
+    effective = tune_in_unit(device, field, value, unit)
     if isinstance(effective, bool):
         raise TypeError("device tune must return its effective numeric value")
     try:
@@ -66,9 +68,9 @@ class ScanDeviceKnobs:
         self._tunables = dict(tunables or {})
         #: (device key, field) -> the value the device reported before this
         #: scan first moved it, in the order the fields were first moved.
-        self._pre_run: dict[tuple[str, str], float] = {}
+        self._pre_run: dict[tuple[str, str], tuple[float, str]] = {}
 
-    def move(self, port: str, value: float) -> float:
+    def move(self, port: str, value: float, unit: str = "") -> float:
         """Set one knob to a scan coordinate, remembering where it stood.
 
         The first move of a knob is when the promise to put it back is
@@ -87,10 +89,10 @@ class ScanDeviceKnobs:
             )
         if (key, field) not in self._pre_run:
             self._pre_run[(key, field)] = self._standing(device, port, field)
-        return tune_value(device, field, float(value))
+        return tune_value(device, field, float(value), unit)
 
     @staticmethod
-    def _standing(device: object, port: str, field: str) -> float:
+    def _standing(device: object, port: str, field: str) -> tuple[float, str]:
         """Where the knob stands, from the device itself, checked to be a
         value the scan could command it back to.
 
@@ -100,22 +102,19 @@ class ScanDeviceKnobs:
         ``tune`` would ever accept back.
         """
 
-        for entry in device.tunable_fields():
-            metadata = entry.metadata
-            if metadata.name != field:
-                continue
-            current = float(entry.current)
-            low, high = metadata.minimum, metadata.maximum
-            if (low is not None and current < float(low)) or (
-                high is not None and current > float(high)
-            ):
-                raise ValueError(
-                    f"{port} stands at {current!r}, outside [{low!r}, {high!r}] "
-                    "that may be commanded, so the scan could not put it "
-                    "back; move it inside the range first"
-                )
-            return current
-        raise ValueError(f"{port} names no field its device offers")
+        entry = read_tunable_in_unit(device, field)
+        metadata = entry.metadata
+        current = float(entry.current)
+        low, high = metadata.minimum, metadata.maximum
+        if (low is not None and current < float(low)) or (
+            high is not None and current > float(high)
+        ):
+            raise ValueError(
+                f"{port} stands at {current!r} {metadata.unit}, outside [{low!r}, {high!r}] "
+                "that may be commanded, so the scan could not put it "
+                "back; move it inside the range first"
+            )
+        return current, metadata.unit
 
     def restore(self) -> None:
         """Put every moved knob back where it was found, last moved first.
@@ -127,13 +126,13 @@ class ScanDeviceKnobs:
         """
 
         failures: list[BaseException] = []
-        for (key, field), value in reversed(self._pre_run.items()):
+        for (key, field), (value, unit) in reversed(self._pre_run.items()):
             try:
-                tune_value(self._tunables[key], field, value)
+                tune_value(self._tunables[key], field, value, unit)
             except BaseException as error:
                 failure = RuntimeError(
                     f"device field {field!r} of {key!r} was not put back to "
-                    f"its pre-run value {value!r}: {error}"
+                    f"its pre-run value {value!r} {unit}: {error}"
                 )
                 failure.__cause__ = error
                 failures.append(failure)

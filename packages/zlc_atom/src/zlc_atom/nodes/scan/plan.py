@@ -41,7 +41,7 @@ from zlc_pulse import (
 )
 from zlc_pulse.codec import read_pulse_document
 
-from zlc_atom.authoring import TunableField
+from zlc_atom.authoring import TunableField, read_tunable_in_unit
 from zlc_atom.nodes._framework.descriptor import (
     SelectionMapping,
     WorkspaceResourceSpec,
@@ -246,7 +246,9 @@ def hardware_scan_ports_for(sequence: PulseSequence) -> tuple[ScanPort, ...]:
     return _ports_from_columns(scan_columns_for(sequence))
 
 
-def scan_ports_for_devices(tunables: Mapping | None) -> tuple[ScanPort, ...]:
+def scan_ports_for_devices(
+    tunables: Mapping | None, *, units: Mapping[str, str] | None = None,
+) -> tuple[ScanPort, ...]:
     """Every port the bench's tunable devices offer, from their own words.
 
     A device volunteers through ``tunable_fields()``.  A scan exposes only a
@@ -269,13 +271,17 @@ def scan_ports_for_devices(tunables: Mapping | None) -> tuple[ScanPort, ...]:
             if not isinstance(tunable, TunableField):
                 raise TypeError("device tunable_fields must contain TunableField values")
             field = tunable.metadata
+            port = f"{DEVICE_PARAM_FAMILY}{key}:{field.name}"
+            selected_unit = (units or {}).get(port)
+            if selected_unit:
+                tunable = read_tunable_in_unit(device, field.name, selected_unit)
+                field = tunable.metadata
             if field.minimum is None or field.maximum is None:
                 continue
             if float(field.minimum) >= float(field.maximum):
                 continue
             if not tunable.live_write or tunable.dependency_group != (field.name,):
                 continue
-            port = f"{DEVICE_PARAM_FAMILY}{key}:{field.name}"
             ports.append(
                 ScanPort(
                     port,

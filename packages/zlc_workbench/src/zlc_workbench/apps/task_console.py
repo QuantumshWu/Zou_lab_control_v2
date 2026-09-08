@@ -142,7 +142,7 @@ def staged_panel_surface(host):
     return host.qt_widget(auto_present=False)
 
 
-def build_console(session, *, window_ratio=None, request_close=None):
+def build_console(session, *, window_ratio=None, request_close=None, run_device_read=None):
     """One console presenter over one session, with the view it drives."""
 
     from ..panel_sizes import install as install_panel_sizes
@@ -152,7 +152,7 @@ def build_console(session, *, window_ratio=None, request_close=None):
 
     from zlc_ui import open_task_console
 
-    from ..board import attach_qt_owner_turn
+    from ..board import attach_qt_owner_turn, attach_qt_worker
     from ..console import ConsolePresenter
     from ..panel_catalog import task_console_fitting_spec
 
@@ -172,9 +172,11 @@ def build_console(session, *, window_ratio=None, request_close=None):
 
     render_release_started = False
     monitor_shutdown = editor_shutdown = False
+    close_device_read = None
 
     def _close_render_processes() -> bool:
         nonlocal render_release_started, monitor_shutdown, editor_shutdown
+        reads_closed = close_device_read is None or close_device_read()
         if not render_release_started:
             monitor_shutdown = not monitor_render.release(timeout=0.0)
             editor_shutdown = not editor_render.release(timeout=0.0)
@@ -185,7 +187,7 @@ def build_console(session, *, window_ratio=None, request_close=None):
         editor_closed = (
             editor_render.close(timeout=0.0) if editor_shutdown else True
         )
-        return bool(monitor_closed and editor_closed)
+        return bool(reads_closed and monitor_closed and editor_closed)
 
     def _build_monitor_host(plot_input, state):
         return build_panel_host(
@@ -257,6 +259,8 @@ def build_console(session, *, window_ratio=None, request_close=None):
         return {} if accepted else None
 
     try:
+        if run_device_read is None:
+            run_device_read, close_device_read = attach_qt_worker("zlc-console-device-read")
         presenter = ConsolePresenter(
             session,
             view,
@@ -275,8 +279,11 @@ def build_console(session, *, window_ratio=None, request_close=None):
             request_close=view.close_later if request_close is None else request_close,
             review_points=_review_points,
             manual_axis=_manual_axis,
+            run_device_read=run_device_read,
         )
     except BaseException:
+        if close_device_read is not None:
+            close_device_read()
         monitor_render.release(timeout=30.0)
         editor_render.release(timeout=30.0)
         view.close()
@@ -428,6 +435,7 @@ class ExperimentGuiFlow:
                 session,
                 window_ratio=self.window_ratio,
                 request_close=self._console_owner_ready,
+                run_device_read=self._device_worker_run,
             )
             timer = attach_qt(
                 self._beat,
@@ -603,8 +611,8 @@ class ExperimentGuiFlow:
                 self._guard_control_gesture(
                     control,
                     "field edit",
-                    lambda field, value, selected=key: self._set_device_control_desired(
-                        selected, field, value
+                    lambda field, value, unit, selected=key: self._set_device_control_desired(
+                        selected, field, value, unit
                     ),
                 )
             )
@@ -617,12 +625,18 @@ class ExperimentGuiFlow:
                     ),
                 )
             )
+            control.field_unit_requested.connect(
+                self._guard_control_gesture(
+                    control, "display unit",
+                    lambda field, unit, selected=key: self._set_device_control_unit(selected, field, unit),
+                )
+            )
             control.field_apply_requested.connect(
                 self._guard_control_gesture(
                     control,
                     "apply",
-                    lambda field, value, selected=key: self._queue_device_tune(
-                        selected, field, value
+                    lambda field, value, unit, selected=key: self._queue_device_tune(
+                        selected, field, value, unit
                     ),
                 )
             )
@@ -652,10 +666,11 @@ class ExperimentGuiFlow:
     @staticmethod
     def _read_device_controls(
         device: object,
+        units: dict[str, str] | None = None,
     ) -> tuple[tuple[object, ...], dict[str, object], dict[str, object]]:
         """What the device declares and holds right now; runs on the worker."""
 
-        from zlc_atom.authoring import TunableField
+        from zlc_atom.authoring import TunableField, read_tunable_in_unit
 
         declare = getattr(device, "tunable_fields", None)
         if not callable(declare):
@@ -663,6 +678,12 @@ class ExperimentGuiFlow:
         fields = tuple(declare())
         if any(not isinstance(field, TunableField) for field in fields):
             raise TypeError("device tunable_fields must contain TunableField values")
+        if units:
+            fields = tuple(
+                read_tunable_in_unit(device, field.metadata.name, units[field.metadata.name])
+                if units.get(field.metadata.name) and units[field.metadata.name] != field.metadata.unit
+                else field for field in fields
+            )
         tune = getattr(device, "tune", None)
         provenance_reader = getattr(device, "settings_provenance", None)
         if fields and (not callable(tune) or not callable(provenance_reader)):
@@ -700,11 +721,14 @@ class ExperimentGuiFlow:
             AuthoringSchema(tuple(field.metadata for field in fields))
         )
         commandable = {
-            field.metadata.name: _commandable(field.metadata, current[field.metadata.name])
+            field.metadata.name: (
+                _commandable(field.metadata, current[field.metadata.name]), field.metadata.unit or ""
+            )
             for field in fields
         }
         if previous_session != session_id:
             model["desired"] = commandable
+            model["unit_drafts"] = set()
             model["live"] = {name: False for name in names}
             self._device_control_risk[key] = None
         else:
@@ -732,7 +756,22 @@ class ExperimentGuiFlow:
         self._device_refresh_active.add(key)
         device = model["device"]
         control = model["control"]
+        desired = dict(model["desired"])
+        unit_requests = dict(model.get("unit_requests", {}))
         control.show_status("refreshing device settings", "task")
+
+        def work():
+            from zlc_atom.authoring import convert_tunable_value
+
+            converted = {}
+            for field, target in unit_requests.items():
+                value, source = desired[field]
+                converted[field] = (
+                    None if value is None else convert_tunable_value(device, field, value, source, target),
+                    target,
+                )
+            units = {name: converted.get(name, pair)[1] for name, pair in desired.items()}
+            return self._read_device_controls(device, units), converted
 
         def settled() -> None:
             self._device_refresh_active.discard(key)
@@ -747,23 +786,41 @@ class ExperimentGuiFlow:
                 settled()
                 return
             try:
-                self._adopt_device_reading(key, model, result)
+                reading, converted = result
+                if any(model["desired"].get(field) != desired[field]
+                       or model.get("unit_requests", {}).get(field) != target
+                       for field, target in unit_requests.items()):
+                    self._device_refresh_pending.add(key)
+                    return  # A newer edit gets its own complete read-only projection.
+                self._adopt_device_reading(key, model, reading)
+                for field, pair in converted.items():
+                    model["desired"][field] = pair
+                    model.setdefault("unit_drafts", set()).add(field)
+                    model["unit_requests"].pop(field, None)
                 self._project_device_control(key)
                 control.show_status(
                     "ready" if model["tunables"] else "No runtime controls", "idle"
                 )
             except BaseException as error:
+                for field, target in unit_requests.items():
+                    if model.get("unit_requests", {}).get(field) == target:
+                        model["unit_requests"].pop(field, None)
+                self._project_device_control(key)
                 control.show_status(str(error), "error")
             finally:
                 settled()
 
         def failed(error: BaseException) -> None:
             if self._device_control_models.get(key) is model:
+                for field, target in unit_requests.items():
+                    if model.get("unit_requests", {}).get(field) == target:
+                        model["unit_requests"].pop(field, None)
+                self._project_device_control(key)
                 control.show_status(str(error), "error")
             settled()
 
         try:
-            run(lambda: self._read_device_controls(device), finish, failed)
+            run(work, finish, failed)
         except BaseException as error:
             failed(error)
 
@@ -799,6 +856,8 @@ class ExperimentGuiFlow:
         fields: dict[str, object] = {}
         for tunable in tunables:
             name = tunable.metadata.name
+            desired_value, desired_unit = desired.get(name, (current.get(name), tunable.metadata.unit or ""))
+            unit_pending = name in model.get("unit_requests", {})
             protected = tuple(blockers[name])
             if protected:
                 editable = False
@@ -832,7 +891,8 @@ class ExperimentGuiFlow:
                 # read-only beside the bench window, so the operator can see
                 # which of the two bounds a refused value ran into.
                 "device_limits": tunable.device_limits,
-                "desired": desired.get(name, current.get(name)),
+                "desired": desired_value,
+                "desired_unit": desired_unit,
                 "editable": editable,
                 "live_apply": bool(live_values.get(name, False)),
                 # CAPABILITY and PERMISSION are two facts.  Collapsed into one
@@ -840,11 +900,13 @@ class ExperimentGuiFlow:
                 # field has no live write at all", so a window limit that can
                 # never be applied live still drew a switch to not press.
                 "live_capable": bool(tunable.live_write),
-                "live_enabled": editable and tunable.live_write,
+                "live_enabled": editable and tunable.live_write and not unit_pending,
                 "apply_enabled": (
                     editable
                     and not applying
-                    and desired.get(name, current.get(name)) != current.get(name)
+                    and not unit_pending
+                    and (name in model.get("unit_drafts", ())
+                         or (desired_value, desired_unit) != (current.get(name), tunable.metadata.unit or ""))
                 ),
                 "status": status,
                 "severity": severity,
@@ -914,15 +976,25 @@ class ExperimentGuiFlow:
         self._project_device_control(str(key))
 
     def _set_device_control_desired(
-        self, key: str, field: str, value: object
+        self, key: str, field: str, value: object, unit: str
     ) -> None:
         model = self._device_control_models.get(str(key))
         if model is None or str(field) not in dict(model.get("current", {})):
             return
         desired = dict(model.get("desired", {}))
-        desired[str(field)] = value
+        if desired[str(field)][1] != str(unit):
+            model.setdefault("unit_drafts", set()).add(str(field))
+        desired[str(field)] = (value, str(unit))
         model["desired"] = desired
         self._project_device_control(str(key))
+
+    def _set_device_control_unit(self, key: str, field: str, unit: str) -> None:
+        model = self._device_control_models.get(str(key))
+        if model is None or str(field) not in model["desired"]:
+            return
+        model.setdefault("unit_requests", {})[str(field)] = str(unit)
+        self._project_device_control(str(key))
+        self._request_device_control_refresh(str(key))
 
     def _set_device_control_live(
         self, key: str, field: str, enabled: bool
@@ -934,10 +1006,13 @@ class ExperimentGuiFlow:
         live[str(field)] = bool(enabled)
         model["live"] = live
 
-    def _queue_device_tune(self, key: str, field: str, requested: object) -> None:
+    def _queue_device_tune(self, key: str, field: str, requested: object, unit: str) -> None:
         key, field = str(key), str(field)
         model = self._device_control_models.get(key)
         if model is None:
+            return
+        if field in model.get("unit_requests", {}):
+            model["control"].show_status("display unit is still being prepared", "task")
             return
         projection = self._device_control_projection(key)
         selected = projection["fields"].get(field)
@@ -946,17 +1021,17 @@ class ExperimentGuiFlow:
             self._project_device_control(key)
             return
         if self._device_tune_active is not None:
-            self._device_tune_pending[(key, field)] = requested
-            model["desired"][field] = requested
+            self._device_tune_pending[(key, field)] = (requested, unit)
+            model["desired"][field] = (requested, unit)
             model["control"].show_status(
                 f"queued latest {field}", "task"
             )
             self._project_device_control(key)
             return
-        self._start_device_tune(key, field, requested)
+        self._start_device_tune(key, field, requested, unit)
 
-    def _start_device_tune(self, key: str, field: str, requested: object) -> None:
-        from zlc_atom.authoring import AuthoringSchema, TunableField
+    def _start_device_tune(self, key: str, field: str, requested: object, unit: str) -> None:
+        from zlc_atom.authoring import AuthoringSchema, TunableField, read_tunable_in_unit, tune_in_unit
         from ..authoring_form import project_schema
         from ..device_use import DeviceClaim
 
@@ -1000,6 +1075,8 @@ class ExperimentGuiFlow:
         self._project_device_control(key)
         device = model["device"]
         with_logic = bool(owners)
+        display_units = {name: pair[1] for name, pair in model["desired"].items()}
+        display_units[field] = unit
 
         def work() -> dict[str, object]:
             declared_before = tuple(device.tunable_fields())
@@ -1018,7 +1095,7 @@ class ExperimentGuiFlow:
                 item.metadata.name: item.current for item in declared_before
             }
             before_provenance = dict(device.settings_provenance())
-            effective = device.tune(field, requested)
+            effective = tune_in_unit(device, field, requested, unit)
             declared_after = tuple(device.tunable_fields())
             if any(not isinstance(item, TunableField) for item in declared_after):
                 raise TypeError("device tunable_fields must contain TunableField values")
@@ -1026,8 +1103,6 @@ class ExperimentGuiFlow:
                 item.metadata.name: item.current for item in declared_after
             }
             after_provenance = dict(device.settings_provenance())
-            if after.get(field) != effective:
-                raise RuntimeError("device tune return differs from authoritative readback")
             before_session = str(
                 before_provenance.get("device_session_id", "")
             ).strip()
@@ -1044,17 +1119,23 @@ class ExperimentGuiFlow:
                 or before_epoch < 0
             ):
                 raise RuntimeError("device settings provenance changed identity")
-            expected_epoch = before_epoch + int(before[field] != effective)
-            if after_epoch != expected_epoch:
-                raise RuntimeError(
-                    "device settings epoch does not match the effective change"
-                )
+            if after_epoch < before_epoch:
+                raise RuntimeError("device settings epoch moved backwards")
+            # Provenance stays in the device's canonical field units; only
+            # the Control reading is projected into the requested spelling.
+            displayed_fields = tuple(
+                read_tunable_in_unit(device, item.metadata.name, display_units[item.metadata.name])
+                if display_units.get(item.metadata.name) and display_units[item.metadata.name] != item.metadata.unit
+                else item for item in declared_after
+            )
             return {
                 "previous": before[field],
+                "new_effective": after[field],
                 "before": before,
                 "effective": effective,
                 "current": after,
-                "tunables": declared_after,
+                "display_current": {item.metadata.name: item.current for item in displayed_fields},
+                "tunables": displayed_fields,
                 "before_provenance": before_provenance,
                 "provenance": after_provenance,
             }
@@ -1067,8 +1148,9 @@ class ExperimentGuiFlow:
                         device_key=key,
                         field=field,
                         requested=requested,
+                        requested_unit=unit,
                         previous_effective=result["previous"],
-                        new_effective=result["effective"],
+                        new_effective=result["new_effective"],
                         verified=True,
                         before_provenance=result["before_provenance"],
                         after_provenance=result["provenance"],
@@ -1085,15 +1167,21 @@ class ExperimentGuiFlow:
                 model["status"] = {field: (str(finish_error), "error")}
                 model["control"].show_status(str(finish_error), "error")
             else:
-                model["current"] = dict(result["current"])
-                model["tunables"] = tuple(result["tunables"])
-                model["spec"] = project_schema(
-                    AuthoringSchema(
-                        tuple(item.metadata for item in model["tunables"])
+                if any((item.metadata.unit or "") != model["desired"][item.metadata.name][1]
+                       for item in result["tunables"]):
+                    self._request_device_control_refresh(key)
+                else:
+                    model["current"] = dict(result["display_current"])
+                    model["tunables"] = tuple(result["tunables"])
+                    model["spec"] = project_schema(
+                        AuthoringSchema(
+                            tuple(item.metadata for item in model["tunables"])
+                        )
                     )
-                )
-                if (key, field) not in self._device_tune_pending:
-                    model["desired"][field] = result["effective"]
+                if ((key, field) not in self._device_tune_pending
+                        and model["desired"][field] == (requested, unit)):
+                    model["desired"][field] = (result["display_current"][field], unit)
+                    model.setdefault("unit_drafts", set()).discard(field)
                 model["device_session_id"] = str(
                     result["provenance"]["device_session_id"]
                 )
@@ -1117,10 +1205,10 @@ class ExperimentGuiFlow:
     def _drain_device_tune_pending(self) -> None:
         if self._device_tune_active is not None or not self._device_tune_pending:
             return
-        (key, field), requested = next(iter(self._device_tune_pending.items()))
+        (key, field), (requested, unit) = next(iter(self._device_tune_pending.items()))
         self._device_tune_pending.pop((key, field), None)
         if key in self._device_control_models:
-            self._queue_device_tune(key, field, requested)
+            self._queue_device_tune(key, field, requested, unit)
 
     def _guard_control_gesture(self, control, what, action):
         """One generic-control gesture, unable to kill the bench.

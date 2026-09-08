@@ -411,7 +411,7 @@ def test_api_values_are_reconciled_under_the_operators_wheel() -> None:
     editor.deleteLater()
 
 
-def test_axis_rows_follow_the_ports_without_being_rebuilt() -> None:
+def test_axis_rows_follow_the_ports_without_being_rebuilt(caplog) -> None:
     """The bench re-projects its ports every time a reading moves; the row
     the operator is inside is kept and re-pointed, never replaced."""
 
@@ -443,19 +443,67 @@ def test_axis_rows_follow_the_ports_without_being_rebuilt() -> None:
     editor.close()
     editor.deleteLater()
 
-    from zlc_data.units import DEFAULT_UNITS
+    from zlc_data.units import DEFAULT_UNITS, Unit, UnitRegistry, VoltageIntoLoad
+    from zlc_atom.authoring import AuthoringField, TunableField
+    from zlc_workbench.board import attach_qt_worker
+    from types import SimpleNamespace
+    from threading import Event, get_ident
+    import time
     import numpy as np
 
     power = ScanPort("device:rf:ch1_power_dbm", "rf.ch1_power_dbm", "dBm",
                      -30.0, 10.0, -20.0, 0.0)
-    editor, reopened = _editor(), _editor()
+    units = UnitRegistry((DEFAULT_UNITS.resolve("dBm"),
+                          Unit("Vpp", "power", VoltageIntoLoad(100.0), prefixable=True)))
+    owner_thread = get_ident()
+    gate = Event()
+
+    def read(unit="dBm"):
+        assert get_ident() != owner_thread, "device read ran on Qt"
+        assert gate.wait(3.0)
+        unit = unit or "dBm"
+        low, high = units.convert((-30.0, 10.0), "dBm", unit)
+        return TunableField(AuthoringField("ch1_power_dbm", "float", "Power", None,
+                                          minimum=float(low), maximum=float(high), unit=unit),
+                            float(units.convert(0.0, "dBm", unit)), True, ("ch1_power_dbm",))
+
+    def convert(name, values, source, target):
+        assert get_ident() != owner_thread, "device conversion ran on Qt"
+        assert gate.wait(3.0)
+        assert name == "ch1_power_dbm"
+        return tuple(units.convert(values, source, target))
+
+    device = SimpleNamespace(tunable_fields=lambda: (read(),),
+                             read_tunable_in_unit=lambda name, unit: read(unit),
+                             convert_tunable_value=convert)
+    run, close_worker = attach_qt_worker("scan-editor-test-read")
+
+    def settled(predicate):
+        deadline = time.monotonic() + 3.0
+        while not predicate():
+            assert time.monotonic() < deadline, "scan editor worker did not settle"
+            app.processEvents(QtCore.QEventLoop.AllEvents, 10)
+            time.sleep(0.001)
+
+    editor = scan_plan_editor_factory(device_ports=True)
+    reopened = scan_plan_editor_factory(device_ports=True)
+    initial = ScanAxis(power.port, (-20.0, -15.0, -10.0, -5.0, 0.0), "dBm")
+    projection = {"form_values": {"plan": json.dumps(ScanPlan((initial,)).to_tree())},
+                  "bench_extras": {"tunable_devices": {"rf": device}}, "run_device_read": run}
     try:
-        editor._ports = reopened._ports = (power,)
-        editor._add_axis()
+        editor.update_projection(projection)
+        # Fresh dicts of the same input must not starve an in-flight read.
+        editor.update_projection(dict(projection))
+        assert not editor._rows
+        gate.set()
+        settled(lambda: bool(editor._rows))
         row = editor._rows[0]
         old_values = row.axis().values
         row.unit_picker.unit_picked.emit("mVpp")
-        assert tuple(row.axis().native_value(power, value) for value in row.axis().values) == pytest.approx(old_values)
+        assert row.axis().unit == "dBm", "unit changed before worker accepted it"
+        settled(lambda: row._unit_request is None)
+        assert tuple(units.convert(row.axis().values, "mVpp", "dBm")) == pytest.approx(old_values)
+        assert row.axis().values[-1] == pytest.approx(894.4271909999159), "used the global 50-ohm conversion"
         assert row.start_spin.valueUnit() == "mVpp"
         row.start_spin.setValue(135.0)
         row.stop_spin.setValue(247.0)
@@ -464,7 +512,8 @@ def test_axis_rows_follow_the_ports_without_being_rebuilt() -> None:
         assert plan.axes[0].unit == "mVpp"
         assert plan.axes[0].values == tuple(np.linspace(135.0, 247.0, 10))
         assert ScanPlan.from_tree(plan.to_tree()) == plan
-        reopened._reconcile_rows(editor._plan_text)
+        reopened.update_projection({**projection, "form_values": {"plan": editor._plan_text}})
+        settled(lambda: bool(reopened._rows))
         restored = reopened._rows[0]
         assert restored.start_spin.shownUnit() == "mVpp"
         assert restored.unit_picker.current_choice_key() == "mVpp"
@@ -472,14 +521,34 @@ def test_axis_rows_follow_the_ports_without_being_rebuilt() -> None:
         assert restored.axis().unit == "mVpp"
         assert restored.start_spin.value() == 135.0 and restored.stop_spin.value() == 247.0
         restored.unit_picker.unit_picked.emit("dBm")
+        settled(lambda: restored._unit_request is None)
         assert restored.axis().unit == "dBm"
-        assert restored.axis().values == tuple(DEFAULT_UNITS.convert(plan.axes[0].values, "mVpp", "dBm"))
+        assert restored.axis().values == tuple(units.convert(plan.axes[0].values, "mVpp", "dBm"))
         assert restored.custom_label.text() == "custom values"
-    finally:
-        editor.close()
-        reopened.close()
-        editor.deleteLater()
+        gate.clear()
+        restored.unit_picker.unit_picked.emit("mVpp")
+        restored.start_spin.setValue(-19.0)
+        edited_axis = restored.axis()
+        gate.set()
+        settled(lambda: restored._unit_request is None)
+        assert restored.axis() == edited_axis, "late conversion overwrote a new draft"
+        gate.clear()
+        restored.unit_picker.unit_picked.emit("mVpp")
+        reopened._remove_row(restored)
         reopened.deleteLater()
+        app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+        gate.set()
+        settled(close_worker)
+    finally:
+        gate.set()
+        settled(close_worker)
+        editor.close()
+        editor.deleteLater()
+        from PyQt5 import sip
+        if not sip.isdeleted(reopened):
+            reopened.close()
+            reopened.deleteLater()
+    assert not [record for record in caplog.records if record.levelno >= 40]
 
 
 def _plain_sequence():

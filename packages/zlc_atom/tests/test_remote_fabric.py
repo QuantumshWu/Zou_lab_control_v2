@@ -109,6 +109,41 @@ def test_a_published_tunable_is_listed_and_driven_over_the_wire(announcer) -> No
         remote.tune("frequency_hz", 1e9)
 
 
+def test_unit_requests_cross_the_existing_fabric_dispatch(monkeypatch) -> None:
+    import threading
+    from types import SimpleNamespace
+    from zlc_atom.authoring import AuthoringField, TunableField
+    from zlc_atom.devices.remote import fabric as module
+
+    calls = []
+    def read(name, unit=""):
+        calls.append(("read", name, unit))
+        return TunableField(AuthoringField(name, "float", "Power", unit=unit or "Vpp",
+                            minimum=0.0, maximum=1000.0),
+                            100.0 if unit == "mVpp" else .1, True, (name,))
+    def tune(name, value, unit):
+        calls.append(("tune", name, value, unit))
+        return value + .125
+    def convert(name, value, source_unit, target_unit):
+        calls.append(("convert", name, value, source_unit, target_unit))
+        return tuple(item * 2 for item in value) if isinstance(value, (list, tuple)) else value * 2
+    source = SimpleNamespace(tunable_fields=lambda: (read("power_dbm"),),
+        read_tunable_in_unit=read, tune_in_unit=tune, convert_tunable_value=convert)
+    announcer = object.__new__(DeviceAnnouncer)
+    announcer._registry_lock = threading.Lock()
+    announcer._published = {"rf": PublishedDevice(instance_id="rf", role="rf",
+        type_id="rf", parameters={}, tunable=source)}
+    monkeypatch.setattr(module, "_call", lambda _host, _port, request: announcer._dispatch(request))
+    remote = RemoteTunableDevice(host="unused", port=0, instance_id="rf")
+    assert remote.read_tunable_in_unit("power_dbm").metadata.unit == "Vpp"
+    projected = remote.read_tunable_in_unit("power_dbm", "mVpp")
+    assert projected.metadata.unit == "mVpp" and projected.current == 100.0
+    assert remote.tune_in_unit("power_dbm", 135.0, "mVpp") == 135.125
+    assert calls[-1] == ("tune", "power_dbm", 135.0, "mVpp")
+    assert remote.convert_tunable_value("power_dbm", (1.0, 2.0), "Vpp", "dBm") == (2.0, 4.0)
+    assert calls[-1] == ("convert", "power_dbm", (1.0, 2.0), "Vpp", "dBm")
+
+
 def test_an_endpoint_device_is_announced_for_its_own_protocol(announcer) -> None:
     """A pulse or SLM record carries its server's address, nothing more.
 

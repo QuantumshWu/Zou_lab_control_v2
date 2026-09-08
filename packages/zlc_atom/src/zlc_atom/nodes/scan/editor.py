@@ -25,9 +25,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from weakref import ref as weakref
 
 import numpy as np
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtWidgets, sip
 from zlc_ui.fluent import (
     retire_widget,
     ACCENT,
@@ -60,6 +61,7 @@ from .plan import (
     manual_axis_name,
     port_group,
     port_leaf,
+    plan_from_authored,
     scan_ports_for,
     DEVICE_PARAM_FAMILY,
     scan_ports_for_devices,
@@ -91,6 +93,7 @@ class _AxisRow(QtWidgets.QWidget):
 
     edited = QtCore.pyqtSignal()
     remove_requested = QtCore.pyqtSignal(object)
+    unit_change_requested = QtCore.pyqtSignal(object, object, str)
 
     def __init__(self, ports, axis: ScanAxis | None, parent=None) -> None:
         super().__init__(parent)
@@ -129,6 +132,7 @@ class _AxisRow(QtWidgets.QWidget):
 
         self._ports = tuple(ports)
         self._custom_values: tuple[float, ...] | None = None
+        self._unit_request = None
         self._fill_ports(None if axis is None else axis.port)
         self._apply_port_limits()
         if axis is not None:
@@ -279,6 +283,10 @@ class _AxisRow(QtWidgets.QWidget):
     def _shown_unit_picked(self, symbol: str) -> None:
         """Convert the whole existing grid, without changing its physical sweep."""
         axis = self.axis()
+        if axis.port.startswith(DEVICE_PARAM_FAMILY):
+            self.unit_picker.set_unit(self.start_spin.valueUnit())
+            self.unit_change_requested.emit(self, axis, symbol)
+            return
         values = tuple(float(value) for value in DEFAULT_UNITS.convert(
             axis.values, self.start_spin.valueUnit(), symbol
         ))
@@ -496,6 +504,10 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self._authored: dict[str, tuple[float, str]] = {}
         self._sequence: object = None
         self._values_broken = False
+        self._run_device_read = None
+        self._tunable_devices = {}
+        self._port_read_request = None
+        self._port_read_pending = False
         self.add_button.clicked.connect(self._add_axis)
         self.add_manual_button.clicked.connect(self._add_manual_axis)
         # Whether a hand can be waited for is a fact about the NODE, known
@@ -514,6 +526,14 @@ class ScanPlanEditor(QtWidgets.QWidget):
         # host is there to move them.
         extras = projection.get("bench_extras") or {}
         tunables = extras.get("tunable_devices") if isinstance(extras, Mapping) else None
+        self._tunable_devices = dict(tunables or {})
+        self._run_device_read = projection.get("run_device_read")
+        values = projection.get("form_values") or {}
+        plan_text = str(values.get("plan") or "") if isinstance(values, Mapping) else ""
+        try:
+            axes = plan_from_authored(plan_text).axes
+        except (TypeError, ValueError):
+            axes = ()  # The existing row editor reports an unfinished plan.
         template_ports = (
             (
                 hardware_scan_ports_for(sequence)
@@ -523,15 +543,60 @@ class ScanPlanEditor(QtWidgets.QWidget):
             if sequence is not None
             else ()
         )
-        ports = template_ports + (
-            scan_ports_for_devices(tunables) if self._device_ports else ()
-        )
+        values_text = str(values.get("api_values") or "") if isinstance(values, Mapping) else ""
+        if self._device_ports and self._tunable_devices:
+            units = {axis.port: axis.unit for axis in axes}
+            key = (id(sequence), plan_text, values_text,
+                   tuple((name, id(device)) for name, device in sorted(self._tunable_devices.items())))
+            self._port_read_request = (
+                key, sequence, template_ports, self._tunable_devices, plan_text, values_text, units,
+            )
+            if callable(self._run_device_read):
+                self._start_port_read()
+                return
+            self._apply_projection(template_ports, sequence, plan_text, values_text)
+            self.summary.setText("Device range reads require the console's device worker.")
+            return
+        self._port_read_request = None
+        self._apply_projection(template_ports, sequence, plan_text, values_text)
+
+    def _start_port_read(self) -> None:
+        request = self._port_read_request
+        if request is None or self._port_read_pending:
+            return
+        key, sequence, template_ports, devices, plan_text, values_text, units = request
+        self._port_read_pending = True
+        self.summary.setText("Reading device ranges…")
+        owner_ref = weakref(self)
+
+        def work():
+            return template_ports + scan_ports_for_devices(devices, units=units)
+
+        def finish(ports=None, error=None):
+            owner = owner_ref()
+            if owner is None or sip.isdeleted(owner):
+                return
+            owner._port_read_pending = False
+            latest = owner._port_read_request
+            if latest is None:
+                return
+            if latest[0] != key:
+                owner._start_port_read()
+                return
+            if error is not None:
+                owner.summary.setText(f"Cannot read device ranges: {error}")
+                return
+            owner._apply_projection(ports, sequence, plan_text, values_text)
+
+        try:
+            self._run_device_read(work, finish, lambda error: finish(error=error))
+        except Exception as error:
+            finish(error=error)
+
+    def _apply_projection(self, ports, sequence, plan_text: str, values_text: str) -> None:
+        """Adopt plain port metadata only on the widget's owner thread."""
         if self._only_port is not None:
             ports = tuple(port for port in ports if port.port == self._only_port)
-        values = projection.get("form_values") or {}
-        plan_text = str(values.get("plan") or "") if isinstance(values, Mapping) else ""
-
-        values_text = str(values.get("api_values") or "") if isinstance(values, Mapping) else ""
 
         ports_changed = tuple(ports) != self._ports
         if ports_changed:
@@ -544,6 +609,54 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self._values_text = values_text
         self._reconcile_values(sequence)
         self._rescope_values()
+
+    @QtCore.pyqtSlot(object, object, str)
+    def _convert_axis_unit(self, row, axis: ScanAxis, unit: str) -> None:
+        from zlc_atom.authoring import convert_tunable_value
+        from .devices import device_port_parts
+
+        key, field = device_port_parts(axis.port)
+        device = self._tunable_devices.get(key)
+        if device is None or not callable(self._run_device_read):
+            row.custom_label.setText("Device unit conversion is unavailable")
+            return
+        request = object()
+        row._unit_request = request
+        row.unit_picker.setEnabled(False)
+        row.custom_label.setText("Converting unit…")
+        owner_ref, row_ref = weakref(self), weakref(row)
+
+        def work():
+            values = tuple(convert_tunable_value(device, field, axis.values, axis.unit, unit))
+            ports = scan_ports_for_devices({key: device}, units={axis.port: unit})
+            port = next(port for port in ports if port.port == axis.port)
+            return values, port
+
+        def finish(result=None, error=None):
+            owner, current = owner_ref(), row_ref()
+            if (owner is None or current is None or sip.isdeleted(owner)
+                    or sip.isdeleted(current) or current not in owner._rows
+                    or current._unit_request is not request):
+                return
+            current._unit_request = None
+            current.unit_picker.setEnabled(True)
+            if current.axis() != axis or owner._tunable_devices.get(key) is not device:
+                current._show_values(current.axis())
+                return
+            if error is not None:
+                current.custom_label.setText(f"Cannot convert unit: {error}")
+                return
+            values, port = result
+            owner._ports = tuple(port if item.port == port.port else item for item in owner._ports)
+            current._ports = owner._ports
+            current._show_values(ScanAxis(axis.port, values, unit))
+            current._custom_values = values
+            owner._emit_plan()
+
+        try:
+            self._run_device_read(work, finish, lambda error: finish(error=error))
+        except Exception as error:
+            finish(error=error)
 
     # ---------------------------------------------------------- API values
 
@@ -708,6 +821,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
 
     def _emit_values(self) -> None:
         self._values_text = api_overrides_to_authored(self._overrides())
+        self._port_read_request = None
         self.draft_changed.emit({"values": {"api_values": self._values_text}})
         self._refresh_values_note(set())
 
@@ -774,6 +888,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
         if self._only_port is not None:
             row.remove_button.hide()
         row.edited.connect(self._emit_plan)
+        row.unit_change_requested.connect(self._convert_axis_unit)
         row.remove_requested.connect(self._remove_row)
         return row
 
@@ -838,6 +953,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 self.rows_layout.insertWidget(index, row)
         plan = self._current_plan()
         self._plan_text = "" if plan is None else json.dumps(plan.to_tree())
+        self._port_read_request = None
         # The host's draft contract: a patch under "values", the same shape
         # the auto-generated form emits.
         self.draft_changed.emit({"values": {"plan": self._plan_text}})

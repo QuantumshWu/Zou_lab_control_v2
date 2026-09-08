@@ -158,34 +158,36 @@ class Decibel:
 
 
 @dataclass(frozen=True, slots=True)
-class PeakVoltageInto:
-    """A peak-to-peak amplitude, read as the power it delivers into a load.
+class VoltageIntoLoad:
+    """Voltage expressed as the power it delivers into a stated load.
 
-    ``base = value**2 / (8 * load_ohms)``: a sine of peak-to-peak amplitude
-    V has RMS V / (2 sqrt 2), and P = V_rms**2 / R.  Vpp is the third
-    spelling of one RF power -- W, dBm, Vpp -- and a signal generator's
-    front panel offers all three, so a field that holds one is workable in
-    the others only if the registry knows the load.  Fifty ohms is the RF
-    convention and what every instrument on this bench is terminated in; a
-    bench driving another load registers Vpp with its own.
+    ``base = value**2 / (mean_square_divisor * load_ohms)``. The divisor
+    is 8 for a sine's peak-to-peak amplitude, 1 for RMS. The registry's
+    default is 50 ohms; a device with another load owns its conversion,
+    rather than treating that convention as a measurement of its load.
     """
 
     load_ohms: float
+    mean_square_divisor: float = 8.0
 
     def __post_init__(self) -> None:
         load = float(self.load_ohms)
         if not np.isfinite(load) or load <= 0.0:
             raise UnitError("a load must be finite and positive")
         object.__setattr__(self, "load_ohms", load)
+        divisor = float(self.mean_square_divisor)
+        if not np.isfinite(divisor) or divisor <= 0.0:
+            raise UnitError("a mean-square divisor must be finite and positive")
+        object.__setattr__(self, "mean_square_divisor", divisor)
 
     def to_base(self, values: ArrayLike) -> NDArray[np.generic]:
         volts = np.asarray(values, dtype=float)
-        return volts * volts / (8.0 * self.load_ohms)
+        return volts * volts / (self.mean_square_divisor * self.load_ohms)
 
     def from_base(self, values: ArrayLike) -> NDArray[np.generic]:
         watts = np.asarray(values, dtype=float)
         with np.errstate(invalid="ignore"):
-            return np.sqrt(8.0 * self.load_ohms * watts)
+            return np.sqrt(self.mean_square_divisor * self.load_ohms * watts)
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,7 +217,7 @@ class Prefixed:
         return np.asarray(self.inner.from_base(values), dtype=float) / self.factor
 
 
-Conversion = Scaled | Decibel | PeakVoltageInto | Prefixed
+Conversion = Scaled | Decibel | VoltageIntoLoad | Prefixed
 
 
 # ------------------------------------------------------------------- the unit
@@ -278,8 +280,8 @@ class Unit:
         for text, field in ((self.symbol, "symbol"), (self.dimension, "dimension")):
             if not isinstance(text, str) or not text or text.strip() != text:
                 raise UnitError(f"unit {field} must be a non-empty, trimmed string")
-        if not isinstance(self.conversion, (Scaled, Decibel, PeakVoltageInto, Prefixed)):
-            raise UnitError("unit conversion must be Scaled, Decibel, PeakVoltageInto or Prefixed")
+        if not isinstance(self.conversion, (Scaled, Decibel, VoltageIntoLoad, Prefixed)):
+            raise UnitError("unit conversion must be Scaled, Decibel, VoltageIntoLoad or Prefixed")
         if isinstance(self.aliases, str):
             raise UnitError("unit aliases must be an iterable of strings, not a string")
         aliases = tuple(self.aliases)
@@ -317,6 +319,28 @@ class Unit:
     @property
     def is_linear(self) -> bool:
         return isinstance(self.conversion, Scaled)
+
+    @property
+    def coordinate_scale(self) -> tuple[str, float] | None:
+        """Group and signed-number scale, distinct from conversion to base.
+
+        Voltage coordinates have a constant ratio to other voltage coordinates,
+        but not to power. This scale also applies to spans and coefficients
+        multiplying an authored coordinate, including negative coefficients.
+        """
+        conversion = self.conversion
+        factor = 1.0
+        while isinstance(conversion, Prefixed):
+            factor *= conversion.factor
+            conversion = conversion.inner
+        if isinstance(conversion, Scaled):
+            return self.dimension, factor * conversion.factor
+        if isinstance(conversion, VoltageIntoLoad):
+            return (
+                f"coordinate:{self.dimension}:voltage",
+                factor / math.sqrt(conversion.mean_square_divisor * conversion.load_ohms),
+            )
+        return None
 
     @property
     def scale(self) -> float:
@@ -485,14 +509,15 @@ class UnitRegistry:
                 factors = tuple(self.resolve(part) for part in unit.split("*"))
                 dimensions, scales = [], []
                 for factor in factors:
-                    if factor.is_linear:
-                        dimension, scale = factor.dimension, factor.scale
+                    coordinate_scale = factor.coordinate_scale
+                    if coordinate_scale is not None:
+                        dimension, scale = coordinate_scale
                     else:
                         # Products multiply the authored numbers, not the
                         # physical conversion of each number. In particular
                         # count*mVpp must never square a negative coefficient.
-                        # Prefix changes within that spelling family are still
-                        # exact scales; crossing to W/dBm is not a product scale.
+                        # Nonhomogeneous coordinates retain their own family;
+                        # crossing to W/dBm is not a product scale.
                         family, prefix = self.family_and_prefix(factor)
                         dimension = f"coordinate:{family.symbol}"
                         scale = 10.0 ** prefix.exponent
@@ -680,7 +705,8 @@ def _builtin_units() -> tuple[Unit, ...]:
         Unit("rad", "angle", prefixable=True),
         Unit("deg", "angle", Scaled(np.pi / 180.0), aliases=("°",)),
         Unit("dBm", "power", Decibel(1.0e-3)),
-        Unit("Vpp", "power", PeakVoltageInto(RF_LOAD_OHMS), prefixable=True),
+        Unit("Vpp", "power", VoltageIntoLoad(RF_LOAD_OHMS), prefixable=True),
+        Unit("Vrms", "power", VoltageIntoLoad(RF_LOAD_OHMS, 1.0), prefixable=True),
         Unit("count", "count"),
         Unit("point", "point"),
         # A DAC code is a signed integer the board takes, where 0 is 0 V.
