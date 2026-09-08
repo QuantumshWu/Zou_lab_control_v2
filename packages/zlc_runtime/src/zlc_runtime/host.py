@@ -8,7 +8,7 @@ from pathlib import Path
 import threading
 from types import MappingProxyType
 
-from zlc_data import OwnedSnapshot, canonical_text
+from zlc_data import OwnedSnapshot, canonical_text, finite_real
 
 from .dataset_output import (
     DatasetOutputDeclaration,
@@ -154,6 +154,11 @@ class NodeExecutionContext:
 
     def cancel_requested(self) -> bool:
         return self._host.cancel_requested
+
+    def report_ready(self) -> None:
+        """Report that this worker has completed its actual startup work."""
+
+        self._host._report_ready()
 
     def seal_terminal(
         self,
@@ -414,6 +419,7 @@ class NodeHost:
         self._progress: NodeProgress | None = None
         self._result: object = _UNRESOLVED
         self._stop_event = threading.Event()
+        self._ready_event = threading.Event()
         self._start_lock = threading.Lock()
         self._worker_stop_sealed = False
         self._worker_stop_accepted = False
@@ -478,6 +484,37 @@ class NodeHost:
     @property
     def cancel_requested(self) -> bool:
         return self._stop_event.is_set()
+
+    def wait_ready(self, timeout: float) -> bool:
+        """Wait off the owner thread for this run's explicit readiness.
+
+        An unstarted candidate may be waited on while its old run stops.
+        Cancellation and terminal completion also wake this wait, but are
+        never readiness: the run must still be available after the wake.
+        """
+
+        timeout = finite_real(timeout, "ready timeout", minimum=0.0)
+        self._ready_event.wait(timeout)
+        with self._start_lock:
+            if self._closed:
+                raise RuntimeError("NodeHost is closed")
+            if self._stop_event.is_set():
+                raise InterruptedError(self._stop_reason)
+            if self._terminal or self._worker_stop_sealed:
+                raise RuntimeError(self._error or "node worker finished before readiness could be used")
+            return self._ready_event.is_set() and self._active
+
+    def _report_ready(self) -> None:
+        with self._start_lock:
+            if self._stop_event.is_set():
+                raise InterruptedError(self._stop_reason)
+            if (
+                self._mode != "worker" or not self._active or self._closed
+                or self._terminal or self._worker_stop_sealed
+            ):
+                raise RuntimeError("only an active worker can report ready")
+            self._ready_event.set()
+        self._request_owner_wake()
 
     @property
     def worker_idle(self) -> bool:
@@ -550,6 +587,7 @@ class NodeHost:
                 return
             self._stop_reason = reason
             self._stop_event.set()
+            self._ready_event.set()
         with self._operator_condition:
             self._operator_condition.notify_all()
         self._phase = "stopping"
@@ -604,6 +642,7 @@ class NodeHost:
         # every retry re-run the whole thing and raise again -- and a console
         # that retries once per beat could never finish closing over it.
         self._closed = True
+        self._ready_event.set()
         if self._owner is not None:
             self._owner.shutdown()
 
@@ -622,6 +661,7 @@ class NodeHost:
         self._progress = None
         self._result = _UNRESOLVED
         self._stop_event.clear()
+        self._ready_event.clear()
         self._worker_stop_sealed = False
         self._worker_stop_accepted = False
         self._worker_partial_seal = False
@@ -728,6 +768,7 @@ class NodeHost:
             self._terminal = True
             self._phase = "failed"
             self._error = f"{type(error).__name__}: {error}"
+            self._ready_event.set()
             self._mark_task_run_failed(error)
             self._retire_plane_state()
             raise
@@ -755,6 +796,7 @@ class NodeHost:
         finally:
             with self._start_lock:
                 self._worker_stop_sealed = True
+                self._ready_event.set()
 
     def _poll_worker(self) -> None:
         assert self._owner is not None
@@ -907,6 +949,7 @@ class NodeHost:
             self._worker_stop_accepted = stopped and accept_stop
             self._worker_partial_seal = partial
             self._worker_stop_sealed = True
+            self._ready_event.set()
 
     def _commit_live(
         self,

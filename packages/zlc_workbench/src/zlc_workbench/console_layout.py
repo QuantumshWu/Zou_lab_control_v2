@@ -282,8 +282,11 @@ def resolve_layout(
         if descriptor is None:
             raise LayoutError(f"no logic node named {entry.api_name!r}")
         try:
-            expected_values = set(descriptor.authoring_schema.field_names)
-            missing_values = expected_values - set(entry.values)
+            fields = descriptor.authoring_schema.fields
+            missing_values = {
+                field.name for field in fields
+                if field.required and field.name not in entry.values
+            }
             if missing_values:
                 raise LayoutError(
                     f"{entry.node_id}: missing authoring fields "
@@ -291,7 +294,8 @@ def resolve_layout(
                 )
             # A saved row is an editable raw draft.  Semantic projection is
             # deliberately deferred to the same finalizer that gates Start.
-            values = dict(entry.values)
+            values = {field.name: field.default for field in fields if not field.required}
+            values.update(entry.values)
             options = device_key_options(descriptor, installation=installation)
         except Exception as error:
             raise LayoutError(f"{entry.node_id}: {error}") from error

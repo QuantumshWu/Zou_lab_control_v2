@@ -901,6 +901,23 @@ def test_restart_is_queued_and_keeps_the_stable_signal_key(presenter, session) -
     assert replacement.signal_key("frames") == old_key
     assert replacement.generation != old_generation
 
+    from concurrent.futures import ThreadPoolExecutor
+
+    context = SimpleNamespace(instance_id="scan", cancel_requested=lambda: False)
+    with ThreadPoolExecutor(max_workers=1) as worker:
+        restart = worker.submit(presenter._restart_acquisition, node_id, context)
+        deadline = time.monotonic() + 5.0
+        while not restart.done() and time.monotonic() < deadline:
+            presenter.beat()
+            time.sleep(0.002)
+        assert restart.done(), "acquisition restart did not finish arming"
+        restart.result()
+    acquisition = presenter.logic[node_id].host
+    assert acquisition is not replacement
+    assert acquisition.wait_ready(0.0)
+    assert acquisition.generation != replacement.generation
+    assert session.signal_plane.latest_publication(old_key) is None
+
 
 def test_the_summary_counts_what_is_running(presenter) -> None:
     presenter.add_logic("camera_measurement")
@@ -1477,3 +1494,24 @@ def test_an_armed_silent_source_admits_a_scan_draft(bench) -> None:
         assert parameter not in presenter._source_options(camera_only, "scan")
         panel.state = replace(panel.state, published_outputs={"amplitude": False})
         assert parameter not in presenter._source_options(descriptor, "scan")
+        camera_id = presenter.add_logic("camera_measurement")
+        scan_id = presenter.add_logic("seamless_scan")
+        projection = presenter.logic_editor_projection(scan_id)
+        field = next(field for field in projection["form_spec"].fields
+                     if field.key == "acquisition_logic")
+        assert field.kind == "choice"
+        assert {choice.value for choice in field.choices} == {"", camera_id}
+        assert projection["form_values"]["settle_seconds"] == 0.5
+        presenter.update_logic_draft(scan_id, values={"acquisition_logic": scan_id})
+        assert any("acquisition Measurement" in text for text in
+                   presenter.logic_editor_projection(scan_id)["issues"])
+        presenter.update_logic_draft(scan_id, values={
+            "acquisition_logic": camera_id, "settle_seconds": 0.123,
+        })
+        assert not any("acquisition Measurement" in text for text in
+                       presenter.logic_editor_projection(scan_id)["issues"])
+        saved = presenter.layout()
+        assert presenter.apply_layout(saved)
+        restored = presenter.logic_editor_projection(scan_id)
+        assert restored["form_values"]["acquisition_logic"] == camera_id
+        assert restored["form_values"]["settle_seconds"] == 0.123

@@ -144,6 +144,7 @@ Node new chunk
 - Measurement必须在bounded cadence内live commit。
 - Task必须发布progress与声明preview，或显式声明无preview。
 - 第一份真实publication前不显示live；terminal清除progress并seal/retire preview。
+- Measurement可显式声明`reports_ready`，并在worker真正完成设备准备后通过现有ExecutionContext报告本run ready；NodeHost独占该事实与等待，running、progress文字和首publication不能代替ready。Camera在完整arm返回后报告；未触发时仍可ready。
 - Descriptor outputs、runtime declarations和preview references只有一份typed vocabulary。
 - Concrete Logic Node不得要求Workbench识别其模块、output spelling或domain helper；通用显示/overlay/selection能力由中立层contract表达，Workbench只路由contract。
 - 通用discovery test必须走真实NodeHost、SignalDataPlane和preview contract。
@@ -311,7 +312,8 @@ Node new chunk
 - Camera Measurement只按自己的authored frames-per-cycle/repeat采集并核实际返回cardinality；Camera adapter不解析Pulse window数量，也不以exposure审查Pulse cadence。Adapter的source ordinal只编号实际采到的frames，必须从本次arm的0连续递增。
 - qCMOS的ROI、exposure、trigger/readout各由adapter的单一working-point owner管理；未变化字段不得在每次Start整套重写。Measurement冻结设置操作返回的authoritative readback，不再为同一capture额外读取完整property surface；相同exposure/ROI的restart因此不支付冗余sensor reconfiguration。
 - Camera auto Panel从canonical publication/preview signal建立；signal尚未publish时显示等待状态，但不得用重复device配置、额外generation或固定5秒轮询作为Panel接线条件。
-- Scan绑定的是声明的Dataset输出，不以首个value或generation是否已出现判定contract兼容。已配置Panel Fit的参数由同一model词汇提供声明，禁用的输出不提供；无数据时可Start并在现有source owner等待首次真实publication，不创建假值、不自动启动Camera。首次arrival接入现有有序tap，首绑后继续严格固定generation，停止时退订且不重放旧sealed值。
+- Scan绑定的是声明的Dataset输出，不以首个value或generation是否已出现判定contract兼容。已配置Panel Fit的参数由同一model词汇提供声明，禁用的输出不提供；无数据时可Start并在现有source owner等待首次真实publication，不创建假值；未显式选择Acquisition logic时不自动启动Camera。首次arrival接入现有有序tap，首绑后继续严格固定generation，停止时退订且不重放旧sealed值。
+- Seamless Scan可显式选择一个`Acquisition logic`，只提供其他声明ready的Measurement；空值保持原行为。选择后每个独立Fire段（初次、manual Continue及device参数外层点）按`Pulse SAFE → 原Logic Start/Restart完整流程 → 本次新host ready → settle → 绑定新source → Fire`执行。所有主机推进的外层轴共用此入口，不逐run_repeat或FPGA scan-slot内层点重启。Restart由composition投递到既有owner队列，设备claim、旧run退出与启动仍只有原Logic owner，不由Scan直接操作Camera。新generation自然退休旧history/Derive/Fit；面板配置保留，不清其他消费者的共享history。settle默认0.5s，已显式设置的值保留。停止等待仍使用原Logic Stop，不另建Scan取消流程。
 - Camera settings provenance属于frame event而不是generation identity：`run_record`在一代内保持不变，frame冻结的小型`event_record`可变化；finite/scan前缀与有界indexed history按实际保留chunks合并epoch ranges，monitor只携带当前event。
 - Temperature保留约20ms authored exposure；Pulse timing与camera exposure是各自owner的独立输入。
 - Virtual sequencer按compiled wall cadence逐cycle并支持Stop；每个到达virtual camera的frame event都被采集，不根据Pulse时间或camera exposure私自skip、制造ordinal gap。

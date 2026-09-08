@@ -238,6 +238,7 @@ LOGIC_NODE = LogicNodeDescriptor(
     "camera_measurement",
     NodeKind.MEASUREMENT,
     CAMERA_MEASUREMENT_SCHEMA,
+    reports_ready=True,
     # One output whatever the cycle size: the frames live on the dataset's
     # READOUT_EVENT axis, so the signal vocabulary no longer changes with
     # the acquisition configuration.

@@ -6928,6 +6928,7 @@ class ConsolePresenter:
             source_options,
             publication is not None,
             armed,
+            self._acquisition_options(binding.node_id),
         )
 
     def _finalize_logic_binding(
@@ -6949,6 +6950,7 @@ class ConsolePresenter:
                 source_options=self._source_options(
                     binding.descriptor, binding.node_id
                 ),
+                acquisition_options=self._acquisition_options(binding.node_id),
             )
             binding.finalization_key = key
         return binding.finalization
@@ -7016,6 +7018,8 @@ class ConsolePresenter:
                 binding.descriptor,
                 workspace_root=str(self.session.workspace.root),
                 field_availability=finalization.field_availability,
+                acquisition_options=self._acquisition_options(binding.node_id),
+                acquisition_selected=str(binding.draft.values.get(binding.descriptor.acquisition_input) or ""),
             ),
             "form_values": form_values,
             "artifact_form_spec": project_artifact_inputs(
@@ -7957,9 +7961,62 @@ class ConsolePresenter:
 
         extras = self._bench_offer_extras()
         extras["save_figure_artifact"] = self._save_figure_artifact
+        extras["restart_logic"] = self._restart_acquisition
         if self._build_figure_host is not None:
             extras["build_figure_host"] = self._build_figure_host
         return extras
+
+    def _acquisition_options(self, consumer: str) -> tuple[str, ...]:
+        return tuple(
+            binding.node_id for binding in self.logic.values()
+            if binding.node_id != consumer
+            and binding.descriptor.kind.value == "measurement"
+            and binding.descriptor.reports_ready
+        )
+
+    def _restart_acquisition(self, node_id: str, context: object) -> None:
+        """Ask the original Logic owner to restart, then wait off the UI thread."""
+
+        answer: Future = Future()
+
+        def start() -> None:
+            if not answer.set_running_or_notify_cancel():
+                return
+            try:
+                if context.cancel_requested() or self._closing:
+                    raise InterruptedError("scan stopped before acquisition restart")
+                if node_id not in self._acquisition_options(str(context.instance_id)):
+                    raise ValueError(f"{node_id!r} is not an available acquisition Measurement")
+                if not self.start_logic(node_id):
+                    raise RuntimeError(self.logic[node_id].draft_error or f"could not restart {node_id}")
+                binding = self.logic[node_id]
+                answer.set_result(binding.pending.host if binding.pending is not None else binding.host)
+            except BaseException as error:
+                answer.set_exception(error)
+
+        self._enqueue_panel_interaction(start)
+        while True:
+            try:
+                host = answer.result(timeout=0.05)
+                break
+            except _AnswerTimeout:
+                if context.cancel_requested() and answer.cancel():
+                    raise InterruptedError("scan stopped before acquisition restart")
+        try:
+            while not context.cancel_requested():
+                if host.wait_ready(0.05):
+                    return
+            raise InterruptedError("scan stopped while acquisition was preparing")
+        finally:
+            if context.cancel_requested():
+                def stop() -> None:
+                    binding = self.logic.get(node_id)
+                    if binding is not None and (
+                        binding.host is host or
+                        (binding.pending is not None and binding.pending.host is host)
+                    ):
+                        self.stop_logic(node_id)
+                self._enqueue_panel_interaction(stop)
 
     def _artifact_results(
         self,

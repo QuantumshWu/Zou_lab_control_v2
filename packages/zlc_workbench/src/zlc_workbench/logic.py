@@ -307,6 +307,7 @@ def finalize_logic_draft(
     signal_plane: Any,
     workspace: Any,
     source_options: Sequence[str] = (),
+    acquisition_options: Sequence[str] = (),
 ) -> LogicDraftFinalization:
     """Resolve every Start admission fact without building or acquiring a run."""
 
@@ -322,6 +323,11 @@ def finalize_logic_draft(
         values = {}
         authored = False
         issues.append(str(error))
+
+    acquisition_field = descriptor.acquisition_input
+    acquisition = str(draft.values.get(acquisition_field) or "") if acquisition_field else ""
+    if acquisition and acquisition not in acquisition_options:
+        issues.append(f"{acquisition!r} is not an available acquisition Measurement")
 
     options = device_key_options(descriptor, installation=installation)
     declared_device_arguments = {

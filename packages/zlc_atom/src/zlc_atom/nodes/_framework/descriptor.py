@@ -370,6 +370,10 @@ class LogicNodeDescriptor:
     resolve_field_availability: (
         Callable[[Mapping[str, object]], Mapping[str, str]] | None
     ) = None
+    #: Optional text authoring field naming a readiness-reporting Logic instance.
+    acquisition_input: str = ""
+    #: The node reports acquisition readiness through its host execution context.
+    reports_ready: bool = False
     build_argument_names: tuple[str, ...] = field(
         init=False,
         repr=False,
@@ -401,6 +405,15 @@ class LogicNodeDescriptor:
             raise ValueError("logic node requires api_name and a valid kind")
         if not isinstance(self.authoring_schema, AuthoringSchema):
             raise TypeError("authoring_schema must be AuthoringSchema")
+        if not isinstance(self.acquisition_input, str):
+            raise TypeError("acquisition_input must be a field name string")
+        if type(self.reports_ready) is not bool:
+            raise TypeError("reports_ready must be bool")
+        if self.acquisition_input:
+            selected = next((field for field in self.authoring_schema.fields
+                             if field.name == self.acquisition_input), None)
+            if selected is None or selected.value_type not in {"str", "text"}:
+                raise ValueError("acquisition_input must name an existing text authoring field")
         inputs = tuple(self.input_specs)
         outputs = tuple(self.outputs)
         if self.kind is NodeKind.TASK and self.node_previews is None:

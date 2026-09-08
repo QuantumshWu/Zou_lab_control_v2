@@ -105,12 +105,18 @@ class SeamlessScanMeasurement:
         shots_per_point: int,
         settle_seconds: float,
         producer: str = "seamless_scan",
+        acquisition_logic: str = "",
+        restart_logic: object = None,
     ) -> None:
         self.instance_id = str(producer).strip() or "seamless_scan"
         self.producer = self.instance_id
         self.sequencer = sequencer
         self.sequencer_key = str(sequencer_key)
         self.source = source
+        self.acquisition_logic = str(acquisition_logic).strip()
+        if self.acquisition_logic and not callable(restart_logic):
+            raise ValueError("the selected Acquisition logic needs the bench's Logic restart capability")
+        self._restart_logic = restart_logic
         self.sequence = sequence
         #: The file the operator chose; the pulse is named by it wherever a
         #: record names the pulse.  A document's own name is whatever it was
@@ -343,6 +349,10 @@ class SeamlessScanMeasurement:
 
         readouts = sweeps * inner_count * shots
         self.sequencer.safe()
+        if self.acquisition_logic:
+            check_cancelled(context)
+            context.report_progress(f"Preparing {self.acquisition_logic}")
+            self._restart_logic(self.acquisition_logic, context)
         settle(context, self.settle_seconds)
         self.source.open(context, cycles=readouts)
         try:
@@ -657,6 +667,7 @@ class SeamlessScanMeasurement:
             "scan_shape": list(self.plan.shape),
             "scan_repeats": self.repeats,
             "run_repeats": self.shots_per_point,
+            "acquisition_logic": self.acquisition_logic or None,
             "settle_seconds": self.settle_seconds,
             "slot_tick_scales": list(slot_tick_scales),
         }

@@ -67,6 +67,8 @@ def project_logic_schema(
     *,
     workspace_root: str,
     field_availability: Mapping[str, str] | None = None,
+    acquisition_options: Sequence[str] = (),
+    acquisition_selected: str = "",
 ) -> FormSpec:
     """Project a logic schema, rooting resource pickers in the workspace.
 
@@ -90,6 +92,13 @@ def project_logic_schema(
     }
     fields: list[FormFieldProps] = []
     for field in schema.fields:
+        if field.name == descriptor.acquisition_input:
+            choices = [FormChoice("None", "")]
+            choices.extend(FormChoice(name, name) for name in acquisition_options)
+            if acquisition_selected and acquisition_selected not in acquisition_options:
+                choices.append(FormChoice(f"{acquisition_selected} (unavailable)", acquisition_selected))
+            fields.append(replace(_project_field(field), kind="choice", choices=tuple(choices)))
+            continue
         reason = str(unavailable.get(field.name, ""))
         if reason:
             fields.append(replace(_project_field(field), unavailable_reason=reason))

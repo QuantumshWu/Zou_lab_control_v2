@@ -256,10 +256,9 @@ def test_a_node_host_runs_a_camera_measurement_to_completion() -> None:
         # lands before it is dropped by every camera, and a run short of one
         # frame times out for a reason that is the fixture's, not the node's.
         deadline = time.monotonic() + 10.0
-        while not camera.capture_state() and time.monotonic() < deadline:
-            host.poll()
-            time.sleep(0.005)
+        assert host.wait_ready(5), "the hosted worker did not report ready"
         assert camera.capture_state(), "the hosted worker did not arm the camera"
+        assert plane.latest_publication(host.signal_key("frames")) is None
         sequencer.fire(run_repeats=1, scan_repeats=1)
         sequencer.wait_done(1.0)
         while time.monotonic() < deadline:
@@ -340,10 +339,9 @@ def test_a_node_host_runs_and_stops_repeat_zero_camera_measurement() -> None:
         host.start()
 
         deadline = time.monotonic() + 5.0
-        while not camera.capture_state() and time.monotonic() < deadline:
-            host.poll()
-            time.sleep(0.005)
+        assert host.wait_ready(5), "the monitor did not report ready"
         assert camera.capture_state(), "hosted repeat-zero worker did not arm the camera"
+        assert plane.latest_publication(host.signal_key("frames")) is None
 
         sequencer.fire(run_repeats=1, scan_repeats=1)
         sequencer.wait_done(1.0)
