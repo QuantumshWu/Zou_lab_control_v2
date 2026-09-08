@@ -516,6 +516,16 @@ def test_device_scan_refuses_an_effective_value_different_from_its_coordinate() 
     with pytest.raises(RuntimeError, match="applied 3.5, not the scan coordinate 3.0"):
         measurement._apply(_Context(), ScanDeviceKnobs(tunables), (3.0,), object())
 
+    from zlc_atom.nodes.scan.devices import tune_exactly
+
+    requested = -13.413924543379501
+    returned = -13.413924543379503
+    device = SimpleNamespace(tune=lambda _field, _value: returned)
+    assert tune_exactly(device, "ch1_power_dbm", requested) == returned
+    assert tune_exactly(device, "ch1_power_dbm", requested, what="its pre-run value") == returned
+    with pytest.raises(RuntimeError, match="not the scan coordinate"):
+        tune_exactly(device, "ch1_power_dbm", requested + 0.000001)
+
 
 def _device_stepped(knob: _Knob, sequencer: _FakeSequencer, source: _FakeSource):
     port = ScanPort(DEVICE_PARAM_FAMILY + "knob:level", "knob.level", "1", 0.0, 3.0)

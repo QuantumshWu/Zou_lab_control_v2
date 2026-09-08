@@ -5,9 +5,9 @@ the installed device between fires -- and both owe the bench the same two
 things for it.
 
 THE COLUMN SAYS WHAT THE HARDWARE DID.  ``tune`` answers with the
-instrument's own read-back, and anything other than exactly the scan
-coordinate is a refusal: a dataset may not carry a frequency the
-synthesizer never stood at.
+instrument's own read-back, and any difference beyond floating-point
+roundoff is a refusal: a dataset may not carry a frequency the synthesizer
+never stood at. Numerical unit round trips are not hardware quantization.
 
 THE BENCH IS HANDED BACK AS IT WAS FOUND.  A scan ends -- complete,
 stopped or failed -- with every knob it moved back at its pre-run value,
@@ -43,7 +43,7 @@ def device_port_parts(port: str) -> tuple[str, str]:
 def tune_exactly(
     device: object, field: str, value: float, *, what: str = "the scan coordinate"
 ) -> float:
-    """Move one knob and verify the instrument stood exactly there."""
+    """Verify one setpoint to floating precision, keeping the actual readback."""
 
     effective = device.tune(field, value)
     if isinstance(effective, bool):
@@ -56,7 +56,11 @@ def tune_exactly(
         ) from error
     if not math.isfinite(actual):
         raise ValueError("device tune returned a non-finite effective value")
-    if actual != value:
+    # Unit round trips (for example dBm -> volts -> dBm) need not reproduce
+    # the final float bit. This is only arithmetic roundoff, not an allowance
+    # for the instrument's step size or clamping. Include the scale at zero.
+    roundoff = 8.0 * math.ulp(max(1.0, abs(actual), abs(value)))
+    if not math.isclose(actual, value, rel_tol=0.0, abs_tol=roundoff):
         raise RuntimeError(
             f"device field {field!r} applied {actual!r}, not {what} {value!r}"
         )
