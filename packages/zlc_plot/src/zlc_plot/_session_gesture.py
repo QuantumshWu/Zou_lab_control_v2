@@ -42,23 +42,21 @@ if TYPE_CHECKING:
 
 class GestureSessionMixin:
 
-    def _pointer_state(self) -> SelectorState | None:
-        gesture = self._gesture
-        if not isinstance(gesture, _SelectorGesture):
-            return None
-        pointer = self._selector_controller.candidate_state()
-        return (
-            pointer
-            if pointer is not None and pointer.kind is gesture.kind
-            else None
-        )
+    def _threshold_gesture_on_histogram(self) -> bool:
+        """A threshold drag on a histogram reads the pointer's x, from the press on.
 
-    def _pointer_threshold_active(self) -> bool:
-        pointer = self._pointer_state()
+        Keyed on the session's own gesture, never on the controller's
+        candidate: the candidate exists only from the first move, and that
+        move takes its point BEFORE it starts the controller -- keyed on the
+        candidate, the first move of every drag read y, the count under the
+        hand, and put the threshold there.
+        """
+
+        gesture = self._gesture
         return bool(
-            pointer is not None
+            isinstance(gesture, _SelectorGesture)
+            and gesture.kind is SelectorKind.THRESHOLD
             and self._projected._is_histogram_plot()
-            and pointer.kind is SelectorKind.THRESHOLD
         )
 
     def _event_canonical(
@@ -78,7 +76,7 @@ class GestureSessionMixin:
             return None
         return (
             CrosshairPoint(point.x, point.x)
-            if self._pointer_threshold_active()
+            if self._threshold_gesture_on_histogram()
             else point
         )
 
@@ -684,17 +682,10 @@ class GestureSessionMixin:
         transform: AxisTransform | None = None,
     ) -> NumericRange:
         if transform is not None:
-            if self._projected._is_histogram_plot():
-                pointer = self._pointer_state()
-                if pointer is not None and pointer.kind is SelectorKind.THRESHOLD:
-                    return NumericRange(*transform.canonical_x_limits)
+            if self._threshold_gesture_on_histogram():
+                return NumericRange(*transform.canonical_x_limits)
             return NumericRange(*transform.canonical_y_limits)
-        pointer = self._pointer_state()
-        if (
-            pointer is not None
-            and self._projected._is_histogram_plot()
-            and pointer.kind is SelectorKind.THRESHOLD
-        ):
+        if self._threshold_gesture_on_histogram():
             return self._selector_x_bounds()
         if self._view is None:
             assert self._renderer is not None
@@ -837,6 +828,15 @@ class GestureSessionMixin:
         if updated is not None and updated != current:
             assert self._renderer is not None
             with self._renderer.raster_transaction():
+                if gesture.kind is SelectorKind.THRESHOLD:
+                    # The bar's reading -- threshold, L/R, fidelity -- is
+                    # the frame's, computed at the last present, and a drag
+                    # moves the bar between presents: the reading follows
+                    # the candidate here, or the bar reads one number while
+                    # standing at another.
+                    self._renderer.set_classifier_labels(
+                        self._classifier_frame_labels()[1]
+                    )
                 self._renderer.preview_selector(self._painted_selector_state(updated))
             self._emit_selection(SelectionChange.UPDATED, updated)
 

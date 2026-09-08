@@ -4540,6 +4540,13 @@ class MatplotlibRenderer:
                 self._compose_frame(chrome_stable=True)
         return True
 
+    def set_classifier_labels(self, labels: tuple[str, ...]) -> None:
+        """The readings the Distribution classifier's thresholds show, between
+        frames: a threshold drag moves the bar without presenting a frame, and
+        the bar's own reading moves with it."""
+
+        self._classifier_labels = tuple(map(str, labels))
+
     def preview_selector(self, state: SelectorState) -> bool:
         """Paint the current selector candidate as one complete frame."""
 

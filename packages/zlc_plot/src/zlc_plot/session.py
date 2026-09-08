@@ -1246,19 +1246,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 (axes_x.low, axes_x.high),
                 self._viewport_y_to_axes(viewport.y),
             )
-        classifier_thresholds = self._classifier_thresholds_for_render()
-        display_classifier_thresholds = tuple(
-            None
-            if value is None
-            else self._projected._canonical_scalar_to_display(
-                value,
-                self._projected._value_quantity(),
-            )
-            for value in classifier_thresholds
-        )
-        classifier_labels = self._classifier_labels(
-            classifier_thresholds,
-            display_classifier_thresholds,
+        display_classifier_thresholds, classifier_labels = (
+            self._classifier_frame_labels()
         )
         with renderer.raster_transaction():
             renderer.present(RenderFrame(
@@ -4461,19 +4450,47 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             else self._painted_selector_state(snapshot.candidate),
         )
 
+    def _classifier_frame_labels(
+        self,
+    ) -> tuple[tuple[float | None, ...], tuple[str, ...]]:
+        """Each distribution's threshold in display units, and its reading.
+
+        The thresholds are the ones a frame classifies at -- the choice, else
+        the fit, and the candidate of a threshold drag in progress -- so a
+        frame and a drag preview read the same numbers.
+        """
+
+        thresholds = self._classifier_thresholds_for_render()
+        display = tuple(
+            None
+            if value is None
+            else self._projected._canonical_scalar_to_display(
+                value,
+                self._projected._value_quantity(),
+            )
+            for value in thresholds
+        )
+        return display, self._classifier_labels(thresholds, display)
+
+    def _selector_state_in_display(self, state: SelectorState) -> SelectorState:
+        """One selector in the units the frontend shows."""
+
+        return (
+            self._projected._display_selector_state(state)
+            if self._view is not None
+            else self._special_display_selector_state(state)
+        )
+
     def _display_selector_snapshot(self) -> SelectorSnapshot:
         snapshot = self._resolved_selector_snapshot()
-
-        def display(state: SelectorState) -> SelectorState:
-            return (
-                self._projected._display_selector_state(state)
-                if self._view is not None
-                else self._special_display_selector_state(state)
-            )
-
         return SelectorSnapshot(
-            tuple(display(state) for state in snapshot.committed),
-            None if snapshot.candidate is None else display(snapshot.candidate),
+            tuple(
+                self._selector_state_in_display(state)
+                for state in snapshot.committed
+            ),
+            None
+            if snapshot.candidate is None
+            else self._selector_state_in_display(snapshot.candidate),
         )
 
     def _raster_pointer_state(
@@ -4483,10 +4500,21 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
     ) -> _PointerUpdate:
         """Return the transient pointer state needed by a raster frontend."""
 
-        snapshot = self._display_selector_snapshot()
+        # The candidate is the controller's own.  The resolved snapshot folds
+        # a threshold candidate into the one painted threshold -- right for
+        # painting and hit-testing, and wrong here: the frontend keeps the
+        # button latched only while an answer names a candidate, and a
+        # threshold drag answered its first move with none, so every later
+        # move went out without a button, as a hover, and the bar stood
+        # still until the release.
         color_candidate = self._display_color_limit_candidate()
+        dragged = self._selector_controller.candidate_state()
         candidate: SelectorState | ColorLimitCandidate | None = (
-            color_candidate if color_candidate is not None else snapshot.candidate
+            color_candidate
+            if color_candidate is not None
+            else None
+            if dragged is None
+            else self._selector_state_in_display(dragged)
         )
         gesture = self._gesture
         # Orbit and scene-pick gestures ride the pan pathway: no selector

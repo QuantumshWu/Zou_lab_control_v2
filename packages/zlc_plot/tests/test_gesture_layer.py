@@ -182,8 +182,38 @@ def test_the_threshold_follows_the_pointer_and_commits_on_release() -> None:
         pressed = pointer("press", 0.456)
 
         fronts = [pressed.front]
+        answers = []
         for step in range(6):
-            fronts.append(pointer("move", 0.47 + 0.03 * step).front)
+            moved = pointer("move", 0.47 + 0.03 * step)
+            fronts.append(moved.front)
+            answers.append(moved.value)
+        # Every answer to a move of a live drag names its candidate and its
+        # axes: that is what keeps the frontend's button latched.  The
+        # resolved snapshot folds a threshold candidate into the one painted
+        # threshold, and the answer once carried none -- so from the second
+        # move on the widget sent no button, the session took a hover, and
+        # the bar stood still until the release.
+        assert all(
+            answer.candidate is not None and answer.role is not None
+            for answer in answers
+        )
+        # The first move already reads the pointer's x.  The swap that makes
+        # a histogram threshold read x was keyed on the controller's
+        # candidate, which the first move creates AFTER its point was taken:
+        # the first move read y, the count under the hand, and put the
+        # threshold there -- a bar that jumped to the left edge on every
+        # press before it followed.
+        axis = next(item for item in front.interaction.axes if item.role == "main")
+        left, _top, right, _bottom = axis.bounds
+        low, high = axis.x_limits
+        first = next(
+            state
+            for state in fronts[1].interaction.selectors
+            if state.kind is SelectorKind.THRESHOLD
+        )
+        assert float(first.value) == pytest.approx(
+            low + (0.47 - left) / (right - left) * (high - low), rel=0.02
+        )
         assert [front.identity.sequence for front in fronts] == sorted(
             {front.identity.sequence for front in fronts}
         )
@@ -524,5 +554,55 @@ def test_a_wheel_notch_zooms_the_committed_view_not_the_drawn_one() -> None:
         assert float(second.x.high) - float(second.x.low) == pytest.approx(
             100.0 * factor * factor, rel=1e-9
         )
+    finally:
+        session.close()
+
+
+def test_a_dragged_threshold_reads_its_own_number_while_it_moves() -> None:
+    """The bar's reading is the frame's, and a drag moves the bar between
+    frames: the reading follows the candidate, or the bar reads one number
+    while standing at another -- 243.5 written beside a bar at 374."""
+
+    rng = np.random.default_rng(3)
+    samples = np.concatenate(
+        [rng.normal(100.0, 9.0, 400), rng.normal(180.0, 13.0, 400)]
+    )
+    schema = make_dataset_schema(
+        repeat_domain(size=samples.size),
+        mapped_domain_from_columns({"site": [0.0]}, roles={"site": SITE}),
+        dtype=np.float64,
+    )
+    session = PlotSession(
+        make_snapshot(schema, samples.reshape(-1, 1), revision=0),
+        HistogramPlot(),
+        size="4x4",
+    )
+    try:
+        session.set_parameters({"threshold_classifier": True})
+        session.rgba()
+        transform = next(
+            axis for axis in session._raster_axes_snapshot() if axis.role == "main"
+        )
+        derived = session._derived_threshold_classifier_selector()
+        assert derived is not None
+        low, high = transform.x_limits
+        fx = (float(derived.value) - low) / (high - low)
+        session._raster_pointer_event(
+            "press", *_inside(transform, fx, 0.5), button=1, axes_snapshot=transform,
+        )
+        for step in (1, 2, 3):
+            session._raster_pointer_event(
+                "move", *_inside(transform, fx + 0.06 * step, 0.5), button=1,
+                axes_snapshot=transform,
+            )
+            painted = next(
+                state
+                for state in session._painted_selector_snapshot().states
+                if state.kind is SelectorKind.THRESHOLD
+            )
+            label = session._renderer._classifier_labels[0]
+            assert label.startswith(f"Threshold {float(painted.value):.4g}"), (
+                label, painted.value
+            )
     finally:
         session.close()
