@@ -882,6 +882,14 @@ def test_header_save_layout_writes_no_panel_dataset(
 
     node, snapshot = _one_shot(session)
     presenter.add_panel(node.signal_key("frames"), snapshot, title="frames")
+    rows = (
+        {"name": "first", "expression": "a.frames.frame(0)"},
+        {"name": "twice", "expression": "first * 2"},
+    )
+    derived = presenter.add_logic(
+        "derive", source_signal=node.signal_key("frames"),
+        values={"expressions": rows},
+    )
     path = tmp_path / "layout.json"
     presenter.view.save_answer = str(path)
 
@@ -889,10 +897,14 @@ def test_header_save_layout_writes_no_panel_dataset(
 
     import json
 
+    assert path.is_file(), presenter.view.status
     document = json.loads(path.read_text(encoding="utf-8"))
     assert presenter.LAYOUT_FORMAT == "zlc.console-board"
     assert document["format"] == presenter.LAYOUT_FORMAT
     assert document["panels"][0]["signal"] == node.signal_key("frames")
+    assert document["logic"][0]["values"]["expressions"] == list(rows)
+    assert presenter.apply_layout(document)
+    assert presenter.logic[derived].draft.values["expressions"] == list(rows)
     assert not tuple(tmp_path.glob("*.npz"))
 
 

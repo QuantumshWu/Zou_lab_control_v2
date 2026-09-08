@@ -136,12 +136,25 @@ class LogicLayoutEntry:
         return {
             "node_id": self.node_id,
             "api_name": self.api_name,
-            "values": dict(self.values),
+            "values": _authoring_tree(self.values),
             "source_signal": self.source_signal,
             "device_keys": dict(self.device_keys),
             "artifact_inputs": dict(self.artifact_inputs),
             "auto_preview": self.auto_preview,
         }
+
+
+def _authoring_tree(value: Any) -> Any:
+    """Encode authoring containers without changing their scalar values.
+
+    Rows and numeric tuples are immutable sequences in a draft, JSON arrays
+    in the saved board. Unsupported scalars still reach the strict writer.
+    """
+    if isinstance(value, Mapping):
+        return {key: _authoring_tree(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_authoring_tree(item) for item in value]
+    return value
 
 
 @dataclass(frozen=True, slots=True)
