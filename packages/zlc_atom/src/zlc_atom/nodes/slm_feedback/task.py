@@ -16,7 +16,6 @@ from scipy.optimize import linear_sum_assignment
 from zlc_data import (
     COMPONENT,
     SCAN_POINT,
-    SITE,
     SPATIAL_X,
     SPATIAL_Y,
     AxisId,
@@ -570,62 +569,6 @@ def _usable_plant_slope(
     return float(np.clip(abs(slope), lower, upper))
 
 
-def _bic_gain(samples: object, fit: object) -> float:
-    column = np.asarray(samples, dtype=float).reshape(-1)
-    if column.size < 4 or not np.all(np.isfinite(column)):
-        return float("nan")
-    one_sigma = max(float(np.std(column)), np.finfo(float).tiny)
-    one_mean = float(np.mean(column))
-    log_one = float(np.sum(
-        -0.5 * np.square((column - one_mean) / one_sigma)
-        - np.log(one_sigma * np.sqrt(2.0 * np.pi))
-    ))
-    try:
-        dark_mean = float(fit.dark_mean)
-        dark_sigma = float(fit.dark_sigma)
-        bright_mean = float(fit.bright_mean)
-        bright_sigma = float(fit.bright_sigma)
-        fraction = float(fit.bright_fraction)
-    except (AttributeError, TypeError, ValueError):
-        return float("nan")
-    if (
-        not all(np.isfinite(value) for value in (
-            dark_mean, dark_sigma, bright_mean, bright_sigma, fraction
-        ))
-        or dark_sigma <= 0.0
-        or bright_sigma <= 0.0
-        or not 0.0 < fraction < 1.0
-    ):
-        return float("nan")
-    dark_density = (
-        np.exp(-0.5 * np.square((column - dark_mean) / dark_sigma))
-        / (dark_sigma * np.sqrt(2.0 * np.pi))
-    )
-    bright_density = (
-        np.exp(-0.5 * np.square((column - bright_mean) / bright_sigma))
-        / (bright_sigma * np.sqrt(2.0 * np.pi))
-    )
-    mixture = (1.0 - fraction) * dark_density + fraction * bright_density
-    if not np.all(np.isfinite(mixture)) or np.any(mixture <= 0.0):
-        return float("nan")
-    log_two = float(np.sum(np.log(mixture)))
-    return float(
-        2.0 * log_two
-        - 5.0 * np.log(column.size)
-        - (2.0 * log_one - 2.0 * np.log(column.size))
-    )
-
-
-#: Two populations are accepted only on DECISIVE evidence: a BIC gain over
-#: ten (Kass and Raftery's "very strong").  A loaded site clears it by
-#: hundreds -- four bright shots in a hundred, the fitter's own population
-#: floor, at the archived run's contrast already do -- while a dark site
-#: whose one Gaussian the fitter split in two
-#: 1.7 sigma apart came in at +4.6 and was reported to the loop as loaded
-#: with a contrast of 10.9 photoelectrons, one hundred times under its
-#: neighbours: the uniformity ratio read 116 and the observable count 33.
-_DECISIVE_BIC_GAIN = 10.0
-
 #: A loaded site whose bright fraction is under this share of the lattice's
 #: typical one is ON ITS LOADING RAMP: loading probability rises from zero
 #: over the last few percent of depth above the loading threshold, so half
@@ -653,7 +596,8 @@ def _loading_edge(bright_fraction: object, observable: object) -> np.ndarray:
 def _fit_contrasts(samples: object) -> dict[str, np.ndarray]:
     """Classify each site's one user-authored shot batch.
 
-    A decisively resolved two-population fit (see ``_DECISIVE_BIC_GAIN``)
+    A decisively resolved two-population fit -- ``fit_bimodal``'s
+    ``decisive``, the rule the calibration labels its reference frames by --
     supplies both feedback observables: the bright-minus-dark contrast of the
     two populations, and the loading rate -- the share of the batch's shots
     the fitted threshold puts on the bright side, with its binomial error.
@@ -722,7 +666,7 @@ def _fit_contrasts(samples: object) -> dict[str, np.ndarray]:
                 + fit.dark_sigma**2 / count_dark
             )
         )
-        bic_gain[site] = _bic_gain(column, fit)
+        bic_gain[site] = float(fit.bic_gain)
         finite_pair = bool(
             estimate > 0.0
             and np.isfinite(sem)
@@ -731,7 +675,7 @@ def _fit_contrasts(samples: object) -> dict[str, np.ndarray]:
         )
         if not finite_pair:
             continue
-        if fit.ok and bic_gain[site] > _DECISIVE_BIC_GAIN:
+        if fit.decisive:
             contrast[site], error[site] = estimate, sem
             separated[site] = True
         else:

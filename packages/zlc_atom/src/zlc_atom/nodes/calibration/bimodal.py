@@ -14,17 +14,31 @@ import numpy as np
 
 _SIGMA_FLOOR = 1e-12
 
-#: How much wider the bright readout state may be than the dark one.  Both are
-#: the same sum over the same pixels, differing by the shot noise of one atom's
-#: photons; a few is already generous, and the bound is what keeps a fitted
-#: "state" from collapsing onto a handful of samples.
-_MAX_WIDTH_RATIO = 5.0
+#: Two populations are accepted only on DECISIVE evidence: a BIC gain over
+#: ten against one Gaussian (Kass and Raftery's "very strong").  A loaded
+#: site clears it by hundreds -- four bright shots in a hundred, the fitter's
+#: own population floor, at an archived run's contrast already do -- while a
+#: dark site whose one Gaussian the fitter split in two, 1.7 sigma apart,
+#: came in at +4.6 and was reported to the SLM feedback loop as loaded with
+#: a contrast of 10.9 photoelectrons, one hundred times under its
+#: neighbours: the uniformity ratio read 116 and the observable count 33.
+#: The calibration asks the same question of a site's reference frames: one
+#: that never loaded has no two states to label them by.
+_DECISIVE_BIC_GAIN = 10.0
 
-# A weak, symmetric prior keeps a finite sample's tail from winning merely by
-# making one component several times narrower than the other.  It does not
-# prescribe which state is wider, and raw likelihood dominates it as the shot
-# count grows.  sigma=0.5 in log(width ratio) corresponds to a factor 1.65.
-_LOG_WIDTH_RATIO_PRIOR_SIGMA = 0.5
+#: What keeps a "state" off a handful of samples.  A Gaussian mixture's
+#: likelihood is unbounded: a component narrowed onto a few shots that
+#: happen to lie close together gains about log(r) per shot, r being how
+#: much narrower it is than its partner, and on a sixty-shot sample whose
+#: two states overlap, six shots within half a unit did exactly that --
+#: a state of width 0.1 beside one of width 7, threshold on the spike.
+#: Ranking the candidate pairs by likelihood less 2 (log r)^2 (a Gaussian
+#: of this width on log r) makes a ratio r cost more than fewer than
+#: 2 log r shots can buy -- nine at r = 72, six at r = 20 -- and less than
+#: any population pays back: sixty dark shots that ARE ten times narrower
+#: than the bright ones gain hundreds.  It is a cost on the ratio, not a
+#: bound: the widths remain the sample's own.
+_LOG_WIDTH_RATIO_SCALE = 0.5
 
 
 def _erf_array(values: np.ndarray) -> np.ndarray:
@@ -267,8 +281,10 @@ def _em_two_state(
     one (without it, one component walks onto a single sample, its width goes
     to zero and its likelihood to infinity -- the classic way an unconstrained
     mixture "wins" while explaining nothing).  Neither population is forced
-    wider: real technical noise can make either conditional distribution the
-    narrower one.  Only their width ratio is bounded symmetrically.
+    wider or narrower than the other: real technical noise can make either
+    conditional distribution the narrower one, and how far apart their widths
+    sit is whatever the shots say -- bright shot noise over dark read noise
+    is a factor of ten on one camera and two on another.
     """
 
     likelihood = -np.inf
@@ -289,21 +305,9 @@ def _em_two_state(
             responsibility * (values[:, None] - means[None, :]) ** 2
         ).sum(axis=0) / counts
         sigmas = np.maximum(np.sqrt(np.maximum(variances, 0.0)), sigma_min)
-        narrow = int(np.argmin(sigmas))
-        wide = 1 - narrow
-        sigmas[narrow] = max(
-            sigmas[narrow], sigmas[wide] / _MAX_WIDTH_RATIO
-        )
-        updated_scaled = (values[:, None] - means[None, :]) / sigmas[None, :]
-        updated_total = np.sum(
-            weights[None, :]
-            * np.exp(-0.5 * updated_scaled**2)
-            / (sigmas[None, :] * sqrt(2.0 * pi)),
-            axis=1,
-        )
-        if not np.all(np.isfinite(updated_total)) or np.any(updated_total <= 0.0):
+        current = _log_likelihood(values, means, sigmas, weights)
+        if not isfinite(current):
             return means, sigmas, weights, -np.inf
-        current = float(np.sum(np.log(updated_total)))
         if abs(current - likelihood) <= tolerance * max(1.0, abs(current)):
             likelihood = current
             break
@@ -334,6 +338,44 @@ def _split_start(
     return means, sigmas, weights / weights.sum()
 
 
+def _log_likelihood(
+    values: np.ndarray,
+    means: np.ndarray,
+    sigmas: np.ndarray,
+    weights: np.ndarray,
+) -> float:
+    """The log-likelihood of ``values`` under a weighted pair of Gaussians;
+    minus infinity where the pair gives some value no density at all."""
+
+    scaled = (values[:, None] - means[None, :]) / sigmas[None, :]
+    total = np.sum(
+        weights[None, :]
+        * np.exp(-0.5 * scaled**2)
+        / (sigmas[None, :] * sqrt(2.0 * pi)),
+        axis=1,
+    )
+    if not np.all(np.isfinite(total)) or np.any(total <= 0.0):
+        return -np.inf
+    return float(np.sum(np.log(total)))
+
+
+def _bic_gain(values: np.ndarray, log_two: float) -> float:
+    """The BIC gain of the fitted pair (log-likelihood ``log_two``, five
+    parameters) over one Gaussian on the same values (two parameters).
+    Positive favours two populations."""
+
+    one_sigma = max(float(np.std(values)), np.finfo(float).tiny)
+    one_mean = float(np.mean(values))
+    log_one = float(
+        np.sum(
+            -0.5 * np.square((values - one_mean) / one_sigma)
+            - np.log(one_sigma * sqrt(2.0 * pi))
+        )
+    )
+    penalty = (5.0 - 2.0) * log(values.size)
+    return float(2.0 * (log_two - log_one) - penalty)
+
+
 @dataclass(frozen=True)
 class BimodalFit:
     threshold: float
@@ -346,7 +388,23 @@ class BimodalFit:
     dark_fidelity: float
     bright_fidelity: float
     bright_above: bool
+    #: The evidence for two populations over one: the BIC gain of the fitted
+    #: pair against a single Gaussian on the same shots.
+    bic_gain: float
+    #: Two states far enough apart, and both populated enough, for a shot to
+    #: be assigned to one of them.
     ok: bool
+
+    @property
+    def decisive(self) -> bool:
+        """``ok`` on decisive evidence that two Gaussians beat one: the site
+        loaded.  What a control action, or a label, may rest on; a threshold
+        for a site known to load needs only ``ok``, since two populations
+        that overlap can be as real as the evidence for them is weak."""
+
+        return bool(
+            self.ok and isfinite(self.bic_gain) and self.bic_gain > _DECISIVE_BIC_GAIN
+        )
 
 
 def fit_bimodal(values: object, *, min_component_fraction: float = 0.01) -> BimodalFit:
@@ -361,13 +419,25 @@ def fit_bimodal(values: object, *, min_component_fraction: float = 0.01) -> Bimo
     answer about the data, not a reason to show nothing.
 
     Cuts across the sample provide both hard-partition moment candidates and
-    EM-refined candidates.  A weak symmetric prior on their width ratio keeps
-    a handful of tail samples from winning solely through an extremely narrow
-    Gaussian, while enough real shots still dominate that prior.  This also
-    permits a genuinely narrower bright peak; neither component owns the wide
-    side.  ``ok`` judges separation and population only: a winner pinned to
-    the width-ratio bound is as valid as any other, because that bound is the
-    estimator's own floor and may not judge the fit it shaped.
+    EM-refined candidates; the likeliest pair wins, less the cost on their
+    width ratio that keeps a state off a handful of samples
+    (``_LOG_WIDTH_RATIO_SCALE``).  The widths are otherwise the sample's
+    own: a dark state that is read noise beside a bright state that is shot
+    noise sit a factor of ten apart on a qCMOS, and a rule that preferred
+    any pair inside a fixed width ratio to the likelier one outside it
+    handed the calibration figure a forty-wide "dark" Gaussian over a
+    three-wide spike, and the feedback loop the threshold that went with
+    it.  A state also holds at least ``min_component_fraction`` of the
+    shots, and two, and is at least one percent of the spread wide.
+
+    ``ok`` says whether the shots are two states far enough apart, and both
+    populated enough, for a shot to be assigned to one of them; ``decisive``
+    adds the evidence that two Gaussians beat one at all (``bic_gain`` over
+    ``_DECISIVE_BIC_GAIN``).  A site that never loaded has its one Gaussian
+    split in two like any other sample, and the evidence is what says it
+    did not; two populations that overlap at sixty shots are ``ok`` and not
+    ``decisive``, and their crossing is still the best threshold there is.
+    Every number is returned either way.
     """
 
     samples = np.asarray(values, dtype=float).reshape(-1)
@@ -375,8 +445,18 @@ def fit_bimodal(values: object, *, min_component_fraction: float = 0.01) -> Bimo
     if samples.size < 4:
         split = _exact_otsu_threshold(samples) if samples.size else float("nan")
         return BimodalFit(
-            split, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan,
-            True, False,
+            threshold=split,
+            fidelity=np.nan,
+            dark_mean=np.nan,
+            dark_sigma=np.nan,
+            bright_mean=np.nan,
+            bright_sigma=np.nan,
+            bright_fraction=np.nan,
+            dark_fidelity=np.nan,
+            bright_fidelity=np.nan,
+            bright_above=True,
+            bic_gain=np.nan,
+            ok=False,
         )
     spread = float(np.std(samples)) or 1.0
     sigma_min = max(0.01 * spread, _SIGMA_FLOOR)
@@ -389,62 +469,29 @@ def fit_bimodal(values: object, *, min_component_fraction: float = 0.01) -> Bimo
         for value in np.quantile(samples, (0.1, 0.25, 0.4, 0.5, 0.6, 0.75, 0.9))
     )
 
-    best: tuple[
-        bool,
-        float,
-        float,
-        np.ndarray,
-        np.ndarray,
-        np.ndarray,
-    ] | None = None
+    best: tuple[float, float, np.ndarray, np.ndarray, np.ndarray] | None = None
     for split in starts:
         start = _split_start(
             samples, split, sigma_min=sigma_min, weight_min=weight_min
         )
         if start is None:
             continue
-        start_means, start_sigmas, start_weights = (
-            np.array(value, copy=True) for value in start
+        refined = _em_two_state(
+            samples,
+            *(np.array(value, copy=True) for value in start),
+            sigma_min=sigma_min,
+            weight_min=weight_min,
         )
-        narrow = int(np.argmin(start_sigmas))
-        wide = 1 - narrow
-        start_sigmas[narrow] = max(
-            start_sigmas[narrow],
-            start_sigmas[wide] / _MAX_WIDTH_RATIO,
-        )
-        refined_means, refined_sigmas, refined_weights, _likelihood = (
-            _em_two_state(
-                samples,
-                *(np.array(value, copy=True) for value in start),
-                sigma_min=sigma_min,
-                weight_min=weight_min,
-            )
-        )
-        for means, sigmas, weights in (
-            (start_means, start_sigmas, start_weights),
-            (refined_means, refined_sigmas, refined_weights),
+        for likelihood, means, sigmas, weights in (
+            (_log_likelihood(samples, *start), *start),
+            (refined[3], *refined[:3]),
         ):
-            scaled = (samples[:, None] - means[None, :]) / sigmas[None, :]
-            total = np.sum(
-                weights[None, :]
-                * np.exp(-0.5 * scaled**2)
-                / (sigmas[None, :] * sqrt(2.0 * pi)),
-                axis=1,
-            )
-            likelihood = (
-                float(np.sum(np.log(total)))
-                if np.all(np.isfinite(total)) and np.all(total > 0.0)
-                else -np.inf
-            )
             if not isfinite(likelihood):
                 continue
-            ratio = float(np.max(sigmas) / max(np.min(sigmas), _SIGMA_FLOOR))
-            interior = ratio < _MAX_WIDTH_RATIO * (1.0 - 1e-9)
-            score = likelihood - 0.5 * (
-                log(ratio) / _LOG_WIDTH_RATIO_PRIOR_SIGMA
-            ) ** 2
-            if best is None or (interior, score) > (best[0], best[1]):
-                best = (interior, score, likelihood, means, sigmas, weights)
+            ratio = float(np.max(sigmas)) / max(float(np.min(sigmas)), _SIGMA_FLOOR)
+            score = likelihood - 0.5 * (log(ratio) / _LOG_WIDTH_RATIO_SCALE) ** 2
+            if best is None or score > best[0]:
+                best = (score, likelihood, means, sigmas, weights)
 
     if best is None:
         split = _exact_otsu_threshold(samples)
@@ -453,7 +500,6 @@ def fit_bimodal(values: object, *, min_component_fraction: float = 0.01) -> Bimo
         bright_mean = float(np.mean(high)) if high.size else dark_mean + spread
         width = max(0.5 * spread, sigma_min)
         best = (
-            False,
             float("nan"),
             float("nan"),
             np.array([dark_mean, bright_mean]),
@@ -461,7 +507,7 @@ def fit_bimodal(values: object, *, min_component_fraction: float = 0.01) -> Bimo
             np.array([0.5, 0.5]),
         )
 
-    _interior, _score, _likelihood, means, sigmas, weights = best
+    _score, likelihood, means, sigmas, weights = best
     order = np.argsort(means)
     dark, bright = int(order[0]), int(order[1])
     dark_mean, dark_sigma = float(means[dark]), float(sigmas[dark])
@@ -473,45 +519,31 @@ def fit_bimodal(values: object, *, min_component_fraction: float = 0.01) -> Bimo
     dark_fidelity, bright_fidelity, fidelity = gaussian_fidelity(
         dark_mean, dark_sigma, bright_mean, bright_sigma, threshold, bright_above
     )
+    bic_gain = _bic_gain(samples, likelihood) if isfinite(likelihood) else float("nan")
     separation = (bright_mean - dark_mean) / max(
         dark_sigma + bright_sigma, _SIGMA_FLOOR
     )
     minimum = max(4.0, float(min_component_fraction) * samples.size) / samples.size
-    # Descriptive: whether the two states are far enough apart, and populated
-    # enough, for a shot to be assigned to one of them.  Every number above is
-    # returned either way.
-    #
-    # A CLAMP MAY NOT JUDGE THE FIT IT SHAPED.  This also required the fitted
-    # width ratio to stay strictly inside _MAX_WIDTH_RATIO -- but that
-    # constant is the estimator's own floor on the narrow sigma, applied in
-    # _em_two_state, so a site whose TRUE ratio reaches it comes back pinned
-    # at exactly the bound and was then rejected for standing there.  In this
-    # readout the expected ratio is bright shot noise over dark read noise,
-    # sqrt(130/6) ~ 4.7, so the population sits astride the bound: six sites
-    # of a thirty-five site lattice -- dark 5.9 +/- 0.8, bright 130 +/- 4.0,
-    # fifty sigma apart, BIC gain +550 to +666 -- were reported to the
-    # feedback loop as sites that DID NOT LOAD.  Width is not what this
-    # sentence is about; distance and population are, and both are asked
-    # above.  The bound keeps its other two jobs: it stops a component
-    # collapsing onto a handful of samples, and ``interior`` still prefers a
-    # start that never had to touch it.
+    # Two states far enough apart, and both populated enough, for a shot to
+    # be assigned to one of them.  Width is not what this sentence is about.
     separated = bool(
         np.isfinite(threshold)
         and separation > 0.5
         and minimum <= fraction <= 1.0 - minimum
     )
     return BimodalFit(
-        threshold,
-        fidelity,
-        dark_mean,
-        dark_sigma,
-        bright_mean,
-        bright_sigma,
-        fraction,
-        dark_fidelity,
-        bright_fidelity,
-        bright_above,
-        separated,
+        threshold=threshold,
+        fidelity=fidelity,
+        dark_mean=dark_mean,
+        dark_sigma=dark_sigma,
+        bright_mean=bright_mean,
+        bright_sigma=bright_sigma,
+        bright_fraction=fraction,
+        dark_fidelity=dark_fidelity,
+        bright_fidelity=bright_fidelity,
+        bright_above=bright_above,
+        bic_gain=bic_gain,
+        ok=separated,
     )
 
 

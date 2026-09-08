@@ -31,6 +31,7 @@ from zlc_atom.nodes.calibration.calibration import (
     detect_sites,
     fit_bimodal,
 )
+from zlc_atom.nodes.calibration.bimodal import _DECISIVE_BIC_GAIN
 from zlc_atom.nodes.slm_feedback.task import _support
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -178,25 +179,23 @@ def test_a_threshold_is_the_weighted_crossing_of_the_unlabelled_fit() -> None:
     assert narrow_bright.dark_mean == pytest.approx(0.0, abs=0.4)
     assert narrow_bright.bright_mean == pytest.approx(5.0, abs=0.2)
 
-    # A CLAMP MAY NOT JUDGE THE FIT IT SHAPED.  The estimator floors the
-    # narrow sigma at the wide one over _MAX_WIDTH_RATIO, so a population
-    # whose true width ratio reaches that bound comes back sitting exactly on
-    # it -- and a validity rule that then demanded the ratio be strictly
-    # INSIDE the bound rejected such a fit for standing where it had been
-    # put.  This is that shape, and it is not a marginal one: fifty sigma of
-    # separation, both states heavily populated.  It was reported to the SLM
-    # feedback loop as a site that did not load.
+    # The widths are the sample's own.  Bright shot noise eight times the
+    # dark read noise, fifty sigma of separation, both states heavily
+    # populated: the fit reports that ratio (the dark width sits on the
+    # one-percent-of-spread floor) and is valid.  A fixed width ratio once
+    # floored the narrow state at a fifth of the wide one and ranked any
+    # pair inside the bound above the likelier one on it; this site was
+    # then reported to the SLM feedback loop as one that did not load.
     rng = np.random.default_rng(17)
     loaded = rng.random(120) < 0.45
-    pinned = fit_bimodal(
+    eightfold = fit_bimodal(
         np.where(
             loaded, rng.normal(130.0, 4.0, 120), rng.normal(5.9, 0.5, 120)
         )
     )
-    assert pinned.ok, (pinned.dark_sigma, pinned.bright_sigma)
-    widths = (pinned.dark_sigma, pinned.bright_sigma)
-    assert max(widths) / min(widths) >= 4.9, widths
-    assert pinned.dark_mean < pinned.threshold < pinned.bright_mean
+    assert eightfold.ok, (eightfold.dark_sigma, eightfold.bright_sigma)
+    assert 5.0 < eightfold.bright_sigma / eightfold.dark_sigma < 10.0
+    assert eightfold.dark_mean < eightfold.threshold < eightfold.bright_mean
 
     # Changing truth labels cannot move a Gaussian model or threshold.  It can
     # only change the empirical evaluation of that already chosen threshold.
@@ -543,3 +542,60 @@ def test_target_registration_keeps_a_never_loaded_site_as_unresolved(
     assert (rows[missing], columns[missing]) == (10, 9)
     assert not registered.topology["observed_sites"][missing]
     assert not registered.valid_sites[missing]
+
+
+def test_the_two_state_fit_takes_the_likeliest_pair_whatever_their_widths() -> None:
+    """A calibration figure showed, over a three-wide dark spike at 5 and a
+    thirty-wide bright peak at 150, a forty-wide "dark" Gaussian and a
+    threshold at 100: the likeliest pair sat outside a fixed width ratio and
+    any pair inside it was preferred.  The fit ranks by likelihood alone,
+    reports the widths the shots have, and its ``decisive`` is the evidence
+    for two populations -- so a site that never loaded is not two states,
+    and five loaded shots in a hundred are."""
+
+    for seed in range(20):
+        rng = np.random.default_rng(seed)
+        dark = int(rng.binomial(100, 0.6))
+        fit = fit_bimodal(
+            np.concatenate(
+                (rng.normal(5.0, 2.5, dark), rng.normal(150.0, 30.0, 100 - dark))
+            )
+        )
+        assert fit.decisive, (seed, fit)
+        assert fit.dark_mean == pytest.approx(5.0, abs=2.0)
+        assert fit.dark_sigma < 5.0
+        assert fit.bright_mean == pytest.approx(150.0, abs=15.0)
+        assert 15.0 < fit.threshold < 100.0
+        assert fit.bright_fraction == pytest.approx(1.0 - dark / 100.0, abs=0.03)
+        assert fit.bic_gain > 10.0 * _DECISIVE_BIC_GAIN
+
+    rng = np.random.default_rng(5)
+    narrow_dark = fit_bimodal(
+        np.concatenate((rng.normal(5.0, 0.5, 60), rng.normal(150.0, 30.0, 40)))
+    )
+    assert narrow_dark.decisive
+    assert narrow_dark.bright_sigma / narrow_dark.dark_sigma > 20.0
+
+    one_state = fit_bimodal(rng.normal(5.0, 2.5, 100))
+    assert not one_state.decisive
+    assert one_state.bic_gain < _DECISIVE_BIC_GAIN
+    five_loaded = fit_bimodal(
+        np.concatenate((rng.normal(5.0, 2.5, 95), rng.normal(150.0, 30.0, 5)))
+    )
+    assert five_loaded.decisive
+    assert five_loaded.bright_fraction == pytest.approx(0.05, abs=0.02)
+    two_loaded = fit_bimodal(
+        np.concatenate((rng.normal(5.0, 2.5, 98), rng.normal(150.0, 30.0, 2)))
+    )
+    assert not two_loaded.ok
+
+    # Two populations that overlap at sixty shots: ok, and not decisive.  Six
+    # of them within half a unit are not a third state either -- the cost on
+    # the width ratio is what a chance cluster cannot pay.
+    rng = np.random.default_rng(11)
+    overlapping = fit_bimodal(
+        np.concatenate((rng.normal(92.0, 4.0, 30), rng.normal(104.0, 4.0, 30)))
+    )
+    assert overlapping.ok and not overlapping.decisive
+    assert overlapping.dark_sigma > 1.5 and overlapping.bright_sigma > 1.5
+    assert 94.0 < overlapping.threshold < 102.0

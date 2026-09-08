@@ -16,7 +16,6 @@ from zlc_pulse.wire import STATUS_DONE, STATUS_ERROR
 from zlc_plot import FacetGridPlot, HistogramPlot, Reduction, read_figure_plot
 from zlc_runtime import NodeHost, SignalDataPlane
 
-from zlc_atom.devices.camera import CameraWorkingPoint
 from zlc_atom.devices.simulation import SimulationWorld, SimulationWorldConfig
 from zlc_atom.devices.simulation.camera import VirtualCamera, VirtualCameraConfig
 from zlc_atom.devices.slm import canonical_phase
@@ -38,6 +37,7 @@ from zlc_atom.nodes.calibration import (
     SiteMap,
     TrapCalibration,
 )
+from zlc_atom.nodes.calibration.bimodal import _DECISIVE_BIC_GAIN
 from zlc_atom.nodes.calibration.pulse import resolve_pulse
 from zlc_atom.nodes.slm_feedback import task as feedback_module
 from zlc_atom.nodes.slm_feedback.task import (
@@ -51,7 +51,6 @@ from zlc_atom.nodes.slm_feedback.task import (
     FEEDBACK_OBSERVABLES,
     _funded_shares,
     _half_readings,
-    _DECISIVE_BIC_GAIN,
     _PLANT_EXCITATION_LOG_STEP,
     _loading_edge,
     _needs_probe,
