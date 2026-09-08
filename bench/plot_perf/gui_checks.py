@@ -385,6 +385,11 @@ def install_observers(bench, emit):
     this canary result and restores every method/subscription, even on failure.
     Intent records are signal-subscriber observations, not emit-entry hooks;
     existing product slots keep their original order ahead of these observers.
+    Set bench.feedback_scope_probe=True BEFORE this call for optional B-side
+    Feedback stages, remote description timing and GC spans over 20 ms. This
+    does not install anything in A/C or change GC/Numba configuration.
+    Set bench.viewer_scope_probe=True for a call-scoped InfoPane.set_tabs
+    profile; it does not replace any Qt slot or virtual method.
     """
     from time import perf_counter_ns
     from zlc_plot.backends import Qt5PlotWidget
@@ -392,6 +397,8 @@ def install_observers(bench, emit):
     counts = {"install": 0, "paint": 0, "events": 0, "observer_errors": 0,
               "paint_data_mismatches": 0}
     connections, originals = [], {}
+    scope_cleanup = None
+    viewer_scope_cleanup = None
 
     def record(event, **facts):
         counts["events"] += 1
@@ -405,22 +412,29 @@ def install_observers(bench, emit):
         try:
             facts = {"widget": id(widget), "visible": widget.isVisible(), "closed": widget._closed,
                      "widget_size": [widget.width(), widget.height()], "front": _observed_front(widget._front)}
-            for key, panel in bench.presenter.panels.items():
-                card = bench.view._cards.get(key)
-                editor = bench.view._panel_editors.get(key)
-                if card is not None and card.surface is widget:
-                    accepted = panel.accepted_surface
-                    facts.update(panel=key, owner="live", pending=panel.configuration is not None)
-                elif editor is not None and editor._surface is widget:
-                    accepted = panel.frozen_data
-                    facts.update(panel=key, owner="editor", pending=panel.editor_configuration is not None)
-                else:
-                    continue
-                if accepted is not None:
-                    data = getattr(accepted.plot_input, "snapshot", accepted.plot_input)
-                    facts["accepted_data"] = {"generation": data.ref.stream_generation.value,
-                                              "revision": data.ref.revision.value}
-                break
+            owners = [("console", bench.presenter, bench.view._cards, bench.view._panel_editors)]
+            viewer = getattr(bench, "viewer", None)
+            if viewer is not None:
+                owners.append(("viewer", viewer.presenter._panel_presenter,
+                               viewer._view._cards, viewer._view._editors))
+            for application, presenter, cards, editors in owners:
+                for key, panel in presenter.panels.items():
+                    card, editor = cards.get(key), editors.get(key)
+                    if card is not None and card.surface is widget:
+                        accepted = panel.accepted_surface
+                        facts.update(application=application, panel=key, owner="live",
+                                     pending=panel.configuration is not None)
+                    elif editor is not None and editor._surface is widget:
+                        accepted = panel.frozen_data
+                        facts.update(application=application, panel=key, owner="editor",
+                                     pending=panel.editor_configuration is not None)
+                    else:
+                        continue
+                    if accepted is not None:
+                        data = getattr(accepted.plot_input, "snapshot", accepted.plot_input)
+                        facts["accepted_data"] = {"generation": data.ref.stream_generation.value,
+                                                  "revision": data.ref.revision.value}
+                    return facts
             return facts
         except Exception as error:
             counts["observer_errors"] += 1
@@ -472,6 +486,8 @@ def install_observers(bench, emit):
         connections.append((signal, observed))
 
     def cleanup():
+        scope_summary = None if scope_cleanup is None else scope_cleanup()
+        viewer_scope_summary = None if viewer_scope_cleanup is None else viewer_scope_cleanup()
         for name, original in originals.items():
             setattr(Qt5PlotWidget, name, original)
         originals.clear()
@@ -483,6 +499,11 @@ def install_observers(bench, emit):
         connections.clear()
         result = {**counts, "passed": counts["install"] > 0 and counts["paint"] > 0
                   and counts["observer_errors"] == 0}
+        if scope_summary is not None:
+            result["scope_probe"] = scope_summary
+        if viewer_scope_summary is not None:
+            result["viewer_scope_probe"] = viewer_scope_summary
+            result["passed"] = result["passed"] and viewer_scope_summary["probe_errors"] == 0
         record("observer.canary", **result)
         result["observer_errors"] = counts["observer_errors"]
         result["passed"] = result["passed"] and counts["observer_errors"] == 0
@@ -490,6 +511,10 @@ def install_observers(bench, emit):
 
     cleanup.counts = counts
     try:
+        if getattr(bench, "feedback_scope_probe", False):
+            scope_cleanup = _install_feedback_scope_probe(bench, record)
+        if getattr(bench, "viewer_scope_probe", False) is True:
+            viewer_scope_cleanup = _install_viewer_scope_probe(record)
         watch("_install_front", "install")
         watch("paintEvent", "paint")
         for name in ("panel_state_changed", "add_panel_requested", "panel_remove_requested",
@@ -500,4 +525,794 @@ def install_observers(bench, emit):
     except BaseException:
         cleanup()
         raise
+    return cleanup
+
+
+def check_scientific_chain(
+    plane, *, frames_signal, counts_signal, occupied_signal,
+    frame_judged_signal=None, survival_signal=None,
+    agreement_counts_signal=None, agreement_occupied_signal=None,
+    max_values=100_000,
+):
+    """Check current exact Camera -> Occupancy -> downstream transactions.
+
+    Each child anchors its OWN latest event and resolves its exact parents;
+    independently advancing latest revisions are never joined by number.
+    No taps, leases, history, calibration execution or camera-pixel scans.
+    Call at a checkpoint, not on every paint. Returned evidence is detached
+    and bounded; unavailable parents/oversized payloads are NOT passes.
+    Agreement indices come from that event's run record, not the live draft.
+    This checks published science consistency, not calibration accuracy or
+    the displayed overlay (the existing front/paint checks own the latter).
+    """
+    import numpy as np
+    from zlc_data import READOUT_EVENT, SITE, SPATIAL_X, SPATIAL_Y, Valid, Invalid
+
+    if type(max_values) is not int or max_values < 1:
+        raise ValueError("max_values must be a positive integer")
+    sections, findings = {}, []
+
+    def event_key(ref):
+        return {"stream": ref.stream_id.value, "generation": ref.generation.value,
+                "sequence": int(ref.sequence)}
+
+    def require(section, condition, code):
+        section["checks"] += 1
+        if not condition:
+            findings.append({"code": code, "severity": "error",
+                             "section": section["name"], "event": section["event"]})
+        return bool(condition)
+
+    def unchecked(section, reason):
+        section["unchecked"].append(reason)
+
+    def latest(label, signal):
+        section = {"name": label, "event": None, "checks": 0,
+                   "unchecked": [], "signals": {}}
+        sections[label] = section
+        publication = plane.latest_publication(signal)
+        if publication is None:
+            unchecked(section, "no publication yet (absent, stopped or awaiting source)")
+        else:
+            section["event"] = event_key(publication.event_ref)
+        return section, publication
+
+    def bundle(section, publication, names):
+        values = [publication.value(name) for name in names]
+        if not require(section, all(value is not None for value in values), "missing_sibling"):
+            return None
+        # One bundle establishes sibling causality; shared Dataset identities
+        # below are a separate within-publication contract, NOT a source join.
+        refs = [value.snapshot.ref for value in values]
+        require(section, all((ref.stream_generation, ref.revision) ==
+                             (refs[0].stream_generation, refs[0].revision)
+                             for ref in refs), "sibling_content_identity")
+        require(section, all(value.coverage == values[0].coverage and
+                             value.cell_origin == values[0].cell_origin
+                             for value in values), "sibling_placement")
+        return values
+
+    def parent(section, publication, names):
+        try:
+            parents = plane.direct_parent_publications(publication)
+        except (LookupError, RuntimeError) as error:
+            unchecked(section, "exact parent unavailable: " + type(error).__name__)
+            return None
+        if not require(section, tuple(item.event_ref for item in parents) ==
+                       publication.direct_parent_refs, "parent_event_refs"):
+            return None
+        matching = [item for item in parents if all(item.value(name) is not None for name in names)]
+        if len(matching) != 1:
+            unchecked(section, "required exact parent payload is absent or not unique")
+            return None
+        section["parent"] = event_key(matching[0].event_ref)
+        return matching[0]
+
+    def small(section, value, *, boolean=False):
+        array = np.asarray(value.values)
+        ref = value.snapshot.ref
+        section["signals"][value.name] = {
+            "shape": list(array.shape), "dtype": str(array.dtype),
+            "generation": ref.stream_generation.value, "revision": int(ref.revision.value),
+            "block_id": ref.block_id.value,
+        }
+        if array.size > max_values:
+            unchecked(section, "small-result budget exceeded: " + value.name)
+            return None
+        if not require(section, array.shape == value.schema.physical_shape and array.ndim == 3,
+                       "result_physical_shape"):
+            return None
+        if not require(section, array.dtype.kind == "b" if boolean else array.dtype.kind in "iuf",
+                       "result_dtype"):
+            return None
+        valid = np.asarray(value.snapshot.expanded_validity())
+        section["signals"][value.name]["valid"] = int(np.count_nonzero(valid))
+        if boolean:
+            section["signals"][value.name]["true_valid"] = int(np.count_nonzero(array & valid))
+        return array, valid
+
+    def frame_site(section, value):
+        schema = value.schema
+        return require(section, len(schema.point_domain.axes) == 1 and
+                       schema.point_domain.axes[0].role == READOUT_EVENT and
+                       len(schema.cell_domain.axes) == 1 and
+                       schema.cell_domain.axes[0].role == SITE, "frame_site_axes")
+
+    def same_domains(left, right):
+        return all(getattr(left.schema, name) == getattr(right.schema, name)
+                   for name in ("repeat_domain", "point_domain", "cell_domain"))
+
+    section, publication = latest("occupancy", counts_signal)
+    if publication is not None:
+        names = [counts_signal, occupied_signal]
+        if frame_judged_signal is not None:
+            names.append(frame_judged_signal)
+        siblings = bundle(section, publication, names)
+        source_event = parent(section, publication, (frames_signal,))
+        if siblings is not None:
+            counts, occupied = siblings[:2]
+            frame_site(section, counts)
+            geometry = require(section, same_domains(counts, occupied), "occupancy_sibling_geometry")
+            c, o = small(section, counts), small(section, occupied, boolean=True)
+            if geometry and c is not None and o is not None:
+                cv, cm = c
+                ov, om = o
+                require(section, np.array_equal(cm, om), "occupancy_sibling_validity")
+                require(section, np.isfinite(cv[cm]).all(), "valid_counts_not_finite")
+                if cv.dtype.kind == "f":
+                    require(section, np.isnan(cv[~cm]).all(), "invalid_counts_not_nan")
+                require(section, not ov[~om].any(), "invalid_occupancy_not_false")
+            if source_event is not None:
+                frames = source_event.value(frames_signal)
+                require(section, counts.schema.repeat_domain == frames.schema.repeat_domain and
+                        counts.schema.point_domain == frames.schema.point_domain, "camera_frame_identity")
+                require(section, tuple(axis.role for axis in frames.schema.cell_domain.axes) ==
+                        (SPATIAL_Y, SPATIAL_X), "camera_spatial_axes")
+                validity = frames.block.validity
+                if frames.schema.repeat_domain.size * frames.schema.point_domain.size > max_values:
+                    frame_valid = None
+                    unchecked(section, "camera event row count exceeds budget")
+                elif isinstance(validity, (Valid, Invalid)):
+                    frame_valid = np.full(frames.shape[:2], isinstance(validity, Valid))
+                elif validity.mask.size <= max_values:
+                    mask = np.asarray(validity.mask)
+                    frame_valid = mask.all(axis=tuple(range(2, mask.ndim)))
+                else:
+                    frame_valid = None
+                    unchecked(section, "camera component-validity mask exceeds budget")
+                if o is not None and frame_valid is not None and o[1].shape[:2] == frame_valid.shape:
+                    require(section, not (o[1] & ~frame_valid[..., None]).any(), "invalid_camera_frame_judged")
+                if frame_judged_signal is not None:
+                    judged = siblings[2]
+                    require(section, judged.schema == frames.schema, "judged_frame_schema")
+                    if judged.block.validity is not validity:
+                        unchecked(section, "judged validity not shared; full image comparison not attempted")
+                    # Runtime restamping preserves the source buffer. Prove
+                    # exact same view without scanning multi-megapixel frames.
+                    left, right = np.asarray(judged.values), np.asarray(frames.values)
+                    same_view = (left.shape == right.shape and left.strides == right.strides and
+                                 left.dtype == right.dtype and
+                                 left.__array_interface__["data"][0] == right.__array_interface__["data"][0])
+                    section["judged_source_same_view"] = same_view
+                    if not same_view:
+                        unchecked(section, "judged pixels not shared; full image comparison not attempted")
+
+    if survival_signal is not None:
+        section, publication = latest("survival", survival_signal)
+        if publication is not None:
+            output = publication.value(survival_signal)
+            require(section, output is not None, "missing_survival_output")
+            source_event = parent(section, publication, (occupied_signal,))
+            result = None if output is None else small(section, output, boolean=True)
+            if source_event is not None and result is not None:
+                source = source_event.value(occupied_signal)
+                original = small(section, source, boolean=True)
+                source_axes = frame_site(section, source)
+                output_axes = frame_site(section, output)
+                if original is not None and source_axes and output_axes:
+                    values, valid = original
+                    actual, actual_valid = result
+                    n = values.shape[1]
+                    geometry = require(section, n >= 2 and actual.shape ==
+                        (values.shape[0], n * (n - 1) // 2, values.shape[2]) and
+                        source.schema.repeat_domain == output.schema.repeat_domain and
+                        source.schema.cell_domain == output.schema.cell_domain, "survival_pair_geometry")
+                    if geometry:
+                        pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
+                        expected_valid = np.stack([values[:, i] & valid[:, i] & valid[:, j]
+                                                   for i, j in pairs], axis=1)
+                        expected = expected_valid & np.stack([values[:, j] for i, j in pairs], axis=1)
+                        require(section, np.array_equal(actual_valid, expected_valid), "survival_denominator")
+                        require(section, np.array_equal(actual, expected), "survival_verdict")
+                        axis = source.schema.point_domain.axes[0]
+                        coords = [axis.coordinate_at(code) for code in source.schema.point_domain.codes(axis.axis_id)]
+                        labels = [value if isinstance(value, str) else "?" if value is None else f"{value:g}"
+                                  for value in coords]
+                        expected_labels = tuple(f"{labels[i]}-{labels[j]}" for i, j in pairs)
+                        require(section, output.schema.point_domain.axes[0].coordinate_labels == expected_labels,
+                                "survival_pair_labels")
+
+    if agreement_counts_signal is not None:
+        if agreement_occupied_signal is None:
+            raise ValueError("agreement_occupied_signal is required with agreement_counts_signal")
+        section, publication = latest("agreement", agreement_counts_signal)
+        if publication is not None:
+            siblings = bundle(section, publication, (agreement_counts_signal, agreement_occupied_signal))
+            source_event = parent(section, publication, (counts_signal, occupied_signal))
+            parameters = publication.run_record.get("parameters", {})
+            selected = [parameters.get(name) for name in
+                        ("first_occupancy_frame", "counts_frame", "second_occupancy_frame")]
+            section["frames"] = selected if all(type(item) is int for item in selected) else None
+            if section["frames"] is None:
+                unchecked(section, "actual Agreement frame parameters not in publication record")
+            elif siblings is not None and source_event is not None:
+                sources = bundle(section, source_event, (counts_signal, occupied_signal))
+                if sources is not None:
+                    counts, occupied = sources
+                    frame_site(section, counts)
+                    frame_site(section, siblings[0])
+                    c, o = small(section, counts), small(section, occupied, boolean=True)
+                    ac, ao = small(section, siblings[0]), small(section, siblings[1], boolean=True)
+                    if all(item is not None for item in (c, o, ac, ao)):
+                        cv, cm = c
+                        ov, om = o
+                        first, sampled, second = selected
+                        geometry = require(section, same_domains(counts, occupied) and
+                            same_domains(*siblings) and all(0 <= index < cv.shape[1] for index in selected) and
+                            ac[0].shape == (cv.shape[0], 1, cv.shape[2]) and
+                            siblings[0].schema.repeat_domain == counts.schema.repeat_domain and
+                            siblings[0].schema.cell_domain == counts.schema.cell_domain,
+                            "agreement_frame_geometry")
+                        if geometry:
+                            agree = (om[:, first] & om[:, second] & (ov[:, first] == ov[:, second]))[:, None, :]
+                            count_valid = agree & cm[:, sampled:sampled + 1]
+                            require(section, np.array_equal(ac[1], count_valid), "agreement_counts_validity")
+                            require(section, np.array_equal(ao[1], agree), "agreement_occupied_validity")
+                            require(section, np.array_equal(ac[0][count_valid], cv[:, sampled:sampled + 1][count_valid]),
+                                    "agreement_selected_counts")
+                            require(section, np.array_equal(ao[0][agree], ov[:, first:first + 1][agree]),
+                                    "agreement_selected_occupied")
+                            source_domain, output_domain = counts.schema.point_domain, siblings[0].schema.point_domain
+                            coordinates_match = len(source_domain.axes) == len(output_domain.axes)
+                            for axis, target in zip(source_domain.axes, output_domain.axes):
+                                code = source_domain.codes(axis.axis_id)[sampled]
+                                coordinates_match &= (target.axis_id == axis.axis_id and target.size == 1 and
+                                                      target.coordinate_at(0) == axis.coordinate_at(code))
+                            require(section, coordinates_match, "agreement_selected_frame_coordinate")
+
+    for name, section in sections.items():
+        section["status"] = ("failed" if any(item["section"] == name for item in findings) else
+                             "unchecked" if section["unchecked"] else "checked")
+    return {"sections": sections, "findings": findings,
+            "status": "failed" if findings else "unchecked" if any(
+                section["unchecked"] for section in sections.values()) else "checked",
+            "scope": "exact event consistency; calibration accuracy and displayed pixels are not re-evaluated"}
+
+
+def check_overlay_pixels(panel, card, *, before=None, max_sites=128):
+    """Check occupied-ring colour in an installed, exact-paired grey image.
+
+    No rendering, event pumping, newest-status lookup, or RGBA serialization.
+    This detects the occupied ring, not the weaker white empty/unknown ring.
+    Small/clipped rings and ambiguous inputs are explicitly unchecked.
+    """
+    import numpy as np
+    from matplotlib.colors import to_rgb
+    from zlc_data.snapshot_projection import selection_indices, value_selection
+    from zlc_plot.config import DEFAULTS
+    from zlc_plot.data_contract import resolve_axis
+    from zlc_plot.primitives import ImageFrame, PointStatus
+    from zlc_plot.rendering import _point_ring_radius
+    from zlc_plot.specs import FacetGridPlot, ImagePlot, semantic_spec
+
+    result = {"status": "unchecked", "front": None, "sites": [], "findings": [],
+              "unchecked": [], "transitions": [],
+              "scope": "installed RGBA occupied-ring chroma; no calibration or native-window proof"}
+    accepted = panel.accepted_surface
+    surface = None if card is None else card.surface
+    front = None if surface is None else surface.presented_front
+    frame = None if accepted is None else accepted.plot_input
+    description = None if accepted is None else accepted.description
+    if front is None or description is None or not isinstance(frame, ImageFrame):
+        result["unchecked"].append("no installed front with an accepted ImageFrame")
+        return result
+    result["front"] = {"host": front.identity.host_id, "sequence": front.identity.sequence,
+                       "generation": front.identity.data_generation,
+                       "revision": front.identity.data_revision,
+                       "overlay_revision": front.identity.image_overlay_revision}
+    identity, ref = front.identity, frame.snapshot.ref
+    if (accepted.host is None or accepted.host.host_id != identity.host_id
+            or str(ref.stream_generation.value) != identity.data_generation
+            or int(ref.revision.value) != identity.data_revision
+            or frame.overlay.revision != identity.image_overlay_revision):
+        result["unchecked"].append("installed pixels do not identify this accepted image/overlay")
+        return result
+    spec, state = description.spec, description.display_state.values
+    if (not isinstance(semantic_spec(spec), ImagePlot)
+            or state.get("colormap") != "gray"
+            or state.get("presentation", "heatmap") != "heatmap"
+            or description.fit.get("model") is not None or front.interaction.selectors
+            or panel.configuration is not None or surface._pointer_button is not None
+            or surface._gesture_front is not None):
+        result["unchecked"].append("requires settled grey Image/Facet Image without fit or selectors")
+        return result
+    overlay = frame.overlay
+    if overlay.status is None or overlay.count < 2:
+        result["unchecked"].append("requires dynamic statuses and at least two real sites")
+        return result
+    facets = None
+    if isinstance(spec, FacetGridPlot) and spec.facet is not None:
+        schema = frame.snapshot.block.schema
+        facet = resolve_axis(schema, spec.facet)
+        if spec.facet.domain.value not in ("repeat", "point"):
+            result["unchecked"].append("status facet must belong to Repeat or Point")
+            return result
+        coordinates = np.asarray(facet.coordinates)
+        if coordinates.dtype.kind not in "biuf" or not np.all(np.isfinite(coordinates)):
+            result["unchecked"].append("non-numeric/non-finite facet ordering is outside this oracle")
+            return result
+        terms = {resolve_axis(schema, ref).axis_id: coordinate for ref, coordinate in spec.scope}
+        try:
+            if terms:
+                repeats, points, _data = selection_indices(schema, value_selection(schema, terms))
+            else:
+                repeats, points = range(schema.repeat_domain.size), range(schema.point_domain.size)
+        except (ValueError, TypeError) as error:
+            result["unchecked"].append(f"facet scope cannot be resolved: {error}")
+            return result
+        rows = repeats if spec.facet.domain.value == "repeat" else points
+        # DataView's retained domains enumerate USED declared codes in ascending
+        # code order, not physical row order or a sort of coordinate values.
+        # Explicit codes are ordinary camera geometry, not evidence of ambiguity.
+        codes = facet.domain.codes(facet.axis_id)[np.asarray(tuple(rows), dtype=np.int64)]
+        facets = tuple(facet.coordinates[int(code)] for code in np.unique(codes))
+        # The declared values are canonical even with a unit annotation;
+        # only the independent display values undergo unit conversion.
+        result["facet_coordinates"] = _plain(facets)
+    style = DEFAULTS.style.artists
+    radius = _point_ring_radius(overlay.coordinates,
+                               fraction=style.point_auto_radius_fraction, fallback=float("nan"))
+    token = style.point_occupied
+    colour = np.asarray(to_rgb(token.color), dtype=float) * 255.0
+    direction = colour - colour.mean()
+    norm = float(np.dot(direction, direction))
+    if not np.isfinite(radius) or radius <= 0 or norm <= 0 or token.alpha <= 0:
+        result["unchecked"].append("ring geometry/style has no measurable occupied chroma")
+        return result
+    rgba = front.buffer.as_rgba(copy=False)
+    height, width = rgba.shape[:2]
+    axes = tuple(axis for axis in front.interaction.axes
+                 if axis.role in ("main", "image", "facet_cell"))
+    if not axes:
+        result["unchecked"].append("no installed image axes")
+        return result
+    old_front = (before or {}).get("front") or {}
+    old_sites = ((before or {}).get("sites", ()) if
+                 old_front.get("host") == identity.host_id and
+                 old_front.get("generation") == identity.data_generation else ())
+    previous = {(site["cell"], site["site"]): site for site in old_sites
+                if site.get("observed") is not None}
+    for axis in axes:
+        cell = axis.cell_index
+        if axis.x_scale != "linear" or axis.y_scale != "linear":
+            result["unchecked"].append(f"cell {cell}: nonlinear mapping")
+            continue
+        if facets is not None and (cell is None or not 0 <= cell < len(facets)):
+            result["unchecked"].append(f"cell {cell}: unknown facet coordinate")
+            continue
+        facet_value = None if facets is None else facets[cell]
+        statuses = overlay.statuses_for(spec, facet_value)
+        if statuses is None:
+            result["unchecked"].append(f"cell {cell}: no uniquely selected shot status")
+            continue
+        left, top, right, bottom = axis.bounds
+        x0, x1 = axis.canonical_x_limits
+        y0, y1 = axis.canonical_y_limits
+        if x1 == x0 or y1 == y0:
+            result["unchecked"].append(f"cell {cell}: degenerate canonical bounds")
+            continue
+        # Invert the installed linear canonical transform, not a current view.
+        scale_x = width * (right - left) / (x1 - x0)
+        scale_y = -height * (bottom - top) / (y1 - y0)
+        rx, ry = abs(radius * scale_x), abs(radius * scale_y)
+        stroke_width = token.linewidth * front.logical_dpi * front.device_pixel_ratio / 72.0
+        # The stroke straddles its centreline. One physical pixel bounds AA;
+        # a whole linewidth here used to turn small annuli into filled discs.
+        padding = 0.5 * stroke_width + 1.0
+        labelled = bool(state.get("show_point_labels", True)) and any(
+            status is PointStatus.OCCUPIED and (
+                (overlay.labels is not None and overlay.labels[i]) or
+                (overlay.point_ids is not None and overlay.point_ids[i]))
+            for i, status in enumerate(statuses))
+        for index, (point, status) in enumerate(zip(overlay.coordinates, statuses)):
+            if len(result["sites"]) >= max_sites:
+                result["unchecked"].append(f"site budget {max_sites} reached")
+                break
+            px = width * left + (float(point[0]) - x0) * scale_x
+            py = height * top + (float(point[1]) - y1) * scale_y
+            point_id = str(index) if overlay.point_ids is None else overlay.point_ids[index]
+            site = {"cell": cell, "site": point_id, "expected": status.value,
+                    "expected_occupied": status is PointStatus.OCCUPIED, "observed": None,
+                    "center": [round(px, 2), round(py, 2)],
+                    "radius_px": [round(rx, 3), round(ry, 3)],
+                    "stroke_halfwidth_plus_aa_px": round(padding, 3)}
+            result["sites"].append(site)
+            if (min(rx, ry) < 4.0 or px - rx - padding <= width * left
+                    or px + rx + padding >= width * right
+                    or py - ry - padding <= height * top
+                    or py + ry + padding >= height * bottom):
+                site["unchecked"] = "ring is subpixel-sized or clipped by image axes"
+                continue
+            if labelled:
+                # RasterFront carries no glyph bounds. Labels use the SAME
+                # colour as occupied rings, so chroma cannot exclude a label
+                # overlapping this site. Keep this conservative until the
+                # operator uses the existing Point labels display switch.
+                site["unchecked"] = "point labels may overlap; their paint bounds are not in this front"
+                continue
+            distances = np.hypot((overlay.coordinates[:, 0] - point[0]) * scale_x,
+                                 (overlay.coordinates[:, 1] - point[1]) * scale_y)
+            distances[index] = np.inf
+            clearance = float(np.min(distances))
+            site["nearest_site_distance_px"] = round(clearance, 3)
+            # Conservative enclosing circles also cover anisotropic ellipses.
+            # Do not attribute another site's real stroke to this one.
+            if clearance <= 2.0 * (max(rx, ry) + padding):
+                site["unchecked"] = "neighbour ring stroke/AA can intersect the detection annulus"
+                continue
+            ix0, ix1 = int(np.floor(px - rx - padding)), int(np.ceil(px + rx + padding)) + 1
+            iy0, iy1 = int(np.floor(py - ry - padding)), int(np.ceil(py + ry + padding)) + 1
+            rgb = rgba[iy0:iy1, ix0:ix1, :3].astype(float)
+            yy, xx = np.mgrid[iy0:iy1, ix0:ix1]
+            dx, dy = (xx + 0.5 - px) / rx, (yy + 0.5 - py) / ry
+            band = abs(np.sqrt(dx * dx + dy * dy) - 1.0) <= padding / min(rx, ry)
+            chroma = rgb - rgb.mean(axis=2, keepdims=True)
+            amount = np.sum(chroma * direction, axis=2) / norm
+            error = np.linalg.norm(chroma - amount[..., None] * direction, axis=2)
+            # Grey compositing preserves the token's chroma direction. Allow
+            # byte-rounding error, but require visible (>= 8/255) colour spread.
+            spread = np.ptp(rgb, axis=2)
+            orange = band & (amount > 0) & (spread >= 8) & (error <= 3.0)
+            foreign = band & (spread >= 8) & ~orange
+            sectors = (dx >= 0).astype(np.int8) + 2 * (dy >= 0).astype(np.int8)
+            hits = [int(np.count_nonzero(orange & (sectors == sector))) for sector in range(4)]
+            site.update(coloured_pixels=int(np.count_nonzero(orange)), quadrant_hits=hits)
+            if np.any(foreign):
+                site["unchecked"] = "another chromatic foreground/background intersects the ring"
+                continue
+            if not np.any(orange):
+                site["observed"] = False
+            elif sum(hit >= 2 for hit in hits) >= 3:
+                site["observed"] = True
+            else:
+                site["unchecked"] = "too little ring coverage to distinguish marker from interference"
+                continue
+            if site["observed"] != site["expected_occupied"]:
+                result["findings"].append({"cell": cell, "site": point_id,
+                                           "expected": site["expected_occupied"],
+                                           "observed": site["observed"]})
+            old = previous.get((cell, point_id))
+            if (old is not None and old["expected_occupied"] != site["expected_occupied"]
+                    and old.get("center") == site["center"]):
+                result["transitions"].append({"cell": cell, "site": point_id,
+                    "expected": [old["expected_occupied"], site["expected_occupied"]],
+                    "observed": [old["observed"], site["observed"]]})
+    for site in result["sites"]:
+        site["status"] = ("unchecked" if "unchecked" in site or site["observed"] is None else
+                          "checked" if site["observed"] == site["expected_occupied"] else "failed")
+    result["site_counts"] = {status: sum(site["status"] == status for site in result["sites"])
+                             for status in ("checked", "failed", "unchecked")}
+    unchecked = result["unchecked"] or any("unchecked" in site for site in result["sites"])
+    result["status"] = ("failed" if result["findings"] else "unchecked" if unchecked
+                        or not result["sites"] else "checked")
+    return result
+
+
+def _install_feedback_scope_probe(bench, record):
+    """Temporary coarse B-process scopes; no payloads, GUI calls or new work.
+
+    Futures are observed only after completion, never awaited. Class wrappers
+    avoid storing a bound-method closure on a host (which would manufacture
+    the very GC cycles this probe investigates). A/C PIDs come from the two
+    existing factory closures; there is deliberately no child injection/JIT
+    claim. All patches and the GC callback are removed by the outer cleanup.
+    """
+    import gc
+    import inspect
+    import itertools
+    import os
+    import threading
+    import weakref
+    from time import perf_counter_ns, thread_time_ns
+    from zlc_atom.nodes.slm_feedback import task as feedback
+    from zlc_plot.render_process import RenderProcess, _RemoteRasterPlotHost
+
+    active = True
+    patches, totals, gc_starts = [], {}, {}
+    serial = itertools.count(1)
+    lock = threading.RLock()
+    first_created, first_front = weakref.WeakSet(), weakref.WeakSet()
+    gc_counts = {"cycles": 0, "slow_spans": 0, "slow_ns": 0}
+
+    def emit(event, **facts):
+        if active:
+            record(event, process_role="B", pid=os.getpid(),
+                   thread=threading.get_ident(), native_thread=threading.get_native_id(), **facts)
+
+    def finish(name, token, started, cpu_started, facts, exception=None):
+        elapsed, cpu = perf_counter_ns() - started, thread_time_ns() - cpu_started
+        with lock:
+            row = totals.setdefault(name, {"calls": 0, "wall_ns": 0, "thread_cpu_ns": 0})
+            row["calls"] += 1
+            row["wall_ns"] += elapsed
+            row["thread_cpu_ns"] += cpu
+        emit("scope.end", scope=name, call=token, start_ns=started, elapsed_ns=elapsed,
+             thread_cpu_ns=cpu, exception=exception, **facts)
+
+    def timed(original, name, describe, result_facts=None):
+        def wrapped(*args, **kwargs):
+            token = next(serial)
+            facts = describe(args, kwargs)
+            emit("scope.begin", scope=name, call=token, **facts)
+            started, cpu_started = perf_counter_ns(), thread_time_ns()
+            exception = None
+            try:
+                answer = original(*args, **kwargs)
+                if result_facts is not None:
+                    facts.update(result_facts(answer))
+                return answer
+            except BaseException as error:
+                exception = type(error).__name__
+                raise
+            finally:
+                finish(name, token, started, cpu_started, facts, exception)
+        return wrapped
+
+    def patch(owner, name, replacement):
+        original = getattr(owner, name)
+        patches.append((owner, name, original, replacement))
+        setattr(owner, name, replacement)
+
+    def host_facts(host):
+        return {"host": host.host_id, "remote_pid": host.process_pid,
+                "remote_name": host.process_name}
+
+    def describe_call(original):
+        def wrapped(process, host, method, args, kwargs):
+            if method != "describe_display":
+                return original(process, host, method, args, kwargs)
+            facts = host_facts(host)
+            token, started = next(serial), perf_counter_ns()
+            emit("scope.begin", scope="describe_display", call=token, **facts)
+            try:
+                pending = original(process, host, method, args, kwargs)
+            except BaseException as error:
+                emit("scope.future.end", scope="describe_display", call=token,
+                     elapsed_ns=perf_counter_ns() - started, exception=type(error).__name__, **facts)
+                raise
+            emit("scope.future.queued", scope="describe_display", call=token,
+                 future=id(pending), enqueue_ns=perf_counter_ns() - started, **facts)
+
+            def completed(done):
+                if not active:
+                    return
+                cancelled = done.cancelled()
+                # add_done_callback guarantees completion; exception() here
+                # cannot block and does not inspect the operation payload.
+                error = None if cancelled else done.exception()
+                emit("scope.future.end", scope="describe_display", call=token,
+                     future=id(done), elapsed_ns=perf_counter_ns() - started,
+                     cancelled=cancelled, exception=None if error is None else type(error).__name__, **facts)
+
+            pending.add_done_callback(completed)
+            return pending
+        return wrapped
+
+    def created(original):
+        def wrapped(host, description):
+            answer = original(host, description)
+            if host not in first_created:
+                first_created.add(host)
+                emit("scope.remote.initial_metadata", **host_facts(host))
+            return answer
+        return wrapped
+
+    def accepted_front(original):
+        def wrapped(host, front):
+            answer = original(host, front)
+            if host not in first_front and host.front is front:
+                first_front.add(host)
+                identity = front.identity
+                emit("scope.remote.first_front", sequence=identity.sequence,
+                     generation=identity.data_generation, revision=identity.data_revision,
+                     **host_facts(host))
+            return answer
+        return wrapped
+
+    def garbage_collection(phase, info):
+        generation = int(info["generation"])
+        if phase == "start":
+            gc_starts[generation] = perf_counter_ns()
+        elif phase == "stop":
+            started = gc_starts.pop(generation, None)
+            gc_counts["cycles"] += 1
+            if started is not None:
+                elapsed = perf_counter_ns() - started
+                if elapsed > 20_000_000:
+                    gc_counts["slow_spans"] += 1
+                    gc_counts["slow_ns"] += elapsed
+                    emit("scope.gc", generation=generation, start_ns=started, elapsed_ns=elapsed,
+                         collected=int(info["collected"]), uncollectable=int(info["uncollectable"]))
+
+    def cleanup():
+        nonlocal active
+        if not active:
+            return {"enabled": True, "totals": dict(totals), "gc": dict(gc_counts)}
+        active = False
+        if garbage_collection in gc.callbacks:
+            gc.callbacks.remove(garbage_collection)
+        for owner, name, original, replacement in reversed(patches):
+            if getattr(owner, name) is replacement:
+                setattr(owner, name, original)
+        patches.clear()
+        gc_starts.clear()
+        return {"enabled": True, "totals": {name: dict(row) for name, row in totals.items()},
+                "gc": dict(gc_counts), "A_compile_observed": False}
+
+    try:
+        services = {}
+        for role, attribute, cell in (("A", "_make_monitor_host", "monitor_render"),
+                                      ("C", "_make_editor_host", "editor_render")):
+            factory = getattr(bench.presenter, attribute)
+            service = inspect.getclosurevars(factory).nonlocals.get(cell)
+            services[role] = (None if service is None else {
+                "pid": service._process.pid, "name": service.name, "owner_id": id(service)})
+        emit("scope.services", services=services, A_compile_observed=False)
+        for name in ("_readout_frames", "_fit_contrasts"):
+            def dimensions(args, kwargs):
+                value = args[0]
+                shape = (value.block.values.shape if hasattr(value, "block") else value.shape)
+                return {"input_id": id(value), "shape": list(shape), "shots": kwargs.get("shots")}
+            patch(feedback, name, timed(getattr(feedback, name), name, dimensions))
+        patch(feedback.SlmFeedbackTask, "_shoot", timed(feedback.SlmFeedbackTask._shoot, "_shoot",
+            lambda args, kwargs: {"object_id": id(args[0]), "node": args[0].instance_id,
+                                  "iteration": args[3], "shots": args[0].shots}))
+        factory = bench.presenter._make_monitor_host
+        patch(bench.presenter, "_make_monitor_host", timed(factory, "_make_monitor_host",
+            lambda args, kwargs: {"input_id": id(args[0]), "signal": args[1].signal,
+                                  "kind": args[1].kind},
+            lambda host: host_facts(host) if isinstance(host, _RemoteRasterPlotHost)
+                         else {"returned_type": type(host).__name__}))
+        patch(RenderProcess, "_call", describe_call(RenderProcess._call))
+        patch(_RemoteRasterPlotHost, "_created", created(_RemoteRasterPlotHost._created))
+        patch(_RemoteRasterPlotHost, "_accept_front", accepted_front(_RemoteRasterPlotHost._accept_front))
+        gc.callbacks.append(garbage_collection)
+    except BaseException:
+        cleanup()
+        raise
+    return cleanup
+
+
+def _install_viewer_scope_probe(record):
+    """Owner-thread profile of ordinary set_tabs, without changing UI work.
+
+    Profiling includes synchronous row construction/layout and profiler cost,
+    not the queued layout/deletion tail after return. Metadata collection and
+    log serialization happen after restoring sys.setprofile. The bound
+    Qt slots, resize/paint virtuals and their signal connections stay intact.
+    """
+    import os
+    import profile
+    import sys
+    from threading import current_thread, get_ident, get_native_id
+    from time import perf_counter, perf_counter_ns
+    from zlc_ui.fluent.info_pane import InfoPane
+    from zlc_ui.fluent import FluentReadoutMultiline
+
+    original = InfoPane.set_tabs
+    counts = {"calls": 0, "elapsed_ns": 0, "probe_errors": 0}
+
+    def profiled(pane, tabs):
+        counts["calls"] += 1
+        call = counts["calls"]
+        # CPython 3.13.12's cProfile monitoring captured worker events in our
+        # two-thread canary and produced cumtime < tottime. Use the standard
+        # Python profiler through an explicitly filtered current-thread hook.
+        profiler = profile.Profile(timer=perf_counter)
+        profiler.set_cmd("InfoPane.set_tabs")
+        owner_ident = get_ident()
+        native_thread = get_native_id()
+        thread_name = current_thread().name
+        previous_profile = sys.getprofile()
+        foreign_events = 0
+        profile_failure = None
+
+        def dispatch(frame, event, arg):
+            nonlocal foreign_events, profile_failure
+            if get_ident() != owner_ident:
+                foreign_events += 1
+                return
+            if profile_failure is not None:
+                return
+            try:
+                profiler.dispatcher(frame, event, arg)
+            except Exception as error:
+                # A diagnostic stack/accounting refusal cannot interrupt a
+                # product slot. Discard this profile, not the UI operation.
+                profile_failure = type(error).__name__
+
+        failure = None
+        started = perf_counter_ns()
+        sys.setprofile(dispatch)
+        try:
+            return original(pane, tabs)
+        except BaseException as error:
+            failure = type(error).__name__
+            raise
+        finally:
+            sys.setprofile(previous_profile)
+            elapsed = perf_counter_ns() - started
+            counts["elapsed_ns"] += elapsed
+            try:
+                functions = []
+                profiler.create_stats()
+                for (filename, line, function), entry in profiler.stats.items():
+                    functions.append({
+                        "file": filename,
+                        "line": line,
+                        "function": function,
+                        "calls": entry[1],
+                        "primitive_calls": entry[0],
+                        "tottime": entry[2],
+                        "cumtime": entry[3],
+                    })
+                invalid_entries = sum(item["tottime"] > item["cumtime"] + 1e-9 for item in functions)
+                profile_valid = profile_failure is None and invalid_entries == 0
+                if not profile_valid:
+                    counts["probe_errors"] += 1
+                    functions = []
+                rows_per_tab = []
+                # Do not consume an arbitrary iterable before/after the
+                # business call. Current Viewer supplies detached tuples.
+                for title, rows in tabs if isinstance(tabs, (tuple, list)) else ():
+                    layout = pane._tab_layouts.get(str(title))
+                    body = None if layout is None else layout.parentWidget()
+                    fields = [] if body is None else body.findChildren(FluentReadoutMultiline)
+                    lengths = [max(0, field.document().characterCount() - 1) for field in fields]
+                    rows_per_tab.append({
+                        "tab": str(title),
+                        "rows": len(rows) if isinstance(rows, (tuple, list)) else None,
+                        "readout_widgets": len(fields),
+                        "text_utf16_units": sum(lengths),
+                        "max_row_text_utf16_units": max(lengths, default=0),
+                    })
+                record(
+                    "scope.viewer_tabs", call=call, pane_id=id(pane),
+                    pid=os.getpid(), thread_ident=owner_ident, native_thread_id=native_thread,
+                    thread_name=thread_name, profiler="profile.Profile+owner-filtered-sys.setprofile",
+                    start_ns=started, elapsed_ns=elapsed, elapsed_ms=elapsed / 1_000_000,
+                    exception=failure, rows_per_tab=rows_per_tab,
+                    function_time_unit="seconds", deferred_tail_included=False,
+                    profile_clock="perf_counter wall time", profile_valid=profile_valid,
+                    ignored_foreign_events=foreign_events, invalid_entries=invalid_entries,
+                    profile_error=profile_failure,
+                    top25_tottime=sorted(functions, key=lambda item: item["tottime"], reverse=True)[:25],
+                    top25_cumtime=sorted(functions, key=lambda item: item["cumtime"], reverse=True)[:25],
+                )
+            except Exception as error:
+                # A failed probe must not replace the product's return value
+                # or its original exception. No exception repr/arguments.
+                counts["probe_errors"] += 1
+                record("scope.viewer_tabs", call=call, pane_id=id(pane),
+                       pid=os.getpid(), thread_ident=owner_ident, native_thread_id=native_thread,
+                       thread_name=thread_name,
+                       start_ns=started, elapsed_ns=elapsed, elapsed_ms=elapsed / 1_000_000,
+                       exception=failure, probe_error=type(error).__name__)
+
+    InfoPane.set_tabs = profiled
+
+    def cleanup():
+        InfoPane.set_tabs = original
+        return {**counts, "restored": InfoPane.set_tabs is original}
+
     return cleanup

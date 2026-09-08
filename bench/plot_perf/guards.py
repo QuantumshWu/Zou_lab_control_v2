@@ -114,22 +114,26 @@ class ProductBeat:
     Used as a context manager so the timer cannot outlive the window.
     """
 
-    def __init__(self, app, presenter):
+    def __init__(self, app, presenter, *, drive_timer: bool = True):
         from PyQt5 import QtCore
 
         self._app = app
         self._QtCore = QtCore
         self.interval_ms = int(presenter.board.base_interval_ms)
-        self._timer = QtCore.QTimer()
-        self._timer.setInterval(self.interval_ms)
-        self._timer.timeout.connect(presenter.beat)
+        self._timer = None
+        if drive_timer:
+            self._timer = QtCore.QTimer()
+            self._timer.setInterval(self.interval_ms)
+            self._timer.timeout.connect(presenter.beat)
 
     def __enter__(self) -> "ProductBeat":
-        self._timer.start()
+        if self._timer is not None:
+            self._timer.start()
         return self
 
     def __exit__(self, *_exc) -> None:
-        self._timer.stop()
+        if self._timer is not None:
+            self._timer.stop()
 
     def run(self, seconds: float, tick=None) -> float:
         """Let the console run for a wall-clock window; return what elapsed.

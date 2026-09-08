@@ -198,6 +198,84 @@ class ConsoleBench:
         self._tmp = pathlib.Path(tempfile.mkdtemp(prefix="console-bench-"))
 
     # ------------------------------------------------------------ lifecycle
+    def open_devices(self):
+        """Open the formal experiment launcher without bypassing its Init UI."""
+        import json
+        import shutil
+        from pulse_fixtures import write_ordinary_pulse
+        from zlc_atom.nodes.scan import scan_ports_for, slots_from_plan
+        from zlc_pulse.codec import read_pulse_document, sequence_to_tree
+        from zlc_workbench.apps.task_console import create_experiment_flow
+
+        write_ordinary_pulse(self._tmp)
+        shutil.copyfile(
+            ROOT / "packages/zlc_atom/tests/pulses/imaging_template.json",
+            self._tmp / "pulses/imaging_template.json",
+        )
+        imaging, _editor = read_pulse_document(self._tmp / "pulses/imaging_template.json")
+        # The existing Feedback test's one-frame imaging pulse: unlike
+        # Calibration's long/short/long template, one cycle has one trigger.
+        from zlc_pulse import PulseSequence
+
+        feedback_period_ids = {"load", "short", "gap_1"}
+        feedback = PulseSequence(
+            "single_frame_feedback",
+            target=imaging.target,
+            time_step_ns=imaging.time_step_ns,
+            periods=tuple(period for period in imaging.periods
+                          if period.period_id in feedback_period_ids),
+            api_parameters=tuple(parameter for parameter in imaging.api_parameters
+                                 if parameter.field_ref.period_id in feedback_period_ids),
+            delays=imaging.delays,
+        )
+        (self._tmp / "pulses/single_frame_feedback.json").write_text(
+            json.dumps(sequence_to_tree(feedback), indent=2), encoding="utf-8",
+        )
+        imaging_scan = slots_from_plan(imaging, tuple(
+            port for port in scan_ports_for(imaging)
+            if port.port == "pulse:param:readout_probe_duration"
+        ))
+        (self._tmp / "pulses/imaging_scan.json").write_text(
+            json.dumps(sequence_to_tree(imaging_scan), indent=2), encoding="utf-8",
+        )
+        self.flow = create_experiment_flow(workspace=self._tmp, template="virtual")
+        self.reports = []
+        self.report_events = []
+        original_status = self.flow.devices.show_status
+
+        def status(message, severity):
+            self.reports.append((str(severity), str(message)))
+            self.report_events.append({"time_ns": time.perf_counter_ns(),
+                "severity": str(severity), "message": str(message), "channel": "devices"})
+            return original_status(message, severity)
+
+        self.flow.devices.show_status = status
+        return self
+
+    def adopt_initialized_flow(self):
+        """Observe the objects the actual Init button created; do not recreate them."""
+        self.session = self.flow.session
+        self.view = self.flow.console
+        self.presenter = self.flow.console_presenter
+        if self.session is None or self.presenter is None:
+            raise RuntimeError("the experiment Init action has not completed")
+        self._capture_reports()
+        return self
+
+    def _capture_reports(self, presenter=None):
+        self.reports = getattr(self, "reports", [])
+        self.report_events = getattr(self, "report_events", [])
+        owner = self.presenter if presenter is None else presenter
+        original_report = owner._report
+
+        def capture(message, severity="info", **kwargs):
+            self.reports.append((str(severity), str(message)))
+            self.report_events.append({"time_ns": time.perf_counter_ns(),
+                                       "severity": str(severity), "message": str(message)})
+            return original_report(message, severity=severity, **kwargs)
+
+        owner._report = capture
+
     def start(
         self,
         *,
@@ -214,21 +292,7 @@ class ConsoleBench:
         self.session = ExperimentSession.open(self._tmp, template="virtual")
         write_ordinary_pulse(self._tmp)
         self.view, self.presenter = build_console(self.session)
-        self.reports: list[tuple[str, str]] = []
-        self.report_events: list[dict] = []
-        original_report = self.presenter._report
-
-        def capture(message, severity="info", **kwargs):
-            # Everything the console would put in front of the operator.  A
-            # bench that drops these reports a BROKEN panel as a slow one:
-            # a panel erroring every frame publishes almost nothing, and the
-            # number that comes back looks like latency.
-            self.reports.append((str(severity), str(message)))
-            self.report_events.append({"time_ns": time.perf_counter_ns(),
-                                       "severity": str(severity), "message": str(message)})
-            return original_report(message, severity=severity, **kwargs)
-
-        self.presenter._report = capture
+        self._capture_reports()
         self.session.load_pulse(PULSE_NAME)
 
         self.node = self.presenter.add_logic("camera_measurement")
@@ -1498,6 +1562,35 @@ class ConsoleBench:
         on the Qt owner, so it is PUMPED to completion rather than awaited.
         """
 
+        viewer = getattr(self, "viewer", None)
+        if viewer is not None:
+            # A test-created Viewer owns its own A/C leases. Discard only its
+            # temporary working copies through the same controls, then close
+            # it before the parent experiment releases its render services.
+            from PyQt5 import QtCore, QtTest
+            for editor in tuple(viewer._view._data_editors.values()):
+                viewer._view.tabs.setCurrentWidget(editor)
+                self.app.processEvents()
+                if editor.discard_button.isEnabled():
+                    QtTest.QTest.mouseClick(editor.discard_button, QtCore.Qt.LeftButton)
+            viewer.close()
+            deadline = time.monotonic() + 20.0
+            while viewer.is_visible():
+                self.app.processEvents()
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("test FigureViewer did not finish its owned shutdown")
+                time.sleep(.005)
+            self.viewer = None
+        flow = getattr(self, "flow", None)
+        if flow is not None:
+            deadline = time.monotonic() + 20.0
+            while not flow.close():
+                self.app.processEvents()
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("experiment GUI did not finish its owned shutdown")
+                time.sleep(0.005)
+            self.app.processEvents()
+            return
         presenter = getattr(self, "presenter", None)
         if presenter is None:
             return
