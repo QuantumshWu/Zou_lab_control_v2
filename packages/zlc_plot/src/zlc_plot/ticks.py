@@ -1049,6 +1049,7 @@ class DeclaredLocator(_MeasuredLocator):
         zero_optional: bool = True,
         label_pt: float,
         measure: "Callable[[str, float], tuple[float, float]] | None" = None,
+        span: tuple[float, float] | None = None,
     ) -> None:
         super().__init__(max_ticks=max(2, int(count)), label_pt=label_pt, measure=measure)
         if isinstance(count, bool) or not isinstance(count, int) or count < 2:
@@ -1057,6 +1058,10 @@ class DeclaredLocator(_MeasuredLocator):
             raise TypeError("text must be callable")
         self.count = int(count)
         self.text = text
+        #: The values the ticks are declared over, when they are not the
+        #: axis' own view: a colorbar on the rail's axis ticks its colour
+        #: limits, which stand inside that axis.  None ticks the view.
+        self.span = None if span is None else tuple(float(value) for value in span)
         #: Spellings from the most preferred to the least: a rail prefers
         #: every digit and falls back to fewer; a colorbar prefers the
         #: shortest that tells its two ends apart.
@@ -1067,7 +1072,7 @@ class DeclaredLocator(_MeasuredLocator):
         self.FLOOR = 1 if self.zero_optional else 2
 
     def tick_values(self, vmin: float, vmax: float) -> list[float]:
-        cache_key = (*self._cache_key(vmin, vmax), self.count, self.text_lengths, self.zero_optional)
+        cache_key = (*self._cache_key(vmin, vmax), self.count, self.text_lengths, self.zero_optional, self.span)
         if self._tick_cache_key == cache_key:
             return self.ticks
         lower, upper = sorted((float(vmin), float(vmax)))
@@ -1075,7 +1080,12 @@ class DeclaredLocator(_MeasuredLocator):
             self._store(_EMPTY, False)
             self._tick_cache_key = cache_key
             return self.ticks
-        ticks = tuple(float(value) for value in np.linspace(lower, upper, self.count))
+        first, last = (lower, upper) if self.span is None else sorted(self.span)
+        if not np.isfinite((first, last)).all() or first == last:
+            self._store(_EMPTY, False)
+            self._tick_cache_key = cache_key
+            return self.ticks
+        ticks = tuple(float(value) for value in np.linspace(first, last, self.count))
         tiers: list[list[_Candidate]] = []
         for length in self.text_lengths:
             texts = tuple(self.text(tick, length) for tick in ticks)
@@ -1266,9 +1276,15 @@ def declare_colorbar_ticks(
     *,
     label_pt: float,
     label_chars: int,
+    span: tuple[float, float],
 ) -> None:
-    """The colorbar's two ends, on the ladder: the shortest spelling that
-    tells them apart and fits the margin they hang in.
+    """The colorbar's two colour limits, on the ladder: the shortest spelling
+    that tells them apart and fits the margin they hang in.
+
+    ``span`` is where the ticks stand -- the colour limits -- and it is not
+    the colorbar axis' own view: the colorbar shares the distribution rail's
+    axis, on which the limits are the two guides.  Its labels therefore stand
+    beside the guides, not at the bar's ends.
 
     Through the Colorbar's own locator slot, because a colorbar reinstalls
     its axis's locator whenever its norm moves; installed on the axis
@@ -1299,6 +1315,7 @@ def declare_colorbar_ticks(
         colorbar._zlc_tick_signature = signature
         colorbar.ax.tick_params(labelsize=size_pt)
     locator = colorbar._zlc_tick_locator
+    locator.span = tuple(float(value) for value in span)
     colorbar.locator = locator
     colorbar.formatter = DeclaredFormatter(locator)
     colorbar.minorlocator = ticker.NullLocator()

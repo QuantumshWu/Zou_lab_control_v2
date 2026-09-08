@@ -27,6 +27,7 @@ import weakref
 
 import numpy as np
 from matplotlib.collections import LineCollection
+from matplotlib.patches import Rectangle
 
 from ._image_raster import ImageFrontStore, PreparedImageFront, _all_true
 from ._fit_scene import FitOverlay, FitPolyline
@@ -73,6 +74,7 @@ from .specs import (
 from .state import DisplayState
 from .style import PlotStyleConfig, style_context
 from .ticks import (
+    DeclaredLocator,
     apply_declared_ticks,
     apply_named_ticks,
     apply_smart_ticks,
@@ -368,9 +370,10 @@ def _axis_draw_key(axis: Any) -> tuple[Any, ...]:
     the axes box; their labels from the formatter applied to those; the
     label text and pad place the axis label; the tick parameters say which
     marks and labels exist.  A fixed locator or formatter carries its own
-    values, so a colour scale whose endpoint ticks moved is a different
-    key at an unchanged view.  Font and style are the renderer's constants
-    and are not part of it.
+    values, and a declared locator ticking a span inside the view carries
+    that span, so a colour scale whose limits moved is a different key at
+    an unchanged view.  Font and style are the renderer's constants and
+    are not part of it.
     """
 
     from matplotlib.ticker import FixedFormatter, FixedLocator
@@ -378,13 +381,19 @@ def _axis_draw_key(axis: Any) -> tuple[Any, ...]:
     axes = axis.axes
     locator = axis.get_major_locator()
     formatter = axis.get_major_formatter()
+    if isinstance(locator, FixedLocator):
+        carried = tuple(map(float, locator.locs))
+    elif isinstance(locator, DeclaredLocator):
+        carried = locator.span
+    else:
+        carried = None
     return (
         tuple(axes.bbox.bounds),
         tuple(axes.viewLim.bounds),
         axis.get_visible(),
         axis.get_scale(),
         type(locator),
-        tuple(map(float, locator.locs)) if isinstance(locator, FixedLocator) else None,
+        carried,
         type(formatter),
         tuple(formatter.seq) if isinstance(formatter, FixedFormatter) else None,
         type(axis.get_minor_locator()),
@@ -7808,6 +7817,10 @@ class MatplotlibRenderer:
                     axis="y", left=True, right=False, labelleft=False, labelright=False
                 )
             else:
+                # The rail's value axis is the history's own, labelled
+                # there; this side repeats neither its labels nor its
+                # marks.  Its count axis keeps both: a label without its
+                # mark is half a statement.
                 axes.set_xlabel("")
                 axes.set_ylabel("")
                 axes.tick_params(
@@ -7816,12 +7829,6 @@ class MatplotlibRenderer:
                     left=False,
                     right=False,
                     labelleft=False,
-                )
-                axes.tick_params(
-                    axis="both",
-                    which="both",
-                    bottom=False,
-                    top=False,
                 )
         elif projection_changed:
             collection.set_verts(_histogram_vertices(edges, counts)[..., ::-1])
@@ -8112,10 +8119,32 @@ class MatplotlibRenderer:
                 self._artists[mappable_key] = mappable
                 colorbar = self._figure.colorbar(mappable, cax=colorbar_axes[0])
                 self._artists[colorbar_key] = colorbar
+                # Past each colour limit the image shows the colormap's end
+                # colour, and so does the bar: two fills from the limits to
+                # the rail's bounds, in the colours the clipped pixels wear.
+                # Just below the ramp in z, so a full draw and the compose
+                # stack them in the same order at the rows they share.
+                self._artists[f"{key}:colorbar_ends"] = tuple(
+                    colorbar_axes[0].add_patch(
+                        Rectangle(
+                            (0.0, 0.0), 1.0, 0.0,
+                            transform=colorbar_axes[0].get_yaxis_transform(),
+                            facecolor="none", edgecolor="none",
+                            zorder=colorbar.solids.get_zorder() - 0.1,
+                        )
+                    )
+                    for _end in (0, 1)
+                )
+            # The bar shares the rail's axis.  A colorbar of its own axis,
+            # (vmin, vmax) over the same height as the rail, put the limits
+            # at the bar's ends while the rail held them at its guides; the
+            # eye read across from the histogram to a colour that was not
+            # the colour of that value.
             colorbar_state = (
                 cmap_name,
                 (vmin, vmax),
                 value_label,
+                tuple(map(float, distribution_limits)),
             )
             state_key = f"{key}:colorbar_state"
             previous_colorbar_state = self._artists.get(state_key)
@@ -8165,18 +8194,26 @@ class MatplotlibRenderer:
                                     coordinates.shape[0],
                                 )
                                 coordinates[..., 1] = ramp[:, None]
+                                # The mesh colours its cells through the
+                                # norm just moved, from the VALUES it was
+                                # built with.  Those must move with the
+                                # coordinates: left at the old limits, the
+                                # ramp squeezed into whatever slice of them
+                                # the new limits still spanned, black and
+                                # white either side of it.
+                                colorbar.solids.set_array(0.5 * (ramp[1:] + ramp[:-1]))
                                 colorbar.solids.stale = True
-                                colorbar_axes[0].set_ylim(vmin, vmax)
                             else:
                                 mappable.set_clim(vmin, vmax)
                 if (
                     previous_colorbar_state is None
                     or previous_colorbar_state[2] != value_label
                 ):
-                    colorbar.set_label(
-                        value_label,
-                        labelpad=policy.colorbar_endpoint_label_pad_pt,
-                    )
+                    # At the house's own pad from the limit labels: the
+                    # negative pad that once tucked the value label between
+                    # two labels pinned at the bar's ends put it under a
+                    # limit label standing mid-bar.
+                    colorbar.set_label(value_label)
                 if (
                     previous_colorbar_state is None
                     or previous_colorbar_state[1] != (vmin, vmax)
@@ -8184,13 +8221,29 @@ class MatplotlibRenderer:
                     declare_colorbar_ticks(
                         colorbar,
                         label_pt=self.style.fonts.tick_pt,
-                        label_chars=policy.colorbar_endpoint_label_chars,
+                        label_chars=policy.colorbar_limit_label_chars,
+                        span=(float(vmin), float(vmax)),
                     )
+                # The bar's axis is dynamic chrome, as the rail's is:
+                # everything standing on it -- ramp, end fills, outline,
+                # ticks -- is repainted above the cached background, so a
+                # new view is not a new background.
+                rail_low, rail_high = colorbar_state[3]
+                if tuple(map(float, colorbar_axes[0].get_ylim())) != (rail_low, rail_high):
+                    colorbar_axes[0].set_ylim(rail_low, rail_high)
+                below, above = self._artists[f"{key}:colorbar_ends"]
+                below.set_y(rail_low)
+                below.set_height(max(0.0, float(vmin) - rail_low))
+                below.set_facecolor(cmap(0.0))
+                above.set_y(float(vmax))
+                above.set_height(max(0.0, rail_high - float(vmax)))
+                above.set_facecolor(cmap(1.0))
                 self._artists[state_key] = colorbar_state
             # Only the colorbar parts whose pixels can change belong above
             # the cached background.  Repainting its whole Axes repeated the
             # patch, hidden short Axis and empty title children every frame.
             self._artists[f"{key}:colorbar_dynamic_artists"] = (
+                *self._artists[f"{key}:colorbar_ends"],
                 colorbar.solids,
                 colorbar.dividers,
                 colorbar.outline,
@@ -8403,6 +8456,7 @@ class MatplotlibRenderer:
         "colorbar",
         "colorbar_mappable",
         "colorbar_state",
+        "colorbar_ends",
         "colorbar_dynamic_artists",
     )
 

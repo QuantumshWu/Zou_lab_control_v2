@@ -654,7 +654,7 @@ def test_a_colorbar_spells_close_ends_apart() -> None:
 
     figure, colorbar = _colorbar(10001.0, 10002.0)
     try:
-        declare_colorbar_ticks(colorbar, label_pt=LABEL_PT, label_chars=5)
+        declare_colorbar_ticks(colorbar, label_pt=LABEL_PT, label_chars=5, span=(10001.0, 10002.0))
         figure.canvas.draw()
         labels = [
             text.get_text()
@@ -664,6 +664,42 @@ def test_a_colorbar_spells_close_ends_apart() -> None:
         assert labels == ["10001", "10002"]
     finally:
         plt.close(figure)
+
+
+def test_a_colorbar_labels_its_limits_where_a_wider_axis_holds_them() -> None:
+    """The bar shares the distribution rail's axis: its two labels stand at
+    the colour limits INSIDE that axis, beside the rail's guides, marked
+    inward like every axis of the house.
+
+    A colorbar ticking its own view labelled the bar's ends; on the rail's
+    axis those ends are the rail's bounds, not the limits.
+    """
+
+    from zlc_plot.config import DEFAULTS
+    from zlc_plot.style import style_context
+    from zlc_plot.ticks import declare_colorbar_ticks
+
+    with style_context(DEFAULTS.style):
+        figure, colorbar = _colorbar(0.0, 1.0)
+        try:
+            colorbar.ax.set_ylim(-1.0, 2.0)
+            declare_colorbar_ticks(
+                colorbar, label_pt=LABEL_PT, label_chars=5, span=(0.0, 1.0)
+            )
+            figure.canvas.draw()
+            assert [float(value) for value in colorbar.ax.get_yticks()] == [0.0, 1.0]
+            canvas = figure.canvas.get_renderer()
+            labels = [text for text in colorbar.ax.get_yticklabels() if text.get_text()]
+            assert [text.get_text() for text in labels] == ["0", "1"]
+            for label, value in zip(labels, (0.0, 1.0)):
+                box = label.get_window_extent(canvas)
+                expected = colorbar.ax.transData.transform((0.0, value))[1]
+                assert abs((box.y0 + box.y1) / 2.0 - expected) < 2.0
+            for tick in colorbar.ax.yaxis.get_major_ticks()[:2]:
+                assert tick.get_tickdir() == "in"
+                assert tick.tick1line.get_visible() or tick.tick2line.get_visible()
+        finally:
+            plt.close(figure)
 
 
 def test_a_colorbar_limit_change_keeps_the_size_its_labels_were_priced_at() -> None:
@@ -684,7 +720,7 @@ def test_a_colorbar_limit_change_keeps_the_size_its_labels_were_priced_at() -> N
             drawn: list[tuple[float, set[float]]] = []
             for limits in ((0.0, 1.0), (0.0, 2.0)):
                 colorbar.mappable.set_clim(*limits)
-                declare_colorbar_ticks(colorbar, label_pt=50.0, label_chars=5)
+                declare_colorbar_ticks(colorbar, label_pt=50.0, label_chars=5, span=limits)
                 figure.canvas.draw()
                 drawn.append(
                     (

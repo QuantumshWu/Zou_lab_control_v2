@@ -579,8 +579,9 @@ class RenderPolicyConfig:
     axes_title_pad_pt: float = 2.5
     compact_axes_title_pad_pt: float = 1.5
     figure_title_y: float = 0.992
-    colorbar_endpoint_label_pad_pt: float = -2.5
-    colorbar_endpoint_label_chars: int = 5
+    #: The shortest spelling the colorbar's two limit labels start from;
+    #: the ladder lengthens it until the two read apart.
+    colorbar_limit_label_chars: int = 5
     axes_text_inset_fraction: float = 0.025
     selector_label_line_fraction: float = 0.11
     selector_sample_colormap_fraction: float = 0.55
@@ -643,7 +644,6 @@ class RenderPolicyConfig:
             "axes_title_pad_pt",
             "compact_axes_title_pad_pt",
             "figure_title_y",
-            "colorbar_endpoint_label_pad_pt",
         ):
             object.__setattr__(self, field, _finite(getattr(self, field), field))
         for field in (
@@ -662,7 +662,7 @@ class RenderPolicyConfig:
         if self.colormap_low_fraction >= self.colormap_high_fraction:
             raise ValueError("colormap fractions must be strictly increasing")
         for field in (
-            "colorbar_endpoint_label_chars",
+            "colorbar_limit_label_chars",
             "rolling_distribution_min_bins",
             "image_distribution_min_bins",
             "distribution_max_bins",

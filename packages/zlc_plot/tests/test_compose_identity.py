@@ -255,7 +255,7 @@ def test_tight_chrome_reuses_one_exact_background_without_residue(
         )
         session.update_data(_snapshot(schema, size, 35.0, 3, seed=14))
         small = np.array(renderer.figure.canvas.buffer_rgba(), copy=True)
-        _cmap, limits, _label = renderer._artists["image:colorbar_state"]
+        _cmap, limits, _label, _rail = renderer._artists["image:colorbar_state"]
         assert tuple(renderer._artists["image:colorbar_mappable"].get_clim()) == limits
         assert tuple(renderer._artists["image:colorbar"].get_ticks()) == limits
         renderer._composed_generation = -1
@@ -341,9 +341,119 @@ def test_tight_colorbar_updates_its_proxy_once_per_frame(monkeypatch) -> None:
         session.update_data(_snapshot(schema, size, 3000.0, 2, seed=32))
         assert draws <= 1
         renderer = session._renderer
-        _cmap, limits, _label = renderer._artists["image:colorbar_state"]
+        _cmap, limits, _label, _rail = renderer._artists["image:colorbar_state"]
         assert tuple(renderer._artists["image:colorbar_mappable"].get_clim()) == limits
         assert tuple(renderer._artists["image:colorbar"].get_ticks()) == limits
+        assert _composed_matches_full_draw(session) == 0
+    finally:
+        session.close()
+
+
+def test_the_colorbar_stands_on_the_rails_axis_with_its_ramp_between_the_limits() -> None:
+    """The bar is the rail's legend.  Its ramp runs between the colour
+    limits where the rail holds them, the clipped colours fill past them
+    to the rail's bounds, and its two labels stand beside the rail's guides.
+
+    A colorbar of its own axis put the limits at the bar's ends while the
+    rail held them at its guides, so the eye read across from the histogram
+    to a colour that was not the colour of that value.  And a limit move
+    rewrote the mesh's coordinates but not its values: normalised by the
+    moved norm, the ramp squeezed into the slice of the old values the new
+    limits still spanned, black and white either side of it.
+    """
+
+    size = 64
+    schema = _image_contract(size)
+    session = PlotSession(
+        _snapshot(schema, size, 4000.0, 1, seed=31),
+        ImagePlot(AxisRef.cell_data("camera_x"), AxisRef.cell_data("camera_y")),
+    )
+    try:
+        renderer = session._renderer
+        session.rgba()
+        limits = session.resolved_color_limits()
+        low, high = float(limits.low), float(limits.high)
+        for fraction_low, fraction_high in ((0.35, 0.95), (0.05, 0.6)):
+            vmin = low + fraction_low * (high - low)
+            vmax = low + fraction_high * (high - low)
+            session.set_color_limits(vmin, vmax, fixed=True)
+            session.rgba()
+            rail = renderer._axes["distribution"][0]
+            bar = renderer._axes["colorbar"][0]
+            assert tuple(bar.get_ylim()) == tuple(rail.get_ylim())
+            assert (bar.get_position().y0, bar.get_position().y1) == pytest.approx(
+                (rail.get_position().y0, rail.get_position().y1)
+            )
+            rail_low, rail_high = (float(value) for value in rail.get_ylim())
+            assert rail_low < vmin < vmax < rail_high
+            colorbar = renderer._artists["image:colorbar"]
+            assert tuple(colorbar.get_ticks()) == pytest.approx((vmin, vmax))
+            coordinates = colorbar.solids.get_coordinates()[:, 0, 1]
+            assert (float(coordinates.min()), float(coordinates.max())) == pytest.approx((vmin, vmax))
+            colorbar.solids.update_scalarmappable()
+            colours = colorbar.solids.get_facecolor()
+            cmap = colorbar.cmap
+            assert np.allclose(colours, cmap((np.arange(len(colours)) + 0.5) / len(colours)))
+            below, above = renderer._artists["image:colorbar_ends"]
+            assert (below.get_y(), below.get_y() + below.get_height()) == pytest.approx((rail_low, vmin))
+            assert (above.get_y(), above.get_y() + above.get_height()) == pytest.approx((vmax, rail_high))
+            assert tuple(below.get_facecolor()) == tuple(cmap(0.0))
+            assert tuple(above.get_facecolor()) == tuple(cmap(1.0))
+            assert _composed_matches_full_draw(session) == 0
+    finally:
+        session.close()
+
+
+def test_a_colorbar_whose_limits_move_under_a_held_rail_repaints_its_labels() -> None:
+    """The bar's labels are a function of the colour limits, not of its view.
+
+    On the rail's axis the view holds still while the limits move inside it
+    (the rail damps its span; the limits track the data), and the dynamic
+    axis' recorded draw was keyed on the view alone: the composed frame
+    replayed last revision's labels beside this revision's handles.
+    """
+
+    size = 64
+    schema = _image_contract(size)
+    session = PlotSession(
+        _snapshot(schema, size, 4000.0, 1, seed=41),
+        ImagePlot(AxisRef.cell_data("camera_x"), AxisRef.cell_data("camera_y")),
+    )
+    try:
+        renderer = session._renderer
+        session.update_data(_snapshot(schema, size, 4000.0, 2, seed=42))
+        rail = renderer._axes["distribution"][0]
+        bar = renderer._axes["colorbar"][0]
+        held_view = tuple(rail.get_ylim())
+        before = renderer._artists["image:colorbar_state"][1]
+        session.update_data(_snapshot(schema, size, 3900.0, 3, seed=43))
+        after = renderer._artists["image:colorbar_state"][1]
+        assert after != before, "the fixture must move the colour limits"
+        assert tuple(rail.get_ylim()) == held_view, "the fixture must hold the rail"
+        assert tuple(bar.get_ylim()) == held_view
+        assert tuple(bar.yaxis.get_majorticklocs()) == pytest.approx(after)
+        assert _composed_matches_full_draw(session) == 0
+    finally:
+        session.close()
+
+
+def test_a_rolling_rails_count_labels_each_have_a_mark() -> None:
+    """The side distribution printed its two declared labels with every
+    mark on the rail hidden; a label without its mark is half a statement.
+    The marks are the house's, inward, as on the image rail."""
+
+    first, second, spec = _generic_kind_pair("rolling")
+    session = PlotSession(first, spec, parameters={"side_distribution": True})
+    try:
+        session.update_data(second)
+        session.rgba()
+        rail = session._renderer._axes["distribution"][0]
+        ticks = rail.xaxis.get_major_ticks()[: len(rail.xaxis.get_majorticklocs())]
+        assert ticks
+        for tick in ticks:
+            assert tick.tick1line.get_visible()
+            assert tick.get_tickdir() == "in"
+        assert not any(tick.tick1line.get_visible() for tick in rail.yaxis.get_major_ticks())
         assert _composed_matches_full_draw(session) == 0
     finally:
         session.close()
