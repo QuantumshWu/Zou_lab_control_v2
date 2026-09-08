@@ -23,6 +23,7 @@ import pickle
 from queue import Empty, Queue
 from threading import Event, Lock, RLock, Thread
 from time import monotonic
+import traceback
 from types import SimpleNamespace
 from uuid import uuid4
 import weakref
@@ -2198,6 +2199,30 @@ def _render_process_main(connection: Connection, name: str) -> None:
 
     Thread(target=heartbeat, name=f"zlc-render-{name}-alive", daemon=True).start()
 
+    #: Set by the first create request: from then on the warming below
+    #: stops before its next picture, so a panel never queues behind it.
+    requested = Event()
+
+    def warm() -> None:
+        """Pay the process's first-render costs now, before a panel asks.
+
+        On a thread of its own, and only until a panel asks: a request
+        shares this process's one interpreter with the warming, so a
+        picture warmed while a panel waits is a picture the panel waited
+        for.  A failure here costs the first panel what it would have cost
+        anyway, and is written to the child's stderr, not allowed to end
+        the child.
+        """
+
+        from ._kernel_warm import warm_process
+
+        try:
+            warm_process(proceed=lambda: not requested.is_set())
+        except Exception:  # noqa: BLE001 -- reported, never fatal
+            traceback.print_exc()
+
+    Thread(target=warm, name=f"zlc-render-{name}-warm", daemon=True).start()
+
     def publish_front(host_id: str, front: RasterFront) -> None:
         sequence = int(front.identity.sequence)
         if sequence <= last_front_sequence.get(host_id, -1):
@@ -2352,6 +2377,7 @@ def _render_process_main(connection: Connection, name: str) -> None:
         parameters: Mapping[str, object] | None,
         device_pixel_ratio: float,
     ) -> None:
+        requested.set()
         plot_input = _resolve_inputs(input_ref, inputs)
 
         def factory() -> PlotSession:

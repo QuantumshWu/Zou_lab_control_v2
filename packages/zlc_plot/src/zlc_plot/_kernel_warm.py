@@ -31,7 +31,7 @@ import os
 import pathlib
 import sys
 import tempfile
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -347,13 +347,14 @@ def _render(
     parameters: dict | None = None,
     *,
     zoom_steps: int = 0,
+    size: str = "2x2",
 ) -> None:
     from . import PlotSession  # noqa: PLC0415
     from .selectors import NumericRange  # noqa: PLC0415
 
     session = PlotSession(snapshot, spec)
     try:
-        session.set_size("2x2")
+        session.set_size(size)
         if parameters:
             session.set_parameters(dict(parameters))
         session.rgba()
@@ -568,6 +569,72 @@ def representative_work(*, include_compiled_fit: bool = True) -> None:
     if include_compiled_fit:
         _fit_compiled.warm_production_cache()
         _fit_radial.warm_production_cache()
+
+
+# ------------------------------------------------------ a fresh process
+def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
+    """The work a fresh process pays once, done before anyone asks for it.
+
+    The disk cache spares a process the COMPILE; it does not spare it the
+    rest of a first render.  Matplotlib's figure, axes and text modules
+    import on first use, the first text measured loads a font, numba
+    refreshes its typing context and reads each kernel's machine code off
+    the disk the first time that kernel is called.  Together that was two
+    thirds of a second on the operator's first panel -- every console,
+    every day -- and none of it depends on what that panel shows.  A
+    render child calls this the moment it starts, on a thread of its own,
+    so the first panel finds the process as warm as the second.
+
+    A short slice of :func:`representative_work`, and a cheap one: a
+    request that arrives while this runs shares the process with it, so
+    every second here is a second that request may wait.  The pictures a
+    panel most often opens on -- a camera frame drawn larger than it is
+    and one reduced, a floating derived plane, a histogram, a curve with
+    its band, a grid of cells -- on frames just big enough to take each
+    path; not the zooms, saves, 3D scene and fit solvers, which have first
+    uses of their own and whose compiled code the disk cache already
+    spares.  The grid of camera frames goes first: it is what a console
+    opens on, and it is where the imports and the font are paid.
+
+    ``proceed`` is asked before every picture.  A request that arrives
+    meanwhile is the operator's, and it comes first: the child answers
+    False from then on, and whatever this did not reach is paid by the
+    first panel that needs it, as it always was.
+    """
+
+    from . import (  # noqa: PLC0415
+        AxisRef,
+        CurvePlot,
+        FacetGridPlot,
+        HistogramPlot,
+        ImagePlot,
+    )
+
+    image = ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y"))
+    series = _series_snapshot(8, 400)
+    pictures = (
+        # The camera panel: a grid of frames, each drawn larger than it is
+        # -- through the direct colour table and the gather -- with the
+        # cell titles that measure the first text.
+        (_image_snapshot(96, 128, np.uint16), FacetGridPlot(None, image), None, "4x4"),
+        (_image_snapshot(96, 128, np.uint16), image, None, "4x4"),
+        # A frame wider than the raster reduces first: the exact unsigned
+        # block sum, or the counting block mean of a floating plane.
+        (_image_snapshot(600, 800, np.uint16), image, None, "2x2"),
+        (_image_snapshot(600, 800, np.float32), image, None, "2x2"),
+        (series, CurvePlot(AxisRef.point("x")), {"uncertainty": True}, "2x2"),
+        (series, HistogramPlot(), None, "2x2"),
+        (
+            _image_snapshot(24, 32, np.float64),
+            FacetGridPlot(AxisRef.cell_data("y"), HistogramPlot()),
+            None,
+            "2x2",
+        ),
+    )
+    for snapshot, spec, parameters, size in pictures:
+        if not proceed():
+            return
+        _render(snapshot, spec, parameters, size=size)
 
 
 # ------------------------------------------------------------ the warmer
