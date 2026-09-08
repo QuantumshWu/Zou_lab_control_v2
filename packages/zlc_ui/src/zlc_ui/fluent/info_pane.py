@@ -22,6 +22,8 @@ from .fluent import (
     fluent_font_size,
     scaled_px,
     setting_label_width,
+    signals_blocked,
+    retire_widget,
     window_pad,
 )
 from .style import (
@@ -53,8 +55,6 @@ class InfoPane(QtWidgets.QWidget):
     """
 
     path_committed = QtCore.pyqtSignal(str)
-    #: A row's action was pressed; carries the action the row named.
-    action_requested = QtCore.pyqtSignal(str)
     #: A row's action was pressed; carries the action the row named.
     action_requested = QtCore.pyqtSignal(str)
 
@@ -119,6 +119,8 @@ class InfoPane(QtWidgets.QWidget):
             QtWidgets.QSizePolicy.Expanding,
         )
         self._tab_layouts: dict[str, QtWidgets.QVBoxLayout] = {}
+        self._pending_tab_rows: dict[str, tuple[InfoRow, ...]] = {}
+        self.info_tabs.currentChanged.connect(self._show_tab_rows)
         self.set_tabs(tabs)
         layout.addWidget(self.info_tabs, 1)
 
@@ -177,25 +179,47 @@ class InfoPane(QtWidgets.QWidget):
         # titles almost never do -- and the rebuilt stack starts at the
         # first tab, so a refresh threw anyone reading Devices back to Plot.
         showing = self.info_tabs.tabText(self.info_tabs.currentIndex())
-        while self.info_tabs.count():
-            widget = self.info_tabs.widget(0)
-            self.info_tabs.removeTab(0)
-            if widget is not None:
-                widget.deleteLater()
-        self._tab_layouts.clear()
-        self._graph_tabs.clear()
-        for title, rows in normalized:
-            if title in self._graph_tab_titles:
-                self._add_graph_tab(title)
-            else:
-                self._add_rows_tab(title, rows)
-        for index in range(self.info_tabs.count()):
-            if self.info_tabs.tabText(index) == showing:
-                self.info_tabs.setCurrentIndex(index)
-                break
+        with signals_blocked(self.info_tabs):
+            while self.info_tabs.count():
+                widget = self.info_tabs.widget(0)
+                self.info_tabs.removeTab(0)
+                if widget is not None:
+                    retire_widget(widget)
+            self._tab_layouts.clear()
+            self._graph_tabs.clear()
+            self._pending_tab_rows.clear()
+            for title, rows in normalized:
+                if title in self._graph_tab_titles:
+                    self._add_graph_tab(title)
+                else:
+                    self._pending_tab_rows[title] = rows
+                    self._add_rows_tab(title)
+            for index in range(self.info_tabs.count()):
+                if self.info_tabs.tabText(index) == showing:
+                    self.info_tabs.setCurrentIndex(index)
+                    break
+        self._show_tab_rows(self.info_tabs.currentIndex())
         self._apply_pane_width()
 
-    def _add_rows_tab(self, title: str, rows: tuple[InfoRow, ...]) -> None:
+    @QtCore.pyqtSlot(int)
+    def _show_tab_rows(self, index: int) -> None:
+        """Build readouts only when their tab is actually requested."""
+
+        title = self.info_tabs.tabText(index)
+        rows = self._pending_tab_rows.pop(title, None)
+        if rows is None:
+            return
+        layout = self._tab_layouts[title]
+        body = layout.parentWidget()
+        body.setUpdatesEnabled(False)
+        layout.setEnabled(False)
+        try:
+            self._fill_rows(layout, rows)
+        finally:
+            layout.setEnabled(True)
+            body.setUpdatesEnabled(True)
+
+    def _add_rows_tab(self, title: str) -> None:
         scroll = FluentScrollArea()
         scroll.setWidgetResizable(True)
         body = QtWidgets.QWidget()
@@ -205,7 +229,6 @@ class InfoPane(QtWidgets.QWidget):
         tab_layout.setContentsMargins(margin, margin, margin, margin)
         tab_layout.setSpacing(scaled_px(3, minimum=2))
         tab_layout.setAlignment(QtCore.Qt.AlignTop)
-        self._fill_rows(tab_layout, rows)
         scroll.setWidget(body)
         self.info_tabs.add_permanent_tab(scroll, title)
         self._tab_layouts[title] = tab_layout
