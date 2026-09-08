@@ -10,6 +10,10 @@
 
 ## 1. 当前实施范围
 
+- 2026-09-08 当前worktree完成六项：Pulse DAC保留disabled全开按钮并实屏确认四列对齐；Layout递归编码authoring rows并完成真实Save/Load；Derive以普通Fluent下拉选择atomic producer bundle、不新增Runtime数据；声明过的Panel fit在无首帧/无reserved generation时允许Scan Start，首次arrival复用有序tap。真实Qt验证单点单shot，Scan输入与新一代首个Fit publication数值/validity相同，唯一根为重启后的Camera首event，未自动启动Camera。GUI及渲染children全部关闭；退出曾有Device Manager等待sequencer control关闭的短暂拒绝日志，最终正常退出，未冒称无日志。
+- 新`Saturation`模型采用通用`amplitude/scale/offset`（A/s/B），`f(x)=A*x/(x+s)+B`；同一compiled公式、解析Jacobian和single/batch求解器。5个模型数值目标实例与2个通用命名目标实例通过；已有缓存的新进程首次fit约317ms、6 hits/0 misses；纯计算steady single 16/64点约0.45–0.90ms、35cell约1.65–2.85ms，不是GUI性能或硬件极限声明。
+- Reduction `Last`复用Scope restriction与既有统计核，包含sigma/SEM、sparse空交集、Rolling shot carrier、Histogram pooling和Figure往返的50项聚焦验证通过；另10项小dtype检查通过，不新增Last kernel。Histogram Figure encoder原来漏存reduced/reduction，现已补齐并严格读取；缺两字段的旧Histogram/FacetHistogram Figure需重新保存，不自动兼容。原始日志、截图、性能报告都在ignored目录，不进入Git。
+
 - 2026-09-07 已完成拟合请求公共准备与逐帧临时闭包减量：Single/Facet共享同一选区、单位与输入准备语义，每个请求仅解析一次公共信息，保留初值竞争、最终精度、逐cell有效性及same-shot呈现；绘图遍历以同序迭代替代自引用递归闭包。不禁用垃圾回收、不调大阈值、不以手动回收移出计时窗口冒充改善；初始化/重布局图对象与稳态临时对象分别取证，不宣称所有长尾已消除。性能结果与报告只留本地ignored research，不纳入Git。
 - 2026-09-07 当前性能worktree实施要求：RegularImage single/Bn收敛为同一数值流程，内部规则轴不再展开成逐像素坐标；现有context贯通prepare/objective，以稳定中心化统计量减少重复整图扫描，并直接核对最终残差。前景文字/边框仍由Matplotlib语义生成，在同一有序compose owner内批量重放。最终是否保留必须由同输入正确性、single/Bn代价和真实四Panel结果裁决，不能将尚未通过的候选记为性能完成。
 - 该cut实现已提交为`971765ba`，并按用户裁决与master `d1b1d1e0`整合；保留master的候选裁决、有效性、交付顺序与公共bench机制。整合前四Panel Curve critical `89.85→84.69ms`、Image `98.08→83.27ms`；isolated B40 image fit `27.52→24.70ms`，single `19.32→26.70ms`是明确代价，不将这些时间冒充合并后的复测。无新production类/文件，性能cut本身净+71行（包括最后补齐的f32/f64预热样本）。带探针Curve的约205ms长尾在补测中定位到117.334ms gen2 GC，不归入renderer/solver正常耗时；无探针的发生频率尚未确定，不宣称物理极限或永不掉帧。细节及剩余大头以`research/FINAL_MAJOR_OPTIMIZATION_REPORT.md`为准。

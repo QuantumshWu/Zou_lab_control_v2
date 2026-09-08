@@ -69,6 +69,7 @@
 - Writer写入前规划全部member namespace并拒绝碰撞。
 - Reader在解释内容前严格验证format、required members、shape、duplicates和non-finite metadata。Figure与Dataset archive的每个member都按其物理ZIP名（`<key>.npy`）读取，不用NpzFile按逻辑名的猜测查找：`signal`与`signal.npy`是两个合法key，各自读回各自的数组；同名重复entry是含糊的archive，拒绝而不选一个。
 - 未知metadata类型拒绝，不自动字符串化。
+- Layout的Logic authoring容器由Layout codec递归编码：内存中的rows/numeric tuple写成JSON array，mapping写成object；标量不被猜测或字符串化，未知类型仍由strict writer拒绝。不是Derive专属的保存分支。
 - Figure只使用稳定`zlc.figure`格式，无数字版本；reader只接受当前完整grammar，其它root或缺失字段均loud拒绝。
 - Figure NPZ是可重绘的数据真相，包含typed Dataset、exact PlotSpec、完整normalized parameters、overlay、viewport、selectors、facet focus、classifier、fit和exact causal lineage graph；PNG只是同stem preview。
 - Figure archive保持标准NPZ，但compression由唯一writer逐member决定：小member及采样后至少节省20%的结构化数组使用Deflate；大而低收益的camera-noise member使用ZIP Stored。不得为不同Task/Viewer复制压缩策略，也不得花秒级CPU只换取少量体积。
@@ -126,6 +127,7 @@ Node new chunk
 - Plot live revision identity始终读取底层Dataset snapshot的`stream_generation + revision`；`ImageFrame`只是overlay wrapper，不能隐藏新generation并把重置后的相同revision误判成stale。same-geometry新run复用host及交互订阅，geometry变化才replacement。
 - Occupancy的SITE是每个`(repeat, point)` cell内原子完整的data axis；overlay不得另存site history。Occupancy只发布通用bool/numeric status signal，点是否可读由该Dataset自身validity表达；XY geometry与adapter contract由`zlc_plot`中立层拥有，Workbench只按contract路由signal且不得import Occupancy。只有scope/facet唯一选中一个cell时才能显示离散状态；对多个cells做reduce/pool时不得私自发明共识状态，未定义则显示UNKNOWN/隐藏。
 - Processor可声明消费主signal同一原子publication内的具名siblings；它们不形成独立source、异步join或第二份history，exact replay和causal lineage只保留实际声明的siblings。`derive`据此只消费其绑定producer这一次publication的输出：绑定Occupancy的`counts`并读其`occupied` sibling，两个可选occupancy frame都valid且判断相同时才保留另一frame的counts与该共同判决，否则对应site validity为False。frame index均可相同，SITE始终完整保留；该下游不得读取camera、calibration、threshold或overlay geometry。
+- Dataset输入可声明`select_bundle`：其界面按同一atomic producer的输出集合提供一项普通Fluent choice，显示producer和成员名，不让操作者在bundle内部选某个叶子。Runtime仍用一个成员signal作为既有订阅锚点，按表达式消费同publication的siblings，不引入bundle数据或另一份registry；不同atomic owner即使共用Panel标题也不得混成一个bundle。Derive使用这个入口，普通单signal输入继续使用现有树形选择器。
 - UI freeze只读取已提交状态，不调用plugin materializer。
 - Stop/Final不受Panel、freeze或Processor订阅影响。
 
@@ -186,6 +188,9 @@ Node new chunk
 - FacetGrid overview每个cell显示哪个fit parameter是display state，不是solver request：Workbench把`Cell fit value`普通下拉放在Fit section的parameter expression正下方，但字段明确写回display owner；未选择fit时不显示。choices包含`Model headline`及当前model parameter identities，默认`Model headline`。修改它只重画annotation、不得re-fit；model切换仅在旧parameter不存在于新model时回到`Model headline`。focused cell仍显示完整formula与全部参数。
 - FitResult携带source parent/generation/revision；任何history/window投影按Measurement primary index连续，未计算、失败或timeout的位置invalid/NaN，window长度按source indices而非成功结果计数。
 - Fit计算在后台worker；Qt owner thread不等待Future或执行fit。
+- `saturation`是普通Series模型，`f(x)=A*x/(x+s)+B`，参数身份为`amplitude/scale/offset`，显示A/s/B，headline为A。x为非负线性量，s>0、A≥0，B可自由或按既有表达式固定；原点不随选区移动。固定detuning与检测条件下，A对应扣背景的饱和计数、s对应半饱和功率。single/batch、evaluator/Jacobian、初值、covariance与预热复用现有compiled fit链，不另设物理拟合节点。
+- Reduction `Last`是对所有Reduced轴按声明坐标顺序取末项的Scope便利写法，不是last-valid或最后到达的physical row。保留轴、Facet轴与Rolling本身的shot carrier不被折叠；末项invalid仍invalid，稀疏末坐标交集不存在时沿普通Scope的空选区语义。数值、Fit选区、selector subject和SEM读取同一restriction，复用既有归约核而不增加Last kernel。
+- Histogram与Facet Histogram的Figure recipe必须保存`reduced`与`reduction`，重开后保留原来的Pool/Reduce/Last语义。此前遗漏这两字段的旧Histogram recipe不属于当前完整grammar，reader不得静默把它补成另一幅Mean/Pooled图。
 - Active Fit超过1秒必须loud标记该source index invalid并从Plane latest继续；不得积累完整frame FIFO，也不得永久锁住Panel、Qt、Stop或close。普通cadence/backpressure跳过计算的indices同样invalid但不是solver failure；raw Runtime data始终完整。
 
 ### 5.2 Performance与state
@@ -280,6 +285,7 @@ Node new chunk
 - 风险接受只绑定当前`device_session_id + device-specific owner revision`。owner或session变化立即失效；字段命令在DeviceUse同一原子锁内再次核revision/claim，active field command阻止新Logic Start。in-flight live edits只保留每字段最新值，owner变化后尚未执行的write取消。
 - `device_session_id/settings_epoch`只在成功且effective值实际改变时推进；requested/effective/readback与active owners只在Logic运行期间的真实override中记录。Camera frame在adapter接受/复制边界冻结epoch，不能在publication时读取“当前epoch”倒填旧frame；Pylon无法证明live tune前后的buffer边界，因此本次arm内tune之后的每个readback都保守标为old/new mixed，只有重新arm才回到单一epoch——一次read碰巧取走部分旧队列不是其余帧已是新设置的证据。Publication只带压缩epoch ranges，Figure只展开lineage实际引用的记录；idle调整不进入历史。
 - Pulse Stop UI立即进入Stopping；Stop/SAFE高优先级并可取消普通wait/transport，hardware ack后台完成。
+- Pulse Editor每个channel保留同一组编辑/单位/全开/全关列；DAC不支持全开时保留按钮但disabled，不隐藏列。全关仍可用。
 - Timeout显示真实错误但不冻结UI；未确认前不能显示Safe。
 - Form reconcile必须按当前schema重建dependency graph。
 - PanelState decoder只接受当前完整grammar；owner wake和产品Figure save各只有一个实现。
@@ -305,6 +311,7 @@ Node new chunk
 - Camera Measurement只按自己的authored frames-per-cycle/repeat采集并核实际返回cardinality；Camera adapter不解析Pulse window数量，也不以exposure审查Pulse cadence。Adapter的source ordinal只编号实际采到的frames，必须从本次arm的0连续递增。
 - qCMOS的ROI、exposure、trigger/readout各由adapter的单一working-point owner管理；未变化字段不得在每次Start整套重写。Measurement冻结设置操作返回的authoritative readback，不再为同一capture额外读取完整property surface；相同exposure/ROI的restart因此不支付冗余sensor reconfiguration。
 - Camera auto Panel从canonical publication/preview signal建立；signal尚未publish时显示等待状态，但不得用重复device配置、额外generation或固定5秒轮询作为Panel接线条件。
+- Scan绑定的是声明的Dataset输出，不以首个value或generation是否已出现判定contract兼容。已配置Panel Fit的参数由同一model词汇提供声明，禁用的输出不提供；无数据时可Start并在现有source owner等待首次真实publication，不创建假值、不自动启动Camera。首次arrival接入现有有序tap，首绑后继续严格固定generation，停止时退订且不重放旧sealed值。
 - Camera settings provenance属于frame event而不是generation identity：`run_record`在一代内保持不变，frame冻结的小型`event_record`可变化；finite/scan前缀与有界indexed history按实际保留chunks合并epoch ranges，monitor只携带当前event。
 - Temperature保留约20ms authored exposure；Pulse timing与camera exposure是各自owner的独立输入。
 - Virtual sequencer按compiled wall cadence逐cycle并支持Stop；每个到达virtual camera的frame event都被采集，不根据Pulse时间或camera exposure私自skip、制造ordinal gap。
