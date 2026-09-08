@@ -136,12 +136,25 @@ class LogicLayoutEntry:
         return {
             "node_id": self.node_id,
             "api_name": self.api_name,
-            "values": dict(self.values),
+            "values": _authoring_tree(self.values),
             "source_signal": self.source_signal,
             "device_keys": dict(self.device_keys),
             "artifact_inputs": dict(self.artifact_inputs),
             "auto_preview": self.auto_preview,
         }
+
+
+def _authoring_tree(value: Any) -> Any:
+    """Encode authoring containers without changing their scalar values.
+
+    Rows and numeric tuples are immutable sequences in a draft, JSON arrays
+    in the saved board. Unsupported scalars still reach the strict writer.
+    """
+    if isinstance(value, Mapping):
+        return {key: _authoring_tree(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_authoring_tree(item) for item in value]
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,8 +282,11 @@ def resolve_layout(
         if descriptor is None:
             raise LayoutError(f"no logic node named {entry.api_name!r}")
         try:
-            expected_values = set(descriptor.authoring_schema.field_names)
-            missing_values = expected_values - set(entry.values)
+            fields = descriptor.authoring_schema.fields
+            missing_values = {
+                field.name for field in fields
+                if field.required and field.name not in entry.values
+            }
             if missing_values:
                 raise LayoutError(
                     f"{entry.node_id}: missing authoring fields "
@@ -278,7 +294,8 @@ def resolve_layout(
                 )
             # A saved row is an editable raw draft.  Semantic projection is
             # deliberately deferred to the same finalizer that gates Start.
-            values = dict(entry.values)
+            values = {field.name: field.default for field in fields if not field.required}
+            values.update(entry.values)
             options = device_key_options(descriptor, installation=installation)
         except Exception as error:
             raise LayoutError(f"{entry.node_id}: {error}") from error

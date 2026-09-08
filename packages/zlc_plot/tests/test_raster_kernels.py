@@ -29,6 +29,9 @@ from zlc_plot.data_view import (
     histogram_counts,
 )
 
+# Last is coordinate restriction in DataView, not a geometry-free kernel.
+KERNEL_REDUCTIONS = tuple(item for item in Reduction if item is not Reduction.LAST)
+
 
 def _both_engines(call):
     """Run ``call`` under each engine and return ``(reference, compiled)``."""
@@ -186,7 +189,7 @@ def test_joint_axis_kernel_matches_the_exact_bucket_reduction() -> None:
         values.shape,
     ).reshape(-1)
     usable = valid.reshape(-1)
-    for reduction in Reduction:
+    for reduction in KERNEL_REDUCTIONS:
         expected, expected_counts = _aggregate_by_codes(
             values.reshape(-1), usable, combined, 9, reduction
         )
@@ -682,7 +685,7 @@ def test_masked_leading_tensor_matrix_matches_numpy_bit_for_bit() -> None:
                 np.broadcast_to(np.asarray(True), values.shape),
                 holey,
             ):
-                for reduction in Reduction:
+                for reduction in KERNEL_REDUCTIONS:
                     kernels.ENGINE = "numpy"
                     reference = _masked_leading_reduce(
                         values, valid, reduction
@@ -704,7 +707,7 @@ def test_masked_leading_tensor_matrix_matches_numpy_bit_for_bit() -> None:
         for pool in (2, 4, 8, 32):
             values = rng.normal(size=(pool, 16384))
             valid = rng.random(values.shape) > 0.2
-            for reduction in Reduction:
+            for reduction in KERNEL_REDUCTIONS:
                 kernels.ENGINE = "numpy"
                 reference = _masked_leading_reduce(values, valid, reduction)
                 kernels.ENGINE = "auto"
@@ -732,7 +735,7 @@ def test_masked_leading_tensor_matrix_matches_numpy_bit_for_bit() -> None:
             (strided, strided_valid),
             (one_column, one_valid),
         ):
-            for reduction in Reduction:
+            for reduction in KERNEL_REDUCTIONS:
                 kernels.ENGINE = "numpy"
                 reference = _masked_leading_reduce(values, valid, reduction)
                 kernels.ENGINE = "auto"

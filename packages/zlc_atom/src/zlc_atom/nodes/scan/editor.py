@@ -6,12 +6,10 @@ editor owns exactly one authored field -- ``plan`` -- and says so through
 ``managed_fields``, so the auto-generated form does not render the raw JSON
 beside it.
 
-A MANUAL axis is the other kind of row: a name and a point count, and no
-port at all, because nothing here can advance it.  It carries no values
-either -- the operator types those when the run asks, which is the whole
-reason the axis exists.  Manual rows sit above the machine rows and cannot
-be moved below them: an operator walks their points BETWEEN plays of the
-inner plan, so they are outside it by construction.
+A MANUAL axis carries a name and its requested values, but no hardware
+port. Manual and device rows move automatically ahead of board rows,
+preserving their relative order: their points advance BETWEEN plays of
+the inner table, so they stand outside it by construction.
 
 Ports are read from the projection -- the resolved pulse template's API
 parameters, plus the bench's tunable devices for a node that can move them --
@@ -46,7 +44,7 @@ from zlc_ui.fluent import (
 )
 from zlc_ui.form import FluentParameterForm, FormFieldProps, FormSpec, being_edited
 
-from zlc_data.units import UnitError
+from zlc_data.units import DEFAULT_UNITS
 from zlc_pulse import api_parameter_columns_for, authored_api_entries, field_label
 
 from .plan import (
@@ -57,6 +55,7 @@ from .plan import (
     ScanAxis,
     ScanPlan,
     hardware_scan_ports_for,
+    host_advanced_port,
     manual_axis,
     manual_axis_name,
     port_group,
@@ -65,6 +64,12 @@ from .plan import (
     DEVICE_PARAM_FAMILY,
     scan_ports_for_devices,
 )
+
+
+def _sweep_values(row: QtWidgets.QWidget) -> tuple[float, ...]:
+    """Space the authored coordinates in the row's selected unit."""
+    values = np.linspace(row.start_spin.value(), row.stop_spin.value(), int(row.points_spin.value()))
+    return tuple(float(value) for value in values)
 
 
 def _spins_regenerate(row: QtWidgets.QWidget, values: tuple[float, ...]) -> bool:
@@ -78,15 +83,7 @@ def _spins_regenerate(row: QtWidgets.QWidget, values: tuple[float, ...]) -> bool
     uniform and silently re-authored it as 1 000 000, 2 000 002.5, 3 000 005.
     """
 
-    regenerated = tuple(
-        float(value)
-        for value in np.linspace(
-            float(row.start_spin.value()),
-            float(row.stop_spin.value()),
-            int(row.points_spin.value()),
-        )
-    )
-    return regenerated == tuple(values)
+    return _sweep_values(row) == tuple(values)
 
 
 class _AxisRow(QtWidgets.QWidget):
@@ -182,16 +179,17 @@ class _AxisRow(QtWidgets.QWidget):
             empty_source_label="ports",
         )
 
-    def _apply_port_limits(self) -> None:
+    def _apply_port_limits(self, unit: str = "") -> None:
         port = next(
             (p for p in self._ports if p.port == self.port_combo.currentData()),
             None,
         )
+        unit = unit or ("" if port is None else port.unit)
+        limits = (-1e12, 1e12) if port is None else (port.lo, port.hi)
+        if port is not None and unit != port.unit:
+            limits = tuple(float(value) for value in DEFAULT_UNITS.convert(limits, port.unit, unit))
         for spin in (self.start_spin, self.stop_spin):
-            if port is None:
-                spin.setRange(-1e12, 1e12)
-            else:
-                spin.setRange(port.lo, port.hi)
+            spin.setRange(min(limits), max(limits))
             # The port has said all along what its numbers are in -- a
             # duration sweeps in the period's own unit -- and these two boxes
             # were the one place on the row that never repeated it, so a
@@ -202,8 +200,9 @@ class _AxisRow(QtWidgets.QWidget):
             # came back as 1.0 in the box that is supposed to be showing what
             # will run.  Readability is the formatter's job now, and the
             # formatter does not round.
-            spin.setValueUnit("" if port is None else port.unit)
-        self._mount_unit_picker("" if port is None else port.unit)
+            spin.setValueUnit(unit)
+            spin.setShownUnit(unit)
+        self._mount_unit_picker(unit)
 
     def _mount_unit_picker(self, unit: str) -> None:
         """Offer this port's other spellings, or just name the one it has.
@@ -213,10 +212,9 @@ class _AxisRow(QtWidgets.QWidget):
         picker already there is re-pointed in place; one is built or retired
         only when the port's unit gains or loses its ladder.
 
-        Both spins go on holding the PORT's own number.  An axis is authored
-        in the unit the plan will run in, so choosing a spelling here changes
-        only what is on screen and nothing has to be converted on the way
-        into the plan or on the way back out of a saved one.
+        Both spins and the saved axis use the selected unit. Choosing another
+        unit converts every authored point; only a from/to/points edit creates
+        a new evenly spaced grid.
         """
 
         layout = self.layout()
@@ -244,6 +242,12 @@ class _AxisRow(QtWidgets.QWidget):
         fact that they are a list nobody's ends describe."""
 
         with signals_blocked(self.start_spin, self.stop_spin, self.points_spin):
+            if self.manual:
+                for spin in (self.start_spin, self.stop_spin):
+                    spin.setValueUnit(axis.unit)
+                    spin.setShownUnit(axis.unit)
+            else:
+                self._apply_port_limits(axis.unit)
             self.start_spin.setValue(axis.values[0])
             self.stop_spin.setValue(axis.values[-1])
             self.points_spin.setValue(len(axis.values))
@@ -263,23 +267,25 @@ class _AxisRow(QtWidgets.QWidget):
         if ports != self._ports:
             self._ports = ports
             self._fill_ports(axis.port)
-            self._apply_port_limits()
+            self._apply_port_limits(axis.unit)
         elif str(self.port_combo.currentData()) != axis.port:
             self._fill_ports(axis.port)
-            self._apply_port_limits()
+            self._apply_port_limits(axis.unit)
         if being_edited(self):
             return
         if self.axis() != axis:
             self._show_values(axis)
 
     def _shown_unit_picked(self, symbol: str) -> None:
-        """Read both ends in the chosen spelling; the swept values do not move."""
-
-        for spin in (self.start_spin, self.stop_spin):
-            try:
-                spin.setShownUnit(symbol)
-            except UnitError:
-                return
+        """Convert the whole existing grid, without changing its physical sweep."""
+        axis = self.axis()
+        values = tuple(float(value) for value in DEFAULT_UNITS.convert(
+            axis.values, self.start_spin.valueUnit(), symbol
+        ))
+        self._show_values(ScanAxis(axis.port, values, symbol))
+        self._custom_values = values
+        self.custom_label.setText("" if _spins_regenerate(self, values) else "custom values")
+        self.edited.emit()
 
     def _port_changed(self, _index: int) -> None:
         self._custom_values = None
@@ -306,15 +312,13 @@ class _AxisRow(QtWidgets.QWidget):
         return False
 
     def axis(self) -> ScanAxis:
+        unit = self.start_spin.valueUnit()
         if self._custom_values is not None:
-            return ScanAxis(str(self.port_combo.currentData()), self._custom_values)
-        points = int(self.points_spin.value())
-        values = np.linspace(
-            float(self.start_spin.value()), float(self.stop_spin.value()), points
-        )
+            return ScanAxis(str(self.port_combo.currentData()), self._custom_values, unit)
         return ScanAxis(
             str(self.port_combo.currentData()),
-            tuple(float(value) for value in values),
+            _sweep_values(self),
+            unit,
         )
 
 
@@ -405,12 +409,12 @@ class _ManualAxisRow(QtWidgets.QWidget):
     def axis(self) -> ScanAxis:
         name = self.name_edit.text().strip()
         if self._custom_values is not None:
-            return manual_axis(name, self._custom_values)
+            return manual_axis(name, self._custom_values, self.start_spin.valueUnit())
         points = int(self.points_spin.value())
         values = np.linspace(
             float(self.start_spin.value()), float(self.stop_spin.value()), points
         )
-        return manual_axis(name, tuple(float(value) for value in values))
+        return manual_axis(name, tuple(float(value) for value in values), self.start_spin.valueUnit())
 
 
 class ScanPlanEditor(QtWidgets.QWidget):
@@ -797,12 +801,8 @@ class ScanPlanEditor(QtWidgets.QWidget):
 
     def _attach_manual_row(self, axis: ScanAxis | None) -> None:
         row = self._build_manual_row(axis)
-        # Above every machine row, because that is where it runs: the
-        # displayed order IS the nesting order, and a manual axis nested
-        # inside a fired table is not a thing the bench can do.
-        at = sum(1 for existing in self._rows if existing.manual)
-        self._rows.insert(at, row)
-        self.rows_layout.insertWidget(at, row)
+        self._rows.append(row)
+        self.rows_layout.addWidget(row)
 
     def _add_axis(self) -> None:
         if not self._ports:
@@ -829,6 +829,13 @@ class ScanPlanEditor(QtWidgets.QWidget):
     def _emit_plan(self) -> None:
         if self._loading:
             return
+        ordered = sorted(self._rows, key=lambda row: host_advanced_port(
+            MANUAL_PARAM_FAMILY if row.manual else str(row.port_combo.currentData())
+        ), reverse=True)
+        if ordered != self._rows:
+            self._rows = ordered
+            for index, row in enumerate(ordered):
+                self.rows_layout.insertWidget(index, row)
         plan = self._current_plan()
         self._plan_text = "" if plan is None else json.dumps(plan.to_tree())
         # The host's draft contract: a patch under "values", the same shape

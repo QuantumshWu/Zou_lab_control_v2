@@ -37,7 +37,8 @@ def _reference(values, usable, codes, bucket_count, reduction):
     return output, counts
 
 
-ALL_REDUCTIONS = tuple(Reduction)
+# Last is an axis-coordinate Scope before this geometry-free numeric kernel.
+ALL_REDUCTIONS = tuple(item for item in Reduction if item is not Reduction.LAST)
 
 
 @pytest.mark.parametrize("reduction", ALL_REDUCTIONS)

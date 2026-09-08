@@ -122,7 +122,11 @@ def _encode_plot_spec(spec: object) -> dict[str, object]:
     common = {"kind": spec.kind.value, "labels": _labels_document(spec.labels)}
     common["scope"] = _scope_document(spec.scope)
     if isinstance(spec, HistogramPlot):
-        return common
+        return {
+            **common,
+            "reduction": spec.reduction.value,
+            "reduced": [_axis_document(ref) for ref in spec.reduced],
+        }
     if spec.kind is PlotKind.FACET_GRID:
         return {
             **common,
@@ -150,8 +154,14 @@ def _decode_plot_spec(value: object) -> object:
     base = {"labels": _labels(value.get("labels"))}
     base["scope"] = _scope(value.get("scope"))
     if kind is PlotKind.HISTOGRAM:
-        _keys(value, {"kind", "labels", "scope"}, "histogram recipe")
-        return HistogramPlot(**base)
+        _keys(value, {"kind", "labels", "scope", "reduction", "reduced"}, "histogram recipe")
+        if not isinstance(value["reduced"], list):
+            raise TypeError("histogram reduced axes must be an array")
+        return HistogramPlot(
+            reduction=Reduction(value["reduction"]),
+            reduced=tuple(_axis(ref, "histogram reduced axis") for ref in value["reduced"]),
+            **base,
+        )
     if kind is PlotKind.FACET_GRID:
         _keys(value, {"kind", "labels", "scope", "facet", "cell"}, "facet recipe")
         return FacetGridPlot(

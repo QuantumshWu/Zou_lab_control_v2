@@ -21,6 +21,7 @@ from .presentation import (
     SurfaceUpdate,
 )
 from .selection_bridge import (
+    FIT_PARAMETER_CONTRACT,
     FitEventValue,
     SelectionBridge,
     SelectionChange,
@@ -33,6 +34,7 @@ from .host import NodeHost, OperatorInputRequest
 from .task_run import TaskArtifact, TaskRun
 
 __all__ = (
+    "FIT_PARAMETER_CONTRACT",
     "BoardScheduler",
     "DatasetCoverage",
     "DatasetOutputDeclaration",

@@ -4,15 +4,16 @@ Both engines advance a ``device:`` axis the same way -- a ``tune`` call on
 the installed device between fires -- and both owe the bench the same two
 things for it.
 
-THE COLUMN SAYS WHAT THE HARDWARE DID.  ``tune`` answers with the
-instrument's own read-back, and anything other than exactly the scan
-coordinate is a refusal: a dataset may not carry a frequency the
-synthesizer never stood at.
+THE SETPOINT AND READBACK ARE DIFFERENT FACTS. The scan coordinate is the
+nominal setpoint; ``tune`` returns the instrument's actual numeric readback
+for the run record. Rounding or cutoff does not make a successful device
+command fail merely because these values differ.
 
 THE BENCH IS HANDED BACK AS IT WAS FOUND.  A scan ends -- complete,
 stopped or failed -- with every knob it moved back at its pre-run value,
 read from the device before the first move and written back through the
-same verified ``tune``.  A synthesizer left standing at the last scan
+same ``tune`` path. A device refusal is reported, not inferred from numeric
+equality. A synthesizer left standing at the last scan
 point was what the operator found after every scan, and nothing on the
 bench said so.
 
@@ -40,10 +41,8 @@ def device_port_parts(port: str) -> tuple[str, str]:
     return key, field
 
 
-def tune_exactly(
-    device: object, field: str, value: float, *, what: str = "the scan coordinate"
-) -> float:
-    """Move one knob and verify the instrument stood exactly there."""
+def tune_value(device: object, field: str, value: float) -> float:
+    """Write a nominal setpoint and return the device's finite readback."""
 
     effective = device.tune(field, value)
     if isinstance(effective, bool):
@@ -56,10 +55,6 @@ def tune_exactly(
         ) from error
     if not math.isfinite(actual):
         raise ValueError("device tune returned a non-finite effective value")
-    if actual != value:
-        raise RuntimeError(
-            f"device field {field!r} applied {actual!r}, not {what} {value!r}"
-        )
     return actual
 
 
@@ -73,7 +68,7 @@ class ScanDeviceKnobs:
         #: scan first moved it, in the order the fields were first moved.
         self._pre_run: dict[tuple[str, str], float] = {}
 
-    def move(self, port: str, value: float) -> None:
+    def move(self, port: str, value: float) -> float:
         """Set one knob to a scan coordinate, remembering where it stood.
 
         The first move of a knob is when the promise to put it back is
@@ -92,7 +87,7 @@ class ScanDeviceKnobs:
             )
         if (key, field) not in self._pre_run:
             self._pre_run[(key, field)] = self._standing(device, port, field)
-        tune_exactly(device, field, float(value))
+        return tune_value(device, field, float(value))
 
     @staticmethod
     def _standing(device: object, port: str, field: str) -> float:
@@ -134,9 +129,7 @@ class ScanDeviceKnobs:
         failures: list[BaseException] = []
         for (key, field), value in reversed(self._pre_run.items()):
             try:
-                tune_exactly(
-                    self._tunables[key], field, value, what="its pre-run value"
-                )
+                tune_value(self._tunables[key], field, value)
             except BaseException as error:
                 failure = RuntimeError(
                     f"device field {field!r} of {key!r} was not put back to "
@@ -188,5 +181,5 @@ __all__ = [
     "ScanDeviceKnobs",
     "device_port_parts",
     "release_after_scan",
-    "tune_exactly",
+    "tune_value",
 ]

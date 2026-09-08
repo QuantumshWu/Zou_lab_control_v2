@@ -24,7 +24,7 @@ def build_payload(projection: Any, view: Any, state: Any) -> None:
         # The band is the operator's display switch; the standard error only
         # exists for a MEAN, so on any other reduction the switch is inert.
         uncertainty=(
-            bool(state["uncertainty"]) and spec.reduction is Reduction.MEAN
+            bool(state["uncertainty"]) and spec.reduction.statistic is Reduction.MEAN
         ),
     )
 

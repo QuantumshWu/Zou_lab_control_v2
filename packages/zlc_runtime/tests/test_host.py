@@ -207,6 +207,67 @@ def test_measurement_commits_live_then_runtime_seals_and_clears_progress() -> No
         plane.close()
 
 
+@pytest.mark.parametrize("ending", ("done", "failed", "cancel-before-ready", "cancel-after-ready"))
+def test_worker_ready_is_explicit_and_cannot_outlive_its_run(ending: str) -> None:
+    plane, wake = SignalDataPlane(), Event()
+    entered, arm, finish = Event(), Event(), Event()
+
+    class Node:
+        def execute(self, context):
+            entered.set()
+            assert arm.wait(2)
+            if ending == "failed":
+                raise ValueError("arm failed")
+            context.report_ready()
+            assert finish.wait(2)
+
+    host = _host(Node(), plane, wake, instance_id="acquisition", kind="measurement")
+    try:
+        # A queued candidate is a valid wait target before activation.
+        assert host.wait_ready(0) is False
+        for _run in range(2 if ending == "done" else 1):
+            entered.clear()
+            arm.clear()
+            finish.clear()
+            host.start()
+            assert entered.wait(1)
+            assert host.running
+            assert host.wait_ready(.01) is False
+            if ending == "cancel-before-ready":
+                host.cancel("stop while arming")
+                with pytest.raises(InterruptedError, match="stop while arming"):
+                    host.wait_ready(1)
+                arm.set()
+            else:
+                arm.set()
+                if ending == "failed":
+                    # No owner poll is needed to wake a failed arm waiter.
+                    with pytest.raises(RuntimeError, match="finished|arm failed"):
+                        host.wait_ready(1)
+                else:
+                    assert host.wait_ready(1) is True
+                    if ending == "cancel-after-ready":
+                        host.cancel("stop after arm")
+                        with pytest.raises(InterruptedError, match="stop after arm"):
+                            host.wait_ready(0)
+            finish.set()
+            expected = "cancelled" if ending.startswith("cancel") else ending
+            assert _wait(host, wake).phase == expected
+            with pytest.raises((RuntimeError, InterruptedError)):
+                host.wait_ready(0)
+        host.shutdown()
+        with pytest.raises(RuntimeError, match="closed"):
+            host.wait_ready(0)
+    finally:
+        arm.set()
+        finish.set()
+        if host.running:
+            host.cancel("test cleanup")
+            _wait(host, wake)
+        host.shutdown()
+        plane.close()
+
+
 def test_task_operator_input_is_exactly_answered_or_stopped(tmp_path: Path) -> None:
     declaration = DatasetOutputDeclaration("review", "test.operator-review")
     wake = Event()

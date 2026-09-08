@@ -901,6 +901,23 @@ def test_restart_is_queued_and_keeps_the_stable_signal_key(presenter, session) -
     assert replacement.signal_key("frames") == old_key
     assert replacement.generation != old_generation
 
+    from concurrent.futures import ThreadPoolExecutor
+
+    context = SimpleNamespace(instance_id="scan", cancel_requested=lambda: False)
+    with ThreadPoolExecutor(max_workers=1) as worker:
+        restart = worker.submit(presenter._restart_acquisition, node_id, context)
+        deadline = time.monotonic() + 5.0
+        while not restart.done() and time.monotonic() < deadline:
+            presenter.beat()
+            time.sleep(0.002)
+        assert restart.done(), "acquisition restart did not finish arming"
+        restart.result()
+    acquisition = presenter.logic[node_id].host
+    assert acquisition is not replacement
+    assert acquisition.wait_ready(0.0)
+    assert acquisition.generation != replacement.generation
+    assert session.signal_plane.latest_publication(old_key) is None
+
 
 def test_the_summary_counts_what_is_running(presenter) -> None:
     presenter.add_logic("camera_measurement")
@@ -1087,6 +1104,21 @@ def test_a_processor_adds_with_an_unresolved_source_and_no_modal(
     assert presenter.logic_editor_projection(node_id)["artifact_values"] == {
         "calibration_path": "manually-picked.json"
     }
+    derived_id = presenter.add_logic("derive")
+    projection = presenter.logic_editor_projection(derived_id)
+    assert projection["source_bundle"] is True
+    bundle_members = [
+        name for name in projection["source_options"]
+        if name.startswith(f"@logic/{node_id}/")
+    ]
+    assert bundle_members == [stable_signal_key(node_id, "counts")]
+    assert "occupied" in projection["source_labels"][bundle_members[0]]
+    presenter.view.logic_draft_changed.emit(
+        derived_id, {"source_signal": stable_signal_key(node_id, "occupied")}
+    )
+    projection = presenter.logic_editor_projection(derived_id)
+    assert stable_signal_key(node_id, "occupied") in projection["source_options"]
+    assert stable_signal_key(node_id, "counts") not in projection["source_options"]
 
 
 def test_an_unresolved_processor_source_disables_start_before_click(presenter) -> None:
@@ -1411,18 +1443,19 @@ def test_reading_in_photoelectrons_is_offered_only_when_the_camera_can(
     assert projection["can_start"] is True
 
 
-def test_an_armed_silent_source_admits_a_scan_draft(session) -> None:
-    """A measurement watches FUTURE publications, so admission asks for an
-    ARMED producer, not an existing Dataset: an externally triggered chain
-    publishes nothing until the scan's own pulse fires the first trigger.
-    A source that is neither publishing nor armed stays refused, naming
-    the chain the operator must start."""
+def test_an_armed_silent_source_admits_a_scan_draft(bench) -> None:
+    """A declared source may not yet have data or a reserved generation.
+
+    A configured panel fit is such a producer before its first real frame;
+    admission must not label its parameter incompatible or start its camera.
+    Undeclared names and incompatible contracts remain rejected.
+    """
 
     catalog = LogicCatalog()
     descriptor = catalog.get("seamless_scan")
     signal = "@logic/camera/frames"
 
-    def finalized(*, armed: bool):
+    def finalized(*, armed: bool, offered=True):
         plane = SimpleNamespace(
             latest_publication=lambda _name: None,
             is_generation_live=lambda _name: armed,
@@ -1431,19 +1464,54 @@ def test_an_armed_silent_source_admits_a_scan_draft(session) -> None:
         return finalize_logic_draft(
             descriptor,
             LogicDraft(source_signal=signal),
-            installation=session.installation,
+            installation=bench.installation,
             signal_plane=plane,
-            workspace=session.workspace,
-            source_options=(signal,),
+            workspace=bench.workspace,
+            source_options=(signal,) if offered else (),
         )
 
     source_issues = [
         text for text in finalized(armed=True).issues if signal in text
     ]
     assert source_issues == []
-    dead_issues = [
+    waiting_issues = [
         text for text in finalized(armed=False).issues if signal in text
     ]
-    assert dead_issues and all(
-        "no armed producer" in text for text in dead_issues
-    )
+    assert waiting_issues == []
+    assert any(signal in text and "not declared" in text
+               for text in finalized(armed=False, offered=False).issues)
+
+    with _console_over(bench) as presenter:
+        panel = presenter.add_blank_panel("curve")
+        panel.state = replace(panel.state, fit={"model": "gaussian_offset"})
+        parameter = f"@logic/{panel.panel_id}/amplitude"
+        assert bench.signal_plane.latest_publication(parameter) is None
+        assert not bench.signal_plane.is_generation_live(parameter)
+        assert parameter in presenter._source_options(descriptor, "scan")
+        from zlc_atom.nodes import DatasetInputSpec
+
+        camera_only = replace(descriptor, input_specs=(DatasetInputSpec("signal", "camera.frames", "exact"),))
+        assert parameter not in presenter._source_options(camera_only, "scan")
+        panel.state = replace(panel.state, published_outputs={"amplitude": False})
+        assert parameter not in presenter._source_options(descriptor, "scan")
+        camera_id = presenter.add_logic("camera_measurement")
+        scan_id = presenter.add_logic("seamless_scan")
+        projection = presenter.logic_editor_projection(scan_id)
+        field = next(field for field in projection["form_spec"].fields
+                     if field.key == "acquisition_logic")
+        assert field.kind == "choice"
+        assert {choice.value for choice in field.choices} == {"", camera_id}
+        assert projection["form_values"]["settle_seconds"] == 0.5
+        presenter.update_logic_draft(scan_id, values={"acquisition_logic": scan_id})
+        assert any("acquisition Measurement" in text for text in
+                   presenter.logic_editor_projection(scan_id)["issues"])
+        presenter.update_logic_draft(scan_id, values={
+            "acquisition_logic": camera_id, "settle_seconds": 0.123,
+        })
+        assert not any("acquisition Measurement" in text for text in
+                       presenter.logic_editor_projection(scan_id)["issues"])
+        saved = presenter.layout()
+        assert presenter.apply_layout(saved)
+        restored = presenter.logic_editor_projection(scan_id)
+        assert restored["form_values"]["acquisition_logic"] == camera_id
+        assert restored["form_values"]["settle_seconds"] == 0.123

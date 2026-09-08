@@ -198,6 +198,14 @@ def test_primary_index_history_keeps_source_order_holes_and_site_groups() -> Non
     np.testing.assert_array_equal(history[1].valid, [True] * 3)
     np.testing.assert_array_equal(history[1].counts, [2] * 3)
     np.testing.assert_allclose(history[1].sem, [1.5] * 3)
+    last = DataView(snapshot).rolling_history(
+        group=AxisRef.cell_data("site"), aggregation=Reduction.LAST,
+    )
+    assert tuple(last.source_indices) == (-2, 0)
+    np.testing.assert_array_equal(last.valid[0], [False] * 3)
+    np.testing.assert_allclose(last.values[1], [9.0, 10.0, 11.0])
+    np.testing.assert_array_equal(last.counts[1], [1] * 3)
+    assert np.all(np.isnan(last.sem))
 
     repeat = DataView(_snapshot(0, repeats=3)).rolling_history()
     np.testing.assert_allclose(

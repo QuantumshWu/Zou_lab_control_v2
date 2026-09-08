@@ -44,10 +44,10 @@ from zlc_atom.nodes.scan import (
 )
 
 
-#: How long the pulse stays stopped before the table plays.  A tenth of a
-#: second is what the bench needs to reach the state the first point starts
-#: from; it is authored because only the operator knows their apparatus.
-DEFAULT_SETTLE_SECONDS = 0.1
+#: How long the pulse stays stopped before the table plays.  Half a
+#: second is the default settling allowance after acquisition is ready;
+#: it is authored because only the operator knows their apparatus.
+DEFAULT_SETTLE_SECONDS = 0.5
 
 
 SEAMLESS_SCAN_SCHEMA = AuthoringSchema(
@@ -65,6 +65,13 @@ SEAMLESS_SCAN_SCHEMA = AuthoringSchema(
             "Scan plan",
             "",
             required=True,
+        ),
+        AuthoringField(
+            "acquisition_logic",
+            "str",
+            "Acquisition logic",
+            "",
+            description="Optional acquisition Logic to restart and wait until ready before settling and firing.",
         ),
         # The pulse's API slots, set once for this run.  Only what differs
         # from the pulse is written here, so a recalibration that lands in
@@ -117,6 +124,8 @@ def _build(
     repeats: int = 1,
     shots_per_point: int = 1,
     settle_seconds: float = DEFAULT_SETTLE_SECONDS,
+    acquisition_logic: str = "",
+    restart_logic: object = None,
 ) -> SeamlessScanMeasurement:
     if (
         not isinstance(pulse_resource, ResolvedWorkspaceResource)
@@ -161,6 +170,8 @@ def _build(
         repeats=int(repeats),
         shots_per_point=int(shots_per_point),
         settle_seconds=float(settle_seconds),
+        acquisition_logic=acquisition_logic,
+        restart_logic=restart_logic,
     )
 
 
@@ -180,6 +191,7 @@ LOGIC_NODE = LogicNodeDescriptor(
     "seamless_scan",
     NodeKind.MEASUREMENT,
     SEAMLESS_SCAN_SCHEMA,
+    acquisition_input="acquisition_logic",
     input_specs=(DatasetInputSpec("signal", None, "exact"),),
     outputs=(SCAN_OUTPUT,),
     # A scan is one measurement per point, so its plot is one cell per

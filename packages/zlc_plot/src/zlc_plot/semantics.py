@@ -23,7 +23,7 @@ from zlc_data import (
     canonical_coordinate_scalar,
 )
 from zlc_data.axis import SCALAR
-from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
+from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID, indexed_history_layout
 from .kinds import AxisDomain, AxisRef, PlotKind
 from .layout import DEFAULT_LAYOUT, PlotLayoutConfig
 from .session_policy import merge_labels
@@ -560,6 +560,31 @@ def _scope_terms(
     spec: PlotSpec,
 ) -> dict[AxisRef, CoordinateScalar | CoordinateSelector]:
     return dict(getattr(spec, "scope", ()))
+
+
+def projection_scope(
+    schema: DatasetSchema, spec: PlotSpec,
+) -> tuple[tuple[AxisRef, CoordinateScalar | CoordinateSelector], ...]:
+    """Authored pins plus Last's exact last-coordinate pins, never last-valid.
+
+    The authored fate table stays reduced. Only the common data restriction
+    expands this convenience into Scope, so fit and selection see the same
+    sample as the picture. Rolling retains its existing shot carrier.
+    """
+
+    scope = _scope_terms(spec)
+    if getattr(semantic_spec(spec), "reduction", None) is Reduction.LAST:
+        indexed = indexed_history_layout(schema) if spec.kind is PlotKind.ROLLING else None
+        for ref in axis_choices_for_schema(schema):
+            if _fate_of(spec, ref) != FATE_REDUCE:
+                continue
+            if spec.kind is PlotKind.ROLLING and (
+                ref == AxisRef.point(PRIMARY_INDEX_AXIS_ID.value) if indexed is not None
+                else ref.domain is AxisDomain.REPEAT
+            ):
+                continue
+            scope[ref] = LATEST_COORDINATE
+    return tuple(scope.items())
 
 
 def _role_holder(spec: PlotSpec, role: str) -> AxisRef | None:

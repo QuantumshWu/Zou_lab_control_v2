@@ -4708,6 +4708,111 @@ def _prepare_release_recapture(coords, observations, valid, seeds, lower, upper,
     return 4
 
 
+@njit(cache=True, inline="always")
+def _saturation_fraction(x, scale):
+    if x <= scale:
+        ratio = x / scale
+        return ratio / (1.0 + ratio)
+    return 1.0 / (1.0 + scale / x)
+
+
+@njit(cache=True, inline="always")
+def _point_saturation(coords, point, parameters, row):
+    amplitude, scale, offset = parameters
+    x = coords[0, point]
+    if x < 0.0 or not scale > 0.0:
+        row[:] = math.nan
+        return math.nan
+    fraction = _saturation_fraction(x, scale)
+    row[0] = fraction
+    row[1] = -amplitude * fraction * (1.0 - fraction) / scale
+    row[2] = 1.0
+    return offset + amplitude * fraction
+
+
+@njit(cache=True)
+def _value_jacobian_saturation(coords, parameters):
+    output = np.empty(coords.shape[1], dtype=np.float64)
+    jacobian = np.empty((coords.shape[1], 3), dtype=np.float64)
+    for point in range(output.size):
+        output[point] = _point_saturation(coords, point, parameters, jacobian[point])
+    return output, jacobian
+
+
+@njit(cache=True)
+def _objective_saturation(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives, context):
+    if derivatives:
+        compiled_reset_accumulators(gradient, info)
+    cost = 0.0
+    rss = 0.0
+    full = np.empty(3, dtype=np.float64)
+    for point in range(obs.size):
+        if not valid[point]:
+            continue
+        predicted = _point_saturation(coords, point, params, full)
+        pc, pr, ok = _accumulate_model_point(
+            predicted, obs[point], full, free,
+            weights[point] if use_w else 1.0, use_w, poisson, loss,
+            gradient, info, row, derivatives,
+        )
+        if not ok:
+            return math.inf, math.inf, False
+        cost += pc
+        rss += pr
+    if derivatives:
+        compiled_finish_information(info)
+    return cost, rss, True
+
+
+@njit(cache=True)
+def _prepare_saturation(coords, observations, valid, seeds, lower, upper, context):
+    """Try three x scales, seeding amplitude/offset by linear regression."""
+    low = math.inf
+    high = -math.inf
+    count = 0
+    mean_y = 0.0
+    for point in range(observations.size):
+        if valid[point]:
+            x = coords[0, point]
+            if x < 0.0:
+                return 0
+            low = min(low, x)
+            high = max(high, x)
+            count += 1
+            mean_y += (observations[point] - mean_y) / count
+    if count < 2 or not high > low:
+        return 0
+    for index, factor in enumerate((0.1, 1.0, 10.0)):
+        scale = high * factor
+        mean_fraction = 0.0
+        for point in range(observations.size):
+            if valid[point]:
+                mean_fraction += _saturation_fraction(coords[0, point], scale) / count
+        variance = 0.0
+        covariance = 0.0
+        for point in range(observations.size):
+            if valid[point]:
+                centered = _saturation_fraction(coords[0, point], scale) - mean_fraction
+                variance += centered * centered
+                covariance += centered * (observations[point] - mean_y)
+        amplitude = max(covariance / variance, 0.0) if variance > 0.0 else 0.0
+        seeds[index, 0] = amplitude
+        seeds[index, 1] = scale
+        seeds[index, 2] = mean_y - amplitude * mean_fraction
+    return 3
+
+
+def saturation_descriptor() -> CompiledFitDescriptor:
+    return CompiledFitDescriptor(
+        prepare=_prepare_saturation,
+        objective=_objective_saturation,
+        value_jacobian=_value_jacobian_saturation,
+        context_builder=series_context_builder,
+        max_candidates=3,
+        cache_key="saturation-v1",
+    )
+
+
 def release_recapture_descriptor() -> CompiledFitDescriptor:
     return CompiledFitDescriptor(
         prepare=_prepare_release_recapture,
@@ -4761,6 +4866,7 @@ def production_dispatchers() -> tuple[Any, ...]:
         _prepare_damped,
         _prepare_exponential,
         _prepare_release_recapture,
+        _prepare_saturation,
         _prepare_radial,
         _prepare_anisotropic,
         _objective_lorentzian,
@@ -4773,6 +4879,7 @@ def production_dispatchers() -> tuple[Any, ...]:
         _objective_damped,
         _objective_exponential,
         _objective_release_recapture,
+        _objective_saturation,
         _objective_radial,
         _objective_anisotropic,
         _value_jacobian_lorentzian,
@@ -4785,6 +4892,7 @@ def production_dispatchers() -> tuple[Any, ...]:
         _value_jacobian_damped,
         _value_jacobian_exponential,
         _value_jacobian_release_recapture,
+        _value_jacobian_saturation,
         _value_jacobian_radial,
         _value_jacobian_anisotropic,
         _prepare_serial,
@@ -4973,6 +5081,18 @@ def warm_production_cache() -> dict[str, Any]:
         np.asarray((infinity, infinity, infinity)),
     )
 
+    power = np.linspace(0.0, 10.0, 97, dtype=np.float64)
+    saturation = np.asarray((120.0, 2.0, 5.0), dtype=np.float64)
+    run_single(
+        "saturation",
+        saturation_descriptor(),
+        (power,),
+        _value_jacobian_saturation(power.reshape(1, -1), saturation)[0],
+        saturation,
+        np.asarray((0.0, positive, -infinity)),
+        np.full(3, infinity),
+    )
+
     release_time = np.linspace(0.0, 0.0001, 97, dtype=np.float64)
     release = np.asarray((0.9, 0.03, 5.0, 1.6e4), dtype=np.float64)
     release_values = _value_jacobian_release_recapture(
@@ -5114,6 +5234,7 @@ __all__ = [
     "production_dispatchers",
     "radial_gaussian_center_descriptor",
     "release_recapture_descriptor",
+    "saturation_descriptor",
     "self_check",
     "solve_compiled_batch",
     "solve_compiled_single",

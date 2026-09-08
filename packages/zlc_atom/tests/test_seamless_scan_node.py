@@ -159,8 +159,7 @@ class _FakeSource:
 class _Knob:
     """One installed device with one field, remembering every tune.
 
-    ``refuse_restore`` answers the pre-run value with something else, the
-    way an instrument that will not go back there would.
+    ``refuse_restore`` raises the device's refusal to accept the restore.
     """
 
     def __init__(self, level: float = 0.25, *, refuse_restore: bool = False) -> None:
@@ -172,7 +171,7 @@ class _Knob:
         assert field == "level"
         self.tunes.append(float(value))
         if self.refuse_restore and value == 0.25:
-            return float(value) + 1.0
+            raise RuntimeError("scripted device refused restore")
         self.level = float(value)
         return self.level
 
@@ -785,33 +784,63 @@ def test_an_armed_silent_chain_is_a_valid_scan_source() -> None:
     )
 
 
-def test_a_chain_that_is_not_armed_stays_refused_by_name() -> None:
-    """No camera measurement running at all: the scan refuses loudly and
-    tells the operator to start the chain, not the pulse."""
+@pytest.mark.parametrize("sealed_before_open", (False, True))
+def test_a_chain_that_is_not_armed_waits_for_its_first_real_publication(sealed_before_open) -> None:
+    """Pending fit-like outputs open without a fake value or a new registry.
 
-    from zlc_runtime import SignalDataPlane as _Plane
+    The arrival callback must attach before another exact event can be lost;
+    a prior sealed generation is never replayed as the new scan's first value.
+    """
+    from zlc_runtime import DatasetOutputDeclaration, LiveDatasetOutput
+    from zlc_atom.nodes.scan import watched_signal_source
 
-    plane = _Plane()
+    plane = SignalDataPlane()
+    declaration = DatasetOutputDeclaration("parameter", "test.parameter")
+    producer = SimpleNamespace(instance_id="late-fit", dataset_output_declarations=(declaration,),
+                               signal_key=lambda name: f"@logic/late-fit/{name}")
+    signal = producer.signal_key("parameter")
+    source = None
+
+    def publish(number):
+        schema = _source_schema(shots=1)
+        snapshot = owned_snapshot_from_arrays(schema, np.full(schema.physical_shape, float(number)),
+                                              number, stream_generation="source-input")
+        plane.commit_live(producer, {"parameter": LiveDatasetOutput(
+            declaration, snapshot, MonitorCoverage(1, 1))})
+        return plane.latest_publication(signal)
+
     try:
-        descriptor = {
-            value.api_name: value for value in discover_logic_nodes()
-        }["seamless_scan"]
-        with pytest.raises(ValueError, match="not armed"):
-            descriptor.instantiate(
-                sequencer=object(),
-                signal_plane=plane,
-                source_signal="nobody:frames",
-                pulse_resource=_pulse_resource(
-                    TEMPLATE_NAME, _template_sequence()
-                ),
-                plan=ScanPlan(
-                    (ScanAxis(BIAS_X_PORT, (0.0,)),)
-                ).to_tree(),
-                repeats=1,
-                shots_per_point=1,
-                settle_seconds=0.0,
-            )
+        if sealed_before_open:
+            plane.begin_generation(producer)
+            publish(999)
+            plane.seal_committed(producer)
+        callbacks = len(plane._publication_callbacks)
+        source = watched_signal_source(plane, signal)
+        source.open(_Context(), cycles=2)
+        source.arm()  # Still no new producer: return so the scan may FIRE.
+        checks = iter((False, True))
+        waiting = _Context()
+        waiting.cancel_requested = lambda: next(checks)
+        with pytest.raises(RuntimeError, match="cancelled"):
+            source.next_value(waiting)
+        plane.begin_generation(producer)
+        first, second = publish(1), publish(2)
+        for expected in (first, second):
+            value, publication = source.next_value(_Context())
+            assert publication is expected
+            assert value is expected.value(signal)
+        plane.seal_committed(producer)
+        with pytest.raises(RuntimeError, match="restarted during the scan"):
+            source.next_value(_Context())
+        source.close()
+        assert len(plane._publication_callbacks) == callbacks
+        plane.begin_generation(producer)
+        publish(3)
+        with pytest.raises(RuntimeError, match="not opened"):
+            source.next_value(_Context())
     finally:
+        if source is not None:
+            source.close()
         plane.close()
 
 
@@ -1052,16 +1081,19 @@ def test_stopping_at_the_question_stops_the_run() -> None:
         installation.close()
 
 
-def test_a_manual_axis_nested_inside_the_table_is_refused_by_name() -> None:
-    """A hand cannot reach into a fired table, so it cannot be nested there."""
+@pytest.mark.parametrize("port", ("manual:power", "device:rf:power_dbm"))
+def test_a_host_axis_is_moved_outside_the_board_table(port) -> None:
+    """Place host knobs outside the table without changing their coordinates."""
 
+    outer_axis = ScanAxis(port, (135.0, 247.0), "mVpp")
+    board_axis = ScanAxis(BIAS_X_PORT, (-256.0, 256.0))
     plan = ScanPlan(
-        (ScanAxis(BIAS_X_PORT, (-256.0, 256.0)), manual_axis("power", (1.0, 2.0)))
+        (board_axis, outer_axis)
     )
-    with pytest.raises(ValueError) as refusal:
-        split_outer_axes(plan)
-    assert "'power'" in str(refusal.value)
-    assert "above the board axes" in str(refusal.value)
+    outer, board = split_outer_axes(plan)
+    assert plan.axes == (outer_axis, board_axis)
+    assert outer == (outer_axis,) and board.axes == (board_axis,)
+    assert ScanPlan.from_tree(plan.to_tree()) == plan
 
 
 def test_a_plan_of_manual_axes_alone_has_no_table_to_play() -> None:
@@ -1078,6 +1110,8 @@ def _device_run(
     values: tuple[float, ...],
     repeats: int = 1,
     tunables=None,
+    unit="",
+    device_field="frequency_hz",
 ):
     """Walk a plan whose outer axis is an installed device knob.
 
@@ -1118,7 +1152,7 @@ def _device_run(
         plan = ScanPlan(
             (
                 ScanAxis(
-                    DEVICE_PARAM_FAMILY + "rf:frequency_hz", frequencies
+                    DEVICE_PARAM_FAMILY + "rf:" + device_field, frequencies, unit
                 ),
                 ScanAxis(BIAS_X_PORT, values),
             )
@@ -1290,7 +1324,7 @@ def test_a_device_axis_is_put_back_however_the_table_ends() -> None:
     assert sequencer.fires == 1
 
     knob, sequencer = _Knob(refuse_restore=True), _FakeSequencer(_template_sequence())
-    with pytest.raises(RuntimeError, match="not its pre-run value 0.25"):
+    with pytest.raises(RuntimeError, match="scripted device refused restore"):
         _device_seamless(knob, sequencer, _FakeSource()).execute(_Context())
 
 
@@ -1308,41 +1342,46 @@ def test_a_stop_received_while_the_board_goes_safe_fires_no_table() -> None:
     assert knob.tunes == [1.0, 0.25] and knob.level == 0.25
 
 
-def test_a_device_that_answers_differently_fails_the_run() -> None:
-    """tune() returns the read-back, and any difference is a refusal."""
+def test_a_device_readback_does_not_replace_the_authored_scan_coordinates() -> None:
+    """Setpoints stay in the selected unit; readback rounding is not refusal."""
 
     class _DriftingKnob:
         def tunable_fields(self):
             return (
                 TunableField(
                     metadata=AuthoringField(
-                        "frequency_hz",
+                        "power_dbm",
                         "float",
-                        "Frequency (Hz)",
+                        "Power",
                         0.0,
-                        minimum=0.0,
-                        maximum=1e10,
-                        unit="Hz",
+                        minimum=-40.0,
+                        maximum=20.0,
+                        unit="dBm",
                     ),
                     current=0.0,
                     live_write=True,
-                    dependency_group=("frequency_hz",),
+                    dependency_group=("power_dbm",),
                 ),
             )
 
         def tune(self, name, value):
             del name
-            return float(value) + 7.0
+            return float(value) + 0.000003
 
         def tunable_values(self):
-            return {"frequency_hz": 0.0}
+            return {"power_dbm": 0.0}
 
         def settings_provenance(self):
             return {"device_session_id": "drift", "settings_epoch": 0}
 
-    with pytest.raises(RuntimeError, match="applied"):
-        _device_run(
-            frequencies=(1e9,),
-            values=(-256.0,),
-            tunables={"rf": _DriftingKnob()},
-        )
+    wanted = tuple(float(value) for value in np.linspace(135.0, 247.0, 10))
+    value, record, _bench, _device, _claims = _device_run(
+        frequencies=wanted, values=(-256.0,),
+        tunables={"rf": _DriftingKnob()}, unit="mVpp", device_field="power_dbm",
+    )
+    axis = next(axis for axis in value.block.schema.point_domain.axes
+                if axis.name == "rf.power_dbm")
+    assert axis.unit == "mVpp"
+    assert tuple(axis.coordinates) == wanted
+    assert record["plan"]["axes"][0]["values"] == list(wanted)
+    assert record["plan"]["axes"][0]["unit"] == "mVpp"

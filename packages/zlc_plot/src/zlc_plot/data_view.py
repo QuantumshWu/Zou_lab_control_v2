@@ -8,7 +8,7 @@ topology from values.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import math
 from numbers import Integral
 from typing import Any, TypeAlias
@@ -19,6 +19,8 @@ from numpy.typing import ArrayLike, NDArray
 
 from zlc_data import (
     CoordinateScalar,
+    BlockId,
+    DatasetRevisionRef,
     DatasetSchema,
     LATEST_COORDINATE,
     OwnedSnapshot,
@@ -27,6 +29,10 @@ from zlc_data import (
 from zlc_data.snapshot_projection import (
     IndexedHistoryLayout,
     indexed_history_layout,
+    restrict_snapshot,
+    restricted_values,
+    selection_indices,
+    value_selection,
 )
 
 from .data_contract import (
@@ -816,6 +822,34 @@ class DataView:
     def coordinate(self, ref: AxisRef) -> CoordinateArray:
         return self._resolve(ref).coordinate
 
+    def _last_view(
+        self, *, keep: Sequence[AxisRef] = (), reduced: Sequence[AxisRef] | None = None
+    ) -> "DataView":
+        """Reuse the Dataset Scope cutter, including sparse empty selections."""
+
+        from .semantics import axis_choices_for_schema
+
+        refs = tuple(reduced) if reduced is not None else tuple(
+            ref for ref in axis_choices_for_schema(self._schema) if ref not in keep
+        )
+        if all(self._resolve(ref).contract.size == 1 for ref in refs):
+            return self
+        terms = {self._resolve(ref).contract.axis_id: LATEST_COORDINATE for ref in refs}
+        source = self._snapshot
+        identity = ",".join(sorted(str(axis) for axis in terms))
+        snapshot = restrict_snapshot(
+            source, value_selection(self._schema, terms),
+            reference_for=lambda schema: DatasetRevisionRef(
+                BlockId(f"{source.ref.block_id.value}|last:{identity}"),
+                source.ref.stream_generation, schema.fingerprint, source.ref.revision,
+            ),
+        )
+        return DataView(
+            snapshot, axis_display_units=self._axis_display_units,
+            value_display_unit=self._samples.value.display_unit,
+            unit_registry=self._unit_registry,
+        )
+
     def selection_subject(
         self,
         spec: PlotSpec,
@@ -894,7 +928,9 @@ class DataView:
             else self._resolve(y_ref).contract.coordinate_frame
         )
         scope: list[tuple[AxisRef, CoordinateScalar]] = []
-        for ref, authored in getattr(spec, "scope", ()):
+        from .semantics import projection_scope
+
+        for ref, authored in projection_scope(self._schema, spec):
             coordinate = (
                 canonical_coordinate_scalar(
                     self._resolve(ref).contract.coordinates[-1],
@@ -991,13 +1027,17 @@ class DataView:
             # The standard error IS the spread of the samples the MEAN pooled:
             # for any other reduction the quantity is undefined, and pretending
             # otherwise would attach a number with no meaning to the plot.
-            if aggregation is not Reduction.MEAN:
+            if aggregation.statistic is not Reduction.MEAN:
                 raise ValueError(
                     "uncertainty is defined for Reduction.MEAN only, "
                     f"not {aggregation.value!r}"
                 )
             if self._samples.value.canonical.dtype.kind == "c":
                 raise ValueError("uncertainty is undefined for complex values")
+        if aggregation is Reduction.LAST:
+            return self._last_view(keep=(x, *groups)).curve(
+                x, group_by=groups, aggregation=Reduction.MEAN, uncertainty=uncertainty,
+            )
         dense = self._dense_data_curve(x, groups, aggregation, uncertainty)
         if dense is not None:
             return dense
@@ -2401,6 +2441,8 @@ class DataView:
     ) -> ImageData:
         self.validate_image(x, y)
         aggregation = _validate_aggregation(aggregation)
+        if aggregation is Reduction.LAST:
+            return self._last_view(keep=(x, y)).image(x, y, aggregation=Reduction.MEAN)
         dense = self._dense_data_image(x, y, aggregation)
         if dense is not None:
             return dense
@@ -2912,6 +2954,15 @@ class DataView:
 
         if not isinstance(aggregation, Reduction):
             raise TypeError("aggregation must be Reduction")
+        if aggregation is Reduction.LAST:
+            terms = {self._resolve(ref).contract.axis_id: LATEST_COORDINATE for ref in refs}
+            indices = selection_indices(self._schema, value_selection(self._schema, terms))
+            scoped = self._last_view(reduced=refs)
+            return scoped._collapse_axes(
+                restricted_values(values, self._schema, *indices),
+                restricted_values(np.broadcast_to(valid, values.shape), self._schema, *indices),
+                refs, Reduction.MEAN,
+            )
         dimensions, coordinates = self._reduction_plan(refs)
         if not dimensions and not coordinates:
             return values, valid
@@ -3404,6 +3455,18 @@ class DataView:
         revision whether or not the band was switched on.
         """
 
+        if aggregation is Reduction.LAST:
+            from .semantics import axis_choices_for_schema
+            from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
+
+            retained = (
+                (AxisRef.point(PRIMARY_INDEX_AXIS_ID.value),) if self.has_primary_index
+                else tuple(ref for ref in axis_choices_for_schema(self._schema)
+                           if ref.domain.value == "repeat")
+            )
+            return self._last_view(keep=retained + (() if group is None else (group,))).rolling_history(
+                group=group, aggregation=Reduction.MEAN, uncertainty=uncertainty,
+            )
         if self.has_primary_index:
             return self._history_by_primary_index(
                 group=group,
@@ -3741,6 +3804,11 @@ class DataView:
         self, spec: FacetGridPlot, window: int
     ) -> "_FacetHistogramPlan":
         window = _history_window(window)
+        if spec.cell.reduction is Reduction.LAST:
+            scoped = self._last_view(reduced=spec.cell.reduced)
+            return scoped._facet_histogram_plan(
+                replace(spec, cell=replace(spec.cell, reduction=Reduction.MEAN)), window,
+            )
         key = (spec, window)
         remembered = self._facet_histogram_cache
         if remembered is not None and remembered[0] == key:
@@ -4040,6 +4108,19 @@ class DataView:
     ) -> FacetData:
         self.validate_facet(spec)
         cell = spec.cell
+        if cell.reduction is Reduction.LAST:
+            kept = tuple(ref for ref in (
+                spec.facet, getattr(cell, "x", None), getattr(cell, "y", None),
+                getattr(cell, "group", None), *(ref for ref, _value in spec.scope),
+            ) if ref is not None)
+            scoped = self._last_view(
+                keep=kept, reduced=cell.reduced if isinstance(cell, HistogramPlot) else None,
+            )
+            payload = scoped.facet(
+                replace(spec, cell=replace(cell, reduction=Reduction.MEAN)),
+                bins=bins, uncertainty=uncertainty, window=window,
+            )
+            return replace(payload, spec=spec)
         if not isinstance(cell, HistogramPlot) and bins is not None:
             raise ValueError("bins are accepted only for Histogram facet cells")
         if uncertainty and not isinstance(cell, CurvePlot):

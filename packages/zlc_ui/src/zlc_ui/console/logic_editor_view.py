@@ -86,7 +86,7 @@ class LogicEditorView(QtWidgets.QWidget):
         self._selector_layout = QtWidgets.QFormLayout(self._selector_frame)
         self._selector_layout.setContentsMargins(margin, margin, margin, margin)
         self._selector_layout.setSpacing(scaled_px(8, minimum=5))
-        self.source_combo: FluentTreeComboBox | None = None
+        self.source_combo: FluentComboBox | None = None
         self._body_layout.addWidget(self._selector_frame)
 
         empty = FormSpec(())
@@ -291,8 +291,13 @@ class LogicEditorView(QtWidgets.QWidget):
                 raise TypeError("logic editor source labels must be a mapping")
             if not isinstance(source_groups, Mapping):
                 raise TypeError("logic editor source groups must be a mapping")
+            bundle = bool(projection.get("source_bundle"))
+            combo_type = FluentComboBox if bundle else FluentTreeComboBox
+            if self.source_combo is not None and type(self.source_combo) is not combo_type:
+                self._retire_selector(self.source_combo)
+                self.source_combo = None
             if self.source_combo is None:
-                self.source_combo = FluentTreeComboBox()
+                self.source_combo = combo_type()
                 # ``activated`` covers both pick paths -- the combo's native
                 # activation and the tree's own leaf-click re-emission --
                 # exactly as the shared keyed-choice form handler wires it.
@@ -302,19 +307,25 @@ class LogicEditorView(QtWidgets.QWidget):
                 )
             # The one grouped signal chooser every other picker already uses:
             # a producer tree with keyed leaves, not a second flat list.
-            fill_grouped_choice_combo(
-                self.source_combo,
-                names=options,
-                sources={
-                    str(key): (str(value),)
-                    for key, value in source_groups.items()
-                },
-                metadata={},
-                labels={str(key): str(value) for key, value in source_labels.items()},
-                current=current,
-                none_label="(not selected)",
-                empty_source_label="signals",
-            )
+            if bundle:
+                self._fill_combo(
+                    self.source_combo, current, options, blank=True,
+                    labels=source_labels,
+                )
+            else:
+                fill_grouped_choice_combo(
+                    self.source_combo,
+                    names=options,
+                    sources={
+                        str(key): (str(value),)
+                        for key, value in source_groups.items()
+                    },
+                    metadata={},
+                    labels={str(key): str(value) for key, value in source_labels.items()},
+                    current=current,
+                    none_label="(not selected)",
+                    empty_source_label="signals",
+                )
         elif self.source_combo is not None:
             self._retire_selector(self.source_combo)
             self.source_combo = None
@@ -361,6 +372,7 @@ class LogicEditorView(QtWidgets.QWidget):
         options: tuple[str, ...],
         *,
         blank: bool,
+        labels: Mapping[str, object] | None = None,
     ) -> None:
         ordered: list[str] = []
         if blank:
@@ -369,7 +381,7 @@ class LogicEditorView(QtWidgets.QWidget):
             ordered.append(current)
         ordered.extend(item for item in options if item not in ordered)
         desired = tuple(
-            ((value if value else "(not selected)"), value)
+            ((str((labels or {}).get(value, value)) if value else "(not selected)"), value)
             for value in ordered
         )
         existing = tuple(
@@ -443,8 +455,13 @@ class LogicEditorView(QtWidgets.QWidget):
     def _source_changed(self, _index: int) -> None:
         if self.source_combo is None:
             return
+        value = (
+            self.source_combo.current_choice_key()
+            if isinstance(self.source_combo, FluentTreeComboBox)
+            else self.source_combo.currentData()
+        )
         self.draft_changed.emit(
-            {"source_signal": str(self.source_combo.current_choice_key() or "")}
+            {"source_signal": str(value or "")}
         )
 
     def _device_changed(self, argument_name: str, combo: FluentComboBox) -> None:

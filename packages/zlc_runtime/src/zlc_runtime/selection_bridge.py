@@ -55,7 +55,10 @@ from .dataset_output import (
 from .plane import GenerationSchemaAdvanced
 from .plane import SignalDataPlane, SignalPublication, SignalValue
 
+FIT_PARAMETER_CONTRACT = "zlc.selection.fit.parameter"
+
 __all__ = [
+    "FIT_PARAMETER_CONTRACT",
     "FacetCondition",
     "FitEventValue",
     "SelectionBridge",
@@ -1972,7 +1975,7 @@ class SelectionBridge:
         # is no second contract to decide between any more, because a
         # parameter carries its uncertainty rather than being published
         # beside one.
-        return "zlc.selection.fit.parameter"
+        return FIT_PARAMETER_CONTRACT
 
     def _selection_output_names(self, state: SelectionState) -> tuple[str, ...]:
         return tuple(
@@ -2450,7 +2453,7 @@ class SelectionBridge:
                 event.parameter_values[parameter],
                 schema,
                 value_validity,
-                "zlc.selection.fit.parameter",
+                FIT_PARAMETER_CONTRACT,
                 coverage,
                 event_record,
                 sigma=errors,

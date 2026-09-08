@@ -151,8 +151,7 @@ class _FakeSource:
 class _Knob:
     """One installed device with one field, remembering every tune.
 
-    ``refuse_restore`` answers the pre-run value with something else, the
-    way an instrument that will not go back there would.
+    ``refuse_restore`` raises the device's refusal to accept the restore.
     """
 
     def __init__(self, level: float = 0.25, *, refuse_restore: bool = False) -> None:
@@ -164,7 +163,7 @@ class _Knob:
         assert field == "level"
         self.tunes.append(float(value))
         if self.refuse_restore and value == 0.25:
-            return float(value) + 1.0
+            raise RuntimeError("scripted device refused restore")
         self.level = float(value)
         return self.level
 
@@ -481,7 +480,7 @@ def test_the_authored_settle_time_stops_the_board_before_every_point() -> None:
         )
 
 
-def test_device_scan_refuses_an_effective_value_different_from_its_coordinate() -> None:
+def test_device_scan_keeps_actual_readback_without_comparing_the_setpoint() -> None:
     class QuantizedDevice:
         def tune(self, _field: str, value: float) -> float:
             return float(value) + 0.5
@@ -498,23 +497,16 @@ def test_device_scan_refuses_an_effective_value_different_from_its_coordinate() 
 
     port_name = DEVICE_PARAM_FAMILY + "camera:gain_db"
     tunables = {"camera": QuantizedDevice()}
-    measurement = SteppedScanMeasurement(
-        sequencer=SimpleNamespace(safe=lambda: None),
-        source=object(),
-        sequence=_template_sequence(),
-        pulse_path=Path("scan_template.json"),
-        plan=ScanPlan((ScanAxis(port_name, (3.0,)),)),
-        ports=(ScanPort(port_name, "camera.gain_db", "", 0.0, 24.0),),
-        repeats=1,
-        shots_per_point=1,
-        settle_seconds=0.0,
-        gating="pulse_gated",
-        free_run_delay_seconds=0.0,
-        tunables=tunables,
-    )
+    knobs = ScanDeviceKnobs(tunables)
+    assert knobs.move(port_name, 3.0) == 3.5
+    knobs.restore()  # A rounded restore readback is not a device refusal.
 
-    with pytest.raises(RuntimeError, match="applied 3.5, not the scan coordinate 3.0"):
-        measurement._apply(_Context(), ScanDeviceKnobs(tunables), (3.0,), object())
+    from zlc_atom.nodes.scan.devices import tune_value
+
+    requested = -12.83089524390248
+    returned = -12.830898342271585
+    device = SimpleNamespace(tune=lambda _field, _value: returned)
+    assert tune_value(device, "ch1_power_dbm", requested) == returned
 
 
 def _device_stepped(knob: _Knob, sequencer: _FakeSequencer, source: _FakeSource):
@@ -570,7 +562,7 @@ def test_every_knob_the_scan_moved_is_put_back_however_the_scan_ends() -> None:
     assert sequencer.fires == 1, "Stop after the first point applied no second"
 
     knob, sequencer = _Knob(refuse_restore=True), _FakeSequencer(_template_sequence())
-    with pytest.raises(RuntimeError, match="not its pre-run value 0.25"):
+    with pytest.raises(RuntimeError, match="scripted device refused restore"):
         _device_stepped(knob, sequencer, _FakeSource()).execute(_Context())
     assert sequencer.safe_calls == 3, "the board still went safe before the knobs"
 

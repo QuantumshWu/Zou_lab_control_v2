@@ -195,7 +195,8 @@ def test_a_window_and_a_reduction_compose() -> None:
         np.testing.assert_allclose(np.sort(pool), np.sort(expected[row]))
 
 
-def test_the_grid_and_the_single_panel_reduce_the_same_way() -> None:
+@pytest.mark.parametrize("reduction", (Reduction.MEAN, Reduction.LAST))
+def test_the_grid_and_the_single_panel_reduce_the_same_way(reduction) -> None:
     """A faceted cell is the standalone kind, one slice at a time."""
 
     rng = np.random.default_rng(5)
@@ -204,14 +205,16 @@ def test_the_grid_and_the_single_panel_reduce_the_same_way() -> None:
     refs = (AxisRef.repeat("repeat"),)
 
     whole, whole_valid = view.histogram_pool(
-        reduce_axes=refs, aggregation=Reduction.MEAN
+        reduce_axes=refs, aggregation=reduction
     )
     single = np.sort(np.asarray(whole)[np.asarray(whole_valid)].reshape(-1))
 
     grid_pool, _ = view.facet_histogram_pool(
-        _grid(reduced=refs, reduction=Reduction.MEAN)
+        _grid(reduced=refs, reduction=reduction)
     )
     np.testing.assert_allclose(np.sort(grid_pool), single)
+    if reduction is Reduction.LAST:
+        np.testing.assert_allclose(single, np.sort(values[-1].reshape(-1)))
 
 
 def _two_column_view(values: np.ndarray) -> DataView:

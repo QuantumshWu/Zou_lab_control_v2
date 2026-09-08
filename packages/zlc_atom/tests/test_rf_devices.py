@@ -123,7 +123,8 @@ class _ScpiInstrument:
         if ":FUNCTION?" in upper:
             return registers["FUNC"]
         if ":VOLTAGE?" in upper:
-            return f"{registers['VOLT']:.4E}"
+            # Echo the memory register without adding test-only quantization.
+            return f"{registers['VOLT']:.17g}"
         if ":IMPEDANCE?" in upper:
             load = registers["LOAD"]
             return "INF" if load == float("inf") else f"{load:.4E}"
@@ -461,6 +462,24 @@ def test_a_channel_in_volts_is_converted_through_its_own_load() -> None:
     # The other channel is untouched, in its own unit.
     assert instrument.registers["2"]["UNIT"] == "DBM"
     assert source.tunable_values()["ch2_power_dbm"] == -30.0
+
+    # The reported failing value and a 135 -> 247 mVpp, ten-point sweep
+    # must survive SCPI serialization. Device readback remains the answer.
+    from zlc_atom.nodes.scan.devices import tune_value
+
+    points = [0.135 + index * (0.247 - 0.135) / 9 for index in range(10)]
+    requested_values = [-12.83089524390248] + [
+        10.0 * math.log10((vpp / (2.0 * math.sqrt(2.0))) ** 2 / 50.0 / 1e-3)
+        for vpp in points
+    ]
+    for requested in requested_values:
+        actual = tune_value(source, "ch1_power_dbm", requested)
+        sent = next(command for command in reversed(instrument.log)
+                    if command.startswith(":SOURce1:VOLTage "))
+        expected_vpp = math.sqrt(1e-3 * 10.0 ** (requested / 10.0) * 50.0) * (2.0 * math.sqrt(2.0))
+        assert float(sent.split()[-1]) == expected_vpp
+        assert actual == source.tunable_values()["ch1_power_dbm"]
+    source.close()
 
 
 def test_volts_into_a_high_z_load_is_named_not_guessed() -> None:

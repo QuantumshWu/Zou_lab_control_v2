@@ -10,7 +10,7 @@ from zlc_plot.fit import FitEngine, FitOptions, builtin_fit_models
 
 def _coordinates(model_id: str) -> tuple[np.ndarray, ...]:
     x = np.linspace(-1.3, 1.4, 41)
-    if model_id == "release_recapture":
+    if model_id in {"release_recapture", "saturation"}:
         return (np.linspace(0.0, 3.0, 41),)
     if model_id == "histogram_poisson_gaussian":
         # Photon histograms over the bins the state occupies: a bin the
@@ -49,6 +49,7 @@ def _parameters(model_id: str) -> np.ndarray:
         "damped_sine": np.array([1.2, 0.1, 0.4, 1.8, 0.3]),
         "exponential_decay": np.array([1.2, 0.1, 1.4]),
         "release_recapture": np.array([0.8, 0.05, 6.0, 0.4]),
+        "saturation": np.array([1.2, 0.8, 0.1]),
         "anisotropic_gaussian_center": np.array([1.2, 0.1, 1.1, 0.8, 0.2, -0.1]),
         "radial_gaussian_center": np.array([1.2, 0.1, 1.1, 0.2, -0.1]),
         "histogram_poisson_gaussian": np.array([1.2, 3.0, 0.6]),

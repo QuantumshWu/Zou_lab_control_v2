@@ -1162,6 +1162,7 @@ class CameraMeasurementNode:
                 commit_live=context.commit_live,
             )
             try:
+                context.report_ready()
                 while not context.cancel_requested():
                     capture.poll()
             finally:
@@ -1176,6 +1177,14 @@ class CameraMeasurementNode:
             owns_generation=False,
             should_stop=context.cancel_requested,
         )
+        try:
+            context.report_ready()
+        except BaseException:
+            # Stop can arrive between the completed arm and its acknowledgement.
+            # collect() has not taken ownership of cleanup yet.
+            capture.stopped = True
+            capture.close()
+            raise
 
         def commit_cycle(cycle: object, index: int) -> None:
             context.commit_live(

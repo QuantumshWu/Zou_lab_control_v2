@@ -75,6 +75,7 @@ from .logic import (
     finalize_logic_draft,
     make_host,
     stable_signal_key,
+    split_signal_key,
     task_input_summary,
 )
 from .panel_save import (
@@ -6187,7 +6188,7 @@ class ConsolePresenter:
         if producer is None:
             return
 
-        context = self._selection_context(publication)
+        context = self._selection_context(publication, signal)
         # Which gestures mean a producer's setting is the producer's own
         # declaration -- its selection mappings, matched by plot and
         # selector kind -- and nothing here narrows it.  A box on a curve
@@ -6228,12 +6229,12 @@ class ConsolePresenter:
         if producer is None:
             return
         applied = producer.descriptor.applied_selection_values(
-            selection, context=self._selection_context(publication)
+            selection, context=self._selection_context(publication, binding.state.signal)
         )
         if applied:
             self.update_logic_draft(producer_node_id, values=dict(applied))
 
-    def _selection_context(self, publication: object) -> dict[str, Any]:
+    def _selection_context(self, publication: object, signal_name: str = "") -> dict[str, Any]:
         """Public run-time device readback, as data only."""
 
         record = getattr(publication, "run_record", {})
@@ -6243,6 +6244,15 @@ class ConsolePresenter:
             else {}
         )
         context: dict[str, Any] = {"device_snapshots": snapshots}
+        if signal_name:
+            value = publication.value(signal_name)
+            if value is not None:
+                schema = value.canonical_schema or value.snapshot.block.schema
+                context["axis_units"] = {
+                    axis.axis_id.value: axis.unit or "1"
+                    for domain in (schema.repeat_domain, schema.point_domain, schema.cell_domain)
+                    for axis in domain.axes
+                }
         if isinstance(snapshots, Mapping) and len(snapshots) == 1:
             actual = next(iter(snapshots.values()))
             if isinstance(actual, Mapping):
@@ -6927,6 +6937,7 @@ class ConsolePresenter:
             source_options,
             publication is not None,
             armed,
+            self._acquisition_options(binding.node_id),
         )
 
     def _finalize_logic_binding(
@@ -6948,6 +6959,7 @@ class ConsolePresenter:
                 source_options=self._source_options(
                     binding.descriptor, binding.node_id
                 ),
+                acquisition_options=self._acquisition_options(binding.node_id),
             )
             binding.finalization_key = key
         return binding.finalization
@@ -7015,6 +7027,8 @@ class ConsolePresenter:
                 binding.descriptor,
                 workspace_root=str(self.session.workspace.root),
                 field_availability=finalization.field_availability,
+                acquisition_options=self._acquisition_options(binding.node_id),
+                acquisition_selected=str(binding.draft.values.get(binding.descriptor.acquisition_input) or ""),
             ),
             "form_values": form_values,
             "artifact_form_spec": project_artifact_inputs(
@@ -7031,9 +7045,11 @@ class ConsolePresenter:
             "source_required": bool(dataset_inputs(binding.descriptor)),
             "source_label": (
                 source_specs[0].name.replace("_", " ").title()
+                + (" · Signal bundle" if source_specs[0].select_bundle else "")
                 if source_specs
                 else "Signal"
             ),
+            "source_bundle": bool(source_specs and source_specs[0].select_bundle),
             "source_signal": binding.draft.source_signal,
             "source_options": source_options,
             "source_labels": source_labels,
@@ -7630,6 +7646,31 @@ class ConsolePresenter:
             if description.owner_id != consumer_node_id
             and accepts(description.contract_id)
         )
+        from zlc_runtime import FIT_PARAMETER_CONTRACT
+
+        if accepts(FIT_PARAMETER_CONTRACT):
+            builtin_models = None
+            for panel in self.panels.values():
+                if panel.panel_id == consumer_node_id or not panel.state.fit.get("model"):
+                    continue
+                description = panel.accepted_display
+                fields = fit_output_fields(
+                    panel.state.fit, () if description is None else description.fit_models
+                )
+                if not fields:
+                    # Declaration only: a configured fit has these parameter
+                    # names even before any Dataset/host/fit result exists.
+                    from zlc_plot.fit import builtin_fit_models
+
+                    if builtin_models is None:
+                        builtin_models = builtin_fit_models()
+                    fields = fit_output_fields(panel.state.fit, builtin_models)
+                for name, _label in fields:
+                    key = stable_signal_key(panel.panel_id, name)
+                    if panel.state.published_outputs.get(name, True):
+                        compatible.add(key)
+                    else:
+                        compatible.discard(key)
         return tuple(sorted(compatible))
 
     def _source_choices(
@@ -7665,6 +7706,28 @@ class ConsolePresenter:
                 key = stable_signal_key(binding.node_id, output.name)
                 if key in compatible:
                     groups.setdefault(key, binding.node_id)
+        for key in options:
+            parts = split_signal_key(key)
+            if parts is not None:
+                groups.setdefault(key, parts[0])
+        specs = dataset_inputs(descriptor)
+        if specs and specs[0].select_bundle:
+            # Only one atomic producer's outputs form a bundle. A panel's
+            # ROI and Fit may share a display heading but have different owners.
+            owners = {row.name: row.owner_id for row in descriptions}
+            bundles: dict[object, list[str]] = {}
+            for key in options:
+                owner = ("published", owners[key]) if key in owners else (
+                    "declared", groups.get(key, key)
+                )
+                bundles.setdefault(owner, []).append(key)
+            selected = self.logic[consumer_node_id].draft.source_signal
+            bundled: dict[str, str] = {}
+            for members in bundles.values():
+                anchor = selected if selected in members else members[0]
+                names = ", ".join(key.rsplit("/", 1)[-1] for key in members)
+                bundled[anchor] = f"{groups.get(anchor, anchor)} · {names}"
+            return tuple(bundled), bundled, {}
         return options, labels, groups
 
     def _build_logic_candidate(
@@ -7907,9 +7970,62 @@ class ConsolePresenter:
 
         extras = self._bench_offer_extras()
         extras["save_figure_artifact"] = self._save_figure_artifact
+        extras["restart_logic"] = self._restart_acquisition
         if self._build_figure_host is not None:
             extras["build_figure_host"] = self._build_figure_host
         return extras
+
+    def _acquisition_options(self, consumer: str) -> tuple[str, ...]:
+        return tuple(
+            binding.node_id for binding in self.logic.values()
+            if binding.node_id != consumer
+            and binding.descriptor.kind.value == "measurement"
+            and binding.descriptor.reports_ready
+        )
+
+    def _restart_acquisition(self, node_id: str, context: object) -> None:
+        """Ask the original Logic owner to restart, then wait off the UI thread."""
+
+        answer: Future = Future()
+
+        def start() -> None:
+            if not answer.set_running_or_notify_cancel():
+                return
+            try:
+                if context.cancel_requested() or self._closing:
+                    raise InterruptedError("scan stopped before acquisition restart")
+                if node_id not in self._acquisition_options(str(context.instance_id)):
+                    raise ValueError(f"{node_id!r} is not an available acquisition Measurement")
+                if not self.start_logic(node_id):
+                    raise RuntimeError(self.logic[node_id].draft_error or f"could not restart {node_id}")
+                binding = self.logic[node_id]
+                answer.set_result(binding.pending.host if binding.pending is not None else binding.host)
+            except BaseException as error:
+                answer.set_exception(error)
+
+        self._enqueue_panel_interaction(start)
+        while True:
+            try:
+                host = answer.result(timeout=0.05)
+                break
+            except _AnswerTimeout:
+                if context.cancel_requested() and answer.cancel():
+                    raise InterruptedError("scan stopped before acquisition restart")
+        try:
+            while not context.cancel_requested():
+                if host.wait_ready(0.05):
+                    return
+            raise InterruptedError("scan stopped while acquisition was preparing")
+        finally:
+            if context.cancel_requested():
+                def stop() -> None:
+                    binding = self.logic.get(node_id)
+                    if binding is not None and (
+                        binding.host is host or
+                        (binding.pending is not None and binding.pending.host is host)
+                    ):
+                        self.stop_logic(node_id)
+                self._enqueue_panel_interaction(stop)
 
     def _artifact_results(
         self,

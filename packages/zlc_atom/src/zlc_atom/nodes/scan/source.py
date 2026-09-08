@@ -27,6 +27,9 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping
+from threading import Event, RLock
+
+from zlc_data import canonical_text
 
 from zlc_runtime import SignalPublication, SignalValue
 from zlc_runtime.streams import SourceGenerationEnded, StreamEndedEarly
@@ -116,27 +119,15 @@ def watched_signal_source(
     signal_plane: object,
     source_signal: str,
 ) -> "PublishedSignalSource":
-    """The armed-signal gate both scan engines start from.
+    """Watch the declared source, including one with no generation/data yet.
 
-    A scan takes each point's value from a signal somebody else runs, so
-    that chain must be ARMED -- a live generation -- but not necessarily
-    publishing yet: an externally triggered camera publishes nothing until
-    this scan's own pulse fires, and zero frames before the first trigger
-    is exactly the aligned start.  What stays refused is a chain that is
-    not running at all, named so the operator starts it -- the scan never
-    starts anybody's camera and never judges frame alignment; both facts
-    belong to the chain's owner and to the trigger wiring.
+    Authoring checks the declaration's contract. A configured panel fit has
+    no runtime output until its first real frame is fitted, so the source may
+    wait for that publication while Scan fires its own pulse. It never starts
+    a camera or creates an initial fit value.
     """
 
-    name = str(source_signal)
-    if not signal_plane.is_generation_live(name):
-        raise ValueError(
-            f"the scan watches {name!r} for each point's value, and its "
-            "producer chain is not armed on this bench -- start the "
-            "measurement that publishes it (its pulse may stay stopped: "
-            "the scan fires its own)"
-        )
-    return PublishedSignalSource(signal_plane, name)
+    return PublishedSignalSource(signal_plane, source_signal)
 
 
 class PublishedSignalSource:
@@ -156,37 +147,44 @@ class PublishedSignalSource:
         signal_name: str,
     ) -> None:
         self.signal_plane = signal_plane
-        self.signal_name = str(signal_name)
+        self.signal_name = canonical_text(signal_name, "scan source signal")
         self._tap = None
+        self._lock = RLock()
+        self._arrival = Event()
+        self._opened = False
+        self._unsubscribe = None
 
     def open(self, context: object, *, cycles: int) -> None:
         """Subscribe before the board is loaded, so nothing played is missed.
 
-        The generation followed is whatever is armed NOW.  It need not have
-        published: an externally triggered chain publishes nothing until
-        this scan's own pulse fires its first trigger, and that silence is
-        the cleanest possible start -- frame one IS point one.  A
-        generation that ends afterwards stays loud through the tap's
-        ``StreamEndedEarly``.
+        An existing live generation binds now; a not-yet-published fit route
+        binds on its first real arrival. A sealed old route is not replayed.
+        Once bound, generation end stays loud through StreamEndedEarly.
         """
 
         del context, cycles
-        try:
-            _baseline, tap = self.signal_plane.follow_publications(
-                self.signal_name,
-                replay=False,
-            )
-        except SourceGenerationEnded:
-            raise RuntimeError(
-                "the source signal's generation ended before the scan began"
-            ) from None
-        self._tap = tap
+        self.close()
+        with self._lock:
+            self._opened = True
+            self._arrival.clear()
+            self._unsubscribe = self.signal_plane.subscribe_publications(self._bind_arrival)
+            self._bind_arrival(replay=False)
 
-    def _require_tap(self):
-        tap = self._tap
-        if tap is None:
-            raise RuntimeError("the scan source was not opened")
-        return tap
+    def _bind_arrival(self, *, replay: bool = True) -> None:
+        # Called synchronously at publication arrival, not by polling latest:
+        # the first event enters the existing ordered tap before another can
+        # replace it. The same lock closes the arrival/close race.
+        with self._lock:
+            if not self._opened or self._tap is not None:
+                return
+            try:
+                _baseline, tap = self.signal_plane.follow_publications(
+                    self.signal_name, replay=replay,
+                )
+            except (LookupError, SourceGenerationEnded):
+                return  # No live route yet; never adopt a sealed old fit.
+            self._tap = tap
+            self._arrival.set()
 
     def validate(
         self,
@@ -208,7 +206,12 @@ class PublishedSignalSource:
     def discard_pending(self) -> None:
         """Discard every publication completed before a sampling boundary."""
 
-        tap = self._require_tap()
+        with self._lock:
+            if not self._opened:
+                raise RuntimeError("the scan source was not opened")
+            tap = self._tap
+        if tap is None:
+            return
         while True:
             try:
                 tap.next(0.0)
@@ -224,10 +227,16 @@ class PublishedSignalSource:
     ) -> tuple[SignalValue, SignalPublication]:
         """The next value and the exact publication the scan consumed."""
 
-        tap = self._require_tap()
         while True:
             if context.cancel_requested():
                 raise RuntimeError("the scan was cancelled")
+            with self._lock:
+                if not self._opened:
+                    raise RuntimeError("the scan source was not opened")
+                tap = self._tap
+            if tap is None:
+                self._arrival.wait(0.1)
+                continue
             try:
                 publication = tap.next(0.1)
             except TimeoutError:
@@ -242,7 +251,13 @@ class PublishedSignalSource:
             return value, publication
 
     def close(self) -> None:
-        tap, self._tap = self._tap, None
+        with self._lock:
+            self._opened = False
+            tap, self._tap = self._tap, None
+            unsubscribe, self._unsubscribe = self._unsubscribe, None
+            self._arrival.set()
+        if unsubscribe is not None:
+            unsubscribe()
         if tap is not None:
             tap.close()
 

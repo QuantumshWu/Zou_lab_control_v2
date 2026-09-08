@@ -78,6 +78,7 @@ _BUILTIN_MODEL_IDS = (
     "radial_gaussian_center",
     "histogram_poisson_gaussian",
     "bimodal_poisson_gaussian",
+    "saturation",
 )
 _HISTOGRAM_MODELS = frozenset((
     "histogram_gaussian",
@@ -110,6 +111,7 @@ _BASE_PARAMETERS = {
     # 0.3-photon read noise would be a 0.5% share, unidentifiable outright.
     "histogram_poisson_gaussian": (410.0, 4.0, 1.2),
     "bimodal_poisson_gaussian": (1.0, 6.0, 200.0, 0.9, 320.0, 1.8),
+    "saturation": (120.0, 2.0, 5.0),
 }
 
 
@@ -166,7 +168,63 @@ def test_release_recapture_matches_lambert_reference_and_recovers_parameters() -
     np.testing.assert_allclose(fixed.parameter_values, (1.0, 0.0, *truth[2:]), rtol=2e-5)
 
 
+def test_saturation_response_jacobian_and_fixed_background_share_compiled_fit() -> None:
+    from scipy.optimize._numdiff import approx_derivative
+
+    engine = FitEngine()
+    model = engine.registry.get("saturation")
+    assert model.compiled_descriptor is not None
+    assert model.parameter_names == ("amplitude", "scale", "offset")
+    assert model.symbols == ("A", "s", "B")
+    assert r"\frac" not in model.formula
+    power = np.linspace(0.0, 10.0, 65)
+    truth = np.array((120.0, 2.0, 5.0))
+
+    def reference(parameters):
+        counts, half_power, background = parameters
+        return background + counts * power / (power + half_power)
+
+    expected = reference(truth)
+    np.testing.assert_allclose(model.evaluate((power,), truth), expected, rtol=2e-15)
+    np.testing.assert_allclose(
+        model.evaluate_jacobian((power,), truth),
+        approx_derivative(reference, truth, method="3-point"), rtol=2e-7, atol=1e-9,
+    )
+    np.testing.assert_array_equal(
+        model.evaluate_jacobian((np.array((0.0,)),), truth), ((0.0, 0.0, 1.0),)
+    )
+    assert model.evaluate((np.array((truth[1],)),), truth)[0] == truth[2] + truth[0] / 2
+    observations = expected + 0.02 * np.sin(np.arange(power.size))
+    fitted = engine.fit(model, (power,), expected)
+    assert fitted.success and fitted.covariance_valid
+    np.testing.assert_allclose(fitted.parameter_values, truth, rtol=1e-7)
+    for all_fixed in (False, True):
+        bounds = {
+            name: (value, value)
+            for name, value in zip(model.parameter_names, truth, strict=True)
+            if all_fixed or name == "offset"
+        }
+        single = engine.fit(model, (power,), observations, bounds=bounds)
+        batch, failures = engine.fit_batch(
+            model, ((power,), (power,)), (observations, observations), bounds=bounds
+        )
+        assert failures == (None, None)
+        for result in batch:
+            assert result is not None and result.success
+            _assert_fit_equal(result, single)
+            assert result.parameters["offset"] == truth[2]
+            assert "offset" in result.fixed_parameter_names
+    # The public model uses absolute linear power, not a shifted fit window.
+    positive = power[power > 1.0]
+    cropped = engine.fit(model, (positive,), reference(truth)[power > 1.0])
+    assert cropped.success
+    np.testing.assert_allclose(cropped.parameter_values, truth, rtol=1e-6)
+    assert np.isnan(model.evaluate((np.array((-1.0,)),), truth)).all()
+
+
 def _coordinates(model_id: str) -> tuple[np.ndarray, ...]:
+    if model_id == "saturation":
+        return (np.linspace(0.0, 10.0, 112),)
     if model_id == "release_recapture":
         return (np.linspace(0.0, 3.0, 112),)
     if model_id in _POISSON_MODELS:
@@ -216,6 +274,8 @@ def _cell_parameters(model_id: str, cell: int) -> np.ndarray:
         parameters[[0, 2]] += (0.2 * position, 0.5 * position)
     elif model_id == "release_recapture":
         parameters += np.asarray((0.04, 0.01, 0.5, 0.03)) * position
+    elif model_id == "saturation":
+        parameters += np.asarray((12.0, 0.4, 0.5)) * position
     elif model_id == "histogram_poisson_gaussian":
         parameters[[0, 1, 2]] += (60.0 * position, 0.8 * position, 0.15 * position)
     elif model_id == "bimodal_poisson_gaussian":
