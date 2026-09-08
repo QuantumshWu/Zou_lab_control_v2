@@ -75,6 +75,7 @@ from .logic import (
     finalize_logic_draft,
     make_host,
     stable_signal_key,
+    split_signal_key,
     task_input_summary,
 )
 from .panel_save import (
@@ -7031,9 +7032,11 @@ class ConsolePresenter:
             "source_required": bool(dataset_inputs(binding.descriptor)),
             "source_label": (
                 source_specs[0].name.replace("_", " ").title()
+                + (" · Signal bundle" if source_specs[0].select_bundle else "")
                 if source_specs
                 else "Signal"
             ),
+            "source_bundle": bool(source_specs and source_specs[0].select_bundle),
             "source_signal": binding.draft.source_signal,
             "source_options": source_options,
             "source_labels": source_labels,
@@ -7630,6 +7633,31 @@ class ConsolePresenter:
             if description.owner_id != consumer_node_id
             and accepts(description.contract_id)
         )
+        from zlc_runtime import FIT_PARAMETER_CONTRACT
+
+        if accepts(FIT_PARAMETER_CONTRACT):
+            builtin_models = None
+            for panel in self.panels.values():
+                if panel.panel_id == consumer_node_id or not panel.state.fit.get("model"):
+                    continue
+                description = panel.accepted_display
+                fields = fit_output_fields(
+                    panel.state.fit, () if description is None else description.fit_models
+                )
+                if not fields:
+                    # Declaration only: a configured fit has these parameter
+                    # names even before any Dataset/host/fit result exists.
+                    from zlc_plot.fit import builtin_fit_models
+
+                    if builtin_models is None:
+                        builtin_models = builtin_fit_models()
+                    fields = fit_output_fields(panel.state.fit, builtin_models)
+                for name, _label in fields:
+                    key = stable_signal_key(panel.panel_id, name)
+                    if panel.state.published_outputs.get(name, True):
+                        compatible.add(key)
+                    else:
+                        compatible.discard(key)
         return tuple(sorted(compatible))
 
     def _source_choices(
@@ -7665,6 +7693,28 @@ class ConsolePresenter:
                 key = stable_signal_key(binding.node_id, output.name)
                 if key in compatible:
                     groups.setdefault(key, binding.node_id)
+        for key in options:
+            parts = split_signal_key(key)
+            if parts is not None:
+                groups.setdefault(key, parts[0])
+        specs = dataset_inputs(descriptor)
+        if specs and specs[0].select_bundle:
+            # Only one atomic producer's outputs form a bundle. A panel's
+            # ROI and Fit may share a display heading but have different owners.
+            owners = {row.name: row.owner_id for row in descriptions}
+            bundles: dict[object, list[str]] = {}
+            for key in options:
+                owner = ("published", owners[key]) if key in owners else (
+                    "declared", groups.get(key, key)
+                )
+                bundles.setdefault(owner, []).append(key)
+            selected = self.logic[consumer_node_id].draft.source_signal
+            bundled: dict[str, str] = {}
+            for members in bundles.values():
+                anchor = selected if selected in members else members[0]
+                names = ", ".join(key.rsplit("/", 1)[-1] for key in members)
+                bundled[anchor] = f"{groups.get(anchor, anchor)} · {names}"
+            return tuple(bundled), bundled, {}
         return options, labels, groups
 
     def _build_logic_candidate(

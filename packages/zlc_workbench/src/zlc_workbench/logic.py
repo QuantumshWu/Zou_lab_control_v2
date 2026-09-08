@@ -432,15 +432,10 @@ def finalize_logic_draft(
                 # Nothing published and nothing armed: a processor follows,
                 # it does not fail.  An ARMED silent source starts now.
                 source_absent = True
-        elif not signal_plane.is_generation_live(source):
-            # A measurement watches FUTURE publications, so what it needs is
-            # an armed producer, not an existing Dataset: an externally
-            # triggered chain publishes nothing until the measurement's own
-            # pulse fires the first trigger.
-            issues.append(
-                f"{source!r} has no armed producer -- start the measurement "
-                "chain that publishes it (its pulse may stay stopped)"
-            )
+        # A Measurement may watch an already declared output before its
+        # producer reserves a generation (a panel fit before its first frame).
+        # Its source waits for real publications; admission does not start the
+        # camera or invent data. Undeclared/incompatible names were refused above.
     elif source:
         issues.append(f"{descriptor.api_name} has no Dataset source input")
 

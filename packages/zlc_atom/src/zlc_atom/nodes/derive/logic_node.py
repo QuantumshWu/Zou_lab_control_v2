@@ -104,7 +104,7 @@ LOGIC_NODE = LogicNodeDescriptor(
     "derive",
     NodeKind.PROCESSOR,
     DERIVE_SCHEMA,
-    input_specs=(DatasetInputSpec("a", None, "exact"),),
+    input_specs=(DatasetInputSpec("a", None, "exact", select_bundle=True),),
     declare_outputs=_draft_outputs,
     build=_build,
 )

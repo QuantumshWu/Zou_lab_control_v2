@@ -31,6 +31,9 @@ class DatasetInputSpec:
     #: are not independently selected or joined: choosing the primary signal
     #: uniquely selects these siblings from that exact event.
     sibling_outputs: tuple[str, ...] = ()
+    #: The operator selects a producer's atomic output bundle; one member
+    #: remains the existing Runtime subscription anchor, not a second input.
+    select_bundle: bool = False
 
     def __post_init__(self) -> None:
         if not self.name or (self.contract_id is not None and not self.contract_id):

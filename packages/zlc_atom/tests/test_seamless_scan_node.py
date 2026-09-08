@@ -785,33 +785,63 @@ def test_an_armed_silent_chain_is_a_valid_scan_source() -> None:
     )
 
 
-def test_a_chain_that_is_not_armed_stays_refused_by_name() -> None:
-    """No camera measurement running at all: the scan refuses loudly and
-    tells the operator to start the chain, not the pulse."""
+@pytest.mark.parametrize("sealed_before_open", (False, True))
+def test_a_chain_that_is_not_armed_waits_for_its_first_real_publication(sealed_before_open) -> None:
+    """Pending fit-like outputs open without a fake value or a new registry.
 
-    from zlc_runtime import SignalDataPlane as _Plane
+    The arrival callback must attach before another exact event can be lost;
+    a prior sealed generation is never replayed as the new scan's first value.
+    """
+    from zlc_runtime import DatasetOutputDeclaration, LiveDatasetOutput
+    from zlc_atom.nodes.scan import watched_signal_source
 
-    plane = _Plane()
+    plane = SignalDataPlane()
+    declaration = DatasetOutputDeclaration("parameter", "test.parameter")
+    producer = SimpleNamespace(instance_id="late-fit", dataset_output_declarations=(declaration,),
+                               signal_key=lambda name: f"@logic/late-fit/{name}")
+    signal = producer.signal_key("parameter")
+    source = None
+
+    def publish(number):
+        schema = _source_schema(shots=1)
+        snapshot = owned_snapshot_from_arrays(schema, np.full(schema.physical_shape, float(number)),
+                                              number, stream_generation="source-input")
+        plane.commit_live(producer, {"parameter": LiveDatasetOutput(
+            declaration, snapshot, MonitorCoverage(1, 1))})
+        return plane.latest_publication(signal)
+
     try:
-        descriptor = {
-            value.api_name: value for value in discover_logic_nodes()
-        }["seamless_scan"]
-        with pytest.raises(ValueError, match="not armed"):
-            descriptor.instantiate(
-                sequencer=object(),
-                signal_plane=plane,
-                source_signal="nobody:frames",
-                pulse_resource=_pulse_resource(
-                    TEMPLATE_NAME, _template_sequence()
-                ),
-                plan=ScanPlan(
-                    (ScanAxis(BIAS_X_PORT, (0.0,)),)
-                ).to_tree(),
-                repeats=1,
-                shots_per_point=1,
-                settle_seconds=0.0,
-            )
+        if sealed_before_open:
+            plane.begin_generation(producer)
+            publish(999)
+            plane.seal_committed(producer)
+        callbacks = len(plane._publication_callbacks)
+        source = watched_signal_source(plane, signal)
+        source.open(_Context(), cycles=2)
+        source.arm()  # Still no new producer: return so the scan may FIRE.
+        checks = iter((False, True))
+        waiting = _Context()
+        waiting.cancel_requested = lambda: next(checks)
+        with pytest.raises(RuntimeError, match="cancelled"):
+            source.next_value(waiting)
+        plane.begin_generation(producer)
+        first, second = publish(1), publish(2)
+        for expected in (first, second):
+            value, publication = source.next_value(_Context())
+            assert publication is expected
+            assert value is expected.value(signal)
+        plane.seal_committed(producer)
+        with pytest.raises(RuntimeError, match="restarted during the scan"):
+            source.next_value(_Context())
+        source.close()
+        assert len(plane._publication_callbacks) == callbacks
+        plane.begin_generation(producer)
+        publish(3)
+        with pytest.raises(RuntimeError, match="not opened"):
+            source.next_value(_Context())
     finally:
+        if source is not None:
+            source.close()
         plane.close()
 
 
