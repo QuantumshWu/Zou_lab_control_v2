@@ -3978,13 +3978,25 @@ class MatplotlibRenderer:
             # own extent, and a hidden Text reports a unit box, so hiding it
             # sent the title off the canvas and the next recording drew it
             # there.  Fully transparent, it lays out where it always does
-            # and leaves the background untouched.
+            # and leaves the background untouched.  Its bbox patch is not
+            # faded with it -- Text.draw paints the patch with the patch's
+            # own alpha, before the text's is even set -- so the patch is
+            # hidden as a patch is: the pulse timeline's slot badges were
+            # baked into the background at the press and stood still,
+            # discs without numbers, while the pan moved the badges.
             from matplotlib.text import Text
 
-            withheld = [
-                (artist, isinstance(artist, Text), artist.get_visible(), artist.get_alpha())
-                for _key, artist in dynamics
-            ]
+            withheld = []
+            for _key, artist in dynamics:
+                is_text = isinstance(artist, Text)
+                withheld.append(
+                    (artist, is_text, artist.get_visible(), artist.get_alpha())
+                )
+                patch = artist.get_bbox_patch() if is_text else None
+                if patch is not None:
+                    withheld.append(
+                        (patch, False, patch.get_visible(), patch.get_alpha())
+                    )
             try:
                 for artist, is_text, _visible, _alpha in withheld:
                     if is_text:

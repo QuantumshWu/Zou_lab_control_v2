@@ -844,3 +844,72 @@ def test_a_gesture_move_repaints_the_scene_a_compose_paints(spec_kind: str) -> N
     finally:
         session.close()
 
+
+
+@pytest.mark.parametrize("ratio", [1.0, 3.0])
+def test_a_confined_pan_of_a_pulse_timeline_moves_its_badges_with_it(ratio) -> None:
+    """A slot badge is a Text with a bbox patch: the disc behind the number.
+
+    The background a confined pan reuses is drawn with the dynamics
+    withheld, and a Text is withheld by fading it -- but Text.draw paints
+    the bbox patch with the patch's own alpha, so the discs were baked into
+    the background at the press and stood still, discs without numbers,
+    while the pan moved the badges.  The composed frame must be the frame a
+    full draw would give at every position of the drag.
+    """
+
+    from zlc_plot import (
+        PulseBlock,
+        PulseChannel,
+        PulseScanRegion,
+        PulseTimelineData,
+        pulse_timeline,
+    )
+    from zlc_plot.selectors import NumericRange
+
+    data = PulseTimelineData(
+        channels=(PulseChannel("laser", "Laser"), PulseChannel("trap", "Trap")),
+        blocks=(
+            PulseBlock("laser", 0.0, 4.0e-3, label="load"),
+            PulseBlock("trap", 1.0e-3, 9.0e-3, label="hold"),
+        ),
+        scan_regions=(
+            PulseScanRegion(1.0e-3, 2.0e-3, 1, kind="api"),
+            PulseScanRegion(5.0e-3, 6.0e-3, 2, kind="api"),
+            PulseScanRegion(7.0e-3, 8.0e-3, 3),
+        ),
+        time_unit="s",
+        total_duration=10.0e-3,
+    )
+    session = pulse_timeline(data, device_pixel_ratio=ratio)
+    try:
+        session.set_size("4x4")
+        session.rgba()
+        renderer = session._renderer
+        axes = renderer.primary_axes
+        y_low, y_high = sorted(map(float, axes.get_ylim()))
+        renderer.set_view_dragging(axes)
+        try:
+            for low in (1.0e-3, 2.5e-3, 4.0e-3):
+                session.set_viewport(
+                    NumericRange(low, low + 4.0e-3),
+                    NumericRange(y_low, y_high),
+                )
+                composed = np.array(session.rgba(), copy=True)
+                canvas = renderer.figure.canvas
+                renderer._native_draw(canvas)
+                drawn = np.asarray(canvas.buffer_rgba()).copy()
+                assert composed.shape == drawn.shape
+                difference = np.abs(
+                    composed.astype(np.int16) - drawn.astype(np.int16)
+                )
+                assert int(difference.max()) == 0, (
+                    "a confined pan of a pulse timeline differs from a full "
+                    "draw on %d pixels with the view at %g"
+                    % (int((difference.max(axis=2) > 0).sum()), low)
+                )
+                renderer._composed_generation = -1
+        finally:
+            renderer.set_view_dragging(None)
+    finally:
+        session.close()
