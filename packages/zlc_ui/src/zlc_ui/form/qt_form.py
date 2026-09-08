@@ -30,9 +30,11 @@ from .form import (
 )
 
 from ..fluent import (
+    ACCENT,
+    ORANGE,
+    FluentButton,
     FluentComboBox,
     FluentCycleComboBox,
-    FluentCodeEdit,
     FluentDoubleSpinBox,
     FluentLineEdit,
     FluentPathEdit,
@@ -268,39 +270,181 @@ class _TextHandler(_StaticHandler):
         return not widget.text().strip()
 
 
-class _MultilineHandler(_TextHandler):
-    """Text that spans lines -- a program of expressions -- in the house
-    code editor.  The value rules are text's; only the box differs, and it
-    is live as it is typed like every other kind."""
+class _RowsEditor(QtWidgets.QWidget):
+    """Rows of controls, one per column, built one row at a time.
 
-    def build(self, field, value, on_change, context=None):
-        del context
-        edit = FluentCodeEdit()
-        edit.setPlaceholderText(field.description)
-        edit.setToolTip(field.description)
-        edit.setMinimumHeight(scaled_px(96, minimum=72))
-        edit.setSizePolicy(
+    Add puts an empty row on the form and the cursor in its first box; a
+    row's own × takes it away.  A list the operator assembles entry by
+    entry, never a block of text with a syntax to get right -- and every
+    cell is the ordinary control of its column's kind, wired live like
+    every other control on the form.
+    """
+
+    def __init__(
+        self,
+        field: FormFieldProps,
+        on_change: Callable[[], None],
+        context: FormRuntimeContext | None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._field = field
+        self._on_change = on_change
+        self._context = context
+        #: ``(row, cells by column key, remove button)`` per row, in order.
+        self._rows: list[
+            tuple[QtWidgets.QWidget, dict[str, QtWidgets.QWidget], FluentButton]
+        ] = []
+        self.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred
         )
-        self.write(field, edit, value)
-        _connect_change(edit.textChanged, on_change)
-        return edit
+        gap = scaled_px(4, minimum=3)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(gap)
+        self._rows_layout = QtWidgets.QVBoxLayout()
+        self._rows_layout.setContentsMargins(0, 0, 0, 0)
+        self._rows_layout.setSpacing(gap)
+        layout.addLayout(self._rows_layout)
+        self.add_button = FluentButton("Add", color=ACCENT)
+        self.add_button.setToolTip(field.description)
+        self.add_button.clicked.connect(self._add_pressed)
+        tail = QtWidgets.QHBoxLayout()
+        tail.setContentsMargins(0, 0, 0, 0)
+        tail.addWidget(self.add_button)
+        tail.addStretch(1)
+        layout.addLayout(tail)
+
+    def rows(self) -> tuple[dict[str, object], ...]:
+        return tuple(
+            {
+                column.key: FORM_WIDGET_HANDLERS[column.kind].read(
+                    column, cells[column.key]
+                )
+                for column in self._field.columns
+            }
+            for _row, cells, _remove in self._rows
+        )
+
+    def set_rows(self, rows: tuple[Mapping[str, object], ...]) -> None:
+        for row, _cells, _remove in self._rows:
+            self._retire(row)
+        self._rows.clear()
+        for values in rows:
+            self._append(values)
+
+    def refresh(self) -> None:
+        for _row, cells, _remove in self._rows:
+            for column in self._field.columns:
+                FORM_WIDGET_HANDLERS[column.kind].refresh(
+                    column, cells[column.key], self._context
+                )
+
+    def _retire(self, row: QtWidgets.QWidget) -> None:
+        self._rows_layout.removeWidget(row)
+        row.hide()
+        row.deleteLater()
+
+    def _append(
+        self, values: Mapping[str, object]
+    ) -> dict[str, QtWidgets.QWidget]:
+        row = QtWidgets.QWidget(self)
+        row.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred
+        )
+        beside = QtWidgets.QHBoxLayout(row)
+        beside.setContentsMargins(0, 0, 0, 0)
+        beside.setSpacing(scaled_px(6, minimum=4))
+        cells: dict[str, QtWidgets.QWidget] = {}
+        for column in self._field.columns:
+            widget = FORM_WIDGET_HANDLERS[column.kind].build(
+                column,
+                values.get(column.key, column.default),
+                self._on_change,
+                self._context,
+            )
+            cells[column.key] = widget
+            beside.addWidget(widget, 1)
+        remove = FluentButton("×", color=ORANGE)
+        remove.setFixedWidth(scaled_px(30, minimum=24))
+        remove.setToolTip("Remove this row")
+        remove.clicked.connect(lambda _checked=False, row=row: self._remove(row))
+        beside.addWidget(remove, 0)
+        self._rows.append((row, cells, remove))
+        self._rows_layout.addWidget(row)
+        return cells
+
+    def _add_pressed(self) -> None:
+        cells = self._append({})
+        first = next(iter(cells.values()), None)
+        if first is not None:
+            first.setFocus(QtCore.Qt.OtherFocusReason)
+        self._on_change()
+
+    def _remove(self, row: QtWidgets.QWidget) -> None:
+        index = next(
+            index for index, (candidate, _cells, _remove) in enumerate(self._rows)
+            if candidate is row
+        )
+        del self._rows[index]
+        self._retire(row)
+        self._on_change()
+
+
+class _RowsHandler(FormWidgetHandler):
+    """A tuple of rows, each a mapping of the field's columns; every cell
+    holds its column's typed value by that column's own handler."""
+
+    def normalize(self, field: FormFieldProps, value: object) -> tuple[dict[str, object], ...]:
+        if value is None:
+            # A required list of rows may stand empty in a draft -- the form
+            # exists to fill it -- and reads as a vacancy, like empty text.
+            return ()
+        if isinstance(value, (str, bytes, Mapping)) or not isinstance(
+            value, (list, tuple)
+        ):
+            raise _value_error(field, "value must be rows")
+        rows = []
+        for index, row in enumerate(value, 1):
+            if not isinstance(row, Mapping):
+                raise _value_error(field, f"row {index} must be a mapping of its columns")
+            unknown = set(row) - {column.key for column in field.columns}
+            if unknown:
+                raise _value_error(field, f"row {index} has no column {sorted(unknown)!r}")
+            rows.append(
+                {
+                    column.key: FORM_WIDGET_HANDLERS[column.kind].normalize(
+                        column, row.get(column.key, column.default)
+                    )
+                    for column in field.columns
+                }
+            )
+        return tuple(rows)
+
+    def build(self, field, value, on_change, context=None):
+        editor = _RowsEditor(field, on_change, context)
+        editor.setToolTip(field.description)
+        editor.set_rows(self.normalize(field, value))
+        return editor
 
     def read(self, field, widget):
         del field
-        return widget.toPlainText()
+        return widget.rows()
 
     def write(self, field, widget, value):
-        # Only a DIFFERENT text is written: setPlainText moves the caret to
-        # the top, and a projection that wrote the same program back on
-        # every keystroke would fight the operator for the cursor.
-        text = self.normalize(field, value)
-        if widget.toPlainText() != text:
-            widget.setPlainText(text)
+        # Only DIFFERENT rows are rebuilt: a projection that repeats what
+        # the boxes hold would replace the box the operator is typing in.
+        rows = self.normalize(field, value)
+        if widget.rows() != rows:
+            widget.set_rows(rows)
 
     def is_empty(self, field, widget):
         del field
-        return not widget.toPlainText().strip()
+        return not widget.rows()
+
+    def refresh(self, field, widget, context=None):
+        del field, context
+        widget.refresh()
 
 
 class _IntHandler(_StaticHandler):
@@ -740,7 +884,7 @@ class _KeyedChoiceHandler(FormWidgetHandler):
 FORM_WIDGET_HANDLERS: Mapping[str, FormWidgetHandler] = MappingProxyType(
     {
         "text": _TextHandler(),
-        "multiline": _MultilineHandler(),
+        "rows": _RowsHandler(),
         "int": _IntHandler(),
         "float": _FloatHandler(),
         "number": _NumberHandler(),
@@ -767,8 +911,8 @@ def _widget_family(field: FormFieldProps) -> str:
         return f"{prefix}line-edit:{field.unit}"
     if field.kind == "text":
         return prefix + "line-edit"
-    if field.kind == "multiline":
-        return "code-edit"
+    if field.kind == "rows":
+        return "rows"
     if field.kind == "choice":
         return prefix + (
             "choice-cycle" if field.cycle_choices is not None else "choice"

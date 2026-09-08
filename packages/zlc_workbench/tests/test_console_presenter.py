@@ -4766,10 +4766,10 @@ def test_a_derive_publishes_the_counts_of_the_occupied_sites(
 ) -> None:
     """The console runs a derive as it runs any processor.  Bound to the
     occupancy's counts, it reads the verdicts from the same publication,
-    and every line of its program publishes under its own name: the photon
+    and every one of its signals publishes under its own name: the photon
     counts of the sites frame 1 judged occupied, valid there and nowhere
     else, open on a histogram panel like any other signal, and how many
-    sites that was is a second signal beside it -- program and all in
+    sites that was is a second signal beside it -- signals and all in
     their record."""
 
     import numpy as np
@@ -4816,8 +4816,8 @@ def test_a_derive_publishes_the_counts_of_the_occupied_sites(
     _settle_logic(presenter, occupancy_id)
     counts_signal = stable_signal_key("occupancy", "counts")
     program = (
-        "bright = a.counts.frame(1).where(a.occupied.frame(1))\n"
-        "how_many = a.occupied.frame(1).count('site')"
+        {"name": "bright", "expression": "a.counts.frame(1).where(a.occupied.frame(1))"},
+        {"name": "how_many", "expression": "a.occupied.frame(1).count('site')"},
     )
     derive_id = presenter.add_logic(
         "derive",

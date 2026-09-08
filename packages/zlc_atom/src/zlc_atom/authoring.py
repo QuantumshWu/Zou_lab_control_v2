@@ -50,15 +50,49 @@ class AuthoringField:
     #: KNOB -- an RF frequency is hertz whoever reads it -- and a scan axis
     #: built over the field publishes this unit into its dataset column.
     unit: str | None = None
-    #: What the field wants written, for the operator: the syntax of a
-    #: program, the shape of a pair.  Shown where the value is typed.
+    #: What the field wants written, for the operator: the syntax of an
+    #: expression, the shape of a pair.  Shown where the value is typed.
     description: str = ""
+    #: For a ``rows`` field: the fields of one row.  Its value is a tuple
+    #: of rows, each a mapping of these names, built one row at a time --
+    #: a derive's signals -- and every row is projected by these fields
+    #: exactly as a whole draft is by its schema.
+    columns: tuple["AuthoringField", ...] = ()
 
     def __post_init__(self) -> None:
         if not self.name or not self.value_type or not self.label:
             raise ValueError("authoring fields require name, value_type, and label")
         if not isinstance(self.description, str):
             raise TypeError("authoring field description must be text")
+        columns = tuple(self.columns)
+        if str(self.value_type) == "rows":
+            if not columns:
+                raise ValueError(f"rows field {self.name!r} needs the columns of a row")
+            if any(not isinstance(column, AuthoringField) for column in columns):
+                raise TypeError("authoring field columns must contain AuthoringField values")
+            if any(str(column.value_type) == "rows" for column in columns):
+                raise ValueError(f"rows field {self.name!r} cannot nest rows in a column")
+            names = tuple(column.name for column in columns)
+            if len(set(names)) != len(names):
+                raise ValueError(f"rows field {self.name!r} column names must be unique")
+            if (
+                self.choices
+                or self.unit is not None
+                or self.minimum is not None
+                or self.maximum is not None
+            ):
+                raise ValueError(
+                    f"rows field {self.name!r} takes neither choices, bounds nor a unit"
+                )
+            default = () if self.default is None else self.default
+            if isinstance(default, (str, bytes, Mapping)) or not isinstance(
+                default, (list, tuple)
+            ) or any(not isinstance(row, Mapping) for row in default):
+                raise TypeError(f"rows field {self.name!r} default must be rows")
+            object.__setattr__(self, "default", tuple(dict(row) for row in default))
+        elif columns:
+            raise ValueError(f"field {self.name!r} is not rows and declares columns")
+        object.__setattr__(self, "columns", columns)
         if self.unit is not None:
             if not isinstance(self.unit, str) or not self.unit.strip():
                 raise ValueError("authoring field unit must be non-empty text or None")
@@ -231,15 +265,23 @@ class AuthoringSchema:
         result: dict[str, Any] = {}
         complete = True
         for field in self.fields:
-            value = _project_value(field, supplied.get(field.name, field.default))
-            if value is None and str(field.value_type) in (
-                "str", "text", "multiline", "folder"
-            ):
+            value = _project_value(
+                field,
+                supplied.get(field.name, field.default),
+                require_complete=require_complete,
+            )
+            if value is None and str(field.value_type) in ("str", "text", "folder"):
                 # One vacancy spelling per type family: an absent text is the
                 # empty string everywhere (form widgets hold "" natively).
                 value = ""
+            if value is None and str(field.value_type) == "rows":
+                value = ()
             vacant = value is None or (
-                isinstance(value, str) and field.required and not value.strip()
+                field.required
+                and (
+                    (isinstance(value, str) and not value.strip())
+                    or (isinstance(value, tuple) and not value)
+                )
             )
             if vacant and field.required:
                 if require_complete:
@@ -263,10 +305,29 @@ class AuthoringSchema:
         return result
 
 
-def _project_value(field: AuthoringField, value: object) -> object:
+def _project_value(
+    field: AuthoringField, value: object, *, require_complete: bool
+) -> object:
     if value is None:
         return None
     declared = str(field.value_type)
+    if declared == "rows":
+        if isinstance(value, (str, bytes, Mapping)) or not isinstance(
+            value, (list, tuple)
+        ):
+            raise TypeError(f"{field.label} must be a list of rows")
+        columns = AuthoringSchema(field.columns)
+        rows = []
+        for index, row in enumerate(value, 1):
+            if not isinstance(row, Mapping):
+                raise TypeError(
+                    f"{field.label} row {index} must be a mapping of its columns"
+                )
+            try:
+                rows.append(columns._project(row, require_complete=require_complete))
+            except (TypeError, ValueError) as error:
+                raise type(error)(f"{field.label} row {index}: {error}") from None
+        return tuple(rows)
     if declared == "numeric_tuple":
         try:
             parts = tuple(
@@ -319,7 +380,7 @@ def _project_value(field: AuthoringField, value: object) -> object:
             if normalized in {"false", "0", "no", "off"}:
                 return False
         raise TypeError(f"{field.label} must be true or false")
-    if declared in {"str", "text", "multiline", "choice", "resource", "folder"}:
+    if declared in {"str", "text", "choice", "resource", "folder"}:
         if not isinstance(value, str):
             if declared not in {"choice"}:
                 raise TypeError(f"{field.label} must be text")

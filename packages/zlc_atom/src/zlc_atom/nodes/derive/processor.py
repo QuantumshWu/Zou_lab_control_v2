@@ -1,8 +1,8 @@
-"""Publish every named line of one program over one publication."""
+"""Publish every named signal of one derive over one publication."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 import numpy as np
 from zlc_data import DatasetSchema, owned_snapshot_from_arrays
@@ -14,52 +14,57 @@ from zlc_runtime import (
     SignalValue,
 )
 
-from .expression import Operand, evaluate, published_names, referenced_outputs
+from .expression import Operand, evaluate, referenced_outputs, signal_rows
 
 
-def declared_outputs(program: str) -> tuple[DatasetOutputDeclaration, ...]:
-    """What one program publishes: one output per named line, in order.
+def declared_outputs(
+    rows: Sequence[Mapping[str, object]],
+) -> tuple[DatasetOutputDeclaration, ...]:
+    """What the signals publish: one output per row, in order, by its name.
 
-    The name is the line's own; the contract says a derive computed it.  A
-    panel leasing an output's history is what makes it a bounded dataset,
-    so every line is indexed by its source, as the bound signal is.
+    The contract says a derive computed it.  A panel leasing an output's
+    history is what makes it a bounded dataset, so every signal is indexed
+    by its source, as the bound signal is.
     """
 
     return tuple(
-        DatasetOutputDeclaration(name, f"derive.{name}", index_by_source=True)
-        for name in published_names(program)
+        DatasetOutputDeclaration(
+            row["name"], f"derive.{row['name']}", index_by_source=True
+        )
+        for row in signal_rows(rows)
     )
 
 
 class DeriveProcessor:
-    """Evaluate one program on every publication of the bound producer.
+    """Evaluate the signals on every publication of the bound producer.
 
-    The inputs are the producer's outputs the program names: the bound
+    The inputs are the producer's outputs the expressions name: the bound
     signal itself and its siblings from the same publication, so they are
     aligned by construction -- one event, one answer, one exact causal
-    parent.  A program over two producers is a join, which this runtime's
-    lineage does not carry; it is not something this node quietly
+    parent.  An expression over two producers is a join, which this
+    runtime's lineage does not carry; it is not something this node quietly
     approximates.
     """
 
     def __init__(
         self,
         *,
-        expressions: str,
+        expressions: Sequence[Mapping[str, object]],
         primary_output: str | None,
         producer: str = "derive",
     ) -> None:
         self.instance_id = str(producer).strip()
         if not self.instance_id:
             raise ValueError("producer must be non-empty")
-        self.expressions = str(expressions).strip()
+        #: The signals as rows of name and expression, admitted.
+        self.expressions = signal_rows(expressions)
         referenced = referenced_outputs(self.expressions)
         if primary_output is not None and primary_output not in referenced:
             raise ValueError(
-                f"the bound output {primary_output!r} is not one the program reads"
+                f"the bound output {primary_output!r} is not one the signals read"
             )
         self.primary_output = primary_output
-        #: The producer outputs the program reads beside the bound one:
+        #: The producer outputs the signals read beside the bound one:
         #: what the host must fetch from the same publication.
         self.dataset_input_siblings = tuple(
             name for name in referenced if name != primary_output
@@ -131,8 +136,9 @@ class DeriveProcessor:
         primary: SignalValue,
         by_output: Mapping[str, SignalValue],
     ) -> dict[str, DatasetSchema]:
-        """The complete-run schema of every line -- the same program typed
-        over the bound signal's canonical schema.  Only a finite run has one."""
+        """The complete-run schema of every signal -- the same expressions
+        typed over the bound signal's canonical schema.  Only a finite run
+        has one."""
 
         if not isinstance(primary.coverage, DatasetCoverage):
             return {}
@@ -163,8 +169,8 @@ class DeriveProcessor:
     ]:
         """Where one result sits in its run, from where the bound signal sits.
 
-        A line may collapse the point domain (``.frame(k)``); the run's cell
-        count shrinks by the same factor.
+        A signal may collapse the point domain (``.frame(k)``); the run's
+        cell count shrinks by the same factor.
         """
 
         source_schema = primary.schema

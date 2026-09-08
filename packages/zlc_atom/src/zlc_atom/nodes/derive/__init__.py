@@ -1,4 +1,4 @@
-"""Derive processor: one program of named expressions over one publication."""
+"""Derive processor: named signals, each an expression, over one publication."""
 
 from .expression import (
     ExpressionError,

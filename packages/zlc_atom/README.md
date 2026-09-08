@@ -281,11 +281,12 @@ occupancy-rate output. The generic
 `zlc_plot` overlay declaration and same-run geometry document let any
 compatible presenter join `occupied` to `frame_judged` without knowing the
 Occupancy plugin. Two processors build on that classification without
-adding a second one: `derive` runs a program of named expressions over the
-publication -- `agree = a.occupied.frame(0) == a.occupied.frame(2)` and
-`counts = a.counts.frame(1).where(agree)` keep one frame's counts only where
-two other frames' verdicts agree, each line published under its own name --
-and `frame_survival` asks, for every forward frame pair
+adding a second one: `derive` publishes named signals over the publication,
+each a row of a name and an expression added one at a time -- `agree`:
+`a.occupied.frame(0) == a.occupied.frame(2)` and `counts`:
+`a.counts.frame(1).where(agree)` keep one frame's counts only where two other
+frames' verdicts agree, each signal published under its own name -- and
+`frame_survival` asks, for every forward frame pair
 of a multi-frame cycle, whether a site an earlier frame saw loaded is still
 seen by a later one -- the pairs form one labelled `READOUT_EVENT` Point axis
 (`0-1`, `0-2`, `1-2` for three frames), each pair's value is the later verdict

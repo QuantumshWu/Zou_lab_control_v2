@@ -1156,57 +1156,70 @@ def test_a_form_opens_on_the_values_it_is_given_and_an_int_has_no_width() -> Non
     assert form.read_value("n") == 2**40, "clamped exactly, in integers"
 
 
-def test_a_multiline_field_edits_a_program_in_the_code_editor() -> None:
-    """A field that spans lines -- a program of expressions -- is edited in
-    the house code editor: it applies as it is typed like every other kind,
-    reads back with its newlines, and a projection that carries the same
-    program back does not move the caret, because nothing is rewritten.
-    """
+def test_a_rows_field_is_built_one_row_at_a_time() -> None:
+    """A field of rows -- a derive's signals -- is edited as rows: Add puts
+    an empty row on the form with a box per column and the cursor in its
+    first box, × takes a row away, every keystroke applies like every other
+    kind, and a projection that carries the same rows back does not rebuild
+    the boxes -- nor does one carrying different rows while the operator is
+    inside one of them."""
 
     _run_qt(
         """
 import zou_lab_control
-from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
+from PyQt5 import QtCore, QtTest, QtWidgets
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import FluentCodeEdit
+from zlc_ui.fluent import FluentLineEdit
 from zlc_ui.form.form import FormFieldProps, FormSpec
 from zlc_ui.form.qt_form import FluentParameterForm
 
 app = ensure_qt_app(['test'])
+columns = (
+    FormFieldProps('name', 'text', 'Name', default='', required=True, description='name of the signal'),
+    FormFieldProps('expression', 'text', 'Expression', default='', required=True, description='expression over a.<output>'),
+)
 spec = FormSpec((
-    FormFieldProps(
-        'expressions', 'multiline', 'Expressions', required=True,
-        description='one per line: name = expression',
-    ),
+    FormFieldProps('expressions', 'rows', 'Signals', default=(), required=True, columns=columns),
 ))
-first = 'agree = a.occupied.frame(0) == a.occupied.frame(2)'
-form = FluentParameterForm(spec, {'expressions': first})
-window = QtWidgets.QMainWindow(); window.setCentralWidget(form); window.show(); app.processEvents()
-edit = form._widgets['expressions']
-assert isinstance(edit, FluentCodeEdit)
-assert edit.placeholderText() == 'one per line: name = expression'
+first = {'name': 'agree', 'expression': 'a.occupied.frame(0) == a.occupied.frame(2)'}
+form = FluentParameterForm(spec, {'expressions': (first,)})
+window = QtWidgets.QMainWindow(); window.setCentralWidget(form); window.show()
+window.activateWindow(); app.processEvents()
+editor = form.widget_for('expressions')
+assert form.read_all() == {'expressions': (first,)}
 seen = []; form.changed.connect(seen.append)
-edit.setFocus(QtCore.Qt.MouseFocusReason)
-edit.moveCursor(QtGui.QTextCursor.End)
-QtTest.QTest.keyClick(edit, QtCore.Qt.Key_Return)
-QtTest.QTest.keyClicks(edit, 'counts = a.counts.frame(1).where(agree)')
-app.processEvents()
-assert seen.count('expressions') >= 2, seen
-program = first + '\\ncounts = a.counts.frame(1).where(agree)'
-assert form.read_all() == {'expressions': program}, form.read_all()
 
-# The operator has left the box; the projection of the same program lands
-# without rewriting it, so the caret stays at the end where they left it.
-edit.clearFocus(); app.processEvents()
-position = edit.textCursor().position()
-assert position == len(program)
-form.reconcile(spec, {'expressions': program})
+editor.add_button.click(); app.processEvents()
+assert seen == ['expressions'], seen
+_row, cells, remove = editor._rows[1]
+assert isinstance(cells['name'], FluentLineEdit)
+assert QtWidgets.QApplication.focusWidget() is cells['name']
+assert cells['expression'].placeholderText() == 'expression over a.<output>'
+QtTest.QTest.keyClicks(cells['name'], 'counts')
+QtTest.QTest.keyClicks(cells['expression'], 'a.counts.frame(1).where(agree)')
 app.processEvents()
-assert edit.toPlainText() == program
-assert edit.textCursor().position() == position, edit.textCursor().position()
-assert not form.is_empty('expressions')
-form.populate({'expressions': ''})
-assert form.is_empty('expressions')
+second = {'name': 'counts', 'expression': 'a.counts.frame(1).where(agree)'}
+assert form.read_all() == {'expressions': (first, second)}, form.read_all()
+assert seen.count('expressions') > 2
+
+# The projection of the same rows lands without rebuilding a box.
+form.reconcile(spec, {'expressions': (first, second)}); app.processEvents()
+assert editor._rows[1][1]['expression'] is cells['expression']
+# Different rows are not written under the operator's cursor ...
+cells['expression'].setFocus(QtCore.Qt.MouseFocusReason); app.processEvents()
+assert QtWidgets.QApplication.focusWidget() is cells['expression']
+form.reconcile(spec, {'expressions': (first,)}); app.processEvents()
+assert form.read_all() == {'expressions': (first, second)}
+# ... and land once they have left it.
+cells['expression'].clearFocus(); app.processEvents()
+form.reconcile(spec, {'expressions': (first,)}); app.processEvents()
+assert form.read_all() == {'expressions': (first,)}
+
+# × takes the row away; with no row left, the required field is vacant.
+editor._rows[0][2].click(); app.processEvents()
+assert form.is_empty('expressions') and form.read_draft() == {'expressions': None}
+form.populate({'expressions': (first,)})
+assert form.read_all() == {'expressions': (first,)}
 window.close()
 print('ok')
 """

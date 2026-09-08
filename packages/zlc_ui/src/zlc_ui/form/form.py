@@ -8,7 +8,7 @@ it never loads Qt.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 import math
@@ -20,7 +20,7 @@ from zlc_data.units import resolve_unit
 
 FormFieldKind: TypeAlias = Literal[
     "text",
-    "multiline",
+    "rows",
     "int",
     "float",
     "number",
@@ -32,7 +32,7 @@ FormFieldKind: TypeAlias = Literal[
 _FORM_FIELD_KINDS = frozenset(
     {
         "text",
-        "multiline",
+        "rows",
         "int",
         "float",
         "number",
@@ -171,10 +171,28 @@ class FormFieldProps:
     #: these.  Unlike ``unavailable_reason`` -- a standing fact about the
     #: field -- this follows the form's own state as it is edited.
     enabled_when: tuple[str, tuple[object, ...]] | None = None
+    #: For a ``rows`` field: the fields of one row.  Its value is a tuple
+    #: of rows, each a mapping of these keys; the form shows every row as
+    #: a control per column beside an × and offers Add below them.
+    columns: tuple["FormFieldProps", ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.key, str) or not self.key.strip():
             raise ValueError("form field key must be a non-empty string")
+        columns = tuple(self.columns)
+        if self.kind == "rows":
+            if not columns:
+                raise ValueError(f"rows field {self.key!r} needs at least one column")
+            if any(not isinstance(column, FormFieldProps) for column in columns):
+                raise TypeError(f"rows field {self.key!r} columns must contain FormFieldProps")
+            if any(column.kind == "rows" for column in columns):
+                raise ValueError(f"rows field {self.key!r} cannot nest rows")
+            keys = tuple(column.key for column in columns)
+            if len(keys) != len(set(keys)):
+                raise ValueError(f"rows field {self.key!r} column keys must be unique")
+        elif columns:
+            raise ValueError(f"non-rows field {self.key!r} cannot declare columns")
+        object.__setattr__(self, "columns", columns)
         if self.unit:
             # A field states what its number is in, and the statement has to
             # be true HERE: a widget cannot refuse a bad unit later without
@@ -323,10 +341,19 @@ class FormFieldProps:
                     raise TypeError(f"number field {self.key!r} {name} must be numeric")
                 if not math.isfinite(float(value)):
                     raise ValueError(f"number field {self.key!r} {name} must be finite")
-        elif self.kind in ("text", "multiline"):
+        elif self.kind == "text":
             if self.default is not None and not isinstance(self.default, str):
                 raise TypeError(
                     f"{self.kind} field {self.key!r} default must be str or None"
+                )
+        elif self.kind == "rows":
+            if self.default is not None:
+                if isinstance(self.default, (str, bytes, Mapping)) or not isinstance(
+                    self.default, (tuple, list)
+                ) or any(not isinstance(row, Mapping) for row in self.default):
+                    raise TypeError(f"rows field {self.key!r} default must be rows or None")
+                object.__setattr__(
+                    self, "default", tuple(dict(row) for row in self.default)
                 )
         elif self.kind == "bool":
             if not isinstance(self.default, bool):

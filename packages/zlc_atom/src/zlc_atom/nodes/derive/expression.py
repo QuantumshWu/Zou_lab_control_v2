@@ -1,17 +1,17 @@
-"""One program of named expressions over the outputs of one publication.
+"""Named signals over the outputs of one publication.
 
-The program is Python, read by the standard parser and admitted node by
-node -- nothing runs that is not listed here.  Every line names what it
-publishes::
+A derive is a list of signals, each a name and an expression, added one
+row at a time.  The expression is Python, read by the standard parser and
+admitted node by node -- nothing runs that is not listed here::
 
-    agree = a.occupied.frame(0) == a.occupied.frame(2)
-    counts = a.counts.frame(1).where(agree)
-    occupied = a.occupied.frame(0).where(agree)
+    agree      a.occupied.frame(0) == a.occupied.frame(2)
+    counts     a.counts.frame(1).where(agree)
+    occupied   a.occupied.frame(0).where(agree)
 
 ``a`` is the bound producer and ``a.<output>`` one of its outputs, an
-operand: a dataset with its validity and unit.  A name a line assigns is
-an operand on the lines below it, and every name is an output of the node
-that runs the program.  Operands compose::
+operand: a dataset with its validity and unit.  A signal's name is an
+operand in the expressions of the signals below it, and every signal is
+an output of the node that computes it.  Operands compose::
 
     a.counts.frame(1).where(a.occupied.frame(1))   counts of the occupied sites
     a.occupied.frame(1).count("site")              how many sites were occupied
@@ -35,14 +35,15 @@ numbers.  Methods on an operand:
     ``count`` is the number of valid true cells of a boolean operand, or of
     valid samples of a numeric one.
 
-The same pass types a schema without arrays, so the shape of every result
+The same pass types a schema without arrays, so the shape of every signal
 is known -- and refused -- before a single value exists.
 """
 
 from __future__ import annotations
 
 import ast
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+import keyword
 from dataclasses import dataclass, replace
 from numbers import Real
 
@@ -80,15 +81,15 @@ _EQUALITY = ("==", "!=")
 
 
 class ExpressionError(ValueError):
-    """The program cannot be admitted or cannot be typed."""
+    """The signals cannot be admitted or cannot be typed."""
 
 
 @dataclass(frozen=True)
 class Operand:
-    """A dataset in the program: its schema, and its arrays when computing.
+    """A dataset in an expression: its schema, and its arrays when computing.
 
     ``values`` and ``valid`` are None in the typing pass, which walks the
-    same program over schemas alone.
+    same expressions over schemas alone.
     """
 
     schema: DatasetSchema
@@ -113,28 +114,42 @@ class Operand:
 
 
 @dataclass(frozen=True)
-class _Line:
-    """One admitted line: the name it publishes and what it computes."""
+class _Signal:
+    """One admitted signal: the name it publishes, the expression as it
+    was written, and the expression as read."""
 
     name: str
+    text: str
     expression: ast.expr
 
 
-def published_names(program: str) -> tuple[str, ...]:
-    """The names the program publishes, one per line, in order."""
-
-    return tuple(line.name for line in _admitted(program))
+Rows = Sequence[Mapping[str, object]]
 
 
-def referenced_outputs(program: str) -> tuple[str, ...]:
-    """The producer outputs the program reads, in order of first use."""
+def signal_rows(rows: Rows) -> tuple[dict[str, str], ...]:
+    """The signals as admitted: a row of name and expression each, the
+    text trimmed -- the one form a record or a declaration is built from."""
+
+    return tuple(
+        {"name": signal.name, "expression": signal.text} for signal in _admitted(rows)
+    )
+
+
+def published_names(rows: Rows) -> tuple[str, ...]:
+    """The names the signals publish, in order."""
+
+    return tuple(signal.name for signal in _admitted(rows))
+
+
+def referenced_outputs(rows: Rows) -> tuple[str, ...]:
+    """The producer outputs the signals read, in order of first use."""
 
     names: list[str] = []
-    for line in _admitted(program):
+    for signal in _admitted(rows):
         reads = sorted(
             (
                 node
-                for node in ast.walk(line.expression)
+                for node in ast.walk(signal.expression)
                 if isinstance(node, ast.Attribute)
                 and isinstance(node.value, ast.Name)
                 and node.value.id == _SOURCE
@@ -147,61 +162,65 @@ def referenced_outputs(program: str) -> tuple[str, ...]:
     return tuple(names)
 
 
-def evaluate(program: str, outputs: Mapping[str, Operand]) -> dict[str, Operand]:
-    """Every line of the program over the producer's outputs, by the name it
-    publishes: typed, and computed when the outputs carry arrays.  Every
-    refusal names what was written."""
+def evaluate(rows: Rows, outputs: Mapping[str, Operand]) -> dict[str, Operand]:
+    """Every signal over the producer's outputs, by the name it publishes:
+    typed, and computed when the outputs carry arrays.  Every refusal
+    names what was written."""
 
     evaluator = _Evaluator(outputs)
     results: dict[str, Operand] = {}
-    for line in _admitted(program):
-        result = evaluator.visit(line.expression)
+    for signal in _admitted(rows):
+        result = evaluator.visit(signal.expression)
         if not isinstance(result, Operand):
             raise ExpressionError(
-                f"{line.name} publishes no dataset; a line must compute from "
+                f"{signal.name} publishes no dataset; a signal must compute from "
                 f"{_SOURCE}.<output>"
             )
-        evaluator.remember(line.name, result)
-        results[line.name] = result
+        evaluator.remember(signal.name, result)
+        results[signal.name] = result
     return results
 
 
-def _admitted(program: str) -> tuple[_Line, ...]:
-    text = str(program).strip()
-    if not text:
+def _admitted(rows: Rows) -> tuple[_Signal, ...]:
+    if isinstance(rows, (str, bytes, Mapping)) or not isinstance(rows, Sequence):
+        raise ExpressionError("the signals must be rows of a name and an expression")
+    if not rows:
         raise ExpressionError(
-            "the program is empty; a line publishes what it names: name = expression"
+            "no signal is written; add one: a name and its expression"
         )
-    try:
-        module = ast.parse(text, mode="exec")
-    except SyntaxError as error:
-        raise ExpressionError(f"cannot read the program: {error.msg}") from None
-    lines: list[_Line] = []
+    signals: list[_Signal] = []
     named: list[str] = []
-    for statement in module.body:
-        if isinstance(statement, ast.Expr):
+    for index, row in enumerate(rows, 1):
+        if not isinstance(row, Mapping):
+            raise ExpressionError(f"signal {index} is not a row of a name and an expression")
+        name = str(row.get("name") or "").strip()
+        text = str(row.get("expression") or "").strip()
+        where = f"signal {index} ({name})" if name else f"signal {index}"
+        if not name:
+            raise ExpressionError(f"{where} has no name")
+        if not name.isidentifier() or keyword.iskeyword(name):
             raise ExpressionError(
-                f"line {statement.lineno} publishes nothing; name it: name = expression"
+                f"{where}: {name!r} cannot name a signal; use letters, digits "
+                "and _, starting with a letter"
             )
-        if (
-            not isinstance(statement, ast.Assign)
-            or len(statement.targets) != 1
-            or not isinstance(statement.targets[0], ast.Name)
-        ):
-            raise ExpressionError(
-                f"line {statement.lineno} is not one 'name = expression'"
-            )
-        name = statement.targets[0].id
         if name == _SOURCE:
             raise ExpressionError(
-                f"{_SOURCE!r} is the bound producer; a line cannot be named after it"
+                f"{_SOURCE!r} is the bound producer; a signal cannot be named after it"
             )
         if name in named:
-            raise ExpressionError(f"{name!r} is already published by an earlier line")
-        _admit(statement.value, tuple(named))
+            raise ExpressionError(f"{name!r} already names signal {named.index(name) + 1}")
+        if not text:
+            raise ExpressionError(f"{where} has no expression")
+        try:
+            tree = ast.parse(text, mode="eval")
+        except SyntaxError as error:
+            raise ExpressionError(
+                f"{where}: cannot read the expression: {error.msg}"
+            ) from None
+        _admit(tree.body, tuple(named))
         named.append(name)
-        lines.append(_Line(name, statement.value))
-    return tuple(lines)
+        signals.append(_Signal(name, text, tree.body))
+    return tuple(signals)
 
 
 def _admit(tree: ast.expr, named: tuple[str, ...]) -> None:
@@ -215,7 +234,7 @@ def _admit(tree: ast.expr, named: tuple[str, ...]) -> None:
             if node.id != _SOURCE and node.id not in named:
                 raise ExpressionError(
                     f"{node.id!r} is not an operand; only {_SOURCE}.<output> and "
-                    "the names of earlier lines are"
+                    "the names of earlier signals are"
                 )
         elif isinstance(node, ast.Attribute):
             if id(node) in methods:
@@ -642,4 +661,5 @@ __all__ = [
     "evaluate",
     "published_names",
     "referenced_outputs",
+    "signal_rows",
 ]

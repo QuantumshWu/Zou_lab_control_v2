@@ -1,9 +1,10 @@
-"""Derive: one program of named expressions over the outputs of one publication.
+"""Derive: named signals, each an expression, over the outputs of one publication.
 
 The operator writes what a panel should see -- the counts of the occupied
 sites, how many sites were occupied, one frame minus another, whether two
-verdicts agree -- as lines of a program over the bound producer's outputs,
-and every line publishes under the name it is given.  "Not selected" is
+verdicts agree -- as signals over the bound producer's outputs, each a row
+of a name and an expression, and every signal publishes under its name.
+"Not selected" is
 validity, so the histogram downstream leaves those cells out; the result's
 shape is typed before any value exists; and a name the producer never
 publishes, a unit that cannot be added, a geometry that does not match, are
@@ -105,23 +106,32 @@ def _outputs(valid_counts: np.ndarray | None = None) -> dict[str, Operand]:
     }
 
 
+def _rows(*signals: tuple[str, str]) -> tuple[dict[str, str], ...]:
+    """Signals as the form hands them over: a row of name and expression each."""
+
+    return tuple({"name": name, "expression": expression} for name, expression in signals)
+
+
 def _one(expression: str, outputs: dict[str, Operand] | None = None) -> Operand:
-    """One expression, published as the one line of a program."""
+    """One expression, published as the one signal of a derive."""
 
-    return evaluate(f"value = {expression}", _outputs() if outputs is None else outputs)["value"]
-
-
-AGREEMENT = """
-agree = a.occupied.frame(0) == a.occupied.frame(2)
-counts = a.counts.frame(1).where(agree)
-occupied = a.occupied.frame(0).where(agree)
-"""
+    return evaluate(_rows(("value", expression)), _outputs() if outputs is None else outputs)["value"]
 
 
-def test_the_program_names_what_it_publishes_and_what_it_reads() -> None:
+AGREEMENT = _rows(
+    ("agree", "a.occupied.frame(0) == a.occupied.frame(2)"),
+    ("counts", "a.counts.frame(1).where(agree)"),
+    ("occupied", "a.occupied.frame(0).where(agree)"),
+)
+BRIGHT = _rows(("bright", "a.counts.frame(1).where(a.occupied.frame(1))"))
+
+
+def test_the_signals_name_what_they_publish_and_what_they_read() -> None:
     assert published_names(AGREEMENT) == ("agree", "counts", "occupied")
     assert referenced_outputs(AGREEMENT) == ("occupied", "counts")
-    assert referenced_outputs("n = a.occupied.frame('frame 1').count('site') > 2") == ("occupied",)
+    assert referenced_outputs(
+        _rows(("n", "a.occupied.frame('frame 1').count('site') > 2"))
+    ) == ("occupied",)
 
 
 def test_the_counts_of_the_occupied_sites_are_the_counts_with_validity() -> None:
@@ -239,10 +249,10 @@ def test_two_verdicts_agree_or_differ_as_boolean_equality() -> None:
             _one(expression, outputs)
 
 
-def test_an_occupancy_agreement_is_three_lines_of_one_program() -> None:
+def test_an_occupancy_agreement_is_three_signals_of_one_derive() -> None:
     """The counts of one frame, kept only where two other frames' verdicts
     agree, and the verdict they agreed on: what a dedicated processor used
-    to hard-code as three frame indices is three lines anyone can edit.
+    to hard-code as three frame indices is three signals anyone can edit.
     A site neither frame could judge is invalid all the way down."""
 
     occupied = np.asarray(
@@ -275,44 +285,54 @@ def test_an_occupancy_agreement_is_three_lines_of_one_program() -> None:
         "occupied": _operand(occupied[:, :1, :], "1", valid[:, :1, :]),
     }
     kept = evaluate(
-        "agree = a.occupied.frame(0) == a.occupied.frame(0)\n"
-        "counts = a.counts.frame(0).where(agree)",
+        _rows(
+            ("agree", "a.occupied.frame(0) == a.occupied.frame(0)"),
+            ("counts", "a.counts.frame(0).where(agree)"),
+        ),
         one_frame,
     )["counts"]
     np.testing.assert_array_equal(kept.valid, valid[:, :1, :])
     np.testing.assert_array_equal(kept.values[:, 0, :4], counts[:, 0, :4])
 
 
-def test_a_named_line_is_an_operand_on_the_lines_below_it() -> None:
+def test_a_named_signal_is_an_operand_in_the_signals_below_it() -> None:
     results = evaluate(
-        "agree = a.occupied.frame(0) == a.occupied.frame(1)\n"
-        "how_many = agree.count('site')\n"
-        "all_agree = ~(~agree).any('site')",
+        _rows(
+            ("agree", "a.occupied.frame(0) == a.occupied.frame(1)"),
+            ("how_many", "agree.count('site')"),
+            ("all_agree", "~(~agree).any('site')"),
+        ),
         _outputs(),
     )
     assert tuple(results) == ("agree", "how_many", "all_agree")
     np.testing.assert_array_equal(results["how_many"].values[:, 0, 0], [2, 1, 0])
     np.testing.assert_array_equal(results["all_agree"].values[:, 0, 0], [False, False, False])
-    for program, said in (
-        ("", "the program is empty"),
-        ("a.counts.frame(0)", "publishes nothing; name it"),
-        ("x, y = a.counts, a.occupied", "is not one 'name = expression'"),
-        ("a = a.counts", "a line cannot be named after it"),
-        ("x = a.counts\nx = a.occupied", "already published by an earlier line"),
-        ("y = x + 1\nx = a.counts", "'x' is not an operand"),
-        ("k = 2", "publishes no dataset"),
-        ("x = a", "read one of its outputs"),
-        ("x = a.counts\ny = x.counts", "'x' has no outputs"),
+    for rows, said in (
+        ((), "no signal is written"),
+        (_rows(("", "a.counts.frame(0)")), "signal 1 has no name"),
+        (_rows(("x y", "a.counts")), "cannot name a signal"),
+        (_rows(("class", "a.counts")), "cannot name a signal"),
+        (_rows(("a", "a.counts")), "cannot be named after it"),
+        (_rows(("x", "a.counts"), ("x", "a.occupied")), "'x' already names signal 1"),
+        (_rows(("y", "x + 1"), ("x", "a.counts")), "'x' is not an operand"),
+        (_rows(("k", "2")), "publishes no dataset"),
+        (_rows(("x", "a")), "read one of its outputs"),
+        (_rows(("x", "a.counts"), ("y", "x.counts")), "'x' has no outputs"),
+        (_rows(("x", "")), r"signal 1 \(x\) has no expression"),
+        (_rows(("x", "a.counts +")), "cannot read the expression"),
+        ("x = a.counts", "rows of a name and an expression"),
     ):
         with pytest.raises(ExpressionError, match=said):
-            evaluate(program, _outputs())
+            evaluate(rows, _outputs())
 
 
 def test_the_typing_pass_knows_the_shape_without_any_values() -> None:
     schemas = {name: Operand(operand.schema) for name, operand in _outputs().items()}
     typed = evaluate(
-        "agree = a.occupied.frame(0) == a.occupied.frame(1)\n"
-        "mean = a.counts.frame(1).where(agree).mean('site')",
+        _rows(
+            ("agree", "a.occupied.frame(0) == a.occupied.frame(1)"),
+            ("mean", "a.counts.frame(1).where(agree).mean('site')"),
+        ),
         schemas,
     )
     assert typed["agree"].values is None and typed["agree"].is_boolean
@@ -340,7 +360,7 @@ def test_the_typing_pass_knows_the_shape_without_any_values() -> None:
         ("a.counts * a.counts", "cannot multiply count by count"),
         ("__import__('os')", "only an operand's own methods"),
         ("a.counts if True else 1", "not admitted"),
-        ("a.counts +", "cannot read the program"),
+        ("a.counts +", "cannot read the expression"),
     ],
 )
 def test_what_cannot_be_typed_is_refused_by_name(expression: str, said: str) -> None:
@@ -353,11 +373,11 @@ def _signal(name: str, values: np.ndarray, unit: str, **placement) -> SignalValu
     return SignalValue(name, _snapshot(values, unit, revision=3), **placement)
 
 
-def test_the_processor_publishes_every_line_with_its_provenance() -> None:
+def test_the_processor_publishes_every_signal_with_its_provenance() -> None:
     processor = DeriveProcessor(
-        expressions=(
-            "bright = a.counts.frame(1).where(a.occupied.frame(1))\n"
-            "how_many = a.occupied.frame(1).count('site')"
+        expressions=_rows(
+            ("bright", "a.counts.frame(1).where(a.occupied.frame(1))"),
+            ("how_many", "a.occupied.frame(1).count('site')"),
         ),
         primary_output="counts",
     )
@@ -393,7 +413,7 @@ def test_the_processor_publishes_every_line_with_its_provenance() -> None:
 
 def test_a_finite_run_keeps_exact_bookkeeping_through_a_frame_selection() -> None:
     processor = DeriveProcessor(
-        expressions="mean = a.counts.frame(0).mean('site')", primary_output="counts"
+        expressions=_rows(("mean", "a.counts.frame(0).mean('site')")), primary_output="counts"
     )
     assert processor.dataset_input_siblings == ()
     # A six-cycle run of which this event is cycles 1..3, eight of twelve
@@ -422,9 +442,9 @@ def test_a_finite_run_keeps_exact_bookkeeping_through_a_frame_selection() -> Non
     assert monitor.canonical_schema is None and monitor.cell_origin is None
 
 
-def test_the_bound_output_must_be_one_the_program_reads() -> None:
-    with pytest.raises(ValueError, match="not one the program reads"):
-        DeriveProcessor(expressions="n = a.occupied.count('site')", primary_output="counts")
+def test_the_bound_output_must_be_one_the_signals_read() -> None:
+    with pytest.raises(ValueError, match="not one the signals read"):
+        DeriveProcessor(expressions=_rows(("n", "a.occupied.count('site')")), primary_output="counts")
 
 
 class _Plane:
@@ -448,7 +468,7 @@ def test_the_build_asks_the_plane_which_outputs_exist_and_which_is_bound() -> No
     node = LOGIC_NODE.instantiate(
         signal_plane=plane,
         source_signal=COUNTS,
-        expressions="bright = a.counts.frame(1).where(a.occupied.frame(1))",
+        expressions=BRIGHT,
     )
     assert isinstance(node, DeriveProcessor)
     assert node.primary_output == "counts"
@@ -458,24 +478,24 @@ def test_the_build_asks_the_plane_which_outputs_exist_and_which_is_bound() -> No
     bound_elsewhere = LOGIC_NODE.instantiate(
         signal_plane=plane,
         source_signal=OCCUPIED,
-        expressions="bright = a.counts.frame(1).where(a.occupied.frame(1))",
+        expressions=BRIGHT,
     )
     assert bound_elsewhere.primary_output == "occupied"
     assert bound_elsewhere.dataset_input_siblings == ("counts",)
 
     with pytest.raises(ValueError, match="no sibling outputs \\('brightness',\\)"):
         LOGIC_NODE.instantiate(
-            signal_plane=plane, source_signal=COUNTS, expressions="x = a.brightness.frame(1)"
+            signal_plane=plane, source_signal=COUNTS, expressions=_rows(("x", "a.brightness.frame(1)"))
         )
     with pytest.raises(ValueError, match="missing required authoring field 'expressions'"):
-        LOGIC_NODE.instantiate(signal_plane=plane, source_signal=COUNTS, expressions="")
+        LOGIC_NODE.instantiate(signal_plane=plane, source_signal=COUNTS, expressions=())
 
 
 def test_the_descriptor_declares_what_a_draft_publishes_before_anything_runs() -> None:
-    """A derive's outputs are the names of its lines, so the descriptor
+    """A derive's outputs are the names of its signals, so the descriptor
     cannot list them once; it answers per draft, without a plane.  A draft
     that cannot be read publishes nothing yet, and the schema's validator
-    is what says why -- to the editor, in the program's words."""
+    is what says why -- to the editor, in the draft's own words."""
 
     assert LOGIC_NODE.outputs == () and LOGIC_NODE.declare_outputs is not None
     declared = LOGIC_NODE.outputs_for({"expressions": AGREEMENT})
@@ -484,12 +504,25 @@ def test_the_descriptor_declares_what_a_draft_publishes_before_anything_runs() -
         ("counts", "derive.counts"),
         ("occupied", "derive.occupied"),
     ]
-    assert LOGIC_NODE.outputs_for({"expressions": "counts +"}) == ()
+    broken = _rows(("counts", "counts +"))
+    assert LOGIC_NODE.outputs_for({"expressions": broken}) == ()
     assert LOGIC_NODE.outputs_for({}) == ()
-    with pytest.raises(ValueError, match="cannot read the program"):
-        LOGIC_NODE.authoring_schema.project_values({"expressions": "counts +"})
-    with pytest.raises(ValueError, match="publishes nothing; name it"):
-        LOGIC_NODE.authoring_schema.project_values({"expressions": "a.counts"})
+    schema = LOGIC_NODE.authoring_schema
+    with pytest.raises(ValueError, match="cannot read the expression"):
+        schema.project_values({"expressions": broken})
+    # A row is a form of its columns: a name still missing is refused as
+    # such at the build, named by the row it is missing from.
+    with pytest.raises(ValueError, match="Signals row 1: missing required authoring field 'name'"):
+        schema.project_values({"expressions": _rows(("", "a.counts"))})
     # A draft still being typed is not complete, and completeness is the
-    # build's law: the validator waits for a complete draft.
-    assert LOGIC_NODE.authoring_schema.draft_values({"expressions": ""}) == {"expressions": ""}
+    # build's law: with no row yet the validator waits; with a row being
+    # written it says, in the editor, what the row still needs.
+    assert schema.draft_values({"expressions": ()}) == {"expressions": ()}
+    assert schema.draft_values({}) == {"expressions": ()}
+    with pytest.raises(ValueError, match="signal 1 has no name"):
+        schema.draft_values({"expressions": _rows(("", "a.counts"))})
+    # Rows come back from a saved layout as lists of mappings; the value
+    # is the same tuple of rows either way.
+    assert schema.project_values({"expressions": [dict(row) for row in AGREEMENT]}) == {
+        "expressions": AGREEMENT
+    }
