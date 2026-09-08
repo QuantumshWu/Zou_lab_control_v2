@@ -187,6 +187,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
             signal_plane=plane,
             instance_id="calibration",
             source_signal=None,
+            values={},
         )
         hosts.append(calibration_host)
 
@@ -346,6 +347,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
             signal_plane=plane,
             instance_id="camera_measurement",
             source_signal=None,
+            values={},
         )
         hosts.append(finite_host)
         finite_host.start()
@@ -413,6 +415,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
             signal_plane=plane,
             instance_id="occupancy",
             source_signal=frames_signal,
+            values={},
         )
         hosts.append(occupancy_host)
         occupancy_host.start()
@@ -504,6 +507,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
             signal_plane=plane,
             instance_id="camera_measurement",
             source_signal=None,
+            values={},
         )
         hosts.append(infinite_host)
         infinite_host.start()

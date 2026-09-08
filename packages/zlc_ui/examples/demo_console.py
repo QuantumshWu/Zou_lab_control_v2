@@ -52,7 +52,8 @@ class FakePresenter:
         for name in (
             "add_panel_requested", "add_logic_requested", "pause_toggled",
             "selectors_toggled", "save_layout_requested",
-            "load_layout_requested", "save_screenshot_requested",
+            "load_layout_requested", "clear_board_requested",
+            "save_screenshot_requested",
             "panel_order_committed",
             "panel_remove_requested",
             "panel_edit_requested", "logic_start_requested",

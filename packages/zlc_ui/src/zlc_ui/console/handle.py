@@ -69,6 +69,7 @@ class TaskConsoleHandle(QtCore.QObject):
     selectors_toggled = QtCore.pyqtSignal(bool)
     save_layout_requested = QtCore.pyqtSignal()
     load_layout_requested = QtCore.pyqtSignal()
+    clear_board_requested = QtCore.pyqtSignal()
     save_screenshot_requested = QtCore.pyqtSignal()
     stop_task_requested = QtCore.pyqtSignal()
     panel_order_committed = QtCore.pyqtSignal(tuple)
@@ -134,7 +135,8 @@ class TaskConsoleHandle(QtCore.QObject):
         for name in (
             "add_panel_requested", "add_logic_requested", "pause_toggled",
             "selectors_toggled", "save_layout_requested",
-            "load_layout_requested", "save_screenshot_requested",
+            "load_layout_requested", "clear_board_requested",
+            "save_screenshot_requested",
             "stop_task_requested", "panel_order_committed",
         ):
             getattr(view, name).connect(getattr(self, name))
@@ -346,6 +348,25 @@ class TaskConsoleHandle(QtCore.QObject):
                 confirm_text="Continue",
                 cancel_text="Stop",
                 kind="info",
+            )
+        )
+
+    def confirm_board_replaced(
+        self, title: str, message: str, *, confirm_text: str
+    ) -> bool:
+        """Ask once before the whole board is replaced or emptied."""
+
+        from ..fluent import fluent_confirm
+
+        parent = self._window if self._window is not None else self._view
+        return bool(
+            fluent_confirm(
+                parent,
+                str(title),
+                str(message),
+                confirm_text=str(confirm_text),
+                cancel_text="Keep the board",
+                kind="warning",
             )
         )
 

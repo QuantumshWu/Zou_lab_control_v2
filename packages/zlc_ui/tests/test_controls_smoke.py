@@ -382,7 +382,7 @@ def test_figure_info_construct() -> None:
     _run_qt_smoke(
         """
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import FluentReadoutMultiline, InfoPane
+from zlc_ui.fluent import InfoPane
 app = ensure_qt_app(['zlc-ui-tests'])
 long_value = 'C:/' + 'very-long-segment/' * 12 + 'figure.npz'
 explicit = 'first\\nsecond\\nthird'
@@ -393,18 +393,14 @@ pane = InfoPane(
     )),),
 )
 pane.resize(560, 600); pane.show(); app.processEvents()
-fields = [
-    pane._tab_layouts['Summary'].itemAt(index).widget().findChild(
-        FluentReadoutMultiline
-    )
-    for index in range(3)
-]
-assert [field.toPlainText() for field in fields] == ['demo', long_value, explicit]
-assert fields[1].height() > fields[0].height()
-assert fields[2].height() > fields[0].height()
-for field in fields:
-    assert field.horizontalScrollBar().maximum() == 0
-    assert field.verticalScrollBar().maximum() == 0
+tree = pane._rows_tabs['Summary'].tree
+rows = [tree.topLevelItem(index) for index in range(3)]
+assert [row.text(1) for row in rows] == ['demo', long_value, explicit]
+# A long value wraps under its name and a multi-line one keeps its lines:
+# both rows are taller than the one-word row, and nothing scrolls sideways.
+heights = [tree.visualItemRect(row).height() for row in rows]
+assert heights[1] > heights[0] and heights[2] > heights[0], heights
+assert tree.horizontalScrollBar().maximum() == 0
 """
     )
 

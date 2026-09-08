@@ -263,3 +263,70 @@ def test_the_zoom_the_warmer_renders_is_centred_on_the_image(monkeypatch) -> Non
     assert (x.low + x.high) / 2.0 == 2.5
     assert (y.low + y.high) / 2.0 == 1.5
     assert (y.high - y.low) / (x.high - x.low) == pytest.approx(3.0 / 5.0)
+
+
+def test_a_fresh_process_is_warmed_before_its_first_request() -> None:
+    """A render child pays its first-render costs at start, on its own.  In
+    a fresh interpreter, after ``warm_process`` alone, the panels a console
+    opens on -- a camera frame and its grid of frames at the screen's own
+    scale, a histogram, a curve with its band -- find the figure modules
+    imported and every kernel they call already answering: their first
+    render loads and compiles nothing."""
+
+    import subprocess
+    import sys
+
+    code = """
+import sys
+import numpy as np
+from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, HistogramPlot, ImagePlot, PlotSession, _kernel_warm
+from zlc_plot._kernel_warm import _image_snapshot, _series_snapshot
+
+_kernel_warm.warm_process()
+figure_ready = 'matplotlib.figure' in sys.modules and 'matplotlib.textpath' in sys.modules
+warmed = set(_kernel_warm.cold_kernels())
+image = ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y"))
+series = _series_snapshot(8, 400)
+for snapshot, spec, parameters in (
+    (_image_snapshot(96, 128, np.uint16), image, None),
+    (_image_snapshot(96, 128, np.uint16), FacetGridPlot(None, image), None),
+    (_image_snapshot(1200, 1920, np.float32), image, None),
+    (series, HistogramPlot(), None),
+    (series, CurvePlot(AxisRef.point("x")), {"uncertainty": True}),
+):
+    session = PlotSession(snapshot, spec, size="4x4", parameters=parameters, device_pixel_ratio=3.0)
+    session.rgba()
+    session.close()
+print(sorted(warmed - set(_kernel_warm.cold_kernels())))
+print(figure_ready)
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    still_cold, figure_ready = completed.stdout.strip().splitlines()[-2:]
+    assert still_cold == "[]", f"a first panel still had to warm {still_cold}"
+    assert figure_ready == "True"
+
+
+def test_the_warming_stops_before_its_next_picture_once_a_panel_asks(monkeypatch) -> None:
+    """A request shares the process with the warming, so the warming asks
+    before every picture whether it may go on, and stops the moment the
+    answer is no -- what it did not reach is paid by the panel that needs
+    it, as before."""
+
+    rendered: list[str] = []
+    monkeypatch.setattr(
+        _kernel_warm, "_render",
+        lambda snapshot, spec, parameters=None, **kw: rendered.append(type(spec).__name__),
+    )
+    answers = iter((True, True, False))
+    _kernel_warm.warm_process(proceed=lambda: next(answers))
+    assert rendered == ["FacetGridPlot", "ImagePlot"]
+    rendered.clear()
+    _kernel_warm.warm_process(proceed=lambda: False)
+    assert rendered == []

@@ -172,7 +172,8 @@ class _ConsoleView:
     _SIGNALS = (
         "close_requested", "add_panel_requested", "add_logic_requested",
         "pause_toggled", "selectors_toggled", "save_layout_requested",
-        "load_layout_requested", "save_screenshot_requested",
+        "load_layout_requested", "clear_board_requested",
+        "save_screenshot_requested",
         "stop_task_requested",
         "panel_order_committed",
         "panel_remove_requested",
@@ -201,6 +202,10 @@ class _ConsoleView:
         #: What a file dialog would answer; "" is the operator cancelling.
         self.open_answer = ""
         self.save_answer = ""
+        #: What the operator answers when the whole board is about to go,
+        #: and every question they were asked.
+        self.confirm_answer = True
+        self.confirmations: list[tuple[str, str, str]] = []
         self.screenshot_path = ""
         self.offered: tuple = ()
         self.logic_editors: dict[str, dict] = {}
@@ -286,6 +291,12 @@ class _ConsoleView:
 
     def ask_save_path(self, caption: str, suggested: str, filter: str) -> str:
         return self.save_answer
+
+    def confirm_board_replaced(
+        self, title: str, message: str, *, confirm_text: str
+    ) -> bool:
+        self.confirmations.append((str(title), str(message), str(confirm_text)))
+        return self.confirm_answer
 
     def save_screenshot(self, path: str) -> str:
         Path(path).write_bytes(b"plain TaskConsole screenshot")
@@ -3673,6 +3684,157 @@ def test_task_console_layout_rejects_a_non_catalog_facet_cell(presenter) -> None
     assert any(expected in text for _severity, text in presenter.view.status)
 
 
+class _RunningHost:
+    """A started node's host as the runtime contract has it: it runs until a
+    cancel has been polled to terminal, and refuses to close before that."""
+
+    def __init__(self) -> None:
+        from zlc_runtime.host import LogicNodeObservation
+
+        self._observe = LogicNodeObservation
+        self.running = True
+        self.cancelled = False
+        self.shut_down = False
+        self.observation = LogicNodeObservation(True, False, "running")
+
+    @property
+    def cancel_requested(self) -> bool:
+        return self.cancelled
+
+    @property
+    def operator_request(self):
+        return None
+
+    def cancel(self, _reason: str) -> None:
+        self.cancelled = True
+
+    def poll(self):
+        if self.cancelled and self.running:
+            self.running = False
+            self.observation = self._observe(False, True, "cancelled")
+        return self.observation
+
+    def published_signals(self) -> tuple[str, ...]:
+        return ()
+
+    def shutdown(self) -> None:
+        if self.running:
+            raise RuntimeError("cannot close NodeHost before terminal")
+        self.shut_down = True
+
+
+def test_clearing_the_board_asks_first_and_then_takes_everything_off(
+    presenter, session
+) -> None:
+    """One button empties the board the way loading a layout replaces it:
+    the same commit, after one question that says what goes and what is
+    stopped.  A running node is asked to stop and the board goes when it
+    has, on the beat; declining keeps everything; an empty board asks
+    nothing."""
+
+    node, snapshot = _one_shot(session)
+    presenter.add_panel(node.signal_key("frames"), snapshot, title="here", kind="image")
+    logic_id = presenter.add_logic("camera_measurement", open_editor=False)
+    host = _RunningHost()
+    presenter.logic[logic_id].host = host
+    view = presenter.view
+
+    view.confirm_answer = False
+    assert presenter.clear_board() is False
+    ((title, message, confirm_text),) = view.confirmations
+    assert title == "Replace the board?" and confirm_text == "Clear"
+    assert "1 panel and 1 logic node" in message and logic_id in message
+    assert tuple(presenter.panels) and tuple(presenter.logic) == (logic_id,)
+    assert host.running and not host.cancelled
+
+    view.confirm_answer = True
+    assert presenter.clear_board() is True
+    assert host.cancelled and not host.shut_down
+    assert tuple(presenter.logic) == (logic_id,), "the board waits for the stop"
+    assert ("task", f"stopping {logic_id}; the board is replaced when they have stopped") in view.status
+    presenter.beat()
+    assert presenter.panels == {} and presenter.logic == {}
+    assert view.cards == () and view.logic_rows == ()
+    assert host.shut_down
+    assert ("task", "board cleared") in view.status
+
+    view.confirmations.clear()
+    assert presenter.clear_board() is False
+    assert view.confirmations == []
+    assert ("idle", "the board is already empty") in view.status
+
+
+def test_clearing_a_stopped_board_needs_no_beat(presenter, session) -> None:
+    node, snapshot = _one_shot(session)
+    presenter.add_panel(node.signal_key("frames"), snapshot, title="here", kind="image")
+    presenter.add_logic("camera_measurement", open_editor=False)
+    assert presenter.clear_board() is True
+    assert presenter.panels == {} and presenter.logic == {}
+    assert presenter.view.status[-1] == ("task", "board cleared")
+
+
+@pytest.mark.parametrize("closing", (False, True), ids=("commit-after-stop", "close-while-stopping"))
+def test_loading_a_layout_over_running_logic_asks_and_stops_it(
+    presenter, session, tmp_path, closing
+) -> None:
+    """A layout replaces the board; running logic is stopped for it only with
+    the operator's word, and the board goes up once it has stopped.  A
+    caller without that word is still refused."""
+
+    node, snapshot = _one_shot(session)
+    presenter.add_panel(node.signal_key("frames"), snapshot, title="here", kind="image")
+    logic_id = presenter.add_logic("camera_measurement", open_editor=False)
+    path = tmp_path / "board.json"
+    presenter._layout_document().write(path)
+    host = _RunningHost()
+    presenter.logic[logic_id].host = host
+    view = presenter.view
+
+    assert presenter.apply_layout(presenter.layout()) is False
+    assert ("warning", "stop running logic before loading a board") in view.status
+    assert host.running and not host.cancelled
+
+    view.open_answer = str(path)
+    view.confirm_answer = False
+    assert presenter.load_layout() is False
+    ((_title, message, confirm_text),) = view.confirmations
+    assert confirm_text == "Stop and load" and logic_id in message
+    assert host.running and not host.cancelled
+
+    view.confirm_answer = True
+    assert presenter.load_layout() is True
+    assert host.cancelled and presenter.logic[logic_id].host is host
+    superseded_panel = presenter._pending_board[0].panels[0]
+    superseded_port = superseded_panel.port
+    assert superseded_port is not None
+    assert presenter.load_layout() is True
+    assert superseded_panel.port is None and superseded_port._closed
+    pending_panel = presenter._pending_board[0].panels[0]
+    pending_port = pending_panel.port
+    assert pending_port is not None
+    if closing:
+        try:
+            assert presenter.close() is False
+            presenter.beat()
+            assert host.shut_down
+            assert presenter.logic == {} and presenter.panels == {}, "closing resurrected the pending board"
+            assert pending_panel.port is None and pending_port._closed
+            assert presenter.close() is True
+        finally:
+            # Keep the existing owner fixture clean even on the pre-fix red.
+            for panel_id in tuple(presenter.panels):
+                presenter.remove_panel(panel_id)
+            for node_id in tuple(presenter.logic):
+                presenter.remove_logic(node_id)
+        return
+    presenter.beat()
+    assert host.shut_down
+    assert tuple(presenter.logic) == (logic_id,)
+    assert presenter.logic[logic_id].host is None
+    assert [binding.title for binding in presenter.panels.values()] == ["here"]
+    assert ("task", "layout loaded") in view.status
+
+
 def test_a_board_naming_a_signal_nobody_publishes_keeps_the_blank_panel(
     presenter, session
 ) -> None:
@@ -4613,6 +4775,124 @@ def test_task_terminal_removes_only_its_auto_previews(
     assert retained.panel_id not in presenter.panels
     assert missing.panel_id not in presenter.panels
     assert manual.panel_id in presenter.panels
+
+
+def _settle_logic(presenter, node_id: str, *, timeout: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout
+    while presenter.logic[node_id].host.running and time.monotonic() < deadline:
+        presenter.poll_logic()
+        time.sleep(0.005)
+    presenter.poll_logic()
+
+
+def test_a_derive_publishes_the_counts_of_the_occupied_sites(
+    presenter, session, tmp_path
+) -> None:
+    """The console runs a derive as it runs any processor.  Bound to the
+    occupancy's counts, it reads the verdicts from the same publication,
+    and every one of its signals publishes under its own name: the photon
+    counts of the sites frame 1 judged occupied, valid there and nowhere
+    else, open on a histogram panel like any other signal, and how many
+    sites that was is a second signal beside it -- signals and all in
+    their record."""
+
+    import numpy as np
+    from zlc_atom.nodes.calibration import (
+        FrameContract,
+        ReadoutModel,
+        ReadoutModelKind,
+        SiteMap,
+        TrapCalibration,
+    )
+    from zlc_workbench.logic import stable_signal_key
+
+    camera_node, _snapshot = _one_shot(session, producer="camera_measurement")
+    site_ids = ("site-0", "site-1")
+    calibration_path = tmp_path / "derive-calibration.json"
+    TrapCalibration(
+        SiteMap(
+            site_ids,
+            np.asarray(((12.0, 10.0), (30.0, 20.0))),
+            np.asarray((True, True)),
+            np.asarray((1.0, 1.0)),
+        ),
+        (
+            ReadoutModel(
+                site_ids,
+                np.asarray((100.0, 100.0)),
+                np.zeros(2),
+                np.ones(2),
+                np.asarray((True, True)),
+                np.asarray((1.0, 1.0)),
+            ),
+        ),
+        ReadoutModelKind.BOX,
+        FrameContract((96, 128)),
+    ).save(calibration_path)
+    occupancy_id = presenter.add_logic(
+        "occupancy",
+        node_id="occupancy",
+        artifact_inputs={"calibration_path": str(calibration_path)},
+        source_signal=camera_node.signal_key("frames"),
+        open_editor=False,
+    )
+    assert presenter.start_logic(occupancy_id) is True
+    _settle_logic(presenter, occupancy_id)
+    counts_signal = stable_signal_key("occupancy", "counts")
+    program = (
+        {"name": "bright", "expression": "a.counts.frame(1).where(a.occupied.frame(1))"},
+        {"name": "how_many", "expression": "a.occupied.frame(1).count('site')"},
+    )
+    derive_id = presenter.add_logic(
+        "derive",
+        node_id="sites",
+        values={"expressions": program},
+        source_signal=counts_signal,
+        open_editor=False,
+    )
+    # Named by the draft, before anything ran: the board's own listing of
+    # what this row will publish.
+    assert [
+        item.name for item in presenter._logic_outputs(presenter.logic[derive_id])
+    ] == ["bright", "how_many"]
+    assert presenter.start_logic(derive_id) is True, presenter.view.status[-3:]
+    _settle_logic(presenter, derive_id)
+    observation = presenter.logic[derive_id].host.observation
+    assert observation.error is None, observation
+
+    front = session.signal_plane.freeze()
+    bright_signal = stable_signal_key("sites", "bright")
+    bright = front.value(bright_signal)
+    counts = front.value(counts_signal)
+    occupied = front.value(stable_signal_key("occupancy", "occupied"))
+    assert bright is not None and counts is not None and occupied is not None
+    judged = (
+        np.asarray(occupied.values, dtype=bool)[:, 1:2, :]
+        & np.asarray(occupied.snapshot.expanded_validity(), dtype=bool)[:, 1:2, :]
+    )
+    np.testing.assert_array_equal(
+        np.asarray(bright.snapshot.expanded_validity(), dtype=bool), judged
+    )
+    values = np.asarray(bright.values)
+    expected = np.asarray(counts.values)[:, 1:2, :]
+    np.testing.assert_array_equal(values[judged], expected[judged])
+    assert np.isnan(values[~judged]).all()
+    assert bright.schema.value_schema.value_unit == counts.schema.value_schema.value_unit
+    assert bright.run_record["parameters"]["expressions"] == program
+    how_many = front.value(stable_signal_key("sites", "how_many"))
+    assert how_many is not None
+    np.testing.assert_array_equal(
+        np.asarray(how_many.values)[:, 0, 0], judged[:, 0, :].sum(axis=-1)
+    )
+
+    panel = presenter.add_panel(
+        bright_signal,
+        bright.snapshot,
+        title="bright-site counts",
+        kind="histogram",
+        initial_publication=front.publication(bright_signal),
+    )
+    assert panel is not None, presenter.view.status[-3:]
 
 
 def test_a_facet_grid_panel_of_frames_carries_the_occupancy_overlay(

@@ -388,8 +388,6 @@ def install_observers(bench, emit):
     Set bench.feedback_scope_probe=True BEFORE this call for optional B-side
     Feedback stages, remote description timing and GC spans over 20 ms. This
     does not install anything in A/C or change GC/Numba configuration.
-    Set bench.viewer_scope_probe=True for a call-scoped InfoPane.set_tabs
-    profile; it does not replace any Qt slot or virtual method.
     """
     from time import perf_counter_ns
     from zlc_plot.backends import Qt5PlotWidget
@@ -398,7 +396,6 @@ def install_observers(bench, emit):
               "paint_data_mismatches": 0}
     connections, originals = [], {}
     scope_cleanup = None
-    viewer_scope_cleanup = None
 
     def record(event, **facts):
         counts["events"] += 1
@@ -487,7 +484,6 @@ def install_observers(bench, emit):
 
     def cleanup():
         scope_summary = None if scope_cleanup is None else scope_cleanup()
-        viewer_scope_summary = None if viewer_scope_cleanup is None else viewer_scope_cleanup()
         for name, original in originals.items():
             setattr(Qt5PlotWidget, name, original)
         originals.clear()
@@ -501,9 +497,6 @@ def install_observers(bench, emit):
                   and counts["observer_errors"] == 0}
         if scope_summary is not None:
             result["scope_probe"] = scope_summary
-        if viewer_scope_summary is not None:
-            result["viewer_scope_probe"] = viewer_scope_summary
-            result["passed"] = result["passed"] and viewer_scope_summary["probe_errors"] == 0
         record("observer.canary", **result)
         result["observer_errors"] = counts["observer_errors"]
         result["passed"] = result["passed"] and counts["observer_errors"] == 0
@@ -513,8 +506,6 @@ def install_observers(bench, emit):
     try:
         if getattr(bench, "feedback_scope_probe", False):
             scope_cleanup = _install_feedback_scope_probe(bench, record)
-        if getattr(bench, "viewer_scope_probe", False) is True:
-            viewer_scope_cleanup = _install_viewer_scope_probe(record)
         watch("_install_front", "install")
         watch("paintEvent", "paint")
         for name in ("panel_state_changed", "add_panel_requested", "panel_remove_requested",
@@ -531,17 +522,15 @@ def install_observers(bench, emit):
 def check_scientific_chain(
     plane, *, frames_signal, counts_signal, occupied_signal,
     frame_judged_signal=None, survival_signal=None,
-    agreement_counts_signal=None, agreement_occupied_signal=None,
     max_values=100_000,
 ):
-    """Check current exact Camera -> Occupancy -> downstream transactions.
+    """Check current exact Camera -> Occupancy -> Frame Survival transactions.
 
     Each child anchors its OWN latest event and resolves its exact parents;
     independently advancing latest revisions are never joined by number.
     No taps, leases, history, calibration execution or camera-pixel scans.
     Call at a checkpoint, not on every paint. Returned evidence is detached
     and bounded; unavailable parents/oversized payloads are NOT passes.
-    Agreement indices come from that event's run record, not the live draft.
     This checks published science consistency, not calibration accuracy or
     the displayed overlay (the existing front/paint checks own the latter).
     """
@@ -731,54 +720,6 @@ def check_scientific_chain(
                         expected_labels = tuple(f"{labels[i]}-{labels[j]}" for i, j in pairs)
                         require(section, output.schema.point_domain.axes[0].coordinate_labels == expected_labels,
                                 "survival_pair_labels")
-
-    if agreement_counts_signal is not None:
-        if agreement_occupied_signal is None:
-            raise ValueError("agreement_occupied_signal is required with agreement_counts_signal")
-        section, publication = latest("agreement", agreement_counts_signal)
-        if publication is not None:
-            siblings = bundle(section, publication, (agreement_counts_signal, agreement_occupied_signal))
-            source_event = parent(section, publication, (counts_signal, occupied_signal))
-            parameters = publication.run_record.get("parameters", {})
-            selected = [parameters.get(name) for name in
-                        ("first_occupancy_frame", "counts_frame", "second_occupancy_frame")]
-            section["frames"] = selected if all(type(item) is int for item in selected) else None
-            if section["frames"] is None:
-                unchecked(section, "actual Agreement frame parameters not in publication record")
-            elif siblings is not None and source_event is not None:
-                sources = bundle(section, source_event, (counts_signal, occupied_signal))
-                if sources is not None:
-                    counts, occupied = sources
-                    frame_site(section, counts)
-                    frame_site(section, siblings[0])
-                    c, o = small(section, counts), small(section, occupied, boolean=True)
-                    ac, ao = small(section, siblings[0]), small(section, siblings[1], boolean=True)
-                    if all(item is not None for item in (c, o, ac, ao)):
-                        cv, cm = c
-                        ov, om = o
-                        first, sampled, second = selected
-                        geometry = require(section, same_domains(counts, occupied) and
-                            same_domains(*siblings) and all(0 <= index < cv.shape[1] for index in selected) and
-                            ac[0].shape == (cv.shape[0], 1, cv.shape[2]) and
-                            siblings[0].schema.repeat_domain == counts.schema.repeat_domain and
-                            siblings[0].schema.cell_domain == counts.schema.cell_domain,
-                            "agreement_frame_geometry")
-                        if geometry:
-                            agree = (om[:, first] & om[:, second] & (ov[:, first] == ov[:, second]))[:, None, :]
-                            count_valid = agree & cm[:, sampled:sampled + 1]
-                            require(section, np.array_equal(ac[1], count_valid), "agreement_counts_validity")
-                            require(section, np.array_equal(ao[1], agree), "agreement_occupied_validity")
-                            require(section, np.array_equal(ac[0][count_valid], cv[:, sampled:sampled + 1][count_valid]),
-                                    "agreement_selected_counts")
-                            require(section, np.array_equal(ao[0][agree], ov[:, first:first + 1][agree]),
-                                    "agreement_selected_occupied")
-                            source_domain, output_domain = counts.schema.point_domain, siblings[0].schema.point_domain
-                            coordinates_match = len(source_domain.axes) == len(output_domain.axes)
-                            for axis, target in zip(source_domain.axes, output_domain.axes):
-                                code = source_domain.codes(axis.axis_id)[sampled]
-                                coordinates_match &= (target.axis_id == axis.axis_id and target.size == 1 and
-                                                      target.coordinate_at(0) == axis.coordinate_at(code))
-                            require(section, coordinates_match, "agreement_selected_frame_coordinate")
 
     for name, section in sections.items():
         section["status"] = ("failed" if any(item["section"] == name for item in findings) else
@@ -1190,129 +1131,4 @@ def _install_feedback_scope_probe(bench, record):
     except BaseException:
         cleanup()
         raise
-    return cleanup
-
-
-def _install_viewer_scope_probe(record):
-    """Owner-thread profile of ordinary set_tabs, without changing UI work.
-
-    Profiling includes synchronous row construction/layout and profiler cost,
-    not the queued layout/deletion tail after return. Metadata collection and
-    log serialization happen after restoring sys.setprofile. The bound
-    Qt slots, resize/paint virtuals and their signal connections stay intact.
-    """
-    import os
-    import profile
-    import sys
-    from threading import current_thread, get_ident, get_native_id
-    from time import perf_counter, perf_counter_ns
-    from zlc_ui.fluent.info_pane import InfoPane
-    from zlc_ui.fluent import FluentReadoutMultiline
-
-    original = InfoPane.set_tabs
-    counts = {"calls": 0, "elapsed_ns": 0, "probe_errors": 0}
-
-    def profiled(pane, tabs):
-        counts["calls"] += 1
-        call = counts["calls"]
-        # CPython 3.13.12's cProfile monitoring captured worker events in our
-        # two-thread canary and produced cumtime < tottime. Use the standard
-        # Python profiler through an explicitly filtered current-thread hook.
-        profiler = profile.Profile(timer=perf_counter)
-        profiler.set_cmd("InfoPane.set_tabs")
-        owner_ident = get_ident()
-        native_thread = get_native_id()
-        thread_name = current_thread().name
-        previous_profile = sys.getprofile()
-        foreign_events = 0
-        profile_failure = None
-
-        def dispatch(frame, event, arg):
-            nonlocal foreign_events, profile_failure
-            if get_ident() != owner_ident:
-                foreign_events += 1
-                return
-            if profile_failure is not None:
-                return
-            try:
-                profiler.dispatcher(frame, event, arg)
-            except Exception as error:
-                # A diagnostic stack/accounting refusal cannot interrupt a
-                # product slot. Discard this profile, not the UI operation.
-                profile_failure = type(error).__name__
-
-        failure = None
-        started = perf_counter_ns()
-        sys.setprofile(dispatch)
-        try:
-            return original(pane, tabs)
-        except BaseException as error:
-            failure = type(error).__name__
-            raise
-        finally:
-            sys.setprofile(previous_profile)
-            elapsed = perf_counter_ns() - started
-            counts["elapsed_ns"] += elapsed
-            try:
-                functions = []
-                profiler.create_stats()
-                for (filename, line, function), entry in profiler.stats.items():
-                    functions.append({
-                        "file": filename,
-                        "line": line,
-                        "function": function,
-                        "calls": entry[1],
-                        "primitive_calls": entry[0],
-                        "tottime": entry[2],
-                        "cumtime": entry[3],
-                    })
-                invalid_entries = sum(item["tottime"] > item["cumtime"] + 1e-9 for item in functions)
-                profile_valid = profile_failure is None and invalid_entries == 0
-                if not profile_valid:
-                    counts["probe_errors"] += 1
-                    functions = []
-                rows_per_tab = []
-                # Do not consume an arbitrary iterable before/after the
-                # business call. Current Viewer supplies detached tuples.
-                for title, rows in tabs if isinstance(tabs, (tuple, list)) else ():
-                    layout = pane._tab_layouts.get(str(title))
-                    body = None if layout is None else layout.parentWidget()
-                    fields = [] if body is None else body.findChildren(FluentReadoutMultiline)
-                    lengths = [max(0, field.document().characterCount() - 1) for field in fields]
-                    rows_per_tab.append({
-                        "tab": str(title),
-                        "rows": len(rows) if isinstance(rows, (tuple, list)) else None,
-                        "readout_widgets": len(fields),
-                        "text_utf16_units": sum(lengths),
-                        "max_row_text_utf16_units": max(lengths, default=0),
-                    })
-                record(
-                    "scope.viewer_tabs", call=call, pane_id=id(pane),
-                    pid=os.getpid(), thread_ident=owner_ident, native_thread_id=native_thread,
-                    thread_name=thread_name, profiler="profile.Profile+owner-filtered-sys.setprofile",
-                    start_ns=started, elapsed_ns=elapsed, elapsed_ms=elapsed / 1_000_000,
-                    exception=failure, rows_per_tab=rows_per_tab,
-                    function_time_unit="seconds", deferred_tail_included=False,
-                    profile_clock="perf_counter wall time", profile_valid=profile_valid,
-                    ignored_foreign_events=foreign_events, invalid_entries=invalid_entries,
-                    profile_error=profile_failure,
-                    top25_tottime=sorted(functions, key=lambda item: item["tottime"], reverse=True)[:25],
-                    top25_cumtime=sorted(functions, key=lambda item: item["cumtime"], reverse=True)[:25],
-                )
-            except Exception as error:
-                # A failed probe must not replace the product's return value
-                # or its original exception. No exception repr/arguments.
-                counts["probe_errors"] += 1
-                record("scope.viewer_tabs", call=call, pane_id=id(pane),
-                       pid=os.getpid(), thread_ident=owner_ident, native_thread_id=native_thread,
-                       thread_name=thread_name,
-                       start_ns=started, elapsed_ns=elapsed, elapsed_ms=elapsed / 1_000_000,
-                       exception=failure, probe_error=type(error).__name__)
-
-    InfoPane.set_tabs = profiled
-
-    def cleanup():
-        InfoPane.set_tabs = original
-        return {**counts, "restored": InfoPane.set_tabs is original}
-
     return cleanup

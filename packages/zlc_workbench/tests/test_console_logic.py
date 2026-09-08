@@ -1100,6 +1100,54 @@ def test_an_unresolved_processor_source_disables_start_before_click(presenter) -
     assert "source_signal" in presenter.logic[node_id].draft_error
 
 
+def test_a_node_that_computes_what_it_was_asked_names_the_siblings_it_reads() -> None:
+    """A derive reads the outputs its expression names.  The declaration says
+    there is an input; the instance says which siblings of it to fetch."""
+
+    from zlc_atom.authoring import AuthoringSchema
+    from zlc_atom.nodes import DatasetInputSpec, LogicNodeDescriptor, NodeKind
+    from zlc_runtime import DatasetOutputDeclaration, SignalDataPlane
+
+    descriptor = LogicNodeDescriptor(
+        "expression_processor",
+        NodeKind.PROCESSOR,
+        AuthoringSchema(),
+        input_specs=(DatasetInputSpec("a", None, "exact"),),
+        # What it publishes is named by its draft, not by its kind.
+        declare_outputs=lambda values: (
+            DatasetOutputDeclaration(str(values["name"]), "derive.value"),
+        ),
+        build=lambda **_values: object(),
+    )
+    plane = SignalDataPlane()
+    host = make_host(
+        descriptor,
+        SimpleNamespace(dataset_input_siblings=("occupied", "frame_judged")),
+        signal_plane=plane,
+        instance_id="derive-1",
+        source_signal="@logic/occupancy/counts",
+        values={"name": "bright"},
+    )
+    try:
+        assert host._input_name == "a"
+        assert host._input_siblings == ("occupied", "frame_judged")
+        assert [item.name for item in host.dataset_output_declarations] == ["bright"]
+    finally:
+        host.shutdown()
+    silent = make_host(
+        descriptor,
+        object(),
+        signal_plane=plane,
+        instance_id="derive-2",
+        source_signal="@logic/occupancy/counts",
+        values={"name": "value"},
+    )
+    try:
+        assert silent._input_siblings == ()
+    finally:
+        silent.shutdown()
+
+
 def test_make_host_passes_descriptor_contract_without_reading_node_attributes() -> None:
     from zlc_atom.authoring import AuthoringSchema
     from zlc_atom.nodes import DatasetInputSpec, LogicNodeDescriptor, NodeKind
@@ -1121,6 +1169,7 @@ def test_make_host_passes_descriptor_contract_without_reading_node_attributes() 
         signal_plane=plane,
         instance_id="processor-7",
         source_signal="@logic/camera-2/frames",
+        values={},
     )
     try:
         assert host.instance_id == "processor-7"
@@ -1145,6 +1194,7 @@ def test_make_host_passes_descriptor_contract_without_reading_node_attributes() 
             signal_plane=plane,
             instance_id="scan-3",
             source_signal="@logic/camera-2/frames",
+            values={},
         )
         try:
             assert scan_host._mode == "worker"

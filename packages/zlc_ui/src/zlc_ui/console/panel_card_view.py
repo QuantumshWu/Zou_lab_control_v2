@@ -278,6 +278,10 @@ class PanelCardView(FluentGroupBox):
         self.panel_id = str(panel_id)
         self._base_title = str(title)
         self._surface: QtWidgets.QWidget | None = None
+        #: Whether the mounted surface has shown a picture this card framed.
+        #: From then on the picture is the card's size; a preset only sizes
+        #: the empty frame.
+        self._surface_framed = False
         self._settings_popup: FluentOverlayFrame | None = None
         self._settings_anchor: FluentSettingsPopupAnchor | None = None
         self._settings_drag_handle: FluentLabel | None = None
@@ -444,15 +448,23 @@ class PanelCardView(FluentGroupBox):
     def _apply_card_size(self, size: str) -> None:
         """Reserve the room a picture of this preset needs, plus this card's own.
 
-        Both halves are asked of whoever owns them, and both answers are here
-        the moment the operator picks the preset.  How big a picture is at a
-        preset is the PLOTTING package's fact -- it plans the canvas, and the
-        answer does not depend on the kind or the cell count -- so the card
-        asks instead of waiting for the picture to be drawn.  How much room
-        the card itself takes is the card's own layout: its strip and its
-        margins, measured, never the constant that was restated here and went
-        wrong the moment the strip grew a second line.
+        Only for a card that holds no picture yet: a board packs an empty
+        card before anything is drawn, and how big a picture is at a preset
+        is the PLOTTING package's fact -- it plans the canvas, and the answer
+        does not depend on the kind or the cell count -- so the empty card
+        asks.  A card that frames a picture is that picture's size and moves
+        with it, never ahead of it: a preset picked by the operator resizes
+        the card when the picture drawn at it lands, in the same event, so
+        the picture, its frame and the strip change together -- not a frame
+        that jumped first and stood around the old picture, strip re-elided,
+        until the new one was painted.  How much room the card itself takes
+        is the card's own layout: its strip and its margins, measured, never
+        the constant that was restated here and went wrong the moment the
+        strip grew a second line.
         """
+
+        if self._surface_framed:
+            return
 
         from zlc_ui.board import (
             PLACEHOLDER_CELL_PX,
@@ -749,6 +761,7 @@ class PanelCardView(FluentGroupBox):
             self._surface_layout.removeWidget(self._surface)
             detach_widget(self._surface)
         self._surface = widget
+        self._surface_framed = False
         if widget is None:
             self._placeholder.show()
             return
@@ -760,20 +773,26 @@ class PanelCardView(FluentGroupBox):
         )
         resized = getattr(widget, "surfaceChanged", None)
         if hasattr(resized, "connect"):
-            # A plot surface also says when its picture became a DIFFERENT
-            # surface.  The preset already told this card how big that is, and
-            # for every panel kind the two agree -- but a drawing may widen
-            # its own margin (the pulse timeline does, by eight pixels), and
-            # the card is the picture's frame, not the preset's.
+            # A plot surface says when its picture became a DIFFERENT
+            # surface -- first painted, redrawn at another preset, widened
+            # by its own margin (the pulse timeline does, by eight pixels).
+            # That is the one moment this card changes size: the card is the
+            # picture's frame, not the preset's.
             resized.connect(self._surface_resized)
         self._surface_layout.addWidget(widget)
         widget.show()
+        if getattr(widget, "presented_front", None) is not None:
+            # A widget made over a host that already had a front shows it
+            # from its first moment -- before this card could listen -- so
+            # its announcement is already past.  Frame what it shows now.
+            self._surface_resized(None)
 
     def _surface_resized(self, _identity: object) -> None:
         """The mounted picture is a different surface now: frame that one."""
 
         surface = self._surface
         if surface is not None and surface.width() and surface.height():
+            self._surface_framed = True
             self._reserve(surface.width(), surface.height())
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt API

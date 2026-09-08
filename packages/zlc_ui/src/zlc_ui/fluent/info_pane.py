@@ -1,34 +1,40 @@
-"""Generic read-only information surface with an optional path field."""
+"""Generic read-only information surface with an optional path field.
+
+A record is a tree, and it is read as one.  Every tab is a two-column
+tree of names and values -- a run's parameters under the run, a device's
+snapshot under the device, the whole saved document under its sections --
+with a filter above it that finds a name or a value anywhere in the tab,
+and Copy on any row.  A pane that printed each record as a Python literal
+in a text box was showing the data structure, not the data.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from enum import Enum
-from pprint import pformat
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from .fluent import (
     FluentButton,
     FluentFrame,
+    FluentLineEdit,
     FluentPathEdit,
-    FluentReadoutMultiline,
-    FluentScrollArea,
     FluentSectionLabel,
-    FluentSettingRow,
     FluentStatusStrip,
     FluentTabWidget,
+    _FluentRoundedMenu,
     apply_fluent_scrollbars,
     fluent_font_size,
+    retire_widget,
     scaled_px,
     setting_label_width,
-    signals_blocked,
-    retire_widget,
     window_pad,
 )
 from .style import (
     ACCENT,
-    CARD_PAD,
+    ACCENT_TINT,
+    BG,
     DIVIDER,
     FONT,
     GRAPHITE,
@@ -36,6 +42,7 @@ from .style import (
     ORANGE,
     ORANGE_DARK,
     ORANGE_TINT,
+    RADIUS,
     SURFACE,
     TEXT,
 )
@@ -43,6 +50,478 @@ from .style import (
 
 InfoRow = tuple[str, object]
 InfoTab = tuple[str, tuple[InfoRow, ...]]
+
+#: A flat list longer than this is read as its count and range, not spelled
+#: out: a coordinate axis of 96 pixels is worth "96 numbers, 0 to 95".
+_LIST_PREVIEW = 8
+
+#: Set on a cell the filter found; the delegate paints it on the tint.
+_MATCH_ROLE = QtCore.Qt.UserRole + 1
+
+
+def _plain(value: object) -> object:
+    return value.value if isinstance(value, Enum) else value
+
+
+def _is_scalar(value: object) -> bool:
+    return _plain(value) is None or isinstance(_plain(value), (str, bool, int, float))
+
+
+def _is_flat_list(value: object) -> bool:
+    return isinstance(value, (list, tuple)) and all(_is_scalar(item) for item in value)
+
+
+def _is_composite(value: object) -> bool:
+    return isinstance(value, Mapping) or (
+        isinstance(value, (list, tuple)) and not _is_flat_list(value)
+    )
+
+
+def value_text(value: object) -> str:
+    """One value as the pane shows it beside its name.
+
+    A number is a number, a switch is a word, a flat list is one line, and
+    a long list of numbers is its count and range.  A record says how many
+    fields it has: they are the rows under it, every one on a line of its
+    own, not a summary crammed beside the name.
+    """
+
+    value = _plain(value)
+    if value is None:
+        return "none"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float):
+        return f"{value:g}"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        return value
+    if _is_flat_list(value):
+        items = tuple(_plain(item) for item in value)
+        if not items:
+            return "(none)"
+        numbers = [
+            item for item in items
+            if isinstance(item, (int, float)) and not isinstance(item, bool)
+        ]
+        if len(items) > _LIST_PREVIEW and len(numbers) == len(items):
+            return (
+                f"{len(items)} numbers, {value_text(min(numbers))} "
+                f"to {value_text(max(numbers))}"
+            )
+        shown = ", ".join(value_text(item) for item in items[:_LIST_PREVIEW])
+        if len(items) > _LIST_PREVIEW:
+            return f"{shown}, … ({len(items)} in all)"
+        return shown
+    if isinstance(value, Mapping):
+        return f"{len(value)} fields"
+    if isinstance(value, (list, tuple)):
+        return f"{len(value)} items"
+    return str(value)
+
+
+def copy_text(value: object, indent: str = "") -> str:
+    """The whole value, for the clipboard: every number of a long list,
+    every field of a record, one name per line, nested by indentation."""
+
+    value = _plain(value)
+    if _is_flat_list(value):
+        return ", ".join(value_text(item) for item in value) or "(none)"
+    if isinstance(value, Mapping):
+        lines = []
+        for key, item in value.items():
+            if _is_composite(item):
+                lines.append(f"{indent}{key}:")
+                lines.append(copy_text(item, indent + "  "))
+            else:
+                lines.append(f"{indent}{key}: {copy_text(item)}")
+        return "\n".join(lines)
+    if isinstance(value, (list, tuple)):
+        lines = []
+        for index, item in enumerate(value):
+            if _is_composite(item):
+                lines.append(f"{indent}[{index}]:")
+                lines.append(copy_text(item, indent + "  "))
+            else:
+                lines.append(f"{indent}[{index}]: {copy_text(item)}")
+        return "\n".join(lines)
+    return value_text(value)
+
+
+def _is_action(value: object) -> bool:
+    return (
+        isinstance(value, Mapping)
+        and set(value) == {"text", "action"}
+        and isinstance(value["text"], str)
+        and isinstance(value["action"], str)
+    )
+
+
+class _MatchDelegate(QtWidgets.QStyledItemDelegate):
+    """A cell the filter found is painted on the attention tint, so the eye
+    lands on the match and not on the rows kept open around it."""
+
+    def paint(self, painter, option, index):  # noqa: N802 - Qt naming
+        if index.data(_MATCH_ROLE):
+            painter.fillRect(option.rect, QtGui.QColor(ORANGE_TINT))
+        super().paint(painter, option, index)
+
+
+class InfoTree(QtWidgets.QTreeWidget):
+    """Names and values as a tree: every field on a row of its own, open
+    from the start, the nesting drawn as guides and chevrons; a filter finds
+    any name or value and tints what it found; Copy takes a row's whole
+    value.  A value is never wrapped or cut: the tree scrolls sideways."""
+
+    #: A row's action was pressed; carries the action the row named.
+    action_requested = QtCore.pyqtSignal(str)
+
+    def __init__(self, *, name_width: int, parent=None) -> None:
+        super().__init__(parent)
+        self.setColumnCount(2)
+        self.setHeaderHidden(True)
+        self.setRootIsDecorated(True)
+        self.setIndentation(scaled_px(18, minimum=14))
+        self._chevron = scaled_px(4, minimum=3)
+        # A value is never elided: its column is as wide as its widest value.
+        # A name wider than the name column's cap shows its two ends.
+        self.setTextElideMode(QtCore.Qt.ElideMiddle)
+        self.setWordWrap(False)
+        self.setItemDelegate(_MatchDelegate(self))
+        self.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.setAlternatingRowColors(False)
+        self.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
+        self.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
+        self.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.AdjustIgnored)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding
+        )
+        self.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        # Sideways, when the values are wider than the pane: a path or a
+        # digest is read whole by scrolling to it, not by wrapping it under
+        # its name or by hovering for a tooltip that repeats the tab.
+        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        self._name_floor = int(name_width)
+        header = self.header()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QtWidgets.QHeaderView.Interactive)
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
+        header.setMinimumSectionSize(scaled_px(60, minimum=48))
+        header.resizeSection(0, self._name_floor)
+        radius = scaled_px(RADIUS, minimum=2)
+        self.setStyleSheet(
+            f"""
+            QTreeView {{
+                background: {SURFACE};
+                color: {TEXT};
+                border: 1px solid {DIVIDER};
+                border-radius: {radius}px;
+                font: {fluent_font_size()}pt "{FONT}";
+                outline: none;
+                selection-background-color: {ACCENT_TINT};
+                selection-color: {TEXT};
+                show-decoration-selected: 1;
+            }}
+            QTreeView::item {{
+                border: none;
+                padding: {scaled_px(2, minimum=1)}px {scaled_px(5, minimum=3)}px;
+            }}
+            QTreeView::item:hover:!selected {{
+                background: {BG};
+            }}
+            QTreeView::branch {{
+                background: {SURFACE};
+            }}
+            QTreeView::branch:selected {{
+                background: {ACCENT_TINT};
+            }}
+            """
+        )
+        apply_fluent_scrollbars(self)
+
+    # ---------------------------------------------------------- branches
+
+    def drawBranches(self, painter, rect, index) -> None:  # noqa: N802 - Qt naming
+        """The nesting, drawn: a guide line down every level a row sits
+        under, and a chevron on a row that opens -- pointing down while it
+        is open.  Indentation alone was a tree the eye could not follow."""
+
+        indent = self.indentation()
+        depth = 0
+        parent = index.parent()
+        while parent.isValid():
+            depth += 1
+            parent = parent.parent()
+        painter.save()
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        guide = QtGui.QPen(QtGui.QColor(DIVIDER))
+        guide.setWidthF(1.0)
+        painter.setPen(guide)
+        for level in range(depth):
+            x = rect.left() + level * indent + indent / 2
+            painter.drawLine(
+                QtCore.QPointF(x, rect.top()), QtCore.QPointF(x, rect.bottom() + 1)
+            )
+        if index.model().hasChildren(index):
+            centre_x = rect.left() + depth * indent + indent / 2
+            centre_y = rect.center().y() + 0.5
+            half = float(self._chevron)
+            pen = QtGui.QPen(QtGui.QColor(GREY))
+            pen.setWidthF(float(scaled_px(1.5, minimum=1)))
+            pen.setCapStyle(QtCore.Qt.RoundCap)
+            pen.setJoinStyle(QtCore.Qt.RoundJoin)
+            painter.setPen(pen)
+            path = QtGui.QPainterPath()
+            if self.isExpanded(index):
+                path.moveTo(centre_x - half, centre_y - half / 2)
+                path.lineTo(centre_x, centre_y + half / 2)
+                path.lineTo(centre_x + half, centre_y - half / 2)
+            else:
+                path.moveTo(centre_x - half / 2, centre_y - half)
+                path.lineTo(centre_x + half / 2, centre_y)
+                path.lineTo(centre_x - half / 2, centre_y + half)
+            painter.drawPath(path)
+        painter.restore()
+
+    # ------------------------------------------------------------- rows
+
+    def set_rows(self, rows: Iterable[InfoRow]) -> None:
+        """Replace every row, and open the whole tree: a tab is read top to
+        bottom, every field on its own line, without being asked."""
+
+        self.clear()
+        for label, value in rows:
+            if _is_action(value):
+                self._add_action(str(label), value)
+                continue
+            self._add_entry(None, str(label), value)
+        self.expandAll()
+        self._fit_name_column()
+
+    def _fit_name_column(self) -> None:
+        """The name column is as wide as its widest name at its depth, up
+        to six tenths of the view: the values must start on screen, and a
+        name deeper and longer than that is read by its two ends -- or
+        whole, from Copy name."""
+
+        metrics = self.fontMetrics()
+        slack = 2 * scaled_px(5, minimum=3) + scaled_px(6, minimum=4)
+        widest = self._name_floor
+
+        def measure(item: QtWidgets.QTreeWidgetItem, depth: int) -> None:
+            nonlocal widest
+            widest = max(
+                widest,
+                metrics.horizontalAdvance(item.text(0))
+                + self.indentation() * depth
+                + slack,
+            )
+            for index in range(item.childCount()):
+                measure(item.child(index), depth + 1)
+
+        for item in self._top_level_items():
+            measure(item, 1)
+        limit = max(self._name_floor, self.viewport().width() * 6 // 10)
+        self.header().resizeSection(0, min(widest, limit))
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().resizeEvent(event)
+        self._fit_name_column()
+
+    def _add_action(self, label: str, value: Mapping[str, str]) -> None:
+        item = QtWidgets.QTreeWidgetItem([label, ""])
+        self.addTopLevelItem(item)
+        button = FluentButton(str(value["text"]), color=ACCENT)
+        button.setMinimumWidth(0)
+        button.clicked.connect(
+            lambda _checked=False, action=str(value["action"]): (
+                self.action_requested.emit(action)
+            )
+        )
+        self.setItemWidget(item, 1, button)
+        item.setData(1, QtCore.Qt.UserRole, str(value["text"]))
+
+    def _add_entry(
+        self, parent: QtWidgets.QTreeWidgetItem | None, name: str, value: object
+    ) -> QtWidgets.QTreeWidgetItem:
+        item = QtWidgets.QTreeWidgetItem([name, value_text(value)])
+        if parent is None:
+            self.addTopLevelItem(item)
+        else:
+            parent.addChild(item)
+        item.setData(1, QtCore.Qt.UserRole, copy_text(value))
+        if _is_composite(value):
+            # How many rows are under it -- a count of what follows, not a
+            # value of its own: set in the muted ink so the eye tells them
+            # apart.
+            item.setForeground(1, QtGui.QBrush(QtGui.QColor(GRAPHITE)))
+            entries = (
+                value.items()
+                if isinstance(value, Mapping)
+                else ((f"[{index}]", item_value) for index, item_value in enumerate(value))
+            )
+            for key, child in entries:
+                self._add_entry(item, str(key), child)
+        return item
+
+    def _top_level_items(self) -> tuple[QtWidgets.QTreeWidgetItem, ...]:
+        return tuple(self.topLevelItem(index) for index in range(self.topLevelItemCount()))
+
+    # ----------------------------------------------------------- filter
+
+    def apply_filter(self, text: str) -> None:
+        """Show the rows whose name or value contains ``text``, or that
+        hold such a row, opened down to the match; tint the cells that
+        match and scroll the first into view.  An empty filter shows the
+        whole tree open, untinted, as at first."""
+
+        needle = str(text).strip().lower()
+        first: list[QtWidgets.QTreeWidgetItem] = []
+        for item in self._top_level_items():
+            self._filter_item(item, needle, first)
+        self.viewport().update()
+        if first:
+            self.scrollToItem(first[0], QtWidgets.QAbstractItemView.PositionAtCenter)
+            # Into view VERTICALLY: the scroll to a deep row also slid the
+            # tree sideways to its cell, and the names left the screen.
+            self.horizontalScrollBar().setValue(0)
+
+    def _filter_item(
+        self,
+        item: QtWidgets.QTreeWidgetItem,
+        needle: str,
+        first: list[QtWidgets.QTreeWidgetItem],
+    ) -> bool:
+        matched = [
+            bool(needle) and needle in item.text(column).lower()
+            for column in (0, 1)
+        ]
+        own = any(matched)
+        if own and not first:
+            first.append(item)
+        for column, hit in enumerate(matched):
+            item.setData(column, _MATCH_ROLE, hit)
+        # Every child is judged, not just the first that matches: a hidden
+        # sibling is a row the operator cannot find.
+        below = [
+            self._filter_item(item.child(index), needle, first)
+            for index in range(item.childCount())
+        ]
+        shown = not needle or own or any(below)
+        item.setHidden(not shown)
+        item.setExpanded(any(below) if needle else True)
+        return shown
+
+    # -------------------------------------------------------------- copy
+
+    def show_row(self, label: str) -> bool:
+        """Bring the top-level row named ``label`` into view, opened."""
+
+        wanted = str(label)
+        for item in self._top_level_items():
+            if item.text(0) == wanted:
+                item.setHidden(False)
+                item.setExpanded(True)
+                self.setCurrentItem(item)
+                self.scrollToItem(item, QtWidgets.QAbstractItemView.PositionAtTop)
+                return True
+        return False
+
+    def row_value(self, item: QtWidgets.QTreeWidgetItem | None = None) -> str:
+        current = self.currentItem() if item is None else item
+        if current is None:
+            return ""
+        return str(current.data(1, QtCore.Qt.UserRole) or current.text(1))
+
+    def row_name(self, item: QtWidgets.QTreeWidgetItem | None = None) -> str:
+        """The row's name from the top: ``devices.camera.exposure_seconds``."""
+
+        current = self.currentItem() if item is None else item
+        parts: list[str] = []
+        while current is not None:
+            parts.append(current.text(0))
+            current = current.parent()
+        return ".".join(reversed(parts))
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        if event.matches(QtGui.QKeySequence.Copy) and self.currentItem() is not None:
+            QtWidgets.QApplication.clipboard().setText(self.row_value())
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        item = self.itemAt(event.pos())
+        if item is not None:
+            self.setCurrentItem(item)
+        menu = _FluentRoundedMenu(self)
+        clipboard = QtWidgets.QApplication.clipboard()
+        copy_value = menu.addAction("Copy value")
+        copy_value.setEnabled(item is not None)
+        copy_value.triggered.connect(lambda: clipboard.setText(self.row_value()))
+        copy_name = menu.addAction("Copy name")
+        copy_name.setEnabled(item is not None)
+        copy_name.triggered.connect(lambda: clipboard.setText(self.row_name()))
+        menu.addSeparator()
+        menu.addAction("Expand all").triggered.connect(self.expandAll)
+        menu.addAction("Collapse all").triggered.connect(self.collapseAll)
+        try:
+            menu.exec_(event.globalPos())
+        finally:
+            retire_widget(menu)
+        event.accept()
+
+
+class _RowsTab(QtWidgets.QWidget):
+    """One tab: a filter over its tree."""
+
+    def __init__(self, rows: Iterable[InfoRow], *, name_width: int, parent=None) -> None:
+        super().__init__(parent)
+        self.setStyleSheet("background: transparent;")
+        layout = QtWidgets.QVBoxLayout(self)
+        gap = scaled_px(6, minimum=4)
+        layout.setContentsMargins(0, gap, 0, 0)
+        layout.setSpacing(gap)
+        self.filter_edit = FluentLineEdit()
+        self.filter_edit.setPlaceholderText("filter names and values")
+        self.filter_edit.setClearButtonEnabled(True)
+        layout.addWidget(self.filter_edit)
+        self.tree = InfoTree(name_width=name_width)
+        self.tree.set_rows(rows)
+        layout.addWidget(self.tree, 1)
+        self.filter_edit.textChanged.connect(self.tree.apply_filter)
+
+
+class _FlowView(QtWidgets.QGraphicsView):
+    """The flow's picture; a click on a card names its node."""
+
+    node_activated = QtCore.pyqtSignal(str)
+
+    def __init__(self, scene: QtWidgets.QGraphicsScene, parent=None) -> None:
+        super().__init__(scene, parent)
+        self._pressed_at: QtCore.QPoint | None = None
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        self._pressed_at = event.pos() if event.button() == QtCore.Qt.LeftButton else None
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().mouseReleaseEvent(event)
+        pressed = self._pressed_at
+        self._pressed_at = None
+        if pressed is None or event.button() != QtCore.Qt.LeftButton:
+            return
+        # A press that travelled was a pan of the picture, not a choice.
+        if (event.pos() - pressed).manhattanLength() > QtWidgets.QApplication.startDragDistance():
+            return
+        for item in self.items(event.pos()):
+            node_id = item.data(0)
+            if node_id:
+                self.node_activated.emit(str(node_id))
+                return
 
 
 class InfoPane(QtWidgets.QWidget):
@@ -80,7 +559,10 @@ class InfoPane(QtWidgets.QWidget):
         self._declared_labels = tuple(str(name) for name in label_names)
         self._label_width = setting_label_width(self._declared_labels)
         self._graph_tab_titles = frozenset(str(title) for title in graph_tabs)
-        self._graph_tabs: dict[str, QtWidgets.QGraphicsView] = {}
+        self._graph_tabs: dict[str, _FlowView] = {}
+        #: Per graph tab, which row each node stands for: ``(tab, label)``.
+        self._graph_rows: dict[str, dict[str, tuple[str, str]]] = {}
+        self._rows_tabs: dict[str, _RowsTab] = {}
         self._fixed_pane_width: int | None = None
 
         layout = QtWidgets.QVBoxLayout(self)
@@ -118,9 +600,6 @@ class InfoPane(QtWidgets.QWidget):
             QtWidgets.QSizePolicy.Expanding,
             QtWidgets.QSizePolicy.Expanding,
         )
-        self._tab_layouts: dict[str, QtWidgets.QVBoxLayout] = {}
-        self._pending_tab_rows: dict[str, tuple[InfoRow, ...]] = {}
-        self.info_tabs.currentChanged.connect(self._show_tab_rows)
         self.set_tabs(tabs)
         layout.addWidget(self.info_tabs, 1)
 
@@ -179,106 +658,49 @@ class InfoPane(QtWidgets.QWidget):
         # titles almost never do -- and the rebuilt stack starts at the
         # first tab, so a refresh threw anyone reading Devices back to Plot.
         showing = self.info_tabs.tabText(self.info_tabs.currentIndex())
-        with signals_blocked(self.info_tabs):
-            while self.info_tabs.count():
-                widget = self.info_tabs.widget(0)
-                self.info_tabs.removeTab(0)
-                if widget is not None:
-                    retire_widget(widget)
-            self._tab_layouts.clear()
-            self._graph_tabs.clear()
-            self._pending_tab_rows.clear()
-            for title, rows in normalized:
-                if title in self._graph_tab_titles:
-                    self._add_graph_tab(title)
-                else:
-                    self._pending_tab_rows[title] = rows
-                    self._add_rows_tab(title)
-            for index in range(self.info_tabs.count()):
-                if self.info_tabs.tabText(index) == showing:
-                    self.info_tabs.setCurrentIndex(index)
-                    break
-        self._show_tab_rows(self.info_tabs.currentIndex())
+        while self.info_tabs.count():
+            widget = self.info_tabs.widget(0)
+            self.info_tabs.removeTab(0)
+            if widget is not None:
+                widget.deleteLater()
+        self._rows_tabs.clear()
+        self._graph_tabs.clear()
+        self._graph_rows.clear()
+        for title, rows in normalized:
+            if title in self._graph_tab_titles:
+                self._add_graph_tab(title)
+            else:
+                self._add_rows_tab(title, rows)
+        for index in range(self.info_tabs.count()):
+            if self.info_tabs.tabText(index) == showing:
+                self.info_tabs.setCurrentIndex(index)
+                break
         self._apply_pane_width()
 
-    @QtCore.pyqtSlot(int)
-    def _show_tab_rows(self, index: int) -> None:
-        """Build readouts only when their tab is actually requested."""
+    def _add_rows_tab(self, title: str, rows: tuple[InfoRow, ...]) -> None:
+        tab = _RowsTab(rows, name_width=self._label_width)
+        tab.tree.action_requested.connect(self.action_requested)
+        self.info_tabs.add_permanent_tab(tab, title)
+        self._rows_tabs[title] = tab
 
-        title = self.info_tabs.tabText(index)
-        rows = self._pending_tab_rows.pop(title, None)
-        if rows is None:
-            return
-        layout = self._tab_layouts[title]
-        body = layout.parentWidget()
-        body.setUpdatesEnabled(False)
-        layout.setEnabled(False)
-        try:
-            self._fill_rows(layout, rows)
-        finally:
-            layout.setEnabled(True)
-            body.setUpdatesEnabled(True)
+    def show_row(self, title: str, label: str) -> bool:
+        """Open the tab ``title`` on its top-level row ``label``."""
 
-    def _add_rows_tab(self, title: str) -> None:
-        scroll = FluentScrollArea()
-        scroll.setWidgetResizable(True)
-        body = QtWidgets.QWidget()
-        body.setStyleSheet("background: transparent;")
-        tab_layout = QtWidgets.QVBoxLayout(body)
-        margin = scaled_px(CARD_PAD, minimum=6)
-        tab_layout.setContentsMargins(margin, margin, margin, margin)
-        tab_layout.setSpacing(scaled_px(3, minimum=2))
-        tab_layout.setAlignment(QtCore.Qt.AlignTop)
-        scroll.setWidget(body)
-        self.info_tabs.add_permanent_tab(scroll, title)
-        self._tab_layouts[title] = tab_layout
-
-    def _fill_rows(self, layout: QtWidgets.QVBoxLayout, rows: tuple[InfoRow, ...]) -> None:
-        """Every row a readout, except an ACTION, which is a button.
-
-        A value shaped ``{"text": ..., "action": ...}`` is something the
-        presenter offers to do about the row -- open the pulse a run played,
-        say -- and pressing it emits ``action_requested`` with the action.
-        Plain data on both sides, so the pane still imports nobody's model.
-        """
-
-        for key, value in rows:
-            if _is_action(value):
-                button = FluentButton(str(value["text"]), color=ACCENT)
-                # The value column's width, like every readout beside it: a
-                # button sized to its own text overflowed the column and was
-                # clipped mid-word the moment the text was a real name.
-                button.setSizePolicy(
-                    QtWidgets.QSizePolicy.Expanding,
-                    QtWidgets.QSizePolicy.Fixed,
-                )
-                button.setMinimumWidth(0)
-                button.clicked.connect(
-                    lambda _checked=False, action=str(value["action"]): (
-                        self.action_requested.emit(action)
-                    )
-                )
-                layout.addWidget(
-                    FluentSettingRow(str(key), button, label_width=self._label_width)
-                )
-                continue
-            text = self._readout_text(value)
-            field = FluentReadoutMultiline(text)
-            field.setSizePolicy(
-                QtWidgets.QSizePolicy.Ignored,
-                QtWidgets.QSizePolicy.Fixed,
-            )
-            layout.addWidget(
-                FluentSettingRow(
-                    str(key),
-                    field,
-                    label_width=self._label_width,
-                )
-            )
+        tab = self._rows_tabs.get(str(title))
+        if tab is None:
+            return False
+        # A filter that hides the row would hide the answer to a question
+        # the operator just asked of the picture.
+        if tab.filter_edit.text():
+            tab.filter_edit.clear()
+        if not tab.tree.show_row(label):
+            return False
+        self.info_tabs.setCurrentWidget(tab)
+        return True
 
     def _add_graph_tab(self, title: str) -> None:
         scene = QtWidgets.QGraphicsScene()
-        view = QtWidgets.QGraphicsView(scene)
+        view = _FlowView(scene)
         view.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
         view.setDragMode(QtWidgets.QGraphicsView.ScrollHandDrag)
         view.setRenderHints(
@@ -288,11 +710,23 @@ class InfoPane(QtWidgets.QWidget):
         view.setBackgroundBrush(QtGui.QColor(SURFACE))
         view.setStyleSheet(f"QGraphicsView {{ border-top: 1px solid {DIVIDER}; }}")
         apply_fluent_scrollbars(view)
+        view.node_activated.connect(
+            lambda node_id, graph=title: self._activate_graph_node(graph, node_id)
+        )
         self.info_tabs.add_permanent_tab(view, title)
         self._graph_tabs[title] = view
 
+    def _activate_graph_node(self, graph: str, node_id: str) -> None:
+        row = self._graph_rows.get(graph, {}).get(node_id)
+        if row is not None:
+            self.show_row(*row)
+
     def set_graph(self, title: str, graph: object) -> None:
-        """Replace one node/edge graph from domain-free plain data."""
+        """Replace one node/edge graph from domain-free plain data.
+
+        A node may name the row it stands for, ``("Logic", label)``: a click
+        on its card opens that row, so the picture is a map of the tabs.
+        """
 
         key = str(title)
         try:
@@ -306,9 +740,10 @@ class InfoPane(QtWidgets.QWidget):
             raise TypeError("info graph nodes and edges must be tuples")
         nodes: dict[str, Mapping[str, object]] = {}
         order: list[str] = []
+        rows: dict[str, tuple[str, str]] = {}
         for raw in raw_nodes:
             if not isinstance(raw, Mapping) or set(raw) != {
-                "id", "kind", "title", "subtitle", "root", "tooltip"
+                "id", "kind", "title", "subtitle", "root", "tooltip", "row"
             }:
                 raise ValueError("info graph node fields differ")
             node_id = str(raw["id"])
@@ -317,6 +752,15 @@ class InfoPane(QtWidgets.QWidget):
                 raise ValueError("info graph node identity is invalid")
             if type(raw["root"]) is not bool:
                 raise TypeError("info graph node root flag must be bool")
+            row = raw["row"]
+            if row is not None:
+                if (
+                    not isinstance(row, tuple)
+                    or len(row) != 2
+                    or not all(isinstance(part, str) and part for part in row)
+                ):
+                    raise TypeError("info graph node row must be (tab, label) or None")
+                rows[node_id] = (str(row[0]), str(row[1]))
             nodes[node_id] = raw
             order.append(node_id)
         edges: list[Mapping[str, object]] = []
@@ -343,6 +787,7 @@ class InfoPane(QtWidgets.QWidget):
             ):
                 raise ValueError("device graph edges must point into Logic nodes")
             edges.append(raw)
+        self._graph_rows[key] = rows
 
         scene = view.scene()
         assert scene is not None
@@ -562,6 +1007,11 @@ class InfoPane(QtWidgets.QWidget):
                 QtGui.QBrush(QtGui.QColor(ORANGE_TINT if is_device else SURFACE)),
             )
             card.setToolTip(str(node["tooltip"]))
+            # The card answers a click with its node; the words on it are
+            # painted over it and take no click of their own.
+            card.setData(0, node_id)
+            if node_id in rows:
+                card.setCursor(QtCore.Qt.PointingHandCursor)
             inset = scaled_px(10, minimum=8)
             badge_font = QtGui.QFont(FONT, max(6, fluent_font_size() - 4))
             badge_font.setBold(True)
@@ -605,27 +1055,5 @@ class InfoPane(QtWidgets.QWidget):
     def set_status(self, text: str) -> None:
         self.status.show_message(str(text))
 
-    @staticmethod
-    def _readout_text(value: object) -> str:
-        if isinstance(value, Enum):
-            value = value.value
-        if isinstance(value, Mapping):
-            return pformat(dict(value), sort_dicts=False, width=80)
-        if isinstance(value, (tuple, list)):
-            return ", ".join(
-                str(item.value if isinstance(item, Enum) else item)
-                for item in value
-            )
-        return str(value)
 
-
-def _is_action(value: object) -> bool:
-    return (
-        isinstance(value, Mapping)
-        and set(value) == {"text", "action"}
-        and isinstance(value["text"], str)
-        and isinstance(value["action"], str)
-    )
-
-
-__all__ = ["InfoPane", "InfoRow", "InfoTab"]
+__all__ = ["InfoPane", "InfoRow", "InfoTab", "InfoTree", "copy_text", "value_text"]

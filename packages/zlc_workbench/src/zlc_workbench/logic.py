@@ -630,9 +630,12 @@ class LogicCatalog:
             (
                 name,
                 str(getattr(item.kind, "value", item.kind)),
-                ", ".join(
-                    output.name for output in item.outputs
-                ) or "nothing",
+                ", ".join(output.name for output in item.outputs)
+                or (
+                    "what its draft asks for"
+                    if item.declare_outputs is not None
+                    else "nothing"
+                ),
             )
             for name, item in sorted(self.by_name.items())
         )
@@ -648,11 +651,13 @@ def make_host(
     signal_plane: Any,
     instance_id: str,
     source_signal: str | None,
+    values: Mapping[str, Any],
     request_owner_wake: Callable[[], None] | None = None,
 ) -> NodeHost:
     """One node under the runtime's own lifecycle, named for its instance.
 
-    The descriptor's frozen output declarations are the sole signal vocabulary.
+    The descriptor's output declarations for this draft are the sole signal
+    vocabulary; the plane refuses a node whose own declarations differ.
     """
 
     inputs = dataset_inputs(descriptor)
@@ -663,22 +668,30 @@ def make_host(
     selected_source = (
         str(source_signal or "").strip() if has_input else None
     )
+    siblings: tuple[str, ...] = ()
+    if has_input and kind == "processor":
+        # Which sibling outputs a processor reads is usually fixed by its
+        # kind and declared once.  A node that computes what it was asked
+        # to (derive) reads the outputs its expression names, and says so
+        # on the instance; the declaration then only says there ARE inputs.
+        declared_by_node = getattr(node, "dataset_input_siblings", None)
+        siblings = (
+            tuple(declared_by_node)
+            if declared_by_node is not None
+            else tuple(inputs[0].sibling_outputs)
+        )
     return NodeHost(
         node,
         signal_plane,
         request_owner_wake,
         instance_id=str(instance_id),
         kind=kind,
-        dataset_output_declarations=tuple(descriptor.outputs),
+        dataset_output_declarations=descriptor.outputs_for(values),
         input_signal=selected_source,
         input_name=(
             inputs[0].name if has_input and kind == "processor" else None
         ),
-        input_siblings=(
-            inputs[0].sibling_outputs
-            if has_input and kind == "processor"
-            else ()
-        ),
+        input_siblings=siblings,
         input_delivery=(
             str(inputs[0].delivery) if has_input else None
         ),

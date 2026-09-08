@@ -2326,7 +2326,10 @@ def calibrate(
     bright = np.zeros_like(reference_label_signals, dtype=bool)
     fit_ok = np.zeros(len(centers), dtype=bool)
     for site, fit in enumerate(fits):
-        if fit.ok and fit.bright_above and np.isfinite(fit.threshold):
+        # A label rests on two populations that are decisively there: a site
+        # that never loaded has its one Gaussian split in two like any other
+        # sample, and must not label its shots by the crossing.
+        if fit.decisive and fit.bright_above and np.isfinite(fit.threshold):
             reference_values = reference_label_signals[:, :, site]
             bright[:, :, site] = classify_threshold(
                 reference_values,

@@ -35,6 +35,8 @@ _FIELD_KINDS = {
     "float": "float",
     "str": "text",
     "text": "text",
+    #: A list built one row at a time, each row a form of its columns.
+    "rows": "rows",
     "bool": "bool",
     "choice": "choice",
     "numeric_tuple": "text",
@@ -180,7 +182,8 @@ def _project_field(field: AuthoringField) -> FormFieldProps:
         choices=tuple(
             FormChoice(choice.label, choice.value) for choice in field.choices
         ),
-        description={
+        columns=tuple(_project_field(column) for column in field.columns),
+        description=field.description or {
             "pair": "two integers as y, x",
             "numeric_tuple": "comma-separated finite numbers",
         }.get(str(field.value_type), ""),
@@ -244,8 +247,11 @@ def _project_resource_field(
 
 
 def display_value(value: object) -> object:
-    """A stored value as the form shows it."""
+    """A stored value as the form shows it: a list of numbers as one line
+    of text, rows as the rows they are."""
 
     if isinstance(value, (tuple, list)):
+        if all(isinstance(item, Mapping) for item in value):
+            return tuple(dict(item) for item in value)
         return ", ".join(str(item) for item in value)
     return value

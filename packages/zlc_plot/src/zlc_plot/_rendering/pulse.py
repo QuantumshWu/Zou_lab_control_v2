@@ -6,6 +6,7 @@ from collections.abc import MutableMapping
 from typing import Any
 
 import numpy as np
+from matplotlib.text import Text
 
 from .._pulse_time import pulse_content_bounds, pulse_time_scale
 from ..primitives import PulseAnalogTrace, PulseTimelineData
@@ -52,6 +53,54 @@ def _sync_texts(axis: Any, artists: MutableMapping[str, Any], key: str, count: i
     for index, text in enumerate(texts):
         text.set_visible(index < count)
     return texts
+
+
+class SpanLabel(Text):
+    """A name printed over a span of time, only where the span is wide
+    enough ON SCREEN to hold it.
+
+    Whether a block or a period can carry its name is a fact of the drawn
+    picture, not of the document: the same 0.3 µs period hides its name in
+    the home view and shows it once the operator zooms in.  So the decision
+    is taken at draw time, against the span's pixel width under the axes'
+    current transform and the text's rendered extent -- never against a
+    fraction of the total duration, which no zoom could change.
+    """
+
+    #: The span the label names, in data (time) units.
+    span: tuple[float, float] = (0.0, 0.0)
+    #: Breathing room demanded on each side of the text, in points.
+    pad_pt: float = 0.0
+    #: Whether the last draw found room and printed the name.
+    fitted: bool = False
+
+    def draw(self, renderer: Any) -> None:
+        self.fitted = False
+        if not self.get_visible() or not self.get_text():
+            self.stale = False
+            return
+        start, stop = self.span
+        x0, x1 = self.get_transform().transform([(start, 0.0), (stop, 0.0)])[:, 0]
+        width = float(self.get_window_extent(renderer).width)
+        if width + 2.0 * renderer.points_to_pixels(self.pad_pt) > abs(float(x1) - float(x0)):
+            self.stale = False
+            return
+        self.fitted = True
+        super().draw(renderer)
+
+
+def _sync_span_labels(
+    axis: Any, artists: MutableMapping[str, Any], key: str, count: int
+) -> list[SpanLabel]:
+    labels: list[SpanLabel] = artists.setdefault(key, [])
+    while len(labels) < count:
+        label = SpanLabel(0.0, 0.0, "", transform=axis.transData)
+        label.set_clip_on(True)
+        axis.add_artist(label)
+        labels.append(label)
+    for index, label in enumerate(labels):
+        label.set_visible(index < count)
+    return labels
 
 
 def _analog_geometry(
@@ -109,7 +158,6 @@ def update_pulse_timeline(
     )
     baseline_offset = row_height / 2.0
 
-    total_duration = 0.0 if payload.total_duration is None else payload.total_duration
     start_min, stop_max = pulse_content_bounds(payload)
     span = stop_max - start_min
     margin = max(span * pulse.x_margin_fraction, np.finfo(float).eps * span)
@@ -130,12 +178,11 @@ def update_pulse_timeline(
         line.set_zorder(pulse.base_zorder)
 
     blocks = _sync_rectangles(axis, artists, "pulse:blocks", len(payload.blocks))
-    block_labels = _sync_texts(axis, artists, "pulse:block_labels", len(payload.blocks))
+    block_labels = _sync_span_labels(axis, artists, "pulse:block_labels", len(payload.blocks))
     label_style = {
         "fontsize": style.fonts.pulse_bar_label_pt,
         "color": style.palette.pulse_name,
     }
-    label_duration = total_duration if total_duration > 0.0 else span
     for index, block in enumerate(payload.blocks):
         baseline = baseline_y[block.channel_id]
         color = row_colors[block.channel_id]
@@ -156,11 +203,9 @@ def update_pulse_timeline(
         label.set_clip_on(True)
         label.set_zorder(pulse.base_zorder + 1.0)
         label.update(label_style)
-        label.set_visible(
-            bool(block.label)
-            and (block.stop - block.start)
-            >= pulse.block_label_min_span_fraction * label_duration
-        )
+        label.span = (block.start, block.stop)
+        label.pad_pt = pulse.label_fit_pad_pt
+        label.set_visible(bool(block.label))
 
     analog_zero_lines = _sync_lines(
         axis,
@@ -324,7 +369,7 @@ def update_pulse_timeline(
         line.set_linestyle("-")
         line.set_clip_on(True)
         line.set_zorder(pulse.base_zorder - 1.0)
-    period_labels = _sync_texts(axis, artists, "pulse:period_labels", len(periods))
+    period_labels = _sync_span_labels(axis, artists, "pulse:period_labels", len(periods))
     for index, mark in enumerate(periods):
         text = period_labels[index]
         text.set_position(((mark.start + mark.stop) / 2.0, row_top + band / 2.0))
@@ -339,11 +384,9 @@ def update_pulse_timeline(
                 "color": style.palette.pulse_period,
             }
         )
-        text.set_visible(
-            bool(mark.name)
-            and (mark.stop - mark.start)
-            >= pulse.period_label_min_span_fraction * label_duration
-        )
+        text.span = (mark.start, mark.stop)
+        text.pad_pt = pulse.label_fit_pad_pt
+        text.set_visible(bool(mark.name))
     left_brackets = _sync_lines(
         axis,
         artists,

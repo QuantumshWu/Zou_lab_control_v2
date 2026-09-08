@@ -41,7 +41,6 @@ from pathlib import Path
 import numpy as np
 from zlc_data import (
     SCAN_POINT,
-    SITE,
     AxisId,
     AxisSpec,
     DatasetSchema,
@@ -131,6 +130,7 @@ class TemperatureTask:
         camera_key: str,
         signal_plane: object,
         sequence: PulseSequence,
+        pulse_path: str | Path,
         calibration: TrapCalibration,
         calibration_path: str | Path,
         plan: ScanPlan,
@@ -221,6 +221,7 @@ class TemperatureTask:
             sequencer_key=sequencer_key,
             source=CameraCycleSource(self._camera),
             sequence=sequence,
+            pulse_path=pulse_path,
             plan=plan,
             ports=ports,
             repeats=self._repeats,

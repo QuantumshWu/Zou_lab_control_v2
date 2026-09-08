@@ -209,9 +209,9 @@ def test_logic_discovery_is_derived_from_leaf_modules() -> None:
     assert tuple(item.api_name for item in descriptors) == (
         "calibration",
         "camera_measurement",
+        "derive",
         "frame_survival",
         "occupancy",
-        "occupancy_agreement",
         "seamless_scan",
         "slm_feedback",
         "stepped_scan",

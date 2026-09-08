@@ -162,6 +162,7 @@ def _build(
             pulse_resource.value,
             api_overrides_from_authored(authored["api_values"]),
         ),
+        pulse_path=pulse_resource.path,
         calibration=calibration.value,
         calibration_path=calibration.path,
         plan=plan_from_authored(authored["plan"]),

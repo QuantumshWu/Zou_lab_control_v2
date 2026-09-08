@@ -434,10 +434,11 @@ class PulseStyleConfig:
     x_margin_fraction: float = 0.04
     grid_linewidth: float = 0.35
     trace_linewidth: float = 0.65
-    block_label_min_span_fraction: float = 0.09
+    #: Room a block or period name needs on each side, in points, before it
+    #: is printed over its span; the span's width is measured on screen.
+    label_fit_pad_pt: float = 1.5
     #: The band above the top row where period names are printed, in rows.
     period_band_height: float = 0.6
-    period_label_min_span_fraction: float = 0.06
     period_boundary_linewidth: float = 0.7
     period_boundary_alpha: float = 0.35
     analog_zero_alpha: float = 0.5
@@ -485,6 +486,7 @@ class PulseStyleConfig:
             "trace_linewidth",
             "scan_badge_pad",
             "scan_dac_linewidth",
+            "label_fit_pad_pt",
             "period_band_height",
             "period_boundary_linewidth",
             "repeat_bottom_step",
@@ -501,8 +503,6 @@ class PulseStyleConfig:
             )
         for field in (
             "x_margin_fraction",
-            "block_label_min_span_fraction",
-            "period_label_min_span_fraction",
             "period_boundary_alpha",
             "repeat_tick_fraction",
             "repeat_max_foot_fraction",

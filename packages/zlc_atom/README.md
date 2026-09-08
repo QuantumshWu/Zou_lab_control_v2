@@ -280,10 +280,13 @@ creating a second image truth. There is no separate validity signal and no
 occupancy-rate output. The generic
 `zlc_plot` overlay declaration and same-run geometry document let any
 compatible presenter join `occupied` to `frame_judged` without knowing the
-Occupancy plugin. Two small processors build on that classification without
-adding a second one: `occupancy_agreement` keeps the counts of one frame only
-where two other frames of the cycle agree on the occupancy (its form names the
-three frame indices), and `frame_survival` asks, for every forward frame pair
+Occupancy plugin. Two processors build on that classification without
+adding a second one: `derive` publishes named signals over the publication,
+each a row of a name and an expression added one at a time -- `agree`:
+`a.occupied.frame(0) == a.occupied.frame(2)` and `counts`:
+`a.counts.frame(1).where(agree)` keep one frame's counts only where two other
+frames' verdicts agree, each signal published under its own name -- and
+`frame_survival` asks, for every forward frame pair
 of a multi-frame cycle, whether a site an earlier frame saw loaded is still
 seen by a later one -- the pairs form one labelled `READOUT_EVENT` Point axis
 (`0-1`, `0-2`, `1-2` for three frames), each pair's value is the later verdict
@@ -436,12 +439,12 @@ ends a run early; the simultaneous interval is recorded as uncertainty but
 never triggers an extra acquisition.
 
 The supported product path discovers nine logic descriptors: `calibration`,
-`camera_measurement`, `frame_survival`, `occupancy`, `occupancy_agreement`,
+`camera_measurement`, `derive`, `frame_survival`, `occupancy`,
 `seamless_scan`, `slm_feedback`, `stepped_scan`, and `temperature`. They are
 hosted through the real runtime plane: virtual Calibration writes a plain
 workspace JSON, Camera Measurement publishes finite or `Repeat = 0` infinite
-frames, Occupancy consumes the frames key plus JSON path, and the two
-occupancy-derived processors consume Occupancy's own outputs. Camera Measurement retains its per-row Auto preview:
+frames, Occupancy consumes the frames key plus JSON path, and the processors
+downstream of it (`derive`, `frame_survival`) consume Occupancy's own outputs. Camera Measurement retains its per-row Auto preview:
 the cycle's `frames` signal uses `facet_grid`, with one or many readout-event
 rows as authored; switching Auto preview off only prevents the panel from
 opening automatically.

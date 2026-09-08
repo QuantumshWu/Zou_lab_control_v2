@@ -1174,6 +1174,7 @@ class PulseEditorPresenter:
         view.bracket_committed.connect(self._guarded(self.set_bracket))
         view.run_repeats_committed.connect(self._guarded(self.set_run_repeats))
         view.visible_ports_committed.connect(self._guarded(self.set_visible_ports))
+        view.fill_port_requested.connect(self._guarded(self.fill_port))
         view.clear_port_requested.connect(self._guarded(self.clear_port))
         # From the button that raises it.  The schedule page also declared a
         # clear_all_requested that nothing ever emitted, and this listened to
@@ -1715,31 +1716,50 @@ class PulseEditorPresenter:
         )
         self._render_run_state()
 
-    def clear_port(self, port_key: str) -> None:
-        """Return one port to rest everywhere, without touching the others."""
+    def fill_port(self, port_key: str) -> None:
+        """Turn one digital port on in every period, and nothing else."""
 
+        self._set_port_everywhere(port_key, high=True)
+
+    def clear_port(self, port_key: str) -> None:
+        """Turn one port off in every period, and nothing else.
+
+        A digital port goes low; an analog port loses its steps.  The port's
+        delay is not a period's state -- it is the output's own timing --
+        and stays: turning a channel off is not un-calibrating it.
+        """
+
+        self._set_port_everywhere(port_key, high=False)
+
+    def _set_port_everywhere(self, port_key: str, *, high: bool) -> None:
         port = self.sequence.target.by_key.get(str(port_key))
         if port is None:
             self._warn(f"{port_key} is not a port on this target")
             return
-        index = self.sequence.target.raw_lanes.index(port.lanes[0])
-        periods = []
-        for period in self.sequence.periods:
-            states = list(period.states)
-            if port.kind == "digital":
-                states[index] = 0
-            periods.append(
-                replace(
+        if port.kind == "digital":
+            index = self.sequence.target.raw_lanes.index(port.lanes[0])
+            level = 1 if high else 0
+
+            def edit(period: PulsePeriod) -> PulsePeriod:
+                states = list(period.states)
+                states[index] = level
+                return replace(period, states=tuple(states))
+
+        elif high:
+            self._warn(f"{port_key} is an analog port; there is no level to fill it with")
+            return
+        else:
+
+            def edit(period: PulsePeriod) -> PulsePeriod:
+                return replace(
                     period,
-                    states=tuple(states),
                     analog_steps=tuple(
                         step for step in period.analog_steps if step.port != port_key
                     ),
                 )
-            )
-        delays = tuple(item for item in self.sequence.delays if item.port != port_key)
+
         self._apply(
-            self._rebuilt(periods=tuple(periods), delays=delays)
+            self._rebuilt(periods=tuple(edit(period) for period in self.sequence.periods))
         )
 
     def clear_all(self) -> None:

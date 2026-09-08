@@ -681,8 +681,6 @@ def perform_action(bench, action, beat, output):
     if kind == "science_check":
         signals = {key: signal_name(value) for key, value in action["signals"].items()}
         answer = check_scientific_chain(bench.session.signal_plane, **signals)
-        if "expected_agreement_frames" in action and answer["sections"].get("agreement", {}).get("frames") != action["expected_agreement_frames"]:
-            raise AssertionError(f"Agreement did not apply requested frame choices: {answer}")
         bench.science_checks.append(answer)
         if answer["status"] == "failed":
             raise AssertionError(f"scientific publication mismatch: {answer['findings']}")
@@ -1018,7 +1016,6 @@ def run_child(args, output):
     try:
         with ConsoleBench() as bench:
             bench.feedback_scope_probe = bool(getattr(args, "feedback_scope_probe", False))
-            bench.viewer_scope_probe = bool(getattr(args, "viewer_scope_probe", False))
             bench.fuzz_saves = []
             bench.fuzz_gestures = []
             bench.nodes = {}
@@ -2020,11 +2017,33 @@ def perform_artifact_action(bench, action, beat, output, *, click, choose, enter
                 tabs = view.info_pane.info_tabs
                 if tabs.tabText(tabs.currentIndex()) != "Devices":
                     raise UnavailableAction("open the Viewer Devices tab before its Pulse action")
-                buttons = [button for button in tabs.currentWidget().findChildren(QtWidgets.QAbstractButton)
-                           if button.text() == played.name]
-                if len(buttons) != 1:
+                tree = tabs.currentWidget().tree
+                rows = [(tree.topLevelItem(index), tree.itemWidget(tree.topLevelItem(index), 1))
+                        for index in range(tree.topLevelItemCount())]
+                matches = [(row, button) for row, button in rows
+                           if isinstance(button, QtWidgets.QAbstractButton) and button.text() == played.name]
+                if len(matches) != 1:
                     raise UnavailableAction("Devices does not show one unambiguous played Pulse button")
-                click(buttons[0], bench.app)
+                row, button = matches[0]
+                tree.scrollToItem(row, QtWidgets.QAbstractItemView.PositionAtCenter)
+                tree.scrollTo(tree.indexFromItem(row, 1), QtWidgets.QAbstractItemView.EnsureVisible)
+                bench.app.processEvents()
+                if not visible(button, bench.app):
+                    raise UnavailableAction("played Pulse action is not visible and enabled")
+                # The record tree's value column may be wider than its
+                # viewport. Click the visible part of the actual button,
+                # not its offscreen centre or the presenter's action API.
+                viewport = tree.viewport()
+                exposed = button.rect().intersected(QtCore.QRect(
+                    button.mapFromGlobal(viewport.mapToGlobal(QtCore.QPoint())), viewport.size()))
+                if exposed.isEmpty():
+                    raise UnavailableAction("played Pulse action is outside the tree viewport")
+                point = exposed.center()
+                window = button.window()
+                hit = window.childAt(window.mapFromGlobal(button.mapToGlobal(point)))
+                if hit is not button and not button.isAncestorOf(hit):
+                    raise UnavailableAction("played Pulse action is covered")
+                QtTest.QTest.mouseClick(button, QtCore.Qt.LeftButton, pos=point)
             else:
                 page = view._pulse_tabs.get(key)
                 if page is None or view.tabs.currentWidget() is not page:
@@ -2211,7 +2230,9 @@ def perform_artifact_action(bench, action, beat, output, *, click, choose, enter
             facts = {"path": str(presenter.path),
                      "info_tab": view.info_pane.info_tabs.tabText(view.info_pane.info_tabs.currentIndex()),
                      "main_tab": view.tabs.tabText(view.tabs.currentIndex()),
-                     "busy": presenter._busy}
+                     "busy": presenter._busy,
+                     "info_tree_top_rows": {title: tab.tree.topLevelItemCount()
+                                            for title, tab in view.info_pane._rows_tabs.items()}}
             if current in view._data_editors.values():
                 facts.update(dirty=current.is_dirty(), message=current.message_label.text(),
                              first_cell=current.value_model.data(current.value_model.index(0, 0), QtCore.Qt.EditRole))
@@ -2235,7 +2256,6 @@ def main():
     parser.add_argument("--chain", action="store_true", help="Start with camera -> drawn ROI -> three ordinary downstream panels")
     parser.add_argument("--system", action="store_true", help="Use the actual Device Manager Init -> experiment GUI flow")
     parser.add_argument("--feedback-scope-probe", action="store_true")
-    parser.add_argument("--viewer-scope-probe", action="store_true")
     parser.add_argument("--replay")
     parser.add_argument("--stop-on-report", help="Stop a reproducer at this exact diagnostic substring")
     parser.add_argument("--output", type=Path)
@@ -2255,8 +2275,6 @@ def main():
         command.append("--system")
     if args.feedback_scope_probe:
         command.append("--feedback-scope-probe")
-    if args.viewer_scope_probe:
-        command.append("--viewer-scope-probe")
     if args.replay:
         command += ["--replay", str(Path(args.replay).resolve())]
     if args.stop_on_report:

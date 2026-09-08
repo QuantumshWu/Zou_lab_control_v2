@@ -4,6 +4,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 from threading import Event
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import numpy as np
@@ -15,7 +16,6 @@ from zlc_pulse.wire import STATUS_DONE, STATUS_ERROR
 from zlc_plot import FacetGridPlot, HistogramPlot, Reduction, read_figure_plot
 from zlc_runtime import NodeHost, SignalDataPlane
 
-from zlc_atom.devices.camera import CameraWorkingPoint
 from zlc_atom.devices.simulation import SimulationWorld, SimulationWorldConfig
 from zlc_atom.devices.simulation.camera import VirtualCamera, VirtualCameraConfig
 from zlc_atom.devices.slm import canonical_phase
@@ -37,6 +37,7 @@ from zlc_atom.nodes.calibration import (
     SiteMap,
     TrapCalibration,
 )
+from zlc_atom.nodes.calibration.bimodal import _DECISIVE_BIC_GAIN
 from zlc_atom.nodes.calibration.pulse import resolve_pulse
 from zlc_atom.nodes.slm_feedback import task as feedback_module
 from zlc_atom.nodes.slm_feedback.task import (
@@ -47,9 +48,9 @@ from zlc_atom.nodes.slm_feedback.task import (
     _excited_target,
     _expected_noise_ratio,
     _fit_contrasts,
+    FEEDBACK_OBSERVABLES,
     _funded_shares,
-    _half_contrasts,
-    _DECISIVE_BIC_GAIN,
+    _half_readings,
     _PLANT_EXCITATION_LOG_STEP,
     _loading_edge,
     _needs_probe,
@@ -464,6 +465,7 @@ def _task(
     probe_factors: tuple[float, ...] = (0.5, 2.0),
     science_context: dict[str, object] | None = None,
     feedback_gain: float = 0.25,
+    feedback_mode: str = "qcmos_bright_dark",
 ) -> SlmFeedbackTask:
     if science_context is None:
         if target is None:
@@ -487,7 +489,7 @@ def _task(
         science_context_path=context_path,
         pulse_sequence=FEEDBACK_PULSE_SEQUENCE,
         pulse_path=IMAGING_PULSE_RESOURCE.path,
-        feedback_mode="qcmos_bright_dark",
+        feedback_mode=feedback_mode,
         exposure_seconds=0.020,
         shots_per_candidate=shots,
         probe_factors=probe_factors,
@@ -625,7 +627,7 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
         columns,
         reference_valid=np.ones(35, dtype=bool),
         feedback_gain=0.25,
-        plant_slope=None,
+        plant_slope=None, plant_sign=-1.0,
         maximum_weight_change=0.5,
     )
     assert updated[rows[0], columns[0]] < updated[rows[-1], columns[-1]]
@@ -646,7 +648,7 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
         columns,
         reference_valid=np.ones(35, dtype=bool),
         feedback_gain=0.25,
-        plant_slope=2.0,
+        plant_slope=2.0, plant_sign=-1.0,
         maximum_weight_change=0.5,
     )
     assert set(measured_decision) == {"feedback_estimated_slope"}
@@ -662,7 +664,7 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
             columns,
             reference_valid=np.ones(35, dtype=bool),
             feedback_gain=0.25,
-            plant_slope=-2.0,
+            plant_slope=-2.0, plant_sign=-1.0,
             maximum_weight_change=0.5,
         )
     standard_error = 0.02 * contrast
@@ -705,7 +707,7 @@ def test_pooled_plant_slope_and_split_half_dispersion_see_through_loop_noise() -
         contrasts.append(full)
         excitations.append(excitation.copy())
         estimate, estimate_error, _rows = _plant_slope(weights, contrasts, excitations)
-        usable = _usable_plant_slope(len(weights), estimate, estimate_error)
+        usable = _usable_plant_slope(len(weights), estimate, estimate_error, plant_sign=-1.0)
         step_gain = 0.15 if usable is None else 0.3 / usable
         control = control + step_gain * (full - np.mean(full))
         excitation = (
@@ -732,14 +734,14 @@ def test_pooled_plant_slope_and_split_half_dispersion_see_through_loop_noise() -
     assert rows == sites * 9
     assert slope == pytest.approx(sum(lags), abs=0.4)
     assert abs(slope - sum(lags)) < 3.0 * error
-    assert _usable_plant_slope(candidates, slope, error) == pytest.approx(
+    assert _usable_plant_slope(candidates, slope, error, plant_sign=-1.0) == pytest.approx(
         abs(slope), abs=1e-12
     )
-    assert _usable_plant_slope(2, slope, error) is None
-    assert _usable_plant_slope(candidates, -slope, error) is None
-    assert _usable_plant_slope(candidates, slope, 0.4 * abs(slope)) is None
-    assert _usable_plant_slope(candidates, -12.0, 0.1) == pytest.approx(5.0)
-    assert _usable_plant_slope(candidates, -0.1, 0.01) == pytest.approx(0.3)
+    assert _usable_plant_slope(2, slope, error, plant_sign=-1.0) is None
+    assert _usable_plant_slope(candidates, -slope, error, plant_sign=-1.0) is None
+    assert _usable_plant_slope(candidates, slope, 0.4 * abs(slope), plant_sign=-1.0) is None
+    assert _usable_plant_slope(candidates, -12.0, 0.1, plant_sign=-1.0) == pytest.approx(5.0)
+    assert _usable_plant_slope(candidates, -0.1, 0.01, plant_sign=-1.0) == pytest.approx(0.3)
     assert np.isnan(_plant_slope(weights[:1], contrasts[:1], excitations[:1])[0])
     unexcited = _plant_slope(weights, contrasts, [np.zeros(sites)] * candidates)
     assert np.isnan(unexcited[0]) and unexcited[2] == 0
@@ -771,9 +773,14 @@ def test_pooled_plant_slope_and_split_half_dispersion_see_through_loop_noise() -
     samples = np.full((8, 2), 10.0)
     samples[[0, 1, 4, 5], 0] = (30.0, 32.0, 34.0, 36.0)
     samples[0, 1] = 30.0
-    odd_half, even_half = _half_contrasts(samples, np.asarray((20.0, 20.0)))
+    halves = _half_readings(samples, np.asarray((20.0, 20.0)))
+    odd_half, even_half = halves["odd_contrast"], halves["even_contrast"]
     assert odd_half[0] == pytest.approx(22.0) and even_half[0] == pytest.approx(24.0)
     assert np.isnan(odd_half[1]) and np.isnan(even_half[1])
+    # The loading of each half is the bright share of ITS shots by the same
+    # threshold; a half with no bright shot is still a loading of zero.
+    assert halves["odd_loading"].tolist() == [0.5, 0.25]
+    assert halves["even_loading"].tolist() == [0.5, 0.0]
     fitted = _fit_contrasts(
         np.column_stack((
             np.where(np.arange(40) % 3 == 0, 40.0, 10.0) + 0.1 * np.arange(40),
@@ -1041,7 +1048,7 @@ def test_direction_preserving_share_allocator_moves_only_balanced_requested_powe
         columns,
         reference_valid=np.zeros(4, dtype=bool),
         feedback_gain=0.25,
-        plant_slope=None,
+        plant_slope=None, plant_sign=-1.0,
         maximum_weight_change=0.5,
         directed_log_step=np.log((1.25, 0.5, 1.0, 1.0)),
         control_boundary=np.asarray((2.0, np.nan, np.nan, np.nan)),
@@ -1061,7 +1068,7 @@ def test_direction_preserving_share_allocator_moves_only_balanced_requested_powe
         columns,
         reference_valid=np.ones(4, dtype=bool),
         feedback_gain=0.5,
-        plant_slope=None,
+        plant_slope=None, plant_sign=-1.0,
         maximum_weight_change=0.5,
         control_boundary=np.asarray((1.4, np.nan, np.nan, np.nan)),
         control_direction=np.asarray((1.0, 0.0, 0.0, 0.0)),
@@ -1117,7 +1124,7 @@ def test_a_loaded_site_on_its_loading_ramp_is_held_and_gives_nothing() -> None:
         columns,
         reference_valid=valid,
         feedback_gain=0.5,
-        plant_slope=1.0,
+        plant_slope=1.0, plant_sign=-1.0,
         maximum_weight_change=0.5,
         loading_edge=loading_edge,
     )
@@ -1130,7 +1137,7 @@ def test_a_loaded_site_on_its_loading_ramp_is_held_and_gives_nothing() -> None:
         columns,
         reference_valid=valid,
         feedback_gain=0.5,
-        plant_slope=1.0,
+        plant_slope=1.0, plant_sign=-1.0,
         maximum_weight_change=0.5,
     )
     assert free_step[3] < 0.0 and free_decision[3] == "feedback_estimated_slope"
@@ -1161,7 +1168,7 @@ def test_a_loaded_site_on_its_loading_ramp_is_held_and_gives_nothing() -> None:
         columns,
         reference_valid=dark_valid,
         feedback_gain=0.5,
-        plant_slope=1.0,
+        plant_slope=1.0, plant_sign=-1.0,
         maximum_weight_change=0.5,
         directed_log_step=directed,
         loading_edge=loading_edge,
@@ -1178,7 +1185,7 @@ def test_a_loaded_site_on_its_loading_ramp_is_held_and_gives_nothing() -> None:
         wrong[0] = True
         _updated_target(
             target, dark_contrast, np.zeros(35), dark_valid, rows, columns,
-            reference_valid=dark_valid, feedback_gain=0.5, plant_slope=1.0,
+            reference_valid=dark_valid, feedback_gain=0.5, plant_slope=1.0, plant_sign=-1.0,
             maximum_weight_change=0.5, loading_edge=wrong,
         )
 
@@ -1379,7 +1386,7 @@ def test_every_site_moves_with_its_own_sign_or_not_at_all_over_random_rosters() 
             columns,
             reference_valid=valid,
             feedback_gain=gain,
-            plant_slope=slope,
+            plant_slope=slope, plant_sign=-1.0,
             maximum_weight_change=clamp,
             directed_log_step=direction,
             control_boundary=boundary,
@@ -1579,7 +1586,7 @@ def test_feedback_applies_science_context_then_measures_before_solving_update(
         *np.nonzero(frozen_target),
         reference_valid=np.ones(35, dtype=bool),
         feedback_gain=0.25,
-        plant_slope=None,
+        plant_slope=None, plant_sign=-1.0,
         maximum_weight_change=0.5,
     )
     # The first update is solved for the control Target with the run's
@@ -1765,7 +1772,7 @@ def test_arbitrary_sparse_geometry_matches_calibration_sites_before_updating_tar
             columns,
             reference_valid=np.ones(len(rows), dtype=bool),
             feedback_gain=0.25,
-            plant_slope=None,
+            plant_slope=None, plant_sign=-1.0,
             maximum_weight_change=0.5,
         )
         expected_solved, _applied = _excited_target(
@@ -2762,7 +2769,7 @@ def test_single_population_sites_probe_both_sides_then_measure_combined_target(
             columns,
             reference_valid=valid,
             feedback_gain=0.25,
-            plant_slope=None,
+            plant_slope=None, plant_sign=-1.0,
             maximum_weight_change=0.5,
             directed_log_step=verdict_step,
             control_boundary=_probe_boundary(
@@ -3343,9 +3350,12 @@ def test_persistently_single_site_probes_both_sides_then_extrapolates_deeper(
         plane.close()
 
 
-def test_virtual_feedback_recovers_missing_sites_and_retains_best_candidate(
-    tmp_path: Path,
-) -> None:
+@contextmanager
+def _virtual_feedback_bench(tmp_path: Path):
+    """A 5x7 lattice calibrated on the virtual world, then a second world at
+    a 0.5 loading ceiling holding the same pattern on its SLM: what a
+    feedback run in any mode starts from."""
+
     plane = SignalDataPlane()
     descriptors = {item.api_name: item for item in discover_logic_nodes()}
     calibration_installation = create_installation("virtual")
@@ -3379,33 +3389,57 @@ def test_virtual_feedback_recovers_missing_sites_and_retains_best_candidate(
             "virtual",
             world=SimulationWorld(SimulationWorldConfig(loading_probability=0.5)),
         )
-        camera = installation.device("camera")
-        sequencer = installation.device("sequencer")
-        slm = installation.device("slm")
-        slm.apply_phase(pattern)
-        context = _Context(tmp_path)
-        task = SlmFeedbackTask(
-            camera=camera,
-            camera_key="camera",
-            sequencer=sequencer,
-            sequencer_key="sequencer",
-            slm=slm,
-            slm_key="slm",
-            signal_plane=plane,
+        installation.device("slm").apply_phase(pattern)
+        yield SimpleNamespace(
+            plane=plane,
+            installation=installation,
+            target=target,
+            pattern=pattern,
             calibration=calibration,
-            calibration_path=calibration_result.artifact_path,
-            science_context=_science_context(slm, target=target),
-            science_context_path=tmp_path / "science_context.npz",
-            pulse_sequence=FEEDBACK_PULSE_SEQUENCE,
-            pulse_path=IMAGING_PULSE_RESOURCE.path,
-            feedback_mode="qcmos_bright_dark",
-            exposure_seconds=0.020,
-            shots_per_candidate=100,
-            probe_factors=(0.5, 2.0),
-            feedback_gain=0.25,
-            maximum_weight_change=0.5,
-            max_updates=16,
+            calibration_result=calibration_result,
         )
+    finally:
+        plane.close()
+        if installation is not None:
+            installation.close()
+        calibration_installation.close()
+
+
+def _virtual_feedback_task(bench, tmp_path: Path, *, feedback_mode: str) -> SlmFeedbackTask:
+    slm = bench.installation.device("slm")
+    return SlmFeedbackTask(
+        camera=bench.installation.device("camera"),
+        camera_key="camera",
+        sequencer=bench.installation.device("sequencer"),
+        sequencer_key="sequencer",
+        slm=slm,
+        slm_key="slm",
+        signal_plane=bench.plane,
+        calibration=bench.calibration,
+        calibration_path=bench.calibration_result.artifact_path,
+        science_context=_science_context(slm, target=bench.target),
+        science_context_path=tmp_path / "science_context.npz",
+        pulse_sequence=FEEDBACK_PULSE_SEQUENCE,
+        pulse_path=IMAGING_PULSE_RESOURCE.path,
+        feedback_mode=feedback_mode,
+        exposure_seconds=0.020,
+        shots_per_candidate=100,
+        probe_factors=(0.5, 2.0),
+        feedback_gain=0.25,
+        maximum_weight_change=0.5,
+        max_updates=16,
+    )
+
+
+def test_virtual_feedback_recovers_missing_sites_and_retains_best_candidate(
+    tmp_path: Path,
+) -> None:
+    with _virtual_feedback_bench(tmp_path) as bench:
+        installation, pattern = bench.installation, bench.pattern
+        camera = installation.device("camera")
+        slm = installation.device("slm")
+        context = _Context(tmp_path)
+        task = _virtual_feedback_task(bench, tmp_path, feedback_mode="qcmos_bright_dark")
         result = task.execute(context)
         saved, metadata = _load_candidate(result["artifact_path"])
         np.testing.assert_array_equal(slm.last_commanded_phase, saved)
@@ -3466,11 +3500,46 @@ def test_virtual_feedback_recovers_missing_sites_and_retains_best_candidate(
         assert len(artifacts) == len(history)
         assert len(tuple((root / "figures").glob("*.npz"))) == 6
         assert len(tuple((root / "figures").glob("*.png"))) == 6
-    finally:
-        plane.close()
-        if installation is not None:
-            installation.close()
-        calibration_installation.close()
+
+
+def test_virtual_loading_rate_feedback_evens_the_loading_of_the_lattice(
+    tmp_path: Path,
+) -> None:
+    """The loading-rate mode on the physical simulation.  The same calibrated
+    lattice, the loop reading each site's share of loaded shots and stepping
+    against a plant whose loading RISES with depth: it runs to an end of its
+    own, records loading rates and never a contrast, and the loading of the
+    observable sites is more even at the last formal candidate than at the
+    first."""
+
+    with _virtual_feedback_bench(tmp_path) as bench:
+        task = _virtual_feedback_task(bench, tmp_path, feedback_mode="qcmos_loading_rate")
+        result = task.execute(_Context(tmp_path))
+        assert result["feedback_status"] in {"completed", "stalled"}
+        history = _load_history(result["artifact_path"])
+        assert 3 <= len(history) < 40
+        assert all(
+            "loading_rate" in item and "bright_minus_dark" not in item
+            for item in history
+        )
+        formal = [item for item in history if item["candidate_kind"] != "probe"]
+        assert len(formal) >= 2
+
+        def spread(item) -> float:
+            rates = np.asarray(item["loading_rate"], dtype=float)
+            valid = np.asarray(item["observable_valid"], dtype=bool)
+            values = rates[valid & np.isfinite(rates) & (rates > 0.0)]
+            return float(np.std(np.log(values))) if values.size >= 3 else float("nan")
+
+        first, last = spread(formal[0]), spread(formal[-1])
+        assert np.isfinite(first) and np.isfinite(last), (first, last)
+        assert last < first, (first, last)
+        assert max(item["observable_sites"] for item in history) >= 25
+        summary = json.loads((tmp_path / "summary.json").read_text())
+        assert "selected_common_site_total_loading_rate" in summary
+        assert "selected_common_site_total_bright_minus_dark" not in summary
+        root = Path(result["artifact_path"]).parent.parent
+        assert len(tuple((root / "figures").glob("*.png"))) == 6
 
 
 def test_completed_run_selects_best_candidate_without_extra_shots(
@@ -4293,3 +4362,173 @@ def test_stop_before_first_candidate_accepts_incoming_as_formal_artifact(
         assert Path(result["artifact_path"]) == root / "final" / "science-context.npz"
     finally:
         plane.close()
+
+
+def test_the_batch_fit_also_reads_the_loading_rate_with_its_binomial_error() -> None:
+    """The two-population fit that gives a site's contrast also gives the
+    share of the batch's shots its threshold puts on the bright side -- the
+    loading rate -- with the binomial error of that count, and the same
+    reading of each half.  A single-population site has no loading rate,
+    as it has no contrast.  No calibration threshold takes part: the
+    populations are the batch's own."""
+
+    rng = np.random.default_rng(23)
+    occupied = rng.random(400) < 0.3
+    samples = np.column_stack((
+        np.where(occupied, rng.normal(32.0, 2.0, 400), rng.normal(10.0, 1.5, 400)),
+        rng.normal(10.0, 1.5, 400),
+    ))
+    fitted = _fit_contrasts(samples)
+    assert fitted["valid"].tolist() == [True, False]
+    bright = samples[:, 0] > fitted["threshold"][0]
+    rate = float(np.mean(bright))
+    assert fitted["loading"][0] == pytest.approx(rate)
+    assert fitted["loading_standard_error"][0] == pytest.approx(
+        np.sqrt(rate * (1.0 - rate) / 400)
+    )
+    assert fitted["odd_loading"][0] == pytest.approx(np.mean(bright[0::2]))
+    assert fitted["even_loading"][0] == pytest.approx(np.mean(bright[1::2]))
+    assert np.isnan(fitted["loading"][1]) and np.isnan(fitted["odd_loading"][1])
+    assert {mode.mode for mode in FEEDBACK_OBSERVABLES.values()} == {
+        "qcmos_bright_dark",
+        "qcmos_loading_rate",
+    }
+    from zlc_atom.nodes.slm_feedback.logic_node import LOGIC_NODE as feedback_node
+
+    mode_field = next(
+        field for field in feedback_node.authoring_schema.fields if field.name == "feedback_mode"
+    )
+    assert {choice.value for choice in mode_field.choices} == set(FEEDBACK_OBSERVABLES)
+
+
+def test_the_plant_sign_decides_the_trusted_slopes_and_the_way_a_site_moves() -> None:
+    """Bright-minus-dark falls with weight (-1); loading rises with it (+1).
+    A trusted slope has the plant's sign, and a site reading above the
+    reference is stepped AGAINST it: more weight for a contrast too high,
+    less for a loading too high, the same magnitude either way."""
+
+    assert _usable_plant_slope(4, -2.0, 0.1, plant_sign=-1.0) == pytest.approx(2.0)
+    assert _usable_plant_slope(4, 2.0, 0.1, plant_sign=-1.0) is None
+    assert _usable_plant_slope(4, 2.0, 0.1, plant_sign=1.0) == pytest.approx(2.0)
+    assert _usable_plant_slope(4, -2.0, 0.1, plant_sign=1.0) is None
+    with pytest.raises(ValueError, match="plant_sign"):
+        _usable_plant_slope(4, 2.0, 0.1, plant_sign=0.0)
+
+    target = _grid_target((17, 23))
+    rows, columns = np.nonzero(target)
+    observed = np.exp(np.linspace(-0.2, 0.2, 35))
+    valid = np.ones(35, dtype=bool)
+    stepped = {}
+    for sign in (-1.0, 1.0):
+        _updated, correction, decision = _updated_target(
+            target,
+            observed,
+            np.zeros(35),
+            valid,
+            rows,
+            columns,
+            reference_valid=valid,
+            feedback_gain=0.4,
+            plant_slope=2.0,
+            plant_sign=sign,
+            maximum_weight_change=0.5,
+        )
+        assert set(decision) == {"feedback_estimated_slope"}
+        stepped[sign] = correction
+    assert stepped[-1.0][0] < 0.0 < stepped[-1.0][-1]
+    assert stepped[1.0][0] > 0.0 > stepped[1.0][-1]
+    # Site for site the two steps are the same request with the sign
+    # turned; what is applied differs only by the share-conserving
+    # allocation, which scales the two directions to balance.
+    np.testing.assert_allclose(stepped[1.0], -stepped[-1.0], rtol=0.05, atol=1e-9)
+    with pytest.raises(ValueError, match="plant_sign"):
+        _updated_target(
+            target, observed, np.zeros(35), valid, rows, columns,
+            reference_valid=valid, feedback_gain=0.4, plant_slope=2.0,
+            plant_sign=0.5, maximum_weight_change=0.5,
+        )
+
+
+def test_loading_rate_feedback_evens_the_lattice_against_a_rising_saturating_plant(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The loop in loading-rate mode against a plant whose loading RISES with
+    weight and saturates: the first candidates step at half gain on the
+    assumed slope, against the plant's sign; the pooled estimate then takes
+    over with the physical sign; the split halves end the run once no
+    dispersion is resolved, and the loading rates are closer than they
+    began.  The record carries loading-rate keys, not contrast ones."""
+
+    slm = _Slm((17, 23))
+    plane = SignalDataPlane()
+    base = _grid_target(slm.shape_yx)
+    rows, columns = np.nonzero(base)
+    plant_lags = (1.5, 1.0)
+    sigma = 0.012
+    truth = np.linspace(-0.3, 0.3, 35)
+    noise = np.random.default_rng(29)
+    applied: list[np.ndarray] = [base]
+
+    def solve(target, **_kwargs):
+        applied.append(np.array(target, copy=True))
+        return freeze_pattern_phase(
+            np.full(slm.shape_yx, 0.3 + 0.05 * len(applied), dtype=np.float32),
+            slm.shape_yx,
+        ), {"method": "test"}
+
+    def fit(samples):
+        level = np.array(truth, copy=True)
+        for slope, target in zip(plant_lags, applied[::-1], strict=False):
+            level += slope * np.log(_control_weights(target[rows, columns]))
+        loading = 0.5 / (1.0 + np.exp(-level))
+        odd = loading * np.exp(noise.normal(0.0, sigma * np.sqrt(2.0), 35))
+        even = loading * np.exp(noise.normal(0.0, sigma * np.sqrt(2.0), 35))
+        rate = np.sqrt(odd * even)
+        result = _fitted_result(rate, standard_error=sigma * rate)
+        result["loading"] = rate
+        result["loading_standard_error"] = sigma * rate
+        result["odd_loading"] = odd
+        result["even_loading"] = even
+        return result
+
+    monkeypatch.setattr(feedback_module, "resolve_pulse", _resolved_pulse)
+    monkeypatch.setattr(feedback_module, "solve_phase", solve)
+    monkeypatch.setattr(feedback_module, "_fit_contrasts", fit)
+    monkeypatch.setattr(
+        SlmFeedbackTask,
+        "_measure",
+        lambda self, pulse, context, iteration: _measured(self, (
+            np.zeros((self.shots, 35)),
+            (),
+            (),
+            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
+        )),
+    )
+    task = _task(
+        tmp_path,
+        slm=slm,
+        camera=object(),
+        sequencer=SimpleNamespace(describe=lambda: object()),
+        plane=plane,
+        target=base,
+        updates=24,
+        feedback_gain=0.4,
+        feedback_mode="qcmos_loading_rate",
+    )
+    result = task.execute(_Context(tmp_path))
+    assert result["feedback_status"] == "completed"
+    history = _load_history(result["artifact_path"])
+    assert 6 <= len(history) < 1 + task.max_updates
+    assert "loading_rate" in history[0] and "bright_minus_dark" not in history[0]
+    assert {item["plant_slope_source"] for item in history[:2]} == {"assumed"}
+    assert "estimated" in {item["plant_slope_source"] for item in history}
+    residual = np.log(np.asarray(history[0]["loading_rate"], dtype=float))
+    residual -= np.mean(residual)
+    np.testing.assert_allclose(
+        history[0]["requested_log_correction"],
+        -0.5 * 0.4 * (1.0 - 4.0 * sigma) * residual,
+        atol=2e-3,
+    )
+    first = np.log(np.asarray(history[0]["loading_rate"], dtype=float))
+    last = np.log(np.asarray(history[-1]["loading_rate"], dtype=float))
+    assert np.std(last) < 0.25 * np.std(first)
