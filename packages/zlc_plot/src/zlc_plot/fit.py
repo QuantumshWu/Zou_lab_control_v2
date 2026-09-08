@@ -3294,6 +3294,36 @@ def _symmetric_lorentzian_doublet(x, center, common_fwhm, component_amplitude, o
     )
 
 
+def _saturation(power, saturation_counts, saturation_power, offset):
+    """Fixed-detuning response in linear power; the offset is measured background."""
+    coords, values = _compiled_series_input(power, (saturation_counts, saturation_power, offset))
+    return _compiled_fit._value_jacobian_saturation(coords, values)[0]
+
+
+def _saturation_jacobian(power, saturation_counts, saturation_power, offset):
+    coords, values = _compiled_series_input(power, (saturation_counts, saturation_power, offset))
+    return _compiled_fit._value_jacobian_saturation(coords, values)[1]
+
+
+def _saturation_candidates(coordinates, observations):
+    coords = np.array(coordinates, dtype=np.float64, order="C")
+    values = np.array(observations, dtype=np.float64, order="C")
+    descriptor = _compiled_fit.saturation_descriptor()
+    seeds = np.empty((descriptor.max_candidates, 3), dtype=np.float64)
+    count = descriptor.prepare(
+        coords, values, np.ones(values.size, dtype=np.bool_), seeds,
+        np.array((0.0, np.nextafter(0.0, 1.0), -np.inf)), np.full(3, np.inf),
+        np.array(descriptor.context_builder(tuple(coords)), copy=True),
+    )
+    if count == 0:
+        raise ValueError("saturation fit requires distinct non-negative linear-power coordinates")
+    return tuple(seeds[:count])
+
+
+def _init_saturation(coordinates, observations):
+    return _saturation_candidates(coordinates, observations)[0]
+
+
 def _release_recapture(t, amplitude, offset, eta, frequency):
     """Sudden radial 2D recapture, normalized at t=0; frequency is in cycles/time."""
 
@@ -4372,6 +4402,24 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             bounds_initializer=_exponential_bounds,
             capabilities=frozenset({_DOMAIN_ANCHORED}),
             compiled_descriptor=_compiled_fit.exponential_decay_descriptor(),
+        ),
+        FitModelSpec(
+            "saturation",
+            "Saturation",
+            1,
+            (
+                FitParameterSpec("saturation_counts", VALUE, NONNEGATIVE, display_label=r"$C_s$"),
+                FitParameterSpec("saturation_power", AXIS_0, POSITIVE, display_label=r"$P_s$"),
+                FitParameterSpec("offset", VALUE, display_label=r"$B$", affine_point=True),
+            ),
+            "saturation_counts",
+            _saturation,
+            _init_saturation,
+            (FitTarget.SERIES,),
+            formula=r"$C(P)=B+C_s P/(P+P_s)$",
+            jacobian=_saturation_jacobian,
+            candidate_initializer=_saturation_candidates,
+            compiled_descriptor=_compiled_fit.saturation_descriptor(),
         ),
         FitModelSpec(
             "release_recapture",
