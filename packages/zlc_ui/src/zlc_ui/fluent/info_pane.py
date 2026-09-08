@@ -55,6 +55,9 @@ InfoTab = tuple[str, tuple[InfoRow, ...]]
 #: out: a coordinate axis of 96 pixels is worth "96 numbers, 0 to 95".
 _LIST_PREVIEW = 8
 
+#: Set on a cell the filter found; the delegate paints it on the tint.
+_MATCH_ROLE = QtCore.Qt.UserRole + 1
+
 
 def _plain(value: object) -> object:
     return value.value if isinstance(value, Enum) else value
@@ -78,9 +81,9 @@ def value_text(value: object) -> str:
     """One value as the pane shows it beside its name.
 
     A number is a number, a switch is a word, a flat list is one line, and
-    a long list of numbers is its count and range.  A mapping shows its
-    scalar fields inline -- the summary of the record under it -- and a
-    list of records says how many there are.
+    a long list of numbers is its count and range.  A record says how many
+    fields it has: they are the rows under it, every one on a line of its
+    own, not a summary crammed beside the name.
     """
 
     value = _plain(value)
@@ -112,12 +115,7 @@ def value_text(value: object) -> str:
             return f"{shown}, … ({len(items)} in all)"
         return shown
     if isinstance(value, Mapping):
-        inline = "; ".join(
-            f"{key}: {value_text(item)}"
-            for key, item in value.items()
-            if not _is_composite(item)
-        )
-        return inline or f"{len(value)} fields"
+        return f"{len(value)} fields"
     if isinstance(value, (list, tuple)):
         return f"{len(value)} items"
     return str(value)
@@ -160,74 +158,21 @@ def _is_action(value: object) -> bool:
     )
 
 
-class _WrapAnywhereDelegate(QtWidgets.QStyledItemDelegate):
-    """Cells wrap anywhere, as the readout fields did: a path or a digest
-    has no space to break at, and cut off it is not a value."""
-
-    def __init__(self, tree: QtWidgets.QTreeWidget) -> None:
-        super().__init__(tree)
-        self._tree = tree
-        self._pad_x = scaled_px(5, minimum=3)
-        self._pad_y = scaled_px(2, minimum=1)
-
-    def _laid_out(self, option, index, width: int) -> QtGui.QTextDocument:
-        document = QtGui.QTextDocument()
-        document.setDefaultFont(option.font)
-        text_option = QtGui.QTextOption()
-        text_option.setWrapMode(QtGui.QTextOption.WrapAtWordBoundaryOrAnywhere)
-        document.setDefaultTextOption(text_option)
-        document.setDocumentMargin(0)
-        document.setPlainText(str(index.data(QtCore.Qt.DisplayRole) or ""))
-        document.setTextWidth(max(1, width - 2 * self._pad_x))
-        return document
-
-    def _cell_width(self, index) -> int:
-        """The width the cell is painted at: its column, less the
-        indentation a nested name sits behind.  Measured at any other
-        width, a value wraps to more lines than its row was given."""
-
-        width = self._tree.columnWidth(index.column())
-        if index.column() == 0:
-            depth = 1
-            parent = index.parent()
-            while parent.isValid():
-                depth += 1
-                parent = parent.parent()
-            width -= self._tree.indentation() * depth
-        return max(1, width)
-
-    def sizeHint(self, option, index):  # noqa: N802 - Qt naming
-        styled = QtWidgets.QStyleOptionViewItem(option)
-        self.initStyleOption(styled, index)
-        document = self._laid_out(styled, index, self._cell_width(index))
-        return QtCore.QSize(
-            int(document.idealWidth()) + 2 * self._pad_x,
-            int(document.size().height()) + 2 * self._pad_y,
-        )
+class _MatchDelegate(QtWidgets.QStyledItemDelegate):
+    """A cell the filter found is painted on the attention tint, so the eye
+    lands on the match and not on the rows kept open around it."""
 
     def paint(self, painter, option, index):  # noqa: N802 - Qt naming
-        styled = QtWidgets.QStyleOptionViewItem(option)
-        self.initStyleOption(styled, index)
-        text_color = styled.palette.color(QtGui.QPalette.Text)
-        # The style paints the row -- its ground, its selection -- and the
-        # words are laid out here, where they can wrap.
-        styled.text = ""
-        widget = styled.widget
-        style = widget.style() if widget is not None else QtWidgets.QApplication.style()
-        style.drawControl(QtWidgets.QStyle.CE_ItemViewItem, styled, painter, widget)
-        document = self._laid_out(styled, index, styled.rect.width())
-        painter.save()
-        painter.setClipRect(styled.rect)
-        painter.translate(styled.rect.left() + self._pad_x, styled.rect.top() + self._pad_y)
-        context = QtGui.QAbstractTextDocumentLayout.PaintContext()
-        context.palette.setColor(QtGui.QPalette.Text, text_color)
-        document.documentLayout().draw(painter, context)
-        painter.restore()
+        if index.data(_MATCH_ROLE):
+            painter.fillRect(option.rect, QtGui.QColor(ORANGE_TINT))
+        super().paint(painter, option, index)
 
 
 class InfoTree(QtWidgets.QTreeWidget):
-    """Names and values as a tree: records open under their name, a filter
-    finds any name or value, and Copy takes a row's whole value."""
+    """Names and values as a tree: every field on a row of its own, open
+    from the start, the nesting drawn as guides and chevrons; a filter finds
+    any name or value and tints what it found; Copy takes a row's whole
+    value.  A value is never wrapped or cut: the tree scrolls sideways."""
 
     #: A row's action was pressed; carries the action the row named.
     action_requested = QtCore.pyqtSignal(str)
@@ -237,32 +182,35 @@ class InfoTree(QtWidgets.QTreeWidget):
         self.setColumnCount(2)
         self.setHeaderHidden(True)
         self.setRootIsDecorated(True)
-        self.setIndentation(scaled_px(14, minimum=10))
-        # A value wraps under its name rather than being cut off: a path, a
-        # program, a sentence of a record are read whole.
-        self.setUniformRowHeights(False)
-        self.setTextElideMode(QtCore.Qt.ElideNone)
-        self.setItemDelegate(_WrapAnywhereDelegate(self))
+        self.setIndentation(scaled_px(18, minimum=14))
+        self._chevron = scaled_px(4, minimum=3)
+        # A value is never elided: its column is as wide as its widest value.
+        # A name wider than the name column's cap shows its two ends.
+        self.setTextElideMode(QtCore.Qt.ElideMiddle)
+        self.setWordWrap(False)
+        self.setItemDelegate(_MatchDelegate(self))
         self.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.setAlternatingRowColors(False)
         self.setFrameShape(QtWidgets.QFrame.NoFrame)
         self.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
+        self.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
         self.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.AdjustIgnored)
         self.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding
         )
         self.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        # Sideways, when the values are wider than the pane: a path or a
+        # digest is read whole by scrolling to it, not by wrapping it under
+        # its name or by hovering for a tooltip that repeats the tab.
+        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
         self._name_floor = int(name_width)
         header = self.header()
-        header.setStretchLastSection(True)
+        header.setStretchLastSection(False)
         header.setSectionResizeMode(0, QtWidgets.QHeaderView.Interactive)
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
         header.setMinimumSectionSize(scaled_px(60, minimum=48))
         header.resizeSection(0, self._name_floor)
-        # A column that moved changes where every value wraps: the rows are
-        # measured again at the widths they will be painted at.
-        header.sectionResized.connect(lambda *_: self.scheduleDelayedItemsLayout())
         radius = scaled_px(RADIUS, minimum=2)
         self.setStyleSheet(
             f"""
@@ -279,6 +227,7 @@ class InfoTree(QtWidgets.QTreeWidget):
             }}
             QTreeView::item {{
                 border: none;
+                padding: {scaled_px(2, minimum=1)}px {scaled_px(5, minimum=3)}px;
             }}
             QTreeView::item:hover:!selected {{
                 background: {BG};
@@ -293,24 +242,70 @@ class InfoTree(QtWidgets.QTreeWidget):
         )
         apply_fluent_scrollbars(self)
 
+    # ---------------------------------------------------------- branches
+
+    def drawBranches(self, painter, rect, index) -> None:  # noqa: N802 - Qt naming
+        """The nesting, drawn: a guide line down every level a row sits
+        under, and a chevron on a row that opens -- pointing down while it
+        is open.  Indentation alone was a tree the eye could not follow."""
+
+        indent = self.indentation()
+        depth = 0
+        parent = index.parent()
+        while parent.isValid():
+            depth += 1
+            parent = parent.parent()
+        painter.save()
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        guide = QtGui.QPen(QtGui.QColor(DIVIDER))
+        guide.setWidthF(1.0)
+        painter.setPen(guide)
+        for level in range(depth):
+            x = rect.left() + level * indent + indent / 2
+            painter.drawLine(
+                QtCore.QPointF(x, rect.top()), QtCore.QPointF(x, rect.bottom() + 1)
+            )
+        if index.model().hasChildren(index):
+            centre_x = rect.left() + depth * indent + indent / 2
+            centre_y = rect.center().y() + 0.5
+            half = float(self._chevron)
+            pen = QtGui.QPen(QtGui.QColor(GREY))
+            pen.setWidthF(float(scaled_px(1.5, minimum=1)))
+            pen.setCapStyle(QtCore.Qt.RoundCap)
+            pen.setJoinStyle(QtCore.Qt.RoundJoin)
+            painter.setPen(pen)
+            path = QtGui.QPainterPath()
+            if self.isExpanded(index):
+                path.moveTo(centre_x - half, centre_y - half / 2)
+                path.lineTo(centre_x, centre_y + half / 2)
+                path.lineTo(centre_x + half, centre_y - half / 2)
+            else:
+                path.moveTo(centre_x - half / 2, centre_y - half)
+                path.lineTo(centre_x + half / 2, centre_y)
+                path.lineTo(centre_x - half / 2, centre_y + half)
+            painter.drawPath(path)
+        painter.restore()
+
     # ------------------------------------------------------------- rows
 
     def set_rows(self, rows: Iterable[InfoRow]) -> None:
-        """Replace every row.  Top-level rows open; what is under them waits
-        to be asked for, so a tab is a list of its subjects first."""
+        """Replace every row, and open the whole tree: a tab is read top to
+        bottom, every field on its own line, without being asked."""
 
         self.clear()
         for label, value in rows:
             if _is_action(value):
                 self._add_action(str(label), value)
                 continue
-            item = self._add_entry(None, str(label), value)
-            item.setExpanded(True)
+            self._add_entry(None, str(label), value)
+        self.expandAll()
         self._fit_name_column()
 
     def _fit_name_column(self) -> None:
-        """The name column is as wide as its widest name, up to half the
-        view: a name broken across lines is a name that cannot be read."""
+        """The name column is as wide as its widest name at its depth, up
+        to six tenths of the view: the values must start on screen, and a
+        name deeper and longer than that is read by its two ends -- or
+        whole, from Copy name."""
 
         metrics = self.fontMetrics()
         slack = 2 * scaled_px(5, minimum=3) + scaled_px(6, minimum=4)
@@ -329,24 +324,17 @@ class InfoTree(QtWidgets.QTreeWidget):
 
         for item in self._top_level_items():
             measure(item, 1)
-        limit = max(self._name_floor, self.viewport().width() // 2)
+        limit = max(self._name_floor, self.viewport().width() * 6 // 10)
         self.header().resizeSection(0, min(widest, limit))
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
         super().resizeEvent(event)
         self._fit_name_column()
-        self.scheduleDelayedItemsLayout()
 
     def _add_action(self, label: str, value: Mapping[str, str]) -> None:
         item = QtWidgets.QTreeWidgetItem([label, ""])
         self.addTopLevelItem(item)
         button = FluentButton(str(value["text"]), color=ACCENT)
-        # The value column's width, like every value beside it: a button
-        # sized to its own text overflowed the column and was clipped
-        # mid-word the moment the text was a real name.
-        button.setSizePolicy(
-            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
-        )
         button.setMinimumWidth(0)
         button.clicked.connect(
             lambda _checked=False, action=str(value["action"]): (
@@ -359,20 +347,16 @@ class InfoTree(QtWidgets.QTreeWidget):
     def _add_entry(
         self, parent: QtWidgets.QTreeWidgetItem | None, name: str, value: object
     ) -> QtWidgets.QTreeWidgetItem:
-        shown = value_text(value)
-        item = QtWidgets.QTreeWidgetItem([name, shown])
+        item = QtWidgets.QTreeWidgetItem([name, value_text(value)])
         if parent is None:
             self.addTopLevelItem(item)
         else:
             parent.addChild(item)
-        whole = copy_text(value)
-        item.setData(1, QtCore.Qt.UserRole, whole)
-        if whole != shown:
-            item.setToolTip(1, whole)
+        item.setData(1, QtCore.Qt.UserRole, copy_text(value))
         if _is_composite(value):
-            # The inline summary is a reading of what is below, not a
-            # value of its own: set in the muted ink so the eye tells
-            # them apart.
+            # How many rows are under it -- a count of what follows, not a
+            # value of its own: set in the muted ink so the eye tells them
+            # apart.
             item.setForeground(1, QtGui.QBrush(QtGui.QColor(GRAPHITE)))
             entries = (
                 value.items()
@@ -389,27 +373,46 @@ class InfoTree(QtWidgets.QTreeWidget):
     # ----------------------------------------------------------- filter
 
     def apply_filter(self, text: str) -> None:
-        """Show the rows whose name or value contains ``text`` anywhere
-        below them, opened down to the match; an empty filter shows every
-        row, opened one level as at first."""
+        """Show the rows whose name or value contains ``text``, or that
+        hold such a row, opened down to the match; tint the cells that
+        match and scroll the first into view.  An empty filter shows the
+        whole tree open, untinted, as at first."""
 
         needle = str(text).strip().lower()
+        first: list[QtWidgets.QTreeWidgetItem] = []
         for item in self._top_level_items():
-            self._filter_item(item, needle, top=True)
+            self._filter_item(item, needle, first)
+        self.viewport().update()
+        if first:
+            self.scrollToItem(first[0], QtWidgets.QAbstractItemView.PositionAtCenter)
+            # Into view VERTICALLY: the scroll to a deep row also slid the
+            # tree sideways to its cell, and the names left the screen.
+            self.horizontalScrollBar().setValue(0)
 
     def _filter_item(
-        self, item: QtWidgets.QTreeWidgetItem, needle: str, *, top: bool
+        self,
+        item: QtWidgets.QTreeWidgetItem,
+        needle: str,
+        first: list[QtWidgets.QTreeWidgetItem],
     ) -> bool:
-        children = [item.child(index) for index in range(item.childCount())]
+        matched = [
+            bool(needle) and needle in item.text(column).lower()
+            for column in (0, 1)
+        ]
+        own = any(matched)
+        if own and not first:
+            first.append(item)
+        for column, hit in enumerate(matched):
+            item.setData(column, _MATCH_ROLE, hit)
         # Every child is judged, not just the first that matches: a hidden
         # sibling is a row the operator cannot find.
-        below = [self._filter_item(child, needle, top=False) for child in children]
-        own = not needle or needle in item.text(0).lower() or needle in str(
-            item.data(1, QtCore.Qt.UserRole) or item.text(1)
-        ).lower()
-        shown = own or any(below)
+        below = [
+            self._filter_item(item.child(index), needle, first)
+            for index in range(item.childCount())
+        ]
+        shown = not needle or own or any(below)
         item.setHidden(not shown)
-        item.setExpanded(any(below) if needle else top)
+        item.setExpanded(any(below) if needle else True)
         return shown
 
     # -------------------------------------------------------------- copy

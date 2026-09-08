@@ -647,21 +647,28 @@ pane.set_tabs((
 pane.resize(520, 640); pane.show(); app.processEvents()
 
 # The record is a tree: the run's name, then its fields, then the fields
-# of its fields -- and a summary of the scalars beside every branch.
+# of its fields -- every one on a row of its own, open from the start, a
+# branch saying only how many rows are under it.  Nothing is repeated in
+# a tooltip: a wide value is reached by scrolling sideways.
 logic = pane._rows_tabs['Logic'].tree
 cm = logic.topLevelItem(0)
 assert cm.text(0) == 'cm' and cm.isExpanded()
 assert [cm.child(i).text(0) for i in range(cm.childCount())] == ['outputs', 'parameters']
 assert cm.child(0).text(1) == 'frames'
 parameters = cm.child(1)
-assert not parameters.isExpanded()
-assert parameters.text(1) == 'exposure_seconds: 0.02; frames_per_cycle: 3; photoelectrons: false; roi_xywh: none'
+assert parameters.isExpanded()
+assert parameters.text(1) == '4 fields'
 assert [parameters.child(i).text(1) for i in range(4)] == ['0.02', '3', 'false', 'none']
+assert parameters.toolTip(1) == '' and parameters.child(0).toolTip(1) == ''
+assert logic.horizontalScrollBarPolicy() == QtCore.Qt.ScrollBarAsNeeded
+assert not logic.header().stretchLastSection()
 assert value_text(list(range(96))) == '96 numbers, 0 to 95'
 assert copy_text(list(range(3))) == '0, 1, 2'
 assert copy_text(record).splitlines()[0:3] == ['outputs: frames', 'parameters:', '  exposure_seconds: 0.02']
 
-# A filter finds a value deep in a device's snapshot and opens the way to it.
+# A filter finds a value deep in a device's snapshot, opens the way to
+# it, and tints the cell it found -- and only that cell.
+from zlc_ui.fluent.info_pane import _MATCH_ROLE
 devices = pane._rows_tabs['Devices']
 devices.filter_edit.setText('roi_shape')
 app.processEvents()
@@ -672,9 +679,14 @@ assert snapshots.isExpanded() and not snapshots.isHidden()
 roles = next(camera.child(i) for i in range(camera.childCount()) if camera.child(i).text(0) == 'roles')
 assert roles.isHidden()
 assert devices.tree.topLevelItem(1).isHidden(), 'the pulse row does not mention roi_shape'
+found = snapshots.child(0).child(2).child(1)
+assert found.text(0) == 'roi_shape_yx' and not found.isHidden()
+assert found.data(0, _MATCH_ROLE) and not found.data(1, _MATCH_ROLE)
+assert not camera.data(0, _MATCH_ROLE) and not snapshots.data(1, _MATCH_ROLE)
 devices.filter_edit.clear(); app.processEvents()
 assert not roles.isHidden() and not devices.tree.topLevelItem(1).isHidden()
-assert camera.isExpanded() and not snapshots.isExpanded()
+assert camera.isExpanded() and snapshots.isExpanded(), 'an empty filter opens the whole tree again'
+assert not found.data(0, _MATCH_ROLE)
 
 # Copy takes the whole value, not the summary on screen.
 logic.setCurrentItem(parameters)
