@@ -6,12 +6,10 @@ editor owns exactly one authored field -- ``plan`` -- and says so through
 ``managed_fields``, so the auto-generated form does not render the raw JSON
 beside it.
 
-A MANUAL axis is the other kind of row: a name and a point count, and no
-port at all, because nothing here can advance it.  It carries no values
-either -- the operator types those when the run asks, which is the whole
-reason the axis exists.  Manual rows sit above the machine rows and cannot
-be moved below them: an operator walks their points BETWEEN plays of the
-inner plan, so they are outside it by construction.
+A MANUAL axis carries a name and its requested values, but no hardware
+port. Manual and device rows move automatically ahead of board rows,
+preserving their relative order: their points advance BETWEEN plays of
+the inner table, so they stand outside it by construction.
 
 Ports are read from the projection -- the resolved pulse template's API
 parameters, plus the bench's tunable devices for a node that can move them --
@@ -57,6 +55,7 @@ from .plan import (
     ScanAxis,
     ScanPlan,
     hardware_scan_ports_for,
+    host_advanced_port,
     manual_axis,
     manual_axis_name,
     port_group,
@@ -806,12 +805,8 @@ class ScanPlanEditor(QtWidgets.QWidget):
 
     def _attach_manual_row(self, axis: ScanAxis | None) -> None:
         row = self._build_manual_row(axis)
-        # Above every machine row, because that is where it runs: the
-        # displayed order IS the nesting order, and a manual axis nested
-        # inside a fired table is not a thing the bench can do.
-        at = sum(1 for existing in self._rows if existing.manual)
-        self._rows.insert(at, row)
-        self.rows_layout.insertWidget(at, row)
+        self._rows.append(row)
+        self.rows_layout.addWidget(row)
 
     def _add_axis(self) -> None:
         if not self._ports:
@@ -838,6 +833,13 @@ class ScanPlanEditor(QtWidgets.QWidget):
     def _emit_plan(self) -> None:
         if self._loading:
             return
+        ordered = sorted(self._rows, key=lambda row: host_advanced_port(
+            MANUAL_PARAM_FAMILY if row.manual else str(row.port_combo.currentData())
+        ), reverse=True)
+        if ordered != self._rows:
+            self._rows = ordered
+            for index, row in enumerate(ordered):
+                self.rows_layout.insertWidget(index, row)
         plan = self._current_plan()
         self._plan_text = "" if plan is None else json.dumps(plan.to_tree())
         # The host's draft contract: a patch under "values", the same shape

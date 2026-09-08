@@ -334,7 +334,9 @@ class ScanPlan:
         names = tuple(axis.port for axis in axes)
         if len(set(names)) != len(names):
             raise ValueError("a port may appear on one axis only")
-        object.__setattr__(self, "axes", axes)
+        object.__setattr__(self, "axes", tuple(sorted(
+            axes, key=lambda axis: host_advanced_port(axis.port), reverse=True,
+        )))
 
     @property
     def shape(self) -> tuple[int, ...]:
@@ -408,27 +410,14 @@ def split_outer_axes(plan: ScanPlan) -> tuple[tuple[ScanAxis, ...], ScanPlan]:
     A manual axis is walked by hand and a device axis by a ``tune()`` call,
     both BETWEEN plays of the inner plan -- not a preference, a fact about
     who moves what: the inner plan plays from one load, and neither a hand
-    nor a host call can reach inside it.  A plan that nests one the other
-    way round is refused here, by name, rather than silently reordered into
-    something the operator did not author.
+    nor a host call can reach inside it. ScanPlan already stably places
+    these axes outside board axes; the editor displays that same order.
     """
 
     axes = plan.axes
     outer = tuple(axis for axis in axes if host_advanced_port(axis.port))
     if not outer:
         return (), plan
-    if axes[: len(outer)] != outer:
-        inside = tuple(
-            port_label(axis.port)
-            for axis in axes[len(outer):]
-            if host_advanced_port(axis.port)
-        )
-        raise ValueError(
-            "the host walks a manual or device axis between plays of the "
-            "inner plan, so it stands outside every axis the board "
-            f"advances; move {', '.join(repr(name) for name in inside)} "
-            "above the board axes"
-        )
     board = axes[len(outer):]
     if not board:
         raise ValueError(

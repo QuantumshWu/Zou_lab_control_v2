@@ -1081,16 +1081,19 @@ def test_stopping_at_the_question_stops_the_run() -> None:
         installation.close()
 
 
-def test_a_manual_axis_nested_inside_the_table_is_refused_by_name() -> None:
-    """A hand cannot reach into a fired table, so it cannot be nested there."""
+@pytest.mark.parametrize("port", ("manual:power", "device:rf:power_dbm"))
+def test_a_host_axis_is_moved_outside_the_board_table(port) -> None:
+    """Place host knobs outside the table without changing their coordinates."""
 
+    outer_axis = ScanAxis(port, (135.0, 247.0), "mVpp")
+    board_axis = ScanAxis(BIAS_X_PORT, (-256.0, 256.0))
     plan = ScanPlan(
-        (ScanAxis(BIAS_X_PORT, (-256.0, 256.0)), manual_axis("power", (1.0, 2.0)))
+        (board_axis, outer_axis)
     )
-    with pytest.raises(ValueError) as refusal:
-        split_outer_axes(plan)
-    assert "'power'" in str(refusal.value)
-    assert "above the board axes" in str(refusal.value)
+    outer, board = split_outer_axes(plan)
+    assert plan.axes == (outer_axis, board_axis)
+    assert outer == (outer_axis,) and board.axes == (board_axis,)
+    assert ScanPlan.from_tree(plan.to_tree()) == plan
 
 
 def test_a_plan_of_manual_axes_alone_has_no_table_to_play() -> None:
