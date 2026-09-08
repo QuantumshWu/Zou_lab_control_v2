@@ -344,7 +344,7 @@ class RigolDg4000RfSource(RfSourceBase):
             if unit == _DBM
             else self._volts_from_dbm(channel, value_dbm, unit)
         )
-        self._link.write(f"{self._source(channel)}:VOLTage {amplitude:.6f}")
+        self._link.write(f"{self._source(channel)}:VOLTage {amplitude:.17g}")
         return self._read_power(channel)
 
     def _write_output(self, channel: str, enabled: bool) -> bool:

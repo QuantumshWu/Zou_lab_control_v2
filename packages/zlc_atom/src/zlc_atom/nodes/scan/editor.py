@@ -46,7 +46,7 @@ from zlc_ui.fluent import (
 )
 from zlc_ui.form import FluentParameterForm, FormFieldProps, FormSpec, being_edited
 
-from zlc_data.units import UnitError
+from zlc_data.units import DEFAULT_UNITS
 from zlc_pulse import api_parameter_columns_for, authored_api_entries, field_label
 
 from .plan import (
@@ -67,6 +67,19 @@ from .plan import (
 )
 
 
+def _sweep_values(row: QtWidgets.QWidget) -> tuple[float, ...]:
+    """Space a sweep in the operator's chosen unit, then encode port values."""
+
+    unit, shown = row.start_spin.valueUnit(), row.start_spin.shownUnit()
+    ends = np.asarray((row.start_spin.value(), row.stop_spin.value()), dtype=float)
+    if shown != unit:
+        ends = DEFAULT_UNITS.convert(ends, unit, shown)
+    values = np.linspace(ends[0], ends[1], int(row.points_spin.value()))
+    if shown != unit:
+        values = DEFAULT_UNITS.convert(values, shown, unit)
+    return tuple(float(value) for value in values)
+
+
 def _spins_regenerate(row: QtWidgets.QWidget, values: tuple[float, ...]) -> bool:
     """Whether from/to/points, as the row's spins now hold them, give back
     exactly these values.
@@ -78,15 +91,7 @@ def _spins_regenerate(row: QtWidgets.QWidget, values: tuple[float, ...]) -> bool
     uniform and silently re-authored it as 1 000 000, 2 000 002.5, 3 000 005.
     """
 
-    regenerated = tuple(
-        float(value)
-        for value in np.linspace(
-            float(row.start_spin.value()),
-            float(row.stop_spin.value()),
-            int(row.points_spin.value()),
-        )
-    )
-    return regenerated == tuple(values)
+    return _sweep_values(row) == tuple(values)
 
 
 class _AxisRow(QtWidgets.QWidget):
@@ -159,7 +164,11 @@ class _AxisRow(QtWidgets.QWidget):
             except ValueError:
                 return "unavailable"
 
-        labels = {port.port: port_leaf(port.port) for port in self._ports}
+        labels = {
+            port.port: port_leaf(port.port).removesuffix("_" + port.unit.lower())
+            if port.unit else port_leaf(port.port)
+            for port in self._ports
+        }
         sources = {port.port: (branch(port.port),) for port in self._ports}
         chosen = str(current or "")
         offered = {port.port for port in self._ports}
@@ -213,10 +222,10 @@ class _AxisRow(QtWidgets.QWidget):
         picker already there is re-pointed in place; one is built or retired
         only when the port's unit gains or loses its ladder.
 
-        Both spins go on holding the PORT's own number.  An axis is authored
-        in the unit the plan will run in, so choosing a spelling here changes
-        only what is on screen and nothing has to be converted on the way
-        into the plan or on the way back out of a saved one.
+        Both spins keep the PORT's own number. Choosing a spelling preserves
+        the existing points; editing from/to/points spaces a new grid in that
+        spelling and converts each point back to the port's unit. The saved
+        axis carries the spelling, so reopening does not reset the controls.
         """
 
         layout = self.layout()
@@ -247,6 +256,7 @@ class _AxisRow(QtWidgets.QWidget):
             self.start_spin.setValue(axis.values[0])
             self.stop_spin.setValue(axis.values[-1])
             self.points_spin.setValue(len(axis.values))
+        self._set_shown_unit(axis.display_unit or self.start_spin.valueUnit())
         self._custom_values = (
             None if _spins_regenerate(self, axis.values) else axis.values
         )
@@ -264,9 +274,11 @@ class _AxisRow(QtWidgets.QWidget):
             self._ports = ports
             self._fill_ports(axis.port)
             self._apply_port_limits()
+            self._set_shown_unit(axis.display_unit or self.start_spin.valueUnit())
         elif str(self.port_combo.currentData()) != axis.port:
             self._fill_ports(axis.port)
             self._apply_port_limits()
+            self._set_shown_unit(axis.display_unit or self.start_spin.valueUnit())
         if being_edited(self):
             return
         if self.axis() != axis:
@@ -275,11 +287,19 @@ class _AxisRow(QtWidgets.QWidget):
     def _shown_unit_picked(self, symbol: str) -> None:
         """Read both ends in the chosen spelling; the swept values do not move."""
 
+        values = self.axis().values
+        self._set_shown_unit(symbol)
+        # Changing the spelling is not editing the experiment. The next
+        # explicit from/to/points edit authors a grid in the new unit.
+        self._custom_values = values
+        self.custom_label.setText("" if _spins_regenerate(self, values) else "custom values")
+        self.edited.emit()
+
+    def _set_shown_unit(self, symbol: str) -> None:
         for spin in (self.start_spin, self.stop_spin):
-            try:
-                spin.setShownUnit(symbol)
-            except UnitError:
-                return
+            spin.setShownUnit(symbol)
+        if self.unit_picker is not None:
+            self.unit_picker.select_choice_key(symbol)
 
     def _port_changed(self, _index: int) -> None:
         self._custom_values = None
@@ -306,15 +326,14 @@ class _AxisRow(QtWidgets.QWidget):
         return False
 
     def axis(self) -> ScanAxis:
+        unit = self.start_spin.shownUnit()
+        display_unit = "" if unit == self.start_spin.valueUnit() else unit
         if self._custom_values is not None:
-            return ScanAxis(str(self.port_combo.currentData()), self._custom_values)
-        points = int(self.points_spin.value())
-        values = np.linspace(
-            float(self.start_spin.value()), float(self.stop_spin.value()), points
-        )
+            return ScanAxis(str(self.port_combo.currentData()), self._custom_values, display_unit)
         return ScanAxis(
             str(self.port_combo.currentData()),
-            tuple(float(value) for value in values),
+            _sweep_values(self),
+            display_unit,
         )
 
 

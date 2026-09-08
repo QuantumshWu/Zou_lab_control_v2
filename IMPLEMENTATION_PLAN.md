@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- 2026-09-08 扫描单位与Rigol精度修复：绑定轴保存display_unit，重开恢复mVpp；输入范围/点数时在所选单位中等分再转端口单位。Qt现有行用例核135→247mVpp十点、unit-only不改已有点、plan重开数值逐位保留。Rigol现有SCPI模拟链精确复现144.37275149961734mVpp被`.6f`写成144.373mVpp的报错；`.17g`修复后同案与十点写入通过，未扩大8ULP，也未替仪器伪造回读。未做真实硬件验收。
+
 - 2026-09-08 Seamless可选`Acquisition logic`已接入原Start/Restart，manual与device外层点共用每Fire前入口，FPGA内部scan slot保持连续。新NodeHost ready由Camera真实arm后报告，settle默认0.5s。6项Host/Camera直接验证及2项Workbench复用Restart/选择保存验证通过；真实Qt两个manual点完成新代采集与Scan，ready→Fire为501.7363/500.4511ms，两代首帧ordinal均0/1/2，Scan参数各匹配其新Fit parent/Camera root。原始Camera signal不支持indexed history，该实屏案的独立history oracle未通过，不冒称history复验；按用户指示不再扩大验证。所有测试窗口与child已退出，证据只留ignored目录。Layout中未指定的可选authoring字段使用schema默认，显式settle值和Acquisition引用按原Layout owner保留。
 
 - 2026-09-08 当前worktree完成六项：Pulse DAC保留disabled全开按钮并实屏确认四列对齐；Layout递归编码authoring rows并完成真实Save/Load；Derive以普通Fluent下拉选择atomic producer bundle、不新增Runtime数据；声明过的Panel fit在无首帧/无reserved generation时允许Scan Start，首次arrival复用有序tap。真实Qt验证单点单shot，Scan输入与新一代首个Fit publication数值/validity相同，唯一根为重启后的Camera首event，未自动启动Camera。GUI及渲染children全部关闭；退出曾有Device Manager等待sequencer control关闭的短暂拒绝日志，最终正常退出，未冒称无日志。

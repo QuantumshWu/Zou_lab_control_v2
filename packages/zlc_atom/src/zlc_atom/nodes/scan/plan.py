@@ -26,7 +26,7 @@ import itertools
 import json
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -294,6 +294,7 @@ class ScanAxis:
 
     port: str
     values: tuple[float, ...]
+    display_unit: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "port", str(self.port))
@@ -303,6 +304,9 @@ class ScanAxis:
         if any(not math.isfinite(value) for value in values):
             raise ValueError(f"axis {self.port!r} contains a non-finite value")
         object.__setattr__(self, "values", values)
+        if not isinstance(self.display_unit, str):
+            raise TypeError("scan axis display_unit must be text")
+        object.__setattr__(self, "display_unit", self.display_unit.strip())
 
 
 @dataclass(frozen=True)
@@ -342,7 +346,8 @@ class ScanPlan:
     def to_tree(self) -> dict:
         return {
             "axes": [
-                {"port": axis.port, "values": list(axis.values)}
+                {"port": axis.port, "values": list(axis.values),
+                 **({"display_unit": axis.display_unit} if axis.display_unit else {})}
                 for axis in self.axes
             ]
         }
@@ -352,7 +357,7 @@ class ScanPlan:
         if not isinstance(tree, Mapping) or "axes" not in tree:
             raise ValueError("a scan plan document carries its axes")
         axes = tuple(
-            ScanAxis(str(entry["port"]), tuple(entry["values"]))
+            ScanAxis(str(entry["port"]), tuple(entry["values"]), entry.get("display_unit", ""))
             for entry in tree["axes"]
         )
         return cls(axes)
@@ -680,9 +685,9 @@ def _selected_plan(
             axes.append(axis)
             continue
         axes.append(
-            ScanAxis(
-                axis.port,
-                tuple(
+            replace(
+                axis,
+                values=tuple(
                     float(value)
                     for value in np.linspace(
                         float(chosen.lower), float(chosen.upper), len(axis.values)
