@@ -1399,8 +1399,6 @@ class SlmEditorControl(QtCore.QObject):
             self._status.setText("Stopping SLM Editor…")
             self._executor.shutdown(wait=False, cancel_futures=True)
             self._command_executor.shutdown(wait=False, cancel_futures=False)
-        for host in (self._target_host, self._phase_host, self._wavefront_host):
-            host.qt_widget().close_adapter()
         hosts_stopped = tuple(
             host.close(timeout=0.0)
             for host in (self._target_host, self._phase_host, self._wavefront_host)

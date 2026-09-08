@@ -5745,6 +5745,7 @@ class FluentWindow(FramelessWindow):
             try:
                 ready = guard() is True
             except BaseException:
+                logging.getLogger(__name__).exception("window close guard failed")
                 ready = False
             if not ready:
                 event.ignore()
