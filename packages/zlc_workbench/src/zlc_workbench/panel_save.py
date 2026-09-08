@@ -15,9 +15,9 @@ from .panel_state import PanelFrozenData, PanelState
 __all__ = ["PanelFigureFiles", "capture_run_chain", "save_panel_figure"]
 
 
-# A sealed Figure publication already owns a complete causal DAG.  The Runtime
-# event used to expose it to Panel code is a transport boundary, not a new
-# experiment, so lineage capture replaces that event with this inherited DAG.
+# A sealed Figure publication carries its saved lineage AND source document.
+# Its Runtime import event is transport, not a new experiment. Even an empty
+# saved DAG must stay empty, without losing the source's frozen Task record.
 _IMPORTED_LINEAGE_KEY = "zlc.figure.imported-lineage"
 
 
@@ -94,18 +94,19 @@ def capture_run_chain(
     *,
     event_records: Mapping[object, object] | None = None,
     resolve_device_settings: object | None = None,
-) -> dict[str, object]:
-    """Capture the exact causal DAG rooted at one displayed publication."""
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Capture the exact causal DAG and inherited source at one publication."""
 
     if publication is None:
-        return {"root": None, "nodes": [], "device_settings": []}
+        return {"root": None, "nodes": [], "device_settings": []}, {}
     parents_of = getattr(signal_plane, "direct_parent_publications", None)
     if not callable(parents_of):
         raise TypeError("signal plane cannot resolve exact parent publications")
-    identities: dict[int, str] = {}
+    identities: dict[int, str | None] = {}
     nodes: dict[str, dict[str, object]] = {}
     exact_records = {} if event_records is None else dict(event_records)
     inherited_settings: list[object] = []
+    inherited_source: dict[str, object] | None = None
     visiting: set[int] = set()
 
     def imported(current: object) -> Mapping[str, object] | None:
@@ -115,29 +116,45 @@ def capture_run_chain(
         candidate = record.get(_IMPORTED_LINEAGE_KEY)
         if candidate is None:
             return None
-        if not isinstance(candidate, Mapping) or set(candidate) != {
+        if not isinstance(candidate, Mapping) or set(candidate) != {"lineage", "source"}:
+            raise ValueError("imported Figure payload requires lineage and source")
+        if not isinstance(candidate["source"], Mapping):
+            raise TypeError("imported Figure source must be a mapping")
+        lineage = candidate["lineage"]
+        if not isinstance(lineage, Mapping) or set(lineage) != {
             "root",
             "nodes",
             "device_settings",
         }:
             raise ValueError("imported Figure lineage fields differ")
-        if not isinstance(candidate["nodes"], (list, tuple)) or not isinstance(
-            candidate["device_settings"], (list, tuple)
+        if not isinstance(lineage["nodes"], (list, tuple)) or not isinstance(
+            lineage["device_settings"], (list, tuple)
         ):
             raise TypeError("imported Figure lineage arrays are malformed")
         return candidate
 
-    def visit(current: object) -> str:
+    def visit(current: object) -> str | None:
+        nonlocal inherited_source
         identity = id(current)
-        existing = identities.get(identity)
-        if existing is not None:
-            return existing
+        if identity in identities:
+            return identities[identity]
         boundary = imported(current)
         if boundary is not None:
-            root = boundary["root"]
+            source = _plain(boundary["source"])
+            if inherited_source is not None and inherited_source != source:
+                raise ValueError("imported Figure source documents differ")
+            inherited_source = source
+            lineage = boundary["lineage"]
+            inherited_settings.extend(_plain(lineage["device_settings"]))
+            root = lineage["root"]
+            if root is None:
+                if lineage["nodes"]:
+                    raise ValueError("empty imported Figure lineage contains nodes")
+                identities[identity] = None
+                return None
             if not isinstance(root, str):
                 raise ValueError("imported Figure lineage needs one root")
-            for raw in boundary["nodes"]:
+            for raw in lineage["nodes"]:
                 if not isinstance(raw, Mapping) or not isinstance(raw.get("id"), str):
                     raise TypeError("imported Figure lineage node is malformed")
                 node = _plain(raw)
@@ -147,14 +164,13 @@ def capture_run_chain(
                     raise ValueError("imported Figure lineage node ids collide")
             if root not in nodes:
                 raise ValueError("imported Figure lineage root is missing")
-            inherited_settings.extend(_plain(boundary["device_settings"]))
             identities[identity] = root
             return root
         if identity in visiting:
             raise ValueError("Runtime causal publications contain a cycle")
         visiting.add(identity)
         parents = tuple(parents_of(current))
-        parent_ids = [visit(parent) for parent in parents]
+        parent_ids = [node_id for parent in parents if (node_id := visit(parent)) is not None]
         visiting.remove(identity)
         serial = len(nodes) + 1
         node_id = f"event-{serial}"
@@ -199,7 +215,7 @@ def capture_run_chain(
                 )
             ),
         ]
-    return result
+    return result, {} if inherited_source is None else inherited_source
 
 
 def save_panel_figure(
@@ -229,7 +245,7 @@ def save_panel_figure(
     if not callable(writer):
         raise TypeError("Panel Save writer must be callable")
     description = frozen.description
-    source_document = dict(source or {})
+    source_document = dict(frozen.source if source is None else source)
     source_document.pop("overlay_signal", None)
     source_document.update(
         {

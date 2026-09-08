@@ -900,6 +900,7 @@ class PanelFrozenData:
     description: object
     lineage: Mapping[str, Any] = field(default_factory=dict)
     overlay: Mapping[str, Any] = field(default_factory=dict)
+    source: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def snapshot(self) -> object:

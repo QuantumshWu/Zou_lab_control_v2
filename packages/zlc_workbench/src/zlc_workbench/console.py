@@ -1424,21 +1424,13 @@ class ConsolePresenter:
             if isinstance(plot_input, ImageFrame) and target.overlay_signal
             else {}
         )
-        return PanelFrozenData(
-            publication,
-            plot_input,
-            target,
-            description,
-            capture_run_chain(
-                self.session.signal_plane,
-                event_records[-1][0] if event_records else publication,
-                event_records=dict(reversed(event_records)),
-                resolve_device_settings=(
-                    self.session.resolve_device_setting_records
-                ),
-            ),
-            overlay,
+        lineage, source = capture_run_chain(
+            self.session.signal_plane,
+            event_records[-1][0] if event_records else publication,
+            event_records=dict(reversed(event_records)),
+            resolve_device_settings=self.session.resolve_device_setting_records,
         )
+        return PanelFrozenData(publication, plot_input, target, description, lineage, overlay, source)
 
     def _panel_presented(
         self,

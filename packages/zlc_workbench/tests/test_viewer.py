@@ -469,7 +469,7 @@ def saved(tmp_path):
             state,
             snapshot,
             publication=result.publication,
-            lineage=capture_run_chain(session.signal_plane, result.publication),
+            lineage=capture_run_chain(session.signal_plane, result.publication)[0],
         )
         written = save_panel_figure(
             tmp_path / "run.png",
@@ -642,7 +642,8 @@ def test_manual_data_uses_runtime_panel_and_the_one_figure_writer(tmp_path) -> N
         assert restored.block.schema.point_domain.axes[0].name == "detuning"
         assert restored.block.schema.point_domain.axes[0].coordinates[8] == 8.5
         lineage = info["sections"]["lineage"]
-        assert lineage["root"] == "manual-1"
+        assert lineage["root"] == lineage["nodes"][0]["id"]
+        assert lineage["nodes"][0]["parents"] == []
         assert lineage["nodes"][0]["record"]["operation"] == "manual-create"
     finally:
         _close_presenter(presenter)
@@ -660,8 +661,6 @@ def test_manual_axis_metadata_edit_preserves_its_existing_scientific_role(saved)
         source_text="camera",
         source_path=None,
         source_dataset="data",
-        source_lineage={"root": None, "nodes": [], "device_settings": []},
-        source_document={},
         recipe=None,
         described=None,
         overlay=None,
@@ -699,8 +698,6 @@ def _manual_draft(editor_id: str = "draft") -> dict:
         source_text="manual",
         source_path=None,
         source_dataset="",
-        source_lineage={"root": None, "nodes": [], "device_settings": []},
-        source_document={},
         recipe=None,
         described=None,
         overlay=None,
@@ -836,8 +833,6 @@ def test_renaming_an_implicit_axis_keeps_its_coordinate_origin() -> None:
         source_text="origin",
         source_path=None,
         source_dataset="data",
-        source_lineage={"root": None, "nodes": [], "device_settings": []},
-        source_document={},
         recipe=None,
         described=None,
         overlay=None,
@@ -907,8 +902,6 @@ def test_manual_interaction_projection_does_not_rebuild_domains(monkeypatch) -> 
         source_text="manual",
         source_path=None,
         source_dataset="",
-        source_lineage={"root": None, "nodes": [], "device_settings": []},
-        source_document={},
         recipe=None,
         described=None,
         overlay=None,
@@ -957,8 +950,6 @@ def test_manual_value_edit_preserves_a_sparse_serpentine_domain() -> None:
         source_text="mapped",
         source_path=None,
         source_dataset="data",
-        source_lineage={"root": None, "nodes": [], "device_settings": []},
-        source_document={},
         recipe=None,
         described=None,
         overlay=None,
@@ -986,10 +977,37 @@ def test_manual_value_edit_preserves_a_sparse_serpentine_domain() -> None:
     expected[1, 3, 0] = 123.0
     np.testing.assert_array_equal(restored.block.values, expected)
 
+@pytest.mark.parametrize("source_only", (False, True))
 def test_existing_archive_manual_edit_saves_reopens_and_keeps_lineage(
-    saved, tmp_path
+    saved, tmp_path, source_only
 ) -> None:
     path, original = saved
+    original_info, original_arrays = read_archive(path)
+    duplicate = {
+        **original_info,
+        "sections": {**original_info["sections"], "source": {
+            **original_info["sections"]["source"],
+            "run_record": original_info["sections"]["lineage"]["nodes"][-1]["record"],
+        }},
+    }
+    actual = describe_archive(original_info, original_arrays)
+    repeated = describe_archive(duplicate, original_arrays)
+    assert (repeated.flow, repeated.pulses) == (actual.flow, actual.pulses)
+    for tab in ("Logic", "Devices"):
+        assert dict(repeated.tabs)[tab] == dict(actual.tabs)[tab]
+    if source_only:
+        from zlc_data.figure_archive import write_figure_archive
+
+        sections = original_info["sections"]
+        sections["source"]["run_record"] = sections["lineage"]["nodes"][-1]["record"]
+        sections["lineage"] = {"root": None, "nodes": [], "device_settings": []}
+        path = tmp_path / "source-record-only.npz"
+        with path.open("wb") as stream:
+            write_figure_archive(
+                stream, original_info["name"], arrays=original_arrays, sections=sections
+            )
+    original_lineage = original_info["sections"]["lineage"]
+    original_source = original_info["sections"]["source"]
     view = _ViewerView()
     presenter = _built_presenter(view)
     try:
@@ -1033,7 +1051,33 @@ def test_existing_archive_manual_edit_saves_reopens_and_keeps_lineage(
         assert restored.block.schema == original.block.schema
         lineage = info["sections"]["lineage"]
         assert lineage["nodes"][-1]["record"]["operation"] == "manual-edit"
-        assert lineage["nodes"][-1]["parents"] == ["event-1"]
+        assert lineage["nodes"][:-1] == original_lineage["nodes"]
+        assert lineage["nodes"][-1]["parents"] == (
+            [] if source_only else [original_lineage["root"]]
+        )
+        assert lineage["device_settings"] == original_lineage["device_settings"]
+        for key, value in original_source.items():
+            if key not in {"signal", "title", "overlay_signal"}:
+                assert info["sections"]["source"][key] == value
+
+        # Ordinary Panel Save must use the same frozen provenance as Data Save.
+        copied = tmp_path / "manual-panel-copy.npz"
+        view.panel_save_figure_requested.emit(str(draft["panel_id"]), str(copied.with_suffix(".png")))
+        _wait_until(lambda: copied.is_file() and not presenter._busy)
+        copied_info, _ = read_archive(copied)
+        assert copied_info["sections"]["source"] == info["sections"]["source"]
+        assert copied_info["sections"]["lineage"] == lineage
+
+        previous = draft["publication"]
+        view.data_editor_intent.emit(
+            editor_id, {"op": "apply_preview", "note": "second edit"}
+        )
+        assert presenter._signal_plane.direct_parent_publications(draft["publication"]) == (previous,)
+        updated, source = capture_run_chain(presenter._signal_plane, draft["publication"])
+        assert updated["nodes"][:-1] == lineage["nodes"]
+        assert updated["nodes"][-1]["parents"] == [lineage["root"]]
+        assert source == original_source
+        view.data_editor_intent.emit(editor_id, {"op": "discard"})
     finally:
         _close_presenter(presenter)
 

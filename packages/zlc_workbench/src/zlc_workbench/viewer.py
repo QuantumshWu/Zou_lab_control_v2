@@ -300,11 +300,10 @@ def _draft_from_snapshot(
     source_text: str,
     source_path: Path | None,
     source_dataset: str,
-    source_lineage: Mapping[str, object],
-    source_document: Mapping[str, object],
     recipe: Mapping[str, object] | None,
     described: object | None,
     overlay: object | None,
+    source_publication: tuple[str, object] | None = None,
 ) -> dict[str, object]:
     """One working copy, with the Runtime identity it will publish under.
 
@@ -337,8 +336,7 @@ def _draft_from_snapshot(
         "source_text": str(source_text),
         "source_path": source_path,
         "source_dataset": str(source_dataset),
-        "source_lineage": deepcopy(dict(source_lineage)),
-        "source_document": deepcopy(dict(source_document)),
+        "source_publication": source_publication,
         "source_snapshot": snapshot,
         "source_repeat_domain": schema.repeat_domain,
         "source_point_domain": schema.point_domain,
@@ -366,7 +364,6 @@ def _draft_from_snapshot(
         "applied_snapshot": None,
         "applied_name": None,
         "applied_note": None,
-        "lineage": None,
         "panel_id": "",
         "save_ready": False,
     }
@@ -1273,7 +1270,9 @@ class _ArchiveDatasetProducer:
             stream_generation=image.ref.stream_generation,
         )
 
-    def publish(self, plane: object) -> object:
+    def publish(
+        self, plane: object, *, source_publication: tuple[str, object] | None = None
+    ) -> object:
         from zlc_plot import (
             IMAGE_POINT_OVERLAY_GEOMETRY_RECORD,
             image_point_overlay_geometry,
@@ -1350,45 +1349,9 @@ class _ArchiveDatasetProducer:
                 run_record,
             )
         plane.begin_generation(self)
-        plane.commit_live(self, outputs)
+        plane.commit_live(self, outputs, worker_source=source_publication)
         plane.seal_committed(self)
         return plane.latest_publication(self.data_signal)
-
-
-def _manual_lineage(
-    signal_plane: object,
-    publication: object,
-    inherited: Mapping[str, object],
-) -> dict[str, object]:
-    """Append one real manual Runtime event to an existing Figure DAG."""
-
-    from .panel_save import capture_run_chain
-
-    if set(inherited) != {"root", "nodes", "device_settings"}:
-        raise ValueError("inherited Figure lineage fields differ")
-    nodes = [deepcopy(dict(node)) for node in tuple(inherited["nodes"])]
-    if not isinstance(inherited["device_settings"], list):
-        raise TypeError("inherited Figure device settings must be an array")
-    captured = capture_run_chain(signal_plane, publication)
-    current_nodes = tuple(captured["nodes"])
-    if len(current_nodes) != 1 or current_nodes[0]["parents"]:
-        raise RuntimeError("manual Dataset publication was not one root event")
-    used = {str(node.get("id")) for node in nodes}
-    serial = len(nodes) + 1
-    node_id = f"manual-{serial}"
-    while node_id in used:
-        serial += 1
-        node_id = f"manual-{serial}"
-    node = deepcopy(dict(current_nodes[0]))
-    node["id"] = node_id
-    old_root = inherited["root"]
-    node["parents"] = [] if old_root is None else [str(old_root)]
-    nodes.append(node)
-    return {
-        "root": node_id,
-        "nodes": nodes,
-        "device_settings": deepcopy(list(inherited["device_settings"])),
-    }
 
 
 def _manual_plot_input(draft: Mapping[str, object], snapshot: object) -> object:
@@ -1436,7 +1399,7 @@ def describe_archive(
         schema=str(info.get("schema", "")),
         datasets=datasets,
         flow=flow,
-        pulses=played_pulses(sections["lineage"]),
+        pulses=played_pulses(sections["lineage"], source=source),
         tabs=(
             ("Plot", _plot_rows(arrays, recipes)),
             ("Logic", _logic_rows(sections["lineage"], source=source)),
@@ -1540,32 +1503,6 @@ def _logic_name(node: Mapping[str, Any]) -> str:
     return stream if parts is None else parts[0]
 
 
-def _manual_lineage_needs_saved_source(
-    root: str | None,
-    nodes: Mapping[str, Mapping[str, Any]],
-) -> bool:
-    if root is None:
-        return False
-    current = root
-    seen: set[str] = set()
-    while current not in seen:
-        seen.add(current)
-        node = nodes.get(current)
-        if node is None:
-            return False
-        record = node["record"]
-        operation = record.get("operation") if isinstance(record, Mapping) else None
-        if operation not in {"manual-create", "manual-edit"}:
-            return False
-        parents = tuple(node["parents"])
-        if not parents:
-            return operation == "manual-edit"
-        if len(parents) != 1:
-            return False
-        current = str(parents[0])
-    return False
-
-
 def _signal_name(value: object) -> str:
     text = str(value)
     parts = split_signal_key(text)
@@ -1574,7 +1511,9 @@ def _signal_name(value: object) -> str:
 
 def _source_run_record(
     source: Mapping[str, object] | None,
+    nodes: Mapping[str, Mapping[str, Any]],
 ) -> tuple[str, str, Mapping[str, object]] | None:
+    """Return saved source facts not already represented by an exact run record."""
     if not isinstance(source, Mapping):
         return None
     record = source.get("run_record")
@@ -1605,6 +1544,8 @@ def _source_run_record(
         raise ValueError("Task Figure saved-result identity must be canonical text")
     if not output:
         raise ValueError("Task Figure source does not name its saved result")
+    if any(node["record"] == record for node in nodes.values()):
+        return None
     return task, output, record
 
 
@@ -1636,11 +1577,7 @@ def _logic_rows(
 
     root, nodes = _lineage_nodes(value)
     rows: list[tuple[str, object]] = []
-    saved = (
-        _source_run_record(source)
-        if not nodes or _manual_lineage_needs_saved_source(root, nodes)
-        else None
-    )
+    saved = _source_run_record(source, nodes)
     if saved is not None:
         name, output, record = saved
         projected = _logic_record(record)
@@ -1696,7 +1633,7 @@ def _lineage_graph(
 
     root, nodes = _lineage_nodes(value)
     if root is None:
-        saved = _source_run_record(source)
+        saved = _source_run_record(source, nodes)
         if saved is None:
             return {"nodes": (), "edges": ()}
         name, output, record = saved
@@ -1856,11 +1793,7 @@ def _lineage_graph(
                 ),
             }
         )
-    saved = (
-        _source_run_record(source)
-        if _manual_lineage_needs_saved_source(root, nodes)
-        else None
-    )
+    saved = _source_run_record(source, nodes)
     if saved is not None:
         name, output, record = saved
         source_id = "logic:saved-source"
@@ -2041,11 +1974,7 @@ def _device_rows(
                 (logic, sequence, "event", event_record, named),
             )
         )
-    saved = (
-        _source_run_record(source)
-        if not nodes or _manual_lineage_needs_saved_source(_root, nodes)
-        else None
-    )
+    saved = _source_run_record(source, nodes)
     if saved is not None:
         records.append(
             (saved[0], None, "task run", saved[2], _named_devices(saved[2]))
@@ -2113,10 +2042,11 @@ def _device_rows(
         )
     # The pulse a run played is offered, not printed: the Devices page says
     # which pulse and hands the operator the tab that draws it.
-    for played in played_pulses(value):
+    for played in played_pulses(value, source=source):
         rows.append(
             (
-                f"{played.device_key} pulse {played.sequence}",
+                (f"{played.device_key} pulse" if played.sequence is None
+                 else f"{played.device_key} pulse {played.sequence}"),
                 {"text": played.name, "action": f"pulse:{played.key}"},
             )
         )
@@ -2131,30 +2061,40 @@ class PlayedPulse:
     key: str
     device_key: str
     logic: str
-    #: The Logic event the run record belongs to, as the lineage numbers it.
-    sequence: int
+    #: None for a Task source record without a Runtime publication event.
+    sequence: int | None
     #: The file the operator chose, which is what the run record calls it.
     name: str
     #: The filled pulse document, exactly as the board's snapshot holds it.
     tree: Mapping[str, object]
 
 
-def played_pulses(lineage: object) -> tuple[PlayedPulse, ...]:
+def played_pulses(
+    lineage: object,
+    *,
+    source: Mapping[str, object] | None = None,
+) -> tuple[PlayedPulse, ...]:
     """Every played pulse the lineage's run records carry, in lineage order.
 
     A sequencer's snapshot carries the document it played under ``pulse``
     (see ``sequencer_archive_snapshot``); the run record names the file
     under its own ``pulse``.  One entry per (Logic event, board), so an
-    archive whose lineage holds several runs offers each of them.
+    archive whose lineage holds several runs offers each of them. A Task
+    report may instead carry its frozen record in source, just as Devices
+    displays it; that record does not imply a Runtime publication event.
     """
 
     _root, nodes = _lineage_nodes(lineage)
     found: list[PlayedPulse] = []
-    for node in nodes.values():
-        record = node["record"]
+    records = [
+        (_logic_name(node), int(node["event"]["sequence"]), node["record"])
+        for node in nodes.values()
+    ]
+    saved = _source_run_record(source, nodes)
+    if saved is not None:
+        records.append((saved[0], None, saved[2]))
+    for logic, sequence, record in records:
         named = _named_devices(record)
-        logic = _logic_name(node)
-        sequence = int(node["event"]["sequence"])
         for role, device_key, snapshot in _record_devices(record, named_devices=named):
             document = snapshot.get("pulse")
             if not isinstance(document, Mapping):
@@ -2167,7 +2107,8 @@ def played_pulses(lineage: object) -> tuple[PlayedPulse, ...]:
             )
             found.append(
                 PlayedPulse(
-                    key=f"{logic}:{sequence}:{device_key}",
+                    key=(f"saved-source:{logic}:{device_key}" if sequence is None
+                         else f"{logic}:{sequence}:{device_key}"),
                     device_key=str(device_key),
                     logic=logic,
                     sequence=sequence,
@@ -2610,11 +2551,10 @@ class FigureViewerPresenter:
                     key,
                     plot_input,
                     resolved,
-                    run_record=(
-                        {_IMPORTED_LINEAGE_KEY: deepcopy(dict(source_lineage))}
-                        if isinstance(source_lineage.get("root"), str)
-                        else None
-                    ),
+                    run_record={_IMPORTED_LINEAGE_KEY: {
+                        "lineage": deepcopy(dict(source_lineage)),
+                        "source": deepcopy(dict(source_document)),
+                    }},
                 )
                 producers.append(producer)
                 publication = producer.publish(plane)
@@ -2684,7 +2624,8 @@ class FigureViewerPresenter:
         self._close_pulse_tabs()
         labels = dict(description.datasets)
         source_title = str(source_document.get("title") or "").strip()
-        for key, plot_input, recipe, described in loaded:
+        for producer, plot_input, recipe, described, publication in published:
+            key = producer.dataset
             snapshot = getattr(plot_input, "snapshot", plot_input)
             overlay = getattr(plot_input, "overlay", None)
             choice = f"archive:{key}"
@@ -2697,8 +2638,7 @@ class FigureViewerPresenter:
                 "recipe": dict(recipe),
                 "described": described,
                 "path": resolved,
-                "lineage": deepcopy(dict(source_lineage)),
-                "source": deepcopy(dict(source_document)),
+                "source_publication": (producer.data_signal, publication),
             }
         self._archive_serial = int(serial)
         self.path = resolved
@@ -2773,8 +2713,6 @@ class FigureViewerPresenter:
             source_text="New manual Dataset",
             source_path=None,
             source_dataset="",
-            source_lineage={"root": None, "nodes": [], "device_settings": []},
-            source_document={},
             recipe=None,
             described=None,
             overlay=None,
@@ -2795,8 +2733,7 @@ class FigureViewerPresenter:
             source_text=f"Copy of {Path(source['path']).name} · {source['key']}",
             source_path=Path(source["path"]),
             source_dataset=str(source["key"]),
-            source_lineage=source["lineage"],
-            source_document=source["source"],
+            source_publication=source["source_publication"],
             recipe=source["recipe"],
             described=source["described"],
             overlay=source["overlay"],
@@ -2907,8 +2844,7 @@ class FigureViewerPresenter:
                 "source_text",
                 "source_path",
                 "source_dataset",
-                "source_lineage",
-                "source_document",
+                "source_publication",
                 "source_snapshot",
                 "source_overlay",
                 "recipe",
@@ -2919,7 +2855,6 @@ class FigureViewerPresenter:
                 "applied_snapshot",
                 "applied_name",
                 "applied_note",
-                "lineage",
                 "panel_id",
                 "save_ready",
                 "unsaved",
@@ -2934,8 +2869,7 @@ class FigureViewerPresenter:
             source_text=str(draft["source_text"]),
             source_path=draft["source_path"],
             source_dataset=str(draft["source_dataset"]),
-            source_lineage=draft["source_lineage"],
-            source_document=draft["source_document"],
+            source_publication=draft["source_publication"],
             recipe=draft["recipe"],
             described=draft["described"],
             overlay=draft["source_overlay"],
@@ -2959,7 +2893,6 @@ class FigureViewerPresenter:
             ("applied_snapshot", None),
             ("applied_name", None),
             ("applied_note", None),
-            ("lineage", None),
             ("panel_id", ""),
             ("save_ready", False),
             ("unsaved", False),
@@ -3102,7 +3035,12 @@ class FigureViewerPresenter:
         serial = int(draft["producer_serial"])
         owner_id = f"manual-data-{serial}"
         signal = f"@figure/manual/{serial}/data"
-        operation = "manual-create" if draft["source_path"] is None else "manual-edit"
+        parent = (
+            (signal, draft["publication"])
+            if draft["publication"] is not None
+            else draft["source_publication"]
+        )
+        operation = "manual-create" if parent is None else "manual-edit"
         timestamp = datetime.now(timezone.utc).isoformat()
         record: dict[str, object] = {
             "node": owner_id,
@@ -3135,17 +3073,12 @@ class FigureViewerPresenter:
             data_signal=signal,
             run_record=record,
         )
-        publication = producer.publish(self._signal_plane)
+        publication = producer.publish(self._signal_plane, source_publication=parent)
         draft["producer"] = producer
         draft["publication"] = publication
         draft["applied_snapshot"] = snapshot
         draft["applied_name"] = str(draft["name"])
         draft["applied_note"] = str(draft["note"])
-        draft["lineage"] = _manual_lineage(
-            self._signal_plane,
-            publication,
-            draft["source_lineage"],
-        )
         draft["modified"] = False
         draft["unsaved"] = True
         draft["save_ready"] = False
@@ -3201,7 +3134,6 @@ class FigureViewerPresenter:
         self._panel_presenter.beat()
 
     def _save_data_draft(self, draft: dict[str, object], path: str) -> None:
-        from dataclasses import replace
         from .panel_save import save_panel_figure
 
         if bool(draft["modified"]) or draft["publication"] is None:
@@ -3217,8 +3149,6 @@ class FigureViewerPresenter:
             else selected
         )
         state = binding.state
-        manual_frozen = replace(frozen, lineage=draft["lineage"])
-        source = deepcopy(dict(draft["source_document"]))
         saved_publication = draft["publication"]
         editor_host = (
             binding.editor_host
@@ -3234,9 +3164,8 @@ class FigureViewerPresenter:
                 save_panel_figure(
                     image_path,
                     state=state,
-                    frozen=manual_frozen,
+                    frozen=frozen,
                     writer=self._save_figure_artifact,
-                    source=source,
                     host=editor_host,
                 )
             )
