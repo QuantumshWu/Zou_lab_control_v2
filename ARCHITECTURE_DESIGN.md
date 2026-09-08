@@ -189,7 +189,7 @@ Node new chunk
 - FacetGrid overview每个cell显示哪个fit parameter是display state，不是solver request：Workbench把`Cell fit value`普通下拉放在Fit section的parameter expression正下方，但字段明确写回display owner；未选择fit时不显示。choices包含`Model headline`及当前model parameter identities，默认`Model headline`。修改它只重画annotation、不得re-fit；model切换仅在旧parameter不存在于新model时回到`Model headline`。focused cell仍显示完整formula与全部参数。
 - FitResult携带source parent/generation/revision；任何history/window投影按Measurement primary index连续，未计算、失败或timeout的位置invalid/NaN，window长度按source indices而非成功结果计数。
 - Fit计算在后台worker；Qt owner thread不等待Future或执行fit。
-- `saturation`是普通Series模型，`f(x)=A*x/(x+s)+B`，参数身份为`amplitude/scale/offset`，显示A/s/B，headline为A。x为非负线性量，s>0、A≥0，B可自由或按既有表达式固定；原点不随选区移动。固定detuning与检测条件下，A对应扣背景的饱和计数、s对应半饱和功率。single/batch、evaluator/Jacobian、初值、covariance与预热复用现有compiled fit链，不另设物理拟合节点。
+- `saturation`是普通Series模型，`f(x)=(A*x+B)/(x+C)`，参数身份为`asymptote/numerator/shift`，显示A/B/C，headline为A。A为渐近值、单位y，B为分子常数、单位y*x，C为分母平移、单位x；三者可按既有表达式固定或给初值，不兼容旧参数名。只要求本次拟合域内`x+C>0`，允许负x与负C但不得跨极点，原点不随选区移动；不强加`A*C>B`的单调性硬门，增长与下降由数据决定。普通背景加饱和曲线是它的特例，例如旧`120*x/(x+2)+5`对应`(A,B,C)=(125,10,2)`。single/batch、evaluator/Jacobian、初值、covariance与预热复用现有compiled fit链，不另设物理拟合节点。
 - Reduction `Last`是对所有Reduced轴按声明坐标顺序取末项的Scope便利写法，不是last-valid或最后到达的physical row。保留轴、Facet轴与Rolling本身的shot carrier不被折叠；末项invalid仍invalid，稀疏末坐标交集不存在时沿普通Scope的空选区语义。数值、Fit选区、selector subject和SEM读取同一restriction，复用既有归约核而不增加Last kernel。
 - Histogram与Facet Histogram的Figure recipe必须保存`reduced`与`reduction`，重开后保留原来的Pool/Reduce/Last语义。此前遗漏这两字段的旧Histogram recipe不属于当前完整grammar，reader不得静默把它补成另一幅Mean/Pooled图。
 - Active Fit超过1秒必须loud标记该source index invalid并从Plane latest继续；不得积累完整frame FIFO，也不得永久锁住Panel、Qt、Stop或close。普通cadence/backpressure跳过计算的indices同样invalid但不是solver failure；raw Runtime data始终完整。

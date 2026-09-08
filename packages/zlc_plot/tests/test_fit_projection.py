@@ -115,6 +115,42 @@ def test_release_recapture_units_and_fixed_expression_use_the_series_contract() 
         session.close()
 
 
+@pytest.mark.parametrize("x_unit, x_display, y_unit, y_display, factor", (
+    ("mVpp", "Vpp", "count", "count", .001),
+    ("s", "ms", "count", "count", 1000.0),
+    ("s", "ms", "V", "mV", 1e6),
+))
+def test_product_fit_parameter_keeps_units_sign_and_expression_roundtrip(
+    x_unit, x_display, y_unit, y_display, factor,
+) -> None:
+    model = FitEngine().registry.get("saturation")
+    parameter = next(item for item in model.parameters if item.name == "numerator")
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"x": np.arange(1.0, 5.0)}, units={"x": x_unit}),
+        value_unit=y_unit,
+    )
+    snapshot = make_snapshot(schema, np.ones((1, 4)), revision=0)
+    projection = _projection(CurvePlot(AxisRef.point("x")), snapshot=snapshot,
+        display={"x_display_unit": x_display, "value_display_unit": y_display})
+    canonical_unit = projection._fit_parameter_units(model)["numerator"]
+    assert canonical_unit == f"{y_unit}*{x_unit}"
+    value, unit = projection._display_fit_parameter_value(parameter, -3.0)
+    assert value == pytest.approx(-3.0 * factor)
+    assert unit == f"{y_display}*{x_display}"
+    error, error_unit = projection._display_fit_parameter_value(parameter, .5, difference=True)
+    assert error == pytest.approx(.5 * factor) and error_unit == unit
+    target = projection.fit_expression_target(model, f"B={value!r}")
+    assert target["fixed"]["numerator"] == pytest.approx(-3.0)
+    assert float(projection.fit_expression_text(model, target).split("=")[1]) == pytest.approx(value)
+    # Published Fit vectors store this exact canonical unit string; consuming
+    # that Dataset uses the ordinary unit resolver, not a fit-only catalog.
+    published_schema = replace(schema, value_schema=replace(schema.value_schema, value_unit=canonical_unit))
+    published = make_snapshot(published_schema, np.full((1, 4), -3.0), revision=0)
+    downstream = _projection(CurvePlot(AxisRef.point("x")), snapshot=published)
+    assert downstream._value_quantity().canonical_unit == DEFAULT_UNITS.resolve(canonical_unit)
+
+
 def _dbm_curve_snapshot() -> OwnedSnapshot:
     x = np.linspace(-6.0, 6.0, 9)
     schema = make_dataset_schema(

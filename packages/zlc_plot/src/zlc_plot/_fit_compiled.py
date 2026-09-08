@@ -4709,25 +4709,19 @@ def _prepare_release_recapture(coords, observations, valid, seeds, lower, upper,
 
 
 @njit(cache=True, inline="always")
-def _saturation_fraction(x, scale):
-    if x <= scale:
-        ratio = x / scale
-        return ratio / (1.0 + ratio)
-    return 1.0 / (1.0 + scale / x)
-
-
-@njit(cache=True, inline="always")
 def _point_saturation(coords, point, parameters, row):
-    amplitude, scale, offset = parameters
+    asymptote, numerator, shift = parameters
     x = coords[0, point]
-    if x < 0.0 or not scale > 0.0:
+    denominator = x + shift
+    if not denominator > 0.0:
         row[:] = math.nan
         return math.nan
-    fraction = _saturation_fraction(x, scale)
-    row[0] = fraction
-    row[1] = -amplitude * fraction * (1.0 - fraction) / scale
-    row[2] = 1.0
-    return offset + amplitude * fraction
+    inverse = 1.0 / denominator
+    row[0] = x * inverse
+    row[1] = inverse
+    predicted = (asymptote * x + numerator) * inverse
+    row[2] = -predicted * inverse
+    return predicted
 
 
 @njit(cache=True)
@@ -4766,7 +4760,12 @@ def _objective_saturation(coords, obs, valid, params, free, weights, use_w, pois
 
 @njit(cache=True)
 def _prepare_saturation(coords, observations, valid, seeds, lower, upper, context):
-    """Try three x scales, seeding amplitude/offset by linear regression."""
+    """Seed the same rational curve at three pole distances from the data.
+
+    Regress y on span/(x+C), then express its intercept/slope as A/B.
+    Centered regression avoids solving against nearly collinear x/(x+C)
+    and 1/(x+C) columns when the authored coordinate has a large offset.
+    """
     low = math.inf
     high = -math.inf
     count = 0
@@ -4774,31 +4773,34 @@ def _prepare_saturation(coords, observations, valid, seeds, lower, upper, contex
     for point in range(observations.size):
         if valid[point]:
             x = coords[0, point]
-            if x < 0.0:
-                return 0
             low = min(low, x)
             high = max(high, x)
             count += 1
             mean_y += (observations[point] - mean_y) / count
     if count < 2 or not high > low:
         return 0
+    lower[2] = max(lower[2], np.nextafter(-low, math.inf))
+    span = high - low
     for index, factor in enumerate((0.1, 1.0, 10.0)):
-        scale = high * factor
+        shift = max(lower[2], min(upper[2], span * factor - low))
+        if not low + shift > 0.0:
+            return 0
         mean_fraction = 0.0
         for point in range(observations.size):
             if valid[point]:
-                mean_fraction += _saturation_fraction(coords[0, point], scale) / count
+                mean_fraction += span / (coords[0, point] + shift) / count
         variance = 0.0
         covariance = 0.0
         for point in range(observations.size):
             if valid[point]:
-                centered = _saturation_fraction(coords[0, point], scale) - mean_fraction
+                centered = span / (coords[0, point] + shift) - mean_fraction
                 variance += centered * centered
                 covariance += centered * (observations[point] - mean_y)
-        amplitude = max(covariance / variance, 0.0) if variance > 0.0 else 0.0
-        seeds[index, 0] = amplitude
-        seeds[index, 1] = scale
-        seeds[index, 2] = mean_y - amplitude * mean_fraction
+        slope = covariance / variance if variance > 0.0 else 0.0
+        asymptote = mean_y - slope * mean_fraction
+        seeds[index, 0] = asymptote
+        seeds[index, 1] = asymptote * shift + slope * span
+        seeds[index, 2] = shift
     return 3
 
 
@@ -4809,7 +4811,7 @@ def saturation_descriptor() -> CompiledFitDescriptor:
         value_jacobian=_value_jacobian_saturation,
         context_builder=series_context_builder,
         max_candidates=3,
-        cache_key="saturation-v1",
+        cache_key="saturation-rational",
     )
 
 
@@ -5082,14 +5084,14 @@ def warm_production_cache() -> dict[str, Any]:
     )
 
     power = np.linspace(0.0, 10.0, 97, dtype=np.float64)
-    saturation = np.asarray((120.0, 2.0, 5.0), dtype=np.float64)
+    saturation = np.asarray((125.0, 10.0, 2.0), dtype=np.float64)
     run_single(
         "saturation",
         saturation_descriptor(),
         (power,),
         _value_jacobian_saturation(power.reshape(1, -1), saturation)[0],
         saturation,
-        np.asarray((0.0, positive, -infinity)),
+        np.full(3, -infinity),
         np.full(3, infinity),
     )
 

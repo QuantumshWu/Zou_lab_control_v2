@@ -111,7 +111,7 @@ _BASE_PARAMETERS = {
     # 0.3-photon read noise would be a 0.5% share, unidentifiable outright.
     "histogram_poisson_gaussian": (410.0, 4.0, 1.2),
     "bimodal_poisson_gaussian": (1.0, 6.0, 200.0, 0.9, 320.0, 1.8),
-    "saturation": (120.0, 2.0, 5.0),
+    "saturation": (125.0, 10.0, 2.0),
 }
 
 
@@ -168,58 +168,75 @@ def test_release_recapture_matches_lambert_reference_and_recovers_parameters() -
     np.testing.assert_allclose(fixed.parameter_values, (1.0, 0.0, *truth[2:]), rtol=2e-5)
 
 
-def test_saturation_response_jacobian_and_fixed_background_share_compiled_fit() -> None:
+def test_saturation_response_jacobian_and_fixed_parameters_share_compiled_fit() -> None:
     from scipy.optimize._numdiff import approx_derivative
 
     engine = FitEngine()
     model = engine.registry.get("saturation")
     assert model.compiled_descriptor is not None
-    assert model.parameter_names == ("amplitude", "scale", "offset")
-    assert model.symbols == ("A", "s", "B")
+    assert model.parameter_names == ("asymptote", "numerator", "shift")
+    assert model.symbols == ("A", "B", "C")
     assert r"\frac" not in model.formula
-    power = np.linspace(0.0, 10.0, 65)
-    truth = np.array((120.0, 2.0, 5.0))
-
-    def reference(parameters):
-        counts, half_power, background = parameters
-        return background + counts * power / (power + half_power)
-
-    expected = reference(truth)
-    np.testing.assert_allclose(model.evaluate((power,), truth), expected, rtol=2e-15)
+    ordinary = np.array((125.0, 10.0, 2.0))
+    x = np.linspace(0.0, 10.0, 65)
     np.testing.assert_allclose(
-        model.evaluate_jacobian((power,), truth),
-        approx_derivative(reference, truth, method="3-point"), rtol=2e-7, atol=1e-9,
+        model.evaluate((x,), ordinary), 120.0 * x / (x + 2.0) + 5.0, rtol=2e-15,
     )
     np.testing.assert_array_equal(
-        model.evaluate_jacobian((np.array((0.0,)),), truth), ((0.0, 0.0, 1.0),)
+        model.evaluate_jacobian((np.array((0.0,)),), ordinary), ((0.0, 0.5, -2.5),)
     )
-    assert model.evaluate((np.array((truth[1],)),), truth)[0] == truth[2] + truth[0] / 2
-    observations = expected + 0.02 * np.sin(np.arange(power.size))
-    fitted = engine.fit(model, (power,), expected)
-    assert fitted.success and fitted.covariance_valid
-    np.testing.assert_allclose(fitted.parameter_values, truth, rtol=1e-7)
-    for all_fixed in (False, True):
-        bounds = {
-            name: (value, value)
-            for name, value in zip(model.parameter_names, truth, strict=True)
-            if all_fixed or name == "offset"
-        }
-        single = engine.fit(model, (power,), observations, bounds=bounds)
-        batch, failures = engine.fit_batch(
-            model, ((power,), (power,)), (observations, observations), bounds=bounds
+    assert model.evaluate((np.array((2.0,)),), ordinary)[0] == 65.0
+    for x, truth in (
+        (x, ordinary),
+        (np.linspace(135.0, 247.0, 65), np.array((125.0, -16865.0, -133.0))),
+        (x, np.array((5.0, 20.0, 2.0))),
+    ):
+        def reference(parameters):
+            asymptote, numerator, shift = parameters
+            return (asymptote * x + numerator) / (x + shift)
+
+        expected = reference(truth)
+        np.testing.assert_allclose(model.evaluate((x,), truth), expected, rtol=2e-15)
+        np.testing.assert_allclose(
+            model.evaluate_jacobian((x,), truth),
+            approx_derivative(reference, truth, method="3-point", abs_step=(1e-4, 1e-3, 1e-5)),
+            rtol=2e-7, atol=1e-9,
         )
-        assert failures == (None, None)
-        for result in batch:
-            assert result is not None and result.success
-            _assert_fit_equal(result, single)
-            assert result.parameters["offset"] == truth[2]
-            assert "offset" in result.fixed_parameter_names
-    # The public model uses absolute linear power, not a shifted fit window.
-    positive = power[power > 1.0]
-    cropped = engine.fit(model, (positive,), reference(truth)[power > 1.0])
-    assert cropped.success
-    np.testing.assert_allclose(cropped.parameter_values, truth, rtol=1e-6)
-    assert np.isnan(model.evaluate((np.array((-1.0,)),), truth)).all()
+        fitted = engine.fit(model, (x,), expected)
+        assert fitted.success and fitted.covariance_valid
+        assert np.all(x + fitted.parameters["shift"] > 0.0)
+        np.testing.assert_allclose(fitted.parameter_values, truth, rtol=1e-7)
+        direction = np.sign(truth[0] * truth[2] - truth[1])
+        assert np.all(np.diff(fitted.fitted_values) * direction > 0.0)
+        observations = expected + 0.02 * np.sin(np.arange(x.size))
+        for fixed_names in (("numerator",), ("shift",), model.parameter_names):
+            bounds = {
+                name: (value, value)
+                for name, value in zip(model.parameter_names, truth, strict=True)
+                if name in fixed_names
+            }
+            single = engine.fit(model, (x,), observations, bounds=bounds)
+            batch, failures = engine.fit_batch(
+                model, ((x,), (x,)), (observations, observations), bounds=bounds
+            )
+            assert failures == (None, None)
+            for result in batch:
+                assert result is not None and result.success
+                _assert_fit_equal(result, single)
+                assert result.fixed_parameter_names == fixed_names
+                assert np.all(x + result.parameters["shift"] > 0.0)
+                for name in fixed_names:
+                    assert result.parameters[name] == truth[model.parameter_names.index(name)]
+        # Cropping changes the fit domain, never the absolute coordinate origin.
+        kept = x > x[0] + 0.1 * (x[-1] - x[0])
+        cropped = engine.fit(model, (x[kept],), expected[kept])
+        assert cropped.success
+        np.testing.assert_allclose(cropped.parameter_values, truth, rtol=1e-6)
+    # Negative x is legal to the right of the pole; the pole and its other
+    # side are invalid, not an alternative branch the solver may cross into.
+    values = model.evaluate((np.array((-3.0, -2.0, -1.0)),), ordinary)
+    assert np.isnan(values[:2]).all()
+    assert values[2] == -115.0
 
 
 def _coordinates(model_id: str) -> tuple[np.ndarray, ...]:

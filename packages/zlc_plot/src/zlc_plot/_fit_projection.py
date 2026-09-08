@@ -2090,6 +2090,10 @@ class FitProjection:
 
         relation = spec.unit_relation
         solver_relation = spec.solver_unit_relation
+        if relation is UnitRelation.VALUE_TIMES_AXIS_0:
+            if solver_relation is not relation:
+                raise ValueError("product parameters cannot cross unit relations")
+            return self._fit_product_unit(spec, display=False).symbol
         if relation in {UnitRelation.DIMENSIONLESS, UnitRelation.RADIAN}:
             if solver_relation is not relation:
                 raise ValueError("unit-free fit parameters cannot cross unit relations")
@@ -2122,6 +2126,19 @@ class FitProjection:
         symbol = quantity.canonical_unit.symbol
         return "" if symbol == "1" else symbol
 
+    def _fit_product_unit(self, spec: Any, *, display: bool) -> Unit:
+        """The same VALUE and AXIS_0 vocabulary, multiplied as authored."""
+
+        symbols = []
+        for relation in (UnitRelation.VALUE, UnitRelation.AXIS_0):
+            factor = replace(spec, unit_relation=relation, solver_unit_relation=relation)
+            symbol = (
+                self._fit_parameter_conversion(factor).symbol
+                if display else self._canonical_fit_parameter_unit(factor)
+            )
+            symbols.append(symbol or "1")
+        return (self._unit_registry or DEFAULT_UNITS).resolve("*".join(symbols))
+
     def _fit_parameter_conversion(
         self,
         spec: Any,
@@ -2140,6 +2157,16 @@ class FitProjection:
         relation = spec.unit_relation if display_relation is None else display_relation
         solver_relation = spec.solver_unit_relation
         name = spec.name
+        if relation is UnitRelation.VALUE_TIMES_AXIS_0:
+            if solver_relation is not relation:
+                raise ValueError("product parameters cannot cross unit relations")
+            canonical_unit = self._fit_product_unit(spec, display=False)
+            display_unit = self._fit_product_unit(spec, display=True)
+            if not canonical_unit.compatible_with(display_unit):
+                raise ValueError("fit product parameter units require compatible linear scales")
+            return _FitParameterConversion(
+                name, canonical_unit, display_unit, display_unit.symbol, _Crossing.SPAN
+            )
         if relation in {UnitRelation.DIMENSIONLESS, UnitRelation.RADIAN}:
             if solver_relation is not relation:
                 raise ValueError("unit-free fit parameters cannot cross unit relations")

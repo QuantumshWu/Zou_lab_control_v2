@@ -49,7 +49,7 @@ def _parameters(model_id: str) -> np.ndarray:
         "damped_sine": np.array([1.2, 0.1, 0.4, 1.8, 0.3]),
         "exponential_decay": np.array([1.2, 0.1, 1.4]),
         "release_recapture": np.array([0.8, 0.05, 6.0, 0.4]),
-        "saturation": np.array([1.2, 0.8, 0.1]),
+        "saturation": np.array([125.0, 10.0, 2.0]),
         "anisotropic_gaussian_center": np.array([1.2, 0.1, 1.1, 0.8, 0.2, -0.1]),
         "radial_gaussian_center": np.array([1.2, 0.1, 1.1, 0.2, -0.1]),
         "histogram_poisson_gaussian": np.array([1.2, 3.0, 0.6]),

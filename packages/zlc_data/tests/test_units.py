@@ -299,3 +299,13 @@ def test_a_prefix_belongs_to_the_reference_of_a_family() -> None:
     with pytest.raises(UnitError, match="cannot take a prefix"):
         Unit("dBx", "power", Decibel(1.0), prefixable=True)
     assert Unit("Vpk", "power", PeakVoltageInto(50.0), prefixable=True).prefixable
+
+    # A fitted numerator multiplies the authored coordinate, not its power.
+    product = resolve_unit("count*mVpp")
+    assert product.symbol == "count*mVpp"
+    assert float(product.convert_value_to(-3000.0, resolve_unit("count*Vpp"))) == -3.0
+    assert float(product.convert_value_to(-3000.0, product)) == -3000.0
+    with pytest.raises(UnitError, match="incompatible"):
+        product.convert_value_to(-3000.0, resolve_unit("count*W"))
+    assert float(resolve_unit("count*s").convert_value_to(2.0, resolve_unit("count*ms"))) == 2000.0
+    assert DEFAULT_UNITS.display_choices(product) == ("count*mVpp",)

@@ -481,6 +481,29 @@ class UnitRegistry:
                 return registered
             base, prefix = self._split_prefix(unit)
         if base is None:
+            if "*" in unit:
+                factors = tuple(self.resolve(part) for part in unit.split("*"))
+                dimensions, scales = [], []
+                for factor in factors:
+                    if factor.is_linear:
+                        dimension, scale = factor.dimension, factor.scale
+                    else:
+                        # Products multiply the authored numbers, not the
+                        # physical conversion of each number. In particular
+                        # count*mVpp must never square a negative coefficient.
+                        # Prefix changes within that spelling family are still
+                        # exact scales; crossing to W/dBm is not a product scale.
+                        family, prefix = self.family_and_prefix(factor)
+                        dimension = f"coordinate:{family.symbol}"
+                        scale = 10.0 ** prefix.exponent
+                    if dimension != "dimensionless":
+                        dimensions.append(dimension)
+                    scales.append(scale)
+                return Unit(
+                    "*".join(factor.symbol for factor in factors),
+                    "*".join(sorted(dimensions)) or "dimensionless",
+                    Scaled(math.prod(scales)),
+                )
             raise UnitError(f"unknown unit {unit!r}")
         return _prefixed(base, prefix)
 
@@ -617,6 +640,8 @@ class UnitRegistry:
                 )
             else:
                 choices.append(candidate.symbol)
+        if not choices:
+            choices.append(resolved.symbol)
         ordered = sorted(
             dict.fromkeys(choices),
             key=lambda symbol: -_display_order(self.resolve(symbol)),
@@ -657,6 +682,7 @@ def _builtin_units() -> tuple[Unit, ...]:
         Unit("dBm", "power", Decibel(1.0e-3)),
         Unit("Vpp", "power", PeakVoltageInto(RF_LOAD_OHMS), prefixable=True),
         Unit("count", "count"),
+        Unit("point", "point"),
         # A DAC code is a signed integer the board takes, where 0 is 0 V.
         # It had no unit at all: carrying the editor's label "DAC code
         # (0 = 0 V)" as one is what killed the first plot ever drawn over a

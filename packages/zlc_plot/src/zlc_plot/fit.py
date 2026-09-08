@@ -72,6 +72,7 @@ class ParameterDomain(str, Enum):
 class UnitRelation(str, Enum):
     DIMENSIONLESS = "dimensionless"
     VALUE = "value"
+    VALUE_TIMES_AXIS_0 = "value_times_axis_0"
     AXIS_0 = "axis_0"
     AXIS_1 = "axis_1"
     INVERSE_AXIS_0 = "inverse_axis_0"
@@ -3047,6 +3048,7 @@ def _covariance_from_information(
 
 DIMENSIONLESS = UnitRelation.DIMENSIONLESS
 VALUE = UnitRelation.VALUE
+VALUE_TIMES_AXIS_0 = UnitRelation.VALUE_TIMES_AXIS_0
 AXIS_0 = UnitRelation.AXIS_0
 AXIS_1 = UnitRelation.AXIS_1
 INVERSE_AXIS_0 = UnitRelation.INVERSE_AXIS_0
@@ -3294,30 +3296,39 @@ def _symmetric_lorentzian_doublet(x, center, common_fwhm, component_amplitude, o
     )
 
 
-def _saturation(x, amplitude, scale, offset):
-    """Offset plus a saturating response in non-negative x."""
-    coords, values = _compiled_series_input(x, (amplitude, scale, offset))
+def _saturation(x, asymptote, numerator, shift):
+    """Rational saturation (A*x+B)/(x+C), to the right of its pole."""
+    coords, values = _compiled_series_input(x, (asymptote, numerator, shift))
     return _compiled_fit._value_jacobian_saturation(coords, values)[0]
 
 
-def _saturation_jacobian(x, amplitude, scale, offset):
-    coords, values = _compiled_series_input(x, (amplitude, scale, offset))
+def _saturation_jacobian(x, asymptote, numerator, shift):
+    coords, values = _compiled_series_input(x, (asymptote, numerator, shift))
     return _compiled_fit._value_jacobian_saturation(coords, values)[1]
 
 
-def _saturation_candidates(coordinates, observations):
+def _saturation_preparation(coordinates, observations):
     coords = np.array(coordinates, dtype=np.float64, order="C")
     values = np.array(observations, dtype=np.float64, order="C")
     descriptor = _compiled_fit.saturation_descriptor()
     seeds = np.empty((descriptor.max_candidates, 3), dtype=np.float64)
+    lower, upper = np.full(3, -np.inf), np.full(3, np.inf)
     count = descriptor.prepare(
         coords, values, np.ones(values.size, dtype=np.bool_), seeds,
-        np.array((0.0, np.nextafter(0.0, 1.0), -np.inf)), np.full(3, np.inf),
+        lower, upper,
         np.array(descriptor.context_builder(tuple(coords)), copy=True),
     )
     if count == 0:
-        raise ValueError("saturation fit requires distinct non-negative coordinates")
-    return tuple(seeds[:count])
+        raise ValueError("saturation fit requires distinct finite coordinates")
+    return tuple(seeds[:count]), lower
+
+
+def _saturation_candidates(coordinates, observations):
+    return _saturation_preparation(coordinates, observations)[0]
+
+
+def _saturation_bounds(coordinates, observations):
+    return {"shift": (float(_saturation_preparation(coordinates, observations)[1][2]), None)}
 
 
 def _init_saturation(coordinates, observations):
@@ -4408,17 +4419,18 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             "Saturation",
             1,
             (
-                FitParameterSpec("amplitude", VALUE, NONNEGATIVE, display_label=r"$A$"),
-                FitParameterSpec("scale", AXIS_0, POSITIVE, display_label=r"$s$"),
-                FitParameterSpec("offset", VALUE, display_label=r"$B$", affine_point=True),
+                FitParameterSpec("asymptote", VALUE, display_label=r"$A$", affine_point=True),
+                FitParameterSpec("numerator", UnitRelation.VALUE_TIMES_AXIS_0, display_label=r"$B$"),
+                FitParameterSpec("shift", AXIS_0, display_label=r"$C$"),
             ),
-            "amplitude",
+            "asymptote",
             _saturation,
             _init_saturation,
             (FitTarget.SERIES,),
-            formula=r"$f(x)=A x/(x+s)+B$",
+            formula=r"$f(x)=(A x+B)/(x+C)$",
             jacobian=_saturation_jacobian,
             candidate_initializer=_saturation_candidates,
+            bounds_initializer=_saturation_bounds,
             compiled_descriptor=_compiled_fit.saturation_descriptor(),
         ),
         FitModelSpec(
