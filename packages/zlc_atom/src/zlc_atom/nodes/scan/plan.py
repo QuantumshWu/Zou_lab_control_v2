@@ -683,13 +683,13 @@ def _selected_plan(
         if chosen is None or len(axis.values) < 2:
             axes.append(axis)
             continue
-        unit = axis.unit or context.get("axis_units", {}).get(axis_id)
-        if unit is None:
+        source_unit = context.get("axis_units", {}).get(axis_id)
+        if source_unit is None:
             raise ValueError(f"selected scan axis {axis_id!r} has no recorded unit")
-        bounds = DEFAULT_UNITS.convert(
-            (float(chosen.lower), float(chosen.upper)),
-            DEFAULT_UNITS.base_for(unit or "1"), unit or "1",
-        )
+        unit = axis.unit or source_unit
+        bounds = (float(chosen.lower), float(chosen.upper))
+        if source_unit != unit:
+            bounds = DEFAULT_UNITS.convert(bounds, source_unit or "1", unit or "1")
         axes.append(
             replace(
                 axis,

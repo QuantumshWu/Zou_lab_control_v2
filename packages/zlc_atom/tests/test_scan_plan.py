@@ -220,16 +220,49 @@ def test_a_region_lands_on_the_axis_the_picture_drew_when_two_ports_share_a_name
     assert narrowed.axes[0].values == (1.25, 1.75)
     assert narrowed.axes[1].values == (12.0, 18.0)
 
+    import numpy as np
+    from zlc_data import owned_snapshot_from_arrays
     from zlc_data.units import DEFAULT_UNITS
-    power = ScanAxis("device:rf:ch1_power_dbm", (135.0, 191.0, 247.0), "mVpp")
+    from zlc_plot import DEFAULTS, AxisRef, CurvePlot
+    from zlc_plot._fit_projection import FitProjection, ProjectionContext
+    from zlc_plot.selectors import NumericRange, SelectorKind, SelectorSnapshot, SelectorState
+    from zlc_plot.specs import parameter_schema_for
+    from zlc_plot.state import DisplayStateStore
+    from zlc_workbench.selection import panel_selection_from_plot
+
+    power = ScanAxis("device:rf:ch1_power_dbm", tuple(np.linspace(135.0, 247.0, 10)), "mVpp")
     power_id = scan_axis_ids(("rf.ch1_power_dbm",))[0]
-    bounds = DEFAULT_UNITS.convert((150.0, 220.0), "mVpp", DEFAULT_UNITS.base_for("mVpp"))
-    selected = SelectionState("curve", "x_range", (
-        SelectionRange(power_id, float(bounds[0]), float(bounds[1]), domain="point"),
-    ))
-    patch = SEAMLESS_NODE.selection_patch(
-        selected, draft={"plan": json.dumps(ScanPlan((power,)).to_tree())}, context={},
-    )
-    authored = ScanPlan.from_tree(json.loads(patch["plan"])).axes[0]
-    assert authored.unit == "mVpp"
-    assert authored.values == pytest.approx((150.0, 185.0, 220.0), rel=1e-14)
+    schema = scan_dataset_schema(_source_schema(shots=1), ScanPlan((power,)).rows(), (("rf.ch1_power_dbm", "mVpp"),))
+    snapshot = owned_snapshot_from_arrays(schema, np.zeros(schema.physical_shape), 0)
+    spec = CurvePlot(AxisRef.point(power_id))
+    for shown_unit, shown_bounds in (("mVpp", (150.0, 220.0)), ("Vpp", (0.15, 0.22))):
+        assert DEFAULT_UNITS.compatible("mVpp", shown_unit)
+        display = DisplayStateStore(parameter_schema_for(spec, style=DEFAULTS.style), {"x_display_unit": shown_unit}).state
+        projection = FitProjection(data=snapshot, revision=0, spec=spec,
+            context=ProjectionContext(display, SelectorSnapshot(())), unit_registry=None,
+            defaults=DEFAULTS, histogram_projection=None)
+        projection._build_view_and_payload()
+        # Use the actual Plot conversion and Workbench event translator: their
+        # canonical coordinates are the Dataset's mVpp, not the registry's W.
+        bounds = projection._display_range_to_canonical(NumericRange(*shown_bounds), spec.x)
+        selected = panel_selection_from_plot(
+            SelectorState(SelectorKind.X_RANGE, bounds),
+            projection.view.selection_subject(spec, projection.payload),
+        )
+        assert (selected.ranges[0].lower, selected.ranges[0].upper) == (150.0, 220.0)
+        context = {"axis_units": {power_id: "mVpp"}}
+        patch = SEAMLESS_NODE.selection_patch(
+            selected, draft={"plan": json.dumps(ScanPlan((power,)).to_tree())}, context=context,
+        )
+        authored = ScanPlan.from_tree(json.loads(patch["plan"])).axes[0]
+        assert authored.unit == "mVpp"
+        assert authored.values == tuple(np.linspace(150.0, 220.0, 10))
+        # The draft can have changed unit since this exact Dataset was shown.
+        changed = ScanAxis(power.port, tuple(DEFAULT_UNITS.convert(power.values, "mVpp", "dBm")), "dBm")
+        patch = SEAMLESS_NODE.selection_patch(
+            selected, draft={"plan": json.dumps(ScanPlan((changed,)).to_tree())}, context=context,
+        )
+        authored = ScanPlan.from_tree(json.loads(patch["plan"])).axes[0]
+        converted = DEFAULT_UNITS.convert((150.0, 220.0), "mVpp", "dBm")
+        assert authored.unit == "dBm"
+        assert authored.values == tuple(np.linspace(*converted, 10))

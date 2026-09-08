@@ -7539,7 +7539,9 @@ def test_a_region_on_a_scan_curve_reaches_the_scan_as_its_next_sweep() -> None:
                 draft=SimpleNamespace(values={"plan": json.dumps(plan.to_tree())}),
             )
         },
-        _selection_context=lambda _publication: {},
+        _selection_context=lambda _publication, _signal: {
+            "axis_units": {"scan.bias": "code"},
+        },
         update_logic_draft=lambda name, **patch: routed.append((name, patch)),
     )
     publication = SimpleNamespace(run_record={})
