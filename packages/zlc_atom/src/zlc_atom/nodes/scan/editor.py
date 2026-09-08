@@ -156,11 +156,7 @@ class _AxisRow(QtWidgets.QWidget):
             except ValueError:
                 return "unavailable"
 
-        labels = {
-            port.port: port_leaf(port.port).removesuffix("_" + port.unit.lower())
-            if port.unit else port_leaf(port.port)
-            for port in self._ports
-        }
+        labels = {port.port: port_leaf(port.port) for port in self._ports}
         sources = {port.port: (branch(port.port),) for port in self._ports}
         chosen = str(current or "")
         offered = {port.port for port in self._ports}
