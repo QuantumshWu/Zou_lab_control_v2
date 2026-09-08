@@ -6188,7 +6188,7 @@ class ConsolePresenter:
         if producer is None:
             return
 
-        context = self._selection_context(publication)
+        context = self._selection_context(publication, signal)
         # Which gestures mean a producer's setting is the producer's own
         # declaration -- its selection mappings, matched by plot and
         # selector kind -- and nothing here narrows it.  A box on a curve
@@ -6229,12 +6229,12 @@ class ConsolePresenter:
         if producer is None:
             return
         applied = producer.descriptor.applied_selection_values(
-            selection, context=self._selection_context(publication)
+            selection, context=self._selection_context(publication, binding.state.signal)
         )
         if applied:
             self.update_logic_draft(producer_node_id, values=dict(applied))
 
-    def _selection_context(self, publication: object) -> dict[str, Any]:
+    def _selection_context(self, publication: object, signal_name: str = "") -> dict[str, Any]:
         """Public run-time device readback, as data only."""
 
         record = getattr(publication, "run_record", {})
@@ -6244,6 +6244,15 @@ class ConsolePresenter:
             else {}
         )
         context: dict[str, Any] = {"device_snapshots": snapshots}
+        if signal_name:
+            value = publication.value(signal_name)
+            if value is not None:
+                schema = value.canonical_schema or value.snapshot.block.schema
+                context["axis_units"] = {
+                    axis.axis_id.value: axis.unit or "1"
+                    for domain in (schema.repeat_domain, schema.point_domain, schema.cell_domain)
+                    for axis in domain.axes
+                }
         if isinstance(snapshots, Mapping) and len(snapshots) == 1:
             actual = next(iter(snapshots.values()))
             if isinstance(actual, Mapping):

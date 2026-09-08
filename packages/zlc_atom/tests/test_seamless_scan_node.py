@@ -159,8 +159,7 @@ class _FakeSource:
 class _Knob:
     """One installed device with one field, remembering every tune.
 
-    ``refuse_restore`` answers the pre-run value with something else, the
-    way an instrument that will not go back there would.
+    ``refuse_restore`` raises the device's refusal to accept the restore.
     """
 
     def __init__(self, level: float = 0.25, *, refuse_restore: bool = False) -> None:
@@ -172,7 +171,7 @@ class _Knob:
         assert field == "level"
         self.tunes.append(float(value))
         if self.refuse_restore and value == 0.25:
-            return float(value) + 1.0
+            raise RuntimeError("scripted device refused restore")
         self.level = float(value)
         return self.level
 
@@ -1108,6 +1107,8 @@ def _device_run(
     values: tuple[float, ...],
     repeats: int = 1,
     tunables=None,
+    unit="",
+    device_field="frequency_hz",
 ):
     """Walk a plan whose outer axis is an installed device knob.
 
@@ -1148,7 +1149,7 @@ def _device_run(
         plan = ScanPlan(
             (
                 ScanAxis(
-                    DEVICE_PARAM_FAMILY + "rf:frequency_hz", frequencies
+                    DEVICE_PARAM_FAMILY + "rf:" + device_field, frequencies, unit
                 ),
                 ScanAxis(BIAS_X_PORT, values),
             )
@@ -1320,7 +1321,7 @@ def test_a_device_axis_is_put_back_however_the_table_ends() -> None:
     assert sequencer.fires == 1
 
     knob, sequencer = _Knob(refuse_restore=True), _FakeSequencer(_template_sequence())
-    with pytest.raises(RuntimeError, match="not its pre-run value 0.25"):
+    with pytest.raises(RuntimeError, match="scripted device refused restore"):
         _device_seamless(knob, sequencer, _FakeSource()).execute(_Context())
 
 
@@ -1338,41 +1339,46 @@ def test_a_stop_received_while_the_board_goes_safe_fires_no_table() -> None:
     assert knob.tunes == [1.0, 0.25] and knob.level == 0.25
 
 
-def test_a_device_that_answers_differently_fails_the_run() -> None:
-    """tune() returns the read-back, and any difference is a refusal."""
+def test_a_device_readback_does_not_replace_the_authored_scan_coordinates() -> None:
+    """Setpoints stay in the selected unit; readback rounding is not refusal."""
 
     class _DriftingKnob:
         def tunable_fields(self):
             return (
                 TunableField(
                     metadata=AuthoringField(
-                        "frequency_hz",
+                        "power_dbm",
                         "float",
-                        "Frequency (Hz)",
+                        "Power",
                         0.0,
-                        minimum=0.0,
-                        maximum=1e10,
-                        unit="Hz",
+                        minimum=-40.0,
+                        maximum=20.0,
+                        unit="dBm",
                     ),
                     current=0.0,
                     live_write=True,
-                    dependency_group=("frequency_hz",),
+                    dependency_group=("power_dbm",),
                 ),
             )
 
         def tune(self, name, value):
             del name
-            return float(value) + 7.0
+            return float(value) + 0.000003
 
         def tunable_values(self):
-            return {"frequency_hz": 0.0}
+            return {"power_dbm": 0.0}
 
         def settings_provenance(self):
             return {"device_session_id": "drift", "settings_epoch": 0}
 
-    with pytest.raises(RuntimeError, match="applied"):
-        _device_run(
-            frequencies=(1e9,),
-            values=(-256.0,),
-            tunables={"rf": _DriftingKnob()},
-        )
+    wanted = tuple(float(value) for value in np.linspace(135.0, 247.0, 10))
+    value, record, _bench, _device, _claims = _device_run(
+        frequencies=wanted, values=(-256.0,),
+        tunables={"rf": _DriftingKnob()}, unit="mVpp", device_field="power_dbm",
+    )
+    axis = next(axis for axis in value.block.schema.point_domain.axes
+                if axis.name == "rf.power_dbm")
+    assert axis.unit == "mVpp"
+    assert tuple(axis.coordinates) == wanted
+    assert record["plan"]["axes"][0]["values"] == list(wanted)
+    assert record["plan"]["axes"][0]["unit"] == "mVpp"

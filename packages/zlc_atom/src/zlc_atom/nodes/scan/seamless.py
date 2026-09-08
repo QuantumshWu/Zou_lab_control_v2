@@ -61,6 +61,7 @@ import itertools
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
+from zlc_data.units import DEFAULT_UNITS
 
 from zlc_pulse import (
     PulseSequence,
@@ -224,7 +225,8 @@ class SeamlessScanMeasurement:
         )
         order = tuple(planned.index(column.name) for column in columns)
         return tuple(
-            tuple(float(row[index]) for index in order) for row in rows
+            tuple(self.board_plan.axes[index].native_value(self.board_ports[index], row[index])
+                  for index in order) for row in rows
         )
 
     def _plan_ordered_rows(
@@ -240,7 +242,10 @@ class SeamlessScanMeasurement:
         slot_names = tuple(column.name for column in columns)
         order = tuple(slot_names.index(name) for name in planned)
         return tuple(
-            tuple(float(row[index]) for index in order) for row in rows
+            tuple(float(DEFAULT_UNITS.convert(
+                row[index], port.unit, axis.unit or port.unit
+            )) for axis, port, index in zip(self.board_plan.axes, self.board_ports, order))
+            for row in rows
         )
 
     def resolved_device_claims(self):
@@ -286,7 +291,9 @@ class SeamlessScanMeasurement:
             context.report_progress(
                 f"Setting {port_label(port)} ({index + 1}/{points})"
             )
-            knobs.move(port, value)
+            axis = next(axis for axis in self.outer_axes if axis.port == port)
+            bound = next(bound for bound in self.ports if bound.port == port)
+            knobs.move(port, axis.native_value(bound, value))
 
     def _ask_for_setting(
         self,
@@ -482,10 +489,11 @@ class SeamlessScanMeasurement:
         )
         axes = tuple(
             [
-                (port_label(axis.port), "" if port is None else port.unit)
+                (port_label(axis.port), axis.unit or ("" if port is None else port.unit))
                 for axis, port in zip(self.outer_axes, self.outer_ports)
             ]
-            + [(port.label, port.unit) for port in self.board_ports]
+            + [(port.label, axis.unit or port.unit)
+               for axis, port in zip(self.board_plan.axes, self.board_ports)]
         )
         run_record = self.run_record(
             effective_rows=effective_rows,
@@ -616,6 +624,7 @@ class SeamlessScanMeasurement:
                 {
                     "port": axis.port,
                     "values": [mapping[float(value)] for value in axis.values],
+                    "unit": axis.unit,
                 }
             )
 

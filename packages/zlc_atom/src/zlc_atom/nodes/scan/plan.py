@@ -32,7 +32,7 @@ from pathlib import Path
 import numpy as np
 from dataclasses import replace
 
-from zlc_data.units import format_quantity
+from zlc_data.units import DEFAULT_UNITS, format_quantity
 from zlc_pulse import (
     apply_api_values,
     PulseSequence,
@@ -294,7 +294,7 @@ class ScanAxis:
 
     port: str
     values: tuple[float, ...]
-    display_unit: str = ""
+    unit: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "port", str(self.port))
@@ -304,9 +304,19 @@ class ScanAxis:
         if any(not math.isfinite(value) for value in values):
             raise ValueError(f"axis {self.port!r} contains a non-finite value")
         object.__setattr__(self, "values", values)
-        if not isinstance(self.display_unit, str):
-            raise TypeError("scan axis display_unit must be text")
-        object.__setattr__(self, "display_unit", self.display_unit.strip())
+        if not isinstance(self.unit, str):
+            raise TypeError("scan axis unit must be text")
+        object.__setattr__(self, "unit", self.unit.strip())
+
+    def native_value(self, port: ScanPort, value: float) -> float:
+        """Convert an authored coordinate only at the port boundary."""
+        unit = self.unit or port.unit
+        native = float(value) if unit == port.unit else float(
+            DEFAULT_UNITS.convert(value, unit, port.unit)
+        )
+        if not math.isfinite(native):
+            raise ValueError(f"axis {self.port!r} converts to a non-finite port value")
+        return native
 
 
 @dataclass(frozen=True)
@@ -346,8 +356,7 @@ class ScanPlan:
     def to_tree(self) -> dict:
         return {
             "axes": [
-                {"port": axis.port, "values": list(axis.values),
-                 **({"display_unit": axis.display_unit} if axis.display_unit else {})}
+                {"port": axis.port, "values": list(axis.values), "unit": axis.unit}
                 for axis in self.axes
             ]
         }
@@ -356,11 +365,12 @@ class ScanPlan:
     def from_tree(cls, tree: Mapping) -> "ScanPlan":
         if not isinstance(tree, Mapping) or "axes" not in tree:
             raise ValueError("a scan plan document carries its axes")
-        axes = tuple(
-            ScanAxis(str(entry["port"]), tuple(entry["values"]), entry.get("display_unit", ""))
-            for entry in tree["axes"]
-        )
-        return cls(axes)
+        axes = []
+        for entry in tree["axes"]:
+            if not isinstance(entry, Mapping) or not {"port", "values"} <= set(entry) or set(entry) - {"port", "values", "unit"}:
+                raise ValueError("scan axis fields must be port, values, and optional unit")
+            axes.append(ScanAxis(str(entry["port"]), tuple(entry["values"]), entry.get("unit", "")))
+        return cls(tuple(axes))
 
 
 def manual_axis_name(port: str) -> str:
@@ -375,7 +385,7 @@ def manual_axis_name(port: str) -> str:
     return name
 
 
-def manual_axis(name: str, values: Sequence[float]) -> ScanAxis:
+def manual_axis(name: str, values: Sequence[float], unit: str = "") -> ScanAxis:
     """One manual axis: a name, and the values a HAND will set.
 
     Authored exactly like every other axis, values and all.  A coordinate
@@ -389,7 +399,7 @@ def manual_axis(name: str, values: Sequence[float]) -> ScanAxis:
     label = str(name).strip()
     if not label:
         raise ValueError("a manual axis carries a name")
-    return ScanAxis(MANUAL_PARAM_FAMILY + label, tuple(values))
+    return ScanAxis(MANUAL_PARAM_FAMILY + label, tuple(values), unit)
 
 
 def split_outer_axes(plan: ScanPlan) -> tuple[tuple[ScanAxis, ...], ScanPlan]:
@@ -450,9 +460,10 @@ def bind_plan(
                 f"it offers {offered}"
             )
         for value in axis.values:
-            if value < port.lo or value > port.hi:
+            native = axis.native_value(port, value)
+            if native < port.lo or native > port.hi:
                 raise ValueError(
-                    f"axis {axis.port!r} plays {value!r}, outside the port's "
+                    f"axis {axis.port!r} plays {value!r} {axis.unit or port.unit}, outside the port's "
                     f"range [{port.lo:g}, {port.hi:g}] {port.unit}"
                 )
         bound.append(port)
@@ -671,7 +682,6 @@ def _selected_plan(
     leaves the plan exactly as it was.  The frames belong to the camera.
     """
 
-    del context
     plan = plan_from_authored(draft.get("plan"))
     wanted = {
         str(getattr(item, "axis", "")): item
@@ -684,13 +694,20 @@ def _selected_plan(
         if chosen is None or len(axis.values) < 2:
             axes.append(axis)
             continue
+        unit = axis.unit or context.get("axis_units", {}).get(axis_id)
+        if unit is None:
+            raise ValueError(f"selected scan axis {axis_id!r} has no recorded unit")
+        bounds = DEFAULT_UNITS.convert(
+            (float(chosen.lower), float(chosen.upper)),
+            DEFAULT_UNITS.base_for(unit or "1"), unit or "1",
+        )
         axes.append(
             replace(
                 axis,
                 values=tuple(
                     float(value)
                     for value in np.linspace(
-                        float(chosen.lower), float(chosen.upper), len(axis.values)
+                        float(bounds[0]), float(bounds[1]), len(axis.values)
                     )
                 ),
             )

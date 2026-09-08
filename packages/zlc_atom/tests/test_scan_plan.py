@@ -93,6 +93,9 @@ def test_plan_rows_nest_outer_first_and_round_trip() -> None:
 
 
 def test_binding_refuses_unknown_ports_and_out_of_range_values() -> None:
+    from zlc_atom.nodes.scan.plan import ScanPort
+    from zlc_data.units import DEFAULT_UNITS
+
     ports = scan_ports_for(_template_sequence())
 
     with pytest.raises(ValueError, match="offers no scan port named"):
@@ -105,6 +108,18 @@ def test_binding_refuses_unknown_ports_and_out_of_range_values() -> None:
         ScanPlan((ScanAxis(BIAS_PORTS[2], (-256.0, 0.0, 256.0)),)), ports
     )
     assert bound[0].label == "da_bias_z"
+
+    power = ScanPort("device:rf:ch1_power_dbm", "rf.ch1_power_dbm", "dBm", -30.0, 10.0)
+    authored = ScanAxis(power.port, (135.0, 247.0), "mVpp")
+    plan = ScanPlan((authored,))
+    assert bind_plan(plan, (power,)) == (power,)
+    assert plan.axes[0].values == (135.0, 247.0)
+    assert ScanPlan.from_tree(plan.to_tree()) == plan
+    assert authored.native_value(power, 135.0) == float(DEFAULT_UNITS.convert(135.0, "mVpp", "dBm"))
+    with pytest.raises(ValueError, match="outside the port's range"):
+        bind_plan(ScanPlan((ScanAxis(power.port, (1e6,), "mVpp"),)), (power,))
+    with pytest.raises(ValueError, match="scan axis fields"):
+        ScanPlan.from_tree({"axes": [{"port": power.port, "values": [-10.0], "display_unit": "mVpp"}]})
 
 
 def test_tunable_devices_project_device_ports() -> None:
@@ -198,8 +213,23 @@ def test_a_region_lands_on_the_axis_the_picture_drew_when_two_ports_share_a_name
         ),
     )
     patched = SEAMLESS_NODE.selection_patch(
-        selection, draft={"plan": json.dumps(plan.to_tree())}, context={}
+        selection, draft={"plan": json.dumps(plan.to_tree())},
+        context={"axis_units": {"scan.bias": "1", "scan.bias.2": "code"}},
     )
     narrowed = ScanPlan.from_tree(json.loads(patched["plan"]))
     assert narrowed.axes[0].values == (1.25, 1.75)
     assert narrowed.axes[1].values == (12.0, 18.0)
+
+    from zlc_data.units import DEFAULT_UNITS
+    power = ScanAxis("device:rf:ch1_power_dbm", (135.0, 191.0, 247.0), "mVpp")
+    power_id = scan_axis_ids(("rf.ch1_power_dbm",))[0]
+    bounds = DEFAULT_UNITS.convert((150.0, 220.0), "mVpp", DEFAULT_UNITS.base_for("mVpp"))
+    selected = SelectionState("curve", "x_range", (
+        SelectionRange(power_id, float(bounds[0]), float(bounds[1]), domain="point"),
+    ))
+    patch = SEAMLESS_NODE.selection_patch(
+        selected, draft={"plan": json.dumps(ScanPlan((power,)).to_tree())}, context={},
+    )
+    authored = ScanPlan.from_tree(json.loads(patch["plan"])).axes[0]
+    assert authored.unit == "mVpp"
+    assert authored.values == pytest.approx((150.0, 185.0, 220.0), rel=1e-14)

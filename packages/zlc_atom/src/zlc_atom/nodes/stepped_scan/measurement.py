@@ -156,9 +156,9 @@ class SteppedScanMeasurement:
 
         pulse_values: dict[str, float] = {}
         device_moves: list[tuple[str, float]] = []
-        for port, value in zip(self.ports, row, strict=True):
+        for axis, port, value in zip(self.plan.axes, self.ports, row, strict=True):
             if port.port.startswith(PULSE_PARAM_FAMILY):
-                pulse_values[port.port[len(PULSE_PARAM_FAMILY):]] = float(value)
+                pulse_values[port.port[len(PULSE_PARAM_FAMILY):]] = axis.native_value(port, value)
             elif port.port.startswith(DEVICE_PARAM_FAMILY):
                 device_moves.append((port.port, float(value)))
             else:
@@ -205,8 +205,8 @@ class SteppedScanMeasurement:
                 f"tunable:{key}",
                 {
                     "application": (
-                        "each published point follows a tune readback equal "
-                        "to its scan coordinate"
+                        "coordinates are requested setpoints; device tune returns "
+                        "its actual readback without a scan-level equality requirement"
                     ),
                     "fields": {},
                 },
@@ -247,7 +247,7 @@ class SteppedScanMeasurement:
         }
         writer = ScanDatasetWriter(
             rows,
-            [(port.label, port.unit) for port in self.ports],
+            [(port.label, axis.unit or port.unit) for axis, port in zip(self.plan.axes, self.ports)],
             scan_repeats=self.repeats,
             run_repeats=shots,
             run_record=run_record,
@@ -306,7 +306,9 @@ class SteppedScanMeasurement:
         self.sequencer.safe()
         settle(context, self.settle_seconds)
         for port, value in device_moves:
-            knobs.move(port, value)
+            axis = next(axis for axis in self.plan.axes if axis.port == port)
+            bound = next(bound for bound in self.ports if bound.port == port)
+            knobs.move(port, axis.native_value(bound, value))
         resolved = resolve_api_parameters(
             self.sequence, self._api_values(pulse_values)
         )

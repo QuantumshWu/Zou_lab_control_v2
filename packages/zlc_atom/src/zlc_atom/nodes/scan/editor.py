@@ -68,15 +68,8 @@ from .plan import (
 
 
 def _sweep_values(row: QtWidgets.QWidget) -> tuple[float, ...]:
-    """Space a sweep in the operator's chosen unit, then encode port values."""
-
-    unit, shown = row.start_spin.valueUnit(), row.start_spin.shownUnit()
-    ends = np.asarray((row.start_spin.value(), row.stop_spin.value()), dtype=float)
-    if shown != unit:
-        ends = DEFAULT_UNITS.convert(ends, unit, shown)
-    values = np.linspace(ends[0], ends[1], int(row.points_spin.value()))
-    if shown != unit:
-        values = DEFAULT_UNITS.convert(values, shown, unit)
+    """Space the authored coordinates in the row's selected unit."""
+    values = np.linspace(row.start_spin.value(), row.stop_spin.value(), int(row.points_spin.value()))
     return tuple(float(value) for value in values)
 
 
@@ -191,16 +184,17 @@ class _AxisRow(QtWidgets.QWidget):
             empty_source_label="ports",
         )
 
-    def _apply_port_limits(self) -> None:
+    def _apply_port_limits(self, unit: str = "") -> None:
         port = next(
             (p for p in self._ports if p.port == self.port_combo.currentData()),
             None,
         )
+        unit = unit or ("" if port is None else port.unit)
+        limits = (-1e12, 1e12) if port is None else (port.lo, port.hi)
+        if port is not None and unit != port.unit:
+            limits = tuple(float(value) for value in DEFAULT_UNITS.convert(limits, port.unit, unit))
         for spin in (self.start_spin, self.stop_spin):
-            if port is None:
-                spin.setRange(-1e12, 1e12)
-            else:
-                spin.setRange(port.lo, port.hi)
+            spin.setRange(min(limits), max(limits))
             # The port has said all along what its numbers are in -- a
             # duration sweeps in the period's own unit -- and these two boxes
             # were the one place on the row that never repeated it, so a
@@ -211,8 +205,9 @@ class _AxisRow(QtWidgets.QWidget):
             # came back as 1.0 in the box that is supposed to be showing what
             # will run.  Readability is the formatter's job now, and the
             # formatter does not round.
-            spin.setValueUnit("" if port is None else port.unit)
-        self._mount_unit_picker("" if port is None else port.unit)
+            spin.setValueUnit(unit)
+            spin.setShownUnit(unit)
+        self._mount_unit_picker(unit)
 
     def _mount_unit_picker(self, unit: str) -> None:
         """Offer this port's other spellings, or just name the one it has.
@@ -222,10 +217,9 @@ class _AxisRow(QtWidgets.QWidget):
         picker already there is re-pointed in place; one is built or retired
         only when the port's unit gains or loses its ladder.
 
-        Both spins keep the PORT's own number. Choosing a spelling preserves
-        the existing points; editing from/to/points spaces a new grid in that
-        spelling and converts each point back to the port's unit. The saved
-        axis carries the spelling, so reopening does not reset the controls.
+        Both spins and the saved axis use the selected unit. Choosing another
+        unit converts every authored point; only a from/to/points edit creates
+        a new evenly spaced grid.
         """
 
         layout = self.layout()
@@ -253,10 +247,15 @@ class _AxisRow(QtWidgets.QWidget):
         fact that they are a list nobody's ends describe."""
 
         with signals_blocked(self.start_spin, self.stop_spin, self.points_spin):
+            if self.manual:
+                for spin in (self.start_spin, self.stop_spin):
+                    spin.setValueUnit(axis.unit)
+                    spin.setShownUnit(axis.unit)
+            else:
+                self._apply_port_limits(axis.unit)
             self.start_spin.setValue(axis.values[0])
             self.stop_spin.setValue(axis.values[-1])
             self.points_spin.setValue(len(axis.values))
-        self._set_shown_unit(axis.display_unit or self.start_spin.valueUnit())
         self._custom_values = (
             None if _spins_regenerate(self, axis.values) else axis.values
         )
@@ -273,33 +272,25 @@ class _AxisRow(QtWidgets.QWidget):
         if ports != self._ports:
             self._ports = ports
             self._fill_ports(axis.port)
-            self._apply_port_limits()
-            self._set_shown_unit(axis.display_unit or self.start_spin.valueUnit())
+            self._apply_port_limits(axis.unit)
         elif str(self.port_combo.currentData()) != axis.port:
             self._fill_ports(axis.port)
-            self._apply_port_limits()
-            self._set_shown_unit(axis.display_unit or self.start_spin.valueUnit())
+            self._apply_port_limits(axis.unit)
         if being_edited(self):
             return
         if self.axis() != axis:
             self._show_values(axis)
 
     def _shown_unit_picked(self, symbol: str) -> None:
-        """Read both ends in the chosen spelling; the swept values do not move."""
-
-        values = self.axis().values
-        self._set_shown_unit(symbol)
-        # Changing the spelling is not editing the experiment. The next
-        # explicit from/to/points edit authors a grid in the new unit.
+        """Convert the whole existing grid, without changing its physical sweep."""
+        axis = self.axis()
+        values = tuple(float(value) for value in DEFAULT_UNITS.convert(
+            axis.values, self.start_spin.valueUnit(), symbol
+        ))
+        self._show_values(ScanAxis(axis.port, values, symbol))
         self._custom_values = values
         self.custom_label.setText("" if _spins_regenerate(self, values) else "custom values")
         self.edited.emit()
-
-    def _set_shown_unit(self, symbol: str) -> None:
-        for spin in (self.start_spin, self.stop_spin):
-            spin.setShownUnit(symbol)
-        if self.unit_picker is not None:
-            self.unit_picker.select_choice_key(symbol)
 
     def _port_changed(self, _index: int) -> None:
         self._custom_values = None
@@ -326,14 +317,13 @@ class _AxisRow(QtWidgets.QWidget):
         return False
 
     def axis(self) -> ScanAxis:
-        unit = self.start_spin.shownUnit()
-        display_unit = "" if unit == self.start_spin.valueUnit() else unit
+        unit = self.start_spin.valueUnit()
         if self._custom_values is not None:
-            return ScanAxis(str(self.port_combo.currentData()), self._custom_values, display_unit)
+            return ScanAxis(str(self.port_combo.currentData()), self._custom_values, unit)
         return ScanAxis(
             str(self.port_combo.currentData()),
             _sweep_values(self),
-            display_unit,
+            unit,
         )
 
 
@@ -424,12 +414,12 @@ class _ManualAxisRow(QtWidgets.QWidget):
     def axis(self) -> ScanAxis:
         name = self.name_edit.text().strip()
         if self._custom_values is not None:
-            return manual_axis(name, self._custom_values)
+            return manual_axis(name, self._custom_values, self.start_spin.valueUnit())
         points = int(self.points_spin.value())
         values = np.linspace(
             float(self.start_spin.value()), float(self.stop_spin.value()), points
         )
-        return manual_axis(name, tuple(float(value) for value in values))
+        return manual_axis(name, tuple(float(value) for value in values), self.start_spin.valueUnit())
 
 
 class ScanPlanEditor(QtWidgets.QWidget):

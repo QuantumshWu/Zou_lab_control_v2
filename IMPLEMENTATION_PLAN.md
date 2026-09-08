@@ -10,7 +10,7 @@
 
 ## 1. 当前实施范围
 
-- 2026-09-08 扫描单位与Rigol精度修复：绑定轴保存display_unit，重开恢复mVpp；输入范围/点数时在所选单位中等分再转端口单位。Qt现有行用例核135→247mVpp十点、unit-only不改已有点、plan重开数值逐位保留。Rigol现有SCPI模拟链精确复现144.37275149961734mVpp被`.6f`写成144.373mVpp的报错；`.17g`修复后同案与十点写入通过，未扩大8ULP，也未替仪器伪造回读。未做真实硬件验收。
+- 2026-09-08 按最终用户裁决，扫描彻底采用author unit：Plan直接存135…247与mVpp，Seamless/Stepped输出同一单位，仅设备/编译边界换算；display_unit旧路径及8ULP/相等检查均删除。5个单位/Plan直接实例通过；真实Runtime的Seamless十点例在设备回读偏离设定时完成，Dataset coordinates逐位等于135→247的十点且unit为mVpp，run record一致；设备异常与restore传播仍保留。曾添加的独立readback event字段不符合现有merge grammar，已撤掉，不扩格式，设备原有tune回读路径保留。未做真实硬件验收。
 
 - 2026-09-08 Seamless可选`Acquisition logic`已接入原Start/Restart，manual与device外层点共用每Fire前入口，FPGA内部scan slot保持连续。新NodeHost ready由Camera真实arm后报告，settle默认0.5s。6项Host/Camera直接验证及2项Workbench复用Restart/选择保存验证通过；真实Qt两个manual点完成新代采集与Scan，ready→Fire为501.7363/500.4511ms，两代首帧ordinal均0/1/2，Scan参数各匹配其新Fit parent/Camera root。原始Camera signal不支持indexed history，该实屏案的独立history oracle未通过，不冒称history复验；按用户指示不再扩大验证。所有测试窗口与child已退出，证据只留ignored目录。Layout中未指定的可选authoring字段使用schema默认，显式settle值和Acquisition引用按原Layout owner保留。
 

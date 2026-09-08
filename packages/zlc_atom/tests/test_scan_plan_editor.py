@@ -444,6 +444,7 @@ def test_axis_rows_follow_the_ports_without_being_rebuilt() -> None:
     editor.deleteLater()
 
     from zlc_data.units import DEFAULT_UNITS
+    import numpy as np
 
     power = ScanPort("device:rf:ch1_power_dbm", "rf.ch1_power_dbm", "dBm",
                      -30.0, 10.0, -20.0, 0.0)
@@ -454,22 +455,26 @@ def test_axis_rows_follow_the_ports_without_being_rebuilt() -> None:
         row = editor._rows[0]
         old_values = row.axis().values
         row.unit_picker.unit_picked.emit("mVpp")
-        assert row.axis().values == old_values, "unit-only change moved the scan"
-        row.start_spin.setValue(float(DEFAULT_UNITS.convert(135.0, "mVpp", "dBm")))
-        row.stop_spin.setValue(float(DEFAULT_UNITS.convert(247.0, "mVpp", "dBm")))
+        assert tuple(row.axis().native_value(power, value) for value in row.axis().values) == pytest.approx(old_values)
+        assert row.start_spin.valueUnit() == "mVpp"
+        row.start_spin.setValue(135.0)
+        row.stop_spin.setValue(247.0)
         row.points_spin.setValue(10)
         plan = _plan(editor)
-        assert plan.axes[0].display_unit == "mVpp"
-        shown = DEFAULT_UNITS.convert(plan.axes[0].values, "dBm", "mVpp")
-        assert tuple(shown) == pytest.approx(
-            tuple(135.0 + i * 112.0 / 9 for i in range(10)), rel=1e-12, abs=1e-12
-        )
+        assert plan.axes[0].unit == "mVpp"
+        assert plan.axes[0].values == tuple(np.linspace(135.0, 247.0, 10))
+        assert ScanPlan.from_tree(plan.to_tree()) == plan
         reopened._reconcile_rows(editor._plan_text)
         restored = reopened._rows[0]
         assert restored.start_spin.shownUnit() == "mVpp"
         assert restored.unit_picker.current_choice_key() == "mVpp"
         assert restored.axis().values == plan.axes[0].values
-        assert restored.axis().display_unit == "mVpp"
+        assert restored.axis().unit == "mVpp"
+        assert restored.start_spin.value() == 135.0 and restored.stop_spin.value() == 247.0
+        restored.unit_picker.unit_picked.emit("dBm")
+        assert restored.axis().unit == "dBm"
+        assert restored.axis().values == tuple(DEFAULT_UNITS.convert(plan.axes[0].values, "mVpp", "dBm"))
+        assert restored.custom_label.text() == "custom values"
     finally:
         editor.close()
         reopened.close()
