@@ -1399,6 +1399,17 @@ class SlmEditorControl(QtCore.QObject):
             self._status.setText("Stopping SLM Editor…")
             self._executor.shutdown(wait=False, cancel_futures=True)
             self._command_executor.shutdown(wait=False, cancel_futures=False)
+            # Painting is over: the filter comes off the target widget NOW.
+            # This object and its window reference each other, so once
+            # the console lets the closed window go it is the cyclic
+            # collector that frees them -- and the collector empties an
+            # object's attributes before its C++ side is gone.  The plot
+            # widgets die with the window in that same collection, and
+            # the events their teardown sends reached this filter through
+            # an object with no attributes left: an AttributeError out of
+            # a Qt filter, which is the end of the process, on whatever
+            # the operator was doing at the time.
+            self._target_widget.removeEventFilter(self)
         hosts_stopped = tuple(
             host.close(timeout=0.0)
             for host in (self._target_host, self._phase_host, self._wavefront_host)
@@ -1419,6 +1430,11 @@ class SlmEditorControl(QtCore.QObject):
         self._executor.shutdown(wait=True, cancel_futures=True)
         self._command_executor.shutdown(wait=True, cancel_futures=False)
         self._cleaned = True
+        # The window's close guard is this object's bound method and the
+        # window was this object's attribute: a cycle only the collector
+        # could free.  With this edge gone the window's release frees the
+        # closed editor by reference count, deterministically.
+        self._window = None
         return True
 
     def close(self) -> None:
