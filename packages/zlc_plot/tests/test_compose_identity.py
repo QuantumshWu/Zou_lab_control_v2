@@ -80,6 +80,49 @@ def _composed_matches_full_draw(session) -> int:
     return int(np.count_nonzero(np.any(composed != full, axis=-1)))
 
 
+def _ink_beyond_the_export(session, path) -> int:
+    """Ink the composed frame carries where an export of the same state has
+    none within two pixels: a stroke of the past, not the native stroke's
+    own joins and caps.
+
+    The export is the reference because a full draw is not one here: a full
+    draw paints whatever artists are visible, stale ones included, while an
+    export re-materializes every cell from the current data.  The native
+    stroke is close to Agg but not byte-identical along every edge, so the
+    export's ink is widened by two pixels before the composed ink outside
+    it is counted.
+    """
+
+    from PIL import Image
+
+    renderer = session._renderer
+    composed = np.array(renderer.figure.canvas.buffer_rgba(), copy=True).astype(int)
+    session.save(
+        path,
+        export_scale=float(renderer.figure.dpi) / float(session.surface_plan.logical_dpi),
+    )
+    exported = np.array(Image.open(path).convert("RGBA")).astype(int)
+    assert exported.shape == composed.shape, (exported.shape, composed.shape)
+    # The export's ink down to its faintest fringe; the composed frame's
+    # ink at the strokes' own darkness, since what a ghost leaves is a
+    # whole stroke, not a fringe.
+    def ink(frame, darker_than):
+        return (255 - frame[..., :3]).max(axis=-1) > darker_than
+
+    reference = ink(exported, 40)
+    widened = reference.copy()
+    for dy in range(-2, 3):
+        for dx in range(-2, 3):
+            shifted = np.zeros_like(reference)
+            ys = slice(max(dy, 0), reference.shape[0] + min(dy, 0))
+            xs = slice(max(dx, 0), reference.shape[1] + min(dx, 0))
+            ys_from = slice(max(-dy, 0), reference.shape[0] + min(-dy, 0))
+            xs_from = slice(max(-dx, 0), reference.shape[1] + min(-dx, 0))
+            shifted[ys, xs] = reference[ys_from, xs_from]
+            widened |= shifted
+    return int((ink(composed, 100) & ~widened).sum())
+
+
 def _composed_matches_owned_recompose(session) -> int:
     """Compare two passes through the renderer's selected consumer."""
 
@@ -455,6 +498,108 @@ def test_a_rolling_rails_count_labels_each_have_a_mark() -> None:
             assert tick.get_tickdir() == "in"
         assert not any(tick.tick1line.get_visible() for tick in rail.yaxis.get_major_ticks())
         assert _composed_matches_full_draw(session) == 0
+    finally:
+        session.close()
+
+
+def _site_grid_session(sites: int = 25, points: int = 5, repeats: int = 12):
+    """A scan panel as the console draws it: cells by site, x the scan point,
+    the mean over a fixed repeat axis whose unlanded shots are invalid."""
+
+    from data_factory import axis as data_axis
+    from zlc_data import SITE
+
+    rng = np.random.default_rng(7)
+    x_values = [1.0e-6 + 12.0e-6 * index for index in range(points)]
+    schema = make_dataset_schema(
+        repeat_domain(size=repeats),
+        mapped_domain_from_columns({"x": x_values}),
+        cell_axes=(data_axis("site", values=[float(i) for i in range(sites)], role=SITE),),
+        dtype=np.float64,
+    )
+    scale = 25.0e-6 * (0.6 + 0.8 * rng.random((1, 1, sites)))
+    shots = (
+        rng.random((repeats, points, sites))
+        < np.exp(-np.asarray(x_values)[None, :, None] / scale)
+    ).astype(np.float64)
+
+    def landed(count: int) -> OwnedSnapshot:
+        values = np.full(shots.shape, np.nan)
+        values[:count] = shots[:count]
+        validity = np.zeros(shots.shape, dtype=bool)
+        validity[:count] = True
+        return make_snapshot(schema, values, revision=count - 1, validity=validity)
+
+    session = PlotSession(
+        landed(2),
+        FacetGridPlot(AxisRef.cell_data("site"), CurvePlot(AxisRef.point("x"))),
+        size="4x4",
+        parameters={"uncertainty": True, "relim_mode": "normal"},
+        device_pixel_ratio=3.0,
+    )
+    return session, landed
+
+
+@pytest.mark.parametrize("materialization", ("export", "compose_fallback"))
+def test_a_facet_grids_live_frames_carry_no_past_after_a_materialization(
+    monkeypatch, tmp_path, materialization: str
+) -> None:
+    """A materialization builds cell artists from the native scene; the next
+    scene install withdraws them.
+
+    Cells of a Curve grid have no artists of their own -- the kernels stroke
+    them from the prepared scene.  An export (and a compose that could not
+    stroke natively) materializes Line2D and error-bar artists on every cell
+    and draws them.  The next live frame installed the scene again and left
+    those artists standing: the lines were baked into the reused background
+    and the bars painted as dynamics, so every later frame carried the
+    materialized revision's curve and bars beneath its own -- a ghost of the
+    past that only a chrome redraw cleared.
+    """
+
+    session, landed = _site_grid_session()
+    try:
+        session.configure(
+            fit={"model": "damped_sine", "fit_all_facets": True}, fit_live=True
+        )
+        renderer = session._renderer
+        session.rgba()
+        _live_advance(session, landed(3))
+        assert isinstance(renderer._artists.get("curve:prepared"), dict)
+        if materialization == "export":
+            session.save(tmp_path / "grid.png", export_scale=1.0)
+        else:
+            native = MatplotlibRenderer._raster_facet_curve_command
+            declined: list[bool] = []
+
+            def decline_once(self, canvas):
+                if not declined:
+                    declined.append(True)
+                    return False
+                return native(self, canvas)
+
+            monkeypatch.setattr(
+                MatplotlibRenderer, "_raster_facet_curve_command", decline_once
+            )
+            _live_advance(session, landed(4))
+            assert declined, "the fallback compose must have run"
+        for count in (5, 6, 7):
+            _live_advance(session, landed(count))
+            assert isinstance(renderer._artists.get("curve:prepared"), dict)
+            # The scene owns the picture: nothing a materialization built
+            # stays visible on any cell.
+            assert not any(
+                line.get_visible()
+                for records in renderer._series_lines.values()
+                for line, _identity, _label in records
+            )
+            assert not any(
+                artist.get_visible()
+                for bars in renderer._series_bars.values()
+                for artists in bars.values()
+                for artist in artists
+            )
+            assert _ink_beyond_the_export(session, tmp_path / f"{count}.png") == 0, count
     finally:
         session.close()
 

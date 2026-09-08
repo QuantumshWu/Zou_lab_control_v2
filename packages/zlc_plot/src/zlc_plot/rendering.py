@@ -4973,12 +4973,7 @@ class MatplotlibRenderer:
                 "x_label": x_label,
                 "y_label": y_label,
             }
-            for line, _identity, _label in self._series_lines.get(id(axes), ()):
-                line.set_visible(False)
-            for artists in self._series_bars.get(id(axes), {}).values():
-                for artist in artists:
-                    artist.set_visible(False)
-            self._series_hit_cache.clear()
+            self._withdraw_series_artists(axes)
             return
         self._artists.pop("curve:prepared", None)
         self._mutate_series_artists(
@@ -5075,6 +5070,23 @@ class MatplotlibRenderer:
                 axes.add_line(cap)
                 caplines.append(cap)
         return (*caplines, collection)
+
+    def _withdraw_series_artists(self, axes: Any) -> None:
+        """Hide one axes' series artists: its native scene owns the picture.
+
+        A materialization -- an export, a compose that could not stroke
+        natively -- builds public Line2D and error-bar artists from the
+        prepared scene.  When the scene is installed again they must leave
+        the picture, or they stand under every later frame with the data
+        they were built from.
+        """
+
+        for line, _identity, _label in self._series_lines.get(id(axes), ()):
+            line.set_visible(False)
+        for artists in self._series_bars.get(id(axes), {}).values():
+            for artist in artists:
+                artist.set_visible(False)
+        self._series_hit_cache.clear()
 
     def _mutate_series_artists(
         self,
@@ -8366,14 +8378,7 @@ class MatplotlibRenderer:
                 "x_label": x_text,
                 "y_label": y_label,
             }
-            for line, _identity, _label in self._series_lines.get(
-                id(history), ()
-            ):
-                line.set_visible(False)
-            for artists in self._series_bars.get(id(history), {}).values():
-                for artist in artists:
-                    artist.set_visible(False)
-            self._series_hit_cache.clear()
+            self._withdraw_series_artists(history)
         else:
             self._artists.pop("curve:prepared", None)
             self._mutate_series_artists(
@@ -8894,6 +8899,14 @@ class MatplotlibRenderer:
                     "series": curve_series,
                     "limits": curve_limits,
                 }
+                # The scene strokes the cells; artists a materialization
+                # left on them (an export, a compose fallback) are not the
+                # picture any more.  Left visible, they were baked into the
+                # next background and painted under every later frame: the
+                # operator saw last revision's curve and bars beneath this
+                # one's until something redrew the chrome.
+                for _key, cell_axes, _index in self.painted_surfaces:
+                    self._withdraw_series_artists(cell_axes)
             else:
                 self._artists.pop("curve:prepared", None)
         elif isinstance(semantic, HistogramPlot):
