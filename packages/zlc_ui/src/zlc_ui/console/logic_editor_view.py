@@ -54,6 +54,7 @@ class LogicEditorView(QtWidgets.QWidget):
         self._mutation_enabled = True
         self._projection: dict[str, object] = {}
         self._device_combos: dict[str, FluentComboBox] = {}
+        self._acquisition_combo: FluentComboBox | None = None
         self._artifact_result_readouts: dict[str, FluentReadoutEdit] = {}
         self._contributions: dict[object, QtWidgets.QWidget] = {}
 
@@ -171,8 +172,10 @@ class LogicEditorView(QtWidgets.QWidget):
         kind = str(incoming.get("kind") or "logic")
         self.kind_label.setText(f"({kind})")
         managed_fields = self._reconcile_contributions(incoming)
+        acquisition_key = str(incoming.get("acquisition_input") or "")
         visible_spec = FormSpec(
-            tuple(field for field in spec.fields if field.key not in managed_fields)
+            tuple(field for field in spec.fields
+                  if field.key not in managed_fields and field.key != acquisition_key)
         )
         self.artifact_form.reconcile(artifact_spec, dict(artifact_values))
         self.artifact_form.setVisible(bool(artifact_spec.keys))
@@ -353,7 +356,34 @@ class LogicEditorView(QtWidgets.QWidget):
         for name in retired:
             self._retire_selector(self._device_combos.pop(name))
 
-        self._selector_frame.setVisible(has_source or bool(self._device_combos))
+        acquisition_key = str(projection.get("acquisition_input") or "")
+        if acquisition_key:
+            field = next(field for field in projection["form_spec"].fields
+                         if field.key == acquisition_key)
+            combo = self._acquisition_combo
+            if combo is None:
+                combo = FluentComboBox()
+                combo.activated[int].connect(
+                    lambda _index, control=combo: self.draft_changed.emit({
+                        "values": {str(self._projection["acquisition_input"]):
+                                   str(control.currentData() or "")}
+                    })
+                )
+                self._acquisition_combo = combo
+                self._selector_layout.addRow(field.label, combo)
+            combo.setToolTip(field.description)
+            self._fill_combo(
+                combo, str(projection["form_values"][acquisition_key] or ""),
+                tuple(str(choice.value) for choice in field.choices), blank=False,
+                labels={str(choice.value): choice.label for choice in field.choices},
+            )
+        elif self._acquisition_combo is not None:
+            self._retire_selector(self._acquisition_combo)
+            self._acquisition_combo = None
+
+        self._selector_frame.setVisible(
+            has_source or bool(self._device_combos) or bool(acquisition_key)
+        )
 
     def _retire_selector(self, combo: FluentComboBox) -> None:
         row = self._selector_layout.takeRow(combo)
@@ -381,7 +411,7 @@ class LogicEditorView(QtWidgets.QWidget):
             ordered.append(current)
         ordered.extend(item for item in options if item not in ordered)
         desired = tuple(
-            ((str((labels or {}).get(value, value)) if value else "(not selected)"), value)
+            (str((labels or {}).get(value, value or "(not selected)")), value)
             for value in ordered
         )
         existing = tuple(

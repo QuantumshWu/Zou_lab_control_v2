@@ -7031,6 +7031,7 @@ class ConsolePresenter:
                 acquisition_selected=str(binding.draft.values.get(binding.descriptor.acquisition_input) or ""),
             ),
             "form_values": form_values,
+            "acquisition_input": binding.descriptor.acquisition_input,
             "artifact_form_spec": project_artifact_inputs(
                 artifact_specs,
                 base_dir=artifact_base_dir,
