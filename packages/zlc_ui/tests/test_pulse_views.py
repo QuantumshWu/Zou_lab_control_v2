@@ -1274,6 +1274,7 @@ def test_a_channel_row_offers_on_for_digital_and_off_for_every_port() -> None:
         _schedule_source()
         + """
 from dataclasses import replace
+from PyQt5 import QtCore, QtTest
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.pulse import DelayRowVM, PulseScheduleView
 app = ensure_qt_app(["channel-buttons"])
@@ -1281,6 +1282,8 @@ view = PulseScheduleView()
 view.set_schedule(replace(vm, delay_rows=tuple(
     DelayRowVM(port.key, FieldVM("0"), "ns", (("ns", 1.0),)) for port in ports
 )))
+view.resize(1200, 700)
+view.show()
 app.processEvents()
 asked = []
 view.fill_port_requested.connect(lambda key: asked.append(("on", key)))
@@ -1288,9 +1291,15 @@ view.clear_port_requested.connect(lambda key: asked.append(("off", key)))
 _edit, _combo, fill_d, clear_d = view.channel_panel._rows["d0"]
 _edit, _combo, fill_a, clear_a = view.channel_panel._rows["a0"]
 assert fill_d.isVisibleTo(view) and clear_d.isVisibleTo(view)
-assert not fill_a.isVisibleTo(view) and clear_a.isVisibleTo(view)
+assert fill_a.isVisibleTo(view) and clear_a.isVisibleTo(view)
+assert fill_d.isEnabled() and not fill_a.isEnabled() and clear_a.isEnabled()
+assert [widget.mapTo(view, QtCore.QPoint()).x() for widget in view.channel_panel._rows["d0"]] == [
+    widget.mapTo(view, QtCore.QPoint()).x() for widget in view.channel_panel._rows["a0"]
+]
 assert fill_d.text() == "●" and clear_d.text() == "○"
-fill_d.click(); clear_d.click(); clear_a.click()
+for button in (fill_d, clear_d, fill_a, clear_a):
+    QtTest.QTest.mouseClick(button, QtCore.Qt.LeftButton)
 assert asked == [("on", "d0"), ("off", "d0"), ("off", "a0")], asked
+view.close()
 """
     )

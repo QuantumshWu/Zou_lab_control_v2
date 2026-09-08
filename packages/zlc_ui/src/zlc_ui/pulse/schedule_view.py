@@ -531,7 +531,8 @@ class ChannelPanel(FluentGroupBox):
                 current = (edit, combo, fill, clear)
             edit, combo, fill, clear = current
             digital = port.kind == "digital"
-            fill.setVisible(digital)
+            # Inapplicable actions keep their column in every port row.
+            fill.setEnabled(digital)
             clear.setToolTip(
                 "Turn this output off in every period"
                 if digital
