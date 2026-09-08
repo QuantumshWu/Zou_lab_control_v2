@@ -163,7 +163,7 @@ def _plane(dtype: str, *, readonly: bool):
     return types.Array(getattr(types, dtype), 2, "C", readonly=readonly)
 
 
-def test_a_mutability_twin_is_named_even_when_only_the_disk_remembers_it() -> None:
+def test_cache_checks_include_signatures_only_the_disk_remembers(monkeypatch) -> None:
     """The process compiled the writable plane; an experiment left the sealed one.
 
     Neither process alone ever held both, and the old check looked only at
@@ -180,6 +180,12 @@ def test_a_mutability_twin_is_named_even_when_only_the_disk_remembers_it() -> No
     sealed = (_plane("uint8", readonly=True),)
     kernel = _FakeKernel(signatures=(writable,), on_disk={(sealed, ()): "x.2.nbc"})
     assert _kernel_warm.duplicate_signatures({"promote": kernel}) == ("promote",)
+    monkeypatch.setattr(_kernel_warm, "kernel_dispatchers", lambda: {
+        "loaded": kernel,
+        "cached_helper": _FakeKernel((), {(sealed, ()): "helper.nbc"}),
+        "cold": _FakeKernel(()),
+    })
+    assert _kernel_warm.cold_kernels() == ("cold",)
 
 
 def test_distinct_dtypes_and_a_repeated_exact_signature_are_not_twins() -> None:

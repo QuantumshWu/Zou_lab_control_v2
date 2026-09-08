@@ -178,13 +178,17 @@ def duplicate_signatures(
 
 
 def cold_kernels() -> tuple[str, ...]:
-    """The kernels that have compiled nothing yet, by name."""
+    """Kernels with neither a loaded signature nor a current disk cache.
+
+    Loading a cached parent does not populate its compiled helpers' Python
+    dispatchers; their empty signature lists do not mean they need compiling.
+    """
 
     return tuple(
         sorted(
             name
             for name, kernel in kernel_dispatchers().items()
-            if not kernel.signatures
+            if not cached_signatures(kernel)
         )
     )
 
