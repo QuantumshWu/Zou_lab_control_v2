@@ -57,6 +57,10 @@ class ConsoleBoardView(QtWidgets.QWidget):
         for panel_id, card in tuple(self._cards.items()):
             if arriving.get(panel_id) is not card:
                 card.retire_settings_popup()
+                # The host owns its adapter until asynchronous shutdown has
+                # drained replies. Retiring its temporary parent must not
+                # destroy that QObject underneath a completing gesture.
+                card.set_surface(None)
                 self._wired_cards.discard(card)
                 retire_widget(card)
         self._cards = arriving

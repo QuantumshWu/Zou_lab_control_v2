@@ -714,12 +714,16 @@ class _RemoteRasterPlotHost:
         if widget is not None:
             widget.set_interaction_enabled(bool(enabled))
 
-    def qt_widget(self):
+    def qt_widget(self, *, auto_present: bool | None = None):
         widget = self._qt_widget
+        if auto_present is not None and not isinstance(auto_present, bool):
+            raise TypeError("auto_present must be boolean or None")
+        if widget is not None and auto_present is not None and widget._auto_present != auto_present:
+            raise ValueError("the host's Qt presentation policy is already fixed")
         if widget is None:
             from .backends import Qt5PlotWidget
 
-            widget = Qt5PlotWidget(self)
+            widget = Qt5PlotWidget(self, auto_present=True if auto_present is None else auto_present)
             self._qt_widget = widget
             if not self._interaction_enabled:
                 widget.set_interaction_enabled(False)

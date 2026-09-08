@@ -216,7 +216,11 @@ def test_staged_widget_accepts_its_exact_current_front_idempotently() -> None:
     widget = None
     try:
         host.wait_for_front(timeout=10)
-        widget = Qt5PlotWidget(host, auto_present=False)
+        widget = host.qt_widget(auto_present=False)
+        assert host.qt_widget() is widget
+        assert host.qt_widget(auto_present=False) is widget
+        with pytest.raises(ValueError, match="presentation policy"):
+            host.qt_widget(auto_present=True)
         assert widget.presented_front is None
         current = host.front
         assert current is not None

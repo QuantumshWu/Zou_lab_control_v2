@@ -265,6 +265,7 @@ Node new chunk
 - `zlc_ui`不拥有domain parser、device state或plot lifecycle。
 - Qt slot不得执行blocking I/O、device tune或`Future.result()`。
 - Window只有在owned command、worker、executor和claim安全退出后才能消失。
+- 正式Board通过host的`qt_widget(auto_present=False)`挂载唯一缓存的Qt adapter，不另建未纳入host关闭流程的surface；普通Edit/standalone保持自动呈现。Card退场先以现有`set_surface(None)`解除Qt父子关系，host完成异步关闭后才结束adapter，不能由Card的deferred delete提前销毁仍接收结果的QObject。
 - Device Manager的`instance_id`是稳定device identity，operator-facing role只是metadata；改role不得把同一硬件变成remove/add。Loaded card的Control与Close都只提交intent，不能由View直接关device。
 - Active apparatus变更走同一个`ExperimentSession`内的差量reconcile：相同key/type/canonical parameters的leaf、SignalPlane、TaskConsole与Panel继续复用；新增只build新增leaf，remove/change/Close只处理受影响leaf、world-bound closure及factory dependants。只有完全相同的draft/live集合才把主按钮解释为Shutdown。
 - Reconcile前以device-key maintenance barrier阻止新Logic/command，停止并等待受影响Logic lease，关闭对应Control；已有不可取消command时loud拒绝。partial close/factory cleanup失败后，所有仍open的leaf必须继续由Session或recovery owner强持有，effective live config与TaskConsole device projection同步后才允许下一次操作。

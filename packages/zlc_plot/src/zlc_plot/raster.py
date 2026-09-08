@@ -551,21 +551,26 @@ class RasterPlotHost:
             front = self._front
         return None if front is None else tuple(front.logical_size)
 
-    def qt_widget(self):
+    def qt_widget(self, *, auto_present: bool | None = None):
         """The Qt widget that shows this host, made once and kept.
 
         The widget is built HERE because it is this package's widget: a host
         handed across a boundary should not oblige the receiver to know which
         class draws it, and a composition root that constructs Qt widgets is a
         composition root assembling a UI.  Made lazily, so a host used
-        headlessly never touches Qt at all.
+        headlessly never touches Qt at all. An explicit presentation policy
+        belongs to the first mount; later getters reuse that same adapter.
         """
 
         widget = self._qt_widget
+        if auto_present is not None and not isinstance(auto_present, bool):
+            raise TypeError("auto_present must be boolean or None")
+        if widget is not None and auto_present is not None and widget._auto_present != auto_present:
+            raise ValueError("the host's Qt presentation policy is already fixed")
         if widget is None:
             from .backends import Qt5PlotWidget
 
-            widget = Qt5PlotWidget(self)
+            widget = Qt5PlotWidget(self, auto_present=True if auto_present is None else auto_present)
             self._qt_widget = widget
             # Whatever was decided before there was a widget to decide it for.
             if not self._interaction_enabled:
@@ -2474,6 +2479,8 @@ class RasterPlotHost:
                 pass
         stopped = thread is None or not thread.is_alive()
         if stopped:
+            if widget is not None and widget._closed:
+                self._qt_widget = None
             with self._condition:
                 self._initial_front = None
                 if self._thread is thread:

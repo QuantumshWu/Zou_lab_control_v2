@@ -139,9 +139,7 @@ def staged_panel_surface(host):
     exempt because its first Dataset came from an archive.
     """
 
-    import zlc_plot as plot
-
-    return plot.Qt5PlotWidget(host, auto_present=False)
+    return host.qt_widget(auto_present=False)
 
 
 def build_console(session, *, window_ratio=None, request_close=None):
