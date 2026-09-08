@@ -1541,7 +1541,7 @@ class FluentReadoutMultiline(QtWidgets.QPlainTextEdit):
         # Recompute height when the text changes AND when the wrapped layout size changes (a resize
         # re-wraps the same text into a different line count) -- both changes trigger remeasurement.
         self.textChanged.connect(self._adjust_height)
-        self.document().documentLayout().documentSizeChanged.connect(lambda *_: self._adjust_height())
+        self.document().documentLayout().documentSizeChanged.connect(self._adjust_height)
         self._adjust_height()
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt naming
@@ -1590,6 +1590,7 @@ class FluentReadoutMultiline(QtWidgets.QPlainTextEdit):
         super().resizeEvent(event)
         self._adjust_height()
 
+    @QtCore.pyqtSlot()
     def _adjust_height(self) -> None:
         """Size the field to fit ALL its wrapped content (no row cap -> every line shown, no inner
         scroll).
@@ -5067,9 +5068,7 @@ class FluentScrollArea(QtWidgets.QScrollArea):
         #: bar's width, in the same instant the operator added that row.
         self._bounded = False
         self._reserving = False
-        self.verticalScrollBar().rangeChanged.connect(
-            lambda *_: self._reserve_scrollbar_gutter()
-        )
+        self.verticalScrollBar().rangeChanged.connect(self._reserve_scrollbar_gutter)
         self.setWidgetResizable(True)
         self.setMinimumWidth(0)
         self.setFrameShape(QtWidgets.QFrame.NoFrame)
@@ -5105,6 +5104,7 @@ class FluentScrollArea(QtWidgets.QScrollArea):
         self.setWidget(widget)
         self._reserve_scrollbar_gutter()
 
+    @QtCore.pyqtSlot()
     def _reserve_scrollbar_gutter(self) -> None:
         """Hold the vertical bar's width whether or not the bar is there.
 
