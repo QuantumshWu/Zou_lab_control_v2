@@ -418,6 +418,87 @@ def test_toggle_is_binary_while_brush_uses_authored_intensity(
         session.installation.close()
 
 
+def test_a_closed_editor_leaves_no_filter_on_its_target_widget(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """A closed editor holds no Qt hook, so nothing Qt does later can reach it.
+
+    The editor and its window reference each other; once the console lets
+    the closed window go, the cyclic collector frees them -- and it empties
+    an object's attributes before the C++ side is gone.  The plot widgets die
+    with the window in that same collection, and the events their teardown
+    sends reached the editor's still-installed target filter through an
+    object with no attributes left: ``AttributeError: no attribute
+    '_target_widget'`` out of a Qt filter, which is the end of the process,
+    on whatever the operator was doing at the time.
+    """
+
+    import zlc_atom.devices.slm.editor as editor
+
+    app = ensure_qt_app()
+    session = _session(tmp_path)
+    monkeypatch.setattr(
+        editor,
+        "solve_phase",
+        lambda target, **_kwargs: (
+            canonical_phase(np.zeros(target.shape), target.shape),
+            {"method": "test", "iterations": 1},
+        ),
+    )
+    control = editor.SlmEditorControl(session, "slm")
+    widgets = (control._target_widget, control._phase_widget, control._wavefront_widget)
+    body = control._body
+    try:
+        control._body.resize(1100, 650)
+        control._body.show()
+        _pump(app, lambda: control._target_widget.presented_front is not None)
+        target = control._target_widget
+        reached: list[int] = []
+        native = editor.SlmEditorControl.eventFilter
+
+        def recording(self, watched, event):
+            reached.append(int(event.type()))
+            return native(self, watched, event)
+
+        monkeypatch.setattr(editor.SlmEditorControl, "eventFilter", recording)
+        app.sendEvent(target, QtCore.QEvent(QtCore.QEvent.User))
+        assert reached, "an open editor filters its target widget"
+        reached.clear()
+        control._finish_close()
+        deadline = time.monotonic() + 5.0
+        while not control._cleaned and time.monotonic() < deadline:
+            app.processEvents()
+            control._finish_close()
+            time.sleep(0.002)
+        assert control._cleaned
+        assert control._window is None
+        # Closing itself disables the body, and that EnabledChange reached
+        # the filter while the editor was still whole; what matters is
+        # what reaches it from here on.
+        reached.clear()
+        # What the collector does to a cycle member: every attribute gone
+        # while the C++ object still stands.
+        state = dict(vars(control))
+        vars(control).clear()
+        try:
+            app.sendEvent(target, QtCore.QEvent(QtCore.QEvent.User))
+        finally:
+            vars(control).update(state)
+        assert reached == [], "a closed editor's filter is gone from its target widget"
+    finally:
+        # ``_dispose`` asks the hosts for their widgets, which a closed host
+        # refuses; the widgets were taken above, so retire them directly.
+        body.close()
+        body.deleteLater()
+        for widget in widgets:
+            widget.close()
+            widget.deleteLater()
+        control.deleteLater()
+        app.sendPostedEvents(None, 0)
+        app.processEvents()
+        session.installation.close()
+
+
 def test_selectors_switch_changes_real_target_events_from_paint_to_plot(
     tmp_path: Path, monkeypatch,
 ) -> None:
