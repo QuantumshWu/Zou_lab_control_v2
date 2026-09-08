@@ -20,7 +20,7 @@ def test_builtin_models_declare_a_parameter_headline() -> None:
         "damped_sine": "decay_time",
         "exponential_decay": "decay_time",
         "release_recapture": "eta",
-        "saturation": "saturation_counts",
+        "saturation": "amplitude",
         "anisotropic_gaussian_center": "center_x",
         "radial_gaussian_center": "center_x",
     } == {name: model.headline for name, model in models.items()}

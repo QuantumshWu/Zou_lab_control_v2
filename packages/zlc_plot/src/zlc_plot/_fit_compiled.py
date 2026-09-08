@@ -4709,25 +4709,25 @@ def _prepare_release_recapture(coords, observations, valid, seeds, lower, upper,
 
 
 @njit(cache=True, inline="always")
-def _saturation_fraction(power, saturation_power):
-    if power <= saturation_power:
-        ratio = power / saturation_power
+def _saturation_fraction(x, scale):
+    if x <= scale:
+        ratio = x / scale
         return ratio / (1.0 + ratio)
-    return 1.0 / (1.0 + saturation_power / power)
+    return 1.0 / (1.0 + scale / x)
 
 
 @njit(cache=True, inline="always")
 def _point_saturation(coords, point, parameters, row):
-    counts, saturation_power, background = parameters
-    power = coords[0, point]
-    if power < 0.0 or not saturation_power > 0.0:
+    amplitude, scale, offset = parameters
+    x = coords[0, point]
+    if x < 0.0 or not scale > 0.0:
         row[:] = math.nan
         return math.nan
-    fraction = _saturation_fraction(power, saturation_power)
+    fraction = _saturation_fraction(x, scale)
     row[0] = fraction
-    row[1] = -counts * fraction * (1.0 - fraction) / saturation_power
+    row[1] = -amplitude * fraction * (1.0 - fraction) / scale
     row[2] = 1.0
-    return background + counts * fraction
+    return offset + amplitude * fraction
 
 
 @njit(cache=True)
@@ -4766,39 +4766,39 @@ def _objective_saturation(coords, obs, valid, params, free, weights, use_w, pois
 
 @njit(cache=True)
 def _prepare_saturation(coords, observations, valid, seeds, lower, upper, context):
-    """Try three power scales, seeding counts/background by linear regression."""
+    """Try three x scales, seeding amplitude/offset by linear regression."""
     low = math.inf
     high = -math.inf
     count = 0
     mean_y = 0.0
     for point in range(observations.size):
         if valid[point]:
-            power = coords[0, point]
-            if power < 0.0:
+            x = coords[0, point]
+            if x < 0.0:
                 return 0
-            low = min(low, power)
-            high = max(high, power)
+            low = min(low, x)
+            high = max(high, x)
             count += 1
             mean_y += (observations[point] - mean_y) / count
     if count < 2 or not high > low:
         return 0
     for index, factor in enumerate((0.1, 1.0, 10.0)):
-        saturation_power = high * factor
+        scale = high * factor
         mean_fraction = 0.0
         for point in range(observations.size):
             if valid[point]:
-                mean_fraction += _saturation_fraction(coords[0, point], saturation_power) / count
+                mean_fraction += _saturation_fraction(coords[0, point], scale) / count
         variance = 0.0
         covariance = 0.0
         for point in range(observations.size):
             if valid[point]:
-                centered = _saturation_fraction(coords[0, point], saturation_power) - mean_fraction
+                centered = _saturation_fraction(coords[0, point], scale) - mean_fraction
                 variance += centered * centered
                 covariance += centered * (observations[point] - mean_y)
-        counts = max(covariance / variance, 0.0) if variance > 0.0 else 0.0
-        seeds[index, 0] = counts
-        seeds[index, 1] = saturation_power
-        seeds[index, 2] = mean_y - counts * mean_fraction
+        amplitude = max(covariance / variance, 0.0) if variance > 0.0 else 0.0
+        seeds[index, 0] = amplitude
+        seeds[index, 1] = scale
+        seeds[index, 2] = mean_y - amplitude * mean_fraction
     return 3
 
 

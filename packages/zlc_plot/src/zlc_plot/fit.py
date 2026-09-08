@@ -3294,14 +3294,14 @@ def _symmetric_lorentzian_doublet(x, center, common_fwhm, component_amplitude, o
     )
 
 
-def _saturation(power, saturation_counts, saturation_power, offset):
-    """Fixed-detuning response in linear power; the offset is measured background."""
-    coords, values = _compiled_series_input(power, (saturation_counts, saturation_power, offset))
+def _saturation(x, amplitude, scale, offset):
+    """Offset plus a saturating response in non-negative x."""
+    coords, values = _compiled_series_input(x, (amplitude, scale, offset))
     return _compiled_fit._value_jacobian_saturation(coords, values)[0]
 
 
-def _saturation_jacobian(power, saturation_counts, saturation_power, offset):
-    coords, values = _compiled_series_input(power, (saturation_counts, saturation_power, offset))
+def _saturation_jacobian(x, amplitude, scale, offset):
+    coords, values = _compiled_series_input(x, (amplitude, scale, offset))
     return _compiled_fit._value_jacobian_saturation(coords, values)[1]
 
 
@@ -3316,7 +3316,7 @@ def _saturation_candidates(coordinates, observations):
         np.array(descriptor.context_builder(tuple(coords)), copy=True),
     )
     if count == 0:
-        raise ValueError("saturation fit requires distinct non-negative linear-power coordinates")
+        raise ValueError("saturation fit requires distinct non-negative coordinates")
     return tuple(seeds[:count])
 
 
@@ -4408,15 +4408,15 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             "Saturation",
             1,
             (
-                FitParameterSpec("saturation_counts", VALUE, NONNEGATIVE, display_label=r"$C_s$"),
-                FitParameterSpec("saturation_power", AXIS_0, POSITIVE, display_label=r"$P_s$"),
+                FitParameterSpec("amplitude", VALUE, NONNEGATIVE, display_label=r"$A$"),
+                FitParameterSpec("scale", AXIS_0, POSITIVE, display_label=r"$s$"),
                 FitParameterSpec("offset", VALUE, display_label=r"$B$", affine_point=True),
             ),
-            "saturation_counts",
+            "amplitude",
             _saturation,
             _init_saturation,
             (FitTarget.SERIES,),
-            formula=r"$C(P)=B+C_s P/(P+P_s)$",
+            formula=r"$f(x)=A x/(x+s)+B$",
             jacobian=_saturation_jacobian,
             candidate_initializer=_saturation_candidates,
             compiled_descriptor=_compiled_fit.saturation_descriptor(),

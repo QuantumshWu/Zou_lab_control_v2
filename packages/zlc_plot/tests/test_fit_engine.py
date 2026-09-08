@@ -174,8 +174,8 @@ def test_saturation_response_jacobian_and_fixed_background_share_compiled_fit() 
     engine = FitEngine()
     model = engine.registry.get("saturation")
     assert model.compiled_descriptor is not None
-    assert model.parameter_names == ("saturation_counts", "saturation_power", "offset")
-    assert model.symbols == ("C_s", "P_s", "B")
+    assert model.parameter_names == ("amplitude", "scale", "offset")
+    assert model.symbols == ("A", "s", "B")
     assert r"\frac" not in model.formula
     power = np.linspace(0.0, 10.0, 65)
     truth = np.array((120.0, 2.0, 5.0))
