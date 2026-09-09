@@ -204,9 +204,9 @@ class LogicEditorView(QtWidgets.QWidget):
         state = "waiting for device release" if pending else ("running" if running else "stopped")
         status = str(incoming.get("status") or state)
         issue = issues[0] if issues else ""
-        self.status_label.setText(error or issue or status)
+        self.status_label.setText(error or (f"Draft: {issue}" if issue else status))
         self.status_label.setStyleSheet(
-            f"color: {'#D13438' if error or issue else GREY}; background: transparent; border: none;"
+            f"color: {'#D13438' if error else GREY}; background: transparent; border: none;"
         )
 
     def set_mutation_enabled(self, enabled: bool) -> None:

@@ -1050,7 +1050,7 @@ try:
     assert 'exposure' in camera_control._view.form.keys, 'opened on its first reading'
     exposure = camera_control._view.form.widget_for('exposure')
     exposure.setValue(0.05)
-    camera_control._view._field_rows['exposure'][2].click()
+    camera_control._view._field_rows['exposure'][3].click()
     application.processEvents()
     camera = flow.session.installation.device('camera')
     deadline = QtCore.QDeadlineTimer(5000)
@@ -1071,22 +1071,54 @@ try:
     try:
         exposure = camera_control._view.form.widget_for('exposure')
         exposure.setValue(0.06)
-        camera_control._view._field_rows['exposure'][2].click()
+        camera_control._view._field_rows['exposure'][3].click()
         application.processEvents()
         (field,) = camera.tunable_fields()
         assert field.current == 0.05, 'Control must not bypass the session claim'
-        assert camera_control._view.status_strip.current_severity == 'warning'
-        assert 'camera task' in camera_control._view.status_strip.text()
+        assert 'camera task' in camera_control._view._field_rows['exposure'][5].text()
     finally:
         blocker.release()
     flow.session.device_use.assert_idle()
 
-    camera_control.close(); application.processEvents()
+    camera_control._view.form._shown_unit_picked('exposure', 'ms')
     deadline = QtCore.QDeadlineTimer(5000)
-    while 'camera' in flow.device_controls and not deadline.hasExpired():
-        application.processEvents(); QtTest.QTest.qWait(10)
-    assert 'camera' not in flow.device_controls
+    while flow._device_refresh_active and not deadline.hasExpired():
+        application.processEvents(); QtTest.QTest.qWait(5)
+    model = flow._device_control_models['camera']
+    assert model['desired']['exposure'][1] == 'ms'
+    camera_control._view._field_rows['exposure'][2].click()
+    exposure = camera_control._view.form.widget_for('exposure')
+    exposure.setValue(65.0)
+    desired = model['desired']['exposure']
+    camera_window = camera_control._window
+    QtTest.QTest.mouseClick(camera_window.titleBar.closeBtn, QtCore.Qt.LeftButton)
+    application.processEvents()
+    assert not camera_control.is_visible()
+    assert flow.device_controls['camera'] is camera_control
+    assert flow._device_control_models['camera'] is model
+    assert not any(timer.isActive() for timer in camera_control._view._live_timers.values())
+    projections = []
+    original_projection = camera_control.set_projection
+    camera_control.set_projection = lambda *_args: projections.append(True)
+    QtTest.QTest.qWait(150)
+    camera_control.set_projection = original_projection
+    assert projections == [], 'a hidden Control must not receive periodic projections'
+    assert model['desired']['exposure'] == desired
     assert camera.tunable_fields()[0].current == 0.05, 'GUI close must not close the device'
+    camera.tune('exposure', 0.04)
+    QtTest.QTest.mouseClick(camera_card.control_button, QtCore.Qt.LeftButton)
+    application.processEvents()
+    deadline = QtCore.QDeadlineTimer(5000)
+    while flow._device_refresh_active and not deadline.hasExpired():
+        application.processEvents(); QtTest.QTest.qWait(5)
+    assert flow.device_controls['camera'] is camera_control
+    assert camera_control.is_visible()
+    assert model['desired']['exposure'] == desired
+    assert camera_control._view.form.shown_unit_for('exposure') == 'ms'
+    assert model['current']['exposure'] == 40.0, 'reopening reads current in the retained unit'
+    QtTest.QTest.mouseClick(camera_window.titleBar.closeBtn, QtCore.Qt.LeftButton)
+    application.processEvents()
+    assert not camera_control.is_visible()
     first_session = flow.session
     slm = flow.session.installation.device('slm')
     slm_phase = slm.last_commanded_phase.copy()
@@ -1109,7 +1141,11 @@ try:
     assert 'slm' not in flow.device_controls
     assert flow.session is None
     assert flow.device_controls == {}
-    assert not slm_control.is_visible()
+    application.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+    from PyQt5 import sip
+    assert sip.isdeleted(camera_window), 'session shutdown must destroy hidden Controls'
+    assert camera_window not in application._zlc_retained_windows
+    assert slm_control._window is None
     assert (slm.last_commanded_phase == slm_phase).all()
 finally:
     solve_release.set()
@@ -1121,7 +1157,7 @@ assert flow.console is None
 assert flow.device_controls == {}
 assert not camera_control.is_visible()
 assert not reopened_pulse.is_visible()
-assert not slm_control.is_visible()
+assert slm_control._window is None
 again = tested_module.create_experiment_flow(
     workspace=r'%s', template='virtual',
 )
@@ -1598,6 +1634,9 @@ class _RecordingControl:
 
     def set_projection(self, _spec, projection) -> None:
         self.projections.append(projection)
+
+    def is_visible(self) -> bool:
+        return True
 
 
 def _bare_flow(workspace):

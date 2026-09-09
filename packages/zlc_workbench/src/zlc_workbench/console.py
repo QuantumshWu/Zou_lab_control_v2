@@ -7542,10 +7542,10 @@ class ConsolePresenter:
         host = binding.host
         if host is None:
             issues = self._finalize_logic_binding(binding).issues
-            error = binding.draft_error or (issues[0] if issues else "")
+            error = binding.draft_error
             state = "error" if error else "idle"
-            status = error or "not started"
-            if binding.following and not error:
+            status = error or (f"Draft: {issues[0]}" if issues else "not started")
+            if binding.following and not error and not issues:
                 signal = getattr(binding.finalization, "source_signal", "")
                 state = "running"
                 status = f"following {signal} (waiting for the signal)"
@@ -7560,7 +7560,7 @@ class ConsolePresenter:
             else:
                 issues = self._finalize_logic_binding(binding).issues
                 if issues:
-                    state, status = "error", issues[0]
+                    state, status = "idle", f"Draft: {issues[0]}"
                 elif binding.following:
                     signal = getattr(
                         binding.finalization, "source_signal", ""

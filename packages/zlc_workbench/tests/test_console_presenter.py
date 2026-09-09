@@ -4905,10 +4905,18 @@ def test_a_derive_publishes_the_counts_of_the_occupied_sites(
     derive_id = presenter.add_logic(
         "derive",
         node_id="sites",
-        values={"expressions": program},
+        values={"expressions": (program[0], {"name": "how_many", "code": ""})},
         source_signal=counts_signal,
         open_editor=False,
     )
+    incomplete = presenter.logic_editor_projection(derive_id)
+    assert not incomplete["can_start"]
+    assert incomplete["issues"][0] == "Signals row 2: Enter Python code"
+    assert presenter._logic_state(presenter.logic[derive_id]) == (
+        "idle", "Draft: Signals row 2: Enter Python code"
+    )
+    assert presenter.update_logic_draft(derive_id, values={"expressions": program})
+    assert presenter.logic_editor_projection(derive_id)["can_start"]
     # Named by the draft, before anything ran: the board's own listing of
     # what this row will publish.
     assert [

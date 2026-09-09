@@ -143,6 +143,9 @@ class _FakeIndex:
     def _load_index(self) -> dict:
         return dict(self._overloads)
 
+    def _data_path(self, name: str) -> str:
+        return __file__
+
 
 class _FakeCache:
     def __init__(self, overloads: dict) -> None:
@@ -206,6 +209,74 @@ def test_distinct_dtypes_and_a_repeated_exact_signature_are_not_twins() -> None:
         on_disk={(narrow, ()): "x.1.nbc", (wide, ()): "x.2.nbc"},
     )
     assert _kernel_warm.duplicate_signatures({"promote": kernel}) == ()
+
+
+@pytest.mark.parametrize(
+    ("changed", "cold", "force", "expected"),
+    (
+        ("_fit_compiled", None, False, (False, True)),
+        ("_fit_radial", None, False, (False, True)),
+        ("_raster_kernels", None, False, (True, False)),
+        ("_height3d_scanline", None, False, (True, False)),
+        (None, "_raster_kernels", False, (True, False)),
+        (None, "missing_data", False, (True, False)),
+        (None, None, False, None),
+        (None, None, True, (True, True)),
+        ("toolchain", None, False, (True, True)),
+    ),
+)
+def test_warm_runs_only_changed_or_cold_groups(
+    monkeypatch, tmp_path, changed, cold, force, expected,
+) -> None:
+    """A partial cache never substitutes for a changed group's full samples."""
+
+    from types import SimpleNamespace
+
+    from numba import types
+
+    signature = (types.float64,)
+    modules = _kernel_warm._KERNEL_MODULE_NAMES
+    dispatchers = {
+        f"{name}.kernel": _FakeKernel(
+            (), {} if name == cold else {(signature, ()): "kernel.nbc"},
+        )
+        for name in modules
+    }
+    for kernel in dispatchers.values():
+        kernel.stats = SimpleNamespace(cache_hits={signature: 11}, cache_misses={signature: 7})
+    if cold == "missing_data":
+        index = dispatchers["_raster_kernels.kernel"]._cache._cache_file
+        index._data_path = lambda name: str(tmp_path / "missing.nbc")
+    previous = "python|numpy|numba|" + "|".join(f"zlc_plot.{name}:old" for name in modules)
+    current = previous.replace(f"{changed}:old", f"{changed}:new")
+    if changed == "toolchain":
+        current = current.replace("numba|", "new-numba|")
+    marker = tmp_path / "zlc_kernels.marker"
+    marker.write_text(previous, encoding="utf-8")
+    monkeypatch.setenv("NUMBA_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(_kernel_warm, "_fingerprint", lambda: current)
+    monkeypatch.setattr(_kernel_warm, "kernel_dispatchers", lambda: dispatchers)
+    calls = []
+
+    def work(*, include_render=True, include_compiled_fit=True):
+        calls.append((include_render, include_compiled_fit))
+        for name, kernel in dispatchers.items():
+            selected = include_compiled_fit if name.startswith("_fit_") else include_render
+            if selected:
+                kernel.signatures = (signature,)
+                kernel.stats.cache_hits[signature] += 2
+                kernel.stats.cache_misses[signature] += 1
+
+    monkeypatch.setattr(_kernel_warm, "representative_work", work)
+    result = _kernel_warm.warm(force=force)
+    assert calls == ([] if expected is None else [expected])
+    assert marker.read_text(encoding="utf-8") == current
+    if expected is None:
+        assert result == "cache is current; nothing to do"
+    else:
+        count = 2 * sum(expected)
+        assert f"{count} production signatures compiled" in result
+        assert f"{2 * count} loaded from disk" in result
 
 
 def test_regular_image_fit_preserves_camera_storage_and_returns_float64() -> None:

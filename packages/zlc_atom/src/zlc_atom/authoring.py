@@ -351,9 +351,7 @@ class AuthoringSchema:
             )
             if vacant and field.required:
                 if require_complete:
-                    raise ValueError(
-                        f"missing required authoring field {field.name!r}"
-                    )
+                    raise ValueError(f"Enter {field.label}")
                 complete = False
             if field.choices and value is not None and not any(
                 _typed_equal(value, choice.value) for choice in field.choices

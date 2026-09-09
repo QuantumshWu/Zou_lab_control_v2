@@ -105,7 +105,10 @@ def cached_signatures(kernel: Any) -> tuple[tuple[Any, ...], ...]:
             overloads = load_index()
         except (OSError, EOFError, ValueError, pickle_error()):
             overloads = {}
-        found.extend(key[0] for key in overloads)
+        found.extend(
+            key[0] for key, filename in overloads.items()
+            if pathlib.Path(cache_file._data_path(filename)).is_file()
+        )
     return tuple(found)
 
 
@@ -441,7 +444,9 @@ def _save(
         session.close()
 
 
-def representative_work(*, include_compiled_fit: bool = True) -> None:
+def representative_work(
+    *, include_render: bool = True, include_compiled_fit: bool = True,
+) -> None:
     """Render what production renders, until every kernel has been asked.
 
     Each case names the kernels it is here for.  They are not asserted
@@ -449,6 +454,16 @@ def representative_work(*, include_compiled_fit: bool = True) -> None:
     which is the check that keeps working when a kernel moves between
     cases.
     """
+
+    if include_compiled_fit:
+        from . import _fit_compiled, _fit_radial  # noqa: PLC0415
+
+        # Regular-image work shares the compiled solver and model callbacks.
+        # Keep their complete samples together, including all storage dtypes.
+        _fit_compiled.warm_production_cache()
+        _fit_radial.warm_production_cache()
+    if not include_render:
+        return
 
     from . import (  # noqa: PLC0415
         AxisRef,
@@ -459,8 +474,6 @@ def representative_work(*, include_compiled_fit: bool = True) -> None:
         RollingPlot,
     )
     from . import (  # noqa: PLC0415
-        _fit_compiled,
-        _fit_radial,
         _height3d_scanline,
         _raster_kernels,
     )
@@ -566,14 +579,6 @@ def representative_work(*, include_compiled_fit: bool = True) -> None:
         {"presentation": "height_bars"},
     )
 
-    # Nine model callbacks plus the shared serial/parallel TRF and strict SVD
-    # finalizers.  This is intentionally explicit work while dispatcher
-    # discovery remains generic: an experiment may select any built-in model,
-    # and its first Fit must only deserialize this cache, never JIT a solver.
-    if include_compiled_fit:
-        _fit_compiled.warm_production_cache()
-        _fit_radial.warm_production_cache()
-
 
 # ------------------------------------------------------ a fresh process
 def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
@@ -668,27 +673,43 @@ def warm(force: bool = False) -> str:
     cache_dir.mkdir(parents=True, exist_ok=True)
     marker = cache_dir / "zlc_kernels.marker"
     fingerprint = _fingerprint()
-    populated = any(cache_dir.glob("**/*.nbc"))
-    if (
-        not force
-        and populated
-        and marker.exists()
-        and marker.read_text(encoding="utf-8") == fingerprint
-    ):
+    current = fingerprint.split("|")
+    previous = marker.read_text(encoding="utf-8").split("|") if marker.exists() else []
+    needed = (
+        set(_KERNEL_MODULE_NAMES)
+        if force or current[:3] != previous[:3]
+        else {
+            entry.split(":", 1)[0].rsplit(".", 1)[-1]
+            for entry in current[3:] if entry not in previous[3:]
+        }
+    )
+    # A matching marker is not proof that the individual caches still exist.
+    # Conversely, one signature is not proof that a changed module's full
+    # dtype/layout sample set has run: its source fingerprint still selects it.
+    needed.update(name.split(".", 1)[0] for name in cold_kernels())
+    if not needed:
         return "cache is current; nothing to do"
 
+    dispatchers = kernel_dispatchers()
+    before = {
+        name: (sum(kernel.stats.cache_misses.values()), sum(kernel.stats.cache_hits.values()))
+        for name, kernel in dispatchers.items()
+    }
     previous_plot = _raster_kernels.ENGINE
     previous_h3d = _height3d_raster._ENGINE
     _raster_kernels.ENGINE = "numba"
     _height3d_raster._ENGINE = "numba"
     try:
-        representative_work()
+        representative_work(
+            include_render=bool(needed & {"_raster_kernels", "_height3d_scanline"}),
+            include_compiled_fit=bool(needed & {"_fit_compiled", "_fit_radial"}),
+        )
     finally:
         _raster_kernels.ENGINE = previous_plot
         _height3d_raster._ENGINE = previous_h3d
 
-    total = len(kernel_dispatchers())
-    twins = duplicate_signatures()
+    total = len(dispatchers)
+    twins = duplicate_signatures(dispatchers)
     if twins:
         # Two compilations of one kernel that differ only in whether their
         # input was writable is not coverage, it is waste -- and it means an
@@ -712,8 +733,18 @@ def warm(force: bool = False) -> str:
             "them; add the render that does."
         )
     marker.write_text(fingerprint, encoding="utf-8")
-    signatures = sum(len(kernel.signatures) for kernel in kernel_dispatchers().values())
-    return f"{total} kernels, {signatures} signatures compiled and cached"
+    compiled = sum(
+        sum(kernel.stats.cache_misses.values()) - before[name][0]
+        for name, kernel in dispatchers.items()
+    )
+    loaded = sum(
+        sum(kernel.stats.cache_hits.values()) - before[name][1]
+        for name, kernel in dispatchers.items()
+    )
+    return (
+        f"{total} kernels verified; {compiled} production signatures compiled, "
+        f"{loaded} loaded from disk"
+    )
 
 
 def main() -> int:

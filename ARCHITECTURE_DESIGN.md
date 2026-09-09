@@ -132,6 +132,7 @@ Node new chunk
 - Processor可声明消费订阅锚点同一原子publication内的具名siblings；它们不形成独立source或异步join，exact replay与causal lineage由该publication提供。Derive用直接`a.<name>`引用规划所需siblings（加上订阅锚点）；动态使用`a`时保留该producer的全部成员，AST这里只规划依赖、不限制Python语法。所有成员统一使用同一个Input range，不能为其中一项读latest或另一份窗口；不支持跨独立producer的隐式join。原`occupancy_agreement`已退役，一致性掩码只是普通Python，例如`agree = a.occupied.isel(frame=0) == a.occupied.isel(frame=2)`，再以`.where(agree)`限制选定frame的counts；也可继续归约Repeat或其它命名轴，不限定为site-only操作，不重读camera/calibration或重新分类。
 - Dataset输入可声明`select_bundle`：其界面按同一atomic producer的输出集合提供一项普通Fluent choice，显示producer和成员名，不让操作者在bundle内部选某个叶子。Runtime仍用一个成员signal作为既有订阅锚点，按上述依赖规则消费同publication的siblings，不引入bundle数据或另一份registry；不同atomic owner即使共用Panel标题也不得混成一个bundle。Derive使用这个入口，普通单signal输入继续使用现有树形选择器。
 - UI freeze只读取已提交状态，不调用plugin materializer。
+- Logic草稿的Start admission问题是待填写/修正提示，不是节点运行失败；保留原草稿且禁用Start，按用户可见field label与嵌套row位置说明，状态显示中性的`Draft: …`。只有明确Start失败、run error或既有draft_error才进入红色error状态。Derive所有控件、只读结构说明与短示例均使用英文。
 - Stop/Final不受Panel、freeze或Processor订阅影响。
 
 ### 4.2 Identity与processors
@@ -284,7 +285,7 @@ Node new chunk
 - Reconcile前以device-key maintenance barrier阻止新Logic/command，停止并等待受影响Logic lease，关闭对应Control；已有不可取消command时loud拒绝。partial close/factory cleanup失败后，所有仍open的leaf必须继续由Session或recovery owner强持有，effective live config与TaskConsole device projection同步后才允许下一次操作。
 - Device operation或projection-refresh pending期间Control、Close、TaskConsole X和root close不得越过owner状态；失败保持window/session可达并提供只刷新projection的retry，不重复hardware work。
 - Hosted Task可登记且只能登记一个domain-owned partial-exit writer；Runtime在worker线程、撤回Dataset及把TaskRun标为stopped/failed之前恰好调用一次。Writer只能从已经完成的数据原子写并登记checkpoint/process/Figure/preview/summary，不得制造required final；writer失败不能覆盖原始hardware/science failure：failure时附注在原始错误上（进入记录的traceback），Stop时成为observation的error与stopped记录的error而状态仍是stopped/cancelled——Stop不因保存失败变成failure，保存失败也不得被当作从未发生。Calibration、Temperature与SLM Feedback都必须使用该边界保存各自可证明的partial报告。
-- Device Control只显示adapter声明的`TunableField`：稳定表单metadata、authoritative current、当前是否live-write及dependency group。每行统一为Current、Desired、Live apply、Apply和Status；打开/显式Refresh及成功Apply后的readback只走session-owned串行device worker，Qt不碰SDK，也不做周期hardware polling。
+- Device Control只显示adapter声明的`TunableField`：稳定表单metadata、authoritative current、当前是否live-write及dependency group。每行统一为Current、Desired、Live apply、Apply和Status；打开/显式Refresh及成功Apply后的readback只走session-owned串行device worker，Qt不碰SDK，也不做周期hardware polling。Generic Control的X在既有close guard放行后只隐藏，同一device session复用窗口与Desired/单位；隐藏时停止Live debounce、撤销尚未执行的字段写入并跳过周期UI投影，重开按保留单位读取current；device unload/rebuild或session shutdown才真正关闭并释放窗口与Qt连接。
 - Device Control的表头与全部Fluent form rows共用一份列宽预算：只有Desired列伸缩，其余列按全表内容对齐；Desired内的单位选择器同宽，输入框右边缘一致。布尔开关保留自己的绘制/命中宽度，无Live能力的行保留空列。不得让各行按不同的两个stretch列独立分配宽度，也不单独给RF手写另一套表单。
 - 运行时设备字段的identity不编码单位：RF是`frequency/power`（多通道加`ch1_`等前缀）、范围控制是`frequency_low/high`和`power_low/high`，Pylon是`gain`（dB），Virtual Camera是`exposure`（s）。单位只由metadata及显式请求携带；Control、claims、Remote、Scan port、派生scan axis和新保存引用使用同一identity，不在UI删后缀，也不保留旧runtime别名。固定单位的Config/Init字段、CameraWorkingPoint及SDK参数仍保留`_hz/_dbm/_seconds`等单位说明；RF范围控制与固定单位Init键在同一声明中明确对应。历史实验数据的已存字段不重写，旧authoring layout中的设备port和对应Panel fate轴引用需要同时更新。
 - RF frequency/power policy window的四个edge是Init与Device Control共享的optional `TunableField`；`None`唯一表示该侧没有bench policy limit。Init省略全部edge不得移动硬件；Control可设置或清回`None`。仪器自身的frequency/power limits在Init连接时从设备读出，并以`TunableField.device_limits`只读投影给Device Control显示；UI control、外部`tune`与Scan共用同一个有效范围＝policy window与device limits逐侧取更紧者，因此只要device limits存在knob就向Scan暴露有限range，缺失的policy edge不阻止扫描；window与仪器范围无交集时Init与Control都loud拒绝。
@@ -415,6 +416,8 @@ Node new chunk
 - Tests使用config override，不修改public mutable world attributes；hidden truth不泄漏给production算法。
 
 ## 10. Deployment、Evidence与Docs
+
+- `warm_numba_cache`沿原kernel discovery/cache owner按模块源码变更或机器码缺失选择预热组：render包含raster与3D，fit包含compiled solver与radial。组内保留完整production dtype/layout样本；无关组不运行。marker相同时仍检查实际缓存，Numba源码stamp/CPU/signature判定不被覆盖；日志分别显示新编译与磁盘加载。修改同一kernel源文件仍受Numba的整文件失效规则影响，跨文件依赖也不伪装成已经自动追踪。
 
 - 一个可安装`zou-lab-control` distribution，bootstrap package为`zou_lab_control`；内部八层不独立发wheel或维护版本。
 - 所有checkout launcher（包括FPGA build/program与resource estimate）通过同一个Python

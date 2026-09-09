@@ -10,6 +10,9 @@
 
 ## 1. 当前实施范围
 
+- Derive界面统一英文，只读信息完整展开，短帮助不设内部scroll。空Code等未提交草稿显示中性`Draft: Signals row N: Enter Python code`，不标节点error；Start仍禁用，填完整后经原finalization解除。实际Qt输入→计算→Plot→Save Fig→FigureViewer流程通过，1×1×35结果与独立NumPy相同，所有窗口已关闭。
+- Numba预热复用原样本，按模块变更/缓存缺失选择render（raster＋3D）或fit（compiled＋radial）组；匹配marker仍检查缺失机器码，日志区分production signatures新编译/磁盘加载。11项无编译定向验证通过，未清缓存或全量预热。同一kernel源文件内的Numba整文件失效仍存在，不声称本改动消除了该重编译。
+
 - Seamless支持无scan slot的manual/device-only计划：无板内轴时加载普通Pulse和空wire，Run repeats采shots_per_point，完整repeats由已有Host循环推进；不虚构slot或Dataset轴，沿用采集准备/Stop/恢复。删除Node/Editor旧否决及空子ScanPlan，真实slot路径保持不变；硬件snapshot记录每次Fire实际scan_repeats。7项定向验证通过（无slot manual/device、原混合路线、排序和Editor），未操作真实硬件。
 
 - Device Control对齐在原Fluent form内收口：统一表头/全部行/单位选择器列宽，仅Desired伸缩，保留bool和无Live行的正确占位；使用正式Control opener和zlc_ui截图API完成默认、混合单位、拉宽窗口的Windows DPR3可见截图检查。截图API支持内容尺寸窗口而不强改窗口尺寸，原固定屏幕比例验证保留；证据留ignored research，测试窗口均已关闭。
@@ -216,6 +219,7 @@
 ### 2.5 Device Control与settings provenance
 
 - Generic Device Control只消费adapter的`TunableField` contract，显示Current、Desired、Live apply、Apply、Status、Refresh及active owners；已删除旧的edit-immediate `field_committed/read_values/set_form`路径和demo残余。
+- Generic Control的X复用现有Fluent隐藏机制，保留同一device session的窗口、Desired和单位；隐藏时停止Live debounce、撤回未执行字段写入并跳过周期UI投影，重开只读刷新current，卸载/重建或session结束真正销毁窗口。现有正式flow的单个Qt生命周期用例红/绿通过，验证ms单位与草稿保留、隐藏无周期投影、重开读回及session shutdown释放；未做硬件测试。
 - RF frequency/power四个policy edge已进入Rigol、Vaunix及Virtual RF的optional Init schema并复用同一Control tunable；空值表示无该侧policy、可随时清回空值。仪器自身limits在Init读出并以`TunableField.device_limits`只读投影；Scan port范围、Control与外部`tune`的有效范围都是policy与device limits逐侧取更紧者，缺失policy edge时该侧就是仪器limit；全空Init不归一化或改写硬件当前值。
 - Pylon以运行时`gain`（dB）公开SDK bounds/current与grabbing-safe write；Virtual camera公开`exposure`（s）。固定单位Config/SDK参数名保留。epoch由设备owner报告，Control不比较不同单位或用浮点相等推断增量；Seamless/Stepped保留用户设定坐标，实际回读不替换扫描轴。
 - Logic静态requirements与Stepped Scan运行时选择的device ports都形成field claim。DeviceUse按device-specific owner revision原子核风险授权、dependency closure与pending write；字段命令期间不能进入新Logic，owner变化取消尚未执行的write。

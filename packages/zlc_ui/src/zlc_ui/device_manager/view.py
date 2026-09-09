@@ -494,6 +494,11 @@ class DeviceControlView(QtWidgets.QWidget):
         super().resizeEvent(event)
         self._align_headings()
 
+    def hideEvent(self, event):  # noqa: N802 - Qt naming
+        for timer in self._live_timers.values():
+            timer.stop()
+        super().hideEvent(event)
+
     def set_projection(self, spec: FormSpec, projection: Mapping[str, object]) -> None:
         fields = projection.get("fields", {})
         self._field_states = dict(fields)

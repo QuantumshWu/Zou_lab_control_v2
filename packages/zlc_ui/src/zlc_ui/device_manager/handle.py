@@ -13,7 +13,7 @@ from typing import Any
 
 from PyQt5 import QtCore
 
-from zlc_ui.fluent import fluent_open_path, fluent_save_path
+from zlc_ui.fluent import fluent_open_path, fluent_save_path, release_window
 
 from .view import DeviceControlView, DeviceManagerView
 
@@ -30,7 +30,7 @@ class DeviceControlHandle(QtCore.QObject):
     closed = QtCore.pyqtSignal()
 
     def __init__(self, window: Any, view: DeviceControlView) -> None:
-        super().__init__()
+        super().__init__(window)
         self._window = window
         self._view = view
         for name in (
@@ -57,16 +57,28 @@ class DeviceControlHandle(QtCore.QObject):
             target.activateWindow()
 
     def close(self) -> None:
+        """Retire the session's control; the window's own X only hides it."""
+
         target = self._window if self._window is not None else self._view
-        target.close()
+        if target is None:
+            return
+        if self._window is not None:
+            self._window._hide_on_close = False
+        if target.close():
+            release_window(target)
+            target.deleteLater()
+            self._window = self._view = None
+        elif self._window is not None:
+            self._window._hide_on_close = True
 
     def set_close_guard(self, guard) -> None:
         if self._window is not None:
             self._window.set_close_guard(guard)
+            self._window.set_hide_guard(guard)
 
     def is_visible(self) -> bool:
         target = self._window if self._window is not None else self._view
-        return bool(target.isVisible())
+        return target is not None and bool(target.isVisible())
 
     def set_projection(self, spec: object, projection: object) -> None:
         self._view.set_projection(spec, projection)

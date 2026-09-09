@@ -71,7 +71,7 @@ def open_device_control(
             width = min(width, available.width())
         return width, height
 
-    window = launch_fluent_window(view, title=str(title), size=snug)
+    window = launch_fluent_window(view, title=str(title), size=snug, hide_on_close=True)
     return DeviceControlHandle(window, view)
 
 

@@ -1,7 +1,7 @@
 @echo off
 rem Warm the numba kernel cache so experiment runs never compile.
 rem ALL of it: the warmer renders what production renders and then
-rem checks that every kernel it can find has compiled, naming any it
+rem checks that every kernel it can find has a current cache, naming any it
 rem could not reach.  It used to call the 3D module's own warmer,
 rem which knew about that module's kernels and nothing about the nine
 rem that draw every camera frame, histogram and uncertainty band.
@@ -10,8 +10,10 @@ rem checkout through the same dispatcher as every other launcher: no
 rem product install, and no layer list of its own -- the bootstrap binds
 rem the layers.  Where the cache lives has ONE owner, in
 rem zlc_plot/_kernel_cache.py (numba_cache at the checkout root).  When it
-rem holds machine code for the current toolchain and kernel source (a
-rem fingerprint marker checks both), this exits in milliseconds.
+rem holds current machine code, this checks the source marker and each
+rem kernel index and skips the work. Changed or cold render/fit groups
+rem run their complete samples; unchanged groups are skipped. The result
+rem reports new compilations separately from disk cache loads.
 setlocal EnableExtensions DisableDelayedExpansion
 
 for %%I in ("%~dp0..") do set "ZLC_HOME=%%~fI"

@@ -488,7 +488,11 @@ class ExperimentGuiFlow:
             raise RuntimeError("a Device Manager operation is still running")
         existing = self.device_controls.get(key)
         if existing is not None:
+            hidden = not existing.is_visible()
             existing.restore()
+            if hidden and key in self._device_control_models:
+                self._project_device_control(key)
+                self._request_device_control_refresh(key)
             return existing
         if key in self._device_control_opening:
             return None
@@ -944,6 +948,8 @@ class ExperimentGuiFlow:
 
         for key in tuple(self._device_control_models):
             model = self._device_control_models[key]
+            if not model["control"].is_visible():
+                continue
             projection = self._device_control_projection(key)
             cancelled = False
             for pending in tuple(self._device_tune_pending):
@@ -1242,6 +1248,9 @@ class ExperimentGuiFlow:
             return False
         active = str(self._device_tune_active or "")
         if not active.startswith(f"{str(key)}:"):
+            for pending in tuple(self._device_tune_pending):
+                if pending[0] == str(key):
+                    self._device_tune_pending.pop(pending, None)
             return True
         control.show_status("device tune is still running", "warning")
         return False
