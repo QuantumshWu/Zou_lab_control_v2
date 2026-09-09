@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- Device Control对齐在原Fluent form内收口：统一表头/全部行/单位选择器列宽，仅Desired伸缩，保留bool和无Live行的正确占位；使用正式Control opener和zlc_ui截图API完成默认、混合单位、拉宽窗口的Windows DPR3可见截图检查。截图API支持内容尺寸窗口而不强改窗口尺寸，原固定屏幕比例验证保留；证据留ignored research，测试窗口均已关闭。
+
 - 2026-09-08 运行时TunableField名称去单位后缀：RF frequency/power及四个policy边界、Pylon gain、Virtual Camera exposure从设备定义统一到Control/claims/Remote/Scan与新保存引用；metadata补齐dB/s，固定单位Config/SDK接口不改，不加旧runtime别名。RF/Scan保存与单位写入/Control的10项及非RF metadata/claims的4项定向验证通过；历史实验记录不重写。
 
 - 2026-09-08 设备单位写入收口：Scan和Control共用设备层的只读单位投影/转换与Apply，Rigol原生Vpp/Vrms/dBm仅必要时切UNIT，原始数值/单位对在退出时恢复。端口范围和单位转换离开Qt；pending单位请求不能误Apply旧单位，晚结果不覆盖新draft或碰已删除控件。Remote沿同一接口透传，canonical provenance与requested_unit分开。最终15个定向实例通过，包含非50Ω、原生写/失败恢复、整数前缀、Control只读换单位、占用权限、异步Scan Editor及Fit负B/C单位转换；仅模拟SCPI与Qt控件验证，未做真机/实屏全流程验收。

@@ -42,7 +42,7 @@ class AcceptanceCapture:
     available_geometry: GeometryTuple
     screen_geometry: GeometryTuple
     screen_dpr: float
-    target_size: SizeTuple
+    target_size: SizeTuple | None
     window_size: SizeTuple
     frame_geometry: GeometryTuple
     window_fraction: tuple[float, float]
@@ -154,7 +154,7 @@ def _desktop_relative_pixmap(
 def capture_window(
     opener: Callable[[], QtWidgets.QWidget],
     *,
-    ratio: float = WINDOW_SCREEN_FRACTION,
+    ratio: float | None = WINDOW_SCREEN_FRACTION,
     output: str | Path | None = None,
     desktop_output: str | Path | None = None,
     settle_ms: int = 120,
@@ -168,7 +168,8 @@ def capture_window(
     loop, and verifies that the returned top-level window is exactly
     ``screen_fit_window_size(ratio)``.  It never resizes a mismatching window:
     a wrong launcher fails loudly instead of producing a plausible but false
-    screenshot.
+    screenshot. ``ratio=None`` captures a content-sized/resized window at its
+    actual size instead; it must still fit the real screen.
 
     This is the only UI acceptance capture API.  The default backend must be
     a real Qt screen; offscreen is rejected because its virtual canvas cannot
@@ -181,7 +182,7 @@ def capture_window(
 
     if not callable(opener):
         raise TypeError("opener must be a zero-argument create_window callable")
-    if not 0 < float(ratio) <= 1:
+    if ratio is not None and not 0 < float(ratio) <= 1:
         raise ValueError("ratio must be between 0 and 1")
 
     app = ensure_qt_app(["zlc-ui-acceptance"])
@@ -203,14 +204,16 @@ def capture_window(
         if screen is None:
             raise RuntimeError("QApplication has no primary screen")
         available = screen.availableGeometry()
-        target = screen_fit_window_size(float(ratio))
+        target = None if ratio is None else screen_fit_window_size(float(ratio))
         actual = window.size()
-        if actual != target:
+        if target is not None and actual != target:
             raise RuntimeError(
                 "window opener did not use the shared screen-fit launcher: "
                 f"target={target.width()}x{target.height()}, "
                 f"window={actual.width()}x{actual.height()}"
             )
+        if target is None and (actual.width() > available.width() or actual.height() > available.height()):
+            raise RuntimeError("content-sized window exceeds the available screen")
 
         title_bar = getattr(window, "titleBar", None)
         loaded = getattr(window, "loaded", None)
@@ -276,7 +279,7 @@ def capture_window(
             available_geometry=_rect(available),
             screen_geometry=_rect(screen.geometry()),
             screen_dpr=float(screen.devicePixelRatio()),
-            target_size=_size(target),
+            target_size=None if target is None else _size(target),
             window_size=_size(actual),
             frame_geometry=_rect(window.frameGeometry()),
             window_fraction=fraction,

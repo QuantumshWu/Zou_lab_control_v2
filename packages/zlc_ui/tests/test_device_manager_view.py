@@ -521,13 +521,16 @@ spec = FormSpec((
     FormFieldProps(key='power', kind='float', label='Power', unit='dBm',
                    minimum=-20.0, maximum=10.0),
     FormFieldProps(key='output', kind='bool', label='Output', default=False),
+    FormFieldProps(key='frequency', kind='float', label='Frequency', unit='Hz',
+                   default=1000.0, minimum=1e-6, maximum=160e6),
 ))
 def state(current, limits):
     return {'current': current, 'desired': current, 'editable': True,
             'live_apply': False, 'live_enabled': True, 'apply_enabled': False,
             'status': '', 'severity': 'info', 'reason': '', 'device_limits': limits}
 view = DeviceControlView(spec, {
-    'fields': {'power': state(-3.0, (-120.0, 30.0)), 'output': state(False, None)},
+    'fields': {'power': state(-3.0, (-120.0, 30.0)), 'output': state(False, None),
+               'frequency': state(1000.0, (1e-6, 160e6))},
     'owners': (), 'reason': '', 'risk_accepted': False, 'risk_enabled': False,
 })
 limits = {key: row[1] for key, row in view._field_rows.items()}
@@ -554,13 +557,15 @@ assert limits['power'].text() == '0.000000000001 mW to 1000 mW', limits['power']
 view.form._shown_unit_picked('power', 'dBm')
 assert limits['power'].text() == '-120 dBm to 30 dBm'
 view.set_projection(spec, {
-    'fields': {'power': state(-3.0, (-110.0, 20.0)), 'output': state(False, None)},
+    'fields': {'power': state(-3.0, (-110.0, 20.0)), 'output': state(False, None),
+               'frequency': state(1000.0, (1e-6, 160e6))},
     'owners': (), 'reason': '', 'risk_accepted': False, 'risk_enabled': False,
 })
 assert limits['power'].text() == '-110 dBm to 20 dBm'
 # The unit gesture changes only the authored pair, even while Live is on.
 applies = []
-fields = {'power': state(-3.0, (-110.0, 20.0)), 'output': state(False, None)}
+fields = {'power': state(-3.0, (-110.0, 20.0)), 'output': state(False, None),
+          'frequency': state(1000.0, (1e-6, 160e6))}
 fields['power']['live_apply'] = True
 projection = {'fields': fields, 'owners': (), 'reason': '',
               'risk_accepted': False, 'risk_enabled': False}
@@ -580,18 +585,22 @@ view._field_rows['power'][2].setChecked(False)
 view.form.widget_for('power').setText('135')
 view._field_rows['power'][3].click()
 assert applies == [('power', 135.0, 'mVpp')], applies
-view.resize(1100, 300); view.show()
-for _ in range(3):
-    app.processEvents()
-view._align_headings(); app.processEvents()
-row = view.form._rows['power']
-cells = [row.layout().itemAt(i).widget() for i in range(row.layout().count())]
 headings = [view.field_heading, view.current_heading, view.desired_heading,
             view.limits_heading, view.live_heading, view.apply_heading, view.status_heading]
-assert len(cells) == len(headings), (len(cells), len(headings))
-for heading, cell in zip(headings, cells):
-    assert (heading.x(), heading.width()) == (cell.x(), cell.width()), (
-        heading.text(), heading.x(), heading.width(), cell.x(), cell.width())
-assert cells[3] is limits['power']
+from PyQt5.QtCore import QPoint
+for width in (view.sizeHint().width(), view.sizeHint().width() + 200):
+    view.resize(width, 300); view.show()
+    for _ in range(3):
+        app.processEvents()
+    view._align_headings(); app.processEvents()
+    for row in view.form._rows.values():
+        cells = [row.layout().itemAt(i).widget() for i in range(row.layout().count())]
+        assert len(cells) == len(headings), (len(cells), len(headings))
+        for heading, cell in zip(headings, cells):
+            assert (heading.mapTo(view, QPoint()).x(), heading.width()) == (cell.mapTo(view, QPoint()).x(), cell.width())
+    pickers = [(picker.mapTo(view, QPoint()).x(), picker.width()) for picker in view.form._unit_pickers.values()]
+    assert len(set(pickers)) == 1, pickers
+assert view.form._rows['power'].layout().itemAt(3).widget() is limits['power']
+view.close()
 """
     )
