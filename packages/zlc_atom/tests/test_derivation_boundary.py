@@ -226,6 +226,57 @@ def test_a_count_the_readout_cannot_judge_is_invalid_not_empty() -> None:
     assert bright.occupied.all()
 
 
+def test_occupancy_preserves_scan_axes_for_live_events_and_the_complete_run() -> None:
+    from types import SimpleNamespace
+    from zlc_atom.nodes.scan import SCAN_OUTPUT, ScanDatasetWriter
+    from zlc_runtime import SignalValue
+
+    frames = frames_snapshot(
+        (tuple(CameraFrameRecord(np.full((72, 92), level, dtype=np.uint16), i)
+               for i, level in enumerate((10, 0, 10))),),
+        producer="camera", generation="scan-frames", revision=1, value_unit="count",
+    )
+    sites = ("site-1",)
+    calibration = TrapCalibration(
+        SiteMap(sites, np.asarray([[40.0, 30.0]]), [True], [1.0]),
+        (ReadoutModel(sites, [5.0], [0.0], [10.0], [True], [1.0]),),
+        ReadoutModelKind.BOX, FrameContract((72, 92)),
+    )
+    processor = OccupancyProcessor(calibration)
+    source = SignalValue("camera/frames", frames, None)
+    writer = ScanDatasetWriter(((135.0,),), (("power", "mVpp"),), run_repeats=50)
+    scan = SimpleNamespace(instance_id="scan", dataset_output_declarations=(SCAN_OUTPUT,),
+                           signal_key=lambda name: f"scan/{name}")
+    plane = SignalDataPlane()
+    try:
+        plane.begin_generation(scan)
+        for repeat in range(50):
+            event = writer.write(source, row=0, scan_repeat=0, run_repeat=repeat)
+            plane.commit_live(scan, {SCAN_OUTPUT.name: event})
+            publication = plane.latest_publication(scan.signal_key(SCAN_OUTPUT.name))
+            value = publication.value(scan.signal_key(SCAN_OUTPUT.name))
+            outputs = processor.evaluate(value)
+            assert outputs["counts"].snapshot.block.values.shape == (1, 3, 1)
+            assert outputs["occupied"].canonical_schema.point_domain == event.canonical_schema.point_domain
+            assert outputs["occupied"].cell_origin == (repeat, 0)
+        plane.seal_committed(scan)
+        snapshot = plane.current_dataset(scan.signal_key(SCAN_OUTPUT.name))
+        assert snapshot.block.values.shape == (50, 3, 72, 92)
+        assert tuple(a.size for a in snapshot.block.schema.point_domain.axes) == (3, 1)
+        full = processor.evaluate(SignalValue(scan.signal_key(SCAN_OUTPUT.name), snapshot, None))
+        for name in ("counts", "occupied"):
+            answer = full[name].snapshot
+            assert answer.block.values.shape == (50, 3, 1)
+            assert answer.block.schema.repeat_domain == snapshot.block.schema.repeat_domain
+            assert answer.block.schema.point_domain == snapshot.block.schema.point_domain
+            assert answer.expanded_validity().all()
+        np.testing.assert_array_equal(full["occupied"].snapshot.block.values,
+                                      np.broadcast_to(np.array([True, False, True])[None, :, None], (50, 3, 1)))
+        assert full["frame_judged"].snapshot is snapshot
+    finally:
+        plane.close()
+
+
 def test_occupancy_classifies_only_event_cells_and_runtime_owns_full_history(
     bench,
 ) -> None:

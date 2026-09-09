@@ -20,8 +20,9 @@ pair, the calibration model-axis pattern (numeric identity, readable
 labels).  A pair is WHICH sub-measurement of the cycle is being asked
 about, exactly as the frames it was derived from are: the frames sit on
 the point axis of the occupancy signal, and their pairs sit on the point
-axis here, so the panel structure reads ``(cycles) x (pairs) x (sites)``
-and a grid gives each pair its own cell without anyone naming an axis.
+axis here, alongside any other Point coordinates such as scan axes. Without
+a scan the structure reads ``(cycles) x (pairs) x (sites)``, and a grid gives
+each pair its own cell without anyone naming an axis.
 Each pair's value is the later frame's VERDICT -- the same boolean the
 occupancy it came from published -- and its validity is that pair's OWN
 denominator: the earlier frame loaded AND both frames judgeable.  The
@@ -78,6 +79,30 @@ def _forward_pairs(frames: int) -> tuple[tuple[int, int], ...]:
     )
 
 
+def _frame_rows(schema: DatasetSchema, frame_axis: AxisSpec) -> np.ndarray:
+    """Physical frame rows within each distinct non-frame Point coordinate."""
+
+    domain = schema.point_domain
+    other_codes = tuple(
+        domain.codes(axis.axis_id)
+        for axis in domain.axes
+        if axis.axis_id != frame_axis.axis_id
+    )
+    groups: dict[tuple[int, ...], dict[int, int]] = {}
+    for row, frame in enumerate(domain.codes(frame_axis.axis_id)):
+        key = tuple(int(codes[row]) for codes in other_codes)
+        frames = groups.setdefault(key, {})
+        if int(frame) in frames:
+            raise ValueError("frame survival has duplicate frames at one Point coordinate")
+        frames[int(frame)] = row
+    if any(len(frames) != frame_axis.size for frames in groups.values()):
+        raise ValueError("frame survival requires whole cycles at each Point coordinate")
+    return np.asarray(
+        [[frames[code] for code in range(frame_axis.size)] for frames in groups.values()],
+        dtype=np.intp,
+    )
+
+
 class FrameSurvivalProcessor:
     """Pair every forward frame combination of one judged cycle."""
 
@@ -96,14 +121,16 @@ class FrameSurvivalProcessor:
 
     # -- schema -------------------------------------------------------------
 
-    def _source_axes(self, schema: DatasetSchema) -> tuple[AxisSpec, object]:
-        """The judged-occupancy shape: one frame Point axis, one site axis."""
+    def _source_axes(self, schema: DatasetSchema) -> tuple[AxisSpec, AxisSpec]:
+        """One declared readout-event axis, with per-site boolean verdicts."""
 
-        point_axes = schema.point_domain.axes
-        if len(point_axes) != 1:
+        frame_axes = tuple(
+            axis for axis in schema.point_domain.axes if axis.role == READOUT_EVENT
+        )
+        if len(frame_axes) != 1:
             raise ValueError(
-                "frame survival consumes a single frame Point axis and the "
-                f"source declares {len(point_axes)}"
+                "frame survival consumes one READOUT_EVENT Point axis and the "
+                f"source declares {len(frame_axes)}"
             )
         cell_axes = schema.cell_domain.axes
         if len(cell_axes) != 1:
@@ -123,24 +150,28 @@ class FrameSurvivalProcessor:
                 "occupancy processor's 'occupied' signal, not "
                 f"'counts' ({schema.value_schema.dtype})"
             )
-        frames = schema.point_domain.size
+        frames = frame_axes[0].size
         if frames < 2:
             raise ValueError(
                 "frame survival needs at least two frames per cycle and the "
                 f"source carries {frames}"
             )
-        return point_axes[0], cell_axes[0]
+        return frame_axes[0], cell_axes[0]
 
-    def _output_schema(self, source: DatasetSchema) -> DatasetSchema:
+    def _output_schema(
+        self, source: DatasetSchema, *, frame_rows: np.ndarray | None = None,
+    ) -> DatasetSchema:
         frame_axis, site_axis = self._source_axes(source)
-        pairs = _forward_pairs(source.point_domain.size)
+        if frame_rows is None:
+            frame_rows = _frame_rows(source, frame_axis)
+        pairs = _forward_pairs(frame_axis.size)
         # Labels carry the SOURCE frame coordinates, whatever the frame axis
         # declared -- numbers or names, since a typed coordinate may be either:
         # the pair identity an operator reads is the one the frame axis already
         # showed them.
         frame_names = tuple(
             "?" if value is None else value if isinstance(value, str) else f"{value:g}"
-            for code in source.point_domain.codes(frame_axis.axis_id)
+            for code in range(frame_axis.size)
             for value in (frame_axis.coordinate_at(code),)
         )
         pair_axis = AxisSpec(
@@ -154,17 +185,27 @@ class FrameSurvivalProcessor:
                 for condition, value in pairs
             ),
         )
-        # The pairs are this output's point rows, one per pair, and the
-        # source's own rows (its frames) do not exist here; any topology
-        # the source carried described those rows, so none is carried.
+        # Replace only the frame axis. Every other Point coordinate keeps
+        # its own forward pairs, in the source groups' physical order.
+        point_codes = tuple(
+            tuple(np.tile(np.arange(len(pairs)), len(frame_rows)).tolist())
+            if axis.axis_id == frame_axis.axis_id
+            else tuple(np.repeat(
+                source.point_domain.codes(axis.axis_id)[frame_rows[:, 0]], len(pairs),
+            ).tolist())
+            for axis in source.point_domain.axes
+        )
         return DatasetSchema(
             source.repeat_domain,
             DomainSpec(
-                (len(pairs),),
-                (pair_axis,),
-                (tuple(range(len(pairs))),),
+                (len(frame_rows) * len(pairs),),
+                tuple(
+                    pair_axis if axis.axis_id == frame_axis.axis_id else axis
+                    for axis in source.point_domain.axes
+                ),
+                point_codes,
             ),
-            DomainSpec((site_axis.size,), (site_axis,)),
+            source.cell_domain,
             ValueSchema(
                 ValidityContract.components(site_axis.axis_id),
                 np.dtype("?"),
@@ -176,29 +217,21 @@ class FrameSurvivalProcessor:
 
     def _pair(self, occupied: OwnedSnapshot) -> OwnedSnapshot:
         schema = occupied.block.schema
-        self._source_axes(schema)
-        pairs = _forward_pairs(schema.point_domain.size)
+        frame_axis, _site_axis = self._source_axes(schema)
+        frame_rows = _frame_rows(schema, frame_axis)
+        pairs = np.asarray(_forward_pairs(frame_axis.size), dtype=np.intp)
         values = np.asarray(occupied.block.values, dtype=bool)
         valid = np.asarray(occupied.expanded_validity(), dtype=bool)
-        cycles, _frames, sites = values.shape
-        survival = np.zeros((cycles, len(pairs), sites), dtype=bool)
-        eligible = np.zeros((cycles, len(pairs), sites), dtype=bool)
-        for entry, (condition, value) in enumerate(pairs):
-            # Eligible = the earlier frame saw the site loaded AND both
-            # frames were judgeable.  That set is the denominator, so it IS
-            # the validity: a MEAN over it is the pooled survival fraction.
-            entry_eligible = (
-                values[:, condition, :]
-                & valid[:, condition, :]
-                & valid[:, value, :]
-            )
-            eligible[:, entry, :] = entry_eligible
-            # False outside the denominator, exactly as the occupancy this
-            # reads publishes its own verdicts: the value of a cell that
-            # ran no trial is not a value, and validity is what says so.
-            survival[:, entry, :] = entry_eligible & values[:, value, :]
+        condition = frame_rows[:, pairs[:, 0]].reshape(-1)
+        later = frame_rows[:, pairs[:, 1]].reshape(-1)
+        # The denominator stays per-site validity, independently in each
+        # Point group: loaded before and judgeable in both frames.
+        eligible = (
+            values[:, condition, :] & valid[:, condition, :] & valid[:, later, :]
+        )
+        survival = eligible & values[:, later, :]
         return owned_snapshot_from_arrays(
-            self._output_schema(schema),
+            self._output_schema(schema, frame_rows=frame_rows),
             survival,
             occupied.block.revision,
             validity=eligible,
@@ -213,8 +246,13 @@ class FrameSurvivalProcessor:
         snapshot = signal_value.snapshot
         survival = self._pair(snapshot)
         source_schema = snapshot.block.schema
-        frames = source_schema.point_domain.size
+        frame_axis, _site_axis = self._source_axes(source_schema)
+        frames = frame_axis.size
         pair_count = len(_forward_pairs(frames))
+        total = (
+            survival.block.schema.repeat_domain.size
+            * survival.block.schema.point_domain.size
+        )
         run_record = {
             "node": self.instance_id,
             "parameters": {
@@ -230,7 +268,9 @@ class FrameSurvivalProcessor:
                 or signal_value.cell_origin is None
             ):
                 raise ValueError("finite source event lacks canonical placement")
-            canonical = self._output_schema(signal_value.canonical_schema)
+            canonical_frame, _site_axis = self._source_axes(signal_value.canonical_schema)
+            rows = _frame_rows(signal_value.canonical_schema, canonical_frame)
+            canonical = self._output_schema(signal_value.canonical_schema, frame_rows=rows)
             # The source ledger counts (cycles x frames) cells; this output
             # counts (cycles x pairs).  A cycle publishes all of its frames
             # together, so the translation is exact -- and refused loudly
@@ -248,22 +288,28 @@ class FrameSurvivalProcessor:
                 source_coverage.written_cells // frames * pair_count,
                 source_coverage.total_cells // frames * pair_count,
             )
-            origin = (signal_value.cell_origin[0], 0)
+            start = signal_value.cell_origin[1]
+            end = start + source_schema.point_domain.size
+            groups = np.flatnonzero(np.all((rows >= start) & (rows < end), axis=1))
+            if (
+                len(groups) * frames != end - start
+                or np.any(np.diff(groups) != 1)
+            ):
+                raise ValueError("frame survival event placement must contain whole cycles")
+            origin = (signal_value.cell_origin[0], int(groups[0]) * pair_count)
         elif signal_value.coverage is None:
-            cycles = source_schema.repeat_domain.size
-            canonical = self._output_schema(source_schema)
-            coverage = DatasetCoverage(cycles * pair_count, cycles * pair_count)
+            canonical = survival.block.schema
+            coverage = DatasetCoverage(total, total)
             origin = (0, 0)
         else:
             # A monitor source counts ITS geometry (cycles x frames); this
             # output counts (cycles x pairs), and the runtime checks the
             # ledger against the snapshot actually published.
             canonical = None
-            cycles = survival.block.schema.repeat_domain.size
             monitor = signal_value.coverage
             coverage = MonitorCoverage(
-                min(cycles, monitor.written_cells // frames) * pair_count,
-                cycles * pair_count,
+                min(total, monitor.written_cells // frames * pair_count),
+                total,
             )
             origin = None
         return {

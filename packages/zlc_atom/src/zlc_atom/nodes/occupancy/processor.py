@@ -9,7 +9,6 @@ from types import MappingProxyType
 
 import numpy as np
 from zlc_data import (
-    AxisSpec,
     DatasetSchema,
     DomainSpec,
     OwnedSnapshot,
@@ -110,14 +109,8 @@ class OccupancyProcessor:
             raise ValueError("producer must be non-empty")
         self.source_signal = None if source_signal is None else str(source_signal).strip()
 
-    def _source_point_axis(self, snapshot: OwnedSnapshot) -> AxisSpec:
-        """Read the parent's declared cycle: cell axes are (y, x), points vary.
-
-        Read, never sniffed.  This used to branch on ``ndim`` and on whether
-        ``shape[1] == 1``, which made a one-frame cycle silently lose its frame
-        point axis -- the shape of an array cannot say what its axes MEAN, and
-        a schema already says it.
-        """
+    def _validate_images(self, snapshot: OwnedSnapshot) -> None:
+        """Validate image cells; Repeat/Point axes pass through unchanged."""
 
         schema = snapshot.block.schema
         axes = schema.cell_domain.axes
@@ -132,13 +125,6 @@ class OccupancyProcessor:
                 f"frame shape {observed} differs from the crop this readout "
                 f"is placed against {expected}"
             )
-        point_axes = schema.point_domain.axes
-        if len(point_axes) != 1:
-            raise ValueError(
-                "occupancy inherits its parent's frame axis and the source "
-                f"declares {len(point_axes)} Point axes"
-            )
-        return point_axes[0]
 
     @property
     def readout(self) -> TrapCalibration:
@@ -295,7 +281,7 @@ class OccupancyProcessor:
 
         if not isinstance(frames, OwnedSnapshot):
             raise TypeError("occupancy process requires zlc_data.OwnedSnapshot")
-        self._source_point_axis(frames)
+        self._validate_images(frames)
         images = np.asarray(frames.block.values)
         repeats, points = images.shape[:2]
         n_sites = self.readout.n_sites
@@ -432,7 +418,6 @@ class OccupancyProcessor:
         # MEASURED on and a run that had moved its ROI was refused before the
         # translation it needed had been computed.
         self._validate_source_run_record(signal_value)
-        self._source_point_axis(snapshot)
         result = self.process(snapshot)
         return self._live_outputs(
             result,

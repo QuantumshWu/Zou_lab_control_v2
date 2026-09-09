@@ -137,6 +137,10 @@ Node new chunk
 
 ### 4.2 Identity与processors
 
+- Occupancy对每个Repeat/Point cell的图像独立应用校准，只检查SPATIAL_Y/X图像及校准尺寸，不限制Point具名轴数量；frame、scan及其它领先轴连同codes/坐标/单位原样传递，只有图像Cell-data转为site判决/计数。Live仍只处理event，terminal处理完整保留数据。
+- Frame Survival按唯一READOUT_EVENT定位frame轴，在每组其它Point坐标内部做forward pair；只把frame替换为pair，保留scan轴，不跨扫描点配对。finite coverage与placement按同一canonical frame-row映射转成pair-row，不把所有事件写到point origin 0。
+- SignalDescription持有不可变canonical schema，physical shape由该schema派生。Logic/Panel Outputs与Source列表从Plot公共schema_structure读取三domain轴大小，只显示三组数字维度，不添加轴名或单位；长度1的轴也保留乘1，不再只打印扁平Point carrier长度。原signal name和Panel标题的轴名行不变，UI仍只接收投影后的文本。
+
 - Generation标识一次run/restart；generation内schema和stream generation固定。
 - Revision严格递增，不接受重复、倒退或同ref不同内容。
 - 一次commit的siblings共享revision、run record和causal parent。

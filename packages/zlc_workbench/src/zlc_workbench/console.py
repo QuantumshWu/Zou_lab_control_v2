@@ -2428,7 +2428,7 @@ class ConsolePresenter:
                 tuple(
                     (
                         row.name.rsplit("/", 1)[-1] or row.name,
-                        format_signal_shape(descriptions[row.name].shape),
+                        format_signal_shape(descriptions[row.name].schema),
                         f"{row.state} · {row.name}",
                     )
                     for row in projected
@@ -7617,7 +7617,7 @@ class ConsolePresenter:
                 (
                     name.rsplit("/", 1)[-1] or name,
                     format_signal_shape(
-                        None if description is None else description.shape
+                        None if description is None else description.schema
                     ),
                     f"{lifecycle} · {name}",
                 )

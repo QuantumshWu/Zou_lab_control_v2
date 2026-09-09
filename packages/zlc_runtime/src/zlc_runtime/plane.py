@@ -258,7 +258,7 @@ class SignalValue:
 
 @dataclass(frozen=True, slots=True)
 class SignalDescription:
-    """One signal as an outsider may know it: names and flags, no objects.
+    """One signal's names, flags and immutable canonical Dataset schema.
 
     Deliberately not a window onto the plane's state.  A view that held the
     real thing would read it at whatever moment it happened to paint, and show
@@ -272,7 +272,11 @@ class SignalDescription:
     live: bool
     source_name: str | None
     revision: int
-    shape: tuple[int, ...] | None
+    schema: DatasetSchema | None
+
+    @property
+    def shape(self) -> tuple[int, ...] | None:
+        return None if self.schema is None else self.schema.physical_shape
 
     @property
     def derived(self) -> bool:
@@ -2778,13 +2782,13 @@ class SignalDataPlane:
                                 if state.publication is None
                                 else state.publication.event_ref.sequence
                             ),
-                            shape=(
+                            schema=(
                                 None
                                 if value is None
                                 else (
-                                    value.canonical_schema.physical_shape
+                                    value.canonical_schema
                                     if value.canonical_schema is not None
-                                    else value.shape
+                                    else value.schema
                                 )
                             ),
                         )

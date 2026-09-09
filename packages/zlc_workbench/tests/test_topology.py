@@ -31,9 +31,10 @@ from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementNode,
     CameraMeasurementRequest,
 )
+from zlc_atom.nodes.scan.dataset import scan_dataset_schema
 from zlc_data import (
+    READOUT_EVENT,
     REPEAT,
-    SCAN_POINT,
     SITE,
     AxisId,
     AxisSpec,
@@ -43,9 +44,9 @@ from zlc_data import (
     owned_snapshot_from_arrays,
 )
 from zlc_runtime import (
+    DatasetCoverage,
     DatasetOutputDeclaration,
     LiveDatasetOutput,
-    MonitorCoverage,
     SignalDataPlane,
 )
 from zlc_workbench.logic import stable_signal_key
@@ -66,12 +67,11 @@ def plane():
 
 
 def _finished_frames(plane, producer: str = "cm") -> str:
-    """One sealed ``frames`` Dataset under ``producer``; its signal name.
+    """One stopped scan's ``frames`` Dataset; its signal name.
 
-    What a finished camera run leaves on the plane is a sealed publication
-    with a shape.  Putting that there directly keeps the apparatus that
-    would have acquired it out of a test whose subject is how a description
-    is spelled for a person.
+    Three source frames sit inside a single power coordinate, with fifty
+    authored repeats. The first event and stopped run retain that full
+    schema without needing the apparatus that would have acquired them.
     """
 
     declaration = DatasetOutputDeclaration("frames", "camera.frames")
@@ -81,21 +81,26 @@ def _finished_frames(plane, producer: str = "cm") -> str:
         signal_key=lambda name: stable_signal_key(producer, name),
     )
     repeat = AxisSpec(AxisId(f"{producer}.repeat"), "repeat", REPEAT, 1, (0,))
-    point = AxisSpec(AxisId(f"{producer}.point"), "point", SCAN_POINT, 1, (0,))
+    point = AxisSpec(AxisId(f"{producer}.point"), "frame", READOUT_EVENT, 3, (0, 1, 2))
     site = AxisSpec(AxisId(f"{producer}.site"), "site", SITE, 3, (0, 1, 2))
     schema = DatasetSchema(
         DomainSpec((1,), (repeat,), ((0,),)),
-        DomainSpec((1,), (point,), ((0,),)),
+        DomainSpec((3,), (point,), ((0, 1, 2),)),
         DomainSpec((3,), (site,)),
         ValueSchema.scalar(np.dtype("<f8")),
     )
-    snapshot = owned_snapshot_from_arrays(schema, np.zeros((1, 1, 3)), 0)
+    snapshot = owned_snapshot_from_arrays(schema, np.zeros((1, 3, 3)), 0)
+    canonical = scan_dataset_schema(
+        schema, ((135.0,),), (("power", "mVpp"),), run_repeats=50,
+    )
     plane.begin_generation(node)
     plane.commit_live(
         node,
-        {"frames": LiveDatasetOutput(declaration, snapshot, MonitorCoverage(1, 1), {})},
+        {"frames": LiveDatasetOutput(
+            declaration, snapshot, DatasetCoverage(3, 150), {}, canonical, (0, 0),
+        )},
     )
-    plane.seal_committed(node)
+    plane.seal_committed(node, cut_short=True)
     return node.signal_key("frames")
 
 
@@ -130,8 +135,16 @@ def test_a_finished_measurement_is_offerable_and_says_it_is_finished(plane) -> N
     rows = project_signals(plane)
     assert rows, "a run that produced data offered nothing to look at"
     row = next(row for row in rows if row.name == signal)
-    assert row.label == f"frames  [{format_signal_shape((1, 1, 3))}]"
-    assert row.label == "frames  [1 × 1 × (3)]"
+    description = next(item for item in plane.describe_signals() if item.name == signal)
+    assert description.shape == (50, 3, 3)
+    assert row.label == f"frames  [{format_signal_shape(description.schema)}]"
+    assert row.label == (
+        "frames  [(1 × 50) × (3 × 1) × (3)]"
+    )
+    scan_axis = description.schema.point_domain.axes[-1]
+    assert (scan_axis.name, scan_axis.size, scan_axis.coordinates, scan_axis.unit) == (
+        "power", 1, (135.0,), "mVpp",
+    )
     assert row.producer == "cm"
     assert row.state == "finished"
     assert row.derived_from == ""
@@ -145,6 +158,7 @@ def test_a_reserved_output_waits_until_its_first_publication() -> None:
                 name="@logic/camera/frames",
                 owner_id="camera",
                 shape=None,
+                schema=None,
                 failure=None,
                 live=True,
                 source_name=None,
@@ -224,6 +238,6 @@ def test_this_module_holds_no_domain_knowledge() -> None:
         if isinstance(node, ast.ImportFrom) and node.module
     }
     assert not any(
-        name.startswith(("zlc_atom", "zlc_plot", "zlc_runtime", "PyQt5"))
+        name.startswith(("zlc_atom", "zlc_runtime", "PyQt5"))
         for name in imported
     ), imported

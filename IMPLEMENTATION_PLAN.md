@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- Scan→Occupancy已删除旧“Point必须只有frame一个轴”的否决，保留真实图像/校准检查并去掉重复验证。正式ScanDatasetWriter/Plane的50×3×72×92案例复现terminal两Point轴报错，修后逐event与完整terminal结果通过且保留frame3、power1/mVpp；FrameSurvival同步按READOUT_EVENT分组配对并保留其它Point轴及finite placement，2/3/4 frames与2×2 scan定向验证通过。信号列表改读canonical schema并复用公共逻辑轴摘要，正式Qt截图确认(1×50)×(3×1)×(72×92)及power轴，测试窗口全部关闭，未操作硬件。
+
 - Derive界面统一英文，只读信息完整展开，短帮助不设内部scroll。空Code等未提交草稿显示中性`Draft: Signals row N: Enter Python code`，不标节点error；Start仍禁用，填完整后经原finalization解除。实际Qt输入→计算→Plot→Save Fig→FigureViewer流程通过，1×1×35结果与独立NumPy相同，所有窗口已关闭。
 - Numba预热复用原样本，按模块变更/缓存缺失选择render（raster＋3D）或fit（compiled＋radial）组；匹配marker仍检查缺失机器码，日志区分production signatures新编译/磁盘加载。11项无编译定向验证通过，未清缓存或全量预热。同一kernel源文件内的Numba整文件失效仍存在，不声称本改动消除了该重编译。
 

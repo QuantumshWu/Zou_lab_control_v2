@@ -229,6 +229,82 @@ def test_evaluate_translates_exact_coverage_by_whole_cycles() -> None:
     assert survival.canonical_schema.repeat_domain.size == 5
 
 
+@pytest.mark.parametrize("frames", (2, 3, 4))
+def test_scan_pairing_preserves_coordinates_and_live_terminal_placement(frames) -> None:
+    from types import SimpleNamespace
+    from zlc_atom.nodes.scan import SCAN_OUTPUT, ScanDatasetWriter
+    from zlc_atom.nodes.frame_survival import SURVIVAL_OUTPUTS
+    from zlc_runtime import SignalDataPlane
+
+    rng = np.random.default_rng(17)
+    occupied = rng.random((2, 4, frames, 3)) < 0.65
+    valid = rng.random(occupied.shape) < 0.85
+    base = _occupied_snapshot(occupied[0, 0][None]).block.schema
+    frame_axis = replace(base.point_domain.axes[0], name="probe window")
+    # Physical rows need not be in frame-coordinate order.
+    frame_codes = tuple(reversed(range(frames)))
+    base = replace(base, point_domain=DomainSpec((frames,), (frame_axis,), (frame_codes,)))
+    writer = ScanDatasetWriter(
+        ((8, 3), (8, 7), (2, 3), (2, 7)),
+        (("frame", "V"), ("other", "Hz")), run_repeats=2,
+    )
+    processor = FrameSurvivalProcessor(producer="survival")
+    scan = SimpleNamespace(instance_id="scan", dataset_output_declarations=(SCAN_OUTPUT,),
+                           signal_key=lambda name: f"@logic/scan/{name}")
+    result = SimpleNamespace(instance_id="survival", dataset_output_declarations=SURVIVAL_OUTPUTS,
+                             signal_key=lambda name: f"@logic/survival/{name}")
+    plane = SignalDataPlane()
+    pair_count = frames * (frames - 1) // 2
+    expected = np.zeros((2, 4, pair_count, 3), dtype=bool)
+    eligible = np.zeros_like(expected)
+    try:
+        plane.begin_generation(scan)
+        plane.begin_generation(result)
+        for repeat in range(2):
+            for point in range(4):
+                snapshot = owned_snapshot_from_arrays(
+                    base, occupied[repeat, point][None], repeat * 4 + point,
+                    validity=valid[repeat, point][None],
+                )
+                event = writer.write(SignalValue("occupied", snapshot, None),
+                                     row=point, scan_repeat=0, run_repeat=repeat)
+                plane.commit_live(scan, {"scan": event})
+                source_publication = plane.latest_publication("@logic/scan/scan")
+                output = processor.evaluate(source_publication.value("@logic/scan/scan"))["survival"]
+                assert output.cell_origin == (repeat, point * pair_count)
+                assert output.coverage == DatasetCoverage(
+                    (repeat * 4 + point + 1) * pair_count, 8 * pair_count,
+                )
+                plane.commit_live(result, {"survival": output})
+                entry = 0
+                for earlier in range(frames):
+                    for later in range(earlier + 1, frames):
+                        before, after = frame_codes.index(earlier), frame_codes.index(later)
+                        trial = (occupied[repeat, point, before]
+                                 & valid[repeat, point, before] & valid[repeat, point, after])
+                        eligible[repeat, point, entry] = trial
+                        expected[repeat, point, entry] = trial & occupied[repeat, point, after]
+                        entry += 1
+                live = plane.current_dataset("@logic/survival/survival")
+                np.testing.assert_array_equal(live.block.values, expected.reshape(2, -1, 3))
+                np.testing.assert_array_equal(live.expanded_validity(), eligible.reshape(2, -1, 3))
+        plane.seal_committed(scan)
+        source = plane.current_dataset("@logic/scan/scan")
+        terminal = processor.evaluate(SignalValue("scan", source, None))["survival"]
+        assert terminal.snapshot.block.schema == live.block.schema
+        assert terminal.coverage == DatasetCoverage(8 * pair_count, 8 * pair_count)
+        np.testing.assert_array_equal(terminal.snapshot.block.values, live.block.values)
+        np.testing.assert_array_equal(terminal.snapshot.expanded_validity(), live.expanded_validity())
+        output_domain = live.block.schema.point_domain
+        assert output_domain.axes[1:] == source.block.schema.point_domain.axes[1:]
+        assert output_domain.axis_codes[1:] == tuple(
+            tuple(code for code in codes[::frames] for _ in range(pair_count))
+            for codes in source.block.schema.point_domain.axis_codes[1:]
+        )
+    finally:
+        plane.close()
+
+
 def test_evaluate_refuses_partial_cycle_coverage() -> None:
     occupied = np.zeros((5, 3, 4), dtype=bool)
     snapshot = _occupied_snapshot(occupied)

@@ -22,6 +22,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from zlc_plot.semantics import schema_structure
+
 
 __all__ = ["SignalRow", "format_signal_shape", "project_signals"]
 
@@ -65,7 +67,7 @@ def project_signals(
             name=description.name,
             label=(
                 f"{_label(description.name)}  "
-                f"[{format_signal_shape(description.shape)}]"
+                f"[{format_signal_shape(description.schema)}]"
             ),
             producer=_producer(description.name, description.owner_id),
             state=_state(description),
@@ -80,16 +82,15 @@ def project_signals(
     )
 
 
-def format_signal_shape(shape: object) -> str:
-    """Spell one published physical ``R × P × cell`` tensor."""
+def format_signal_shape(schema: object) -> str:
+    """Format the shared three-domain sizes, without adding axis names."""
 
-    if shape is None:
+    if schema is None:
         return "—"
-    dimensions = tuple(int(value) for value in shape)  # type: ignore[arg-type]
-    if len(dimensions) < 3:
-        return " × ".join(str(value) for value in dimensions)
-    cell = "×".join(str(value) for value in dimensions[2:])
-    return f"{dimensions[0]} × {dimensions[1]} × ({cell})"
+    return " × ".join(
+        "(" + (" × ".join(str(size) for _name, size in group) or "1") + ")"
+        for group in schema_structure(schema)
+    )
 
 
 def _state(description: object) -> str:

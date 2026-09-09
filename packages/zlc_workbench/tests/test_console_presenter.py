@@ -2691,7 +2691,7 @@ def test_committed_selection_outputs_enter_the_real_occupancy_input(
         if row.name in projection["source_options"]:
             leaf = row.name.rsplit("/", 1)[-1]
             assert projection["source_labels"][row.name] == (
-                f"{leaf}  [{format_signal_shape(row.shape)}]"
+                f"{leaf}  [{format_signal_shape(row.schema)}]"
             )
 
     presenter.set_deriving(True)
@@ -2710,7 +2710,7 @@ def test_committed_selection_outputs_enter_the_real_occupancy_input(
         if row.name == roi_signal
     )
     assert projection["source_labels"][roi_signal] == (
-        f"roi_frame  [{format_signal_shape(roi_description.shape)}]"
+        f"roi_frame  [{format_signal_shape(roi_description.schema)}]"
     )
     presenter.beat()
     shown_rows = presenter.view._rows[producer_id].publishes
@@ -2940,8 +2940,7 @@ def test_every_control_on_a_card_is_answered(presenter, session) -> None:
         for display, key in leaves
     }
     assert binding.signal in offered
-    shape = snapshot.block.values.shape
-    shape_text = f"{shape[0]} × {shape[1]} × ({'×'.join(map(str, shape[2:]))})"
+    shape_text = format_signal_shape(snapshot.block.schema)
     assert offered[binding.signal] == f"frames  [{shape_text}]"
     assert card.chosen == binding.signal
 
