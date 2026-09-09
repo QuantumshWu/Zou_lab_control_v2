@@ -2304,12 +2304,6 @@ class FitProjection:
                     + ", ".join(model.symbols)
                 )
             name = parameter.name
-            if parameter.supplied is not None:
-                # The histogram's own bin pitch: printed in the formula so
-                # the model is stated whole, never the operator's to set.
-                raise ValueError(
-                    f"{symbol!r} is the histogram's own bin width; the data sets it"
-                )
             if name in fixed or name in initial:
                 raise ValueError(f"repeated fit parameter {symbol!r}")
             guessed = raw.startswith("guess(") and raw.endswith(")")

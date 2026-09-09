@@ -43,8 +43,8 @@ def _parameters(model_id: str) -> np.ndarray:
     return {
         "lorentzian": np.array([0.2, 0.8, 1.4, 0.1]),
         "gaussian_offset": np.array([1.2, 0.1, 0.7, 0.2]),
-        "histogram_gaussian": np.array([60.0, 0.2, 0.7, 0.1]),
-        "bimodal_gaussian": np.array([40.0, -0.3, 0.4, 0.8, 0.5, 0.45, 0.1]),
+        "histogram_gaussian": np.array([6.0, 0.2, 0.7]),
+        "bimodal_gaussian": np.array([4.0, -0.3, 0.4, 0.8, 0.5, 0.45]),
         "symmetric_lorentzian_doublet": np.array([0.1, 0.7, 1.2, 0.1, 0.8]),
         "damped_sine": np.array([1.2, 0.1, 0.4, 1.8, 0.3]),
         "exponential_decay": np.array([1.2, 0.1, 1.4]),
@@ -52,8 +52,8 @@ def _parameters(model_id: str) -> np.ndarray:
         "saturation": np.array([125.0, 10.0, 2.0]),
         "anisotropic_gaussian_center": np.array([1.2, 0.1, 1.1, 0.8, 0.2, -0.1]),
         "radial_gaussian_center": np.array([1.2, 0.1, 1.1, 0.2, -0.1]),
-        "histogram_poisson_gaussian": np.array([10.0, 3.0, 0.6, 0.2]),
-        "bimodal_poisson_gaussian": np.array([12.0, 0.5, 0.5, 5.0, 0.6, 0.45, 0.2]),
+        "histogram_poisson_gaussian": np.array([2.0, 3.0, 0.6]),
+        "bimodal_poisson_gaussian": np.array([2.4, 0.5, 0.5, 5.0, 0.6, 0.45]),
     }[model_id].copy()
 
 

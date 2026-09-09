@@ -43,21 +43,19 @@ def _shots(rng: np.random.Generator, count: int, bright_fraction: float) -> np.n
 
 
 def test_the_histogram_models_are_written_in_physical_parameters() -> None:
-    """Shots, a centre and a width; then an offset, a width and a share; and
-    the bin the data supplies.  Nothing is a peak height or a midpoint."""
+    """An amplitude (the shots times the bin), a centre and a width; then an
+    offset, a width and a share.  Nothing is a peak height or a midpoint."""
 
     models = {model.model_id: model for model in builtin_fit_models()}
-    assert models["histogram_gaussian"].parameter_names == (
-        "total", "center", "sigma", "bin_width"
-    )
+    assert models["histogram_gaussian"].parameter_names == ("amplitude", "center", "sigma")
     assert models["bimodal_gaussian"].parameter_names == (
-        "total", "center", "sigma", "delta_center", "sigma_B", "ratio", "bin_width"
+        "amplitude", "center", "sigma", "delta_center", "sigma_B", "ratio"
     )
     assert models["histogram_poisson_gaussian"].parameter_names == (
-        "total", "rate", "sigma", "bin_width"
+        "amplitude", "rate", "sigma"
     )
     assert models["bimodal_poisson_gaussian"].parameter_names == (
-        "total", "rate", "sigma", "delta_rate", "sigma_B", "ratio", "bin_width"
+        "amplitude", "rate", "sigma", "delta_rate", "sigma_B", "ratio"
     )
     for model_id in ("bimodal_gaussian", "bimodal_poisson_gaussian"):
         model = models[model_id]
@@ -66,42 +64,24 @@ def test_the_histogram_models_are_written_in_physical_parameters() -> None:
         assert model.reduction.nested_model_id == model_id.replace(
             "bimodal_", "histogram_"
         )
-        assert model.parameters[-1].supplied == "bin_width"
-        assert model.symbols == ("N", "lambda" if "poisson" in model_id else "x_0",
-                                 "sigma", "delta", "sigma_B", "r", "w")
+        assert model.symbols == (
+            "Nw", "lambda" if "poisson" in model_id else "x_0", "sigma", "delta", "sigma_B", "r"
+        )
 
 
-def test_a_single_gaussian_counts_its_shots_and_takes_the_bin_from_the_data() -> None:
+def test_a_single_gaussian_is_the_shots_times_the_bin() -> None:
     rng = np.random.default_rng(3)
     samples = rng.normal(100.0, 10.0, 2000)
     centres, counts = _histogram(samples, bins=50)
     result = FitEngine().fit("histogram_gaussian", (centres,), counts, data_revision=0)
     assert result.success
-    assert result.fixed_parameter_names == ("bin_width",)
-    assert result.parameters["bin_width"] == pytest.approx(float(centres[1] - centres[0]))
-    assert result.parameters["total"] == pytest.approx(2000.0, rel=0.03)
+    assert result.fixed_parameter_names == ()
+    bin_width = float(centres[1] - centres[0])
+    assert result.parameters["amplitude"] == pytest.approx(2000.0 * bin_width, rel=0.03)
     assert result.parameters["center"] == pytest.approx(100.0, abs=1.0)
     assert result.parameters["sigma"] == pytest.approx(10.0, rel=0.05)
-    # The bin is printed in the formula, since the formula states the model.
-    assert "w" in result.model.symbols
-
-
-def test_the_bin_is_the_histograms_own_and_cannot_be_bounded_away() -> None:
-    rng = np.random.default_rng(4)
-    centres, counts = _histogram(rng.normal(100.0, 10.0, 500))
-    engine = FitEngine()
-    with pytest.raises(ValueError, match="histogram's own bin width"):
-        engine.fit(
-            "histogram_gaussian", (centres,), counts, bounds={"bin_width": (5.0, 5.0)}
-        )
-    # A seed naming it is overridden, as any seed's fixed values are.
-    seeded = engine.fit(
-        "histogram_gaussian",
-        (centres,),
-        counts,
-        initial={"bin_width": 5.0, "center": 100.0},
-    )
-    assert seeded.parameters["bin_width"] == pytest.approx(float(centres[1] - centres[0]))
+    # The formula states the model: one amplitude, the shots times the bin.
+    assert result.model.symbols == ("Nw", "x_0", "sigma")
 
 
 def test_a_histogram_fit_stays_within_what_the_histogram_shows() -> None:
@@ -125,7 +105,7 @@ def test_a_histogram_fit_stays_within_what_the_histogram_shows() -> None:
         assert result.reduced is (model == "bimodal_gaussian")
         assert low_edge <= result.parameters["center"] <= high_edge
         assert 0.5 * step <= result.parameters["sigma"] <= high_edge - low_edge
-        assert result.parameters["total"] <= 10.0 * counts.sum()
+        assert result.parameters["amplitude"] <= 10.0 * counts.sum() * step
     # A bound the caller asks for meets the histogram's: a tighter one is
     # kept, one with nothing inside the histogram's limit is refused.
     kept = engine.fit(
@@ -167,8 +147,8 @@ def test_two_populations_are_reported_with_their_share_and_evidence() -> None:
     assert values["sigma"] == pytest.approx(10.0, rel=0.25)
     assert values["sigma_B"] == pytest.approx(25.0, rel=0.25)
     assert values["ratio"] == pytest.approx(0.3, abs=0.05)
-    assert values["total"] == pytest.approx(400.0, rel=0.05)
-    assert result.fixed_parameter_names == ("bin_width",)
+    assert values["amplitude"] == pytest.approx(400.0 * (centres[1] - centres[0]), rel=0.05)
+    assert result.fixed_parameter_names == ()
     threshold, left, right, fidelity = _bimodal_classifier_metrics(result)
     assert threshold is not None and 120.0 < threshold < 220.0
     assert right == pytest.approx(values["ratio"], abs=0.02)
@@ -190,14 +170,12 @@ def test_one_population_stands_with_its_components_coinciding() -> None:
     assert values["sigma_B"] == values["sigma"]
     assert values["ratio"] == 0.5
     single = engine.fit("histogram_gaussian", (centres,), counts, data_revision=0)
-    for name in ("total", "center", "sigma", "bin_width"):
+    for name in ("amplitude", "center", "sigma"):
         assert values[name] == single.parameters[name]
         assert result.errors[name] == single.errors[name]
     np.testing.assert_array_equal(result.fitted_values, single.fitted_values)
     # The pinned parameters were fitted by nobody: no error bar stands on them.
-    assert result.fixed_parameter_names == (
-        "delta_center", "sigma_B", "ratio", "bin_width"
-    )
+    assert result.fixed_parameter_names == ("delta_center", "sigma_B", "ratio")
     assert not result.parameter_error_validity["ratio"]
     assert "one population" in result.message
     assert _bimodal_classifier_metrics(result)[0] is None
@@ -274,9 +252,6 @@ def test_the_overlay_says_how_the_question_was_decided() -> None:
         )
         assert overlay.evidence.startswith("ΔBIC = ")
         assert overlay.evidence.endswith("one population")
-        # The bin is stated with the fit, and stands without an error bar.
-        bin_row = next(row for row in overlay.parameter_display if row.name == "bin_width")
-        assert bin_row.standard_error is None
     finally:
         session.close()
     session = _bimodal_session(_shots(rng, 400, 0.5))
@@ -305,10 +280,6 @@ def test_the_threshold_is_a_fit_setting_of_the_model_that_asks() -> None:
         with pytest.raises(TypeError, match="has no min_bic_gain"):
             session.configure(
                 fit={"model": "histogram_gaussian", "min_bic_gain": 5.0}, fit_live=False
-            )
-        with pytest.raises(ValueError, match="histogram's own bin width"):
-            session._projected.fit_expression_target(
-                session._resolve_fit_model("bimodal_gaussian"), "w=2"
             )
     finally:
         session.close()

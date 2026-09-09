@@ -22,43 +22,33 @@ from zlc_plot.fit import (
 
 
 _SQRT_TWO_PI = math.sqrt(2.0 * math.pi)
-#: The frozen anchors' bin pitches: the Gaussian histograms are binned at
-#: 0.075 and the photon histograms at 0.125.
-_ANCHOR_STEP = 0.075
-_ANCHOR_PHOTON_STEP = 0.125
-#: The pitches of ``_coordinates`` for the histogram models.
-_STEP = 10.0 / 111.0
-_PHOTON_STEP = 18.0 / 72.0
 
 
-def _shots(height: float, sigma: float, step: float) -> float:
-    """The shots behind a Gaussian peak ``height`` counts per bin tall."""
+def _area(height: float, sigma: float) -> float:
+    """The area of a Gaussian peak ``height`` counts per bin tall: the
+    histogram models' amplitude, the shots times the bin."""
 
-    return height * sigma * _SQRT_TWO_PI / step
+    return height * sigma * _SQRT_TWO_PI
 
 
 PARAMETERS = {
     "lorentzian": (0.35, 1.2, 2.5, 0.2),
     "gaussian_offset": (2.0, 0.15, 0.9, -0.3),
-    "histogram_gaussian": (_shots(2.0, 0.9, _ANCHOR_STEP), 0.2, 0.9, _ANCHOR_STEP),
+    "histogram_gaussian": (_area(2.0, 0.9), 0.2, 0.9),
     "bimodal_gaussian": (
-        _shots(1.2, 0.6, _ANCHOR_STEP) + _shots(0.9, 0.8, _ANCHOR_STEP),
+        _area(1.2, 0.6) + _area(0.9, 0.8),
         -0.7,
         0.6,
         1.4,
         0.8,
-        _shots(0.9, 0.8, _ANCHOR_STEP)
-        / (_shots(1.2, 0.6, _ANCHOR_STEP) + _shots(0.9, 0.8, _ANCHOR_STEP)),
-        _ANCHOR_STEP,
+        _area(0.9, 0.8) / (_area(1.2, 0.6) + _area(0.9, 0.8)),
     ),
     "symmetric_lorentzian_doublet": (0.1, 1.0, 1.5, 0.1, 1.2),
     "damped_sine": (1.2, 0.1, 1.4, 3.0, 0.2),
     "exponential_decay": (2.2, 0.1, 2.5),
     "radial_gaussian_center": (3.0, 0.2, 0.8, 0.4, -0.3),
-    "histogram_poisson_gaussian": (2.0 / _ANCHOR_PHOTON_STEP, 1.5, 0.6, _ANCHOR_PHOTON_STEP),
-    "bimodal_poisson_gaussian": (
-        2.1 / _ANCHOR_PHOTON_STEP, 0.8, 0.5, 3.2, 0.7, 0.9 / 2.1, _ANCHOR_PHOTON_STEP
-    ),
+    "histogram_poisson_gaussian": (2.0, 1.5, 0.6),
+    "bimodal_poisson_gaussian": (2.1, 0.8, 0.5, 3.2, 0.7, 0.9 / 2.1),
 }
 
 _ANCHOR_PATH = Path(__file__).with_name("fixtures") / "fit_anchors.json"
@@ -120,16 +110,14 @@ _POISSON_MODELS = frozenset(
 _BASE_PARAMETERS = {
     "lorentzian": (-0.4, 1.1, 2.2, 0.25),
     "gaussian_offset": (2.0, 0.2, 0.9, -0.3),
-    "histogram_gaussian": (_shots(90.0, 0.8, _STEP), -0.3, 0.8, _STEP),
+    "histogram_gaussian": (_area(90.0, 0.8), -0.3, 0.8),
     "bimodal_gaussian": (
-        _shots(60.0, 0.55, _STEP) + _shots(45.0, 0.75, _STEP),
+        _area(60.0, 0.55) + _area(45.0, 0.75),
         -1.2,
         0.55,
         2.4,
         0.75,
-        _shots(45.0, 0.75, _STEP)
-        / (_shots(60.0, 0.55, _STEP) + _shots(45.0, 0.75, _STEP)),
-        _STEP,
+        _area(45.0, 0.75) / (_area(60.0, 0.55) + _area(45.0, 0.75)),
     ),
     "symmetric_lorentzian_doublet": (0.1, 0.8, 1.4, 0.2, 2.5),
     "damped_sine": (1.2, 0.2, 0.25, 6.0, -0.3),
@@ -137,8 +125,8 @@ _BASE_PARAMETERS = {
     "release_recapture": (0.8, 0.05, 6.0, 0.4),
     "anisotropic_gaussian_center": (3.0, 0.2, 0.9, 0.6, 0.35, -0.25),
     "radial_gaussian_center": (3.0, 0.2, 0.8, 0.35, -0.25),
-    # N is the shots, the density's area over the bin: these put ~60 counts
-    # in the tallest bin like the Gaussian rows do.  The read noise is a fair
+    # Nw is the shots times the bin, the density's area: these put ~60
+    # counts in the tallest bin like the Gaussian rows do.  The read noise is a fair
     # share of each state's variance (sigma^2 / (rate + sigma^2) of 26%, and
     # 45% / 32%): it is a resolved quantity, the optimum is sharp and two
     # solvers land on the same point.  At a 13% share, three outlier bins
@@ -146,10 +134,8 @@ _BASE_PARAMETERS = {
     # (the same total variance), leaving the width on its floor in a flat
     # valley two solvers stop in differently; at twenty photons a
     # 0.3-photon read noise would be a 0.5% share, unidentifiable outright.
-    "histogram_poisson_gaussian": (410.0 / _PHOTON_STEP, 4.0, 1.2, _PHOTON_STEP),
-    "bimodal_poisson_gaussian": (
-        520.0 / _PHOTON_STEP, 1.0, 0.9, 6.0, 1.8, 320.0 / 520.0, _PHOTON_STEP
-    ),
+    "histogram_poisson_gaussian": (410.0, 4.0, 1.2),
+    "bimodal_poisson_gaussian": (520.0, 1.0, 0.9, 6.0, 1.8, 320.0 / 520.0),
     "saturation": (125.0, 10.0, 2.0),
 }
 
@@ -307,10 +293,10 @@ def _cell_parameters(model_id: str, cell: int) -> np.ndarray:
     elif model_id == "gaussian_offset":
         parameters[[0, 2, 3]] += (0.2 * position, 0.15 * position, 0.7 * position)
     elif model_id == "histogram_gaussian":
-        parameters[[0, 1, 2]] += (270.0 * position, 0.6 * position, 0.12 * position)
+        parameters[[0, 1, 2]] += (24.0 * position, 0.6 * position, 0.12 * position)
     elif model_id == "bimodal_gaussian":
         parameters += np.asarray(
-            (250.0, 0.4, 0.08, 0.25, -0.08, 0.05, 0.0)
+            (22.5, 0.4, 0.08, 0.25, -0.08, 0.05)
         ) * position
     elif model_id == "symmetric_lorentzian_doublet":
         parameters[[0, 1, 2, 4]] += (
@@ -333,10 +319,10 @@ def _cell_parameters(model_id: str, cell: int) -> np.ndarray:
     elif model_id == "saturation":
         parameters += np.asarray((12.0, 0.4, 0.5)) * position
     elif model_id == "histogram_poisson_gaussian":
-        parameters[[0, 1, 2]] += (240.0 * position, 0.8 * position, 0.15 * position)
+        parameters[[0, 1, 2]] += (60.0 * position, 0.8 * position, 0.15 * position)
     elif model_id == "bimodal_poisson_gaussian":
         parameters += np.asarray(
-            (200.0, 0.2, 0.08, 0.8, -0.08, 0.05, 0.0)
+            (50.0, 0.2, 0.08, 0.8, -0.08, 0.05)
         ) * position
     elif model_id == "anisotropic_gaussian_center":
         parameters[[0, 2, 3, 4, 5]] += (

@@ -32,7 +32,6 @@ from .fit import (
     FitOptions,
     FitResult,
     _bimodal_classifier_metrics,
-    _histogram_step,
 )
 from .parameters import RenderEffect
 from .selectors import (
@@ -1243,10 +1242,9 @@ class FitSessionMixin:
         ratio = float(components["ratio"])
         x = np.asarray(selection.coordinates[0], dtype=float).reshape(-1)
         observed = np.asarray(selection.observations, dtype=float).reshape(-1)
-        # The pair is authored in shape; only the shots are the histogram's,
-        # and they are what the counts say they are.
-        bin_width = _histogram_step(x)
-        density = bin_width * (
+        # The pair is authored in shape; only its area is the histogram's,
+        # and that is what the counts say it is.
+        shape = (
             (1.0 - ratio)
             / (sigma * math.sqrt(2.0 * math.pi))
             * np.exp(-0.5 * ((x - center) / sigma) ** 2)
@@ -1254,20 +1252,19 @@ class FitSessionMixin:
             / (sigma_b * math.sqrt(2.0 * math.pi))
             * np.exp(-0.5 * ((x - center - delta_center) / sigma_b) ** 2)
         )
-        denominator = float(np.dot(density, density))
-        total = (
-            max(0.0, float(np.dot(density, observed)) / denominator)
+        denominator = float(np.dot(shape, shape))
+        amplitude = (
+            max(0.0, float(np.dot(shape, observed)) / denominator)
             if denominator > 0.0
             else 0.0
         )
         values = {
-            "total": total,
+            "amplitude": amplitude,
             "center": center,
             "sigma": sigma,
             "delta_center": delta_center,
             "sigma_B": sigma_b,
             "ratio": ratio,
-            "bin_width": bin_width,
         }
         parameters = np.asarray(
             [values[name] for name in model.parameter_names], dtype=float
