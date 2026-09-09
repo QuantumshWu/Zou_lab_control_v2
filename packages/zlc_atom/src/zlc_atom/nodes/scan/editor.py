@@ -39,8 +39,11 @@ from zlc_ui.fluent import (
     FluentTreeComboBox,
     FluentLineEdit,
     FluentSpinBox,
+    FluentLabel,
+    ElidedLabel,
     fill_grouped_choice_combo,
     fluent_unit_picker,
+    scaled_px,
     signals_blocked,
 )
 from zlc_ui.form import FluentParameterForm, FormFieldProps, FormSpec, being_edited
@@ -108,24 +111,28 @@ class _AxisRow(QtWidgets.QWidget):
         self.stop_spin = FluentDoubleSpinBox()
         self.points_spin = FluentSpinBox()
         self.points_spin.setRange(1, 100_000)
-        self.custom_label = QtWidgets.QLabel("")
+        self.custom_label = ElidedLabel("")
         #: Which spelling of the port's unit both ends are read in.  ONE
         #: picker, not two: "from" and "to" are two ends of one sweep, and a
         #: row that could say 1 us to 40 ms is a row nobody can read.
         self.unit_picker = None
-        self.unit_label = QtWidgets.QLabel("")
+        self._unit_host = QtWidgets.QWidget(self)
+        self._unit_layout = QtWidgets.QHBoxLayout(self._unit_host)
+        self._unit_layout.setContentsMargins(0, 0, 0, 0)
+        self._unit_layout.setSpacing(0)
+        self.unit_label = FluentLabel("")
+        self._unit_layout.addWidget(self.unit_label)
         remove = FluentButton("×", color=GREY)
-        remove.setFixedWidth(32)
+        remove.setFixedWidth(scaled_px(32))
         remove.setToolTip("Remove this axis")
         self.remove_button = remove
         layout.addWidget(self.port_combo, 2)
-        layout.addWidget(QtWidgets.QLabel("from"))
+        layout.addWidget(FluentLabel("from"))
         layout.addWidget(self.start_spin, 1)
-        layout.addWidget(QtWidgets.QLabel("to"))
+        layout.addWidget(FluentLabel("to"))
         layout.addWidget(self.stop_spin, 1)
-        self._unit_slot = layout.count()
-        layout.addWidget(self.unit_label)
-        layout.addWidget(QtWidgets.QLabel("points"))
+        layout.addWidget(self._unit_host)
+        layout.addWidget(FluentLabel("points"))
         layout.addWidget(self.points_spin)
         layout.addWidget(self.custom_label)
         layout.addWidget(remove)
@@ -221,7 +228,7 @@ class _AxisRow(QtWidgets.QWidget):
         a new evenly spaced grid.
         """
 
-        layout = self.layout()
+        layout = self._unit_layout
         symbol = str(unit).strip()
         picker = self.unit_picker
         if picker is not None:
@@ -238,7 +245,7 @@ class _AxisRow(QtWidgets.QWidget):
             return
         self.unit_label.setVisible(False)
         picker.unit_picked.connect(self._shown_unit_picked)
-        layout.insertWidget(self._unit_slot, picker)
+        layout.addWidget(picker)
         self.unit_picker = picker
 
     def _show_values(self, axis: ScanAxis) -> None:
@@ -250,6 +257,7 @@ class _AxisRow(QtWidgets.QWidget):
                 for spin in (self.start_spin, self.stop_spin):
                     spin.setValueUnit(axis.unit)
                     spin.setShownUnit(axis.unit)
+                self.unit_label.setText("" if axis.unit in ("", "1") else axis.unit)
             else:
                 self._apply_port_limits(axis.unit)
             self.start_spin.setValue(axis.values[0])
@@ -357,18 +365,29 @@ class _ManualAxisRow(QtWidgets.QWidget):
             spin.setDecimals(4)
         self.points_spin = FluentSpinBox()
         self.points_spin.setRange(1, 100_000)
-        self.custom_label = QtWidgets.QLabel("")
+        self.custom_label = ElidedLabel("")
+        self._unit_host = QtWidgets.QWidget(self)
+        unit_layout = QtWidgets.QHBoxLayout(self._unit_host)
+        unit_layout.setContentsMargins(0, 0, 0, 0)
+        unit_layout.setSpacing(0)
+        self.unit_label = FluentLabel("")
+        unit_layout.addWidget(self.unit_label)
         remove = FluentButton("×", color=GREY)
-        remove.setFixedWidth(32)
+        remove.setFixedWidth(scaled_px(32))
         remove.setToolTip("Remove this axis")
         self.remove_button = remove
-        layout.addWidget(QtWidgets.QLabel("by hand"))
-        layout.addWidget(self.name_edit, 2)
-        layout.addWidget(QtWidgets.QLabel("from"))
+        identity = QtWidgets.QWidget(self)
+        identity_layout = QtWidgets.QHBoxLayout(identity)
+        identity_layout.setContentsMargins(0, 0, 0, 0)
+        identity_layout.addWidget(FluentLabel("by hand"))
+        identity_layout.addWidget(self.name_edit, 1)
+        layout.addWidget(identity, 2)
+        layout.addWidget(FluentLabel("from"))
         layout.addWidget(self.start_spin, 1)
-        layout.addWidget(QtWidgets.QLabel("to"))
+        layout.addWidget(FluentLabel("to"))
         layout.addWidget(self.stop_spin, 1)
-        layout.addWidget(QtWidgets.QLabel("points"))
+        layout.addWidget(self._unit_host)
+        layout.addWidget(FluentLabel("points"))
         layout.addWidget(self.points_spin)
         layout.addWidget(self.custom_label)
         layout.addWidget(remove)
@@ -454,7 +473,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
         column = QtWidgets.QVBoxLayout(self)
         column.setContentsMargins(0, 0, 0, 0)
         header = QtWidgets.QHBoxLayout()
-        title = QtWidgets.QLabel("Scan plan")
+        title = FluentLabel("Scan plan")
         title.setStyleSheet("font-weight: 600;")
         self.add_button = FluentButton("Add axis", color=ACCENT)
         self.add_manual_button = FluentButton("Add manual axis", color=GREY)
@@ -472,7 +491,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
         column.addLayout(header)
         self.rows_layout = QtWidgets.QVBoxLayout()
         column.addLayout(self.rows_layout)
-        self.summary = QtWidgets.QLabel("")
+        self.summary = FluentLabel("")
         self.summary.setWordWrap(True)
         column.addWidget(self.summary)
 
@@ -480,7 +499,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
         # nothing sweeps them, they are the numbers the pulse holds while the
         # table plays.  A slot the plan DOES scan is left out -- the table
         # already says what it plays, and two places saying it is one too many.
-        self.values_title = QtWidgets.QLabel("API values")
+        self.values_title = FluentLabel("API values")
         self.values_title.setStyleSheet("font-weight: 600;")
         column.addWidget(self.values_title)
         # THE SHARED FORM, RECONCILED.  This section was a grid rebuilt from
@@ -492,7 +511,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self.values_form = FluentParameterForm(FormSpec(()))
         self.values_form.changed.connect(self._value_changed)
         column.addWidget(self.values_form)
-        self.values_note = QtWidgets.QLabel("")
+        self.values_note = FluentLabel("")
         self.values_note.setWordWrap(True)
         column.addWidget(self.values_note)
 
@@ -609,6 +628,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self._values_text = values_text
         self._reconcile_values(sequence)
         self._rescope_values()
+        self._align_columns()
 
     @QtCore.pyqtSlot(object, object, str)
     def _convert_axis_unit(self, row, axis: ScanAxis, unit: str) -> None:
@@ -842,6 +862,43 @@ class ScanPlanEditor(QtWidgets.QWidget):
 
     # ------------------------------------------------------------ internals
 
+    def _align_columns(self) -> None:
+        """Share one column budget across manual, device and pulse axes."""
+
+        layouts = tuple(row.layout() for row in getattr(self, "_rows", ()))
+        if not layouts:
+            return
+        columns = tuple(tuple(layout.itemAt(index).widget() for layout in layouts)
+                        for index in range(10))
+        widths = [max(max(cell.sizeHint().width(), cell.minimumSizeHint().width())
+                      for cell in cells) for cells in columns]
+        units = tuple(getattr(row, "unit_picker", None) or row.unit_label for row in self._rows)
+        widths[5] = max(cell.sizeHint().width() for cell in units)
+        widths[2] = widths[4] = max(widths[2], widths[4])
+        widths[8] = self.fontMetrics().horizontalAdvance("custom values") + scaled_px(4)
+        widths[9] = scaled_px(32)
+        for cell in units:
+            if cell.minimumWidth() != widths[5] or cell.maximumWidth() != widths[5]:
+                cell.setFixedWidth(widths[5])
+        for index, cells in enumerate(columns):
+            for cell in cells:
+                if index == 0:
+                    policy = cell.sizePolicy()
+                    # Port text must elide, not enlarge this embedded editor
+                    # or change the numeric columns when the window narrows.
+                    if policy.horizontalPolicy() != QtWidgets.QSizePolicy.Ignored:
+                        cell.setSizePolicy(QtWidgets.QSizePolicy.Ignored, policy.verticalPolicy())
+                elif cell.minimumWidth() != widths[index] or cell.maximumWidth() != widths[index]:
+                    cell.setFixedWidth(widths[index])
+            for layout in layouts:
+                stretch = 1 if index == 0 else 0
+                if layout.stretch(index) != stretch:
+                    layout.setStretch(index, stretch)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._align_columns()
+
     def _reconcile_rows(self, plan_text: str) -> None:
         """The axis rows brought to the plan, kept wherever they can be.
 
@@ -882,6 +939,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 self._attach_row(None)
         finally:
             self._loading = False
+        self._align_columns()
 
     def _build_row(self, axis: ScanAxis | None) -> _AxisRow:
         row = _AxisRow(self._ports, axis, self)
@@ -944,6 +1002,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
     def _emit_plan(self) -> None:
         if self._loading:
             return
+        self._align_columns()
         ordered = sorted(self._rows, key=lambda row: host_advanced_port(
             MANUAL_PARAM_FAMILY if row.manual else str(row.port_combo.currentData())
         ), reverse=True)

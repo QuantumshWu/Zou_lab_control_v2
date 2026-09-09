@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- Scan Plan统一手动/device/pulse行的列结构与预算，单位slot固定、起终点等宽，保留原扫描/单位/草稿逻辑。正式Console真实Qt在正常和70%屏幕宽度下截图，原手动行起点错位50 logical px降为0，各行start/stop/points/remove位置与宽度一致；resize不改plan，单位切换通过，2项既有直接编辑/单位用例通过，测试窗口关闭。截图和探针留ignored research，不入Git。
+
 - sealed Scan→Derive Run→Image改表达式再Start的`signal generation owner is already active`已复现并根修：Processor复用原Producer的终态世代替换，不改Shutdown保留数据政策和Input range。正式Qt二次Start为Done，新generation、同一exact Scan parent，下游Image逐像素为原值×2；11项直接生命周期验证含连续三次frozen运行、并发Start、active保护、未发布幂等通过。Derive结构说明复用三域颜色，以logical shape为主、Storage shape为辅。
 
 - Scan→Occupancy已删除旧“Point必须只有frame一个轴”的否决，保留真实图像/校准检查并去掉重复验证。正式ScanDatasetWriter/Plane的50×3×72×92案例复现terminal两Point轴报错，修后逐event与完整terminal结果通过且保留frame3、power1/mVpp；FrameSurvival同步按READOUT_EVENT分组配对并保留其它Point轴及finite placement，2/3/4 frames与2×2 scan定向验证通过。信号列表改读canonical schema并复用公共逻辑轴摘要，正式Qt截图确认(1×50)×(3×1)×(72×92)及power轴，测试窗口全部关闭，未操作硬件。
