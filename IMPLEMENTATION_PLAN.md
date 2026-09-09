@@ -23,7 +23,7 @@
 - Derive界面统一英文，只读信息完整展开，短帮助不设内部scroll。空Code等未提交草稿显示中性`Draft: Signals row N: Enter Python code`，不标节点error；Start仍禁用，填完整后经原finalization解除。实际Qt输入→计算→Plot→Save Fig→FigureViewer流程通过，1×1×35结果与独立NumPy相同，所有窗口已关闭。
 - Numba预热复用原样本，按模块变更/缓存缺失选择render（raster＋3D）或fit（compiled＋radial）组；匹配marker仍检查缺失机器码，日志区分production signatures新编译/磁盘加载。11项无编译定向验证通过，未清缓存或全量预热。同一kernel源文件内的Numba整文件失效仍存在，不声称本改动消除了该重编译。
 
-- Seamless支持无scan slot的manual/device-only计划：无板内轴时加载普通Pulse和空wire，Run repeats采shots_per_point，完整repeats由已有Host循环推进；不虚构slot或Dataset轴，沿用采集准备/Stop/恢复。删除Node/Editor旧否决及空子ScanPlan，真实slot路径保持不变；硬件snapshot记录每次Fire实际scan_repeats。7项定向验证通过（无slot manual/device、原混合路线、排序和Editor），未操作真实硬件。
+- Seamless支持无scan slot的manual/device-only计划：无板内轴时加载普通Pulse和空wire，Run repeats采shots_per_point，完整repeats由已有Host循环推进；不虚构slot或Dataset轴，沿用采集准备/Stop/恢复。删除Node/Editor旧否决及空子ScanPlan，真实slot路径保持不变；硬件snapshot记录每次Fire实际scan_repeats。7项定向验证通过（无slot manual/device、原混合路线、排序和Editor）。2026-09-09实屏又定位到资源加载层残留的“必须有slot”门槛，现删除该wrapper，直接复用严格Pulse reader；既有文件加载用例红绿确认普通Pulse可选、真实slot及API保留、坏slot引用仍拒绝。未操作真实硬件。
 
 - Device Control对齐在原Fluent form内收口：统一表头/全部行/单位选择器列宽，仅Desired伸缩，保留bool和无Live行的正确占位；使用正式Control opener和zlc_ui截图API完成默认、混合单位、拉宽窗口的Windows DPR3可见截图检查。截图API支持内容尺寸窗口而不强改窗口尺寸，原固定屏幕比例验证保留；证据留ignored research，测试窗口均已关闭。
 
@@ -31,9 +31,11 @@
 
 - 2026-09-08 设备单位写入收口：Scan和Control共用设备层的只读单位投影/转换与Apply，Rigol原生Vpp/Vrms/dBm仅必要时切UNIT，原始数值/单位对在退出时恢复。端口范围和单位转换离开Qt；pending单位请求不能误Apply旧单位，晚结果不覆盖新draft或碰已删除控件。Remote沿同一接口透传，canonical provenance与requested_unit分开。最终15个定向实例通过，包含非50Ω、原生写/失败恢复、整数前缀、Control只读换单位、占用权限、异步Scan Editor及Fit负B/C单位转换；仅模拟SCPI与Qt控件验证，未做真机/实屏全流程验收。
 
+- 2026-09-09 Scan Editor单位异步回调修复两处：换port可撤掉unit picker，pending期间改为禁用/恢复同一行稳定的unit host；用户已改草稿而丢弃晚结果时，按当前mode刷新状态，清除过期的Converting提示。只在原owner改3行，保留新草稿与原单位转换流程。
+
 - 2026-09-08 按最终用户裁决，扫描彻底采用author unit：Plan直接存135…247与mVpp，Seamless/Stepped输出同一单位，仅设备/编译边界换算；display_unit旧路径及8ULP/相等检查均删除。5个单位/Plan直接实例通过；真实Runtime的Seamless十点例在设备回读偏离设定时完成，Dataset coordinates逐位等于135→247的十点且unit为mVpp，run record一致；设备异常与restore传播仍保留。曾添加的独立readback event字段不符合现有merge grammar，已撤掉，不扩格式，设备原有tune回读路径保留。未做真实硬件验收。
 
-- 2026-09-08 Seamless可选`Acquisition logic`已接入原Start/Restart，manual与device外层点共用每Fire前入口，FPGA内部scan slot保持连续。新NodeHost ready由Camera真实arm后报告，settle默认0.5s。6项Host/Camera直接验证及2项Workbench复用Restart/选择保存验证通过；真实Qt两个manual点完成新代采集与Scan，ready→Fire为501.7363/500.4511ms，两代首帧ordinal均0/1/2，Scan参数各匹配其新Fit parent/Camera root。原始Camera signal不支持indexed history，该实屏案的独立history oracle未通过，不冒称history复验；按用户指示不再扩大验证。所有测试窗口与child已退出，证据只留ignored目录。Layout中未指定的可选authoring字段使用schema默认，显式settle值和Acquisition引用按原Layout owner保留。
+- 2026-09-08 Seamless可选`Acquisition logic`已接入原Start/Restart，manual与device外层点共用每Fire前入口，FPGA内部scan slot保持连续。新NodeHost ready由Camera真实arm后报告，settle默认0.5s。6项Host/Camera直接验证及2项Workbench复用Restart/选择保存验证通过；真实Qt两个manual点完成新代采集与Scan，ready→Fire为501.7363/500.4511ms，两代首帧ordinal均0/1/2，Scan参数各匹配其新Fit parent/Camera root。原始Camera signal不支持indexed history，该实屏案的独立history oracle未通过，不冒称history复验；按用户指示不再扩大验证。所有测试窗口与child已退出，证据只留ignored目录。Layout中未指定的可选authoring字段使用schema默认，显式settle值和Acquisition引用按原Layout owner保留。2026-09-09修复Preparing提示一直留到整点结束：原Scan owner在settle与Fire成功时更新状态，每个已commit shot更新全run进度，复用NodeProgress/Runtime/UI文字通道，无新增进度条。既有直接用例红绿及正式Qt纯manual两点×8shots通过，原无slot imaging_template经真实文件加载、Acquisition重启两代，截图分别显示1/16与9/16，最终16/16→done、errors空且窗口关闭；证据仅在ignored `bench/results/gui-fuzz-round2/scan-progress/`。
 
 - 2026-09-08 当前worktree完成六项：Pulse DAC保留disabled全开按钮并实屏确认四列对齐；Layout递归编码authoring rows并完成真实Save/Load；Derive以普通Fluent下拉选择atomic producer bundle、不新增Runtime数据；声明过的Panel fit在无首帧/无reserved generation时允许Scan Start，首次arrival复用有序tap。真实Qt验证单点单shot，Scan输入与新一代首个Fit publication数值/validity相同，唯一根为重启后的Camera首event，未自动启动Camera。GUI及渲染children全部关闭；退出曾有Device Manager等待sequencer control关闭的短暂拒绝日志，最终正常退出，未冒称无日志。
 - `Saturation`按用户新裁决改为`f(x)=(A*x+B)/(x+C)`，使用`asymptote/numerator/shift`（A/B/C），headline为asymptote；参数单位依次为y、y*x、x。C可负，仅限制拟合域`x+C>0`，不把增长条件`A*C>B`设成不可配置门槛；固定B/C、绝对坐标裁剪、single/batch与uncertainty继续共用现有fit机制。公式/Jacobian/负C/下降数据/固定参数、normal/hard single与B1/B8/B64、headline及复合单位的显示/表达式/派生Dataset共8项目标验证通过。B的单位复用通用乘积解析，同单位原样通过，前缀转换保留符号，非线性换算不得冒充乘积倍率。

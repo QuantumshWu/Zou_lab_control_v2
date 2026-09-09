@@ -534,24 +534,6 @@ def load_stepped_template(path: str | Path) -> PulseSequence:
     return sequence
 
 
-def load_seamless_template(path: str | Path) -> PulseSequence:
-    """A seamless/board-driven template: its hardware scan slots ARE the axes.
-
-    The template's author placed the slots in the pulse editor; the plan
-    supplies the values every slot plays.  API parameters may also be
-    declared -- they bake to their authored values before the table plays.
-    """
-
-    sequence = _template_sequence(path)
-    if not sequence.slots:
-        raise ValueError(
-            "a seamless scan template declares hardware scan slots; this "
-            "pulse declares none.  Place the slots in the pulse editor -- "
-            "the board plays exactly what the template scans"
-        )
-    return sequence
-
-
 #: The stepped/API-driven template, selected from the workspace's ``pulses``.
 STEPPED_PULSE_RESOURCE = WorkspaceResourceSpec(
     "pulse_template",
@@ -562,13 +544,14 @@ STEPPED_PULSE_RESOURCE = WorkspaceResourceSpec(
     argument_name="pulse_resource",
 )
 
-#: The seamless/board-driven template, selected from the same folder.
+#: A seamless plan may carry only host axes and play an ordinary fixed Pulse;
+#: any declared board slots still bind to the plan in the scan owner.
 SEAMLESS_PULSE_RESOURCE = WorkspaceResourceSpec(
     "pulse_template",
     SCAN_PULSE_CONTRACT,
     "pulses",
     (".json",),
-    load_seamless_template,
+    _template_sequence,
     argument_name="pulse_resource",
 )
 
@@ -777,7 +760,6 @@ __all__ = [
     "ScanPort",
     "bind_plan",
     "hardware_scan_ports_for",
-    "load_seamless_template",
     "load_stepped_template",
     "slots_from_plan",
     "plan_from_authored",

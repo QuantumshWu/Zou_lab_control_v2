@@ -116,11 +116,12 @@ def editor_checkpoint(panel, editor=None):
     return result
 
 
-def _snapshot_shape(snapshot):
+def _snapshot_shape(snapshot, source=None):
     """Derive title factors from Dataset axes and compact validity directly.
 
-    Does not call Workbench panel_data_shape or the card's title formatter.
-    Explicit sparse-domain row counts are NOT products of coordinate sizes.
+    Uses only this accepted publication's last written Repeat/Point position.
+    Does not call production count/projection helpers or the title formatter.
+    The small checkpoint oracle never expands validity over image pixels.
     """
     import numpy as np
     from zlc_data import Valid, Invalid
@@ -132,28 +133,87 @@ def _snapshot_shape(snapshot):
                   if index != 2 or axis.role != SCALAR]
                  for index, domain in enumerate(domains)]
     validity = block.validity
-    repeat = schema.repeat_domain
+    repeat, point = schema.repeat_domain, schema.point_domain
+    mask = None if isinstance(validity, (Valid, Invalid)) else validity.mask
+    work = len(repeat.axes) * (repeat.size + point.size + (0 if mask is None else mask.size))
+    row_work = len(repeat.axes) * repeat.size
+    unchecked = None
+    positions = {}
     landed = []
     if isinstance(validity, Invalid):
         landed = [0 for _axis in repeat.axes]
-    else:
-        rows = (np.arange(repeat.size) if isinstance(validity, Valid) else
-                np.flatnonzero(np.asarray(validity.mask).reshape(repeat.size, -1).any(axis=1)))
-        for axis in repeat.axes:
-            # One coordinate counts if any stored row for it landed. This
-            # also handles missing/duplicate combinations in explicit codes.
-            landed.append(int(np.unique(repeat.codes(axis.axis_id)[rows]).size))
+    elif work > 250_000 or row_work > 2048:
+        # This runs on the Qt owner. A large component mask is explicitly
+        # unverified, never silently pooled or expanded into a pixel mask.
+        landed = None
+        unchecked = (f"compact Repeat-count work {work}, row visits bound {row_work}; "
+                     "checkpoint budgets are 250000 values and 2048 rows")
+    elif repeat.axes:
+        for domain in (repeat, point):
+            for axis in domain.axes:
+                positions[axis.axis_id] = int(domain.codes(axis.axis_id)[-1])
+        if source is not None:
+            event = source.snapshot.block.schema
+            declared = source.canonical_schema or event
+            origin = source.cell_origin or (0, 0)
+            for index, domain in enumerate((repeat, point)):
+                source_domain = (declared.repeat_domain, declared.point_domain)[index]
+                event_domain = (event.repeat_domain, event.point_domain)[index]
+                last_row = int(origin[index]) + event_domain.size - 1
+                by_id = {axis.axis_id: axis for axis in source_domain.axes}
+                for axis in domain.axes:
+                    if axis.axis_id in by_id:
+                        source_axis = by_id[axis.axis_id]
+                        coordinate = source_axis.coordinate_at(int(source_domain.codes(axis.axis_id)[last_row]))
+                        position = axis.coordinate_position(coordinate)
+                        if position is not None:
+                            positions[axis.axis_id] = int(position)
+        point_rows = np.arange(point.size)
+        for axis in point.axes:
+            point_rows = point_rows[point.codes(axis.axis_id)[point_rows] == positions[axis.axis_id]]
+        codes = [repeat.codes(axis.axis_id) for axis in repeat.axes]
+        for target, axis in enumerate(repeat.axes):
+            rows = np.arange(repeat.size)
+            for other, other_axis in enumerate(repeat.axes):
+                if other != target:
+                    rows = rows[codes[other][rows] == positions[other_axis.axis_id]]
+            if not rows.size or not point_rows.size:
+                landed.append(0)
+                continue
+            if mask is None:
+                landed.append(len(set(map(int, codes[target][rows]))))
+                continue
+            # Other Repeat/Point coordinates are all fixed. Only duplicate
+            # physical rows for the SAME complete coordinates may combine;
+            # every simultaneously observed component retains its own count.
+            observed = {}
+            for row in rows:
+                coordinate = int(codes[target][row])
+                cells = np.any(mask[row, point_rows], axis=0).reshape(-1)
+                if coordinate in observed:
+                    observed[coordinate] |= cells
+                else:
+                    observed[coordinate] = cells
+            counts = np.sum(list(observed.values()), axis=0)
+            low, high = int(counts.min()), int(counts.max())
+            landed.append(low if low == high else [low, high])
     sizes, names = [], []
     for index, group in enumerate(structure):
         if group:
             counts = landed if index == 0 else [size for _name, size in group]
-            sizes.append("(" + " × ".join(map(str, counts)) + ")")
+            if counts is not None:
+                sizes.append("(" + " × ".join(
+                    f"{count[0]}–{count[1]}" if isinstance(count, list) else str(count)
+                    for count in counts) + ")")
             names.append("(" + " × ".join(name for name, _size in group) + ")")
     return {"structure": _plain(structure), "landed": landed,
+            "repeat_counts_status": "unchecked" if unchecked else "checked",
+            "repeat_counts_unchecked": unchecked,
+            "repeat_count_positions": {str(key.value): value for key, value in positions.items()},
             "domain_shapes": [list(domain.shape) for domain in domains],
             "values_shape": list(block.values.shape),
             "schema_physical_shape": list(schema.physical_shape),
-            "title_sizes": " × ".join(sizes), "title_names": " × ".join(names)}
+            "title_sizes": None if unchecked else " × ".join(sizes), "title_names": " × ".join(names)}
 
 
 def panel_checkpoint(panel, card=None, *, editor=None):
@@ -190,7 +250,8 @@ def panel_checkpoint(panel, card=None, *, editor=None):
         result["snapshot_ref"] = {"block_id": str(ref.block_id.value),
                                   "schema_fingerprint": ref.schema_fingerprint,
                                   "generation": str(ref.stream_generation.value), "revision": int(ref.revision.value)}
-        result["shape"] = _snapshot_shape(snapshot)
+        source = None if accepted.publication is None else accepted.publication.value(accepted.target.signal)
+        result["shape"] = _snapshot_shape(snapshot, source)
     if front is not None:
         identity = front.identity
         result["front_identity"] = {"host": identity.host_id, "sequence": identity.sequence,
@@ -280,7 +341,8 @@ def check_panel(panel, card=None, *, stable=False, before=None, editor=None):
         if shape["values_shape"] != shape["schema_physical_shape"]:
             report("snapshot_physical_shape", "Shown values disagree with their declared physical domains", shape=shape)
         if card_state is not None and front is not None:
-            if card_state["structure"] != shape["structure"] or card_state["landed"] != shape["landed"]:
+            if (card_state["structure"] != shape["structure"]
+                    or shape["landed"] is not None and card_state["landed"] != shape["landed"]):
                 report("title_data_structure", "Card title structure does not describe its accepted snapshot",
                        expected=shape, card=card_state)
             if shape["title_sizes"]:

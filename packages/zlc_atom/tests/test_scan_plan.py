@@ -60,6 +60,9 @@ def test_the_mot_template_offers_the_three_bias_ports() -> None:
 def test_scan_accepts_the_complete_document_saved_by_the_pulse_editor(
     tmp_path,
 ) -> None:
+    from zlc_atom.nodes.scan import slots_from_plan
+    from zlc_pulse.codec import sequence_to_tree
+
     tree = json.loads(pulse_document("mot_field_template.json").decode("utf-8"))
     tree["editor"] = {
         "visible_ports": None,
@@ -72,6 +75,20 @@ def test_scan_accepts_the_complete_document_saved_by_the_pulse_editor(
     path.write_text(json.dumps(tree), encoding="utf-8")
 
     assert load_stepped_template(path).name == tree["name"]
+    resource = SEAMLESS_NODE.workspace_resources[0]
+    ordinary = resource.resolve(path).value
+    assert ordinary.name == tree["name"] and ordinary.slots == ()
+    assert ordinary.api_parameters, "host-only scans keep the fixed Pulse's authored values"
+    slotted = slots_from_plan(ordinary, scan_ports_for(ordinary)[:1])
+    slotted_tree = sequence_to_tree(slotted)
+    path.write_text(json.dumps(slotted_tree), encoding="utf-8")
+    resolved = resource.resolve(path).value
+    assert resolved.slots == slotted.slots
+    assert resolved.api_parameters == slotted.api_parameters
+    slotted_tree["slots"][0]["field_ref"]["period_id"] = "missing_period"
+    path.write_text(json.dumps(slotted_tree), encoding="utf-8")
+    with pytest.raises(ValueError, match="missing_period"):
+        resource.resolve(path)
 
 
 def test_plan_rows_nest_outer_first_and_round_trip() -> None:

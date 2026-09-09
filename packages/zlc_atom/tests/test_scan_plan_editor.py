@@ -568,13 +568,42 @@ def test_axis_rows_follow_the_ports_without_being_rebuilt(caplog) -> None:
         assert restored.axis().values == tuple(units.convert(plan.axes[0].values, "mVpp", "dBm"))
         assert restored.custom_label.text() == "custom values"
         assert parse_scan_values(restored.values_edit.text()) == tuple(units.convert(converted_values, "mVpp", "dBm"))
+        restored.mode_button.click()
         gate.clear()
         restored.unit_picker.unit_picked.emit("mVpp")
-        restored.start_spin.setValue(-19.0)
-        edited_axis = restored.axis()
+        from PyQt5 import QtTest
+        QtTest.QTest.keyClick(restored.values_edit, QtCore.Qt.Key_A, QtCore.Qt.ControlModifier)
+        QtTest.QTest.keyClicks(restored.values_edit, "-19, -17")
+        QtTest.QTest.keyClick(restored.values_edit, QtCore.Qt.Key_Return)
+        edited_entry = restored.input_entry()
         gate.set()
         settled(lambda: restored._unit_request is None)
-        assert restored.axis() == edited_axis, "late conversion overwrote a new draft"
+        assert restored.input_entry() == edited_entry, "late conversion overwrote a new draft"
+        assert restored.custom_label.text() == "", "discarded conversion still says it is running"
+        # The port can change while its unit read is in flight. A code-valued
+        # port retires the picker, but not the row's stable unit cell.
+        dac = ScanPort("pulse:param:dac", "dac", "code", -100., 100., 0., 1.)
+        reopened._ports = (*reopened._ports, dac)
+        reopened._reconcile_rows(reopened._plan_text)
+        gate.clear()
+        restored.unit_picker.unit_picked.emit("mVpp")
+        reopened.show()
+        restored.port_combo.showPopup()
+        tree = restored.port_combo._popup_view
+        tree.expandAll()
+        app.processEvents()
+        matches = restored.port_combo._model.match(restored.port_combo._model.index(0, 0),
+            QtCore.Qt.UserRole, dac.port, 1, QtCore.Qt.MatchExactly | QtCore.Qt.MatchRecursive)
+        assert len(matches) == 1
+        tree.scrollTo(matches[0]); app.processEvents()
+        QtTest.QTest.mouseClick(tree.viewport(), QtCore.Qt.LeftButton,
+                               pos=tree.visualRect(matches[0]).center())
+        assert restored.port_combo.currentData() == dac.port and restored.unit_picker is None
+        port_entry = restored.input_entry()
+        gate.set()
+        settled(lambda: restored._unit_request is None)
+        assert restored.input_entry() == port_entry and restored._unit_host.isEnabled()
+        reopened._reconcile_rows(json.dumps({"axes": [edited_entry]}))
         gate.clear()
         restored.unit_picker.unit_picked.emit("mVpp")
         reopened._remove_row(restored)

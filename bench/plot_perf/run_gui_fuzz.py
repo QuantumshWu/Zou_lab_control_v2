@@ -73,14 +73,19 @@ def click(widget, app):
             current = current.parentWidget()
         print("UNUSABLE_TARGET", parents, flush=True)
         raise UnavailableAction(f"target is not usable: {type(widget).__name__}")
-    point = widget.rect().center()
+    exposed = widget.visibleRegion().boundingRect()
+    if exposed.isEmpty():
+        raise UnavailableAction(f"target is clipped out of its viewport: {type(widget).__name__}")
+    point = exposed.center()
     if (isinstance(widget, QtWidgets.QAbstractButton) and sip.ispycreated(widget)
             and not widget.hitButton(point)):
-        # A stretched form cell is not the switch/check-box's painted track.
-        # Use Qt's own size hint and hit test, not a guessed per-widget width.
-        point.setX(min(widget.width(), widget.sizeHint().width()) // 2)
-        if not widget.hitButton(point):
-            raise UnavailableAction("button has no hittable content at its size hint")
+        # A form's column minimum also enlarges sizeHint, while the painted
+        # switch track stays narrow. Ask the actual button's hit test.
+        hits = [x for x in range(exposed.left(), exposed.right() + 1)
+                if widget.hitButton(QtCore.QPoint(x, point.y()))]
+        if not hits:
+            raise UnavailableAction(f"button has no hittable content: {type(widget).__name__} {widget.rect()}")
+        point.setX(hits[len(hits) // 2])
     root = widget.window()
     hit = root.childAt(root.mapFromGlobal(widget.mapToGlobal(point)))
     if hit is not widget and not widget.isAncestorOf(hit):
@@ -205,7 +210,7 @@ def enter_text(widget, text, app):
     if hasattr(widget, "edit") and isinstance(widget.edit, QtWidgets.QLineEdit):
         widget = widget.edit
     edit = widget.lineEdit() if isinstance(widget, QtWidgets.QAbstractSpinBox) else widget
-    click(edit, app)
+    click(edit.viewport() if isinstance(edit, (QtWidgets.QPlainTextEdit, QtWidgets.QTextEdit)) else edit, app)
     QtTest.QTest.keyClick(edit, QtCore.Qt.Key_A, QtCore.Qt.ControlModifier)
     QtTest.QTest.keyClick(edit, QtCore.Qt.Key_Backspace)
     # Resolve the current keyboard receiver each time: reconciliation may
@@ -297,6 +302,8 @@ def pick_action(bench, rng, step):
                "field", "field", "field", "scope", "source", "restart", "stop", "save"]
     if len(panels) > 1:
         options.append("remove")
+    if getattr(bench, "fuzz_live_only", False):
+        options = [kind for kind in options if kind not in ("stop", "restart", "remove", "source")]
     kind = rng.choice(options)
     action = dict(kind=kind, panel=panel.panel_id)
     if kind == "field":
@@ -726,8 +733,11 @@ def perform_action(bench, action, beat, output):
             from collections.abc import Mapping
             wanted = action.get("phase", "done")
             def ready():
-                host = bench.presenter.logic[identity].host
+                binding = bench.presenter.logic[identity]
+                host = binding.host
                 if host is None:
+                    if binding.draft_error:
+                        raise AssertionError(f"{identity}: {binding.draft_error}")
                     return False
                 observation = host.observation
                 if observation.phase == "failed" and wanted != "failed":
@@ -1015,6 +1025,7 @@ def run_child(args, output):
                   frames_per_cycle=args.frames, errors=errors)
     try:
         with ConsoleBench() as bench:
+            bench.fuzz_live_only = bool(getattr(args, "live_only", False))
             bench.feedback_scope_probe = bool(getattr(args, "feedback_scope_probe", False))
             bench.fuzz_saves = []
             bench.fuzz_gestures = []
@@ -1093,6 +1104,7 @@ def run_child(args, output):
                         bench.view.save_screenshot(str(output / "inventory.png"))
                     else:
                         replay = json.loads(Path(args.replay).read_text(encoding="utf-8")) if args.replay else None
+                        result["requested_actions"] = args.actions if replay is None else len(replay)
                         actions = []
                         result["findings"] = []
                         for step in range(args.actions if replay is None else len(replay)):
@@ -1203,6 +1215,7 @@ def run_child(args, output):
             result["saved_checks"].append(check)
         result["needs_review"] = bool(
             any(severity == "error" for severity, _message in result.get("reports", ()))
+            or result.get("initial_findings")
             or result.get("findings")
             or result.get("observer_canary", {}).get("paint_data_mismatches")
         )
@@ -1258,7 +1271,21 @@ def file_dialog_action(button, path, app, *, click, enter_text, save=False, open
             buttons = dialog.findChild(QtWidgets.QDialogButtonBox)
             submit = buttons.button(QtWidgets.QDialogButtonBox.Save if save
                                     else QtWidgets.QDialogButtonBox.Open)
-            click(submit, app)
+            replace_timer = QtCore.QTimer()
+            def confirm_replacement():
+                question = app.activeModalWidget()
+                if (save and Path(path).exists() and isinstance(question, QtWidgets.QMessageBox)
+                        and question.parentWidget() is dialog
+                        and question.standardButtons() & QtWidgets.QMessageBox.Yes):
+                    replace_timer.stop()
+                    click(question.button(QtWidgets.QMessageBox.Yes), app)
+            replace_timer.timeout.connect(confirm_replacement)
+            replace_timer.start(20)
+            try:
+                click(submit, app)
+            finally:
+                replace_timer.stop()
+                replace_timer.deleteLater()
             selected.append(str(path))
         except Exception as error:
             errors.append(error)
@@ -1332,12 +1359,57 @@ def perform_device_action(bench, action, beat, output, *, click, choose, enter_t
                 assert key in leaves and leaves[key].device is not old_devices[key], facts
         control = flow.device_controls.get(device)
         view = getattr(control, "_view", None)
+        facts["control_visible"] = control is not None and control.is_visible()
+        if "control_visible" in action:
+            assert facts["control_visible"] == action["control_visible"], facts
+        if "remember_control" in action:
+            assert control is not None, "there is no Control to remember"
+            if not hasattr(bench, "fuzz_device_objects"):
+                bench.fuzz_device_objects = {}
+            bench.fuzz_device_objects["control:" + action["remember_control"]] = control
+        if "same_control_as" in action:
+            assert control is bench.fuzz_device_objects["control:" + action["same_control_as"]], facts
         if view is not None and hasattr(view, "_field_states"):
             expected_current = action.get("current", {})
             if expected_current and not beat.run_until(lambda: all(
                     view._field_states.get(field, {}).get("current") == expected
                     for field, expected in expected_current.items()), float(action.get("timeout", 5))):
-                raise AssertionError(f"Control readback did not arrive: {expected_current}")
+                failure = AssertionError(f"Control readback did not arrive: {expected_current}")
+                # Preserve the failed human flow before outer cleanup changes
+                # ownership or hides Control. No Refresh or replacement write.
+                facts["timeout"] = {"device": device, "expected_current": expected_current,
+                                    "error": str(failure), "action": dict(action)}
+                facts["control"] = {"fields": dict(view._field_states),
+                    "risk_enabled": view.risk_switch.isEnabled(),
+                    "risk_accepted": view.risk_switch.isChecked(),
+                    "owners": view.owner_label.text(), "reason": view.reason_label.text(),
+                    "status": view.status_strip.text(), "severity": view.status_strip.current_severity,
+                    "form_values": {}, "widgets": {}}
+                try:
+                    for field in view.form.keys:
+                        try:
+                            facts["control"]["form_values"][field] = view.form.read_value(field)
+                        except (TypeError, ValueError) as error:
+                            facts["control"]["form_values"][field] = {"read_error": str(error)}
+                        widget = view.form.widget_for(field)
+                        edit = (widget.lineEdit() if isinstance(widget, QtWidgets.QAbstractSpinBox)
+                                else getattr(widget, "edit", widget))
+                        text = getattr(edit, "text", None)
+                        row = view._field_rows[field]
+                        facts["control"]["widgets"][field] = {
+                            "type": type(widget).__name__, "text": text() if callable(text) else None,
+                            "unit": view.form._field_for(field).unit, "editable": widget.isEnabled(),
+                            "apply_enabled": row[3].isEnabled(), "apply_visible": row[3].isVisible(),
+                            "status": row[5].text(), "reason": row[5].toolTip()}
+                    write_json(output / f"device-{action['name']}-timeout.json", facts)
+                    facts["screenshots"] = {
+                        "manager": manager.window().grab().save(str(output / f"device-{action['name']}-timeout-manager.png")),
+                        "control": view.window().grab().save(str(output / f"device-{action['name']}-timeout-control.png"))}
+                    write_json(output / f"device-{action['name']}-timeout.json", facts)
+                except Exception as evidence_error:
+                    print(f"Control timeout evidence could not be completed: {evidence_error}", flush=True)
+                    raise failure from evidence_error
+                raise failure
             facts["control"] = {"fields": dict(view._field_states),
                                 "risk_enabled": view.risk_switch.isEnabled(),
                                 "risk_accepted": view.risk_switch.isChecked(),
@@ -1351,7 +1423,10 @@ def perform_device_action(bench, action, beat, output, *, click, choose, enter_t
                 assert view._field_states[field]["editable"] == expected, facts
             for field, expected in action.get("current", {}).items():
                 assert view._field_states[field]["current"] == expected, facts
-        elif any(key in action for key in ("current", "risk_enabled", "risk_accepted", "editable")):
+            for property_name in ("desired", "desired_unit"):
+                for field, expected in action.get(property_name, {}).items():
+                    assert view._field_states[field][property_name] == expected, facts
+        elif any(key in action for key in ("current", "risk_enabled", "risk_accepted", "editable", "desired", "desired_unit")):
             raise AssertionError("the requested generic Control readback is absent")
         if "report_contains" in action:
             matches = [(severity, message) for severity, message in bench.reports
@@ -1447,15 +1522,21 @@ def perform_device_action(bench, action, beat, output, *, click, choose, enter_t
             raise UnavailableAction(f"device is not loaded: {device}")
         click(getattr(card, kind[7:] + "_button"), bench.app)
         if kind == "device_control" and not beat.run_until(
-                lambda: device in flow.device_controls, float(action.get("timeout", 5))):
+                lambda: device in flow.device_controls and flow.device_controls[device].is_visible(),
+                float(action.get("timeout", 5))):
             raise AssertionError(f"Control did not open: {device}")
         return
-    elif kind in ("device_desired", "device_field_apply", "device_live",
+    elif kind in ("device_desired", "device_field_apply", "device_live", "device_control_hide",
                   "device_refresh", "device_risk"):
         control = flow.device_controls.get(device)
         if control is None or not hasattr(getattr(control, "_view", None), "_field_rows"):
             raise UnavailableAction(f"open the generic Control first: {device}")
         view = control._view
+        if kind == "device_control_hide":
+            click(view.window().titleBar.closeBtn, bench.app)
+            assert beat.run_until(lambda: not control.is_visible(),
+                                  float(action.get("timeout", 5))), "Control did not hide"
+            return
         if kind == "device_refresh":
             click(view.refresh_button, bench.app)
             return
@@ -1486,12 +1567,18 @@ def perform_device_action(bench, action, beat, output, *, click, choose, enter_t
                 bench.app.processEvents()
             if value is None:
                 return
-        widget = form.widget_for(key)
         if "unit" in action:
             picker = form.unit_picker_for(key)
             if picker is None:
                 raise UnavailableAction(f"device field has no unit picker: {key}")
             choose(picker, action["unit"], bench.app)
+            if kind == "device_desired":
+                if not beat.run_until(lambda: key not in flow._device_control_models[device].get("unit_requests", {})
+                        and view.form._field_for(key).unit == action["unit"],
+                        float(action.get("timeout", 5))):
+                    raise AssertionError(f"Control unit projection did not arrive: {key} {action['unit']}")
+                form = view.form
+        widget = form.widget_for(key)
         if hasattr(widget, "_popup_view"):
             choose(widget, value, bench.app)
         elif isinstance(widget, QtWidgets.QAbstractButton):
@@ -2255,6 +2342,7 @@ def main():
     parser.add_argument("--inventory", action="store_true")
     parser.add_argument("--chain", action="store_true", help="Start with camera -> drawn ROI -> three ordinary downstream panels")
     parser.add_argument("--system", action="store_true", help="Use the actual Device Manager Init -> experiment GUI flow")
+    parser.add_argument("--live-only", action="store_true", help="Keep acquisition and wiring alive during random plot interactions")
     parser.add_argument("--feedback-scope-probe", action="store_true")
     parser.add_argument("--replay")
     parser.add_argument("--stop-on-report", help="Stop a reproducer at this exact diagnostic substring")
@@ -2273,6 +2361,8 @@ def main():
         command.append("--chain")
     if args.system:
         command.append("--system")
+    if args.live_only:
+        command.append("--live-only")
     if args.feedback_scope_probe:
         command.append("--feedback-scope-probe")
     if args.replay:

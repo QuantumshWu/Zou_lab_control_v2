@@ -633,7 +633,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
             return
         request = object()
         row._unit_request = request
-        row.unit_picker.setEnabled(False)
+        row._unit_host.setEnabled(False)
         row.custom_label.setText("Converting unit…")
         owner_ref, row_ref = weakref(self), weakref(row)
         explicit = parse_scan_values(entry["value_text"]) if entry["value_text"].strip() else ()
@@ -653,8 +653,9 @@ class ScanPlanEditor(QtWidgets.QWidget):
                     or current._unit_request is not request):
                 return
             current._unit_request = None
-            current.unit_picker.setEnabled(True)
+            current._unit_host.setEnabled(True)
             if current.input_entry() != entry or owner._tunable_devices.get(key) is not device:
+                current._refresh_mode()
                 return
             if error is not None:
                 current.custom_label.setText(f"Cannot convert unit: {error}")

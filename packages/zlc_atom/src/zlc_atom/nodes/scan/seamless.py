@@ -318,6 +318,8 @@ class SeamlessScanMeasurement:
             check_cancelled(context)
             context.report_progress(f"Preparing {self.acquisition_logic}")
             self._restart_logic(self.acquisition_logic, context)
+        if self.settle_seconds:
+            context.report_progress("Settling")
         settle(context, self.settle_seconds)
         self.source.open(context, cycles=readouts)
         try:
@@ -333,6 +335,11 @@ class SeamlessScanMeasurement:
             self.sequencer.fire(
                 run_repeats=shots,
                 scan_repeats=sweeps,
+            )
+            context.report_progress(
+                f"Scanning point {progress_base + 1}/{progress_total}; shots",
+                current=progress_base * shots,
+                total=progress_total * shots,
             )
             per_sweep = inner_count * shots
             for played in range(readouts):
@@ -376,12 +383,11 @@ class SeamlessScanMeasurement:
                     front,
                     source_publication=source_publication,
                 )
-                if (played + 1) % shots == 0:
-                    context.report_progress(
-                        "Scanning",
-                        current=progress_base + (played + 1) // shots,
-                        total=progress_total,
-                    )
+                context.report_progress(
+                    f"Scanning point {progress_base + played // shots + 1}/{progress_total}; shots",
+                    current=progress_base * shots + played + 1,
+                    total=progress_total * shots,
+                )
             wait_for_board(self.sequencer, context)
         finally:
             try:

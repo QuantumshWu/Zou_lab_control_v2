@@ -197,6 +197,7 @@ class _Context:
     def __init__(self) -> None:
         self.cancelled = False
         self.commits = 0
+        self.progress = []
 
     def cancel_requested(self) -> bool:
         return self.cancelled
@@ -205,8 +206,8 @@ class _Context:
         del outputs, source_publication
         self.commits += 1
 
-    def report_progress(self, *_args, **_kwargs) -> None:
-        pass
+    def report_progress(self, message, *, current=None, total=None) -> None:
+        self.progress.append((message, current, total, self.commits))
 
     def current_dataset(self, name: str) -> str:
         return name
@@ -1284,7 +1285,11 @@ def test_an_off_grid_device_value_fails_the_run_with_the_grid_named() -> None:
         )
 
 
-def _device_seamless(knob: _Knob, sequencer: _FakeSequencer, source: _FakeSource):
+def _device_seamless(
+    knob: _Knob, sequencer: _FakeSequencer, source: _FakeSource, *,
+    shots: int = 1, acquisition_logic: str = "", restart_logic=None,
+    settle_seconds: float = 0.0,
+):
     sequence = _template_sequence()
     pulse_port = hardware_scan_ports_for(sequence)[0]
     device_port = ScanPort(
@@ -1304,19 +1309,41 @@ def _device_seamless(knob: _Knob, sequencer: _FakeSequencer, source: _FakeSource
         ports=(device_port, pulse_port),
         tunables={"knob": knob},
         repeats=1,
-        shots_per_point=1,
-        settle_seconds=0.0,
+        shots_per_point=shots,
+        settle_seconds=settle_seconds,
+        acquisition_logic=acquisition_logic,
+        restart_logic=restart_logic,
     )
 
 
 def test_a_device_axis_is_put_back_however_the_table_ends() -> None:
     """The outer device knob goes back to its pre-run value: complete,
-    stopped or failed -- the same promise the stepped engine keeps."""
+    stopped or failed. Each ready/fire segment reports its committed shots
+    while it runs, replacing the preceding acquisition preparation."""
 
     knob, sequencer, source = _Knob(), _FakeSequencer(_template_sequence()), _FakeSource()
-    _device_seamless(knob, sequencer, source).execute(_Context())
+    context = _Context()
+    prepared = []
+    readout_progress = []
+    source.on_take = lambda _taken: readout_progress.append(context.progress[-1])
+    _device_seamless(
+        knob, sequencer, source, shots=3, acquisition_logic="camera_measurement",
+        restart_logic=lambda name, _context: prepared.append((name, context.commits)),
+        settle_seconds=0.001,
+    ).execute(context)
     assert knob.tunes == [1.0, 2.0, 0.25] and knob.level == 0.25
     assert sequencer.fires == 2, "one fire per device point"
+    assert prepared == [("camera_measurement", 0), ("camera_measurement", 6)]
+    assert all(message.startswith("Scanning point") for message, *_rest in readout_progress)
+    scanning = [entry for entry in context.progress if entry[1] is not None]
+    assert [(current, total, committed) for _message, current, total, committed in scanning] == [
+        (current, 12, current) for current in (*range(7), *range(6, 13))
+    ], "Fire starts at the retained shot count; every committed shot advances it"
+    assert scanning[0][0] == "Scanning point 1/4; shots"
+    assert scanning[7][0] == "Scanning point 3/4; shots"
+    assert scanning[-1][0] == "Scanning point 4/4; shots"
+    assert [committed for message, _current, _total, committed in context.progress
+            if message == "Settling"] == [0, 6]
 
     knob, sequencer = _Knob(), _FakeSequencer(_template_sequence())
     with pytest.raises(RuntimeError, match="scripted source failed"):
