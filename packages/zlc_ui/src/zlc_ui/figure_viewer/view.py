@@ -1283,6 +1283,11 @@ class FigureViewerView(QtWidgets.QWidget):
     def has_panel_editor(self, panel_id: str) -> bool:
         return str(panel_id) in self._editors
 
+    def set_panel_snapshot_status(self, panel_id: str, status: object) -> None:
+        editor = self._editors.get(str(panel_id))
+        if isinstance(editor, PanelEditorView):
+            editor.set_snapshot_status(dict(status))
+
     def show_panel_editor(
         self, panel_id: str, widget: QtWidgets.QWidget | None
     ) -> None:

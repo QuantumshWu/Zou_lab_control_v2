@@ -28,6 +28,8 @@ def test_a_repeat_axis_reads_its_landed_count_where_the_others_read_their_size()
     plain_sizes, _names = data_structure_fragments(STRUCTURE)
     assert _line(plain_sizes) == "(35 \u00d7 100) \u00d7 (10) \u00d7 (35)"
     assert [colour for _t, colour, _e in sizes] == [colour for _t, colour, _e in plain_sizes]
+    ranged, _names = data_structure_fragments(STRUCTURE, ((1, 2), (7, 9)))
+    assert _line(ranged) == "(1–2 × 7–9) × (10) × (35)"
 
 
 def test_no_landed_count_means_the_size_is_shown():

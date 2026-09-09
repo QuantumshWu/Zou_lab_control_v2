@@ -1491,11 +1491,13 @@ class ConsolePresenter:
         shown = getattr(plot_input, "snapshot", plot_input)
         shown_schema = getattr(getattr(shown, "block", None), "schema", None)
         shape_changed = False
+        accepted_shape = None
         if shown_schema is not None:
             accepted_shape = panel_data_shape(
                 shown_schema,
                 description,
                 validity=getattr(getattr(shown, "block", None), "validity", None),
+                source=(None if publication is None else publication.value(surface.target.signal)),
             )
             shape_changed = any(
                 binding.parameter_surface.get(name) != value
@@ -1504,7 +1506,9 @@ class ConsolePresenter:
         interaction_changed = self._normalize_panel_interaction(binding)
         if binding.frozen_data is not None and not binding.refresh_requested:
             if state_changed or ui_changed or shape_changed or interaction_changed:
-                self._publish_panel_state(binding)
+                self._publish_panel_state(binding, data_shape=accepted_shape)
+            else:
+                self._refresh_panel_snapshot_status(binding)
             return
         binding.refresh_requested = False
         try:
@@ -3924,6 +3928,28 @@ class ConsolePresenter:
             return tuple(binding.host.dataset_output_declarations)
         return binding.descriptor.outputs_for(binding.draft.values)
 
+    def _panel_snapshot_status(self, binding: PanelBinding) -> dict[str, object]:
+        frozen = binding.frozen_data
+        source_status = ""
+        if frozen is not None and frozen.publication is not None:
+            plane = self.session.signal_plane
+            latest = plane.latest_publication(frozen.signal)
+            if latest is not None and _run_of(latest) != _run_of(frozen.publication):
+                source_status = "earlier_run"
+            elif not plane.retains(frozen.signal, frozen.publication):
+                source_status = "no_longer_current"
+        return {
+            "stale": bool(binding.frozen_configuration_incompatible),
+            "data_advanced": bool(binding.frozen_data_advanced),
+            "source_status": source_status,
+        }
+
+    def _refresh_panel_snapshot_status(self, binding: PanelBinding) -> None:
+        if binding.editor_open:
+            update = getattr(self.view, "set_panel_snapshot_status", None)
+            if callable(update):
+                update(binding.panel_id, self._panel_snapshot_status(binding))
+
     def panel_editor_projection(self, panel_id: str) -> dict[str, Any] | None:
         """Plain, widget-free state consumed by the non-modal Panel Edit tab."""
 
@@ -3948,8 +3974,7 @@ class ConsolePresenter:
             "frozen_signal": None if frozen is None else frozen.signal,
             "frozen_publication": None if frozen is None else frozen.publication,
             "frozen_snapshot": None if frozen is None else frozen.snapshot,
-            "stale": bool(binding.frozen_configuration_incompatible),
-            "data_advanced": bool(binding.frozen_data_advanced),
+            **self._panel_snapshot_status(binding),
             "producer_node_id": producer_node_id,
             "save_directory": str(self.session.day_folder_path()),
         }
@@ -4594,7 +4619,9 @@ class ConsolePresenter:
             return binding.frozen_data.snapshot
         return None
 
-    def _publish_panel_state(self, binding: PanelBinding) -> None:
+    def _publish_panel_state(
+        self, binding: PanelBinding, *, data_shape: Mapping[str, object] | None = None,
+    ) -> None:
         """Purely project the current panel records to every view."""
 
         surface = dict(binding.parameter_surface)
@@ -4636,19 +4663,29 @@ class ConsolePresenter:
                 }
                 for field in declared
             )
-        snapshot = self._shown_snapshot(binding)
-        schema = getattr(getattr(snapshot, "block", None), "schema", None)
-        if schema is None:
-            schema = self._panel_schema(binding)
-        surface.update(
-            {"data_structure": (), "data_valid": (), "data_scope": ()}
-            if schema is None
-            else panel_data_shape(
-                schema,
-                binding.accepted_display,
-                validity=getattr(getattr(snapshot, "block", None), "validity", None),
+        if data_shape is None:
+            snapshot = self._shown_snapshot(binding)
+            schema = getattr(getattr(snapshot, "block", None), "schema", None)
+            if schema is None:
+                schema = self._panel_schema(binding)
+            accepted = binding.accepted_surface
+            if accepted is not None:
+                publication, signal = accepted.publication, accepted.target.signal
+            elif binding.frozen_data is not None:
+                publication, signal = binding.frozen_data.publication, binding.frozen_data.signal
+            else:
+                publication, signal = None, binding.state.signal
+            data_shape = (
+                {"data_structure": (), "data_valid": (), "data_scope": ()}
+                if schema is None
+                else panel_data_shape(
+                    schema,
+                    binding.accepted_display,
+                    validity=getattr(getattr(snapshot, "block", None), "validity", None),
+                    source=None if publication is None else publication.value(signal),
+                )
             )
-        )
+        surface.update(data_shape)
         binding.parameter_surface = surface
 
         set_projection = getattr(self.view, "set_panel_projection", None)
@@ -8148,6 +8185,9 @@ class ConsolePresenter:
         here.  Rows and the running count therefore cannot observe different
         moments of the same host lifecycle.
         """
+
+        for binding in self.panels.values():
+            self._refresh_panel_snapshot_status(binding)
 
         # ONE read for every row, which is what "one current state read"
         # above has always claimed.  Each row rebuilt the plane's whole

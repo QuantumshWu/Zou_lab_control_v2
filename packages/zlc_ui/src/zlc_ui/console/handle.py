@@ -551,6 +551,11 @@ class TaskConsoleHandle(QtCore.QObject):
         editor.update_projection(incoming)
         return True
 
+    def set_panel_snapshot_status(self, panel_id: str, status: Mapping[str, object]) -> None:
+        editor = self._panel_editors.get(str(panel_id))
+        if editor is not None:
+            editor.set_snapshot_status(status)
+
     def show_panel_editor(self, panel_id: str, host: Any | None) -> None:
         """Mount a plotting host without exposing its QWidget to Workbench."""
 

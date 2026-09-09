@@ -352,16 +352,7 @@ class PanelEditorView(QtWidgets.QWidget):
                 bool(spec.fields) or bool(unavailable)
             )
 
-        stale = bool(incoming.get("stale"))
-        snapshot = incoming.get("frozen_snapshot")
-        self.snapshot_label.setText(self._snapshot_text(incoming, stale=stale))
-        self.snapshot_label.setStyleSheet(
-            f"color: {ORANGE if stale else GREY}; background: transparent; border: none;"
-        )
-        self._snapshot_can_save = snapshot is not None and not stale
-        self.save_button.setToolTip(
-            "Refresh the stale snapshot before saving" if stale else ""
-        )
+        self._update_snapshot_status()
         producer_node_id = str(incoming.get("producer_node_id") or "")
         self.producer_summary.setText(
             f"Logic node: {producer_node_id}"
@@ -370,6 +361,28 @@ class PanelEditorView(QtWidgets.QWidget):
         )
         self.open_producer_button.setEnabled(bool(producer_node_id))
         self.set_mutation_enabled(self._mutation_enabled)
+
+    def set_snapshot_status(self, status: Mapping[str, object]) -> None:
+        """Update frozen age without reconciling the editor's forms."""
+
+        if all(self._projection.get(key) == value for key, value in status.items()):
+            return
+        self._projection.update(status)
+        self._update_snapshot_status()
+        self._update_save_controls()
+
+    def _update_snapshot_status(self) -> None:
+        stale = bool(self._projection.get("stale"))
+        snapshot = self._projection.get("frozen_snapshot")
+        aged = bool(self._projection.get("data_advanced") or self._projection.get("source_status"))
+        self.snapshot_label.setText(self._snapshot_text(self._projection, stale=stale))
+        self.snapshot_label.setStyleSheet(
+            f"color: {ORANGE if stale or aged else GREY}; background: transparent; border: none;"
+        )
+        self._snapshot_can_save = snapshot is not None and not stale
+        self.save_button.setToolTip(
+            "Refresh the stale snapshot before saving" if stale else ""
+        )
 
     def set_surface(self, widget: QtWidgets.QWidget | None) -> None:
         """Mount or replace the plot widget supplied by the console handle."""
@@ -546,9 +559,6 @@ class PanelEditorView(QtWidgets.QWidget):
         if shape is not None:
             pieces.append(f"shape {tuple(shape)}")
         if stale:
-            # Two different facts wore one sentence, and for the common one it
-            # was false: a panel whose SIGNAL was retargeted, and a panel whose
-            # frozen picture belongs to a run that has since been replaced.
             state = projection.get("state")
             signal = ""
             if isinstance(state, Mapping):
@@ -557,8 +567,14 @@ class PanelEditorView(QtWidgets.QWidget):
             pieces.append(
                 "STALE: this panel now shows another signal; refresh before Save Fig"
                 if signal and frozen_signal and signal != frozen_signal
-                else "STALE: frozen from an earlier run; refresh before Save Fig"
+                else "STALE: panel configuration changed; refresh before Save Fig"
             )
+        elif projection.get("source_status") == "earlier_run":
+            pieces.append("Frozen from an earlier run; Refresh to update; Save keeps this snapshot")
+        elif projection.get("source_status") == "no_longer_current":
+            pieces.append("Source is no longer current; Refresh to update; Save keeps this snapshot")
+        elif projection.get("data_advanced"):
+            pieces.append("Live data advanced; Refresh to update; Save keeps this snapshot")
         else:
             pieces.append("frozen and ready to save")
         return " · ".join(pieces)

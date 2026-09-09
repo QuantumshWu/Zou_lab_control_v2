@@ -320,6 +320,9 @@ class FigureViewerHandle(QtCore.QObject):
     def update_panel_editor(self, panel_id: str, projection: object) -> bool:
         return self._view.update_panel_editor(panel_id, projection)
 
+    def set_panel_snapshot_status(self, panel_id: str, status: object) -> None:
+        self._view.set_panel_snapshot_status(panel_id, status)
+
     def has_panel_editor(self, panel_id: str) -> bool:
         return self._view.has_panel_editor(panel_id)
 

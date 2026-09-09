@@ -416,6 +416,9 @@ class _ConsoleView:
         else:
             self.panel_editor_surfaces[key] = host
 
+    def set_panel_snapshot_status(self, panel_id: str, status) -> None:
+        self.panel_editors[str(panel_id)].update(status)
+
     def focus_panel_editor(self, panel_id: str) -> None:
         self.focused_panel_editor = str(panel_id)
 
@@ -4176,14 +4179,12 @@ def test_saved_fates_are_read_in_todays_vocabulary_or_refused_by_name() -> None:
 
 
 def test_panel_edit_projects_the_direct_producer_link_and_ages(
-    presenter, session, monkeypatch
+    presenter, session, monkeypatch, tmp_path
 ) -> None:
     """Edit knows whose data it shows, and when that run is over.
 
-    Its picture is one frozen revision; a later RUN of the same signal leaves
-    it describing an experiment the bench no longer holds -- its fit solved
-    against gone data, its Save still armed -- so the projection says so
-    until Refresh.
+    A later run is a visible age warning, not permission to replace the
+    frozen picture or refuse saving it. Only Refresh adopts the newer data.
     """
 
     node_id = presenter.add_logic("camera_measurement")
@@ -4203,19 +4204,46 @@ def test_panel_edit_projects_the_direct_producer_link_and_ages(
     assert projection["stale"] is False
     assert projection["data_advanced"] is False
 
+    _settle_panel_hosts(presenter, lambda: panel.editor_configuration is None)
     previous = panel.frozen_data
     assert previous is not None
+    old_editor_front = panel.editor_host.front
+    full_updates = presenter.view.panel_editor_update_count.get(panel.panel_id, 0)
+    session.signal_plane.retire(node)
+    presenter._refresh_console_projection()
+    projection = presenter.view.panel_editors[panel.panel_id]
+    assert projection["source_status"] == "no_longer_current"
+    assert projection["stale"] is False
+    assert panel.frozen_data is previous
     _one_shot(session, producer=node_id)
     latest = session.signal_plane.latest_publication(panel.state.signal)
     assert latest is not None and latest is not previous.publication
     current = latest.value(panel.state.signal)
     assert current is not None
+    _settle_panel_hosts(presenter, lambda: panel.display_publication is latest)
+    assert current.snapshot.ref.stream_generation != previous.snapshot.ref.stream_generation
+    assert current.snapshot.ref.revision == previous.snapshot.ref.revision
+    assert panel.frozen_data is previous and panel.editor_host.front is old_editor_front
+    projection = presenter.view.panel_editors[panel.panel_id]
+    assert projection["data_advanced"] is True
+    assert projection["stale"] is False
+    assert presenter.view.panel_editor_update_count.get(panel.panel_id, 0) == full_updates
+    from zlc_ui.console.panel_editor_view import PanelEditorView
+    assert "earlier run" in PanelEditorView._snapshot_text(projection, stale=False)
+    from zlc_data.figure_archive import read_archive, read_dataset
+    saved_path = tmp_path / "earlier-run.png"
+    assert presenter.save_panel_figure(panel.panel_id, str(saved_path))
+    _wait_for_panel_save(presenter, saved_path)
+    document, arrays = read_archive(saved_path.with_suffix(".npz"))
+    saved = read_dataset(document, arrays, "data")
+    assert saved.ref == previous.snapshot.ref
+    np.testing.assert_array_equal(saved.block.values, previous.snapshot.block.values)
     latest_front = SimpleNamespace(
         value=lambda _name: current,
         publication=lambda _name: latest,
     )
     with monkeypatch.context() as blocked:
-        blocked.setattr(presenter.board, "tick", lambda: None)
+        blocked.setattr(presenter.board, "tick", lambda **_kwargs: None)
         blocked.setattr(session.signal_plane, "freeze", lambda: latest_front)
         assert presenter.refresh_panel_snapshot(panel.panel_id)
         assert panel.frozen_data is previous, (

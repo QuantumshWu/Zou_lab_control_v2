@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 
 from zlc_data.axis import AxisId, AxisSpec, REPEAT, SCAN_POINT, SPATIAL_X
@@ -55,15 +57,7 @@ def test_dataset_component_validity_expands_over_repeat_and_point_carriers():
 
 
 def test_a_repeat_axis_counts_the_samples_that_have_landed():
-    """34\u2713 beside a repeat axis is the number of repeats that have LANDED.
-
-    Two repeat axes over one carrier: ``repeat`` (which play of the table)
-    and ``run`` (which run within it).  A row is a sample; a coordinate of
-    either axis has landed once any row it owns holds one valid cell.  A
-    run that faulted holds none and is not counted, and a coordinate the
-    carrier does not hold yet never is -- but a row with a point still to
-    land, or a site the readout could not judge, IS a landed sample.
-    """
+    """Count at the other coordinates; never pool validity across contexts."""
 
     repeat = _axis("repeat", REPEAT, 3)
     run = _axis("run", REPEAT, 2)
@@ -79,13 +73,22 @@ def test_a_repeat_axis_counts_the_samples_that_have_landed():
     )
     assert repeat_validity_counts(VALID, schema) == (2, 2)
     assert repeat_validity_counts(INVALID, schema) == (0, 0)
-    # Row 3 (repeat 1, run 1) has one point still to land: landed all the same.
+    # Row 3 is still missing Point 1. Its valid Point 0 cannot fill that hole.
     cells = CellValidity(np.array([[True, True], [True, True], [True, True], [True, False]]))
-    assert repeat_validity_counts(cells, schema) == (2, 2)
+    assert repeat_validity_counts(cells, schema) == ((1, 2), (1, 2))
+    assert repeat_validity_counts(cells, schema, {point.axis_id: 0}) == (2, 2)
+    assert repeat_validity_counts(cells, schema, {
+        repeat.axis_id: 1, run.axis_id: 1, point.axis_id: 1,
+    }) == (1, 1)
+    # A target ignores its own pin; an absent intersection for another target
+    # is genuinely empty. No undeclared Cartesian rows are invented.
+    assert repeat_validity_counts(VALID, schema, {
+        repeat.axis_id: 2, run.axis_id: 0, point.axis_id: 0,
+    }) == (2, 0)
     # Rows 1 and 3 are run 1 of each repeat, and both faulted: run 1 never landed.
     faulted = CellValidity(np.array([[True, True], [False, False], [True, True], [False, False]]))
-    assert repeat_validity_counts(faulted, schema) == (2, 1)
-    # A component mask reads the same way: an unjudged site does not un-land its row.
+    assert repeat_validity_counts(faulted, schema) == ((0, 2), 1)
+    # A different site's valid value cannot stand in for an unjudged site.
     component_schema = DatasetSchema(
         schema.repeat_domain,
         schema.point_domain,
@@ -101,17 +104,27 @@ def test_a_repeat_axis_counts_the_samples_that_have_landed():
             [[True, True], [True, True]],
         ]),
     )
-    assert repeat_validity_counts(components, component_schema) == (2, 2)
+    assert repeat_validity_counts(components, component_schema) == ((1, 2), (1, 2))
+    assert repeat_validity_counts(components, component_schema, {
+        repeat.axis_id: 1, run.axis_id: 0, point.axis_id: 0, site.axis_id: 1,
+    }) == (1, 1)
+    assert repeat_validity_counts(components, component_schema, {site.axis_id: 0}) == (2, 2)
+    # Reordered/duplicate storage rows still count distinct Repeat coordinates.
+    order = (3, 0, 2, 1, 2, 0)
+    repeated_schema = replace(schema,
+        repeat_domain=DomainSpec((6,), (repeat, run),
+            tuple(tuple(codes[i] for i in order) for codes in schema.repeat_domain.axis_codes)),
+        point_domain=DomainSpec((3,), (point,), ((1, 0, 0),)))
+    repeated = cells.mask[np.asarray(order)][:, (1, 0, 0)].copy()
+    repeated[:, 1] = False  # another row with the same Point coordinate is valid
+    repeated[1] = False    # another row with the same Repeat coordinates is valid
+    assert repeat_validity_counts(CellValidity(repeated), repeated_schema) == ((1, 2), (1, 2))
+    assert repeat_validity_counts(CellValidity(repeated), repeated_schema,
+                                  {point.axis_id: 0}) == (2, 2)
 
 
-def test_a_seamless_sweep_counts_every_run_from_its_first_point():
-    """One sweep, three runs, four points, and only the first point played.
-
-    A seamless scan holds one point while its runs supply the shots, then
-    advances, so every run of the sweep is part-landed until the sweep is
-    over.  Counting whole samples read 0 x 0 for the whole scan; the runs
-    have landed from their first point on, and the sweep with them.
-    """
+def test_a_seamless_sweep_counts_the_runs_at_the_selected_point():
+    """Unplayed points report zero, even when all runs reached Point 0."""
 
     scan = AxisSpec(AxisId("scan"), "scan", REPEAT, 1, (0,))
     run = AxisSpec(AxisId("run"), "run", REPEAT, 3, (0, 1, 2))
@@ -125,7 +138,9 @@ def test_a_seamless_sweep_counts_every_run_from_its_first_point():
     )
     assert repeat_validity_counts(INVALID, schema) == (0, 0)
     first_point = CellValidity(np.array([[True, False, False, False]] * 3))
-    assert repeat_validity_counts(first_point, schema) == (1, 3)
+    assert repeat_validity_counts(first_point, schema) == ((0, 1), (0, 3))
+    assert repeat_validity_counts(first_point, schema, {point.axis_id: 0}) == (1, 3)
+    assert repeat_validity_counts(first_point, schema, {point.axis_id: 1}) == (0, 0)
 
 
 def test_two_repeat_axes_of_one_name_keep_their_own_counts():
@@ -152,4 +167,7 @@ def test_two_repeat_axes_of_one_name_keep_their_own_counts():
     cells = CellValidity(
         np.array([[True, True]] * 2 + [[False, False]] + [[True, True]] * 2 + [[False, False]])
     )
-    assert repeat_validity_counts(cells, schema) == (2, 2)
+    assert repeat_validity_counts(cells, schema) == ((0, 2), 2)
+    assert repeat_validity_counts(cells, schema, {
+        first.axis_id: 0, second.axis_id: 2, point.axis_id: 0,
+    }) == (0, 2)

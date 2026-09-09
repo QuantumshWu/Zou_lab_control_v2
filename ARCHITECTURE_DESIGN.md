@@ -142,6 +142,7 @@ Node new chunk
 - SignalDescription持有不可变canonical schema，physical shape由该schema派生。Logic/Panel Outputs与Source列表从Plot公共schema_structure读取三domain轴大小，只显示三组数字维度，不添加轴名或单位；长度1的轴也保留乘1，不再只打印扁平Point carrier长度。原signal name和Panel标题的轴名行不变，UI仍只接收投影后的文本。
 
 - Generation标识一次run/restart；generation内schema和stream generation固定。
+- Panel标题仅Repeat域显示条件有效数，Point/Cell-data仍显示完整维度。对每个Repeat轴放开自身，其余Repeat/Point坐标由同一次publication最后写入的位置与canonical axis_codes决定；没有incremental placement的完整数据以自身carrier末位置为当前值。不得读取Panel Scope/Focus/Facet/Reduction或独立latest决定计数。Cell-data同时存在多个component且计数不同时显示min–max；计数之积不代表全Dataset有效样本总数。统计只读compact validity，不展开image pixels；一次surface acceptance的标题metadata复用，不重复计算。
 - Producer与latest/frozen/follow Processor的Start共用同一终态世代交接：旧结果在结束/Shutdown后仍保留，直到下一次Start才退休旧owner及派生closure。cleanup在Plane锁外，最终source exact校验与新state安装在同一锁内，`_starting`由同一入口释放；仍active的owner不得被覆盖。不得用关闭时清数据或为Derive另建重启路径绕过。
 - Revision严格递增，不接受重复、倒退或同ref不同内容。
 - 一次commit的siblings共享revision、run record和causal parent。
@@ -281,6 +282,7 @@ Node new chunk
 ## 6. UI与Lifecycle
 
 - `zlc_ui`不拥有domain parser、device state或plot lifecycle。
+- Frozen Edit的配置兼容性与数据年龄分开：新generation（包括revision重置）或旧source已退休时明确显示橙色旧代/不再current提示，尚无新首帧也不能漏提示；不重建表单、不替换旧Frozen图和数据。Save仍精确保存该Frozen，只有Refresh接受新front后才换快照；配置不兼容仍按原stale gate处理。Console与FigureViewer共用PanelEditorView的轻量状态更新。
 - Derive的输入/输出信息以完整三domain逻辑结构为主，颜色复用Panel标题的`AXIS_GROUP_COLORS`；NumPy物理shape明确标为Storage辅助信息。多个逻辑Repeat/Point轴共享一个物理carrier是既有Dataset模型，不把逻辑轴丢弃或错误解释成同一轴。Signal列表仍只显示数字维度，不随此信息面板增加轴名。
 - Derive的具体Logic Editor只组合普通Fluent控件：Input range与window数量、逐输出Name/多行Code、Add/Remove、只读输入/输出三domain结构与代码帮助。结构摘要读取Runtime已发布的schema/snapshot，未运行的代码不预猜输出；普通Python/NumPy、`isel/sel/where`、命名轴归约、有效性、显式schema及range边界都在同一帮助文本中说明。Qt只编辑草稿/投影metadata，不执行表达式或物化run/history；数值业务仍在Derive自己的owner。
 - Qt slot不得执行blocking I/O、device tune或`Future.result()`。

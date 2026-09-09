@@ -124,11 +124,10 @@ def data_structure_fragments(
 ) -> tuple[tuple, tuple]:
     """The one coloured two-line rendering of a three-domain shape.
 
-    ``valid`` is one landed count per axis of the Repeat group, in that
-    group's own order, and that number is what the axis reads where the
-    others read their size: a repeat is a sample, not a coordinate, and the
-    count a reader wants is the count of landed ones, which is also the
-    number that moves while a run is playing.  By POSITION within the
+    ``valid`` is one conditional count (or min/max pair) per Repeat axis,
+    in that group's own order. Other domains still read their full size.
+    These counts come from the current data position, not plot selection;
+    their product is not a total sample count. By POSITION within the
     Repeat group, never by name: an axis is very often called "repeat", two
     Repeat axes may both be, and so may a Point axis, and a name lookup
     handed the last count to every one of them.
@@ -154,11 +153,14 @@ def data_structure_fragments(
     missing one's.
     """
 
-    landed = tuple(int(count) for count in tuple(valid or ()))
+    landed = tuple(valid or ())
 
     def count_text(group_index: int, position: int, size: object) -> str:
         if group_index == 0 and position < len(landed):
-            return str(landed[position])
+            count = landed[position]
+            if isinstance(count, (tuple, list)):
+                return f"{int(count[0])}–{int(count[1])}"
+            return str(int(count))
         return str(int(size))
 
     sizes: list[tuple[str, str | None, object]] = []

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import uuid4
 
@@ -373,40 +374,97 @@ def expand_dataset_validity(
 def repeat_validity_counts(
     validity: Valid | Invalid | CellValidity | DatasetComponentValidity,
     schema: DatasetSchema,
-) -> tuple[int, ...]:
-    """How many coordinates of each Repeat axis have landed, one count per
-    axis in the schema's own order.
+    positions: Mapping[AxisId, int] | None = None,
+) -> tuple[int | tuple[int, int], ...]:
+    """Count distinct valid Repeat coordinates at the other named positions.
 
-    A repeat is a sample, and the number a reader wants beside a repeat axis
-    is how many samples have LANDED: a coordinate counts once anything of
-    it is valid -- one point, one component -- and not before.  A shot the
-    pulse faulted on lands nothing and is not counted, nor is a coordinate
-    the carrier does not hold yet.  A coordinate is not asked to be whole:
-    a seamless scan lands one point at a time across every run of a sweep,
-    so until the sweep is over no run is whole, and a count of whole
-    samples read "0 x 0" for the entire scan; and a site the readout could
-    not judge does not un-land the shot it was taken in.  Decided on the
-    compact form: a dense expansion over a frame's pixels would be as large
-    as the frames.
-
-    By POSITION, never by name.  Only an axis's id is unique: two Repeat
-    axes may both be called "repeat", and so may a Point axis, and a count
-    keyed by name silently overwrote the first with the second and lent a
-    Repeat axis's count to a Point axis of the same name.
+    Each target Repeat axis ignores its own pin. Unpinned axes are separate
+    contexts, not an ANY reduction: differing counts return (minimum, maximum).
+    Contexts are the combinations actually carried by the schema, never a
+    fabricated Cartesian product. An explicitly empty intersection counts zero.
+    Only the compact validity is read; omitted pixel axes cannot vary its answer.
     """
-
     _validate_dataset_validity(validity, schema)
-    rows = schema.repeat_domain.size
-    if isinstance(validity, (Valid, Invalid)):
-        row_landed = np.full(rows, isinstance(validity, Valid), dtype=bool)
-    else:
-        row_landed = np.asarray(validity.mask).reshape(rows, -1).any(axis=1)
-    counts: list[int] = []
-    for axis in schema.repeat_domain.axes:
-        codes = schema.repeat_domain.codes(axis.axis_id)
-        landed = np.bincount(codes[row_landed], minlength=axis.size) > 0
-        counts.append(int(np.count_nonzero(landed)))
-    return tuple(counts)
+    repeat = schema.repeat_domain
+    if not repeat.axes:
+        return ()
+    if isinstance(validity, Invalid):
+        return (0,) * len(repeat.axes)
+    pins = {} if positions is None else positions
+    point = schema.point_domain
+    point_rows = np.ones(point.size, dtype=bool)
+    for axis in point.axes:
+        if axis.axis_id in pins:
+            point_rows &= point.codes(axis.axis_id) == pins[axis.axis_id]
+    point_rows = np.flatnonzero(point_rows)
+    if not point_rows.size:
+        return (0,) * len(repeat.axes)
+
+    mask = None
+    if not isinstance(validity, Valid):
+        # Slice component axes before selecting any carrier rows: one site
+        # must not copy a complete camera-sized component mask.
+        component_slice = (
+            tuple(pins.get(axis_id, slice(None)) for axis_id in validity.axis_ids)
+            if isinstance(validity, DatasetComponentValidity) else ()
+        )
+        mask = validity.mask[(slice(None), slice(None), *component_slice)]
+        if point_rows.size != point.size:
+            mask = mask[:, point_rows]
+        # Duplicate physical Point rows with identical complete coordinates
+        # describe the same context. Combine only those, not different sites
+        # or frame/scan coordinates.
+        if point.axes and point_rows.size > 1:
+            point_codes = np.column_stack([point.codes(axis.axis_id)[point_rows] for axis in point.axes])
+            unique_points, inverse = np.unique(point_codes, axis=0, return_inverse=True)
+            if len(unique_points) != len(point_rows):
+                grouped = np.zeros((len(unique_points), mask.shape[0], *mask.shape[2:]), dtype=bool)
+                np.logical_or.at(grouped, inverse, np.moveaxis(mask, 1, 0))
+                mask = np.moveaxis(grouped, 0, 1)
+
+    # Deduplicate complete Repeat coordinates once, not independently for
+    # each axis; multiple storage rows cannot count the same target twice.
+    codes = np.column_stack([repeat.codes(axis.axis_id) for axis in repeat.axes])
+    unique, inverse = np.unique(codes, axis=0, return_inverse=True)
+    if len(unique) != len(codes):
+        if mask is not None:
+            grouped = np.zeros((len(unique), *mask.shape[1:]), dtype=bool)
+            np.logical_or.at(grouped, inverse, mask)
+            mask = grouped
+        codes = unique
+
+    result: list[int | tuple[int, int]] = []
+    for target, axis in enumerate(repeat.axes):
+        rows = np.ones(len(codes), dtype=bool)
+        context_columns = []
+        for index, other in enumerate(repeat.axes):
+            if index == target:
+                continue
+            if other.axis_id in pins:
+                rows &= codes[:, index] == pins[other.axis_id]
+            else:
+                context_columns.append(index)
+        rows = np.flatnonzero(rows)
+        if not rows.size:
+            result.append(0)
+            continue
+        if context_columns:
+            contexts, groups = np.unique(codes[rows][:, context_columns], axis=0, return_inverse=True)
+            group_count = len(contexts)
+        else:
+            groups = np.zeros(len(rows), dtype=np.int64)
+            group_count = 1
+        minimum, maximum = axis.size, 0
+        for group in range(group_count):
+            selected = rows[groups == group]
+            if mask is None:
+                low = high = len(selected)
+            else:
+                counts = np.count_nonzero(mask[selected], axis=0)
+                low, high = int(counts.min()), int(counts.max())
+            minimum, maximum = min(minimum, low), max(maximum, high)
+        result.append(minimum if minimum == maximum else (minimum, maximum))
+    return tuple(result)
 
 
 def compact_dataset_validity(

@@ -72,17 +72,16 @@ def panel_data_shape(
     description: object | None,
     *,
     validity: object | None = None,
+    source: object | None = None,
 ) -> dict[str, object]:
-    """Canonical three-part Dataset shape, how many samples of each Repeat
-    axis have landed, plus accepted typed scope fates.
+    """Three-domain structure and data-only conditional Repeat counts.
 
-    ``validity`` is the shown snapshot's, when there is one: the strip then
-    prints, for a repeat axis, how many of its samples have landed instead
-    of its size, because a repeat is a sample and the count that means
-    anything is the count of landed ones.  With no snapshot there is
-    no such count.  ``data_valid`` carries one count per Repeat axis in the
-    order the Repeat group of ``data_structure`` lists them: a name is not
-    an identity, and two axes may share one.
+    ``source`` is the exact publication event underlying the snapshot, never
+    a separate read of latest. Its final written Repeat/Point position fixes
+    the other axes while each Repeat axis is counted in turn. Components
+    without one current coordinate contribute a min/max count. Plot scope
+    only supplies the existing scope labels; it cannot change these counts.
+    No input validity means zero observed samples, not the planned capacity.
     """
 
     from zlc_plot.semantics import (
@@ -91,6 +90,33 @@ def panel_data_shape(
         scope_coordinate_from_fate,
     )
     from zlc_data import LATEST_COORDINATE, repeat_validity_counts
+
+    # A title reports the DATA's progress, not its plot projection. The last
+    # Repeat/Point row in this exact publication's write block is its current
+    # position; Cell-data are simultaneous components, so none is picked here.
+    domains = (schema.repeat_domain, schema.point_domain)
+    positions = {
+        axis.axis_id: int(domain.codes(axis.axis_id)[-1])
+        for domain in domains for axis in domain.axes
+    }
+    if source is not None:
+        event = source.snapshot.block.schema
+        declared = source.canonical_schema or event
+        origin = source.cell_origin or (0, 0)
+        for index, (domain, event_domain) in enumerate(zip(
+            (declared.repeat_domain, declared.point_domain),
+            (event.repeat_domain, event.point_domain), strict=True,
+        )):
+            last_row = int(origin[index]) + event_domain.size - 1
+            shown_axes = {axis.axis_id: axis for axis in domains[index].axes}
+            for axis in domain.axes:
+                shown_axis = shown_axes.get(axis.axis_id)
+                if shown_axis is None:
+                    continue
+                coordinate = axis.coordinate_at(int(domain.codes(axis.axis_id)[last_row]))
+                position = shown_axis.coordinate_position(coordinate)
+                if position is not None:
+                    positions[axis.axis_id] = position
 
     def pinned_text(field: object) -> str:
         value = getattr(field, "value", None)
@@ -115,7 +141,8 @@ def panel_data_shape(
     return {
         "data_structure": schema_structure(schema),
         "data_valid": (
-            () if validity is None else repeat_validity_counts(validity, schema)
+            tuple(0 for _axis in schema.repeat_domain.axes)
+            if validity is None else repeat_validity_counts(validity, schema, positions)
         ),
         "data_scope": pinned,
     }
