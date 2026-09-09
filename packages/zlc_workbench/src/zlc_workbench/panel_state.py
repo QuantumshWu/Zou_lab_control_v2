@@ -308,6 +308,28 @@ def panel_surface_from_description(
                 ),
             }
         )
+        if "min_bic_gain" in accepted_fit:
+            # A two-population model asks whether the data has two, and
+            # the evidence it demands is the operator's to set: the BIC
+            # gain of two populations over one, ten by default.  Below it
+            # the fit reports one population.
+            fit_fields.append(
+                {
+                    "key": "min_bic_gain",
+                    "label": "Two populations if ΔBIC ≥",
+                    "kind": "number",
+                    "value": accepted_fit["min_bic_gain"],
+                    "allow_none": False,
+                    "choices": (),
+                    "minimum": None,
+                    "maximum": None,
+                    "step": 1.0,
+                    "description": (
+                        "the evidence two populations must show over one; "
+                        "below it the fit reports one population"
+                    ),
+                }
+            )
         if facet_fit_control is not None:
             fit_fields.append(
                 {

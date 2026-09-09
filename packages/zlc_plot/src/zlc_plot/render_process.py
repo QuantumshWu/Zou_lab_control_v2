@@ -202,6 +202,8 @@ def _wire_complete_fit_result(result: object) -> dict[str, object]:
             "parameter_units": dict(result.parameter_units),
             "batch_revision": int(result.batch_revision),
             "fixed_parameter_names": tuple(result.fixed_parameter_names),
+            "reduced": bool(result.reduced),
+            "evidence": float(result.evidence),
         }
     return {
         "kind": "batch",
@@ -392,6 +394,8 @@ def _restore_complete_fit_result(document: Mapping[str, object]) -> object:
             parameter_units=document["parameter_units"],
             batch_revision=document["batch_revision"],
             fixed_parameter_names=document["fixed_parameter_names"],
+            reduced=document["reduced"],
+            evidence=document["evidence"],
         )
     return FacetFitBatchResult(
         facet=document["facet"],

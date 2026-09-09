@@ -2,7 +2,9 @@
 
 This module is the single owner of the normal CDF, Gaussian overlap, and
 threshold classification primitives used by calibration and runtime readout.
-It intentionally has no device, runtime, plotting, or GUI imports.
+It intentionally has no device, runtime, or GUI imports; from the plot
+package it takes one number, the evidence two populations must show over
+one, which the plot's bimodal fit decides by as well.
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ from dataclasses import dataclass
 from math import erf, isfinite, log, pi, sqrt
 
 import numpy as np
+from zlc_plot.fit import DECISIVE_BIC_GAIN
 
 _SIGMA_FLOOR = 1e-12
 
@@ -23,8 +26,9 @@ _SIGMA_FLOOR = 1e-12
 #: a contrast of 10.9 photoelectrons, one hundred times under its
 #: neighbours: the uniformity ratio read 116 and the observable count 33.
 #: The calibration asks the same question of a site's reference frames: one
-#: that never loaded has no two states to label them by.
-_DECISIVE_BIC_GAIN = 10.0
+#: that never loaded has no two states to label them by.  The number is
+#: ``zlc_plot.fit.DECISIVE_BIC_GAIN``: the plot's bimodal fit decides by it
+#: too, and it has one owner.
 
 #: What keeps a "state" off a handful of samples.  A Gaussian mixture's
 #: likelihood is unbounded: a component narrowed onto a few shots that
@@ -403,7 +407,7 @@ class BimodalFit:
         that overlap can be as real as the evidence for them is weak."""
 
         return bool(
-            self.ok and isfinite(self.bic_gain) and self.bic_gain > _DECISIVE_BIC_GAIN
+            self.ok and isfinite(self.bic_gain) and self.bic_gain > DECISIVE_BIC_GAIN
         )
 
 
@@ -433,7 +437,7 @@ def fit_bimodal(values: object, *, min_component_fraction: float = 0.01) -> Bimo
     ``ok`` says whether the shots are two states far enough apart, and both
     populated enough, for a shot to be assigned to one of them; ``decisive``
     adds the evidence that two Gaussians beat one at all (``bic_gain`` over
-    ``_DECISIVE_BIC_GAIN``).  A site that never loaded has its one Gaussian
+    ``DECISIVE_BIC_GAIN``).  A site that never loaded has its one Gaussian
     split in two like any other sample, and the evidence is what says it
     did not; two populations that overlap at sixty shots are ``ok`` and not
     ``decisive``, and their crossing is still the best threshold there is.

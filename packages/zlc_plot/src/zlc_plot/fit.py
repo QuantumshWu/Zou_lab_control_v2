@@ -67,6 +67,18 @@ class ParameterDomain(str, Enum):
     POSITIVE = "positive"
     NONNEGATIVE = "nonnegative"
     PHASE_RADIANS = "phase_radians"
+    #: A share of a whole: zero to one inclusive.
+    UNIT_INTERVAL = "unit_interval"
+
+
+#: The evidence two populations must show over one before a two-population
+#: fit keeps its own parameters: the BIC gain of the pair over the nested
+#: single population, ten being Kass and Raftery's "very strong" (a Bayes
+#: factor of about 150).  A loaded site clears it by hundreds; a dark site
+#: whose one Gaussian the fitter split in two, 1.7 sigma apart, came in at
+#: +4.6 and was reported as loaded.  The readout's own two-state fit
+#: (``zlc_atom.nodes.calibration.bimodal``) decides by this same number.
+DECISIVE_BIC_GAIN = 10.0
 
 
 class UnitRelation(str, Enum):
@@ -238,6 +250,8 @@ class FitParameterSpec:
             return 0.0, np.inf
         if self.domain is ParameterDomain.PHASE_RADIANS:
             return -np.pi, float(np.nextafter(np.pi, -np.inf))
+        if self.domain is ParameterDomain.UNIT_INTERVAL:
+            return 0.0, 1.0
         raise RuntimeError(self.domain)
 
 
@@ -306,6 +320,59 @@ class FitPresentationSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class FitReductionSpec:
+    """The one-population model nested in a two-population one, and how its
+    answer is written in the wider model's own parameters.
+
+    A two-population fit always finds two populations, because it has the
+    parameters for them; whether the data has two is a separate question,
+    asked by fitting the nested model as well and weighing the evidence
+    (``FitOptions.min_bic_gain``).  When the evidence falls short, the
+    nested answer stands: ``shared`` says which of the wider model's
+    parameters the nested model also has, by both names; ``pinned`` gives
+    every other parameter either a number or the name of a shared
+    parameter whose value it takes -- the two components coincide.
+    """
+
+    nested_model_id: str
+    shared: tuple[tuple[str, str], ...]
+    pinned: Mapping[str, float | str]
+
+    def __post_init__(self) -> None:
+        nested_model_id = _text(self.nested_model_id, "fit reduction nested model id")
+        shared = tuple(
+            (_text(wide, "fit reduction parameter"), _text(narrow, "fit reduction parameter"))
+            for wide, narrow in self.shared
+        )
+        if not shared:
+            raise ValueError("a fit reduction shares at least one parameter")
+        shared_names = {wide for wide, _narrow in shared}
+        pinned: dict[str, float | str] = {}
+        for name, value in dict(self.pinned).items():
+            key = _text(name, "fit reduction pinned parameter")
+            if key in shared_names:
+                raise ValueError(f"fit reduction parameter {key!r} is both shared and pinned")
+            if isinstance(value, str):
+                source = _text(value, "fit reduction pinned source")
+                if source not in shared_names:
+                    raise ValueError(
+                        f"fit reduction pins {key!r} to {source!r}, which is not shared"
+                    )
+                pinned[key] = source
+            else:
+                pinned[key] = _finite_real(value, f"fit reduction pinned value {key}")
+        object.__setattr__(self, "nested_model_id", nested_model_id)
+        object.__setattr__(self, "shared", shared)
+        object.__setattr__(self, "pinned", MappingProxyType(pinned))
+
+    @property
+    def wide_names(self) -> frozenset[str]:
+        return frozenset(
+            {wide for wide, _narrow in self.shared} | set(self.pinned)
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class FitModelSpec:
     """One fit model, including optional MathText presentation metadata."""
 
@@ -326,6 +393,7 @@ class FitModelSpec:
     default_for: tuple[FitTarget, ...] = ()
     capabilities: frozenset[str] = frozenset()
     compiled_descriptor: _compiled_fit.CompiledFitDescriptor | None = None
+    reduction: FitReductionSpec | None = None
 
     def __post_init__(self) -> None:
         model_id = _text(self.model_id, "fit model id")
@@ -446,6 +514,19 @@ class FitModelSpec:
         formula = self.formula
         if formula is not None:
             formula = _text(formula, "fit model formula")
+        if self.reduction is not None:
+            if not isinstance(self.reduction, FitReductionSpec):
+                raise TypeError("reduction must be FitReductionSpec or None")
+            if self.reduction.wide_names != set(names):
+                raise ValueError(
+                    f"fit model {model_id!r}: its reduction must account for "
+                    "every parameter, shared or pinned"
+                )
+            if targets != (FitTarget.HISTOGRAM,):
+                raise ValueError(
+                    f"fit model {model_id!r}: a reduction is weighed by the "
+                    "Poisson deviance of counts; only a histogram model has one"
+                )
         object.__setattr__(self, "model_id", model_id)
         object.__setattr__(self, "display_name", display_name)
         object.__setattr__(self, "independent_arity", independent_arity)
@@ -670,6 +751,11 @@ class FitOptions:
     #: keep the final model evaluation, residuals and quality on the full
     #: data.  ``None`` solves every point exactly at any size.
     max_exact_points: int | None = 4096
+    #: The BIC gain a two-population model must show over its nested
+    #: one-population model to keep its own answer; below it the nested
+    #: answer stands with the two components coinciding.  ``None`` never
+    #: asks.  Only models that declare a reduction are ever weighed.
+    min_bic_gain: float | None = DECISIVE_BIC_GAIN
 
     def __post_init__(self) -> None:
         loss = _text(self.loss, "fit loss")
@@ -690,6 +776,15 @@ class FitOptions:
             if max_exact <= 0:
                 raise ValueError("max_exact_points must be a positive integer")
             object.__setattr__(self, "max_exact_points", max_exact)
+        if self.min_bic_gain is not None:
+            if isinstance(self.min_bic_gain, bool) or not isinstance(
+                self.min_bic_gain, Real
+            ):
+                raise TypeError("min_bic_gain must be a real number or None")
+            gain = float(self.min_bic_gain)
+            if math.isnan(gain):
+                raise ValueError("min_bic_gain cannot be NaN")
+            object.__setattr__(self, "min_bic_gain", gain)
 
 
 def _readonly(array: np.ndarray) -> np.ndarray:
@@ -834,10 +929,25 @@ class FitResult:
     parameter_units: Mapping[str, str] = field(default_factory=dict)
     batch_revision: int = 0
     fixed_parameter_names: tuple[str, ...] = ()
+    #: Whether the nested one-population answer stands in this result's
+    #: parameters (see ``FitReductionSpec``): the pinned parameters are then
+    #: listed among ``fixed_parameter_names``, since nothing fitted them.
+    reduced: bool = False
+    #: The BIC gain of this model over its nested model on these
+    #: observations; NaN where the question was not asked.
+    evidence: float = float("nan")
 
     def __post_init__(self) -> None:
         if not isinstance(self.model, FitModelSpec):
             raise TypeError("model must be FitModelSpec")
+        if not isinstance(self.reduced, (bool, np.bool_)):
+            raise TypeError("fit result reduced must be bool")
+        object.__setattr__(self, "reduced", bool(self.reduced))
+        if isinstance(self.evidence, bool) or not isinstance(
+            self.evidence, (Real, np.number)
+        ):
+            raise TypeError("fit result evidence must be a real number")
+        object.__setattr__(self, "evidence", float(self.evidence))
         parameters = np.asarray(self.parameter_values, dtype=np.float64).reshape(-1)
         errors = np.asarray(self.standard_errors, dtype=np.float64).reshape(-1)
         covariance = np.asarray(self.covariance, dtype=np.float64)
@@ -1018,6 +1128,8 @@ class FitResult:
             "parameter_units": self.parameter_units,
             "batch_revision": self.batch_revision,
             "fixed_parameter_names": self.fixed_parameter_names,
+            "reduced": self.reduced,
+            "evidence": self.evidence,
         }
         values.update(overrides)
         if set(overrides).issubset({"parameter_units", "batch_revision"}):
@@ -1050,6 +1162,8 @@ class FitResult:
                 "reduced_chi_square",
                 "covariance_valid",
                 "fixed_parameter_names",
+                "reduced",
+                "evidence",
             ):
                 object.__setattr__(clone, name, values[name])
             for name in ("fitted_values", "residuals", "selected_indices"):
@@ -1125,6 +1239,8 @@ def _fit_result_from_validated_batch_row(
     covariance_valid: bool,
     parameter_units: Mapping[str, str],
     fixed_parameter_names: tuple[str, ...],
+    reduced: bool = False,
+    evidence: float = float("nan"),
 ) -> FitResult:
     """Build one row after its entire compiled batch passed validation.
 
@@ -1161,6 +1277,8 @@ def _fit_result_from_validated_batch_row(
     object.__setattr__(result, "parameter_units", parameter_units)
     object.__setattr__(result, "batch_revision", 0)
     object.__setattr__(result, "fixed_parameter_names", fixed_parameter_names)
+    object.__setattr__(result, "reduced", bool(reduced))
+    object.__setattr__(result, "evidence", float(evidence))
     return result
 
 
@@ -1188,26 +1306,27 @@ def _bimodal_classifier_metrics(
 
     if result.model.model_id != "bimodal_gaussian" or not result.success:
         raise ValueError("threshold classification requires a successful bimodal fit")
+    if result.reduced:
+        # One population: there is nowhere two states separate.
+        return (None, float("nan"), float("nan"), float("nan"))
     values = result.parameters
-    center = float(values["center"])
-    separation = float(values["center_splitting"])
-    left_mean = center - 0.5 * separation
-    right_mean = center + 0.5 * separation
-    left_sigma = max(abs(float(values["left_sigma"])), np.finfo(float).eps)
-    right_sigma = max(abs(float(values["right_sigma"])), np.finfo(float).eps)
+    left_mean = float(values["center"])
+    right_mean = left_mean + float(values["delta_center"])
+    left_sigma = max(abs(float(values["sigma"])), np.finfo(float).eps)
+    right_sigma = max(abs(float(values["sigma_B"])), np.finfo(float).eps)
 
     def cdf(value: float, mean: float, sigma: float) -> float:
         return 0.5 * (
             1.0 + math.erf((value - mean) / (sigma * math.sqrt(2.0)))
         )
 
-    left_area = float(values["left_amplitude"]) * left_sigma
-    right_area = float(values["right_amplitude"]) * right_sigma
-    total_area = left_area + right_area
-    if not math.isfinite(total_area) or total_area <= 0.0:
+    right_weight = float(values["ratio"])
+    shots = float(np.sum(np.asarray(result.fitted_values, dtype=float)))
+    if not (math.isfinite(right_weight) and 0.0 <= right_weight <= 1.0) or not (
+        math.isfinite(shots) and shots > 0.0
+    ):
         return (None, float("nan"), float("nan"), float("nan"))
-    left_weight = left_area / total_area
-    right_weight = 1.0 - left_weight
+    left_weight = 1.0 - right_weight
 
     def error(value: float) -> float:
         return (
@@ -1215,9 +1334,7 @@ def _bimodal_classifier_metrics(
             + right_weight * cdf(value, right_mean, right_sigma)
         )
     if threshold is None:
-        # The fitted curve's own total is the shot count, whatever the bins
-        # are: the model IS counts per bin.
-        shots = float(np.sum(np.asarray(result.fitted_values, dtype=float)))
+        # The curve's counts over the bins are the shots it describes.
         if (
             min(left_weight, right_weight) * shots
             < _CLASSIFIER_MINIMUM_COMPONENT_SHOTS
@@ -1718,8 +1835,26 @@ class FitEngine:
             cancelled=cancelled,
         )
         for local, cell in enumerate(compiled_cells):
-            results[cell] = solved[local]
-            failures[cell] = failed[local]
+            result = solved[local]
+            failure = failed[local]
+            if result is not None and spec.reduction is not None:
+                try:
+                    result = self._settle_population(
+                        spec,
+                        result,
+                        tuple(compiled_coordinates[local]),
+                        compiled_observations[local],
+                        data_revision=compiled_revisions[local],
+                        bounds=bounds,
+                        options=options or FitOptions(),
+                        cancelled=cancelled,
+                    )
+                except FitCancelled:
+                    raise
+                except Exception as error:
+                    result, failure = None, str(error) or type(error).__name__
+            results[cell] = result
+            failures[cell] = failure
         return tuple(results), tuple(failures)
 
     def _fit_compiled_batch(
@@ -1764,13 +1899,6 @@ class FitEngine:
             [item.bounds[1] for item in model.parameters],
             dtype=np.float64,
         )
-        requested_lower, requested_upper = _solver_bounds(model, None, bounds)
-        requested_mask = np.asarray(
-            [item.name in (bounds or {}) for item in model.parameters],
-            dtype=np.bool_,
-        )
-        fixed_names, free_indices = _fixed_parameter_partition(model, bounds)
-        free_index = np.asarray(free_indices, dtype=np.int64)
         counted = model.targets == (FitTarget.HISTOGRAM,)
 
         results: list[FitResult | None] = [None] * len(coordinates)
@@ -1835,6 +1963,21 @@ class FitEngine:
                     indices = indices[finite]
                     if sigma_array is not None:
                         sigma_array = sigma_array[finite]
+                # The bounds are the cell's: a histogram's parameters are
+                # confined to THIS cell's coordinates.  Cells with the same
+                # coordinates share them, and share a bucket below.
+                cell_bounds = _histogram_bounds(model, coords, bounds)
+                requested_lower, requested_upper = _solver_bounds(
+                    model, None, cell_bounds
+                )
+                requested_mask = np.asarray(
+                    [item.name in (cell_bounds or {}) for item in model.parameters],
+                    dtype=np.bool_,
+                )
+                fixed_names, free_indices = _fixed_parameter_partition(
+                    model, cell_bounds
+                )
+                free_index = np.asarray(free_indices, dtype=np.int64)
                 if values.size <= len(free_indices):
                     raise ValueError(
                         "fit requires more finite observations than free parameters"
@@ -1937,80 +2080,89 @@ class FitEngine:
                 "model": effective_model,
                 "authored": authored,
                 "warm": warm,
+                "requested_lower": requested_lower,
+                "requested_upper": requested_upper,
+                "requested_mask": requested_mask,
+                "fixed_names": fixed_names,
+                "free_indices": free_indices,
+                "free_index": free_index,
             }
 
-        if not free_indices:
-            fixed_values = np.asarray(requested_lower, dtype=np.float64)
+        empty_units = MappingProxyType({
+            name: "" for name in model.parameter_names
+        })
+        for cell, item in tuple(prepared.items()):
+            if item["free_indices"]:
+                continue
+            del prepared[cell]
+            fixed_values = np.asarray(item["requested_lower"], dtype=np.float64)
             count = parameter_count
-            empty_units = MappingProxyType({
-                name: "" for name in model.parameter_names
-            })
-            for cell, item in prepared.items():
-                check()
-                try:
-                    fitted = item["model"].evaluate(
-                        item["coords"],
-                        fixed_values,
-                    ).reshape(-1)
-                    if (
-                        fitted.shape != item["values"].shape
-                        or not np.all(np.isfinite(fitted))
-                    ):
-                        raise RuntimeError("fixed fit evaluation is non-finite")
-                    residuals = item["values"] - fitted
-                    if counted:
-                        expected = np.maximum(fitted, _COUNT_FLOOR)
-                        with np.errstate(divide="ignore", invalid="ignore"):
-                            logarithm = np.where(
-                                item["values"] > 0.0,
-                                item["values"]
-                                * np.log(item["values"] / expected),
-                                0.0,
-                            )
-                        deviance = 2.0 * np.maximum(
-                            expected - item["values"] + logarithm,
+            check()
+            try:
+                fitted = item["model"].evaluate(
+                    item["coords"],
+                    fixed_values,
+                ).reshape(-1)
+                if (
+                    fitted.shape != item["values"].shape
+                    or not np.all(np.isfinite(fitted))
+                ):
+                    raise RuntimeError("fixed fit evaluation is non-finite")
+                residuals = item["values"] - fitted
+                if counted:
+                    expected = np.maximum(fitted, _COUNT_FLOOR)
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        logarithm = np.where(
+                            item["values"] > 0.0,
+                            item["values"]
+                            * np.log(item["values"] / expected),
                             0.0,
                         )
-                        quality = np.copysign(
-                            np.sqrt(deviance),
-                            expected - item["values"],
-                        )
-                    elif item["weights"] is None:
-                        quality = residuals
-                    else:
-                        quality = residuals * item["weights"]
-                    parameters = _readonly(fixed_values)
-                    errors = _readonly(np.zeros(count, dtype=np.float64))
-                    covariance = _readonly(
-                        np.zeros((count, count), dtype=np.float64)
+                    deviance = 2.0 * np.maximum(
+                        expected - item["values"] + logarithm,
+                        0.0,
                     )
-                    fitted = _readonly(fitted)
-                    residuals = _readonly(residuals)
-                    indices = _readonly(item["indices"])
-                    results[cell] = _fit_result_from_validated_batch_row(
-                        model=item["model"],
-                        parameter_values=parameters,
-                        standard_errors=errors,
-                        covariance=covariance,
-                        fitted_values=fitted,
-                        residuals=residuals,
-                        selected_indices=indices,
-                        source_revision=item["revision"],
-                        success=True,
-                        message="all parameters fixed",
-                        reduced_chi_square=float(
-                            np.dot(quality, quality) / item["values"].size
-                        ),
-                        covariance_valid=True,
-                        parameter_units=empty_units,
-                        fixed_parameter_names=fixed_names,
+                    quality = np.copysign(
+                        np.sqrt(deviance),
+                        expected - item["values"],
                     )
-                    failures[cell] = None
-                except Exception as error:
-                    failures[cell] = str(error) or type(error).__name__
+                elif item["weights"] is None:
+                    quality = residuals
+                else:
+                    quality = residuals * item["weights"]
+                parameters = _readonly(fixed_values)
+                errors = _readonly(np.zeros(count, dtype=np.float64))
+                covariance = _readonly(
+                    np.zeros((count, count), dtype=np.float64)
+                )
+                fitted = _readonly(fitted)
+                residuals = _readonly(residuals)
+                indices = _readonly(item["indices"])
+                results[cell] = _fit_result_from_validated_batch_row(
+                    model=item["model"],
+                    parameter_values=parameters,
+                    standard_errors=errors,
+                    covariance=covariance,
+                    fitted_values=fitted,
+                    residuals=residuals,
+                    selected_indices=indices,
+                    source_revision=item["revision"],
+                    success=True,
+                    message="all parameters fixed",
+                    reduced_chi_square=float(
+                        np.dot(quality, quality) / item["values"].size
+                    ),
+                    covariance_valid=True,
+                    parameter_units=empty_units,
+                    fixed_parameter_names=item["fixed_names"],
+                )
+                failures[cell] = None
+            except Exception as error:
+                failures[cell] = str(error) or type(error).__name__
+        if not prepared:
             return tuple(results), tuple(failures)
 
-        buckets: dict[tuple[int, bytes], list[int]] = {}
+        buckets: dict[tuple[int, bytes, bytes], list[int]] = {}
         # One digest per coordinate OBJECT, not per cell: a tensor facet's
         # cells share the same axis arrays, and hashing the same quarter
         # megabyte forty times over was most of the batch's Python time.
@@ -2029,12 +2181,22 @@ class FitEngine:
                     known = axis_hash.digest()
                     axis_digests[id(axis)] = known
                 digest.update(known)
-            key = (int(item["solver_values"].size), digest.digest())
+            key = (
+                int(item["solver_values"].size),
+                digest.digest(),
+                item["free_index"].tobytes(),
+            )
             buckets.setdefault(key, []).append(cell)
 
         for bucket in buckets.values():
             check()
             items = [prepared[cell] for cell in bucket]
+            requested_lower = items[0]["requested_lower"]
+            requested_upper = items[0]["requested_upper"]
+            requested_mask = items[0]["requested_mask"]
+            fixed_names = items[0]["fixed_names"]
+            free_indices = items[0]["free_indices"]
+            free_index = items[0]["free_index"]
             shared_coordinates = tuple(
                 np.ascontiguousarray(axis, dtype=np.float64)
                 for axis in items[0]["compiled_coords"]
@@ -2412,7 +2574,16 @@ class FitEngine:
             result = results[0]
             if result is None:
                 raise ValueError(failures[0] or "compiled fit failed")
-            return result
+            return self._settle_population(
+                spec,
+                result,
+                tuple(coordinates),
+                observations,
+                data_revision=data_revision,
+                bounds=bounds,
+                options=opts,
+                cancelled=cancelled,
+            )
 
         coords = _coordinate_arrays(tuple(coordinates), spec.independent_arity)
         values = np.asarray(observations, dtype=np.float64).reshape(-1)
@@ -2446,6 +2617,8 @@ class FitEngine:
         if _DOMAIN_ANCHORED in spec.capabilities:
             spec = spec.anchored_at(float(np.min(coords[0])))
         counted_observations = spec.targets == (FitTarget.HISTOGRAM,)
+        requested_bounds = bounds
+        bounds = _histogram_bounds(spec, coords, bounds)
         fixed_names, free_indices = _fixed_parameter_partition(spec, bounds)
         start = time.monotonic()
         invalid_residual = np.finfo(np.float64).max ** 0.25
@@ -2520,26 +2693,6 @@ class FitEngine:
             else None
         )
         lower, upper = _solver_bounds(spec, default_bounds, bounds)
-        if spec.targets == (FitTarget.HISTOGRAM,):
-            # A histogram cannot resolve a width finer than its own binning: a
-            # component narrower than a bin describes one bar, not a
-            # distribution, and on sparse data that is exactly what the best
-            # fit becomes -- a spike standing on a single tall bin beside a
-            # broad partner covering everything else.  Widths therefore start
-            # at half a bin: they are the positive parameters measured along
-            # the value axis, which is the sigmas and not a splitting or an
-            # amplitude.
-            steps = np.diff(np.unique(solver_coords[0]))
-            step = float(np.median(steps)) if steps.size else 0.0
-            if step > 0.0:
-                floor = 0.5 * step
-                for index, parameter in enumerate(spec.parameters):
-                    if (
-                        parameter.domain is ParameterDomain.POSITIVE
-                        and parameter.unit_relation is UnitRelation.AXIS_0
-                        and lower[index] < floor < upper[index]
-                    ):
-                        lower[index] = floor
         if values.size <= len(free_indices):
             raise ValueError("fit requires more finite observations than free parameters")
         if not free_indices:
@@ -2745,20 +2898,143 @@ class FitEngine:
             free_covariance,
             covariance_valid,
         )
+        return self._settle_population(
+            spec,
+            FitResult(
+                spec,
+                solved_parameters,
+                errors,
+                covariance,
+                fitted,
+                residuals,
+                indices,
+                data_revision,
+                bool(solved.success),
+                solved.message,
+                reduced,
+                covariance_valid=covariance_valid,
+                fixed_parameter_names=fixed_names,
+            ),
+            tuple(coordinates),
+            observations,
+            data_revision=data_revision,
+            bounds=requested_bounds,
+            options=opts,
+            cancelled=cancelled,
+        )
+
+    def _settle_population(
+        self,
+        spec: FitModelSpec,
+        result: FitResult,
+        coordinates: Sequence[np.ndarray],
+        observations: np.ndarray,
+        *,
+        data_revision: int,
+        bounds: Mapping[str, tuple[float | None, float | None]] | None,
+        options: FitOptions,
+        cancelled: Callable[[], bool] | None,
+    ) -> FitResult:
+        """Weigh a two-population answer against its nested one-population
+        answer, and let the nested one stand where the evidence falls short.
+
+        The two-population model always finds two populations, because it
+        has the parameters for them: a single Gaussian of three hundred
+        shots came back as a broad component with a narrow one on its tail,
+        and the classifier drew a threshold through it.  So the nested model
+        is fitted as well, and the BIC gain of the pair -- the Poisson
+        deviance the second population saves, less its extra parameters
+        times the log of the shots -- has to reach ``min_bic_gain``.  Below
+        it, the answer is one population written in the wider model's own
+        parameters (the two components coincide), so every consumer reads
+        the same names either way.
+        """
+
+        reduction = spec.reduction
+        threshold = options.min_bic_gain
+        if reduction is None or threshold is None or not result.success:
+            return result
+        nested_spec = self.registry.get(reduction.nested_model_id)
+        narrow_for = dict(reduction.shared)
+        nested_bounds = (
+            {
+                narrow_for[name]: pair
+                for name, pair in bounds.items()
+                if name in narrow_for
+            }
+            if bounds
+            else None
+        )
+        nested = self.fit(
+            nested_spec,
+            tuple(coordinates),
+            observations,
+            data_revision=data_revision,
+            bounds=nested_bounds or None,
+            options=options,
+            cancelled=cancelled,
+        )
+        if not nested.success:
+            return result
+        wide_observed = np.asarray(result.fitted_values) + np.asarray(result.residuals)
+        narrow_observed = np.asarray(nested.fitted_values) + np.asarray(nested.residuals)
+        deviance_wide = _poisson_deviance_total(result.fitted_values, wide_observed)
+        deviance_narrow = _poisson_deviance_total(nested.fitted_values, narrow_observed)
+        shots = float(np.sum(np.clip(wide_observed, 0.0, None)))
+        extra = (
+            len(spec.parameters) - len(result.fixed_parameter_names)
+        ) - (len(nested_spec.parameters) - len(nested.fixed_parameter_names))
+        evidence = (deviance_narrow - deviance_wide) - extra * math.log(max(shots, 1.0))
+        if not math.isfinite(evidence):
+            return result
+        if evidence >= threshold:
+            return result._clone(evidence=evidence)
+        nested_values = nested.parameters
+        count = len(spec.parameters)
+        values = np.empty(count, dtype=np.float64)
+        for index, parameter in enumerate(spec.parameters):
+            if parameter.name in narrow_for:
+                values[index] = nested_values[narrow_for[parameter.name]]
+            else:
+                pin = reduction.pinned[parameter.name]
+                values[index] = (
+                    nested_values[narrow_for[pin]] if isinstance(pin, str) else float(pin)
+                )
+        covariance = np.zeros((count, count), dtype=np.float64)
+        errors = np.zeros(count, dtype=np.float64)
+        if nested.covariance_valid:
+            wide_index = {name: index for index, name in enumerate(spec.parameter_names)}
+            narrow_index = {
+                name: index for index, name in enumerate(nested_spec.parameter_names)
+            }
+            wide = [wide_index[name] for name, _narrow in reduction.shared]
+            narrow = [narrow_index[name] for _wide, name in reduction.shared]
+            covariance[np.ix_(wide, wide)] = np.asarray(nested.covariance)[
+                np.ix_(narrow, narrow)
+            ]
+            errors = np.sqrt(np.maximum(np.diag(covariance), 0.0))
+        pinned = frozenset(reduction.pinned)
         return FitResult(
             spec,
-            solved_parameters,
+            values,
             errors,
             covariance,
-            fitted,
-            residuals,
-            indices,
+            np.asarray(nested.fitted_values),
+            np.asarray(nested.residuals),
+            np.asarray(nested.selected_indices),
             data_revision,
-            bool(solved.success),
-            solved.message,
-            reduced,
-            covariance_valid=covariance_valid,
-            fixed_parameter_names=fixed_names,
+            True,
+            f"one population: BIC gain {evidence:.1f} is below {threshold:g}",
+            nested.reduced_chi_square,
+            covariance_valid=nested.covariance_valid,
+            parameter_units=result.parameter_units,
+            fixed_parameter_names=tuple(
+                name
+                for name in spec.parameter_names
+                if name in result.fixed_parameter_names or name in pinned
+            ),
+            reduced=True,
+            evidence=evidence,
         )
 
 
@@ -2855,6 +3131,85 @@ def _solver_bounds(
         lower.append(low)
         upper.append(high)
     return np.asarray(lower), np.asarray(upper)
+
+
+def _histogram_bounds(
+    model: FitModelSpec,
+    coordinates: ArrayTuple,
+    bounds: Mapping[str, tuple[float | None, float | None]] | None,
+) -> Mapping[str, tuple[float | None, float | None]] | None:
+    """Confine a histogram model's axis parameters to what its histogram can
+    show.
+
+    A histogram is bins of one pitch from a first centre to a last, and
+    that is all a fit to it resolves.  Finer than half a bin, a width
+    describes one bar and not a distribution -- and on sparse data that is
+    exactly what the best fit becomes: a spike on a single tall bin beside
+    a broad partner covering everything else.  Beyond the histogram's
+    breadth, a width -- or beyond its edges, a centre -- describes a slope
+    across the histogram and not a population it shows; on gapped data that
+    is where a one-population fit runs, because a tail is flatter across an
+    empty valley than any hump: 5e13 shots centred at -1.3e5, from 120
+    shots binned between 0 and 4000.  So a location stays within the
+    edges, a width between half a bin and the breadth, and a length (a
+    splitting) within the breadth.
+
+    A bound the caller asks for meets these: a tighter one is kept, a
+    looser one stops at the histogram's limit, and one with nothing inside
+    the limit is refused.
+    """
+
+    if model.targets != (FitTarget.HISTOGRAM,):
+        return bounds
+    x = np.asarray(coordinates[0], dtype=np.float64).reshape(-1)
+    step = _histogram_step(x)
+    low_edge = float(np.min(x)) - 0.5 * step
+    high_edge = float(np.max(x)) + 0.5 * step
+    breadth = high_edge - low_edge
+    confined = dict(bounds or {})
+    for item in model.parameters:
+        if item.unit_relation is not UnitRelation.AXIS_0:
+            continue
+        elif item.affine_point:
+            limit = (low_edge, high_edge)
+            role = (
+                "a location on the histogram's axis, which runs from "
+                f"{low_edge:g} to {high_edge:g}"
+            )
+        elif item.domain is ParameterDomain.POSITIVE:
+            limit = (0.5 * step, breadth)
+            role = (
+                "a width the histogram resolves, from half a bin "
+                f"({0.5 * step:g}) to its breadth ({breadth:g})"
+            )
+        else:
+            limit = (-breadth, breadth)
+            role = f"a length on the histogram's axis, within its breadth ({breadth:g})"
+        domain_low, domain_high = item.bounds
+        low = max(limit[0], domain_low)
+        high = min(limit[1], domain_high)
+        asked = confined.get(item.name, (None, None))
+        if asked[0] is not None:
+            low = max(low, float(asked[0]))
+        if asked[1] is not None:
+            high = min(high, float(asked[1]))
+        if low > high:
+            raise ValueError(
+                f"{item.name!r} is {role}; the bound {asked} has nothing inside it"
+            )
+        confined[item.name] = (low, high)
+    return confined
+
+
+def _poisson_deviance_total(fitted: np.ndarray, observed: np.ndarray) -> float:
+    """Twice the Poisson log-likelihood ratio of ``observed`` counts against
+    the ``fitted`` expectations, summed over the bins."""
+
+    expected = np.maximum(np.asarray(fitted, dtype=np.float64), _COUNT_FLOOR)
+    counts = np.asarray(observed, dtype=np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        logarithm = np.where(counts > 0.0, counts * np.log(counts / expected), 0.0)
+    return float(np.sum(2.0 * np.maximum(expected - counts + logarithm, 0.0)))
 
 
 def _fixed_parameter_partition(
@@ -3056,6 +3411,7 @@ RADIAN = UnitRelation.RADIAN
 REAL = ParameterDomain.REAL
 POSITIVE = ParameterDomain.POSITIVE
 NONNEGATIVE = ParameterDomain.NONNEGATIVE
+UNIT_INTERVAL = ParameterDomain.UNIT_INTERVAL
 PHASE = ParameterDomain.PHASE_RADIANS
 
 
@@ -3128,98 +3484,56 @@ def _gaussian_offset_jacobian(x, amplitude, offset, sigma, center):
     ))
 
 
+_SQRT_TWO_PI = math.sqrt(2.0 * math.pi)
+
+
 def _histogram_gaussian(x, amplitude, center, sigma):
-    return amplitude * np.exp(-0.5 * ((x - center) / sigma) ** 2)
+    """Counts per bin of normally distributed shots.  ``amplitude`` is the
+    shots times the bin: the density's area over the histogram."""
+
+    delta = (x - center) / sigma
+    return amplitude / (sigma * _SQRT_TWO_PI) * np.exp(-0.5 * delta * delta)
 
 
 def _histogram_gaussian_jacobian(x, amplitude, center, sigma):
     delta = x - center
-    gaussian = np.exp(-0.5 * (delta / sigma) ** 2)
+    density = np.exp(-0.5 * (delta / sigma) ** 2) / (sigma * _SQRT_TWO_PI)
+    value = amplitude * density
     return np.column_stack((
-        gaussian,
-        amplitude * gaussian * delta / sigma**2,
-        amplitude * gaussian * delta**2 / sigma**3,
+        density,
+        value * delta / sigma**2,
+        value * (delta**2 / sigma**3 - 1.0 / sigma),
     ))
 
 
-def _bimodal_left(
-    x,
-    center,
-    center_splitting,
-    left_amplitude,
-    left_sigma,
-    _right_amplitude,
-    _right_sigma,
-):
-    return _histogram_gaussian(
-        x,
-        left_amplitude,
-        center - center_splitting / 2.0,
-        left_sigma,
-    )
+def _bimodal_a(x, amplitude, center, sigma, delta_center, sigma_b, ratio):
+    return _histogram_gaussian(x, amplitude * (1.0 - ratio), center, sigma)
 
 
-def _bimodal_right(
-    x,
-    center,
-    center_splitting,
-    _left_amplitude,
-    _left_sigma,
-    right_amplitude,
-    right_sigma,
-):
-    return _histogram_gaussian(
-        x,
-        right_amplitude,
-        center + center_splitting / 2.0,
-        right_sigma,
-    )
+def _bimodal_b(x, amplitude, center, sigma, delta_center, sigma_b, ratio):
+    return _histogram_gaussian(x, amplitude * ratio, center + delta_center, sigma_b)
 
 
-def _bimodal_gaussian(
-    x,
-    center,
-    center_splitting,
-    left_amplitude,
-    left_sigma,
-    right_amplitude,
-    right_sigma,
-):
-    parameters = (
-        center,
-        center_splitting,
-        left_amplitude,
-        left_sigma,
-        right_amplitude,
-        right_sigma,
-    )
-    return _bimodal_left(x, *parameters) + _bimodal_right(x, *parameters)
+def _bimodal_gaussian(x, *parameters):
+    return _bimodal_a(x, *parameters) + _bimodal_b(x, *parameters)
 
 
 def _bimodal_gaussian_jacobian(
-    x,
-    center,
-    center_splitting,
-    left_amplitude,
-    left_sigma,
-    right_amplitude,
-    right_sigma,
+    x, amplitude, center, sigma, delta_center, sigma_b, ratio
 ):
-    left_center = center - center_splitting / 2.0
-    right_center = center + center_splitting / 2.0
-    left_delta = x - left_center
-    right_delta = x - right_center
-    left_gaussian = np.exp(-0.5 * (left_delta / left_sigma) ** 2)
-    right_gaussian = np.exp(-0.5 * (right_delta / right_sigma) ** 2)
-    left_center_derivative = left_amplitude * left_gaussian * left_delta / left_sigma**2
-    right_center_derivative = right_amplitude * right_gaussian * right_delta / right_sigma**2
+    delta_a = x - center
+    delta_b = x - center - delta_center
+    density_a = np.exp(-0.5 * (delta_a / sigma) ** 2) / (sigma * _SQRT_TWO_PI)
+    density_b = np.exp(-0.5 * (delta_b / sigma_b) ** 2) / (sigma_b * _SQRT_TWO_PI)
+    value_a = amplitude * (1.0 - ratio) * density_a
+    value_b = amplitude * ratio * density_b
     return np.column_stack((
-        left_center_derivative + right_center_derivative,
-        -0.5 * left_center_derivative + 0.5 * right_center_derivative,
-        left_gaussian,
-        left_amplitude * left_gaussian * left_delta**2 / left_sigma**3,
-        right_gaussian,
-        right_amplitude * right_gaussian * right_delta**2 / right_sigma**3,
+        (1.0 - ratio) * density_a + ratio * density_b,
+        value_a * delta_a / sigma**2 + value_b * delta_b / sigma_b**2,
+        value_a * (delta_a**2 / sigma**3 - 1.0 / sigma),
+        value_b * delta_b / sigma_b**2,
+        value_b * (delta_b**2 / sigma_b**3 - 1.0 / sigma_b),
+        amplitude * (density_b - density_a),
     ))
 
 
@@ -3236,14 +3550,14 @@ def _histogram_poisson_gaussian(x, amplitude, rate, sigma):
     """The Poisson law extended to a real photon number through the Gamma
     function, ``p(u) = rate^u e^-rate / Gamma(u+1)`` on ``u >= 0``,
     convolved with the camera's Gaussian read noise:
-    ``A / (sigma sqrt(2 pi)) int p(u) exp(-(x-u)^2 / 2 sigma^2) du``.  A
+    ``Nw / (sigma sqrt(2 pi)) int p(u) exp(-(x-u)^2 / 2 sigma^2) du``.  A
     smooth function of the bin centre like every other model; negative
-    values (read noise below zero photons) are ordinary.  ``A`` is the
-    counts times the bin width once the extended law carries unit mass
-    (from about two photons up).  The quadrature has ONE implementation,
-    the compiled kernel; the frozen anchors hold it to an independent one.
-    (A NumPy twin evaluated over a pixel-value histogram cost forty cells'
-    overlays 240 ms.)"""
+    values (read noise below zero photons) are ordinary.  ``Nw`` is the
+    shots times the bin: the extended law carries unit mass (from about
+    two photons up), so the curve's own area is the amplitude.  The
+    quadrature has ONE implementation, the compiled kernel; the frozen
+    anchors hold it to an independent one.  (A NumPy twin evaluated over a
+    pixel-value histogram cost forty cells' overlays 240 ms.)"""
 
     coords, parameters = _compiled_series_input(x, (amplitude, rate, sigma))
     return _compiled_fit._value_jacobian_poisson(coords, parameters)[0]
@@ -3254,29 +3568,13 @@ def _histogram_poisson_gaussian_jacobian(x, amplitude, rate, sigma):
     return _compiled_fit._value_jacobian_poisson(coords, parameters)[1]
 
 
-def _poisson_bimodal_left(
-    x,
-    left_rate,
-    _rate_splitting,
-    left_amplitude,
-    left_sigma,
-    _right_amplitude,
-    _right_sigma,
-):
-    return _histogram_poisson_gaussian(x, left_amplitude, left_rate, left_sigma)
+def _poisson_bimodal_a(x, amplitude, rate, sigma, delta_rate, sigma_b, ratio):
+    return _histogram_poisson_gaussian(x, amplitude * (1.0 - ratio), rate, sigma)
 
 
-def _poisson_bimodal_right(
-    x,
-    left_rate,
-    rate_splitting,
-    _left_amplitude,
-    _left_sigma,
-    right_amplitude,
-    right_sigma,
-):
+def _poisson_bimodal_b(x, amplitude, rate, sigma, delta_rate, sigma_b, ratio):
     return _histogram_poisson_gaussian(
-        x, right_amplitude, left_rate + rate_splitting, right_sigma
+        x, amplitude * ratio, rate + delta_rate, sigma_b
     )
 
 
@@ -3544,7 +3842,7 @@ def _init_gaussian(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
 
 
 def _init_histogram(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
-    x = coords[0]
+    x = np.asarray(coords[0], dtype=np.float64).reshape(-1)
     weights = np.maximum(y, 0)
     total = float(np.sum(weights))
     if total <= 0:
@@ -3553,7 +3851,7 @@ def _init_histogram(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
     else:
         center = float(np.sum(x * weights) / total)
         sigma = max(float(np.sqrt(np.sum(weights * (x - center) ** 2) / total)), _span(x) / 1000)
-    return max(float(np.max(y)), 0.0), center, sigma
+    return total * _histogram_step(x), center, sigma
 
 
 def _bimodal_candidates(
@@ -3579,6 +3877,10 @@ def _bimodal_candidates(
     solving from the best cut alone (41 misplaced peaks against 46) and eleven
     times slower -- 105 distribution panels in a calibration report is 1046
     least-squares solves against 105.
+
+    A seed is the model's own parameters: the shots times the bin, the
+    lower population's centre and width, the upper population's offset,
+    width and share.
     """
 
     x = np.asarray(coords[0], dtype=np.float64).reshape(-1)
@@ -3588,10 +3890,15 @@ def _bimodal_candidates(
     span = _span(x)
     step = _histogram_step(x)
     total = float(counts.sum())
-    if x.size < 3 or total <= 0.0:
+
+    def fallback() -> tuple[tuple[float, ...], ...]:
         midpoint = float((np.min(x) + np.max(x)) / 2.0) if x.size else 0.0
-        height = max(float(np.max(counts)) if counts.size else 0.0, 0.0)
-        return ((midpoint, span / 2.0, height, span / 10.0, height, span / 10.0),)
+        return (
+            (total * step, midpoint - span / 4.0, span / 10.0, span / 2.0, span / 10.0, 0.5),
+        )
+
+    if x.size < 3 or total <= 0.0:
+        return fallback()
 
     seeds: list[tuple[float, ...]] = []
     for split in _histogram_cuts(x, counts):
@@ -3616,18 +3923,16 @@ def _bimodal_candidates(
         )
         seeds.append(
             (
-                (left_center + right_center) / 2.0,
-                right_center - left_center,
-                max(float(np.max(counts[left])), 0.0),
+                total * step,
+                left_center,
                 left_sigma,
-                max(float(np.max(counts[right])), 0.0),
+                right_center - left_center,
                 right_sigma,
+                right_weight / total,
             )
         )
     if not seeds:
-        midpoint = float((np.min(x) + np.max(x)) / 2.0)
-        height = max(float(np.max(counts)), 0.0)
-        return ((midpoint, span / 2.0, height, span / 10.0, height, span / 10.0),)
+        return fallback()
 
     # The closest seed first, so a single-start caller gets the best of them.
     seeds.sort(
@@ -3683,7 +3988,7 @@ def _histogram_cuts(x: np.ndarray, counts: np.ndarray) -> tuple[float, ...]:
 def _poisson_moments(
     x: np.ndarray, counts: np.ndarray, step: float
 ) -> tuple[float, float, float]:
-    """(amplitude, rate, sigma) of one Poisson-Gaussian component from a
+    """(shots, rate, sigma) of one Poisson-Gaussian component from a
     histogram sorted by ``x``.
 
     The mean of a Poisson-Gaussian is its rate and its variance the rate plus
@@ -3694,8 +3999,8 @@ def _poisson_moments(
     spikes far from its peak, and the moments of that put the seed in a flat
     valley from which neither solver finds the peak.  The read noise is the
     width's excess over the rate and never under a bin (the solver floors
-    it at half a bin, as it does every width on a histogram).  The
-    amplitude is the mass times the bin: the model is a density.
+    it at half a bin, as it does every width on a histogram).  The shots
+    are the mass; the model's amplitude is the shots times the bin.
     """
 
     total = float(counts.sum())
@@ -3710,7 +4015,7 @@ def _poisson_moments(
     rate = max(float(np.sum(x[core] * counts[core]) / float(counts[core].sum())), 0.25 * step)
     width = (upper - lower) / 1.349
     sigma = max(math.sqrt(max(width * width - rate, 0.0)), step)
-    return total * step, rate, sigma
+    return total, rate, sigma
 
 
 def _sorted_histogram(coords: ArrayTuple, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -3722,7 +4027,9 @@ def _sorted_histogram(coords: ArrayTuple, y: np.ndarray) -> tuple[np.ndarray, np
 
 def _init_poisson_histogram(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
     x, counts = _sorted_histogram(coords, y)
-    return _poisson_moments(x, counts, _histogram_step(x))
+    step = _histogram_step(x)
+    total, rate, sigma = _poisson_moments(x, counts, step)
+    return total * step, rate, sigma
 
 
 def _init_poisson_bimodal(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
@@ -3739,12 +4046,12 @@ def _init_poisson_bimodal(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
     def fallback() -> tuple[float, ...]:
         midpoint = float((np.min(x) + np.max(x)) / 2.0) if x.size else 0.0
         return (
+            total * step,
             max(midpoint - span / 4.0, 0.25 * step),
+            max(span / 10.0, step),
             span / 2.0,
-            0.5 * total * step,
             max(span / 10.0, step),
-            0.5 * total * step,
-            max(span / 10.0, step),
+            0.5,
         )
 
     if x.size < 3 or total <= 0.0:
@@ -3755,21 +4062,21 @@ def _init_poisson_bimodal(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
         right = ~left
         if float(counts[left].sum()) <= 0.0 or float(counts[right].sum()) <= 0.0:
             continue
-        left_amplitude, left_rate, left_sigma = _poisson_moments(
+        left_total, left_rate, left_sigma = _poisson_moments(
             x[left], counts[left], step
         )
-        right_amplitude, right_rate, right_sigma = _poisson_moments(
+        right_total, right_rate, right_sigma = _poisson_moments(
             x[right], counts[right], step
         )
         if not right_rate > left_rate:
             continue
         seeds.append((
+            total * step,
             left_rate,
-            right_rate - left_rate,
-            left_amplitude,
             left_sigma,
-            right_amplitude,
+            right_rate - left_rate,
             right_sigma,
+            right_total / total,
         ))
     if not seeds:
         return fallback()
@@ -3783,16 +4090,16 @@ def _poisson_seed_distance(x: np.ndarray, counts: np.ndarray, seed: Sequence[flo
     as ``_fit_compiled._poisson_bimodal_score``, so both paths solve from
     the same cut."""
 
-    left_rate, splitting, left_amplitude, left_sigma, right_amplitude, right_sigma = seed
+    amplitude, rate, sigma, delta_rate, sigma_b, ratio = seed
     predicted = np.zeros_like(counts)
-    for amplitude, rate, sigma in (
-        (left_amplitude, left_rate, left_sigma),
-        (right_amplitude, left_rate + splitting, right_sigma),
+    for area, component_rate, component_sigma in (
+        (amplitude * (1.0 - ratio), rate, sigma),
+        (amplitude * ratio, rate + delta_rate, sigma_b),
     ):
-        variance = rate + sigma * sigma
+        variance = component_rate + component_sigma * component_sigma
         predicted += (
-            amplitude / (math.sqrt(2.0 * math.pi) * math.sqrt(variance))
-            * np.exp(-0.5 * (x - rate) ** 2 / variance)
+            area / (math.sqrt(2.0 * math.pi) * math.sqrt(variance))
+            * np.exp(-0.5 * (x - component_rate) ** 2 / variance)
         )
     return float(np.sum((predicted - counts) ** 2))
 
@@ -4164,7 +4471,10 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             1,
             (
                 FitParameterSpec(
-                    "amplitude", VALUE, NONNEGATIVE, display_label=r"$A$"
+                    "amplitude",
+                    VALUE_TIMES_AXIS_0,
+                    NONNEGATIVE,
+                    display_label=r"$Nw$",
                 ),
                 FitParameterSpec(
                     "center", AXIS_0, display_label=r"$x_0$", affine_point=True
@@ -4177,7 +4487,10 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             _histogram_gaussian,
             _init_histogram,
             (FitTarget.HISTOGRAM,),
-            formula=r"$f(x)=A e^{-\frac{1}{2}((x-x_0)/\sigma)^2}$",
+            formula=(
+                r"$f(x)=\frac{Nw}{\sigma\sqrt{2\pi}}"
+                r"e^{-\frac{1}{2}((x-x_0)/\sigma)^2}$"
+            ),
             jacobian=_histogram_gaussian_jacobian,
             compiled_descriptor=_compiled_fit.histogram_gaussian_descriptor(),
         ),
@@ -4187,44 +4500,58 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             1,
             (
                 FitParameterSpec(
+                    "amplitude",
+                    VALUE_TIMES_AXIS_0,
+                    NONNEGATIVE,
+                    display_label=r"$Nw$",
+                ),
+                FitParameterSpec(
                     "center", AXIS_0, display_label=r"$x_0$", affine_point=True
                 ),
                 FitParameterSpec(
-                    "center_splitting",
+                    "sigma", AXIS_0, POSITIVE, display_label=r"$\sigma$"
+                ),
+                FitParameterSpec(
+                    "delta_center",
                     AXIS_0,
                     NONNEGATIVE,
                     display_label=r"$\delta$",
                 ),
                 FitParameterSpec(
-                    "left_amplitude", VALUE, NONNEGATIVE, display_label=r"$A_L$"
+                    "sigma_B", AXIS_0, POSITIVE, display_label=r"$\sigma_B$"
                 ),
                 FitParameterSpec(
-                    "left_sigma", AXIS_0, POSITIVE, display_label=r"$\sigma_L$"
-                ),
-                FitParameterSpec(
-                    "right_amplitude", VALUE, NONNEGATIVE, display_label=r"$A_R$"
-                ),
-                FitParameterSpec(
-                    "right_sigma", AXIS_0, POSITIVE, display_label=r"$\sigma_R$"
+                    "ratio", DIMENSIONLESS, UNIT_INTERVAL, display_label=r"$r$"
                 ),
             ),
-            "center",
+            "ratio",
             _bimodal_gaussian,
             _init_bimodal,
             (FitTarget.HISTOGRAM,),
             formula=(
-                r"$f(x)=A_L e^{-\frac{1}{2}((x-x_0+\delta/2)/\sigma_L)^2}"
-                r"+A_R e^{-\frac{1}{2}((x-x_0-\delta/2)/\sigma_R)^2}$"
+                r"$f(x)=Nw\left[\frac{1-r}{\sigma\sqrt{2\pi}}"
+                r"e^{-\frac{1}{2}((x-x_0)/\sigma)^2}"
+                r"+\frac{r}{\sigma_B\sqrt{2\pi}}"
+                r"e^{-\frac{1}{2}((x-x_0-\delta)/\sigma_B)^2}\right]$"
             ),
             jacobian=_bimodal_gaussian_jacobian,
             presentation=FitPresentationSpec(
                 components=(
-                    FitComponentSpec("left", _bimodal_left),
-                    FitComponentSpec("right", _bimodal_right),
+                    FitComponentSpec("A", _bimodal_a),
+                    FitComponentSpec("B", _bimodal_b),
                 ),
             ),
             default_for=(FitTarget.HISTOGRAM,),
             compiled_descriptor=_compiled_fit.bimodal_gaussian_descriptor(),
+            reduction=FitReductionSpec(
+                "histogram_gaussian",
+                (
+                    ("amplitude", "amplitude"),
+                    ("center", "center"),
+                    ("sigma", "sigma"),
+                ),
+                {"delta_center": 0.0, "sigma_B": "sigma", "ratio": 0.5},
+            ),
         ),
         FitModelSpec(
             "histogram_poisson_gaussian",
@@ -4232,7 +4559,10 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             1,
             (
                 FitParameterSpec(
-                    "amplitude", VALUE, NONNEGATIVE, display_label=r"$A$"
+                    "amplitude",
+                    VALUE_TIMES_AXIS_0,
+                    NONNEGATIVE,
+                    display_label=r"$Nw$",
                 ),
                 # A rate is a position on the axis, not a width: zero photons
                 # is a value it may take (the model is then empty), and the
@@ -4253,7 +4583,8 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             _init_poisson_histogram,
             (FitTarget.HISTOGRAM,),
             formula=(
-                r"$f(x)=\frac{A}{\sigma\sqrt{2\pi}}\int_0^{\infty}"
+                r"$f(x)=Nw\,P(x;\lambda,\sigma),\ "
+                r"P(x;\lambda,\sigma)=\frac{1}{\sigma\sqrt{2\pi}}\int_0^{\infty}"
                 r"\frac{\lambda^u e^{-\lambda}}{\Gamma(u+1)}"
                 r"\,e^{-\frac{1}{2}((x-u)/\sigma)^2}\,du$"
             ),
@@ -4268,50 +4599,63 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             1,
             (
                 FitParameterSpec(
-                    "left_rate",
+                    "amplitude",
+                    VALUE_TIMES_AXIS_0,
+                    NONNEGATIVE,
+                    display_label=r"$Nw$",
+                ),
+                FitParameterSpec(
+                    "rate",
                     AXIS_0,
                     NONNEGATIVE,
-                    display_label=r"$\lambda_L$",
+                    display_label=r"$\lambda$",
                     affine_point=True,
                 ),
                 FitParameterSpec(
-                    "rate_splitting",
+                    "sigma", AXIS_0, POSITIVE, display_label=r"$\sigma$"
+                ),
+                FitParameterSpec(
+                    "delta_rate",
                     AXIS_0,
                     NONNEGATIVE,
                     display_label=r"$\delta$",
                 ),
                 FitParameterSpec(
-                    "left_amplitude", VALUE, NONNEGATIVE, display_label=r"$A_L$"
+                    "sigma_B", AXIS_0, POSITIVE, display_label=r"$\sigma_B$"
                 ),
                 FitParameterSpec(
-                    "left_sigma", AXIS_0, POSITIVE, display_label=r"$\sigma_L$"
-                ),
-                FitParameterSpec(
-                    "right_amplitude", VALUE, NONNEGATIVE, display_label=r"$A_R$"
-                ),
-                FitParameterSpec(
-                    "right_sigma", AXIS_0, POSITIVE, display_label=r"$\sigma_R$"
+                    "ratio", DIMENSIONLESS, UNIT_INTERVAL, display_label=r"$r$"
                 ),
             ),
-            "rate_splitting",
+            "ratio",
             _bimodal_poisson_gaussian,
             _init_poisson_bimodal,
             (FitTarget.HISTOGRAM,),
             formula=(
-                r"$f(x)=A_L P(x;\lambda_L,\sigma_L)+A_R P(x;\lambda_L+\delta,\sigma_R),"
-                r"\ P(x;\lambda,\sigma)=\frac{1}{\sigma\sqrt{2\pi}}\int_0^{\infty}"
+                r"$f(x)=Nw\left[(1-r)\,P(x;\lambda,\sigma)"
+                r"+r\,P(x;\lambda+\delta,\sigma_B)\right],\ "
+                r"P(x;\lambda,\sigma)=\frac{1}{\sigma\sqrt{2\pi}}\int_0^{\infty}"
                 r"\frac{\lambda^u e^{-\lambda}}{\Gamma(u+1)}"
                 r"\,e^{-\frac{1}{2}((x-u)/\sigma)^2}\,du$"
             ),
             jacobian=_bimodal_poisson_gaussian_jacobian,
             presentation=FitPresentationSpec(
                 components=(
-                    FitComponentSpec("left", _poisson_bimodal_left),
-                    FitComponentSpec("right", _poisson_bimodal_right),
+                    FitComponentSpec("A", _poisson_bimodal_a),
+                    FitComponentSpec("B", _poisson_bimodal_b),
                 ),
             ),
             compiled_descriptor=(
                 _compiled_fit.bimodal_poisson_gaussian_descriptor()
+            ),
+            reduction=FitReductionSpec(
+                "histogram_poisson_gaussian",
+                (
+                    ("amplitude", "amplitude"),
+                    ("rate", "rate"),
+                    ("sigma", "sigma"),
+                ),
+                {"delta_rate": 0.0, "sigma_B": "sigma", "ratio": 0.5},
             ),
         ),
         FitModelSpec(

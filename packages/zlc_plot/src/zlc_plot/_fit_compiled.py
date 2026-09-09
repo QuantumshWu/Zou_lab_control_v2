@@ -2902,47 +2902,18 @@ def _value_jacobian_histogram(coords: np.ndarray, parameters: np.ndarray):
     x = coords[0]
     output = np.empty(x.size, dtype=np.float64)
     jacobian = np.empty((x.size, 3), dtype=np.float64)
-    amplitude, center, sigma = parameters
-    sigma2 = sigma * sigma
-    sigma3 = sigma2 * sigma
     for point in range(x.size):
-        delta = x[point] - center
-        shape = math.exp(-0.5 * delta * delta / sigma2)
-        output[point] = amplitude * shape
-        jacobian[point, 0] = shape
-        jacobian[point, 1] = amplitude * shape * delta / sigma2
-        jacobian[point, 2] = amplitude * shape * delta * delta / sigma3
+        output[point] = _point_histogram(coords, point, parameters, jacobian[point])
     return output, jacobian
-
 
 @njit(cache=True)
 def _value_jacobian_bimodal(coords: np.ndarray, parameters: np.ndarray):
     x = coords[0]
     output = np.empty(x.size, dtype=np.float64)
     jacobian = np.empty((x.size, 6), dtype=np.float64)
-    center, splitting, left_amp, left_sigma, right_amp, right_sigma = parameters
-    left_center = center - 0.5 * splitting
-    right_center = center + 0.5 * splitting
-    left2 = left_sigma * left_sigma
-    left3 = left2 * left_sigma
-    right2 = right_sigma * right_sigma
-    right3 = right2 * right_sigma
     for point in range(x.size):
-        left_delta = x[point] - left_center
-        right_delta = x[point] - right_center
-        left_shape = math.exp(-0.5 * left_delta * left_delta / left2)
-        right_shape = math.exp(-0.5 * right_delta * right_delta / right2)
-        left_center_d = left_amp * left_shape * left_delta / left2
-        right_center_d = right_amp * right_shape * right_delta / right2
-        output[point] = left_amp * left_shape + right_amp * right_shape
-        jacobian[point, 0] = left_center_d + right_center_d
-        jacobian[point, 1] = -0.5 * left_center_d + 0.5 * right_center_d
-        jacobian[point, 2] = left_shape
-        jacobian[point, 3] = left_amp * left_shape * left_delta * left_delta / left3
-        jacobian[point, 4] = right_shape
-        jacobian[point, 5] = right_amp * right_shape * right_delta * right_delta / right3
+        output[point] = _point_bimodal(coords, point, parameters, jacobian[point])
     return output, jacobian
-
 
 @njit(cache=True)
 def _value_jacobian_poisson(coords: np.ndarray, parameters: np.ndarray):
@@ -2954,20 +2925,18 @@ def _value_jacobian_poisson(coords: np.ndarray, parameters: np.ndarray):
         output[point] = _point_poisson(coords, point, parameters, jacobian[point], grid)
     return output, jacobian
 
-
 @njit(cache=True)
 def _value_jacobian_poisson_bimodal(coords: np.ndarray, parameters: np.ndarray):
     x = coords[0]
     output = np.empty(x.size, dtype=np.float64)
     jacobian = np.empty((x.size, 6), dtype=np.float64)
-    left = _poisson_grid(parameters[0], parameters[3])
-    right = _poisson_grid(parameters[0] + parameters[1], parameters[5])
+    left = _poisson_grid(parameters[1], parameters[2])
+    right = _poisson_grid(parameters[1] + parameters[3], parameters[4])
     for point in range(x.size):
         output[point] = _point_poisson_bimodal(
             coords, point, parameters, jacobian[point], left, right
         )
     return output, jacobian
-
 
 @njit(cache=True)
 def _value_jacobian_doublet(coords: np.ndarray, parameters: np.ndarray):
@@ -3122,33 +3091,32 @@ def _point_histogram(coords, point, parameters, row):
     amplitude, center, sigma = parameters
     delta = coords[0, point] - center
     sigma2 = sigma * sigma
-    shape = math.exp(-0.5 * delta * delta / sigma2)
-    row[0] = shape
-    row[1] = amplitude * shape * delta / sigma2
-    row[2] = amplitude * shape * delta * delta / (sigma2 * sigma)
-    return amplitude * shape
-
+    density = math.exp(-0.5 * delta * delta / sigma2) / (sigma * SQRT_TWO_PI)
+    value = amplitude * density
+    row[0] = density
+    row[1] = value * delta / sigma2
+    row[2] = value * (delta * delta / (sigma2 * sigma) - 1.0 / sigma)
+    return value
 
 @njit(cache=True, inline="always")
 def _point_bimodal(coords, point, parameters, row):
-    center, splitting, left_amp, left_sigma, right_amp, right_sigma = parameters
+    amplitude, center, sigma, delta_center, sigma_b, ratio = parameters
     x = coords[0, point]
-    left_delta = x - (center - 0.5 * splitting)
-    right_delta = x - (center + 0.5 * splitting)
-    left2 = left_sigma * left_sigma
-    right2 = right_sigma * right_sigma
-    left_shape = math.exp(-0.5 * left_delta * left_delta / left2)
-    right_shape = math.exp(-0.5 * right_delta * right_delta / right2)
-    left_center_d = left_amp * left_shape * left_delta / left2
-    right_center_d = right_amp * right_shape * right_delta / right2
-    row[0] = left_center_d + right_center_d
-    row[1] = -0.5 * left_center_d + 0.5 * right_center_d
-    row[2] = left_shape
-    row[3] = left_amp * left_shape * left_delta * left_delta / (left2 * left_sigma)
-    row[4] = right_shape
-    row[5] = right_amp * right_shape * right_delta * right_delta / (right2 * right_sigma)
-    return left_amp * left_shape + right_amp * right_shape
-
+    delta_a = x - center
+    delta_b = x - center - delta_center
+    sigma2 = sigma * sigma
+    sigma_b2 = sigma_b * sigma_b
+    density_a = math.exp(-0.5 * delta_a * delta_a / sigma2) / (sigma * SQRT_TWO_PI)
+    density_b = math.exp(-0.5 * delta_b * delta_b / sigma_b2) / (sigma_b * SQRT_TWO_PI)
+    value_a = amplitude * (1.0 - ratio) * density_a
+    value_b = amplitude * ratio * density_b
+    row[0] = (1.0 - ratio) * density_a + ratio * density_b
+    row[1] = value_a * delta_a / sigma2 + value_b * delta_b / sigma_b2
+    row[2] = value_a * (delta_a * delta_a / (sigma2 * sigma) - 1.0 / sigma)
+    row[3] = value_b * delta_b / sigma_b2
+    row[4] = value_b * (delta_b * delta_b / (sigma_b2 * sigma_b) - 1.0 / sigma_b)
+    row[5] = amplitude * (density_b - density_a)
+    return value_a + value_b
 
 #: A photon count is a Poisson variable on the integers; a histogram's bins
 #: are not.  The Poisson-Gaussian models use the Gamma extension of the
@@ -3188,7 +3156,6 @@ EULER_GAMMA = 0.5772156649015329
 ZETA_2 = 1.6449340668482264
 ZETA_3 = 1.2020569031595943
 SQRT_TWO_PI = 2.5066282746310002
-
 
 @njit(cache=True, inline="always")
 def _poisson_support(rate):
@@ -3360,25 +3327,25 @@ def _point_poisson(coords, point, parameters, row, grid):
     row[2] = sigma_d
     return amplitude * shape
 
-
 @njit(cache=True, inline="always")
 def _point_poisson_bimodal(coords, point, parameters, row, left, right):
-    left_rate, splitting, left_amp, left_sigma, right_amp, right_sigma = parameters
+    amplitude, rate, sigma, delta_rate, sigma_b, ratio = parameters
     x = coords[0, point]
-    left_shape, left_rate_d, left_sigma_d = _poisson_component(
-        x, left_amp, left_rate, left_sigma, left
+    amplitude_a = amplitude * (1.0 - ratio)
+    amplitude_b = amplitude * ratio
+    shape_a, rate_d_a, sigma_d_a = _poisson_component(
+        x, amplitude_a, rate, sigma, left
     )
-    right_shape, right_rate_d, right_sigma_d = _poisson_component(
-        x, right_amp, left_rate + splitting, right_sigma, right
+    shape_b, rate_d_b, sigma_d_b = _poisson_component(
+        x, amplitude_b, rate + delta_rate, sigma_b, right
     )
-    row[0] = left_rate_d + right_rate_d
-    row[1] = right_rate_d
-    row[2] = left_shape
-    row[3] = left_sigma_d
-    row[4] = right_shape
-    row[5] = right_sigma_d
-    return left_amp * left_shape + right_amp * right_shape
-
+    row[0] = (1.0 - ratio) * shape_a + ratio * shape_b
+    row[1] = rate_d_a + rate_d_b
+    row[2] = sigma_d_a
+    row[3] = rate_d_b
+    row[4] = sigma_d_b
+    row[5] = amplitude * (shape_b - shape_a)
+    return amplitude_a * shape_a + amplitude_b * shape_b
 
 @njit(cache=True, inline="always")
 def _point_doublet(coords, point, parameters, row):
@@ -3545,8 +3512,8 @@ def _objective_poisson(coords, obs, valid, params, free, weights, use_w, poisson
 def _objective_poisson_bimodal(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives, context):
     if derivatives: compiled_reset_accumulators(gradient, info)
     cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
-    left=_poisson_grid(params[0], params[3])
-    right=_poisson_grid(params[0] + params[1], params[5])
+    left=_poisson_grid(params[1], params[2])
+    right=_poisson_grid(params[1] + params[3], params[4])
     for point in range(obs.size):
         if not valid[point]: continue
         predicted=_point_poisson_bimodal(coords, point, params, full, left, right)
@@ -3773,12 +3740,10 @@ def _prepare_histogram(coords, observations, valid, seeds, lower, upper, context
     x = compact[0]
     total = 0.0
     first_moment = 0.0
-    maximum = max(values[0], 0.0)
     for index in range(values.size):
         weight = max(values[index], 0.0)
         total += weight
         first_moment += x[index] * weight
-        maximum = max(maximum, values[index])
     span = _array_span(x)
     if total <= 0.0:
         center = np.mean(x)
@@ -3791,26 +3756,34 @@ def _prepare_histogram(coords, observations, valid, seeds, lower, upper, context
             difference = x[index] - center
             variance += weight * difference * difference
         sigma = max(math.sqrt(variance / total), span / 1000.0)
-    seeds[0, 0] = max(maximum, 0.0)
+    step = _unique_step(x)
+    seeds[0, 0] = total * step
     seeds[0, 1] = center
     seeds[0, 2] = sigma
-    lower[2] = max(lower[2], 0.5 * _unique_step(x))
     return 1
 
 
 @njit(cache=True, inline="always")
-def _bimodal_score(x, counts, center, splitting, left_amp, left_sigma, right_amp, right_sigma):
-    total = 0.0
-    left_center = center - 0.5 * splitting
-    right_center = center + 0.5 * splitting
-    for index in range(x.size):
-        left = (x[index] - left_center) / left_sigma
-        right = (x[index] - right_center) / right_sigma
-        predicted = left_amp * math.exp(-0.5 * left * left) + right_amp * math.exp(-0.5 * right * right)
-        difference = predicted - counts[index]
-        total += difference * difference
-    return total
+def _bimodal_score(x, counts, seed):
+    """Distance of a two-population seed from the histogram: one exponential
+    per bin and population, in the model's own parameters."""
 
+    amplitude = seed[0]
+    center_a = seed[1]
+    sigma_a = seed[2]
+    center_b = seed[1] + seed[3]
+    sigma_b = seed[4]
+    ratio = seed[5]
+    height_a = amplitude * (1.0 - ratio) / (sigma_a * SQRT_TWO_PI)
+    height_b = amplitude * ratio / (sigma_b * SQRT_TWO_PI)
+    distance = 0.0
+    for index in range(x.size):
+        a = (x[index] - center_a) / sigma_a
+        b = (x[index] - center_b) / sigma_b
+        predicted = height_a * math.exp(-0.5 * a * a) + height_b * math.exp(-0.5 * b * b)
+        difference = predicted - counts[index]
+        distance += difference * difference
+    return distance
 
 @njit(cache=True, inline="always")
 def _try_bimodal_split(x, counts, split_value, step, output):
@@ -3818,18 +3791,14 @@ def _try_bimodal_split(x, counts, split_value, step, output):
     right_mass = 0.0
     left_moment = 0.0
     right_moment = 0.0
-    left_maximum = 0.0
-    right_maximum = 0.0
     for index in range(x.size):
         count = max(counts[index], 0.0)
         if x[index] <= split_value:
             left_mass += count
             left_moment += x[index] * count
-            left_maximum = max(left_maximum, count)
         else:
             right_mass += count
             right_moment += x[index] * count
-            right_maximum = max(right_maximum, count)
     if left_mass <= 0.0 or right_mass <= 0.0:
         return math.inf
     left_center = left_moment / left_mass
@@ -3846,27 +3815,14 @@ def _try_bimodal_split(x, counts, split_value, step, output):
         else:
             difference = x[index] - right_center
             right_variance += count * difference * difference
-    left_sigma = max(math.sqrt(left_variance / left_mass), step)
-    right_sigma = max(math.sqrt(right_variance / right_mass), step)
-    center = 0.5 * (left_center + right_center)
-    splitting = right_center - left_center
-    output[0] = center
-    output[1] = splitting
-    output[2] = left_maximum
-    output[3] = left_sigma
-    output[4] = right_maximum
-    output[5] = right_sigma
-    return _bimodal_score(
-        x,
-        counts,
-        center,
-        splitting,
-        left_maximum,
-        left_sigma,
-        right_maximum,
-        right_sigma,
-    )
-
+    total = left_mass + right_mass
+    output[0] = total * step
+    output[1] = left_center
+    output[2] = max(math.sqrt(left_variance / left_mass), step)
+    output[3] = right_center - left_center
+    output[4] = max(math.sqrt(right_variance / right_mass), step)
+    output[5] = right_mass / total
+    return _bimodal_score(x, counts, output)
 
 @njit(cache=True, inline="always")
 def _two_state_cuts(x, values, total, split_values):
@@ -3937,48 +3893,33 @@ def _prepare_bimodal(coords, observations, valid, seeds, lower, upper, context):
     span = _array_span(x)
     step = _unique_step(x)
     total = 0.0
-    maximum = 0.0
     for index in range(count):
-        value = max(values[index], 0.0)
-        total += value
-        maximum = max(maximum, value)
-    if count < 3 or total <= 0.0:
-        midpoint = 0.5 * (x[0] + x[count - 1])
-        seeds[0, 0] = midpoint
-        seeds[0, 1] = span / 2.0
-        seeds[0, 2] = maximum
-        seeds[0, 3] = span / 10.0
-        seeds[0, 4] = maximum
-        seeds[0, 5] = span / 10.0
-        lower[3] = max(lower[3], 0.5 * step)
-        lower[5] = max(lower[5], 0.5 * step)
-        return 1
-    split_values = np.empty(10, dtype=np.float64)
-    split_count = _two_state_cuts(x, values, total, split_values)
-    trial = np.empty(6, dtype=np.float64)
+        total += max(values[index], 0.0)
     best = np.empty(6, dtype=np.float64)
-    best_score = math.inf
     found = False
-    for split in range(split_count):
-        score = _try_bimodal_split(x, values, split_values[split], step, trial)
-        if score < best_score:
-            best_score = score
-            for parameter in range(6):
-                best[parameter] = trial[parameter]
-            found = True
+    if count >= 3 and total > 0.0:
+        split_values = np.empty(10, dtype=np.float64)
+        split_count = _two_state_cuts(x, values, total, split_values)
+        trial = np.empty(6, dtype=np.float64)
+        best_score = math.inf
+        for split in range(split_count):
+            score = _try_bimodal_split(x, values, split_values[split], step, trial)
+            if score < best_score:
+                best_score = score
+                for parameter in range(6):
+                    best[parameter] = trial[parameter]
+                found = True
     if not found:
-        best[0] = 0.5 * (x[0] + x[count - 1])
-        best[1] = span / 2.0
-        best[2] = maximum
-        best[3] = span / 10.0
-        best[4] = maximum
-        best[5] = span / 10.0
+        midpoint = 0.5 * (x[0] + x[count - 1])
+        best[0] = total * step
+        best[1] = midpoint - span / 4.0
+        best[2] = span / 10.0
+        best[3] = span / 2.0
+        best[4] = span / 10.0
+        best[5] = 0.5
     for parameter in range(6):
         seeds[0, parameter] = best[parameter]
-    lower[3] = max(lower[3], 0.5 * step)
-    lower[5] = max(lower[5], 0.5 * step)
     return 1
-
 
 @njit(cache=True, inline="always")
 def _poisson_moments(x, values, split, side, step):
@@ -4042,16 +3983,14 @@ def _prepare_poisson_histogram(coords, observations, valid, seeds, lower, upper,
     x = compact[0, order]
     values = raw_values[order]
     step = _unique_step(x)
-    amplitude, rate, sigma, total = _poisson_moments(x, values, 0.0, 0, step)
+    _amplitude, rate, sigma, total = _poisson_moments(x, values, 0.0, 0, step)
     if total <= 0.0:
         rate = max(np.mean(x), 0.25 * step)
         sigma = max(_array_span(x) / 6.0, step)
-    seeds[0, 0] = amplitude
+    seeds[0, 0] = total * step
     seeds[0, 1] = rate
     seeds[0, 2] = sigma
-    lower[2] = max(lower[2], 0.5 * step)
     return 1
-
 
 @njit(cache=True, inline="always")
 def _poisson_bimodal_score(x, counts, seed):
@@ -4060,43 +3999,44 @@ def _poisson_bimodal_score(x, counts, seed):
     per bin ranks the cuts.  ``fit._poisson_seed_distance`` is the same
     arithmetic for the SciPy path."""
 
-    total = 0.0
-    left_rate = seed[0]
-    right_rate = seed[0] + seed[1]
-    left_variance = left_rate + seed[3] * seed[3]
-    right_variance = right_rate + seed[5] * seed[5]
-    left_height = seed[2] / (SQRT_TWO_PI * math.sqrt(left_variance))
-    right_height = seed[4] / (SQRT_TWO_PI * math.sqrt(right_variance))
+    amplitude = seed[0]
+    rate_a = seed[1]
+    rate_b = seed[1] + seed[3]
+    ratio = seed[5]
+    variance_a = rate_a + seed[2] * seed[2]
+    variance_b = rate_b + seed[4] * seed[4]
+    height_a = amplitude * (1.0 - ratio) / (SQRT_TWO_PI * math.sqrt(variance_a))
+    height_b = amplitude * ratio / (SQRT_TWO_PI * math.sqrt(variance_b))
+    distance = 0.0
     for index in range(x.size):
-        left_delta = x[index] - left_rate
-        right_delta = x[index] - right_rate
+        delta_a = x[index] - rate_a
+        delta_b = x[index] - rate_b
         predicted = (
-            left_height * math.exp(-0.5 * left_delta * left_delta / left_variance)
-            + right_height * math.exp(-0.5 * right_delta * right_delta / right_variance)
+            height_a * math.exp(-0.5 * delta_a * delta_a / variance_a)
+            + height_b * math.exp(-0.5 * delta_b * delta_b / variance_b)
         )
         difference = predicted - counts[index]
-        total += difference * difference
-    return total
-
+        distance += difference * difference
+    return distance
 
 @njit(cache=True, inline="always")
 def _try_poisson_split(x, counts, split_value, step, output):
-    left_amplitude, left_rate, left_sigma, left_mass = _poisson_moments(
+    _left_amplitude, left_rate, left_sigma, left_mass = _poisson_moments(
         x, counts, split_value, -1, step
     )
-    right_amplitude, right_rate, right_sigma, right_mass = _poisson_moments(
+    _right_amplitude, right_rate, right_sigma, right_mass = _poisson_moments(
         x, counts, split_value, 1, step
     )
     if left_mass <= 0.0 or right_mass <= 0.0 or not right_rate > left_rate:
         return math.inf
-    output[0] = left_rate
-    output[1] = right_rate - left_rate
-    output[2] = left_amplitude
-    output[3] = left_sigma
-    output[4] = right_amplitude
-    output[5] = right_sigma
+    total = left_mass + right_mass
+    output[0] = total * step
+    output[1] = left_rate
+    output[2] = left_sigma
+    output[3] = right_rate - left_rate
+    output[4] = right_sigma
+    output[5] = right_mass / total
     return _poisson_bimodal_score(x, counts, output)
-
 
 @njit(cache=True)
 def _prepare_poisson_bimodal(coords, observations, valid, seeds, lower, upper, context):
@@ -4128,18 +4068,15 @@ def _prepare_poisson_bimodal(coords, observations, valid, seeds, lower, upper, c
                 found = True
     if not found:
         midpoint = 0.5 * (x[0] + x[count - 1])
-        best[0] = max(midpoint - span / 4.0, 0.25 * step)
-        best[1] = span / 2.0
-        best[2] = 0.5 * total * step
-        best[3] = max(span / 10.0, step)
-        best[4] = 0.5 * total * step
-        best[5] = max(span / 10.0, step)
+        best[0] = total * step
+        best[1] = max(midpoint - span / 4.0, 0.25 * step)
+        best[2] = max(span / 10.0, step)
+        best[3] = span / 2.0
+        best[4] = max(span / 10.0, step)
+        best[5] = 0.5
     for parameter in range(6):
         seeds[0, parameter] = best[parameter]
-    lower[3] = max(lower[3], 0.5 * step)
-    lower[5] = max(lower[5], 0.5 * step)
     return 1
-
 
 @njit(cache=True, inline="always")
 def _peak_properties(values, threshold, peaks, widths):
@@ -4505,7 +4442,7 @@ def histogram_gaussian_descriptor() -> CompiledFitDescriptor:
         value_jacobian=_value_jacobian_histogram,
         context_builder=series_context_builder,
         max_candidates=1,
-        cache_key="histogram-gaussian-v1",
+        cache_key="histogram-gaussian-v3",
     )
 
 
@@ -4516,7 +4453,7 @@ def bimodal_gaussian_descriptor() -> CompiledFitDescriptor:
         value_jacobian=_value_jacobian_bimodal,
         context_builder=series_context_builder,
         max_candidates=1,
-        cache_key="bimodal-gaussian-v1",
+        cache_key="bimodal-gaussian-v3",
     )
 
 
@@ -4527,7 +4464,7 @@ def histogram_poisson_gaussian_descriptor() -> CompiledFitDescriptor:
         value_jacobian=_value_jacobian_poisson,
         context_builder=series_context_builder,
         max_candidates=1,
-        cache_key="histogram-poisson-gaussian-v1",
+        cache_key="histogram-poisson-gaussian-v3",
     )
 
 
@@ -4538,7 +4475,7 @@ def bimodal_poisson_gaussian_descriptor() -> CompiledFitDescriptor:
         value_jacobian=_value_jacobian_poisson_bimodal,
         context_builder=series_context_builder,
         max_candidates=1,
-        cache_key="bimodal-poisson-gaussian-v1",
+        cache_key="bimodal-poisson-gaussian-v3",
     )
 
 
@@ -4939,6 +4876,9 @@ def warm_production_cache() -> dict[str, Any]:
             observations,
             base_lower=lower,
             base_upper=upper,
+            requested_lower=None,
+            requested_upper=None,
+            requested_mask=None,
             authored_seeds=parameters,
             use_authored=True,
             poisson=poisson,
@@ -4980,7 +4920,8 @@ def warm_production_cache() -> dict[str, Any]:
         loss="soft_l1",
     )
 
-    histogram = np.asarray((70.0, 0.15, 0.75), dtype=np.float64)
+    bin_width = float(x[1] - x[0])
+    histogram = np.asarray((2100.0 * bin_width, 0.15, 0.75), dtype=np.float64)
     histogram_values = _value_jacobian_histogram.py_func(
         np.ascontiguousarray(x.reshape(1, -1)), histogram
     )[0]
@@ -4995,7 +4936,9 @@ def warm_production_cache() -> dict[str, Any]:
         poisson=True,
     )
 
-    bimodal = np.asarray((0.0, 2.0, 55.0, 0.45, 40.0, 0.65), dtype=np.float64)
+    bimodal = np.asarray(
+        (2035.0 * bin_width, -1.0, 0.45, 2.0, 0.65, 0.513), dtype=np.float64
+    )
     bimodal_values = _value_jacobian_bimodal.py_func(
         np.ascontiguousarray(x.reshape(1, -1)), bimodal
     )[0]
@@ -5005,8 +4948,8 @@ def warm_production_cache() -> dict[str, Any]:
         (x,),
         bimodal_values,
         bimodal,
-        np.asarray((-infinity, 0.0, 0.0, positive, 0.0, positive)),
-        np.asarray((infinity, infinity, infinity, infinity, infinity, infinity)),
+        np.asarray((0.0, -infinity, positive, 0.0, positive, 0.0)),
+        np.asarray((infinity, infinity, infinity, infinity, infinity, 1.0)),
         poisson=True,
     )
 
@@ -5015,7 +4958,8 @@ def warm_production_cache() -> dict[str, Any]:
     # helpers on their own, which are not production dispatchers).
     photons = np.linspace(-2.0, 14.0, 97, dtype=np.float64)
     photon_coords = np.ascontiguousarray(photons.reshape(1, -1))
-    poisson_single = np.asarray((60.0, 1.5, 0.6), dtype=np.float64)
+    photon_bin = float(photons[1] - photons[0])
+    poisson_single = np.asarray((360.0 * photon_bin, 1.5, 0.6), dtype=np.float64)
     run_single(
         "histogram_poisson_gaussian_poisson",
         histogram_poisson_gaussian_descriptor(),
@@ -5027,15 +4971,17 @@ def warm_production_cache() -> dict[str, Any]:
         poisson=True,
     )
 
-    poisson_bimodal = np.asarray((0.8, 5.2, 55.0, 0.5, 40.0, 0.7), dtype=np.float64)
+    poisson_bimodal = np.asarray(
+        (570.0 * photon_bin, 0.8, 0.5, 5.2, 0.7, 0.421), dtype=np.float64
+    )
     run_single(
         "bimodal_poisson_gaussian_poisson",
         bimodal_poisson_gaussian_descriptor(),
         (photons,),
         _value_jacobian_poisson_bimodal(photon_coords, poisson_bimodal)[0],
         poisson_bimodal,
-        np.asarray((0.0, 0.0, 0.0, positive, 0.0, positive)),
-        np.asarray((infinity, infinity, infinity, infinity, infinity, infinity)),
+        np.asarray((0.0, 0.0, positive, 0.0, positive, 0.0)),
+        np.asarray((infinity, infinity, infinity, infinity, infinity, 1.0)),
         poisson=True,
     )
 

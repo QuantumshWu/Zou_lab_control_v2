@@ -480,16 +480,22 @@ def test_nothing_is_written_unless_the_operator_asks(tmp_path: Path) -> None:
         )
         components = target["gaussian_components"]
         if np.isfinite(expected).all():
+            dark_mean, dark_sigma, dark_weight, bright_mean, bright_sigma, bright_weight = expected
             np.testing.assert_allclose(
                 [
-                    components["left_mean"],
-                    components["left_sigma"],
-                    components["left_weight"],
-                    components["right_mean"],
-                    components["right_sigma"],
-                    components["right_weight"],
+                    components["center"],
+                    components["sigma"],
+                    components["delta_center"],
+                    components["sigma_B"],
+                    components["ratio"],
                 ],
-                expected,
+                [
+                    dark_mean,
+                    dark_sigma,
+                    bright_mean - dark_mean,
+                    bright_sigma,
+                    bright_weight / (dark_weight + bright_weight),
+                ],
             )
         else:
             assert components is None

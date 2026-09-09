@@ -37,7 +37,7 @@ from zlc_atom.nodes.calibration import (
     SiteMap,
     TrapCalibration,
 )
-from zlc_atom.nodes.calibration.bimodal import _DECISIVE_BIC_GAIN
+from zlc_plot.fit import DECISIVE_BIC_GAIN
 from zlc_atom.nodes.calibration.pulse import resolve_pulse
 from zlc_atom.nodes.slm_feedback import task as feedback_module
 from zlc_atom.nodes.slm_feedback.task import (
@@ -1206,9 +1206,9 @@ def test_two_populations_need_decisive_evidence() -> None:
     few_bright[[10, 35, 60, 85]] = rng.normal(1300.0, 40.0, 4)
     fitted = _fit_contrasts(np.column_stack((few_bright, dark)))
     assert fitted["valid"].tolist() == [True, False]
-    assert fitted["bic_gain"][0] > 10.0 * _DECISIVE_BIC_GAIN
+    assert fitted["bic_gain"][0] > 10.0 * DECISIVE_BIC_GAIN
     assert fitted["single_population"][1]
-    assert _DECISIVE_BIC_GAIN == 10.0
+    assert DECISIVE_BIC_GAIN == 10.0
 
 
 def test_funding_a_dark_site_never_presses_a_loaded_one_past_its_edge() -> None:
@@ -3984,9 +3984,12 @@ def test_failure_after_a_completed_candidate_saves_figures_and_context(
         _plot_input, recipe = read_figure_plot(info, arrays, "data")
         assert isinstance(recipe["spec"], FacetGridPlot)
         assert isinstance(recipe["spec"].cell, HistogramPlot)
+        # The two-population fit states the evidence it demanded, at the
+        # default, so the saved figure says how its populations were decided.
         assert recipe["fit"] == {
             "model": "bimodal_gaussian",
             "fit_all_facets": True,
+            "min_bic_gain": 10.0,
         }
         run = json.loads((run_root / "run.json").read_text(encoding="utf-8"))
         artifact_roles = {

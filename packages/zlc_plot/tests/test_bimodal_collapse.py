@@ -52,12 +52,12 @@ def test_a_rare_state_is_found_and_not_fitted_away() -> None:
     centres, counts = _histogram(_draw(rng, 2000, 0.02))
     result = FitEngine().fit("bimodal_gaussian", (centres,), counts, data_revision=0)
     values = _named(result)
-    low = values["center"] - 0.5 * values["center_splitting"]
-    high = values["center"] + 0.5 * values["center_splitting"]
+    low = values["center"]
+    high = values["center"] + values["delta_center"]
 
     assert abs(low - DARK[0]) < 2.0, values
     assert abs(high - BRIGHT[0]) < 5.0, values
-    assert min(values["left_sigma"], values["right_sigma"]) > 2.0 * FLOOR, values
+    assert min(values["sigma"], values["sigma_B"]) > 2.0 * FLOOR, values
     threshold, _left, right, _fidelity = _bimodal_classifier_metrics(result, None)
     assert DARK[0] < threshold < BRIGHT[0]
     assert 0.005 < right < 0.10, right
@@ -66,7 +66,12 @@ def test_a_rare_state_is_found_and_not_fitted_away() -> None:
 def test_a_live_classifier_leaves_an_early_wrong_answer_behind() -> None:
     """Thirty shots cannot show a rare state; four hundred can.
 
-    The whole live sequence, seeded exactly as the classifier seeds it.
+    The whole live sequence, seeded exactly as the classifier seeds it: a
+    reduced answer (one population) is never a warm start, since its
+    coinciding components are nowhere to start a two-population solve.
+    Thirty shots with no bright one in them are one population, and say so
+    with no threshold at all; by the end the rare state stands and the
+    threshold sits between the two.
     """
 
     rng = np.random.default_rng(11)
@@ -84,12 +89,17 @@ def test_a_live_classifier_leaves_an_early_wrong_answer_behind() -> None:
             data_revision=step,
             warm_start=warm,
         )
-        warm = tuple(float(value) for value in result.parameter_values)
+        warm = (
+            None
+            if result.reduced
+            else tuple(float(value) for value in result.parameter_values)
+        )
         thresholds.append(_bimodal_classifier_metrics(result, None)[0])
         assert min(_named(result).values(), default=1.0) is not None
 
+    assert thresholds[0] is None, thresholds
+    assert thresholds[-1] is not None
     assert DARK[0] < thresholds[-1] < BRIGHT[0], thresholds
-    assert thresholds[-1] > thresholds[0] + 20.0, thresholds
 
 
 def test_a_run_that_has_not_loaded_yet_publishes_no_threshold() -> None:
@@ -124,7 +134,7 @@ def test_a_run_that_has_not_loaded_yet_publishes_no_threshold() -> None:
             warm = tuple(float(value) for value in result.parameter_values)
             named = _named(result)
             threshold = _bimodal_classifier_metrics(result, None)[0]
-            if min(named["left_sigma"], named["right_sigma"]) <= FLOOR * 1.01:
+            if min(named["sigma"], named["sigma_B"]) <= FLOOR * 1.01:
                 spikes += 1
                 assert threshold is None, (seed, step, named)
         assert threshold is not None, (seed, named)
@@ -150,9 +160,8 @@ def test_a_spike_does_not_survive_being_seeded() -> None:
     spike.update(
         {
             "center": peak,
-            "center_splitting": 0.0,
-            "left_sigma": 0.5 * step,
-            "left_amplitude": float(np.max(counts)),
+            "delta_center": 0.0,
+            "sigma": 0.5 * step,
         }
     )
     seeded = engine.fit(
@@ -163,7 +172,7 @@ def test_a_spike_does_not_survive_being_seeded() -> None:
         initial=spike,
     )
     escaped = _named(seeded)
-    assert min(escaped["left_sigma"], escaped["right_sigma"]) > 2.0 * FLOOR, escaped
+    assert min(escaped["sigma"], escaped["sigma_B"]) > 2.0 * FLOOR, escaped
     assert np.allclose(
         seeded.parameter_values, truth.parameter_values, rtol=1e-3, atol=1e-3
     ), (escaped, _named(truth))

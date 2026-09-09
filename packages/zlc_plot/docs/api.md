@@ -283,7 +283,8 @@ The classifier owns its bimodal Gaussian classification fit, initial
 fitted-population-weighted threshold, component/sum curves, movable threshold,
 fitted population L/R percentages that sum to 100%, and population-weighted
 fidelity readout. A coordinate-addressed threshold target may additionally
-carry `gaussian_components` (left/right mean, sigma, and weight) so a saved
+carry `gaussian_components` (the bimodal model's own `center`, `sigma`,
+`delta_center`, `sigma_B` and `ratio`) so a saved
 scientific Figure presents its authoritative model instead of refitting the
 displayed bins; an explicit null keeps the final threshold line without
 inventing a Gaussian fit. It is independent of the ordinary `fit()` state.

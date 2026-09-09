@@ -2034,6 +2034,12 @@ class FitProjection:
             result,
             selection,
         )
+        evidence = ""
+        if math.isfinite(result.evidence):
+            # The two-population question, answered where the parameters
+            # are read: the BIC gain of two over one, and what it decided.
+            verdict = "one population" if result.reduced else "two populations"
+            evidence = f"ΔBIC = {result.evidence:.1f}: {verdict}"
         return FitOverlay(
             polylines=polylines,
             ellipse_glyph=self._fit_overlay_ellipse(result, parameter_display),
@@ -2043,6 +2049,7 @@ class FitProjection:
             diagnostic=result.message,
             facet_index=selection.facet_index,
             headline_parameter=headline_parameter,
+            evidence=evidence,
         )
 
     def _display_fit_parameters(
@@ -2137,8 +2144,10 @@ class FitProjection:
                 self._fit_parameter_conversion(factor).symbol
                 if display else self._canonical_fit_parameter_unit(factor)
             )
-            symbols.append(symbol or "1")
-        return (self._unit_registry or DEFAULT_UNITS).resolve("*".join(symbols))
+            # A unitless factor multiplies nothing: count*1 is count.
+            if symbol:
+                symbols.append(symbol)
+        return (self._unit_registry or DEFAULT_UNITS).resolve("*".join(symbols) or "1")
 
     def _fit_parameter_conversion(
         self,
