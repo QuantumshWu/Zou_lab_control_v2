@@ -29,7 +29,7 @@ from zlc_atom.nodes.scan import (
     scan_ports_for,
     scan_ports_for_devices,
 )
-from zlc_atom.nodes.scan.plan import scan_axis_ids
+from zlc_atom.nodes.scan.plan import plan_from_authored, plan_input_rows, scan_axis_ids
 from zlc_atom.nodes.seamless_scan import LOGIC_NODE as SEAMLESS_NODE
 from test_scan_repeat_domain import _source_schema
 
@@ -115,6 +115,25 @@ def test_binding_refuses_unknown_ports_and_out_of_range_values() -> None:
     assert bind_plan(plan, (power,)) == (power,)
     assert plan.axes[0].values == (135.0, 247.0)
     assert ScanPlan.from_tree(plan.to_tree()) == plan
+    raw = {"axes": [{"port": BIAS_PORTS[0], "values": [1.0, 3.0, 2.0],
+                     "unit": "code", "mode": "values", "value_text": "10, 5, 10"}]}
+    compiled = plan_from_authored(json.dumps(raw))
+    assert compiled.axes[0].values == (10.0, 5.0, 10.0), "Values preserves order and duplicates"
+    assert compiled.to_tree() == {"axes": [{"port": BIAS_PORTS[0],
+        "values": [10.0, 5.0, 10.0], "unit": "code"}]}
+    raw["axes"][0]["mode"] = "range"
+    assert plan_from_authored(raw).axes[0].values == (1.0, 3.0, 2.0)
+    assert plan_input_rows(raw)[0]["value_text"] == "10, 5, 10"
+    assert plan_input_rows(plan)[0]["mode"] == "range"
+    assert plan_input_rows(plan)[0]["value_text"] == ""
+    for text in ("", "1,", "1;2", "1, nan", "inf"):
+        raw["axes"][0].update(mode="values", value_text=text)
+        assert plan_input_rows(raw)[0]["value_text"] == text
+        with pytest.raises(ValueError, match=r"scan axis 1 .*da_bias_x.*Values"):
+            plan_from_authored(raw)
+        raw["axes"][0]["mode"] = "range"
+        assert plan_from_authored(raw).axes[0].values == (1.0, 3.0, 2.0)
+    assert compiled.axes[0].values == (10.0, 5.0, 10.0), "later drafts do not mutate an execution plan"
     assert authored.native_value(power, 135.0) == float(DEFAULT_UNITS.convert(135.0, "mVpp", "dBm"))
     with pytest.raises(ValueError, match="outside the port's range"):
         bind_plan(ScanPlan((ScanAxis(power.port, (1e6,), "mVpp"),)), (power,))
@@ -277,6 +296,19 @@ def test_a_region_lands_on_the_axis_the_picture_drew_when_two_ports_share_a_name
         authored = ScanPlan.from_tree(json.loads(patch["plan"])).axes[0]
         assert authored.unit == "mVpp"
         assert authored.values == tuple(np.linspace(150.0, 220.0, 10))
+        for value_text in ("", "247, 135, 200"):
+            raw = {"axes": [{"port": power.port, "values": list(power.values), "unit": "mVpp",
+                             "mode": "values", "value_text": value_text},
+                            {"port": BIAS_PORTS[0], "values": [4.0, 1.0], "unit": "code",
+                             "mode": "values", "value_text": "5, 7"}]}
+            patch = SEAMLESS_NODE.selection_patch(selected, draft={"plan": json.dumps(raw)}, context=context)
+            banks = plan_input_rows(patch["plan"])
+            assert banks[0]["values"] == list(np.linspace(150.0, 220.0, 10))
+            assert banks[0]["mode"] == "values" and banks[0]["value_text"] == value_text
+            assert banks[1] == raw["axes"][1]
+            assert raw["axes"][0]["values"] == list(power.values)
+            roi = SelectionState("image", "area", (SelectionRange("camera.x", 1.0, 2.0, domain="cell_data"),))
+            assert SEAMLESS_NODE.selection_patch(roi, draft={"plan": json.dumps(raw)}, context={}) is None
         # The draft can have changed unit since this exact Dataset was shown.
         changed = ScanAxis(power.port, tuple(DEFAULT_UNITS.convert(power.values, "mVpp", "dBm")), "dBm")
         patch = SEAMLESS_NODE.selection_patch(

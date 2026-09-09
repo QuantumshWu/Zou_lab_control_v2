@@ -14,6 +14,7 @@
 - Restart后的Frozen Edit旧代提示已补齐，纯数据/年龄变化仅更新状态文字，不reconcile表单；FigureViewer同一路径。真实Runtime/Host/Save直接用例及正式Qt确认revision同为1而generation不同仍正确提示，Refresh前保存ref/values精确为旧快照，Refresh后才更新；所有测试GUI/渲染子进程已关闭。
 
 - Scan Plan统一手动/device/pulse行的列结构与预算，单位slot固定、起终点等宽，保留原扫描/单位/草稿逻辑。正式Console真实Qt在正常和70%屏幕宽度下截图，原手动行起点错位50 logical px降为0，各行start/stop/points/remove位置与宽度一致；resize不改plan，单位切换通过，2项既有直接编辑/单位用例通过，测试窗口关闭。截图和探针留ignored research，不入Git。
+- Scan Range/Values复用原轴行与Plan owner：Range数列和初始为空的Values文本独立保留，Values不显示Points；切换只隐藏原控件，selector始终只改Range（包括隐藏时），共享unit分别换算两套输入、不互相回填。`plan_input_rows`读取raw banks供编辑/selector使用，Layout原样保存raw plan；Start才按mode解析当前数列，执行`ScanAxis/ScanPlan`及plain port/values/unit输出不变。直接用例覆盖顺序、重复值、空/坏Values拒绝、隐藏Range更新、单位独立换算与执行快照不被后续草稿改动；正式TaskConsole实屏通过三类轴混排、真实按钮切换/输入/Save→Load，空Values和未显示Range均保留，输入/单位/mode/删除列位置宽度一致，Qt异常为0。窗口已关闭，截图与探针仅在ignored research。
 
 - sealed Scan→Derive Run→Image改表达式再Start的`signal generation owner is already active`已复现并根修：Processor复用原Producer的终态世代替换，不改Shutdown保留数据政策和Input range。正式Qt二次Start为Done，新generation、同一exact Scan parent，下游Image逐像素为原值×2；11项直接生命周期验证含连续三次frozen运行、并发Start、active保护、未发布幂等通过。Derive结构说明复用三域颜色，以logical shape为主、Storage shape为辅。
 

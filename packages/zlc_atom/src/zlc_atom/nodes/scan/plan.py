@@ -27,10 +27,10 @@ import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from numbers import Real
 from pathlib import Path
 
 import numpy as np
-from dataclasses import replace
 
 from zlc_data.units import DEFAULT_UNITS, format_quantity
 from zlc_pulse import (
@@ -370,14 +370,19 @@ class ScanPlan:
         }
 
     @classmethod
-    def from_tree(cls, tree: Mapping) -> "ScanPlan":
-        if not isinstance(tree, Mapping) or "axes" not in tree:
-            raise ValueError("a scan plan document carries its axes")
+    def from_tree(cls, tree: object) -> "ScanPlan":
         axes = []
-        for entry in tree["axes"]:
-            if not isinstance(entry, Mapping) or not {"port", "values"} <= set(entry) or set(entry) - {"port", "values", "unit"}:
-                raise ValueError("scan axis fields must be port, values, and optional unit")
-            axes.append(ScanAxis(str(entry["port"]), tuple(entry["values"]), entry.get("unit", "")))
+        for index, entry in enumerate(plan_input_rows(tree), 1):
+            try:
+                if entry["port"].startswith(MANUAL_PARAM_FAMILY):
+                    manual_axis_name(entry["port"])
+                values = (
+                    parse_scan_values(entry["value_text"])
+                    if entry["mode"] == "values" else entry["values"]
+                )
+                axes.append(ScanAxis(entry["port"], tuple(values), entry["unit"]))
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"scan axis {index} ({entry['port']!r}): {error}") from None
         return cls(tuple(axes))
 
 
@@ -639,27 +644,67 @@ def api_overrides_to_authored(overrides: Mapping[str, float]) -> str:
     return "\n".join(lines)
 
 
-def plan_from_authored(payload: object) -> ScanPlan:
-    """The plan behind one authored value: a document, a tree, or its JSON."""
-
+def plan_input_rows(payload: object) -> tuple[dict, ...]:
+    """Read the two independent input banks without compiling Values text."""
     if isinstance(payload, ScanPlan):
-        return payload
-    if isinstance(payload, Mapping):
-        return ScanPlan.from_tree(payload)
-    text = str(payload or "").strip()
-    if not text:
-        raise ValueError(
-            'the scan plan is empty; it reads like '
-            '{"axes": [{"port": "pulse:param:da_bias_x", "values": [-256, 0, 256]}]}'
-        )
-    return ScanPlan.from_tree(json.loads(text))
+        payload = payload.to_tree()
+    elif isinstance(payload, str):
+        if not payload.strip():
+            raise ValueError("the scan plan is empty; add an axis")
+        payload = json.loads(payload)
+    if not isinstance(payload, Mapping) or set(payload) != {"axes"}:
+        raise ValueError("a scan plan document carries only its axes")
+    entries = payload["axes"]
+    if isinstance(entries, (str, bytes)) or not isinstance(entries, Sequence):
+        raise TypeError("scan plan axes must be a list")
+    rows = []
+    for index, entry in enumerate(entries, 1):
+        allowed = {"port", "values", "unit", "mode", "value_text"}
+        if not isinstance(entry, Mapping) or not {"port", "values"} <= set(entry) or set(entry) - allowed:
+            raise ValueError("scan axis fields must be port, values, and optional unit, mode, value_text")
+        row = {"port": entry["port"], "values": entry["values"], "unit": entry.get("unit", ""),
+               "mode": entry.get("mode", "range"), "value_text": entry.get("value_text", "")}
+        if any(not isinstance(row[key], str) for key in ("port", "unit", "mode", "value_text")):
+            raise TypeError(f"scan axis {index}: port, unit, mode and value_text must be text")
+        if row["mode"] not in ("range", "values"):
+            raise ValueError(f"scan axis {index} ({row['port']!r}): mode must be range or values")
+        values = row["values"]
+        if (isinstance(values, (str, bytes)) or not isinstance(values, Sequence)
+                or any(isinstance(value, bool) or not isinstance(value, Real) for value in values)):
+            raise TypeError(f"scan axis {index} ({row['port']!r}): Range values must be a numeric list")
+        row["values"] = list(values)
+        rows.append(row)
+    return tuple(sorted(rows, key=lambda row: host_advanced_port(row["port"]), reverse=True))
+
+
+def parse_scan_values(text: str) -> tuple[float, ...]:
+    """Comma-separated finite numbers, retaining the authored order/repeats."""
+    if not isinstance(text, str):
+        raise TypeError("Values must be comma-separated text")
+    if not text.strip():
+        raise ValueError("Values is empty; enter comma-separated numbers")
+    values = []
+    for index, item in enumerate(text.split(","), 1):
+        try:
+            value = float(item.strip())
+        except ValueError:
+            raise ValueError(f"Values item {index} is not a number: {item!r}") from None
+        if not math.isfinite(value):
+            raise ValueError(f"Values item {index} must be finite")
+        values.append(value)
+    return tuple(values)
+
+
+def plan_from_authored(payload: object) -> ScanPlan:
+    """Compile the active bank to the existing immutable execution plan."""
+    return payload if isinstance(payload, ScanPlan) else ScanPlan.from_tree(payload)
 
 
 def _selected_plan(
     selection: object,
     draft: Mapping[str, object],
     context: Mapping[str, object],
-) -> dict[str, object]:
+) -> dict[str, object] | None:
     """The authored plan, narrowed to the region the operator drew.
 
     A box or an x range on a scan's own plot names SCANNED axes -- that is
@@ -671,37 +716,28 @@ def _selected_plan(
     leaves the plan exactly as it was.  The frames belong to the camera.
     """
 
-    plan = plan_from_authored(draft.get("plan"))
+    rows = plan_input_rows(draft.get("plan"))
     wanted = {
         str(getattr(item, "axis", "")): item
         for item in getattr(selection, "ranges", ())
     }
-    axis_ids = scan_axis_ids([port_label(axis.port) for axis in plan.axes])
-    axes: list[ScanAxis] = []
-    for axis, axis_id in zip(plan.axes, axis_ids, strict=True):
+    axis_ids = scan_axis_ids([port_label(row["port"]) for row in rows])
+    changed = False
+    for row, axis_id in zip(rows, axis_ids, strict=True):
         chosen = wanted.get(axis_id)
-        if chosen is None or len(axis.values) < 2:
-            axes.append(axis)
+        if chosen is None or len(row["values"]) < 2:
             continue
         source_unit = context.get("axis_units", {}).get(axis_id)
         if source_unit is None:
             raise ValueError(f"selected scan axis {axis_id!r} has no recorded unit")
-        unit = axis.unit or source_unit
+        unit = row["unit"] or source_unit
         bounds = (float(chosen.lower), float(chosen.upper))
         if source_unit != unit:
             bounds = DEFAULT_UNITS.convert(bounds, source_unit or "1", unit or "1")
-        axes.append(
-            replace(
-                axis,
-                values=tuple(
-                    float(value)
-                    for value in np.linspace(
-                        float(bounds[0]), float(bounds[1]), len(axis.values)
-                    )
-                ),
-            )
-        )
-    return {"plan": json.dumps(ScanPlan(tuple(axes)).to_tree())}
+        row["values"] = [float(value) for value in np.linspace(
+            float(bounds[0]), float(bounds[1]), len(row["values"]))]
+        changed = True
+    return {"plan": json.dumps({"axes": rows})} if changed else None
 
 
 #: What a region drawn on a scan's plot does to that scan's plan.  A cell of a
@@ -745,6 +781,8 @@ __all__ = [
     "load_stepped_template",
     "slots_from_plan",
     "plan_from_authored",
+    "plan_input_rows",
+    "parse_scan_values",
     "scan_ports_for",
     "scan_ports_for_devices",
 ]

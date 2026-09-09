@@ -17,7 +17,7 @@ import pytest
 
 from zlc_atom.nodes.scan import ScanAxis, ScanPlan, manual_axis_name
 from zlc_atom.nodes.scan.editor import scan_plan_editor_factory
-from zlc_atom.nodes.scan.plan import ScanPort
+from zlc_atom.nodes.scan.plan import ScanPort, parse_scan_values, plan_input_rows
 from zlc_ui import ensure_qt_app
 
 
@@ -201,6 +201,16 @@ def test_a_manual_row_round_trips_through_the_document(points: int) -> None:
         row = next(row for row in editor._rows if row.manual)
         row.name_edit.setText("angle")
         row.points_spin.setValue(points)
+        range_values = row.input_entry()["values"]
+        widgets = (row.start_spin, row.stop_spin, row.points_spin, row.values_edit)
+        assert row.input_entry()["value_text"] == ""
+        row.mode_button.click()
+        assert row.input_stack.currentIndex() == 1
+        assert row.range_inputs.isHidden() and not row.points_spin.isVisibleTo(row)
+        assert row.input_entry()["mode"] == "values"
+        assert row.input_entry()["values"] == range_values
+        with pytest.raises(ValueError, match="Values is empty"):
+            editor._current_plan()
         text = editor._plan_text
 
         reopened = _editor()
@@ -209,6 +219,38 @@ def test_a_manual_row_round_trips_through_the_document(points: int) -> None:
             restored = next(row for row in reopened._rows if row.manual)
             assert restored.name_edit.text() == "angle"
             assert int(restored.points_spin.value()) == points
+            assert restored.input_entry() == row.input_entry()
+            assert restored.values_edit.text() == "" and restored.input_stack.currentIndex() == 1
+            restored.values_edit.setText("9, 3, 9")
+            restored.values_edit.editingFinished.emit()
+            assert reopened._current_plan().axes[0].values == (9.0, 3.0, 9.0)
+            assert restored.input_entry()["values"] == range_values
+            restored_widgets = (restored.start_spin, restored.stop_spin, restored.points_spin, restored.values_edit)
+            restored.mode_button.click()
+            assert restored.input_stack.currentIndex() == 0
+            assert reopened._current_plan().axes[0].values == tuple(range_values)
+            assert restored.values_edit.text() == "9, 3, 9"
+            restored.mode_button.click()
+            from zlc_runtime import SelectionRange, SelectionState
+            from zlc_atom.nodes.seamless_scan import LOGIC_NODE
+
+            selection = SelectionState("curve", "x_range", (SelectionRange("scan.angle", 10., 16., domain="point"),))
+            patch = LOGIC_NODE.selection_patch(selection, draft={"plan": reopened._plan_text},
+                context={"axis_units": {"scan.angle": "1"}})
+            if points > 1:
+                assert patch is not None
+                untouched = plan_input_rows(reopened._plan_text)[1]
+                reopened._reconcile_rows(patch["plan"])
+                assert plan_input_rows(patch["plan"])[1] == untouched
+                assert restored.start_spin.value() == 10. and restored.stop_spin.value() == 16.
+                assert len(restored.input_entry()["values"]) == points
+            else:
+                assert patch is None
+            assert restored.input_entry()["mode"] == "values"
+            assert restored.values_edit.text() == "9, 3, 9"
+            assert reopened._current_plan().axes[0].values == (9., 3., 9.)
+            assert (restored.start_spin, restored.stop_spin, restored.points_spin, restored.values_edit) == restored_widgets
+            assert (row.start_spin, row.stop_spin, row.points_spin, row.values_edit) == widgets
         finally:
             reopened.deleteLater()
     finally:
@@ -237,7 +279,7 @@ def test_a_devices_knobs_hang_under_that_device_not_in_one_flat_list() -> None:
         port("device:rf_source:power", -30.0, 10.0),
         port("device:slm:tilt_x", -1.0, 1.0),
     )
-    row = _AxisRow(ports, ScanAxis("device:rf_source:power", (0.0, 1.0, 2.0)))
+    row = _AxisRow(ports, plan_input_rows(ScanPlan((ScanAxis("device:rf_source:power", (0.0, 1.0, 2.0)),)))[0])
     try:
         model = row.port_combo._model
         tree = {
@@ -491,6 +533,8 @@ def test_axis_rows_follow_the_ports_without_being_rebuilt(caplog) -> None:
         gate.set()
         settled(lambda: bool(editor._rows))
         row = editor._rows[0]
+        row.values_edit.setText("-17, -13, -17")
+        row.values_edit.editingFinished.emit()
         old_values = row.axis().values
         row.unit_picker.unit_picked.emit("mVpp")
         assert row.axis().unit == "dBm", "unit changed before worker accepted it"
@@ -498,12 +542,16 @@ def test_axis_rows_follow_the_ports_without_being_rebuilt(caplog) -> None:
         assert tuple(units.convert(row.axis().values, "mVpp", "dBm")) == pytest.approx(old_values)
         assert row.axis().values[-1] == pytest.approx(894.4271909999159), "used the global 50-ohm conversion"
         assert row.start_spin.valueUnit() == "mVpp"
+        converted_values = parse_scan_values(row.values_edit.text())
+        assert converted_values == tuple(units.convert((-17., -13., -17.), "dBm", "mVpp"))
+        assert len(converted_values) == 3 and len(row.input_entry()["values"]) == 5
         row.start_spin.setValue(135.0)
         row.stop_spin.setValue(247.0)
         row.points_spin.setValue(10)
         plan = _plan(editor)
         assert plan.axes[0].unit == "mVpp"
         assert plan.axes[0].values == tuple(np.linspace(135.0, 247.0, 10))
+        assert parse_scan_values(row.values_edit.text()) == converted_values
         assert ScanPlan.from_tree(plan.to_tree()) == plan
         reopened.update_projection({**projection, "form_values": {"plan": editor._plan_text}})
         settled(lambda: bool(reopened._rows))
@@ -513,11 +561,13 @@ def test_axis_rows_follow_the_ports_without_being_rebuilt(caplog) -> None:
         assert restored.axis().values == plan.axes[0].values
         assert restored.axis().unit == "mVpp"
         assert restored.start_spin.value() == 135.0 and restored.stop_spin.value() == 247.0
+        assert parse_scan_values(restored.values_edit.text()) == converted_values
         restored.unit_picker.unit_picked.emit("dBm")
         settled(lambda: restored._unit_request is None)
         assert restored.axis().unit == "dBm"
         assert restored.axis().values == tuple(units.convert(plan.axes[0].values, "mVpp", "dBm"))
         assert restored.custom_label.text() == "custom values"
+        assert parse_scan_values(restored.values_edit.text()) == tuple(units.convert(converted_values, "mVpp", "dBm"))
         gate.clear()
         restored.unit_picker.unit_picked.emit("mVpp")
         restored.start_spin.setValue(-19.0)
