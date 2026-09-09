@@ -153,6 +153,93 @@ def _overlay_projection():
     return project
 
 
+def test_finite_overlay_uses_the_exact_canonical_prefix_and_last_scope() -> None:
+    from dataclasses import replace
+    import numpy as np
+    from data_factory import axis, repeat_domain, make_dataset_schema, make_snapshot
+    from zlc_data import READOUT_EVENT, SITE, SPATIAL_X, SPATIAL_Y, DatasetSchema, DomainSpec, ValueSchema
+    from zlc_plot import AxisRef, ImagePlot, FacetGridPlot, Reduction
+    from zlc_plot.primitives import IMAGE_POINT_OVERLAY_GEOMETRY_RECORD, PointStatus, image_point_overlay_geometry
+    from zlc_runtime import SignalDataPlane, DatasetCoverage, DatasetOutputDeclaration, LiveDatasetOutput
+    from zlc_workbench.console import ConsolePresenter
+    from test_fit_projection import _projection
+
+    frames = axis("frame", role=READOUT_EVENT, values=(0, 1, 2))
+    points = DomainSpec((3,), (frames,), ((0, 1, 2),))
+    site = axis("site", role=SITE, values=(0, 1))
+    image_schema = make_dataset_schema(repeat_domain(size=50), points,
+        cell_axes=(axis("y", role=SPATIAL_Y, size=1), axis("x", role=SPATIAL_X, size=2)))
+    status_schema = DatasetSchema(image_schema.repeat_domain, points,
+        DomainSpec((2,), (site,)), ValueSchema.scalar(np.dtype(bool), "1"))
+    geometry = image_point_overlay_geometry(make_snapshot(image_schema, np.zeros((50, 3, 1, 2)), revision=0),
+        ((0.0, 0.0), (1.0, 0.0)), ("s0", "s1"), status_axis=site)
+    image_output = DatasetOutputDeclaration("frames", "test.frames")
+    status_output = DatasetOutputDeclaration("status", "test.status")
+    image_node = SimpleNamespace(instance_id="camera", dataset_output_declarations=(image_output,),
+                                 signal_key=lambda name: f"camera/{name}")
+    status_node = SimpleNamespace(instance_id="status", dataset_output_declarations=(status_output,),
+                                  signal_key=lambda name: f"status/{name}")
+    plane = SignalDataPlane()
+    presenter = object.__new__(ConsolePresenter)
+    presenter.session = SimpleNamespace(signal_plane=plane)
+    image_spec = ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y"))
+    facet_spec = FacetGridPlot(AxisRef.point("frame"), image_spec)
+    try:
+        plane.begin_generation(image_node)
+        plane.begin_generation(status_node)
+        for index, origin in enumerate((0, 49)):
+            event_repeat = repeat_domain(size=1)
+            record = {"device_settings": {"camera": {"device_session_id": "camera-session",
+                "epoch_ranges": [[index, index]], "mixed": False}}}
+            plane.commit_live(image_node, {"frames": LiveDatasetOutput(image_output,
+                make_snapshot(replace(image_schema, repeat_domain=event_repeat),
+                    np.full((1, 3, 1, 2), float(origin)) + np.arange(3)[None, :, None, None], revision=index + 1),
+                DatasetCoverage((index + 1) * 3, 150), canonical_schema=image_schema, cell_origin=(origin, 0))})
+            image_publication = plane.latest_publication("camera/frames")
+            values = np.asarray([[[True, False], [False, True], [True, True]]], dtype=bool)
+            if index:
+                values = ~values
+            valid = np.ones((1, 3, 2), dtype=bool)
+            valid[:, 2] = False
+            plane.commit_live(status_node, {"status": LiveDatasetOutput(status_output,
+                make_snapshot(replace(status_schema, repeat_domain=event_repeat), values,
+                              revision=index + 1, validity=valid),
+                DatasetCoverage((index + 1) * 3, 150), {IMAGE_POINT_OVERLAY_GEOMETRY_RECORD: geometry},
+                canonical_schema=status_schema, cell_origin=(origin, 0), event_record=record)},
+                worker_source=("camera/frames", image_publication))
+            status_publication = plane.latest_publication("status/status")
+            exact_front = SimpleNamespace(publication=lambda name: status_publication if name == "status/status" else image_publication)
+            image = plane.current_dataset("camera/frames", image_publication)
+            overlay, used_publication, used_record = presenter._image_point_overlay(
+                exact_front, image_publication, "status/status", image, index + 1)
+            assert used_publication is status_publication
+            assert overlay.status is plane.current_dataset("status/status", status_publication)
+            assert overlay.status.block.values.shape == (50, 3, 2)
+            assert used_record == plane.current_dataset_view("status/status", status_publication)[1]
+            assert used_record["device_settings"]["camera"]["epoch_ranges"] == ((0, index),)
+            assert overlay.statuses_for(facet_spec, 0) is None, "Mean over repeats cannot invent a judgement"
+            scope_zero = replace(facet_spec, scope=((AxisRef.repeat("repeat"), 0),))
+            assert overlay.statuses_for(scope_zero, 0) == (PointStatus.OCCUPIED, PointStatus.EMPTY)
+            last = replace(facet_spec, cell=replace(image_spec, reduction=Reduction.LAST))
+            assert overlay.statuses_for(last, 0) == (
+                None if not index else (PointStatus.EMPTY, PointStatus.OCCUPIED))
+            assert overlay.statuses_for(last, 2) is None, "invalid latest cell cannot reuse an earlier judgement"
+            scoped_last = replace(last, scope=((AxisRef.repeat("repeat"), 0),))
+            assert overlay.statuses_for(scoped_last, 1) == (PointStatus.EMPTY, PointStatus.OCCUPIED)
+            explicit_last = replace(facet_spec, scope=((AxisRef.repeat("repeat"), 49),))
+            # The actual image payload, not merely two overlay interpreters:
+            # Last and an explicit last-coordinate Scope must name one picture.
+            last_payload = _projection(last, snapshot=image)._payload
+            scoped_payload = _projection(explicit_last, snapshot=image)._payload
+            for cell, scoped_cell in zip(last_payload.cells, scoped_payload.cells, strict=True):
+                np.testing.assert_array_equal(cell.payload.z.canonical, scoped_cell.payload.z.canonical)
+                np.testing.assert_array_equal(cell.payload.valid, scoped_cell.payload.valid)
+                assert overlay.statuses_for(last, cell.facet_value_canonical) == overlay.statuses_for(
+                    explicit_last, scoped_cell.facet_value_canonical)
+    finally:
+        plane.close()
+
+
 def test_an_overlay_for_a_replaced_picture_is_dropped_not_pushed(
     panels,
 ) -> None:

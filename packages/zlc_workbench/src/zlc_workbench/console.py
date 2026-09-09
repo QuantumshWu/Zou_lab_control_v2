@@ -1361,8 +1361,9 @@ class ConsolePresenter:
         status = overlay_publication.value(overlay_signal)
         if status is None:
             return None
-        snapshot = status.snapshot
-        event_record = status.event_record
+        snapshot, event_record = self._presentation_snapshot(
+            overlay_signal, status, overlay_publication
+        )
         geometry = overlay_publication.run_record.get(
             IMAGE_POINT_OVERLAY_GEOMETRY_RECORD
         )
@@ -7019,6 +7020,40 @@ class ConsolePresenter:
         source_options, source_labels, source_groups = self._source_choices(
             binding.descriptor, binding.node_id
         )
+        input_bundle = output_bundle = ()
+        if source_specs and source_specs[0].select_bundle:
+            # Immutable metadata/references only: the editor must not ask a
+            # plugin or the plane to assemble a run/history on the Qt thread.
+            selected_source = binding.draft.source_signal
+            publication = (
+                self.session.signal_plane.latest_publication(selected_source)
+                if selected_source else None
+            )
+            if publication is not None:
+                input_bundle = tuple(
+                    (name.rsplit("/", 1)[-1], value.canonical_schema or value.snapshot.block.schema,
+                     value.snapshot)
+                    for name, value in publication.signals.items()
+                )
+            elif selected_source:
+                parts = split_signal_key(selected_source)
+                producer = None if parts is None else self.logic.get(parts[0])
+                names = (
+                    tuple(output.name for output in self._logic_outputs(producer))
+                    if producer is not None else (selected_source.rsplit("/", 1)[-1],)
+                )
+                input_bundle = tuple((name, None, None) for name in names)
+            outputs = self._logic_outputs(binding)
+            if outputs:
+                publication = self.session.signal_plane.latest_publication(
+                    stable_signal_key(binding.node_id, outputs[0].name)
+                )
+                if publication is not None:
+                    output_bundle = tuple(
+                        (name.rsplit("/", 1)[-1], value.canonical_schema or value.snapshot.block.schema,
+                         value.snapshot)
+                        for name, value in publication.signals.items()
+                    )
         return {
             "node_id": binding.node_id,
             "api_name": str(binding.descriptor.api_name),
@@ -7057,6 +7092,8 @@ class ConsolePresenter:
             "source_options": source_options,
             "source_labels": source_labels,
             "source_groups": source_groups,
+            "input_bundle": input_bundle,
+            "output_bundle": output_bundle,
             "device_keys": dict(binding.draft.device_keys),
             "device_options": options,
             "ui_contributions": tuple(binding.descriptor.ui_contributions),

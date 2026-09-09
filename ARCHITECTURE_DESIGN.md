@@ -96,7 +96,7 @@ Logic Node只提交本次新增chunk/event；Runtime按run和signal identity累�
 ```text
 Node new chunk
   -> Runtime append/commit
-  -> immutable event view -> exact scientific Processor
+  -> immutable event view / declared run or window view -> Processor
   -> canonical current view -> Signal description / Panel / Edit / Save /
                                Selector / Overlay / display derivation
   -> retained partial seal
@@ -106,10 +106,13 @@ Node new chunk
 - Camera、Scan、Calibration和Task preview不得自建parallel slot/history/terminal truth。
 - Camera使用chunked append，避免每次复制全部历史；Scan按固定point geometry增长。
 - 未写位置invalid；coverage只描述实际写入extent。
-- Finite exact signal的event view只用于commit与exact Processor；所有UI/display consumer必须使用同一publication对应的canonical current view，从第一次publication起报告完整authored physical shape，未来位置invalid。
+- Finite exact signal的event view用于commit及默认的逐event Processor输入；Processor显式声明的Input range由Runtime在同一exact publication上选择，不能由delivery policy或coverage猜测。所有UI/display consumer必须使用同一publication对应的canonical current view，从第一次publication起报告完整authored physical shape，未来位置invalid。
 - 普通Monitor signal没有finite canonical extent，UI显示latest complete event；Processor不得仅因“derived”就增加科学轴。输出契约的`index_by_source`只声明history能力；只有真实consumer按window取得lease后，Runtime才从当时的current event开始建立带通用`primary-index`的bounded ordinary Dataset，并按全部active leases的最大window保留、在最后一个lease释放时立即归零。Runtime内部以绝对source ordinal排序、保留gap；materialized Dataset只暴露相对最新事件的普通整数坐标，最新固定为`0`、过去为`-1/-2/...`、缺失offset为invalid。lease之前的event不回填、不伪造；Runtime是唯一跨publication history owner，所有Plot读取同一Dataset且不建立Plot-kind、Fit或Workbench专用history lane。materialized history的点表布局（shot 序列、每 shot 的 event 行数、随窗口滑动不变的 event）只由`zlc_data.snapshot_projection.indexed_history_layout`读一次并缓存在schema上：窗口选行掩码、rolling 的 shot 编码与 source index、`indexed_schemas_compatible`、标题里的 shot 计数全部读这一个对象，任何消费者不得再逐行扫描 primary-index 列或用对象数组做成员判断；不合契约的 shot index（正offset即绝对ordinal、乱序或非整数offset、每shot行数不等）直接拒绝而不是宽松读取。对该Dataset的任何restriction（Scope到过去的shot、显式window）保留源相对坐标：只留过去shot时最后一个offset为负，仍是同一history的合法裁剪，layout reader照常读取而不把它当坏producer。显式window只按该普通轴的相对坐标选择最后N个cell，不形成第二份history；除此之外Plot/Workbench不得识别primary-index为history或自动增加Latest scope，它与其他AxisRef使用完全相同的fate、selector、focus和viewport规则。history event/indexed表示切换即推进该signal的presentation epoch并使全部consumer重新投影，即使scientific publication未变；该epoch不冒充run generation或content revision。Occupancy exact处理每个camera cycle，但其公开Monitor几何仍是当前cycle的`frame`，processor自身不得在published geometry上再叠一层source index；这不禁止它像其他Monitor输出一样`index_by_source`声明history能力——那条history仍由Runtime在lease成立后用通用`primary-index`单独建立，几何不变。
-- 信号的通用运算与衍生只有一个processor：`derive`。它的authoring是一张signal表：每行一个signal，各有名字与表达式，Add逐行加入、每行自己的×移除，不是一大块要写对语法的多行文本；操作数是绑定producer的输出（`a.counts`、`a.occupied`……）和上面各行signal的名字；链式方法`.frame(k)`选帧、`.where(mask)`只改validity不改值、`.sum/.mean/.count/.any/.all("site")`沿site归约，算术/比较运算要求同一几何且单位可算，布尔操作数之间只有`==`/`!=`（两次判决是否一致）与`& | ~`。每个signal按其名字发布为该节点的一个输出（`@logic/<node>/<名字>`，contract `derive.<名字>`）：descriptor的输出随草稿而定（`declare_outputs`→`outputs_for(values)`），host、layout校验、信号列表都按草稿取，读不出的草稿暂不发布而由schema validator按行报错（第几个signal缺名字、缺表达式、读不出）。表达式先在schema上typing出每个signal的几何再算值，任何不能typing的写法按名拒绝。它读的所有输入都来自同一次publication（bound signal及其sibling输出，`dataset_input_siblings`由各表达式决定，host据此取sibling），所以对齐由构造保证、因果父唯一；跨两次publication的join（两个panel各自的fit相减）不是它悄悄读别的信号能做的事——那需要Runtime的双父lineage，未做。各signal的名字与表达式原文进run record与存档lineage。原`occupancy_agreement`节点已退役：它就是三个signal `agree = a.occupied.frame(0) == a.occupied.frame(2)`、`counts = a.counts.frame(1).where(agree)`、`occupied = a.occupied.frame(0).where(agree)`。authoring的`rows`值类型（`AuthoringField.columns`声明一行的字段，值是行的元组，每行按列schema投影）与表单的`rows`控件（每行按列的handler建控件、行尾×、行下Add）为它而设，也是任何「逐条添加」设置的唯一写法。
-- `scope/reduction/fate`只决定怎样投影canonical view，绝不决定选择event还是canonical；同一publication不能因Panel semantic不同代表两份不同数据truth。
+- 信号的通用运算与衍生只有一个processor：`derive`。每行一个输出，由`Name`与可多行的`Python code`组成，Add逐行加入、行尾×移除；草稿仍保存普通`rows`（`name/code`），不另造程序格式。单个表达式走普通Python `eval`，多语句走`exec`并以`result`给出这一行的答案；`np`、同一输入bundle的`a.<signal>`和前面已命名输出可用，中间变量不发布。输出名、代码与Input range写入run record和存档lineage；descriptor按合法输出名声明`@logic/<node>/<name>`（contract `derive.<name>`），草稿检查名字和Python语法，不预先在schema上解释或限制一套DSL。代码在原Processor worker执行，普通执行异常按输出名报告；这不是安全沙箱，不保证中断无限循环或危险的原生调用。
+- `Operand`只是完整`DatasetSchema + values + validity`的薄数值包装，始终保留Repeat × Point × Cell-data三domain，不按数组shape猜轴、不自动squeeze。`isel`按索引、`sel`按精确typed coordinate选择任意具名axis；标量选择移除该具名axis但保留所属domain，长度1列表保留该axis，无具名axis的domain仍有大小1。`mean/sum/count/any/all/min/max/std`可沿一个或多个任意domain中的具名axis归约，歧义用完整AxisId消除，轴名与ID区分大小写、示例须按实际输入轴名替换；`where`只限制validity，空组invalid，`std`为总体标准差（ddof=0），bool归约使用`count/any/all`，其`count`数有效True、numeric的`count`数有效样本。算术/比较/布尔运算要求相同几何并沿公共单位规则，不静默对齐或做笛卡尔积；原始NumPy可通过`.values/.valid/.masked`使用，同shape替换走`.with_values(...)`，高级变形必须显式构造带完整schema的`Operand`，不能直接发布一个猜不出domain的ndarray。
+- Processor的Input range由Node的`dataset_input_view/dataset_input_window`声明，独立于exact/latest交付策略：`event`为当前publication的原始event；`run`为该publication对应的本次运行canonical Dataset，finite源包含尚未采集的invalid位置，且不受其它Panel的history lease影响；普通Monitor没有finite累计范围时，`run`就是它当前完整结果，不凭此无限积累。`window`为Runtime原有`index_by_source`能力下最近N个publication位置的bounded Dataset，沿原source ordinal保留gap/invalid与相对`primary-index`，不按Repeat长度猜事件数或只数成功样本；不支持history的源（包括无此能力的finite源）明确拒绝并提示使用`run`。Derive默认`event`、window默认50；显式范围在live与terminal求值一致，未声明该属性的既有Processor仍保持live-event/terminal-canonical规则。
+- Input window的lease只在NodeHost运行期间对同一bundle所需成员一起取得，按同一exact publication与共同可保留窗口物化，不能拼出不同起点的siblings；开始前不可恢复的旧event不回填，结束、Stop、失败或关闭释放自身lease，不影响其它consumer的lease。Runtime继续独占history、event record与causal publication；Derive不存输入历史、不建第二份placement表。每次Derive求值的所有输出都是完整当前结果，以`MonitorCoverage`替换上次估计，不把任意归约结果按输入finite位置append，也不继承未归约输入的50-repeat geometry。输出保留本次实际parent与source primary index，声明`index_by_source`仅供真实下游按需取得history；终态保留完整结果并seal。
+- `scope/reduction/fate`只决定怎样投影Panel已经取得的canonical view，绝不替代Processor的Input range或决定读取event；同一publication不能因Panel semantic不同代表两份不同数据truth。
 - Incremental placement沿Repeat/Point两个`DomainSpec`的物理rows；多维scan由Point domain内多个
   logical axes及其唯一`axis_codes`表达，不另存平行row/topology结构。一个cell payload
   原子完整发布，不新增cell-internal tile/slice streaming contract。
@@ -125,9 +128,9 @@ Node new chunk
 - Panel surface在`board.commit`中首次accepted后，Derivation Bridge必须在同一个owner turn完成level reconcile，之后才能把交互权交回Qt；不得出现像素已可点但首个selector尚无Bridge而永久丢失的display-cadence窗口。
 - Layout文件（`zlc.console-board`）的每个panel entry写下该panel在board上的identity（`panel_id`）：panel是producer，其Bridge把ROI/Fit派生输出发布在`@logic/<panel id>/<output>`下，下游panel的signal/overlay与Logic row的source正是以这个拼写指名它，丢掉identity的文件说不出下游读的是谁。Load绝不复用写下的identity：console先为本次加载铸造全部新panel id，再把文档里每个`@logic/<旧id>/...`引用统一改写到新id；没有`panel_id`的旧文件按保存顺序解释（第一项即`panel-1`）；指向本board不含panel的引用无法解析则置空并在status strip说明，绝不静默丢弃。旧fate拼写按前缀翻译（`fate:point_dimension:`→`fate:point:`、`fate:data:`→`fate:cell_data:`、裸`fate:repeat`在load时展开到该signal今天发布的全部Repeat axes，无signal可问则丢弃并说明），读不懂的fate key按名loud拒绝；没有格式版本字段。Load与表头的Clear都是整板替换，走同一条commit：候选板先完整解析，有节点在跑时先问操作员一次（说明拿掉几个panel/节点、先停哪些），同意后只是请求停止，候选板挂起到最后一个节点到terminal才由beat提交——host只有到terminal才能关闭，而等待的不能是窗口；没人在跑则当场提交。程序化`apply_layout`没有操作员的同意（`stop_running`）时遇到在跑的节点直接拒绝。
 - Plot live revision identity始终读取底层Dataset snapshot的`stream_generation + revision`；`ImageFrame`只是overlay wrapper，不能隐藏新generation并把重置后的相同revision误判成stale。same-geometry新run复用host及交互订阅，geometry变化才replacement。
-- Occupancy的SITE是每个`(repeat, point)` cell内原子完整的data axis；overlay不得另存site history。Occupancy只发布通用bool/numeric status signal，点是否可读由该Dataset自身validity表达；XY geometry与adapter contract由`zlc_plot`中立层拥有，Workbench只按contract路由signal且不得import Occupancy。只有scope/facet唯一选中一个cell时才能显示离散状态；对多个cells做reduce/pool时不得私自发明共识状态，未定义则显示UNKNOWN/隐藏。
-- Processor可声明消费主signal同一原子publication内的具名siblings；它们不形成独立source、异步join或第二份history，exact replay和causal lineage只保留实际声明的siblings。`derive`据此只消费其绑定producer这一次publication的输出：绑定Occupancy的`counts`并读其`occupied` sibling，两个可选occupancy frame都valid且判断相同时才保留另一frame的counts与该共同判决，否则对应site validity为False。frame index均可相同，SITE始终完整保留；该下游不得读取camera、calibration、threshold或overlay geometry。
-- Dataset输入可声明`select_bundle`：其界面按同一atomic producer的输出集合提供一项普通Fluent choice，显示producer和成员名，不让操作者在bundle内部选某个叶子。Runtime仍用一个成员signal作为既有订阅锚点，按表达式消费同publication的siblings，不引入bundle数据或另一份registry；不同atomic owner即使共用Panel标题也不得混成一个bundle。Derive使用这个入口，普通单signal输入继续使用现有树形选择器。
+- Occupancy的SITE是每个`(repeat, point)` cell内原子完整的data axis；overlay不得另存site history。Occupancy只发布通用bool/numeric status signal，点是否可读由该Dataset自身validity表达；XY geometry与adapter contract由`zlc_plot`中立层拥有，Workbench只按contract路由signal且不得import Occupancy。动态status与图像都取其exact publication的canonical prefix，再按公共Scope/Last与facet定位一个Repeat/Point cell；site向量不能被图像pixel fate裁掉。多个cells的Mean或pool没有独立Boolean判决，不私造共识状态，无法唯一选定时显示UNKNOWN/隐藏。
+- Processor可声明消费订阅锚点同一原子publication内的具名siblings；它们不形成独立source或异步join，exact replay与causal lineage由该publication提供。Derive用直接`a.<name>`引用规划所需siblings（加上订阅锚点）；动态使用`a`时保留该producer的全部成员，AST这里只规划依赖、不限制Python语法。所有成员统一使用同一个Input range，不能为其中一项读latest或另一份窗口；不支持跨独立producer的隐式join。原`occupancy_agreement`已退役，一致性掩码只是普通Python，例如`agree = a.occupied.isel(frame=0) == a.occupied.isel(frame=2)`，再以`.where(agree)`限制选定frame的counts；也可继续归约Repeat或其它命名轴，不限定为site-only操作，不重读camera/calibration或重新分类。
+- Dataset输入可声明`select_bundle`：其界面按同一atomic producer的输出集合提供一项普通Fluent choice，显示producer和成员名，不让操作者在bundle内部选某个叶子。Runtime仍用一个成员signal作为既有订阅锚点，按上述依赖规则消费同publication的siblings，不引入bundle数据或另一份registry；不同atomic owner即使共用Panel标题也不得混成一个bundle。Derive使用这个入口，普通单signal输入继续使用现有树形选择器。
 - UI freeze只读取已提交状态，不调用plugin materializer。
 - Stop/Final不受Panel、freeze或Processor订阅影响。
 
@@ -136,7 +139,7 @@ Node new chunk
 - Generation标识一次run/restart；generation内schema和stream generation固定。
 - Revision严格递增，不接受重复、倒退或同ref不同内容。
 - 一次commit的siblings共享revision、run record和causal parent。
-- Exact scientific Processor逐event处理；pure display derivation可latest。策略由input contract声明，不从coverage猜。
+- Exact scientific Processor逐publication有序处理；pure display derivation可latest。交付策略由input contract声明，不从coverage猜；同一交付publication的event/run/window输入范围是另一项显式选择，exact并不强制只读event chunk。
 - 不同Processor可并发，同一Processor保持有序。
 
 ### 4.3 Logic Node contract
@@ -261,7 +264,7 @@ Node new chunk
 ### 5.3 Overlay与selector
 
 - Overlay producer发布匹配中立Plot contract的numeric/bool companion signal，并在同一run record中携带该contract要求的geometry document；`zlc_plot`拥有通用adapter与renderer，Workbench只按contract路由，不import domain plugin，也不重建science。
-- Data、Fit和Overlay共同使用同一个scope/axis/fate projection；无法唯一对齐则拒绝。
+- Data、Fit和Overlay共同使用同一个scope/axis/fate projection；动态Overlay先读取其exact publication的canonical prefix，不用最后event chunk覆盖已保留的前缀。公共`projection_scope`将`Last`化为各Reduced axis声明顺序的末coordinate，随后与显式Scope和facet走同一限制；不是最后valid值，不回退到之前已采位置。Overlay只借Repeat/Point确定对应采集cell，保留自身完整site向量，不把图像pixel axis当site axis。Mean没有另外一套Boolean归约/共识判断；scope后仍有多个Repeat/Point cells就不画离散判决。无法唯一对齐则拒绝。
 - 图像数据更新是一份完整presentation输入；新数据未携overlay表示该帧没有overlay，直接更新与Host管线都必须清除旧层。同一数据上的显式overlay-only编辑仍是独立配置事务。动态status的invalid或无法唯一选定状态不画判断圈；静态Calibration/point-review显式标记不受该数据有效性规则影响。
 - ROI/binning坐标只由一个transform owner处理。
 - Selector Off时plot不消费任何pointer gesture：不画selector、不zoom/pan，也不响应双击facet focus；普通滚轮继续滚外层board。
@@ -272,6 +275,7 @@ Node new chunk
 ## 6. UI与Lifecycle
 
 - `zlc_ui`不拥有domain parser、device state或plot lifecycle。
+- Derive的具体Logic Editor只组合普通Fluent控件：Input range与window数量、逐输出Name/多行Code、Add/Remove、只读输入/输出三domain结构与代码帮助。结构摘要读取Runtime已发布的schema/snapshot，未运行的代码不预猜输出；普通Python/NumPy、`isel/sel/where`、命名轴归约、有效性、显式schema及range边界都在同一帮助文本中说明。Qt只编辑草稿/投影metadata，不执行表达式或物化run/history；数值业务仍在Derive自己的owner。
 - Qt slot不得执行blocking I/O、device tune或`Future.result()`。
 - Window只有在owned command、worker、executor和claim安全退出后才能消失。
 - 正式Board通过host的`qt_widget(auto_present=False)`挂载唯一缓存的Qt adapter，不另建未纳入host关闭流程的surface；普通Edit/standalone保持自动呈现。Card退场先以现有`set_surface(None)`解除Qt父子关系，host完成异步关闭后才结束adapter，不能由Card的deferred delete提前销毁仍接收结果的QObject。

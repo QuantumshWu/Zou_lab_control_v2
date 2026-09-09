@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from zlc_atom.authoring import AuthoringField, AuthoringSchema
+from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
 from zlc_atom.nodes._framework.descriptor import (
     DatasetInputSpec,
     LogicNodeDescriptor,
@@ -12,7 +12,7 @@ from zlc_atom.nodes._framework.descriptor import (
 )
 from zlc_runtime import DatasetOutputDeclaration
 
-from .expression import ExpressionError, referenced_outputs
+from .expression import ExpressionError, compiled_rows, input_members
 from .processor import DeriveProcessor, declared_outputs
 
 
@@ -23,7 +23,7 @@ def _readable(values: Mapping[str, object]) -> None:
     not at Start, where the same words would arrive as a failure to run.
     """
 
-    referenced_outputs(values["expressions"])
+    compiled_rows(values["expressions"])
 
 
 #: One signal: the name it publishes under and the expression that computes it.
@@ -37,17 +37,23 @@ _SIGNAL_COLUMNS = (
         description="name of the signal",
     ),
     AuthoringField(
-        "expression",
+        "code",
         "text",
-        "Expression",
+        "Python code",
         "",
         required=True,
-        description="expression over a.<output> and the signals above",
+        description="ordinary Python over a.<output>; assign the Dataset answer to result",
     ),
 )
 
 DERIVE_SCHEMA = AuthoringSchema(
     (
+        AuthoringField("input_view", "choice", "Input range", "event", choices=(
+            AuthoringChoice("event", "Current event"),
+            AuthoringChoice("run", "Current run"),
+            AuthoringChoice("window", "Recent events"),
+        )),
+        AuthoringField("window", "int", "Events", 50, minimum=1),
         AuthoringField(
             "expressions",
             "rows",
@@ -55,7 +61,7 @@ DERIVE_SCHEMA = AuthoringSchema(
             (),
             required=True,
             columns=_SIGNAL_COLUMNS,
-            description="one row per signal: its name and its expression",
+            description="one row per output: name and Python code",
         ),
     ),
     validator=_readable,
@@ -91,13 +97,23 @@ def _build(*, signal_plane: object, source_signal: str, **values: object) -> Der
     selected_source = str(source_signal).strip()
     if not selected_source:
         raise ValueError("source_signal must be non-empty")
-    referenced = referenced_outputs(expressions)
-    resolved = signal_plane.resolve_sibling_signals(selected_source, referenced)
-    primary = next(
-        (name for name, qualified in zip(referenced, resolved) if qualified == selected_source),
-        None,
-    )
-    return DeriveProcessor(expressions=expressions, primary_output=primary)
+    described = {item.name: item for item in signal_plane.describe_signals()}
+    source = described.get(selected_source)
+    if source is None:
+        raise ValueError("select an available input bundle")
+    names = tuple(item.name.rsplit("/", 1)[-1] for item in described.values() if item.owner_id == source.owner_id)
+    primary = selected_source.rsplit("/", 1)[-1]
+    names = tuple(dict.fromkeys((primary, *input_members(expressions, names))))
+    signal_plane.resolve_sibling_signals(selected_source, names)
+    return DeriveProcessor(expressions=expressions,
+                           primary_output=primary,
+                           input_outputs=names, input_view=authored["input_view"],
+                           window=int(authored["window"]))
+
+
+def _editor_factory(parent=None):
+    from .editor import derive_editor_factory
+    return derive_editor_factory(parent)
 
 
 LOGIC_NODE = LogicNodeDescriptor(
@@ -106,6 +122,7 @@ LOGIC_NODE = LogicNodeDescriptor(
     DERIVE_SCHEMA,
     input_specs=(DatasetInputSpec("a", None, "exact", select_bundle=True),),
     declare_outputs=_draft_outputs,
+    ui_contributions=(_editor_factory,),
     build=_build,
 )
 

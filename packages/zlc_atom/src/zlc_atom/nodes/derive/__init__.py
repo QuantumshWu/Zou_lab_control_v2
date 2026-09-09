@@ -5,7 +5,6 @@ from .expression import (
     Operand,
     evaluate,
     published_names,
-    referenced_outputs,
 )
 from .logic_node import DERIVE_SCHEMA, LOGIC_NODE
 from .processor import DeriveProcessor, declared_outputs
@@ -19,5 +18,4 @@ __all__ = [
     "declared_outputs",
     "evaluate",
     "published_names",
-    "referenced_outputs",
 ]

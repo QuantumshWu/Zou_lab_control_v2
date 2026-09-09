@@ -58,7 +58,11 @@
   Runtime内部绝对ordinal在materialize时统一转换为以最新为0的相对primary-index；Plot与
   Workbench只把它当普通AxisRef，不自动scope或建立history专用interaction路径。
 - 关联显示按完整same-shot group就绪；已选成员pending（含首发与重启）时整组保留上次完整画面，只有同shot明确invalid结果可呈现且不画无效标记。完整新图像输入不继承旧overlay；删除缺companion提前放行与同generation沿用旧层的旧行为。
-- 判决一致性（原`Occupancy Agreement`节点）是`derive`的一段程序：source picker选择Occupancy的`counts`，Runtime从同一原子publication交付其`occupied` sibling；`agree = a.occupied.frame(0) == a.occupied.frame(2)`、`counts = a.counts.frame(1).where(agree)`、`occupied = a.occupied.frame(0).where(agree)`三行各按其名发布，帧号可编辑且可重复。不一致或任一所需值invalid则只通过Dataset validity标为invalid；不重新读取camera/calibration，不重新提取counts或分类，也不携带overlay知识。
+- Derive现使用普通Python/NumPy：每行Name与多行Code，单表达式`eval`或多语句`exec`后取`result`；上一行输出可按名引用，中间变量不发布。草稿只验证名字与Python语法，不保留`.frame/site` DSL或预先schema typing。具体Logic Editor复用Fluent控件，显示Input range、window数量、输入/输出三domain摘要和同一份代码帮助；Qt不求值也不物化数据。代码不是安全沙箱，执行异常按输出名报告，无限循环或危险native调用不承诺可取消。
+- `Operand`薄封装完整Repeat × Point × Cell-data schema、values和validity；任意命名axis可`isel/sel`、`where`与`mean/sum/count/any/all/min/max/std`归约，不自动squeeze。标量选择只移除指定axis，无轴domain保留大小1；std为总体标准差、空组invalid，bool count数有效True。NumPy同shape修改通过`with_values`，高级变形显式构造完整schema的Operand；不猜裸ndarray的轴或隐式对齐不同几何。原判决一致性只是`a.occupied.isel(frame=0) == a.occupied.isel(frame=2)`及`where`的普通代码，可接任意命名轴归约，不重读camera/calibration或重新分类。
+- Input range明确为`event`（默认，当前原子事件）、`run`（同publication的本次canonical Dataset，finite未采位置invalid且跳过其它Panel history）或`window`（默认50个位置，Runtime已有index_by_source bounded history）。没有finite累计范围的Monitor在run模式只提供当前完整结果，不无限积累；不支持history的源明确拒绝window并提示run。NodeHost对订阅锚点及所需atomic siblings使用同一范围与共同可保留窗口，保留source ordinal gap、event record及exact parent；窗口lease只在运行时持有，Stop/失败/结束释放自身需求，之前未保留的event不回填。直接`a.<name>`规划成员，动态使用`a`保留同producer全部成员，不把AST变成Python白名单，也不跨producer拼latest。
+- Derive每次发布完整当前结果，用`MonitorCoverage`替换上次估计，不继承输入finite placement或把归约后的1×1×35结果偷偷append进50×3×35。输出保留source primary index和exact publication parent、终态完整seal；其index_by_source只声明可由下游按需取得Runtime history，Derive自身不积历史。输入范围与exact/latest交付策略分开，显式range在live/terminal一致，未声明range的原Processor行为保留。
+- 动态Overlay与图像都从各自exact publication取canonical prefix；状态再走公共Scope/Last和facet定位，Last是声明顺序末coordinate而非最后valid值。仅Repeat/Point定位采集cell，site向量保持原子完整；Mean或pool没有独立Boolean判决，多个cells不能伪造共识圈。invalid或不能唯一选择时隐藏，与原same-shot等待规则一致。
 - Panel window demand在authored state接受时先于Plot render同步；最后lease的`10→1`在调用
   返回前释放并切回event表示。当前host的Focus/Area/Crosshair按同generation与accepted轴词汇
   接受，owner落后一版不得否决indexed front，Facet只忽略其自身focus cell这一层subject差异。

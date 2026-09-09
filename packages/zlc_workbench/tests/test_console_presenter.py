@@ -883,8 +883,8 @@ def test_header_save_layout_writes_no_panel_dataset(
     node, snapshot = _one_shot(session)
     presenter.add_panel(node.signal_key("frames"), snapshot, title="frames")
     rows = (
-        {"name": "first", "expression": "a.frames.frame(0)"},
-        {"name": "twice", "expression": "first * 2"},
+        {"name": "first", "code": "result = a.frames.isel(frame=0)"},
+        {"name": "twice", "code": "result = first * 2"},
     )
     derived = presenter.add_logic(
         "derive", source_signal=node.signal_key("frames"),
@@ -4852,8 +4852,8 @@ def test_a_derive_publishes_the_counts_of_the_occupied_sites(
     _settle_logic(presenter, occupancy_id)
     counts_signal = stable_signal_key("occupancy", "counts")
     program = (
-        {"name": "bright", "expression": "a.counts.frame(1).where(a.occupied.frame(1))"},
-        {"name": "how_many", "expression": "a.occupied.frame(1).count('site')"},
+        {"name": "bright", "code": "result = a.counts.isel(frame=1).where(a.occupied.isel(frame=1))"},
+        {"name": "how_many", "code": "result = a.occupied.isel(frame=1).count('calibration.site')"},
     )
     derive_id = presenter.add_logic(
         "derive",
@@ -4888,8 +4888,8 @@ def test_a_derive_publishes_the_counts_of_the_occupied_sites(
     values = np.asarray(bright.values)
     expected = np.asarray(counts.values)[:, 1:2, :]
     np.testing.assert_array_equal(values[judged], expected[judged])
-    assert np.isnan(values[~judged]).all()
-    assert bright.schema.value_schema.value_unit == counts.schema.value_schema.value_unit
+    assert bright.schema.point_domain.axes == (), "scalar isel removes the named frame axis"
+    assert bright.schema.value_schema.value_unit == (counts.schema.value_schema.value_unit or "1")
     assert bright.run_record["parameters"]["expressions"] == program
     how_many = front.value(stable_signal_key("sites", "how_many"))
     assert how_many is not None
