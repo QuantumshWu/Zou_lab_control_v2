@@ -480,6 +480,98 @@ def test_a_colorbar_whose_limits_move_under_a_held_rail_repaints_its_labels() ->
         session.close()
 
 
+@pytest.mark.parametrize("side", ("left", "bottom"))
+def test_a_recorded_draw_owns_its_geometry(side: str) -> None:
+    """Replaying a recording paints what was recorded, whatever the artist
+    did since.
+
+    Matplotlib hands the renderer the artist's own objects: a Spine's path
+    shares the vertex array ``Spine._adjust_location`` rewrites from the
+    axes' current view on every draw and extent query -- and each Axis
+    measures one spine to place its label, the y axis the left one, the x
+    axis the bottom one.  A recording that kept that array was a
+    photograph that changed after it was taken: new data coordinates under
+    the mapping of the recording.
+    """
+
+    from matplotlib.backends.backend_agg import RendererAgg
+    from matplotlib.figure import Figure
+
+    from zlc_plot.rendering import _record_artist_draw, _replay_draw
+
+    figure = Figure(figsize=(2.0, 2.0), dpi=100)
+    axes = figure.add_axes((0.2, 0.2, 0.6, 0.6))
+    axes.set_xlim(0.0, 1.0)
+    axes.set_ylim(0.0, 1.0)
+    spine = axes.spines[side]
+    commands = _record_artist_draw(spine, RendererAgg(200, 200, 100))
+    assert commands
+    first = RendererAgg(200, 200, 100)
+    _replay_draw(commands, first)
+    if side == "left":
+        axes.set_ylim(0.0, 3.0)
+    else:
+        axes.set_xlim(0.0, 3.0)
+    # What the Axis does to place its label: measure its spine.
+    spine.get_window_extent()
+    second = RendererAgg(200, 200, 100)
+    _replay_draw(commands, second)
+    np.testing.assert_array_equal(
+        np.asarray(first.buffer_rgba()), np.asarray(second.buffer_rgba())
+    )
+
+
+def test_the_rails_left_spine_stays_on_its_box_when_its_limits_move_under_a_drag() -> None:
+    """The rail's frame is its box, whatever its limits do.
+
+    The rail's limits are dynamic by design: they follow the colour handles
+    without a chrome-dirty mark, and the rail's spines are replayed from a
+    recording.  A live frame arriving while the upper handle stood above
+    the data moved the rail's limits, so the rail's axis was redrawn --
+    which measures the left spine to place the axis label, rewriting the
+    spine's vertices from the new view.  The recorded left spine, new data
+    coordinates under the mapping of its recording, was then replayed up
+    past the box: the rail's top edge read as an L.
+    """
+
+    size = 64
+    schema = _image_contract(size)
+    session = PlotSession(
+        _snapshot(schema, size, 4000.0, 1, seed=31),
+        ImagePlot(AxisRef.cell_data("camera_x"), AxisRef.cell_data("camera_y")),
+    )
+    try:
+        renderer = session._renderer
+        for _ in range(3):
+            session.rgba()
+        rail = renderer._axes["distribution"][0]
+        held_top = float(rail.get_ylim()[1])
+        current = renderer._resolved_color_limit_state()
+        assert current is not None
+        with renderer.raster_transaction():
+            renderer.begin_color_limit_gesture(ColorLimitCandidate(current.value))
+        with renderer.raster_transaction():
+            renderer.preview_color_limit_candidate(
+                ColorLimitCandidate(
+                    NumericRange(current.value.low, current.value.high * 1.6)
+                )
+            )
+        session.update_data(_snapshot(schema, size, 4000.0, 2, seed=32))
+        assert float(rail.get_ylim()[1]) > held_top, (
+            "the fixture must move the rail's limits under the open gesture"
+        )
+        pixels = np.asarray(renderer.figure.canvas.buffer_rgba()).astype(int)
+        top_row = pixels.shape[0] - int(round(float(rail.bbox.y1)))
+        left_column = int(round(float(rail.bbox.x0)))
+        above = pixels[: top_row - 2, left_column - 3 : left_column + 4, :3]
+        assert int(((255 - above).max(axis=-1) > 100).sum()) == 0, (
+            "no ink stands above the rail's top-left corner"
+        )
+        assert _composed_matches_full_draw(session) == 0
+    finally:
+        session.close()
+
+
 def test_a_cell_focused_after_a_materialization_draws_its_error_bars(tmp_path) -> None:
     """A withdrawn bar comes back when its cell is drawn through artists again.
 
