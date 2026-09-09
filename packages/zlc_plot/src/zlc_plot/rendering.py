@@ -10025,6 +10025,8 @@ class MatplotlibRenderer:
             lines.append(_drawable_text(overlay.formula))
         for parameter in overlay.parameter_display:
             lines.append(self._fit_parameter_line(parameter))
+        if overlay.evidence:
+            lines.append(_drawable_text(overlay.evidence))
         return "\n".join(lines)
 
     @staticmethod

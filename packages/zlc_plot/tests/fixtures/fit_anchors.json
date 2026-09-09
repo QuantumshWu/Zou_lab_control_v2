@@ -87,12 +87,13 @@
         ]
       },
       "parameters": {
-        "center": 0.0,
-        "center_splitting": 1.4,
-        "left_amplitude": 1.2,
-        "left_sigma": 0.6,
-        "right_amplitude": 0.9,
-        "right_sigma": 0.8
+        "total": 48.1272628729151,
+        "center": -0.7,
+        "sigma": 0.6,
+        "delta_center": 1.4,
+        "sigma_B": 0.8,
+        "ratio": 0.5,
+        "bin_width": 0.07500000000000018
       },
       "values": [
         0.0007936415635272369,
@@ -281,12 +282,13 @@
         ]
       },
       "parameters": {
-        "left_rate": 0.8,
-        "rate_splitting": 3.2,
-        "left_amplitude": 1.2,
-        "left_sigma": 0.5,
-        "right_amplitude": 0.9,
-        "right_sigma": 0.7
+        "total": 16.8,
+        "rate": 0.8,
+        "sigma": 0.5,
+        "delta_rate": 3.2,
+        "sigma_B": 0.7,
+        "ratio": 0.42857142857142855,
+        "bin_width": 0.125
       },
       "values": [
         7.496403394507078e-05,
@@ -1003,9 +1005,10 @@
         ]
       },
       "parameters": {
-        "amplitude": 2.0,
+        "total": 60.15907859114387,
         "center": 0.2,
-        "sigma": 0.9
+        "sigma": 0.9,
+        "bin_width": 0.07500000000000018
       },
       "values": [
         0.003596333323695163,
@@ -1178,9 +1181,10 @@
         ]
       },
       "parameters": {
-        "amplitude": 2.0,
+        "total": 16.0,
         "rate": 1.5,
-        "sigma": 0.6
+        "sigma": 0.6,
+        "bin_width": 0.125
       },
       "values": [
         0.00023943567626001427,

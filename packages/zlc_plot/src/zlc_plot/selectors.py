@@ -128,13 +128,15 @@ class SelectorState:
 _THRESHOLD_TARGET_REQUIRED_FIELDS = {"value", "scope"}
 _THRESHOLD_TARGET_OPTIONAL_FIELDS = {"gaussian_components"}
 _THRESHOLD_SCOPE_FIELDS = {"domain", "axis_id", "coordinate"}
+#: A pair of populations as the bimodal fit writes them: the first
+#: population's centre and width, the second's offset above it and width,
+#: and the share of the shots in the second.
 _GAUSSIAN_COMPONENT_FIELDS = {
-    "left_mean",
-    "left_sigma",
-    "left_weight",
-    "right_mean",
-    "right_sigma",
-    "right_weight",
+    "center",
+    "sigma",
+    "delta_center",
+    "sigma_B",
+    "ratio",
 }
 
 
@@ -154,15 +156,12 @@ def _gaussian_components(value: object) -> Mapping[str, float] | None:
         if not math.isfinite(number):
             raise ValueError("classifier Gaussian components must be finite numbers")
         selected[name] = number
-    if selected["right_mean"] <= selected["left_mean"]:
+    if selected["delta_center"] <= 0.0:
         raise ValueError("classifier Gaussian means must be strictly ordered")
-    if min(selected["left_sigma"], selected["right_sigma"]) <= 0.0:
+    if min(selected["sigma"], selected["sigma_B"]) <= 0.0:
         raise ValueError("classifier Gaussian sigmas must be positive")
-    if min(selected["left_weight"], selected["right_weight"]) <= 0.0:
+    if not 0.0 < selected["ratio"] < 1.0:
         raise ValueError("classifier Gaussian weights must be positive")
-    total = selected["left_weight"] + selected["right_weight"]
-    selected["left_weight"] /= total
-    selected["right_weight"] /= total
     return MappingProxyType(selected)
 
 

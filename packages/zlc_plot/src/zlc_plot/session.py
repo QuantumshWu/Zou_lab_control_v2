@@ -78,6 +78,7 @@ from ._selector_scene import (
 from ._validation import readonly_copy as _readonly
 from .config import DEFAULTS, PlotLibraryDefaults
 from .fit import (
+    DECISIVE_BIC_GAIN,
     FitCancelled,
     FitEngine,
     FacetFitBatchResult,
@@ -1001,12 +1002,30 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                         if not fit["bounds"]:
                             fit.pop("bounds")
                 if request.options is not None:
-                    fit["options"] = {
-                        "loss": request.options.loss,
-                        "max_nfev": request.options.max_nfev,
-                        "deadline_seconds": request.options.deadline_seconds,
-                        "max_exact_points": request.options.max_exact_points,
+                    # What was asked of the solver, and only that: a
+                    # default written out is a setting nobody chose.
+                    defaults = FitOptions()
+                    options = {
+                        name: getattr(request.options, name)
+                        for name in (
+                            "loss",
+                            "max_nfev",
+                            "deadline_seconds",
+                            "max_exact_points",
+                        )
+                        if getattr(request.options, name) != getattr(defaults, name)
                     }
+                    if options:
+                        fit["options"] = options
+                if request.model.reduction is not None:
+                    # The two-population question's threshold is a fit
+                    # setting of its own for a model that asks it, and the
+                    # default is stated so the operator sees a number.
+                    fit["min_bic_gain"] = (
+                        DECISIVE_BIC_GAIN
+                        if request.options is None
+                        else request.options.min_bic_gain
+                    )
                 if request.all_facets:
                     fit["fit_all_facets"] = True
                 failure = self._fit_expression_failure

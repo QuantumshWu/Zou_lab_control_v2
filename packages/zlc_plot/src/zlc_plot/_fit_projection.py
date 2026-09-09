@@ -2034,6 +2034,12 @@ class FitProjection:
             result,
             selection,
         )
+        evidence = ""
+        if math.isfinite(result.evidence):
+            # The two-population question, answered where the parameters
+            # are read: the BIC gain of two over one, and what it decided.
+            verdict = "one population" if result.reduced else "two populations"
+            evidence = f"ΔBIC = {result.evidence:.1f}: {verdict}"
         return FitOverlay(
             polylines=polylines,
             ellipse_glyph=self._fit_overlay_ellipse(result, parameter_display),
@@ -2043,6 +2049,7 @@ class FitProjection:
             diagnostic=result.message,
             facet_index=selection.facet_index,
             headline_parameter=headline_parameter,
+            evidence=evidence,
         )
 
     def _display_fit_parameters(
@@ -2297,6 +2304,12 @@ class FitProjection:
                     + ", ".join(model.symbols)
                 )
             name = parameter.name
+            if parameter.supplied is not None:
+                # The histogram's own bin pitch: printed in the formula so
+                # the model is stated whole, never the operator's to set.
+                raise ValueError(
+                    f"{symbol!r} is the histogram's own bin width; the data sets it"
+                )
             if name in fixed or name in initial:
                 raise ValueError(f"repeated fit parameter {symbol!r}")
             guessed = raw.startswith("guess(") and raw.endswith(")")

@@ -932,14 +932,18 @@ def _save_report_images(
             if not valid:
                 continue
             component_values = tuple(field[index] for field in gaussian_fields)
+            # The pair as the panel's bimodal fit writes it: the dark state's
+            # centre and width, the bright state's contrast and width, and
+            # the share of shots that were bright.
             components = (
                 {
-                    "left_mean": float(component_values[0]),
-                    "left_sigma": float(component_values[1]),
-                    "left_weight": float(component_values[2]),
-                    "right_mean": float(component_values[3]),
-                    "right_sigma": float(component_values[4]),
-                    "right_weight": float(component_values[5]),
+                    "center": float(component_values[0]),
+                    "sigma": float(component_values[1]),
+                    "delta_center": float(component_values[3] - component_values[0]),
+                    "sigma_B": float(component_values[4]),
+                    "ratio": float(
+                        component_values[5] / (component_values[2] + component_values[5])
+                    ),
                 }
                 if np.isfinite(component_values).all()
                 else None

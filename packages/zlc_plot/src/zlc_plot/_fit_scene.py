@@ -48,6 +48,9 @@ class FitOverlay:
     diagnostic: str = ""
     facet_index: int | None = None
     headline_parameter: FitParameterDisplay | None = None
+    #: One line under the parameters saying how the two-population question
+    #: was decided, for a model that asks it; empty otherwise.
+    evidence: str = ""
 
 
 __all__ = ["FitOverlay"]

@@ -1072,12 +1072,11 @@ def test_threshold_classifier_is_independent_and_covers_every_facet() -> None:
                         },
                     ),
                     "gaussian_components": {
-                        "left_mean": 0.0,
-                        "left_sigma": 1.0,
-                        "left_weight": 0.7,
-                        "right_mean": 2.0,
-                        "right_sigma": 1.0,
-                        "right_weight": 0.3,
+                        "center": 0.0,
+                        "sigma": 1.0,
+                        "delta_center": 2.0,
+                        "sigma_B": 1.0,
+                        "ratio": 0.3,
                     },
                 },
                 {
@@ -1102,18 +1101,17 @@ def test_threshold_classifier_is_independent_and_covers_every_facet() -> None:
         first = session._classifier_results[0]
         assert first is not None
         values = first.parameters
-        left_area = values["left_amplitude"] * values["left_sigma"]
-        right_area = values["right_amplitude"] * values["right_sigma"]
-        assert left_area / (left_area + right_area) == pytest.approx(0.7)
-        left_curve = values["left_amplitude"] * np.exp(
-            -0.5
-            * ((weighted_crossing - 0.0) / values["left_sigma"]) ** 2
+        assert values["ratio"] == pytest.approx(0.3)
+        assert values["center"] == pytest.approx(0.0)
+        assert values["delta_center"] == pytest.approx(2.0)
+        crossing = (np.asarray([weighted_crossing]),)
+        left_curve = first.model.evaluate_component(
+            "A", crossing, first.parameter_values
         )
-        right_curve = values["right_amplitude"] * np.exp(
-            -0.5
-            * ((weighted_crossing - 2.0) / values["right_sigma"]) ** 2
+        right_curve = first.model.evaluate_component(
+            "B", crossing, first.parameter_values
         )
-        assert left_curve == pytest.approx(right_curve)
+        assert float(left_curve[0]) == pytest.approx(float(right_curve[0]))
         assert session._classifier_results[1] is None
     finally:
         host.close(timeout=10)

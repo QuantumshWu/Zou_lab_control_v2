@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import replace
 from importlib import import_module
 from pathlib import Path
@@ -20,17 +21,44 @@ from zlc_plot.fit import (
 )
 
 
+_SQRT_TWO_PI = math.sqrt(2.0 * math.pi)
+#: The frozen anchors' bin pitches: the Gaussian histograms are binned at
+#: 0.075 and the photon histograms at 0.125.
+_ANCHOR_STEP = 0.075
+_ANCHOR_PHOTON_STEP = 0.125
+#: The pitches of ``_coordinates`` for the histogram models.
+_STEP = 10.0 / 111.0
+_PHOTON_STEP = 18.0 / 72.0
+
+
+def _shots(height: float, sigma: float, step: float) -> float:
+    """The shots behind a Gaussian peak ``height`` counts per bin tall."""
+
+    return height * sigma * _SQRT_TWO_PI / step
+
+
 PARAMETERS = {
     "lorentzian": (0.35, 1.2, 2.5, 0.2),
     "gaussian_offset": (2.0, 0.15, 0.9, -0.3),
-    "histogram_gaussian": (2.0, 0.2, 0.9),
-    "bimodal_gaussian": (0.0, 1.4, 1.2, 0.6, 0.9, 0.8),
+    "histogram_gaussian": (_shots(2.0, 0.9, _ANCHOR_STEP), 0.2, 0.9, _ANCHOR_STEP),
+    "bimodal_gaussian": (
+        _shots(1.2, 0.6, _ANCHOR_STEP) + _shots(0.9, 0.8, _ANCHOR_STEP),
+        -0.7,
+        0.6,
+        1.4,
+        0.8,
+        _shots(0.9, 0.8, _ANCHOR_STEP)
+        / (_shots(1.2, 0.6, _ANCHOR_STEP) + _shots(0.9, 0.8, _ANCHOR_STEP)),
+        _ANCHOR_STEP,
+    ),
     "symmetric_lorentzian_doublet": (0.1, 1.0, 1.5, 0.1, 1.2),
     "damped_sine": (1.2, 0.1, 1.4, 3.0, 0.2),
     "exponential_decay": (2.2, 0.1, 2.5),
     "radial_gaussian_center": (3.0, 0.2, 0.8, 0.4, -0.3),
-    "histogram_poisson_gaussian": (2.0, 1.5, 0.6),
-    "bimodal_poisson_gaussian": (0.8, 3.2, 1.2, 0.5, 0.9, 0.7),
+    "histogram_poisson_gaussian": (2.0 / _ANCHOR_PHOTON_STEP, 1.5, 0.6, _ANCHOR_PHOTON_STEP),
+    "bimodal_poisson_gaussian": (
+        2.1 / _ANCHOR_PHOTON_STEP, 0.8, 0.5, 3.2, 0.7, 0.9 / 2.1, _ANCHOR_PHOTON_STEP
+    ),
 }
 
 _ANCHOR_PATH = Path(__file__).with_name("fixtures") / "fit_anchors.json"
@@ -92,16 +120,25 @@ _POISSON_MODELS = frozenset(
 _BASE_PARAMETERS = {
     "lorentzian": (-0.4, 1.1, 2.2, 0.25),
     "gaussian_offset": (2.0, 0.2, 0.9, -0.3),
-    "histogram_gaussian": (90.0, -0.3, 0.8),
-    "bimodal_gaussian": (0.0, 2.4, 60.0, 0.55, 45.0, 0.75),
+    "histogram_gaussian": (_shots(90.0, 0.8, _STEP), -0.3, 0.8, _STEP),
+    "bimodal_gaussian": (
+        _shots(60.0, 0.55, _STEP) + _shots(45.0, 0.75, _STEP),
+        -1.2,
+        0.55,
+        2.4,
+        0.75,
+        _shots(45.0, 0.75, _STEP)
+        / (_shots(60.0, 0.55, _STEP) + _shots(45.0, 0.75, _STEP)),
+        _STEP,
+    ),
     "symmetric_lorentzian_doublet": (0.1, 0.8, 1.4, 0.2, 2.5),
     "damped_sine": (1.2, 0.2, 0.25, 6.0, -0.3),
     "exponential_decay": (1.6, 0.2, 3.0),
     "release_recapture": (0.8, 0.05, 6.0, 0.4),
     "anisotropic_gaussian_center": (3.0, 0.2, 0.9, 0.6, 0.35, -0.25),
     "radial_gaussian_center": (3.0, 0.2, 0.8, 0.35, -0.25),
-    # A is the density's area (counts times bin): these put ~60 counts in
-    # the tallest bin like the Gaussian rows do.  The read noise is a fair
+    # N is the shots, the density's area over the bin: these put ~60 counts
+    # in the tallest bin like the Gaussian rows do.  The read noise is a fair
     # share of each state's variance (sigma^2 / (rate + sigma^2) of 26%, and
     # 45% / 32%): it is a resolved quantity, the optimum is sharp and two
     # solvers land on the same point.  At a 13% share, three outlier bins
@@ -109,8 +146,10 @@ _BASE_PARAMETERS = {
     # (the same total variance), leaving the width on its floor in a flat
     # valley two solvers stop in differently; at twenty photons a
     # 0.3-photon read noise would be a 0.5% share, unidentifiable outright.
-    "histogram_poisson_gaussian": (410.0, 4.0, 1.2),
-    "bimodal_poisson_gaussian": (1.0, 6.0, 200.0, 0.9, 320.0, 1.8),
+    "histogram_poisson_gaussian": (410.0 / _PHOTON_STEP, 4.0, 1.2, _PHOTON_STEP),
+    "bimodal_poisson_gaussian": (
+        520.0 / _PHOTON_STEP, 1.0, 0.9, 6.0, 1.8, 320.0 / 520.0, _PHOTON_STEP
+    ),
     "saturation": (125.0, 10.0, 2.0),
 }
 
@@ -268,10 +307,10 @@ def _cell_parameters(model_id: str, cell: int) -> np.ndarray:
     elif model_id == "gaussian_offset":
         parameters[[0, 2, 3]] += (0.2 * position, 0.15 * position, 0.7 * position)
     elif model_id == "histogram_gaussian":
-        parameters[[0, 1, 2]] += (12.0 * position, 0.6 * position, 0.12 * position)
+        parameters[[0, 1, 2]] += (270.0 * position, 0.6 * position, 0.12 * position)
     elif model_id == "bimodal_gaussian":
         parameters += np.asarray(
-            (0.4, 0.25, 8.0, 0.08, -6.0, -0.08)
+            (250.0, 0.4, 0.08, 0.25, -0.08, 0.05, 0.0)
         ) * position
     elif model_id == "symmetric_lorentzian_doublet":
         parameters[[0, 1, 2, 4]] += (
@@ -294,10 +333,10 @@ def _cell_parameters(model_id: str, cell: int) -> np.ndarray:
     elif model_id == "saturation":
         parameters += np.asarray((12.0, 0.4, 0.5)) * position
     elif model_id == "histogram_poisson_gaussian":
-        parameters[[0, 1, 2]] += (60.0 * position, 0.8 * position, 0.15 * position)
+        parameters[[0, 1, 2]] += (240.0 * position, 0.8 * position, 0.15 * position)
     elif model_id == "bimodal_poisson_gaussian":
         parameters += np.asarray(
-            (0.2, 0.8, 30.0, 0.08, -40.0, -0.08)
+            (200.0, 0.2, 0.08, 0.8, -0.08, 0.05, 0.0)
         ) * position
     elif model_id == "anisotropic_gaussian_center":
         parameters[[0, 2, 3, 4, 5]] += (
@@ -1109,7 +1148,14 @@ def test_every_builtin_model_recovers_synthetic_parameters(model: str) -> None:
         float(_anchors()[model]["parameters"][name])
         for name in spec.parameter_names
     )
-    result = engine.fit(model, coordinates, observations, data_revision=11)
+    # Recovery is asked of the model itself.  A two-population model also
+    # asks whether the data has two populations, and an anchor of a few
+    # dozen shots spread over eighty bins cannot show that it does; that
+    # question has its own tests.
+    options = FitOptions(min_bic_gain=None) if spec.reduction is not None else None
+    result = engine.fit(
+        model, coordinates, observations, data_revision=11, options=options
+    )
     assert result.success
     assert result.source_revision == 11
     if model in _ANCHORED_MODELS:
@@ -1688,16 +1734,17 @@ def test_poisson_gaussian_recovers_two_state_photon_histograms() -> None:
     centres = 0.5 * (edges[1:] + edges[:-1])
     result = engine.fit("bimodal_poisson_gaussian", (centres,), counts.astype(float))
     assert result.success
-    assert 2.5 < result.parameters["left_rate"] < 3.3
-    assert 26.5 < result.parameters["rate_splitting"] < 27.6
-    assert 0.8 < result.parameters["left_sigma"] < 1.4
-    assert 0.5 < result.parameters["right_sigma"] < 2.5
+    assert 2.5 < result.parameters["rate"] < 3.3
+    assert 26.5 < result.parameters["delta_rate"] < 27.6
+    assert 0.8 < result.parameters["sigma"] < 1.4
+    assert 0.5 < result.parameters["sigma_B"] < 2.5
+    assert 0.45 < result.parameters["ratio"] < 0.55
 
     bright = np.where(loaded, rng.poisson(210.0, n), rng.poisson(60.0, n))
     counts, edges = np.histogram(bright + rng.normal(0.0, 3.0, n), bins=64)
     centres = 0.5 * (edges[1:] + edges[:-1])
     result = engine.fit("bimodal_poisson_gaussian", (centres,), counts.astype(float))
     assert result.success
-    assert 148.0 < result.parameters["rate_splitting"] < 152.0
-    assert 2.0 < result.parameters["left_sigma"] < 4.5
-    assert 1.5 < result.parameters["right_sigma"] < 5.0
+    assert 148.0 < result.parameters["delta_rate"] < 152.0
+    assert 2.0 < result.parameters["sigma"] < 4.5
+    assert 1.5 < result.parameters["sigma_B"] < 5.0

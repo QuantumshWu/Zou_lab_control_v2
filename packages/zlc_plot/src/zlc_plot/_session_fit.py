@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import Future
 from dataclasses import dataclass, field, replace
+import math
 from threading import Event
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
@@ -31,6 +32,7 @@ from .fit import (
     FitOptions,
     FitResult,
     _bimodal_classifier_metrics,
+    _histogram_step,
 )
 from .parameters import RenderEffect
 from .selectors import (
@@ -295,7 +297,10 @@ class FitSessionMixin:
             if request_generation != self._fit_request_generation:
                 return
             for key, fit in zip(keys, fits, strict=True):
-                if fit is None or not fit.success:
+                # A reduced answer is the nested model's, written with the
+                # components coinciding: started there, the next solve would
+                # sit on the collapsed pair.  It starts from its own seeds.
+                if fit is None or not fit.success or fit.reduced:
                     self._fit_warm_starts.pop(key, None)
                     continue
                 self._fit_warm_starts[key] = tuple(fit.parameter_values)
@@ -441,10 +446,33 @@ class FitSessionMixin:
         bounds = values.pop("bounds", None)
         options = values.pop("options", None)
         fit_all_facets = values.pop("fit_all_facets", False)
+        evidence_marker = object()
+        min_bic_gain = values.pop("min_bic_gain", evidence_marker)
         if values:
             raise TypeError(
                 f"unknown fit target fields: {', '.join(sorted(map(str, values)))}"
             )
+        if min_bic_gain is not evidence_marker:
+            # The threshold rides on the fit target beside the model that
+            # asks the question; it is one option among the solver's.
+            if model_spec.reduction is None:
+                raise TypeError(
+                    f"{model_spec.model_id} fits one population; it has no "
+                    "min_bic_gain"
+                )
+            options = {
+                **(
+                    dict(options)
+                    if isinstance(options, Mapping)
+                    else {} if options is None else {
+                        "loss": options.loss,
+                        "max_nfev": options.max_nfev,
+                        "deadline_seconds": options.deadline_seconds,
+                        "max_exact_points": options.max_exact_points,
+                    }
+                ),
+                "min_bic_gain": None if min_bic_gain is None else float(min_bic_gain),
+            }
         if selector_kind is not None and not isinstance(
             selector_kind, SelectorKind
         ):
@@ -1208,35 +1236,38 @@ class FitSessionMixin:
     ) -> FitResult:
         """Present a caller-owned Gaussian pair without independently refitting it."""
 
-        left_mean = float(components["left_mean"])
-        right_mean = float(components["right_mean"])
-        left_sigma = float(components["left_sigma"])
-        right_sigma = float(components["right_sigma"])
-        left_weight = float(components["left_weight"])
-        right_weight = float(components["right_weight"])
+        center = float(components["center"])
+        sigma = float(components["sigma"])
+        delta_center = float(components["delta_center"])
+        sigma_b = float(components["sigma_B"])
+        ratio = float(components["ratio"])
         x = np.asarray(selection.coordinates[0], dtype=float).reshape(-1)
         observed = np.asarray(selection.observations, dtype=float).reshape(-1)
-        base = (
-            left_weight
-            / left_sigma
-            * np.exp(-0.5 * ((x - left_mean) / left_sigma) ** 2)
-            + right_weight
-            / right_sigma
-            * np.exp(-0.5 * ((x - right_mean) / right_sigma) ** 2)
+        # The pair is authored in shape; only the shots are the histogram's,
+        # and they are what the counts say they are.
+        bin_width = _histogram_step(x)
+        density = bin_width * (
+            (1.0 - ratio)
+            / (sigma * math.sqrt(2.0 * math.pi))
+            * np.exp(-0.5 * ((x - center) / sigma) ** 2)
+            + ratio
+            / (sigma_b * math.sqrt(2.0 * math.pi))
+            * np.exp(-0.5 * ((x - center - delta_center) / sigma_b) ** 2)
         )
-        denominator = float(np.dot(base, base))
-        scale = (
-            max(0.0, float(np.dot(base, observed)) / denominator)
+        denominator = float(np.dot(density, density))
+        total = (
+            max(0.0, float(np.dot(density, observed)) / denominator)
             if denominator > 0.0
             else 0.0
         )
         values = {
-            "center": 0.5 * (left_mean + right_mean),
-            "center_splitting": right_mean - left_mean,
-            "left_amplitude": scale * left_weight / left_sigma,
-            "left_sigma": left_sigma,
-            "right_amplitude": scale * right_weight / right_sigma,
-            "right_sigma": right_sigma,
+            "total": total,
+            "center": center,
+            "sigma": sigma,
+            "delta_center": delta_center,
+            "sigma_B": sigma_b,
+            "ratio": ratio,
+            "bin_width": bin_width,
         }
         parameters = np.asarray(
             [values[name] for name in model.parameter_names], dtype=float
@@ -1392,7 +1423,7 @@ class FitSessionMixin:
                     model.model_id,
                     index if facet else None,
                 )
-                if result is None or not result.success:
+                if result is None or not result.success or result.reduced:
                     self._fit_warm_starts.pop(key, None)
                 else:
                     self._fit_warm_starts[key] = tuple(result.parameter_values)

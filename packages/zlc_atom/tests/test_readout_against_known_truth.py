@@ -31,7 +31,7 @@ from zlc_atom.nodes.calibration.calibration import (
     detect_sites,
     fit_bimodal,
 )
-from zlc_atom.nodes.calibration.bimodal import _DECISIVE_BIC_GAIN
+from zlc_plot.fit import DECISIVE_BIC_GAIN
 from zlc_atom.nodes.slm_feedback.task import _support
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -567,7 +567,7 @@ def test_the_two_state_fit_takes_the_likeliest_pair_whatever_their_widths() -> N
         assert fit.bright_mean == pytest.approx(150.0, abs=15.0)
         assert 15.0 < fit.threshold < 100.0
         assert fit.bright_fraction == pytest.approx(1.0 - dark / 100.0, abs=0.03)
-        assert fit.bic_gain > 10.0 * _DECISIVE_BIC_GAIN
+        assert fit.bic_gain > 10.0 * DECISIVE_BIC_GAIN
 
     rng = np.random.default_rng(5)
     narrow_dark = fit_bimodal(
@@ -578,7 +578,7 @@ def test_the_two_state_fit_takes_the_likeliest_pair_whatever_their_widths() -> N
 
     one_state = fit_bimodal(rng.normal(5.0, 2.5, 100))
     assert not one_state.decisive
-    assert one_state.bic_gain < _DECISIVE_BIC_GAIN
+    assert one_state.bic_gain < DECISIVE_BIC_GAIN
     five_loaded = fit_bimodal(
         np.concatenate((rng.normal(5.0, 2.5, 95), rng.normal(150.0, 30.0, 5)))
     )

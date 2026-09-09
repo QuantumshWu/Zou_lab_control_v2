@@ -1407,6 +1407,53 @@ def test_arming_a_fit_from_setting_reaches_the_panels_pixels(
     assert expression["value"] == "missing=1"
 
 
+def test_a_two_population_fit_offers_its_evidence_threshold_in_setting(
+    presenter, session
+) -> None:
+    """The bimodal fit asks whether the data has two populations, and the
+    evidence it demands is the operator's to set from the same form that
+    chose the model: it appears beside the parameters, at the default, and
+    a new value reaches the panel's fit."""
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(
+        node.signal_key("frames"), snapshot, kind="histogram"
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: bool(binding.parameter_surface.get("fit"))
+        and bool(presenter.view.presented_fronts),
+    )
+    assert presenter.update_panel_state(
+        binding.panel_id, {"fit": {"model": "bimodal_gaussian"}}
+    )
+
+    def evidence_field():
+        return next(
+            (
+                field
+                for field in binding.parameter_surface["fit"]
+                if field["key"] == "min_bic_gain"
+            ),
+            None,
+        )
+
+    _settle_panel_hosts(presenter, lambda: evidence_field() is not None)
+    field = evidence_field()
+    assert field["kind"] == "number"
+    assert field["value"] == 10.0
+    assert presenter.update_panel_state(
+        binding.panel_id, {"fit": {"min_bic_gain": 20.0}}
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.state.fit.get("min_bic_gain") == 20.0
+        and evidence_field() is not None
+        and evidence_field()["value"] == 20.0,
+    )
+    assert binding.state.fit["model"] == "bimodal_gaussian"
+
+
 def test_a_saved_figure_contains_the_fit_it_was_saved_with(
     presenter, session, tmp_path
 ) -> None:
