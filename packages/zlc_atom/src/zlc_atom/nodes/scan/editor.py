@@ -968,20 +968,6 @@ class ScanPlanEditor(QtWidgets.QWidget):
             )
             return
         shape = " × ".join(str(n) for n in plan.shape)
-        # The ordering law lives in split_outer_axes and binds the BOARD's
-        # table: only the seamless form has one.  Saying its refusal HERE
-        # is what lets the operator fix the order while the rows are still
-        # in front of them, instead of at Start.  Nothing is silently
-        # reordered.  The stepped engine applies every axis itself, point by
-        # point, and has no table to refuse.
-        if self._hardware_slots:
-            try:
-                from .plan import split_outer_axes
-
-                split_outer_axes(plan)
-            except ValueError as refusal:
-                self.summary.setText(str(refusal))
-                return
         manual = tuple(
             axis for axis in plan.axes
             if axis.port.startswith(MANUAL_PARAM_FAMILY)

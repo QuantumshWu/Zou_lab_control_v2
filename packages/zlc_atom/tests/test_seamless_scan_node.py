@@ -10,9 +10,8 @@ twice: once against a source whose every publication is named, and once
 against the virtual world's own physics, where a wrong order would show up as
 a survival curve that does not fall.
 
-A ``device:`` axis is refused here, by name, pointing at the node that can
-run it: a host call between two rows of one fired table is exactly what
-does not happen.
+Manual and device axes advance between fires. With no board axes, each
+fire repeats the fixed pulse without a scan table or a fabricated slot.
 """
 
 from __future__ import annotations
@@ -340,36 +339,31 @@ def _scripted_run(
         installation.close()
 
 
-def test_a_device_axis_below_a_board_axis_is_refused_by_name() -> None:
-    """The host moves a device knob BETWEEN fires, never inside one.
-
-    The seamless node used to refuse every device axis outright, pointing
-    at the stepped executor; a device axis is now an outer loop of this
-    node -- the run pauses, the knob is tuned and read back, the next
-    segment fires.  What stays refused is the impossible nesting: a device
-    axis underneath the board's own table.
-    """
-
-    plan = ScanPlan(
-        (
-            ScanAxis(BIAS_X_PORT, (-256.0, 256.0)),
-            ScanAxis(
-                DEVICE_PARAM_FAMILY + "rf:frequency", (1e9, 2e9)
-            ),
-        )
+def test_device_axes_alone_repeat_a_fixed_pulse_and_restore_the_device() -> None:
+    value, record, bench, source, claims = _device_run(
+        frequencies=(1.0, 1.5, 2.0), values=None, unit="GHz", shots=2, repeats=2,
     )
-    with pytest.raises(ValueError) as refusal:
-        split_outer_axes(plan)
-    assert "rf.frequency" in str(refusal.value)
-    assert "above the board axes" in str(refusal.value)
-
-
-def test_a_plan_of_device_axes_alone_has_no_table_to_play() -> None:
-    plan = ScanPlan(
-        (ScanAxis(DEVICE_PARAM_FAMILY + "rf:frequency", (1e9, 2e9)),)
-    )
-    with pytest.raises(ValueError, match="no table to play"):
-        split_outer_axes(plan)
+    assert bench.fired_repeats == [(2, 1)] * 6
+    assert bench.loads == 6 and bench.scan_tables == []
+    assert all(not sequence.slots for sequence in bench.loaded_sources)
+    assert bench._loaded_rows == () and bench._loaded_program.slot_count == 0
+    assert bench.published[1:] == list(range(12))
+    schema = value.block.schema
+    axes = tuple(axis for axis in schema.point_domain.axes if axis.axis_id.value.startswith("scan."))
+    assert tuple(axis.name for axis in axes) == ("rf.frequency",)
+    assert axes[0].unit == "GHz" and tuple(axes[0].coordinates) == (1.0, 1.5, 2.0)
+    assert tuple(axis.size for axis in schema.repeat_domain.axes) == (2, 2)
+    assert np.asarray(value.block.values).mean(axis=(2, 3)).tolist() == [
+        [0.0, 2.0, 4.0], [1.0, 3.0, 5.0],
+        [6.0, 8.0, 10.0], [7.0, 9.0, 11.0],
+    ]
+    assert source.tunable_values()["frequency"] == 600e6
+    field = next(field for field in source.tunable_fields() if field.metadata.name == "frequency")
+    assert field.metadata.unit == "Hz" and field.current == 600e6
+    assert record["plan"]["axes"] == [
+        {"port": "device:rf:frequency", "values": [1.0, 1.5, 2.0], "unit": "GHz"},
+    ]
+    assert claims[0].protected_fields == ("frequency",)
 
 
 def test_the_seamless_node_asks_nothing_about_gating_or_advance() -> None:
@@ -847,7 +841,7 @@ def test_a_chain_that_is_not_armed_waits_for_its_first_real_publication(sealed_b
 def _manual_run(
     *,
     manual: tuple[tuple[str, tuple[float, ...]], ...],
-    values: tuple[float, ...],
+    values: tuple[float, ...] | None,
     shots: int = 1,
     repeats: int = 1,
     answer=None,
@@ -869,18 +863,19 @@ def _manual_run(
         bench = ScriptedScanBench(
             installation.device("sequencer"),
             plane,
-            publications_per_fire=len(values) * shots,
+            publications_per_fire=(1 if values is None else len(values)) * shots,
         )
         bench.publish(SCRIPTED_SEED_VALUE)
         plan = ScanPlan(
             tuple(manual_axis(name, points) for name, points in manual)
-            + (ScanAxis(BIAS_X_PORT, values),)
+            + (() if values is None else (ScanAxis(BIAS_X_PORT, values),))
         )
         node = descriptors["seamless_scan"].instantiate(
             sequencer=bench,
             signal_plane=plane,
             source_signal=bench.signal_name,
-            pulse_resource=_pulse_resource(TEMPLATE_NAME, _template_sequence()),
+            pulse_resource=_pulse_resource(TEMPLATE_NAME,
+                pulse_sequence("mot_field_template.json") if values is None else _template_sequence()),
             plan=plan.to_tree(),
             repeats=repeats,
             shots_per_point=shots,
@@ -1092,23 +1087,36 @@ def test_a_host_axis_is_moved_outside_the_board_table(port) -> None:
     )
     outer, board = split_outer_axes(plan)
     assert plan.axes == (outer_axis, board_axis)
-    assert outer == (outer_axis,) and board.axes == (board_axis,)
+    assert outer == (outer_axis,) and board == (board_axis,)
     assert ScanPlan.from_tree(plan.to_tree()) == plan
 
 
-def test_a_plan_of_manual_axes_alone_has_no_table_to_play() -> None:
-    """The seamless node exists to play a board table; a hand is not one."""
-
-    with pytest.raises(ValueError) as refusal:
-        split_outer_axes(ScanPlan((manual_axis("power", (1.0, 2.0)),)))
-    assert "no table to play" in str(refusal.value)
+def test_manual_axes_alone_repeat_a_fixed_pulse_at_each_confirmation() -> None:
+    value, asked, bench = _manual_run(
+        manual=(("power", (1.0, 2.0)),), values=None, shots=2, repeats=2,
+    )
+    assert bench.fired_repeats == [(2, 1)] * 4
+    assert bench.loads == 4 and bench.scan_tables == []
+    assert all(not sequence.slots for sequence in bench.loaded_sources)
+    assert bench._loaded_rows == () and bench._loaded_program.slot_count == 0
+    assert bench.published[1:] == list(range(8))
+    assert [request.payload["value"] for request in asked] == [1.0, 2.0, 1.0, 2.0]
+    assert len({request.request_id for request in asked}) == 4
+    schema = value.block.schema
+    assert tuple(axis.name for axis in schema.point_domain.axes
+                 if axis.axis_id.value.startswith("scan.")) == ("power",)
+    assert tuple(axis.size for axis in schema.repeat_domain.axes) == (2, 2)
+    assert np.asarray(value.block.values).mean(axis=(2, 3)).tolist() == [
+        [0.0, 2.0], [1.0, 3.0], [4.0, 6.0], [5.0, 7.0],
+    ]
 
 
 def _device_run(
     *,
     frequencies: tuple[float, ...],
-    values: tuple[float, ...],
+    values: tuple[float, ...] | None,
     repeats: int = 1,
+    shots: int = 1,
     tunables=None,
     unit="",
     device_field="frequency",
@@ -1146,7 +1154,7 @@ def _device_run(
         bench = ScriptedScanBench(
             installation.device("sequencer"),
             plane,
-            publications_per_fire=len(values),
+            publications_per_fire=(1 if values is None else len(values)) * shots,
         )
         bench.publish(SCRIPTED_SEED_VALUE)
         plan = ScanPlan(
@@ -1154,18 +1162,19 @@ def _device_run(
                 ScanAxis(
                     DEVICE_PARAM_FAMILY + "rf:" + device_field, frequencies, unit
                 ),
-                ScanAxis(BIAS_X_PORT, values),
             )
+            + (() if values is None else (ScanAxis(BIAS_X_PORT, values),))
         )
         node = descriptors["seamless_scan"].instantiate(
             sequencer=bench,
             signal_plane=plane,
             source_signal=bench.signal_name,
-            pulse_resource=_pulse_resource(TEMPLATE_NAME, _template_sequence()),
+            pulse_resource=_pulse_resource(TEMPLATE_NAME,
+                pulse_sequence("mot_field_template.json") if values is None else _template_sequence()),
             plan=plan.to_tree(),
             tunable_devices=tunables,
             repeats=repeats,
-            shots_per_point=1,
+            shots_per_point=shots,
             settle_seconds=0.0,
         )
         host = _scan_host(node, plane)

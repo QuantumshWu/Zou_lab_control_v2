@@ -1,58 +1,15 @@
-"""The seamless scan engine: the BOARD advances the points.
+"""Host-advanced axes around an optional seamless hardware scan table.
 
-The plan's axes become hardware SLOTS and its rows become the board's scan
-table.  One load, one fire, and the board plays every point back to back with
-no host in the loop -- which is the only way the points can be seamless, and
-the reason the seamless node exists apart from the stepped one.
+Manual and device axes advance between fires. Board axes fill the Pulse's
+declared slots and advance inside a fire; without them, each host point
+plays the fixed Pulse with no table. Run repeats supplies shots_per_point,
+without rewriting PulseBracket or adding artificial scan coordinates.
 
-Two consequences shape everything here.
-
-FRAME ORDER EQUALS POINT ORDER BY CONSTRUCTION.  The source is driven by the
-fired cycle, so the n-th publication is the n-th played row; there is no
-gating question to ask and no straddling frame to skip.  That is why the
-seamless node has no capture choice: the question does not arise.
-
-ONLY THE BOARD'S OWN KNOBS CAN BE SCANNED.  A ``device:`` port is moved by a
-host call, which is exactly what does not happen between two cycles of one
-fired table, so such a plan is refused when it is bound -- by name, pointing
-at the node that can run it.
-
-A SHOT IS ONE WHOLE PULSE AT THE SAME TABLE ROW.  The board's Run-repeat
-counter plays the complete timeline -- including any independent internal
-Bracket -- ``shots_per_point`` times before its scan cursor advances.  The
-table therefore carries exactly the plan's rows and no caller rewrites the
-Bracket or duplicates rows to manufacture shots.
-
-A MANUAL AXIS BREAKS THE FIRE, NOT THE POINT.  An axis nobody here can
-advance -- a power knob, a waveplate -- is walked by the OPERATOR, so it
-stands outside everything a machine advances: for each of its points the
-run stops, asks, and then plays the whole inner table from one fire, still
-seamless inside.  ``repeats`` means the same thing it always did, the whole
-plan again from the top; with a manual axis in the plan it simply cannot be
-a longer fire, so it is a longer loop.
-
-A MANUAL AXIS IS AUTHORED LIKE ANY OTHER.  Its values are written in the
-plan, because a dataset's schema is fixed by its first frame and a
-generation may never restate it: a number typed after the frames it
-describes could not be that run's axis.  So the plan says which values
-the axis walks, and the run's only question is the one a machine cannot
-answer -- move the knob there.
-
-THE LOOP LIVES HERE, NOT IN A NODE PACKAGE, BECAUSE IT HAS TWO CONSUMERS.
-``acquire`` plays the plan and commits each point; Runtime hands back the
-current canonical scan.  A Task that scans for a reason of its own commits its
-typed companions in the same event bundle, so neither can drift from the
-other about what a played point means.
-
-STOP IS READ BEFORE ANYTHING NEW IS DONE TO THE BENCH.  The settle before a
-fire is slept in slices with the flag read between them, and read once more
-before the fire itself: a Stop that arrived while the board was acknowledging
-SAFE used to be noticed only by the read-out loop, after the table had been
-loaded and fired again.
-
-THE BENCH IS HANDED BACK AS IT WAS FOUND.  Every device knob the plan moved
-is put back at its pre-run value when the scan ends -- complete, stopped or
-failed -- through the same verified ``tune`` that moved it.
+The original acquisition preparation and Stop checks precede each fire.
+Committed source publications are placed in scan/repeat order by the shared
+Dataset writer. Tasks using acquire may attach typed companions to the same
+event bundle. Device knobs return to their original values and units on
+completion, Stop or failure through the existing cleanup path.
 """
 
 from __future__ import annotations
@@ -130,7 +87,7 @@ class SeamlessScanMeasurement:
         #: host-advanced -- the run pauses between fires either way; what
         #: differs is only whether a hand or a ``tune()`` call moves the
         #: knob.
-        self.outer_axes, self.board_plan = split_outer_axes(plan)
+        self.outer_axes, self.board_axes = split_outer_axes(plan)
         self.tunables = dict(tunables or {})
         bound = tuple(ports)
         self.ports = bound
@@ -151,7 +108,7 @@ class SeamlessScanMeasurement:
             for axis in self.outer_axes
         )
         self.board_ports = tuple(
-            by_port[axis.port] for axis in self.board_plan.axes
+            by_port[axis.port] for axis in self.board_axes
         )
         for axis in self.outer_axes:
             if not axis.port.startswith(DEVICE_PARAM_FAMILY):
@@ -188,7 +145,8 @@ class SeamlessScanMeasurement:
         placed them in the pulse editor -- and the plan supplies the values
         every slot plays.  The plan must cover every slot exactly: a slot
         with no axis has no values to play, and an axis naming no slot was
-        already refused when the plan was bound.
+        already refused when the plan was bound. A host-only scan can instead
+        use a template with no slots, playing its fixed values at each point.
         """
 
         slot_ids = tuple(slot.slot_id for slot in self.sequence.slots)
@@ -225,7 +183,7 @@ class SeamlessScanMeasurement:
         )
         order = tuple(planned.index(column.name) for column in columns)
         return tuple(
-            tuple(self.board_plan.axes[index].native_value(self.board_ports[index], row[index])
+            tuple(self.board_axes[index].native_value(self.board_ports[index], row[index])
                   for index in order) for row in rows
         )
 
@@ -244,7 +202,7 @@ class SeamlessScanMeasurement:
         return tuple(
             tuple(float(DEFAULT_UNITS.convert(
                 row[index], port.unit, axis.unit or port.unit
-            )) for axis, port, index in zip(self.board_plan.axes, self.board_ports, order))
+            )) for axis, port, index in zip(self.board_axes, self.board_ports, order))
             for row in rows
         )
 
@@ -452,18 +410,22 @@ class SeamlessScanMeasurement:
 
         self._last_run_record = None
         board = self.sequencer.describe()
-        inner_rows = self.board_plan.rows()
+        inner_rows = tuple(itertools.product(*(axis.values for axis in self.board_axes)))
         # The board holds one row while Run repeats supplies its shots, then
         # advances the row; the independent PulseBracket remains wholly inside
         # each shot.
         streamed, columns = self._streamed_sequence(board)
         shots = self.shots_per_point
-        slot_rows = self._slot_ordered_rows(inner_rows, columns)
-        effective_slot_rows, slot_tick_scales, wire = prepare_scan_application(
-            streamed,
-            slot_rows,
-            params=board.geometry,
-        )
+        if columns:
+            slot_rows = self._slot_ordered_rows(inner_rows, columns)
+            effective_slot_rows, slot_tick_scales, wire = prepare_scan_application(
+                streamed, slot_rows, params=board.geometry,
+            )
+            effective_inner = self._plan_ordered_rows(effective_slot_rows, columns)
+        else:
+            # One fixed Pulse per host point. No columns go on the wire: an
+            # unslotted program uses ordinary Run repeats, not a dummy table.
+            effective_inner, slot_tick_scales, wire = inner_rows, (), ()
         # Filled by the board, then compiled, ONCE: a config parameter is the
         # apparatus's calibrated number and it is baked in here.  The filled
         # sequence is what every fire loads as ``source=`` and what the run
@@ -474,10 +436,6 @@ class SeamlessScanMeasurement:
             board.geometry,
             board.clock_hz,
             slot_tick_scales=slot_tick_scales,
-        )
-        effective_inner = self._plan_ordered_rows(
-            effective_slot_rows,
-            columns,
         )
         outer_rows = tuple(
             itertools.product(*(axis.values for axis in self.outer_axes))
@@ -493,7 +451,7 @@ class SeamlessScanMeasurement:
                 for axis, port in zip(self.outer_axes, self.outer_ports)
             ]
             + [(port.label, axis.unit or port.unit)
-               for axis, port in zip(self.board_plan.axes, self.board_ports)]
+               for axis, port in zip(self.board_axes, self.board_ports)]
         )
         run_record = self.run_record(
             effective_rows=effective_rows,
@@ -655,7 +613,7 @@ class SeamlessScanMeasurement:
                     source=source,
                     rows=wire,
                     run_repeats=self.shots_per_point,
-                    scan_repeats=self.repeats,
+                    scan_repeats=1 if self.outer_axes else self.repeats,
                 ),
                 **{
                     f"tunable:{key}": {
