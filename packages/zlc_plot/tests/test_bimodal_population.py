@@ -252,6 +252,12 @@ def test_the_overlay_says_how_the_question_was_decided() -> None:
         )
         assert overlay.evidence.startswith("ΔBIC = ")
         assert overlay.evidence.endswith("one population")
+        # The amplitude is counts times the value axis; a unitless axis
+        # multiplies nothing (this printed "count*1").
+        amplitude_row = next(
+            row for row in overlay.parameter_display if row.name == "amplitude"
+        )
+        assert amplitude_row.unit == "count"
     finally:
         session.close()
     session = _bimodal_session(_shots(rng, 400, 0.5))

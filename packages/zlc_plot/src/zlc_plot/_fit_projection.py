@@ -2144,8 +2144,10 @@ class FitProjection:
                 self._fit_parameter_conversion(factor).symbol
                 if display else self._canonical_fit_parameter_unit(factor)
             )
-            symbols.append(symbol or "1")
-        return (self._unit_registry or DEFAULT_UNITS).resolve("*".join(symbols))
+            # A unitless factor multiplies nothing: count*1 is count.
+            if symbol:
+                symbols.append(symbol)
+        return (self._unit_registry or DEFAULT_UNITS).resolve("*".join(symbols) or "1")
 
     def _fit_parameter_conversion(
         self,
