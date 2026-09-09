@@ -35,8 +35,8 @@ class DeriveEditor(QtWidgets.QWidget):
         controls.setContentsMargins(0, 0, 0, 0)
         controls.addWidget(FluentLabel("Input range"))
         self.input_view = FluentComboBox()
-        for label, value in (("Event · 当前事件", "event"), ("Run · 本次运行", "run"),
-                             ("Window · 最近事件", "window")):
+        for label, value in (("Event", "event"), ("Run", "run"),
+                             ("Window", "window")):
             self.input_view.addItem(label, value)
         controls.addWidget(self.input_view)
         self.window_label = FluentLabel("Window")
@@ -57,7 +57,7 @@ class DeriveEditor(QtWidgets.QWidget):
         input_layout.addWidget(self.input_summary)
         layout.addWidget(input_frame)
         header = QtWidgets.QHBoxLayout()
-        header.addWidget(FluentLabel("Outputs · 每项代码以 result = … 结束"))
+        header.addWidget(FluentLabel("Outputs · Assign each answer to result"))
         header.addStretch(1)
         self.add_button = FluentButton("Add output", color=ACCENT)
         header.addWidget(self.add_button)
@@ -96,7 +96,7 @@ class DeriveEditor(QtWidgets.QWidget):
         header = QtWidgets.QHBoxLayout()
         header.addWidget(FluentLabel("Name"))
         name_edit = FluentLineEdit(name)
-        name_edit.setPlaceholderText("输出名称，例如 contrast")
+        name_edit.setPlaceholderText("Output name, e.g. contrast")
         header.addWidget(name_edit, 1)
         remove = FluentButton("×", color=GREY)
         remove.setToolTip("Remove this output")
@@ -145,16 +145,16 @@ class DeriveEditor(QtWidgets.QWidget):
         lines = [title]
         for name, schema, snapshot in tuple(bundle or ()):
             if schema is None:
-                lines.append(f"a.{name}: 等待首份真实数据，尚无 schema")
+                lines.append(f"a.{name}: Waiting for data")
                 continue
             lines.append(f"{name}: {schema.physical_shape} · {schema.value_schema.dtype} · {schema.value_schema.value_unit or '1'}")
             if snapshot is not None and snapshot.block.schema != schema:
-                lines.append(f"  当前 Event shape={snapshot.block.schema.physical_shape}；上行为 Run 声明")
+                lines.append(f"  Event shape={snapshot.block.schema.physical_shape}; Run shape shown above")
             for number, (label, domain) in enumerate((("Repeat", schema.repeat_domain), ("Point", schema.point_domain),
                                   ("Cell-data", schema.cell_domain))):
                 physical = str(number) if number < 2 else ", ".join(str(2+i) for i in range(len(domain.shape)))
                 if not domain.axes:
-                    lines.append(f"  {label} · NumPy axis {physical}: 无具名轴，长度 1")
+                    lines.append(f"  {label} · NumPy axis {physical}: No named axis, length 1")
                 for index, axis in enumerate(domain.axes):
                     if axis.size <= 6:
                         coordinates = repr(tuple(axis.coordinate_at(i) for i in range(axis.size)))
@@ -164,7 +164,7 @@ class DeriveEditor(QtWidgets.QWidget):
                     lines.append(f"  {label} · NumPy {location}: {axis.name} [{axis.axis_id.value}] "
                                  f"· {axis.size} · {axis.unit or '1'} · {coordinates}")
         if len(lines) == 1:
-            lines.append("尚无已提交数据；不会在编辑器执行代码或构造预览数据。")
+            lines.append("No published data")
         return "\n".join(lines)
 
     def update_projection(self, projection: Mapping[str, object]) -> None:
@@ -193,7 +193,7 @@ class DeriveEditor(QtWidgets.QWidget):
                 "Inputs · a.<output>",
                 projection.get("input_bundle"))
             output_text = self._bundle_text(
-                "Outputs · 已发布数据", projection.get("output_bundle"))
+                "Outputs · Published data", projection.get("output_bundle"))
             for widget, text in ((self.input_summary, input_text), (self.output_summary, output_text)):
                 if widget.text() != text:
                     widget.setText(text)

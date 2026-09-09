@@ -382,8 +382,8 @@ def execute(programs, outputs):
     return results
 
 
-HELP_TEXT = '''取轴 isel / sel；筛选 where；归约 mean / sum / count / any / all / min / max / std。
-运算 + - * / **、比较、abs、& | ^ ~。NumPy 读 x.values / x.valid / x.schema，同形结果用 x.with_values(...)。
-示例：result = a.counts.isel(frame=1).mean("repeat")（使用输入的实际轴名，区分大小写）'''
+HELP_TEXT = '''Select: isel / sel. Mask: where. Reduce: mean / sum / count / any / all / min / max / std.
+Math: + - * / **, comparisons, abs, & | ^ ~. NumPy: x.values / x.valid / x.schema; same-shape results: x.with_values(...).
+Example: result = a.counts.isel(frame=1).mean("repeat")  (Use the input's case-sensitive axis names.)'''
 
 __all__ = ["ExpressionError", "Operand", "evaluate", "execute", "compiled_rows", "published_names", "signal_rows", "HELP_TEXT"]
