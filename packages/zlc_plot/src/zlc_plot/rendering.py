@@ -314,10 +314,13 @@ def _frozen_draw_argument(value: Any) -> Any:
     move by design without a re-recording, one redraw of its axis left the
     recorded left spine holding the new view's data coordinates under the
     mapping of its recording, and every replay drew it up past the box.
-    Paths and arrays are copied and transforms frozen; the rest -- numbers,
-    strings, font properties -- cannot change under the recording.
+    Paths and arrays are copied, transforms frozen, and a text's font
+    properties copied -- ``Text.set_fontsize`` writes into the object the
+    draw handed over; the rest -- numbers and strings -- cannot change
+    under the recording.
     """
 
+    from matplotlib.font_manager import FontProperties
     from matplotlib.path import Path as GeometryPath
     from matplotlib.transforms import Transform
 
@@ -325,6 +328,8 @@ def _frozen_draw_argument(value: Any) -> Any:
         return copy.deepcopy(value)
     if isinstance(value, Transform):
         return value.frozen()
+    if isinstance(value, FontProperties):
+        return value.copy()
     if isinstance(value, np.ndarray):
         return value.copy()
     if isinstance(value, (list, tuple)):

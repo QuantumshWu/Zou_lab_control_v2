@@ -480,15 +480,18 @@ def test_a_colorbar_whose_limits_move_under_a_held_rail_repaints_its_labels() ->
         session.close()
 
 
-def test_a_recorded_draw_owns_its_geometry() -> None:
+@pytest.mark.parametrize("side", ("left", "bottom"))
+def test_a_recorded_draw_owns_its_geometry(side: str) -> None:
     """Replaying a recording paints what was recorded, whatever the artist
     did since.
 
     Matplotlib hands the renderer the artist's own objects: a Spine's path
     shares the vertex array ``Spine._adjust_location`` rewrites from the
-    axes' current view on every draw and extent query.  A recording that
-    kept that array was a photograph that changed after it was taken --
-    new data coordinates under the mapping of the recording.
+    axes' current view on every draw and extent query -- and each Axis
+    measures one spine to place its label, the y axis the left one, the x
+    axis the bottom one.  A recording that kept that array was a
+    photograph that changed after it was taken: new data coordinates under
+    the mapping of the recording.
     """
 
     from matplotlib.backends.backend_agg import RendererAgg
@@ -498,14 +501,18 @@ def test_a_recorded_draw_owns_its_geometry() -> None:
 
     figure = Figure(figsize=(2.0, 2.0), dpi=100)
     axes = figure.add_axes((0.2, 0.2, 0.6, 0.6))
+    axes.set_xlim(0.0, 1.0)
     axes.set_ylim(0.0, 1.0)
-    spine = axes.spines["left"]
+    spine = axes.spines[side]
     commands = _record_artist_draw(spine, RendererAgg(200, 200, 100))
     assert commands
     first = RendererAgg(200, 200, 100)
     _replay_draw(commands, first)
-    axes.set_ylim(0.0, 3.0)
-    # What YAxis.draw does to place its label: measure the left spine.
+    if side == "left":
+        axes.set_ylim(0.0, 3.0)
+    else:
+        axes.set_xlim(0.0, 3.0)
+    # What the Axis does to place its label: measure its spine.
     spine.get_window_extent()
     second = RendererAgg(200, 200, 100)
     _replay_draw(commands, second)
