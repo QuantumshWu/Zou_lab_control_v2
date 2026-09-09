@@ -980,7 +980,7 @@ def test_terminal_processor_always_receives_runtime_current_dataset(delivery: st
                     ],
                 )
             )
-            return {"derived": _monitor_output(derived_declaration, 1)}
+            return {"derived": _monitor_output(derived_declaration, 1, value=float(len(seen)))}
 
     wake = Event()
     host = _host(
@@ -1006,6 +1006,22 @@ def test_terminal_processor_always_receives_runtime_current_dataset(delivery: st
         result = plane.current_dataset(host.signal_key("derived"))
         assert result.block.values.reshape(-1).tolist() == [1.0]
         assert not plane.is_generation_live(host.signal_key("derived"))
+        source_publication = plane.latest_publication(source.signal_key("frame"))
+        for answer in (2.0, 3.0):
+            previous = plane.latest_publication(host.signal_key("derived"))
+            host.shutdown()
+            assert plane.latest_publication(host.signal_key("derived")) is previous
+            host = _host(
+                Processor(), plane, wake, instance_id=f"processor-{delivery}",
+                kind="processor", outputs=(derived_declaration,),
+                source=source.signal_key("frame"), delivery=delivery,
+            )
+            host.start()
+            assert _wait(host, wake).phase == "done"
+            current = plane.latest_publication(host.signal_key("derived"))
+            assert current.event_ref.generation != previous.event_ref.generation
+            assert current.direct_parent_refs == (source_publication.event_ref,)
+            assert plane.current_dataset(host.signal_key("derived")).block.values.item() == answer
     finally:
         host.shutdown()
         plane.close()

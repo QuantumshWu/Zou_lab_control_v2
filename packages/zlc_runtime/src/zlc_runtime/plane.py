@@ -20,6 +20,7 @@ independently; there is no cross-run global counter.
 from __future__ import annotations
 
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 import math
 import threading
@@ -1897,53 +1898,21 @@ class SignalDataPlane:
             ),
         )
 
-    def begin_generation(self, node: object) -> StreamGenerationId:
-        """Start a producer generation, superseding a FINISHED predecessor.
+    @contextmanager
+    def _generation_start(self, owner_id: str):
+        """Retire a finished predecessor, then validate/install under the lock."""
 
-        A generation belongs to one run, but the node that performs the run is a
-        reusable object, so something has to decide when the previous retained
-        generation is replaced.  It ends when the next run begins -- and that
-        is this method.
-
-        Use this to START a run.  It is the only way in: a lower-level
-        ``reserve`` used to sit beside it, refusing to touch an existing
-        generation at all, so a caller that took it could never run the same
-        node twice -- the first run left a terminal generation behind and the
-        second reservation was rejected.  Nothing in production took it.
-
-        A generation that is still LIVE is not superseded: two concurrent runs of
-        one producer is a real error and still raises.
-        """
-
-        owner_id = _node_instance_id(node)
-        output_names, bare_names = self._node_route_names(node)
-        retired: tuple[_GenerationState, ...] = ()
         with self._lock:
             self._wait_for_start_locked(owner_id)
             existing = self._states.get(owner_id)
-            if existing is not None and not (
+            if existing is None or not (
                 existing.retired or existing.terminal
             ):
-                if (
-                    existing.kind == "producer"
-                    and existing.node is node
-                    and existing.publication is None
-                    and existing.output_names == output_names
-                    and dict(existing.bare_names) == dict(bare_names)
-                ):
-                    return existing.generation
-                raise RuntimeError("producer generation is already active")
-            if existing is None:
-                return self._install_state_locked(
-                    owner_id=owner_id,
-                    kind="producer",
-                    output_names=output_names,
-                    bare_names=bare_names,
-                    node=node,
-                ).generation
-            retired = self._reserve_retirement_closure_locked(
-                owner_id,
-            )
+                # The caller retains its active-owner checks and the producer's
+                # unpublished, same-instance idempotence. Never replace a live run.
+                yield existing
+                return
+            retired = self._reserve_retirement_closure_locked(owner_id)
             retiring_owners = tuple(state.owner_id for state in retired)
         try:
             errors = self._cleanup_retired_states(retired)
@@ -1953,27 +1922,43 @@ class SignalDataPlane:
             try:
                 if errors:
                     self._membership_changed = True
-                elif self._closed:
-                    errors = (RuntimeError("signal data plane is closed"),)
-                else:
-                    for candidate in retired:
-                        self._drop_state_locked(candidate)
-                    state = self._install_state_locked(
-                        owner_id=owner_id,
-                        kind="producer",
-                        output_names=output_names,
-                        bare_names=bare_names,
-                        node=node,
+                    raise BaseExceptionGroup(
+                        "previous signal generation cleanup failed", list(errors),
                     )
+                if self._closed:
+                    raise RuntimeError("signal data plane is closed")
+                for candidate in retired:
+                    self._drop_state_locked(candidate)
+                # Recheck the requested source here, after cleanup, in the
+                # very same critical section that installs its new consumer.
+                yield None
             finally:
                 self._starting.difference_update(retiring_owners)
                 self._generation_ready.notify_all()
-        if errors:
-            raise BaseExceptionGroup(
-                "previous signal generation cleanup failed",
-                list(errors),
-            )
-        return state.generation
+
+    def begin_generation(self, node: object) -> StreamGenerationId:
+        """Start a producer run, replacing its finished retained predecessor."""
+
+        owner_id = _node_instance_id(node)
+        output_names, bare_names = self._node_route_names(node)
+        with self._generation_start(owner_id) as existing:
+            if existing is not None:
+                if (
+                    existing.kind == "producer"
+                    and existing.node is node
+                    and existing.publication is None
+                    and existing.output_names == output_names
+                    and dict(existing.bare_names) == dict(bare_names)
+                ):
+                    return existing.generation
+                raise RuntimeError("producer generation is already active")
+            return self._install_state_locked(
+                owner_id=owner_id,
+                kind="producer",
+                output_names=output_names,
+                bare_names=bare_names,
+                node=node,
+            ).generation
 
     @staticmethod
     def _declarations_by_bare(
@@ -3102,7 +3087,7 @@ class SignalDataPlane:
             raise ValueError("Processor publication has no selected signal")
         owner_id = _node_instance_id(node)
         output_names, bare_names = self._node_route_names(node)
-        with self._lock:
+        with self._generation_start(owner_id):
             if self._closed:
                 raise RuntimeError("signal data plane is closed")
             self._require_issued_publication_locked(initial_publication)
@@ -3199,7 +3184,7 @@ class SignalDataPlane:
             raise ValueError("frozen Processor publication has no selected signal")
         owner_id = _node_instance_id(node)
         output_names, bare_names = self._node_route_names(node)
-        with self._lock:
+        with self._generation_start(owner_id):
             if self._closed:
                 raise RuntimeError("signal data plane is closed")
             self._require_issued_publication_locked(source_publication)
@@ -3267,7 +3252,7 @@ class SignalDataPlane:
                 )
         owner_id = _node_instance_id(node)
         output_names, bare_names = self._node_route_names(node)
-        with self._lock:
+        with self._generation_start(owner_id):
             if self._closed:
                 raise RuntimeError("signal data plane is closed")
             if source_publication is not None:

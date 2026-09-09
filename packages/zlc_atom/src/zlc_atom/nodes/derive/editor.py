@@ -7,11 +7,13 @@ device or Runtime to materialize data on the Qt thread.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from html import escape
 
 from PyQt5 import QtCore, QtWidgets
 
+from zlc_plot.semantics import schema_structure
 from zlc_ui.fluent import (
-    ACCENT, GREY, FluentButton, FluentCodeEdit, FluentComboBox, FluentLineEdit, FluentLabel, FluentFrame,
+    ACCENT, AXIS_GROUP_COLORS, GREY, FluentButton, FluentCodeEdit, FluentComboBox, FluentLineEdit, FluentLabel, FluentFrame,
     FluentSpinBox, retire_widget, scaled_px, signals_blocked,
 )
 
@@ -50,7 +52,7 @@ class DeriveEditor(QtWidgets.QWidget):
 
         self.input_summary = FluentLabel()
         self.input_summary.setWordWrap(True)
-        self.input_summary.setTextFormat(QtCore.Qt.PlainText)
+        self.input_summary.setTextFormat(QtCore.Qt.RichText)
         self.input_summary.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         input_frame = FluentFrame()
         input_layout = QtWidgets.QVBoxLayout(input_frame)
@@ -66,7 +68,7 @@ class DeriveEditor(QtWidgets.QWidget):
         layout.addLayout(self.rows_layout)
         self.output_summary = FluentLabel()
         self.output_summary.setWordWrap(True)
-        self.output_summary.setTextFormat(QtCore.Qt.PlainText)
+        self.output_summary.setTextFormat(QtCore.Qt.RichText)
         self.output_summary.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         output_frame = FluentFrame()
         output_layout = QtWidgets.QVBoxLayout(output_frame)
@@ -142,30 +144,39 @@ class DeriveEditor(QtWidgets.QWidget):
 
     @staticmethod
     def _bundle_text(title: str, bundle: object) -> str:
-        lines = [title]
+        lines = [f"<b>{escape(title)}</b>"]
         for name, schema, snapshot in tuple(bundle or ()):
             if schema is None:
-                lines.append(f"a.{name}: Waiting for data")
+                lines.append(escape(f"a.{name}: Waiting for data"))
                 continue
-            lines.append(f"{name}: {schema.physical_shape} · {schema.value_schema.dtype} · {schema.value_schema.value_unit or '1'}")
+            groups = []
+            for color, group in zip(AXIS_GROUP_COLORS, schema_structure(schema), strict=True):
+                sizes = " × ".join(str(size) for _name, size in group) or "1"
+                groups.append(f'<span style="color: {color}">({escape(sizes)})</span>')
+            lines.append(f"<b>{escape(str(name))}: {' × '.join(groups)}</b>")
+            lines.append(escape(f"Storage (NumPy): {schema.physical_shape} · {schema.value_schema.dtype} · {schema.value_schema.value_unit or '1'}"))
+            lines.append("Repeat and Point each use one storage dimension; their named axes stay separate.")
             if snapshot is not None and snapshot.block.schema != schema:
-                lines.append(f"  Event shape={snapshot.block.schema.physical_shape}; Run shape shown above")
+                lines.append(escape(f"Event storage: {snapshot.block.schema.physical_shape}; Run storage shown above"))
             for number, (label, domain) in enumerate((("Repeat", schema.repeat_domain), ("Point", schema.point_domain),
                                   ("Cell-data", schema.cell_domain))):
+                color = AXIS_GROUP_COLORS[number]
                 physical = str(number) if number < 2 else ", ".join(str(2+i) for i in range(len(domain.shape)))
                 if not domain.axes:
-                    lines.append(f"  {label} · NumPy axis {physical}: No named axis, length 1")
+                    detail = f"{label} · No named axis, length 1 · storage dim {physical}"
+                    lines.append(f'<span style="color: {color}">{escape(detail)}</span>')
                 for index, axis in enumerate(domain.axes):
                     if axis.size <= 6:
                         coordinates = repr(tuple(axis.coordinate_at(i) for i in range(axis.size)))
                     else:
                         coordinates = f"({axis.coordinate_at(0)!r}, …, {axis.coordinate_at(axis.size - 1)!r})"
-                    location = f"axis={2+index}" if number == 2 else f"carrier axis={number}"
-                    lines.append(f"  {label} · NumPy {location}: {axis.name} [{axis.axis_id.value}] "
-                                 f"· {axis.size} · {axis.unit or '1'} · {coordinates}")
+                    physical = 2 + index if number == 2 else number
+                    detail = (f"{label} · {axis.name} [{axis.axis_id.value}] "
+                              f"· size {axis.size} · unit {axis.unit or '1'} · {coordinates} · storage dim {physical}")
+                    lines.append(f'<span style="color: {color}">{escape(detail)}</span>')
         if len(lines) == 1:
             lines.append("No published data")
-        return "\n".join(lines)
+        return "<br>".join(lines)
 
     def update_projection(self, projection: Mapping[str, object]) -> None:
         values = projection.get("form_values") or {}

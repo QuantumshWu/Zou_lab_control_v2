@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- sealed Scan→Derive Run→Image改表达式再Start的`signal generation owner is already active`已复现并根修：Processor复用原Producer的终态世代替换，不改Shutdown保留数据政策和Input range。正式Qt二次Start为Done，新generation、同一exact Scan parent，下游Image逐像素为原值×2；11项直接生命周期验证含连续三次frozen运行、并发Start、active保护、未发布幂等通过。Derive结构说明复用三域颜色，以logical shape为主、Storage shape为辅。
+
 - Scan→Occupancy已删除旧“Point必须只有frame一个轴”的否决，保留真实图像/校准检查并去掉重复验证。正式ScanDatasetWriter/Plane的50×3×72×92案例复现terminal两Point轴报错，修后逐event与完整terminal结果通过且保留frame3、power1/mVpp；FrameSurvival同步按READOUT_EVENT分组配对并保留其它Point轴及finite placement，2/3/4 frames与2×2 scan定向验证通过。信号列表改读canonical schema并复用公共逻辑轴摘要，正式Qt截图确认(1×50)×(3×1)×(72×92)及power轴，测试窗口全部关闭，未操作硬件。
 
 - Derive界面统一英文，只读信息完整展开，短帮助不设内部scroll。空Code等未提交草稿显示中性`Draft: Signals row N: Enter Python code`，不标节点error；Start仍禁用，填完整后经原finalization解除。实际Qt输入→计算→Plot→Save Fig→FigureViewer流程通过，1×1×35结果与独立NumPy相同，所有窗口已关闭。
