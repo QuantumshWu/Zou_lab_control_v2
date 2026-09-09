@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections import deque
 from contextlib import contextmanager
+import copy
 import ctypes
 from dataclasses import dataclass
 from functools import lru_cache
@@ -302,6 +303,35 @@ _UNRECORDED_DRAW_METHODS = (
 _UNRECORDABLE: Any = ()
 
 
+def _frozen_draw_argument(value: Any) -> Any:
+    """A recording's own copy of one draw argument.
+
+    Matplotlib hands the renderer the artist's live objects: a Spine's path
+    shares the vertex array ``Spine._adjust_location`` rewrites from the
+    axes' current view on every draw and extent query, and an Axis measures
+    its spine to place its label.  A recording that kept those objects was
+    a photograph that changed after it was taken.  On the rail, whose limits
+    move by design without a re-recording, one redraw of its axis left the
+    recorded left spine holding the new view's data coordinates under the
+    mapping of its recording, and every replay drew it up past the box.
+    Paths and arrays are copied and transforms frozen; the rest -- numbers,
+    strings, font properties -- cannot change under the recording.
+    """
+
+    from matplotlib.path import Path as GeometryPath
+    from matplotlib.transforms import Transform
+
+    if isinstance(value, GeometryPath):
+        return copy.deepcopy(value)
+    if isinstance(value, Transform):
+        return value.frozen()
+    if isinstance(value, np.ndarray):
+        return value.copy()
+    if isinstance(value, (list, tuple)):
+        return type(value)(_frozen_draw_argument(item) for item in value)
+    return value
+
+
 def _record_artist_draw(artist: Any, renderer: Any) -> _RecordedDraw | None:
     """Draw ``artist`` on ``renderer`` and return the renderer calls it made.
 
@@ -309,8 +339,10 @@ def _record_artist_draw(artist: Any, renderer: Any) -> _RecordedDraw | None:
     scratch buffer and no second draw -- by shadowing the renderer's draw
     methods for the duration and restoring whatever was there before,
     which may itself be an instance-level fitting such as the text memo.
-    An artist that asks for a method the recorder does not keep yields
-    ``None``: nothing partial is ever replayed.
+    Each call is kept with its own copy of every argument that could change
+    under it (see ``_frozen_draw_argument``), so a replay paints what was
+    recorded.  An artist that asks for a method the recorder does not keep
+    yields ``None``: nothing partial is ever replayed.
     """
 
     active: list[tuple[str, Any, tuple[Any, ...], dict[str, Any]]] = []
@@ -330,7 +362,17 @@ def _record_artist_draw(artist: Any, renderer: Any) -> _RecordedDraw | None:
             ) -> Any:
                 frozen = renderer.new_gc()
                 frozen.copy_properties(gc)
-                active.append((_name, frozen, args, dict(kwargs)))
+                active.append(
+                    (
+                        _name,
+                        frozen,
+                        _frozen_draw_argument(args),
+                        {
+                            key: _frozen_draw_argument(item)
+                            for key, item in kwargs.items()
+                        },
+                    )
+                )
                 return _original(gc, *args, **kwargs)
 
             if method_name in vars(renderer):
