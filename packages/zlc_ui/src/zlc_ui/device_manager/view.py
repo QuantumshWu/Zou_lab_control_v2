@@ -303,7 +303,7 @@ class DeviceControlView(QtWidgets.QWidget):
         columns.addWidget(self.limits_heading)
         columns.addWidget(self.live_heading)
         columns.addWidget(self.apply_heading)
-        columns.addWidget(self.status_heading, 1)
+        columns.addWidget(self.status_heading)
         outer.addWidget(self.columns)
 
         fields = projection.get("fields", {})
@@ -362,9 +362,8 @@ class DeviceControlView(QtWidgets.QWidget):
         apply = FluentButton("Apply", color=ACCENT)
         dot = FluentStatusDot(size=12)
         status = ElidedLabel("")
-        # The status column stretches, and elides a long sentence behind its
-        # tooltip; it still asks for the width of an ordinary one, so a row
-        # never opens with its dot and no words beside it.
+        # Status has one shared width. Long messages elide behind their
+        # tooltip, without moving the controls in another row.
         status.setMinimumWidth(
             status.fontMetrics().horizontalAdvance("Applying; latest queued")
         )
@@ -384,7 +383,7 @@ class DeviceControlView(QtWidgets.QWidget):
         apply.clicked.connect(lambda _checked=False, value=key: self._emit_apply(value))
         self._field_rows[key] = current, limits, live, apply, dot, status
         self._live_timers[key] = timer
-        return (current,), ((limits, 0), (live_host, 0), (apply, 0), (status_host, 1))
+        return (current,), ((limits, 0), (live_host, 0), (apply, 0), (status_host, 0))
 
     def _prune_rows(self) -> None:
         """Forget the cells of rows the form no longer has."""
@@ -396,16 +395,11 @@ class DeviceControlView(QtWidgets.QWidget):
         self._align_headings()
 
     def _align_headings(self) -> None:
-        """Put the headings on the SAME grid as the rows they name.
+        """One column budget for the header and every complete form row.
 
-        The headings are their own row of labels beside a form that lays out
-        its own; two layouts pretending to be one table only line up while
-        every column is the same width in both.  Field, Current and Desired
-        were kept in step by hand and the rest were given round numbers that no
-        widget had any reason to match, so Live apply, Apply and Status sat off
-        their columns.  Here each heading takes the width of the widget under
-        it, and the heading row borrows the row's own spacing and margins, so
-        there is one set of column widths and it is the one the rows use.
+        Only Desired expands. Two independent expanding columns let each
+        row's different editor minimum move the columns after it. Unit
+        pickers also share a width so the numeric editors have one right edge.
         """
 
         rows = tuple(self.form._rows.values())
@@ -422,32 +416,40 @@ class DeviceControlView(QtWidgets.QWidget):
             headings.setSpacing(layout.spacing())
         if layout.count() < 7:
             return
-        # label, current, editor, limits, live cell, apply, status.  A
-        # column is as wide as the widest thing IN it, heading included --
-        # sized to the widget alone, "Live apply" was clipped by its own
-        # switch.  The stretched columns (editor, status) resolve equally
-        # once the fixed ones agree.
-        for index, heading in (
-            (0, self.field_heading),
-            (3, self.limits_heading),
-            (4, self.live_heading),
-            (5, self.apply_heading),
-        ):
-            cells = [
-                row.layout().itemAt(index).widget()
-                for row in rows
-                if row.layout().count() > index
-            ]
-            cells = [cell for cell in cells if cell is not None]
-            if not cells:
-                continue
-            width = max(
-                [heading.sizeHint().width()]
-                + [cell.sizeHint().width() for cell in cells]
-            )
-            for widget in (heading, *cells):
-                if widget.width() != width or widget.minimumWidth() != width:
-                    widget.setFixedWidth(width)
+        pickers = tuple(self.form._unit_pickers.values())
+        if pickers:
+            width = max(picker.sizeHint().width() for picker in pickers)
+            for picker in pickers:
+                if picker.minimumWidth() != width or picker.maximumWidth() != width:
+                    picker.setFixedWidth(width)
+        header_cells = (
+            self.field_heading, self.current_heading, self.desired_heading,
+            self.limits_heading, self.live_heading, self.apply_heading, self.status_heading,
+        )
+        row_layouts = tuple(row.layout() for row in rows)
+        widths = []
+        for index, heading in enumerate(header_cells):
+            cells = (heading, *(row.itemAt(index).widget() for row in row_layouts))
+            width = max(max(cell.sizeHint().width(), cell.minimumSizeHint().width()) for cell in cells)
+            widths.append(width)
+            for cell in cells:
+                if index == 2:
+                    policy = cell.sizePolicy()
+                    if policy.horizontalPolicy() != QtWidgets.QSizePolicy.Expanding:
+                        cell.setSizePolicy(QtWidgets.QSizePolicy.Expanding, policy.verticalPolicy())
+                    if cell.minimumWidth() != width:
+                        cell.setMinimumWidth(width)
+                elif cell.minimumWidth() != width or cell.maximumWidth() != width:
+                    cell.setFixedWidth(width)
+            for row in (headings, *row_layouts):
+                stretch = 1 if index == 2 else 0
+                if row.stretch(index) != stretch:
+                    row.setStretch(index, stretch)
+        margins = (self.layout().contentsMargins(), self.form.layout().contentsMargins(), layout.contentsMargins())
+        minimum = sum(widths) + layout.spacing() * (len(widths) - 1)
+        minimum += sum(margin.left() + margin.right() for margin in margins)
+        if self.minimumWidth() != minimum:
+            self.setMinimumWidth(minimum)
 
     def align_columns(self) -> None:
         """Give every fixed column its width and let the layout settle.
