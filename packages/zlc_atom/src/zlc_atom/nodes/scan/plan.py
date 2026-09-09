@@ -410,7 +410,7 @@ def manual_axis(name: str, values: Sequence[float], unit: str = "") -> ScanAxis:
     return ScanAxis(MANUAL_PARAM_FAMILY + label, tuple(values), unit)
 
 
-def split_outer_axes(plan: ScanPlan) -> tuple[tuple[ScanAxis, ...], ScanPlan]:
+def split_outer_axes(plan: ScanPlan) -> tuple[tuple[ScanAxis, ...], tuple[ScanAxis, ...]]:
     """The host-advanced axes, and the plan the board plays underneath.
 
     A manual axis is walked by hand and a device axis by a ``tune()`` call,
@@ -418,19 +418,13 @@ def split_outer_axes(plan: ScanPlan) -> tuple[tuple[ScanAxis, ...], ScanPlan]:
     who moves what: the inner plan plays from one load, and neither a hand
     nor a host call can reach inside it. ScanPlan already stably places
     these axes outside board axes; the editor displays that same order.
+    An empty board part means a fixed Pulse at each host point, not a fake
+    scan axis or an empty public ScanPlan.
     """
 
     axes = plan.axes
     outer = tuple(axis for axis in axes if host_advanced_port(axis.port))
-    if not outer:
-        return (), plan
-    board = axes[len(outer):]
-    if not board:
-        raise ValueError(
-            "a seamless scan plays a table the board advances; a plan of "
-            "manual and device axes alone has no table to play"
-        )
-    return outer, ScanPlan(board)
+    return outer, axes[len(outer):]
 
 
 def bind_plan(

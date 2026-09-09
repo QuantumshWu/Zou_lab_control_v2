@@ -147,14 +147,8 @@ def test_an_authored_grid_the_spins_cannot_regenerate_is_kept_exactly() -> None:
         editor.deleteLater()
 
 
-def test_the_stepped_form_never_shows_the_boards_ordering_refusal() -> None:
-    """The stepped engine applies every axis itself; only the seamless
-    form has a board table whose ordering can be refused.
-
-    A device-only plan is a plan the stepped node runs, and its summary
-    read "a plan of manual and device axes alone has no table to play" --
-    the seamless rule, applied to a form that has no table.
-    """
+def test_host_only_scan_plans_need_no_dummy_board_axis_in_either_editor() -> None:
+    """Both forms describe a device-only plan using its real coordinates."""
 
     ensure_qt_app()
     device = ScanPort("device:rf:frequency", "rf.frequency", "Hz", 1e5, 5e6)
@@ -168,9 +162,8 @@ def test_the_stepped_form_never_shows_the_boards_ordering_refusal() -> None:
             editor._ports = (device,)
             editor._reconcile_rows(plan)
             editor._refresh_summary()
-        assert "no table to play" in seamless.summary.text()
-        assert "no table to play" not in stepped.summary.text()
-        assert "2 device settings are applied" in stepped.summary.text()
+            assert "2 device settings are applied" in editor.summary.text()
+            assert len(editor._current_plan().axes) == 1
     finally:
         stepped.deleteLater()
         seamless.deleteLater()

@@ -40,7 +40,6 @@ from zlc_atom.nodes.scan import (
     apply_api_overrides,
     plan_from_authored,
     scan_ports_for_devices,
-    split_outer_axes,
 )
 
 
@@ -143,8 +142,7 @@ def _build(
     # An operator's axis binds to no port at all: the run stops and asks
     # for it.  A device axis binds to an installed knob the HOST moves
     # between fires.  Everything left under them is the table the board
-    # plays -- split_outer_axes owns the ordering law and its refusals.
-    split_outer_axes(parsed)
+    # plays, if there are board axes. A host-only plan plays a fixed Pulse.
     bindable = tuple(
         axis
         for axis in parsed.axes
