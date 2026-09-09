@@ -10639,22 +10639,33 @@ class MatplotlibRenderer:
     ) -> None:
         """Paint Distribution classifier curves separately from ordinary fits."""
 
-        active: dict[int, tuple[FitOverlay, float, str]] = {}
+        active: dict[int, tuple[tuple[FitPolyline, ...], float, str]] = {}
         if isinstance(self.semantic_spec, HistogramPlot):
             for fallback, (overlay, threshold, label) in enumerate(
                 zip(overlays, thresholds, labels, strict=True)
             ):
                 index = fallback if overlay.facet_index is None else overlay.facet_index
+                # The classifier paints the two populations and their sum.
+                # The bimodal model's components are A, B and the flat
+                # background, in that order; the background is nobody's
+                # population and is not a classifier curve.
+                curves = tuple(
+                    polyline
+                    for polyline in overlay.polylines
+                    if polyline.role == "component" and polyline.component_index < 2
+                ) + tuple(
+                    polyline for polyline in overlay.polylines if polyline.role == "total"
+                )
                 if (
                     overlay.success
                     and threshold is not None
-                    and len(overlay.polylines) == 3
+                    and len(curves) == 3
                     and (
                         not isinstance(self.spec, FacetGridPlot)
                         or index < self._visible_facet_count
                     )
                 ):
-                    active[index] = (overlay, float(threshold), label)
+                    active[index] = (curves, float(threshold), label)
         for index in tuple(self._classifier_artists):
             if index in active:
                 continue
@@ -10662,7 +10673,7 @@ class MatplotlibRenderer:
             self._remove_artists((*lines, threshold_line, label))
 
         axes = self._axes.get("facet_cell", ())
-        for index, (overlay, threshold, content) in active.items():
+        for index, (curves, threshold, content) in active.items():
             axis = axes[index] if isinstance(self.spec, FacetGridPlot) else self.primary_axes
             artists = self._classifier_artists.get(index)
             if artists is None:
@@ -10695,7 +10706,7 @@ class MatplotlibRenderer:
                 artists = (lines, threshold_line, label)
                 self._classifier_artists[index] = artists
             lines, threshold_line, label = artists
-            for line, polyline in zip(lines, overlay.polylines, strict=True):
+            for line, polyline in zip(lines, curves, strict=True):
                 self._set_fit_line(line, polyline)
             y_low, y_high = axis.get_ylim()
             threshold_line.set_data((threshold, threshold), (y_low, y_high))

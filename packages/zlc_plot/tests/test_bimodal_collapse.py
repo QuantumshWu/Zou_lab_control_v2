@@ -111,13 +111,18 @@ def test_a_run_that_has_not_loaded_yet_publishes_no_threshold() -> None:
     must not happen is that such a fit reports a threshold and a fidelity.
     Measured here: 15 of 220 fits put a component on one bin, and every one
     of them holds fewer than four shots.
+
+    The rarest state is one shot in twenty: with the flat background in the
+    one-population model as well, a state of nine shots in 430 is strong
+    evidence but not the very strong (a BIC gain of ten) that the default
+    asks for -- at one in fifty a threshold arrives after some 800 shots.
     """
 
     engine = FitEngine()
     spikes = 0
     for seed in range(20):
         rng = np.random.default_rng(seed)
-        fraction = (0.02, 0.1, 0.5)[seed % 3]
+        fraction = (0.05, 0.1, 0.5)[seed % 3]
         values = _draw(rng, 30, fraction)
         warm = None
         for step in range(11):
