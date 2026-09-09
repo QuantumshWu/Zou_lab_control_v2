@@ -227,7 +227,7 @@ LOGIC_NODE = LogicNodeDescriptor(
             "camera.adapter",
             "camera",
             (
-                "exposure_seconds",
+                "exposure",
                 "roi_x",
                 "roi_y",
                 "roi_width",

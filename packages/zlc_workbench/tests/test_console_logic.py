@@ -568,7 +568,7 @@ def _claim_descriptor(
 def test_logic_claim_carries_descriptor_protected_fields(presenter) -> None:
     descriptor = _claim_descriptor(
         "protected",
-        protected_fields=("exposure_seconds", "roi_x"),
+        protected_fields=("exposure", "roi_x"),
     )
     presenter.catalog = LogicCatalog((descriptor,))
     node_id = presenter.add_logic("protected")
@@ -576,14 +576,14 @@ def test_logic_claim_carries_descriptor_protected_fields(presenter) -> None:
     assert presenter.start_logic(node_id) is True
     revision, owners, policy = presenter.session.device_use.field_policy(
         "camera",
-        ("exposure_seconds", "gain_db", "roi_width"),
+        ("exposure", "gain", "roi_width"),
         dependency_groups=(("roi_x", "roi_width"),),
     )
     assert revision > 0
     assert owners == (node_id,)
     assert policy == {
-        "exposure_seconds": (node_id,),
-        "gain_db": (),
+        "exposure": (node_id,),
+        "gain": (),
         "roi_width": (node_id,),
     }
 
@@ -597,13 +597,13 @@ def test_device_setting_history_records_only_worker_verified_active_changes(
     lease = session.device_use.prepare_logic(
         object(),
         "camera measurement",
-        (DeviceClaim("camera", "camera", device, ("exposure_seconds",)),),
+        (DeviceClaim("camera", "camera", device, ("exposure",)),),
         stop=lambda _reason: None,
         superseded=lambda: None,
     ).commit()
     session.record_device_tune(
         device_key="camera",
-        field="gain_db",
+        field="gain",
         requested=8.0,
         previous_effective=6.0,
         new_effective=8.0,
@@ -616,8 +616,8 @@ def test_device_setting_history_records_only_worker_verified_active_changes(
             "device_session_id": "camera-session",
             "settings_epoch": 1,
         },
-        previous_values={"gain_db": 6.0},
-        current_values={"gain_db": 8.0},
+        previous_values={"gain": 6.0},
+        current_values={"gain": 8.0},
         active_logic_owners=("camera measurement",),
     )
     event = {
@@ -636,7 +636,7 @@ def test_device_setting_history_records_only_worker_verified_active_changes(
     lease.release()
     assert session.record_device_tune(
         device_key="camera",
-        field="gain_db",
+        field="gain",
         requested=10.0,
         previous_effective=8.0,
         new_effective=10.0,
@@ -649,8 +649,8 @@ def test_device_setting_history_records_only_worker_verified_active_changes(
             "device_session_id": "camera-session",
             "settings_epoch": 2,
         },
-        previous_values={"gain_db": 8.0},
-        current_values={"gain_db": 10.0},
+        previous_values={"gain": 8.0},
+        current_values={"gain": 10.0},
         active_logic_owners=(),
     ) is None
     assert session.resolve_device_setting_records((event,)) == records

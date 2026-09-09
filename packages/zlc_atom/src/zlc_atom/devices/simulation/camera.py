@@ -197,22 +197,23 @@ class VirtualCamera:
         return (
             TunableField(
                 metadata=AuthoringField(
-                    "exposure_seconds",
+                    "exposure",
                     "float",
-                    "Exposure (s)",
+                    "Exposure",
                     float(self.config.exposure_seconds),
                     minimum=1e-6,
                     maximum=10.0,
+                    unit="s",
                 ),
                 current=current,
                 live_write=True,
-                dependency_group=("exposure_seconds",),
+                dependency_group=("exposure",),
             ),
         )
 
     def tunable_values(self) -> dict[str, float]:
         with self._condition:
-            return {"exposure_seconds": float(self._exposure_seconds)}
+            return {"exposure": float(self._exposure_seconds)}
 
     def settings_provenance(self) -> dict[str, object]:
         with self._condition:
@@ -232,7 +233,7 @@ class VirtualCamera:
         exposure = float(value)
         if not np.isfinite(exposure) or not (field.minimum <= exposure <= field.maximum):
             raise ValueError(
-                f"exposure_seconds must lie in [{field.minimum:g}, {field.maximum:g}]"
+                f"exposure must lie in [{field.minimum:g}, {field.maximum:g}] s"
             )
         with self._condition:
             if exposure != self._exposure_seconds:

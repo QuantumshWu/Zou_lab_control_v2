@@ -66,47 +66,47 @@ def test_a_published_tunable_is_listed_and_driven_over_the_wire(announcer) -> No
     assert isinstance(remote, RfSource)
 
     fields = {field.metadata.name: field for field in remote.tunable_fields()}
-    frequency = fields["frequency_hz"].metadata
+    frequency = fields["frequency"].metadata
     assert (frequency.minimum, frequency.maximum) == (500e6, 8e9)
     assert frequency.unit == "Hz"
 
-    assert remote.tune("frequency_hz", 2.5e9) == 2.5e9
-    assert source.tunable_values()["frequency_hz"] == pytest.approx(2.5e9), (
+    assert remote.tune("frequency", 2.5e9) == 2.5e9
+    assert source.tunable_values()["frequency"] == pytest.approx(2.5e9), (
         "the tune must have reached the machine that owns the instrument"
     )
-    assert remote.tunable_values()["frequency_hz"] == pytest.approx(2.5e9)
+    assert remote.tunable_values()["frequency"] == pytest.approx(2.5e9)
     assert remote.settings_provenance()["device_session_id"] == (
         source.settings_provenance()["device_session_id"]
     )
 
     # A refusal crosses the wire as a refusal, message intact.
     with pytest.raises(RuntimeError, match="10.*Hz grid"):
-        remote.tune("frequency_hz", 2_500_000_005.0)
+        remote.tune("frequency", 2_500_000_005.0)
 
     # Bounds are device truth, not open-time facts: the RF owner moves its
     # commandable window when a policy edge is tuned, and a Refresh (or the
     # scan port projection) must offer the window the device accepts NOW.
     from zlc_atom.nodes.scan.plan import scan_ports_for_devices
 
-    assert remote.tune("frequency_low_hz", 2e9) == 2e9
+    assert remote.tune("frequency_low", 2e9) == 2e9
     refreshed = {field.metadata.name: field for field in remote.tunable_fields()}
     local = {field.metadata.name: field for field in source.tunable_fields()}
     assert (
-        refreshed["frequency_hz"].metadata.minimum,
-        refreshed["frequency_hz"].metadata.maximum,
+        refreshed["frequency"].metadata.minimum,
+        refreshed["frequency"].metadata.maximum,
     ) == (
-        local["frequency_hz"].metadata.minimum,
-        local["frequency_hz"].metadata.maximum,
+        local["frequency"].metadata.minimum,
+        local["frequency"].metadata.maximum,
     ) == (2e9, 8e9)
-    assert refreshed["frequency_hz"].current == pytest.approx(2.5e9)
+    assert refreshed["frequency"].current == pytest.approx(2.5e9)
     port = next(
         item
         for item in scan_ports_for_devices({"rf": remote})
-        if item.port.endswith(":frequency_hz")
+        if item.port.endswith(":frequency")
     )
     assert (port.lo, port.hi) == (2e9, 8e9)
     with pytest.raises(RuntimeError, match="must lie in"):
-        remote.tune("frequency_hz", 1e9)
+        remote.tune("frequency", 1e9)
 
 
 def test_unit_requests_cross_the_existing_fabric_dispatch(monkeypatch) -> None:
@@ -127,7 +127,7 @@ def test_unit_requests_cross_the_existing_fabric_dispatch(monkeypatch) -> None:
     def convert(name, value, source_unit, target_unit):
         calls.append(("convert", name, value, source_unit, target_unit))
         return tuple(item * 2 for item in value) if isinstance(value, (list, tuple)) else value * 2
-    source = SimpleNamespace(tunable_fields=lambda: (read("power_dbm"),),
+    source = SimpleNamespace(tunable_fields=lambda: (read("power"),),
         read_tunable_in_unit=read, tune_in_unit=tune, convert_tunable_value=convert)
     announcer = object.__new__(DeviceAnnouncer)
     announcer._registry_lock = threading.Lock()
@@ -135,13 +135,13 @@ def test_unit_requests_cross_the_existing_fabric_dispatch(monkeypatch) -> None:
         type_id="rf", parameters={}, tunable=source)}
     monkeypatch.setattr(module, "_call", lambda _host, _port, request: announcer._dispatch(request))
     remote = RemoteTunableDevice(host="unused", port=0, instance_id="rf")
-    assert remote.read_tunable_in_unit("power_dbm").metadata.unit == "Vpp"
-    projected = remote.read_tunable_in_unit("power_dbm", "mVpp")
+    assert remote.read_tunable_in_unit("power").metadata.unit == "Vpp"
+    projected = remote.read_tunable_in_unit("power", "mVpp")
     assert projected.metadata.unit == "mVpp" and projected.current == 100.0
-    assert remote.tune_in_unit("power_dbm", 135.0, "mVpp") == 135.125
-    assert calls[-1] == ("tune", "power_dbm", 135.0, "mVpp")
-    assert remote.convert_tunable_value("power_dbm", (1.0, 2.0), "Vpp", "dBm") == (2.0, 4.0)
-    assert calls[-1] == ("convert", "power_dbm", (1.0, 2.0), "Vpp", "dBm")
+    assert remote.tune_in_unit("power", 135.0, "mVpp") == 135.125
+    assert calls[-1] == ("tune", "power", 135.0, "mVpp")
+    assert remote.convert_tunable_value("power", (1.0, 2.0), "Vpp", "dBm") == (2.0, 4.0)
+    assert calls[-1] == ("convert", "power", (1.0, 2.0), "Vpp", "dBm")
 
 
 def test_an_endpoint_device_is_announced_for_its_own_protocol(announcer) -> None:

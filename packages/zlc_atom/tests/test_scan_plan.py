@@ -109,7 +109,7 @@ def test_binding_refuses_unknown_ports_and_out_of_range_values() -> None:
     )
     assert bound[0].label == "da_bias_z"
 
-    power = ScanPort("device:rf:ch1_power_dbm", "rf.ch1_power_dbm", "dBm", -30.0, 10.0)
+    power = ScanPort("device:rf:ch1_power", "rf.ch1_power", "dBm", -30.0, 10.0)
     authored = ScanAxis(power.port, (135.0, 247.0), "mVpp")
     plan = ScanPlan((authored,))
     assert bind_plan(plan, (power,)) == (power,)
@@ -135,18 +135,18 @@ def test_tunable_devices_project_device_ports() -> None:
         tunables = tunable_devices(installation)
         assert "mot_camera" in tunables and "camera" in tunables
         (exposure,) = tunables["mot_camera"].tunable_fields()
-        assert exposure.metadata.name == "exposure_seconds"
+        assert exposure.metadata.name == "exposure"
         assert exposure.current == tunables["mot_camera"].tunable_values()[
-            "exposure_seconds"
+            "exposure"
         ]
         assert exposure.live_write is True
-        assert exposure.dependency_group == ("exposure_seconds",)
+        assert exposure.dependency_group == ("exposure",)
         ports = scan_ports_for_devices(tunables)
         by_name = {port.port: port for port in ports}
-        key = DEVICE_PARAM_FAMILY + "mot_camera:exposure_seconds"
+        key = DEVICE_PARAM_FAMILY + "mot_camera:exposure"
         assert key in by_name
         port = by_name[key]
-        assert port.label == "mot_camera.exposure_seconds"
+        assert port.label == "mot_camera.exposure"
         assert 0 < port.lo < port.hi
     finally:
         installation.close()
@@ -243,9 +243,16 @@ def test_a_region_lands_on_the_axis_the_picture_drew_when_two_ports_share_a_name
     from zlc_plot.state import DisplayStateStore
     from zlc_workbench.selection import panel_selection_from_plot
 
-    power = ScanAxis("device:rf:ch1_power_dbm", tuple(np.linspace(135.0, 247.0, 10)), "mVpp")
-    power_id = scan_axis_ids(("rf.ch1_power_dbm",))[0]
-    schema = scan_dataset_schema(_source_schema(shots=1), ScanPlan((power,)).rows(), (("rf.ch1_power_dbm", "mVpp"),))
+    power = ScanAxis("device:rf:ch1_power", tuple(np.linspace(135.0, 247.0, 10)), "mVpp")
+    saved_plan = json.loads(json.dumps(ScanPlan((power,)).to_tree()))
+    assert saved_plan["axes"][0]["port"] == "device:rf:ch1_power"
+    assert saved_plan["axes"][0]["unit"] == "mVpp"
+    assert ScanPlan.from_tree(saved_plan).axes == (power,)
+    power_id = scan_axis_ids(("rf.ch1_power",))[0]
+    assert power_id == "scan.rf.ch1_power"
+    schema = scan_dataset_schema(_source_schema(shots=1), ScanPlan((power,)).rows(), (("rf.ch1_power", "mVpp"),))
+    saved_axis = next(axis for axis in schema.point_domain.axes if axis.axis_id.value == power_id)
+    assert saved_axis.unit == "mVpp" and tuple(saved_axis.coordinates) == power.values
     snapshot = owned_snapshot_from_arrays(schema, np.zeros(schema.physical_shape), 0)
     spec = CurvePlot(AxisRef.point(power_id))
     for shown_unit, shown_bounds in (("mVpp", (150.0, 220.0)), ("Vpp", (0.15, 0.22))):

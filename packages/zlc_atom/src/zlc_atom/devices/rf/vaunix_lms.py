@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from zlc_atom.devices.rf.contract import RfSourceBase, snap_to_grid
+from zlc_atom.devices.rf.contract import FREQUENCY_FIELD, POWER_FIELD, RfSourceBase, snap_to_grid
 from zlc_atom.devices.vendor import resolve_vendor_file
 
 #: The instrument's own units, from the vendor API reference.
@@ -197,7 +197,7 @@ class VaunixLmsRfSource(RfSourceBase):
     # A Lab Brick has one output, so the channel is always the bare "".
     def _write_frequency(self, channel: str, value_hz: float) -> float:
         snap_to_grid(
-            value_hz, FREQUENCY_UNIT_HZ, name="frequency_hz", unit="Hz"
+            value_hz, FREQUENCY_UNIT_HZ, name=FREQUENCY_FIELD, unit="Hz"
         )
         self._library.set_frequency(
             self._handle, round(value_hz / FREQUENCY_UNIT_HZ)
@@ -205,7 +205,7 @@ class VaunixLmsRfSource(RfSourceBase):
         return self._read_frequency(channel)
 
     def _write_power(self, channel: str, value_dbm: float) -> float:
-        snap_to_grid(value_dbm, POWER_UNIT_DBM, name="power_dbm", unit="dBm")
+        snap_to_grid(value_dbm, POWER_UNIT_DBM, name=POWER_FIELD, unit="dBm")
         self._library.set_power(
             self._handle, round(value_dbm / POWER_UNIT_DBM)
         )

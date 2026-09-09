@@ -141,7 +141,7 @@ class RigolDg4000Config:
 
 
 #: ch1 -> :SOURce1/:OUTPut1.  The channel NAMES are field-name prefixes
-#: (ch1_frequency_hz), the numbers are SCPI's.
+#: (ch1_frequency), the numbers are SCPI's.
 _CHANNELS = ("ch1", "ch2")
 #: The three amplitude units a DG4000 channel can be displaying.
 _DBM = "DBM"
@@ -360,7 +360,7 @@ class RigolDg4000RfSource(RfSourceBase):
         return native, 10.0 ** prefix.exponent
 
     def _check_policy_units(self, name: str, *units: str) -> None:
-        policy_unit = next((unit for field, _label, unit in WINDOW_FIELDS if field == name), None)
+        policy_unit = next((unit for field, _label, unit, _config_name in WINDOW_FIELDS if field == name), None)
         if policy_unit is None or DEFAULT_UNITS.resolve(policy_unit).dimension != "power":
             return
         if any(unit and self._amplitude_unit_parts(unit)[0] in (_VPP, _VRMS) for unit in units):

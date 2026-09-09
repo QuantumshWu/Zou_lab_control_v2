@@ -651,37 +651,38 @@ def test_the_camera_volunteers_its_analog_gain_and_reports_the_real_one() -> Non
 
     (tunable,) = adapter.tunable_fields()
     field = tunable.metadata
-    assert field.name == "gain_db"
+    assert field.name == "gain"
+    assert field.unit == "dB"
     assert (field.minimum, field.maximum) == (0.0, 24.0)
     assert field.default == pytest.approx(6.0)
     assert tunable.current == pytest.approx(6.0)
     assert tunable.live_write is True
-    assert tunable.dependency_group == ("gain_db",)
+    assert tunable.dependency_group == ("gain",)
     provenance = adapter.settings_provenance()
     assert provenance["settings_epoch"] == 0
-    assert adapter.tunable_values() == {"gain_db": pytest.approx(6.0)}
+    assert adapter.tunable_values() == {"gain": pytest.approx(6.0)}
 
-    assert adapter.tune("gain_db", 12.0) == pytest.approx(12.0)
+    assert adapter.tune("gain", 12.0) == pytest.approx(12.0)
     assert camera.Gain.GetValue() == pytest.approx(12.0)
     refreshed = adapter.tunable_fields()[0]
     assert refreshed.metadata.default == pytest.approx(6.0)
     assert refreshed.current == pytest.approx(12.0)
-    assert adapter.tunable_values() == {"gain_db": pytest.approx(12.0)}
+    assert adapter.tunable_values() == {"gain": pytest.approx(12.0)}
     assert adapter.settings_provenance() == {
         "device_session_id": provenance["device_session_id"],
         "settings_epoch": 1,
     }
-    assert adapter.tune("gain_db", 12.0) == pytest.approx(12.0)
+    assert adapter.tune("gain", 12.0) == pytest.approx(12.0)
     assert adapter.settings_provenance()["settings_epoch"] == 1
     # A working point carries the LINEAR factor, which is what every reader of
     # one means by gain; the camera states dB.
     assert adapter.working_point().gain == pytest.approx(10.0 ** (12.0 / 20.0))
 
-    with pytest.raises(ValueError, match="gain_db must lie in"):
-        adapter.tune("gain_db", 30.0)
+    with pytest.raises(ValueError, match="gain must lie in"):
+        adapter.tune("gain", 30.0)
     assert adapter.settings_provenance()["settings_epoch"] == 1
     with pytest.raises(ValueError, match="no tunable field"):
-        adapter.tune("exposure_seconds", 0.1)
+        adapter.tune("exposure", 0.1)
     other = PylonCameraAdapter(_config(), camera=_FakeCamera())
     assert (
         other.settings_provenance()["device_session_id"]
@@ -710,7 +711,7 @@ def test_live_gain_and_acquisition_readback_share_one_sdk_lane() -> None:
 
     def tune() -> None:
         try:
-            adapter.tune("gain_db", 8.0)
+            adapter.tune("gain", 8.0)
         except BaseException as error:
             errors.append(error)
 
@@ -756,7 +757,7 @@ def test_a_live_gain_change_marks_every_later_read_of_the_arm_as_a_transition(
     session_id = adapter.settings_provenance()["device_session_id"]
     adapter.arm(2, source_group_sizes=(2,), buffer_frame_count=2, timeout=0.5)
     # Both frames were ready under epoch 0 before the tune.
-    adapter.tune("gain_db", 8.0)
+    adapter.tune("gain", 8.0)
     first = adapter.read_frame_records(1, timeout=0.5, exact=True)[0]
     second = adapter.read_frame_records(1, timeout=0.5, exact=True)[0]
     assert (int(first.image[0, 0]), int(second.image[0, 0])) == (10, 20)

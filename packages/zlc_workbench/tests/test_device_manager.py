@@ -1262,12 +1262,12 @@ def test_each_published_device_reads_only_its_own_log(tmp_path) -> None:
         # Before any publishing, the device's OWN interactions already
         # narrate: the contract layer tags every tune with the hardware
         # identity, whoever called it.
-        source.tune("frequency_hz", 1_000_000_000.0)
+        source.tune("frequency", 1_000_000_000.0)
         assert manager.show_device_log("rf") is True
         (_key, local_snapshot) = view.device_logs_opened[-1]
         _total, local_lines = local_snapshot()
         assert any(
-            "TUNE field=frequency_hz" in line
+            "TUNE field=frequency" in line
             and line.endswith(f"device={source.identity}")
             for line in local_lines
         ), local_lines
@@ -1275,10 +1275,10 @@ def test_each_published_device_reads_only_its_own_log(tmp_path) -> None:
         assert manager.toggle_remote("rf") is True
         logging.getLogger("zlc_pulse.remote").info("ZLC NOISE for the board")
         logging.getLogger("zlc_atom.devices.remote.fabric").info(
-            "FABRIC TUNE device=rf field=frequency_hz value=1.0"
+            "FABRIC TUNE device=rf field=frequency value=1.0"
         )
         logging.getLogger("zlc_atom.devices.remote.fabric").info(
-            "FABRIC TUNE device=other field=power_dbm value=2.0"
+            "FABRIC TUNE device=other field=power value=2.0"
         )
         logging.getLogger("zlc_atom.devices.remote.fabric").info(
             "FABRIC WITHDRAW device=rf"
@@ -1288,7 +1288,7 @@ def test_each_published_device_reads_only_its_own_log(tmp_path) -> None:
         assert key == "rf"
         _total, lines = snapshot()
         tails = [line.split("] ", 1)[1] for line in lines]
-        assert "FABRIC TUNE device=rf field=frequency_hz value=1.0" in tails
+        assert "FABRIC TUNE device=rf field=frequency value=1.0" in tails
         assert "FABRIC WITHDRAW device=rf" in tails
         assert not any("device=other" in line for line in tails), (
             "another device's lines must not appear"

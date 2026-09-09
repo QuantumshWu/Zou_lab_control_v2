@@ -488,14 +488,14 @@ def test_device_scan_keeps_actual_readback_without_comparing_the_setpoint() -> N
         def tunable_fields(self) -> tuple[TunableField, ...]:
             return (
                 TunableField(
-                    AuthoringField("gain_db", "float", "gain", 0.0, minimum=0.0, maximum=24.0),
+                    AuthoringField("gain", "float", "gain", 0.0, minimum=0.0, maximum=24.0),
                     0.0,
                     True,
-                    ("gain_db",),
+                    ("gain",),
                 ),
             )
 
-    port_name = DEVICE_PARAM_FAMILY + "camera:gain_db"
+    port_name = DEVICE_PARAM_FAMILY + "camera:gain"
     tunables = {"camera": QuantizedDevice()}
     knobs = ScanDeviceKnobs(tunables)
     assert knobs.move(port_name, 3.0) == 3.5
@@ -506,7 +506,7 @@ def test_device_scan_keeps_actual_readback_without_comparing_the_setpoint() -> N
     requested = -12.83089524390248
     returned = -12.830898342271585
     device = SimpleNamespace(tune=lambda _field, _value: returned)
-    assert tune_value(device, "ch1_power_dbm", requested) == returned
+    assert tune_value(device, "ch1_power", requested) == returned
 
 
 def _device_stepped(knob: _Knob, sequencer: _FakeSequencer, source: _FakeSource):
@@ -650,7 +650,7 @@ def test_scanning_a_device_port_moves_the_camera_exposure() -> None:
         plan = ScanPlan(
             (
                 ScanAxis(
-                    DEVICE_PARAM_FAMILY + "mot_camera:exposure_seconds",
+                    DEVICE_PARAM_FAMILY + "mot_camera:exposure",
                     exposures,
                 ),
             )
@@ -668,7 +668,7 @@ def test_scanning_a_device_port_moves_the_camera_exposure() -> None:
         (claim,) = scan_node.resolved_device_claims()
         assert claim.device_key == "mot_camera"
         assert claim.device is installation.device("mot_camera")
-        assert claim.protected_fields == ("exposure_seconds",)
+        assert claim.protected_fields == ("exposure",)
         host = _scan_host(scan_node, plane)
         host.start()
         deadline = time.monotonic() + 240.0
@@ -692,7 +692,7 @@ def test_scanning_a_device_port_moves_the_camera_exposure() -> None:
         document = published.run_record["device_snapshots"]["sequencer"]["pulse"]
         assert document["periods"], "the played timing travels with the record"
         assert published.run_record["device_snapshots"][role]["fields"][
-            "exposure_seconds"
+            "exposure"
         ]["scan_values"] == exposures
         value = plane.current_dataset(host.signal_key("scan"))
         frames = np.asarray(value.block.values, dtype=float)

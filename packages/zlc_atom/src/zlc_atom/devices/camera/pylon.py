@@ -277,22 +277,23 @@ class PylonCameraAdapter:
         return (
             TunableField(
                 metadata=AuthoringField(
-                    "gain_db",
+                    "gain",
                     "float",
-                    "Gain (dB)",
+                    "Gain",
                     self._gain_default,
                     minimum=float(node.GetMin()),
                     maximum=float(node.GetMax()),
+                    unit="dB",
                 ),
                 current=float(node.GetValue()),
                 live_write=True,
-                dependency_group=("gain_db",),
+                dependency_group=("gain",),
             ),
         )
 
     @_serialized
     def tunable_values(self) -> dict[str, float]:
-        return {"gain_db": float(self._gain_node().GetValue())}
+        return {"gain": float(self._gain_node().GetValue())}
 
     @_serialized
     def settings_provenance(self) -> dict[str, object]:
@@ -315,7 +316,7 @@ class PylonCameraAdapter:
         gain = float(value)
         if not np.isfinite(gain) or not (field.minimum <= gain <= field.maximum):
             raise ValueError(
-                f"gain_db must lie in [{field.minimum:g}, {field.maximum:g}]"
+                f"gain must lie in [{field.minimum:g}, {field.maximum:g}] dB"
             )
         node = self._gain_node()
         previous = float(node.GetValue())

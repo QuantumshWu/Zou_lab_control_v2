@@ -245,6 +245,7 @@ def test_a_unit_that_cannot_be_scaled_is_shown_plainly() -> None:
     for value, unit, shown in (
         (4096, "count", "4096 count"),
         (512, "pixel", "512 pixel"),
+        (6.0, "dB", "6 dB"),
         (1.5, "1", "1.5"),
         (2000.0, "ms", "2000 ms"),
         (2000.0, "us", "2000 µs"),
@@ -254,6 +255,10 @@ def test_a_unit_that_cannot_be_scaled_is_shown_plainly() -> None:
         text = format_quantity(value, unit)
         assert text == shown
         assert parse_quantity(text, unit) == value
+
+    assert DEFAULT_UNITS.display_choices("dB") == ("dB",)
+    with pytest.raises(UnitError, match="incompatible"):
+        DEFAULT_UNITS.convert(6.0, "dB", "dBm")
 
 
 def test_a_reciprocal_unit_is_the_exact_reciprocal_or_nothing() -> None:

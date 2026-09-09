@@ -1047,10 +1047,10 @@ try:
     while 'camera' not in flow.device_controls and not deadline.hasExpired():
         application.processEvents(); QtTest.QTest.qWait(5)
     camera_control = flow.device_controls['camera']
-    assert 'exposure_seconds' in camera_control._view.form.keys, 'opened on its first reading'
-    exposure = camera_control._view.form.widget_for('exposure_seconds')
+    assert 'exposure' in camera_control._view.form.keys, 'opened on its first reading'
+    exposure = camera_control._view.form.widget_for('exposure')
     exposure.setValue(0.05)
-    camera_control._view._field_rows['exposure_seconds'][2].click()
+    camera_control._view._field_rows['exposure'][2].click()
     application.processEvents()
     camera = flow.session.installation.device('camera')
     deadline = QtCore.QDeadlineTimer(5000)
@@ -1069,9 +1069,9 @@ try:
         (DeviceClaim('camera', 'camera', camera),),
     )
     try:
-        exposure = camera_control._view.form.widget_for('exposure_seconds')
+        exposure = camera_control._view.form.widget_for('exposure')
         exposure.setValue(0.06)
-        camera_control._view._field_rows['exposure_seconds'][2].click()
+        camera_control._view._field_rows['exposure'][2].click()
         application.processEvents()
         (field,) = camera.tunable_fields()
         assert field.current == 0.05, 'Control must not bypass the session claim'
@@ -1274,14 +1274,14 @@ try:
     while 'camera' not in flow.device_controls and not deadline.hasExpired():
         application.processEvents(); QtTest.QTest.qWait(5)
     control = flow.device_controls['camera']
-    assert 'exposure_seconds' in control._view.form.keys, 'opened on its first reading'
+    assert 'exposure' in control._view.form.keys, 'opened on its first reading'
     threading.Timer(0.4, release.set).start()
 
-    exposure = control._view.form.widget_for('exposure_seconds')
+    exposure = control._view.form.widget_for('exposure')
     before_turns = len(heartbeat)
     started_at = time.monotonic()
     exposure.setValue(0.05)
-    control._view._field_rows['exposure_seconds'][2].click()
+    control._view._field_rows['exposure'][2].click()
     returned_in = time.monotonic() - started_at
     assert returned_in < 0.1, returned_in
     deadline = QtCore.QDeadlineTimer(1000)
@@ -1292,7 +1292,7 @@ try:
     while len(heartbeat) == before_turns and not deadline.hasExpired():
         application.processEvents(); QtTest.QTest.qWait(5)
     assert len(heartbeat) > before_turns, 'Qt timer stopped during tune'
-    assert 'applying exposure_seconds' in control._view.status_strip.text()
+    assert 'applying exposure' in control._view.status_strip.text()
     stop_turn = []
     flow.console.stop_task_requested.connect(lambda: stop_turn.append(True))
     stop_button = flow.console._view.status_strip.action_button
@@ -1302,14 +1302,14 @@ try:
     assert stop_turn == [True], 'Stop intent could not take a Qt owner turn'
 
     QtTest.QTest.mouseClick(
-        control._view._field_rows['exposure_seconds'][1],
+        control._view._field_rows['exposure'][1],
         QtCore.Qt.LeftButton,
     )
     exposure.setValue(0.06)
     exposure.setValue(0.07)
     QtTest.QTest.qWait(110); application.processEvents()
     assert len(calls) == 1, 'latest-only write bypassed the active vendor call'
-    assert flow._device_tune_pending == {('camera', 'exposure_seconds'): (0.07, '')}
+    assert flow._device_tune_pending == {('camera', 'exposure'): (0.07, '')}
     assert control._view.status_strip.current_severity == 'task'
     control.close(); application.processEvents()
     assert control.is_visible(), 'hung tune control claimed it had closed'
@@ -1435,9 +1435,9 @@ def test_control_apply_sends_the_authored_unit_and_keeps_canonical_provenance(wo
     registry = UnitRegistry(DEFAULT_UNITS.resolve(name) for name in DEFAULT_UNITS.distinct_symbols())
     registry.register(Unit("Vpp", "power", VoltageIntoLoad(75.0), prefixable=True), replace=True)
     def fields():
-        return (TunableField(AuthoringField("power_dbm", "float", "Power", unit="dBm",
+        return (TunableField(AuthoringField("power", "float", "Power", unit="dBm",
                     minimum=-50.0, maximum=20.0),
-                    float(registry.convert(state["volts"], "Vpp", "dBm")), True, ("power_dbm",)),)
+                    float(registry.convert(state["volts"], "Vpp", "dBm")), True, ("power",)),)
     def read(name, unit=""):
         unit = unit or "Vpp"
         return TunableField(AuthoringField(name, "float", "Power", unit=unit),
@@ -1463,46 +1463,46 @@ def test_control_apply_sends_the_authored_unit_and_keeps_canonical_provenance(wo
     flow.device_controls["rf"] = control
     converting = []
     flow._device_worker_run = lambda work, done, _failed: converting.append((work, done))
-    flow._set_device_control_unit("rf", "power_dbm", "mVpp")
-    pending_field = flow._device_control_projection("rf")["fields"]["power_dbm"]
+    flow._set_device_control_unit("rf", "power", "mVpp")
+    pending_field = flow._device_control_projection("rf")["fields"]["power"]
     assert pending_field["editable"]
     assert not pending_field["apply_enabled"] and not pending_field["live_enabled"]
-    flow._queue_device_tune("rf", "power_dbm", 135.0, "mVpp")
+    flow._queue_device_tune("rf", "power", 135.0, "mVpp")
     assert calls == [], "Apply ran before its display unit conversion completed"
     work, done = converting.pop()
     done(work())
     flow._device_worker_run = lambda work, done, _failed: done(work())
-    assert model["desired"]["power_dbm"][0] == pytest.approx(100.0)
+    assert model["desired"]["power"][0] == pytest.approx(100.0)
     flow._request_device_control_refresh("rf")
     assert calls == []
-    assert flow._device_control_projection("rf")["fields"]["power_dbm"]["apply_enabled"]
-    flow._set_device_control_desired("rf", "power_dbm", 135.0, "mVpp")
-    flow._queue_device_tune("rf", "power_dbm", 135.0, "mVpp")
-    assert calls == [("power_dbm", 135.0, "mVpp")], model["status"]
-    assert model["status"]["power_dbm"] == ("Applied", "ready")
-    assert model["desired"]["power_dbm"][0] == pytest.approx(135.125)
-    assert model["desired"]["power_dbm"][1] == "mVpp"
+    assert flow._device_control_projection("rf")["fields"]["power"]["apply_enabled"]
+    flow._set_device_control_desired("rf", "power", 135.0, "mVpp")
+    flow._queue_device_tune("rf", "power", 135.0, "mVpp")
+    assert calls == [("power", 135.0, "mVpp")], model["status"]
+    assert model["status"]["power"] == ("Applied", "ready")
+    assert model["desired"]["power"][0] == pytest.approx(135.125)
+    assert model["desired"]["power"][1] == "mVpp"
     assert model["tunables"][0].metadata.unit == "mVpp"
     assert not model["unit_drafts"]
     assert records[0]["requested"] == 135.0 and records[0]["requested_unit"] == "mVpp"
-    assert records[0]["new_effective"] == records[0]["current_values"]["power_dbm"]
+    assert records[0]["new_effective"] == records[0]["current_values"]["power"]
     assert records[0]["new_effective"] == pytest.approx(float(registry.convert(.135125, "Vpp", "dBm")))
     standing = state["volts"]
-    flow._set_device_control_unit("rf", "power_dbm", "dBm")
+    flow._set_device_control_unit("rf", "power", "dBm")
     assert len(calls) == 1 and state["volts"] == standing
     flow._request_device_control_refresh("rf")
-    assert flow._device_control_projection("rf")["fields"]["power_dbm"]["apply_enabled"]
-    value, unit = model["desired"]["power_dbm"]
-    flow._queue_device_tune("rf", "power_dbm", value, unit)
+    assert flow._device_control_projection("rf")["fields"]["power"]["apply_enabled"]
+    value, unit = model["desired"]["power"]
+    flow._queue_device_tune("rf", "power", value, unit)
     assert state["volts"] == pytest.approx(standing), "unit-only Apply changed the 75-ohm working point"
     pending = []
     flow._device_worker_run = lambda work, done, _failed: pending.append((done, work()))
-    flow._set_device_control_desired("rf", "power_dbm", value + 1, unit)
-    flow._queue_device_tune("rf", "power_dbm", value + 1, unit)
-    flow._set_device_control_desired("rf", "power_dbm", value + 2, unit)
+    flow._set_device_control_desired("rf", "power", value + 1, unit)
+    flow._queue_device_tune("rf", "power", value + 1, unit)
+    flow._set_device_control_desired("rf", "power", value + 2, unit)
     done, result = pending.pop()
     done(result)
-    assert model["desired"]["power_dbm"] == (value + 2, unit), "an old Apply overwrote the newer draft"
+    assert model["desired"]["power"] == (value + 2, unit), "an old Apply overwrote the newer draft"
     flow.session.device_use.assert_idle()
 
 
@@ -1525,7 +1525,7 @@ def test_device_control_risk_unlock_is_field_scoped_and_owner_scoped(
                 "camera",
                 "camera",
                 device,
-                ("exposure_seconds",),
+                ("exposure",),
             ),
         ),
         stop=lambda _reason: None,
@@ -1538,35 +1538,35 @@ def test_device_control_risk_unlock_is_field_scoped_and_owner_scoped(
         "tunables": (
             TunableField(
                 AuthoringField(
-                    "exposure_seconds", "float", "Exposure", 0.1
+                    "exposure", "float", "Exposure", 0.1
                 ),
                 0.1,
                 True,
-                ("exposure_seconds",),
+                ("exposure",),
             ),
             TunableField(
-                AuthoringField("gain_db", "float", "Gain", 6.0),
+                AuthoringField("gain", "float", "Gain", 6.0),
                 6.0,
                 True,
-                ("gain_db",),
+                ("gain",),
             ),
         ),
-        "current": {"exposure_seconds": 0.1, "gain_db": 6.0},
-        "desired": {"exposure_seconds": (0.1, ""), "gain_db": (6.0, "")},
+        "current": {"exposure": 0.1, "gain": 6.0},
+        "desired": {"exposure": (0.1, ""), "gain": (6.0, "")},
         "live": {},
         "status": {},
     }
 
     locked = flow._device_control_projection("camera")
-    assert locked["fields"]["exposure_seconds"]["editable"] is False
-    assert locked["fields"]["gain_db"]["editable"] is False
+    assert locked["fields"]["exposure"]["editable"] is False
+    assert locked["fields"]["gain"]["editable"] is False
     flow._device_control_risk["camera"] = (
         "camera-session",
         locked["owner_revision"],
     )
     accepted = flow._device_control_projection("camera")
-    assert accepted["fields"]["exposure_seconds"]["editable"] is False
-    assert accepted["fields"]["gain_db"]["editable"] is True
+    assert accepted["fields"]["exposure"]["editable"] is False
+    assert accepted["fields"]["gain"]["editable"] is True
 
     lease.release()
     replacement = coordinator.prepare_logic(
@@ -1577,7 +1577,7 @@ def test_device_control_risk_unlock_is_field_scoped_and_owner_scoped(
                 "camera",
                 "camera",
                 device,
-                ("exposure_seconds",),
+                ("exposure",),
             ),
         ),
         stop=lambda _reason: None,
@@ -1585,7 +1585,7 @@ def test_device_control_risk_unlock_is_field_scoped_and_owner_scoped(
     ).commit()
     changed = flow._device_control_projection("camera")
     assert changed["risk_accepted"] is False
-    assert changed["fields"]["gain_db"]["editable"] is False
+    assert changed["fields"]["gain"]["editable"] is False
     replacement.release()
 
 
@@ -1650,7 +1650,7 @@ def test_a_policy_change_projects_each_control_once(workspace) -> None:
     def projection(key: str) -> dict:
         computed.append(key)
         editable = len(computed) > 1
-        return {"fields": {"frequency_hz": {"editable": editable}}}
+        return {"fields": {"frequency": {"editable": editable}}}
 
     flow._device_control_projection = projection
     flow._refresh_device_control_policies()
@@ -1659,11 +1659,11 @@ def test_a_policy_change_projects_each_control_once(workspace) -> None:
     assert control.projections[0] is not None
 
     computed.clear()
-    flow._device_tune_pending[("rf", "frequency_hz")] = 1.0e9
+    flow._device_tune_pending[("rf", "frequency")] = 1.0e9
     flow._refresh_device_control_policies()
     assert computed == ["rf", "rf"]
-    assert ("rf", "frequency_hz") not in flow._device_tune_pending
+    assert ("rf", "frequency") not in flow._device_tune_pending
     assert flow._device_control_models["rf"]["status"] == {
-        "frequency_hz": ("Cancelled because field ownership changed", "warning")
+        "frequency": ("Cancelled because field ownership changed", "warning")
     }
     assert len(control.projections) == 2

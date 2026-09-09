@@ -339,7 +339,7 @@ def test_device_requirements_name_build_arguments() -> None:
     ]
     camera_fields = set(camera[0].protected_fields)
     assert {
-        "exposure_seconds",
+        "exposure",
         "roi_x",
         "roi_y",
         "roi_width",
@@ -347,7 +347,7 @@ def test_device_requirements_name_build_arguments() -> None:
         "trigger_source",
         "readout_speed",
     } <= camera_fields
-    assert "gain_db" not in camera_fields
+    assert "gain" not in camera_fields
     assert calibration[0].protected_fields == camera[0].protected_fields
     assert calibration[1].protected_fields == ("program",)
     assert all(not hasattr(value, "device_key") for value in (*camera, *calibration))

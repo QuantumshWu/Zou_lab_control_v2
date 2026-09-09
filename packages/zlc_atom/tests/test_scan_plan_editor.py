@@ -157,7 +157,7 @@ def test_the_stepped_form_never_shows_the_boards_ordering_refusal() -> None:
     """
 
     ensure_qt_app()
-    device = ScanPort("device:rf:frequency_hz", "rf.frequency_hz", "Hz", 1e5, 5e6)
+    device = ScanPort("device:rf:frequency", "rf.frequency", "Hz", 1e5, 5e6)
     stepped = scan_plan_editor_factory(device_ports=True, hardware_slots=False)
     seamless = scan_plan_editor_factory(
         device_ports=True, hardware_slots=True, manual_axes=True
@@ -240,11 +240,11 @@ def test_a_devices_knobs_hang_under_that_device_not_in_one_flat_list() -> None:
 
     ports = (
         port("pulse:param:mot_duration", 0.0, 1.0),
-        port("device:rf_source:frequency_hz", 1e5, 5e6),
-        port("device:rf_source:power_dbm", -30.0, 10.0),
+        port("device:rf_source:frequency", 1e5, 5e6),
+        port("device:rf_source:power", -30.0, 10.0),
         port("device:slm:tilt_x", -1.0, 1.0),
     )
-    row = _AxisRow(ports, ScanAxis("device:rf_source:power_dbm", (0.0, 1.0, 2.0)))
+    row = _AxisRow(ports, ScanAxis("device:rf_source:power", (0.0, 1.0, 2.0)))
     try:
         model = row.port_combo._model
         tree = {
@@ -256,12 +256,12 @@ def test_a_devices_knobs_hang_under_that_device_not_in_one_flat_list() -> None:
         }
         assert tree == {
             "pulse": ["mot_duration"],
-            "rf_source": ["frequency_hz", "power_dbm"],
+            "rf_source": ["frequency", "power"],
             "slm": ["tilt_x"],
         }, tree
         # The authored port is still the selection, and its own limits are
         # what the sweep is bounded by.
-        assert row.port_combo.currentData() == "device:rf_source:power_dbm"
+        assert row.port_combo.currentData() == "device:rf_source:power"
         assert (row.start_spin.minimum(), row.start_spin.maximum()) == (-30.0, 10.0)
     finally:
         row.deleteLater()
@@ -451,7 +451,7 @@ def test_axis_rows_follow_the_ports_without_being_rebuilt(caplog) -> None:
     import time
     import numpy as np
 
-    power = ScanPort("device:rf:ch1_power_dbm", "rf.ch1_power_dbm", "dBm",
+    power = ScanPort("device:rf:ch1_power", "rf.ch1_power", "dBm",
                      -30.0, 10.0, -20.0, 0.0)
     units = UnitRegistry((DEFAULT_UNITS.resolve("dBm"),
                           Unit("Vpp", "power", VoltageIntoLoad(100.0), prefixable=True)))
@@ -463,14 +463,14 @@ def test_axis_rows_follow_the_ports_without_being_rebuilt(caplog) -> None:
         assert gate.wait(3.0)
         unit = unit or "dBm"
         low, high = units.convert((-30.0, 10.0), "dBm", unit)
-        return TunableField(AuthoringField("ch1_power_dbm", "float", "Power", None,
+        return TunableField(AuthoringField("ch1_power", "float", "Power", None,
                                           minimum=float(low), maximum=float(high), unit=unit),
-                            float(units.convert(0.0, "dBm", unit)), True, ("ch1_power_dbm",))
+                            float(units.convert(0.0, "dBm", unit)), True, ("ch1_power",))
 
     def convert(name, values, source, target):
         assert get_ident() != owner_thread, "device conversion ran on Qt"
         assert gate.wait(3.0)
-        assert name == "ch1_power_dbm"
+        assert name == "ch1_power"
         return tuple(units.convert(values, source, target))
 
     device = SimpleNamespace(tunable_fields=lambda: (read(),),

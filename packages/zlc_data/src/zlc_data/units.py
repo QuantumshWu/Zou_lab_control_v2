@@ -705,6 +705,7 @@ def _builtin_units() -> tuple[Unit, ...]:
         Unit("rad", "angle", prefixable=True),
         Unit("deg", "angle", Scaled(np.pi / 180.0), aliases=("°",)),
         Unit("dBm", "power", Decibel(1.0e-3)),
+        Unit("dB", "log_gain"),
         Unit("Vpp", "power", VoltageIntoLoad(RF_LOAD_OHMS), prefixable=True),
         Unit("Vrms", "power", VoltageIntoLoad(RF_LOAD_OHMS, 1.0), prefixable=True),
         Unit("count", "count"),

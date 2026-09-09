@@ -172,20 +172,20 @@ def test_one_instrument_is_one_instance_with_every_channel_s_knobs() -> None:
 
     names = [field.metadata.name for field in source.tunable_fields()]
     assert names == [
-        "ch1_frequency_hz",
-        "ch1_power_dbm",
+        "ch1_frequency",
+        "ch1_power",
         "ch1_output_enabled",
-        "ch2_frequency_hz",
-        "ch2_power_dbm",
+        "ch2_frequency",
+        "ch2_power",
         "ch2_output_enabled",
-        "frequency_low_hz",
-        "frequency_high_hz",
-        "power_low_dbm",
-        "power_high_dbm",
+        "frequency_low",
+        "frequency_high",
+        "power_low",
+        "power_high",
     ]
 
-    assert source.tune("ch1_frequency_hz", 80e6) == 80e6
-    assert source.tune("ch2_frequency_hz", 5e6) == 5e6
+    assert source.tune("ch1_frequency", 80e6) == 80e6
+    assert source.tune("ch2_frequency", 5e6) == 5e6
     assert instrument.registers["1"]["FREQ"] == 80e6
     assert instrument.registers["2"]["FREQ"] == 5e6
     assert source.tune("ch2_output_enabled", True) is True
@@ -193,8 +193,8 @@ def test_one_instrument_is_one_instance_with_every_channel_s_knobs() -> None:
         "tuning one channel must not move the other"
     )
     values = source.tunable_values()
-    assert values["ch1_frequency_hz"] == 80e6
-    assert values["ch2_frequency_hz"] == 5e6
+    assert values["ch1_frequency"] == 80e6
+    assert values["ch2_frequency"] == 5e6
     assert values["ch2_output_enabled"] is True
 
 
@@ -204,14 +204,14 @@ def test_bounds_are_bench_policy_and_refuse_before_writing() -> None:
         channel: dict(registers)
         for channel, registers in instrument.registers.items()
     }
-    with pytest.raises(ValueError, match="ch2_frequency_hz must lie in"):
-        source.tune("ch2_frequency_hz", 2e6)
-    with pytest.raises(ValueError, match="ch1_power_dbm must lie in"):
-        source.tune("ch1_power_dbm", 99.0)
+    with pytest.raises(ValueError, match="ch2_frequency must lie in"):
+        source.tune("ch2_frequency", 2e6)
+    with pytest.raises(ValueError, match="ch1_power must lie in"):
+        source.tune("ch1_power", 99.0)
     with pytest.raises(TypeError, match="ch1_output_enabled takes a bool"):
         source.tune("ch1_output_enabled", 1)
     with pytest.raises(ValueError, match="no tunable field"):
-        source.tune("frequency_hz", 1e5)
+        source.tune("frequency", 1e5)
     assert instrument.registers == written, "a refusal must not touch hardware"
 
 
@@ -229,12 +229,12 @@ def test_only_an_effective_change_advances_the_settings_epoch() -> None:
 
     source, _instrument = _rigol()
     first = source.settings_provenance()
-    assert source.tune("ch1_frequency_hz", 10e6) == 10e6
+    assert source.tune("ch1_frequency", 10e6) == 10e6
     second = source.settings_provenance()
     assert second["settings_epoch"] == first["settings_epoch"] + 1
     assert second["device_session_id"] == first["device_session_id"]
 
-    assert source.tune("ch1_frequency_hz", 10e6) == 10e6
+    assert source.tune("ch1_frequency", 10e6) == 10e6
     assert source.settings_provenance() == second, (
         "landing where the knob already stands is not a settings change"
     )
@@ -266,23 +266,23 @@ def test_the_scan_facing_fields_carry_bounds_and_units() -> None:
     )
     by_name = {field.metadata.name: field for field in source.tunable_fields()}
     for channel in ("ch1", "ch2"):
-        frequency = by_name[f"{channel}_frequency_hz"].metadata
+        frequency = by_name[f"{channel}_frequency"].metadata
         assert (frequency.minimum, frequency.maximum) == (1e3, 160e6)
         assert frequency.unit == "Hz"
         assert frequency.label.startswith(channel.upper())
-        assert by_name[f"{channel}_power_dbm"].metadata.unit == "dBm"
+        assert by_name[f"{channel}_power"].metadata.unit == "dBm"
         # The instrument's own limits ride beside the effective bounds, so
         # a panel can show which fence is the binding one: here the bench
         # authored the low edge and the instrument owns the high one.
-        assert by_name[f"{channel}_frequency_hz"].device_limits == (1e-6, 160e6)
-        assert by_name[f"{channel}_power_dbm"].device_limits == (-60.0, 23.98)
+        assert by_name[f"{channel}_frequency"].device_limits == (1e-6, 160e6)
+        assert by_name[f"{channel}_power"].device_limits == (-60.0, 23.98)
         # The output switch is a control, not an axis: unbounded on purpose,
         # so scan_ports_for_devices never offers it.
         output = by_name[f"{channel}_output_enabled"]
         assert output.metadata.minimum is None and output.metadata.maximum is None
         assert output.device_limits is None
-        assert by_name[f"{channel}_frequency_hz"].live_write
-    for name in ("frequency_low_hz", "frequency_high_hz", "power_low_dbm", "power_high_dbm"):
+        assert by_name[f"{channel}_frequency"].live_write
+    for name in ("frequency_low", "frequency_high", "power_low", "power_high"):
         assert by_name[name].device_limits is None, "a policy edge has no instrument limit"
     for field in by_name.values():
         assert field.dependency_group == (field.metadata.name,)
@@ -310,10 +310,10 @@ def test_optional_window_is_one_init_and_control_policy() -> None:
     source, instrument = _rigol()
     by_name = {field.metadata.name: field for field in source.tunable_fields()}
     for name in (
-        "frequency_low_hz",
-        "frequency_high_hz",
-        "power_low_dbm",
-        "power_high_dbm",
+        "frequency_low",
+        "frequency_high",
+        "power_low",
+        "power_high",
     ):
         window = by_name[name]
         assert not window.live_write, "the window applies, never live"
@@ -322,69 +322,69 @@ def test_optional_window_is_one_init_and_control_policy() -> None:
 
     ports = {port.port.split(":")[-1]: port for port in scan_ports_for_devices({"rf": source})}
     assert set(ports) == {
-        "ch1_frequency_hz", "ch1_power_dbm", "ch2_frequency_hz", "ch2_power_dbm"
+        "ch1_frequency", "ch1_power", "ch2_frequency", "ch2_power"
     }, "with no window, a knob is swept over the instrument's own range"
-    assert (ports["ch1_frequency_hz"].lo, ports["ch1_frequency_hz"].hi) == (1e-6, 160e6)
-    assert (ports["ch1_power_dbm"].lo, ports["ch1_power_dbm"].hi) == (-60.0, 23.98)
+    assert (ports["ch1_frequency"].lo, ports["ch1_frequency"].hi) == (1e-6, 160e6)
+    assert (ports["ch1_power"].lo, ports["ch1_power"].hi) == (-60.0, 23.98)
     assert not any("FREQuency " in command for command in instrument.log), (
         "omitting all policy edges must not move hardware at open"
     )
     # With no window at all, the instrument's own limit fences direct
     # control too -- refused by name before anything is written.
-    with pytest.raises(ValueError, match="ch1_frequency_hz must lie in"):
-        source.tune("ch1_frequency_hz", 200e6)
+    with pytest.raises(ValueError, match="ch1_frequency must lie in"):
+        source.tune("ch1_frequency", 200e6)
     assert instrument.registers["1"]["FREQ"] == 1000.0
 
-    assert source.tune("frequency_low_hz", 1e3) == 1e3
-    assert source.tune("frequency_high_hz", 80e6) == 80e6
-    assert source.tune("power_low_dbm", -30.0) == -30.0
-    assert source.tune("power_high_dbm", 10.0) == 10.0
+    assert source.tune("frequency_low", 1e3) == 1e3
+    assert source.tune("frequency_high", 80e6) == 80e6
+    assert source.tune("power_low", -30.0) == -30.0
+    assert source.tune("power_high", 10.0) == 10.0
     ports = scan_ports_for_devices({"rf": source})
     offered = {port.port.split(":")[-1] for port in ports}
     assert offered == {
-        "ch1_frequency_hz", "ch1_power_dbm", "ch2_frequency_hz", "ch2_power_dbm"
+        "ch1_frequency", "ch1_power", "ch2_frequency", "ch2_power"
     }
 
     before = source.settings_provenance()["settings_epoch"]
-    assert source.tune("frequency_high_hz", None) is None
-    assert source.tunable_values()["frequency_high_hz"] is None
+    assert source.tune("frequency_high", None) is None
+    assert source.tunable_values()["frequency_high"] is None
     assert source.settings_provenance()["settings_epoch"] == before + 1
     cleared = next(
         port for port in scan_ports_for_devices({"rf": source})
-        if port.port.endswith(":ch1_frequency_hz")
+        if port.port.endswith(":ch1_frequency")
     )
     assert (cleared.lo, cleared.hi) == (1e3, 160e6), (
         "clearing an edge hands that side back to the instrument's own limit"
     )
     # A window looser than the instrument on one side widens nothing: the
     # tighter fence is the range, whichever of the two it is.
-    assert source.tune("frequency_high_hz", 200e6) == 200e6
+    assert source.tune("frequency_high", 200e6) == 200e6
     loose = next(
         port for port in scan_ports_for_devices({"rf": source})
-        if port.port.endswith(":ch1_frequency_hz")
+        if port.port.endswith(":ch1_frequency")
     )
     assert (loose.lo, loose.hi) == (1e3, 160e6)
-    with pytest.raises(ValueError, match="ch1_frequency_hz must lie in"):
-        source.tune("ch1_frequency_hz", 170e6)
-    assert source.tune("frequency_high_hz", 80e6) == 80e6
+    with pytest.raises(ValueError, match="ch1_frequency must lie in"):
+        source.tune("ch1_frequency", 170e6)
+    assert source.tune("frequency_high", 80e6) == 80e6
     # The channel knobs' own scan bounds follow the window immediately.
     by_name = {field.metadata.name: field for field in source.tunable_fields()}
-    assert by_name["ch1_frequency_hz"].metadata.maximum == 80e6
-    assert by_name["ch1_frequency_hz"].device_limits == (1e-6, 160e6)
+    assert by_name["ch1_frequency"].metadata.maximum == 80e6
+    assert by_name["ch1_frequency"].device_limits == (1e-6, 160e6)
 
-    source.tune("ch1_frequency_hz", 50e6)
-    with pytest.raises(ValueError, match="strand ch1_frequency_hz at 5e"):
-        source.tune("frequency_high_hz", 20e6)
+    source.tune("ch1_frequency", 50e6)
+    with pytest.raises(ValueError, match="strand ch1_frequency at 5e"):
+        source.tune("frequency_high", 20e6)
     with pytest.raises(ValueError, match="empty window"):
-        source.tune("frequency_low_hz", 90e6)
+        source.tune("frequency_low", 90e6)
 
     # A window entirely outside the instrument's range is a contradiction,
     # refused on the panel and at Init alike -- and Init opens no session
     # for it.
     fresh, _instrument = _rigol()
     with pytest.raises(ValueError, match="leaves nothing of the instrument"):
-        fresh.tune("frequency_low_hz", 200e6)
-    assert fresh.tunable_values()["frequency_low_hz"] is None
+        fresh.tune("frequency_low", 200e6)
+    assert fresh.tunable_values()["frequency_low"] is None
     refused = _ScpiInstrument()
     with pytest.raises(ValueError, match="leaves nothing of the instrument"):
         RigolDg4000RfSource(
@@ -434,17 +434,17 @@ def test_connecting_reads_the_instrument_and_moves_nothing() -> None:
     ), instrument.log
 
     values = source.tunable_values()
-    assert values["ch1_frequency_hz"] == 90e6
-    assert values["ch2_power_dbm"] == 25.0
+    assert values["ch1_frequency"] == 90e6
+    assert values["ch2_power"] == 25.0
     by_name = {field.metadata.name: field for field in source.tunable_fields()}
-    assert by_name["ch1_frequency_hz"].current == 90e6
-    assert by_name["ch1_frequency_hz"].metadata.maximum == 80e6
+    assert by_name["ch1_frequency"].current == 90e6
+    assert by_name["ch1_frequency"].metadata.maximum == 80e6
 
     # Policy still bounds what may be COMMANDED, from outside as much as in.
-    with pytest.raises(ValueError, match="ch1_frequency_hz must lie in"):
-        source.tune("ch1_frequency_hz", 85e6)
+    with pytest.raises(ValueError, match="ch1_frequency must lie in"):
+        source.tune("ch1_frequency", 85e6)
     assert instrument.registers["1"]["FREQ"] == 90e6
-    assert source.tune("ch1_frequency_hz", 50e6) == 50e6
+    assert source.tune("ch1_frequency", 50e6) == 50e6
 
 
 def test_a_channel_in_volts_is_converted_through_its_own_load() -> None:
@@ -469,17 +469,17 @@ def test_a_channel_in_volts_is_converted_through_its_own_load() -> None:
         instrument,
     )
     assert instrument.registers["1"]["UNIT"] == "VPP", "opening changed a unit"
-    assert source.tunable_values()["ch1_power_dbm"] == pytest.approx(0.0, abs=1e-3)
+    assert source.tunable_values()["ch1_power"] == pytest.approx(0.0, abs=1e-3)
 
     # A written dBm lands as the volts THIS channel is displaying, and the
     # read-back that follows converts straight back.
-    assert source.tune("ch1_power_dbm", -6.0) == pytest.approx(-6.0, abs=1e-3)
+    assert source.tune("ch1_power", -6.0) == pytest.approx(-6.0, abs=1e-3)
     assert instrument.registers["1"]["UNIT"] == "VPP"
     assert instrument.registers["1"]["VOLT"] == pytest.approx(0.3170, abs=1e-3)
 
     # The other channel is untouched, in its own unit.
     assert instrument.registers["2"]["UNIT"] == "DBM"
-    assert source.tunable_values()["ch2_power_dbm"] == -30.0
+    assert source.tunable_values()["ch2_power"] == -30.0
 
     # The reported failing value and a 135 -> 247 mVpp, ten-point sweep
     # must survive SCPI serialization. Device readback remains the answer.
@@ -491,12 +491,12 @@ def test_a_channel_in_volts_is_converted_through_its_own_load() -> None:
         for vpp in points
     ]
     for requested in requested_values:
-        actual = tune_value(source, "ch1_power_dbm", requested)
+        actual = tune_value(source, "ch1_power", requested)
         sent = next(command for command in reversed(instrument.log)
                     if command.startswith(":SOURce1:VOLTage "))
         expected_vpp = math.sqrt(1e-3 * 10.0 ** (requested / 10.0) * 50.0) * (2.0 * math.sqrt(2.0))
         assert float(sent.split()[-1]) == expected_vpp
-        assert actual == source.tunable_values()["ch1_power_dbm"]
+        assert actual == source.tunable_values()["ch1_power"]
     source.close()
 
 
@@ -504,7 +504,7 @@ def test_selected_units_write_native_amplitude_and_restore_the_raw_pair() -> Non
     from zlc_atom.authoring import read_tunable_in_unit, tune_in_unit
     from zlc_atom.nodes.scan.devices import ScanDeviceKnobs
 
-    field = "ch1_power_dbm"
+    field = "ch1_power"
     port = "device:rf:" + field
     for old_unit, old_value, symbol in (
         ("DBM", -20.123456789, "dBm"),
@@ -523,7 +523,7 @@ def test_selected_units_write_native_amplitude_and_restore_the_raw_pair() -> Non
             selected = read_tunable_in_unit(source, field, "mVpp")
             assert selected.metadata.maximum == pytest.approx(math.sqrt(8 * 75 * 1e-4) * 1000)
             assert selected.metadata.label.endswith("Power")
-            assert read_tunable_in_unit(source, "ch1_frequency_hz", "kHz").metadata.label.endswith("Frequency")
+            assert read_tunable_in_unit(source, "ch1_frequency", "kHz").metadata.label.endswith("Frequency")
             assert not any(":UNIT " in item for item in instrument.log)
             before = {key: dict(value) for key, value in instrument.registers.items()}
             provenance = source.settings_provenance()
@@ -537,7 +537,7 @@ def test_selected_units_write_native_amplitude_and_restore_the_raw_pair() -> Non
             assert [item for item in instrument.log if "?" not in item] == writes
             # Policy edges cover both channels and have no unique load from
             # which to define a voltage; actual channel fields above do.
-            for policy in ("power_low_dbm", "power_high_dbm"):
+            for policy in ("power_low", "power_high"):
                 for voltage_unit in ("mVpp", "Vrms"):
                     with pytest.raises(ValueError, match="no single channel load"):
                         source.read_tunable_in_unit(policy, voltage_unit)
@@ -545,10 +545,10 @@ def test_selected_units_write_native_amplitude_and_restore_the_raw_pair() -> Non
                         source.convert_tunable_value(policy, -20.0, "dBm", voltage_unit)
                     with pytest.raises(ValueError, match="no single channel load"):
                         source.tune_in_unit(policy, 135.0, voltage_unit)
-            assert source.read_tunable_in_unit("power_high_dbm", "mW").current == pytest.approx(.1)
-            assert source.tune_in_unit("power_high_dbm", .1, "mW") == pytest.approx(.1)
-            assert source.tune_in_unit("power_low_dbm", None, "mVpp") is None
-            source.tune("power_low_dbm", -40.0)
+            assert source.read_tunable_in_unit("power_high", "mW").current == pytest.approx(.1)
+            assert source.tune_in_unit("power_high", .1, "mW") == pytest.approx(.1)
+            assert source.tune_in_unit("power_low", None, "mVpp") is None
+            source.tune("power_low", -40.0)
             assert [item for item in instrument.log if "?" not in item] == writes
             # The actual instrument may quantize one amplitude. Keep its
             # answer rather than comparing it to the authored coordinate.
@@ -664,16 +664,16 @@ def test_peak_to_peak_volts_are_converted_only_for_a_sine() -> None:
         link=instrument,
     )
     # 1 Vrms into 50 ohms is 20 mW whatever the shape.
-    assert source.tunable_values()["ch1_power_dbm"] == pytest.approx(13.0103, abs=1e-3)
+    assert source.tunable_values()["ch1_power"] == pytest.approx(13.0103, abs=1e-3)
 
     # A sine in Vpp converts through 2*sqrt(2); a shape changed under a
     # live connection is caught at the next read or write, and the write
     # never happens.
     instrument.registers["1"].update(UNIT="VPP", VOLT=0.632456, FUNC="SIN")
-    assert source.tunable_values()["ch1_power_dbm"] == pytest.approx(0.0, abs=1e-3)
+    assert source.tunable_values()["ch1_power"] == pytest.approx(0.0, abs=1e-3)
     instrument.registers["1"]["FUNC"] = "RAMP"
     with pytest.raises(RuntimeError, match="RAMP waveform"):
-        source.tune("ch1_power_dbm", -6.0)
+        source.tune("ch1_power", -6.0)
     assert instrument.registers["1"]["VOLT"] == 0.632456, "a refusal wrote nothing"
 
 
@@ -691,10 +691,10 @@ def test_a_frequency_the_standing_amplitude_cannot_follow_is_refused() -> None:
     """
 
     source, instrument = _rigol()
-    assert source.tune("ch1_power_dbm", 20.0) == 20.0
+    assert source.tune("ch1_power", 20.0) == 20.0
     provenance = source.settings_provenance()
-    with pytest.raises(RuntimeError, match="caps its amplitude at 17.96 DBM.*lower ch1_power_dbm first"):
-        source.tune("ch1_frequency_hz", 50e6)
+    with pytest.raises(RuntimeError, match="caps its amplitude at 17.96 DBM.*lower ch1_power first"):
+        source.tune("ch1_frequency", 50e6)
     assert instrument.registers["1"]["FREQ"] == 1000.0
     assert instrument.registers["1"]["VOLT"] == 20.0
     assert source.settings_provenance() == provenance
@@ -705,10 +705,10 @@ def test_a_frequency_the_standing_amplitude_cannot_follow_is_refused() -> None:
 
     # Under the cap a frequency write is an ordinary write, and the
     # amplitude stays where it was set.
-    assert source.tune("ch1_power_dbm", 10.0) == 10.0
-    assert source.tune("ch1_frequency_hz", 50e6) == 50e6
+    assert source.tune("ch1_power", 10.0) == 10.0
+    assert source.tune("ch1_frequency", 50e6) == 50e6
     assert instrument.registers["1"]["VOLT"] == 10.0
-    assert source.tunable_values()["ch1_power_dbm"] == 10.0
+    assert source.tunable_values()["ch1_power"] == 10.0
 
 
 def test_what_a_constructor_acquired_the_constructor_releases(monkeypatch) -> None:
@@ -916,12 +916,12 @@ def test_every_interaction_narrates_at_the_contract_layer(caplog) -> None:
             source.tune(FREQUENCY_FIELD, 1_000_000_005.0)
     lines = [record.getMessage() for record in caplog.records]
     assert any(
-        line.startswith("TUNE field=frequency_hz value=1000000000.0")
+        line.startswith("TUNE field=frequency value=1000000000.0")
         and line.endswith(f"device={source.identity}")
         for line in lines
     )
     assert any(
-        line.startswith("TUNE REFUSED field=frequency_hz")
+        line.startswith("TUNE REFUSED field=frequency")
         and line.endswith(f"device={source.identity}")
         for line in lines
     )

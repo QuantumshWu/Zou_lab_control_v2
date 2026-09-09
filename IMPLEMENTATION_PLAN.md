@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- 2026-09-08 运行时TunableField名称去单位后缀：RF frequency/power及四个policy边界、Pylon gain、Virtual Camera exposure从设备定义统一到Control/claims/Remote/Scan与新保存引用；metadata补齐dB/s，固定单位Config/SDK接口不改，不加旧runtime别名。RF/Scan保存与单位写入/Control的10项及非RF metadata/claims的4项定向验证通过；历史实验记录不重写。
+
 - 2026-09-08 设备单位写入收口：Scan和Control共用设备层的只读单位投影/转换与Apply，Rigol原生Vpp/Vrms/dBm仅必要时切UNIT，原始数值/单位对在退出时恢复。端口范围和单位转换离开Qt；pending单位请求不能误Apply旧单位，晚结果不覆盖新draft或碰已删除控件。Remote沿同一接口透传，canonical provenance与requested_unit分开。最终15个定向实例通过，包含非50Ω、原生写/失败恢复、整数前缀、Control只读换单位、占用权限、异步Scan Editor及Fit负B/C单位转换；仅模拟SCPI与Qt控件验证，未做真机/实屏全流程验收。
 
 - 2026-09-08 按最终用户裁决，扫描彻底采用author unit：Plan直接存135…247与mVpp，Seamless/Stepped输出同一单位，仅设备/编译边界换算；display_unit旧路径及8ULP/相等检查均删除。5个单位/Plan直接实例通过；真实Runtime的Seamless十点例在设备回读偏离设定时完成，Dataset coordinates逐位等于135→247的十点且unit为mVpp，run record一致；设备异常与restore传播仍保留。曾添加的独立readback event字段不符合现有merge grammar，已撤掉，不扩格式，设备原有tune回读路径保留。未做真实硬件验收。
@@ -207,7 +209,7 @@
 
 - Generic Device Control只消费adapter的`TunableField` contract，显示Current、Desired、Live apply、Apply、Status、Refresh及active owners；已删除旧的edit-immediate `field_committed/read_values/set_form`路径和demo残余。
 - RF frequency/power四个policy edge已进入Rigol、Vaunix及Virtual RF的optional Init schema并复用同一Control tunable；空值表示无该侧policy、可随时清回空值。仪器自身limits在Init读出并以`TunableField.device_limits`只读投影；Scan port范围、Control与外部`tune`的有效范围都是policy与device limits逐侧取更紧者，缺失policy edge时该侧就是仪器limit；全空Init不归一化或改写硬件当前值。
-- Pylon公开`gain_db`的SDK bounds/current与grabbing-safe write；Virtual camera公开`exposure_seconds`。epoch由设备owner报告，Control不比较不同单位或用浮点相等推断增量；Seamless/Stepped保留用户设定坐标，实际回读不替换扫描轴。
+- Pylon以运行时`gain`（dB）公开SDK bounds/current与grabbing-safe write；Virtual camera公开`exposure`（s）。固定单位Config/SDK参数名保留。epoch由设备owner报告，Control不比较不同单位或用浮点相等推断增量；Seamless/Stepped保留用户设定坐标，实际回读不替换扫描轴。
 - Logic静态requirements与Stepped Scan运行时选择的device ports都形成field claim。DeviceUse按device-specific owner revision原子核风险授权、dependency closure与pending write；字段命令期间不能进入新Logic，owner变化取消尚未执行的write。
 - Device I/O只在现有串行worker/adapter command lane执行。Refresh去重合并且属于close guard；75 ms live input在相同policy projection及in-flight write期间保留每字段latest-only值，Qt owner只处理plain projection和已完成readback。
 - Device Manager的Remote公布是Session DeviceUse里该device的command claim：本地Logic/command占用时按名拒绝且不公布，已公布期间本地Logic、command、字段写入与rebuild按名拒绝直到撤回；公布的是accepted apparatus而非draft，远端proxy每次Refresh经fields RPC取当前完整字段投影、不缓存bounds。SLM Editor的device状态问句在其串行command executor上问、Qt线程只显示答案，command的交付带回它留下的状态；Qt从不等remote proxy的apply锁。

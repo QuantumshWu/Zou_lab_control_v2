@@ -354,19 +354,19 @@ def test_a_device_axis_below_a_board_axis_is_refused_by_name() -> None:
         (
             ScanAxis(BIAS_X_PORT, (-256.0, 256.0)),
             ScanAxis(
-                DEVICE_PARAM_FAMILY + "rf:frequency_hz", (1e9, 2e9)
+                DEVICE_PARAM_FAMILY + "rf:frequency", (1e9, 2e9)
             ),
         )
     )
     with pytest.raises(ValueError) as refusal:
         split_outer_axes(plan)
-    assert "rf.frequency_hz" in str(refusal.value)
+    assert "rf.frequency" in str(refusal.value)
     assert "above the board axes" in str(refusal.value)
 
 
 def test_a_plan_of_device_axes_alone_has_no_table_to_play() -> None:
     plan = ScanPlan(
-        (ScanAxis(DEVICE_PARAM_FAMILY + "rf:frequency_hz", (1e9, 2e9)),)
+        (ScanAxis(DEVICE_PARAM_FAMILY + "rf:frequency", (1e9, 2e9)),)
     )
     with pytest.raises(ValueError, match="no table to play"):
         split_outer_axes(plan)
@@ -1081,7 +1081,7 @@ def test_stopping_at_the_question_stops_the_run() -> None:
         installation.close()
 
 
-@pytest.mark.parametrize("port", ("manual:power", "device:rf:power_dbm"))
+@pytest.mark.parametrize("port", ("manual:power", "device:rf:power"))
 def test_a_host_axis_is_moved_outside_the_board_table(port) -> None:
     """Place host knobs outside the table without changing their coordinates."""
 
@@ -1111,7 +1111,7 @@ def _device_run(
     repeats: int = 1,
     tunables=None,
     unit="",
-    device_field="frequency_hz",
+    device_field="frequency",
 ):
     """Walk a plan whose outer axis is an installed device knob.
 
@@ -1140,7 +1140,7 @@ def _device_run(
         )
         # As an operator leaves a brick before scanning it: standing inside
         # the window, where the scan can put it back.
-        source.tune("frequency_hz", 600e6)
+        source.tune("frequency", 600e6)
         tunables = {"rf": source}
     try:
         bench = ScriptedScanBench(
@@ -1217,16 +1217,16 @@ def test_a_device_axis_is_the_outer_loop_and_the_device_is_verified() -> None:
     frequency = next(
         axis
         for axis in schema.point_domain.axes
-        if axis.name == "rf.frequency_hz"
+        if axis.name == "rf.frequency"
     )
-    assert _point_axis_values(schema, "rf.frequency_hz") == pytest.approx(
+    assert _point_axis_values(schema, "rf.frequency") == pytest.approx(
         (1e9, 1e9, 1.5e9, 1.5e9, 2e9, 2e9)
     )
     assert frequency.unit == "Hz", "a device axis publishes its knob's unit"
 
     # The instrument is handed back where the operator left it, and that
     # tune() really ran shows in the epoch: three moves and the way back.
-    assert source.tunable_values()["frequency_hz"] == pytest.approx(600e6)
+    assert source.tunable_values()["frequency"] == pytest.approx(600e6)
     assert source.settings_provenance()["settings_epoch"] == (
         record["device_snapshots"]["tunable:rf"]["settings_epoch"] + 4
     )
@@ -1240,13 +1240,13 @@ def test_a_device_axis_is_the_outer_loop_and_the_device_is_verified() -> None:
     # The run-start snapshot carries the whole surface, the safety window
     # included: provenance should say what fence the scan ran inside.
     assert set(snapshot["settings"]) == {
-        "frequency_hz",
-        "power_dbm",
+        "frequency",
+        "power",
         "output_enabled",
-        "frequency_low_hz",
-        "frequency_high_hz",
-        "power_low_dbm",
-        "power_high_dbm",
+        "frequency_low",
+        "frequency_high",
+        "power_low",
+        "power_high",
     }
     assert snapshot["device_session_id"] == (
         source.settings_provenance()["device_session_id"]
@@ -1258,7 +1258,7 @@ def test_a_device_axis_is_the_outer_loop_and_the_device_is_verified() -> None:
     (claim,) = claims
     assert claim.device_key == "rf"
     assert claim.device is source
-    assert claim.protected_fields == ("frequency_hz",)
+    assert claim.protected_fields == ("frequency",)
 
 
 def test_an_off_grid_device_value_fails_the_run_with_the_grid_named() -> None:
@@ -1350,7 +1350,7 @@ def test_a_device_readback_does_not_replace_the_authored_scan_coordinates() -> N
             return (
                 TunableField(
                     metadata=AuthoringField(
-                        "power_dbm",
+                        "power",
                         "float",
                         "Power",
                         0.0,
@@ -1360,7 +1360,7 @@ def test_a_device_readback_does_not_replace_the_authored_scan_coordinates() -> N
                     ),
                     current=0.0,
                     live_write=True,
-                    dependency_group=("power_dbm",),
+                    dependency_group=("power",),
                 ),
             )
 
@@ -1369,7 +1369,7 @@ def test_a_device_readback_does_not_replace_the_authored_scan_coordinates() -> N
             return float(value) + 0.000003
 
         def tunable_values(self):
-            return {"power_dbm": 0.0}
+            return {"power": 0.0}
 
         def settings_provenance(self):
             return {"device_session_id": "drift", "settings_epoch": 0}
@@ -1377,10 +1377,10 @@ def test_a_device_readback_does_not_replace_the_authored_scan_coordinates() -> N
     wanted = tuple(float(value) for value in np.linspace(135.0, 247.0, 10))
     value, record, _bench, _device, _claims = _device_run(
         frequencies=wanted, values=(-256.0,),
-        tunables={"rf": _DriftingKnob()}, unit="mVpp", device_field="power_dbm",
+        tunables={"rf": _DriftingKnob()}, unit="mVpp", device_field="power",
     )
     axis = next(axis for axis in value.block.schema.point_domain.axes
-                if axis.name == "rf.power_dbm")
+                if axis.name == "rf.power")
     assert axis.unit == "mVpp"
     assert tuple(axis.coordinates) == wanted
     assert record["plan"]["axes"][0]["values"] == list(wanted)

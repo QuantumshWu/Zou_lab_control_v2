@@ -11,8 +11,8 @@ RF-only vocabulary for a consumer to learn.
 CHANNELS ARE THE DEVICE'S OWN STRUCTURE.  One instrument is one installed
 instance whatever its channel count -- a two-channel generator is not two
 devices to manage, it is one device with six knobs.  A single-channel
-source keeps the bare field names (``frequency_hz``); a multi-channel one
-prefixes them with its own channel names (``ch1_frequency_hz``), so the
+source keeps the bare field names (``frequency``); a multi-channel one
+prefixes them with its own channel names (``ch1_frequency``), so the
 add-axis combo and the control panel show every knob of the one instrument
 under its one card.
 
@@ -50,20 +50,20 @@ from uuid import uuid4
 
 from zlc_atom.authoring import AuthoringField, TunableField
 
-FREQUENCY_FIELD = "frequency_hz"
-POWER_FIELD = "power_dbm"
+FREQUENCY_FIELD = "frequency"
+POWER_FIELD = "power"
 OUTPUT_FIELD = "output_enabled"
 
 #: The bench's safety window is a CONTROL knob, not an apparatus fact: the
 #: operator adjusts it on the control panel (plain Apply, never live) or
 #: through the same ``tune`` API, and nothing else may scan it.  It is
 #: deliberately unbounded and non-live so scan_ports_for_devices never
-#: offers it as an axis.  (name, label, unit) per policy field.
+#: offers it as an axis. (runtime name, label, unit, fixed-unit Init key).
 WINDOW_FIELDS = (
-    ("frequency_low_hz", "Frequency low (Hz)", "Hz"),
-    ("frequency_high_hz", "Frequency high (Hz)", "Hz"),
-    ("power_low_dbm", "Power low (dBm)", "dBm"),
-    ("power_high_dbm", "Power high (dBm)", "dBm"),
+    ("frequency_low", "Frequency low", "Hz", "frequency_low_hz"),
+    ("frequency_high", "Frequency high", "Hz", "frequency_high_hz"),
+    ("power_low", "Power low", "dBm", "power_low_dbm"),
+    ("power_high", "Power high", "dBm", "power_high_dbm"),
 )
 
 #: The same optional policy fields are authored at Init and exposed again by
@@ -71,8 +71,8 @@ WINDOW_FIELDS = (
 #: imposed that edge.  Keeping the declarations here prevents real and
 #: virtual RF families from inventing different defaults or units.
 WINDOW_AUTHORING_FIELDS = tuple(
-    AuthoringField(name, "float", label, None, unit=unit)
-    for name, label, unit in WINDOW_FIELDS
+    AuthoringField(config_name, "float", label, None, unit=unit)
+    for _name, label, unit, config_name in WINDOW_FIELDS
 )
 
 
@@ -439,7 +439,7 @@ class RfSourceBase:
                         dependency_group=(channel_field(channel, OUTPUT_FIELD),),
                     )
                 )
-            for name, label, unit in WINDOW_FIELDS:
+            for name, label, unit, _config_name in WINDOW_FIELDS:
                 current = self._window_value(name)
                 fields.append(
                     TunableField(
@@ -466,7 +466,7 @@ class RfSourceBase:
                 values[channel_field(channel, OUTPUT_FIELD)] = bool(
                     self._read_output(channel)
                 )
-            for name, _label, _unit in WINDOW_FIELDS:
+            for name, _label, _unit, _config_name in WINDOW_FIELDS:
                 values[name] = self._window_value(name)
             return values
 
@@ -512,10 +512,10 @@ class RfSourceBase:
 
     def _window_value(self, name: str) -> float | None:
         return {
-            "frequency_low_hz": self._frequency_bounds[0],
-            "frequency_high_hz": self._frequency_bounds[1],
-            "power_low_dbm": self._power_bounds[0],
-            "power_high_dbm": self._power_bounds[1],
+            "frequency_low": self._frequency_bounds[0],
+            "frequency_high": self._frequency_bounds[1],
+            "power_low": self._power_bounds[0],
+            "power_high": self._power_bounds[1],
         }[name]
 
     def _tune_window(self, selected: str, value: Any) -> float | None:
@@ -535,10 +535,10 @@ class RfSourceBase:
             frequency_low, frequency_high = self._frequency_bounds
             power_low, power_high = self._power_bounds
             window = {
-                "frequency_low_hz": (requested, frequency_high),
-                "frequency_high_hz": (frequency_low, requested),
-                "power_low_dbm": (requested, power_high),
-                "power_high_dbm": (power_low, requested),
+                "frequency_low": (requested, frequency_high),
+                "frequency_high": (frequency_low, requested),
+                "power_low": (requested, power_high),
+                "power_high": (power_low, requested),
             }
             low, high = window[selected]
             if low is not None and high is not None and low >= high:

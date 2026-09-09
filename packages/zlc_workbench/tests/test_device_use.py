@@ -26,18 +26,18 @@ def test_field_policy_projects_logic_claims_and_dependency_closure() -> None:
     reservation = coordinator.prepare_logic(
         object(),
         "camera measurement",
-        (_claim("camera", object(), ("exposure_seconds", "roi_x")),),
+        (_claim("camera", object(), ("exposure", "roi_x")),),
         stop=lambda _reason: None,
         superseded=lambda: None,
     )
     assert coordinator.field_policy(
-        "camera", ("exposure_seconds", "gain_db")
-    ) == (0, (), {"exposure_seconds": (), "gain_db": ()})
+        "camera", ("exposure", "gain")
+    ) == (0, (), {"exposure": (), "gain": ()})
 
     lease = reservation.commit()
     revision, owners, policy = coordinator.field_policy(
         "camera",
-        ("exposure_seconds", "gain_db", "roi_width", "roi_height"),
+        ("exposure", "gain", "roi_width", "roi_height"),
         dependency_groups=(
             ("roi_x", "roi_width"),
             ("roi_width", "roi_height"),
@@ -46,17 +46,17 @@ def test_field_policy_projects_logic_claims_and_dependency_closure() -> None:
     assert revision == 1
     assert owners == ("camera measurement",)
     assert policy == {
-        "exposure_seconds": ("camera measurement",),
-        "gain_db": (),
+        "exposure": ("camera measurement",),
+        "gain": (),
         "roi_width": ("camera measurement",),
         "roi_height": ("camera measurement",),
     }
 
     assert lease.release() is True
-    assert coordinator.field_policy("camera", ("exposure_seconds",)) == (
+    assert coordinator.field_policy("camera", ("exposure",)) == (
         2,
         (),
-        {"exposure_seconds": ()},
+        {"exposure": ()},
     )
 
 
@@ -66,19 +66,19 @@ def test_field_command_atomically_rejects_stale_risk_and_claimed_fields() -> Non
     first = coordinator.prepare_logic(
         object(),
         "first camera run",
-        (_claim("camera", device, ("exposure_seconds",)),),
+        (_claim("camera", device, ("exposure",)),),
         stop=lambda _reason: None,
         superseded=lambda: None,
     ).commit()
     accepted_revision, owners, _policy = coordinator.field_policy(
-        "camera", ("gain_db",)
+        "camera", ("gain",)
     )
     assert owners == ("first camera run",)
     first.release()
     second = coordinator.prepare_logic(
         object(),
         "second camera run",
-        (_claim("camera", device, ("exposure_seconds",)),),
+        (_claim("camera", device, ("exposure",)),),
         stop=lambda _reason: None,
         superseded=lambda: None,
     ).commit()
@@ -87,19 +87,19 @@ def test_field_command_atomically_rejects_stale_risk_and_claimed_fields() -> Non
         coordinator.acquire_field_command(
             object(),
             "stale gain write",
-            _claim("camera", device, ("gain_db",)),
+            _claim("camera", device, ("gain",)),
             expected_owner_revision=accepted_revision,
             allow_while_logic=True,
         )
 
     revision, _owners, _policy = coordinator.field_policy(
-        "camera", ("gain_db", "exposure_seconds")
+        "camera", ("gain", "exposure")
     )
     with pytest.raises(DeviceUseBusy, match="second camera run"):
         coordinator.acquire_field_command(
             object(),
             "claimed exposure write",
-            _claim("camera", device, ("exposure_seconds",)),
+            _claim("camera", device, ("exposure",)),
             expected_owner_revision=revision,
             allow_while_logic=True,
         )
@@ -107,7 +107,7 @@ def test_field_command_atomically_rejects_stale_risk_and_claimed_fields() -> Non
     gain = coordinator.acquire_field_command(
         gain_owner,
         "accepted gain write",
-        _claim("camera", device, ("gain_db",)),
+        _claim("camera", device, ("gain",)),
         expected_owner_revision=revision,
         allow_while_logic=True,
     )
@@ -130,7 +130,7 @@ def test_runtime_selected_field_protection_does_not_change_exclusive_admission()
     measurement = coordinator.prepare_logic(
         object(),
         "camera measurement",
-        (_claim("camera", camera, ("exposure_seconds",)),),
+        (_claim("camera", camera, ("exposure",)),),
         stop=lambda _reason: None,
         superseded=lambda: None,
     ).commit()
@@ -141,7 +141,7 @@ def test_runtime_selected_field_protection_does_not_change_exclusive_admission()
             _claim(
                 "camera",
                 camera,
-                ("gain_db",),
+                ("gain",),
                 exclusive=False,
             ),
             _claim("sequencer", object(), ("program",)),
@@ -150,12 +150,12 @@ def test_runtime_selected_field_protection_does_not_change_exclusive_admission()
         superseded=lambda: None,
     ).commit()
     _revision, owners, policy = coordinator.field_policy(
-        "camera", ("exposure_seconds", "gain_db")
+        "camera", ("exposure", "gain")
     )
     assert owners == ("camera measurement", "stepped scan")
     assert policy == {
-        "exposure_seconds": ("camera measurement",),
-        "gain_db": ("stepped scan",),
+        "exposure": ("camera measurement",),
+        "gain": ("stepped scan",),
     }
     scan.release()
     measurement.release()
