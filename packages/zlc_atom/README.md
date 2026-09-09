@@ -281,11 +281,21 @@ occupancy-rate output. The generic
 `zlc_plot` overlay declaration and same-run geometry document let any
 compatible presenter join `occupied` to `frame_judged` without knowing the
 Occupancy plugin. Two processors build on that classification without
-adding a second one: `derive` publishes named signals over the publication,
-each a row of a name and an expression added one at a time -- `agree`:
-`a.occupied.frame(0) == a.occupied.frame(2)` and `counts`:
-`a.counts.frame(1).where(agree)` keep one frame's counts only where two other
-frames' verdicts agree, each signal published under its own name -- and
+adding a second one: `derive` publishes named Dataset results from ordinary
+Python. Each output has a `name` and multiline `code`, ending in `result = ...`
+(a single expression also works). For example, output `agree` uses
+`result = a.occupied.isel(frame=0) == a.occupied.isel(frame=2)`; output `counts`
+uses `result = a.counts.isel(frame=1).where(agree)`. Scalar `isel` removes the
+selected named frame axis while retaining its size-one Point domain;
+`isel(frame=[1])` instead retains the length-one named axis. `where` changes
+validity, not the stored counts. Input range is explicit: `event` is the current
+publication, `run` is the accumulated run, and `window` requests the last N
+events from Runtime. Derive owns no additional history. Named reductions such
+as `mean("repeat", where=condition)` preserve the remaining axes and units;
+the editor lists the actual input axes and embeds the supported operations.
+Axis names are case-sensitive; use the displayed name or full AxisId, for
+example `count("calibration.site")` for Occupancy's `Site` axis.
+The separate processor
 `frame_survival` asks, for every forward frame pair
 of a multi-frame cycle, whether a site an earlier frame saw loaded is still
 seen by a later one -- the pairs form one labelled `READOUT_EVENT` Point axis

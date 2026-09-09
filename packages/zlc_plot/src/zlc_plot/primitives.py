@@ -344,9 +344,16 @@ class ImagePointOverlay:
             return self.static_statuses
         if self.status is None:
             return None
+        from .semantics import projection_scope
+
         schema = self.status.block.schema
         terms: dict[AxisId, object] = {}
-        for ref, coordinate in tuple(getattr(spec, "scope", ())):
+        for ref, coordinate in projection_scope(schema, spec):
+            # Only Repeat/Point identify the image's acquisition cell. Its
+            # pixels and this status Dataset's sites are distinct atomic data
+            # axes; Last must never collapse the per-site judgement vector.
+            if ref.domain is AxisDomain.CELL_DATA:
+                continue
             axis_id = self._leading_axis_id(schema, ref)
             if axis_id is None:
                 return None

@@ -922,7 +922,8 @@ class _Source:
 
 
 @pytest.mark.parametrize("delivery", ("exact", "latest"))
-def test_terminal_processor_always_receives_runtime_current_dataset(delivery: str) -> None:
+@pytest.mark.parametrize("view", (None, "event", "run", "window"))
+def test_terminal_processor_always_receives_runtime_current_dataset(delivery: str, view) -> None:
     source_declaration = DatasetOutputDeclaration("frame", "test.frame")
     derived_declaration = DatasetOutputDeclaration("derived", "test.derived")
     source = _Source(f"source-{delivery}", source_declaration)
@@ -968,6 +969,7 @@ def test_terminal_processor_always_receives_runtime_current_dataset(delivery: st
     seen: list[tuple[int, list[float], object]] = []
 
     class Processor:
+        dataset_input_view = view
         def evaluate(self, value: SignalValue):
             seen.append(
                 (
@@ -992,9 +994,15 @@ def test_terminal_processor_always_receives_runtime_current_dataset(delivery: st
         delivery=delivery,
     )
     try:
+        if view == "window":
+            with pytest.raises(ValueError, match="use run input"):
+                host.start()
+            assert not host._input_history_leases
+            return
         host.start()
         assert _wait(host, wake).phase == "done"
-        assert seen == [(2, [1.0, 2.0], ((0, 0), (2, 2)))]
+        assert seen == ([(1, [2.0], ((2, 2),))] if view == "event"
+                        else [(2, [1.0, 2.0], ((0, 0), (2, 2)))])
         result = plane.current_dataset(host.signal_key("derived"))
         assert result.block.values.reshape(-1).tolist() == [1.0]
         assert not plane.is_generation_live(host.signal_key("derived"))
@@ -1110,7 +1118,8 @@ def test_exact_processor_receives_each_event_chunk_not_cumulative_history() -> N
         plane.close()
 
 
-def test_exact_processor_receives_selected_atomic_siblings_on_late_replay() -> None:
+@pytest.mark.parametrize("view", (None, "event", "run"))
+def test_exact_processor_receives_selected_atomic_siblings_on_late_replay(view) -> None:
     counts = DatasetOutputDeclaration("counts", "test.counts")
     occupied = DatasetOutputDeclaration("occupied", "test.occupied")
     derived = DatasetOutputDeclaration("derived", "test.derived")
@@ -1137,16 +1146,19 @@ def test_exact_processor_receives_selected_atomic_siblings_on_late_replay() -> N
                 ),
             },
         )
-    seen: list[tuple[float, float]] = []
+    seen = []
 
     class Processor:
+        dataset_input_view = view
         def evaluate_inputs(self, inputs: Mapping[str, SignalValue]):
             seen.append(
                 (
-                    float(inputs["counts"].values[0, 0, 0]),
-                    float(inputs["occupied"].values[0, 0, 0]),
+                    inputs["counts"].values[:, 0, 0].tolist(),
+                    inputs["occupied"].values[:, 0, 0].tolist(),
+                    inputs["counts"].snapshot.expanded_validity()[:, 0, 0].tolist(),
                 )
             )
+            assert inputs["counts"].primary_index == inputs["occupied"].primary_index
             return {
                 "derived": _finite_output(
                     derived,
@@ -1174,7 +1186,10 @@ def test_exact_processor_receives_selected_atomic_siblings_on_late_replay() -> N
         host.start()
         plane.seal_committed(source)
         assert _wait(host, wake).phase == "done"
-        assert seen == [(1.0, 10.0), (2.0, 20.0)]
+        assert seen == (
+            [([1.0, 0.0], [10.0, 0.0], [True, False]), ([1.0, 2.0], [10.0, 20.0], [True, True])]
+            if view == "run" else [([1.0], [10.0], [True]), ([2.0], [20.0], [True])]
+        )
         result = plane.current_dataset(host.signal_key("derived"))
         assert result.block.values[:, 0, 0].tolist() == [1.0, 2.0]
         publication = plane.latest_publication(host.signal_key("derived"))
@@ -1255,6 +1270,114 @@ def test_an_exact_processor_starts_on_an_armed_silent_source() -> None:
         assert seen == [4.0, 6.0]
     finally:
         host.shutdown()
+        plane.close()
+
+
+@pytest.mark.parametrize("view", ("event", "run", "window"))
+@pytest.mark.parametrize("finish", ("cancel", "done", "failed"))
+def test_processor_input_range_keeps_siblings_together_and_releases_history(view, finish) -> None:
+    from types import SimpleNamespace
+    import numpy as np
+    from zlc_data import owned_snapshot_from_arrays
+    from zlc_data.snapshot_projection import indexed_history_layout
+
+    raw = DatasetOutputDeclaration("frame", "test.frame")
+    counts = DatasetOutputDeclaration("counts", "test.counts", index_by_source=True)
+    occupied = DatasetOutputDeclaration("occupied", "test.occupied", index_by_source=True)
+    result = DatasetOutputDeclaration("result", "test.result")
+    source = _Source("range-source", raw)
+    plane, wake = SignalDataPlane(), Event()
+    plane.begin_generation(source)
+    def produce(value):
+        number = int(value.values.item())
+        outputs = {}
+        for declaration, scale in ((counts, 1.0), (occupied, 10.0)):
+            original = _snapshot(declaration.name, number, value=number * scale)
+            snapshot = owned_snapshot_from_arrays(
+                original.block.schema, original.block.values, number,
+                validity=np.full((1, 1, 1), number != 3, dtype=bool),
+                sigma=np.full((1, 1, 1), 0.25),
+            )
+            outputs[declaration.name] = LiveDatasetOutput(
+                declaration, snapshot, MonitorCoverage(1, 1),
+                event_record={"device_settings": {"source": {
+                    "device_session_id": "source-session", "epoch_ranges": ((number, number),),
+                }}},
+            )
+        return outputs
+
+    producer = _host(SimpleNamespace(evaluate=produce), plane, wake,
+        instance_id="range-producer", kind="processor", outputs=(counts, occupied),
+        source=source.signal_key("frame"), delivery="exact")
+    seen = []
+
+    def evaluate(inputs):
+        a, b = inputs["counts"], inputs["occupied"]
+        assert a.primary_index == b.primary_index
+        assert a.run_record == b.run_record and a.event_record == b.event_record
+        values = a.values.reshape(-1).tolist()
+        assert b.values.reshape(-1).tolist() == [10.0 * value for value in values]
+        assert a.snapshot.expanded_validity().reshape(-1).tolist() == [value != 3.0 for value in values]
+        np.testing.assert_array_equal(a.snapshot.block.sigma, np.full(a.values.shape, 0.25))
+        assert a.event_record["device_settings"]["source"]["epoch_ranges"] == ((int(values[0]), int(values[-1])),)
+        seen.append(values)
+        if finish == "failed" and len(seen) == 3:
+            raise RuntimeError("range processor failed")
+        return {"result": _monitor_output(result, len(seen), value=float(len(seen)))}
+
+    consumer = _host(SimpleNamespace(dataset_input_view=view, dataset_input_window=2,
+                                    evaluate_inputs=evaluate), plane, wake,
+                     instance_id="range-consumer", kind="processor", outputs=(result,),
+                     source=producer.signal_key("counts"), input_name="counts",
+                     input_siblings=("occupied",), delivery="exact")
+    external = None
+
+    def settle(predicate):
+        deadline = time.monotonic() + 3.0
+        while not predicate() and time.monotonic() < deadline:
+            producer.poll()
+            consumer.poll()
+            time.sleep(0.001)
+        assert predicate(), (producer.observation, consumer.observation)
+
+    def publish(number):
+        plane.commit_live(source, {"frame": _monitor_output(raw, number, value=float(number))})
+        settle(lambda: (publication := plane.latest_publication(producer.signal_key("counts"))) is not None
+               and publication.value(producer.signal_key("counts")).values.item() == number)
+
+    try:
+        producer.start()
+        publish(1)
+        # Another panel retained only counts before the bundle consumer:
+        # its longer history must neither enlarge our window nor misalign siblings.
+        external = plane.acquire_indexed_history(producer.signal_key("counts"), 5)
+        publish(2)
+        consumer.start()
+        settle(lambda: len(seen) == 1)
+        publish(3)
+        settle(lambda: len(seen) == 2)
+        publish(4)
+        settle(lambda: len(seen) == 3)
+        assert seen == ([[2.0], [2.0, 3.0], [3.0, 4.0]] if view == "window"
+                        else [[2.0], [3.0], [4.0]])
+        if finish == "cancel":
+            consumer.cancel()
+        elif finish == "done":
+            plane.seal_committed(source)
+            settle(lambda: producer.terminal)
+        settle(lambda: consumer.terminal)
+        assert consumer.observation.phase == {"cancel": "cancelled", "done": "done", "failed": "failed"}[finish]
+        assert consumer._input_history_leases == ()
+        assert indexed_history_layout(plane.current_dataset(producer.signal_key("occupied")).block.schema) is None
+        assert indexed_history_layout(plane.current_dataset(producer.signal_key("counts")).block.schema).shot_count == 4
+    finally:
+        consumer.cancel()
+        producer.cancel()
+        settle(lambda: not consumer.running and not producer.running)
+        consumer.shutdown()
+        producer.shutdown()
+        if external is not None:
+            external.close()
         plane.close()
 
 

@@ -505,10 +505,18 @@ class UnitRegistry:
                 return registered
             base, prefix = self._split_prefix(unit)
         if base is None:
-            if "*" in unit:
-                factors = tuple(self.resolve(part) for part in unit.split("*"))
-                dimensions, scales = [], []
-                for factor in factors:
+            if "*" in unit or "^" in unit:
+                dimensions: dict[str, Decimal] = {}
+                symbols, scales = [], []
+                for part in unit.split("*"):
+                    spelling, separator, raw_exponent = part.partition("^")
+                    try:
+                        exponent = Decimal(raw_exponent) if separator else Decimal(1)
+                    except InvalidOperation as error:
+                        raise UnitError(f"invalid unit exponent {raw_exponent!r}") from error
+                    if not exponent.is_finite() or not math.isfinite(float(exponent)):
+                        raise UnitError("unit exponent must be finite")
+                    factor = self.resolve(spelling)
                     coordinate_scale = factor.coordinate_scale
                     if coordinate_scale is not None:
                         dimension, scale = coordinate_scale
@@ -522,11 +530,18 @@ class UnitRegistry:
                         dimension = f"coordinate:{family.symbol}"
                         scale = 10.0 ** prefix.exponent
                     if dimension != "dimensionless":
-                        dimensions.append(dimension)
-                    scales.append(scale)
+                        dimensions[dimension] = dimensions.get(dimension, Decimal(0)) + exponent
+                    try:
+                        scales.append(math.pow(scale, float(exponent)))
+                    except (OverflowError, ValueError) as error:
+                        raise UnitError("unit exponent produces an invalid scale") from error
+                    symbols.append(factor.symbol if exponent == 1 else
+                                   f"{factor.symbol}^{exponent.normalize()}")
                 return Unit(
-                    "*".join(factor.symbol for factor in factors),
-                    "*".join(sorted(dimensions)) or "dimensionless",
+                    "*".join(symbols),
+                    "*".join(dimension if power == 1 else f"{dimension}^{power.normalize()}"
+                             for dimension, power in sorted(dimensions.items()) if power)
+                    or "dimensionless",
                     Scaled(math.prod(scales)),
                 )
             raise UnitError(f"unknown unit {unit!r}")

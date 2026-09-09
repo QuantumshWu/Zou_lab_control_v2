@@ -323,3 +323,17 @@ def test_a_prefix_belongs_to_the_reference_of_a_family() -> None:
             product.convert_value_to(-3000.0, resolve_unit(f"count*{incompatible}"))
     assert float(resolve_unit("count*s").convert_value_to(2.0, resolve_unit("count*ms"))) == 2000.0
     assert DEFAULT_UNITS.display_choices(product) == ("count*mVpp",)
+    # Derive arithmetic writes a flat product of numeric powers. Resolution
+    # must combine equal dimensions without changing the authored values.
+    assert parse_quantity("-2 count*s^-1", "count*ms^-1") == pytest.approx(-.002)
+    assert DEFAULT_UNITS.compatible("count*count^-1", "1")
+    assert DEFAULT_UNITS.compatible("count*count", "count^2")
+    assert DEFAULT_UNITS.compatible("s^0.5*s^0.5", "s")
+    assert parse_quantity("4 s^0.5", "ms^0.5") == pytest.approx(4 * np.sqrt(1000))
+    assert parse_quantity("-3 count*mVpp^-1", "count*Vpp^-1") == pytest.approx(-3000)
+    assert float(DEFAULT_UNITS.convert(-2.0, "count^2*mVpp^-1", "count*count*Vrms^-1")) == pytest.approx(-2000 * np.sqrt(8))
+    with pytest.raises(UnitError, match="incompatible"):
+        DEFAULT_UNITS.convert(1.0, "Vpp^2", "W")
+    for exponent in ("nan", "inf", "-inf", "1e999", "", "2^3"):
+        with pytest.raises(UnitError, match="exponent"):
+            resolve_unit(f"s^{exponent}")

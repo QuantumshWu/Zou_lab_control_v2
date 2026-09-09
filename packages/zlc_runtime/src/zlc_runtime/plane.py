@@ -1019,6 +1019,8 @@ def _indexed_materialization_input(
     generation: StreamGenerationId,
     sequence: int,
     value: SignalValue,
+    window: int | None = None,
+    first_index: int | None = None,
 ) -> tuple[OwnedSnapshot, Mapping[str, object]] | _IndexedMaterialization:
     primary_index = value.primary_index
     if primary_index is None:
@@ -1028,7 +1030,12 @@ def _indexed_materialization_input(
             "publication precedes retained indexed history"
         )
     events = history.events
-    start = max(history.first_index, primary_index - history.capacity + 1)
+    capacity = history.capacity if window is None else min(history.capacity, window)
+    start = max(history.first_index, primary_index - capacity + 1)
+    if first_index is not None:
+        start = max(start, first_index)
+    if start > primary_index:
+        raise RetainedPublicationExpired("publication precedes the sibling history window")
     cached = history.materialized
     if (
         cached is not None
@@ -1543,24 +1550,7 @@ class SignalDataPlane:
     ) -> IndexedHistoryLease:
         """Start retaining this capable signal from its current event onward."""
 
-        name = canonical_text(signal_name, "signal name")
-        selected = self._indexed_history_window(window)
-        token = object()
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("signal data plane is closed")
-            state = self._state_for_signal_locked(name)
-            if state is None or state.retired:
-                raise LookupError(f"signal {name!r} is not retained")
-            declaration = state.declarations.get(name)
-            if declaration is None or not declaration.index_by_source:
-                raise ValueError(
-                    f"signal {name!r} does not declare source-index history"
-                )
-            transition = self._set_indexed_history_demand_locked(
-                name, token, selected
-            )
-        return IndexedHistoryLease(self, name, token, selected, transition)
+        return self.acquire_indexed_histories((signal_name,), window)[0]
 
     def _resize_indexed_history_lease(
         self,
@@ -1579,6 +1569,35 @@ class SignalDataPlane:
                 signal_name, token, selected
             )
         return selected, transition
+
+    def acquire_indexed_histories(
+        self, signal_names: Iterable[str], window: int,
+    ) -> tuple[IndexedHistoryLease, ...]:
+        """Acquire one sibling bundle's ordinary leases at the same event boundary."""
+
+        names = tuple(dict.fromkeys(canonical_text(name, "signal name") for name in signal_names))
+        selected = self._indexed_history_window(window)
+        leases: list[IndexedHistoryLease] = []
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("signal data plane is closed")
+            for name in names:
+                state = self._state_for_signal_locked(name)
+                if state is None or state.retired:
+                    raise LookupError(f"signal {name!r} is not retained")
+                declaration = state.declarations.get(name)
+                if declaration is None or not declaration.index_by_source:
+                    raise ValueError(f"signal {name!r} does not declare source-index history")
+            try:
+                for name in names:
+                    token = object()
+                    transition = self._set_indexed_history_demand_locked(name, token, selected)
+                    leases.append(IndexedHistoryLease(self, name, token, selected, transition))
+            except BaseException:
+                for lease in leases:
+                    self._set_indexed_history_demand_locked(lease.signal_name, lease._token, None)
+                raise
+        return tuple(leases)
 
     def _release_indexed_history_lease(
         self,
@@ -2407,9 +2426,17 @@ class SignalDataPlane:
         self,
         signal_name: str,
         publication: SignalPublication | None = None,
+        *,
+        indexed_history: bool = True,
+        history_window: int | None = None,
+        history_signals: tuple[str, ...] = (),
     ) -> tuple[OwnedSnapshot, Mapping[str, object]]:
         """Materialize one Dataset and the exact event record it contains."""
         name = canonical_text(signal_name, "signal name")
+        if history_window is not None:
+            history_window = self._indexed_history_window(history_window)
+            if not indexed_history:
+                raise ValueError("history_window requires indexed history")
         indexed_input = None
         finite_input = None
         materialized_record: Mapping[str, object] | None = None
@@ -2432,14 +2459,26 @@ class SignalDataPlane:
             if value is None:
                 raise ValueError("publication does not contain the selected signal")
             sequence = selected.event_ref.sequence
-            history = state.indexed_history.get(name)
+            history = state.indexed_history.get(name) if indexed_history else None
+            if history_window is not None and history is None:
+                raise ValueError(
+                    f"signal {name!r} has no publication history for window input; "
+                    "use run input for a finite Dataset"
+                )
             if history is not None:
+                sibling_floor = None
+                if history_signals:
+                    if any(name not in state.indexed_history for name in history_signals):
+                        raise ValueError("window input requires retained history for every sibling")
+                    sibling_floor = max(state.indexed_history[name].first_index for name in history_signals)
                 indexed_result = _indexed_materialization_input(
                     history,
                     signal_name=name,
                     generation=state.generation,
                     sequence=sequence,
                     value=value,
+                    window=history_window,
+                    first_index=sibling_floor,
                 )
                 if not isinstance(indexed_result, _IndexedMaterialization):
                     return indexed_result

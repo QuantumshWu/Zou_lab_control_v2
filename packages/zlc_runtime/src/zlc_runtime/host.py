@@ -20,6 +20,7 @@ from .plane import (
     SignalDataPlane,
     SignalPublication,
     SignalValue,
+    RetainedPublicationExpired,
 )
 from .streams import FollowTap, SourceFailed, SourceGenerationEnded, StreamEndedEarly
 from .task_run import TaskArtifact, TaskRun
@@ -396,6 +397,13 @@ class NodeHost:
         self._input_siblings = sibling_inputs
         self._resolved_input_signals: Mapping[str, str] | None = None
         self._input_delivery = delivery
+        self._input_view = getattr(node, "dataset_input_view", None)
+        self._input_window = getattr(node, "dataset_input_window", 50)
+        if self._input_view is not None and self._input_view not in {"event", "run", "window"}:
+            raise ValueError("dataset_input_view must be 'event', 'run', or 'window'")
+        if self._input_view == "window" and (type(self._input_window) is not int or self._input_window < 1):
+            raise ValueError("dataset_input_window must be a positive integer")
+        self._input_history_leases = ()
         self._required_artifacts = artifacts
         self._task_name = selected_task_name
         self._data_plane = data_plane
@@ -552,7 +560,22 @@ class NodeHost:
         if self._mode == "processor":
             if run_root is not None or input_summary is not None:
                 raise ValueError("only a Task start accepts run metadata")
-            self._start_processor()
+            try:
+                if self._input_view == "window":
+                    names = tuple(self._processor_signal_names().values())
+                    if not all(self._data_plane.supports_indexed_history(name) for name in names):
+                        raise ValueError(
+                            "window input requires source-index history on every sibling; "
+                            "use run input for a finite Dataset"
+                        )
+                    self._input_history_leases = self._data_plane.acquire_indexed_histories(
+                        names, self._input_window,
+                    )
+                self._start_processor()
+            except BaseException as error:
+                self._release_input_history()
+                self._refuse_start(error)
+                raise
         else:
             if self._kind == "task":
                 if run_root is None or input_summary is None:
@@ -635,6 +658,7 @@ class NodeHost:
             self._plane_state = False
         elif self._plane_state:
             self._plane_state = False
+        self._release_input_history()
         # Seal this host BEFORE the owner hop.  An owner that refuses to
         # release is its own loud failure and the caller still sees it, but it
         # must not be able to veto the retirement for ever: shutdown() returns
@@ -1087,6 +1111,7 @@ class NodeHost:
             )
 
     def _retire_plane_state(self) -> None:
+        self._release_input_history()
         if not self._plane_state:
             return
         if self._mode == "processor":
@@ -1094,6 +1119,11 @@ class NodeHost:
         else:
             self._data_plane.retire(self)
         self._plane_state = False
+
+    def _release_input_history(self) -> None:
+        leases, self._input_history_leases = self._input_history_leases, ()
+        for lease in leases:
+            lease.close()
 
     def _seal_committed_plane_state(self, *, cut_short: bool = False) -> None:
         if not self._plane_state:
@@ -1126,40 +1156,41 @@ class NodeHost:
     def _publication_inputs(
         self,
         publication: SignalPublication,
+        *,
+        terminal: bool = False,
     ) -> Mapping[str, SignalValue]:
+        view = self._input_view or ("run" if terminal else "event")
         inputs: dict[str, SignalValue] = {}
-        for input_name, signal_name in self._processor_signal_names().items():
+        signal_names = self._processor_signal_names()
+        for input_name, signal_name in signal_names.items():
             value = publication.value(signal_name)
             if not isinstance(value, SignalValue):
                 raise RuntimeError(
                     f"processor publication lost sibling input {input_name!r}"
                 )
-            inputs[input_name] = value
-        return MappingProxyType(inputs)
-
-    def _terminal_processor_inputs(
-        self,
-        publication: SignalPublication,
-    ) -> Mapping[str, SignalValue]:
-        inputs: dict[str, SignalValue] = {}
-        for input_name, signal_name in self._processor_signal_names().items():
-            current = publication.value(signal_name)
-            if not isinstance(current, SignalValue):
-                raise RuntimeError(
-                    f"processor publication lost sibling input {input_name!r}"
-                )
+            if view == "event":
+                inputs[input_name] = value
+                continue
             snapshot, event_record = self._data_plane.current_dataset_view(
                 signal_name,
                 publication,
+                indexed_history=view == "window" or self._input_view is None,
+                history_window=self._input_window if view == "window" else None,
+                history_signals=tuple(signal_names.values()) if view == "window" else (),
             )
             inputs[input_name] = SignalValue(
                 signal_name,
                 snapshot,
                 None,
                 run_record=publication.run_record,
-                primary_index=current.primary_index,
+                primary_index=value.primary_index,
                 event_record=event_record,
             )
+        if view == "window" and len({
+            (value.snapshot.block.window.start, value.snapshot.block.window.latest)
+            for value in inputs.values()
+        }) != 1:
+            raise RetainedPublicationExpired("sibling window expired while materializing its inputs")
         return MappingProxyType(inputs)
 
     def _refuse_start(self, error: BaseException) -> None:
@@ -1228,7 +1259,7 @@ class NodeHost:
             self._error = "processor publication lost its selected input signal"
             raise RuntimeError(self._error)
         if not self._data_plane.is_generation_live(self._source_signal):
-            self._terminal_inputs = self._terminal_processor_inputs(publication)
+            self._terminal_inputs = self._publication_inputs(publication, terminal=True)
             assert self._input_name is not None
             self._terminal_source = self._terminal_inputs[self._input_name]
             self._processor_path = "frozen"
@@ -1360,6 +1391,7 @@ class NodeHost:
                 self._phase = "done"
                 self._error = None
                 self._progress = None
+                self._release_input_history()
             owner.mark_owner_reaped()
 
     def _finish_frozen_processor_cancelled(self) -> None:
@@ -1494,6 +1526,7 @@ class NodeHost:
                 last_publication = publication
         finally:
             tap.close()
+            self._release_input_history()
 
     def _poll_follow_processor(self) -> None:
         owner = self._owner
@@ -1595,23 +1628,19 @@ class NodeHost:
         *,
         inputs: Mapping[str, SignalValue] | None = None,
     ) -> Mapping[str, LiveDatasetOutput]:
+        selected_inputs = self._publication_inputs(source_publication) if inputs is None else inputs
         if self._input_siblings:
             evaluate_inputs = getattr(self._node, "evaluate_inputs", None)
             if not callable(evaluate_inputs):
                 raise TypeError(
                     "a sibling-input processor must provide evaluate_inputs(mapping)"
                 )
-            selected_inputs = (
-                self._publication_inputs(source_publication)
-                if inputs is None
-                else inputs
-            )
             outputs = evaluate_inputs(selected_inputs)
         else:
             evaluate = getattr(self._node, "evaluate", None)
             if not callable(evaluate):
                 raise TypeError("processor must provide evaluate(SignalValue)")
-            outputs = evaluate(source)
+            outputs = evaluate(selected_inputs[self._input_name])
         if not isinstance(outputs, Mapping) or not outputs:
             raise TypeError("processor evaluate() must return a non-empty mapping")
         return dict(outputs)
@@ -1635,6 +1664,7 @@ class NodeHost:
     def accept_processor_failure(self, error: Exception) -> None:
         if not self._active:
             return
+        self._release_input_history()
         if isinstance(
             error,
             (SourceGenerationEnded, SourceFailed, GenerationSchemaAdvanced),
@@ -1659,6 +1689,7 @@ class NodeHost:
     def accept_processor_cancelled(self) -> None:
         if not self._active:
             return
+        self._release_input_history()
         self._plane_state = False
         self._active = False
         self._terminal = True
