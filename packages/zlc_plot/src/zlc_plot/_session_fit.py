@@ -1249,26 +1249,9 @@ class FitSessionMixin:
         delta_center = float(components["delta_center"])
         sigma_b = float(components["sigma_B"])
         ratio = float(components["ratio"])
-        x = np.asarray(selection.coordinates[0], dtype=float).reshape(-1)
         observed = np.asarray(selection.observations, dtype=float).reshape(-1)
-        # The pair is authored in shape; only its area is the histogram's,
-        # and that is what the counts say it is.
-        shape = (
-            (1.0 - ratio)
-            / (sigma * math.sqrt(2.0 * math.pi))
-            * np.exp(-0.5 * ((x - center) / sigma) ** 2)
-            + ratio
-            / (sigma_b * math.sqrt(2.0 * math.pi))
-            * np.exp(-0.5 * ((x - center - delta_center) / sigma_b) ** 2)
-        )
-        denominator = float(np.dot(shape, shape))
-        amplitude = (
-            max(0.0, float(np.dot(shape, observed)) / denominator)
-            if denominator > 0.0
-            else 0.0
-        )
         values = {
-            "amplitude": amplitude,
+            "amplitude": 1.0,
             "center": center,
             "sigma": sigma,
             "delta_center": delta_center,
@@ -1281,7 +1264,16 @@ class FitSessionMixin:
         parameters = np.asarray(
             [values[name] for name in model.parameter_names], dtype=float
         )
-        fitted = model.evaluate(selection.coordinates, parameters).reshape(-1)
+        # The caller owns the Gaussian shape; only its area is the current
+        # histogram's. Use the model's one evaluator, not a second PDF here.
+        shape = model.evaluate(selection.coordinates, parameters).reshape(-1)
+        denominator = float(np.dot(shape, shape))
+        amplitude = (
+            max(0.0, float(np.dot(shape, observed)) / denominator)
+            if denominator > 0.0 else 0.0
+        )
+        parameters[model.parameter_index("amplitude")] = amplitude
+        fitted = shape * amplitude
         residuals = observed - fitted
         count = len(parameters)
         result = FitResult(

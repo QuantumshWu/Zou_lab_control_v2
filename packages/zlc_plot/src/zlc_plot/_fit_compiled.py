@@ -24,8 +24,8 @@ with_derivatives, context) -> (cost, raw_rss, finite)``
     use ``compiled_point_terms`` and the accumulator helpers below so linear,
     Poisson and robust-loss semantics stay identical.
 
-``value_jacobian(coords, full_parameters) -> (values, full_jacobian)``
-    Evaluate the winning model and its analytic full-parameter Jacobian.  The
+``value_jacobian(coords, full_parameters, with_jacobian) -> (values, jacobian)``
+    Evaluate the model; a value-only consumer receives an empty Jacobian. The
     common finalizer projects free columns, reconstructs SciPy's robust scaled
     Jacobian, and uses a strict SVD rank test for covariance.
 
@@ -93,6 +93,9 @@ STATUS_FTOL_XTOL = 4
 _F64_1C = nb_types.Array(nb_types.float64, 1, "C")
 _F64_2C = nb_types.Array(nb_types.float64, 2, "C")
 _F64_3C = nb_types.Array(nb_types.float64, 3, "C")
+_F64_1R = nb_types.Array(nb_types.float64, 1, "C", readonly=True)
+_F64_2R = nb_types.Array(nb_types.float64, 2, "C", readonly=True)
+_F64_3R = nb_types.Array(nb_types.float64, 3, "C", readonly=True)
 _BOOL_1C = nb_types.Array(nb_types.boolean, 1, "C")
 _BOOL_2C = nb_types.Array(nb_types.boolean, 2, "C")
 _I32_1C = nb_types.Array(nb_types.int32, 1, "C")
@@ -100,7 +103,7 @@ _I32_2C = nb_types.Array(nb_types.int32, 2, "C")
 _I64_1C = nb_types.Array(nb_types.int64, 1, "C")
 
 _PREPARE_CALLBACK_SIGNATURE = nb_types.int64(
-    _F64_2C,
+    _F64_2R,
     _F64_1C,
     _BOOL_1C,
     _F64_2C,
@@ -114,7 +117,7 @@ _OBJECTIVE_RETURN = nb_types.Tuple(
     (nb_types.float64, nb_types.float64, nb_types.boolean)
 )
 _OBJECTIVE_CALLBACK_SIGNATURE = _OBJECTIVE_RETURN(
-    _F64_2C,
+    _F64_2R,
     _F64_1C,
     _BOOL_1C,
     _F64_1C,
@@ -132,14 +135,14 @@ _OBJECTIVE_CALLBACK_SIGNATURE = _OBJECTIVE_RETURN(
 _OBJECTIVE_FUNCTION_TYPE = nb_types.FunctionType(_OBJECTIVE_CALLBACK_SIGNATURE)
 
 _VALUE_JACOBIAN_RETURN = nb_types.Tuple((_F64_1C, _F64_2C))
-_VALUE_JACOBIAN_CALLBACK_SIGNATURE = _VALUE_JACOBIAN_RETURN(_F64_2C, _F64_1C)
+_VALUE_JACOBIAN_CALLBACK_SIGNATURE = _VALUE_JACOBIAN_RETURN(_F64_2R, _F64_1R, nb_types.boolean)
 _VALUE_JACOBIAN_FUNCTION_TYPE = nb_types.FunctionType(
     _VALUE_JACOBIAN_CALLBACK_SIGNATURE
 )
 
 _PREPARE_KERNEL_SIGNATURE = nb_types.void(
     _PREPARE_FUNCTION_TYPE,
-    _F64_3C,
+    _F64_3R,
     _F64_2C,
     _BOOL_2C,
     _F64_3C,
@@ -163,7 +166,7 @@ _PREPARE_KERNEL_SIGNATURE = nb_types.void(
 
 _SOLVE_KERNEL_SIGNATURE = nb_types.void(
     _OBJECTIVE_FUNCTION_TYPE,
-    _F64_3C,
+    _F64_3R,
     _F64_2C,
     _BOOL_2C,
     _F64_3C,
@@ -198,7 +201,7 @@ _SOLVE_KERNEL_SIGNATURE = nb_types.void(
 
 _FINALIZE_KERNEL_SIGNATURE = nb_types.void(
     _VALUE_JACOBIAN_FUNCTION_TYPE,
-    _F64_3C,
+    _F64_3R,
     _F64_2C,
     _BOOL_2C,
     _F64_2C,
@@ -1795,7 +1798,7 @@ def _finalize_one(
                 covariance[row, column] = math.nan
         return fitted, residuals, covariance, errors, math.inf, False
 
-    predicted, full_jacobian = value_jacobian_callback(coordinates, parameters)
+    predicted, full_jacobian = value_jacobian_callback(coordinates, parameters, True)
     if predicted.size != point_count:
         for row in range(parameter_count):
             errors[row] = math.nan
@@ -2096,6 +2099,11 @@ def _coordinate_stack(
         stack[0, 0, 1 : x.size + 1] = x
         stack[0, 1, 1 : y.size + 1] = y
         return stack
+    if len(coordinates) == 1:
+        array = np.asarray(coordinates[0], dtype=np.float64)
+        if array.shape != (points,):
+            raise ValueError("compiled fit coordinates must be shared 1D axes")
+        return np.ascontiguousarray(array).reshape(1, 1, points)
     stack = np.empty((1, len(coordinates), points), dtype=np.float64)
     for axis, values in enumerate(coordinates):
         array = np.asarray(values, dtype=np.float64)
@@ -2262,6 +2270,7 @@ def _solve_compiled(
     warm_seeds: np.ndarray | Sequence[float] | None,
     use_warm: bool | Sequence[bool],
     coordinates_are_canonical: bool,
+    all_finite: bool,
     parallel: bool,
     finalize: bool,
 ) -> CompiledFitOutput:
@@ -2295,15 +2304,16 @@ def _solve_compiled(
         if valid_values.shape != (cells, points):
             raise ValueError("compiled fit valid mask must match observations")
         valid_values = np.array(valid_values, dtype=np.bool_, order="C", copy=True)
-    valid_values &= np.isfinite(values)
-    if grid:
-        width, height = (int(coordinate_values[0, axis, 0]) for axis in range(2))
-        valid_grid = valid_values.reshape(cells, height, width)
-        valid_grid &= np.isfinite(coordinate_values[0, 0, 1 : width + 1])[None, None, :]
-        valid_grid &= np.isfinite(coordinate_values[0, 1, 1 : height + 1])[None, :, None]
-    else:
-        for axis in range(coordinate_values.shape[1]):
-            valid_values &= np.isfinite(coordinate_values[:, axis, :])
+    if not all_finite:
+        valid_values &= np.isfinite(values)
+        if grid:
+            width, height = (int(coordinate_values[0, axis, 0]) for axis in range(2))
+            valid_grid = valid_values.reshape(cells, height, width)
+            valid_grid &= np.isfinite(coordinate_values[0, 0, 1 : width + 1])[None, None, :]
+            valid_grid &= np.isfinite(coordinate_values[0, 1, 1 : height + 1])[None, :, None]
+        else:
+            for axis in range(coordinate_values.shape[1]):
+                valid_values &= np.isfinite(coordinate_values[:, axis, :])
 
     coordinate_values, coordinate_origins = _canonicalize_coordinates(
         descriptor,
@@ -2311,6 +2321,8 @@ def _solve_compiled(
         valid_values,
         already_canonical=bool(coordinates_are_canonical),
     )
+    coordinate_values = coordinate_values.view()
+    coordinate_values.setflags(write=False)
     contexts = _context_stack(
         descriptor,
         coordinate_values,
@@ -2640,6 +2652,7 @@ def solve_compiled_batch(
     warm_seeds: np.ndarray | Sequence[float] | None = None,
     use_warm: bool | Sequence[bool] = False,
     coordinates_are_canonical: bool = False,
+    all_finite: bool = False,
     finalize: bool = True,
 ) -> CompiledFitOutput:
     """Solve independent cells in one ``prange`` compiled invocation."""
@@ -2668,6 +2681,7 @@ def solve_compiled_batch(
         warm_seeds=warm_seeds,
         use_warm=use_warm,
         coordinates_are_canonical=coordinates_are_canonical,
+        all_finite=bool(all_finite),
         parallel=True,
         finalize=bool(finalize),
     )
@@ -2698,6 +2712,7 @@ def solve_compiled_single(
     warm_seeds: np.ndarray | Sequence[float] | None = None,
     use_warm: bool | Sequence[bool] = False,
     coordinates_are_canonical: bool = False,
+    all_finite: bool = False,
     finalize: bool = True,
 ) -> CompiledFitOutput:
     """Solve exactly one cell through the serial form of the compiled core."""
@@ -2731,6 +2746,7 @@ def solve_compiled_single(
         warm_seeds=warm_seeds,
         use_warm=use_warm,
         coordinates_are_canonical=coordinates_are_canonical,
+        all_finite=bool(all_finite),
         parallel=False,
         finalize=bool(finalize),
     )
@@ -2858,202 +2874,144 @@ def _accumulate_model_point(
 
 
 @njit(cache=True)
-def _value_jacobian_lorentzian(coords: np.ndarray, parameters: np.ndarray):
-    x = coords[0]
-    output = np.empty(x.size, dtype=np.float64)
-    jacobian = np.empty((x.size, 4), dtype=np.float64)
-    center, width, amplitude, offset = parameters
-    half = 0.5 * width
-    half_squared = half * half
-    for point in range(x.size):
-        delta = x[point] - center
-        denominator = delta * delta + half_squared
-        squared = denominator * denominator
-        shape = half_squared / denominator
-        output[point] = amplitude * shape + offset
-        jacobian[point, 0] = amplitude * half_squared * 2.0 * delta / squared
-        jacobian[point, 1] = amplitude * half * delta * delta / squared
-        jacobian[point, 2] = shape
-        jacobian[point, 3] = 1.0
+def _value_jacobian_lorentzian(coords: np.ndarray, parameters: np.ndarray, with_jacobian: bool):
+    output = np.empty(coords.shape[1], dtype=np.float64)
+    jacobian = np.empty((output.size if with_jacobian else 0, parameters.size), dtype=np.float64)
+    no_derivatives = np.empty(0, dtype=np.float64)
+    for point in range(output.size):
+        output[point] = _point_lorentzian(
+            coords, point, parameters,
+            jacobian[point] if with_jacobian else no_derivatives,
+        )
     return output, jacobian
 
 
 @njit(cache=True)
-def _value_jacobian_gaussian(coords: np.ndarray, parameters: np.ndarray):
-    x = coords[0]
-    output = np.empty(x.size, dtype=np.float64)
-    jacobian = np.empty((x.size, 4), dtype=np.float64)
-    amplitude, offset, sigma, center = parameters
-    sigma2 = sigma * sigma
-    sigma3 = sigma2 * sigma
-    for point in range(x.size):
-        delta = x[point] - center
-        shape = math.exp(-0.5 * delta * delta / sigma2)
-        output[point] = amplitude * shape + offset
-        jacobian[point, 0] = shape
-        jacobian[point, 1] = 1.0
-        jacobian[point, 2] = amplitude * shape * delta * delta / sigma3
-        jacobian[point, 3] = amplitude * shape * delta / sigma2
+def _value_jacobian_gaussian(coords: np.ndarray, parameters: np.ndarray, with_jacobian: bool):
+    output = np.empty(coords.shape[1], dtype=np.float64)
+    jacobian = np.empty((output.size if with_jacobian else 0, parameters.size), dtype=np.float64)
+    no_derivatives = np.empty(0, dtype=np.float64)
+    for point in range(output.size):
+        output[point] = _point_gaussian(
+            coords, point, parameters,
+            jacobian[point] if with_jacobian else no_derivatives,
+        )
     return output, jacobian
 
 
 @njit(cache=True)
-def _value_jacobian_histogram(coords: np.ndarray, parameters: np.ndarray):
-    x = coords[0]
-    output = np.empty(x.size, dtype=np.float64)
-    jacobian = np.empty((x.size, 4), dtype=np.float64)
-    for point in range(x.size):
-        output[point] = _point_histogram(coords, point, parameters, jacobian[point])
+def _value_jacobian_histogram(coords: np.ndarray, parameters: np.ndarray, with_jacobian: bool):
+    output = np.empty(coords.shape[1], dtype=np.float64)
+    jacobian = np.empty((output.size if with_jacobian else 0, parameters.size), dtype=np.float64)
+    no_derivatives = np.empty(0, dtype=np.float64)
+    for point in range(output.size):
+        output[point] = _point_histogram(
+            coords, point, parameters,
+            jacobian[point] if with_jacobian else no_derivatives,
+        )
     return output, jacobian
 
 @njit(cache=True)
-def _value_jacobian_bimodal(coords: np.ndarray, parameters: np.ndarray):
-    x = coords[0]
-    output = np.empty(x.size, dtype=np.float64)
-    jacobian = np.empty((x.size, 7), dtype=np.float64)
-    for point in range(x.size):
-        output[point] = _point_bimodal(coords, point, parameters, jacobian[point])
+def _value_jacobian_bimodal(coords: np.ndarray, parameters: np.ndarray, with_jacobian: bool):
+    output = np.empty(coords.shape[1], dtype=np.float64)
+    jacobian = np.empty((output.size if with_jacobian else 0, parameters.size), dtype=np.float64)
+    no_derivatives = np.empty(0, dtype=np.float64)
+    for point in range(output.size):
+        output[point] = _point_bimodal(
+            coords, point, parameters,
+            jacobian[point] if with_jacobian else no_derivatives,
+        )
     return output, jacobian
 
 @njit(cache=True)
-def _value_jacobian_poisson(coords: np.ndarray, parameters: np.ndarray):
-    x = coords[0]
-    output = np.empty(x.size, dtype=np.float64)
-    jacobian = np.empty((x.size, 4), dtype=np.float64)
+def _value_jacobian_poisson(coords: np.ndarray, parameters: np.ndarray, with_jacobian: bool):
+    output = np.empty(coords.shape[1], dtype=np.float64)
+    jacobian = np.empty((output.size if with_jacobian else 0, parameters.size), dtype=np.float64)
+    no_derivatives = np.empty(0, dtype=np.float64)
     grid = _poisson_grid(parameters[1], parameters[2])
-    for point in range(x.size):
-        output[point] = _point_poisson(coords, point, parameters, jacobian[point], grid)
+    for point in range(output.size):
+        output[point] = _point_poisson(
+            coords, point, parameters,
+            jacobian[point] if with_jacobian else no_derivatives, grid,
+        )
     return output, jacobian
 
 @njit(cache=True)
-def _value_jacobian_poisson_bimodal(coords: np.ndarray, parameters: np.ndarray):
-    x = coords[0]
-    output = np.empty(x.size, dtype=np.float64)
-    jacobian = np.empty((x.size, 7), dtype=np.float64)
+def _value_jacobian_poisson_bimodal(coords: np.ndarray, parameters: np.ndarray, with_jacobian: bool):
+    output = np.empty(coords.shape[1], dtype=np.float64)
+    jacobian = np.empty((output.size if with_jacobian else 0, parameters.size), dtype=np.float64)
+    no_derivatives = np.empty(0, dtype=np.float64)
     left = _poisson_grid(parameters[1], parameters[2])
     right = _poisson_grid(parameters[1] + parameters[3], parameters[4])
-    for point in range(x.size):
+    for point in range(output.size):
         output[point] = _point_poisson_bimodal(
-            coords, point, parameters, jacobian[point], left, right
+            coords, point, parameters,
+            jacobian[point] if with_jacobian else no_derivatives, left, right,
         )
     return output, jacobian
 
 @njit(cache=True)
-def _value_jacobian_doublet(coords: np.ndarray, parameters: np.ndarray):
-    x = coords[0]
-    output = np.empty(x.size, dtype=np.float64)
-    jacobian = np.empty((x.size, 5), dtype=np.float64)
-    center, width, amplitude, offset, splitting = parameters
-    half = 0.5 * width
-    half_squared = half * half
-    left_center = center - 0.5 * splitting
-    right_center = center + 0.5 * splitting
-    for point in range(x.size):
-        left_delta = x[point] - left_center
-        right_delta = x[point] - right_center
-        left_den = left_delta * left_delta + half_squared
-        right_den = right_delta * right_delta + half_squared
-        left_shape = half_squared / left_den
-        right_shape = half_squared / right_den
-        left_center_d = amplitude * half_squared * 2.0 * left_delta / (left_den * left_den)
-        right_center_d = amplitude * half_squared * 2.0 * right_delta / (right_den * right_den)
-        output[point] = amplitude * (left_shape + right_shape) + offset
-        jacobian[point, 0] = left_center_d + right_center_d
-        jacobian[point, 1] = amplitude * half * (
-            left_delta * left_delta / (left_den * left_den)
-            + right_delta * right_delta / (right_den * right_den)
+def _value_jacobian_doublet(coords: np.ndarray, parameters: np.ndarray, with_jacobian: bool):
+    output = np.empty(coords.shape[1], dtype=np.float64)
+    jacobian = np.empty((output.size if with_jacobian else 0, parameters.size), dtype=np.float64)
+    no_derivatives = np.empty(0, dtype=np.float64)
+    for point in range(output.size):
+        output[point] = _point_doublet(
+            coords, point, parameters,
+            jacobian[point] if with_jacobian else no_derivatives,
         )
-        jacobian[point, 2] = left_shape + right_shape
-        jacobian[point, 3] = 1.0
-        jacobian[point, 4] = -0.5 * left_center_d + 0.5 * right_center_d
     return output, jacobian
 
 
 @njit(cache=True)
-def _value_jacobian_damped(coords: np.ndarray, parameters: np.ndarray):
-    x = coords[0]
-    output = np.empty(x.size, dtype=np.float64)
-    jacobian = np.empty((x.size, 5), dtype=np.float64)
-    amplitude, offset, frequency, decay, phase = parameters
-    decay2 = decay * decay
-    for point in range(x.size):
-        coordinate = x[point]
-        exponential = math.exp(-coordinate / decay)
-        argument = 2.0 * math.pi * frequency * coordinate + phase
-        sine = math.sin(argument)
-        cosine = math.cos(argument)
-        exp_sine = exponential * sine
-        exp_cosine = exponential * cosine
-        output[point] = offset + amplitude * exp_sine
-        jacobian[point, 0] = exp_sine
-        jacobian[point, 1] = 1.0
-        jacobian[point, 2] = amplitude * exp_cosine * 2.0 * math.pi * coordinate
-        jacobian[point, 3] = amplitude * exp_sine * coordinate / decay2
-        jacobian[point, 4] = amplitude * exp_cosine
+def _value_jacobian_damped(coords: np.ndarray, parameters: np.ndarray, with_jacobian: bool):
+    output = np.empty(coords.shape[1], dtype=np.float64)
+    jacobian = np.empty((output.size if with_jacobian else 0, parameters.size), dtype=np.float64)
+    no_derivatives = np.empty(0, dtype=np.float64)
+    for point in range(output.size):
+        output[point] = _point_damped(
+            coords, point, parameters,
+            jacobian[point] if with_jacobian else no_derivatives,
+        )
     return output, jacobian
 
 
 @njit(cache=True)
-def _value_jacobian_exponential(coords: np.ndarray, parameters: np.ndarray):
-    x = coords[0]
-    output = np.empty(x.size, dtype=np.float64)
-    jacobian = np.empty((x.size, 3), dtype=np.float64)
-    amplitude, offset, decay = parameters
-    decay2 = decay * decay
-    for point in range(x.size):
-        exponential = math.exp(-x[point] / decay)
-        output[point] = offset + amplitude * exponential
-        jacobian[point, 0] = exponential
-        jacobian[point, 1] = 1.0
-        jacobian[point, 2] = amplitude * exponential * x[point] / decay2
+def _value_jacobian_exponential(coords: np.ndarray, parameters: np.ndarray, with_jacobian: bool):
+    output = np.empty(coords.shape[1], dtype=np.float64)
+    jacobian = np.empty((output.size if with_jacobian else 0, parameters.size), dtype=np.float64)
+    no_derivatives = np.empty(0, dtype=np.float64)
+    for point in range(output.size):
+        output[point] = _point_exponential(
+            coords, point, parameters,
+            jacobian[point] if with_jacobian else no_derivatives,
+        )
     return output, jacobian
 
 
 @njit(cache=True)
-def _value_jacobian_radial(coords: np.ndarray, parameters: np.ndarray):
-    x, y = coords[0], coords[1]
-    output = np.empty(x.size, dtype=np.float64)
-    jacobian = np.empty((x.size, 5), dtype=np.float64)
-    amplitude, offset, radius, center_x, center_y = parameters
-    radius2 = radius * radius
-    radius3 = radius2 * radius
-    for point in range(x.size):
-        delta_x = x[point] - center_x
-        delta_y = y[point] - center_y
-        squared = delta_x * delta_x + delta_y * delta_y
-        shape = math.exp(-squared / radius2)
-        output[point] = offset + amplitude * shape
-        jacobian[point, 0] = shape
-        jacobian[point, 1] = 1.0
-        jacobian[point, 2] = amplitude * shape * 2.0 * squared / radius3
-        jacobian[point, 3] = amplitude * shape * 2.0 * delta_x / radius2
-        jacobian[point, 4] = amplitude * shape * 2.0 * delta_y / radius2
+def _value_jacobian_radial(coords: np.ndarray, parameters: np.ndarray, with_jacobian: bool):
+    output = np.empty(coords.shape[1], dtype=np.float64)
+    jacobian = np.empty((output.size if with_jacobian else 0, parameters.size), dtype=np.float64)
+    no_derivatives = np.empty(0, dtype=np.float64)
+    for point in range(output.size):
+        output[point] = _point_radial(
+            coords, point, parameters,
+            jacobian[point] if with_jacobian else no_derivatives,
+        )
     return output, jacobian
 
 
 @njit(cache=True)
-def _value_jacobian_anisotropic(coords: np.ndarray, parameters: np.ndarray):
-    x, y = coords[0], coords[1]
-    output = np.empty(x.size, dtype=np.float64)
-    jacobian = np.empty((x.size, 6), dtype=np.float64)
-    amplitude, offset, radius_x, radius_y, center_x, center_y = parameters
-    radius_x2 = radius_x * radius_x
-    radius_y2 = radius_y * radius_y
-    radius_x3 = radius_x2 * radius_x
-    radius_y3 = radius_y2 * radius_y
-    for point in range(x.size):
-        delta_x = x[point] - center_x
-        delta_y = y[point] - center_y
-        delta_x2 = delta_x * delta_x
-        delta_y2 = delta_y * delta_y
-        shape = math.exp(-(delta_x2 / radius_x2 + delta_y2 / radius_y2))
-        output[point] = offset + amplitude * shape
-        jacobian[point, 0] = shape
-        jacobian[point, 1] = 1.0
-        jacobian[point, 2] = amplitude * shape * 2.0 * delta_x2 / radius_x3
-        jacobian[point, 3] = amplitude * shape * 2.0 * delta_y2 / radius_y3
-        jacobian[point, 4] = amplitude * shape * 2.0 * delta_x / radius_x2
-        jacobian[point, 5] = amplitude * shape * 2.0 * delta_y / radius_y2
+def _value_jacobian_anisotropic(coords: np.ndarray, parameters: np.ndarray, with_jacobian: bool):
+    output = np.empty(coords.shape[1], dtype=np.float64)
+    jacobian = np.empty((output.size if with_jacobian else 0, parameters.size), dtype=np.float64)
+    no_derivatives = np.empty(0, dtype=np.float64)
+    for point in range(output.size):
+        output[point] = _point_anisotropic(
+            coords, point, parameters,
+            jacobian[point] if with_jacobian else no_derivatives,
+        )
     return output, jacobian
 
 
@@ -3064,12 +3022,13 @@ def _point_lorentzian(coords, point, parameters, row):
     half = 0.5 * width
     half_squared = half * half
     denominator = delta * delta + half_squared
-    denominator_squared = denominator * denominator
     shape = half_squared / denominator
-    row[0] = amplitude * half_squared * 2.0 * delta / denominator_squared
-    row[1] = amplitude * half * delta * delta / denominator_squared
-    row[2] = shape
-    row[3] = 1.0
+    if row.size:
+        denominator_squared = denominator * denominator
+        row[0] = amplitude * half_squared * 2.0 * delta / denominator_squared
+        row[1] = amplitude * half * delta * delta / denominator_squared
+        row[2] = shape
+        row[3] = 1.0
     return amplitude * shape + offset
 
 
@@ -3079,10 +3038,11 @@ def _point_gaussian(coords, point, parameters, row):
     delta = coords[0, point] - center
     sigma2 = sigma * sigma
     shape = math.exp(-0.5 * delta * delta / sigma2)
-    row[0] = shape
-    row[1] = 1.0
-    row[2] = amplitude * shape * delta * delta / (sigma2 * sigma)
-    row[3] = amplitude * shape * delta / sigma2
+    if row.size:
+        row[0] = shape
+        row[1] = 1.0
+        row[2] = amplitude * shape * delta * delta / (sigma2 * sigma)
+        row[3] = amplitude * shape * delta / sigma2
     return amplitude * shape + offset
 
 
@@ -3093,10 +3053,11 @@ def _point_histogram(coords, point, parameters, row):
     sigma2 = sigma * sigma
     density = math.exp(-0.5 * delta * delta / sigma2) / (sigma * SQRT_TWO_PI)
     value = amplitude * density
-    row[0] = density
-    row[1] = value * delta / sigma2
-    row[2] = value * (delta * delta / (sigma2 * sigma) - 1.0 / sigma)
-    row[3] = 1.0
+    if row.size:
+        row[0] = density
+        row[1] = value * delta / sigma2
+        row[2] = value * (delta * delta / (sigma2 * sigma) - 1.0 / sigma)
+        row[3] = 1.0
     return value + background
 
 @njit(cache=True, inline="always")
@@ -3111,13 +3072,14 @@ def _point_bimodal(coords, point, parameters, row):
     density_b = math.exp(-0.5 * delta_b * delta_b / sigma_b2) / (sigma_b * SQRT_TWO_PI)
     value_a = amplitude * (1.0 - ratio) * density_a
     value_b = amplitude * ratio * density_b
-    row[0] = (1.0 - ratio) * density_a + ratio * density_b
-    row[1] = value_a * delta_a / sigma2 + value_b * delta_b / sigma_b2
-    row[2] = value_a * (delta_a * delta_a / (sigma2 * sigma) - 1.0 / sigma)
-    row[3] = value_b * delta_b / sigma_b2
-    row[4] = value_b * (delta_b * delta_b / (sigma_b2 * sigma_b) - 1.0 / sigma_b)
-    row[5] = amplitude * (density_b - density_a)
-    row[6] = 1.0
+    if row.size:
+        row[0] = (1.0 - ratio) * density_a + ratio * density_b
+        row[1] = value_a * delta_a / sigma2 + value_b * delta_b / sigma_b2
+        row[2] = value_a * (delta_a * delta_a / (sigma2 * sigma) - 1.0 / sigma)
+        row[3] = value_b * delta_b / sigma_b2
+        row[4] = value_b * (delta_b * delta_b / (sigma_b2 * sigma_b) - 1.0 / sigma_b)
+        row[5] = amplitude * (density_b - density_a)
+        row[6] = 1.0
     return value_a + value_b + background
 
 #: A photon count is a Poisson variable on the integers; a histogram's bins
@@ -3231,7 +3193,7 @@ def _poisson_grid(rate, sigma):
 
 
 @njit(cache=True, inline="always")
-def _poisson_convolution(x, rate, sigma, table, first, n):
+def _poisson_convolution(x, rate, sigma, table, first, n, derivatives):
     """``(I0, I1, I2) = int p(u) g(x-u) {1, u, (x-u)^2} du`` over the bin's
     +-8 sigma window on the grid, ``g`` the unnormalised Gaussian; the end
     terms at ``u = 0`` come in when the window reaches it."""
@@ -3262,8 +3224,9 @@ def _poisson_convolution(x, rate, sigma, table, first, n):
         if m == 0:
             weight *= 0.5
         s0 += weight
-        s1 += weight * (m * h)
-        s2 += weight * delta * delta
+        if derivatives:
+            s1 += weight * (m * h)
+            s2 += weight * delta * delta
         delta -= h
         shape *= ratio
         ratio *= decay
@@ -3288,15 +3251,16 @@ def _poisson_convolution(x, rate, sigma, table, first, n):
         c2 = h * h / 12.0 * f0
         c4 = h * h * h * h / 720.0 * f0
         i0 += c2 * d1 - c4 * d3
-        i1 += c2 - 3.0 * c4 * d2
-        i2 += c2 * (d1 * x * x - 2.0 * x) - c4 * (
-            d3 * x * x - 6.0 * x * d2 + 6.0 * d1
-        )
+        if derivatives:
+            i1 += c2 - 3.0 * c4 * d2
+            i2 += c2 * (d1 * x * x - 2.0 * x) - c4 * (
+                d3 * x * x - 6.0 * x * d2 + 6.0 * d1
+            )
     return i0, i1, i2
 
 
 @njit(cache=True, inline="always")
-def _poisson_component(x, amplitude, rate, sigma, grid):
+def _poisson_component(x, amplitude, rate, sigma, grid, derivatives):
     """``(shape, d/d rate, d/d sigma)`` of one population at ``x``: the model
     is ``amplitude * shape`` with ``shape = I0 / (mass sigma sqrt(2 pi))``,
     the density of a photon number under the extended law plus read noise."""
@@ -3307,11 +3271,13 @@ def _poisson_component(x, amplitude, rate, sigma, grid):
     if not (rate >= POISSON_ZERO_RATE):
         t = x / sigma
         shape = norm * math.exp(-0.5 * t * t)
-        return shape, 0.0, amplitude * shape * (t * t - 1.0) / sigma
+        return shape, 0.0, amplitude * shape * (t * t - 1.0) / sigma if derivatives else 0.0
     table, first, n, mass, mean = grid
-    i0, i1, i2 = _poisson_convolution(x, rate, sigma, table, first, n)
+    i0, i1, i2 = _poisson_convolution(x, rate, sigma, table, first, n, derivatives)
     norm /= mass
     shape = i0 * norm
+    if not derivatives:
+        return shape, 0.0, 0.0
     # d/d rate of p is p (u/rate - 1) and of the mass is mass (mean/rate - 1).
     rate_derivative = amplitude * norm * (i1 - i0 * mean) / rate
     sigma_derivative = amplitude * norm * (i2 / (sigma * sigma) - i0) / sigma
@@ -3322,12 +3288,13 @@ def _poisson_component(x, amplitude, rate, sigma, grid):
 def _point_poisson(coords, point, parameters, row, grid):
     amplitude, rate, sigma, background = parameters
     shape, rate_d, sigma_d = _poisson_component(
-        coords[0, point], amplitude, rate, sigma, grid
+        coords[0, point], amplitude, rate, sigma, grid, bool(row.size)
     )
-    row[0] = shape
-    row[1] = rate_d
-    row[2] = sigma_d
-    row[3] = 1.0
+    if row.size:
+        row[0] = shape
+        row[1] = rate_d
+        row[2] = sigma_d
+        row[3] = 1.0
     return amplitude * shape + background
 
 @njit(cache=True, inline="always")
@@ -3337,18 +3304,19 @@ def _point_poisson_bimodal(coords, point, parameters, row, left, right):
     amplitude_a = amplitude * (1.0 - ratio)
     amplitude_b = amplitude * ratio
     shape_a, rate_d_a, sigma_d_a = _poisson_component(
-        x, amplitude_a, rate, sigma, left
+        x, amplitude_a, rate, sigma, left, bool(row.size)
     )
     shape_b, rate_d_b, sigma_d_b = _poisson_component(
-        x, amplitude_b, rate + delta_rate, sigma_b, right
+        x, amplitude_b, rate + delta_rate, sigma_b, right, bool(row.size)
     )
-    row[0] = (1.0 - ratio) * shape_a + ratio * shape_b
-    row[1] = rate_d_a + rate_d_b
-    row[2] = sigma_d_a
-    row[3] = rate_d_b
-    row[4] = sigma_d_b
-    row[5] = amplitude * (shape_b - shape_a)
-    row[6] = 1.0
+    if row.size:
+        row[0] = (1.0 - ratio) * shape_a + ratio * shape_b
+        row[1] = rate_d_a + rate_d_b
+        row[2] = sigma_d_a
+        row[3] = rate_d_b
+        row[4] = sigma_d_b
+        row[5] = amplitude * (shape_b - shape_a)
+        row[6] = 1.0
     return amplitude_a * shape_a + amplitude_b * shape_b + background
 
 @njit(cache=True, inline="always")
@@ -3361,19 +3329,20 @@ def _point_doublet(coords, point, parameters, row):
     right_delta = x - (center + 0.5 * splitting)
     left_den = left_delta * left_delta + half_squared
     right_den = right_delta * right_delta + half_squared
-    left_den2 = left_den * left_den
-    right_den2 = right_den * right_den
     left_shape = half_squared / left_den
     right_shape = half_squared / right_den
-    left_center_d = amplitude * half_squared * 2.0 * left_delta / left_den2
-    right_center_d = amplitude * half_squared * 2.0 * right_delta / right_den2
-    row[0] = left_center_d + right_center_d
-    row[1] = amplitude * half * (
-        left_delta * left_delta / left_den2 + right_delta * right_delta / right_den2
-    )
-    row[2] = left_shape + right_shape
-    row[3] = 1.0
-    row[4] = -0.5 * left_center_d + 0.5 * right_center_d
+    if row.size:
+        left_den2 = left_den * left_den
+        right_den2 = right_den * right_den
+        left_center_d = amplitude * half_squared * 2.0 * left_delta / left_den2
+        right_center_d = amplitude * half_squared * 2.0 * right_delta / right_den2
+        row[0] = left_center_d + right_center_d
+        row[1] = amplitude * half * (
+            left_delta * left_delta / left_den2 + right_delta * right_delta / right_den2
+        )
+        row[2] = left_shape + right_shape
+        row[3] = 1.0
+        row[4] = -0.5 * left_center_d + 0.5 * right_center_d
     return amplitude * (left_shape + right_shape) + offset
 
 
@@ -3384,14 +3353,14 @@ def _point_damped(coords, point, parameters, row):
     exponential = math.exp(-x / decay)
     argument = 2.0 * math.pi * frequency * x + phase
     sine = math.sin(argument)
-    cosine = math.cos(argument)
     exp_sine = exponential * sine
-    exp_cosine = exponential * cosine
-    row[0] = exp_sine
-    row[1] = 1.0
-    row[2] = amplitude * exp_cosine * 2.0 * math.pi * x
-    row[3] = amplitude * exp_sine * x / (decay * decay)
-    row[4] = amplitude * exp_cosine
+    if row.size:
+        exp_cosine = exponential * math.cos(argument)
+        row[0] = exp_sine
+        row[1] = 1.0
+        row[2] = amplitude * exp_cosine * 2.0 * math.pi * x
+        row[3] = amplitude * exp_sine * x / (decay * decay)
+        row[4] = amplitude * exp_cosine
     return offset + amplitude * exp_sine
 
 
@@ -3400,9 +3369,10 @@ def _point_exponential(coords, point, parameters, row):
     amplitude, offset, decay = parameters
     x = coords[0, point]
     exponential = math.exp(-x / decay)
-    row[0] = exponential
-    row[1] = 1.0
-    row[2] = amplitude * exponential * x / (decay * decay)
+    if row.size:
+        row[0] = exponential
+        row[1] = 1.0
+        row[2] = amplitude * exponential * x / (decay * decay)
     return offset + amplitude * exponential
 
 
@@ -3414,11 +3384,12 @@ def _point_radial(coords, point, parameters, row):
     squared = delta_x * delta_x + delta_y * delta_y
     radius2 = radius * radius
     shape = math.exp(-squared / radius2)
-    row[0] = shape
-    row[1] = 1.0
-    row[2] = amplitude * shape * 2.0 * squared / (radius2 * radius)
-    row[3] = amplitude * shape * 2.0 * delta_x / radius2
-    row[4] = amplitude * shape * 2.0 * delta_y / radius2
+    if row.size:
+        row[0] = shape
+        row[1] = 1.0
+        row[2] = amplitude * shape * 2.0 * squared / (radius2 * radius)
+        row[3] = amplitude * shape * 2.0 * delta_x / radius2
+        row[4] = amplitude * shape * 2.0 * delta_y / radius2
     return offset + amplitude * shape
 
 
@@ -3432,19 +3403,20 @@ def _point_anisotropic(coords, point, parameters, row):
     radius_x2 = radius_x * radius_x
     radius_y2 = radius_y * radius_y
     shape = math.exp(-(delta_x2 / radius_x2 + delta_y2 / radius_y2))
-    row[0] = shape
-    row[1] = 1.0
-    row[2] = amplitude * shape * 2.0 * delta_x2 / (radius_x2 * radius_x)
-    row[3] = amplitude * shape * 2.0 * delta_y2 / (radius_y2 * radius_y)
-    row[4] = amplitude * shape * 2.0 * delta_x / radius_x2
-    row[5] = amplitude * shape * 2.0 * delta_y / radius_y2
+    if row.size:
+        row[0] = shape
+        row[1] = 1.0
+        row[2] = amplitude * shape * 2.0 * delta_x2 / (radius_x2 * radius_x)
+        row[3] = amplitude * shape * 2.0 * delta_y2 / (radius_y2 * radius_y)
+        row[4] = amplitude * shape * 2.0 * delta_x / radius_x2
+        row[5] = amplitude * shape * 2.0 * delta_y / radius_y2
     return offset + amplitude * shape
 
 
 @njit(cache=True)
 def _objective_lorentzian(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives, context):
     if derivatives: compiled_reset_accumulators(gradient, info)
-    cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
+    cost=0.0; rss=0.0; full=np.empty(params.size if derivatives else 0, dtype=np.float64)
     for point in range(obs.size):
         if not valid[point]: continue
         predicted=_point_lorentzian(coords, point, params, full)
@@ -3458,7 +3430,7 @@ def _objective_lorentzian(coords, obs, valid, params, free, weights, use_w, pois
 @njit(cache=True)
 def _objective_gaussian(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives, context):
     if derivatives: compiled_reset_accumulators(gradient, info)
-    cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
+    cost=0.0; rss=0.0; full=np.empty(params.size if derivatives else 0, dtype=np.float64)
     for point in range(obs.size):
         if not valid[point]: continue
         predicted=_point_gaussian(coords, point, params, full)
@@ -3472,7 +3444,7 @@ def _objective_gaussian(coords, obs, valid, params, free, weights, use_w, poisso
 @njit(cache=True)
 def _objective_histogram(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives, context):
     if derivatives: compiled_reset_accumulators(gradient, info)
-    cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
+    cost=0.0; rss=0.0; full=np.empty(params.size if derivatives else 0, dtype=np.float64)
     for point in range(obs.size):
         if not valid[point]: continue
         predicted=_point_histogram(coords, point, params, full)
@@ -3486,7 +3458,7 @@ def _objective_histogram(coords, obs, valid, params, free, weights, use_w, poiss
 @njit(cache=True)
 def _objective_bimodal(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives, context):
     if derivatives: compiled_reset_accumulators(gradient, info)
-    cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
+    cost=0.0; rss=0.0; full=np.empty(params.size if derivatives else 0, dtype=np.float64)
     for point in range(obs.size):
         if not valid[point]: continue
         predicted=_point_bimodal(coords, point, params, full)
@@ -3500,7 +3472,7 @@ def _objective_bimodal(coords, obs, valid, params, free, weights, use_w, poisson
 @njit(cache=True)
 def _objective_poisson(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives, context):
     if derivatives: compiled_reset_accumulators(gradient, info)
-    cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
+    cost=0.0; rss=0.0; full=np.empty(params.size if derivatives else 0, dtype=np.float64)
     grid=_poisson_grid(params[1], params[2])
     for point in range(obs.size):
         if not valid[point]: continue
@@ -3515,7 +3487,7 @@ def _objective_poisson(coords, obs, valid, params, free, weights, use_w, poisson
 @njit(cache=True)
 def _objective_poisson_bimodal(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives, context):
     if derivatives: compiled_reset_accumulators(gradient, info)
-    cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
+    cost=0.0; rss=0.0; full=np.empty(params.size if derivatives else 0, dtype=np.float64)
     left=_poisson_grid(params[1], params[2])
     right=_poisson_grid(params[1] + params[3], params[4])
     for point in range(obs.size):
@@ -3531,7 +3503,7 @@ def _objective_poisson_bimodal(coords, obs, valid, params, free, weights, use_w,
 @njit(cache=True)
 def _objective_doublet(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives, context):
     if derivatives: compiled_reset_accumulators(gradient, info)
-    cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
+    cost=0.0; rss=0.0; full=np.empty(params.size if derivatives else 0, dtype=np.float64)
     for point in range(obs.size):
         if not valid[point]: continue
         predicted=_point_doublet(coords, point, params, full)
@@ -3545,7 +3517,7 @@ def _objective_doublet(coords, obs, valid, params, free, weights, use_w, poisson
 @njit(cache=True)
 def _objective_damped(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives, context):
     if derivatives: compiled_reset_accumulators(gradient, info)
-    cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
+    cost=0.0; rss=0.0; full=np.empty(params.size if derivatives else 0, dtype=np.float64)
     for point in range(obs.size):
         if not valid[point]: continue
         predicted=_point_damped(coords, point, params, full)
@@ -3559,7 +3531,7 @@ def _objective_damped(coords, obs, valid, params, free, weights, use_w, poisson,
 @njit(cache=True)
 def _objective_exponential(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives, context):
     if derivatives: compiled_reset_accumulators(gradient, info)
-    cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
+    cost=0.0; rss=0.0; full=np.empty(params.size if derivatives else 0, dtype=np.float64)
     for point in range(obs.size):
         if not valid[point]: continue
         predicted=_point_exponential(coords, point, params, full)
@@ -3573,7 +3545,7 @@ def _objective_exponential(coords, obs, valid, params, free, weights, use_w, poi
 @njit(cache=True)
 def _objective_radial(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives, context):
     if derivatives: compiled_reset_accumulators(gradient, info)
-    cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
+    cost=0.0; rss=0.0; full=np.empty(params.size if derivatives else 0, dtype=np.float64)
     for point in range(obs.size):
         if not valid[point]: continue
         predicted=_point_radial(coords, point, params, full)
@@ -3587,7 +3559,7 @@ def _objective_radial(coords, obs, valid, params, free, weights, use_w, poisson,
 @njit(cache=True)
 def _objective_anisotropic(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives, context):
     if derivatives: compiled_reset_accumulators(gradient, info)
-    cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
+    cost=0.0; rss=0.0; full=np.empty(params.size if derivatives else 0, dtype=np.float64)
     for point in range(obs.size):
         if not valid[point]: continue
         predicted=_point_anisotropic(coords, point, params, full)
@@ -4589,15 +4561,18 @@ def _point_release_recapture(coords, point, parameters, row):
     amplitude, offset, eta, frequency = parameters
     time = coords[0, point]
     if time == 0.0:
-        row[0] = 1.0; row[1] = 1.0; row[2] = 0.0; row[3] = 0.0
+        if row.size:
+            row[0] = 1.0; row[1] = 1.0; row[2] = 0.0; row[3] = 0.0
         return amplitude + offset
     w = _release_recapture_w(frequency, time)
     q = math.exp(-w)
-    complement = -math.expm1(-w)
     denominator = -math.expm1(-eta)
     scaled = eta * q
-    exponential = math.exp(-scaled)
     survival = -math.expm1(-scaled) / denominator
+    if not row.size:
+        return amplitude * survival + offset
+    complement = -math.expm1(-w)
+    exponential = math.exp(-scaled)
     if eta < 0.01:
         # Difference of u/expm1(u) at eta*q and eta, divided by eta.
         # Factoring (1-q) preserves both eta->0 and t->0 derivatives.
@@ -4626,12 +4601,14 @@ def _point_release_recapture(coords, point, parameters, row):
 
 
 @njit(cache=True)
-def _value_jacobian_release_recapture(coords: np.ndarray, parameters: np.ndarray):
+def _value_jacobian_release_recapture(coords: np.ndarray, parameters: np.ndarray, with_jacobian: bool):
     output = np.empty(coords.shape[1], dtype=np.float64)
-    jacobian = np.empty((coords.shape[1], 4), dtype=np.float64)
+    jacobian = np.empty((output.size if with_jacobian else 0, parameters.size), dtype=np.float64)
+    no_derivatives = np.empty(0, dtype=np.float64)
     for point in range(output.size):
         output[point] = _point_release_recapture(
-            coords, point, parameters, jacobian[point]
+            coords, point, parameters,
+            jacobian[point] if with_jacobian else no_derivatives,
         )
     return output, jacobian
 
@@ -4639,7 +4616,7 @@ def _value_jacobian_release_recapture(coords: np.ndarray, parameters: np.ndarray
 @njit(cache=True)
 def _objective_release_recapture(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives, context):
     if derivatives: compiled_reset_accumulators(gradient, info)
-    cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
+    cost=0.0; rss=0.0; full=np.empty(params.size if derivatives else 0, dtype=np.float64)
     for point in range(obs.size):
         if not valid[point]: continue
         predicted=_point_release_recapture(coords, point, params, full)
@@ -4691,19 +4668,24 @@ def _point_saturation(coords, point, parameters, row):
         row[:] = math.nan
         return math.nan
     inverse = 1.0 / denominator
-    row[0] = x * inverse
-    row[1] = inverse
     predicted = (asymptote * x + numerator) * inverse
-    row[2] = -predicted * inverse
+    if row.size:
+        row[0] = x * inverse
+        row[1] = inverse
+        row[2] = -predicted * inverse
     return predicted
 
 
 @njit(cache=True)
-def _value_jacobian_saturation(coords, parameters):
+def _value_jacobian_saturation(coords: np.ndarray, parameters: np.ndarray, with_jacobian: bool):
     output = np.empty(coords.shape[1], dtype=np.float64)
-    jacobian = np.empty((coords.shape[1], 3), dtype=np.float64)
+    jacobian = np.empty((output.size if with_jacobian else 0, parameters.size), dtype=np.float64)
+    no_derivatives = np.empty(0, dtype=np.float64)
     for point in range(output.size):
-        output[point] = _point_saturation(coords, point, parameters, jacobian[point])
+        output[point] = _point_saturation(
+            coords, point, parameters,
+            jacobian[point] if with_jacobian else no_derivatives,
+        )
     return output, jacobian
 
 
@@ -4713,7 +4695,7 @@ def _objective_saturation(coords, obs, valid, params, free, weights, use_w, pois
         compiled_reset_accumulators(gradient, info)
     cost = 0.0
     rss = 0.0
-    full = np.empty(3, dtype=np.float64)
+    full = np.empty(3 if derivatives else 0, dtype=np.float64)
     for point in range(obs.size):
         if not valid[point]:
             continue
@@ -4895,6 +4877,12 @@ def warm_production_cache() -> dict[str, Any]:
     positive = EPSILON
     statuses: dict[str, int] = {}
 
+    def sample_values(evaluate, coordinates, parameters):
+        from .fit import _compiled_model_input
+
+        packed, values = _compiled_model_input(tuple(coordinates), parameters)
+        return evaluate(packed, values, False)[0]
+
     def run_single(
         name: str,
         descriptor: CompiledFitDescriptor,
@@ -4929,9 +4917,7 @@ def warm_production_cache() -> dict[str, Any]:
     x = np.linspace(-3.0, 3.0, 97, dtype=np.float64)
 
     lorentzian = np.asarray((0.25, 0.7, 3.0, 0.2), dtype=np.float64)
-    lorentzian_values = _value_jacobian_lorentzian.py_func(
-        np.ascontiguousarray(x.reshape(1, -1)), lorentzian
-    )[0]
+    lorentzian_values = sample_values(_value_jacobian_lorentzian, np.ascontiguousarray(x.reshape(1, -1)), lorentzian)
     run_single(
         "lorentzian",
         lorentzian_descriptor(),
@@ -4943,9 +4929,7 @@ def warm_production_cache() -> dict[str, Any]:
     )
 
     gaussian = np.asarray((3.0, 0.25, 0.6, -0.2), dtype=np.float64)
-    gaussian_values = _value_jacobian_gaussian.py_func(
-        np.ascontiguousarray(x.reshape(1, -1)), gaussian
-    )[0]
+    gaussian_values = sample_values(_value_jacobian_gaussian, np.ascontiguousarray(x.reshape(1, -1)), gaussian)
     run_single(
         "gaussian_offset_robust",
         gaussian_offset_descriptor(),
@@ -4959,9 +4943,7 @@ def warm_production_cache() -> dict[str, Any]:
 
     bin_width = float(x[1] - x[0])
     histogram = np.asarray((2100.0 * bin_width, 0.15, 0.75, 0.2), dtype=np.float64)
-    histogram_values = _value_jacobian_histogram.py_func(
-        np.ascontiguousarray(x.reshape(1, -1)), histogram
-    )[0]
+    histogram_values = sample_values(_value_jacobian_histogram, np.ascontiguousarray(x.reshape(1, -1)), histogram)
     run_single(
         "histogram_gaussian_poisson",
         histogram_gaussian_descriptor(),
@@ -4976,9 +4958,7 @@ def warm_production_cache() -> dict[str, Any]:
     bimodal = np.asarray(
         (2035.0 * bin_width, -1.0, 0.45, 2.0, 0.65, 0.513, 0.1), dtype=np.float64
     )
-    bimodal_values = _value_jacobian_bimodal.py_func(
-        np.ascontiguousarray(x.reshape(1, -1)), bimodal
-    )[0]
+    bimodal_values = sample_values(_value_jacobian_bimodal, np.ascontiguousarray(x.reshape(1, -1)), bimodal)
     run_single(
         "bimodal_gaussian_poisson",
         bimodal_gaussian_descriptor(),
@@ -5001,7 +4981,7 @@ def warm_production_cache() -> dict[str, Any]:
         "histogram_poisson_gaussian_poisson",
         histogram_poisson_gaussian_descriptor(),
         (photons,),
-        _value_jacobian_poisson(photon_coords, poisson_single)[0],
+        sample_values(_value_jacobian_poisson, photon_coords, poisson_single),
         poisson_single,
         np.asarray((0.0, 0.0, positive, 0.0)),
         np.asarray((infinity, infinity, infinity, infinity)),
@@ -5015,7 +4995,7 @@ def warm_production_cache() -> dict[str, Any]:
         "bimodal_poisson_gaussian_poisson",
         bimodal_poisson_gaussian_descriptor(),
         (photons,),
-        _value_jacobian_poisson_bimodal(photon_coords, poisson_bimodal)[0],
+        sample_values(_value_jacobian_poisson_bimodal, photon_coords, poisson_bimodal),
         poisson_bimodal,
         np.asarray((0.0, 0.0, positive, 0.0, positive, 0.0, 0.0)),
         np.asarray((infinity, infinity, infinity, infinity, infinity, 1.0, infinity)),
@@ -5023,9 +5003,7 @@ def warm_production_cache() -> dict[str, Any]:
     )
 
     doublet = np.asarray((0.1, 0.45, 2.0, 0.15, 1.5), dtype=np.float64)
-    doublet_values = _value_jacobian_doublet.py_func(
-        np.ascontiguousarray(x.reshape(1, -1)), doublet
-    )[0]
+    doublet_values = sample_values(_value_jacobian_doublet, np.ascontiguousarray(x.reshape(1, -1)), doublet)
     run_single(
         "symmetric_lorentzian_doublet",
         symmetric_lorentzian_doublet_descriptor(),
@@ -5039,9 +5017,7 @@ def warm_production_cache() -> dict[str, Any]:
     world_time = np.linspace(10.0, 14.0, 97, dtype=np.float64)
     relative_time = world_time - world_time[0]
     damped = np.asarray((2.0, 0.2, 0.8, 2.5, 0.3), dtype=np.float64)
-    damped_values = _value_jacobian_damped.py_func(
-        np.ascontiguousarray(relative_time.reshape(1, -1)), damped
-    )[0]
+    damped_values = sample_values(_value_jacobian_damped, np.ascontiguousarray(relative_time.reshape(1, -1)), damped)
     run_single(
         "damped_sine",
         damped_sine_descriptor(),
@@ -5053,9 +5029,7 @@ def warm_production_cache() -> dict[str, Any]:
     )
 
     exponential = np.asarray((3.0, 0.2, 0.9), dtype=np.float64)
-    exponential_values = _value_jacobian_exponential.py_func(
-        np.ascontiguousarray(relative_time.reshape(1, -1)), exponential
-    )[0]
+    exponential_values = sample_values(_value_jacobian_exponential, np.ascontiguousarray(relative_time.reshape(1, -1)), exponential)
     run_single(
         "exponential_decay",
         exponential_decay_descriptor(),
@@ -5072,7 +5046,7 @@ def warm_production_cache() -> dict[str, Any]:
         "saturation",
         saturation_descriptor(),
         (power,),
-        _value_jacobian_saturation(power.reshape(1, -1), saturation)[0],
+        sample_values(_value_jacobian_saturation, power.reshape(1, -1), saturation),
         saturation,
         np.full(3, -infinity),
         np.full(3, infinity),
@@ -5080,9 +5054,7 @@ def warm_production_cache() -> dict[str, Any]:
 
     release_time = np.linspace(0.0, 0.0001, 97, dtype=np.float64)
     release = np.asarray((0.9, 0.03, 5.0, 1.6e4), dtype=np.float64)
-    release_values = _value_jacobian_release_recapture(
-        np.ascontiguousarray(release_time.reshape(1, -1)), release
-    )[0]
+    release_values = sample_values(_value_jacobian_release_recapture, np.ascontiguousarray(release_time.reshape(1, -1)), release)
     run_single(
         "release_recapture",
         release_recapture_descriptor(),
@@ -5100,7 +5072,7 @@ def warm_production_cache() -> dict[str, Any]:
     image_coordinates = np.ascontiguousarray(np.stack((image_x, image_y)))
 
     radial = np.asarray((3.0, 0.2, 0.8, 0.15, -0.1), dtype=np.float64)
-    radial_values = _value_jacobian_radial.py_func(image_coordinates, radial)[0]
+    radial_values = sample_values(_value_jacobian_radial, image_coordinates, radial)
     run_single(
         "radial_gaussian_center",
         radial_gaussian_center_descriptor(),
@@ -5112,9 +5084,7 @@ def warm_production_cache() -> dict[str, Any]:
     )
 
     anisotropic = np.asarray((3.0, 0.2, 0.7, 1.0, 0.15, -0.1), dtype=np.float64)
-    anisotropic_values = _value_jacobian_anisotropic.py_func(
-        image_coordinates, anisotropic
-    )[0]
+    anisotropic_values = sample_values(_value_jacobian_anisotropic, image_coordinates, anisotropic)
     run_single(
         "anisotropic_gaussian_center",
         anisotropic_gaussian_center_descriptor(),

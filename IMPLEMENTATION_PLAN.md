@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- Fit数学owner收敛：13内置模型删NumPy/bulk重复公式，value-only不求Jacobian（2M点/4参数少生成64MB导数输出），一维坐标借只读view；已有finite筛选不重复执行。4个production文件净减127行；14项相关既有用例覆盖独立数学锚/差分、single/batch、Poisson、RegularImage、fixed/NaN、custom及cold/warm竞争，均通过。未把测试含编译耗时当fit性能，未做全量预热，实际缓存重复signature检查为空。
+
 - Evidence去掉TaskConsole逐item第二层进程包装：当前完整test_task_console_app在同一pytest进程顺序28 passed/55.07s。发现的两处旧测试问题分别是未选择必填Pulse、关闭后访问已清owner；改为真实选择及检查原窗口handle，没有修改产品默认值或生命周期来迁就测试。测试内部真正需要的独立app进程仍保留，运行后无本worktree Python残留。
 
 - UI复核发现Manual与Panel的公共标题函数会隐藏无具名axis的域，与固定三域contract冲突；现保留该组，显示(1)/(—)，不创建新axis。3个既有title直接用例通过。

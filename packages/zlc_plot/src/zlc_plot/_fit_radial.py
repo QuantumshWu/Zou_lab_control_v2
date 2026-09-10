@@ -1471,6 +1471,10 @@ def fit_regular_separable_images(
                 xtol=_REGULAR_IMAGE_PROXY_TOL if coarse_proxy else _REGULAR_IMAGE_FTOL,
                 gtol=_REGULAR_IMAGE_PROXY_TOL if coarse_proxy else _REGULAR_IMAGE_GTOL,
                 finalize=False,
+                # Regular images retain their original masked/NaN samples;
+                # unlike compact point fits, they still need this boundary's
+                # finite-input selection.
+                all_finite=False,
             )
             direct_rss = None
             if refinement and options.loss == "linear":

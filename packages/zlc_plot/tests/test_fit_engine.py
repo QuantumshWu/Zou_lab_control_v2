@@ -1107,6 +1107,9 @@ def test_public_batch_uses_per_cell_fit_route_for_explicit_customization(
 
 
 def test_frozen_anchors_cover_all_builtin_evaluators() -> None:
+    from scipy.optimize._numdiff import approx_derivative
+    from zlc_plot.fit import _compiled_model_input
+
     engine = FitEngine()
     anchors = _anchors()
     assert set(anchors) == set(PARAMETERS)
@@ -1131,6 +1134,20 @@ def test_frozen_anchors_cover_all_builtin_evaluators() -> None:
         # accuracy, not to the closed forms' rounding.
         tolerance = 1e-6 if model in _POISSON_MODELS else 2e-12
         assert np.allclose(actual, expected, rtol=tolerance, atol=tolerance), model
+        flat = tuple(np.asarray(axis, dtype=np.float64).reshape(-1) for axis in coordinates)
+        packed, values = _compiled_model_input(flat, parameters)
+        predicted, no_jacobian = spec.compiled_descriptor.value_jacobian(packed, values, False)
+        assert no_jacobian.shape == (0, len(parameters))
+        np.testing.assert_array_equal(predicted, actual.reshape(-1))
+        if len(flat) == 1:
+            assert np.shares_memory(packed, flat[0])
+        derivative = approx_derivative(
+            lambda point: spec.evaluate(flat, point), np.asarray(parameters), method="3-point",
+        )
+        np.testing.assert_allclose(
+            spec.evaluate_jacobian(flat, parameters), derivative, rtol=2e-5, atol=2e-7,
+            err_msg=model,
+        )
 
 
 @pytest.mark.parametrize("model", tuple(PARAMETERS))

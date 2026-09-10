@@ -217,6 +217,7 @@ Node new chunk
 ### 5.2 Performance与state
 
 - 数值显示单位仅在真实消费者需要的表示上转换；归约后绘图不得预先转换全量raw values，raw selector确实读取display时才按需取得。完整用户初值直接进入solver，不计算马上覆盖的自动初值；partial初值仍补自动值。预热停止在构造下一个样例前生效，size/parameters按最终初态进入共享Host。
+- 内置模型的值、Jacobian与single/batch求解共用同一逐点数学primitive；只有需要导数的求解/协方差消费者才请求Jacobian。只画曲线不生成N×P导数矩阵，也不为可写ABI复制一维坐标。已筛finite的数据在同一私有数值入口复用该事实，新的坐标变换/分箱、RegularImage原始masked输入仍检查实际有效性；不移除cold/warm不同初值竞争或custom fallback。
 
 - Display cadence按同一HarmonicClock的真实单调时间跨deadline判定；Qt延迟/合并回调时只欠一次最新呈现，不按回调次数再等待若干逻辑拍，也不补画已错过的帧。Pause、容量与same-shot接纳规则不变。
 
