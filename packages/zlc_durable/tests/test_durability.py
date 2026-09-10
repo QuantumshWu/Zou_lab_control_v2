@@ -184,7 +184,7 @@ def test_durable_mkdir_flushes_one_child_before_its_existing_parent(
     assert observed == [child, child.parent]
     observed.clear()
     assert durable_mkdir(child) == child
-    assert observed == []
+    assert observed == [child, child.parent]
 
 
 def test_durable_mkdir_reports_a_visible_directory_whose_flush_failed(
@@ -214,14 +214,14 @@ def test_durable_mkdir_reports_a_visible_directory_whose_flush_failed(
 
     observed.clear()
     assert durable_mkdir(target) == target
-    assert observed == []
+    assert observed == [target, target.parent]
 
 
-def test_durable_makedirs_only_creates_and_flushes_missing_levels(
+def test_durable_makedirs_confirms_a_previous_incomplete_directory_creation(
     tmp_path,
     monkeypatch,
 ):
-    """Old directory entries are not rewritten by a new artifact's save."""
+    """A retry confirms the failed parent entry before creating its children."""
 
     import zlc_durable.durability as durability
 
@@ -246,17 +246,17 @@ def test_durable_makedirs_only_creates_and_flushes_missing_levels(
         durable_makedirs(target)
     assert caught.value.published == workspace
     assert workspace.is_dir() and not target.exists()
-    assert observed == [workspace, root]
+    assert observed == [root, root.parent, workspace, root]
 
     observed.clear()
     assert durable_makedirs(target) == target
     assert target.is_dir()
-    assert observed == [target, workspace]
+    assert observed == [workspace, root, target, workspace]
 
-    # With nothing missing there is no directory write to acknowledge.
+    # Existence alone cannot distinguish a completed creation from a failed flush.
     observed.clear()
     assert durable_makedirs(target) == target
-    assert observed == []
+    assert observed == [target, workspace]
 
 
 def test_durable_mkdir_rejects_a_missing_parent(tmp_path):

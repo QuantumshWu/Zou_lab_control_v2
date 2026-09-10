@@ -232,14 +232,14 @@ def atomic_write_text(
 
 
 def durable_mkdir(directory: str | os.PathLike[str]) -> Path:
-    """Create and flush a missing directory; an existing directory is a no-op."""
+    """Confirm a directory and its parent entry, creating it when missing.
+
+    An existing directory may be the result of a previous failed flush.
+    Existence cannot replace confirmation when its caller retries Start/Save.
+    """
 
     target = Path(directory).expanduser().resolve()
     parent = target.parent
-    if target.exists():
-        if not target.is_dir():
-            raise NotADirectoryError(target)
-        return target
     if not parent.exists():
         raise FileNotFoundError(
             f"parent directory does not exist for durable mkdir: {parent}"
@@ -247,23 +247,17 @@ def durable_mkdir(directory: str | os.PathLike[str]) -> Path:
     if not parent.is_dir():
         raise NotADirectoryError(parent)
     try:
-        target.mkdir()
-    except FileExistsError:
-        if not target.is_dir():
-            raise NotADirectoryError(target)
-        return target
+        target.mkdir(exist_ok=True)
+    except FileExistsError as error:
+        raise NotADirectoryError(target) from error
     _flush_published(target, target)
-    _flush_published(parent, target)
+    if parent != target:
+        _flush_published(parent, target)
     return target
 
 
 def durable_makedirs(directory: str | os.PathLike[str]) -> Path:
-    """Create only missing levels, flushing each new child and its parent.
-
-    Naming an existing hierarchy changes no directory entry.  A failed
-    creation flush reports that its directory is already visible through
-    DirectoryDurabilityError.published; it is not retried on unrelated saves.
-    """
+    """Confirm the nearest existing anchor, then create each missing level."""
 
     target = Path(directory).expanduser().resolve()
     missing: list[Path] = []
@@ -276,7 +270,7 @@ def durable_makedirs(directory: str | os.PathLike[str]) -> Path:
         anchor = parent
     if not anchor.is_dir():
         raise NotADirectoryError(anchor)
-    for level in reversed(missing):
+    for level in (anchor, *reversed(missing)):
         durable_mkdir(level)
     return target
 

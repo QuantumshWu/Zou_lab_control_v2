@@ -87,7 +87,7 @@
 
 ### 3.3 Durable paths
 
-- mkdir只创建并flush缺失目录及其父项；已存在目录没有新的namespace写入，不为每次artifact保存重复flush整条旧路径。创建后flush失败明确报告已可见的published路径，不能称为已确认持久化；不会由后续无关的mkdir自动重试。文件自己的fsync、原子发布及父目录flush保持不变。
+- durable_mkdir确认目录与父目录项；已存在目录也可能是上次父flush失败后留下的，不能以exists代替确认。durable_makedirs只确认最近的existing anchor及其父项，再逐层创建缺失目录，不重刷完整祖先链。flush失败明确报告已可见published路径；再次Start/Save必须能够完成此前未完成的确认。文件自己的fsync、原子发布及父目录flush保持不变。
 
 - Unique name allocation与commit构成一个并发原子操作，多process不得取得同一目标。
 - Atomic replace失败后的outcome必须诚实，不把可能已写入伪装成旧状态。
