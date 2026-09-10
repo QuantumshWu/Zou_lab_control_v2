@@ -629,6 +629,15 @@ def test_remote_slm_caches_reads_and_only_calls_the_server_to_send_phase(
     server, worker = _running_server(physical)
     calls: list[str] = []
     original = device_module._rpc_call
+    connections: list[socket.socket] = []
+    create_connection = socket.create_connection
+
+    def connected(*args, **kwargs):
+        connection = create_connection(*args, **kwargs)
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(device_module.socket, "create_connection", connected)
 
     def counted(endpoint, method, arguments, timeout):
         calls.append(method)
@@ -668,6 +677,10 @@ def test_remote_slm_caches_reads_and_only_calls_the_server_to_send_phase(
         assert remote.last_command_receipt["outcome"] == "known-new"
         np.testing.assert_array_equal(applied, remote.last_commanded_phase)
         np.testing.assert_array_equal(applied, physical.last_commanded_phase)
+        remote.apply_phase(expected)
+        assert sdk.write_count == 2
+        assert calls == ["describe", "apply", "apply"]
+        assert len(connections) == 1
 
         timed_out = False
 
@@ -676,6 +689,7 @@ def test_remote_slm_caches_reads_and_only_calls_the_server_to_send_phase(
             calls.append(method)
             if method == "apply" and not timed_out:
                 timed_out = True
+                original(endpoint, method, arguments, timeout)
                 raise socket.timeout("simulated reply timeout")
             return original(endpoint, method, arguments, timeout)
 
@@ -686,12 +700,19 @@ def test_remote_slm_caches_reads_and_only_calls_the_server_to_send_phase(
             )
         assert remote.last_commanded_phase is None
         assert remote.last_command_receipt["outcome"] == "unknown"
+        assert sdk.write_count == 3, "a lost reply must not resend the applied phase"
+        assert connections[0].fileno() == -1
         recovered = remote.apply_phase(
             np.full(remote.shape_yx, np.pi / 2.0, dtype=np.float32)
         )
-        assert calls == ["describe", "apply", "apply", "describe", "apply"]
-        assert sdk.write_count == 2
+        assert calls == ["describe", "apply", "apply", "apply", "describe", "apply"]
+        assert sdk.write_count == 4
+        assert len(connections) == 2
         np.testing.assert_array_equal(remote.last_commanded_phase, recovered)
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=2.0)
+        assert connections[1].recv(1) == b"", "server close must release idle sessions"
 
     finally:
         if installation is not None:
@@ -701,10 +722,11 @@ def test_remote_slm_caches_reads_and_only_calls_the_server_to_send_phase(
         worker.join(timeout=2.0)
         physical.close()
     assert not worker.is_alive()
-    assert calls == ["describe", "apply", "apply", "describe", "apply"]
+    assert all(connection.fileno() == -1 for connection in connections)
+    assert calls == ["describe", "apply", "apply", "apply", "describe", "apply"]
     with pytest.raises(RuntimeError, match="closed"):
         remote.apply_phase(expected)
-    assert calls == ["describe", "apply", "apply", "describe", "apply"]
+    assert calls == ["describe", "apply", "apply", "apply", "describe", "apply"]
 
 
 def test_remote_slm_rejects_a_stale_writer_and_refreshes_physical_truth(
@@ -862,6 +884,9 @@ def test_remote_packet_grammar_rejects_partial_duplicate_and_nonfinite_input(
     monkeypatch,
 ) -> None:
     import zlc_atom.devices.slm.device as device_module
+    # These grammar-only replies bypass the wire; the proxy still owns and
+    # closes the socket supplied to that request seam.
+    monkeypatch.setattr(device_module.socket, "create_connection", lambda *args, **kwargs: socket.socket())
 
     def huge_shape(_endpoint, _method, _arguments, _timeout):
         return {

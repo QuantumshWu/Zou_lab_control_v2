@@ -63,16 +63,20 @@ def _remote_tunable_factory(context, key: str, values: dict) -> InstalledLeaf:
         port=int(authored["port"]),
         instance_id=str(authored["instance_id"]),
     )
-    binding, proof = bind_verified_device(
-        context.broker,
-        key=ResourceKey.parse(f"device/{key}"),
-        identity_probe=lambda: PhysicalDeviceIdentity(
-            f"fabric:{authored['host']}:{authored['port']}"
-            f"/{authored['instance_id']}",
-            DeviceIdentityEvidenceKind.INSTALLATION_ASSERTED_ENDPOINT,
-        ),
-        capability_probe=lambda: {},
-    )
+    try:
+        binding, proof = bind_verified_device(
+            context.broker,
+            key=ResourceKey.parse(f"device/{key}"),
+            identity_probe=lambda: PhysicalDeviceIdentity(
+                f"fabric:{authored['host']}:{authored['port']}"
+                f"/{authored['instance_id']}",
+                DeviceIdentityEvidenceKind.INSTALLATION_ASSERTED_ENDPOINT,
+            ),
+            capability_probe=lambda: {},
+        )
+    except BaseException:
+        device.close()
+        raise
     return InstalledLeaf(
         key,
         FABRIC_TUNABLE_TYPE,

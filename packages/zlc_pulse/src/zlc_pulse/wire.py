@@ -26,7 +26,7 @@ __all__ = [
 
 # CTRL word 63 is the single host/bitstream geometry handshake.  The RTL carries
 # the precomputed value; host packing and generated headers call this function.
-LAYOUT_STRUCT_VERSION = 5   # Included in the word-63 compatibility fingerprint.
+LAYOUT_STRUCT_VERSION = 6   # Completion-acknowledged commands and resident replay.
 
 # Only host-side validation caps are excluded; all other geometry fields are hashed.
 _FINGERPRINT_HOST_ONLY = frozenset({"ttl_delay_max_ticks"})
@@ -100,6 +100,10 @@ class CtrlWords:
     BANK1_CHUNK = 18      # host -> top: sweep-chunk index currently resident in bank 1
     SCAN_REPEAT_COUNT = 19  # complete scan-table sweeps; 0 = infinite
     CLK_ENABLE = 20
+    COMMAND_ID = 22
+    ACK_ID = 23
+    ACK_STATUS = 24
+    ACK_CURSOR = 25
     LAYOUT_ID = 63
 
 CTRL_WORDS = 64
@@ -166,7 +170,8 @@ class StreamerParams:
     @property
     def ctrl_scratch_base(self) -> int:
         """First CTRL word above the command and clock-enable fields."""
-        base = int(CtrlWords.CLK_ENABLE) + self.clk_enable_words
+        base = max(int(CtrlWords.CLK_ENABLE) + self.clk_enable_words,
+                   int(CtrlWords.ACK_CURSOR) + 1)
         if base + 2 > int(CtrlWords.LAYOUT_ID):
             raise ValueError(
                 f"CTRL register file has no scratch room: defined words reach {base} "

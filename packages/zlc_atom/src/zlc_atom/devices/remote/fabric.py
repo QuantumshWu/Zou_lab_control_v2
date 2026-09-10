@@ -22,10 +22,9 @@ What every remote device SHARES is only this:
   that speaks the tunable quartet -- gets the fabric's ONE generic data
   plane: fields / tune / values / provenance over the same socket.
 
-Wire format: length-prefixed JSON, one request per connection (the SLM
-server's shape -- no request ids, no session state, nothing to resynchronize
-after a dropped frame).  The UDP responder answers the broadcast with the
-TCP port; everything else is TCP.
+Wire format: length-prefixed JSON, serialized requests on an owned connection.
+A broken connection fails its current request without replaying a write.
+The UDP responder answers the broadcast with the TCP port; everything else is TCP.
 """
 
 from __future__ import annotations
@@ -132,29 +131,47 @@ class DeviceAnnouncer:
     def __init__(self, *, host: str = "0.0.0.0", port: int = DEFAULT_FABRIC_PORT) -> None:
         self._published: dict[str, PublishedDevice] = {}
         self._registry_lock = threading.Lock()
+        self._connections: set[socket.socket] = set()
 
         announcer = self
 
         class _Handler(socketserver.BaseRequestHandler):
-            def handle(self) -> None:  # one request per connection
-                try:
-                    request = _recv_frame(self.request)
-                    response = announcer._dispatch(request)
-                except Exception as error:  # noqa: BLE001 -- answered, not fatal
-                    response = {
-                        "error": {
-                            "type": type(error).__name__,
-                            "message": str(error),
+            def handle(self) -> None:
+                while True:
+                    try:
+                        request = _recv_frame(self.request)
+                    except (OSError, ValueError):
+                        return
+                    try:
+                        response = announcer._dispatch(request)
+                    except Exception as error:  # noqa: BLE001 -- answered, not fatal
+                        response = {
+                            "error": {
+                                "type": type(error).__name__,
+                                "message": str(error),
+                            }
                         }
-                    }
-                try:
-                    _send_frame(self.request, response)
-                except OSError:
-                    pass
+                    try:
+                        _send_frame(self.request, response)
+                    except OSError:
+                        return
 
         class _Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
-            daemon_threads = True
+            daemon_threads = False
             allow_reuse_address = True
+
+            def get_request(self):
+                connection, address = super().get_request()
+                with announcer._registry_lock:
+                    announcer._connections.add(connection)
+                return connection, address
+
+            def shutdown_request(self, request):
+                try:
+                    super().shutdown_request(request)
+                finally:
+                    with announcer._registry_lock:
+                        announcer._connections.discard(request)
 
         self._server = _Server((host, int(port)), _Handler)
         self.port = int(self._server.server_address[1])
@@ -201,6 +218,14 @@ class DeviceAnnouncer:
 
     def close(self) -> None:
         self._server.shutdown()
+        with self._registry_lock:
+            connections = tuple(self._connections)
+        for connection in connections:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            connection.close()
         self._server.server_close()
         try:
             self._udp.close()
@@ -254,7 +279,10 @@ class DeviceAnnouncer:
         if method in {"fields", "read_tunable_in_unit"}:
             with device.lock:
                 if method == "fields":
-                    fields = device.tunable.tunable_fields()
+                    from zlc_atom.authoring import refresh_tunable_fields
+
+                    fields = (refresh_tunable_fields(device.tunable) if request.get("refresh", False)
+                              else device.tunable.tunable_fields())
                 else:
                     from zlc_atom.authoring import read_tunable_in_unit
 
@@ -329,13 +357,9 @@ class DeviceAnnouncer:
 
 
 # --------------------------------------------------------------- consuming
-def _call(host: str, port: int, request: Mapping[str, Any]) -> dict[str, Any]:
-    with socket.create_connection(
-        (host, int(port)), timeout=_REQUEST_TIMEOUT_SECONDS
-    ) as connection:
-        connection.settimeout(_REQUEST_TIMEOUT_SECONDS)
-        _send_frame(connection, dict(request))
-        response = _recv_frame(connection)
+def _call(connection: socket.socket, request: Mapping[str, Any]) -> dict[str, Any]:
+    _send_frame(connection, dict(request))
+    response = _recv_frame(connection)
     if not isinstance(response, Mapping):
         raise TypeError("fabric response must be an object")
     error = response.get("error")
@@ -393,7 +417,8 @@ def discover_announcers(
 
 
 def list_remote_devices(host: str, port: int) -> tuple[dict[str, Any], ...]:
-    response = _call(host, port, {"method": "list"})
+    with socket.create_connection((host, int(port)), timeout=_REQUEST_TIMEOUT_SECONDS) as connection:
+        response = _call(connection, {"method": "list"})
     devices = response.get("devices")
     if not isinstance(devices, list):
         raise TypeError("fabric list must contain devices")
@@ -405,7 +430,8 @@ class RemoteTunableDevice:
 
     It speaks exactly what every local tunable device speaks, so the scan
     axis combo, the generic control panel and the device-axis executor use
-    it without knowing it is remote.  Nothing is remembered between calls:
+    it without knowing it is remote.  The connection is reused, but device
+    fields are not remembered between calls:
     fields, values, tunes and provenance all go to the wire every time,
     because the truth lives on the other machine -- and a field's bounds
     are part of that truth.  An RF source moves its commandable window
@@ -418,23 +444,38 @@ class RemoteTunableDevice:
         self._host = str(host)
         self._port = int(port)
         self._instance = str(instance_id)
+        self._io_lock = threading.RLock()
+        self._connection = socket.create_connection(
+            (self._host, self._port), timeout=_REQUEST_TIMEOUT_SECONDS
+        )
         #: How this proxy's OWN log lines are tagged on the consuming bench;
         #: the serving machine tags the same actions with its instance id.
         self.identity = f"fabric:{self._instance}@{self._host}:{self._port}"
         # Opening is asking: the record must exist, and be one the fabric's
         # generic plane serves -- a device with its own protocol refuses
         # here, by name, rather than at the first tune.
-        self.tunable_fields()
+        try:
+            self.tunable_fields()
+        except BaseException:
+            self.close()
+            raise
 
     def _call(self, method: str, **extra: Any) -> dict[str, Any]:
-        return _call(
-            self._host,
-            self._port,
-            {"method": method, "instance": self._instance, **extra},
-        )
+        with self._io_lock:
+            if self._connection is None:
+                raise ConnectionError("remote tunable connection is closed")
+            try:
+                return _call(self._connection,
+                             {"method": method, "instance": self._instance, **extra})
+            except (OSError, ValueError, TypeError):
+                self.close()
+                raise
 
     def tunable_fields(self):
         return self._read_fields("fields")
+
+    def refresh_tunable_fields(self):
+        return self._read_fields("fields", refresh=True)
 
     def read_tunable_in_unit(self, name: str, unit: str = ""):
         return self._read_fields("read_tunable_in_unit", name=str(name), unit=str(unit))[0]
@@ -510,6 +551,15 @@ class RemoteTunableDevice:
 
     def close(self) -> None:
         """Closing the handle closes nothing remote: PC2 owns its device."""
+
+        with self._io_lock:
+            connection, self._connection = self._connection, None
+            if connection is not None:
+                try:
+                    connection.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                connection.close()
 
 
 __all__ = [

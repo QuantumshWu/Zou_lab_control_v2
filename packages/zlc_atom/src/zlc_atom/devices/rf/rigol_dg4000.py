@@ -5,30 +5,21 @@ is written against a three-verb link so the transport is the ONLY thing a
 test or a virtual bench has to stand in for -- the SCPI vocabulary, the
 read-back discipline and the bound checks are all exercised as shipped.
 
-Frequency is written and read in hertz; power in dBm.  The channel's
-amplitude UNIT belongs to the instrument, not to this driver: connecting
-changes nothing, so every read and write asks which unit the channel is
-in and speaks it.  A channel already in dBm costs one extra query and
-nothing else; a channel in volts is converted through its own output
-load, and a channel in volts into a high-Z load -- where delivered power
-is not defined -- is a named refusal rather than a number.  Peak-to-peak
-volts are converted through the channel's WAVEFORM as well: the
-Vpp-to-RMS ratio is a property of the shape, and only a sine's is known
-here, so a Vpp channel playing anything else is refused by name rather
-than read through the sine ratio.  ``tune`` returns what the instrument
-reports back, never what was asked, which is how a mistyped bound or a
-loading-dependent amplitude shows up as a named error instead of a wrong
-dataset column.
+Frequency is written and read in hertz; power's canonical unit is dBm.
+Connecting and explicit Refresh read the channel's unit, load, waveform,
+limits and values. Apply uses those bounded session facts, writes the
+selected quantity, and returns the instrument's actual readback. External
+front-panel changes are adopted by Refresh, not by probing the whole
+instrument before every scan point.
 
 Explicit selected-unit Apply uses ``tune_in_unit``: it selects the channel's
 native amplitude unit only when needed and writes volts directly. A raw
 ``read_tunable_in_unit`` snapshot lets Scan restore both number and unit.
 
-The frequency knob and the power knob are each their own dependency group,
-and the driver keeps that true: the instrument caps its amplitude lower as
-the frequency rises and lowers a standing amplitude the new frequency
-cannot carry, so a frequency write that would move the amplitude is taken
-back and refused by name instead of quietly changing the power.
+Frequency-dependent amplitude limits and current become unknown after a
+frequency write. They are read again when amplitude is next needed; the
+driver does not undo a requested frequency to counter the instrument's own
+amplitude limiting.
 """
 
 from __future__ import annotations
@@ -284,6 +275,7 @@ class RigolDg4000RfSource(RfSourceBase):
         self._link = link if link is not None else VisaScpiLink(
             config.resource, timeout_seconds=config.timeout_seconds
         )
+        self._amplitudes: dict[str, dict[str, object]] = {}
         # From here on the session is this object's to close: a failure
         # before the constructor returns has no other owner to hand it to.
         try:
@@ -311,47 +303,50 @@ class RigolDg4000RfSource(RfSourceBase):
 
     # ------------------------------------------------------- transport verbs
     def _write_frequency(self, channel: str, value_hz: float) -> float:
-        """Set the frequency, and only the frequency.
-
-        The instrument's amplitude cap steps down with frequency -- a
-        DG4162 allows 10 Vpp to 20 MHz, 5 Vpp to 60 MHz, 2.5 Vpp to
-        100 MHz -- and at a frequency the standing amplitude cannot carry
-        the instrument lowers the amplitude itself.  The power knob is
-        declared independent of the frequency knob, which is what lets
-        each be a scan axis on its own and what a Logic protecting the
-        power relies on, so a frequency write the amplitude would not
-        survive is taken back -- frequency first, then the amplitude it
-        allowed -- and refused by name: the operator lowers the power
-        first, and no dataset carries a power the instrument changed on
-        its own.
-        """
-
+        """Set and read the requested field, without unrelated queries."""
         source = self._source(channel)
-        standing_frequency = self._read_frequency(channel)
-        standing_amplitude = float(self._link.query(f"{source}:VOLTage?"))
-        self._link.write(f"{source}:FREQuency {value_hz:.6f}")
-        effective = self._read_frequency(channel)
-        amplitude = float(self._link.query(f"{source}:VOLTage?"))
-        if amplitude != standing_amplitude:
-            self._link.write(f"{source}:FREQuency {standing_frequency:.6f}")
-            self._link.write(f"{source}:VOLTage {standing_amplitude:.6f}")
-            unit = self._amplitude_unit(channel)
-            raise RuntimeError(
-                f"channel {channel} at {value_hz:g} Hz caps its amplitude at "
-                f"{amplitude:g} {unit}, below the {standing_amplitude:g} {unit} "
-                f"it stands at; lower {channel_field(channel, POWER_FIELD)} first"
-            )
-        return effective
+        self._current_values.pop(channel_field(channel, POWER_FIELD), None)
+        if channel in self._amplitudes:
+            self._amplitudes[channel].update(current=None, minimum=None, maximum=None)
+        self._device_limits[channel] = (self._device_limits[channel][0], None)
+        self._link.write(f"{source}:FREQuency {value_hz:.17g}")
+        return self._read_frequency(channel)
 
     def _write_power(self, channel: str, value_dbm: float) -> float:
-        unit = self._amplitude_unit(channel)
-        amplitude = (
-            value_dbm
-            if unit == _DBM
-            else self._volts_from_dbm(channel, value_dbm, unit)
-        )
-        self._link.write(f"{self._source(channel)}:VOLTage {amplitude:.17g}")
-        return self._read_power(channel)
+        held = self._amplitude_state(channel)
+        unit = held["unit"]
+        if unit is None:
+            unit = held["unit"] = self._amplitude_unit(channel)
+        target = {_DBM: "dBm", _VPP: "Vpp", _VRMS: "Vrms"}[unit]
+        amplitude = self._convert_amplitude(channel, value_dbm, "dBm", target)
+        actual = self._write_power_in_unit(channel, amplitude, target)
+        return self._convert_amplitude(channel, actual, target, "dBm")
+
+    def _amplitude_state(self, channel: str) -> dict[str, object]:
+        """The one bounded set of channel facts, refreshed only when needed."""
+
+        held = self._amplitudes.get(channel)
+        if held is None:
+            source = self._source(channel)
+            held = {
+                "unit": self._amplitude_unit(channel),
+                "load": self._load_ohms(channel),
+                "waveform": self._link.query(f"{source}:FUNCtion?").strip().upper(),
+                "current": float(self._link.query(f"{source}:VOLTage?")),
+                "minimum": float(self._link.query(f"{source}:VOLTage? MINimum")),
+                "maximum": float(self._link.query(f"{source}:VOLTage? MAXimum")),
+            }
+            self._amplitudes[channel] = held
+        return held
+
+    def tunable_values(self) -> dict[str, object]:
+        with self._condition:
+            self._amplitudes.clear()
+            values = super().tunable_values()
+            for channel in self._channels:
+                frequency_limits, _power_limits = self._device_limits[channel]
+                self._device_limits[channel] = (frequency_limits, self._read_power_limits(channel))
+            return values
 
     @staticmethod
     def _amplitude_unit_parts(unit: str) -> tuple[str | None, float]:
@@ -428,19 +423,23 @@ class RigolDg4000RfSource(RfSourceBase):
                     maximum=converted(field.metadata.maximum)), current=converted(field.current),
                     device_limits=None if field.device_limits is None else tuple(converted(v) for v in field.device_limits))
             channel = routed[0]
-            source = self._source(channel)
-            native = self._amplitude_unit(channel)
-            standing_unit = {_DBM: "dBm", _VPP: "Vpp", _VRMS: "Vrms"}[native]
+            held = self._amplitude_state(channel)
+            native = held["unit"]
+            standing_unit = {_DBM: "dBm", _VPP: "Vpp", _VRMS: "Vrms"}.get(native, "dBm")
             target = unit or standing_unit
-            raw = float(self._link.query(f"{source}:VOLTage?"))
-            current = raw if target == standing_unit else self._convert_amplitude(channel, raw, standing_unit, target)
-            limits = self._instrument_limits(tuple(
-                self._convert_amplitude(channel, float(self._link.query(f"{source}:VOLTage? {edge}")), standing_unit, target)
-                for edge in ("MINimum", "MAXimum")
+            raw = held["current"]
+            current = (raw if raw is None or target == standing_unit
+                       else self._convert_amplitude(channel, raw, standing_unit, target))
+            limits = None if held["minimum"] is None else self._instrument_limits(tuple(
+                self._convert_amplitude(channel, float(held[edge]), standing_unit, target)
+                for edge in ("minimum", "maximum")
             ), name=str(name), unit=target)
             policy = tuple(None if edge is None else self._convert_amplitude(channel, edge, "dBm", target)
                            for edge in self._power_bounds)
-            low, high = self._effective_range(policy, limits, name=str(name), unit=target)
+            low, high = (policy if limits is None else
+                         self._effective_range(policy, limits, name=str(name), unit=target))
+            if raw is not None:
+                self._current_values[str(name)] = self._convert_amplitude(channel, raw, standing_unit, "dBm")
             return TunableField(
                 AuthoringField(str(name), "float", f"{self._channel_label(channel)}Power", None,
                                minimum=low, maximum=high, unit=target),
@@ -470,28 +469,37 @@ class RigolDg4000RfSource(RfSourceBase):
             actual = self._write_power(channel, float(DEFAULT_UNITS.convert(value, unit, "dBm")))
             return float(DEFAULT_UNITS.convert(actual, "dBm", unit))
         source = self._source(channel)
-        old_unit = self._amplitude_unit(channel)
-        old_value = float(self._link.query(f"{source}:VOLTage?"))
+        held = self._amplitude_state(channel)
+        old_unit = held["unit"]
+        old_value = held["current"]
         try:
             if native != old_unit:
                 self._link.write(f"{source}:VOLTage:UNIT {native}")
-                if self._amplitude_unit(channel) != native:
-                    raise RuntimeError(f"channel {channel} refused amplitude unit {native}")
             self._link.write(f"{source}:VOLTage {float(value) * scale:.17g}{native}")
-            actual_unit = {_DBM: "dBm", _VPP: "Vpp", _VRMS: "Vrms"}[self._amplitude_unit(channel)]
             actual = float(self._link.query(f"{source}:VOLTage?"))
-            return self._convert_amplitude(channel, actual, actual_unit, unit)
+            old_symbol = {_DBM: "dBm", _VPP: "Vpp", _VRMS: "Vrms"}.get(old_unit, "dBm")
+            new_symbol = {_DBM: "dBm", _VPP: "Vpp", _VRMS: "Vrms"}[native]
+            for edge in ("minimum", "maximum"):
+                if held[edge] is not None:
+                    held[edge] = self._convert_amplitude(channel, float(held[edge]), old_symbol, new_symbol)
+            held.update(unit=native, current=actual)
+            return actual / scale
         except BaseException as error:
             # Control Apply also owns a complete command: a failed write
             # must not leave its temporary unit behind. Restore raw numbers,
             # never a dBm round trip, and preserve both failures if it cannot.
-            commands = ([f"{source}:VOLTage:UNIT {old_unit}"] if native != old_unit else [])
-            commands.append(f"{source}:VOLTage {old_value:.17g}{old_unit}")
+            commands = ([f"{source}:VOLTage:UNIT {old_unit}"]
+                        if old_unit is not None and native != old_unit else [])
+            if old_value is not None:
+                commands.append(f"{source}:VOLTage {old_value:.17g}{old_unit}")
             for command in commands:
                 try:
                     self._link.write(command)
                 except BaseException as restore_error:
                     error.add_note(f"restoring channel {channel} also failed: {restore_error}")
+            held.update(unit=None, current=None, minimum=None, maximum=None)
+            self._device_limits[channel] = (self._device_limits[channel][0], None)
+            self._current_values.pop(channel_field(channel, POWER_FIELD), None)
             raise
 
     def _write_output(self, channel: str, enabled: bool) -> bool:
@@ -517,31 +525,31 @@ class RigolDg4000RfSource(RfSourceBase):
         """The instrument's amplitude range, in dBm through the channel's own
         unit and load -- the same arithmetic every power read goes through."""
 
-        source = self._source(channel)
-        unit = self._amplitude_unit(channel)
+        held = self._amplitude_state(channel)
+        unit = held["unit"]
         edges = []
-        for extreme in ("MINimum", "MAXimum"):
-            amplitude = float(self._link.query(f"{source}:VOLTage? {extreme}"))
+        for extreme in ("minimum", "maximum"):
+            amplitude = float(held[extreme])
             edges.append(
                 amplitude if unit == _DBM else self._dbm_from_volts(channel, amplitude, unit)
             )
         return min(edges), max(edges)
 
     def _read_power(self, channel: str) -> float:
-        unit = self._amplitude_unit(channel)
-        amplitude = float(self._link.query(f"{self._source(channel)}:VOLTage?"))
+        held = self._amplitude_state(channel)
+        if held["current"] is None:
+            self._amplitudes.pop(channel)
+            held = self._amplitude_state(channel)
+            self._device_limits[channel] = (self._device_limits[channel][0], self._read_power_limits(channel))
+        unit = held["unit"]
+        amplitude = float(held["current"])
         if unit == _DBM:
             return amplitude
         return self._dbm_from_volts(channel, amplitude, unit)
 
     # ---------------------------------------------- the channel's own units
     def _amplitude_unit(self, channel: str) -> str:
-        """Which unit this channel is displaying its amplitude in.
-
-        Asked every time rather than pinned once: the unit is a setting of
-        the instrument, and an operator turning the front-panel knob is
-        entitled to have it stay turned.
-        """
+        """Read the unit while refreshing this channel's session facts."""
 
         answer = self._link.query(
             f"{self._source(channel)}:VOLTage:UNIT?"
@@ -573,7 +581,7 @@ class RigolDg4000RfSource(RfSourceBase):
         return ohms
 
     def _delivering_load(self, channel: str, unit: str) -> float:
-        load = self._load_ohms(channel)
+        load = float(self._amplitude_state(channel)["load"])
         if math.isinf(load):
             raise RuntimeError(
                 f"channel {channel} states its amplitude in {unit} into a "
@@ -585,16 +593,13 @@ class RigolDg4000RfSource(RfSourceBase):
     def _vpp_per_vrms(self, channel: str) -> float:
         """The channel's peak-to-peak/RMS ratio, which is its waveform's.
 
-        Asked every time, like the unit: the waveform is a setting of the
-        instrument.  Only a sine's ratio is known here; a square wave's
+        Refreshed with the unit/load: only a sine's ratio is known here; a square wave's
         depends on its duty cycle, a ramp's on its symmetry, and reading
         either through the sine ratio would state a power the channel is
         not delivering (3 dB off for a symmetric square wave).
         """
 
-        answer = self._link.query(
-            f"{self._source(channel)}:FUNCtion?"
-        ).strip().upper()
+        answer = str(self._amplitude_state(channel)["waveform"])
         if answer.startswith(_SINE):
             return _SINE_VPP_PER_VRMS
         raise RuntimeError(

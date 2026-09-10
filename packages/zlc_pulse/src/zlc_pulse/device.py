@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 import math
 from numbers import Integral
 import threading
@@ -42,8 +42,6 @@ from .wire import (
 # Loader and SAFE handshakes share the same five-second action budget.
 LOAD_TIMEOUT = 5.0
 SAFE_TIMEOUT = 5.0
-SAFE_RETRY_AFTER = 0.05
-SAFE_POLL_INTERVAL = 0.001
 _MIN_SEAM_SPAN_TICKS = 3
 
 
@@ -62,8 +60,7 @@ class DoneReport:
     cursor: int | None  # cumulative row-visit ordinal; table row = cursor % len(rows)
     underflow: bool
     elapsed_seconds: float
-    status_reads: tuple[int, int] = ()
-    cursor_reads: tuple[int, int] = ()
+    command_id: int = 0
     observer_error: str = ""
     #: How many status/cursor polls failed during this shot, and how many
     #: frames the line had to send again for it.  A shot that finished clean
@@ -78,8 +75,7 @@ class DoneReport:
         object.__setattr__(self, "cursor", None if self.cursor is None else int(self.cursor))
         object.__setattr__(self, "underflow", bool(self.underflow))
         object.__setattr__(self, "elapsed_seconds", float(self.elapsed_seconds))
-        object.__setattr__(self, "status_reads", tuple(int(value) for value in self.status_reads))
-        object.__setattr__(self, "cursor_reads", tuple(int(value) for value in self.cursor_reads))
+        object.__setattr__(self, "command_id", int(self.command_id))
         object.__setattr__(self, "observer_error", str(self.observer_error))
         object.__setattr__(self, "poll_failures", int(self.poll_failures))
         object.__setattr__(self, "resent_frames", int(self.resent_frames))
@@ -115,37 +111,19 @@ class DoneReport:
     def link_error(self) -> bool:
         return bool(self.status & STATUS_LINK_ERROR)
 
-    @property
-    def status_first(self) -> int | None:
-        return self.status_reads[0] if self.status_reads else None
-
-    @property
-    def status_second(self) -> int | None:
-        return self.status_reads[1] if len(self.status_reads) > 1 else None
-
-    @property
-    def cursor_first(self) -> int | None:
-        return self.cursor_reads[0] if self.cursor_reads else None
-
-    @property
-    def cursor_second(self) -> int | None:
-        return self.cursor_reads[1] if len(self.cursor_reads) > 1 else None
-
-
 @dataclass(frozen=True)
 class SafeReadback:
-    status_reads: tuple[int, int]
-    clock_enable_words: tuple[int, ...]
-    stable: bool
+    """A completed command or terminal run proving that pins are safe."""
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "status_reads", tuple(int(value) for value in self.status_reads))
-        object.__setattr__(self, "clock_enable_words", tuple(int(value) for value in self.clock_enable_words))
-        object.__setattr__(self, "stable", bool(self.stable))
+    status: int
+    command_id: int
 
     @property
-    def status(self) -> int:
-        return self.status_reads[-1]
+    def stable(self) -> bool:
+        return self.status in (0, STATUS_LOADED) or bool(
+            self.status & STATUS_DONE
+            and not self.status & (STATUS_RUNNING | STATUS_ERROR | STATUS_UNDERFLOW)
+        )
 
 
 @dataclass(frozen=True)
@@ -409,7 +387,7 @@ class PulseStreamer(ConfigValueHolder):
         # running it.
         self._applied_digest = ""
         self._loaded = False
-        self._hardware_loaded = self._last_fire_reloaded = False
+        self._validated_execution: tuple[int, int] | None = None
         self._firing = False
         self._run_repeats = 1
         self._scan_repeats = 1
@@ -422,19 +400,17 @@ class PulseStreamer(ConfigValueHolder):
         self._scan_cursor_total = 0
         self._cursor_value: int | None = None
         self._underflow = False
-        self._terminal_status_reads: tuple[int, int] = ()
-        self._terminal_cursor_reads: tuple[int, int] = ()
         self._observer_error = ""
         self._poll_failures = 0
         self._resends_at_fire = 0
         self._worker: threading.Thread | None = None
-        self._fire_gate: threading.Event | None = None
         self._stop = threading.Event()
         self._done = threading.Event()
         self._terminal_status = 0
         self._fire_started = 0.0
-        self._safe_status_word: int | None = None
-        self._safe_clock_enable_words: tuple[int, ...] | None = None
+        self._safe_readback: SafeReadback | None = None
+        self._command_id: int | None = None
+        self._fire_command_id = 0
         # Board-lifetime, deliberately outside open()/close(): a calibrated
         # set is a fact about the apparatus, not about one connection to it.
         self._init_config_values()
@@ -453,6 +429,7 @@ class PulseStreamer(ConfigValueHolder):
                 if callable(close): close()
                 raise
             self._opened = True
+            self._command_id = None
     def check_register_layout(self) -> None:
         with self._lock:
             self._require_open()
@@ -490,12 +467,11 @@ class PulseStreamer(ConfigValueHolder):
             if callable(close):
                 close()
             self._opened = False
-            self._loaded = self._hardware_loaded = self._last_fire_reloaded = False
+            self._loaded = False
             self._program = None
             self._applied = None
             self._applied_digest = ""
-            self._safe_status_word = None
-            self._safe_clock_enable_words = None
+            self._safe_readback = None
     def load(
         self,
         prog: CompiledProgram,
@@ -532,12 +508,18 @@ class PulseStreamer(ConfigValueHolder):
             self._require_open()
             self._require_idle()
             self._stop.clear()
+            if self._program == prog and self._scan_rows == normalized:
+                self.safe()
+                self._stop.clear()
+                assert self._applied is not None
+                self._applied = replace(self._applied, source=source)
+                return
             self._validate_application(prog, normalized)
             words = pack_program(prog, self.geom)
-            if not self._safe_readback_current_locked():
-                self._drive_physical_safe(deadline=time.monotonic() + SAFE_TIMEOUT)
-            self._clear_safe_readback_locked()
-            self._loaded = self._hardware_loaded = False; self._program = None; self._applied = None
+            self.safe()
+            self._stop.clear()
+            self._loaded = False; self._program = None; self._applied = None
+            self._validated_execution = None
             self._applied_digest = ""
             self._scan_rows = normalized
             self._scan_count = len(normalized)
@@ -549,9 +531,10 @@ class PulseStreamer(ConfigValueHolder):
                 + ((CtrlWords.BANK_READY, 0b11),),
                 stop=self._stop,
             )
-            self._strobe(CMD_LOAD, repeatable=True, stop=self._stop)
-            self._await_loaded(stop=self._stop)
-            self._hardware_loaded = True
+            status, _cursor = self._command(CMD_LOAD, stop=self._stop)
+            if status != STATUS_LOADED:
+                raise RuntimeError(f"LOAD did not complete successfully (STATUS=0x{status:08X})")
+            self._safe_readback = SafeReadback(status, self._command_id)
             self._program = prog
             self._loaded = True
             self._scan_next_chunk = 2
@@ -561,8 +544,6 @@ class PulseStreamer(ConfigValueHolder):
             self._scan_cursor_total = 0
             self._cursor_value = 0
             self._underflow = False
-            self._terminal_status_reads = ()
-            self._terminal_cursor_reads = ()
             self._observer_error = ""
             self._applied = AppliedState(
                 program=prog,
@@ -594,12 +575,9 @@ class PulseStreamer(ConfigValueHolder):
                 raise ValueError(
                     "finite scan row visits exceed the 32-bit CURSOR range"
                 )
-            self._validate_delay_capacity(
-                self._program,
-                self._scan_rows,
-                run_repeats,
-                scan_repeats,
-            )
+            if self._validated_execution != (run_repeats, scan_repeats):
+                self._validate_delay_capacity(self._program, self._scan_rows,
+                                              run_repeats, scan_repeats)
             # The single registered affine cache is prepared two clocks before
             # every frame seam.  A one-shot may be only one tick long, but every
             # point which is followed by another point must reach that schedule
@@ -613,72 +591,45 @@ class PulseStreamer(ConfigValueHolder):
                 seam_rows = table
             else:
                 seam_rows = table[:-1]
-            for row in seam_rows:
-                self._validate_slot_row(
-                    self._program,
-                    row,
-                    require_outer_seam=True,
-                )
+            if self._validated_execution != (run_repeats, scan_repeats):
+                for row in seam_rows:
+                    self._validate_slot_row(self._program, row, require_outer_seam=True)
+            self._validated_execution = (run_repeats, scan_repeats)
             self._run_repeats = run_repeats
             self._scan_repeats = scan_repeats
-            self._scan_armed = False
             assert self._applied is not None
             self._applied = replace(
                 self._applied,
                 run_repeats=run_repeats,
                 scan_repeats=scan_repeats,
             )
-            # DONE/SAFE clear the RTL's LOADED gate; replay only its resident mini-loader.
-            self._last_fire_reloaded = not self._hardware_loaded
-            self._clear_safe_readback_locked()
-            if self._last_fire_reloaded:
-                # SAFE clears live clock enables, not the resident program.
-                self._write(
-                    tuple((CtrlWords.CLK_ENABLE + i,
-                           (self._program.clk_enable >> (32 * i)) & 0xFFFFFFFF)
-                          for i in range(self.geom.clk_enable_words))
-                    + self._scan_bank_arming(),
-                    stop=self._stop,
-                )
-                self._strobe(CMD_LOAD, repeatable=True, stop=self._stop)
-                self._await_loaded(stop=self._stop)
-                self._hardware_loaded = True
-            self._firing = True; self._hardware_loaded = False
+            # A resident program survives DONE/SAFE. Only streamed banks which
+            # were overwritten during the last run need their first rows back.
+            arming = self._scan_bank_arming()
+            if arming:
+                self._write(((CtrlWords.SCAN_COUNT, self._scan_count),
+                             (CtrlWords.SCAN_ENABLE, int(bool(self._scan_rows))),
+                             *arming), stop=self._stop)
+                self._scan_armed = True
+            self._safe_readback = None
             self._done.clear()
             self._underflow = False
             self._cursor_value = 0
             self._scan_last_cursor = 0
             self._scan_cursor_total = 0
-            self._terminal_status_reads = ()
-            self._terminal_cursor_reads = ()
             self._observer_error = ""
             self._poll_failures = 0
             self._resends_at_fire = int(getattr(self.transport, "resends", 0) or 0)
-            self._terminal_status = STATUS_RUNNING
             self._fire_started = time.monotonic()
-            self._fire_gate = threading.Event()
+            status, _cursor = self._command(CMD_FIRE, run_repeats=run_repeats,
+                                            scan_repeats=scan_repeats, stop=self._stop)
+            if not status & STATUS_RUNNING or status & STATUS_ERROR:
+                raise RuntimeError(f"FIRE was not accepted (STATUS=0x{status:08X})")
+            self._fire_command_id = self._command_id
+            self._firing = True
+            self._terminal_status = STATUS_RUNNING
             self._worker = threading.Thread(target=self._observe, name="zlc-pulse-observer", daemon=True)
             self._worker.start()
-            try:
-                self._write(
-                    (
-                        (CtrlWords.SCAN_COUNT, self._scan_count),
-                        (CtrlWords.SCAN_ENABLE, int(bool(self._scan_rows))),
-                        (CtrlWords.RUN_REPEAT_COUNT, run_repeats),
-                        (CtrlWords.SCAN_REPEAT_COUNT, scan_repeats),
-                    )
-                    + self._scan_bank_arming(),
-                    stop=self._stop,
-                )
-                self._strobe(
-                    CMD_FIRE,
-                    took_effect=self._fire_took_effect,
-                    stop=self._stop,
-                )
-            except BaseException:
-                self._stop_worker()
-                raise
-            self._fire_gate.set()
 
     def wait_done(self, timeout: float | None = None) -> DoneReport | None:
         with self._lock:
@@ -693,31 +644,21 @@ class PulseStreamer(ConfigValueHolder):
             if worker.is_alive():
                 raise RuntimeError("pulse observer did not exit after terminal readback")
         with self._lock:
-            status_reads = self._terminal_status_reads
-            cursor_reads = self._terminal_cursor_reads
-            poll_failures = self._poll_failures
-            resent_frames = (
-                int(getattr(self.transport, "resends", 0) or 0) - self._resends_at_fire
+            report = DoneReport(
+                status=self._terminal_status,
+                cursor=self._cursor_value,
+                underflow=self._underflow,
+                elapsed_seconds=max(0.0, time.monotonic() - self._fire_started),
+                command_id=self._fire_command_id,
+                observer_error=self._observer_error,
+                poll_failures=self._poll_failures,
+                resent_frames=int(getattr(self.transport, "resends", 0) or 0) - self._resends_at_fire,
             )
-        if len(status_reads) != 2 or len(cursor_reads) != 2:
-            raise RuntimeError("observer completed without terminal readback")
-        report = DoneReport(
-            status=status_reads[-1],
-            cursor=cursor_reads[-1],
-            underflow=bool(status_reads[-1] & STATUS_UNDERFLOW) or self._underflow,
-            elapsed_seconds=max(0.0, time.monotonic() - self._fire_started),
-            status_reads=status_reads,
-            cursor_reads=cursor_reads,
-            observer_error=self._observer_error,
-            poll_failures=poll_failures,
-            resent_frames=resent_frames,
-        )
-        with self._lock:
             self._firing = False
             self._worker = None
-            self._fire_gate = None
-            self._terminal_status = report.status
-        return report
+            if report.status & STATUS_DONE and not report.fault:
+                self._safe_readback = SafeReadback(report.status, report.command_id)
+            return report
     def cursor(self) -> int | None:
         with self._lock:
             if self._firing:
@@ -727,18 +668,16 @@ class PulseStreamer(ConfigValueHolder):
         self._stop_worker()
         with self._lock:
             self._require_open()
-            if self._safe_readback_current_locked():
-                status_reads = (0, 0)
-                clock_words = self._safe_clock_enable_words or ()
-            else:
-                status_reads, clock_words = self._drive_physical_safe(
-                    deadline=time.monotonic() + SAFE_TIMEOUT
-                )
-                self._record_safe_readback_locked(status_reads[-1], clock_words)
-            self._firing = self._hardware_loaded = self._scan_armed = False
+            if self._safe_readback is None or not self._safe_readback.stable:
+                status, _cursor = self._command(CMD_SAFE)
+                readback = SafeReadback(status, self._command_id)
+                if status != 0:
+                    raise RuntimeError(f"SAFE did not complete (STATUS=0x{status:08X})")
+                self._safe_readback = readback
+            self._firing = False
             self._done.clear()
-            self._terminal_status = status_reads[-1]
-            return SafeReadback(status_reads, clock_words, True)
+            self._terminal_status = self._safe_readback.status
+            return self._safe_readback
     def describe(self) -> BoardDescription:
         """The board this streamer drives, as its handshake proved it to be.
 
@@ -764,7 +703,6 @@ class PulseStreamer(ConfigValueHolder):
                 "firing": self._firing,
                 "run_repeats": self._run_repeats,
                 "scan_repeats": self._scan_repeats,
-                "reloaded_before_fire": self._last_fire_reloaded,
                 "cursor": self._cursor_value,
                 "scan_count": self._scan_count,
                 "scan_next_chunk": self._scan_next_chunk,
@@ -815,15 +753,14 @@ class PulseStreamer(ConfigValueHolder):
         """
 
         try:
-            gate = self._fire_gate
-            while gate is not None and not gate.wait(self._observer_interval):
-                if self._stop.is_set():
-                    return
             consecutive_failures = 0
             while not self._stop.is_set():
                 try:
-                    status = self._read(CtrlWords.STATUS, stop=self._stop)
-                    cursor = self._read(CtrlWords.CURSOR, stop=self._stop)
+                    words = self.transport.read_words(
+                        CtrlWords.STATUS, CtrlWords.CURSOR - CtrlWords.STATUS + 1,
+                        stop=self._stop,
+                    )
+                    status, cursor = words[0], words[-1]
                 except Exception as error:
                     if self._stop.is_set():
                         return
@@ -857,66 +794,26 @@ class PulseStreamer(ConfigValueHolder):
                 self._done.set()
     def _record_observer_failure(self, error: BaseException) -> None:
         with self._lock:
-            cursor = self._cursor_value or 0
-            self._terminal_status_reads = (STATUS_ERROR, STATUS_ERROR)
-            self._terminal_cursor_reads = (cursor, cursor)
-            self._terminal_status = STATUS_ERROR
             self._observer_error = f"{type(error).__name__}: {error}"
-    def _finish_observation(self, first_status: int, first_cursor: int) -> None:
-        try:
-            second_status = self._read(CtrlWords.STATUS, stop=self._stop)
-            second_cursor = self._read(CtrlWords.CURSOR, stop=self._stop)
-        except Exception:
-            second_status = first_status
-            second_cursor = first_cursor
-            with self._lock:
-                self._poll_failures += 1
-        with self._lock:
-            self._terminal_status_reads = (first_status, second_status)
-            self._terminal_cursor_reads = (first_cursor, second_cursor)
-            self._terminal_status = second_status
-    def _enter_safe(self, *, deadline: float) -> tuple[int, int]:
-        self._write(((CtrlWords.STATUS, STATUS_ERROR),), deadline=deadline)
-        self._strobe(CMD_SAFE, deadline=deadline, repeatable=True)
-        retry_at = time.monotonic() + min(
-            SAFE_RETRY_AFTER,
-            max(SAFE_POLL_INTERVAL, (deadline - time.monotonic()) / 2),
-        )
-        retried = False
-        stable_zero = 0
-        while time.monotonic() < deadline:
-            status = self._read(CtrlWords.STATUS, deadline=deadline)
-            stable_zero = stable_zero + 1 if status == 0 else 0
-            if stable_zero >= 2:
-                return (0, 0)
-            if not retried and time.monotonic() >= retry_at:
-                self._strobe(CMD_SAFE, deadline=deadline, repeatable=True)
-                retried = True
-            remaining = deadline - time.monotonic()
-            # Once zero is observed, take the adjacent confirming read
-            # immediately; a non-zero acknowledgement keeps the 1 ms cadence.
-            if remaining > 0 and status != 0:
-                time.sleep(min(SAFE_POLL_INTERVAL, remaining))
-        raise TimeoutError("pulse streamer did not acknowledge SAFE with stable STATUS=0")
-    def _drive_physical_safe(self, *, deadline: float) -> tuple[tuple[int, int], tuple[int, ...]]:
-        self._enter_safe(deadline=deadline)
-        self._write(
-            tuple((CtrlWords.CLK_ENABLE + i, 0) for i in range(self.geom.clk_enable_words)),
-            deadline=deadline,
-        )
-        clock_words = tuple(
-            self._read(CtrlWords.CLK_ENABLE + i, deadline=deadline)
-            for i in range(self.geom.clk_enable_words)
-        )
-        if any(clock_words):
-            raise RuntimeError("pulse SAFE could not verify that every live clock mux is disabled")
-        status_reads = self._enter_safe(deadline=deadline)
-        return status_reads, clock_words
-    @staticmethod
-    def _command(code: int) -> tuple[tuple[int, int], ...]:
-        """Strobe one command by returning COMMAND to zero first."""
 
-        return ((CtrlWords.COMMAND, 0), (CtrlWords.COMMAND, int(code)))
+    def _finish_observation(self, status: int, cursor: int) -> None:
+        with self._lock:
+            self._terminal_status = status
+            self._cursor_value = cursor
+
+    def _command(self, code: int, *, run_repeats: int = 1,
+                 scan_repeats: int = 1, stop: threading.Event | None = None) -> tuple[int, int]:
+        # One identity is reused by transport retries. It is not a new FIRE.
+        # A pending LOAD must still be interrupted by SAFE: a previous safe
+        # acknowledgement does not prove that this newer command has retired.
+        self._safe_readback = None
+        if self._command_id is None:
+            self._command_id = self._read(CtrlWords.ACK_ID, stop=stop)
+        self._command_id = (self._command_id + 1) & MAXIMUM_REPEAT_COUNT or 1
+        return self.transport.command(
+            code, self._command_id, run_repeats=run_repeats, scan_repeats=scan_repeats,
+            stop=stop, deadline=time.monotonic() + (SAFE_TIMEOUT if code == CMD_SAFE else LOAD_TIMEOUT),
+        )
 
     def _validate_application(
         self,
@@ -1188,23 +1085,7 @@ class PulseStreamer(ConfigValueHolder):
                     f"connected geometry holds {capacity}"
                 )
 
-    def _await_loaded(self, *, stop: threading.Event | None = None) -> None:
-        """The RTL gates FIRE on STATUS_LOADED, so an incomplete load would
-        turn every later fire into a silent no-op.  Report it here instead."""
 
-        deadline = time.monotonic() + LOAD_TIMEOUT
-        while True:
-            status = self._read(CtrlWords.STATUS, stop=stop)
-            if status & STATUS_ERROR:
-                raise RuntimeError(f"pulse streamer reported STATUS_ERROR during load (0x{status:08X})")
-            if status & STATUS_LOADED:
-                return
-            if time.monotonic() >= deadline:
-                raise RuntimeError(
-                    f"pulse streamer did not report LOADED within {LOAD_TIMEOUT}s "
-                    f"(STATUS=0x{status:08X})"
-                )
-            time.sleep(self._observer_interval)
 
     def _scan_bank_arming(self) -> tuple[tuple[int, int], ...]:
         """Rows that put the scan banks back at chunks 0/1, ready for point 0.
@@ -1228,7 +1109,6 @@ class PulseStreamer(ConfigValueHolder):
         rows.append((CtrlWords.BANK_READY, ready))
         self._scan_next_chunk = 2
         self._scan_ready = ready
-        self._scan_armed = True
         self._scan_last_cursor = 0
         self._scan_cursor_total = 0
         return tuple(rows)
@@ -1275,6 +1155,7 @@ class PulseStreamer(ConfigValueHolder):
                 self._scan_rows, self.geom, bank, table_chunk
             )
             chunk_reg = CtrlWords.BANK0_CHUNK if bank == 0 else CtrlWords.BANK1_CHUNK
+            self._scan_armed = False
             self._write((
                 (CtrlWords.BANK_READY, unarmed),
                 *tuple(sorted(words.items())),
@@ -1282,15 +1163,12 @@ class PulseStreamer(ConfigValueHolder):
                 (CtrlWords.BANK_READY, self._scan_ready | bit),
             ), stop=self._stop)
             self._scan_next_chunk += 1
-            self._scan_armed = False
 
     def _stop_worker(self) -> None:
         self._stop.set()
         worker = self._worker
         if worker is None:
             return
-        if self._fire_gate is not None:
-            self._fire_gate.set()
         if worker is not threading.current_thread():
             worker.join(timeout=2.0)
         if worker.is_alive():
@@ -1298,7 +1176,6 @@ class PulseStreamer(ConfigValueHolder):
         with self._lock:
             if self._worker is worker:
                 self._worker = None
-                self._fire_gate = None
 
     def _read(
         self,
@@ -1322,103 +1199,20 @@ class PulseStreamer(ConfigValueHolder):
     ) -> None:
         """Write register words; a frame the link loses is sent again.
 
-        Data only.  A COMMAND strobe goes through _strobe, which does NOT
-        resend: a command that was executed and whose acknowledgement was lost
-        would be executed twice, and "fire twice" is not a recoverable
-        arithmetic error.
+        Data only. Commands use their completion protocol and stable identity,
+        so retrying a lost command reply cannot start a second shot.
         """
 
         normalized = tuple((int(address), int(value) & 0xFFFFFFFF) for address, value in rows)
         assert not any(address == CtrlWords.COMMAND for address, _ in normalized), (
-            "a command strobe must go through _strobe, which never resends"
+            "commands must use the completion protocol"
         )
         options = {} if stop is None else {"stop": stop}
         if deadline is not None:
             options["deadline"] = deadline
         self.transport.write_words(normalized, **options)
 
-    def _strobe(
-        self,
-        code: int,
-        *,
-        deadline: float | None = None,
-        repeatable: bool = False,
-        took_effect: "Callable[[], bool] | None" = None,
-        stop: threading.Event | None = None,
-    ) -> None:
-        """Fire one command, and never a second time BLINDLY.
 
-        Sent after the data it acts on has been acknowledged, so the board is
-        never asked to act on a program that is still arriving.
-
-        Three kinds of command, three policies, because "may this be sent
-        again?" has three honest answers:
-
-        * ``repeatable=True`` -- SAFE and LOAD.  Their effect is idempotent
-          (safing a safe board is safe, reloading the resident image is the
-          same image), so a lost acknowledgement is handled like any lost data
-          frame: the line resends it.
-
-        * ``took_effect`` given -- FIRE.  Running twice is two shots, so a
-          lost acknowledgement may not be resolved by guessing.  It does not
-          have to be: the board KNOWS whether it fired -- accepting FIRE
-          consumes the LOADED gate and raises RUNNING -- so the ambiguity is
-          resolved by reading the status.  Executed: done, nobody mourns the
-          acknowledgement.  Provably not executed: strobing again is exactly
-          as safe as the first attempt was.  On a line that loses one byte in
-          a hundred, this is the difference between an experiment that runs
-          and one that dies every sixth On Pulse.
-
-        * Neither -- an unanswered strobe stays fatal, because guessing is
-          the one thing this path must never do.
-
-        How long the acknowledgement is waited for is the line's business,
-        not this method's: a non-resending strobe is one attempt, and the
-        line budgets an attempt by the bytes in flight
-        (``UartRegisterTransport._attempt_budget``).  This method once handed
-        the line a 0.3 s window of its own for the verified case -- the same
-        claim owned twice, and the second owner dead, because the line's
-        budget was already the shorter of the two.
-        """
-
-        rows = self._command(code)
-        # Verification-by-status is sound only on a line that LOSES things: a
-        # UART frame either executes within microseconds or is gone forever,
-        # so after a timeout nothing is still in flight.  A Vivado TCL that
-        # timed out may still execute later -- verify would read "idle", the
-        # strobe would go again, and the late original would make it two
-        # shots.  The transport declares which world it lives in.
-        verified = took_effect is not None and bool(
-            getattr(self.transport, "lossy_line", False)
-        )
-        attempts = 3 if verified else 1
-        for attempt in range(attempts):
-            options: dict = {} if deadline is None else {"deadline": deadline}
-            if stop is not None:
-                options["stop"] = stop
-            try:
-                self.transport.write_words(rows, resend=repeatable, **options)
-                return
-            except TimeoutError:
-                if not verified:
-                    raise
-                if took_effect():
-                    return
-                if attempt + 1 == attempts:
-                    raise
-
-    def _fire_took_effect(self) -> bool:
-        """Did the board hear CMD_FIRE?  Its status register is the witness.
-
-        Accepting FIRE consumes the RTL's LOADED gate and raises RUNNING; a
-        short program may already be DONE by the time anyone looks.  A board
-        still advertising LOADED with none of that happened did not hear the
-        command.
-        """
-
-        status = self._read(CtrlWords.STATUS, stop=self._stop)
-        heard = bool(status & (STATUS_RUNNING | STATUS_DONE))
-        return heard or not bool(status & STATUS_LOADED)
 
     def _initial_ready(self, count: int) -> int:
         return (1 if count > 0 else 0) | (2 if count > self.geom.bank_size else 0)
@@ -1443,27 +1237,7 @@ class PulseStreamer(ConfigValueHolder):
                 f"geometry/layout mismatch: device=0x{layout:08X}, host=0x{expected:08X}"
             )
 
-    def _safe_readback_current_locked(self) -> bool:
-        return (
-            self._safe_status_word == 0
-            and self._safe_clock_enable_words is not None
-            and len(self._safe_clock_enable_words) == self.geom.clk_enable_words
-            and not any(self._safe_clock_enable_words)
-        )
 
-    def _clear_safe_readback_locked(self) -> None:
-        self._safe_status_word = None
-        self._safe_clock_enable_words = None
-
-    def _record_safe_readback_locked(
-        self,
-        status_word: int,
-        clock_enable_words: tuple[int, ...],
-    ) -> None:
-        if status_word != 0 or len(clock_enable_words) != self.geom.clk_enable_words or any(clock_enable_words):
-            raise ValueError("physical SAFE readback facts are not safe")
-        self._safe_status_word = int(status_word)
-        self._safe_clock_enable_words = tuple(int(value) for value in clock_enable_words)
 
 
 __all__ = [

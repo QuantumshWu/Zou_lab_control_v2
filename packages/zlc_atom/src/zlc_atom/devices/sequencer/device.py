@@ -113,7 +113,6 @@ def sequencer_archive_snapshot(
             "firing",
             "run_repeats",
             "scan_repeats",
-            "reloaded_before_fire",
             "cursor",
             "scan_count",
             "scan_next_chunk",

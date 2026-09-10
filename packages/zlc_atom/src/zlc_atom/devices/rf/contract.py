@@ -35,9 +35,9 @@ plumbing here owns the rules that must not fork per driver:
 * a value the instrument would silently round is REFUSED before it is
   written, naming the grid -- a scan coordinate must mean exactly what its
   dataset column says (the same law the pulse DAC axes obey);
-* ``settings_epoch`` advances only when a write actually changed the
-  instrument's effective state, so a control panel and a running scan can
-  see each other's writes without counting no-ops as changes.
+* ``settings_epoch`` compares the actual write result with the session's
+  latest known value. It requires no extra device query or saved history.
+  Explicit Refresh adopts external front-panel changes.
 """
 
 from __future__ import annotations
@@ -188,10 +188,13 @@ class RfSourceBase:
         #: channel -> (frequency limits, power limits), the instrument's own,
         #: read once by ``_attach``.
         self._device_limits: dict[
-            str, tuple[tuple[float, float], tuple[float, float]]
+            str, tuple[tuple[float, float], tuple[float, float] | None]
         ] = {}
         self._condition = threading.Condition()
         self._settings_epoch = 0
+        # One latest reading per knob, never a settings history. Metadata
+        # projection and a write's epoch must not query the whole instrument.
+        self._current_values: dict[str, Any] = {}
         # Minted per connection, never derived from the instrument: two
         # sessions over the same brick are two histories of settings, and a
         # risk acceptance bound to one must not survive into the other.
@@ -251,6 +254,9 @@ class RfSourceBase:
             limits[channel] = (frequency_limits, power_limits)
         self._identity = str(identity)
         self._device_limits = limits
+        # Construction already read the driver's channel facts with its
+        # limits. Seed current values without repeating an explicit refresh.
+        RfSourceBase.tunable_values(self)
 
     @staticmethod
     def _optional_edge(value: object, *, name: str) -> float | None:
@@ -327,7 +333,9 @@ class RfSourceBase:
             unit="Hz",
         )
 
-    def _power_range(self, channel: str) -> tuple[float, float]:
+    def _power_range(self, channel: str) -> tuple[float | None, float | None]:
+        if self._device_limits[channel][1] is None:
+            return self._power_bounds
         return self._effective_range(
             self._power_bounds,
             self._device_limits[channel][1],
@@ -376,7 +384,7 @@ class RfSourceBase:
         with self._condition:
             for channel in self._channels:
                 label = self._channel_label(channel)
-                frequency = float(self._read_frequency(channel))
+                frequency = self._current_values.get(channel_field(channel, FREQUENCY_FIELD))
                 frequency_limits, power_limits = self._device_limits[channel]
                 frequency_range = self._frequency_range(channel)
                 power_range = self._power_range(channel)
@@ -404,7 +412,7 @@ class RfSourceBase:
                         device_limits=frequency_limits,
                     )
                 )
-                power = float(self._read_power(channel))
+                power = self._current_values.get(channel_field(channel, POWER_FIELD))
                 fields.append(
                     TunableField(
                         metadata=AuthoringField(
@@ -434,7 +442,7 @@ class RfSourceBase:
                             f"{label}Output enabled",
                             False,
                         ),
-                        current=bool(self._read_output(channel)),
+                        current=self._current_values.get(channel_field(channel, OUTPUT_FIELD)),
                         live_write=True,
                         dependency_group=(channel_field(channel, OUTPUT_FIELD),),
                     )
@@ -468,7 +476,15 @@ class RfSourceBase:
                 )
             for name, _label, _unit, _config_name in WINDOW_FIELDS:
                 values[name] = self._window_value(name)
+            self._current_values.update(values)
             return values
+
+    def refresh_tunable_fields(self) -> tuple[TunableField, ...]:
+        """Explicit hardware refresh followed by the ordinary projection."""
+
+        with self._condition:
+            self.tunable_values()
+            return self.tunable_fields()
 
     @property
     def identity(self) -> str:
@@ -551,12 +567,9 @@ class RfSourceBase:
             kind = FREQUENCY_FIELD if frequency_window else POWER_FIELD
             for channel in self._channels:
                 knob = channel_field(channel, kind)
-                self._effective_range(
-                    (low, high),
-                    self._device_limits[channel][0 if frequency_window else 1],
-                    name=knob,
-                    unit=unit,
-                )
+                limits = self._device_limits[channel][0 if frequency_window else 1]
+                if limits is not None:
+                    self._effective_range((low, high), limits, name=knob, unit=unit)
                 current = float(
                     self._read_frequency(channel)
                     if frequency_window
@@ -593,10 +606,9 @@ class RfSourceBase:
             )
         channel, kind = routed
         with self._condition:
-            # The epoch counts CHANGES of effective state, so the instrument
-            # is read before as well as after: a tune that lands where the
-            # knob already stood is a success and not a change, and a panel
-            # that treated it as one would re-project for nothing.
+            # Compare the actual result with this session's latest reading;
+            # no extra before-query merely to count an epoch.
+            before = self._current_values.get(selected)
             if kind == FREQUENCY_FIELD:
                 requested = float(value)
                 low, high = self._frequency_range(channel)
@@ -604,20 +616,21 @@ class RfSourceBase:
                     raise ValueError(
                         f"{selected} must lie in [{low!r}, {high!r}] Hz"
                     )
-                before: Any = float(self._read_frequency(channel))
+                self._current_values.pop(selected, None)
                 effective: Any = float(self._write_frequency(channel, requested))
             elif kind == POWER_FIELD:
                 requested = float(value)
-                reading = self.read_tunable_in_unit(selected, unit) if unit else None
+                reader = getattr(self, "read_tunable_in_unit", None)
+                reading = reader(selected, unit or "dBm") if callable(reader) else None
                 low, high = (
                     (reading.metadata.minimum, reading.metadata.maximum)
                     if reading is not None else self._power_range(channel)
                 )
-                if not low <= requested <= high:
+                if (low is not None and requested < low) or (high is not None and requested > high):
                     raise ValueError(
                         f"{selected} must lie in [{low!r}, {high!r}] {unit or 'dBm'}"
                     )
-                before = float(reading.current if reading is not None else self._read_power(channel))
+                self._current_values.pop(selected, None)
                 effective = float(
                     self._write_power_in_unit(channel, requested, unit)
                     if unit else self._write_power(channel, requested)
@@ -625,9 +638,14 @@ class RfSourceBase:
             else:
                 if type(value) is not bool:
                     raise TypeError(f"{selected} takes a bool")
-                before = bool(self._read_output(channel))
+                self._current_values.pop(selected, None)
                 effective = bool(self._write_output(channel, value))
-            if effective != before:
+            canonical = (
+                self.convert_tunable_value(selected, effective, unit, "dBm")
+                if kind == POWER_FIELD and unit else effective
+            )
+            self._current_values[selected] = canonical
+            if canonical != before:
                 self._settings_epoch += 1
                 self._condition.notify_all()
             return effective

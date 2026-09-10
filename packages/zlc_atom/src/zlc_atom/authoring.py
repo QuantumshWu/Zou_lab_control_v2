@@ -209,6 +209,12 @@ class TunableField:
         object.__setattr__(self, "dependency_group", group)
 
 
+def refresh_tunable_fields(device: object) -> tuple[TunableField, ...]:
+    """Read current device fields once through the adapter's refresh entry."""
+    refresh = getattr(device, "refresh_tunable_fields", None)
+    return tuple(refresh() if callable(refresh) else device.tunable_fields())
+
+
 def read_tunable_in_unit(device: object, name: str, unit: str = "") -> TunableField:
     """Read a knob without changing it; blank requests its standing unit.
 
@@ -472,4 +478,4 @@ def _project_integer(value: object, *, label: str) -> int:
 
 
 __all__ = ["AuthoringChoice", "AuthoringField", "AuthoringSchema", "TunableField",
-           "read_tunable_in_unit", "tune_in_unit", "convert_tunable_value"]
+           "refresh_tunable_fields", "read_tunable_in_unit", "tune_in_unit", "convert_tunable_value"]

@@ -10,6 +10,7 @@ from zlc_pulse.transport import uart_frame as framing
 from zlc_pulse.transport.axi import JTAG_AXI_OBSERVER_INTERVAL
 from zlc_pulse.transport.uart import PySerialLink, UartError, UartRegisterTransport
 from zlc_pulse.transport.memory import MemoryRegisterTransport
+from zlc_pulse.wire import CMD_FIRE, CtrlWords, STATUS_RUNNING
 
 
 def test_uart_frame_round_trip_and_crc_guard() -> None:
@@ -54,6 +55,10 @@ def test_axi_burst_split_preserves_4kb_boundary(tmp_path) -> None:
 
     def execute(lines, action, _remaining):
         calls.append((list(lines), action))
+        if action == "axi_read":
+            return "ZLCDATA 0000000900000004"
+        if action == "pulse_command":
+            return "ZLCCOMMAND 000000090000000200000011"
         return ""
 
     transport = VivadoAxiRegisterTransport(state_dir=tmp_path, tcl_executor=execute)
@@ -64,6 +69,14 @@ def test_axi_burst_split_preserves_4kb_boundary(tmp_path) -> None:
     assert len(writes) == 2
     assert "-address 00000FFC" in writes[0]
     assert "-address 00001000" in writes[1]
+    assert transport.read_words(CtrlWords.STATUS, 2) == (4, 9)
+    assert transport.command(CMD_FIRE, 17, run_repeats=3) == (STATUS_RUNNING, 9)
+    assert [action for _lines, action in calls] == ["axi_write", "axi_read", "pulse_command"]
+    command_lines = calls[-1][0]
+    assert sum("-type write" in line for line in command_lines) == 5
+    assert sum("-len 3 -type read" in line for line in command_lines) == 1
+    assert any("[clock milliseconds]" in line for line in command_lines)
+    transport.close()
 
 
 def test_uart_open_disables_modem_control_lines_before_any_write(monkeypatch) -> None:

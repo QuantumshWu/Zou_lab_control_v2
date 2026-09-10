@@ -73,6 +73,7 @@ from zlc_atom.nodes.scan import (
     bind_plan,
     scan_repeat_domain,
     scan_ports_for,
+    settle,
     slots_from_plan,
 )
 
@@ -226,7 +227,6 @@ class TemperatureTask:
             ports=ports,
             repeats=self._repeats,
             shots_per_point=1,
-            settle_seconds=SETTLE_SECONDS,
             producer=self.instance_id,
         )
         self._written = 0
@@ -503,6 +503,8 @@ class TemperatureTask:
                 context, status, error
             )
         )
+        self._scan.sequencer.safe()
+        settle(context, SETTLE_SECONDS)
         _scan_dataset, scan_record = self._scan.acquire(
             context,
             on_point=self._judge,

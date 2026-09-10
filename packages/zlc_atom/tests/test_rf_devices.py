@@ -495,7 +495,7 @@ def test_a_channel_in_volts_is_converted_through_its_own_load() -> None:
         sent = next(command for command in reversed(instrument.log)
                     if command.startswith(":SOURce1:VOLTage "))
         expected_vpp = math.sqrt(1e-3 * 10.0 ** (requested / 10.0) * 50.0) * (2.0 * math.sqrt(2.0))
-        assert float(sent.split()[-1]) == expected_vpp
+        assert float(sent.split()[-1].removesuffix("VPP")) == expected_vpp
         assert actual == source.tunable_values()["ch1_power"]
     source.close()
 
@@ -562,11 +562,15 @@ def test_selected_units_write_native_amplitude_and_restore_the_raw_pair() -> Non
                     quantized = True
             instrument.write = first_write_quantized
             knobs = ScanDeviceKnobs({"rf": source})
+            instrument.log.clear()
             actual = knobs.move(port, 135.0, "mVpp")
+            assert [item for item in instrument.log if "?" in item] == [":SOURce1:VOLTage?"]
             assert actual != 135.0 and actual == instrument.registers["1"]["VOLT"] / 0.001
             sent = next(item for item in instrument.log if item.startswith(":SOURce1:VOLTage ") and item.endswith("VPP"))
             assert float(sent.split()[-1][:-3]) == 135.0 / 1000
+            before_move = len(instrument.log)
             knobs.move(port, 220.0, "mVpp")  # legal at 75 ohm, above the 50-ohm policy edge
+            assert instrument.log[before_move:] == [":SOURce1:VOLTage 0.22VPP", ":SOURce1:VOLTage?"]
             knobs.restore()
             assert instrument.registers["1"]["UNIT"] == old_unit
             assert instrument.registers["1"]["VOLT"] == old_value
@@ -600,6 +604,12 @@ def test_selected_units_write_native_amplitude_and_restore_the_raw_pair() -> Non
                 tune_in_unit(source, field, 135.0, "mVpp")
             assert instrument.registers["1"]["UNIT"] == "DBM"
             assert instrument.registers["1"]["VOLT"] == original
+            # A successful rollback write is not a confirmed readback.
+            before_projection = len(instrument.log)
+            assert source.tunable_fields()[1].current is None
+            assert source.read_tunable_in_unit(field, "mVpp").current is None
+            assert len(instrument.log) == before_projection
+            source.refresh_tunable_fields()
         def restore_refused(command):
             if command.endswith(":VOLTage:UNIT DBM"):
                 raise RuntimeError("unit restore failed")
@@ -613,6 +623,15 @@ def test_selected_units_write_native_amplitude_and_restore_the_raw_pair() -> Non
             tune_in_unit(source, field, 135.0, "mVpp")
         assert any("unit restore failed" in note for note in failure.value.__notes__)
         assert any("amplitude restore failed" in note for note in failure.value.__notes__)
+        before_projection = len(instrument.log)
+        assert source.tunable_fields()[1].current is None
+        assert source.read_tunable_in_unit(field, "mVpp").current is None
+        assert len(instrument.log) == before_projection
+        instrument.write = write
+        instrument.log.clear()
+        assert tune_in_unit(source, field, 220.0, "mVpp") == pytest.approx(220.0)
+        assert instrument.log == [":SOURce1:VOLTage:UNIT VPP",
+                                  ":SOURce1:VOLTage 0.22VPP", ":SOURce1:VOLTage?"]
     finally:
         source.close()
 
@@ -673,35 +692,30 @@ def test_peak_to_peak_volts_are_converted_only_for_a_sine() -> None:
     assert source.tunable_values()["ch1_power"] == pytest.approx(0.0, abs=1e-3)
     instrument.registers["1"]["FUNC"] = "RAMP"
     with pytest.raises(RuntimeError, match="RAMP waveform"):
-        source.tune("ch1_power", -6.0)
+        source.refresh_tunable_fields()
     assert instrument.registers["1"]["VOLT"] == 0.632456, "a refusal wrote nothing"
 
 
-def test_a_frequency_the_standing_amplitude_cannot_follow_is_refused() -> None:
-    """The power knob is independent of the frequency knob only if a
-    frequency write can never move the amplitude.
-
-    A DG4162 caps its amplitude lower as the frequency rises and lowers a
-    standing amplitude the new frequency cannot carry, so a frequency tune
-    used to change the delivered power with nothing said -- past a Logic
-    protecting the power, and past the singleton dependency group that
-    lets each knob be a scan axis alone.  The driver takes such a write
-    back and refuses it by name: the bench is as it was, and nothing
-    advanced the epoch.
-    """
+def test_frequency_apply_reads_only_frequency_and_invalidates_amplitude() -> None:
+    """Native amplitude limiting never undoes an authored frequency write."""
 
     source, instrument = _rigol()
     assert source.tune("ch1_power", 20.0) == 20.0
     provenance = source.settings_provenance()
-    with pytest.raises(RuntimeError, match="caps its amplitude at 17.96 DBM.*lower ch1_power first"):
-        source.tune("ch1_frequency", 50e6)
-    assert instrument.registers["1"]["FREQ"] == 1000.0
-    assert instrument.registers["1"]["VOLT"] == 20.0
-    assert source.settings_provenance() == provenance
-    assert all(
-        field.dependency_group == (field.metadata.name,)
-        for field in source.tunable_fields()
-    ), "each knob stays its own group, because the driver keeps that true"
+    instrument.log.clear()
+    assert source.tune_in_unit("ch1_frequency", 50000.0, "kHz") == 50000.0
+    assert instrument.log == [":SOURce1:FREQuency 50000000", ":SOURce1:FREQuency?"]
+    assert instrument.registers["1"]["FREQ"] == 50e6
+    assert instrument.registers["1"]["VOLT"] == 17.96
+    assert source.settings_provenance()["settings_epoch"] == provenance["settings_epoch"] + 1
+    fields = {field.metadata.name: field for field in source.tunable_fields()}
+    assert fields["ch1_power"].current is None
+    assert fields["ch1_power"].device_limits is None
+    displayed = source.read_tunable_in_unit("ch1_power", "mVpp")
+    assert displayed.current is None and displayed.metadata.unit == "mVpp"
+    assert len(instrument.log) == 2, "metadata and epoch do not query the instrument"
+    source.refresh_tunable_fields()
+    assert source.tunable_fields()[1].current == 17.96
 
     # Under the cap a frequency write is an ordinary write, and the
     # amplitude stays where it was set.
@@ -709,6 +723,23 @@ def test_a_frequency_the_standing_amplitude_cannot_follow_is_refused() -> None:
     assert source.tune("ch1_frequency", 50e6) == 50e6
     assert instrument.registers["1"]["VOLT"] == 10.0
     assert source.tunable_values()["ch1_power"] == 10.0
+
+    query = instrument.query
+    def lost_frequency_readback(command):
+        if command == ":SOURce1:FREQuency?":
+            raise TimeoutError("frequency readback lost")
+        return query(command)
+    instrument.query = lost_frequency_readback
+    with pytest.raises(TimeoutError, match="frequency readback lost"):
+        source.tune("ch1_frequency", 60e6)
+    assert instrument.registers["1"]["FREQ"] == 60e6
+    before_projection = len(instrument.log)
+    assert source.tunable_fields()[0].current is None
+    assert source.read_tunable_in_unit("ch1_frequency", "kHz").current is None
+    assert len(instrument.log) == before_projection
+    instrument.query = query
+    source.refresh_tunable_fields()
+    assert source.tunable_fields()[0].current == 60e6
 
 
 def test_what_a_constructor_acquired_the_constructor_releases(monkeypatch) -> None:

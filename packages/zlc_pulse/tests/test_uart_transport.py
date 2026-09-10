@@ -70,55 +70,49 @@ def test_a_frame_the_board_never_answered_is_sent_again() -> None:
     assert len(set(link.sent)) < len(link.sent), "some SEQ was sent twice"
 
 
-def test_a_command_strobe_is_never_sent_twice() -> None:
-    """A command that WAS executed and whose acknowledgement was lost would be
-    executed twice, and "fire twice" is not a recoverable arithmetic error.
-
-    Its one attempt waits the attempt budget, not the transaction deadline:
-    the acknowledgement is a courtesy and the status read that follows is
-    the authority, so a lost FIRE acknowledgement costs milliseconds before
-    verification.  The device used to hand the line a window of its own for
-    this (a 0.3 s constant) -- a second owner of the same claim, and a dead
-    one, because the line's budget was already shorter.
-    """
-
-    import time
-
-    import pytest
-
-    from zlc_pulse.transport import uart_frame as framing
+def test_command_lost_ack_retries_the_same_id_without_firing_twice() -> None:
+    from zlc_pulse.transport import MemoryRegisterTransport, uart_frame as framing
     from zlc_pulse.transport.uart import UartRegisterTransport
+    from zlc_pulse.wire import CMD_FIRE, CMD_LOAD, STATUS_RUNNING
 
-    class _SilentLink:
+    engine = MemoryRegisterTransport(auto_done=False)
+    engine.start()
+    engine.command(CMD_LOAD, 1)
+
+    class _AckLosingLink:
         port = "COM-TEST"
         baud = 3_000_000
-        last_shortfall = "0 of 1 replies"
+        last_shortfall = ""
 
-        def __init__(self) -> None:
-            self.windows: list[float] = []
+        def __init__(self):
+            self.requests = []
 
-        def open(self) -> None: ...
+        def open(self): ...
+        def close(self): ...
 
-        def close(self) -> None: ...
+        def exchange(self, request, *, deadline, stop=None):
+            self.requests.append(request)
+            assert request[2] == framing.OP_COMMAND
+            assert int.from_bytes(request[4:8], "little") == CMD_FIRE
+            assert int.from_bytes(request[8:10], "little") == 3
+            command_id, runs, sweeps = (
+                int.from_bytes(request[index:index + 4], "little")
+                for index in (10, 14, 18)
+            )
+            status, cursor = engine.command(CMD_FIRE, command_id,
+                                             run_repeats=runs, scan_repeats=sweeps)
+            if len(self.requests) == 1:
+                engine.publish_execution_readback(status=STATUS_RUNNING, cursor=5)
+                raise TimeoutError("completion reply was lost")
+            return framing.encode_reply(request[3], framing.ST_OK, (command_id, status, cursor))
 
-        def write_batch(self, requests, *, deadline, stop=None):
-            # A real link waits out its deadline before returning short.
-            self.windows.append(deadline - time.monotonic())
-            time.sleep(max(0.0, deadline - time.monotonic()))
-            return []
-
-    link = _SilentLink()
+    link = _AckLosingLink()
     transport = UartRegisterTransport(link=link)
     transport.start()
-    started = time.monotonic()
-    with pytest.raises(TimeoutError, match="1 attempt"):
-        transport.write_words(((1, 0), (1, 8)), resend=False)
-    elapsed = time.monotonic() - started
-    assert transport.resends == 0
-    budget = transport._attempt_budget([framing.encode_write(1, (0, 8), seq=1)])
-    assert len(link.windows) == 1
-    assert link.windows[0] <= budget + 0.005, f"{link.windows[0]:.3f}s window for one strobe"
-    assert elapsed < budget + 0.1, f"{elapsed:.3f}s for one unanswered strobe"
+    assert transport.command(CMD_FIRE, 2, run_repeats=3) == (STATUS_RUNNING, 0)
+    assert len(link.requests) == 2 and link.requests[0] == link.requests[1]
+    assert engine.cursor_value == 5, "the duplicate returns its original ACK without replay"
+    assert transport.resends == 1
 
 
 def test_resending_happens_while_there_is_still_time_to_resend() -> None:
@@ -216,71 +210,6 @@ def test_a_damaged_acknowledgement_means_send_that_frame_again() -> None:
     transport.start()
     transport.write_words(((7, 1), (9, 2)))
     assert transport.resends == 1
-
-
-def test_a_rejected_strobe_is_provably_unexecuted_and_may_go_again() -> None:
-    """ST_CRC_FAIL is the board saying "that arrived damaged, I did nothing".
-
-    Nothing ran, so even a command strobe -- which must never be resent into
-    AMBIGUITY -- may safely be sent again.  The refusal to resend exists for
-    the lost-acknowledgement case, where the command may have executed.
-
-    Two laws ride on that verdict.  It belongs to the attempt that earned
-    it: a strobe refused once and then UNANSWERED (a write that timed out,
-    a reply that never came) is back in the ambiguous case, and the stale
-    refusal must not send it a third time.  And a refused attempt is still
-    charged its budget: a board that refuses within a round trip and is
-    asked again within a round trip is a storm, not a retry (324,338
-    attempts in one half-second deadline, ``resends`` meaningless).
-    """
-
-    import time
-
-    import pytest
-
-    from zlc_pulse.transport import uart_frame as framing
-    from zlc_pulse.transport.uart import UartRegisterTransport
-
-    class _RejectingOnceLink:
-        port = "COM-TEST"
-        baud = 3_000_000
-        last_shortfall = ""
-
-        def __init__(self, then_stall: bool = False) -> None:
-            self.calls = 0
-            self.then_stall = then_stall
-
-        def open(self) -> None: ...
-
-        def close(self) -> None: ...
-
-        def write_batch(self, requests, *, deadline, stop=None):
-            self.calls += 1
-            if self.calls == 2 and self.then_stall:
-                raise TimeoutError("UART write timed out on COM-TEST")
-            status = framing.ST_CRC_FAIL if self.calls == 1 else framing.ST_OK
-            return [
-                framing.encode_reply(request[3], status, ())
-                for request in requests
-            ]
-
-    link = _RejectingOnceLink()
-    transport = UartRegisterTransport(link=link)
-    transport.start()
-    budget = transport._attempt_budget([framing.encode_write(1, (0, 8), seq=1)])
-    started = time.monotonic()
-    # resend=False is the strobe contract, and a rejected strobe still goes again.
-    transport.write_words(((1, 0), (1, 8)), resend=False)
-    assert link.calls == 2
-    assert transport.resends == 2, "both refused frames went again, once each"
-    assert time.monotonic() - started >= budget - 0.005, "the refused attempt was not charged its budget"
-
-    link = _RejectingOnceLink(then_stall=True)
-    transport = UartRegisterTransport(link=link)
-    transport.start()
-    with pytest.raises(TimeoutError, match="after 2 attempt"):
-        transport.write_words(((1, 0), (1, 8)), resend=False)
-    assert link.calls == 2, "a refusal must not speak for the unanswered attempt after it"
 
 
 def test_extraction_walks_past_a_damaged_frame_to_the_good_one_behind_it() -> None:

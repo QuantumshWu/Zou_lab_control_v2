@@ -5,8 +5,9 @@ declared slots and advance inside a fire; without them, each host point
 plays the fixed Pulse with no table. Run repeats supplies shots_per_point,
 without rewriting PulseBracket or adding artificial scan coordinates.
 
-Acquisition preparation happens once at Scan Start. Device writes are followed
-by their authored settle; manual changes are controlled by the operator.
+Acquisition preparation happens once at Scan Start. Device writes use their
+actual readback; manual changes are controlled by the operator. No implicit
+settling delay is added to either operation.
 Committed source publications are placed in scan/repeat order by the shared
 Dataset writer. Tasks using acquire may attach typed companions to the same
 event bundle. Device knobs return to their original values and units on
@@ -39,7 +40,7 @@ from .plan import (
     port_label,
     split_outer_axes,
 )
-from .source import check_cancelled, settle, wait_for_board
+from .source import check_cancelled, wait_for_board
 
 #: The one operator-input kind this engine raises, and it asks the one
 #: question a machine here cannot answer: move this knob to this value.
@@ -62,7 +63,6 @@ class SeamlessScanMeasurement:
         tunables: Mapping[str, object] | None = None,
         repeats: int,
         shots_per_point: int,
-        settle_seconds: float,
         producer: str = "seamless_scan",
         acquisition_logic: str = "",
         restart_logic: object = None,
@@ -130,9 +130,6 @@ class SeamlessScanMeasurement:
         self.shots_per_point = int(shots_per_point)
         if self.shots_per_point < 1:
             raise ValueError("shots_per_point must be at least 1")
-        self.settle_seconds = float(settle_seconds)
-        if not self.settle_seconds >= 0.0:
-            raise ValueError("settle_seconds must be zero or more")
         self._last_run_record: dict[str, object] | None = None
 
     @property
@@ -240,8 +237,7 @@ class SeamlessScanMeasurement:
         """Move the installed knobs this row names, through the one owner
         of the device-axis law.
 
-        The board is already SAFE here. Each device write owns its settling;
-        a manual acknowledgement or another repeat adds no device wait.
+        The board has completed its previous run before any device is moved.
         """
 
         for port, value, index, points in changed:
@@ -252,7 +248,6 @@ class SeamlessScanMeasurement:
             axis = next(axis for axis in self.outer_axes if axis.port == port)
             bound = next(bound for bound in self.ports if bound.port == port)
             knobs.move(port, value, axis.unit or bound.unit)
-            settle(context, self.settle_seconds)
 
     def _ask_for_setting(
         self,
@@ -377,11 +372,11 @@ class SeamlessScanMeasurement:
                     total=progress_total * shots,
                 )
             wait_for_board(self.sequencer, context)
+        except BaseException:
+            self.sequencer.safe()
+            raise
         finally:
-            try:
-                self.source.close()
-            finally:
-                self.sequencer.safe()
+            self.source.close()
 
     def acquire(self, context: object, *, on_point: object = None):
         """Play the whole plan and return the dataset it filled.
@@ -487,9 +482,6 @@ class SeamlessScanMeasurement:
             if self.acquisition_logic:
                 context.report_progress(f"Preparing {self.acquisition_logic}")
                 self._restart_logic(self.acquisition_logic, context)
-            if self.settle_seconds:
-                context.report_progress("Settling")
-                settle(context, self.settle_seconds)
             if not self.outer_axes:
                 self._play_table(
                     context,
@@ -635,7 +627,6 @@ class SeamlessScanMeasurement:
             "scan_repeats": self.repeats,
             "run_repeats": self.shots_per_point,
             "acquisition_logic": self.acquisition_logic or None,
-            "settle_seconds": self.settle_seconds,
             "slot_tick_scales": list(slot_tick_scales),
         }
 

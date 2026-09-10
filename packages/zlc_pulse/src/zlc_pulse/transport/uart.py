@@ -188,9 +188,6 @@ class PySerialLink:
 class UartRegisterTransport:
     transport_id = "uart"
     observer_interval = UART_OBSERVER_INTERVAL
-    #: A frame on this line either executes within microseconds of arriving or
-    #: is gone forever -- the property that makes verify-and-retry sound.
-    lossy_line = True
 
     def __init__(
         self,
@@ -262,26 +259,11 @@ class UartRegisterTransport:
         *,
         stop: threading.Event | None = None,
         deadline: float | None = None,
-        resend: bool = True,
     ) -> None:
-        """Write register words, resending any frame the board did not answer.
+        """Upload absolute register values, retrying only unanswered frames.
 
-        A serial line with no flow control loses a frame now and then, and the
-        board cannot ask for one back: its bridge is a single-frame state
-        machine, and one mis-sampled stop bit makes it abandon the frame it was
-        reading and go back to hunting for a sync pair.  That frame is never
-        acknowledged, and nothing downstream ever hears about it.
-
-        Which frame is not a mystery: every frame carries a SEQ and every
-        acknowledgement carries it back.  That field existed and was used only
-        to assert equality, so one lost frame in a load of ten failed the whole
-        load -- on one machine and not another, because what differs is the
-        USB-serial adapter's own clock at 3 Mbaud, not the board.
-
-        ``resend=False`` for frames that must not be repeated: a command strobe
-        that WAS executed and whose acknowledgement was lost would be executed
-        twice.  A register write is an absolute value and repeating it is the
-        same write.
+        Program data is acknowledged before LOAD is issued. Commands use
+        command(), whose persistent execution identity prevents duplicate FIRE.
         """
 
         with self._lock:
@@ -299,26 +281,15 @@ class UartRegisterTransport:
             # the same one -- an acknowledgement that answers both answers
             # neither.
             for start in range(0, len(frames), 255):
-                self._deliver(frames[start:start + 255], absolute, stop, resend=resend)
+                self._deliver(frames[start:start + 255], absolute, stop)
 
     def _deliver(
         self,
         frames: list[bytes],
         absolute: float,
         stop: threading.Event | None,
-        *,
-        resend: bool,
     ) -> None:
-        """Send one SEQ-distinct group until every frame is acknowledged.
-
-        A frame the board REJECTED (ST_CRC_FAIL: the request arrived damaged)
-        is provably unexecuted, so sending it again is safe even when
-        ``resend`` was refused -- that refusal exists for the ambiguous case,
-        a command whose acknowledgement went missing after it may have run.
-        The board answering "damaged" every time is a CRC verdict about the
-        host-to-board direction, and the attempt record says so in those
-        words: that is what separates a corrupting cable from a dead one.
-        """
+        """Deliver one SEQ-distinct data group and match its acknowledgements."""
 
         outstanding = list(frames)
         rejected: set[int] = set()
@@ -332,7 +303,7 @@ class UartRegisterTransport:
             # not speak for it -- a strobe refused once and then unanswered
             # would otherwise be sent a third time into exactly the ambiguity
             # the ban exists for.  The read path clears its verdict the same
-            # way (``_read_with_retry``).
+            # way (``_exchange_with_retry``).
             rejected = set()
             try:
                 replies = self._link.write_batch(
@@ -360,7 +331,6 @@ class UartRegisterTransport:
             absolute,
             attempt,
             outstanding=lambda: outstanding,
-            resend=resend,
             refused=lambda: all(frame[3] in rejected for frame in outstanding),
             what=f"write of {len(frames)} frame(s)",
             stop=stop,
@@ -372,59 +342,16 @@ class UartRegisterTransport:
         attempt: "Callable[[float], str | None]",
         *,
         outstanding: "Callable[[], Sequence[bytes]]",
-        resend: bool,
         refused: "Callable[[], bool]",
         what: str,
         stop: threading.Event | None,
     ) -> None:
-        """THE retry law -- reads and writes alike run their attempts here.
+        """Retry the same transaction until it is acknowledged or its deadline.
 
-        The line is lossy (``lossy_line``): a frame either executes within
-        microseconds of arriving or is gone forever, and so is its reply.
-        Therefore waiting is never the answer to a missing frame -- sending
-        again is -- and an attempt is worth exactly what its bytes need plus
-        host slack (``_attempt_budget`` of what is still ``outstanding``),
-        after which the next attempt goes out.  How many attempts there are
-        is not a rule of its own: it is whatever the transaction deadline
-        divides into.  The former rule -- three attempts, the last inheriting
-        the remaining deadline "to keep patience for a slow link" -- answered
-        a LOST byte with the patience owed to a SLOW one, and a read whose
-        reply arrived one byte short three times spent 4.88 s waiting for
-        that byte instead of asking sixty more times.
-
-        EVERY attempt is charged its budget, however it ended.  A refusal
-        (the board answered within a round trip: "that arrived damaged") or
-        a reply that decoded as noise ends the attempt early, and asking
-        again in the same millisecond is not a retry, it is a storm: a
-        board refusing everything was asked 324,338 times inside one
-        half-second deadline, ``resends`` -- the operator's one view of a
-        quietly degrading line -- said 324,337, and a corrupting cable got
-        thousands of chances at a frame in the time a lost one gets sixty.
-        The budget is also the length of the burst the next attempt is kept
-        out of: corruption on a serial line comes in bursts (a USB hiccup, a
-        moment of interference), and sending the same bytes back into one
-        earns the same refusal.  So the next attempt waits for the budget to
-        elapse -- ``stop``-aware, because that wait is where a cancelled
-        transaction now sits -- and the deadline divides into the same
-        number of attempts whether the line is silent or refusing.
-
-        ``attempt(deadline)`` returns None when the transaction is complete,
-        otherwise how that try failed.  EVERY failure is kept and reported:
-        the previous law raised the last attempt's words only, and what the
-        first two attempts had seen -- the one fact that tells a run of lost
-        bytes from a line that went dead -- was nowhere.
-
-        ``resend=False`` is the command-strobe contract: a strobe whose
-        acknowledgement went missing may have run, so it is never sent again
-        blindly.  ``refused()`` -- the board answered THIS attempt and
-        rejected what is outstanding as damaged (ST_CRC_FAIL), so nothing
-        ran -- lifts that ban for the next attempt only, and when the
-        deadline ends on refusals the error says CRC, not timeout: that
-        verdict about the host-to-board direction is what separates a
-        corrupting cable from a dead one.
-
-        Resends are counted when a frame is actually SENT again, not when it
-        is found missing: a link that gives up is not a link that retried.
+        Reads and absolute writes are idempotent; command requests carry their
+        own board-deduplicated identity. Failed attempts keep their real error
+        and spend the link's retry budget, preventing a tight retry storm.
+        A successful response returns immediately, without spending that budget.
         """
 
         started = time.monotonic()
@@ -435,7 +362,7 @@ class UartRegisterTransport:
         next_at = started
         while True:
             now = time.monotonic()
-            if now >= absolute or (failures and not (resend or refused())):
+            if now >= absolute:
                 break
             if now < next_at:
                 pause = min(next_at, absolute) - now
@@ -487,7 +414,10 @@ class UartRegisterTransport:
         """
 
         payload = sum(len(frame) + 8 for frame in frames)
-        payload += framing.reply_frame_len(0) * len(frames)
+        payload += sum(framing.reply_frame_len(
+            int.from_bytes(frame[8:10], "little") if frame[2] == framing.OP_READ
+            else 3 if frame[2] == framing.OP_COMMAND else 0
+        ) for frame in frames)
         on_the_wire = payload * 10.0 / max(1.0, float(self.baud))
         return on_the_wire * 1.5 + self.retry_slack + 0.002 * len(frames)
 
@@ -530,29 +460,39 @@ class UartRegisterTransport:
         return answered, rejected
 
     def read_word(self, word_offset: int, *, stop: threading.Event | None = None, deadline: float | None = None) -> int:
+        return self.read_words(word_offset, 1, stop=stop, deadline=deadline)[0]
+
+    def read_words(self, word_offset: int, count: int, *, stop: threading.Event | None = None, deadline: float | None = None) -> tuple[int, ...]:
         absolute = self._deadline(deadline)
         with self._lock:
             self._require_open()
-            request = framing.encode_read(word_offset, 1, seq=self._next_sequence())
-            return self._read_with_retry(request, absolute, stop)
+            request = framing.encode_read(word_offset, count, seq=self._next_sequence())
+            return self._exchange_with_retry(request, absolute, stop, count=count)
 
-    def _read_with_retry(
+    def command(self, code: int, command_id: int, *, run_repeats: int = 1,
+                scan_repeats: int = 1, stop: threading.Event | None = None,
+                deadline: float | None = None) -> tuple[int, int]:
+        absolute = self._deadline(deadline)
+        with self._lock:
+            self._require_open()
+            request = framing.encode_command(code, command_id, run_repeats, scan_repeats,
+                                             seq=self._next_sequence())
+            reply = self._exchange_with_retry(request, absolute, stop, count=3)
+            if reply[0] != command_id:
+                raise UartError(f"command reply belongs to {reply[0]}, expected {command_id}")
+            return reply[1], reply[2]
+
+    def _exchange_with_retry(
         self,
         request: bytes,
         absolute: float,
         stop: threading.Event | None,
-    ) -> int:
-        """Ask, and ask again while the answer is missing, stale or damaged.
+        *,
+        count: int,
+    ) -> tuple[int, ...]:
+        """Exchange a read or identified command, preserving its request on retry."""
 
-        A read is idempotent, so the SAME frame goes again -- if the first
-        answer was merely late, its duplicate says the same thing.  Under the
-        one retry law (``_until_answered``), which is what kept Stop from
-        stalling: the safe path reads back status and clock words, and every
-        one of those reads used to wait out the whole deadline over a single
-        lost byte.
-        """
-
-        value: int | None = None
+        value: tuple[int, ...] | None = None
         refused = False
 
         def attempt(attempt_deadline: float) -> str | None:
@@ -562,7 +502,10 @@ class UartRegisterTransport:
                 reply = self._link.exchange(request, deadline=attempt_deadline, stop=stop)
             except TimeoutError as error:
                 return getattr(self._link, "last_shortfall", "") or str(error)
-            sequence, status, words = framing.decode_reply(reply)
+            try:
+                sequence, status, words = framing.decode_reply(reply)
+            except framing.FrameError as error:
+                return str(error)
             if sequence != request[3]:
                 # A stale answer to an earlier question, dropped like the
                 # write path's classifier drops it.
@@ -570,18 +513,19 @@ class UartRegisterTransport:
             if status == framing.ST_CRC_FAIL:
                 refused = True
                 return "the board rejected the request as damaged (CRC error)"
-            if status != framing.ST_OK or len(words) != 1:
+            if status != framing.ST_OK or len(words) != count:
                 raise UartError(f"UART read reply was invalid (status=0x{status:02X})")
-            value = int(words[0]) & 0xFFFFFFFF
+            value = tuple(int(word) & 0xFFFFFFFF for word in words)
             return None
 
         self._until_answered(
             absolute,
             attempt,
             outstanding=lambda: (request,),
-            resend=True,
             refused=lambda: refused,
-            what=f"read of word {int.from_bytes(request[4:8], 'little')}",
+            what=(f"command {int.from_bytes(request[4:8], 'little')}"
+                  if request[2] == framing.OP_COMMAND
+                  else f"read of {count} words at {int.from_bytes(request[4:8], 'little')}"),
             stop=stop,
         )
         assert value is not None

@@ -11,9 +11,9 @@
 // It presents the top a write interface (u_word_addr/u_wdata/u_we) that the top
 // MUXes against the axi_bram_ctrl bram_* side before the region decode, and a
 // CTRL-region read tap (u_rd_word -> u_rd_data one clock later) for STATUS/CURSOR/
-// LAYOUT_ID.  Only TWO wire opcodes: WRITE (a run of words at a base word addr)
-// and READ (a run back).  COMMAND / scan-step / PING are COMPOSED by the host
-// from WRITE/READ, so this FSM stays small and image.py is the single source.
+// LAYOUT_ID. WRITE/READ move register words; COMMAND carries an execution ID
+// and Run/Scan counts. Its response comes from the top's command completion,
+// not from receiving a frame. The decoder remains available while LOAD runs.
 //
 // Frame (LSB-first, LE fields):
 //   request = SYNC0(5A) SYNC1(A5) OP SEQ ADDR[4] COUNT[2] PAYLOAD[4*COUNT] CRC16[2]
@@ -52,12 +52,21 @@ module zlc_uart_bridge #(
     output reg                        u_error,    // protocol fault pulse; top latches non-fatal STATUS.LINK_ERROR
     // CTRL-region read tap (STATUS/CURSOR/LAYOUT_ID)
     output reg  [5:0]  u_rd_word,
-    input  wire [31:0] u_rd_data
+    input  wire [31:0] u_rd_data,
+    // Commands are acknowledged by the execution owner, not by register receipt.
+    output reg u_cmd_valid,
+    output reg [3:0] u_cmd_code,
+    output reg [7:0] u_cmd_seq,
+    output reg [31:0] u_cmd_id, u_cmd_runs, u_cmd_scans,
+    input wire u_cmd_reply_valid,
+    output wire u_cmd_reply_ready,
+    input wire [7:0] u_cmd_reply_seq,
+    input wire [31:0] u_cmd_reply_id, u_cmd_reply_status, u_cmd_reply_cursor
 );
     localparam integer FW_AW = $clog2(FRAME_WORDS);
 
     localparam [7:0] SYNC0 = 8'h5A, SYNC1 = 8'hA5;
-    localparam [7:0] OP_WRITE = 8'h01, OP_READ = 8'h02, RESP = 8'h81;
+    localparam [7:0] OP_WRITE = 8'h01, OP_READ = 8'h02, OP_COMMAND = 8'h03, RESP = 8'h81;
     localparam [7:0] ST_OK = 8'h00, ST_CRC_FAIL = 8'h01,
                      ST_BAD_OP = 8'h02, ST_ADDR_RANGE = 8'h03;
 
@@ -141,14 +150,25 @@ module zlc_uart_bridge #(
 
     // handshake to the reply serializer (single-writer here, single-reader there)
     reg        rpl_go; reg [7:0] rpl_seq, rpl_status; reg [15:0] rpl_count;
+    reg rpl_command;
+    reg [31:0] command_payload [0:2];
+    reg [31:0] command_reply [0:2];
+    reg serializer_command;
+    assign u_cmd_reply_ready = dst == D_HUNT && sst == S_IDLE && !rpl_go && !rx_valid;
 
     always @(posedge clk) begin
-        if (rst) begin dst<=D_HUNT; u_we<=1'b0; u_active<=1'b0; u_error<=1'b0; rpl_go<=1'b0; frame_idle<=32'd0; seq_valid<=1'b0; commit_raddr<={FW_AW{1'b0}}; wbuf_we<=1'b0; end
+        if (rst) begin dst<=D_HUNT; u_we<=1'b0; u_active<=1'b0; u_error<=1'b0; rpl_go<=1'b0; frame_idle<=32'd0; seq_valid<=1'b0; commit_raddr<={FW_AW{1'b0}}; wbuf_we<=1'b0; u_cmd_valid<=1'b0; rpl_command<=1'b0; end
         else begin
-            u_we<=1'b0; u_error<=1'b0; rpl_go<=1'b0; wbuf_we<=1'b0;
+            u_we<=1'b0; u_error<=1'b0; rpl_go<=1'b0; wbuf_we<=1'b0; u_cmd_valid<=1'b0; rpl_command<=1'b0;
             if (!u_active || rx_valid) frame_idle <= 32'd0;
             else frame_idle <= frame_idle + 1'b1;
-            if (u_active && frame_idle >= FRAME_TIMEOUT_CYCLES-1) begin
+            if (u_cmd_reply_valid && u_cmd_reply_ready) begin
+                command_reply[0] <= u_cmd_reply_id;
+                command_reply[1] <= u_cmd_reply_status;
+                command_reply[2] <= u_cmd_reply_cursor;
+                rpl_seq<=u_cmd_reply_seq; rpl_status<=ST_OK; rpl_count<=16'd3;
+                rpl_command<=1'b1; rpl_go<=1'b1;
+            end else if (u_active && frame_idle >= FRAME_TIMEOUT_CYCLES-1) begin
                 dst<=D_HUNT; u_active<=1'b0; u_error<=1'b1; frame_idle<=32'd0;
                 if (seq_valid) begin rpl_seq<=f_seq; rpl_status<=ST_CRC_FAIL; rpl_count<=16'd0; rpl_go<=1'b1; end
             end else if (rx_ferr) begin
@@ -164,7 +184,7 @@ module zlc_uart_bridge #(
                                  else dst<=D_HUNT; end
                     D_OP:    if (rx_valid) begin
                                  f_op<=rx_byte; crc_run<=crc_byte(16'hFFFF, rx_byte); u_active<=1'b1; seq_valid<=1'b0;
-                                 dst <= (rx_byte==OP_WRITE || rx_byte==OP_READ) ? D_SEQ : D_BAD_SEQ; end
+                                 dst <= (rx_byte==OP_WRITE || rx_byte==OP_READ || rx_byte==OP_COMMAND) ? D_SEQ : D_BAD_SEQ; end
                     D_BAD_SEQ: if (rx_valid) begin
                                  f_seq<=rx_byte; rpl_seq<=rx_byte; rpl_status<=ST_BAD_OP; rpl_count<=16'd0; rpl_go<=1'b1;
                                  dst<=D_HUNT; u_active<=1'b0; u_error<=1'b1; end
@@ -186,11 +206,15 @@ module zlc_uart_bridge #(
                                              |f_addr[31:6]
                                              || ({1'b0,f_addr[5:0]} + {1'b0,rx_byte,f_count[7:0]}) > 17'd64
                                          ))
+                                         || (f_op==OP_COMMAND && (
+                                             {rx_byte,f_count[7:0]} != 16'd3
+                                             || !(f_addr==1 || f_addr==2 || f_addr==4 || f_addr==8)
+                                         ))
                                      ) begin
                                          rpl_seq<=f_seq; rpl_status<=ST_ADDR_RANGE; rpl_count<=16'd0; rpl_go<=1'b1;
                                          dst<=D_HUNT; u_active<=1'b0; u_error<=1'b1;
                                      end
-                                     else if (f_op==OP_WRITE) dst<=D_DATA;
+                                     else if (f_op==OP_WRITE || f_op==OP_COMMAND) dst<=D_DATA;
                                      else dst<=D_CRC;
                                  end end
                     D_DATA:  if (rx_valid) begin
@@ -198,6 +222,7 @@ module zlc_uart_bridge #(
                                  if (byte_in_word==2'd3) begin
                                      byte_in_word<=0; wbuf_we<=1'b1; wbuf_waddr<=w_idx[FW_AW-1:0];
                                      wbuf_wdata<={rx_byte, word_acc[31:8]};
+                                     if (f_op==OP_COMMAND) command_payload[w_idx[1:0]] <= {rx_byte, word_acc[31:8]};
                                      if (w_idx==f_count-1) dst<=D_CRC; else w_idx<=w_idx+1'b1;
                                  end else byte_in_word<=byte_in_word+1'b1; end
                     D_CRC:   if (rx_valid) begin
@@ -205,6 +230,11 @@ module zlc_uart_bridge #(
                                  else begin
                                      if ({rx_byte, crc_rx[7:0]}==crc_run) begin
                                          if (f_op==OP_WRITE) begin w_idx<=0; commit_raddr<={FW_AW{1'b0}}; dst<=D_CWAIT; end
+                                         else if (f_op==OP_COMMAND) begin
+                                             u_cmd_code<=f_addr[3:0]; u_cmd_seq<=f_seq;
+                                             u_cmd_id<=command_payload[0]; u_cmd_runs<=command_payload[1]; u_cmd_scans<=command_payload[2];
+                                             u_cmd_valid<=1'b1; dst<=D_HUNT; u_active<=1'b0;
+                                         end
                                          else begin rd_i<=0; dst<=D_READ; end
                                      end else begin
                                          rpl_seq<=f_seq; rpl_status<=ST_CRC_FAIL; rpl_count<=16'd0; rpl_go<=1'b1;
@@ -265,7 +295,9 @@ module zlc_uart_bridge #(
             // is self-determined to the 2-bit width of pj[1:0], so the <<3 truncates to 0 and every
             // payload byte would come out as byte 0 (0x5A4C4C02 -> 0x02020202 on the wire).  Concatenate
             // 3 zero bits instead ( == pj[1:0]*8, a proper 5-bit 0/8/16/24 offset).
-            cur_byte = wbuf_rdata[{pj[1:0], 3'b000} +: 8];
+            cur_byte = serializer_command
+                ? command_reply[pj[3:2]][{pj[1:0], 3'b000} +: 8]
+                : wbuf_rdata[{pj[1:0], 3'b000} +: 8];
         end else cur_byte = (t_i == t_pcut) ? t_crc_run[7:0] : t_crc_run[15:8];
     end
 
@@ -279,6 +311,7 @@ module zlc_uart_bridge #(
             S_IDLE: begin
                 tx_send<=1'b0;
                 if (rpl_go) begin
+                    serializer_command <= rpl_command;
                     hdr[0]<=SYNC0; hdr[1]<=SYNC1; hdr[2]<=RESP; hdr[3]<=rpl_seq; hdr[4]<=rpl_status;
                     hdr[5]<=rpl_count[7:0]; hdr[6]<=rpl_count[15:8];
                     t_pcut  <= 16'd7 + (rpl_count<<2);

@@ -10,6 +10,7 @@ SYNC0 = 0x5A
 SYNC1 = 0xA5
 OP_WRITE = 0x01
 OP_READ = 0x02
+OP_COMMAND = 0x03
 RESP = 0x81
 ST_OK = 0x00
 ST_CRC_FAIL = 0x01
@@ -64,6 +65,20 @@ def encode_read(word_addr: int, count: int, *, seq: int = 0) -> bytes:
     address, count = _span(word_addr, count)
     sequence = _unsigned(seq, 0xFF, "seq")
     return _frame(bytes((OP_READ, sequence)) + address.to_bytes(4, "little") + count.to_bytes(2, "little"))
+
+
+def encode_command(code: int, command_id: int, run_repeats: int, scan_repeats: int, *, seq: int = 0) -> bytes:
+    if code not in (1, 2, 4, 8):
+        raise ValueError("unknown pulse command")
+    sequence = _unsigned(seq, 0xFF, "seq")
+    values = tuple(_unsigned(value, MASK32, name) for value, name in (
+        (command_id, "command_id"), (run_repeats, "run_repeats"),
+        (scan_repeats, "scan_repeats"),
+    ))
+    if not command_id:
+        raise ValueError("command_id must be nonzero")
+    return _frame(bytes((OP_COMMAND, sequence)) + code.to_bytes(4, "little")
+                  + (3).to_bytes(2, "little") + struct.pack("<3I", *values))
 
 
 def encode_reply(seq: int, status: int, words: Sequence[int] = ()) -> bytes:
@@ -128,6 +143,7 @@ __all__ = [
     "MAX_FRAME_WORDS",
     "OP_READ",
     "OP_WRITE",
+    "OP_COMMAND",
     "RESP",
     "ST_OK",
     "SYNC0",
@@ -136,6 +152,7 @@ __all__ = [
     "crc16_ccitt",
     "decode_reply",
     "encode_read",
+    "encode_command",
     "encode_reply",
     "encode_write",
     "reply_frame_len",

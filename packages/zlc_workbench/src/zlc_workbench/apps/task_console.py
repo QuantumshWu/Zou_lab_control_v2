@@ -376,7 +376,7 @@ class ExperimentGuiFlow:
         )
 
         from .device_manager import create_window as create_device_window
-        from ..board import attach_qt_worker
+        from ..board import attach_qt_owner_turn, attach_qt_worker
 
         if self.devices is not None:
             return self
@@ -389,7 +389,23 @@ class ExperimentGuiFlow:
         self.catalog = catalog
         # One flow-owned serial device worker: Manager discover/init/shutdown
         # and generic tune share its existing busy policy and one close truth.
-        run, close = attach_qt_worker("zlc-devices")
+        submit, close = attach_qt_worker("zlc-devices")
+        continue_close = attach_qt_owner_turn(self.close)
+
+        def run(work, deliver, failed):
+            def finished(result):
+                deliver(result)
+                if self._closing_all:
+                    continue_close()
+
+            def failure(error):
+                failed(error)
+                # A failed shutdown stays visible; never replay device close.
+                if self._closing_all and not self._device_shutdown_pending:
+                    continue_close()
+
+            submit(work, finished, failure)
+
         self._device_worker_run = run
         self._device_worker_close = close
         try:
@@ -469,6 +485,8 @@ class ExperimentGuiFlow:
         if presenter is not None:
             presenter.beat()
         self._refresh_device_control_policies()
+        if self._closing_all:
+            self.close()
 
     def open_device_control(self, instance_id: str) -> object | None:
         """Open or raise the one control window for a loaded named device.
@@ -671,15 +689,17 @@ class ExperimentGuiFlow:
     def _read_device_controls(
         device: object,
         units: dict[str, str] | None = None,
+        *,
+        refresh: bool = True,
     ) -> tuple[tuple[object, ...], dict[str, object], dict[str, object]]:
         """What the device declares and holds right now; runs on the worker."""
 
-        from zlc_atom.authoring import TunableField, read_tunable_in_unit
+        from zlc_atom.authoring import TunableField, read_tunable_in_unit, refresh_tunable_fields
 
         declare = getattr(device, "tunable_fields", None)
         if not callable(declare):
             return (), {}, {}
-        fields = tuple(declare())
+        fields = refresh_tunable_fields(device) if refresh else tuple(declare())
         if any(not isinstance(field, TunableField) for field in fields):
             raise TypeError("device tunable_fields must contain TunableField values")
         if units:
@@ -775,7 +795,7 @@ class ExperimentGuiFlow:
                     target,
                 )
             units = {name: converted.get(name, pair)[1] for name, pair in desired.items()}
-            return self._read_device_controls(device, units), converted
+            return self._read_device_controls(device, units, refresh=not unit_requests), converted
 
         def settled() -> None:
             self._device_refresh_active.discard(key)
@@ -1424,6 +1444,7 @@ class ExperimentGuiFlow:
         if self._closing_console:
             return False
         self._closing_console = True
+        self._closing_all = True
         try:
             if (
                 self.devices is not None
@@ -1437,7 +1458,6 @@ class ExperimentGuiFlow:
                 return False
             if not self._device_tune_idle():
                 return False
-            self._closing_all = True
             if self.console_presenter is not None and not self.console_presenter.close():
                 return False
             if self.devices is not None:
@@ -1459,11 +1479,11 @@ class ExperimentGuiFlow:
     def _device_manager_close_guard(self) -> bool:
         """Retire the whole composition before its root window disappears."""
 
+        self._closing_all = True
         if self.devices is not None and self.devices.presenter.device_operation_active:
             return False
         if not self._device_tune_idle():
             return False
-        self._closing_all = True
         try:
             if self.devices is not None and not self.devices.presenter.close():
                 return False

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from .base import JTAG_AXI_OBSERVER_INTERVAL, TransportAborted
+from ..wire import CtrlWords
 
 
 AXI_BURST_BOUNDARY_BYTES = 4096
@@ -71,10 +72,6 @@ class VivadoAxiRegisterTransport:
     """Ordered 32-bit register/BRAM access through one persistent Vivado Tcl owner."""
 
     transport_id = "vivado-axi"
-    #: Nothing on this transport is ever lost -- it may be slow, and a
-    #: timed-out action may still complete later, which is exactly why the
-    #: strobe verify-and-retry machinery must NOT run here.
-    lossy_line = False
     observer_interval = JTAG_AXI_OBSERVER_INTERVAL
 
     def __init__(
@@ -181,13 +178,6 @@ class VivadoAxiRegisterTransport:
         *,
         stop: threading.Event | None = None,
         deadline: float | None = None,
-        #: Whether a frame the link never answered may be sent again.  False
-        #: for a command strobe: one that WAS executed and whose acknowledgement
-        #: was lost would be executed twice.  A transport with no frames to lose
-        #: takes the argument and ignores it, because the caller's meaning is
-        #: the same either way and a caller should not have to ask which
-        #: transport it has.
-        resend: bool = True,
     ) -> None:
         absolute_deadline = self._effective_deadline(deadline)
         pending = tuple(
@@ -223,15 +213,46 @@ class VivadoAxiRegisterTransport:
         stop: threading.Event | None = None,
         deadline: float | None = None,
     ) -> int:
+        return self.read_words(word_offset, 1, stop=stop, deadline=deadline)[0]
+
+    def read_words(self, word_offset: int, count: int, *, stop=None, deadline=None) -> tuple[int, ...]:
+        if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 256:
+            raise ValueError("AXI read count must be in [1, 256]")
         absolute_deadline = self._effective_deadline(deadline)
         marker = "ZLCDATA"
         output = self._run_tcl(
-            self._read_txn_tcl(_byte_address(word_offset), marker),
+            self._read_txn_tcl(_byte_address(word_offset), marker, count=count),
             action="axi_read",
             deadline=absolute_deadline,
             stop=stop,
         )
-        return self._parse_read(output, marker)
+        return self._parse_read(output, marker, count=count)
+
+    def command(self, code: int, command_id: int, *, run_repeats: int = 1,
+                scan_repeats: int = 1, stop=None, deadline=None) -> tuple[int, int]:
+        absolute = self._effective_deadline(deadline)
+        rows = ((CtrlWords.RUN_REPEAT_COUNT, run_repeats),
+                (CtrlWords.SCAN_REPEAT_COUNT, scan_repeats),
+                (CtrlWords.COMMAND_ID, command_id),
+                (CtrlWords.COMMAND, 0), (CtrlWords.COMMAND, code))
+        lines = []
+        for address, value in rows:
+            lines.extend(self._write_burst_tcl(_byte_address(address), (_word_value(value),)))
+        milliseconds = max(1, int(self._remaining(absolute, "pulse command") * 1000))
+        lines.extend((f"set zlc_cmd_deadline [expr {{[clock milliseconds] + {milliseconds}}}]",
+                      "while {1} {",
+                      f"create_hw_axi_txn zlc_r [get_hw_axis] -address {_byte_address(CtrlWords.ACK_ID):08X} -len 3 -type read -force",
+                      "run_hw_axi zlc_r",
+                      "set zlc_cmd_answer [get_property DATA [get_hw_axi_txns zlc_r]]",
+                      "delete_hw_axi_txn zlc_r",
+                      f"if {{([scan [string range $zlc_cmd_answer end-7 end] %x] & 0xffffffff) == {command_id}}} {{puts \"ZLCCOMMAND $zlc_cmd_answer\"; break}}",
+                      "if {[clock milliseconds] >= $zlc_cmd_deadline} {error {pulse command completion timed out}}",
+                      "}"))
+        output = self._run_tcl(lines, action="pulse_command", deadline=absolute, stop=stop)
+        reply = self._parse_read(output, "ZLCCOMMAND", count=3)
+        if reply[0] != command_id:
+            raise RuntimeError("AXI command completion belongs to another command")
+        return reply[1], reply[2]
 
     def _record_diagnostic(self, name: str, text: str) -> None:
         try:
@@ -331,17 +352,17 @@ class VivadoAxiRegisterTransport:
         ]
 
     @staticmethod
-    def _read_txn_tcl(byte_address: int, marker: str) -> list[str]:
+    def _read_txn_tcl(byte_address: int, marker: str, *, count: int = 1) -> list[str]:
         address = f"{byte_address:08X}"
         return [
-            f"create_hw_axi_txn zlc_r [get_hw_axis] -address {address} -len 1 -type read -force",
+            f"create_hw_axi_txn zlc_r [get_hw_axis] -address {address} -len {count} -type read -force",
             "run_hw_axi zlc_r",
             f'puts "{marker} [get_property DATA [get_hw_axi_txns zlc_r]]"',
             "delete_hw_axi_txn zlc_r",
         ]
 
     @staticmethod
-    def _parse_read(output: str, marker: str) -> int:
+    def _parse_read(output: str, marker: str, *, count: int = 1) -> tuple[int, ...]:
         token = ""
         for line in output.splitlines():
             if marker in line:
@@ -349,9 +370,10 @@ class VivadoAxiRegisterTransport:
                 token = fields[-1] if fields else ""
         if not token:
             raise RuntimeError("hw_axi read returned no DATA")
-        if re.fullmatch(r"(?:0[xX])?[0-9a-fA-F]{1,8}", token) is None:
+        if re.fullmatch(rf"(?:0[xX])?[0-9a-fA-F]{{1,{8 * count}}}", token) is None:
             raise RuntimeError(f"hw_axi read returned non-binary DATA {token!r}")
-        return int(token, 16) & 0xFFFFFFFF
+        packed = int(token, 16)
+        return tuple((packed >> (32 * index)) & 0xFFFFFFFF for index in range(count))
 
     def _run_tcl(
         self,

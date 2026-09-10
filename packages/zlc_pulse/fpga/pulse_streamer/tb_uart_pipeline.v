@@ -13,6 +13,27 @@ module tb_uart_pipeline;
     wire [29:0] u_word_addr; wire [31:0] u_wdata; wire u_we, u_active, u_error;
     wire [5:0] u_rd_word; reg [31:0] u_rd_data; reg [31:0] ctrl_reg [0:63];
     integer commits = 0; integer error_pulses = 0;
+    wire command_valid, command_reply_ready;
+    wire [3:0] command_code;
+    wire [7:0] command_seq;
+    wire [31:0] command_id, command_runs, command_scans;
+    reg command_reply_valid=0, load_pending=0;
+    reg [7:0] command_reply_seq=0;
+    reg [31:0] command_reply_id=0, command_reply_status=0;
+    integer commands=0;
+    always @(posedge clk) begin
+        if (command_reply_valid && command_reply_ready) command_reply_valid<=0;
+        if (command_valid) begin
+            commands=commands+1;
+            if (command_code==1) load_pending<=1;
+            else if (command_code==8) begin
+                if (!load_pending) $fatal(1,"SAFE command did not follow pending LOAD");
+                load_pending<=0;
+                command_reply_seq<=command_seq; command_reply_id<=command_id;
+                command_reply_status<=0; command_reply_valid<=1;
+            end
+        end
+    end
 
     always @(posedge clk) begin
         if (u_active && u_we) begin ctrl_reg[u_word_addr[5:0]] <= u_wdata; commits = commits + 1; end
@@ -24,7 +45,12 @@ module tb_uart_pipeline;
                       .ADDRESS_WORDS(64), .FRAME_TIMEOUT_CYCLES(2000)) dut (
         .clk(clk), .rst(rst), .uart_rx(uart_rx), .uart_tx(uart_tx),
         .u_word_addr(u_word_addr), .u_wdata(u_wdata), .u_we(u_we), .u_active(u_active), .u_error(u_error),
-        .u_rd_word(u_rd_word), .u_rd_data(u_rd_data));
+        .u_rd_word(u_rd_word), .u_rd_data(u_rd_data),
+        .u_cmd_valid(command_valid), .u_cmd_code(command_code), .u_cmd_seq(command_seq),
+        .u_cmd_id(command_id), .u_cmd_runs(command_runs), .u_cmd_scans(command_scans),
+        .u_cmd_reply_valid(command_reply_valid), .u_cmd_reply_ready(command_reply_ready),
+        .u_cmd_reply_seq(command_reply_seq), .u_cmd_reply_id(command_reply_id),
+        .u_cmd_reply_status(command_reply_status), .u_cmd_reply_cursor(32'd0));
 
     task send_byte(input [7:0] b); integer i; begin
         uart_rx=1'b0; #(BITT);
@@ -35,10 +61,27 @@ module tb_uart_pipeline;
         @(negedge uart_tx); #(BITT*1.5);
         for (i=0;i<8;i=i+1) begin b[i]=uart_tx; #(BITT); end end
     endtask
+    task send_command(input [7:0] seq, input [31:0] code, input [31:0] id);
+        reg [15:0] crc; reg [7:0] value; integer i;
+        begin
+            send_byte(8'h5a); send_byte(8'ha5); crc=16'hffff;
+            for (i=0;i<20;i=i+1) begin
+                if (i==0) value=3;
+                else if (i==1) value=seq;
+                else if (i<6) value=code >> ((i-2)*8);
+                else if (i==6) value=3;
+                else if (i==7) value=0;
+                else if (i<12) value=id >> ((i-8)*8);
+                else value=(i==12 || i==16) ? 1 : 0;
+                crc=dut.crc_byte(crc,value); send_byte(value);
+            end
+            send_byte(crc[7:0]); send_byte(crc[15:8]);
+        end
+    endtask
 
     reg [7:0] wr [0:63];    // 4 WRITE frames (16 B each) = 64 B, sent back-to-back
     reg [7:0] rd [0:47];    // 4 READ  frames (12 B each) = 48 B
-    reg [7:0] rb [0:127];
+    reg [7:0] rb [0:191];
     integer k, j, fails; integer nrx; integer bad_base; integer commits_before_faults;
 
     initial begin : collector
@@ -117,6 +160,19 @@ module tb_uart_pipeline;
         if (error_pulses < 2) begin
             fails=fails+1; $display("TB: protocol error pulse was not raised for both faults");
         end
+
+        bad_base=nrx;
+        send_command(8'h31,32'd1,32'h01020304);
+        repeat(100) @(posedge clk);
+        if (nrx!=bad_base || !load_pending || u_active)
+            $fatal(1,"LOAD was acknowledged before completion or blocked decoder");
+        send_command(8'h32,32'd8,32'h01020305);
+        wait(nrx>=bad_base+21);
+        if (commands!=2 || load_pending || rb[bad_base+3]!=8'h32 || rb[bad_base+5]!=3
+            || {rb[bad_base+10],rb[bad_base+9],rb[bad_base+8],rb[bad_base+7]}!==32'h01020305
+            || {rb[bad_base+14],rb[bad_base+13],rb[bad_base+12],rb[bad_base+11]}!==0)
+            $fatal(1,"completion command reply payload or SAFE interruption failed");
+        $display("UART-COMMAND-COMPLETION-INTERRUPT-OK");
 
         if (fails!=0) $fatal(1, "UART pipeline/watchdog/bounds had %0d error(s) (nrx=%0d)", fails, nrx);
         $display("UART-PIPELINE-WATCHDOG-BOUNDS-OK");

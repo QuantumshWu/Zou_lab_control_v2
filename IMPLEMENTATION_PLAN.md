@@ -10,7 +10,11 @@
 
 ## 1. 当前实施范围
 
-- Seamless按2026-09-10最新裁决收口：选定Acquisition logic仅每次Scan Start准备一次，运行中不再按point/repeat重启；settle默认10ms，只在启动和每次set device操作后等待，manual/repeat不额外等。完整Pulse仅load一次，重复Fire复用驻留程序；同源driver已补SAFE后clock mask恢复及恢复失败时SAFE cache失效，不改RTL。原每段入口SAFE删掉，首次SAFE移到任何设备写入前，段尾确认保留。
+- 2026-09-10本次验证：真实UART串行帧证明LOAD完成回复及SAFE抢占；真实top＋既有Xilinx BRAM行为模型证明首次装载4shots与SAFE后驻留重放4shots的18 TTL/40 DAC data逐tick一致、4 DAC clock工作、同ID不重复Fire。没有运行FPGA build/synthesis/program，旧时序报告不代表新ABI已通过。相关软件定向验证覆盖驻留重用、丢ACK、pending LOAD取消、新server握手、device/manual扫描及错误恢复。
+- RF正常设频率/幅度为1 write＋1 query（两次发送、一个响应）；Control Apply与单位投影不额外读设备。没有未经厂商证实的复合SCPI；真实native UNIT切换另发一次必要写入。错误后的current/unit/range保持unknown直到必要操作或显式Refresh确认。Fabric与SLM remote各在原session内复用连接，断线不自动重放写入，关闭释放idle连接。
+- 窗口首个Close保留关闭意图；device read/tune/init/discovery完成后由原Qt owner继续完整关闭，不要求再次点击、不加timer或平行生命周期。直接Qt验证覆盖有/无TaskConsole的pending关闭，测试窗口均已关闭。原始探针/日志只在ignored目录，不进入git。
+
+- 2026-09-10通信收口：Seamless仅Start准备一次Acquisition；按最新裁决删除全部settle参数/UI/等待/记录。正常DONE后不追加SAFE。Pulse使用带command ID的完成握手，驻留Fire不重load/不清clock，软件与RTL同一新ABI；实验机需重启server并自行build/program。本次不执行FPGA build/program，软件与RTL仿真证据单独列出。
 - Repeat标题已撤掉擅自添加的min/max统计及区间格式：其余所有轴固定于同一数据当前坐标，Cell-data也先选定坐标，再沿目标Repeat数valid；每轴只返回整数，Point/Cell尺寸不变，不受Plot Scope影响，也不改为采集次数。旧多context汇总分支删除，GUI探针同步同一标量契约。
 - Pulse Bracket编辑已统一Period/post的光标、chrome命中、拖动、gap指示和Add目标；旧分立MIME/端点drag/只数Period的gap路径删除。结构编辑一次提交period与Bracket，移动原边界不再留旧锚造成逆序。空Bracket在首/中/尾均保留，可改count及重新插入修复；On Pulse、Save Pulse/Preview与compile/codec共用同一错误提示，未改RTL或有效文件格式。直接边界/空编辑用例和可见Qt事件链及截图验证，证据在ignored research，不入Git。
 - Repeat标题统计已从全局any改为本次publication当前坐标的条件有效数，不受呈现fate/Scope/Focus影响。正式Qt Scan第一power50次、下一power7次显示50→7；同publication切Scope135/200均为7，Point/Cell维度不改。完整panel_data_shape每case300次：Site35 P50/P95/max=0.094/0.253/0.575ms，207万像素但compact有效性=0.086/0.111/0.349ms；不包含Qt paint，未展开像素mask，首次统计也<1ms。原始计时与截图只在ignored research。
@@ -38,7 +42,7 @@
 
 - 2026-09-08 按最终用户裁决，扫描彻底采用author unit：Plan直接存135…247与mVpp，Seamless/Stepped输出同一单位，仅设备/编译边界换算；display_unit旧路径及8ULP/相等检查均删除。5个单位/Plan直接实例通过；真实Runtime的Seamless十点例在设备回读偏离设定时完成，Dataset coordinates逐位等于135→247的十点且unit为mVpp，run record一致；设备异常与restore传播仍保留。曾添加的独立readback event字段不符合现有merge grammar，已撤掉，不扩格式，设备原有tune回读路径保留。未做真实硬件验收。
 
-- Seamless的Acquisition logic复用原Start/Restart及ready入口，不含Camera类型分支；按2026-09-10裁决每次Scan仅调用一次。当前正式Qt两轮repeat×两manual点、每点2shots：4次Fire共享同一采集generation，Restart=1、完整load=1、settle=1且10.53ms，24/24 frame数据完成，errors空、窗口和子进程已关闭。每次device写后的等待由直接用例验证，manual/repeat不额外等待。进度仍每shot更新，已有草稿/布局显式settle值保留；所有原始证据只在ignored research。
+- Seamless的Acquisition logic沿原Start/Restart与ready入口，后续所有points/repeats复用同一generation。之前包含10ms settle的GUI结果不作为当前无settle通信流程验收；当前测试删除被取消的等待断言，保留shot placement/Stop/恢复与一次准备。Temperature原有50ms等待留在自身Task，不借Seamless参数实现。
 
 - 2026-09-08 当前worktree完成六项：Pulse DAC保留disabled全开按钮并实屏确认四列对齐；Layout递归编码authoring rows并完成真实Save/Load；Derive以普通Fluent下拉选择atomic producer bundle、不新增Runtime数据；声明过的Panel fit在无首帧/无reserved generation时允许Scan Start，首次arrival复用有序tap。真实Qt验证单点单shot，Scan输入与新一代首个Fit publication数值/validity相同，唯一根为重启后的Camera首event，未自动启动Camera。GUI及渲染children全部关闭；退出曾有Device Manager等待sequencer control关闭的短暂拒绝日志，最终正常退出，未冒称无日志。
 - `Saturation`按用户新裁决改为`f(x)=(A*x+B)/(x+C)`，使用`asymptote/numerator/shift`（A/B/C），headline为asymptote；参数单位依次为y、y*x、x。C可负，仅限制拟合域`x+C>0`，不把增长条件`A*C>B`设成不可配置门槛；固定B/C、绝对坐标裁剪、single/batch与uncertainty继续共用现有fit机制。公式/Jacobian/负C/下降数据/固定参数、normal/hard single与B1/B8/B64、headline及复合单位的显示/表达式/派生Dataset共8项目标验证通过。B的单位复用通用乘积解析，同单位原样通过，前缀转换保留符号，非线性换算不得冒充乘积倍率。
@@ -303,7 +307,7 @@
 - Camera restart selector顺序根修：`_refresh_signal_choices`原来把“首个surface尚未accept、因此`binding.host is None`”误当成“panel尚未mount”，在已有initial `PlotPanelPort`忙于首帧时又启动第二个retarget port；后完成的候选会关闭已接受crosshair的port。恢复路径现在只在唯一生命周期真相`binding.port is None`时创建port，Board继续独占已有port的首帧accept；没有新增状态、helper、selector/restart特判或测试函数。原必现的auto-inference→camera-restart顺序`2 passed`；Workbench全包该缺陷已消失，结果`436 passed`。
 - 长Task partial artifacts：Runtime在worker failure/Stop边界调用domain writer；Feedback普通异常从最后完成candidate生成6组Figure后rollback，Temperature从已提交survival保存partial curve/Figure，Calibration从最新完整三帧cycle保存partial capture（分析完成则保存完整报告）。`run.json`只索引这些已完成文件，不再是失败run唯一内容。
 - Feedback的`candidates/candidate-XXXX.npz`现为标准Science Context；operator可在既有Science Context输入中手动选择它作为新run起点。过程数组移至`data/measurements/measurement-XXXX.npz`。新run从candidate 1开始并使用本次authored update预算；没有resume输入、自动旧run查找、续编号或旧run预算继承。
-- Pulse STATUS ABI当前为LOADED/RUNNING/DONE/ENGINE_ERROR/UNDERFLOW/LINK_ERROR；UART fault不再置engine ERROR，observer failure不再伪装成board error，Remote日志使用ERROR/DONE真实事件名并写status/cursor双读、observer exception与FIRE总elapsed。Remote client的`safe()`在command lane被LOAD/FIRE占着等回复时，先用`open`回复的cancel token在自己的一条连接上发一次`cancel`（server执行takeover/disconnect的第一步：command lane旁SAFE、stop event打断pending transport，owner/epoch不变），再在command lane上串行`safe`取最终readback；cancel连接从不claim、一问即关。三层repeat register layout令layout fingerprint更新为`0x5A86511A`，实验板必须重build/program。
+- Pulse STATUS位仍为LOADED/RUNNING/DONE/ENGINE_ERROR/UNDERFLOW/LINK_ERROR，新增独立完成命令协议和CTRL22..25的command/ACK信息；fingerprint为`0x5A83C4CA`，旧板或旧server不进入新执行路径。SAFE由板端隔离输出且保留clock/program；Fire回复丢失用同command ID重试，不猜旧LOADED gate。运行/完成读取一次status/cursor块，日志记录单一结果与command ID，不保存或伪造两次读回。既有Remote cancel旁路保留，正常DONE无需额外SAFE命令。
 - 第一次installed software尝试曾在重负载下出现一次本地SLM测试TCP connect timeout；
   同一wheel的精确case随后连续5/5通过，第二次完整installed software lane通过，因此没有
   用该不可复现事件改动产品remote timeout或server逻辑。
@@ -311,6 +315,8 @@
 ## 4. 仍有效的FPGA build/timing证据
 
 以下证据来自2026-09-03在当前三层repeat tree上强制执行的Vivado 2019.1纯build，不代替实验板验收：
+
+本节是旧命令ABI的历史build证据，不能用于确认当前`0x5A83C4CA`的资源或时序；当前版本由操作员在实验机build/program。
 
 - Vivado 2019.1 fresh project完成全部IP、top synth、place/route、reports和bitstream。
 - Routed setup WNS `+0.193 ns`、TNS `0`；hold WHS `+0.036 ns`、THS `0`；全部约束MET。

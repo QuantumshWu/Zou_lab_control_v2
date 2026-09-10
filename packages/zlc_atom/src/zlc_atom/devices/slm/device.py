@@ -232,17 +232,7 @@ def _open_slm_server(slm: SlmAdapter, host: str, port: int) -> socketserver.TCPS
         }
         return {"version": _REMOTE_VERSION, "ok": ok, "error": error, "state": state}, payload
 
-    def handle(connection: socket.socket, address, _server) -> None:
-        connection.settimeout(_SERVER_SOCKET_TIMEOUT)
-        client = f"{address[0]}:{address[1]}" if address else "?"
-        try:
-            request, payload = _recv_packet(connection)
-        except Exception as error:
-            _LOG.info(
-                "SLM RECEIVE FAILED client=%s error=%s: %s",
-                client, type(error).__name__, error,
-            )
-            return
+    def command(request, payload):
         fields = set(request)
         if (
             type(request.get("version")) is not int
@@ -288,21 +278,64 @@ def _open_slm_server(slm: SlmAdapter, host: str, port: int) -> socketserver.TCPS
                 )
             else:
                 reply = response(True, None, include_phase=False)
-        metadata = reply[0]
-        _LOG.info(
-            "SLM %s client=%s ok=%s%s command_revision=%s",
-            str(request.get("method", "?")).upper(),
-            client,
-            metadata["ok"],
-            "" if metadata["error"] is None else f" error={metadata['error']!r}",
-            metadata["state"]["command_revision"],
-        )
-        try:
-            _send_packet(connection, *reply)
-        except OSError:
-            pass
+        return reply
 
-    server = socketserver.TCPServer((bind_host, port), handle)
+    command_lock, connections_lock = Lock(), Lock()
+    connections: set[socket.socket] = set()
+    closing = False
+
+    def handle(connection: socket.socket, address, _server) -> None:
+        client = f"{address[0]}:{address[1]}" if address else "?"
+        with connections_lock:
+            if closing:
+                return
+            connections.add(connection)
+        try:
+            while True:
+                # Idle sessions do not expire. Once a frame starts, retain the
+                # existing bounded receive timeout for incomplete messages.
+                connection.settimeout(None)
+                if not connection.recv(1, socket.MSG_PEEK):
+                    return
+                connection.settimeout(_SERVER_SOCKET_TIMEOUT)
+                request, payload = _recv_packet(connection)
+                with command_lock:
+                    if closing:
+                        return
+                    reply = command(request, payload)
+                metadata = reply[0]
+                _LOG.info(
+                    "SLM %s client=%s ok=%s%s command_revision=%s",
+                    str(request.get("method", "?")).upper(), client,
+                    metadata["ok"],
+                    "" if metadata["error"] is None else f" error={metadata['error']!r}",
+                    metadata["state"]["command_revision"],
+                )
+                _send_packet(connection, *reply)
+        except (OSError, ValueError, TypeError) as error:
+            if not closing:
+                _LOG.info("SLM CONNECTION FAILED client=%s error=%s: %s", client, type(error).__name__, error)
+        finally:
+            with connections_lock:
+                connections.discard(connection)
+
+    server = socketserver.ThreadingTCPServer((bind_host, port), handle)
+    original_close = server.server_close
+
+    def close() -> None:
+        nonlocal closing
+        with connections_lock:
+            closing = True
+            active = tuple(connections)
+        for connection in active:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            connection.close()
+        original_close()
+
+    server.server_close = close
     _LOG.info(
         "SLM SERVER LISTENING endpoint=%s:%d device=%s",
         bind_host, int(server.server_address[1]), slm.identity,
@@ -311,7 +344,7 @@ def _open_slm_server(slm: SlmAdapter, host: str, port: int) -> socketserver.TCPS
 
 
 def _rpc_call(
-    endpoint: tuple[str, int], method: str, arguments: tuple[object, ...], timeout: float
+    endpoint: tuple[str, int] | socket.socket, method: str, arguments: tuple[object, ...], timeout: float
 ) -> tuple[dict[str, object], bytes]:
     if method == "describe" and not arguments:
         metadata, payload = {"version": _REMOTE_VERSION, "method": method}, b""
@@ -327,6 +360,9 @@ def _rpc_call(
         payload = bytes(payload)
     else:
         raise ValueError("invalid local SLM remote call")
+    if isinstance(endpoint, socket.socket):
+        _send_packet(endpoint, metadata, payload)
+        return _recv_packet(endpoint)
     with socket.create_connection(endpoint, timeout=timeout) as connection:
         connection.settimeout(timeout)
         _send_packet(connection, metadata, payload)
@@ -348,6 +384,7 @@ class _RemoteSlmAdapter:
         self._endpoint = (remote_host, port)
         self._timeout = timeout
         self._lock = Lock()
+        self._connection: socket.socket | None = None
         self._identity = ""
         self._shape_yx = (1, 1)
         self._command_revision = 0
@@ -408,25 +445,37 @@ class _RemoteSlmAdapter:
         *,
         commanded: np.ndarray | None = None,
     ) -> str | None:
-        value, payload = _rpc_call(self._endpoint, method, arguments, self._timeout)
-        if not isinstance(value, dict) or set(value) != {"version", "ok", "error", "state"}:
-            raise ValueError("SLM remote response has an invalid field set")
-        if (
-            type(value["version"]) is not int
-            or value["version"] != _REMOTE_VERSION
-            or type(value["ok"]) is not bool
-        ):
-            raise ValueError("SLM remote response has an invalid protocol version")
-        self._accept_state(
-            value["state"], payload, commanded=commanded if value["ok"] else None
-        )
-        if not value["ok"]:
-            if not isinstance(value["error"], str) or not value["error"]:
-                raise ValueError("SLM remote error is missing its message")
-            return value["error"]
-        if value["error"] is not None:
-            raise ValueError("successful SLM remote response contains an error")
-        return None
+        try:
+            if self._connection is None:
+                self._connection = socket.create_connection(self._endpoint, timeout=self._timeout)
+                self._connection.settimeout(self._timeout)
+            value, payload = _rpc_call(self._connection, method, arguments, self._timeout)
+            if not isinstance(value, dict) or set(value) != {"version", "ok", "error", "state"}:
+                raise ValueError("SLM remote response has an invalid field set")
+            if (
+                type(value["version"]) is not int
+                or value["version"] != _REMOTE_VERSION
+                or type(value["ok"]) is not bool
+            ):
+                raise ValueError("SLM remote response has an invalid protocol version")
+            self._accept_state(
+                value["state"], payload, commanded=commanded if value["ok"] else None
+            )
+            if not value["ok"]:
+                if not isinstance(value["error"], str) or not value["error"]:
+                    raise ValueError("SLM remote error is missing its message")
+                return value["error"]
+            if value["error"] is not None:
+                raise ValueError("successful SLM remote response contains an error")
+            return None
+        except BaseException:
+            self._close_connection()
+            raise
+
+    def _close_connection(self) -> None:
+        connection, self._connection = self._connection, None
+        if connection is not None:
+            connection.close()
 
     def _describe(self) -> None:
         error = self._request("describe")
@@ -507,6 +556,7 @@ class _RemoteSlmAdapter:
     def close(self) -> None:
         with self._lock:
             self._closed = True
+            self._close_connection()
 
 
 def bind_slm(

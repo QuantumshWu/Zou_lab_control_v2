@@ -149,6 +149,8 @@ module zlc_pulse_streamer_top #(
     // dense delay-tick CTRL words any more (TTL+DAC delays live in the R_DELAY region).
     localparam integer CLK_ENABLE_WORDS = (CHANNEL_COUNT + 31) / 32;            // 2
     localparam integer C_CLK_ENABLE = C_SCAN_REPEAT_COUNT + 1;                  // 20: per-channel clk mask (2 words: 20..21)
+    localparam integer C_COMMAND_ID = 22, C_ACK_ID = 23, C_ACK_STATUS = 24, C_ACK_CURSOR = 25;
+    reg [31:0] ack_id = 0, ack_status = 0, ack_cursor = 0;
 
     // engine outputs
     wire [CHANNEL_COUNT-1:0] out;
@@ -228,13 +230,24 @@ module zlc_pulse_streamer_top #(
     // JTAG write to the same word (only the operands are re-sourced, decode/timing unchanged).
     wire [29:0] u_word_addr; wire [31:0] u_wdata; wire u_we, u_active, u_protocol_error;
     wire [5:0]  u_rd_word;   reg [31:0] u_rd_data;
+    wire u_cmd_valid, u_cmd_reply_ready;
+    wire [3:0] u_cmd_code;
+    wire [7:0] u_cmd_seq;
+    wire [31:0] u_cmd_id, u_cmd_runs, u_cmd_scans;
+    reg u_cmd_reply_valid = 1'b0;
+    reg [7:0] u_cmd_reply_seq = 0;
     reg  [3:0]  uart_por = 4'h0;                            // power-on reset, independent of eng_reset
     always @(posedge clk) if (uart_por != 4'hF) uart_por <= uart_por + 1'b1;
     wire uart_rst = (uart_por != 4'hF);
     zlc_uart_bridge #(.CLK_HZ(50_000_000), .BAUD(3_000_000), .ADDRESS_WORDS(R_TOTAL_WORDS)) zlc_uart_i (
         .clk(clk), .rst(uart_rst), .uart_rx(uart_rx), .uart_tx(uart_tx),
         .u_word_addr(u_word_addr), .u_wdata(u_wdata), .u_we(u_we), .u_active(u_active), .u_error(u_protocol_error),
-        .u_rd_word(u_rd_word), .u_rd_data(u_rd_data)
+        .u_rd_word(u_rd_word), .u_rd_data(u_rd_data),
+        .u_cmd_valid(u_cmd_valid), .u_cmd_code(u_cmd_code), .u_cmd_seq(u_cmd_seq),
+        .u_cmd_id(u_cmd_id), .u_cmd_runs(u_cmd_runs), .u_cmd_scans(u_cmd_scans),
+        .u_cmd_reply_valid(u_cmd_reply_valid), .u_cmd_reply_ready(u_cmd_reply_ready),
+        .u_cmd_reply_seq(u_cmd_reply_seq), .u_cmd_reply_id(ack_id),
+        .u_cmd_reply_status(ack_status), .u_cmd_reply_cursor(ack_cursor)
     );
     wire        uart_sel  = u_active;
     wire [29:0] word_addr = uart_sel ? u_word_addr : bram_addra[31:2];
@@ -301,6 +314,10 @@ module zlc_pulse_streamer_top #(
 
     always @(posedge clk) begin
         if (ena_mux && wr && sel_ctrl) ctrl_reg[word_addr[5:0]] <= wdata_mux;
+        if (u_cmd_valid && u_cmd_code == 4'd2) begin
+            ctrl_reg[C_RUN_REPEAT_COUNT] <= u_cmd_runs;
+            ctrl_reg[C_SCAN_REPEAT_COUNT] <= u_cmd_scans;
+        end
         if (ena_mux && wr && sel_delay && (delay_word_off < DELAY_REG_COUNT))
             delay_reg[delay_word_off[6:0]] <= wdata_mux;
         if (ldr_status_we) ctrl_reg[C_STATUS] <= ldr_status_val;
@@ -321,7 +338,7 @@ module zlc_pulse_streamer_top #(
     localparam [31:0] ZLC_LAYOUT_ID = LAYOUT_FINGERPRINT[31:0];   // geometry fingerprint (image.build_fingerprint)
     always @(*) begin
         if (sel_ctrl) bram_douta = (word_addr[5:0] == C_LAYOUT_ID[5:0])
-                                   ? ZLC_LAYOUT_ID : ctrl_reg[word_addr[5:0]];
+                                   ? ZLC_LAYOUT_ID : command_readback(word_addr[5:0], ctrl_reg[word_addr[5:0]], ack_id, ack_status, ack_cursor);
         else bram_douta = 32'b0;
     end
 
@@ -334,7 +351,20 @@ module zlc_pulse_streamer_top #(
     // Combinational makes u_rd_data = f(u_rd_word) valid the moment u_rd_word is, matching the bridge's
     // single-cycle D_READ->D_RLAT handshake.  (Latched into wbuf on the D_RLAT clock edge -> no glitch.)
     always @(*)
-        u_rd_data = (u_rd_word == C_LAYOUT_ID[5:0]) ? ZLC_LAYOUT_ID : ctrl_reg[u_rd_word];
+        u_rd_data = (u_rd_word == C_LAYOUT_ID[5:0]) ? ZLC_LAYOUT_ID : command_readback(u_rd_word, ctrl_reg[u_rd_word], ack_id, ack_status, ack_cursor);
+
+    function [31:0] command_readback;
+        input [5:0] word_index;
+        input [31:0] ordinary_value, completed_id, completed_status, completed_cursor;
+        begin
+            case (word_index)
+                C_ACK_ID: command_readback = completed_id;
+                C_ACK_STATUS: command_readback = completed_status;
+                C_ACK_CURSOR: command_readback = completed_cursor;
+                default: command_readback = ordinary_value;
+            endcase
+        end
+    endfunction
 
     // --- 3 PARALLEL edge BRAMs (tick 32b, coeff 64b, mask 62/64b) -------------
     // Forced READ_LATENCY_B = 2 by the build tcl; engine RD_LAT must match.
@@ -397,7 +427,9 @@ module zlc_pulse_streamer_top #(
 
     // --- control / bus mini-loader FSM ----------------------------------------
     // On LOAD: hold engine reset, copy the bus image (R_BUS) into the engine bus LUTRAM via
-    // bus_prog_*, then set STATUS.LOADED.  On FIRE: release reset + pulse start.  Edge/scan are
+    // bus_prog_*, then acknowledge LOADED. FIRE resets only runtime and reuses
+    // resident LUTRAM; SAFE can interrupt any loader state and preserves a
+    // fully loaded program. Edge/scan are
     // NOT copied (the engine reads those BRAMs directly); the LITERAL delay line takes its delays
     // straight from the dense CTRL words (no image to copy).  Bus rows are 7 words = [start_tick,
     // stop_tick, sc_lo, sc_hi, ec_lo, ec_hi, flags] (host.image).  Rising-edge-detected commands.
@@ -429,8 +461,18 @@ module zlc_pulse_streamer_top #(
     reg [BUS_SEL_WIDTH-1:0] bus_prog_value_select = {BUS_SEL_WIDTH{1'b0}};
     reg [BUS_SEL_WIDTH-1:0] bus_prog_stop_value_select = {BUS_SEL_WIDTH{1'b0}};
 
-    localparam [3:0] L_IDLE=0, L_RD=1, L_CAP=2, L_EMIT=3, L_NEXT=4, L_FIRE=5, L_RUN=6;
+    localparam [3:0] L_IDLE=0, L_RD=1, L_CAP=2, L_EMIT=3, L_NEXT=4, L_FIRE=5, L_RUN=6,
+                     L_SAFE=7, L_ARM=8, L_START_ACK=9;
+    // A resident Fire still gives the engine one complete shadow-read sweep
+    // after resetting runtime.  These are fabric clocks, not a host polling gap.
+    localparam integer ENGINE_ARM_SETTLE = 4;
+    localparam integer ENGINE_ARM_CYCLES = 12 * (ENGINE_ARM_SETTLE + 1) + 4;
     reg [3:0] lstate = L_IDLE;
+    reg resident_valid = 1'b0;
+    reg pending_command = 1'b0, pending_uart = 1'b0, ack_valid = 1'b0;
+    reg [31:0] pending_id = 0;
+    reg [7:0] pending_seq = 0;
+    reg [7:0] command_wait = 0;
     reg [2:0] wi;                       // word index within a bus row
     reg [31:0] cap [0:6];
     reg [BUS_INDEX_WIDTH:0] bcur;       // current bus
@@ -443,6 +485,22 @@ module zlc_pulse_streamer_top #(
 
     wire [3:0] cmd_now = ctrl_reg[C_COMMAND][3:0];
     wire [3:0] cmd_edge = cmd_now & ~cmd_seen;
+    wire command_request = u_cmd_valid || (|cmd_edge);
+    wire [3:0] command_code = u_cmd_valid ? u_cmd_code : cmd_edge;
+    wire [31:0] command_id = u_cmd_valid ? u_cmd_id : ctrl_reg[C_COMMAND_ID];
+
+    task complete_command;
+        input [31:0] result_status;
+        input [31:0] result_cursor;
+        begin
+            ack_id <= pending_id; ack_status <= result_status; ack_cursor <= result_cursor;
+            ack_valid <= 1'b1; pending_command <= 1'b0;
+            if (pending_uart) begin
+                u_cmd_reply_seq <= pending_seq;
+                u_cmd_reply_valid <= 1'b1;
+            end
+        end
+    endtask
 
     function [CNT_W-1:0] bus_count_of; input integer b; begin
         bus_count_of = ctrl_reg[C_BUS_COUNTS][b*CNT_W +: CNT_W]; end endfunction
@@ -454,17 +512,49 @@ module zlc_pulse_streamer_top #(
     always @(posedge clk) begin
         ldr_status_we <= 1'b0;
         eng_start <= 1'b0;
+        cmd_seen <= cmd_now;
+        if (u_cmd_reply_valid && u_cmd_reply_ready) u_cmd_reply_valid <= 1'b0;
         if (u_protocol_error) protocol_error <= 1'b1;
-        case (lstate)
-        L_IDLE: begin
-            cmd_seen <= cmd_now;
-            if (cmd_edge & CMD_RESET) begin eng_reset <= 1'b1; status_running <= 1'b0; protocol_error <= 1'b0; ldr_status_we <= 1'b1; ldr_status_val <= 32'b0; end
-            else if (cmd_edge & CMD_SAFE) begin eng_reset <= 1'b1; status_running <= 1'b0; protocol_error <= 1'b0; ldr_status_we <= 1'b1; ldr_status_val <= 32'b0; end
-            else if (cmd_edge & CMD_LOAD) begin
-                eng_reset <= 1'b1; status_running <= 1'b0; protocol_error <= 1'b0; bcur <= 0; baddr <= 0; bcnt <= bus_count_of(0); wi <= 0; lstate <= L_NEXT;
-            end else if ((cmd_edge & CMD_FIRE) && (ctrl_reg[C_STATUS][0]) && !(ctrl_reg[C_STATUS][3])) begin
-                lstate <= L_FIRE;
+        if (command_request && ack_valid && command_id == ack_id) begin
+            // An ACK may be lost; the same execution ID never executes twice.
+            if (u_cmd_valid) begin u_cmd_reply_seq <= u_cmd_seq; u_cmd_reply_valid <= 1'b1; end
+        end else if (command_request && pending_command && command_id == pending_id) begin
+            // A retry while LOAD is pending observes its original completion.
+            if (u_cmd_valid) begin pending_seq <= u_cmd_seq; pending_uart <= 1'b1; end
+        end else if (command_request && (command_code == CMD_SAFE || command_code == CMD_RESET)) begin
+            // SAFE wins in every loader state, before any further row commit.
+            eng_reset <= 1'b1; status_running <= 1'b0; protocol_error <= 1'b0;
+            pending_id <= command_id; pending_seq <= u_cmd_seq; pending_uart <= u_cmd_valid;
+            pending_command <= 1'b1; command_wait <= 8'd4; lstate <= L_SAFE;
+            if (command_code == CMD_RESET) resident_valid <= 1'b0;
+        end else if (command_request && lstate == L_IDLE) begin
+            pending_id <= command_id; pending_seq <= u_cmd_seq; pending_uart <= u_cmd_valid;
+            pending_command <= 1'b1;
+            if (command_code == CMD_LOAD) begin
+                eng_reset <= 1'b1; status_running <= 1'b0; protocol_error <= 1'b0;
+                resident_valid <= 1'b0;
+                bcur <= 0; baddr <= 0; bcnt <= bus_count_of(0); wi <= 0; lstate <= L_NEXT;
+            end else if (command_code == CMD_FIRE && resident_valid && !status_running && ctrl_reg[C_PROG_COUNT] != 0) begin
+                eng_reset <= 1'b1; status_running <= 1'b0; protocol_error <= 1'b0;
+                command_wait <= ENGINE_ARM_CYCLES; lstate <= L_ARM;
+            end else begin
+                ack_id <= command_id; ack_status <= {27'b0, ST_ERROR}; ack_cursor <= zlc_cursor;
+                ack_valid <= 1'b1; pending_command <= 1'b0;
+                if (u_cmd_valid) begin u_cmd_reply_seq <= u_cmd_seq; u_cmd_reply_valid <= 1'b1; end
             end
+        end else begin
+        case (lstate)
+        L_IDLE: begin end
+        L_SAFE: begin
+            if (command_wait != 0) command_wait <= command_wait - 1'b1;
+            else begin
+                ldr_status_we <= 1'b1; ldr_status_val <= 0;
+                complete_command(0, 0); lstate <= L_IDLE;
+            end
+        end
+        L_ARM: begin
+            if (command_wait != 0) command_wait <= command_wait - 1'b1;
+            else lstate <= L_FIRE;
         end
         L_NEXT: begin
             wi <= 0;
@@ -472,7 +562,8 @@ module zlc_pulse_streamer_top #(
                 if (bcur == BUS_COUNT-1) begin
                     // bus image done -> LOADED.  The LITERAL delay line needs no image copy
                     // (its delays ride the dense CTRL words, latched by the engine at FIRE).
-                    ldr_status_we <= 1'b1; ldr_status_val <= {27'b0, ST_LOADED}; lstate <= L_IDLE;
+                    ldr_status_we <= 1'b1; ldr_status_val <= {27'b0, ST_LOADED}; resident_valid <= 1'b1;
+                    complete_command({27'b0, ST_LOADED}, 0); lstate <= L_IDLE;
                 end else begin
                     bcur <= bcur + 1'b1; baddr <= 0; bcnt <= bus_count_of(bcur + 1'b1); lstate <= L_NEXT;
                 end
@@ -522,11 +613,19 @@ module zlc_pulse_streamer_top #(
             eng_start <= 1'b1;
             status_running <= 1'b1;
             ldr_status_we <= 1'b1; ldr_status_val <= {27'b0, ST_RUNNING};
-            cmd_seen <= cmd_now;
-            lstate <= L_IDLE;
+            lstate <= L_START_ACK;
+        end
+        L_START_ACK: begin
+            if (zlc_underflow || zlc_overflow) begin
+                complete_command({27'b0, ST_ERROR} | (zlc_underflow ? {27'b0, ST_UNDERFLOW} : 32'b0), zlc_cursor);
+                lstate <= L_IDLE;
+            end else if (zlc_running || zlc_done) begin
+                complete_command({27'b0, ST_RUNNING}, 0); lstate <= L_IDLE;
+            end
         end
         default: lstate <= L_IDLE;
         endcase
+        end
         // Surface DONE / UNDERFLOW while running -- but ONLY when idle and NOT
         // handling a command this cycle.  This block runs after the case and shares
         // ldr_status_val with it, so if it fired unconditionally it would OVERWRITE a
@@ -535,7 +634,7 @@ module zlc_pulse_streamer_top #(
         // next CMD_LOAD's LOADED would never stick (observed as STATUS stuck at 0x2).
         // Gating on (idle && no command edge) lets SAFE/RESET/LOAD/FIRE win their
         // cycle, while still tracking done/underflow on the quiescent run cycles.
-        if ((lstate == L_IDLE) && (cmd_edge == 4'b0) && status_running) begin
+        if ((lstate == L_IDLE) && !command_request && status_running) begin
             ldr_status_we <= 1'b1;
             ldr_status_val <= {26'b0, ((zlc_done ? 6'b0 : {1'b0, ST_RUNNING})
                               | (zlc_done ? {1'b0, ST_DONE} : 6'b0)
@@ -543,7 +642,7 @@ module zlc_pulse_streamer_top #(
                               | (zlc_underflow ? {1'b0, ST_UNDERFLOW} : 6'b0)
                               | (protocol_error ? ST_LINK_ERROR : 6'b0))};
             if (zlc_done) status_running <= 1'b0;   // DONE latched; stop re-asserting STATUS
-        end else if ((lstate == L_IDLE) && (cmd_edge == 4'b0) && protocol_error) begin
+        end else if ((lstate == L_IDLE) && !command_request && protocol_error) begin
             ldr_status_we <= 1'b1;
             ldr_status_val <= ctrl_reg[C_STATUS] | ST_LINK_ERROR;
         end
@@ -593,7 +692,7 @@ module zlc_pulse_streamer_top #(
         // RD_LAT = the configured edge-BRAM latency.  The registered address plus
         // generated memory/core output stages make issue->data RD_LAT+2 cycles;
         // FIFO_DEPTH=RD_LAT+3 owns the resident head and all tracked reads.
-        .RD_LAT(2), .FIFO_DEPTH(5)
+        .RD_LAT(2), .FIFO_DEPTH(5), .ARM_SETTLE(ENGINE_ARM_SETTLE)
     ) zlc_engine_i (
         .clk(axi_clk), .reset(eng_reset), .start(eng_start),
         .prog_count(ctrl_reg[C_PROG_COUNT][EDGE_ADDR_WIDTH:0]),

@@ -217,8 +217,6 @@ class _Context:
 
 TEMPLATE_NAME = "mot_field_template.json"
 BIAS_X_PORT = PULSE_PARAM_FAMILY + "da_bias_x"
-#: Long enough that no scheduling jitter could produce it, short enough to pay.
-AUTHORED_SETTLE_SECONDS = 0.37
 
 
 def _point_axis_values(schema, name: str) -> tuple[object, ...]:
@@ -268,7 +266,6 @@ def _scripted_run(
     values: tuple[float, ...],
     shots: int,
     repeats: int,
-    settle: float,
     sequence: object | None = None,
     seed: bool = True,
 ) -> tuple[np.ndarray, ScriptedScanBench]:
@@ -305,7 +302,6 @@ def _scripted_run(
             plan=plan.to_tree(),
             repeats=repeats,
             shots_per_point=shots,
-            settle_seconds=settle,
         )
         host = _scan_host(node, plane)
         host.start()
@@ -382,7 +378,6 @@ def test_the_seamless_node_asks_nothing_about_gating_or_advance() -> None:
         "api_values",
         "repeats",
         "shots_per_point",
-        "settle_seconds",
     }
 
 
@@ -407,7 +402,6 @@ def test_source_preflight_rejects_before_the_board_is_loaded(monkeypatch) -> Non
             plan=ScanPlan((ScanAxis(BIAS_X_PORT, (0.0,)),)).to_tree(),
             repeats=1,
             shots_per_point=1,
-            settle_seconds=0.0,
         )
 
         def reject(*_args, **_kwargs) -> None:
@@ -441,7 +435,7 @@ def test_the_table_is_the_plan_and_the_shots_are_run_repeats(monkeypatch) -> Non
     """
 
     kept, bench = _scripted_run(
-        values=(-256.0, 256.0), shots=2, repeats=2, settle=0.0
+        values=(-256.0, 256.0), shots=2, repeats=2
     )
     assert kept.tolist() == [
         [0.0, 2.0],  # sweep 0, shot 0
@@ -507,7 +501,6 @@ def test_the_table_is_the_plan_and_the_shots_are_run_repeats(monkeypatch) -> Non
         values=requested,
         shots=1,
         repeats=1,
-        settle=0.0,
         sequence=sequence,
     )
 
@@ -577,7 +570,6 @@ def test_an_authored_whole_bracket_stays_independent_of_run_repeats() -> None:
         values=(-256.0, 256.0),
         shots=2,
         repeats=1,
-        settle=0.0,
         sequence=template,
     )
     assert kept.tolist() == [
@@ -601,31 +593,11 @@ def test_a_partial_bracket_and_multiple_run_repeats_are_independent() -> None:
     )
 
     kept, bench = _scripted_run(
-        values=(0.0,), shots=2, repeats=1, settle=0.0, sequence=partial
+        values=(0.0,), shots=2, repeats=1, sequence=partial
     )
     assert kept.tolist() == [[0.0], [1.0]]
     assert bench.fired_repeats == [(2, 1)]
     assert bench.loaded_loop_counts == [2]
-
-
-def test_the_authored_settle_time_stops_the_board_before_the_table() -> None:
-    """The whole table plays from one fire, so the board is stopped once."""
-
-    _kept, bench = _scripted_run(
-        values=(-256.0, 256.0), shots=1, repeats=1, settle=AUTHORED_SETTLE_SECONDS
-    )
-    intervals = bench.stop_intervals()
-    assert len(intervals) == 1, (
-        f"one stop before the one fire was expected, got {intervals}"
-    )
-    assert intervals[0] >= AUTHORED_SETTLE_SECONDS, (
-        f"the board was stopped for only {intervals[0]:.3f}s, less than the "
-        f"authored {AUTHORED_SETTLE_SECONDS}s"
-    )
-    assert intervals[0] < AUTHORED_SETTLE_SECONDS + 1.0, (
-        f"the stop of {intervals[0]:.3f}s is not the authored "
-        f"{AUTHORED_SETTLE_SECONDS}s"
-    )
 
 
 def test_the_board_advanced_scan_recovers_the_planted_trap_loss() -> None:
@@ -704,7 +676,6 @@ def test_the_board_advanced_scan_recovers_the_planted_trap_loss() -> None:
             ),
             plan=plan.to_tree(),
             shots_per_point=shots,
-            settle_seconds=0.05,
         )
         host = _scan_host(scan_node, plane)
         host.start()
@@ -773,7 +744,7 @@ def test_an_armed_silent_chain_is_a_valid_scan_source() -> None:
     """
 
     kept, bench = _scripted_run(
-        values=(-256.0, 256.0), shots=1, repeats=1, settle=0.0, seed=False
+        values=(-256.0, 256.0), shots=1, repeats=1, seed=False
     )
     assert kept.tolist() == [[0.0, 1.0]]
     assert bench.published == [0, 1], (
@@ -882,7 +853,6 @@ def _manual_run(
             plan=plan.to_tree(),
             repeats=repeats,
             shots_per_point=shots,
-            settle_seconds=0.0,
         )
         host = _scan_host(node, plane)
         host.start()
@@ -1056,7 +1026,6 @@ def test_stopping_at_the_question_stops_the_run() -> None:
             plan=plan.to_tree(),
             repeats=1,
             shots_per_point=1,
-            settle_seconds=0.0,
         )
         host = _scan_host(node, plane)
         host.start()
@@ -1178,7 +1147,6 @@ def _device_run(
             tunable_devices=tunables,
             repeats=repeats,
             shots_per_point=shots,
-            settle_seconds=0.0,
         )
         host = _scan_host(node, plane)
         host.start()
@@ -1290,7 +1258,6 @@ def test_an_off_grid_device_value_fails_the_run_with_the_grid_named() -> None:
 def _device_seamless(
     knob: _Knob, sequencer: _FakeSequencer, source: _FakeSource, *,
     shots: int = 1, acquisition_logic: str = "", restart_logic=None,
-    settle_seconds: float = 0.0,
     repeats: int = 1,
 ):
     sequence = _template_sequence()
@@ -1313,13 +1280,12 @@ def _device_seamless(
         tunables={"knob": knob},
         repeats=repeats,
         shots_per_point=shots,
-        settle_seconds=settle_seconds,
         acquisition_logic=acquisition_logic,
         restart_logic=restart_logic,
     )
 
 
-def test_a_device_axis_is_put_back_however_the_table_ends(monkeypatch) -> None:
+def test_a_device_axis_is_put_back_however_the_table_ends() -> None:
     """The outer device knob goes back to its pre-run value: complete,
     stopped or failed. Each ready/fire segment reports its committed shots
     while it runs, replacing the preceding acquisition preparation."""
@@ -1327,27 +1293,16 @@ def test_a_device_axis_is_put_back_however_the_table_ends(monkeypatch) -> None:
     knob, sequencer, source = _Knob(), _FakeSequencer(_template_sequence()), _FakeSource()
     context = _Context()
     prepared = []
-    import zlc_atom.nodes.scan.seamless as scan_module
-    wait_calls = []
-    actual_settle = scan_module.settle
-    def measured_settle(context, seconds):
-        wait_calls.append((knob.level, context.commits, seconds))
-        actual_settle(context, seconds)
-    monkeypatch.setattr(scan_module, "settle", measured_settle)
     readout_progress = []
     source.on_take = lambda _taken: readout_progress.append(context.progress[-1])
     _device_seamless(
         knob, sequencer, source, shots=3, repeats=2, acquisition_logic="selected_acquisition",
         restart_logic=lambda name, _context: prepared.append((name, context.commits)),
-        settle_seconds=0.001,
     ).execute(context)
     assert knob.tunes == [1.0, 2.0, 1.0, 2.0, 0.25] and knob.level == 0.25
     assert sequencer.fires == 4 and sequencer.loads == 1
-    assert sequencer.safe_calls == 5, "one initial SAFE and one per finished segment"
+    assert sequencer.safe_calls == 1, "normal DONE is already safe; only initial SAFE is sent"
     assert prepared == [("selected_acquisition", 0)], "prepare the selected logic once per Scan Start"
-    assert wait_calls == [(0.25, 0, 0.001), (1.0, 0, 0.001), (2.0, 6, 0.001),
-                          (1.0, 12, 0.001), (2.0, 18, 0.001)]
-    monkeypatch.setattr(scan_module, "settle", actual_settle)
     assert all(message.startswith("Scanning point") for message, *_rest in readout_progress)
     scanning = [entry for entry in context.progress if entry[1] is not None]
     assert [(current, total, committed) for _message, current, total, committed in scanning] == [
@@ -1356,8 +1311,6 @@ def test_a_device_axis_is_put_back_however_the_table_ends(monkeypatch) -> None:
     assert scanning[0][0] == "Scanning point 1/8; shots"
     assert scanning[7][0] == "Scanning point 3/8; shots"
     assert scanning[-1][0] == "Scanning point 8/8; shots"
-    assert [committed for message, _current, _total, committed in context.progress
-            if message == "Settling"] == [0]
 
     knob, sequencer = _Knob(), _FakeSequencer(_template_sequence())
     with pytest.raises(RuntimeError, match="scripted source failed"):

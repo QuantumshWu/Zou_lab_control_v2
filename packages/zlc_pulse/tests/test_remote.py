@@ -36,7 +36,7 @@ from zlc_pulse.remote import (
 from zlc_pulse.transport import MemoryRegisterTransport
 from zlc_pulse.transport.uart import UartError
 from zlc_pulse.transport import uart_frame as framing
-from zlc_pulse.wire import CtrlWords, StreamerParams, build_fingerprint, pack_program, pack_scan_rows
+from zlc_pulse.wire import CMD_LOAD, CMD_SAFE, CtrlWords, StreamerParams, build_fingerprint, pack_program, pack_scan_rows
 
 
 _BOARD_TARGET = pulse_target_from_xdc()
@@ -227,7 +227,7 @@ def test_takeover_revokes_and_cancels_an_active_old_command(monkeypatch) -> None
     original_write = transport.write_words
     original_safe = streamer.safe
 
-    def blocked_write(rows, *, stop=None, deadline=None, resend=True):
+    def blocked_write(rows, *, stop=None, deadline=None):
         if stop is not None and not command_entered.is_set():
             events.append("A command entered transport")
             command_entered.set()
@@ -238,10 +238,12 @@ def test_takeover_revokes_and_cancels_an_active_old_command(monkeypatch) -> None
                     raise RuntimeError("blocked transport command cancelled")
             events.append("A command completed naturally")
         return original_write(
-            rows, stop=stop, deadline=deadline, resend=resend
+            rows, stop=stop, deadline=deadline
         )
 
     def recorded_safe():
+        if not command_entered.is_set():
+            return original_safe()
         phase = "cancel" if not safe_calls else "final"
         safe_calls.append(phase)
         events.append(f"{phase} SAFE started")
@@ -321,20 +323,30 @@ def test_takeover_revokes_and_cancels_an_active_old_command(monkeypatch) -> None
         streamer.close()
 
 
-def test_remote_replays_device_path_with_short_done_poll() -> None:
+def test_remote_replays_device_path_with_short_done_poll(monkeypatch) -> None:
     geom = _sequence_geometry()
     source = _sequence(slotted=True)
     program = compile_sequence(source, geom, 50e6)
     transport = MemoryRegisterTransport(geom=geom, auto_done=True)
     streamer = PulseStreamer(transport, geom, 50e6, target=source.target)
     with _server(streamer) as server:
+        dispatch = server.dispatch
+        def old_open(method, params, **kwargs):
+            answer = dispatch(method, params, **kwargs)
+            if method == "open":
+                return {"cancel_token": answer["cancel_token"]}
+            return answer
+        with monkeypatch.context() as legacy:
+            legacy.setattr(server, "dispatch", old_open)
+            with pytest.raises(ConnectionError, match="command protocol differs"):
+                _client(server)
         client = _client(server)
         try:
             client.load(program, source=source, rows=((1,),))
             client.fire(run_repeats=2, scan_repeats=3)
             report = client.wait_done(1.0)
             assert report is not None
-            assert report.status_reads == (4, 4)
+            assert report.status == 4 and report.command_id > 0
             assert report.cursor == 2
             safe = client.safe()
             assert safe.stable
@@ -396,18 +408,20 @@ def test_remote_safe_cancels_a_pending_load_before_its_reply(monkeypatch) -> Non
     command_entered = threading.Event()
     natural_release = threading.Event()
     command_cancelled = threading.Event()
-    original_write = transport.write_words
+    original_command = transport.command
+    command_codes = []
 
-    def blocked_write(rows, *, stop=None, deadline=None, resend=True):
-        if stop is not None and not command_entered.is_set():
+    def blocked_command(code, command_id, *, stop=None, deadline=None, **kwargs):
+        command_codes.append(code)
+        if code == CMD_LOAD and stop is not None and not command_entered.is_set():
             command_entered.set()
             while not natural_release.is_set():
                 if stop.wait(0.01):
                     command_cancelled.set()
                     raise RuntimeError("blocked transport command cancelled")
-        return original_write(rows, stop=stop, deadline=deadline, resend=resend)
+        return original_command(code, command_id, stop=stop, deadline=deadline, **kwargs)
 
-    monkeypatch.setattr(transport, "write_words", blocked_write)
+    monkeypatch.setattr(transport, "command", blocked_command)
     load_failures: list[BaseException] = []
     safe_results: list[object] = []
     with _server(streamer) as server:
@@ -444,6 +458,7 @@ def test_remote_safe_cancels_a_pending_load_before_its_reply(monkeypatch) -> Non
             assert "cancelled" in str(load_failures[0])
             assert len(safe_results) == 1
             assert safe_results[0].stable
+            assert command_codes[-2:] == [CMD_LOAD, CMD_SAFE]
             # Stop is not a takeover: the same connection still owns the board.
             assert server.owner_status()[0] == owner
             assert client.snapshot()["firing"] is False
@@ -570,7 +585,7 @@ def test_remote_logs_lifecycle_events_without_payload_dump(capsys) -> None:
     assert "ZLC FIRE" in output
     assert "run_repeats=1" in output
     assert "scan_repeats=1" in output
-    assert "reloaded_before_fire=False" in output
+    assert "reloaded_before_fire" not in output
     assert "ZLC SNAPSHOT client=127.0.0.1:" in output
     assert "ZLC CURSOR client=127.0.0.1:" in output
     assert "ZLC APPLIED client=127.0.0.1:" in output

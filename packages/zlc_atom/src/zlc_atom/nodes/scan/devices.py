@@ -26,7 +26,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 
-from zlc_atom.authoring import read_tunable_in_unit, tune_in_unit
+from zlc_atom.authoring import read_tunable_in_unit, refresh_tunable_fields, tune_in_unit
 
 from .plan import DEVICE_PARAM_FAMILY
 
@@ -103,6 +103,9 @@ class ScanDeviceKnobs:
         """
 
         entry = read_tunable_in_unit(device, field)
+        if entry.current is None:
+            refresh_tunable_fields(device)
+            entry = read_tunable_in_unit(device, field)
         metadata = entry.metadata
         current = float(entry.current)
         low, high = metadata.minimum, metadata.maximum

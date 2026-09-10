@@ -48,7 +48,7 @@ from .model import (
     PulseSlot,
     PulseTarget,
 )
-from .wire import StreamerParams, load_streamer_config
+from .wire import LAYOUT_STRUCT_VERSION, StreamerParams, load_streamer_config
 
 
 MAX_FRAME_BYTES = 8 * 1024 * 1024
@@ -212,12 +212,6 @@ def _program_summary(program: object, *, source: object = None) -> str:
         duration_us=f"{program.duration_seconds * 1e6:.3f}",
         source="provided" if source is not None else "none",
     )
-
-
-def _compact_tuple(values: object) -> str:
-    """Keep readback tuples readable without turning them into quoted fields."""
-
-    return "(" + ",".join(str(value) for value in values) + ")"
 
 
 def _client_addresses(bind_host: str) -> tuple[str, ...]:
@@ -1034,7 +1028,8 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                     # lane; the ownership checks around this lane have
                     # already proved the token is this connection's.
                     with self._client_lock:
-                        result = {"cancel_token": self._owner_token}
+                        result = {"cancel_token": self._owner_token,
+                                  "command_protocol": LAYOUT_STRUCT_VERSION}
                 elif method == "describe":
                     result = self.streamer.describe()
                     _server_log(
@@ -1096,7 +1091,7 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                     fire_fields = _log_fields(
                         run_repeats="INFINITE" if run_repeats == 0 else run_repeats,
                         scan_repeats="INFINITE" if scan_repeats == 0 else scan_repeats,
-                        reloaded_before_fire=self.streamer.snapshot().get("reloaded_before_fire"),
+
                     )
                     _server_log(
                         "FIRE",
@@ -1118,8 +1113,7 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                                 underflow=result.underflow,
                                 link_error=result.link_error,
                                 elapsed_ms=f"{result.elapsed_seconds * 1e3:.3f}",
-                                status_reads=result.status_reads,
-                                cursor_reads=result.cursor_reads,
+                                command_id=result.command_id,
                                 observer_error=result.observer_error or None,
                                 # Quiet while zero, like resent_frames on LOAD:
                                 # a line that is degrading shows up here shot
@@ -1140,8 +1134,8 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                         client=client,
                         detail=_log_fields(
                             stable=result.stable,
-                            status_reads=_compact_tuple(result.status_reads),
-                            clock_enable_words=_compact_tuple(result.clock_enable_words),
+                            status=result.status,
+                            command_id=result.command_id,
                         ),
                     )
                 elif method == "snapshot":
@@ -1235,8 +1229,8 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             client=owner,
             detail=_log_fields(
                 stable=result.stable,
-                status_reads=_compact_tuple(result.status_reads),
-                clock_enable_words=_compact_tuple(result.clock_enable_words),
+                status=result.status,
+                command_id=result.command_id,
             ),
         )
 
@@ -1317,8 +1311,8 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                 client=client,
                 detail=_log_fields(
                     stable=result.stable,
-                    status_reads=_compact_tuple(result.status_reads),
-                    clock_enable_words=_compact_tuple(result.clock_enable_words),
+                    status=result.status,
+                    command_id=result.command_id,
                 ),
             )
         return True
@@ -1368,12 +1362,13 @@ class RemotePulseStreamer(ConfigValueHolder):
                 answer = self._call_locked("open", {})
                 if (
                     not isinstance(answer, Mapping)
-                    or set(answer) != {"cancel_token"}
+                    or set(answer) != {"cancel_token", "command_protocol"}
+                    or answer.get("command_protocol") != LAYOUT_STRUCT_VERSION
                     or not isinstance(answer["cancel_token"], str)
                     or not answer["cancel_token"]
                 ):
                     raise ConnectionError(
-                        "the pulse server's open reply carries no cancel token"
+                        "Pulse server command protocol differs; update and restart run_server before connecting"
                     )
                 self._cancel_token = answer["cancel_token"]
             except Exception:
@@ -1737,7 +1732,7 @@ def open_local_streamer(
         if not initial_safe.stable:
             raise RuntimeError(
                 "initial SAFE readback was not stable: "
-                f"status_reads={_compact_tuple(initial_safe.status_reads)}"
+                f"status={initial_safe.status}"
             )
     except BaseException:
         streamer.close()
@@ -1747,8 +1742,8 @@ def open_local_streamer(
         detail=_log_fields(
             geometry_handshake=True,
             safe_readback=initial_safe.stable,
-            status_reads=_compact_tuple(initial_safe.status_reads),
-            clock_enable_words=_compact_tuple(initial_safe.clock_enable_words),
+            status=initial_safe.status,
+            command_id=initial_safe.command_id,
         ),
     )
     return streamer

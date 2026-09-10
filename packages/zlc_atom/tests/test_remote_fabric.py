@@ -30,7 +30,7 @@ def announcer():
         fabric.close()
 
 
-def test_a_published_tunable_is_listed_and_driven_over_the_wire(announcer) -> None:
+def test_a_published_tunable_is_listed_and_driven_over_the_wire(announcer, monkeypatch) -> None:
     """The remote handle speaks the same quartet the local device does.
 
     It is the REAL Vaunix driver on the serving side, the generic proxy on
@@ -38,6 +38,15 @@ def test_a_published_tunable_is_listed_and_driven_over_the_wire(announcer) -> No
     panel can tell the difference -- which is the entire point.
     """
 
+    from zlc_atom.devices.remote import fabric as module
+
+    connections = []
+    original_connect = module.socket.create_connection
+    def connect(*args, **kwargs):
+        connection = original_connect(*args, **kwargs)
+        connections.append(connection)
+        return connection
+    monkeypatch.setattr(module.socket, "create_connection", connect)
     source = virtual_rf_source(
         VaunixLmsConfig(
             serial=1001,
@@ -45,6 +54,12 @@ def test_a_published_tunable_is_listed_and_driven_over_the_wire(announcer) -> No
             frequency_high_hz=8e9,
         )
     )
+    refreshes = []
+    refresh_fields = source.refresh_tunable_fields
+    def refresh():
+        refreshes.append(True)
+        return refresh_fields()
+    monkeypatch.setattr(source, "refresh_tunable_fields", refresh)
     announcer.publish(
         PublishedDevice(
             instance_id="rf_main",
@@ -62,10 +77,12 @@ def test_a_published_tunable_is_listed_and_driven_over_the_wire(announcer) -> No
     remote = RemoteTunableDevice(
         host="127.0.0.1", port=announcer.port, instance_id="rf_main"
     )
+    assert refreshes == [], "the initial metadata request uses the adapter's initialized facts"
     # The proxy satisfies the same capability contract as the local device.
     assert isinstance(remote, RfSource)
 
-    fields = {field.metadata.name: field for field in remote.tunable_fields()}
+    fields = {field.metadata.name: field for field in remote.refresh_tunable_fields()}
+    assert len(refreshes) == 1
     frequency = fields["frequency"].metadata
     assert (frequency.minimum, frequency.maximum) == (500e6, 8e9)
     assert frequency.unit == "Hz"
@@ -107,13 +124,40 @@ def test_a_published_tunable_is_listed_and_driven_over_the_wire(announcer) -> No
     assert (port.lo, port.hi) == (2e9, 8e9)
     with pytest.raises(RuntimeError, match="must lie in"):
         remote.tune("frequency", 1e9)
+    assert len(connections) == 2, "one discovery connection and one persistent device connection"
+    assert len(refreshes) == 1, "metadata requests do not trigger a device refresh"
+    assert remote.tunable_values()["frequency"] == 2.5e9, "a refused command does not retire a healthy connection"
+
+    # An acknowledged server-side write whose reply is lost must not be sent twice.
+    original_receive = module._recv_frame
+    connection = remote._connection
+    def lost_reply(sock):
+        response = original_receive(sock)
+        if sock is connection:
+            raise ConnectionError("reply lost after the device answered")
+        return response
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_recv_frame", lost_reply)
+        with pytest.raises(ConnectionError, match="reply lost"):
+            remote.tune("power", -5.0)
+    assert source.tunable_values()["power"] == -5.0
+    assert len(connections) == 2, "the failed write was not retried on a new connection"
+    with pytest.raises(ConnectionError, match="closed"):
+        remote.tunable_values()
+    remote.close()
+
+    peer = RemoteTunableDevice(host="127.0.0.1", port=announcer.port, instance_id="rf_main")
+    announcer.close()
+    with pytest.raises(ConnectionError):
+        peer.tunable_values()
+    peer.close()
+    assert not announcer._connections, "server close released its accepted connections"
+    source.close()
 
 
-def test_unit_requests_cross_the_existing_fabric_dispatch(monkeypatch) -> None:
-    import threading
+def test_unit_requests_cross_the_existing_fabric_dispatch(announcer) -> None:
     from types import SimpleNamespace
     from zlc_atom.authoring import AuthoringField, TunableField
-    from zlc_atom.devices.remote import fabric as module
 
     calls = []
     def read(name, unit=""):
@@ -129,19 +173,17 @@ def test_unit_requests_cross_the_existing_fabric_dispatch(monkeypatch) -> None:
         return tuple(item * 2 for item in value) if isinstance(value, (list, tuple)) else value * 2
     source = SimpleNamespace(tunable_fields=lambda: (read("power"),),
         read_tunable_in_unit=read, tune_in_unit=tune, convert_tunable_value=convert)
-    announcer = object.__new__(DeviceAnnouncer)
-    announcer._registry_lock = threading.Lock()
-    announcer._published = {"rf": PublishedDevice(instance_id="rf", role="rf",
-        type_id="rf", parameters={}, tunable=source)}
-    monkeypatch.setattr(module, "_call", lambda _host, _port, request: announcer._dispatch(request))
-    remote = RemoteTunableDevice(host="unused", port=0, instance_id="rf")
+    announcer.publish(PublishedDevice(instance_id="rf", role="rf", type_id="rf",
+                                     parameters={}, tunable=source))
+    remote = RemoteTunableDevice(host="127.0.0.1", port=announcer.port, instance_id="rf")
     assert remote.read_tunable_in_unit("power").metadata.unit == "Vpp"
     projected = remote.read_tunable_in_unit("power", "mVpp")
     assert projected.metadata.unit == "mVpp" and projected.current == 100.0
     assert remote.tune_in_unit("power", 135.0, "mVpp") == 135.125
     assert calls[-1] == ("tune", "power", 135.0, "mVpp")
     assert remote.convert_tunable_value("power", (1.0, 2.0), "Vpp", "dBm") == (2.0, 4.0)
-    assert calls[-1] == ("convert", "power", (1.0, 2.0), "Vpp", "dBm")
+    assert calls[-1] == ("convert", "power", [1.0, 2.0], "Vpp", "dBm")
+    remote.close()
 
 
 def test_an_endpoint_device_is_announced_for_its_own_protocol(announcer) -> None:

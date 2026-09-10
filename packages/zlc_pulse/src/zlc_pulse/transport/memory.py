@@ -24,10 +24,6 @@ from .base import DEFAULT_OBSERVER_INTERVAL
 
 class MemoryRegisterTransport:
     transport_id = "memory"
-    #: Nothing on this transport is ever lost -- it may be slow, and a
-    #: timed-out action may still complete later, which is exactly why the
-    #: strobe verify-and-retry machinery must NOT run here.
-    lossy_line = False
     observer_interval = DEFAULT_OBSERVER_INTERVAL
 
     def __init__(
@@ -55,6 +51,9 @@ class MemoryRegisterTransport:
         #: The command bits currently held high.  The board detects a command
         #: on a rising edge and never clears this register itself.
         self._command_seen = 0
+        self._resident = False
+        self._last_command_id = 0
+        self._last_command_reply = (0, 0)
         #: How many command writes this twin ignored because the bits were
         #: already high.  A real board ignores them the same way, silently.
         self.dropped_commands = 0
@@ -76,13 +75,6 @@ class MemoryRegisterTransport:
         *,
         stop: threading.Event | None = None,
         deadline: float | None = None,
-        #: Whether a frame the link never answered may be sent again.  False
-        #: for a command strobe: one that WAS executed and whose acknowledgement
-        #: was lost would be executed twice.  A transport with no frames to lose
-        #: takes the argument and ignores it, because the caller's meaning is
-        #: the same either way and a caller should not have to ask which
-        #: transport it has.
-        resend: bool = True,
     ) -> None:
         del deadline
         if stop is not None and stop.is_set():
@@ -109,38 +101,12 @@ class MemoryRegisterTransport:
                     if written and not risen:
                         self.dropped_commands += 1
                     value = risen
-                    if value & CMD_RESET:
-                        self.status = 0
-                    if value & CMD_SAFE:
-                        self.status = 0
-                        self.words[CtrlWords.CLK_ENABLE] = 0
-                    if value & CMD_LOAD:
-                        self.status = STATUS_LOADED
-                    if value & CMD_FIRE:
-                        infinite = (
-                            self.words.get(CtrlWords.RUN_REPEAT_COUNT, 1) == 0
-                            or self.words.get(CtrlWords.SCAN_REPEAT_COUNT, 1) == 0
+                    if value:
+                        self._complete_command(
+                            value, self.words.get(CtrlWords.COMMAND_ID, 0),
+                            self.words.get(CtrlWords.RUN_REPEAT_COUNT, 1),
+                            self.words.get(CtrlWords.SCAN_REPEAT_COUNT, 1),
                         )
-                        if infinite or not self.auto_done:
-                            self.cursor_value = 0
-                            self.status = STATUS_RUNNING
-                        else:
-                            # The instant-completion twin publishes the same
-                            # terminal row-visit ordinal as RTL, not an initial
-                            # cursor that contradicts its DONE status.
-                            scan_count = self.words.get(CtrlWords.SCAN_COUNT, 0)
-                            scan_enabled = bool(
-                                self.words.get(CtrlWords.SCAN_ENABLE, 0)
-                            )
-                            scan_repeats = self.words.get(
-                                CtrlWords.SCAN_REPEAT_COUNT, 1
-                            )
-                            self.cursor_value = (
-                                (scan_count * scan_repeats - 1) & 0xFFFFFFFF
-                                if scan_enabled and scan_count
-                                else 0
-                            )
-                            self.status = STATUS_DONE
                     value = written
                 self.words[address] = value
 
@@ -162,6 +128,56 @@ class MemoryRegisterTransport:
             if int(word_offset) == CtrlWords.CURSOR:
                 return int(self.cursor_value) & 0xFFFFFFFF
             return int(self.words.get(int(word_offset), 0)) & 0xFFFFFFFF
+
+    def read_words(self, word_offset: int, count: int, *, stop=None, deadline=None) -> tuple[int, ...]:
+        with self._lock:
+            return tuple(self.read_word(word_offset + index, stop=stop, deadline=deadline)
+                         for index in range(count))
+
+    def command(self, code: int, command_id: int, *, run_repeats: int = 1,
+                scan_repeats: int = 1, stop=None, deadline=None) -> tuple[int, int]:
+        if stop is not None and stop.is_set():
+            raise RuntimeError("memory command cancelled")
+        with self._lock:
+            if self._record_history:
+                self.write_batches.append(((CtrlWords.COMMAND_ID, command_id),
+                                           (CtrlWords.COMMAND, code)))
+            return self._complete_command(code, command_id, run_repeats, scan_repeats)
+
+    def _complete_command(self, code: int, command_id: int,
+                          run_repeats: int, scan_repeats: int) -> tuple[int, int]:
+        if command_id and command_id == self._last_command_id:
+            return self._last_command_reply
+        self.words[CtrlWords.COMMAND_ID] = command_id
+        if code == CMD_RESET:
+            self._resident = False
+            self.status = 0
+            self.cursor_value = 0
+        elif code == CMD_SAFE:
+            self.status = 0
+            self.cursor_value = 0
+        elif code == CMD_LOAD:
+            self._resident = True
+            self.status = STATUS_LOADED
+        elif code == CMD_FIRE and self._resident:
+            self.words[CtrlWords.RUN_REPEAT_COUNT] = run_repeats
+            self.words[CtrlWords.SCAN_REPEAT_COUNT] = scan_repeats
+            self.cursor_value = 0
+            self.status = STATUS_RUNNING
+        else:
+            self.status = STATUS_ERROR
+        reply = (self.status, self.cursor_value)
+        self._last_command_id = command_id
+        self._last_command_reply = reply
+        self.words[CtrlWords.ACK_ID] = command_id
+        self.words[CtrlWords.ACK_STATUS], self.words[CtrlWords.ACK_CURSOR] = reply
+        if code == CMD_FIRE and self.status == STATUS_RUNNING and self.auto_done:
+            if run_repeats and scan_repeats:
+                count = self.words.get(CtrlWords.SCAN_COUNT, 0)
+                self.cursor_value = ((count * scan_repeats - 1) & 0xFFFFFFFF
+                                     if count and self.words.get(CtrlWords.SCAN_ENABLE, 0) else 0)
+                self.status = STATUS_DONE
+        return reply
 
     def publish_execution_readback(self, *, status: int, cursor: int) -> bool:
         """Publish one board-owned runtime state transition.

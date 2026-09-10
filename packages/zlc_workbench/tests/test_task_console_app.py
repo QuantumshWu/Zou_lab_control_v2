@@ -517,15 +517,38 @@ def test_formal_console_close_keeps_qt_turning_until_every_owner_retires(
             window.close()
             _wait_qt(application, lambda: not window.is_visible())
 
-def test_experiment_flow_closes_its_session_off_the_qt_owner(workspace) -> None:
+@pytest.mark.parametrize("pending_stage", ("read", "discovery"))
+def test_experiment_flow_closes_its_session_off_the_qt_owner(workspace, pending_stage) -> None:
     from threading import Event, current_thread
 
-    from PyQt5 import QtCore
+    from PyQt5 import QtCore, QtTest
     from zlc_ui.qt import ensure_qt_app
     from zlc_workbench.apps.task_console import ExperimentGuiFlow
 
     application = ensure_qt_app(["flow-session-close"])
     flow = ExperimentGuiFlow(workspace=workspace, template="virtual")
+    if pending_stage == "discovery":
+        flow.open()
+        window = flow.devices
+        started, release = Event(), Event()
+        def discover():
+            started.set()
+            assert release.wait(5.0)
+            return (), ()
+        flow.devices.presenter._scan_families = discover
+        try:
+            assert flow.devices.presenter.discover()
+            _wait_qt(application, started.is_set)
+            assert flow.timer is None and flow.console is None
+            QtTest.QTest.mouseClick(window._window.titleBar.closeBtn, QtCore.Qt.LeftButton)
+            assert window.is_visible(), "the vendor read has not returned"
+            release.set()
+            _wait_qt(application, lambda: not window.is_visible())
+            assert flow.session is None and flow.console is None
+        finally:
+            release.set()
+            _wait_qt(application, flow.close)
+        return
     init_threads: list[str] = []
     initialize_session = flow._initialize_session
 
@@ -543,6 +566,14 @@ def test_experiment_flow_closes_its_session_off_the_qt_owner(workspace) -> None:
     release = Event()
     started = Event()
     real_close = flow.session.close
+    camera = flow.session.installation.device("camera")
+    fields = camera.tunable_fields
+    read_started, read_release = Event(), Event()
+    def slow_fields():
+        read_started.set()
+        assert read_release.wait(5.0)
+        return fields()
+    camera.tunable_fields = slow_fields
 
     def slow_close() -> None:
         close_threads.append(current_thread().name)
@@ -558,8 +589,12 @@ def test_experiment_flow_closes_its_session_off_the_qt_owner(workspace) -> None:
     heartbeat.timeout.connect(lambda: turns.append(True))
     heartbeat.start()
     try:
-        console.close()
-        _wait_qt(application, started.is_set, timeout_ms=2000)
+        flow.open_device_control("camera")
+        _wait_qt(application, read_started.is_set)
+        QtTest.QTest.mouseClick(console._window.titleBar.closeBtn, QtCore.Qt.LeftButton)
+        assert console.is_visible(), "close cannot pass an in-flight device read"
+        read_release.set()
+        _wait_qt(application, started.is_set)
         assert console.is_visible()
         _wait_qt(application, lambda: len(turns) >= 5, timeout_ms=500)
         release.set()
@@ -569,6 +604,8 @@ def test_experiment_flow_closes_its_session_off_the_qt_owner(workspace) -> None:
         assert init_threads and init_threads[0].startswith("zlc-devices")
     finally:
         heartbeat.stop()
+        read_release.set()
+        camera.tunable_fields = fields
         release.set()
         _wait_qt(application, flow.close)
 
@@ -1222,10 +1259,6 @@ try:
     camera = session.installation.device('camera')
     slm = session.installation.device('slm')
     flow.devices.presenter.busy = True
-    assert flow._console_close_guard() is False
-    assert flow.console.is_visible()
-    assert not flow.console_presenter._closing
-    assert not flow._closing_all
     assert flow.devices.presenter.open_device('camera') is False
     assert 'camera' not in flow.device_controls
     flow.devices.presenter.busy = False
@@ -1316,8 +1349,8 @@ try:
     exposure = control._view.form.widget_for('exposure')
     before_turns = len(heartbeat)
     started_at = time.monotonic()
-    exposure.setValue(0.05)
     control._view._field_rows['exposure'][2].click()
+    exposure.setValue(0.05)
     returned_in = time.monotonic() - started_at
     assert returned_in < 0.1, returned_in
     deadline = QtCore.QDeadlineTimer(1000)
@@ -1345,12 +1378,10 @@ try:
     exposure.setValue(0.07)
     QtTest.QTest.qWait(110); application.processEvents()
     assert len(calls) == 1, 'latest-only write bypassed the active vendor call'
-    assert flow._device_tune_pending == {('camera', 'exposure'): (0.07, '')}
+    assert flow._device_tune_pending == {('camera', 'exposure'): (0.07, 's')}
     assert control._view.status_strip.current_severity == 'task'
     control.close(); application.processEvents()
     assert control.is_visible(), 'hung tune control claimed it had closed'
-    flow.devices.close(); application.processEvents()
-    assert flow.devices.is_visible(), 'root window closed over hung vendor work'
     assert flow.session is not None
 
     deadline = QtCore.QDeadlineTimer(3000)
@@ -1440,8 +1471,8 @@ try:
         application.processEvents(); QtTest.QTest.qWait(5)
     typed_control = flow.device_controls['typed']
     switch = typed_control._view.form.widget_for('enabled')
-    switch.setChecked(True)
     typed_control._view._field_rows['enabled'][2].click()
+    switch.setChecked(True)
     deadline = QtCore.QDeadlineTimer(1000)
     while not typed_seen and not deadline.hasExpired():
         application.processEvents(); QtTest.QTest.qWait(5)
@@ -1467,7 +1498,7 @@ def test_control_apply_sends_the_authored_unit_and_keeps_canonical_provenance(wo
     from zlc_workbench.apps.task_console import ExperimentGuiFlow
     from zlc_workbench.device_use import DeviceUseCoordinator
 
-    state, calls, records = {"volts": .1, "epoch": 0}, [], []
+    state, calls, records, refreshes = {"volts": .1, "epoch": 0}, [], [], []
     registry = UnitRegistry(DEFAULT_UNITS.resolve(name) for name in DEFAULT_UNITS.distinct_symbols())
     registry.register(Unit("Vpp", "power", VoltageIntoLoad(75.0), prefixable=True), replace=True)
     def fields():
@@ -1478,12 +1509,16 @@ def test_control_apply_sends_the_authored_unit_and_keeps_canonical_provenance(wo
         unit = unit or "Vpp"
         return TunableField(AuthoringField(name, "float", "Power", unit=unit),
                     float(registry.convert(state["volts"], "Vpp", unit)), True, (name,))
+    def refresh():
+        refreshes.append(True)
+        return fields()
     def tune(name, value, unit):
         calls.append((name, value, unit))
         state["volts"] = float(registry.convert(value + (.125 if unit == "mVpp" else 0.0), unit, "Vpp"))
         state["epoch"] += 7
         return value + .1  # A later read may differ from the command reply.
-    device = SimpleNamespace(tunable_fields=fields, read_tunable_in_unit=read,
+    device = SimpleNamespace(tunable_fields=fields, refresh_tunable_fields=refresh,
+        read_tunable_in_unit=read,
         tune=lambda _name, _value: pytest.fail("native unit write was bypassed"), tune_in_unit=tune,
         convert_tunable_value=lambda _name, value, source, target: float(registry.convert(value, source, target)),
         settings_provenance=lambda: {"device_session_id": "rf", "settings_epoch": state["epoch"]})
@@ -1495,6 +1530,7 @@ def test_control_apply_sends_the_authored_unit_and_keeps_canonical_provenance(wo
     flow._device_worker_run = lambda work, done, _failed: done(work())
     model = {"device": device, "control": control, "device_session_id": "", "desired": {}, "live": {}}
     flow._adopt_device_reading("rf", model, flow._read_device_controls(device))
+    assert len(refreshes) == 1
     flow._device_control_models["rf"] = model
     flow.device_controls["rf"] = control
     converting = []
@@ -1507,14 +1543,17 @@ def test_control_apply_sends_the_authored_unit_and_keeps_canonical_provenance(wo
     assert calls == [], "Apply ran before its display unit conversion completed"
     work, done = converting.pop()
     done(work())
+    assert len(refreshes) == 1, "changing the displayed unit is not a full device refresh"
     flow._device_worker_run = lambda work, done, _failed: done(work())
     assert model["desired"]["power"][0] == pytest.approx(100.0)
     flow._request_device_control_refresh("rf")
+    assert len(refreshes) == 2
     assert calls == []
     assert flow._device_control_projection("rf")["fields"]["power"]["apply_enabled"]
     flow._set_device_control_desired("rf", "power", 135.0, "mVpp")
     flow._queue_device_tune("rf", "power", 135.0, "mVpp")
     assert calls == [("power", 135.0, "mVpp")], model["status"]
+    assert len(refreshes) == 2, "Apply must consume its command readback, not refresh every field"
     assert model["status"]["power"] == ("Applied", "ready")
     assert model["desired"]["power"][0] == pytest.approx(135.125)
     assert model["desired"]["power"][1] == "mVpp"
@@ -1540,6 +1579,40 @@ def test_control_apply_sends_the_authored_unit_and_keeps_canonical_provenance(wo
     done(result)
     assert model["desired"]["power"] == (value + 2, unit), "an old Apply overwrote the newer draft"
     flow.session.device_use.assert_idle()
+
+    # Exercise those same Control paths with the real RF driver, where a
+    # metadata projection must not quietly become another instrument query.
+    from test_rf_devices import _rigol
+    source, instrument = _rigol()
+    try:
+        rf_control = _RecordingControl()
+        rf_control.show_status = lambda *_: None
+        rf_model = {"device": source, "control": rf_control,
+                    "device_session_id": "", "desired": {}, "live": {}}
+        flow._device_worker_run = lambda work, done, _failed: done(work())
+        instrument.log.clear()
+        flow._adopt_device_reading("rigol", rf_model, flow._read_device_controls(source))
+        assert len(instrument.log) == 16, "Open reads each channel's eight current facts once"
+        flow._device_control_models["rigol"] = rf_model
+        flow.device_controls["rigol"] = rf_control
+        instrument.log.clear()
+        flow._set_device_control_unit("rigol", "ch1_frequency", "kHz")
+        flow._set_device_control_unit("rigol", "ch1_power", "mVpp")
+        assert instrument.log == [], "unit projection uses the accepted device facts"
+        flow._set_device_control_desired("rigol", "ch1_frequency", 50000.0, "kHz")
+        flow._queue_device_tune("rigol", "ch1_frequency", 50000.0, "kHz")
+        assert instrument.log == [":SOURce1:FREQuency 50000000", ":SOURce1:FREQuency?"]
+        assert rf_model["current"]["ch1_frequency"] == 50000.0
+        assert rf_model["current"]["ch1_power"] is None
+        assert next(item for item in rf_model["tunables"]
+                    if item.metadata.name == "ch1_power").metadata.unit == "mVpp"
+        instrument.log.clear()
+        flow._request_device_control_refresh("rigol")
+        assert len(instrument.log) == 16, "explicit Refresh reads the device once"
+        assert rf_model["current"]["ch1_power"] is not None
+        flow.session.device_use.assert_idle()
+    finally:
+        source.close()
 
 
 def test_device_control_risk_unlock_is_field_scoped_and_owner_scoped(

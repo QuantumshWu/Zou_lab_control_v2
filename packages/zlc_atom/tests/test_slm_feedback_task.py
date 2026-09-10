@@ -2481,8 +2481,7 @@ def test_measure_keeps_observer_only_faults_repeats_board_faults_and_loads_every
             cursor=85,
             underflow=underflow,
             elapsed_seconds=1.0,
-            status_reads=(status, status),
-            cursor_reads=(85, 85),
+            command_id=17,
             observer_error=observer_error,
         )
 

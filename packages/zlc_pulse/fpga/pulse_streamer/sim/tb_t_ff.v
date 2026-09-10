@@ -3,8 +3,8 @@
 // blk_mem_gen IPs, with a frozen current-layout host word image (9 periods,
 // da_bias_y = edge -192(code320)@P0, edge 388(code900)@P1, HOLD after; one
 // frame = 116 ticks).  Replays the host
-// flow TWICE (consecutive on_pulse): SAFE -> upload -> LOAD -> FIRE, runs 4 frames each, captures
-// da_bias_y + cooling per tick, prints each frame's bus transitions, and checks F0==F1==F2.
+// flow twice: one upload/LOAD then resident FIRE after SAFE.  Also interrupts a
+// pending LOAD and retries a FIRE with the same execution ID (lost ACK).
 // This covers everything an engine-only TB bypasses: ctrl regfile, mini-loader, command
 // sequencing, clk mux, pin map.
 
@@ -68,24 +68,52 @@ module axi_bram_ctrl_0(
       bram_en_a <= 1'b0; bram_we_a <= 4'h0;
     end
   endtask
+  integer command_identity = 0;
+  task issue_cmd;
+    input [31:0] x;
+    begin
+      command_identity = command_identity + 1;
+      wr(30'd22, command_identity); wr(30'd1, 32'd0); wr(30'd1, x);
+    end
+  endtask
+  task await_ack;
+    input [31:0] expected;
+    integer remaining;
+    begin
+      @(negedge s_axi_aclk); bram_en_a=1; bram_we_a=0; bram_addr_a=23*4;
+      remaining=10000;
+      repeat(3) @(negedge s_axi_aclk);
+      while (bram_rddata_a !== command_identity && remaining > 0) begin
+        @(negedge s_axi_aclk); remaining=remaining-1;
+      end
+      if (remaining==0) $fatal(1,"command %0d did not complete", command_identity);
+      bram_addr_a=24*4; repeat(3) @(negedge s_axi_aclk);
+      if (bram_rddata_a !== expected) $fatal(1,"command %0d result %h != %h",command_identity,bram_rddata_a,expected);
+      bram_en_a=0;
+    end
+  endtask
   task cmd;
     input [31:0] x;
-    begin wr(30'd1, 32'd0); wr(30'd1, x); end
+    begin issue_cmd(x); await_ack(x==8 || x==4 ? 0 : x); end
   endtask
   task upload;
     begin
 `include "replay_t.vh"
     end
   endtask
-  task prepare_and_fire;       // one host on_pulse: SAFE -> upload -> LOAD -> FIRE
+  task prepare_and_fire;
     begin
       cmd(32'd8);                       // CMD_SAFE
-      repeat (300) @(negedge s_axi_aclk);
       upload;
+      // SAFE must preempt the active mini-loader, not wait behind it.
+      issue_cmd(32'd1);
+      cmd(32'd8);
       cmd(32'd1);                       // CMD_LOAD
-      repeat (600) @(negedge s_axi_aclk);   // loader done long before this
+      wr(30'd6, 32'd4);                 // four whole-Pulse shots
       wr(30'd16, 32'd3);                // BANK_READY
       cmd(32'd2);                       // CMD_FIRE
+      // Same command ID, as when its completion reply was lost: never refire.
+      wr(30'd1, 32'd0); wr(30'd1, 32'd2); await_ack(32'd2);
       $display("[TB] FIRE issued at %0t", $time);
     end
   endtask
@@ -95,7 +123,8 @@ module axi_bram_ctrl_0(
     repeat (50) @(negedge s_axi_aclk);
     prepare_and_fire;                   // on_pulse #1
     repeat (5 * 116 * 1 + 2000) @(negedge s_axi_aclk);   // ~4+ frames
-    prepare_and_fire;                   // on_pulse #2 (consecutive run, same program)
+    cmd(32'd8);
+    cmd(32'd2);                         // resident replay: no upload and no LOAD
   end
 endmodule
 
@@ -209,7 +238,7 @@ module tb_t_ff;
   // would copy zeros and ALL DA output would be silently wrong (we demonstrated exactly
   // that with a deliberate 512-vs-2048 skew).
   zlc_pulse_streamer_top dut (
-    .clk(clk), .led(led),
+    .clk(clk), .led(led), .uart_rx(1'b1),
     .cooling(cooling), .cooling_pgc(cooling_pgc), .repump(repump), .probe(probe),
     .pushout(pushout), .state_pre(state_pre), .trig(trig), .coil(coil),
     .grey_cooling(grey_cooling), .trap(trap), .UV(UV), .emCCD(emCCD),
@@ -228,6 +257,8 @@ module tb_t_ff;
   integer ti = -1, fire_n = 0; reg run_prev = 0;
   reg [9:0] bh [0:2*NFR*200];      // [fire*NFR*T_FRAME + t]
   reg       chh [0:2*NFR*200];
+  reg [39:0] all_bus [0:2*NFR*200];
+  reg [17:0] all_ttl [0:2*NFR*200];
   always @(posedge clk) begin
     if (led[0] && !run_prev) begin
       $display("[TB] running (fire #%0d) at %0t", fire_n, $time);
@@ -235,8 +266,17 @@ module tb_t_ff;
     end else if (led[0] && ti >= 0) ti = ti + 1;
     if (!led[0] && run_prev) begin fire_n = fire_n + 1; ti = -1; end
     if (led[0] && ti >= 0 && ti < NFR*T_FRAME)
-      begin bh[fire_n*NFR*T_FRAME + ti] <= da_bias_y; chh[fire_n*NFR*T_FRAME + ti] <= cooling; end
+      begin
+        bh[fire_n*NFR*T_FRAME + ti] <= da_bias_y; chh[fire_n*NFR*T_FRAME + ti] <= cooling;
+        all_bus[fire_n*NFR*T_FRAME + ti] <= {da_bias_z,da_bias_x,da_bias_y,da_dipole};
+        all_ttl[fire_n*NFR*T_FRAME + ti] <= {bias,probe_shutter,repump_shutter,cooling_shutter,address_w,microwave,emCCD,UV,trap,grey_cooling,coil,trig,state_pre,pushout,probe,repump,cooling_pgc,cooling};
+      end
     run_prev <= led[0];
+  end
+  always @(negedge clk) begin
+    #1;
+    if (led[0] && {da_clk3,da_clk2,da_clk1,da_clk0} !== 4'b1111)
+      $fatal(1,"a running replay lost its DAC latch clocks");
   end
 
   integer f, k, base, prev, errs;
@@ -267,27 +307,19 @@ module tb_t_ff;
     end
   endtask
 
-  // hierarchical probes: LUTRAM contents just before FIRE, engine bus state just after
-  initial begin
-    repeat (1310) @(posedge clk);    // after LOAD completes, before FIRE (~tick 1324)
-    $display("[PROBE pre-FIRE] STATUS=%h BUS_COUNTS=%h", dut.ctrl_reg[2], dut.ctrl_reg[12]);
-    $display("[PROBE pre-FIRE] eng LUTRAM bus1 row0: start_tick=%0d stop_tick=%0d vstart=%0d vstop=%0d mode=%0d",
-             dut.zlc_engine_i.bus_start_tick_mem[64], dut.zlc_engine_i.bus_stop_tick_mem[64],
-             dut.zlc_engine_i.bus_start_value_mem[64], dut.zlc_engine_i.bus_stop_value_mem[64],
-             dut.zlc_engine_i.bus_mode_mem[64]);
-    $display("[PROBE pre-FIRE] eng LUTRAM bus1 row1: start_tick=%0d vstop=%0d",
-             dut.zlc_engine_i.bus_start_tick_mem[65], dut.zlc_engine_i.bus_stop_value_mem[65]);
-    repeat (60) @(posedge clk);      // a few ticks after FIRE
-    $display("[PROBE post-FIRE] count_act[1]=%0d idx_act[1]=%0d value_act[1]=%0d del_bus[1]=%0d running=%b",
-             dut.zlc_engine_i.bus_count_active[1], dut.zlc_engine_i.bus_index_active[1],
-             dut.zlc_engine_i.bus_value_active[1], dut.zlc_engine_i.del_bus_ticks[1], led[0]);
-  end
-
   initial begin
     // fire #1: ~50+300+upload+600+fire, frames 4*116; fire #2 same again
     repeat (50 + 1000 + 600 + 5*T_FRAME + 2000 + 1000 + 600 + 5*T_FRAME + 2000) @(posedge clk);
     report_fire(0);
     report_fire(1);
+    if (fire_n != 2) $fatal(1,"expected two physical executions, got %0d",fire_n);
+    for (k=0;k<NFR*T_FRAME;k=k+1) begin
+      if ($isunknown(all_bus[k]) || all_bus[k] !== all_bus[NFR*T_FRAME+k])
+        $fatal(1,"resident DAC output differs at tick %0d",k);
+      if ($isunknown(all_ttl[k]) || all_ttl[k] !== all_ttl[NFR*T_FRAME+k])
+        $fatal(1,"resident TTL output differs at tick %0d",k);
+    end
+    $display("RESIDENT-REPLAY-SAFE-INTERRUPT-DEDUP-OK");
     $display("==== DONE ====");
     $finish;
   end

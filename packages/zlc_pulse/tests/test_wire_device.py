@@ -82,7 +82,7 @@ def test_build_fingerprint_covers_each_geometry_field_except_host_cap() -> None:
 
 
 def test_default_geometry_is_pinned_to_deployed_word63() -> None:
-    assert build_fingerprint(StreamerParams()) == 0x5A86511A
+    assert build_fingerprint(StreamerParams()) == 0x5A83C4CA
 
 
 def test_host_rejects_affine_geometry_beyond_the_shipped_four_dsp_lanes() -> None:
@@ -580,103 +580,36 @@ def test_applied_state_tracks_scan_table_and_survives_done_and_safe() -> None:
     assert streamer.applied() is None
 
 
-class _RtlFireGateTransport(MemoryRegisterTransport):
-    """Model the frozen RTL rule that FIRE acts only while STATUS_LOADED is set."""
-
-    def __init__(self, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self.accepted_loads = 0
-        self.accepted_fires = 0
-
-    def write_words(self, rows, **kwargs):
-        rows = tuple(rows)
-        with self._lock:
-            for address, value in rows:
-                if address != CtrlWords.COMMAND:
-                    continue
-                if value & CMD_LOAD:
-                    self.accepted_loads += 1
-                if value & CMD_FIRE and self.status & STATUS_LOADED:
-                    self.accepted_fires += 1
-        return super().write_words(rows, **kwargs)
-
-
-def test_repeated_fire_reloads_the_resident_image_before_the_rtl_gate() -> None:
-    """A prior DONE clears LOADED; replay must LOAD without retransmitting edges."""
-
-    geom = replace(StreamerParams(), max_edges=8, bank_size=2)
-    program = compile_sequence(_sequence(), geom, 50e6)
-    transport = _RtlFireGateTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
-    streamer.open()
-    streamer.load(program)
-    bases = region_bases(geom)
-    edge_uploads_before = sum(
-        bases["tick"] <= address < bases["scan"]
-        for batch in transport.write_batches
-        for address, _value in batch
-    )
-
-    streamer.fire(run_repeats=1)
-    assert streamer.snapshot()["reloaded_before_fire"] is False
-    assert streamer.wait_done(1.0) is not None
-    streamer.fire(run_repeats=1)
-    assert streamer.snapshot()["reloaded_before_fire"] is True
-    assert streamer.wait_done(1.0) is not None
-
-    edge_uploads_after = sum(
-        bases["tick"] <= address < bases["scan"]
-        for batch in transport.write_batches
-        for address, _value in batch
-    )
-    assert transport.accepted_loads == 2
-    assert transport.accepted_fires == 2
-    assert edge_uploads_after == edge_uploads_before
-
-
-def test_fire_after_safe_reloads_the_resident_image_before_firing(monkeypatch) -> None:
+def test_repeated_fire_reuses_resident_program_after_done_and_safe() -> None:
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
     program = compile_sequence(_sequence(slotted=True), geom, 50e6)
-    transport = _RtlFireGateTransport(geom=geom, auto_done=True)
+    transport = MemoryRegisterTransport(geom=geom, auto_done=True)
     streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
     try:
-        rows = ((1,), (2,), (1,))
-        streamer.load(program, rows=rows)
-        clock_addresses = tuple(CtrlWords.CLK_ENABLE + i for i in range(geom.clk_enable_words))
-        loaded_clocks = tuple(transport.read_word(address) for address in clock_addresses)
-        assert program.clk_enable and any(loaded_clocks), "the loaded Pulse has real clock ports"
+        streamer.load(program, rows=((1,), (2,), (1,)))
+        clocks = tuple(transport.read_word(CtrlWords.CLK_ENABLE + i)
+                       for i in range(geom.clk_enable_words))
+        streamer.fire(run_repeats=1)
+        assert streamer.wait_done(1.0) is not None
         uploaded = len(transport.write_batches)
         streamer.fire(run_repeats=1)
         assert streamer.wait_done(1.0) is not None
-        streamer.safe()
-        assert not any(transport.read_word(address) for address in clock_addresses)
-
+        streamer.fire(run_repeats=0)
+        safe = streamer.safe()
+        assert safe.stable and safe.status == 0 and safe.command_id > 0
+        before = len(transport.write_batches)
+        assert streamer.safe() == safe
+        assert len(transport.write_batches) == before, "a completed SAFE is already proof"
         streamer.fire(run_repeats=1)
         assert streamer.wait_done(1.0) is not None
-        assert tuple(transport.read_word(address) for address in clock_addresses) == loaded_clocks
-        assert transport.accepted_loads == 2
-        assert transport.accepted_fires == 2
-        assert transport.read_word(CtrlWords.BANK0_CHUNK) == 0
-        assert transport.read_word(CtrlWords.BANK1_CHUNK) == 1
-        assert transport.read_word(CtrlWords.BANK_READY) == 0b11
-        for bank in (0, 1):
-            for address, value in pack_scan_rows(rows, geom, bank, bank).items():
-                assert transport.read_word(address) == value
-        bases = region_bases(geom)
-        assert not any(bases["tick"] <= address < bases["scan"]
-                       for batch in transport.write_batches[uploaded:] for address, _value in batch)
-
-        # Restoring the clock mask changes the SAFE facts even if LOAD fails.
-        streamer.safe()
-        def fail_load(*, stop=None):
-            raise RuntimeError("resident LOAD failed")
-        monkeypatch.setattr(streamer, "_await_loaded", fail_load)
-        with pytest.raises(RuntimeError, match="resident LOAD failed"):
-            streamer.fire(run_repeats=1)
-        assert tuple(transport.read_word(address) for address in clock_addresses) == loaded_clocks
-        streamer.safe()
-        assert not any(transport.read_word(address) for address in clock_addresses)
+        commands = [value for batch in transport.write_batches[uploaded:]
+                    for address, value in batch if address == CtrlWords.COMMAND]
+        assert commands == [CMD_FIRE, CMD_FIRE, CMD_SAFE, CMD_FIRE]
+        assert all(address in (CtrlWords.COMMAND_ID, CtrlWords.COMMAND)
+                   for batch in transport.write_batches[uploaded:] for address, _ in batch)
+        assert tuple(transport.read_word(CtrlWords.CLK_ENABLE + i)
+                     for i in range(geom.clk_enable_words)) == clocks
     finally:
         streamer.close()
 
@@ -689,31 +622,6 @@ def test_runtime_slot_rows_reject_colliding_affine_edges() -> None:
     streamer.open()
     with pytest.raises(ValueError, match="edge ticks"):
         streamer.load(program, rows=((-2,),))
-
-
-def test_safe_readback_uses_stable_status_and_zero_clock_mask() -> None:
-    geom = replace(StreamerParams(), max_edges=8, bank_size=2)
-    program = compile_sequence(_sequence(), geom, 50e6)
-    transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
-    streamer.open()
-    streamer.load(program)
-    streamer.fire(run_repeats=1)
-    assert streamer.wait_done(1.0) is not None
-    safe = streamer.safe()
-    assert safe.stable
-    assert safe.status_reads == (0, 0)
-    assert not any(safe.clock_enable_words)
-    # Each strobe is its own transaction, sent after the write it acts on has
-    # been acknowledged: a lost frame is resent and a command must never be.
-    strobe = ((CtrlWords.COMMAND, 0), (CtrlWords.COMMAND, CMD_SAFE))
-    assert transport.write_batches[-5:] == [
-        ((CtrlWords.STATUS, STATUS_ERROR),),
-        strobe,
-        tuple((CtrlWords.CLK_ENABLE + index, 0) for index in range(geom.clk_enable_words)),
-        ((CtrlWords.STATUS, STATUS_ERROR),),
-        strobe,
-    ]
 
 
 def test_open_rejects_mismatched_word63() -> None:
@@ -746,7 +654,7 @@ def test_layout_check_and_transport_self_test_use_the_frozen_ctrl_contract() -> 
     streamer.check_register_layout()
 
 
-def test_wait_done_uses_observer_owned_terminal_double_reads() -> None:
+def test_wait_done_uses_one_observer_owned_status_cursor_block() -> None:
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
     program = compile_sequence(_sequence(), geom, 50e6)
     transport = MemoryRegisterTransport(geom=geom, auto_done=True)
@@ -757,14 +665,9 @@ def test_wait_done_uses_observer_owned_terminal_double_reads() -> None:
     streamer.fire(run_repeats=1)
     report = streamer.wait_done(1.0)
     assert report is not None
-    assert report.status_reads == (STATUS_DONE, STATUS_DONE)
-    assert report.cursor_reads == (0, 0)
-    assert transport.read_log == [
-        CtrlWords.STATUS,
-        CtrlWords.CURSOR,
-        CtrlWords.STATUS,
-        CtrlWords.CURSOR,
-    ]
+    assert report.status == STATUS_DONE and report.cursor == 0
+    assert report.command_id > 0
+    assert transport.read_log == list(range(CtrlWords.STATUS, CtrlWords.CURSOR + 1))
 
 
 class _BlockingObserverTransport(MemoryRegisterTransport):
@@ -927,8 +830,7 @@ def test_observer_refill_failure_becomes_terminal_error() -> None:
     streamer.fire(run_repeats=1)
     report = streamer.wait_done(1.0)
     assert report is not None
-    assert report.status == STATUS_ERROR
-    assert report.status_reads == (STATUS_ERROR, STATUS_ERROR)
+    assert report.status == STATUS_RUNNING, "do not fabricate a hardware error for a host exception"
     assert report.observer_error == "RuntimeError: synthetic scan refill failure"
     assert report.fault == (
         "pulse observer failed: RuntimeError: synthetic scan refill failure"
@@ -939,8 +841,6 @@ def test_observer_refill_failure_becomes_terminal_error() -> None:
 class _PollFailingTransport(MemoryRegisterTransport):
     """The observer's STATUS polls fail ``failures`` times in a row, the way
     a UART read that exhausted its retries fails: with a TimeoutError."""
-
-    lossy_line = True
 
     def __init__(self, *, failures: int, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -982,7 +882,6 @@ def test_one_failed_poll_is_a_warning_and_the_shot_still_reports_done() -> None:
     assert report is not None
     assert report.fault == ""
     assert report.status == STATUS_DONE
-    assert report.status_reads == (STATUS_DONE, STATUS_DONE)
     assert report.observer_error == ""
     assert report.poll_failures == 1
     assert report.resent_frames == 60
@@ -1001,7 +900,7 @@ def test_two_consecutive_failed_polls_end_the_observation_in_error() -> None:
     streamer.fire(run_repeats=1)
     report = streamer.wait_done(1.0)
     assert report is not None
-    assert report.status == STATUS_ERROR
+    assert report.status == STATUS_RUNNING, "the FIRE acknowledgement is the last hardware status received"
     assert report.observer_error.startswith("TimeoutError: UART reply timed out")
     assert report.poll_failures == 2
     assert report.resent_frames == 120
@@ -1018,8 +917,7 @@ def test_recovered_link_error_is_visible_but_not_an_engine_fault() -> None:
         12,
         False,
         1.5,
-        (STATUS_DONE | STATUS_LINK_ERROR,) * 2,
-        (12, 12),
+        command_id=17,
     )
     assert report.link_error is True
     assert report.fault == ""

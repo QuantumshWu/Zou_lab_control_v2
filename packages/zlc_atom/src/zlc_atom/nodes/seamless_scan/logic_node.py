@@ -43,12 +43,6 @@ from zlc_atom.nodes.scan import (
 )
 
 
-#: How long the pulse stays stopped before the table plays.  Half a
-#: second is the default settling allowance after acquisition is ready;
-#: it is authored because only the operator knows their apparatus.
-DEFAULT_SETTLE_SECONDS = 0.01
-
-
 SEAMLESS_SCAN_SCHEMA = AuthoringSchema(
     (
         AuthoringField(
@@ -70,7 +64,7 @@ SEAMLESS_SCAN_SCHEMA = AuthoringSchema(
             "str",
             "Acquisition logic",
             "",
-            description="Optional acquisition Logic to restart and wait until ready before settling and firing.",
+            description="Optional acquisition Logic to restart once and wait until ready before the scan.",
         ),
         # The pulse's API slots, set once for this run.  Only what differs
         # from the pulse is written here, so a recalibration that lands in
@@ -99,13 +93,6 @@ SEAMLESS_SCAN_SCHEMA = AuthoringSchema(
             1,
             minimum=1,
         ),
-        AuthoringField(
-            "settle_seconds",
-            "float",
-            "Settle time (s)",
-            DEFAULT_SETTLE_SECONDS,
-            minimum=0.0,
-        ),
     )
 )
 
@@ -122,7 +109,6 @@ def _build(
     tunable_devices: object = None,
     repeats: int = 1,
     shots_per_point: int = 1,
-    settle_seconds: float = DEFAULT_SETTLE_SECONDS,
     acquisition_logic: str = "",
     restart_logic: object = None,
 ) -> SeamlessScanMeasurement:
@@ -167,7 +153,6 @@ def _build(
         tunables=tunable_devices,
         repeats=int(repeats),
         shots_per_point=int(shots_per_point),
-        settle_seconds=float(settle_seconds),
         acquisition_logic=acquisition_logic,
         restart_logic=restart_logic,
     )
@@ -208,4 +193,4 @@ LOGIC_NODE = LogicNodeDescriptor(
 )
 
 
-__all__ = ["DEFAULT_SETTLE_SECONDS", "LOGIC_NODE", "SEAMLESS_SCAN_SCHEMA"]
+__all__ = ["LOGIC_NODE", "SEAMLESS_SCAN_SCHEMA"]

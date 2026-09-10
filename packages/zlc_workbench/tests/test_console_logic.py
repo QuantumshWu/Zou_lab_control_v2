@@ -1501,12 +1501,12 @@ def test_an_armed_silent_source_admits_a_scan_draft(bench) -> None:
                      if field.key == "acquisition_logic")
         assert field.kind == "choice"
         assert {choice.value for choice in field.choices} == {"", camera_id}
-        assert projection["form_values"]["settle_seconds"] == 0.5
+        assert "settle_seconds" not in projection["form_values"]
         presenter.update_logic_draft(scan_id, values={"acquisition_logic": scan_id})
         assert any("acquisition Measurement" in text for text in
                    presenter.logic_editor_projection(scan_id)["issues"])
         presenter.update_logic_draft(scan_id, values={
-            "acquisition_logic": camera_id, "settle_seconds": 0.123,
+            "acquisition_logic": camera_id,
         })
         assert not any("acquisition Measurement" in text for text in
                        presenter.logic_editor_projection(scan_id)["issues"])
@@ -1514,4 +1514,4 @@ def test_an_armed_silent_source_admits_a_scan_draft(bench) -> None:
         assert presenter.apply_layout(saved)
         restored = presenter.logic_editor_projection(scan_id)
         assert restored["form_values"]["acquisition_logic"] == camera_id
-        assert restored["form_values"]["settle_seconds"] == 0.123
+        assert "settle_seconds" not in restored["form_values"]

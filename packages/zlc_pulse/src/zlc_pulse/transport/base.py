@@ -19,13 +19,6 @@ class TransportAborted(RuntimeError):
 class RegisterTransport(Protocol):
     transport_id: str
     observer_interval: float
-    #: Whether this line can LOSE a request or its acknowledgement outright.
-    #: True only for the UART: a frame either executes within microseconds of
-    #: arriving or is gone forever, so a timeout implies nothing is still in
-    #: flight -- which is the precondition for verify-and-retry on a command
-    #: strobe.  A Vivado TCL that timed out may still execute later, so on
-    #: that transport the same retry would risk firing twice.
-    lossy_line: bool
 
     def start(self) -> None: ...
 
@@ -37,14 +30,27 @@ class RegisterTransport(Protocol):
         *,
         stop: threading.Event | None = None,
         deadline: float | None = None,
-        #: Whether a frame the link never answered may be sent again.  False
-        #: for a command strobe: one that WAS executed and whose acknowledgement
-        #: was lost would be executed twice.  A transport with no frames to lose
-        #: takes the argument and ignores it, because the caller's meaning is
-        #: the same either way and a caller should not have to ask which
-        #: transport it has.
-        resend: bool = True,
     ) -> None: ...
+
+    def read_words(
+        self,
+        word_offset: int,
+        count: int,
+        *,
+        stop: threading.Event | None = None,
+        deadline: float | None = None,
+    ) -> tuple[int, ...]: ...
+
+    def command(
+        self,
+        code: int,
+        command_id: int,
+        *,
+        run_repeats: int = 1,
+        scan_repeats: int = 1,
+        stop: threading.Event | None = None,
+        deadline: float | None = None,
+    ) -> tuple[int, int]: ...
 
     def read_word(
         self,
