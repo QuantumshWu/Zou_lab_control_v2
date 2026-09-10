@@ -354,7 +354,7 @@ Node new chunk
 
 ### 7.4 Host/RTL/build invariants
 
-- Load前核target ABI、clock、geometry、counts和delay FIFO capacity；不把camera exposure或frames-per-cycle反向解释进Pulse program。
+- Load前核target ABI、clock、geometry与合法slot rows；delay FIFO capacity和循环接缝在Fire前按本次真实run/scan repeats验证，不先计算一个未请求的1×1执行。相同驻留程序与执行参数复用已验证结论；不把camera exposure或frames-per-cycle反向解释进Pulse program。
 - Count必须是合法hardware range内整数，不clamp/wrap。
 - Hardware SAFE独立gate TTL/DAC data/clock；LOAD/FIRE前pins保持safe。
 - Public DONE等待delay FIFOs和final DAC latch完成并进入安全态。

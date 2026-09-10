@@ -101,7 +101,7 @@ class DoneReport:
                     f"the line failed {self.poll_failures} poll(s) and resent "
                     f"{self.resent_frames} frame(s) during this shot"
                 )
-        elif self.status & STATUS_ERROR:
+        if self.status & STATUS_ERROR:
             reasons.append("the board reported an error")
         if self.status & STATUS_UNDERFLOW or self.underflow:
             reasons.append("the scan bank underran")
@@ -829,7 +829,6 @@ class PulseStreamer(ConfigValueHolder):
             raise ValueError("compiled geometry does not match the connected sequencer")
         for row in rows or ((),):
             self._validate_slot_row(program, row)
-        self._validate_delay_capacity(program, rows, 1, 1)
 
     def _validate_slot_row(
         self,
