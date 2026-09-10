@@ -449,13 +449,13 @@ app = ensure_qt_app(["schedule-selection"])
 port = PortRowVM("d0", "digital", "Gate", "d0")
 periods = tuple(
     PeriodVM(f"p{n}", f"P{n}", FieldVM("1"), "us", ("ns", "us"), digital=(("d0", False),))
-    for n in range(3)
+    for n in range(8)
 )
 view = PulseScheduleView()
 view.resize(1200, 500); view.show()
 view.set_schedule(ScheduleVM(
     document_generation=0, revision=0, document_name="x", clock_text="50 MHz",
-    total_text="3 us", total_tooltip="", period_count=3, visible_text="1/1",
+    total_text="8 us", total_tooltip="", period_count=8, visible_text="1/1",
     summary_text="x", ports=(port,), periods=periods,
 ))
 app.processEvents()
@@ -467,7 +467,7 @@ view.remove_period_requested.connect(lambda pid: asked.append(("remove", pid)))
 
 # nothing selected -> append, and Remove takes the last
 view.add_button.click(); view.remove_button.click()
-assert asked == [("add", None), ("remove", "p2")], asked
+assert asked == [("add", None), ("remove", "p7")], asked
 
 # a selected CARD inserts after it, and Remove takes that one
 asked.clear()
@@ -489,6 +489,8 @@ assert container.selection() == (None, None, None)
 
 # a selection naming a period the strip no longer holds cannot survive a rebuild
 container.period_clicked.emit("p1"); app.processEvents()
+before_width = container.width()
+before_scroll = view.timeline_scroll.horizontalScrollBar().maximum()
 view.set_schedule(ScheduleVM(
     document_generation=0, revision=1, document_name="x", clock_text="50 MHz",
     total_text="1 us", total_tooltip="", period_count=1, visible_text="1/1",
@@ -496,6 +498,13 @@ view.set_schedule(ScheduleVM(
 ))
 app.processEvents()
 assert container.selection() == (None, None, None), container.selection()
+print('removed period geometry', before_width, container.width(), before_scroll,
+      view.timeline_scroll.horizontalScrollBar().maximum())
+assert container.width() < before_width
+assert container.size() == container.sizeHint()
+assert view.timeline_scroll.horizontalScrollBar().maximum() < before_scroll
+view.close(); view.deleteLater()
+app.processEvents()
 """
     )
 
@@ -585,6 +594,22 @@ assert not layout_moves, 'hiding a port detached the unchanged timeline'
 assert strip.selection() == (None, 'end', None)
 assert set(view.channel_panel._rows) == {"d0", "d2"}, "a hidden port keeps no delay row"
 assert set(view._cards["p0"].port_rows) == {"d0", "d2"}, "and the card agrees"
+
+strip.show_selection(gap=1)
+before_height = strip.height()
+view.set_visible_ports(("d0",))
+for _ in range(4):
+    app.processEvents()
+print('hidden row geometry', before_height, strip.height(), strip._indicator.height())
+assert strip.height() < before_height
+assert strip.size() == strip.sizeHint()
+assert strip._indicator.height() == strip.height(), 'selected gap did not follow the real layout'
+assert strip.items() == timeline and strip._posts == posts
+assert strip.selection() == (None, None, 1)
+view.set_visible_ports(("d0", "d2"))
+for _ in range(4):
+    app.processEvents()
+assert strip._indicator.height() == strip.height()
 
 # The single-row push is the other way into that column, and it must obey the
 # same rule -- otherwise one API binding brings a hidden row back.

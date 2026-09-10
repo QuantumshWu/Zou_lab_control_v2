@@ -728,6 +728,12 @@ class PulseDragContainer(QtWidgets.QWidget):
         else:
             self.show_selection(gap=gap)
 
+    def event(self, event):
+        handled = super().event(event)
+        if event.type() == QtCore.QEvent.LayoutRequest and self._selected_gap is not None:
+            self._show_indicator_at_gap(self._selected_gap)
+        return handled
+
     #: Widgets that need their own clicks: typing in them, ticking them and
     #: opening them ARE the click.  Everything else on a card is chrome, and a
     #: click on chrome belongs to the card.

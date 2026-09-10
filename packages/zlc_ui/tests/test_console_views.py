@@ -381,9 +381,49 @@ assert tabs is not None and tabs.count() >= 2
 tabs.setCurrentIndex(1)
 app.processEvents()
 assert not popup.isVisible(), 'the frame floated over another tab'
+# Hidden page updates stay as metadata until the same popup becomes visible.
+form = card._settings_form
+reconciles = []
+original_reconcile = form.reconcile
+form.reconcile = lambda *args, **kwargs: (reconciles.append(True), original_reconcile(*args, **kwargs))[1]
+changed_state = dict(card._state_projection)
+changed_state['display'] = {'colormap': 'magma'}
+changed_surface = dict(card._parameter_surface)
+changed_surface['display'] = ({
+    'key': 'colormap', 'label': 'Colormap', 'kind': 'choice',
+    'value': 'magma', 'allow_none': False,
+    'choices': (('Viridis', 'viridis'), ('Magma', 'magma')),
+    'minimum': None, 'maximum': None, 'step': None,
+},)
+console.set_panel_projection('panel-1', changed_state, changed_surface)
+assert not reconciles and 'display__colormap' not in form.spec.keys
 tabs.setCurrentIndex(0)
 app.processEvents()
 assert popup.isVisible(), 'the frame did not come back with its tab'
+print('restored Setting keys', form.spec.keys)
+assert form.read_value('display__colormap') == 'magma'
+assert len(reconciles) == 1
+tabs.setCurrentIndex(1); app.processEvents()
+tabs.setCurrentIndex(0); app.processEvents()
+assert len(reconciles) == 1, 'an unchanged page return rebuilt the form'
+
+# Runtime keyed choices are not part of FormSpec: retain their invalidation too.
+card.set_signal_choices((('source', (('Original', '@logic/source/value'),)),),
+                        current='@logic/source/value')
+picker = form.widget_for('signal')
+QtTest.QTest.mouseClick(card._settings_close_button, QtCore.Qt.LeftButton)
+app.processEvents()
+before_choices = len(reconciles)
+card.set_signal_choices((('source', (('Original', '@logic/source/value'),
+                                    ('Derived', '@logic/source/derived'))),),
+                        current='@logic/source/value')
+assert len(reconciles) == before_choices
+assert not picker._find_choice_index('@logic/source/derived').isValid()
+QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
+app.processEvents()
+assert form.widget_for('signal') is picker
+assert picker._find_choice_index('@logic/source/derived').isValid()
+assert len(reconciles) == before_choices + 1
 
 # The console going behind another program cannot separate them: a child
 # has no desktop presence to leave behind.

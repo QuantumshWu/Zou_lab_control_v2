@@ -283,6 +283,8 @@ class PanelCardView(FluentGroupBox):
         self._settings_scroll: FluentScrollArea | None = None
         self._settings_body: QtWidgets.QWidget | None = None
         self._settings_form: FluentParameterForm | None = None
+        # None means current; a deferred request retains whether keyed choices changed.
+        self._settings_pending_rebuild: bool | None = None
         #: What the card's status dot says, kept so the Setting frame can say
         #: it too, whenever it is opened.
         self._status_text = ""
@@ -791,6 +793,12 @@ class PanelCardView(FluentGroupBox):
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt API
         popup = self._settings_popup
+        if (
+            watched is popup
+            and event.type() == QtCore.QEvent.Show
+            and self._settings_pending_rebuild is not None
+        ):
+            self._rebuild_settings_form(opening=True)
         if watched is self._settings_drag_handle and popup is not None:
             if (
                 event.type() == QtCore.QEvent.MouseButtonPress
@@ -1092,14 +1100,20 @@ class PanelCardView(FluentGroupBox):
         if not opening and (
             self._settings_popup is None or not self._settings_popup.isVisible()
         ):
+            self._settings_pending_rebuild = bool(force or self._settings_pending_rebuild)
             return
         if self._settings_form is not None:
             spec = self._form_spec()
             values = self._form_values()
-            if force or not self._settings_form.adopt_projection(spec, values):
+            if (
+                force
+                or self._settings_pending_rebuild
+                or not self._settings_form.adopt_projection(spec, values)
+            ):
                 self._settings_form.reconcile(spec, values)
             self._apply_settings_enabled_state()
             self._sync_settings_body_size(opening=opening)
+            self._settings_pending_rebuild = None
 
     def _apply_settings_enabled_state(self) -> None:
         """Apply standing edit policy without one-frame enabled flicker."""
@@ -1286,6 +1300,7 @@ class PanelCardView(FluentGroupBox):
                 runtime=self._signal_runtime,
                 parent=body,
             )
+            self._settings_pending_rebuild = None
             self._settings_form.changed.connect(self._setting_changed)
             self._apply_settings_enabled_state()
             body_layout.addWidget(self._settings_form)
@@ -1318,6 +1333,7 @@ class PanelCardView(FluentGroupBox):
             # LayoutRequest-driven measurement: the body says when its own
             # geometry went stale (see eventFilter).
             body.installEventFilter(self)
+            popup.installEventFilter(self)
             self._sync_settings_body_size(opening=True)
             popup.hide()
         anchor = self._settings_anchor
