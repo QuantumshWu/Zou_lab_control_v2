@@ -232,20 +232,13 @@ def atomic_write_text(
 
 
 def durable_mkdir(directory: str | os.PathLike[str]) -> Path:
-    """Create or re-acknowledge one directory below an existing parent.
-
-    The child and parent are flushed on every call, including retries after a
-    previous parent flush failed.  Hierarchy owners must call this once per
-    level; hiding recursive creation here would make a visible child look
-    durable on retry without re-acknowledging the entry whose flush failed.
-    """
+    """Create and flush a missing directory; an existing directory is a no-op."""
 
     target = Path(directory).expanduser().resolve()
     parent = target.parent
-    if parent == target:
+    if target.exists():
         if not target.is_dir():
             raise NotADirectoryError(target)
-        flush_directory(target)
         return target
     if not parent.exists():
         raise FileNotFoundError(
@@ -253,32 +246,23 @@ def durable_mkdir(directory: str | os.PathLike[str]) -> Path:
         )
     if not parent.is_dir():
         raise NotADirectoryError(parent)
-    if not target.exists():
-        try:
-            target.mkdir()
-        except FileExistsError:
-            if not target.is_dir():
-                raise NotADirectoryError(target)
-    if not target.is_dir():
-        raise NotADirectoryError(target)
-    flush_directory(target)
-    flush_directory(parent)
+    try:
+        target.mkdir()
+    except FileExistsError:
+        if not target.is_dir():
+            raise NotADirectoryError(target)
+        return target
+    _flush_published(target, target)
+    _flush_published(parent, target)
     return target
 
 
 def durable_makedirs(directory: str | os.PathLike[str]) -> Path:
-    """Durably create a caller-owned hierarchy from its first existing parent.
+    """Create only missing levels, flushing each new child and its parent.
 
-    The first existing directory on the way up is re-acknowledged first --
-    flushed with its parent, as :func:`durable_mkdir` does on a retry -- and
-    then each missing level is created through :func:`durable_mkdir`,
-    top-down, so every directory entry and its parent receive the same
-    durability evidence as a single-level creation.  The anchor is not taken
-    on trust because a retry cannot tell it from the level a previous call
-    created and left behind when the flush of ITS parent failed: building
-    below it would complete the tree with the one entry whose durability was
-    never confirmed still unconfirmed.  This is the composition-root
-    operation for a fresh explicit workspace such as ``~/.zlc/device-manager``.
+    Naming an existing hierarchy changes no directory entry.  A failed
+    creation flush reports that its directory is already visible through
+    DirectoryDurabilityError.published; it is not retried on unrelated saves.
     """
 
     target = Path(directory).expanduser().resolve()
@@ -292,7 +276,7 @@ def durable_makedirs(directory: str | os.PathLike[str]) -> Path:
         anchor = parent
     if not anchor.is_dir():
         raise NotADirectoryError(anchor)
-    for level in (anchor, *reversed(missing)):
+    for level in reversed(missing):
         durable_mkdir(level)
     return target
 

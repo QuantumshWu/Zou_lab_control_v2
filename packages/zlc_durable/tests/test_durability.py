@@ -182,9 +182,12 @@ def test_durable_mkdir_flushes_one_child_before_its_existing_parent(
     child = (tmp_path / "child").resolve()
     assert durable_mkdir(child) == child
     assert observed == [child, child.parent]
+    observed.clear()
+    assert durable_mkdir(child) == child
+    assert observed == []
 
 
-def test_durable_mkdir_retry_reacknowledges_visible_child_and_parent(
+def test_durable_mkdir_reports_a_visible_directory_whose_flush_failed(
     tmp_path,
     monkeypatch,
 ):
@@ -203,28 +206,22 @@ def test_durable_mkdir_retry_reacknowledges_visible_child_and_parent(
             raise durability.DirectoryDurabilityError("parent flush failed")
 
     monkeypatch.setattr(durability, "flush_directory", flush)
-    with pytest.raises(durability.DirectoryDurabilityError, match="parent flush"):
+    with pytest.raises(durability.DirectoryDurabilityError, match="parent flush") as caught:
         durable_mkdir(target)
+    assert caught.value.published == target
     assert target.is_dir()
     assert observed == [target, target.parent]
 
     observed.clear()
     assert durable_mkdir(target) == target
-    assert observed == [target, target.parent]
+    assert observed == []
 
 
-def test_durable_makedirs_retry_reacknowledges_the_entry_whose_flush_failed(
+def test_durable_makedirs_only_creates_and_flushes_missing_levels(
     tmp_path,
     monkeypatch,
 ):
-    """A retry re-flushes the level it finds, and that level's parent.
-
-    Creating ``root/workspace/device-manager``: ``workspace`` is made, then
-    the flush of ``root`` fails.  The retry finds ``workspace`` visible and
-    used to build below it without flushing ``root`` again, so the tree was
-    completed with the one entry whose durability was never confirmed still
-    unconfirmed.
-    """
+    """Old directory entries are not rewritten by a new artifact's save."""
 
     import zlc_durable.durability as durability
 
@@ -245,20 +242,21 @@ def test_durable_makedirs_retry_reacknowledges_the_entry_whose_flush_failed(
             raise durability.DirectoryDurabilityError("root flush failed")
 
     monkeypatch.setattr(durability, "flush_directory", flush)
-    with pytest.raises(durability.DirectoryDurabilityError, match="root flush"):
+    with pytest.raises(durability.DirectoryDurabilityError, match="root flush") as caught:
         durable_makedirs(target)
+    assert caught.value.published == workspace
     assert workspace.is_dir() and not target.exists()
-    assert observed == [root, root.parent, workspace, root]
+    assert observed == [workspace, root]
 
     observed.clear()
     assert durable_makedirs(target) == target
     assert target.is_dir()
-    assert observed == [workspace, root, target, workspace]
+    assert observed == [target, workspace]
 
-    # With nothing missing, the target itself is the anchor: one level.
+    # With nothing missing there is no directory write to acknowledge.
     observed.clear()
     assert durable_makedirs(target) == target
-    assert observed == [target, workspace]
+    assert observed == []
 
 
 def test_durable_mkdir_rejects_a_missing_parent(tmp_path):
