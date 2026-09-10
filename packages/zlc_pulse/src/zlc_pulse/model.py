@@ -556,20 +556,20 @@ MAXIMUM_REPEAT_COUNT = (1 << 32) - 1
 class PulseBracket:
     """Loop one continuous range of timeline periods, at least twice."""
 
-    start_period_id: str
-    end_period_id: str
+    start_period_id: str | None
+    end_period_id: str | None
     count: int
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self,
             "start_period_id",
-            _identifier(self.start_period_id, "bracket start"),
+            None if self.start_period_id is None else _identifier(self.start_period_id, "bracket start"),
         )
         object.__setattr__(
             self,
             "end_period_id",
-            _identifier(self.end_period_id, "bracket end"),
+            None if self.end_period_id is None else _identifier(self.end_period_id, "bracket end"),
         )
         object.__setattr__(
             self,
@@ -711,12 +711,10 @@ class PulseSequence:
             if not isinstance(bracket, PulseBracket):
                 raise TypeError("bracket must be PulseBracket or None")
             if (
-                bracket.start_period_id not in by_period
-                or bracket.end_period_id not in by_period
+                (bracket.start_period_id is not None and bracket.start_period_id not in by_period)
+                or (bracket.end_period_id is not None and bracket.end_period_id not in by_period)
             ):
                 raise ValueError("bracket references a missing period")
-            if ids.index(bracket.end_period_id) < ids.index(bracket.start_period_id):
-                raise ValueError("bracket end precedes bracket start")
         run_repeats = _nonnegative_int(run_repeats, "run_repeats")
         if run_repeats > MAXIMUM_REPEAT_COUNT:
             raise ValueError("run_repeats does not fit the hardware 32-bit count")
@@ -729,6 +727,9 @@ class PulseSequence:
         object.__setattr__(self, "config_parameters", config_values)
         object.__setattr__(self, "delays", delay_values)
         object.__setattr__(self, "bracket", bracket)
+        bounds = self.bracket_bounds
+        if bounds is not None and bounds[0] > bounds[1]:
+            raise ValueError("bracket end precedes bracket start")
         object.__setattr__(self, "run_repeats", run_repeats)
         object.__setattr__(self, "_period_by_id", MappingProxyType(by_period))
         object.__setattr__(self, "_slot_by_id", MappingProxyType({slot.slot_id: slot for slot in slot_values}))
@@ -737,6 +738,22 @@ class PulseSequence:
             "_api_parameter_by_id",
             MappingProxyType({parameter.parameter_id: parameter for parameter in api_values}),
         )
+
+    @property
+    def bracket_bounds(self) -> tuple[int, int] | None:
+        """Half-open period gaps; equal gaps preserve an empty authored bracket."""
+        if self.bracket is None:
+            return None
+        ids = tuple(period.period_id for period in self.periods)
+        return (
+            len(ids) if self.bracket.start_period_id is None else ids.index(self.bracket.start_period_id),
+            0 if self.bracket.end_period_id is None else ids.index(self.bracket.end_period_id) + 1,
+        )
+
+    def require_nonempty_bracket(self) -> None:
+        bounds = self.bracket_bounds
+        if bounds is not None and bounds[0] == bounds[1]:
+            raise ValueError("The bracket is empty. Put a period inside it or remove the bracket before running or saving.")
 
     @property
     def slot_count(self) -> int:

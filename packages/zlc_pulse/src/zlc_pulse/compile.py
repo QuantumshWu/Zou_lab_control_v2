@@ -560,6 +560,7 @@ def compile_sequence(
 
     if not isinstance(sequence, PulseSequence):
         raise TypeError("sequence must be PulseSequence")
+    sequence.require_nonempty_bracket()
     if sequence.api_parameters:
         declared = tuple(
             parameter.parameter_id for parameter in sequence.api_parameters

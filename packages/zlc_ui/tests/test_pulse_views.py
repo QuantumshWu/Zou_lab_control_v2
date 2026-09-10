@@ -15,7 +15,12 @@ SRC = ROOT / "src"
 #: silently tested a DIFFERENT zlc_plot than the one beside it.  The
 #: product bootstrap is what puts this checkout's layers on the path,
 #: and it is the same one every launcher uses.
-_BOOTSTRAP = "import zou_lab_control" + chr(10)
+_BOOTSTRAP = (
+    "import zou_lab_control\nfrom pathlib import Path\nimport zlc_ui\n"
+    "print('BOOTSTRAP', zou_lab_control.__file__)\n"
+    "print('ROOT', Path(zou_lab_control.__file__).resolve().parents[1], 'UI', zlc_ui.__file__)\n"
+    "from zlc_plot._kernel_cache import install\ninstall()\n"
+)
 
 
 def _run_qt(code: str) -> None:
@@ -248,12 +253,13 @@ from zlc_ui.pulse import PulseScheduleView
 app = ensure_qt_app(["pulse-drag"])
 view = PulseScheduleView(); view.set_schedule(vm); view.show(); app.processEvents()
 events = []
-view.move_period_requested.connect(lambda period, before: events.append((period, before)))
+view.reorder_items_requested.connect(events.append)
 strip = view.drag_container
 
 def drop(period_id, x):
+    import json
     data = QtCore.QMimeData()
-    data.setData(strip.CARD_MIME, QtCore.QByteArray(period_id.encode("utf-8")))
+    data.setData(strip.ITEM_MIME, QtCore.QByteArray(json.dumps(("period", period_id)).encode("utf-8")))
     event = QtGui.QDropEvent(
         QtCore.QPoint(x, 5), QtCore.Qt.MoveAction, data,
         QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
@@ -263,12 +269,12 @@ def drop(period_id, x):
 cards = strip.pulse_cards()
 # Dropped left of the first card: it goes before p1.
 drop("p2", cards[0].geometry().left())
-assert events == [("p2", "p1")], events
+assert events == [(("period", "p2"), ("period", "p1"))], events
 
 # Dropped past the last card: it goes to the end, which is "before nothing".
 events.clear()
 drop("p1", cards[-1].geometry().right() + 40)
-assert events == [("p1", None)], events
+assert events == [(("period", "p2"), ("period", "p1"))], events
 
 # Dropped on itself proposes nothing at all.
 events.clear()
@@ -423,7 +429,7 @@ def test_clicking_a_period_or_a_gap_decides_where_the_next_one_lands() -> None:
 
     A selected gap inserts there, a selected card inserts AFTER it,
     Remove takes the selected one, and clicking the current selection again
-    clears it.  Here ``_selected_before_id`` returned None unconditionally and
+    clears it.  Previously the insertion target was always None and
     ``gap_clicked`` was declared but never emitted, so a period could only ever
     be appended and Remove could only ever take the last -- an operator had no
     way to say "here".
@@ -463,14 +469,14 @@ asked.clear()
 container.period_clicked.emit("p0"); app.processEvents()
 assert container.selection() == ("p0", None, None)
 view.add_button.click(); view.remove_button.click()
-assert asked == [("add", "p1"), ("remove", "p0")], asked
+assert asked == [("add", ("period", "p1")), ("remove", "p0")], asked
 
 # a selected GAP inserts there, and the two selections are exclusive
 asked.clear()
 container.gap_clicked.emit(0); app.processEvents()
 assert container.selection() == (None, None, 0), container.selection()
 view.add_button.click()
-assert asked == [("add", "p0")], asked
+assert asked == [("add", ("period", "p0"))], asked
 
 # clicking the current selection again clears it
 container.gap_clicked.emit(0); app.processEvents()
@@ -716,15 +722,15 @@ QtWidgets.QApplication.sendEvent(start_post, QtGui.QMouseEvent(
 ))
 schedule_module.QtGui.QDrag = real_drag
 assert len(started) == 1
-assert started[0].data.hasFormat(strip.BRACKET_MIME)
-assert bytes(started[0].data.data(strip.BRACKET_MIME)).decode("utf-8") == (
-    "\0".join(("start", "p1", "p1", "4"))
-)
+import json
+assert started[0].data.hasFormat(strip.ITEM_MIME)
+assert json.loads(bytes(started[0].data.data(strip.ITEM_MIME))) == ["bracket", "start"]
 
-def drop(kind, start, end, count, x):
+orders = []
+view.reorder_items_requested.connect(orders.append)
+def drop(kind, x):
     data = QtCore.QMimeData()
-    payload = "\0".join((kind, start, end, str(count))).encode("utf-8")
-    data.setData(strip.BRACKET_MIME, QtCore.QByteArray(payload))
+    data.setData(strip.ITEM_MIME, QtCore.QByteArray(json.dumps(("bracket", kind)).encode("utf-8")))
     event = QtGui.QDropEvent(
         QtCore.QPoint(x, 5), QtCore.Qt.MoveAction, data,
         QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
@@ -733,12 +739,13 @@ def drop(kind, start, end, count, x):
     return event.isAccepted()
 
 cards = strip.pulse_cards()
-assert drop("end", "p1", "p1", 4, cards[-1].geometry().right() + 40)
-assert bracket_requests == [("p1", "p2", 4)]
+assert drop("end", strip.items()[-1].geometry().right() + 40)
+assert orders == [(("bracket", "start"), ("period", "p1"), ("period", "p2"), ("bracket", "end"))]
+assert bracket_requests == [], "drag proposes item order, not a second endpoint update"
 assert view._schedule.bracket == bracketed.bracket, "a drop is proposal-only"
 
 # Re-project the accepted span, then move its left post to the first gap.
-bracket_requests.clear()
+orders.clear()
 right_only = replace(
     bracketed,
     revision=4,
@@ -747,14 +754,14 @@ right_only = replace(
 assert view.set_schedule(right_only)
 app.processEvents()
 cards = strip.pulse_cards()
-assert drop("start", "p2", "p2", 4, cards[0].geometry().left())
-assert bracket_requests == [("p1", "p2", 4)]
+assert drop("start", strip.items()[0].geometry().left())
+assert orders == [(("bracket", "start"), ("period", "p1"), ("period", "p2"), ("bracket", "end"))]
 assert view._schedule.bracket == right_only.bracket
 
 # A post cannot cross its partner; an illegal gap commits nothing.
-bracket_requests.clear()
-assert not drop("start", "p2", "p2", 4, cards[-1].geometry().right() + 40)
-assert bracket_requests == []
+orders.clear()
+assert not drop("start", strip.items()[-1].geometry().right() + 40)
+assert orders == [] and bracket_requests == []
 
 view.close(); view.deleteLater()
 app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete); app.processEvents()
@@ -899,10 +906,11 @@ view.show(); app.processEvents()
 strip = view.drag_container
 cards = strip.pulse_cards()
 
-def hover(mime, payload, x):
+def hover(key, x):
     """One dragMoveEvent, and what the strip decided about it."""
     data = QtCore.QMimeData()
-    data.setData(mime, QtCore.QByteArray(payload.encode("utf-8")))
+    import json
+    data.setData(strip.ITEM_MIME, QtCore.QByteArray(json.dumps(key).encode("utf-8")))
     event = QtGui.QDragMoveEvent(
         QtCore.QPoint(x, 5), QtCore.Qt.MoveAction, data,
         QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
@@ -913,25 +921,26 @@ def hover(mime, payload, x):
 on_itself = cards[0].geometry().center().x()
 elsewhere = cards[-1].geometry().right() + 40
 
-card = strip.CARD_MIME
-post = strip.BRACKET_MIME
+card = ("period", "p1")
+post = ("bracket", "end")
 
 # A move that would change nothing is refused WHILE dragging, not after.
-assert hover(card, "p1", on_itself) == (False, False)
-assert hover(post, "\0".join(("end", "p1", "p1", "4")), on_itself) == (False, False)
+assert hover(card, on_itself) == (False, False)
+end_post = next(item for item in strip.items() if strip._item_key(item) == post)
+assert hover(post, end_post.geometry().center().x()) == (False, False)
 
 # A move that would do something is offered, and shows where it lands.
-assert hover(card, "p1", elsewhere) == (True, True)
-assert hover(post, "\0".join(("end", "p1", "p1", "4")), elsewhere) == (True, True)
+assert hover(card, elsewhere) == (True, True)
+assert hover(post, elsewhere) == (True, True)
 
 # And what the marker offered is what the drop commits -- for both.
-moves, brackets = [], []
-view.move_period_requested.connect(lambda *payload: moves.append(payload))
-view.bracket_committed.connect(lambda *payload: brackets.append(payload))
+moves = []
+view.reorder_items_requested.connect(moves.append)
 
-def drop(mime, payload, x):
+def drop(key, x):
     data = QtCore.QMimeData()
-    data.setData(mime, QtCore.QByteArray(payload.encode("utf-8")))
+    import json
+    data.setData(strip.ITEM_MIME, QtCore.QByteArray(json.dumps(key).encode("utf-8")))
     event = QtGui.QDropEvent(
         QtCore.QPoint(x, 5), QtCore.Qt.MoveAction, data,
         QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
@@ -939,12 +948,12 @@ def drop(mime, payload, x):
     strip.dropEvent(event)
     return event.isAccepted()
 
-assert drop(card, "p1", on_itself) is False and moves == []
-assert drop(post, "\0".join(("end", "p1", "p1", "4")), on_itself) is False
-assert brackets == []
-assert drop(card, "p1", elsewhere) is True and moves == [("p1", None)]
-assert drop(post, "\0".join(("end", "p1", "p1", "4")), elsewhere) is True
-assert brackets == [("p1", "p2", 4)]
+assert drop(card, on_itself) is False and moves == []
+assert drop(post, end_post.geometry().center().x()) is False and moves == []
+assert drop(card, elsewhere) is True
+assert moves == [(("bracket", "start"), ("bracket", "end"), ("period", "p2"), card)]
+assert drop(post, elsewhere) is True
+assert moves[-1] == (("bracket", "start"), card, ("period", "p2"), post)
 
 view.close(); view.deleteLater()
 app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
@@ -978,6 +987,7 @@ view.show(); app.processEvents()
 strip = view.drag_container
 cards = strip.pulse_cards()
 posts = {post.kind: post for post in strip.findChildren(BracketPost)}
+assert all(item.cursor().shape() == QtCore.Qt.ArrowCursor for item in (*cards, *posts.values()))
 
 def click(widget):
     for kind in (QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonRelease):
@@ -1185,7 +1195,9 @@ label = next(w for w in card.findChildren(QtWidgets.QLabel) if w.text() == "Dura
 local = label.rect().center()
 global_pos = label.mapToGlobal(local)
 starts = []
-strip._begin_card_drag = starts.append
+strip._begin_drag = starts.append
+assert card.cursor().shape() == QtCore.Qt.ArrowCursor
+assert label.cursor().shape() == QtCore.Qt.ArrowCursor
 
 def send(kind, button, buttons):
     event = QtGui.QMouseEvent(kind, QtCore.QPointF(local), QtCore.QPointF(global_pos),
@@ -1206,7 +1218,7 @@ far = global_pos + QtCore.QPoint(QtWidgets.QApplication.startDragDistance() * 3,
 QtWidgets.QApplication.sendEvent(label, QtGui.QMouseEvent(
     QtCore.QEvent.MouseMove, QtCore.QPointF(label.mapFromGlobal(far)), QtCore.QPointF(far),
     QtCore.Qt.NoButton, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier))
-assert starts == ["p1"]
+assert starts == [("period", "p1")]
 view.close(); view.deleteLater()
 app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
 '''

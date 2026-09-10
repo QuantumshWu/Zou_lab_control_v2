@@ -191,6 +191,27 @@ def test_pulse_tree_uses_only_bracket_and_run_repeats() -> None:
     assert not hasattr(authored, "repeat")
     assert sequence_from_tree(tree) == authored
 
+    for start, end, gap in (("p0", None, 0), ("p1", "p0", 1), (None, "p2", 3)):
+        empty = replace(authored, bracket=PulseBracket(start, end, 3))
+        assert empty.bracket_bounds == (gap, gap)
+        raw = {**tree, "bracket": {"start_period_id": start, "end_period_id": end, "count": 3}}
+        messages = []
+        for operation in (
+            empty.require_nonempty_bracket,
+            lambda: compile_sequence(empty, StreamerParams(max_edges=8, bank_size=2), 50e6),
+            lambda: sequence_to_tree(empty),
+            lambda: sequence_from_tree(raw),
+        ):
+            try:
+                operation()
+            except ValueError as error:
+                messages.append(str(error))
+            else:
+                raise AssertionError("empty authoring bracket escaped the execution/save boundary")
+        assert len(set(messages)) == 1 and "bracket is empty" in messages[0]
+    with np.testing.assert_raises_regex(ValueError, "end precedes"):
+        replace(authored, bracket=PulseBracket("p2", "p0", 3))
+
     obsolete = dict(tree)
     obsolete["repeat"] = obsolete.pop("bracket")
     with np.testing.assert_raises_regex(ValueError, "unknown pulse field.*repeat"):

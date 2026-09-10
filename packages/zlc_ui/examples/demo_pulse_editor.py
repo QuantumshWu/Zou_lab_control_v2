@@ -248,7 +248,7 @@ def populate(editor) -> None:
         (schedule.digital_committed, "digital_committed"),
         (schedule.analog_committed, "analog_committed"),
         (schedule.binding_cycle_requested, "binding_cycle_requested"),
-        (schedule.move_period_requested, "move_period_requested"),
+        (schedule.reorder_items_requested, "reorder_items_requested"),
         (schedule.bracket_committed, "bracket_committed"),
         (schedule.run_repeats_committed, "run_repeats_committed"),
         (schedule.visible_ports_committed, "visible_ports_committed"),

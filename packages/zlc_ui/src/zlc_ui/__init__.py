@@ -48,6 +48,7 @@ _EXPORTS = {
     "BindingRecord": ("zlc_ui.pulse.models", "BindingRecord"),
     "ScanPageRecord": ("zlc_ui.pulse.models", "ScanPageRecord"),
     "ScheduleVM": ("zlc_ui.pulse.models", "ScheduleVM"),
+    "schedule_item_order": ("zlc_ui.pulse.models", "schedule_item_order"),
     "TargetPortRecord": ("zlc_ui.pulse.models", "TargetPortRecord"),
     "TargetWidthRule": ("zlc_ui.pulse.models", "TargetWidthRule"),
     "VALIDATOR_FLOAT": ("zlc_ui.pulse.models", "VALIDATOR_FLOAT"),

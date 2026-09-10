@@ -58,14 +58,19 @@ thing the controls do.  A port whose `kind` changes under the same key is
 rebuilt as a new row.
 
 `PeriodCard`, `ChannelNamesPanel`, `ChannelPanel`, `BracketPost`, and
-`PulseDragContainer` are reusable subviews. A period drag emits
-`move_period_requested(period_id, before_period_id)`; a post drag emits
-`bracket_committed(start_period_id, end_period_id, count)`. Neither mutates
-local state; the presenter commits the new `ScheduleVM`. The schedule page
+`PulseDragContainer` are reusable subviews. `ScheduleVM.item_order` derives
+one visual order of `(kind, id)` items from periods and bracket anchors;
+both post and period drags emit `reorder_items_requested(item_order)`.
+Add targets the next visual item, not the next period, so both sides of a
+post are distinct gaps. Neither drag mutates local state; the presenter
+commits period order and bracket anchors atomically in the new `ScheduleVM`.
+Empty brackets remain editable; running or saving requires nonempty content.
+`bracket_committed(start_period_id, end_period_id, count)` handles explicit
+Add/Delete and count edits. The schedule page
 also emits `document_name_committed`, `port_label_committed`,
 `period_name_committed`, `duration_committed`, `digital_committed`,
 `analog_committed`, `delay_committed`, `binding_cycle_requested`,
-`insert_period_requested`, `move_period_requested`,
+`insert_period_requested`, `reorder_items_requested`,
 `remove_period_requested`, `bracket_committed`, `run_repeats_committed`,
 `visible_ports_committed`,
 `clear_port_requested`, `clear_all_requested`, the run/save/load/connection

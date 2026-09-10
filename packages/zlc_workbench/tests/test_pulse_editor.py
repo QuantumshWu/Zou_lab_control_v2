@@ -84,7 +84,7 @@ class _ScheduleView:
         "analog_committed",
         "delay_committed",
         "insert_period_requested",
-        "move_period_requested",
+        "reorder_items_requested",
         "remove_period_requested",
         "bracket_committed",
         "run_repeats_committed",
@@ -353,7 +353,7 @@ class _EditorView:
         "document_name_committed", "port_label_committed",
         "period_name_committed", "duration_committed", "digital_committed",
         "analog_committed", "delay_committed", "binding_cycle_requested",
-        "insert_period_requested", "move_period_requested",
+        "insert_period_requested", "reorder_items_requested",
         "remove_period_requested", "bracket_committed",
         "run_repeats_committed",
         "visible_ports_committed", "fill_port_requested", "clear_port_requested",
@@ -691,12 +691,64 @@ def test_inserting_a_period_copies_its_neighbour(presenter) -> None:
     """A new period that zeroes every lane inserts a silent gap mid-sequence."""
 
     before = presenter.sequence.periods
-    presenter.view.insert_period_requested.emit(before[1].period_id)
+    presenter.view.insert_period_requested.emit(("period", before[1].period_id))
 
     after = presenter.sequence.periods
     assert len(after) == len(before) + 1
     assert after[1].states == before[0].states
     assert len({period.period_id for period in after}) == len(after)
+
+    # The posts, not the endpoint cards, decide bracket membership. Four
+    # visually distinct boundary gaps must remain distinguishable at Add.
+    from zlc_pulse import PulseBracket
+    from zlc_ui.pulse.models import schedule_item_order
+
+    ids = tuple(period.period_id for period in after)
+    presenter.set_bracket(ids[1], ids[2], 3)
+    baseline = presenter.sequence
+    order = schedule_item_order(ids, ids[1], ids[2])
+    assert presenter.view.schedule_view.schedule.item_order == order
+    for before_item, included in (
+        (("bracket", "start"), False), (("period", ids[1]), True),
+        (("bracket", "end"), True), (("period", ids[3]), False),
+    ):
+        presenter._apply(baseline)
+        presenter.insert_period(before_item)
+        current = [period.period_id for period in presenter.sequence.periods]
+        added = next(key for key in current if key not in ids)
+        bracket = presenter.sequence.bracket
+        members = current[current.index(bracket.start_period_id):current.index(bracket.end_period_id) + 1]
+        assert (added in members) is included
+        assert bracket.count == 3
+
+    # Moving either old boundary card outside leaves the other inside; the
+    # candidate changes order and inclusive endpoints together, never reversed.
+    for moving, before_item, remaining in (
+        (ids[1], None, ids[2]), (ids[2], ("period", ids[0]), ids[1]),
+    ):
+        presenter._apply(baseline)
+        changed = list(order)
+        item = ("period", moving)
+        changed.remove(item)
+        changed.insert(len(changed) if before_item is None else changed.index(before_item), item)
+        presenter.view.reorder_items_requested.emit(tuple(changed))
+        assert tuple(period.period_id for period in presenter.sequence.periods) == tuple(
+            key for kind, key in changed if kind == "period")
+        assert presenter.sequence.bracket == PulseBracket(remaining, remaining, 3)
+        assert presenter.sequence.run_repeats == baseline.run_repeats
+
+    presenter._apply(baseline)
+    presenter.remove_period(ids[1])
+    assert presenter.sequence.bracket == PulseBracket(ids[2], ids[2], 3)
+    presenter.remove_period(ids[2])
+    assert presenter.sequence.bracket == PulseBracket(ids[3], ids[0], 3)
+    assert presenter.sequence.bracket_bounds == (1, 1)
+    presenter.insert_period(("bracket", "end"))
+    presenter.sequence.require_nonempty_bracket()
+    assert presenter.sequence.bracket.start_period_id == presenter.sequence.bracket.end_period_id
+    assert not presenter.view.warnings
+    with pytest.raises(TypeError, match="schedule item tuple"):
+        presenter.insert_period(ids[0])
 
 
 def test_clearing_a_port_leaves_the_others_and_its_delay_alone(presenter, sequence) -> None:
@@ -2512,7 +2564,7 @@ def test_a_change_of_shape_does_rebuild(presenter, sequence) -> None:
     schedule = presenter.view.schedule_view
     before = schedule.rebuilds
 
-    presenter.view.insert_period_requested.emit(sequence.periods[1].period_id)
+    presenter.view.insert_period_requested.emit(("period", sequence.periods[1].period_id))
 
     assert schedule.rebuilds == before + 1
     assert len(presenter.sequence.periods) == len(sequence.periods) + 1
@@ -2976,7 +3028,7 @@ def test_hide_off_keeps_what_the_pulse_drives_and_show_all_brings_it_back(sequen
         presenter.close()
 
 
-def test_a_bracket_repeats_at_least_twice_or_it_is_not_a_bracket(sequence) -> None:
+def test_a_bracket_repeats_at_least_twice_or_it_is_not_a_bracket(sequence, tmp_path) -> None:
     """Add Bracket silently undid itself.
 
     The view model carried default_bracket_count=1 and the presenter reads a
@@ -2986,7 +3038,7 @@ def test_a_bracket_repeats_at_least_twice_or_it_is_not_a_bracket(sequence) -> No
     minimum is the domain's to state, and now does.
     """
 
-    from zlc_pulse import MINIMUM_BRACKET_COUNT
+    from zlc_pulse import MINIMUM_BRACKET_COUNT, PulseBracket
 
     view = _EditorView()
     presenter = PulseEditorPresenter(view, sequence)
@@ -3002,6 +3054,49 @@ def test_a_bracket_repeats_at_least_twice_or_it_is_not_a_bracket(sequence) -> No
 
         presenter.set_bracket(None, None, 0)
         assert presenter.sequence.bracket is None
+    finally:
+        presenter.close()
+
+    board = _Sequencer()
+    view = _EditorView()
+    presenter = PulseEditorPresenter(view, sequence, sequencer=board)
+    target = tmp_path / "empty.json"
+    asked = []
+    view.ask_save_path = lambda *args: (asked.append(args), str(target))[1]
+    ids = tuple(period.period_id for period in sequence.periods)
+    try:
+        for start, end, gap in ((ids[0], None, 0), (ids[1], ids[0], 1), (None, ids[-1], len(ids))):
+            presenter._apply(replace(sequence, bracket=PulseBracket(start, end, 3)))
+            presenter.set_bracket(start, end, 5)  # Count editing cannot delete an edge-empty span.
+            current = presenter.sequence
+            assert current.bracket_bounds == (gap, gap) and current.bracket.count == 5
+            with pytest.raises(ValueError, match="bracket loops at least"):
+                presenter.set_bracket(start, end, 1)
+            assert presenter.sequence is current
+            order = view.schedule_view.schedule.item_order
+            assert order.index(("bracket", "end")) == order.index(("bracket", "start")) + 1
+            assert view.warnings == [], "ordinary empty-bracket editing raised a modal warning"
+            with pytest.raises(ValueError) as refusal:
+                current.require_nonempty_bracket()
+            message = str(refusal.value)
+            board.events.clear()
+            baseline, path = presenter._saved_state, presenter.path
+            assert presenter.fire() is False
+            view.fire_requested.emit()
+            assert presenter.load_into_sequencer() is False
+            assert presenter.save_pulse() == ""
+            presenter.save_preview_image()
+            assert view.warnings == [message] * 5
+            assert board.events == [] and asked == [] and not target.exists()
+            assert presenter.sequence is current and presenter._saved_state is baseline and presenter.path == path
+            with pytest.raises(ValueError, match="bracket is empty"):
+                timeline_of(current)
+            view.warnings.clear()
+            presenter.insert_period(("bracket", "end"))
+            presenter.sequence.require_nonempty_bracket()
+            assert presenter.compile()[1].loop_count == 5
+            assert presenter.sequence.run_repeats == sequence.run_repeats
+        assert presenter.save_pulse() == str(target) and target.exists()
     finally:
         presenter.close()
 
@@ -3803,16 +3898,16 @@ def test_a_defective_handler_warns_instead_of_killing_the_editor(sequence) -> No
     def detonate(*_args):
         raise LookupError("wired to fail")
 
-    presenter.move_period = detonate
-    view.move_period_requested.emit("p0", 1)
+    presenter.reorder_items = detonate
+    view.reorder_items_requested.emit((("period", "p0"),))
     assert any(
-        "internal error in move_period" in warning and "wired to fail" in warning
+        "internal error in reorder_items" in warning and "wired to fail" in warning
         for warning in view.warnings
     ), view.warnings
     import pytest as _pytest
 
     with _pytest.raises(LookupError):
-        presenter.move_period("p0", 1)
+        presenter.reorder_items((("period", "p0"),))
 
 
 # ---------------------------------------------------------------------------

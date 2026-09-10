@@ -85,6 +85,7 @@ from zlc_ui import (
 
 from .device_use import DeviceClaim, DeviceLease, DeviceUseBusy, DeviceUseCoordinator
 from .pulse_state import PulseEditorState, read_pulse, write_pulse
+from zlc_ui import schedule_item_order
 
 
 _LOG = logging.getLogger(__name__)
@@ -107,6 +108,15 @@ __all__ = [
 #: drawing anything.  Offered shortest first, which is presentation and is all
 #: this line decides.
 _TIME_UNITS = TIME_UNIT_CHOICES
+
+
+def _sequence_item_order(sequence: PulseSequence) -> tuple[tuple[str, str], ...]:
+    bracket = sequence.bracket
+    return schedule_item_order(
+        tuple(period.period_id for period in sequence.periods),
+        None if bracket is None else bracket.start_period_id,
+        None if bracket is None else bracket.end_period_id,
+    )
 
 
 def _nanoseconds(value: float, unit: str) -> float:
@@ -735,6 +745,7 @@ def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
     other way is a drawing of something else.
     """
 
+    sequence.require_nonempty_bracket()
     from zlc_plot import (
         PulseAnalogTrace,
         PulseBlock,
@@ -1169,7 +1180,7 @@ class PulseEditorPresenter:
         view.analog_committed.connect(self._guarded(self.set_analog))
         view.delay_committed.connect(self._guarded(self.set_delay))
         view.insert_period_requested.connect(self._guarded(self.insert_period))
-        view.move_period_requested.connect(self._guarded(self.move_period))
+        view.reorder_items_requested.connect(self._guarded(self.reorder_items))
         view.remove_period_requested.connect(self._guarded(self.remove_period))
         view.bracket_committed.connect(self._guarded(self.set_bracket))
         view.run_repeats_committed.connect(self._guarded(self.set_run_repeats))
@@ -1603,7 +1614,7 @@ class PulseEditorPresenter:
             self._rebuilt(delays=delays), port_key=str(port_key)
         )
 
-    def insert_period(self, before_period_id: object) -> None:
+    def insert_period(self, before_item: tuple[str, str] | None) -> None:
         """Add one period, copying the state its neighbour was already in.
 
         With no pulse open this is how one starts: the first period is what
@@ -1614,66 +1625,84 @@ class PulseEditorPresenter:
         visible as a longer hold, which is what the operator can then edit.
         """
 
+        if before_item is not None and (
+            not isinstance(before_item, tuple) or len(before_item) != 2
+            or any(not isinstance(value, str) for value in before_item)
+        ):
+            raise TypeError("insert target must be a schedule item tuple or None")
         if self.sequence is None:
             self.start_new_pulse()
             return
         periods = list(self.sequence.periods)
         ids = [period.period_id for period in periods]
-        position = ids.index(str(before_period_id)) if before_period_id in ids else len(periods)
-        model = periods[max(0, position - 1)] if periods else None
+        order = list(_sequence_item_order(self.sequence))
+        position = order.index(before_item) if before_item is not None else len(order)
+        period_position = sum(kind == "period" for kind, _key in order[:position])
+        model = periods[max(0, period_position - 1)] if periods else None
         new_id = _unique_id(ids, "period")
-        periods.insert(
-            position,
-            PulsePeriod(
-                period_id=new_id,
-                duration=model.duration if model else self.sequence.time_step_ns,
-                unit=model.unit if model else "ns",
-                states=model.states if model else (0,) * len(self.sequence.target.raw_lanes),
-                analog_steps=(),
-                name="",
-            ),
+        period = PulsePeriod(
+            period_id=new_id,
+            duration=model.duration if model else self.sequence.time_step_ns,
+            unit=model.unit if model else "ns",
+            states=model.states if model else (0,) * len(self.sequence.target.raw_lanes),
+            analog_steps=(),
+            name="",
         )
-        self._apply(self._rebuilt(periods=tuple(periods)))
+        order.insert(position, ("period", new_id))
+        self._apply_item_order(order, periods={p.period_id: p for p in (*periods, period)})
 
-    def move_period(self, period_id: str, before_period_id: object) -> None:
-        periods = list(self.sequence.periods)
-        ids = [period.period_id for period in periods]
-        if period_id not in ids:
+    def reorder_items(self, order: Sequence[tuple[str, str]]) -> None:
+        self._apply_item_order(order)
+
+    def _apply_item_order(
+        self, order: Sequence[tuple[str, str]], *, periods: Mapping[str, PulsePeriod] | None = None,
+    ) -> None:
+        """Commit periods and their inclusive bracket anchors in one rebuild."""
+        if self.sequence is None:
             return
-        moving = periods.pop(ids.index(period_id))
-        ids = [period.period_id for period in periods]
-        position = ids.index(str(before_period_id)) if before_period_id in ids else len(periods)
-        periods.insert(position, moving)
-        self._apply(self._rebuilt(periods=tuple(periods)))
-
-    def remove_period(self, period_id: str) -> None:
-        periods = tuple(
-            period for period in self.sequence.periods if period.period_id != period_id
-        )
-        if not periods:
+        by_id = {p.period_id: p for p in self.sequence.periods} if periods is None else dict(periods)
+        if not by_id:
             self._warn("a sequence needs at least one period")
             return
+        items = tuple(tuple(item) for item in order)
         bracket = self.sequence.bracket
-        if bracket is not None and period_id in (
-            bracket.start_period_id,
-            bracket.end_period_id,
-        ):
-            bracket = None
-        self._apply(self._rebuilt(periods=periods, bracket=bracket))
+        expected = {("period", key) for key in by_id}
+        if bracket is not None:
+            expected.update((("bracket", "start"), ("bracket", "end")))
+        if len(items) != len(expected) or set(items) != expected:
+            raise ValueError("schedule order must contain each current item exactly once")
+        if bracket is not None:
+            start = items.index(("bracket", "start"))
+            end = items.index(("bracket", "end"))
+            if end < start:
+                self._warn("bracket end precedes bracket start")
+                return
+            first = next((key for kind, key in items[start + 1:] if kind == "period"), None)
+            last = next((key for kind, key in reversed(items[:end]) if kind == "period"), None)
+            bracket = PulseBracket(first, last, bracket.count)
+        self._apply(self._rebuilt(
+            periods=tuple(by_id[key] for kind, key in items if kind == "period"), bracket=bracket,
+        ))
+
+    def remove_period(self, period_id: str) -> None:
+        periods = {p.period_id: p for p in self.sequence.periods if p.period_id != period_id}
+        order = tuple(item for item in _sequence_item_order(self.sequence) if item != ("period", period_id))
+        self._apply_item_order(order, periods=periods)
 
     def set_bracket(self, start: object, end: object, count: int) -> None:
         """Bracket these periods, or clear the bracket.
 
-        No start, no end, or a count below the domain's minimum all mean the
-        same thing: there is no bracket.
+        Explicit deletion clears the bracket. One missing neighbour instead
+        locates an empty bracket at the first or last timeline gap.
         """
 
-        if start is None or end is None or int(count) < MINIMUM_BRACKET_COUNT:
+        if (start is None and end is None) or int(count) == 0:
             self._apply(self._rebuilt(bracket=None))
             return
         self._apply(
             self._rebuilt(
-                bracket=PulseBracket(str(start), str(end), int(count))
+                bracket=PulseBracket(None if start is None else str(start),
+                                     None if end is None else str(end), int(count))
             )
         )
 
@@ -1835,6 +1864,7 @@ class PulseEditorPresenter:
         sequence = sequence if sequence is not None else self.sequence
         if sequence is None:
             raise RuntimeError("no pulse is open, so there is nothing to compile")
+        sequence.require_nonempty_bracket()
         geometry, clock_hz = self._compiler_target()
         sequencer = self.sequencer
         if sequencer is not None:
@@ -2410,6 +2440,8 @@ class PulseEditorPresenter:
     def load_into_sequencer(self) -> bool:
         """Put what is on screen onto the board, without firing it."""
 
+        if not self._check_bracket():
+            return False
         if self.sequence is None:
             self._warn("no pulse is open")
             return False
@@ -2562,6 +2594,8 @@ class PulseEditorPresenter:
         return source
 
     def _fire_from_view(self) -> None:
+        if not self._check_bracket():
+            return
         if self._run_device_work is None:
             self.fire()
             return
@@ -2769,6 +2803,8 @@ class PulseEditorPresenter:
         invariant lives with the device that owns it.
         """
 
+        if not self._check_bracket():
+            return False
         if self.sequence is None:
             self._warn("no pulse is open")
             return False
@@ -3253,6 +3289,8 @@ class PulseEditorPresenter:
     def save_pulse(self) -> str:
         """Write what is on screen as a ``zlc.pulse`` JSON document."""
 
+        if not self._check_bracket():
+            return ""
         if self.sequence is None:
             self._warn("there is no pulse to save")
             return ""
@@ -4369,6 +4407,8 @@ class PulseEditorPresenter:
         preview rather than a second drawing of the same pulse.
         """
 
+        if not self._check_bracket():
+            return
         if self._preview_host is None:
             self._warn("there is no preview to save")
             return
@@ -4602,6 +4642,15 @@ class PulseEditorPresenter:
         except Exception as error:
             self._warn(str(error))
             return None
+
+    def _check_bracket(self) -> bool:
+        try:
+            if self.sequence is not None:
+                self.sequence.require_nonempty_bracket()
+        except ValueError as error:
+            self._warn(str(error))
+            return False
+        return True
 
     def _warn(self, text: str) -> None:
         warn = getattr(self.view, "show_warning", None)

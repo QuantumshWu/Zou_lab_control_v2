@@ -8,6 +8,7 @@ only :mod:`zlc_ui.pulse.models` records.
 
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -611,8 +612,7 @@ class BracketPost(FluentGroupBox):
         # The count belongs to the end post: a span is closed by saying how
         # many times.  The start post keeps an empty line of the same height so
         # the two posts stay level with each other and with the cards.
-        self.setCursor(QtCore.Qt.SizeHorCursor)
-        self.setToolTip("Drag this post to any valid period gap")
+        self.setToolTip("Drag to move this bracket boundary")
         self.count_spin = fluent_count_box(minimum=int(minimum))
         self.count_spin.setValue(float(count))
         self.count_spin.setFixedSize(width - 2 * px(7), row_height())
@@ -640,7 +640,7 @@ class PulseDragContainer(QtWidgets.QWidget):
     period_clicked = QtCore.pyqtSignal(str)
     bracket_clicked = QtCore.pyqtSignal(str)
     gap_clicked = QtCore.pyqtSignal(int)
-    move_period_requested = QtCore.pyqtSignal(str, object)
+    reorder_items_requested = QtCore.pyqtSignal(object)
     bracket_committed = QtCore.pyqtSignal(object, object, int)
 
     def __init__(self, parent=None) -> None:
@@ -655,7 +655,7 @@ class PulseDragContainer(QtWidgets.QWidget):
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
         self._cards: tuple[PeriodCard, ...] = ()
         self._posts: tuple["BracketPost", ...] = ()
-        self._pressed: tuple[str, str, QtCore.QPoint] | None = None
+        self._pressed: tuple[tuple[str, str], QtCore.QPoint] | None = None
         self._dragging = False
         self._indicator = QtWidgets.QFrame(self)
         self._indicator.setFixedWidth(px(3, minimum=2))
@@ -673,6 +673,7 @@ class PulseDragContainer(QtWidgets.QWidget):
         cards: tuple[PeriodCard, ...],
         bracket: BracketVM | None,
         *,
+        order: tuple[tuple[str, str], ...],
         minimum_bracket: int = 2,
     ) -> None:
         while self.layout_main.count():
@@ -692,24 +693,14 @@ class PulseDragContainer(QtWidgets.QWidget):
             # still holding their text.
             retire_widget(widget)
         self._cards = tuple(cards)
-        for card in self._cards:
-            self.watch_card_chrome(card)
-            self.layout_main.addWidget(card)
+        widgets = {("period", card.period_id): card for card in cards}
         if bracket is not None:
             start = BracketPost("start", minimum=minimum_bracket)
             end = BracketPost(
                 "end", count=bracket.count, minimum=minimum_bracket
             )
-            payload = "\0".join(
-                (
-                    bracket.start_period_id,
-                    bracket.end_period_id,
-                    str(bracket.count),
-                )
-            )
             for post in (start, end):
-                post.setProperty("zlcBracketPayload", payload)
-                self.watch_bracket_chrome(post)
+                widgets[("bracket", post.kind)] = post
             end.count_committed.connect(
                 lambda count,
                 s=bracket.start_period_id,
@@ -717,27 +708,14 @@ class PulseDragContainer(QtWidgets.QWidget):
                     s, e, int(count)
                 )
             )
-            start_index = next(
-                (
-                    i
-                    for i, card in enumerate(self._cards)
-                    if card.period_id == bracket.start_period_id
-                ),
-                0,
-            )
-            end_index = next(
-                (
-                    i
-                    for i, card in enumerate(self._cards)
-                    if card.period_id == bracket.end_period_id
-                ),
-                len(self._cards) - 1,
-            )
-            self.layout_main.insertWidget(start_index, start)
-            self.layout_main.insertWidget(end_index + 2, end)
             self._posts = (start, end)
         else:
             self._posts = ()
+        for key in order:
+            widget = widgets[key]
+            self.watch_item_chrome(widget)
+            self.layout_main.addWidget(widget)
+        self._pressed = None
         self.setMinimumSize(0, 0)
         self.adjustSize()
         # A rebuild drops every outline, and a selection that names a period
@@ -750,7 +728,7 @@ class PulseDragContainer(QtWidgets.QWidget):
         if post is not None and not any(item.kind == post for item in self._posts):
             post = None
         gap = self._selected_gap
-        if gap is not None and gap > len(self._cards):
+        if gap is not None and gap > len(order):
             gap = None
         if card is not None:
             self.show_selection(card=card)
@@ -769,7 +747,7 @@ class PulseDragContainer(QtWidgets.QWidget):
         QtWidgets.QComboBox,
     )
 
-    def watch_card_chrome(self, card: "PeriodCard") -> None:
+    def watch_item_chrome(self, item: QtWidgets.QWidget) -> None:
         """Let a click anywhere that is not an editable control select the card.
 
         A card is almost entirely covered by its own children -- checkboxes,
@@ -779,35 +757,24 @@ class PulseDragContainer(QtWidgets.QWidget):
         underneath and selected a GAP instead.
         """
 
-        card.installEventFilter(self)
-        for child in card.findChildren(QtWidgets.QWidget):
-            self._watch_chrome(child)
-
-    def watch_bracket_chrome(self, post: "BracketPost") -> None:
-        """Make the post itself draggable while leaving its count editable."""
-
-        post.installEventFilter(self)
-        for child in post.findChildren(QtWidgets.QWidget):
-            if not isinstance(child, self._INTERACTIVE):
-                child.setCursor(QtCore.Qt.SizeHorCursor)
+        item.installEventFilter(self)
+        for child in item.findChildren(QtWidgets.QWidget):
+            ancestor = child
+            while ancestor is not item and not isinstance(ancestor, self._INTERACTIVE):
+                ancestor = ancestor.parentWidget()
+            if ancestor is item:
                 child.installEventFilter(self)
 
-    def _watch_chrome(self, widget: QtWidgets.QWidget) -> None:
-        if not isinstance(widget, self._INTERACTIVE):
-            widget.installEventFilter(self)
+    @staticmethod
+    def _item_key(item: QtWidgets.QWidget) -> tuple[str, str]:
+        return ("period", item.period_id) if isinstance(item, PeriodCard) else ("bracket", item.kind)
 
-    def _card_of(self, widget: object) -> "PeriodCard | None":
-        """Which card a watched widget belongs to, if any."""
+    def items(self) -> tuple[QtWidgets.QWidget, ...]:
+        return tuple(self.layout_main.itemAt(index).widget() for index in range(self.layout_main.count()))
 
+    def _item_of(self, widget: object) -> QtWidgets.QWidget | None:
         while isinstance(widget, QtWidgets.QWidget):
-            if isinstance(widget, PeriodCard):
-                return widget
-            widget = widget.parentWidget()
-        return None
-
-    def _post_of(self, widget: object) -> "BracketPost | None":
-        while isinstance(widget, QtWidgets.QWidget):
-            if isinstance(widget, BracketPost):
+            if isinstance(widget, (PeriodCard, BracketPost)):
                 return widget
             widget = widget.parentWidget()
         return None
@@ -871,25 +838,23 @@ class PulseDragContainer(QtWidgets.QWidget):
         self.show_selection()
 
     def _gap_at(self, x: int) -> int:
-        """Which gap an empty-space click at ``x`` means, in period positions.
-
-        0 is before the first card, len(cards) is after the last.
-        """
-
-        for index, card in enumerate(self._cards):
-            if x < card.geometry().center().x():
+        """One gap per visible adjacency, including BOTH sides of each post."""
+        items = self.items()
+        for index, item in enumerate(items):
+            if x < item.geometry().center().x():
                 return index
-        return len(self._cards)
+        return len(items)
 
     def _show_indicator_at_gap(self, position: int) -> None:
-        if not self._cards:
+        items = self.items()
+        if not items:
             self._indicator.hide()
             return
-        clamped = max(0, min(int(position), len(self._cards)))
-        if clamped < len(self._cards):
-            x = self._cards[clamped].geometry().left() - self.layout_main.spacing() // 2
+        clamped = max(0, min(int(position), len(items)))
+        if clamped < len(items):
+            x = items[clamped].geometry().left() - self.layout_main.spacing() // 2
         else:
-            x = self._cards[-1].geometry().right() + self.layout_main.spacing() // 2
+            x = items[-1].geometry().right() + self.layout_main.spacing() // 2
         self._indicator.setGeometry(x, 0, self._indicator.width(), self.height())
         self._indicator.raise_()
         self._indicator.show()
@@ -913,55 +878,40 @@ class PulseDragContainer(QtWidgets.QWidget):
             self.gap_clicked.emit(self._gap_at(event.pos().x()))
         super().mouseReleaseEvent(event)
 
-    def request_move(self, period_id: str, before_period_id: str | None) -> None:
-        self.move_period_requested.emit(str(period_id), before_period_id)
-
-    #: What a dragged period carries.  Typed, so a drop from anywhere else is
-    #: not mistaken for one of ours.
-    CARD_MIME = "application/x-zlc-pulse-card"
-    BRACKET_MIME = "application/x-zlc-pulse-bracket"
+    ITEM_MIME = "application/x-zlc-pulse-item"
 
     def dragEnterEvent(self, event):  # noqa: N802 - Qt name
-        if event.mimeData().hasFormat(self.CARD_MIME) or event.mimeData().hasFormat(
-            self.BRACKET_MIME
-        ):
+        if event.mimeData().hasFormat(self.ITEM_MIME):
             event.acceptProposedAction()
         else:
             super().dragEnterEvent(event)
 
     def _proposal_at(self, data: QtCore.QMimeData, gap: int) -> object | None:
-        """What dropping THIS payload in THIS gap would do, or None for nothing.
-
-        One question, asked by the two events that must never disagree about
-        it.  While the cursor moves it decides whether to offer the gap at
-        all; when the button comes up it decides what to emit.  A card and a
-        post are different payloads and the same gesture, so they differ in
-        the payload and nowhere else.
-        """
-
-        if data.hasFormat(self.BRACKET_MIME):
-            return self._bracket_proposal(data, gap)
-        if data.hasFormat(self.CARD_MIME):
-            return self._card_proposal(data, gap)
-        return None
+        """Move one visible item; never mutate the accepted document locally."""
+        if not data.hasFormat(self.ITEM_MIME):
+            return None
+        try:
+            key = tuple(json.loads(bytes(data.data(self.ITEM_MIME))))
+        except (TypeError, ValueError):
+            return None
+        order = [self._item_key(item) for item in self.items()]
+        if key not in order or not 0 <= gap <= len(order):
+            return None
+        here = order.index(key)
+        if gap in (here, here + 1):
+            return None
+        order.pop(here)
+        order.insert(gap - int(here < gap), key)
+        if self._posts:
+            # Empty brackets remain editable; only crossing the posts is not
+            # an ordered pair of boundaries. Execution validates the content.
+            if order.index(("bracket", "end")) < order.index(("bracket", "start")):
+                return None
+        return tuple(order)
 
     def dragMoveEvent(self, event):  # noqa: N802 - Qt name
-        """Offer only the gaps that would actually do something.
-
-        Without this the whole gesture was invisible: the drop position was
-        decided from where the button happened to come up, with nothing on
-        screen to aim at, so a drag that clearly went somewhere did nothing.
-        It arrived for the bracket post alone, and the card kept half of the
-        old problem: it accepted every gap and showed the marker in all of
-        them, including the two that mean "where it already is", and then
-        discarded the drop in silence.  A gesture that says yes and does
-        nothing is worse than one that says no.
-        """
-
-        if not (
-            event.mimeData().hasFormat(self.CARD_MIME)
-            or event.mimeData().hasFormat(self.BRACKET_MIME)
-        ):
+        """The marker and drop consume exactly the same ordering proposal."""
+        if not event.mimeData().hasFormat(self.ITEM_MIME):
             return super().dragMoveEvent(event)
         gap = self._gap_at(event.pos().x())
         if self._proposal_at(event.mimeData(), gap) is None:
@@ -984,7 +934,7 @@ class PulseDragContainer(QtWidgets.QWidget):
         """
 
         data = event.mimeData()
-        if not (data.hasFormat(self.CARD_MIME) or data.hasFormat(self.BRACKET_MIME)):
+        if not data.hasFormat(self.ITEM_MIME):
             return super().dropEvent(event)
         proposal = self._proposal_at(data, self._gap_at(event.pos().x()))
         self._restore_selection()
@@ -992,10 +942,7 @@ class PulseDragContainer(QtWidgets.QWidget):
             event.ignore()
             return
         event.acceptProposedAction()
-        if data.hasFormat(self.BRACKET_MIME):
-            self.bracket_committed.emit(*proposal)
-        else:
-            self.move_period_requested.emit(*proposal)
+        self.reorder_items_requested.emit(proposal)
 
     def _restore_selection(self) -> None:
         """Put back whatever was picked before the drag moved the marker."""
@@ -1006,141 +953,51 @@ class PulseDragContainer(QtWidgets.QWidget):
             gap=self._selected_gap,
         )
 
-    def _card_proposal(
-        self, data: QtCore.QMimeData, gap: int
-    ) -> tuple[str, str | None] | None:
-        """Translate a card drop into one proposed move: what, and before what.
-
-        ``None`` where the move would change nothing.  The gap just before a
-        card and the gap just after it are both where that card already is,
-        so proposing either is a rebuild of the whole board for no change.
-        """
-
-        period_id = bytes(data.data(self.CARD_MIME)).decode("utf-8")
-        order = [card.period_id for card in self._cards]
-        if period_id not in order:
-            return None
-        here = order.index(period_id)
-        if gap in (here, here + 1):
-            return None
-        return period_id, (order[gap] if gap < len(order) else None)
-
-    def _bracket_proposal(
-        self, data: QtCore.QMimeData, gap: int
-    ) -> tuple[str, str, int] | None:
-        """Translate a post drop into one proposed inclusive bracket span."""
-
-        parts = bytes(data.data(self.BRACKET_MIME)).decode("utf-8").split("\0")
-        if len(parts) != 4:
-            return None
-        kind, start, end, count_text = parts
-        order = [card.period_id for card in self._cards]
-        if start not in order or end not in order:
-            return None
-        count = int(count_text)
-        start_index = order.index(start)
-        end_index = order.index(end)
-        if kind == "start" and 0 <= gap <= end_index:
-            candidate = (order[gap], end, count)
-        elif kind == "end" and start_index < gap <= len(order):
-            candidate = (start, order[gap - 1], count)
-        else:
-            return None
-        return None if candidate == (start, end, count) else candidate
-
-    def _begin_card_drag(self, period_id: str) -> None:
-        """Carry one period under the cursor, Qt's own way.
-
-        A QDrag is what makes the gesture real: the cursor changes, the widget
-        under it is told, and the drop is a decision taken where the operator
-        let go rather than inferred afterwards from two coordinates.
-        """
-
-        data = QtCore.QMimeData()
-        data.setData(self.CARD_MIME, QtCore.QByteArray(str(period_id).encode("utf-8")))
-        drag = QtGui.QDrag(self)
-        drag.setMimeData(data)
-        card = next((item for item in self._cards if item.period_id == period_id), None)
-        if card is not None:
-            drag.setPixmap(card.grab())
-            drag.setHotSpot(QtCore.QPoint(card.width() // 2, 0))
-        drag.exec_(QtCore.Qt.MoveAction)
-
-    def _begin_bracket_drag(self, post: BracketPost) -> None:
-        payload = str(post.property("zlcBracketPayload") or "")
+    def _begin_drag(self, key: tuple[str, str]) -> None:
+        item = next((item for item in self.items() if self._item_key(item) == key), None)
+        if item is None:
+            return
         data = QtCore.QMimeData()
         data.setData(
-            self.BRACKET_MIME,
-            QtCore.QByteArray(f"{post.kind}\0{payload}".encode("utf-8")),
+            self.ITEM_MIME, QtCore.QByteArray(json.dumps(key).encode("utf-8")),
         )
         drag = QtGui.QDrag(self)
         drag.setMimeData(data)
-        drag.setPixmap(post.grab())
-        drag.setHotSpot(QtCore.QPoint(post.width() // 2, 0))
+        drag.setPixmap(item.grab())
+        drag.setHotSpot(QtCore.QPoint(item.width() // 2, 0))
         drag.exec_(QtCore.Qt.MoveAction)
 
     def eventFilter(self, obj, event):  # noqa: N802
-        # The gesture is measured in GLOBAL coordinates.  A press on a
-        # card's chrome reaches this filter once for the label and once for
-        # the card, each with its own local position; compared across the
-        # two frames, a pointer that had not moved measured a whole label's
-        # offset and started a drag from a click.
-        card = self._card_of(obj)
-        if card is not None:
-            obj = card
-            if (
-                event.type() == QtCore.QEvent.MouseButtonPress
-                and event.button() == QtCore.Qt.LeftButton
-            ):
-                self._pressed = ("card", obj.period_id, event.globalPos())
-                self._dragging = False
-            elif event.type() == QtCore.QEvent.MouseMove and self._pressed is not None:
-                if not self._dragging and (
-                    event.globalPos() - self._pressed[2]
-                ).manhattanLength() >= QtWidgets.QApplication.startDragDistance():
-                    self._dragging = True
-                    period_id = self._pressed[1]
-                    self._pressed = None
-                    self._begin_card_drag(period_id)
-                    return True
-            elif (
-                event.type() == QtCore.QEvent.MouseButtonRelease
-                and event.button() == QtCore.Qt.LeftButton
-            ):
-                # A drag was carried out by the QDrag loop and ended there, so
-                # a press that reaches release without one IS a click.
-                if not self._dragging and self._pressed is not None:
-                    self.period_clicked.emit(obj.period_id)
-                self._pressed = None
-                self._dragging = False
+        item = self._item_of(obj)
+        if item is None:
             return super().eventFilter(obj, event)
-
-        post = self._post_of(obj)
-        if post is not None:
-            if (
-                event.type() == QtCore.QEvent.MouseButtonPress
-                and event.button() == QtCore.Qt.LeftButton
-            ):
-                self._pressed = ("bracket", post.kind, event.globalPos())
-                self._dragging = False
-            elif event.type() == QtCore.QEvent.MouseMove and self._pressed is not None:
-                if not self._dragging and (
-                    event.globalPos() - self._pressed[2]
-                ).manhattanLength() >= QtWidgets.QApplication.startDragDistance():
-                    self._dragging = True
-                    self._pressed = None
-                    self._begin_bracket_drag(post)
-                    return True
-            elif (
-                event.type() == QtCore.QEvent.MouseButtonRelease
-                and event.button() == QtCore.Qt.LeftButton
-            ):
-                # Same rule as a card's: a press that reaches release
-                # without a drag IS a click, and a click picks the thing.
-                if not self._dragging and self._pressed is not None:
-                    self.bracket_clicked.emit(post.kind)
+        key = self._item_key(item)
+        if event.type() == QtCore.QEvent.MouseButtonPress and event.button() == QtCore.Qt.LeftButton:
+            # All descendants use one global frame; propagation through a
+            # label and its card must not turn a stationary click into drag.
+            self._pressed = (key, event.globalPos())
+            self._dragging = False
+        elif event.type() == QtCore.QEvent.MouseMove and self._pressed is not None:
+            if not event.buttons() & QtCore.Qt.LeftButton:
                 self._pressed = None
-                self._dragging = False
+            elif not self._dragging and (
+                event.globalPos() - self._pressed[1]
+            ).manhattanLength() >= QtWidgets.QApplication.startDragDistance():
+                moving = self._pressed[0]
+                self._pressed = None
+                self._dragging = True
+                try:
+                    self._begin_drag(moving)
+                finally:
+                    self._dragging = False
+                    self._restore_selection()
+                return True
+        elif event.type() == QtCore.QEvent.MouseButtonRelease and event.button() == QtCore.Qt.LeftButton:
+            pressed = self._pressed
+            self._pressed = None
+            if not self._dragging and pressed is not None and pressed[0] == key:
+                signal = self.period_clicked if key[0] == "period" else self.bracket_clicked
+                signal.emit(key[1])
         return super().eventFilter(obj, event)
 
 
@@ -1154,7 +1011,7 @@ class PulseScheduleView(QtWidgets.QWidget):
     delay_committed = QtCore.pyqtSignal(str, object, str)
     binding_cycle_requested = QtCore.pyqtSignal(str, object, object)
     insert_period_requested = QtCore.pyqtSignal(object)
-    move_period_requested = QtCore.pyqtSignal(str, object)
+    reorder_items_requested = QtCore.pyqtSignal(object)
     remove_period_requested = QtCore.pyqtSignal(str)
     bracket_committed = QtCore.pyqtSignal(object, object, int)
     run_repeats_committed = QtCore.pyqtSignal(int)
@@ -1437,7 +1294,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.channel_panel.clear_port_requested.connect(self.clear_port_requested)
         self.channel_panel.scan_array_load_requested.connect(self.scan_array_load_requested)
         self.channel_panel.run_repeats_committed.connect(self.run_repeats_committed)
-        self.drag_container.move_period_requested.connect(self.move_period_requested)
+        self.drag_container.reorder_items_requested.connect(self.reorder_items_requested)
         self.drag_container.bracket_committed.connect(self.bracket_committed)
         self.run_button.clicked.connect(self.run_requested)
         self.stop_button.clicked.connect(self.stop_requested)
@@ -1446,7 +1303,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.load_button.clicked.connect(self.load_requested)
         self.load_values_button.clicked.connect(self.values_load_requested)
         self.save_values_button.clicked.connect(self.values_save_requested)
-        self.add_button.clicked.connect(lambda: self.insert_period_requested.emit(self._selected_before_id()))
+        self.add_button.clicked.connect(lambda: self.insert_period_requested.emit(self._selected_before_item()))
         self.remove_button.clicked.connect(self._request_remove_period)
         self.bracket_button.clicked.connect(self._request_toggle_bracket)
         self.collapse_button.clicked.connect(self._toggle_left_panels)
@@ -1583,6 +1440,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.drag_container.set_items(
             tuple(desired[p.period_id] for p in vm.periods),
             vm.bracket,
+            order=vm.item_order,
             minimum_bracket=vm.min_bracket_count,
         )
         if not being_edited(self.channel_panel.run_repeats_spin):
@@ -1635,7 +1493,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         # is known to have happened, rather than guessed at from ChildAdded:
         # a child is not fully constructed when that fires, and touching it
         # there segfaults.
-        self.drag_container.watch_card_chrome(card)
+        self.drag_container.watch_item_chrome(card)
 
     def set_delay_row(self, row: DelayRowVM) -> None:
         if self._schedule is None:
@@ -1826,26 +1684,16 @@ class PulseScheduleView(QtWidgets.QWidget):
             gap=None if current == int(position) else int(position)
         )
 
-    def _selected_before_id(self) -> str | None:
-        """Which period the next Add goes BEFORE, or None to append.
-
-        A selected gap inserts there, a selected card inserts AFTER it, and
-        with neither the new period is appended.  This returned None
-        unconditionally, so a
-        period could only ever be added to the end.
-        """
-
-        periods = self._schedule.periods if self._schedule else ()
-        card, _post, gap = self.drag_container.selection()
+    def _selected_before_item(self) -> tuple[str, str] | None:
+        """Add in the selected visual gap, or immediately after the selection."""
+        order = self._schedule.item_order if self._schedule else ()
+        card, post, gap = self.drag_container.selection()
         if gap is not None:
-            return periods[gap].period_id if gap < len(periods) else None
-        if card is not None:
-            after = next(
-                (index for index, item in enumerate(periods) if item.period_id == card),
-                None,
-            )
-            if after is not None and after + 1 < len(periods):
-                return periods[after + 1].period_id
+            return order[gap] if gap < len(order) else None
+        selected = ("period", card) if card is not None else ("bracket", post)
+        if selected in order:
+            after = order.index(selected) + 1
+            return order[after] if after < len(order) else None
         return None
 
     def _request_remove_period(self) -> None:
@@ -1853,7 +1701,10 @@ class PulseScheduleView(QtWidgets.QWidget):
 
         if not (self._schedule and self._schedule.periods):
             return
-        card, _post, _gap = self.drag_container.selection()
+        card, post, _gap = self.drag_container.selection()
+        if post is not None:
+            self.bracket_committed.emit(None, None, 0)
+            return
         target = card if card is not None else self._schedule.periods[-1].period_id
         self.remove_period_requested.emit(target)
 

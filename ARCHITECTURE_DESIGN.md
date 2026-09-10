@@ -313,6 +313,7 @@ Node new chunk
 
 ### 7.1 Execution vocabulary
 
+- Pulse编辑的Period与Bracket post共用一份只读派生item order、一条drag/drop与插入目标通道；post两侧是不同gap，重排/插入/删除在一次模型更新中同步period顺序和Bracket锚。Bracket可在编辑中为空且绝不自动删除；首/尾空边界允许缺少外邻锚，统一半开gap范围相等即空，不改变任何已有有效Pulse文件格式。只有显式Delete移除Bracket。On Pulse、编译、Save Pulse/Preview及序列导出共用同一nonempty校验和提示，在设备/文件副作用前拒绝；普通Edit不弹错误或抛弃空Bracket。
 - Pulse执行固定为三层且各有唯一owner：`Scan repeats -> scan point -> Run repeats -> Pulse timeline -> PulseBracket`。`PulseBracket`只表达timeline内一个连续period区间的内部loop，左右端点可放在任意合法gap并由一个count控制；即使覆盖整个Pulse也不得冒充Run repeats。每个Pulse最多一个Bracket，因为硬件只有一套`LOOP_*`。Bracket回绕对TTL与DAC是同一件事：RTL在回绕拍输出loop-start边沿的mask，并把每条DAC段表重启到loop-start tick所在的段（恰好从该tick起始的段在回绕拍重放，否则沿用carry值直到该段起始），绝不重启到整个Pulse的第0段——preamble不属于Bracket，它的DAC码不得在任何一次重放中出现。
 - `run_repeats`是Pulse文件的正式字段，UI默认`0 = infinite`，有限值为`1..2^32-1`。无scan时它控制整个Pulse（包含Bracket）执行次数；有scan时它控制同一个scan point保持不变并执行整个Pulse的次数，完成后scan cursor才前进。Task的`shots_per_point`只是本次execution对该值的显式immutable override，不修改保存的Pulse。
 - `scan_repeats`保持独立，`0 = infinite`或有限完整table sweep数；Pulse Scan保留该字段，Seamless的`repeats`只是本次execution对它的override。它不改变Run repeats或Bracket。无scan时scan_repeats固定为1且不参与执行。

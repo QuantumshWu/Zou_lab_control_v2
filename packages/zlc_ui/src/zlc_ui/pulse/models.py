@@ -25,6 +25,24 @@ VALIDATOR_FLOAT = "float"
 VALIDATOR_KINDS = (VALIDATOR_NONE, VALIDATOR_INT, VALIDATOR_FLOAT)
 
 
+def schedule_item_order(
+    period_ids: tuple[str, ...], start: str | None = None, end: str | None = None,
+) -> tuple[tuple[str, str], ...]:
+    """Derive visual items from inclusive period endpoints; store no timeline."""
+    items = []
+    first = len(period_ids) if start is None else period_ids.index(start)
+    stop = 0 if end is None else period_ids.index(end) + 1
+    bracket = start is not None or end is not None
+    for index in range(len(period_ids) + 1):
+        if bracket and index == first:
+            items.append(("bracket", "start"))
+        if bracket and index == stop:
+            items.append(("bracket", "end"))
+        if index < len(period_ids):
+            items.append(("period", period_ids[index]))
+    return tuple(items)
+
+
 @dataclass(frozen=True)
 class FieldVM:
     text: str
@@ -72,8 +90,8 @@ class PeriodVM:
 
 @dataclass(frozen=True)
 class BracketVM:
-    start_period_id: str
-    end_period_id: str
+    start_period_id: str | None
+    end_period_id: str | None
     count: int
 
 
@@ -177,6 +195,14 @@ class ScheduleVM:
     min_bracket_count: int = 2
     default_bracket_count: int = 2
 
+    @property
+    def item_order(self) -> tuple[tuple[str, str], ...]:
+        return schedule_item_order(
+            tuple(period.period_id for period in self.periods),
+            None if self.bracket is None else self.bracket.start_period_id,
+            None if self.bracket is None else self.bracket.end_period_id,
+        )
+
     def __post_init__(self) -> None:
         values = _string_choice_values(
             self.analog_mode_choices,
@@ -247,6 +273,7 @@ __all__ = [
     "BracketVM",
     "ScanPageRecord",
     "ScheduleVM",
+    "schedule_item_order",
     "TargetPortRecord",
     "TargetWidthRule",
 ]
