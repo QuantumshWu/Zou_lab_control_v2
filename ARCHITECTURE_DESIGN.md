@@ -68,7 +68,7 @@
 ### 3.2 Figure archive
 
 - 一个writer、一个reader、一个format owner。
-- Figure reader直接返回metadata、NPZ成员和已经完整验证的typed datasets；typed成员与Dataset共享同一不可变buffer，消费者不再次decode或copy。初始Host配置使用同一configure事务，在第一张front之前应用viewport/selectors/focus/classifier/fit；临时export-only Host保存后不重画即将关闭的屏幕。
+- Figure reader直接返回metadata、NPZ成员和已经完整验证的typed datasets；typed成员与Dataset共享同一不可变buffer，消费者不再次decode或copy。初始Host配置使用同一configure事务，在第一张front之前应用viewport/selectors/focus/classifier/fit。纯文件导出由已有save worker直接使用同一PlotSession/MatplotlibRenderer，按最终导出DPI准备数据和artist，不创建无人观看的RasterPlotHost、屏幕front或返回假的accepted description；规范化配置仍由同一Session与Figure codec保存。先写NPZ，再绘制真实文件，不恢复不存在的屏幕。已有交互Host保存仍恢复原屏幕。
 - FigureViewer开图只创建真正的Monitor A Host，不在C先画一遍来取配置；首个真实accept才从其SelectionSubject恢复交互并同步Port/PanelState的规范化target。新图成功前保留旧板，失败或Close清理候选；A沿普通live fit契约首帧求解并继续处理新数据，C的静态保存策略不复制到A。
 - 编辑任意archive Dataset的数据只需要typed数据和已有recipe，不能先创建隐藏Host求fit/description；包括非默认Dataset。修改后的实际Preview才进入同一个A接受流程，纯数据草稿不保存第二份display description。
 - Writer写入前规划全部member namespace并拒绝碰撞。
@@ -241,8 +241,9 @@ Node new chunk
 - TaskConsole与FigureViewer的显示执行固定为三个进程、一个Plot真相源：B是Qt主进程并继续拥有
   Runtime、Logic、device client、PanelState、SelectionBridge、LiveBoard与same-shot accept；A只承载
   全部Monitor card的`RasterPlotHost -> PlotSession -> DataView/Fit/Render/Compose`；C承载Panel Edit、
-  point review与Figure archive/export。A和C运行同一个render-service实现，内部仍实例化同一个
-  `RasterPlotHost`，不得复制live/editor/export renderer，也不得在A/C失败时退回B进程内渲染。
+  point review与Figure archive/export。A和C运行同一个render-service实现，交互surface使用同一个
+  `RasterPlotHost`；C纯文件save worker直接使用同一`PlotSession/MatplotlibRenderer`，无需屏幕Host。
+  不得复制live/editor/export renderer，也不得在A/C失败时退回B进程内渲染。
   Edit的Qt表单和A/C输出的QImage-only frontend始终留在B；B只提交异步命令、接收完整Front和
   observation，任何Qt slot都不得同步等待IPC。同一application只创建一对A/C；TaskConsole与其
   打开的FigureViewer各持一个显式owner lease，任一窗口先关闭都不得终止另一窗口仍在使用的服务，

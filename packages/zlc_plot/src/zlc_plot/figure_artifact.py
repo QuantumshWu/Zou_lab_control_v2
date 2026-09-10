@@ -459,9 +459,8 @@ def _prepare_figure_artifact(
 ) -> tuple[OwnedSnapshot, Path, object]:
     """The paths and the data of one archive, and the write that makes it.
 
-    The recipe is not an input: it is read off the settled
-    ``DisplayDescription`` the write is handed, which is the one truth of
-    what the host was showing when the archive was taken.
+    The recipe comes from the same Session state as the image. Export-only
+    preparation needs no screen front or invented accepted description.
     """
 
     selected = Path(base_path).expanduser().resolve()
@@ -477,20 +476,10 @@ def _prepare_figure_artifact(
         raise TypeError("data-backed figure requires an OwnedSnapshot")
     overlay_arrays, overlay = _overlay_payload(plot_input, "data.overlay")
 
-    def write(description: object, save_image: object) -> tuple[Path, Path]:
-        recipe = encode_plot_recipe(
-            description.spec,
-            parameters=description.display_state.values,
-            size=description.size,
-            viewport=description.viewport,
-            classifier_thresholds=description.classifier_thresholds,
-            facet_focus=description.facet_focus,
-            fit=description.fit,
-            selectors=description.selectors,
-            overlay=overlay,
-        )
+    def write(recipe: Mapping[str, object], save_image: object) -> tuple[Path, Path]:
+        recipe = {**recipe, "overlay": overlay}
         source_document = dict(source or {})
-        title = getattr(getattr(description.spec, "labels", None), "title", None)
+        title = recipe["spec"]["labels"]["title"]
         if title is not None:
             source_document.setdefault("title", title)
         sections = {
@@ -588,7 +577,7 @@ def _submit_figure_artifact(
         ):
             raise RuntimeError("settled save host differs from the frozen data")
         return write(
-            description,
+            session._figure_recipe(),
             lambda: session.save(_image_path),
         )
 
@@ -608,7 +597,8 @@ def save_figure_artifact(
 
     A caller-owned host is validated against the frozen recipe and data, then
     archives and renders in one ordered host transaction.  Without ``host``,
-    this function owns the temporary local host it creates.
+    this function prepares the same PlotSession on its caller's export worker,
+    without creating a screen host or a redundant raster worker.
     """
 
     if host is not None:
@@ -634,11 +624,15 @@ def save_figure_artifact(
         base_path, plot_input=plot_input, lineage=lineage, source=source
     )
 
-    owned_host = build_figure_host(
+    from .session import PlotSession
+
+    session = PlotSession(
         plot_input,
         spec,
         parameters=parameters,
         size=size,
+        device_pixel_ratio=DEFAULTS.layout.export_scale,
+        _for_export=True,
         initial_configuration={
             "viewport": viewport,
             "classifier_thresholds": classifier_thresholds,
@@ -649,15 +643,12 @@ def save_figure_artifact(
         },
     )
     try:
-        configured = owned_host.describe_display()
-        operation = configured.result() if hasattr(configured, "result") else configured
-        description = operation.value
         return write(
-            description,
-            lambda: owned_host.save(image_path, restore_display=False).result(),
+            session._figure_recipe(),
+            lambda: session.save(image_path, restore_display=False),
         )
     finally:
-        owned_host.close()
+        session.close()
 
 
 __all__ = [

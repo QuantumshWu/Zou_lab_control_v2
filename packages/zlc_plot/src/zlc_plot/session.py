@@ -424,6 +424,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         device_pixel_ratio: float = 1.0,
         dispatch: HostDispatch | None = None,
         fit_engine: FitEngine | None = None,
+        _for_export: bool = False,
     ) -> None:
         if not isinstance(defaults, PlotLibraryDefaults):
             raise TypeError("defaults must be PlotLibraryDefaults")
@@ -434,6 +435,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         self._ownership_gate = RLock()
         self._session_identity = object()
         self._closed = False
+        self._for_export = _for_export
         self._defaults = defaults
         if unit_registry is not None and not isinstance(unit_registry, UnitRegistry):
             raise TypeError("unit_registry must be UnitRegistry or None")
@@ -592,7 +594,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             # Determine missing authored limits through the ordinary data
             # preparation, without rasterizing an intermediate automatic view.
             self._update_renderer(renderer, RenderEffect.LAYOUT, compose=False)
-        self.configure(parameters=deferred_fixed_limits, **initial)
+        self._configure(parameters=deferred_fixed_limits, **initial)
 
     @staticmethod
     def _split_image_frame(
@@ -970,6 +972,92 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             NumericRange(y_low, y_high),
         )
 
+    def _fit_configuration(self) -> dict[str, object]:
+        """The normalized fit target shared by controls and Figure recipes."""
+
+        fit: dict[str, object] = {}
+        accepted = self._accepted_fit
+        if accepted is None:
+            return fit
+        request = accepted.request
+        fit["model"] = str(request.model.model_id)
+        if request.selector_kind is not None:
+            fit["selector_kind"] = request.selector_kind.value
+        if request.initial is not None:
+            fit["initial"] = (
+                dict(request.initial)
+                if isinstance(request.initial, Mapping)
+                else dict(
+                    zip(
+                        request.model.parameter_names,
+                        request.initial,
+                        strict=True,
+                    )
+                )
+            )
+        if request.bounds is not None:
+            fit["bounds"] = dict(request.bounds)
+            fixed = {
+                name: pair[0]
+                for name, pair in request.bounds.items()
+                if pair[0] is not None and pair[0] == pair[1]
+            }
+            if fixed:
+                fit["fixed"] = fixed
+                for name in fixed:
+                    fit["bounds"].pop(name)
+                if not fit["bounds"]:
+                    fit.pop("bounds")
+        if request.options is not None:
+            # What was asked of the solver, and only that: a
+            # default written out is a setting nobody chose.
+            defaults = FitOptions()
+            options = {
+                name: getattr(request.options, name)
+                for name in (
+                    "loss",
+                    "max_nfev",
+                    "deadline_seconds",
+                    "max_exact_points",
+                )
+                if getattr(request.options, name) != getattr(defaults, name)
+            }
+            if options:
+                fit["options"] = options
+        if request.model.reduction is not None:
+            # The two-population question's threshold is a fit
+            # setting of its own for a model that asks it, and the
+            # default is stated so the operator sees a number.
+            fit["min_bic_gain"] = (
+                DECISIVE_BIC_GAIN
+                if request.options is None
+                else request.options.min_bic_gain
+            )
+        if request.all_facets:
+            fit["fit_all_facets"] = True
+        return fit
+
+    def _configured_selectors(self) -> tuple[SelectorState, ...]:
+        return tuple(
+            state for state in self._resolved_selector_snapshot().committed
+            if state.kind is not SelectorKind.THRESHOLD
+        )
+
+    def _figure_recipe(self) -> dict[str, object]:
+        """Encode prepared scientific/configuration state, not an invented front."""
+
+        from .figure_artifact import encode_plot_recipe
+
+        with self._render_lock:
+            self._assert_open()
+            return encode_plot_recipe(
+                self._spec, parameters=self.display_state.values,
+                size=self.surface_plan.preset, viewport=self._viewport,
+                classifier_thresholds=self._classifier_threshold_targets_state(settled=True),
+                facet_focus=self._facet_focus_index, fit=self._fit_configuration(),
+                selectors=self._configured_selectors(),
+            )
+
     def describe_display(self) -> DisplayDescription:
         """Return one complete immutable snapshot for external controls."""
 
@@ -978,66 +1066,11 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._assert_open()
             semantics = self.describe_semantics()
             accepted = self._accepted_fit
-            fit: dict[str, object] = {}
+            fit = self._fit_configuration()
             fit_expression = ""
             fit_expression_error = ""
             if accepted is not None:
                 request = accepted.request
-                fit["model"] = str(request.model.model_id)
-                if request.selector_kind is not None:
-                    fit["selector_kind"] = request.selector_kind.value
-                if request.initial is not None:
-                    fit["initial"] = (
-                        dict(request.initial)
-                        if isinstance(request.initial, Mapping)
-                        else dict(
-                            zip(
-                                request.model.parameter_names,
-                                request.initial,
-                                strict=True,
-                            )
-                        )
-                    )
-                if request.bounds is not None:
-                    fit["bounds"] = dict(request.bounds)
-                    fixed = {
-                        name: pair[0]
-                        for name, pair in request.bounds.items()
-                        if pair[0] is not None and pair[0] == pair[1]
-                    }
-                    if fixed:
-                        fit["fixed"] = fixed
-                        for name in fixed:
-                            fit["bounds"].pop(name)
-                        if not fit["bounds"]:
-                            fit.pop("bounds")
-                if request.options is not None:
-                    # What was asked of the solver, and only that: a
-                    # default written out is a setting nobody chose.
-                    defaults = FitOptions()
-                    options = {
-                        name: getattr(request.options, name)
-                        for name in (
-                            "loss",
-                            "max_nfev",
-                            "deadline_seconds",
-                            "max_exact_points",
-                        )
-                        if getattr(request.options, name) != getattr(defaults, name)
-                    }
-                    if options:
-                        fit["options"] = options
-                if request.model.reduction is not None:
-                    # The two-population question's threshold is a fit
-                    # setting of its own for a model that asks it, and the
-                    # default is stated so the operator sees a number.
-                    fit["min_bic_gain"] = (
-                        DECISIVE_BIC_GAIN
-                        if request.options is None
-                        else request.options.min_bic_gain
-                    )
-                if request.all_facets:
-                    fit["fit_all_facets"] = True
                 failure = self._fit_expression_failure
                 if failure is None:
                     fit_expression = self._projected.fit_expression_text(
@@ -1058,11 +1091,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 viewport=self._viewport,
                 semantics=semantics,
                 selection_subject=self._selection_subject(),
-                selectors=tuple(
-                    state
-                    for state in self._resolved_selector_snapshot().committed
-                    if state.kind is not SelectorKind.THRESHOLD
-                ),
+                selectors=self._configured_selectors(),
                 classifier_thresholds=self._classifier_threshold_targets_state(
                     settled=True
                 ),
@@ -1264,6 +1293,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         if deferred is not None:
             self._configuration_effects = deferred | effects
             return
+        compose = compose and not self._for_export
         gesture = self._gesture
         viewport = (
             gesture.candidate
@@ -1593,6 +1623,35 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         fit: Mapping[str, object] | None | object = _UNSET,
         fit_live: bool = True,
     ) -> DisplayDescription:
+        """Apply one target and describe its accepted screen presentation."""
+
+        with self._render_lock:
+            self._configure(
+                data=data, semantic=semantic, parameters=parameters,
+                parameter_updates=parameter_updates, size=size, image_overlay=image_overlay,
+                classifier_thresholds=classifier_thresholds, selectors=selectors,
+                selector_updates=selector_updates, viewport=viewport, facet_focus=facet_focus,
+                fit=fit, fit_live=fit_live,
+            )
+            return self.describe_display()
+
+    def _configure(
+        self,
+        *,
+        data: PlotInput | object = _UNSET,
+        semantic: Mapping[str, object] | None = None,
+        parameters: Mapping[str, object] | None = None,
+        parameter_updates: Mapping[str, object] | None = None,
+        size: str | None = None,
+        image_overlay: ImagePointOverlay | None | object = _UNSET,
+        classifier_thresholds: object = _UNSET,
+        selectors: Sequence[SelectorState] | object = _UNSET,
+        selector_updates: Mapping[SelectorKind, SelectorState | None] | object = _UNSET,
+        viewport: RectangleRange | None | object = _UNSET,
+        facet_focus: int | None | object = _UNSET,
+        fit: Mapping[str, object] | None | object = _UNSET,
+        fit_live: bool = True,
+    ) -> None:
         """Apply one target once; an identical target does no work.
 
         A complete parameter target may carry its current authored delta so
@@ -1795,7 +1854,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     self._configuration_fit_commit_actions or ()
                 )
                 self._configuration_fit_commit_actions = None
-                description = self.describe_display()
             except BaseException:
                 # Leave the deferred envelope BEFORE restoring: the restore
                 # has to paint, and a paint requested inside the envelope
@@ -1814,7 +1872,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             self._notify_display(display_events[-1])
         for event in fit_events:
             self._notify_fit(event)
-        return description
 
     def _configuration_state_snapshot(self) -> dict[str, object]:
         assert self._renderer is not None

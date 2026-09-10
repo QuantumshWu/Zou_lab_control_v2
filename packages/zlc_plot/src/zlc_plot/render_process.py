@@ -2149,6 +2149,7 @@ def _render_process_main(connection: Connection, name: str) -> None:
     from .config import DEFAULTS
     from .raster import RasterPlotHost
     from .session import PlotSession
+    from . import _raster_kernels as kernels
 
     state_lock = RLock()
     hosts: dict[str, RasterPlotHost] = {}
@@ -2161,7 +2162,8 @@ def _render_process_main(connection: Connection, name: str) -> None:
     subscriptions: dict[int, tuple[str, Callable[[], object]]] = {}
     fronts = _SharedFrontPool()
     save_worker = ThreadPoolExecutor(
-        max_workers=1, thread_name_prefix=f"zlc-render-{name}-save"
+        max_workers=1, thread_name_prefix=f"zlc-render-{name}-save",
+        initializer=kernels.configure_worker_threads,
     )
     closer_threads: set[Thread] = set()
 

@@ -1129,12 +1129,17 @@ def test_threshold_classifier_is_independent_and_covers_every_facet(monkeypatch,
         from zlc_plot import RenderProcess, open_figure_host, save_figure_artifact
         from zlc_plot.figure_artifact import encode_plot_recipe, decode_plot_recipe
 
-        presentations, restores = [], []
+        presentations, restores, captures = [], [], []
         original_present, original_draw = MatplotlibRenderer.present, MatplotlibRenderer.draw
+        original_capture = RasterPlotHost._capture_front
 
         def present_final(self, frame, **kwargs):
-            presentations.append(frame)
+            presentations.append(kwargs.get("compose", True))
             return original_present(self, frame, **kwargs)
+
+        def capture_front(self, *args, **kwargs):
+            captures.append(True)
+            return original_capture(self, *args, **kwargs)
 
         def restore_display(self):
             restores.append(True)
@@ -1142,6 +1147,7 @@ def test_threshold_classifier_is_independent_and_covers_every_facet(monkeypatch,
 
         monkeypatch.setattr(MatplotlibRenderer, "present", present_final)
         monkeypatch.setattr(MatplotlibRenderer, "draw", restore_display)
+        monkeypatch.setattr(RasterPlotHost, "_capture_front", capture_front)
 
         targets = configured.value.classifier_thresholds
         snapshot = _site_distribution_snapshot()
@@ -1154,11 +1160,12 @@ def test_threshold_classifier_is_independent_and_covers_every_facet(monkeypatch,
         restored = open_figure_host(snapshot, recipe)
         try:
             assert restored.describe_display().result(timeout=10).value.classifier_thresholds == targets
-            assert len(presentations) == 1
+            assert presentations == [True]
         finally:
             restored.close(timeout=10)
         presentations.clear()
         restores.clear()
+        captures.clear()
         save_figure_artifact(
             tmp_path / "known-model.png", plot_input=snapshot, spec=spec,
             parameters=configured.value.display_state.values,
@@ -1167,10 +1174,12 @@ def test_threshold_classifier_is_independent_and_covers_every_facet(monkeypatch,
         assert (tmp_path / "known-model.png").is_file()
         assert (tmp_path / "known-model.npz").is_file()
         assert unnecessary_solves == []
-        assert len(presentations) == 1
+        assert presentations == [False]
         assert restores == []
+        assert captures == []
         monkeypatch.setattr(MatplotlibRenderer, "present", original_present)
         monkeypatch.setattr(MatplotlibRenderer, "draw", original_draw)
+        monkeypatch.setattr(RasterPlotHost, "_capture_front", original_capture)
 
         service = RenderProcess("authored-classifier-test")
         remote = None

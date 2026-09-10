@@ -2300,7 +2300,7 @@ def _solve_compiled(
     if valid is None:
         valid_values = (
             np.broadcast_to(np.asarray(True), (cells, points))
-            if all_finite else np.ones((cells, points), dtype=np.bool_)
+            if all_finite else np.isfinite(values)
         )
     else:
         valid_values = np.asarray(valid, dtype=np.bool_)
@@ -2311,7 +2311,8 @@ def _solve_compiled(
         if not all_finite:
             valid_values = np.array(valid_values, dtype=np.bool_, order="C", copy=True)
     if not all_finite:
-        valid_values &= np.isfinite(values)
+        if valid is not None:
+            valid_values &= np.isfinite(values)
         if grid:
             width, height = (int(coordinate_values[0, axis, 0]) for axis in range(2))
             valid_grid = valid_values.reshape(cells, height, width)

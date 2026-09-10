@@ -2266,20 +2266,12 @@ def test_panel_save_reports_that_the_archive_survived_an_image_failure(
     state = PanelState("camera", "image", "2x2", 400, "camera")
     frozen = _frozen_surface(state, snapshot)
 
-    def fail_image(_path) -> None:
+    from zlc_plot.rendering import MatplotlibRenderer
+
+    def fail_image(self, _path, **_kwargs) -> None:
         raise OSError("renderer failed")
 
-    monkeypatch.setattr(
-        figure_module,
-        "build_figure_host",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            configure=lambda **_kwargs: SimpleNamespace(
-                result=lambda: SimpleNamespace(value=frozen.description)
-            ),
-            save=fail_image,
-            close=lambda: None,
-        ),
-    )
+    monkeypatch.setattr(MatplotlibRenderer, "save", fail_image)
 
     with pytest.raises(RuntimeError, match="archive.*saved.*image") as failure:
         save_panel_figure(

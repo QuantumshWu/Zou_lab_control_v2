@@ -234,7 +234,7 @@
 
 - 公共Figure API严格编码/解码PlotSpec、parameters、size、viewport、selectors、facet focus、classifier、fit与
   typed image overlay；archive先发布，preview后渲染。
-- Panel Save只是公共Figure API的adapter，不再维护第二套writer或restore grammar。
+- Panel Save只是公共Figure API的adapter，不再维护第二套writer或restore grammar。纯文件保存复用Session配置/投影/fit与renderer，在最终导出DPI准备，不创建临时screen Host、compose、capture或restore；交互Host保存仍按原屏幕恢复。Curve/Histogram/Image/3D实际导出均0 screen compose、0 capture、1 savefig，与同最终DPI的普通Host导出逐像素相同；相对旧默认screen DPR准备的PNG有像素变化，不宣称旧PNG exact。现有artifact/configuration与失败保留用例9项通过，证据不入Git。
 - FigureViewer把archive typed Dataset发布为sealed Runtime signals，默认panel从archive exact recipe恢复，且不按shape推断plot kind；保存spec的`kind + cell_kind`在Panel创建前经同一个catalog identity owner解析，semantic vocabulary随后才投影。Add Panel只建立空的fixed-kind `panel-N`，Signal/ROI/Fit派生及后续compose全部走与TaskConsole相同的ConsolePresenter、SelectionBridge和Plot host，不再保留static panel owner。静态host在Bridge订阅前已有accepted fit时，Fit subscription只replay该immutable FitEvent，不重复solve/render；因此ROI与Fit参数都继续发布给后续Panel。
 - FigureViewer与TaskConsole Live/Frozen使用同一个accepted PlotSpec、parameter、selector/
   viewport capability contract以及完整Panel Edit：Frozen snapshot/Refresh、Interaction、
@@ -307,7 +307,7 @@
 
 ### 2.6 Plot三进程边界
 
-- TaskConsole/FigureViewer采用固定B/A/C拓扑：B拥有Qt、Runtime、Logic、device通信、PanelState、SelectionBridge与same-shot accept；单一A拥有全部Monitor的DataView/Fit/Render/Compose；单一C拥有Panel Edit、point review、Panel/FigureViewer Save以及Calibration/Temperature/SLM Feedback的Figure render/export。A/C复用同一`RasterPlotHost/PlotSession`，正式Workbench没有B进程内Plot fallback。
+- TaskConsole/FigureViewer采用固定B/A/C拓扑：B拥有Qt、Runtime、Logic、device通信、PanelState、SelectionBridge与same-shot accept；单一A拥有全部Monitor的DataView/Fit/Render/Compose；单一C拥有Panel Edit、point review、Panel/FigureViewer Save以及Calibration/Temperature/SLM Feedback的Figure render/export。A/C交互Host复用`RasterPlotHost/PlotSession`；C纯文件save worker直接使用同一Session/renderer、不建立无消费者screen front。正式Workbench没有B进程内Plot fallback。
 - 同一application只有一对A/C；TaskConsole打开的FigureViewer共享并分别持有owner lease，最后窗口关闭才shutdown。A/C崩溃由现有Panel replacement lifecycle恢复，旧完整Front继续可读，不能把partial frame或latest publication伪装成旧surface。
 - B→A/C的同一Dataset revision每service只传一次并按host/pending引用计数；A/C→B的RGBA使用只读shared-memory lease，QImage不复制像素。父子消息统一使用owned `send_bytes(pickle.dumps)`/`pickle.loads(recv_bytes())`，避开Python3.13 `Connection.send`临时BytesIO export生命周期错误。
 - Domain Task仍在B决定科学数据、路径及非Figure NPZ/JSON并register artifact；只把Figure执行能力由composition注入C。direct/notebook显式使用本地Plot，不把TaskArtifactContext或Runtime变成Plot owner。
