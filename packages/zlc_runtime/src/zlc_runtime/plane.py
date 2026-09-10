@@ -31,18 +31,24 @@ from weakref import WeakKeyDictionary
 
 import numpy as np
 from zlc_data import (
+    INVALID,
     PRIMARY_INDEX,
     AxisSpec,
     BlockId,
+    CellValidity,
+    DatasetComponentValidity,
     DatasetRevision,
     DatasetSchema,
     DomainSpec,
     IndexedWindow,
+    Invalid,
     OwnedSnapshot,
     StreamGenerationId,
+    Valid,
     owned_snapshot_from_arrays,
 )
 from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
+from zlc_data.value import dataset_validity_storage, compact_dataset_validity
 from .dataset_output import (
     DatasetOutputDeclaration,
     LiveDatasetOutput,
@@ -718,14 +724,12 @@ def _materialize_indexed_dataset(
     basis = materialization.basis
     if basis is None:
         values, validity, sigma = _assembled_planes(
-            schema.physical_shape,
-            event_schema.value_schema.dtype,
+            schema,
             placements(),
         )
     else:
         values, validity, sigma = _rolled_planes(
-            schema.physical_shape,
-            event_schema.value_schema.dtype,
+            schema,
             basis,
             start,
             point_count,
@@ -745,14 +749,13 @@ def _materialize_indexed_dataset(
 
 
 def _rolled_planes(
-    shape: tuple[int, ...],
-    dtype: object,
+    schema: DatasetSchema,
     basis: _MaterializedIndexed,
     start: int,
     point_count: int,
     trailing: tuple[slice, ...],
     placements: tuple,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+) -> tuple[np.ndarray, Valid | Invalid | CellValidity | DatasetComponentValidity, np.ndarray | None]:
     """Planes for a window that only ROLLED FORWARD from a known basis.
 
     The overlapping indices are copied out of the basis planes in one
@@ -766,10 +769,11 @@ def _rolled_planes(
     keep = (basis.latest - start + 1) * point_count
     source = (slice(None), slice((start - basis.start) * point_count, (start - basis.start) * point_count + keep), *trailing)
     target = (slice(None), slice(0, keep), *trailing)
-    values = np.zeros(shape, dtype=dtype)
-    validity = np.zeros(shape, dtype=np.bool_)
+    shape = schema.physical_shape
+    values = np.zeros(shape, dtype=schema.value_schema.dtype)
+    validity = np.zeros(dataset_validity_storage(INVALID, schema).shape, dtype=np.bool_)
     values[target] = block.values[source]
-    validity[target] = basis.snapshot.expanded_validity()[source]
+    validity[target[:2]] = dataset_validity_storage(block.validity, block.schema)[source[:2]]
     sigma: np.ndarray | None = None
     if block.sigma is not None or any(
         snapshot.block.sigma is not None for _place, snapshot in placements
@@ -779,18 +783,17 @@ def _rolled_planes(
             sigma[target] = block.sigma[source]
     for place, snapshot in placements:
         values[place] = snapshot.block.values
-        validity[place] = snapshot.expanded_validity()
+        validity[place[:2]] = dataset_validity_storage(snapshot.block.validity, snapshot.block.schema)
         if snapshot.block.sigma is not None:
             sigma[place] = snapshot.block.sigma
-    return values, validity, sigma
+    return values, compact_dataset_validity(validity, schema), sigma
 
 
 def _extended_planes(
-    shape: tuple[int, ...],
-    dtype: object,
+    schema: DatasetSchema,
     basis: OwnedSnapshot,
     placements: tuple,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+) -> tuple[np.ndarray, Valid | Invalid | CellValidity | DatasetComponentValidity, np.ndarray | None]:
     """Planes for a dataset that only GAINED cells since a known basis.
 
     Re-placing every chunk rebuilt an answer that could not have changed:
@@ -805,26 +808,26 @@ def _extended_planes(
     """
 
     block = basis.block
-    values = np.array(block.values, dtype=dtype)
-    validity = np.array(basis.expanded_validity(), dtype=np.bool_)
+    shape = schema.physical_shape
+    values = np.array(block.values, dtype=schema.value_schema.dtype)
+    validity = np.array(dataset_validity_storage(block.validity, block.schema), dtype=np.bool_)
     sigma = None if block.sigma is None else np.array(block.sigma)
     for target, snapshot in placements:
         values[target] = snapshot.block.values
-        validity[target] = snapshot.expanded_validity()
+        validity[target[:2]] = dataset_validity_storage(snapshot.block.validity, snapshot.block.schema)
         stated = snapshot.block.sigma
         if stated is None:
             continue
         if sigma is None:
             sigma = np.full(shape, np.nan, dtype=np.float64)
         sigma[target] = stated
-    return values, validity, sigma
+    return values, compact_dataset_validity(validity, schema), sigma
 
 
 def _assembled_planes(
-    shape: tuple[int, ...],
-    dtype: object,
+    schema: DatasetSchema,
     placements: object,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+) -> tuple[np.ndarray, Valid | Invalid | CellValidity | DatasetComponentValidity, np.ndarray | None]:
     """Allocate and fill EVERY plane of a rebuilt dataset, as a set.
 
     Both materializers wrote out "allocate values, allocate validity, fill
@@ -839,19 +842,20 @@ def _assembled_planes(
     nobody stated is unknown, and zero would read as certainty.
     """
 
-    values = np.zeros(shape, dtype=dtype)
-    validity = np.zeros(shape, dtype=np.bool_)
+    shape = schema.physical_shape
+    values = np.zeros(shape, dtype=schema.value_schema.dtype)
+    validity = np.zeros(dataset_validity_storage(INVALID, schema).shape, dtype=np.bool_)
     sigma: np.ndarray | None = None
     for target, snapshot in placements:
         values[target] = snapshot.block.values
-        validity[target] = snapshot.expanded_validity()
+        validity[target[:2]] = dataset_validity_storage(snapshot.block.validity, snapshot.block.schema)
         stated = snapshot.block.sigma
         if stated is None:
             continue
         if sigma is None:
             sigma = np.full(shape, np.nan, dtype=np.float64)
         sigma[target] = stated
-    return values, validity, sigma
+    return values, compact_dataset_validity(validity, schema), sigma
 
 
 @dataclass(slots=True)
@@ -2026,14 +2030,12 @@ class SignalDataPlane:
 
         if basis is None:
             values, validity, sigma = _assembled_planes(
-                schema.physical_shape,
-                schema.value_schema.dtype,
+                schema,
                 placements(),
             )
         else:
             values, validity, sigma = _extended_planes(
-                schema.physical_shape,
-                schema.value_schema.dtype,
+                schema,
                 basis.snapshot,
                 tuple(placements()),
             )

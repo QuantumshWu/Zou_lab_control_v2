@@ -35,7 +35,7 @@ from .value import (
     DatasetRevisionRef,
     OwnedSnapshot,
     compact_dataset_validity,
-    expand_dataset_validity,
+    dataset_validity_storage,
 )
 
 __all__ = [
@@ -398,6 +398,8 @@ def selection_indices(
 
 
 def _subset_axis(axis: AxisSpec, indices: range | tuple[int, ...]) -> AxisSpec:
+    if _keeps_everything(indices, axis.size):
+        return axis
     labels = (
         None
         if axis.coordinate_labels is None
@@ -460,6 +462,8 @@ def _subset_mapped_domain(
 
 
 def _keeps_everything(indices: range | tuple[int, ...], size: int) -> bool:
+    if isinstance(indices, range):
+        return indices == range(size)
     return len(indices) == size and all(
         position == index for position, index in enumerate(indices)
     )
@@ -479,10 +483,17 @@ def restricted_schema(
         _subset_axis(axis, data_indices[axis.axis_id])
         for axis in schema.cell_domain.axes
     )
-    cell_domain = DomainSpec(
-        tuple(axis.size for axis in cell_axes),
-        cell_axes,
+    cell_domain = (
+        schema.cell_domain
+        if all(left is right for left, right in zip(cell_axes, schema.cell_domain.axes))
+        else DomainSpec(tuple(axis.size for axis in cell_axes), cell_axes)
     )
+    if (
+        repeat_domain is schema.repeat_domain
+        and point_domain is schema.point_domain
+        and cell_domain is schema.cell_domain
+    ):
+        return schema
     return DatasetSchema(
         repeat_domain,
         point_domain,
@@ -591,13 +602,11 @@ def restrict_snapshot(
     values = restricted_values(
         snapshot.block.values, schema, repeat_indices, point_indices, data_indices
     )
-    mask = restricted_values(
-        expand_dataset_validity(snapshot.block.validity, schema),
-        schema,
-        repeat_indices,
-        point_indices,
-        data_indices,
-    )
+    mask = dataset_validity_storage(snapshot.block.validity, schema)
+    mask = take_indices(mask, repeat_indices, axis=0)
+    mask = take_indices(mask, point_indices, axis=1)
+    for position, axis_id in enumerate(schema.value_schema.validity_contract.component_axis_ids):
+        mask = take_indices(mask, data_indices[axis_id], axis=2 + position)
     # Every plane of a sample is cut by the same indices, because a
     # restriction is about WHICH SAMPLES survive and says nothing about
     # what is known of each.  Cutting the values alone is how a fitted

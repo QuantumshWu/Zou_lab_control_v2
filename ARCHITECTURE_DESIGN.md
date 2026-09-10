@@ -47,6 +47,7 @@
 
 - `OwnedSnapshot`是外部不可变数据面；schema、coordinates、labels、units和validity共同定义truth。
 - Snapshot restriction必须对values、validity、coordinates、labels和coordinate frame执行同一projection。
+- Validity的存储与组装只沿schema声明的component轴，不为整cell判决展开逐像素mask再压回；需要逐像素布尔视图的数值消费者才广播。裁剪保留未改变的不可变Axis/Domain身份，不重建无变化的坐标与codes。
 - Validity入口只接受明确bool contract，不做numeric truthiness转换。
 - Selection按AxisId和typed coordinate唯一解析；重名或不可唯一映射必须拒绝。
 - Plot轴身份只用`AxisRef(domain, axis_id)`稳定key；label只用于显示，不进入

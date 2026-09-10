@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- 必要性整改的数据存储切面：finite extend/indexed hole/roll直接组装compact validity，VALUE和各component组合与233基线结果一致；公共restriction复用未变Axis/Domain。4个既有直接案例通过；独立四种validity的A/B证明输出相同且不再分配VALUE逐像素mask，未运行GUI或硬件。
+
 - 2026-09-10本次验证：真实UART串行帧证明LOAD完成回复及SAFE抢占；真实top＋既有Xilinx BRAM行为模型证明首次装载4shots与SAFE后驻留重放4shots的18 TTL/40 DAC data逐tick一致、4 DAC clock工作、同ID不重复Fire。没有运行FPGA build/synthesis/program，旧时序报告不代表新ABI已通过。相关软件定向验证覆盖驻留重用、丢ACK、pending LOAD取消、新server握手、device/manual扫描及错误恢复。
 - RF正常设频率/幅度为1 write＋1 query（两次发送、一个响应）；Control Apply与单位投影不额外读设备。没有未经厂商证实的复合SCPI；真实native UNIT切换另发一次必要写入。错误后的current/unit/range保持unknown直到必要操作或显式Refresh确认。Fabric与SLM remote各在原session内复用连接，断线不自动重放写入，关闭释放idle连接。
 - 窗口首个Close保留关闭意图；device read/tune/init/discovery完成后由原Qt owner继续完整关闭，不要求再次点击、不加timer或平行生命周期。直接Qt验证覆盖有/无TaskConsole的pending关闭，测试窗口均已关闭。原始探针/日志只在ignored目录，不进入git。
