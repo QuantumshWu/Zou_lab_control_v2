@@ -83,57 +83,6 @@ raise SystemExit(pytest.main(['-q', *sys.argv[2:]]))
     return int(result.returncode)
 
 
-def _pytest_items(names: tuple[str, ...], path: Path) -> int:
-    """Collect one Qt-heavy file, then give every item a fresh process."""
-
-    import subprocess
-    import tempfile
-
-    script = r"""
-from importlib import import_module
-from pathlib import Path
-import sys
-import zou_lab_control
-print(f'root={Path(zou_lab_control.__file__).resolve()}')
-for name in sys.argv[1].split(','):
-    module = import_module(name)
-    print(f'tested={Path(module.__file__).resolve()}')
-import pytest
-raise SystemExit(pytest.main(['--collect-only', '-q', sys.argv[2]]))
-"""
-    with tempfile.TemporaryDirectory(prefix="zlc-collect-") as folder:
-        try:
-            collected = subprocess.run(
-                [sys.executable, "-c", script, ",".join(names), str(path)],
-                cwd=folder,
-                env=os.environ.copy(),
-                capture_output=True,
-                text=True,
-                timeout=120,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            print(f"pytest collection exceeded 120 s: {path}")
-            return 124
-    if collected.returncode != 0:
-        print(collected.stdout, end="")
-        print(collected.stderr, end="", file=sys.stderr)
-        return int(collected.returncode)
-    items = tuple(
-        f"{path}::{line.split('::', 1)[1]}"
-        for line in collected.stdout.splitlines()
-        if "::" in line and not line.startswith("tested=")
-    )
-    if not items:
-        print(f"no pytest items collected from {path}")
-        return 2
-    for item in items:
-        result = _pytest_process(names, (item,))
-        if result != 0:
-            return result
-    return 0
-
-
 def evidence(argv: list[str] | None = None) -> int:
     """Execute one installed software lane, or identify a manual-only lane."""
 
@@ -260,30 +209,21 @@ def evidence(argv: list[str] | None = None) -> int:
 
     if lane == "software":
         groups_list: list[tuple[tuple[str, ...], tuple[object, ...]]] = []
-        itemized: list[tuple[tuple[str, ...], Path]] = []
         for name in entry_specs("zou_lab_control.layers"):
             tests = repo / f"packages/{name}/tests"
             if name != "zlc_workbench":
                 groups_list.append(((name,), (tests,)))
                 continue
             for path in sorted(tests.glob("test_*.py")):
-                if path.name == "test_task_console_app.py":
-                    itemized.append(((name,), path))
-                else:
-                    groups_list.append(((name,), (path,)))
+                groups_list.append(((name,), (path,)))
         groups = tuple(groups_list)
     elif lane == "gui_offscreen":
-        itemized = [
-            (
-                ("zlc_workbench",),
-                repo / "packages/zlc_workbench/tests/test_task_console_app.py",
-            )
-        ]
         groups = (
             (("zlc_ui",), (repo / "packages/zlc_ui/tests",)),
             (("zlc_plot",), (repo / "packages/zlc_plot/tests/test_qt_widget.py",)),
             (("zlc_plot",), (repo / "packages/zlc_plot/tests/test_semantic_ui.py",)),
             (("zlc_atom",), (repo / "packages/zlc_atom/tests/test_slm_editor.py",)),
+            (("zlc_workbench",), (repo / "packages/zlc_workbench/tests/test_task_console_app.py",)),
             (("zlc_workbench",), (repo / "packages/zlc_workbench/tests/test_console_presenter.py",)),
             (("zlc_workbench",), (repo / "packages/zlc_workbench/tests/test_device_manager.py",)),
             (("zlc_workbench",), (repo / "packages/zlc_workbench/tests/test_pulse_editor.py",)),
@@ -293,7 +233,6 @@ def evidence(argv: list[str] | None = None) -> int:
             (("zlc_workbench",), (repo / "packages/zlc_workbench/tests/test_editor_named_behaviours.py",)),
         )
     else:
-        itemized = []
         groups = (
             (
                 ("zlc_atom", "zlc_workbench"),
@@ -318,12 +257,6 @@ def evidence(argv: list[str] | None = None) -> int:
         if result != 0:
             status = result
             break
-    if status == 0:
-        for names, path in itemized:
-            result = _pytest_items(names, path)
-            if result != 0:
-                status = result
-                break
     print(f"{lane}: {'PASS' if status == 0 else 'FAIL'}")
     return status
 

@@ -959,8 +959,10 @@ view._view.kind_combo.setCurrentIndex(task_index)
 QtTest.QTest.mouseClick(view._view.add_panel_button, QtCore.Qt.LeftButton)
 application.processEvents()
 editor = view._logic_editors['calibration']
+editor.form.widget_for('pulse_template').setText('imaging_template.json')
 editor.form.widget_for('repeats').setValue(200)
 application.processEvents()
+until(editor.start_button.isEnabled)
 
 QtTest.QTest.mouseClick(editor.start_button, QtCore.Qt.LeftButton)
 application.processEvents()
@@ -1208,12 +1210,13 @@ try:
     assert again.session is again.devices.presenter.active_session
     assert again.session is not first_session
     assert again.device_controls == {}
-    again.devices.close()
+    devices_again = again.devices
+    devices_again.close()
     closed_again = QtCore.QDeadlineTimer(5000)
-    while again.devices.is_visible() and not closed_again.hasExpired():
+    while devices_again.is_visible() and not closed_again.hasExpired():
         application.processEvents()
         QtTest.QTest.qWait(10)
-    assert not again.devices.is_visible()
+    assert not devices_again.is_visible()
     assert again.session is None
     assert again.console is None
     assert again.device_controls == {}

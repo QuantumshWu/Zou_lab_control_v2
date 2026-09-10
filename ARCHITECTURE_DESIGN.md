@@ -459,6 +459,7 @@ Node new chunk
 - 根`pyproject.toml`是唯一product manifest，`constraints.txt`是唯一resolved dependency surface，`zlc`是唯一console entry并从manifest加载commands/layers/evidence。
 - Wheel必须包含bootstrap、八层、Calibration/Scan templates、SLM profile、Plot font及完整有效FPGA RTL/XDC/Tcl assets；installed environment check按distribution RECORD验证归属。
 - 正式evidence lanes：software、gui_offscreen、virtual_vertical、notebook_offline、real_screen和hardware runbooks。
+- Evidence使用每个既有文件/层的普通pytest进程；TaskConsole用例中明确需要的fresh-process场景由用例自身隔离，不在外层再collect并给每个item各开一层Python。
 - Mock/virtual/offscreen证据不得冒充真hardware/optical acceptance。
 - Root Architecture只保存目标不变量；Implementation Plan只保存当前实现状态和最新证据。
 - 活文档保持current-only，不在尾部追加change log或修补记录。

@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- Evidence去掉TaskConsole逐item第二层进程包装：当前完整test_task_console_app在同一pytest进程顺序28 passed/55.07s。发现的两处旧测试问题分别是未选择必填Pulse、关闭后访问已清owner；改为真实选择及检查原窗口handle，没有修改产品默认值或生命周期来迁就测试。测试内部真正需要的独立app进程仍保留，运行后无本worktree Python残留。
+
 - UI复核发现Manual与Panel的公共标题函数会隐藏无具名axis的域，与固定三域contract冲突；现保留该组，显示(1)/(—)，不创建新axis。3个既有title直接用例通过。
 
 - Simulation同site geometry不再重采样全部camera PSF；原35个plane重建变为复用同一不可变对象。原add/remove/move下一帧物理图像用例红绿通过，FFT/像差/PSF尾部/随机序列未改；未量化毫秒收益。
