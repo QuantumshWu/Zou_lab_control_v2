@@ -388,6 +388,23 @@ assert editor.value_table.verticalScrollBar().maximum() > 0
 assert editor.value_table.horizontalScrollBar().maximum() > 0
 assert values.reads < 500, values.reads
 assert editor.value_table.indexWidget(editor.value_model.index(0, 0)) is None
+removed = []; headers = []
+for combo in (editor.dtype_combo, editor.axis_combo, editor.domain_combo,
+              editor.component_combo, *(parts[2] for parts in editor._axis_view_widgets.values())):
+    combo.model().rowsRemoved.connect(lambda *_args: removed.append(True))
+editor.axis_value_model.headerDataChanged.connect(lambda *_args: headers.append(True))
+editor.value_model.headerDataChanged.connect(lambda *_args: headers.append(True))
+editor.update_projection(projection)
+assert not removed, 'a data-only projection rebuilt unchanged choice rows'
+assert not headers, 'unchanged axis coordinates were announced as new headers'
+changed_regions = []
+editor.value_model.dataChanged.connect(lambda first, last, _roles:
+    changed_regions.append((first.row(), first.column(), last.row(), last.column())))
+changed = dict(projection)
+changed['table'] = dict(projection['table'], changed_cells=((3, 4),))
+changed['axis_values'] = dict(projection['axis_values'], changed_cells=())
+editor.update_projection(changed)
+assert changed_regions == [(3, 4, 3, 4)]
 editor.value_table.setCurrentIndex(editor.value_model.index(10, 10))
 editor.value_table.setFocus()
 QtTest.QTest.keyClick(editor.value_table, QtCore.Qt.Key_Right)

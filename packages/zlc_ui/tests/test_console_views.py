@@ -522,7 +522,8 @@ def test_a_dragged_setting_popup_stays_where_the_operator_put_it() -> None:
 
     _run_qt(
         """
-import zou_lab_control
+import zou_lab_control, zlc_ui
+print(zou_lab_control.__file__); print(zlc_ui.__file__)
 from PyQt5 import QtCore
 from zlc_ui import open_task_console
 from zlc_ui.qt import ensure_qt_app
@@ -601,6 +602,20 @@ try:
         'a remembered origin only ever existed to survive a re-placement '
         'that no longer happens'
     )
+    specs = []
+    original_spec = card._form_spec
+    def counted_spec():
+        specs.append(True)
+        return original_spec()
+    card._form_spec = counted_spec
+    console.set_panel_projection('panel-1', state, {
+        'semantic': (), 'display': (), 'fit': fit_fields('model'),
+    })
+    app.processEvents()
+    assert not specs, 'a hidden Setting rebuilt its controls'
+    card._open_settings()
+    app.processEvents()
+    assert popup.isVisible() and 'fit__expression' not in card._settings_form.keys
 finally:
     console.close()
     app.processEvents()

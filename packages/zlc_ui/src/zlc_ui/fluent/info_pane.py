@@ -205,6 +205,7 @@ class InfoTree(QtWidgets.QTreeWidget):
         # its name or by hovering for a tooltip that repeats the tab.
         self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
         self._name_floor = int(name_width)
+        self._name_measurement: tuple[object, int] | None = None
         header = self.header()
         header.setStretchLastSection(False)
         header.setSectionResizeMode(0, QtWidgets.QHeaderView.Interactive)
@@ -292,6 +293,7 @@ class InfoTree(QtWidgets.QTreeWidget):
         """Replace every row, and open the whole tree: a tab is read top to
         bottom, every field on its own line, without being asked."""
 
+        self._name_measurement = None
         self.clear()
         for label, value in rows:
             if _is_action(value):
@@ -307,6 +309,12 @@ class InfoTree(QtWidgets.QTreeWidget):
         name deeper and longer than that is read by its two ends -- or
         whole, from Copy name."""
 
+        signature = (self.font().key(), self.indentation(), self.devicePixelRatioF())
+        if self._name_measurement is not None and self._name_measurement[0] == signature:
+            widest = self._name_measurement[1]
+            limit = max(self._name_floor, self.viewport().width() * 6 // 10)
+            self.header().resizeSection(0, min(widest, limit))
+            return
         metrics = self.fontMetrics()
         slack = 2 * scaled_px(5, minimum=3) + scaled_px(6, minimum=4)
         widest = self._name_floor
@@ -324,12 +332,20 @@ class InfoTree(QtWidgets.QTreeWidget):
 
         for item in self._top_level_items():
             measure(item, 1)
+        self._name_measurement = (signature, widest)
         limit = max(self._name_floor, self.viewport().width() * 6 // 10)
         self.header().resizeSection(0, min(widest, limit))
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
         super().resizeEvent(event)
         self._fit_name_column()
+
+    def changeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().changeEvent(event)
+        if event.type() in (QtCore.QEvent.FontChange, QtCore.QEvent.ApplicationFontChange):
+            if hasattr(self, "_name_measurement"):
+                self._name_measurement = None
+                self._fit_name_column()
 
     def _add_action(self, label: str, value: Mapping[str, str]) -> None:
         item = QtWidgets.QTreeWidgetItem([label, ""])

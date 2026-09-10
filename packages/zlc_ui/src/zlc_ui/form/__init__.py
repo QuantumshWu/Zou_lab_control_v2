@@ -11,8 +11,6 @@ _EXPORTS = {
     "FormSpec": ("zlc_ui.form.form", "FormSpec"),
     "FormFieldKind": ("zlc_ui.form.form", "FormFieldKind"),
     "parse_number_text": ("zlc_ui.form.form", "parse_number_text"),
-    "choice_value_to_tree": ("zlc_ui.form.form", "choice_value_to_tree"),
-    "choice_value_from_tree": ("zlc_ui.form.form", "choice_value_from_tree"),
     "FormRuntimeContext": ("zlc_ui.form.qt_form", "FormRuntimeContext"),
     "FluentParameterForm": ("zlc_ui.form.qt_form", "FluentParameterForm"),
     "being_edited": ("zlc_ui.form.qt_form", "being_edited"),

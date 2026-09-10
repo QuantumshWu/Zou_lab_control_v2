@@ -308,7 +308,7 @@ Node new chunk
 - Pulse Stop UI立即进入Stopping；Stop/SAFE高优先级并可取消普通wait/transport，hardware ack后台完成。
 - Pulse Editor每个channel保留同一组编辑/单位/全开/全关列；DAC不支持全开时保留按钮但disabled，不隐藏列。全关仍可用。
 - Timeout显示真实错误但不冻结UI；未确认前不能显示Safe。
-- Form reconcile必须按当前schema重建dependency graph。
+- Form reconcile只在schema改变时重建dependency graph；同schema成功adopt只更新值。隐藏Setting延后构造/度量到实际打开，Manual Data单格修改只通知实际变化的格子。Pulse显示切换保留原timeline/滚动与bracket对象，不拆装未变控件。
 - PanelState decoder只接受当前完整grammar；owner wake和产品Figure save各只有一个实现。
 - FigureViewer与TaskConsole必须复用同一个`PanelCardView` frame owner、Monitor board、panel preset尺寸、title band、Setting按钮和body padding；card是图的框不是preset的框：只有空卡按preset占位，挂了图的card尺寸只在图本身换了surface（首次画出、按新preset重画、自己加宽边距）的那一个事件里跟着变，操作员选Size不得先让card跳一次再等图，picture、frame与title band必须同帧变化；挂上一个已经带图的widget时card当场框住它；Viewer右栏是白色Fluent work surface，global action bar固定自身高度，Panel在其下方top-align，不能把剩余窗口高度塞进action bar或让同一2x2 card漂到中部；card title读取当前archive dataset的operator label。左侧InfoPane宽度在window创建时一次确定，任何archive label/value不得改变window split；每个信息页是一棵「名字 | 值」两列树：顶层行是该页的主题（一次run、一台device、文档的一个section），record的每个字段都是其下的一行、打开时整棵树默认全部展开，嵌套用每层的竖向guide线和可展开行的chevron画出而不只靠缩进；分支行的值列只用灰色墨写其下有几个字段，长数值列表按个数与范围读；值不换行、不cutoff、不用tooltip重复整页，过宽时整页横向滚动；每页顶部一个filter按子串同时找名字和值：命中的格子染橙色tint、树展开到命中处并滚到第一处、不命中的行隐藏；任一行Ctrl+C或右键菜单复制整个值或名字路径。Raw页就是文档本身按section嵌套，不再拍平成点分路径。Flow使用Fluent node-edge graph：Logic与Device节点不重叠，共享节点只出现一次，causal edge与device-use edge视觉区分；每个node携带它代表的行`(tab, label)`，点击card就切到该页并选中该行；Workbench只给plain nodes/edges，Qt owner负责字体测量、布局、绘制和滚动。
 - Panel Setting是Panel page scroll viewport内的`FluentOverlayFrame`，不是top-level companion window；随page隐藏/恢复并被page边界裁剪。header显示固定Panel identity，例如`Setting · panel-3`，不得混入可编辑title、signal或structure。右侧紧凑`×`单击只隐藏Setting、不删除Panel；拖动与再次点击Setting切换仍由同一overlay owner处理。

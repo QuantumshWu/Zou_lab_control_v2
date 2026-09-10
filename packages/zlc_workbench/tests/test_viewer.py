@@ -606,6 +606,9 @@ def test_manual_data_uses_runtime_panel_and_the_one_figure_writer(tmp_path) -> N
                 "cells": ((0, 3, "7.25"),),
             },
         )
+        projected = view.data_editors[editor_id]["projection"]
+        assert projected["table"]["changed_cells"] == ((0, 3),)
+        assert projected["axis_values"]["changed_cells"] == ()
         view.data_editor_intent.emit(
             editor_id,
             {"op": "apply_preview", "note": "manual Figure check"},

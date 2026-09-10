@@ -96,13 +96,17 @@ class _VirtualTextTableModel(QtCore.QAbstractTableModel):
         if len(shape) != 2 or any(value < 0 for value in shape):
             raise ValueError("table projection shape must contain two nonnegative sizes")
         reset = shape != self._shape
+        row_headers = data.get("row_headers", ())
+        column_headers = data.get("column_headers", ())
+        row_headers_changed = row_headers != self._row_headers
+        column_headers_changed = column_headers != self._column_headers
         if reset:
             self.beginResetModel()
         self._shape = shape
         self._values = data.get("values", ())
         self._validity = data.get("validity")
-        self._row_headers = data.get("row_headers", ())
-        self._column_headers = data.get("column_headers", ())
+        self._row_headers = row_headers
+        self._column_headers = column_headers
         self._editable = bool(data.get("editable", True))
         self._finite_values = bool(data.get("finite_values", False))
         self._blank_hint = str(data.get("blank_hint", ""))
@@ -110,10 +114,17 @@ class _VirtualTextTableModel(QtCore.QAbstractTableModel):
         if reset:
             self.endResetModel()
             return
-        if shape[0] and shape[1]:
+        changed = data.get("changed_cells")
+        if shape[0] and shape[1] and (changed is None or changed):
+            first = (0, 0) if changed is None else (
+                min(row for row, _column in changed), min(column for _row, column in changed)
+            )
+            last = (shape[0] - 1, shape[1] - 1) if changed is None else (
+                max(row for row, _column in changed), max(column for _row, column in changed)
+            )
             self.dataChanged.emit(
-                self.index(0, 0),
-                self.index(shape[0] - 1, shape[1] - 1),
+                self.index(*first),
+                self.index(*last),
                 (
                     QtCore.Qt.DisplayRole,
                     QtCore.Qt.EditRole,
@@ -121,8 +132,10 @@ class _VirtualTextTableModel(QtCore.QAbstractTableModel):
                     QtCore.Qt.ToolTipRole,
                 ),
             )
-        self.headerDataChanged.emit(QtCore.Qt.Horizontal, 0, max(0, shape[1] - 1))
-        self.headerDataChanged.emit(QtCore.Qt.Vertical, 0, max(0, shape[0] - 1))
+        if column_headers_changed:
+            self.headerDataChanged.emit(QtCore.Qt.Horizontal, 0, max(0, shape[1] - 1))
+        if row_headers_changed:
+            self.headerDataChanged.emit(QtCore.Qt.Vertical, 0, max(0, shape[0] - 1))
 
     def rowCount(self, _parent=QtCore.QModelIndex()) -> int:  # noqa: N802
         return self._shape[0]
@@ -234,18 +247,27 @@ class _VirtualTextTableModel(QtCore.QAbstractTableModel):
 
 
 def _fill_choice_combo(combo: FluentComboBox, rows: object, current: object) -> None:
+    desired = []
+    for row in tuple(rows or ()):
+        values = tuple(row)
+        if len(values) not in (2, 3):
+            raise ValueError("choice rows must be (key, label[, enabled])")
+        key, label = values[:2]
+        desired.append((key, str(label), bool(values[2]) if len(values) == 3 else True))
     with signals_blocked(combo):
-        combo.clear()
-        for row in tuple(rows or ()):
-            values = tuple(row)
-            if len(values) not in (2, 3):
-                raise ValueError("choice rows must be (key, label[, enabled])")
-            key, label = values[:2]
-            combo.addItem(str(label), key)
-            if len(values) == 3:
-                item = combo.model().item(combo.count() - 1)
-                if item is not None:
-                    item.setEnabled(bool(values[2]))
+        for index, (key, label, enabled) in enumerate(desired):
+            if index >= combo.count():
+                combo.addItem(label, key)
+            item = combo.model().item(index)
+            if item.text() != label:
+                item.setText(label)
+            previous = item.data(QtCore.Qt.UserRole)
+            if type(previous) is not type(key) or previous != key:
+                item.setData(key, QtCore.Qt.UserRole)
+            if item.isEnabled() != enabled:
+                item.setEnabled(enabled)
+        if combo.count() > len(desired):
+            combo.model().removeRows(len(desired), combo.count() - len(desired))
         index = combo.findData(current)
         combo.setCurrentIndex(index if index >= 0 else (-1 if not combo.count() else 0))
 
@@ -640,14 +662,16 @@ class _DataEditorView(QtWidgets.QWidget):
                 controls = (holder, label, mode)
                 self._axis_view_widgets[axis_id] = controls
             holder, label, mode = controls
-            self._axis_view_layout.addWidget(holder, position, 0)
+            placed = self._axis_view_layout.indexOf(holder)
+            if placed < 0 or self._axis_view_layout.getItemPosition(placed) != (position, 0, 1, 1):
+                self._axis_view_layout.addWidget(holder, position, 0)
             unit = str(row.get("unit") or "")
             suffix = f" ({int(row.get('size', 1))})" + (f" [{unit}]" if unit else "")
             label.setText(str(row.get("name", axis_id)) + suffix)
             with signals_blocked(mode):
-                mode.clear()
-                mode.addItem("Rows ↓", "rows")
-                mode.addItem("Columns →", "columns")
+                if not mode.count():
+                    mode.addItem("Rows ↓", "rows")
+                    mode.addItem("Columns →", "columns")
                 mode.setCycleChoices("Scope", row["scope_choices"])
                 selected_mode = str(row.get("mode", "scope"))
                 if selected_mode == "scope":

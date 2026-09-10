@@ -1609,7 +1609,6 @@ class FluentParameterForm(QtWidgets.QWidget):
                 return False
         self._spec = spec
         self._fields = {field.key: field for field in spec.fields}
-        self._dependents = self._dependency_map(spec)
         return True
 
     def _prepare_population(

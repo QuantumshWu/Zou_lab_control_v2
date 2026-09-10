@@ -313,6 +313,11 @@ scan = PulseScanView(); scan.set_page(ScanPageRecord(source_text="committed", so
 edited = []; runs = []; scan.source_edited.connect(edited.append); scan.run_requested.connect(lambda: runs.append("run"))
 scan.scan_code.setPlainText("typing"); scan.scan_run_button.click()
 assert edited == ["typing"] and runs == ["run"]
+scan.set_page(ScanPageRecord(source_text="typing", table_text="1 2 3"))
+table_changes = []
+scan.scan_table_view.textChanged.connect(lambda: table_changes.append(True))
+scan.set_page(ScanPageRecord(source_text="typing more", table_text="1 2 3", source_dirty=True))
+assert not table_changes, 'typing source replaced the unchanged scan-table document'
 assert not hasattr(scan, "_code_dirty") and not hasattr(scan, "_source_revision")
 scan.set_repeats((1 << 32) - 1)
 assert int(scan.scan_repeats_spin.maximum()) == (1 << 32) - 1
@@ -545,7 +550,7 @@ def test_hiding_a_port_takes_its_delay_row_with_it() -> None:
         """
 from PyQt5 import QtCore
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.pulse import DelayRowVM, FieldVM, PeriodVM, PortRowVM, PulseScheduleView, ScheduleVM
+from zlc_ui.pulse import BracketVM, DelayRowVM, FieldVM, PeriodVM, PortRowVM, PulseScheduleView, ScheduleVM
 app = ensure_qt_app(["schedule-hide-delay"])
 
 ports = tuple(PortRowVM(f"d{n}", "digital", f"Out {n}", f"d{n}") for n in range(3))
@@ -561,12 +566,23 @@ view.set_schedule(ScheduleVM(
     delay_rows=tuple(
         DelayRowVM(port.key, FieldVM("0"), "ns", (("ns", 1.0),)) for port in ports
     ),
+    bracket=BracketVM('p0', 'p0', 4),
 ))
 app.processEvents()
 assert set(view.channel_panel._rows) == {"d0", "d1", "d2"}
+strip = view.drag_container
+timeline = strip.items()
+posts = strip._posts
+strip.show_selection(post='end')
+layout_moves = []
+original_take = strip.layout_main.takeAt
+strip.layout_main.takeAt = lambda index: (layout_moves.append(index), original_take(index))[1]
 
 view.set_visible_ports(("d0", "d2"))
 app.processEvents()
+assert strip.items() == timeline and strip._posts == posts
+assert not layout_moves, 'hiding a port detached the unchanged timeline'
+assert strip.selection() == (None, 'end', None)
 assert set(view.channel_panel._rows) == {"d0", "d2"}, "a hidden port keeps no delay row"
 assert set(view._cards["p0"].port_rows) == {"d0", "d2"}, "and the card agrees"
 
@@ -762,6 +778,15 @@ assert view._schedule.bracket == right_only.bracket
 orders.clear()
 assert not drop("start", strip.items()[-1].geometry().right() + 40)
 assert orders == [] and bracket_requests == []
+end_post = next(post for post in strip._posts if post.kind == 'end')
+end_post.count_spin.setValue(7)
+assert bracket_requests == [('p2', 'p2', 7)], 'retained post used stale bracket anchors'
+empty = replace(right_only, revision=5, bracket=BracketVM('p2', 'p1', 7))
+assert view.set_schedule(empty)
+app.processEvents()
+assert end_post in strip._posts and start_post in strip._posts
+keys = tuple(strip._item_key(item) for item in strip.items())
+assert keys.index(('bracket', 'end')) == keys.index(('bracket', 'start')) + 1
 
 view.close(); view.deleteLater()
 app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete); app.processEvents()

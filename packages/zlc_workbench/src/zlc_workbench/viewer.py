@@ -2683,9 +2683,14 @@ class FigureViewerPresenter:
         )
         setter(tuple(rows), current=str(current))
 
-    def _show_data_draft(self, draft: Mapping[str, object]) -> None:
+    def _show_data_draft(
+        self, draft: Mapping[str, object], *, changed_cells: tuple | None = None,
+    ) -> None:
         editor_id = str(draft["editor_id"])
         projection = _data_projection(draft)
+        if changed_cells is not None:
+            projection["table"]["changed_cells"] = changed_cells
+            projection["axis_values"]["changed_cells"] = ()
         if bool(getattr(self.view, "has_data_editor", lambda _key: False)(editor_id)):
             self.view.update_data_editor(editor_id, projection)
             self.view.focus_data_editor(editor_id)
@@ -2905,6 +2910,7 @@ class FigureViewerPresenter:
             self.view.set_status(f"unknown data editor {editor_id!r}", error=True)
             return
         try:
+            changed_cells = None
             command = dict(intent)
             operation = str(command.pop("op"))
             draft["message"] = ""
@@ -2991,9 +2997,11 @@ class FigureViewerPresenter:
                     if draft["component"] == "sigma":
                         draft["component"] = "values"
             elif operation == "set_cells":
+                cells = tuple(command["cells"])
                 marks_dirty = _set_table_cells(
-                    draft, str(command["component"]), command["cells"]
+                    draft, str(command["component"]), cells
                 )
+                changed_cells = tuple((int(row), int(column)) for row, column, _text in cells)
             elif operation == "discard":
                 if bool(draft["modified"]):
                     self._restore_data_draft(draft)
@@ -3012,7 +3020,7 @@ class FigureViewerPresenter:
                 raise ValueError(f"unknown data edit operation {operation!r}")
             if marks_dirty:
                 draft["modified"] = True
-            self._show_data_draft(draft)
+            self._show_data_draft(draft, changed_cells=changed_cells)
             self._project_data_choices(f"manual:{editor_id}")
         except (KeyError, IndexError, TypeError, ValueError, RuntimeError) as error:
             draft["message"] = str(error)

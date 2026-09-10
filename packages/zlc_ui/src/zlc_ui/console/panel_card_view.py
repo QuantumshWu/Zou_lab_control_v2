@@ -1093,14 +1093,18 @@ class PanelCardView(FluentGroupBox):
                 values[f"{section}__{key}"] = value
         return values
 
-    def _rebuild_settings_form(self, *, force: bool = False) -> None:
+    def _rebuild_settings_form(self, *, force: bool = False, opening: bool = False) -> None:
+        if not opening and (
+            self._settings_popup is None or not self._settings_popup.isVisible()
+        ):
+            return
         if self._settings_form is not None:
             spec = self._form_spec()
             values = self._form_values()
             if force or not self._settings_form.adopt_projection(spec, values):
                 self._settings_form.reconcile(spec, values)
             self._apply_settings_enabled_state()
-            self._sync_settings_body_size()
+            self._sync_settings_body_size(opening=opening)
 
     def _apply_settings_enabled_state(self) -> None:
         """Apply standing edit policy without one-frame enabled flicker."""
@@ -1121,7 +1125,7 @@ class PanelCardView(FluentGroupBox):
                 if key in form.spec.keys:
                     form.widget_for(key).setEnabled(False)
 
-    def _sync_settings_body_size(self) -> None:
+    def _sync_settings_body_size(self, *, opening: bool = False) -> None:
         """Measure the content.  Do NOT move the frame it is sitting in.
 
         This used to re-run the whole placement -- size AND position, derived
@@ -1137,6 +1141,10 @@ class PanelCardView(FluentGroupBox):
         sized from -- but they end here.  Content goes into the scroll.
         """
 
+        if not opening and (
+            self._settings_popup is None or not self._settings_popup.isVisible()
+        ):
+            return
         body = self._settings_body
         scroll = self._settings_scroll
         if body is None or body.layout() is None or scroll is None:
@@ -1228,7 +1236,8 @@ class PanelCardView(FluentGroupBox):
         )
 
     def _open_settings(self) -> None:
-        if self._settings_popup is None:
+        created = self._settings_popup is None
+        if created:
             # A frame INSIDE the page, not a window.  It lives in the panel
             # area's viewport, so it is clipped to that area, hides and
             # returns with the tab, and travels/minimises/closes with the
@@ -1314,12 +1323,12 @@ class PanelCardView(FluentGroupBox):
             # LayoutRequest-driven measurement: the body says when its own
             # geometry went stale (see eventFilter).
             body.installEventFilter(self)
-            self._sync_settings_body_size()
+            self._sync_settings_body_size(opening=True)
             popup.hide()
         anchor = self._settings_anchor
         anchor.toggle(
             self._settings_body,
-            prepare=self._rebuild_settings_form,
+            prepare=None if created else lambda: self._rebuild_settings_form(opening=True),
             # The card's own placement call: it reads the width the rebuild
             # just measured, where a value passed alongside ``prepare`` would
             # be the one measured BEFORE it ran.
