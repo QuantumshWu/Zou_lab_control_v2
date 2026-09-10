@@ -62,6 +62,7 @@
   第四份axis容器。不得再并行保存逐row coordinate与另一份domain/mapping，或向Plot暴露
   同一Point axis的两种身份。domain是数据归属，Plot fate只属于PanelState；
   UI不得把role/fate写回Dataset truth。
+- 三域标题不会因为domain没有具名axis就消失：该域数量显示1、轴名显示“—”，不虚构axis；普通数值/有效性计数规则不变。Manual editor和Panel共用同一格式化函数。
 - 同一run/content revision不可代表不同内容；EventRef只表达causal publication，不代替content identity。
 
 ### 3.2 Figure archive

@@ -33,6 +33,9 @@ def test_a_repeat_axis_reads_its_landed_count_where_the_others_read_their_size()
 def test_no_landed_count_means_the_size_is_shown():
     sizes, _names = data_structure_fragments(STRUCTURE, ())
     assert _line(sizes) == "(35 \u00d7 100) \u00d7 (10) \u00d7 (35)"
+    sizes, names = data_structure_fragments(((("repeat", 1),), (("x", 16),), ()))
+    assert _line(sizes) == "(1) × (16) × (1)"
+    assert _line(names) == "(repeat) × (x) × (—)"
 
 
 def test_a_landed_count_is_the_axis_own_whatever_the_others_are_called():

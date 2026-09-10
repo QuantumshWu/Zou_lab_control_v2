@@ -145,12 +145,9 @@ def data_structure_fragments(
     to say everything still show how many groups there are, in which colours,
     paired line to line.
 
-    A domain with no axes is not a factor of anything and contributes no
-    group.  It used to render as an empty "()" behind its own multiplication
-    sign, which reads as a bracket somebody forgot to fill.  The colour
-    belongs to the DOMAIN rather than to the printed position, so the domains
-    that do appear keep their own colour instead of shifting up into the
-    missing one's.
+    An axis-free domain still exists and has one scalar carrier. Its number
+    is 1 and its name is a dash, not an invented axis. Keep all three domain
+    groups and their colours, including after a manual axis deletion.
     """
 
     landed = tuple(valid or ())
@@ -163,8 +160,6 @@ def data_structure_fragments(
     sizes: list[tuple[str, str | None, object]] = []
     names: list[tuple[str, str | None, object]] = []
     for index, group in enumerate(tuple(structure or ())):
-        if not group:
-            continue
         colour = AXIS_GROUP_COLORS[index % len(AXIS_GROUP_COLORS)]
         if sizes:
             sizes.append((" × ", None, None))
@@ -175,9 +170,9 @@ def data_structure_fragments(
                 " × ".join(
                     count_text(index, position, size)
                     for position, (_name, size) in enumerate(group)
-                ),
+                ) or "1",
             ),
-            (names, " × ".join(str(name) for name, _size in group)),
+            (names, " × ".join(str(name) for name, _size in group) or "—"),
         ):
             line.append(("(", colour, None))
             line.append((inner, colour, QtCore.Qt.ElideMiddle))

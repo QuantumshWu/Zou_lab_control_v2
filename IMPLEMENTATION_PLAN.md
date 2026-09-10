@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- UI复核发现Manual与Panel的公共标题函数会隐藏无具名axis的域，与固定三域contract冲突；现保留该组，显示(1)/(—)，不创建新axis。3个既有title直接用例通过。
+
 - Simulation同site geometry不再重采样全部camera PSF；原35个plane重建变为复用同一不可变对象。原add/remove/move下一帧物理图像用例红绿通过，FFT/像差/PSF尾部/随机序列未改；未量化毫秒收益。
 
 - DCAM整改：同ROI setter由22次SDK属性调用降为0；相同exposure请求不再因硬件量化重写，arm保留一次真实工作点读回，Monitor复用该结果。失败后只读可恢复actual但不伪造请求成功，下一setter重试；原量化、读回失败及arm变更拒绝用例通过。源码满幅/裁剪arm链约20/24次SDK属性调用，不是通信往返或实测时延；未操作实验机。
