@@ -16,8 +16,10 @@ the renders arrived in, and regardless of Pause.
 from __future__ import annotations
 
 from concurrent.futures import Future
+from itertools import count
 import time
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from zlc_runtime import LiveDatasetOutput
 from zlc_runtime.plane import SignalDataPlane
@@ -140,11 +142,12 @@ def _bench_board(bench: _Bench):
     occupancy_host = _RenderHost("occupancy")
     presents: list[tuple[str, object]] = []
     ports: list[PlotPanelPort] = []
-    board = LiveBoard(
-        bench.plane,
-        lambda: tuple(ports),
-        intervals=(100, 200, 400, 800),
-    )
+    with patch("zlc_runtime.presentation.monotonic_ns", count(0, 100_000_000).__next__):
+        board = LiveBoard(
+            bench.plane,
+            lambda: tuple(ports),
+            intervals=(100, 200, 400, 800),
+        )
     frame_port = PlotPanelPort(
         "panel-frame",
         FRAME,

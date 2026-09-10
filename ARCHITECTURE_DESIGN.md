@@ -209,6 +209,8 @@ Node new chunk
 
 ### 5.2 Performance与state
 
+- Display cadence按同一HarmonicClock的真实单调时间跨deadline判定；Qt延迟/合并回调时只欠一次最新呈现，不按回调次数再等待若干逻辑拍，也不补画已错过的帧。Pause、容量与same-shot接纳规则不变。
+
 - PanelState一次应用是幂等transaction；no-op产生0 solve、0 render、0 front。
 - `PanelState`是可编辑、可在拒绝后继续修复的authored target；只有Plot成功接受后返回的
   完整`DisplayDescription`才是当前Live/Frozen/Viewer pixels的accepted truth，其`spec`也是

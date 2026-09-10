@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- 必要性整改的display clock：HarmonicClock改按monotonic elapsed跨deadline，保留harmonic周期、owed/debt及Pause；Qt采用不会提早唤醒的PreciseTimer。6个既有直接case通过，延迟跨过多个800ms周期只产生一次due，不补画漏帧。该问题只解释慢周期延迟，不能归因默认100ms四图的全部耗时。
+
 - Pulse装载不再为未请求的1×1执行计算delay FIFO占用；Fire使用实际repeat数的原有检查和驻留验证复用。既有TTL/DAC溢出及repeat seam/terminal SAFE直接用例通过，溢出在FIRE命令前拒绝；没有RTL修改或FPGA build。
 
 - 必要性整改的Atom数值切面：删除BOX整帧float64转换、Camera二层stack、numeric count弃置数值归约、成功Gaussian threshold的弃置Empirical计算。5个既有直接用例通过；Derive与233基线在105个dtype/归约/轴组合上schema及validity一致、数值等价，std明确在float64做subtract避免float32中间运算。无科学阈值/shot/模型政策变化。

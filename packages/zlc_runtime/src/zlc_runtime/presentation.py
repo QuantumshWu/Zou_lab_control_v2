@@ -6,6 +6,7 @@ from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import CancelledError, Future
 from dataclasses import dataclass
 from numbers import Integral
+from time import monotonic_ns
 from typing import Protocol, runtime_checkable
 
 from .plane import SignalDataPlane, SignalFront, SignalPublication, SignalValue
@@ -38,11 +39,11 @@ class WakeSink(Protocol):
 
 
 class HarmonicClock:
-    """Pure arithmetic clock for one harmonic set of panel intervals."""
+    """Monotonic deadlines for one harmonic set of panel intervals."""
 
-    __slots__ = ("_allowed", "_base_ms", "_elapsed_ms")
+    __slots__ = ("_allowed", "_base_ms", "_elapsed_ms", "_previous_ms", "_now_ns", "_origin_ns")
 
-    def __init__(self, intervals: Sequence[int]) -> None:
+    def __init__(self, intervals: Sequence[int], *, now_ns: Callable[[], int] | None = None) -> None:
         normalized = tuple(sorted({_positive_int(value, "display interval") for value in intervals}))
         if not normalized:
             raise ValueError("display interval set must not be empty")
@@ -52,6 +53,9 @@ class HarmonicClock:
         self._allowed = frozenset(normalized)
         self._base_ms = base
         self._elapsed_ms = 0
+        self._previous_ms = 0
+        self._now_ns = monotonic_ns if now_ns is None else now_ns
+        self._origin_ns = self._now_ns()
 
     @property
     def base_ms(self) -> int:
@@ -70,7 +74,8 @@ class HarmonicClock:
         return normalized
 
     def advance(self) -> int:
-        self._elapsed_ms += self._base_ms
+        self._previous_ms = self._elapsed_ms
+        self._elapsed_ms = (self._now_ns() - self._origin_ns) // 1_000_000
         return self._elapsed_ms
 
     def group_due(self, elapsed_ms: int, member_intervals: Iterable[int]) -> bool:
@@ -78,7 +83,10 @@ class HarmonicClock:
         members = tuple(self._interval(value) for value in member_intervals)
         if not members:
             raise ValueError("a presentation group must have at least one interval")
-        return elapsed % max(members) == 0
+        interval = max(members)
+        # A late/coalesced timer can cross several deadlines.  Owe one
+        # current picture, never replay the ticks or shots that were missed.
+        return elapsed // interval > self._previous_ms // interval
 
 
 @dataclass(frozen=True, slots=True)

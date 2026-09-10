@@ -48,14 +48,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _beat_interval_ms(presenter) -> int:
-    """Return the one wall cadence owned by the display clock.
-
-    ``HarmonicClock.advance`` credits one clock base per beat, so the wall-time
-    truth of every panel's labeled refresh interval requires the timer to fire
-    at exactly that base.  An independent override silently rescales every
-    panel's admission cadence, so it is rejected rather than retained as a
-    second clock truth.
-    """
+    """Poll at the display clock's base; overdue deadlines use monotonic time."""
 
     return int(presenter.board.base_interval_ms)
 
