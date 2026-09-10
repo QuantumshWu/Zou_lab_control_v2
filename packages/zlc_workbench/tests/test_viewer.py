@@ -371,7 +371,7 @@ def _display_description(plot_input, recipe):
 
 def _built_presenter(view) -> FigureViewerPresenter:
     from zlc_workbench.apps.figure_viewer import build
-    from zlc_workbench.board import attach_qt_worker
+    from zlc_workbench.board import attach_qt_owner_turn, attach_qt_worker
     from zlc_ui.qt import ensure_qt_app
     from test_console_presenter import _async_writer
 
@@ -388,7 +388,7 @@ def _built_presenter(view) -> FigureViewerPresenter:
         save_figure_artifact=_async_writer(save_figure_artifact),
         save_front=_async_writer(save_front),
     )
-    return build(
+    presenter = build(
         view,
         run_off_thread=run_off_thread,
         close_worker=close_worker,
@@ -397,6 +397,8 @@ def _built_presenter(view) -> FigureViewerPresenter:
         editor_render=editor_render,
         close_render_processes=lambda: True,
     )
+    presenter._panel_presenter.board.wake.set_notify(attach_qt_owner_turn(presenter.commit_surfaces))
+    return presenter
 
 def _close_presenter(presenter: FigureViewerPresenter) -> None:
     _wait_until(presenter.close)
@@ -1387,10 +1389,22 @@ def test_the_raw_tab_is_the_typed_document_not_a_node_probe(saved) -> None:
     # The dataset manifest is part of the document too, however verbose.
     assert "data" in raw["dataset"]
 
-def test_opening_shows_the_figure_and_its_record(presenter, saved, tmp_path) -> None:
+def test_opening_shows_the_figure_and_its_record(presenter, saved, tmp_path, monkeypatch) -> None:
     path, _snapshot = saved
-    presenter.view.path_committed.emit(str(path))
-    _wait_until(lambda: not presenter._busy)
+    builds = []
+    make_monitor = presenter._panel_presenter._make_monitor_host
+
+    def monitor(*args, **kwargs):
+        builds.append(kwargs)
+        return make_monitor(*args, **kwargs)
+
+    with monkeypatch.context() as first_open:
+        first_open.setattr(presenter._panel_presenter, "_make_monitor_host", monitor)
+        first_open.setattr(presenter, "_build_figure_host", lambda *_args, **_kwargs: pytest.fail("Open built an unused edit/save host"))
+        presenter.view.path_committed.emit(str(path))
+        _wait_until(lambda: not presenter._busy)
+    assert len(builds) == 1
+    assert builds[0]["initial_spec"] is not None
 
     assert presenter.description is not None, presenter.view.status
     assert presenter.view.title == "run.png"
@@ -1455,6 +1469,18 @@ def test_opening_shows_the_figure_and_its_record(presenter, saved, tmp_path) -> 
     assert presenter.panels[added].host is None
     presenter.view.panel_remove_requested.emit(added)
     assert tuple(presenter.panels) == (panel_id,)
+
+    previous = dict(presenter.panels)
+    with monkeypatch.context() as refused:
+        def refuse_monitor(*_args, **_kwargs):
+            assert all(key in presenter.panels for key in previous)
+            raise ValueError("initial figure cannot be drawn")
+        refused.setattr(presenter._panel_presenter, "_make_monitor_host", refuse_monitor)
+        presenter.open(str(path))
+        _wait_until(lambda: not presenter._busy)
+    assert presenter.panels == previous
+    assert presenter.path == path
+    assert "cannot be drawn" in presenter.view.status[-1][0]
 
 def test_a_file_that_cannot_be_read_is_answered_not_raised(presenter, tmp_path) -> None:
     """An operator types paths.  Most of what they type is not an archive."""
@@ -1548,7 +1574,7 @@ def test_formal_window_waits_for_guarded_host_work_without_blocking_or_hiding(
     release_close = Event()
 
     class GuardedHost:
-        """A raster host whose configure waits, staged like every panel."""
+        """The initial Monitor host can be cancelled before its front is ready."""
 
         host_id = "guarded-host"
         startup_failure = None
@@ -1578,6 +1604,9 @@ def test_formal_window_waits_for_guarded_host_work_without_blocking_or_hiding(
         def subscribe_front(self, _callback):
             return lambda: None
 
+        def describe_display(self):
+            return self.configure()
+
         def set_device_pixel_ratio(self, _ratio):
             done = Future()
             done.set_result(None)
@@ -1599,7 +1628,8 @@ def test_formal_window_waits_for_guarded_host_work_without_blocking_or_hiding(
         _wait_until(configured.is_set)
         _wait_until(lambda: len(owner_turns) >= 3)
         assert window.is_visible()
-        assert not window.presenter.panels
+        assert window.presenter._opening_archive is not None
+        assert all(binding.host is None for binding in window.presenter.panels.values())
 
         window.close()
         application.processEvents()
@@ -1841,6 +1871,67 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
                 )
             )
         )
+
+        # Initial archive fit is synchronously primed and remains live. A
+        # later data+overlay publication must fit again without a Fit UI edit.
+        assert host._session._live_fit_request is not None
+        from zlc_workbench.viewer import _ArchiveDatasetProducer
+        from test_selection import _draw_area
+
+        plane = real_presenter._signal_plane
+        offset_signal = fit_center.rsplit("/", 1)[0] + "/offset"
+        before_offset = plane.current_dataset(offset_signal).block.values.item()
+        previous = plane.latest_publication(source_signal)
+        shifted = owned_snapshot_from_arrays(
+            snapshot.block.schema,
+            snapshot.block.values + np.asarray(7, dtype=snapshot.block.values.dtype),
+            2,
+            validity=snapshot.block.validity,
+        )
+        producer = _ArchiveDatasetProducer(
+            1, 0, "data", ImageFrame(shifted, overlay), archive,
+            owner_id=real_presenter._archive_producers[0].instance_id,
+            data_signal=source_signal, run_record={"operation": "manual-edit"},
+        )
+        updated = producer.publish(
+            plane, source_publication=(source_signal, previous),
+        )
+        real_presenter._archive_producers = (producer,)
+        front = plane.freeze()
+        assert front.publication(source_signal) is updated
+        assert front.publication(active["state"].overlay_signal) is updated
+
+        def refitted():
+            real_presenter.beat()
+            publication = plane.latest_publication(offset_signal)
+            return (
+                publication is not None
+                and publication.direct_parent_refs == (updated.event_ref,)
+                and real_presenter.panels[source_panel_id].display_publication is updated
+            )
+
+        _wait_until(refitted)
+        assert real_presenter.panels[source_panel_id].host is host
+        after_offset = plane.current_dataset(offset_signal).block.values.item()
+        assert after_offset == pytest.approx(before_offset + 7.0, abs=1e-3)
+        assert real_presenter.panels[source_panel_id].state.selector
+        roi_publication = plane.latest_publication(derived_roi)
+        assert roi_publication is not None
+        assert roi_publication.direct_parent_refs == (updated.event_ref,)
+
+        # A real gesture has a nonzero owner revision; the persisted region
+        # document deliberately does not carry that lifecycle counter.
+        _draw_area(host, span=(0.1, 0.1, 0.8, 0.8))
+        binding = real_presenter.panels[source_panel_id]
+        _wait_until(lambda: real_presenter.beat() or (
+            binding.selection_revision > 0 and binding.configuration is None
+        ))
+        region_revision = binding.selection_revision
+        updated = producer.publish(plane, source_publication=(source_signal, updated))
+        _wait_until(refitted)
+        assert binding.host is host and binding.selection_revision == region_revision
+        assert binding.bridge.last_error is None
+        assert plane.latest_publication(derived_roi).direct_parent_refs == (updated.event_ref,)
 
         panel_id = source_panel_id
         center_x = float(state.fit["fixed"]["center_x"])

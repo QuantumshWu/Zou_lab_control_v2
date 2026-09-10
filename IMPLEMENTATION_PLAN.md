@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- Viewer去掉临时C Host，直接一个A首accept，旧板在新图成功前保留；菜单纯投影，延迟mount回Host生命周期入口，修掉交叉验证暴露的递归。保存/选区/viewport/typed overlay及Manual保存重开原case通过；短实屏确认7.25、三域title、1A/0临时C，窗口/children关闭。后续又验证真实Area手势后新generation：同Host offset随数据+7、ROI/Fit exact parent更新，selection revision不虚增，drawn-only不重算；未削弱same-shot或旧revision拒绝。探针的控件API/路径/等待fit错误均在ignored记录，不当产品证据。
+
 - 新世代自派生front根修：Manual新data+overlay共同parent旧同名bundle时，旧front算法直接永久pending。现只在leaf内撞名时从本次已读DAG选唯一因果后代，独立分支和跨leaf同shot判据不放松。原source-sibling案例扩展红绿、三个front直接case通过，不删除旧parent、不用latest冒充。
 
 - 第二轮独立交叉检查修复U1/U2遗漏：隐藏Setting丢force/父Tab Show不刷新会留下旧fates和Signal目录，现延期事实在原Card由Show或open消费一次；Pulse容器已正确缩小，不恢复adjustSize，只修gap indicator 228/286高度不同为228/228。4个既有直接case在Windows Qt正文通过，隐藏0 reconcile、未变Show0重建，无长期GUI残留。

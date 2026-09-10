@@ -69,6 +69,7 @@
 
 - 一个writer、一个reader、一个format owner。
 - Figure reader直接返回metadata、NPZ成员和已经完整验证的typed datasets；typed成员与Dataset共享同一不可变buffer，消费者不再次decode或copy。初始Host配置使用同一configure事务，在第一张front之前应用viewport/selectors/focus/classifier/fit；临时export-only Host保存后不重画即将关闭的屏幕。
+- FigureViewer开图只创建真正的Monitor A Host，不在C先画一遍来取配置；首个真实accept才从其SelectionSubject恢复交互并同步Port/PanelState的规范化target。新图成功前保留旧板，失败或Close清理候选；A沿普通live fit契约首帧求解并继续处理新数据，C的静态保存策略不复制到A。
 - Writer写入前规划全部member namespace并拒绝碰撞。
 - Reader在解释内容前严格验证format、required members、shape、duplicates和non-finite metadata。Figure与Dataset archive的每个member都按其物理ZIP名（`<key>.npy`）读取，不用NpzFile按逻辑名的猜测查找：`signal`与`signal.npy`是两个合法key，各自读回各自的数组；同名重复entry是含糊的archive，拒绝而不选一个。
 - 未知metadata类型拒绝，不自动字符串化。
@@ -155,6 +156,7 @@ Node new chunk
 - Panel标题仅Repeat域显示条件有效整数，Point/Cell-data仍显示完整维度。对每个Repeat轴只放开自身，其余所有轴都固定：Repeat/Point坐标取同一次publication最后写入的位置与canonical axis_codes；Cell-data取该完整原子数据块的末坐标，没有incremental placement时各域使用数据自身末坐标。不得读取Panel Scope/Focus/Facet/Reduction或独立latest决定计数。只数固定坐标下valid的不同Repeat坐标，不把其它site的有效性混进来，不用已采集数量替代valid，也不产生min–max区间。计数之积不代表全Dataset有效样本总数。统计只读compact validity并先切component坐标，不展开image pixels；一次surface acceptance的标题metadata复用，不重复计算。
 - Producer与latest/frozen/follow Processor的Start共用同一终态世代交接：旧结果在结束/Shutdown后仍保留，直到下一次Start才退休旧owner及派生closure。cleanup在Plane锁外，最终source exact校验与新state安装在同一锁内，`_starting`由同一入口释放；仍active的owner不得被覆盖。不得用关闭时清数据或为Derive另建重启路径绕过。
 - Revision严格递增，不接受重复、倒退或同ref不同内容。
+- Selection revision属于用户的数值范围选择，不属于source generation。相同revision、相同数值几何和同source generation是幂等提交；旧revision或同revision改真实范围仍拒绝。兼容选区遇到新的accepted source generation时在原Bridge重新激活派生，不伪造一次用户编辑。仅视觉用的drawn不触发数值重算，Panel文档不另存revision，交回Bridge始终用原binding.selection_revision。
 - 一次commit的siblings共享revision、run record和causal parent。
 - Run record在generation内只冻结一次，event record每次atomic commit只冻结一次，内部siblings/publication复用同一不可变记录；外部构造仍独立冻结和校验。finite物化仅合并新增chunks与已有prefix，indexed窗口滚动时记录只覆盖仍保留的事件。仅更换DataBlock身份不重扫已验证且未改变的数值内容。
 - Exact scientific Processor逐publication有序处理；pure display derivation可latest。交付策略由input contract声明，不从coverage猜；同一交付publication的event/run/window输入范围是另一项显式选择，exact并不强制只读event chunk。

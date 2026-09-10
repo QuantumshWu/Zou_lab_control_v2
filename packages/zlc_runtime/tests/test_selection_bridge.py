@@ -40,6 +40,7 @@ from zlc_runtime.dataset_output import (
 from zlc_runtime.plane import SignalDataPlane
 from zlc_runtime.selection_bridge import (
     FacetCondition,
+    DrawnRegion,
     FitEventValue,
     SelectionBridge,
     SelectionChange,
@@ -432,7 +433,7 @@ def test_image_area_catalog_statistics_and_publication_choice_share_one_owner() 
         _close(bridge, plane, source)
 
 
-def test_selection_commit_republishes_same_source_and_source_revision_follows() -> None:
+def test_selection_commit_republishes_same_source_and_source_revision_follows(monkeypatch) -> None:
     schema = _image_schema()
     values = np.arange(12, dtype=np.float64).reshape(1, 1, 4, 3)
     plane, source, slot, state, _initial = _source_setup(schema, values)
@@ -470,6 +471,21 @@ def test_selection_commit_republishes_same_source_and_source_revision_follows() 
         assert second.event_ref.sequence == 1
         assert second.direct_parent_refs == first.direct_parent_refs
         assert float(second_front.value("@logic/image/roi_mean").snapshot.block.values.reshape(-1)[0]) == 9.0
+        with monkeypatch.context() as same_source:
+            same_source.setattr(
+                bridge, "_materialize_selection_outputs",
+                lambda *args, **kwargs: pytest.fail("unchanged region prepared again"),
+            )
+            events.emit_selection(SelectionChange.COMMITTED, second_state)
+            events.emit_selection(
+                SelectionChange.COMMITTED,
+                replace(second_state, drawn=DrawnRegion("area", 0.0, 10.0)),
+            )
+        assert plane.latest_publication("@logic/image/roi_mean") is second
+        with pytest.raises(ValueError, match="revisions must increase"):
+            events.emit_selection(SelectionChange.COMMITTED, first_state)
+        with pytest.raises(ValueError, match="revisions must increase"):
+            events.emit_selection(SelectionChange.COMMITTED, replace(first_state, revision=2))
 
         state["frame"] = LiveDatasetOutput(
             state["frame"].declaration,

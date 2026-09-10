@@ -74,6 +74,8 @@ def build_panel_host(
     *,
     build_host,
     device_pixel_ratio: float = 1.0,
+    initial_spec=None,
+    initial_configuration=None,
 ):
     """One panel host from one panel state: THE mount path for every card.
 
@@ -95,9 +97,8 @@ def build_panel_host(
         raise TypeError("build_host must be callable")
 
     snapshot = getattr(plot_input, "snapshot", plot_input)
-    spec = task_console_fitting_spec(
-        snapshot.block.schema, state.kind, state.cell_kind
-    )
+    spec = initial_spec if initial_spec is not None else task_console_fitting_spec(
+        snapshot.block.schema, state.kind, state.cell_kind)
     if spec is None:
         raise ValueError(
             f"{state.signal!r} cannot be drawn as {state.kind or 'anything'}"
@@ -115,6 +116,7 @@ def build_panel_host(
         size=state.size,
         parameters=parameters,
         device_pixel_ratio=device_pixel_ratio,
+        initial_configuration=initial_configuration,
     )
 
 
@@ -182,7 +184,7 @@ def build_console(session, *, window_ratio=None, request_close=None, run_device_
         )
         return bool(reads_closed and monitor_closed and editor_closed)
 
-    def _build_monitor_host(plot_input, state):
+    def _build_monitor_host(plot_input, state, **initial):
         return build_panel_host(
             plot_input,
             state,
@@ -192,6 +194,7 @@ def build_console(session, *, window_ratio=None, request_close=None, run_device_
             # it must not touch Qt here; it must also not retain the scale of
             # the screen on which the console originally opened.
             device_pixel_ratio=float(view.device_pixel_ratio()),
+            **initial,
         )
 
     def _build_editor_host(plot_input, state):

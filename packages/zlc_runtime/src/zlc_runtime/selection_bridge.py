@@ -616,7 +616,7 @@ def _immutable_float_vector(value: object, field: str) -> np.ndarray:
     # A bytes-backed array cannot be made writable by changing its flags.  Fit
     # results cross an asynchronous callback boundary, so retaining a mutable
     # producer buffer here would make the event non-deterministic.
-    payload = np.array(array, dtype=np.float64, copy=True).tobytes(order="C")
+    payload = array.tobytes(order="C")
     return np.frombuffer(payload, dtype=np.float64).reshape(array.shape)
 
 
@@ -626,7 +626,7 @@ def _immutable_bool_vector(value: object, field: str) -> np.ndarray:
         raise TypeError(f"{field} must be a bool array")
     if array.ndim != 1 or array.size == 0:
         raise ValueError(f"{field} must be a non-empty one-dimensional array")
-    payload = np.array(array, dtype=np.bool_, copy=True).tobytes(order="C")
+    payload = array.tobytes(order="C")
     return np.frombuffer(payload, dtype=np.bool_).reshape(array.shape)
 
 
@@ -1422,12 +1422,26 @@ class SelectionBridge:
             if self._closed or not self._started:
                 return
             previous = self._selection
-            if (
-                not rearm
-                and previous is not None
-                and state.revision <= previous.revision
-            ):
-                raise ValueError("selection revisions must increase")
+            if rearm and state is not previous:
+                return
+            if previous is not None:
+                if state.revision < previous.revision or (
+                    state.revision == previous.revision
+                    and (state.plot_kind, state.selector_kind, state.ranges, state.facets)
+                    != (previous.plot_kind, previous.selector_kind, previous.ranges, previous.facets)
+                ):
+                    raise ValueError("selection revisions must increase")
+                if not rearm and state.revision == previous.revision:
+                    parent = self._selection_publication
+                    if parent is not None and (
+                        parent.event_ref.stream_id, parent.event_ref.generation
+                    ) == (
+                        source_publication.event_ref.stream_id,
+                        source_publication.event_ref.generation,
+                    ):
+                        return
+                    # The same compatible region on a new accepted run must
+                    # reactivate its retired route, not invent a user edit.
             output_names = self._selection_output_names(state)
             self._selection_epoch += 1
             selection_epoch = self._selection_epoch

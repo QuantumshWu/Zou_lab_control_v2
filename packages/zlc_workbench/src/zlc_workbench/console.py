@@ -312,6 +312,8 @@ class PanelBinding:
     selection_revision: int = 0
     configuration: Any = None
     editor_configuration: Any = None
+    #: An exact initial request, cleared when the real first host accepts it.
+    initial_recipe: tuple[PanelState, Mapping[str, object], object] | None = None
 
     @property
     def accepted_surface(self) -> object | None:
@@ -456,7 +458,7 @@ class ConsolePresenter:
         session: object,
         view: object,
         *,
-        make_monitor_host: Callable[[object, PanelState], Any],
+        make_monitor_host: Callable[..., Any],
         make_editor_host: Callable[[object, PanelState], Any],
         build_figure_host: Callable[..., object] | None = None,
         save_figure_artifact: Callable[..., object],
@@ -831,6 +833,7 @@ class ConsolePresenter:
         fit: Mapping[str, Any] | None = None,
         overlay_signal: str = "",
         initial_publication: object | None = None,
+        initial_recipe: Mapping[str, object] | None = None,
     ) -> PanelBinding:
         """Show a signal under one complete ``kind + cell_kind`` identity.
 
@@ -860,6 +863,8 @@ class ConsolePresenter:
         ):
             publication = front.publication(signal_name)
         exact_value = self._publication_value(publication, signal_name)
+        if initial_recipe is not None and publication is None:
+            raise ValueError("an initial plot recipe requires its exact publication")
 
         wanted = str(kind)
         if not wanted:
@@ -900,6 +905,8 @@ class ConsolePresenter:
             parameter_surface=self._unbound_panel_parameters(state),
         )
         parameter_snapshot = initial
+        if initial_recipe is not None:
+            binding.initial_recipe = (state, dict(initial_recipe), publication.event_ref)
         if exact_value is not None and publication is not None:
             parameter_snapshot = (
                 getattr(exact_value, "canonical_schema", None)
@@ -925,16 +932,16 @@ class ConsolePresenter:
         self._refresh_console_projection()
         return binding
 
-    def restore_panel_description(
+    def _restore_initial_panel_description(
         self,
-        panel_id: str,
+        binding: PanelBinding,
         description: object,
-    ) -> PanelBinding:
-        """Seed one shared Panel from an accepted archived Figure recipe."""
+        plot_input: object,
+    ) -> PanelState:
+        """Read initial interactions from the host's real accepted subject."""
 
         from zlc_plot.selectors import CrosshairPoint
 
-        binding = self.panels[str(panel_id)]
         accepted_kind, accepted_cell_kind = task_console_panel_identity_for_spec(
             description.spec
         )
@@ -963,10 +970,8 @@ class ConsolePresenter:
             classifier_thresholds=tuple(description.classifier_thresholds),
             focused_cell=description.facet_focus,
         )
-        binding.state = state
-        current = self.session.signal_plane.freeze().value(state.signal)
-        snapshot = None if current is None else current.snapshot
-        if description.viewport is not None and snapshot is not None:
+        snapshot = getattr(plot_input, "snapshot", plot_input)
+        if description.viewport is not None:
             binding.interaction_viewport = (
                 self._panel_view_identity(
                     binding,
@@ -975,11 +980,7 @@ class ConsolePresenter:
                 ),
                 description.viewport,
             )
-        if binding.port is not None:
-            binding.port.retarget(state)
-        self._publish_panel_state(binding)
-        self.board.owe_presentation((binding.panel_id,))
-        return binding
+        return state
 
     @staticmethod
     def _publication_value(publication: object | None, signal: str) -> object | None:
@@ -998,12 +999,13 @@ class ConsolePresenter:
         selected = binding.state if target is None else target
         port: PlotPanelPort | None = None
 
-        def presented(surface: object) -> None:
+        def presented(surface: object) -> object | None:
             # A retarget is rendered and accepted before it replaces the live
             # port.  Ignore that one candidate callback; once this exact port
             # is installed, every later accepted surface advances the card.
             if binding.port is port:
-                self._panel_presented(binding, surface)
+                return self._panel_presented(binding, surface)
+            return None
 
         port = PlotPanelPort(
             binding.panel_id,
@@ -1446,7 +1448,7 @@ class ConsolePresenter:
         self,
         binding: PanelBinding,
         surface: object,
-    ) -> None:
+    ) -> object | None:
         """Track the exact live event separately from Panel Edit's frozen one."""
 
         publication = surface.publication
@@ -1462,10 +1464,14 @@ class ConsolePresenter:
                 surface.host,
                 description.display_state,
             )
-            accepted_state = panel_state_from_description(
-                binding.state,
-                description,
-            )
+            initial = binding.initial_recipe
+            if (initial is not None
+                    and _same_panel_plot_target(initial[0], surface.target)
+                    and publication.event_ref == initial[2]):
+                accepted_state = self._restore_initial_panel_description(binding, description, plot_input)
+            else:
+                accepted_state = panel_state_from_description(binding.state, description)
+            binding.initial_recipe = None
             state_changed = accepted_state != binding.state
             binding.state = accepted_state
             frozen_target = binding.state
@@ -1506,12 +1512,22 @@ class ConsolePresenter:
                 for name, value in accepted_shape.items()
             )
         interaction_changed = self._normalize_panel_interaction(binding)
+        if describes_current_target:
+            frozen_target = binding.state
+            if binding.state.selector and binding.bridge is not None:
+                binding.bridge.commit_selection(
+                    replace(
+                        panel_selection_from_document(binding.state.selector),
+                        revision=binding.selection_revision,
+                    ),
+                    source_publication=publication,
+                )
         if binding.frozen_data is not None and not binding.refresh_requested:
             if state_changed or ui_changed or shape_changed or interaction_changed:
                 self._publish_panel_state(binding, data_shape=accepted_shape)
             else:
                 self._refresh_panel_snapshot_status(binding)
-            return
+            return frozen_target if describes_current_target else None
         binding.refresh_requested = False
         try:
             self._freeze_panel(
@@ -1532,6 +1548,7 @@ class ConsolePresenter:
                 severity="error",
             )
         self._publish_panel_state(binding)
+        return frozen_target if describes_current_target else None
 
     # ------------------------------------------------------------ presentation
     #
@@ -2261,9 +2278,23 @@ class ConsolePresenter:
                 focused_cell=current.focused_cell,
             )
 
-        host = self._make_monitor_host(plot_input, state)
+        initial = binding.initial_recipe
+        first = (initial is not None and _same_panel_plot_target(initial[0], state)
+                 and publication.event_ref == initial[2])
+        options = {}
+        if first:
+            recipe = initial[1]
+            options = {
+                "initial_spec": recipe["spec"],
+                "initial_configuration": {
+                    name: recipe[name] for name in (
+                        "viewport", "classifier_thresholds", "facet_focus", "selectors", "fit",
+                    )
+                },
+            }
+        host = self._make_monitor_host(plot_input, state, **options)
         try:
-            operation = self._match_host_to_panel(
+            operation = host.describe_display() if first else self._match_host_to_panel(
                 binding,
                 host,
                 state=state,
@@ -2501,14 +2532,6 @@ class ConsolePresenter:
                 )
             self._offered_groups = groups
             self._offered_overlays = overlay_offers
-        for panel_id, binding in tuple(self.panels.items()):
-            if (
-                binding.port is None
-                and binding.state.signal
-                and not binding.vacancy
-                and publications.get(binding.state.signal) is not None
-            ):
-                self.update_panel_state(panel_id, {"signal": binding.state.signal})
         for node_id in tuple(self.logic):
             self.refresh_logic_editor(node_id)
         self._signal_choice_context = (directory, wiring)
@@ -3580,6 +3603,12 @@ class ConsolePresenter:
         """Project metadata and selectors only after each initial render finished."""
 
         for binding in tuple(self.panels.values()):
+            if (binding.port is None and binding.configuration is None
+                    and binding.state.signal and not binding.vacancy
+                    and self.session.signal_plane.latest_publication(binding.state.signal) is not None):
+                # Source arrival starts the ordinary mount here, never while
+                # projecting menus (which update_panel_state also projects).
+                self.update_panel_state(binding.panel_id, {"signal": binding.state.signal})
             host = binding.host
             configuration_entry = binding.configuration
             if (
@@ -5363,6 +5392,8 @@ class ConsolePresenter:
         if binding.accepted_display is None:
             return
         initial_selection = panel_selection_from_document(binding.state.selector)
+        if initial_selection is not None:
+            initial_selection = replace(initial_selection, revision=binding.selection_revision)
         initial_publication = None
         bridge_selection = initial_selection
         if bridge_selection is not None:
