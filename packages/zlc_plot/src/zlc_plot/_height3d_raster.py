@@ -441,6 +441,7 @@ def render_height_bars(
     rim_width_px: float = 0.0,
     render_cache: dict | None = None,
     origin: str = "lower",
+    inset_px: tuple[float, float] = (0.0, 0.0),
 ) -> tuple[NDArray[np.uint8], HeightBarScene]:
     """Render the grid as boxes -> ((H, W, 4) uint8 RGBA, scene map).
 
@@ -567,10 +568,15 @@ def render_height_bars(
     span_x = diagonal
     span_y = diagonal * se + pane_high - pane_low
     margin = 0.04 * max(span_x, span_y)
+    # Chrome and bars share this one transform and full-size picking plane.
+    # Symmetric text room stays independent of azimuth; user zoom then acts
+    # on the fitted scene normally, including intentional viewport clipping.
+    inner_w = max(1.0, render_w - 2.0 * inset_px[0] * supersample)
+    inner_h = max(1.0, render_h - 2.0 * inset_px[1] * supersample)
     scale = (
         min(
-            render_w / (span_x + 2.0 * margin),
-            render_h / (span_y + 2.0 * margin),
+            inner_w / (span_x + 2.0 * margin),
+            inner_h / (span_y + 2.0 * margin),
         )
         * camera.zoom
     )

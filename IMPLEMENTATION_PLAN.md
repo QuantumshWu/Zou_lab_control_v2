@@ -475,7 +475,7 @@ heatmap 的**中键 pan**（同样整幅重画）**30.3 ms**；静源 3D orbit *
   所以只有触到最新一发的窗口才有数据。现在会明说，不再发布一整帧无效数据（`ea462c6`）。
   要真的切到那些 shot，需要用面板已经租下的 indexed history 重新派生——那是能力，不是修补。
 - **`_reduce_blocks` 4.2 ms 出现在半数 image 帧上**（裁决见上，记录在此备查）。
-- **z 刻度标签被切**（"0.8" 印成 ".8"）：场景 fit 只留 4% 几何 margin。先于本轮存在。
+- **z刻度裁剪已修复**：原fit仅计4%几何margin；现真实tick字符串与字体像素度量作为同一scene fit的对称inset，axes边界保持不变，原user zoom继续作用于同一个变换。DPR2同图`2500`由左端−41.53px移至46.46px（axes左界16px），屏幕与导出均完整；原直接bbox/picking案例通过。
 - **`test_guard_c_save_semantics` 红**：保存面板图时 matplotlib mathtext
   `ParseException`。**在 master 上同样红**，与本轮无关。
 - **`Github\zlc_*` 是拆包残留的旧副本**（`zlc_runtime/selection_bridge.py` 56KB vs 树内 96KB，

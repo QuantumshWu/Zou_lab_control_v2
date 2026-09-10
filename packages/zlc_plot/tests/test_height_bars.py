@@ -95,7 +95,7 @@ def test_pick_inverts_projection_in_every_quadrant(azimuth) -> None:
     camera = HeightBarCamera(azimuth_deg=azimuth, elevation_deg=30.0)
     _frame, scene = render_height_bars(
         heights, colors, camera=camera, value_limits=(0.0, 1.0),
-        width=320, height=240,
+        width=320, height=240, inset_px=(35.0, 25.0),
     )
     for row, column in ((0, 0), (2, 5), (5, 8), (3, 3)):
         a, b = scene.fold_cell(row, column)
@@ -300,13 +300,24 @@ def test_presentation_roundtrip_is_bit_identical_and_keeps_selectors() -> None:
 def test_camera_parameters_are_display_state_not_projection() -> None:
     session = _session()
     try:
-        session.set_parameter("presentation", "height_bars")
+        session.set_parameters({
+            "presentation": "height_bars", "color_min": -12345.0, "color_max": 87654.0,
+        })
         revision_before = session.data_revision
         first = session.rgba().copy()
+        renderer = session._renderer
+        axes = renderer.primary_axes
+        original_box = axes.bbox.bounds
         session.set_parameter("camera_azimuth", -20.0)
         second = session.rgba()
         assert session.data_revision == revision_before
         assert np.abs(second.astype(int) - first.astype(int)).max() > 0
+        assert axes.bbox.bounds == original_box
+        for text in renderer._artists["image:h3d_chrome"]["texts"]:
+            if text.get_visible():
+                extent = text.get_window_extent(renderer.figure.canvas.get_renderer())
+                assert axes.bbox.contains(extent.x0, extent.y0), (text.get_text(), extent)
+                assert axes.bbox.contains(extent.x1, extent.y1), (text.get_text(), extent)
     finally:
         session.close()
 
