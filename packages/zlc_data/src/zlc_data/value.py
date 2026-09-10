@@ -375,14 +375,14 @@ def repeat_validity_counts(
     validity: Valid | Invalid | CellValidity | DatasetComponentValidity,
     schema: DatasetSchema,
     positions: Mapping[AxisId, int] | None = None,
-) -> tuple[int | tuple[int, int], ...]:
+) -> tuple[int, ...]:
     """Count distinct valid Repeat coordinates at the other named positions.
 
-    Each target Repeat axis ignores its own pin. Unpinned axes are separate
-    contexts, not an ANY reduction: differing counts return (minimum, maximum).
-    Contexts are the combinations actually carried by the schema, never a
-    fabricated Cartesian product. An explicitly empty intersection counts zero.
-    Only the compact validity is read; omitted pixel axes cannot vary its answer.
+    Each target Repeat axis ignores its own pin; every other axis is fixed.
+    Positions default to the dataset's final coordinates and can be supplied
+    from its exact publication. Count valid values, not arrived events. Only
+    duplicate storage rows at the same full coordinates may share evidence.
+    Component axes are sliced before counting; image pixels are never expanded.
     """
     _validate_dataset_validity(validity, schema)
     repeat = schema.repeat_domain
@@ -390,80 +390,44 @@ def repeat_validity_counts(
         return ()
     if isinstance(validity, Invalid):
         return (0,) * len(repeat.axes)
-    pins = {} if positions is None else positions
     point = schema.point_domain
+    pins = {
+        axis.axis_id: int(domain.codes(axis.axis_id)[-1])
+        for domain in (repeat, point) for axis in domain.axes
+    }
+    pins.update({axis.axis_id: axis.size - 1 for axis in schema.cell_domain.axes})
+    if positions is not None:
+        pins.update(positions)
     point_rows = np.ones(point.size, dtype=bool)
     for axis in point.axes:
-        if axis.axis_id in pins:
-            point_rows &= point.codes(axis.axis_id) == pins[axis.axis_id]
+        point_rows &= point.codes(axis.axis_id) == pins[axis.axis_id]
     point_rows = np.flatnonzero(point_rows)
     if not point_rows.size:
         return (0,) * len(repeat.axes)
 
-    mask = None
+    valid_rows = None
     if not isinstance(validity, Valid):
         # Slice component axes before selecting any carrier rows: one site
         # must not copy a complete camera-sized component mask.
         component_slice = (
-            tuple(pins.get(axis_id, slice(None)) for axis_id in validity.axis_ids)
+            tuple(pins[axis_id] for axis_id in validity.axis_ids)
             if isinstance(validity, DatasetComponentValidity) else ()
         )
         mask = validity.mask[(slice(None), slice(None), *component_slice)]
         if point_rows.size != point.size:
             mask = mask[:, point_rows]
-        # Duplicate physical Point rows with identical complete coordinates
-        # describe the same context. Combine only those, not different sites
-        # or frame/scan coordinates.
-        if point.axes and point_rows.size > 1:
-            point_codes = np.column_stack([point.codes(axis.axis_id)[point_rows] for axis in point.axes])
-            unique_points, inverse = np.unique(point_codes, axis=0, return_inverse=True)
-            if len(unique_points) != len(point_rows):
-                grouped = np.zeros((len(unique_points), mask.shape[0], *mask.shape[2:]), dtype=bool)
-                np.logical_or.at(grouped, inverse, np.moveaxis(mask, 1, 0))
-                mask = np.moveaxis(grouped, 0, 1)
+        # Every selected Point row names the same fixed coordinates.
+        valid_rows = np.any(mask, axis=1)
 
-    # Deduplicate complete Repeat coordinates once, not independently for
-    # each axis; multiple storage rows cannot count the same target twice.
-    codes = np.column_stack([repeat.codes(axis.axis_id) for axis in repeat.axes])
-    unique, inverse = np.unique(codes, axis=0, return_inverse=True)
-    if len(unique) != len(codes):
-        if mask is not None:
-            grouped = np.zeros((len(unique), *mask.shape[1:]), dtype=bool)
-            np.logical_or.at(grouped, inverse, mask)
-            mask = grouped
-        codes = unique
-
-    result: list[int | tuple[int, int]] = []
+    codes = tuple(repeat.codes(axis.axis_id) for axis in repeat.axes)
+    result: list[int] = []
     for target, axis in enumerate(repeat.axes):
-        rows = np.ones(len(codes), dtype=bool)
-        context_columns = []
+        rows = np.ones(repeat.size, dtype=bool) if valid_rows is None else valid_rows.copy()
         for index, other in enumerate(repeat.axes):
             if index == target:
                 continue
-            if other.axis_id in pins:
-                rows &= codes[:, index] == pins[other.axis_id]
-            else:
-                context_columns.append(index)
-        rows = np.flatnonzero(rows)
-        if not rows.size:
-            result.append(0)
-            continue
-        if context_columns:
-            contexts, groups = np.unique(codes[rows][:, context_columns], axis=0, return_inverse=True)
-            group_count = len(contexts)
-        else:
-            groups = np.zeros(len(rows), dtype=np.int64)
-            group_count = 1
-        minimum, maximum = axis.size, 0
-        for group in range(group_count):
-            selected = rows[groups == group]
-            if mask is None:
-                low = high = len(selected)
-            else:
-                counts = np.count_nonzero(mask[selected], axis=0)
-                low, high = int(counts.min()), int(counts.max())
-            minimum, maximum = min(minimum, low), max(maximum, high)
-        result.append(minimum if minimum == maximum else (minimum, maximum))
+            rows &= codes[index] == pins[other.axis_id]
+        result.append(int(np.unique(codes[target][rows]).size))
     return tuple(result)
 
 

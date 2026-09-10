@@ -78,8 +78,8 @@ def panel_data_shape(
 
     ``source`` is the exact publication event underlying the snapshot, never
     a separate read of latest. Its final written Repeat/Point position fixes
-    the other axes while each Repeat axis is counted in turn. Components
-    without one current coordinate contribute a min/max count. Plot scope
+    the other axes while each Repeat axis is counted in turn. Cell-data axes
+    are fixed at the same complete data block's final coordinates. Plot scope
     only supplies the existing scope labels; it cannot change these counts.
     No input validity means zero observed samples, not the planned capacity.
     """
@@ -93,12 +93,14 @@ def panel_data_shape(
 
     # A title reports the DATA's progress, not its plot projection. The last
     # Repeat/Point row in this exact publication's write block is its current
-    # position; Cell-data are simultaneous components, so none is picked here.
+    # position. Cell-data axes use the final coordinates of that atomic block,
+    # not an aggregation across sites or a choice taken from the plot.
     domains = (schema.repeat_domain, schema.point_domain)
     positions = {
         axis.axis_id: int(domain.codes(axis.axis_id)[-1])
         for domain in domains for axis in domain.axes
     }
+    positions.update({axis.axis_id: axis.size - 1 for axis in schema.cell_domain.axes})
     if source is not None:
         event = source.snapshot.block.schema
         declared = source.canonical_schema or event

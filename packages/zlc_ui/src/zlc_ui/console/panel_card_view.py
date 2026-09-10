@@ -124,7 +124,7 @@ def data_structure_fragments(
 ) -> tuple[tuple, tuple]:
     """The one coloured two-line rendering of a three-domain shape.
 
-    ``valid`` is one conditional count (or min/max pair) per Repeat axis,
+    ``valid`` is one integer conditional count per Repeat axis,
     in that group's own order. Other domains still read their full size.
     These counts come from the current data position, not plot selection;
     their product is not a total sample count. By POSITION within the
@@ -157,10 +157,7 @@ def data_structure_fragments(
 
     def count_text(group_index: int, position: int, size: object) -> str:
         if group_index == 0 and position < len(landed):
-            count = landed[position]
-            if isinstance(count, (tuple, list)):
-                return f"{int(count[0])}–{int(count[1])}"
-            return str(int(count))
+            return str(int(landed[position]))
         return str(int(size))
 
     sizes: list[tuple[str, str | None, object]] = []

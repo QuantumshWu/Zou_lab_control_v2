@@ -119,12 +119,13 @@ def editor_checkpoint(panel, editor=None):
 def _snapshot_shape(snapshot, source=None):
     """Derive title factors from Dataset axes and compact validity directly.
 
-    Uses only this accepted publication's last written Repeat/Point position.
+    Fixes this accepted publication's last written Repeat/Point position and
+    the last coordinate of every Cell-data axis while counting each Repeat axis.
     Does not call production count/projection helpers or the title formatter.
     The small checkpoint oracle never expands validity over image pixels.
     """
     import numpy as np
-    from zlc_data import Valid, Invalid
+    from zlc_data import Valid, Invalid, DatasetComponentValidity
     from zlc_data.axis import SCALAR
 
     block, schema = snapshot.block, snapshot.block.schema
@@ -152,6 +153,7 @@ def _snapshot_shape(snapshot, source=None):
         for domain in (repeat, point):
             for axis in domain.axes:
                 positions[axis.axis_id] = int(domain.codes(axis.axis_id)[-1])
+        positions.update({axis.axis_id: axis.size - 1 for axis in schema.cell_domain.axes})
         if source is not None:
             event = source.snapshot.block.schema
             declared = source.canonical_schema or event
@@ -168,6 +170,9 @@ def _snapshot_shape(snapshot, source=None):
                         position = axis.coordinate_position(coordinate)
                         if position is not None:
                             positions[axis.axis_id] = int(position)
+        if isinstance(validity, DatasetComponentValidity):
+            mask = mask[(slice(None), slice(None),
+                         *(positions[axis_id] for axis_id in validity.axis_ids))]
         point_rows = np.arange(point.size)
         for axis in point.axes:
             point_rows = point_rows[point.codes(axis.axis_id)[point_rows] == positions[axis.axis_id]]
@@ -183,28 +188,17 @@ def _snapshot_shape(snapshot, source=None):
             if mask is None:
                 landed.append(len(set(map(int, codes[target][rows]))))
                 continue
-            # Other Repeat/Point coordinates are all fixed. Only duplicate
-            # physical rows for the SAME complete coordinates may combine;
-            # every simultaneously observed component retains its own count.
-            observed = {}
-            for row in rows:
-                coordinate = int(codes[target][row])
-                cells = np.any(mask[row, point_rows], axis=0).reshape(-1)
-                if coordinate in observed:
-                    observed[coordinate] |= cells
-                else:
-                    observed[coordinate] = cells
-            counts = np.sum(list(observed.values()), axis=0)
-            low, high = int(counts.min()), int(counts.max())
-            landed.append(low if low == high else [low, high])
+            # All other coordinates are fixed, so duplicate storage rows
+            # may contribute to the same target coordinate only once.
+            observed = {int(codes[target][row]) for row in rows
+                        if np.any(mask[row, point_rows])}
+            landed.append(len(observed))
     sizes, names = [], []
     for index, group in enumerate(structure):
         if group:
             counts = landed if index == 0 else [size for _name, size in group]
             if counts is not None:
-                sizes.append("(" + " × ".join(
-                    f"{count[0]}–{count[1]}" if isinstance(count, list) else str(count)
-                    for count in counts) + ")")
+                sizes.append("(" + " × ".join(str(count) for count in counts) + ")")
             names.append("(" + " × ".join(name for name, _size in group) + ")")
     return {"structure": _plain(structure), "landed": landed,
             "repeat_counts_status": "unchecked" if unchecked else "checked",
