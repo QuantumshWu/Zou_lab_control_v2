@@ -92,10 +92,32 @@ They constrain implementation method; product and architecture truth remain in
    or cannot fix it. For performance work, profile the real human UI path first.
 9. Stop and report before editing if the proposed cut would:
    - add any unrequested file;
-   - add any new production class;
-   - add more than roughly 300 net production lines.
+   - add any new production class.
 10. If a simple change starts requiring lifecycle machinery or parallel state,
    discard that direction and re-derive the solution from the existing path.
+
+## Converge without unnecessary work
+
+- Settle product semantics before choosing a representation. Do not invent
+  automatic deletion, fallback, or save/run policy to accommodate the current
+  model. Editing an incomplete state and executing or saving it are separate
+  decisions; follow the user's contract, asking only about material ambiguity.
+- Once the root cause, existing owner and required behaviour are established,
+  implement that route. Reopen architecture alternatives only when new evidence
+  disproves it; do not expand a local fix into unrelated cleanup or research.
+- Before running a probe, check the actual API signatures, widget types and
+  result/error channels. Reuse existing interaction and capture APIs. A probe
+  failure is not a product failure, and a hidden widget is not screenshot proof.
+- Use the shortest verification sequence covering the changed behaviour. Do
+  not rerun unchanged cases for reassurance; rerun for a relevant code change,
+  a specific failure, or deliberate reproducibility work, with that reason clear.
+- Read the complete relevant authority, but do not repeatedly reload unchanged
+  sections already available in context. Delegate independent bounded work, not
+  duplicate investigation of the same chain.
+- If effort grows without new evidence or implementation progress, identify the
+  wasted work, communicate the concrete blocker and narrow the route. Do not add
+  automatic audits, tests, fixed time limits or line-count gates in response.
+  Efficiency never excuses omitting a required fix, verification or cleanup.
 
 ## Repository authority and verification
 
