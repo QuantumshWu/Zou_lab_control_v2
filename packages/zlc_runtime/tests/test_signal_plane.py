@@ -866,6 +866,7 @@ def test_finite_signal_reports_full_point_grid_geometry_while_cells_arrive() -> 
     plane = SignalDataPlane()
     try:
         plane.begin_generation(node)
+        waiting_directory = plane.describe_signals()
         plane.commit_live(
             node,
             {
@@ -877,7 +878,10 @@ def test_finite_signal_reports_full_point_grid_geometry_while_cells_arrive() -> 
                 )
             },
         )
-        description = plane.describe_signals()[0]
+        directory = plane.describe_signals()
+        assert directory is not waiting_directory
+        assert plane.describe_signals() is directory
+        description = directory[0]
         assert description.shape == (1, 4, 1)
         first = plane.current_dataset(description.name)
         assert first.block.schema.point_domain.logical_shape == (2, 2)
@@ -900,6 +904,7 @@ def test_finite_signal_reports_full_point_grid_geometry_while_cells_arrive() -> 
             },
         )
         second = plane.current_dataset(description.name)
+        assert plane.describe_signals() is directory, "new values do not rebuild the directory"
         assert second.block.values[0, :, 0].tolist() == [10.0, 0.0, 0.0, 40.0]
         assert second.expanded_validity()[0, :, 0].tolist() == [
             True,
@@ -908,6 +913,7 @@ def test_finite_signal_reports_full_point_grid_geometry_while_cells_arrive() -> 
             True,
         ]
         assert plane.seal_committed(node, cut_short=True)
+        assert plane.describe_signals() is not directory
         assert plane.describe_signals()[0].shape == (1, 4, 1)
     finally:
         plane.close()

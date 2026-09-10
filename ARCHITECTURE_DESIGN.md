@@ -146,6 +146,7 @@ Node new chunk
 - Frame Survival按唯一READOUT_EVENT定位frame轴，在每组其它Point坐标内部做forward pair；只把frame替换为pair，保留scan轴，不跨扫描点配对。finite coverage与placement按同一canonical frame-row映射转成pair-row，不把所有事件写到point origin 0。
 - 不变的event/canonical frame拓扑各在现有Processor中规划一次；placement只定位本event覆盖的有序group范围，不每shot扫描整份canonical frame表。
 - SignalDescription持有不可变canonical schema，physical shape由该schema派生。Logic/Panel Outputs与Source列表从Plot公共schema_structure读取三domain轴大小，只显示三组数字维度，不添加轴名或单位；长度1的轴也保留乘1，不再只打印扁平Point carrier长度。原signal name和Panel标题的轴名行不变，UI仍只接收投影后的文本。
+- Signal目录只随其结构、生命周期与parent generation事实改变；值revision不属于菜单事实。Plane保留唯一不可变目录，Console从这一份目录产生并复用rows与overlay候选；无变更的idle/new-value拍不重建菜单。菜单家族匹配不是same-shot许可，实际呈现仍核exact publication。
 
 - Generation标识一次run/restart；generation内schema和stream generation固定。
 - Panel标题仅Repeat域显示条件有效整数，Point/Cell-data仍显示完整维度。对每个Repeat轴只放开自身，其余所有轴都固定：Repeat/Point坐标取同一次publication最后写入的位置与canonical axis_codes；Cell-data取该完整原子数据块的末坐标，没有incremental placement时各域使用数据自身末坐标。不得读取Panel Scope/Focus/Facet/Reduction或独立latest决定计数。只数固定坐标下valid的不同Repeat坐标，不把其它site的有效性混进来，不用已采集数量替代valid，也不产生min–max区间。计数之积不代表全Dataset有效样本总数。统计只读compact validity并先切component坐标，不展开image pixels；一次surface acceptance的标题metadata复用，不重复计算。

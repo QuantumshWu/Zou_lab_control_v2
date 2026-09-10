@@ -313,7 +313,6 @@ class SignalDescription:
     contract_id: str | None
     live: bool
     source_name: str | None
-    revision: int
     schema: DatasetSchema | None
 
     @property
@@ -1546,6 +1545,7 @@ class SignalDataPlane:
             tuple[str, ...],
         ] = WeakKeyDictionary()
         self._states: dict[str, _GenerationState] = {}
+        self._signal_descriptions: tuple[SignalDescription, ...] | None = None
         self._starting: set[str] = set()
         self._indexed_history_demands: dict[str, dict[object, int]] = {}
         self._front_signals: frozenset[str] = frozenset()
@@ -1815,6 +1815,7 @@ class SignalDataPlane:
         ):
             return
         self._states.pop(state.owner_id)
+        self._signal_descriptions = None
         state.retired = True
         state.publication = None
 
@@ -1910,6 +1911,7 @@ class SignalDataPlane:
             ),
         )
         self._states[identity] = state
+        self._signal_descriptions = None
         self._membership_changed = True
         return state
 
@@ -2625,6 +2627,7 @@ class SignalDataPlane:
             # Terminal state prevents all further commits under this lock;
             # neither a second sealing state nor a full buffer is needed.
             state.terminal = True
+            self._signal_descriptions = None
             self._membership_changed = True
             producer = state.publication_stream
         if producer is not None:
@@ -2692,6 +2695,8 @@ class SignalDataPlane:
         """
 
         with self._lock:
+            if self._signal_descriptions is not None:
+                return self._signal_descriptions
             states = tuple(self._states.values())
             descriptions = []
             for state in states:
@@ -2716,11 +2721,6 @@ class SignalDataPlane:
                             ),
                             live=not state.terminal,
                             source_name=state.source_name,
-                            revision=(
-                                0
-                                if state.publication is None
-                                else state.publication.event_ref.sequence
-                            ),
                             schema=(
                                 None
                                 if value is None
@@ -2732,7 +2732,8 @@ class SignalDataPlane:
                             ),
                         )
                     )
-        return tuple(sorted(descriptions, key=lambda item: item.name))
+            self._signal_descriptions = tuple(sorted(descriptions, key=lambda item: item.name))
+            return self._signal_descriptions
 
     def is_generation_live(self, signal_name: str) -> bool:
         """Whether more publications can still arrive for one signal.
@@ -3435,6 +3436,15 @@ class SignalDataPlane:
             event_record=event_record,
         )
         self._publication_parents[publication] = parents
+        previous = state.publication
+        if previous is None or frozenset(
+            (ref.stream_id, ref.generation) for ref in previous.direct_parent_refs
+        ) != frozenset(
+            (parent.event_ref.stream_id, parent.event_ref.generation) for parent in parents
+        ):
+            # Data revisions do not change the directory. A first value or a
+            # changed causal generation can change shape/overlay eligibility.
+            self._signal_descriptions = None
         state.next_sequence += 1
         state.publication = publication
         state.terminal = False
@@ -3475,6 +3485,7 @@ class SignalDataPlane:
                 self._starting.update(owners)
                 for state in states:
                     state.retired = True
+                self._signal_descriptions = None
                 self._membership_changed = True
                 return states
             self._generation_ready.wait()
@@ -3596,6 +3607,7 @@ class SignalDataPlane:
             self._closed = True
             states = tuple(self._states.values())
             self._states.clear()
+            self._signal_descriptions = None
             self._indexed_history_demands.clear()
             self._front_signals = frozenset()
             self._front = SignalFront({})

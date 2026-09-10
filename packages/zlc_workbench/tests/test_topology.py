@@ -132,7 +132,7 @@ def _measure(session, producer: str):
 
 def test_a_finished_measurement_is_offerable_and_says_it_is_finished(plane) -> None:
     signal = _finished_frames(plane)
-    rows = project_signals(plane)
+    rows = project_signals(plane.describe_signals())
     assert rows, "a run that produced data offered nothing to look at"
     row = next(row for row in rows if row.name == signal)
     description = next(item for item in plane.describe_signals() if item.name == signal)
@@ -171,7 +171,7 @@ def test_a_reserved_output_waits_until_its_first_publication() -> None:
             ),
         )
     )
-    (row,) = project_signals(plane)
+    (row,) = project_signals(plane.describe_signals())
     assert row.state == "waiting"
     assert row.label == "frames  [—]"
 
@@ -201,7 +201,7 @@ def test_a_live_monitor_is_offered_before_a_finished_run(session) -> None:
             if seen < CAMERA_WINDOWS:
                 assert session.signal_plane.latest_publication(live_signal) is None
         assert seen == CAMERA_WINDOWS
-        rows = project_signals(session.signal_plane)
+        rows = project_signals(session.signal_plane.describe_signals())
         states = [row.state for row in rows]
         assert states.index("live") < states.index("finished")
     finally:
@@ -210,7 +210,7 @@ def test_a_live_monitor_is_offered_before_a_finished_run(session) -> None:
 
 def test_a_panel_already_showing_a_signal_says_so(plane) -> None:
     signal = _finished_frames(plane)
-    rows = project_signals(plane, shown={signal})
+    rows = project_signals(plane.describe_signals(), shown={signal})
     assert next(row for row in rows if row.name == signal).shown
 
 
@@ -218,7 +218,7 @@ def test_only_plain_values_cross(plane) -> None:
     """The rule that keeps a window from reading the plane directly."""
 
     _finished_frames(plane)
-    for row in project_signals(plane):
+    for row in project_signals(plane.describe_signals()):
         assert isinstance(row, SignalRow)
         assert isinstance(row.name, str)
         assert isinstance(row.label, str)

@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- 信号目录必要性整改：Plane缓存未变目录、删除无消费者的description revision；Console一次生成rows/overlay offers且直接交View。真实Plane＋Console纯metadata探针中首次4panel/2signals只生成2 descriptors及1次rows，20次idle与普通数值更新后均0重建/0菜单push；Stop→Start的overlay候选失效与恢复正确，4个原目录/拓扑用例通过。此证据不宣称像素或GUI验收。
+
 - Figure单次读取与初态切面：read_archive返回(info, arrays, datasets)，删除read_dataset重复解码，所有生产消费者统一复用已验证Dataset；raw typed成员复用其不可变bytes。36个原格式/命名空间用例和3个Viewer/Calibration入口通过。Host共用initial_configuration，首次呈现已有最终fit，临时export不恢复废弃display；4个原Plot直接case覆盖固定limits、初始fit、零额外present及真实远程初态。未改磁盘格式。
 
 - Atom必要性整改：FrameSurvival的8cycle映射从16次规划变为event/canonical各1次；SLM command规范化从3次变1次，未变phase的idle状态不重扫像素。Feedback每run一次LOAD、每candidate一次Fire，删除同phase整批重拍与接受observer故障的旧策略；Pulse fault不再以observer_error遮蔽engine error。直接有限capture/fault矩阵、Task失败后Figure/Context保存、Survival 2/3/4frame及SLM stale/unknown用例通过。没有实验板/build或长100-shot验收。
