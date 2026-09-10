@@ -391,6 +391,7 @@ def build_figure_host(
     *,
     parameters: Mapping[str, object],
     size: str,
+    classifier_thresholds: object = (),
     device_pixel_ratio: float = 1.0,
     build_host: Callable[..., object] | None = None,
 ) -> object:
@@ -408,6 +409,7 @@ def build_figure_host(
         spec,
         size=size,
         parameters=parameters,
+        classifier_thresholds=classifier_thresholds,
         device_pixel_ratio=device_pixel_ratio,
     )
 
@@ -431,6 +433,7 @@ def open_figure_host(
         entry["spec"],
         size=entry["size"],
         parameters=entry["parameters"],
+        classifier_thresholds=entry["classifier_thresholds"],
         device_pixel_ratio=device_pixel_ratio,
         build_host=build_host,
     )
@@ -638,6 +641,7 @@ def save_figure_artifact(
         spec,
         parameters=parameters,
         size=size,
+        classifier_thresholds=classifier_thresholds,
     )
     try:
         configured = owned_host.configure(

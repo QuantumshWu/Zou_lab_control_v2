@@ -1010,7 +1010,7 @@ def test_a_regular_bimodal_fit_does_not_create_a_threshold_classifier() -> None:
     finally:
         host.close(timeout=10)
 
-def test_threshold_classifier_is_independent_and_covers_every_facet() -> None:
+def test_threshold_classifier_is_independent_and_covers_every_facet(monkeypatch, tmp_path) -> None:
     """The Distribution switch owns its fit, threshold, and compact cell text."""
 
     host = RasterPlotHost.from_plot(
@@ -1059,8 +1059,17 @@ def test_threshold_classifier_is_independent_and_covers_every_facet() -> None:
         ).result(timeout=10).value.value == moved.value.value
 
         weighted_crossing = 1.0 + 0.5 * float(np.log(0.7 / 0.3))
+        unnecessary_solves = []
+        original_fit, original_batch = FitEngine.fit, FitEngine.fit_batch
+
+        def reject_unrequested_solve(*args, **kwargs):
+            unnecessary_solves.append(True)
+            raise AssertionError("caller-owned classifier must not run an automatic fit")
+
+        monkeypatch.setattr(FitEngine, "fit", reject_unrequested_solve)
+        monkeypatch.setattr(FitEngine, "fit_batch", reject_unrequested_solve)
         configured = host.configure(
-            parameters={"threshold_classifier": True},
+            parameters={"threshold_classifier": True, "bin_count": 32},
             classifier_thresholds=(
                 {
                     "value": weighted_crossing,
@@ -1113,10 +1122,65 @@ def test_threshold_classifier_is_independent_and_covers_every_facet() -> None:
         )
         assert float(left_curve[0]) == pytest.approx(float(right_curve[0]))
         assert session._classifier_results[1] is None
+        assert unnecessary_solves == []
+
+        from zlc_plot import RenderProcess, open_figure_host, save_figure_artifact
+        from zlc_plot.figure_artifact import encode_plot_recipe, decode_plot_recipe
+
+        targets = configured.value.classifier_thresholds
+        snapshot = _site_distribution_snapshot()
+        spec = FacetGridPlot(AxisRef.point("site"), HistogramPlot())
+        recipe = decode_plot_recipe(encode_plot_recipe(
+            spec, parameters=configured.value.display_state.values,
+            size=configured.value.size, classifier_thresholds=targets,
+        ))
+        recipe.pop("overlay")
+        restored = open_figure_host(snapshot, recipe)
+        try:
+            assert restored.describe_display().result(timeout=10).value.classifier_thresholds == targets
+        finally:
+            restored.close(timeout=10)
+        save_figure_artifact(
+            tmp_path / "known-model.png", plot_input=snapshot, spec=spec,
+            parameters=configured.value.display_state.values,
+            size=configured.value.size, classifier_thresholds=targets,
+        )
+        assert (tmp_path / "known-model.png").is_file()
+        assert (tmp_path / "known-model.npz").is_file()
+        assert unnecessary_solves == []
+
+        service = RenderProcess("authored-classifier-test")
+        remote = None
+        try:
+            remote = service.build_host(
+                snapshot, spec, parameters=configured.value.display_state.values,
+                classifier_thresholds=targets,
+            )
+            description = remote.describe_display().result(timeout=30).value
+            assert description.classifier_thresholds == targets
+        finally:
+            if remote is not None:
+                remote.close(timeout=10)
+            assert service.close(timeout=10)
+
+        batches = []
+
+        def solve_requested(self, model, coordinates, observations, **kwargs):
+            batches.append((model.model_id, len(coordinates)))
+            return original_batch(self, model, coordinates, observations, **kwargs)
+
+        monkeypatch.setattr(FitEngine, "fit", original_fit)
+        monkeypatch.setattr(FitEngine, "fit_batch", solve_requested)
+        automatic_second = dict(targets[1])
+        automatic_second.pop("gaussian_components")
+        host.configure(classifier_thresholds=(targets[0], automatic_second)).result(timeout=10)
+        assert batches == [("bimodal_gaussian", 1)]
+        assert session._classifier_results[0] is first
+        assert session._classifier_results[1] is not None
     finally:
         host.close(timeout=10)
 
-def test_one_complete_configuration_is_differenced_by_the_plot_owner() -> None:
+def test_one_complete_configuration_is_differenced_by_the_plot_owner(monkeypatch) -> None:
     """An embedder states the desired plot; it does not choose the render path."""
 
     from zlc_plot import PlotKind
@@ -1124,6 +1188,16 @@ def test_one_complete_configuration_is_differenced_by_the_plot_owner() -> None:
     host = RasterPlotHost.from_plot(_snapshot(), CurvePlot(AxisRef.point("x")))
     try:
         first = host.wait_for_front(timeout=10)
+        session = host._require_session()
+        host.describe_display().result(timeout=10)
+        described = []
+        original = session.describe_display
+
+        def describe_once():
+            described.append(True)
+            return original()
+
+        monkeypatch.setattr(session, "describe_display", describe_once)
         configured = host.configure(
             semantic={"kind": PlotKind.CURVE},
             parameters={"title": "Configured once", "show_grid": True},
@@ -1133,6 +1207,7 @@ def test_one_complete_configuration_is_differenced_by_the_plot_owner() -> None:
         assert configured.value.display_state.values["title"] == "Configured once"
         assert configured.front.identity.sequence == first.identity.sequence + 1
         assert configured.front.identity.display_revision > first.identity.display_revision
+        assert len(described) == 1
 
         reshaped = host.configure(
             semantic={"kind": PlotKind.HISTOGRAM},
@@ -2135,7 +2210,7 @@ def _click_series(renderer, axes, px, py):
         "release", axes, px, py, hit_radius=10.0, click_radius=4.0
     )
 
-def test_one_series_is_not_a_choice() -> None:
+def test_one_series_is_not_a_choice(monkeypatch) -> None:
     """A lone line has nothing to choose between, so it does not respond.
 
     Focus dimmed the only curve on screen and grew an inspector naming it,
@@ -2155,8 +2230,10 @@ def test_one_series_is_not_a_choice() -> None:
     try:
         renderer = session._renderer
         axes = renderer.primary_axes
-        renderer._materialize_prepared_curve()
-        assert len(renderer._series_lines[id(axes)]) == 1
+        def reject_materialization():
+            raise AssertionError("a refused series gesture must not materialize artists")
+
+        monkeypatch.setattr(renderer, "_materialize_prepared_curve", reject_materialization)
         px, py = axes.transData.transform((0.5, float(np.sin(0.5))))
 
         assert renderer.series_focus(
@@ -2168,7 +2245,7 @@ def test_one_series_is_not_a_choice() -> None:
     finally:
         session.close()
 
-def test_a_grid_overview_does_not_choose_series() -> None:
+def test_a_grid_overview_does_not_choose_series(monkeypatch) -> None:
     """The overview is a chooser of CELLS; its only gesture enters one.
 
     Series focus is dispatched beside the gesture handlers rather than
@@ -2199,16 +2276,10 @@ def test_a_grid_overview_does_not_choose_series() -> None:
     try:
         renderer = session._renderer
         assert renderer._facet_focus_index is None, "this test needs the overview"
-        # Series interaction belongs to the prepared cell scene, not to one
-        # particular consumer.  With SEM the scene is materialized as public
-        # Line2D/error-bar artists; without SEM the same scene may stay in the
-        # native command until an interaction needs it.  Either way every
-        # overview cell carries the two real series this guard must refuse.
-        renderer._materialize_prepared_curve()
-        assert all(
-            len(renderer._series_lines.get(id(axis), ())) > 1
-            for _key, axis, _index in renderer.painted_surfaces
-        )
+        def reject_materialization():
+            raise AssertionError("overview must not materialize a series scene it cannot select")
+
+        monkeypatch.setattr(renderer, "_materialize_prepared_curve", reject_materialization)
         _key, axes, _index = renderer.painted_surfaces[0]
         px = float(axes.bbox.x0 + axes.bbox.width / 2.0)
         py = float(axes.bbox.y0 + axes.bbox.height / 2.0)

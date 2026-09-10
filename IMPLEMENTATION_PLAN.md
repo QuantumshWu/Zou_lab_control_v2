@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- 必要性整改的classifier/交互切面：authored Gaussian/fallback初态贯通Figure、本地/远程Host，0自动fit；移除单cell组件只求解该cell。配置只产生一次最终description，拒绝overview/单series hover不物化native。4个既有定向case通过；新worktree首次缓存触发过超时，未修改timeout、只在缓存就绪后重跑受影响case。无GUI/硬件/build。
+
 - 必要性整改的数据存储切面：finite extend/indexed hole/roll直接组装compact validity，VALUE和各component组合与233基线结果一致；公共restriction复用未变Axis/Domain。4个既有直接案例通过；独立四种validity的A/B证明输出相同且不再分配VALUE逐像素mask，未运行GUI或硬件。
 
 - 2026-09-10本次验证：真实UART串行帧证明LOAD完成回复及SAFE抢占；真实top＋既有Xilinx BRAM行为模型证明首次装载4shots与SAFE后驻留重放4shots的18 TTL/40 DAC data逐tick一致、4 DAC clock工作、同ID不重复Fire。没有运行FPGA build/synthesis/program，旧时序报告不代表新ABI已通过。相关软件定向验证覆盖驻留重用、丢ACK、pending LOAD取消、新server握手、device/manual扫描及错误恢复。

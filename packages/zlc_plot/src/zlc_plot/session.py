@@ -418,6 +418,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         *,
         size: str | None = None,
         parameters: Mapping[str, object] | None = None,
+        classifier_thresholds: object = (),
         defaults: PlotLibraryDefaults = DEFAULTS,
         unit_registry: UnitRegistry | None = None,
         device_pixel_ratio: float = 1.0,
@@ -557,7 +558,11 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             histogram_projection=None,
         )
         self._rebuild_projection()
-        self._refresh_threshold_classifier()
+        initial_thresholds = normalize_classifier_threshold_targets(classifier_thresholds)
+        if initial_thresholds:
+            self._set_classifier_thresholds_state(initial_thresholds, refresh=True)
+        else:
+            self._refresh_threshold_classifier()
         self._presentation_epoch = 0
         # One configure unions existing owners' effects before one final paint.
         self._configuration_effects: RenderEffect | None = None
@@ -1849,7 +1854,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         size: str | None = None,
         image_overlay: ImagePointOverlay | None | object = _UNSET,
         classifier_thresholds: object = _UNSET,
-    ) -> DisplayDescription:
+    ) -> None:
         """Apply semantic/display/layout state inside ``configure``.
 
         The caller supplies state, not a render strategy.  Semantic choices are
@@ -1882,7 +1887,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             spec_changed = candidate_spec != self._spec
 
         if spec_changed:
-            description = self.replace_spec(
+            self.replace_spec(
                 candidate_spec,
                 parameters=display_values,
                 size=size,
@@ -1897,9 +1902,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 image_overlay=image_overlay,
                 classifier_thresholds=classifier_thresholds,
             )
-            description = self.describe_display()
-
-        return description
 
     def set_labels(
         self,
@@ -2407,10 +2409,12 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                             )
                         )
                     )
-                    if classifier_changed:
-                        self._refresh_threshold_classifier()
                     if thresholds_changed:
-                        self._set_classifier_thresholds_state(classifier_thresholds)
+                        self._set_classifier_thresholds_state(
+                            classifier_thresholds, refresh=classifier_changed,
+                        )
+                    elif classifier_changed:
+                        self._refresh_threshold_classifier()
                     plan = (
                         self._resolve_plan()
                         if effects & RenderEffect.LAYOUT
@@ -2656,12 +2660,14 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 # Layout resolution can reject a spec (for example the facet
                 # cell cap); it must stay inside the rollback envelope so a
                 # rejected replacement never leaves half-committed state.
-                self._refresh_threshold_classifier()
                 if self._threshold_classifier_enabled():
                     self._set_classifier_thresholds_state(
                         replacement_thresholds,
                         discard_unmatched=True,
+                        refresh=True,
                     )
+                else:
+                    self._refresh_threshold_classifier()
                 renderer.spec = spec
                 plan = self._resolve_plan()
                 renderer.relayout(

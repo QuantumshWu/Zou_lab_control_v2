@@ -260,6 +260,7 @@ Node new chunk
 - 编译Fit中未启用权重时，由既有use_weights表示并传递空权重行，所有objective/finalizer只在启用时读取权重数据；不得为默认权重1建立完整B×N数组。前景仍由Agg/FreeType/MathText产生字形/覆盖率，现有compose按原顺序批量重放；未纳入批量覆盖的artist在原顺序位置保留既有draw，不另建科学数据路线。Image的备用像素在fallback/export消费时才由公共owner物化，普通native帧不重复生成一份未绘制RGBA。
 - Fit的warm记忆只保留当前request/model/cell最近一次成功参数tuple，失败清除；前次参数仅是与当前数据自动候选竞争的初值，不再通过半径/幅度/history chi-square阈值另设资格状态或扫描原图。RegularImage的线性least-squares proxy只负责寻找初值盆地，可使用与最终输出不同的收敛精度；robust loss仍保留原proxy精度。所有fresh正负候选仍参与，最终参数、残差与协方差必须继续来自完整数据及既有full-refinement精度，不能把proxy结果直接当成最终拟合。
 - Title/layout等非plot变化不得re-fit。
+- Histogram classifier先按distribution选择模型来源：调用方已提供Gaussian components就直接呈现该模型，显式空模型直接不画；仅未提供模型的分布自动求解。完整classifier初态必须先于Host首次计算传入，不能先fit再覆盖。拒绝overview/单series的line交互不得物化native artists。
 - 删除重复configure/clear/replay与多front handoff。
 - Live/Edit之间的选区镜像也走同一个`configure`事务，以`selector_updates`只更新命名的kind，保留执行时其它选区；完整`selectors`替换后才应用同次patch，排队合并遵守同一顺序。事务返回同一front的完整`DisplayDescription`，不得把`SelectorState`交给configuration接受入口，也不得先安装像素再验证返回契约。Edit的交互与Refresh共用已有pending/accepted入口，Save在配置未接受时保存最后accepted frozen recipe，不复用正变化的host。
 - Qt owner必须在RasterPlotHost第一次render前把当前screen DPR以plain scalar交给Plot；不得先按默认DPR生成front，再在Widget挂载后为同一data/state重画一次。Form consumer在FormSpec结构和实际Widget值均已匹配时只接受新metadata，不得reconcile；keyed runtime choice domain真实变化仍强制刷新。

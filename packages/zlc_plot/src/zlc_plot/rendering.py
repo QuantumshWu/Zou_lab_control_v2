@@ -1580,35 +1580,6 @@ def _span_landing_on(
     return base
 
 
-def _fraction_landing_on(target: float, scale: float, base: float) -> float:
-    """A fraction near *base* whose product with *scale* IS *target*.
-
-    An axes box is stored as a fraction of the figure and multiplied back
-    out, and ``(k / scale) * scale`` is only within an ulp of ``k``.  That
-    last ulp is not cosmetic: Matplotlib rounds an image's output size UP
-    whenever the box is not an exactly integral float, and scales the
-    transform to match, so a box measuring 93 plus one part in a
-    quadrillion is resampled into 94 rows.  The neighbouring
-    representable fractions are searched for one that lands exactly; if
-    none does, the caller keeps the plain quotient and the compose simply
-    declines its copy.
-    """
-
-    if scale == 0.0:
-        return base
-    candidate = base
-    for _ in range(6):
-        if candidate * scale == target:
-            return candidate
-        candidate = np.nextafter(candidate, np.inf)
-    candidate = base
-    for _ in range(6):
-        candidate = np.nextafter(candidate, -np.inf)
-        if candidate * scale == target:
-            return candidate
-    return base
-
-
 def _pooled_store(block: bytearray) -> object:
     """A weak-referenceable buffer owner supported by Python 3.11+.
 
@@ -5682,7 +5653,6 @@ class MatplotlibRenderer:
         guard written against it would never fire.
         """
 
-        self._materialize_prepared_curve()
         return axes is not None and axes.get_visible() and (
             self._series_focus_allowed(id(axes))
         )
@@ -5692,6 +5662,14 @@ class MatplotlibRenderer:
 
         if isinstance(self.spec, FacetGridPlot) and self._facet_focus_index is None:
             return False
+        prepared = self._artists.get("curve:prepared")
+        if isinstance(prepared, dict) and "series" in prepared:
+            series = prepared["series"]
+            return (
+                axis_id == id(self.primary_axes)
+                and len(series) == 1
+                and len(series[0]) > 1
+            )
         return len(self._series_lines.get(axis_id, ())) > 1
 
     def series_focus(self, action: str, axes: Any | None, px: float, py: float, *,

@@ -1063,6 +1063,7 @@ class RenderProcess:
         *,
         size: str | None = None,
         parameters: Mapping[str, object] | None = None,
+        classifier_thresholds: object = (),
         device_pixel_ratio: float = 1.0,
     ) -> _RemoteRasterPlotHost:
         self._ensure_running()
@@ -1089,6 +1090,7 @@ class RenderProcess:
                 size,
                 None if parameters is None else dict(parameters),
                 float(device_pixel_ratio),
+                _plain(classifier_thresholds),
                 host_id=host_id,
                 input_tokens=tuple(input_tokens),
                 input_transition="create",
@@ -2384,6 +2386,7 @@ def _render_process_main(connection: Connection, name: str) -> None:
         size: str | None,
         parameters: Mapping[str, object] | None,
         device_pixel_ratio: float,
+        classifier_thresholds: object,
     ) -> None:
         requested.set()
         plot_input = _resolve_inputs(input_ref, inputs)
@@ -2396,6 +2399,7 @@ def _render_process_main(connection: Connection, name: str) -> None:
                 parameters=parameters,
                 defaults=DEFAULTS,
                 device_pixel_ratio=device_pixel_ratio,
+                classifier_thresholds=classifier_thresholds,
             )
 
         host = RasterPlotHost(factory, host_id=host_id)
