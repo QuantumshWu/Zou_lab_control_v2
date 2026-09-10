@@ -850,6 +850,10 @@ def test_add_remove_and_move_change_the_next_triggered_qcmos_frame(
     sequencer = installation.device("sequencer")
     slm = installation.device("slm")
     try:
+        spots = world._trap_psf_spots
+        world.apply_slm_phase(world.commanded_phase)
+        world._ensure_slm_propagation()
+        assert world._trap_psf_spots is spots, 'unchanged site geometry re-sampled every camera PSF'
         def load_every_present_trap() -> np.ndarray:
             world._ensure_slm_propagation()
             world._occupancy = np.ones(len(world._trap_intensities), dtype=bool)

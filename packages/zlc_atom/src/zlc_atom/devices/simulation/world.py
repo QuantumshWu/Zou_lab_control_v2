@@ -621,8 +621,9 @@ class SimulationWorld:
         self._trap_plane_intensity = _immutable(intensity, "<f4")
         self._trap_indices_yx = _immutable(trap_indices, np.intp)
         self._trap_intensities = _immutable(trap_intensities, "<f4")
-        self._trap_centers_xy = _readonly(trap_centers)
-        self._trap_psf_spots = _readonly(self._camera_spots(trap_centers))
+        if not np.array_equal(trap_centers, self._trap_centers_xy):
+            self._trap_centers_xy = _readonly(trap_centers)
+            self._trap_psf_spots = _readonly(self._camera_spots(trap_centers))
         self._occupancy = occupancy
         self._propagated_revision = self._slm_phase_revision
         self._propagation_count += 1

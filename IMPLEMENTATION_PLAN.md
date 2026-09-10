@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- Simulation同site geometry不再重采样全部camera PSF；原35个plane重建变为复用同一不可变对象。原add/remove/move下一帧物理图像用例红绿通过，FFT/像差/PSF尾部/随机序列未改；未量化毫秒收益。
+
 - DCAM整改：同ROI setter由22次SDK属性调用降为0；相同exposure请求不再因硬件量化重写，arm保留一次真实工作点读回，Monitor复用该结果。失败后只读可恢复actual但不伪造请求成功，下一setter重试；原量化、读回失败及arm变更拒绝用例通过。源码满幅/裁剪arm链约20/24次SDK属性调用，不是通信往返或实测时延；未操作实验机。
 
 - Stepped重复操作已清：device-only只编译/LOAD一次，API两点只编译两次（首个实际点直接用于run记录）；settle改到写设备之后。原case从等待时看到旧值[0.25,1]变为[1,2]，Stop、恢复及第二点拒绝路径通过；未删Stepped authored settle或Temperature等待。
