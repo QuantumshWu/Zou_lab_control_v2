@@ -1902,13 +1902,14 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             spec_changed = candidate_spec != self._spec
 
         if spec_changed:
-            self.replace_spec(
+            state = self._replace_spec(
                 candidate_spec,
                 parameters=display_values,
                 size=size,
                 image_overlay=image_overlay,
                 classifier_thresholds=classifier_thresholds,
             )
+            self._notify_display(state)
         else:
             self._set_configuration_values(
                 display_values,
@@ -2578,6 +2579,26 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
     ) -> DisplayDescription:
         """Atomically replace semantics and final presentation on one Figure."""
 
+        with self._render_lock:
+            state = self._replace_spec(
+                spec, parameters=parameters, size=size, image_overlay=image_overlay,
+                classifier_thresholds=classifier_thresholds,
+            )
+            description = self.describe_display()
+        self._notify_display(state)
+        return description
+
+    def _replace_spec(
+        self,
+        spec: PlotSpec,
+        *,
+        parameters: Mapping[str, object] | None = None,
+        size: str | None = None,
+        image_overlay: ImagePointOverlay | None | object = _UNSET,
+        classifier_thresholds: object = _UNSET,
+    ) -> DisplayState:
+        """Replace the spec inside its caller's one presentation transaction."""
+
         if not isinstance(spec, (CurvePlot, ImagePlot, HistogramPlot, RollingPlot,
                                  FacetGridPlot, PulseTimelinePlot)):
             raise TypeError("spec must be a supported PlotSpec")
@@ -2731,7 +2752,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._live_fit_completion = None
                 self._live_fit_request = None
                 self._live_fit_future = None
-                description = self.describe_display()
+                state = self.display_state
 
         def retire_replaced_fit() -> None:
             fit_cancel.set()
@@ -2743,8 +2764,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 )
 
         self._commit_fit_actions(retire_replaced_fit)
-        self._notify_display(description.display_state)
-        return description
+        return state
 
     def set_size(self, preset: str) -> SurfacePlan:
         selected = self._defaults.layout.validate_preset(preset)

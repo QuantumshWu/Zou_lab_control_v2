@@ -1233,6 +1233,7 @@ def test_one_complete_configuration_is_differenced_by_the_plot_owner(monkeypatch
         assert configured.front.identity.display_revision > first.identity.display_revision
         assert len(described) == 1
 
+        described.clear()
         reshaped = host.configure(
             semantic={"kind": PlotKind.HISTOGRAM},
             parameters={"title": "Distribution", "bin_count": 8},
@@ -1242,6 +1243,7 @@ def test_one_complete_configuration_is_differenced_by_the_plot_owner(monkeypatch
         assert reshaped.value.display_state.values["title"] == "Distribution"
         assert reshaped.value.size == "2x4"
         assert reshaped.front.identity.sequence == configured.front.identity.sequence + 1
+        assert len(described) == 1
 
         unchanged = host.configure(
             semantic={"kind": PlotKind.HISTOGRAM},

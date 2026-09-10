@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- 完成核对补齐P8/P11：spec替换不再生成被外层configure丢弃的description；known-finite的全True mask改为广播，prepare/objective/solve/finalizer共用readonly strided ABI。5个既有直接case通过（包括拒绝回滚、NaN/σ、RegularImage与saturation初始化），无CFFI validity原始指针假设、缓存重复signature为空；没有运行全量warmer。
+
 - 完成核对补齐非默认Dataset Edit data漏点：Viewer整条described传递链及隐藏C预绘删除。原双Dataset案例编辑第二个other时0Host、Preview1个A，123保存typed读回/lineage、无效输入后继续编辑恢复均通过；production净减41行。
 
 - Viewer去掉临时C Host，直接一个A首accept，旧板在新图成功前保留；菜单纯投影，延迟mount回Host生命周期入口，修掉交叉验证暴露的递归。保存/选区/viewport/typed overlay及Manual保存重开原case通过；短实屏确认7.25、三域title、1A/0临时C，窗口/children关闭。后续又验证真实Area手势后新generation：同Host offset随数据+7、ROI/Fit exact parent更新，selection revision不虚增，drawn-only不重算；未削弱same-shot或旧revision拒绝。探针的控件API/路径/等待fit错误均在ignored记录，不当产品证据。

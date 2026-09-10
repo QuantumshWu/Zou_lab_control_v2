@@ -150,7 +150,10 @@ def _prepare_regular_image_refinement(
     _upper,
     _context,
 ):
-    """Python preparation supplies the exact regular-image seeds and bounds."""
+    """Python supplies seeds and bounds; coordinates/validity are read-only.
+
+    Validity follows the common strided-mask ABI, including a broadcast mask.
+    """
 
     return 0
 

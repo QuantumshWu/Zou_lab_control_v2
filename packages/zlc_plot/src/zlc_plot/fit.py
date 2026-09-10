@@ -3614,7 +3614,7 @@ def _saturation_preparation(coordinates, observations):
     seeds = np.empty((descriptor.max_candidates, 3), dtype=np.float64)
     lower, upper = np.full(3, -np.inf), np.full(3, np.inf)
     count = descriptor.prepare(
-        coords, values, np.ones(values.size, dtype=np.bool_), seeds,
+        coords, values, np.broadcast_to(np.asarray(True), values.shape), seeds,
         lower, upper,
         np.array(descriptor.context_builder(tuple(coords)), copy=True),
     )
@@ -3652,7 +3652,7 @@ def _release_recapture_candidates(coordinates, observations):
     coords = np.array(coordinates, dtype=np.float64, order="C")
     coords.setflags(write=False)
     values = np.array(observations, dtype=np.float64, order="C")
-    valid = np.ones(values.size, dtype=np.bool_)
+    valid = np.broadcast_to(np.asarray(True), values.shape)
     descriptor = _compiled_fit.release_recapture_descriptor()
     seeds = np.empty((descriptor.max_candidates, 4), dtype=np.float64)
     lower = np.array((0.0, -np.inf, np.nextafter(0.0, 1.0), np.nextafter(0.0, 1.0)))

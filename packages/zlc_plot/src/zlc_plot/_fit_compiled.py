@@ -98,6 +98,8 @@ _F64_2R = nb_types.Array(nb_types.float64, 2, "C", readonly=True)
 _F64_3R = nb_types.Array(nb_types.float64, 3, "C", readonly=True)
 _BOOL_1C = nb_types.Array(nb_types.boolean, 1, "C")
 _BOOL_2C = nb_types.Array(nb_types.boolean, 2, "C")
+_BOOL_1R = nb_types.Array(nb_types.boolean, 1, "A", readonly=True)
+_BOOL_2R = nb_types.Array(nb_types.boolean, 2, "A", readonly=True)
 _I32_1C = nb_types.Array(nb_types.int32, 1, "C")
 _I32_2C = nb_types.Array(nb_types.int32, 2, "C")
 _I64_1C = nb_types.Array(nb_types.int64, 1, "C")
@@ -105,7 +107,7 @@ _I64_1C = nb_types.Array(nb_types.int64, 1, "C")
 _PREPARE_CALLBACK_SIGNATURE = nb_types.int64(
     _F64_2R,
     _F64_1C,
-    _BOOL_1C,
+    _BOOL_1R,
     _F64_2C,
     _F64_1C,
     _F64_1C,
@@ -119,7 +121,7 @@ _OBJECTIVE_RETURN = nb_types.Tuple(
 _OBJECTIVE_CALLBACK_SIGNATURE = _OBJECTIVE_RETURN(
     _F64_2R,
     _F64_1C,
-    _BOOL_1C,
+    _BOOL_1R,
     _F64_1C,
     _I64_1C,
     _F64_1C,
@@ -144,7 +146,7 @@ _PREPARE_KERNEL_SIGNATURE = nb_types.void(
     _PREPARE_FUNCTION_TYPE,
     _F64_3R,
     _F64_2C,
-    _BOOL_2C,
+    _BOOL_2R,
     _F64_3C,
     _F64_2C,
     _F64_2C,
@@ -168,7 +170,7 @@ _SOLVE_KERNEL_SIGNATURE = nb_types.void(
     _OBJECTIVE_FUNCTION_TYPE,
     _F64_3R,
     _F64_2C,
-    _BOOL_2C,
+    _BOOL_2R,
     _F64_3C,
     _I32_1C,
     _F64_2C,
@@ -203,7 +205,7 @@ _FINALIZE_KERNEL_SIGNATURE = nb_types.void(
     _VALUE_JACOBIAN_FUNCTION_TYPE,
     _F64_3R,
     _F64_2C,
-    _BOOL_2C,
+    _BOOL_2R,
     _F64_2C,
     _I64_1C,
     _F64_2C,
@@ -2296,14 +2298,18 @@ def _solve_compiled(
         raise ValueError("compiled fit observations cannot be empty")
     coordinate_values = _coordinate_stack(coordinates, points, descriptor.coordinate_layout)
     if valid is None:
-        valid_values = np.ones((cells, points), dtype=np.bool_)
+        valid_values = (
+            np.broadcast_to(np.asarray(True), (cells, points))
+            if all_finite else np.ones((cells, points), dtype=np.bool_)
+        )
     else:
         valid_values = np.asarray(valid, dtype=np.bool_)
         if valid_values.ndim == 1 and cells == 1:
             valid_values = valid_values.reshape(1, -1)
         if valid_values.shape != (cells, points):
             raise ValueError("compiled fit valid mask must match observations")
-        valid_values = np.array(valid_values, dtype=np.bool_, order="C", copy=True)
+        if not all_finite:
+            valid_values = np.array(valid_values, dtype=np.bool_, order="C", copy=True)
     if not all_finite:
         valid_values &= np.isfinite(values)
         if grid:
@@ -2314,6 +2320,8 @@ def _solve_compiled(
         else:
             for axis in range(coordinate_values.shape[1]):
                 valid_values &= np.isfinite(coordinate_values[:, axis, :])
+    valid_values = valid_values.view()
+    valid_values.setflags(write=False)
 
     coordinate_values, coordinate_origins = _canonicalize_coordinates(
         descriptor,
