@@ -1178,21 +1178,21 @@ def test_repeat_100_publication_cost_and_retained_arrays_stay_linear(monkeypatch
         placement_bytes = state.occupied_cells["linear/frame"].nbytes
         assert retained_array_bytes + placement_bytes == 100 * (8 + 1) + 100
 
+        assert plane.seal_committed(node)
+        assert calls == 0, "ending production must not consume an unread Dataset"
+        assert state.materialized == {}
         current = plane.current_dataset("linear/frame")
         assert calls == 1
         assert current.expanded_validity().all()
-        assert plane.seal_committed(node)
-        assert calls == 1
     finally:
         plane.close()
 
 
-@pytest.mark.parametrize("operation", ("current", "seal"))
-def test_full_materialization_does_not_hold_plane_lock(monkeypatch, operation: str) -> None:
+def test_full_materialization_does_not_hold_plane_lock(monkeypatch) -> None:
     import zlc_runtime.plane as plane_module
 
     declaration = DatasetOutputDeclaration("frame", "test.frame")
-    node = _node(f"nonblocking-{operation}", declaration)
+    node = _node("nonblocking-current", declaration)
     entered = threading.Event()
     release = threading.Event()
     reader_done = threading.Event()
@@ -1224,10 +1224,7 @@ def test_full_materialization_does_not_hold_plane_lock(monkeypatch, operation: s
 
         def materialize() -> None:
             try:
-                if operation == "seal":
-                    plane.seal_committed(node)
-                else:
-                    plane.current_dataset(node.signal_key("frame"))
+                plane.current_dataset(node.signal_key("frame"))
             except BaseException as error:
                 errors.append(error)
 

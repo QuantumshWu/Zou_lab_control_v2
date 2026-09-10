@@ -923,7 +923,7 @@ class _Source:
 
 @pytest.mark.parametrize("delivery", ("exact", "latest"))
 @pytest.mark.parametrize("view", (None, "event", "run", "window"))
-def test_terminal_processor_always_receives_runtime_current_dataset(delivery: str, view) -> None:
+def test_terminal_processor_always_receives_runtime_current_dataset(delivery: str, view, monkeypatch) -> None:
     source_declaration = DatasetOutputDeclaration("frame", "test.frame")
     derived_declaration = DatasetOutputDeclaration("derived", "test.derived")
     source = _Source(f"source-{delivery}", source_declaration)
@@ -966,6 +966,15 @@ def test_terminal_processor_always_receives_runtime_current_dataset(delivery: st
         },
     )
     plane.seal_committed(source)
+    owner_thread = threading.get_ident()
+    materialize = plane.current_dataset_view
+
+    def worker_input(signal_name, publication=None, **options):
+        if signal_name == source.signal_key("frame"):
+            assert threading.get_ident() != owner_thread, "Start must not materialize its input"
+        return materialize(signal_name, publication, **options)
+
+    monkeypatch.setattr(plane, "current_dataset_view", worker_input)
     seen: list[tuple[int, list[float], object]] = []
 
     class Processor:

@@ -1177,7 +1177,6 @@ class _GenerationState:
     materialized: dict[str, _MaterializedFinite] = field(default_factory=dict)
     indexed_history: dict[str, _IndexedHistory] = field(default_factory=dict)
     committed_run_record: Mapping[str, object] | None = None
-    sealing: bool = False
     processor_cleanup_complete: bool = False
     publication_stream_cleaned: bool = False
 
@@ -2162,7 +2161,6 @@ class SignalDataPlane:
                 )
             if (
                 state.terminal
-                or state.sealing
                 or state.node is not node
                 or state.kind != kind
             ):
@@ -2554,124 +2552,35 @@ class SignalDataPlane:
         return self.current_dataset_view(signal_name, publication)[0]
 
     def seal_committed(self, node: object, *, cut_short: bool = False) -> bool:
-        """Seal one commit generation without publishing a duplicate full event."""
+        """End production while retaining its chunks and exact publications.
+
+        Sealing does not consume the data.  A complete canonical buffer is
+        built only when a reader actually asks for it, through the same
+        current_dataset_view path used while the run is live.
+        """
 
         if type(cut_short) is not bool:
             raise TypeError("cut_short must be bool")
         owner_id = _node_instance_id(node)
-        producer = None
-        state = None
-        sequence = 0
-        retain_latest_monitor = False
-        materialized: dict[str, _MaterializedFinite] = {}
-        pending: dict[
-            str,
-            tuple[
-                tuple[
-                    DatasetSchema,
-                    StreamGenerationId,
-                    tuple[tuple[OwnedSnapshot, tuple[int, int]], ...],
-                    _MaterializedFinite | None,
-                ],
-                Mapping[str, object],
-            ],
-        ] = {}
         with self._lock:
             state = self._states.get(owner_id)
             if (
                 state is None
                 or state.retired
                 or state.terminal
-                or state.sealing
                 or state.node is not node
                 or state.exact_outputs is None
                 or state.publication is None
             ):
                 raise RuntimeError("committed generation is not active")
-            exact_outputs = state.exact_outputs
-            if exact_outputs:
-                if not cut_short and not all(
-                    isinstance(state.publication.signals[name].coverage, DatasetCoverage)
-                    and state.publication.signals[name].coverage.complete
-                    for name in exact_outputs
-                ):
-                    raise RuntimeError(
-                        "exact committed terminal Dataset coverage is incomplete"
-                    )
-                state.sealing = True
-                sequence = state.publication.event_ref.sequence
-                for name in exact_outputs:
-                    cached = state.materialized.get(name)
-                    if cached is not None and cached.sequence == sequence:
-                        materialized[name] = cached
-                    else:
-                        pending[name] = (
-                            self._materialization_input_locked(
-                                state,
-                                name,
-                                sequence,
-                            ),
-                            _freeze_run_record(
-                                _merge_event_records(
-                                    value.event_record
-                                    for commit_sequence, value, _origin, _parents in (
-                                        state.commit_chunks[name]
-                                    )
-                                    if commit_sequence <= sequence
-                                )
-                            ),
-                        )
-            else:
-                producer = state.publication_stream
-                # STOP ENDS PRODUCTION, NEVER THE DATA.  The last monitor
-                # publication is the picture still on every panel that
-                # views this signal, and an operator draws ROIs and arms
-                # fits on a stopped run exactly as on a live one -- the
-                # bridge's terminal route exists for that.  Retention was
-                # once a per-origin opt-in flag, so the policy lived in N
-                # node declarations and the origins that forgot it (the
-                # camera, the calibration preview) had their whole derived
-                # chain answer "this run is no longer held" the moment a
-                # measurement stopped.  The plane is the one owner of
-                # retention; the next begin_generation replaces the state,
-                # so the cost is bounded at one publication per signal.
-                retain_latest_monitor = bool(state.publication.signals) and all(
-                    isinstance(value.coverage, MonitorCoverage)
-                    for value in state.publication.signals.values()
-                )
-                if retain_latest_monitor:
-                    state.terminal = True
-                    self._membership_changed = True
-        if not exact_outputs:
-            if producer is not None:
-                producer.finish()
-            if retain_latest_monitor:
-                return True
-            self._withdraw_owner(owner_id)
-            return False
-        try:
-            for name, (inputs, event_record) in pending.items():
-                materialized[name] = _MaterializedFinite(
-                    sequence,
-                    self._materialize_dataset(name, sequence, *inputs),
-                    event_record,
-                )
-        except BaseException:
-            with self._lock:
-                if self._states.get(owner_id) is state:
-                    state.sealing = False
-            raise
-        with self._lock:
-            if (
-                self._states.get(owner_id) is not state
-                or state.retired
-                or not state.sealing
-                or state.publication is None
-                or state.publication.event_ref.sequence != sequence
+            if not cut_short and not all(
+                state.publication.signals[name].coverage.complete
+                for name in state.exact_outputs
             ):
-                raise RuntimeError("committed generation changed while sealing")
-            state.materialized = materialized
-            state.sealing = False
+                raise RuntimeError("exact committed terminal Dataset coverage is incomplete")
+            # Both Monitor and finite results stay available after Stop.
+            # Terminal state prevents all further commits under this lock;
+            # neither a second sealing state nor a full buffer is needed.
             state.terminal = True
             self._membership_changed = True
             producer = state.publication_stream
