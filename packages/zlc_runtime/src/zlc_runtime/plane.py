@@ -697,19 +697,6 @@ def _restamp_snapshot(
     return OwnedSnapshot(block.ref(generation), block)
 
 
-_INDEXED_HISTORY_BYTES = 64 << 20
-_INDEXED_HISTORY_COUNT = 100_000
-
-
-def _indexed_capacity(snapshot: OwnedSnapshot) -> int:
-    values = snapshot.block.values
-    bytes_per_index = max(1, int(values.nbytes) + int(values.size))
-    return max(
-        1,
-        min(_INDEXED_HISTORY_COUNT, _INDEXED_HISTORY_BYTES // bytes_per_index),
-    )
-
-
 def _indexed_schema(
     event_schema: DatasetSchema,
     indices: tuple[int, ...],
@@ -969,7 +956,6 @@ class _IndexedHistory:
 
     events: dict[int, tuple[int, OwnedSnapshot, Mapping[str, object]]]
     first_index: int
-    capacity: int
     materialized: _MaterializedIndexed | None = None
     replaced_at: int = -1
 
@@ -1036,7 +1022,6 @@ def _update_indexed_history(
             _IndexedHistory(
                 {primary_index: (sequence, event, selected_record)},
                 primary_index,
-                min(demand, _indexed_capacity(event)),
             ),
             True,
         )
@@ -1056,10 +1041,9 @@ def _update_indexed_history(
             event,
             selected_record,
         )
-    history.capacity = min(demand, _indexed_capacity(event))
     previous_first = history.first_index
     history.first_index = max(
-        previous_first, primary_index - history.capacity + 1
+        previous_first, primary_index - demand + 1
     )
     while events and next(iter(events)) < history.first_index:
         events.pop(next(iter(events)))
@@ -1085,8 +1069,9 @@ def _indexed_materialization_input(
             "publication precedes retained indexed history"
         )
     events = history.events
-    capacity = history.capacity if window is None else min(history.capacity, window)
-    start = max(history.first_index, primary_index - capacity + 1)
+    start = history.first_index
+    if window is not None:
+        start = max(start, primary_index - window + 1)
     if first_index is not None:
         start = max(start, first_index)
     if start > primary_index:

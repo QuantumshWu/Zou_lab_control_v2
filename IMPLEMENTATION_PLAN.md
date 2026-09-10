@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- History删除64MiB/100000的隐藏截短、错误nbytes预算和重复capacity状态，唯一保留量为max(active window)。3个原window/多lease/gap用例通过；两次带gap的真实publication A/B证明请求100001时旧路径只给100000并丢首valid，新路径完整100001（两端valid、中间gap invalid）。未执行100000 shots；大窗口内存成本由实际数据决定。
+
 - Plot按需计算：8×400 V→mV归约绘图只转换400个输出，不再额外转换8×400原数据；raw selector按需转换仍正确。完整初值自动initializer为0次、partial仍1次；停止warmer不生成后续样例，初始size/parameters不再多轮绘制。3个既有单位/预热直接用例通过，无全量warm/GUI运行。
 
 - Feedback报告已删除binned Histogram二次fit，candidate与selected都复用本次科学fit的分量/threshold；invalid显式无模型/阈值，公共classifier target与Figure/远程roundtrip不再把null变成自动fit。既有classifier case和失败后partial Figure/Context case通过，报告参数按site坐标逐项一致；首次测试误按target列表顺序配site，已改为按真实coordinate核对，未改生产数值掩盖测试。
