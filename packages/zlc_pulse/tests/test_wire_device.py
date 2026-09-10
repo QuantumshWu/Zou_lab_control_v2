@@ -924,6 +924,8 @@ def test_recovered_link_error_is_visible_but_not_an_engine_fault() -> None:
     assert report.link_error is True
     assert report.fault == ""
     assert report.elapsed_seconds == pytest.approx(1.5)
+    failed = replace(report, status=STATUS_ERROR, observer_error="link failed")
+    assert failed.fault == "pulse observer failed: link failed; the board reported an error"
 
 
 def test_pack_scan_rows_only_targets_the_requested_bank_chunk() -> None:
