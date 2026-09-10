@@ -44,14 +44,10 @@ class SignalRow:
     state: str
     #: The signal this one was cut from, or "" when it was acquired.
     derived_from: str
-    #: Whether a panel is already showing it.
-    shown: bool
 
 
 def project_signals(
     descriptions: object,
-    *,
-    shown: object = (),
 ) -> tuple[SignalRow, ...]:
     """Project one already-read signal directory, live producers first.
 
@@ -61,7 +57,6 @@ def project_signals(
     moving underneath.
     """
 
-    displayed = {str(name) for name in shown}
     rows = [
         SignalRow(
             name=description.name,
@@ -72,7 +67,6 @@ def project_signals(
             producer=_producer(description.name, description.owner_id),
             state=_state(description),
             derived_from=description.source_name or "",
-            shown=description.name in displayed,
         )
         for description in descriptions
     ]

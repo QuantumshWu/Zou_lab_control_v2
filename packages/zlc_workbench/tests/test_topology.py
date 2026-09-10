@@ -208,12 +208,6 @@ def test_a_live_monitor_is_offered_before_a_finished_run(session) -> None:
         monitor.close()
 
 
-def test_a_panel_already_showing_a_signal_says_so(plane) -> None:
-    signal = _finished_frames(plane)
-    rows = project_signals(plane.describe_signals(), shown={signal})
-    assert next(row for row in rows if row.name == signal).shown
-
-
 def test_only_plain_values_cross(plane) -> None:
     """The rule that keeps a window from reading the plane directly."""
 
@@ -225,7 +219,6 @@ def test_only_plain_values_cross(plane) -> None:
         assert isinstance(row.producer, str)
         assert isinstance(row.state, str)
         assert isinstance(row.derived_from, str)
-        assert isinstance(row.shown, bool)
         with pytest.raises((AttributeError, TypeError)):
             row.name = "mutated"
 
