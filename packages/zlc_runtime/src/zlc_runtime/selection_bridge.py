@@ -107,13 +107,14 @@ class _Sample:
     asserts the two give identical numbers.
     """
 
-    __slots__ = ("_values", "_counts", "_size")
+    __slots__ = ("_values", "_counts", "_size", "_total")
 
-    def __init__(self, values: np.ndarray) -> None:
+    def __init__(self, values: np.ndarray, *, counted: bool = True) -> None:
         self._values = values
         self._size = int(values.size)
         self._counts: np.ndarray | None = None
-        if values.dtype.kind == "u" and values.dtype.itemsize <= 2 and self._size:
+        self._total: float | None = None
+        if counted and values.dtype.kind == "u" and values.dtype.itemsize <= 2 and self._size:
             self._counts = np.bincount(np.ravel(values))
 
     @property
@@ -125,15 +126,16 @@ class _Sample:
         return np.arange(self._counts.size, dtype=np.float64)
 
     def mean(self) -> float:
-        if self._counts is None:
-            return float(np.mean(self._values, dtype=np.float64))
-        total = float(np.dot(self._counts, self._levels()))
-        return total / float(self._size)
+        return float(np.divide(self.total(), self._size))
 
     def total(self) -> float:
-        if self._counts is None:
-            return float(np.sum(self._values, dtype=np.float64))
-        return float(np.dot(self._counts, self._levels()))
+        if self._total is None:
+            self._total = (
+                float(np.sum(self._values, dtype=np.float64))
+                if self._counts is None
+                else float(np.dot(self._counts, self._levels()))
+            )
+        return self._total
 
     def minimum(self) -> float:
         if self._counts is None:
@@ -355,8 +357,6 @@ def _roi_statistics(
     shape = values.shape[:2]
     flat_values = values.reshape(*shape, -1)
     flat_finite = finite.reshape(*shape, -1)
-    result = {name: np.zeros(shape, dtype=np.float64) for name in reducers}
-    valid = np.zeros(shape, dtype=np.bool_)
     # Asked once for the whole set rather than per cell: where nothing is
     # excluded the sample IS the row, and compacting it through a boolean
     # mask copies every pixel of the region to arrive at the same numbers.
@@ -382,14 +382,27 @@ def _roi_statistics(
         and all(row is not None for row in rows)
     ):
         stacked = np.ascontiguousarray(flat_values)
+        total = (
+            _sum_rows(stacked)
+            if _mean_rows in rows and _sum_rows in rows else None
+        )
+        result = {}
         for (name, _reducer), row in zip(reducers.items(), rows):
             assert row is not None
-            result[name] = row(stacked)
-        valid[...] = True
+            if total is not None and row is _sum_rows:
+                result[name] = total
+            elif total is not None and row is _mean_rows:
+                result[name] = total / stacked.shape[-1]
+            else:
+                result[name] = row(stacked)
+        valid = np.broadcast_to(np.asarray(True), shape)
         return MappingProxyType(
             {name: (answer, valid) for name, answer in result.items()}
         )
 
+    result = {name: np.zeros(shape, dtype=np.float64) for name in reducers}
+    valid = np.zeros(shape, dtype=np.bool_)
+    counted = any(reducer in (_bottom_10_mean, _top_10_mean) for reducer in reducers.values())
     for index in np.ndindex(shape):
         sample = flat_values[index]
         if not everything_counts:
@@ -404,7 +417,7 @@ def _roi_statistics(
         if not sample.size:
             continue
         valid[index] = True
-        summary = _Sample(sample)
+        summary = _Sample(sample, counted=counted)
         for name, reducer in reducers.items():
             result[name][index] = reducer(summary)
     return MappingProxyType(

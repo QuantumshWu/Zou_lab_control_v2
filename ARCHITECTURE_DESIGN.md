@@ -295,6 +295,7 @@ Node new chunk
 - Data、Fit和Overlay共同使用同一个scope/axis/fate projection；动态Overlay先读取其exact publication的canonical prefix，不用最后event chunk覆盖已保留的前缀。公共`projection_scope`将`Last`化为各Reduced axis声明顺序的末coordinate，随后与显式Scope和facet走同一限制；不是最后valid值，不回退到之前已采位置。Overlay只借Repeat/Point确定对应采集cell，保留自身完整site向量，不把图像pixel axis当site axis。Mean没有另外一套Boolean归约/共识判断；scope后仍有多个Repeat/Point cells就不画离散判决。无法唯一对齐则拒绝。
 - 图像数据更新是一份完整presentation输入；新数据未携overlay表示该帧没有overlay，直接更新与Host管线都必须清除旧层。同一数据上的显式overlay-only编辑仍是独立配置事务。动态status的invalid或无法唯一选定状态不画判断圈；静态Calibration/point-review显式标记不受该数据有效性规则影响。
 - ROI/binning坐标只由一个transform owner处理。
+- ROI统计按已启用输出准备计算：仅Mean/Sum不构造整数直方图，均值与总和共享一次累加；确实请求尾部统计时才用原计数路径，并保持全部结果一致。已知全有效的stacked结果不先分配随后丢弃的零矩阵。此规则不改变默认发布开关或推断订阅需求。
 - Selector Off时plot不消费任何pointer gesture：不画selector、不zoom/pan，也不响应双击facet focus；普通滚轮继续滚外层board。
 - Selector On时，FacetGrid overview只响应双击进入cell，不得在overview开始area selector；进入具体cell后，selector才按该cell的canonical projection工作。
 - Area selector及已有Area handle/body的左键press只做命中并arm手势；它不得建立candidate、发布selection或渲染overlay。只有按键仍held且pointer坐标相对press确实变化的首个move才开始gesture并首次preview；原地release不得产生零面积Area。Qt/Notebook的double-click都走这一共享状态机，双击的首个普通press/release因此不能闪现或提交Area；空白单击清除既有Area仍是独立click语义，不得靠创建degenerate candidate实现。

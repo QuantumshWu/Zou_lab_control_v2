@@ -2990,7 +2990,7 @@ def test_a_box_that_names_no_sample_is_a_condition_that_clears() -> None:
         _close(bridge, plane, source)
 
 
-def test_the_stacked_reduction_gives_the_per_cell_numbers() -> None:
+def test_the_stacked_reduction_gives_the_per_cell_numbers(monkeypatch) -> None:
     """Whichever machine the cell count picks, the numbers are the same.
 
     A scan cut is thousands of short rows and a camera window is one long
@@ -3034,6 +3034,33 @@ def test_the_stacked_reduction_gives_the_per_cell_numbers() -> None:
                 f"{label}: {name} disagrees between the stacked and per-cell paths"
             )
             assert bool(np.all(answered[name][1]))
+
+    import zlc_runtime.selection_bridge as module
+    totals = []
+    original_sum = np.sum
+    original_sum_rows = module._sum_rows
+
+    def total(values, *args, **kwargs):
+        totals.append(values.shape)
+        return original_sum(values, *args, **kwargs)
+
+    def total_rows(values):
+        totals.append(values.shape)
+        return original_sum_rows(values)
+
+    with monkeypatch.context() as selected:
+        selected.setattr(np, "bincount", lambda *_args: pytest.fail("Mean/Sum do not need a distribution"))
+        selected.setattr(np, "sum", total)
+        selected.setattr(module, "_sum_rows", total_rows)
+        selected.setattr(module, "_ROW_REDUCERS", {module._mean: module._mean_rows, module._sum: total_rows})
+        for shape in ((1, 1, 20, 30), (2, 3, 20, 30)):
+            values = np.arange(np.prod(shape), dtype=np.uint16).reshape(shape)
+            totals.clear()
+            answers = _roi_statistics(values, np.ones(shape, dtype=bool),
+                                      {"mean": module._mean, "sum": module._sum})
+            assert len(totals) == 1
+            assert np.array_equal(answers["sum"][0], values.sum(axis=(-2, -1), dtype=np.float64))
+            assert np.array_equal(answers["mean"][0], values.mean(axis=(-2, -1), dtype=np.float64))
 
 
 def test_a_selection_on_a_stopped_run_still_derives() -> None:

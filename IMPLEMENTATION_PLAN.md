@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- R8数值子项补齐：Mean/Sum-only整数ROI不再bincount，scalar/stacked均复用一次总和；完整尾部统计仍用原计数路线。3个原直接case通过，完整统计逐位一致，已选Mean/Sum证明0bincount、1次累加；未改默认输出开关，不新增订阅机制。
+
 - 完成核对补齐P8/P11：spec替换不再生成被外层configure丢弃的description；known-finite的全True mask改为广播，prepare/objective/solve/finalizer共用readonly strided ABI。5个既有直接case通过（包括拒绝回滚、NaN/σ、RegularImage与saturation初始化），无CFFI validity原始指针假设、缓存重复signature为空；没有运行全量warmer。
 
 - 完成核对补齐非默认Dataset Edit data漏点：Viewer整条described传递链及隐藏C预绘删除。原双Dataset案例编辑第二个other时0Host、Preview1个A，123保存typed读回/lineage、无效输入后继续编辑恢复均通过；production净减41行。
