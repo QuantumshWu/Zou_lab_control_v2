@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- Atom必要性整改：FrameSurvival的8cycle映射从16次规划变为event/canonical各1次；SLM command规范化从3次变1次，未变phase的idle状态不重扫像素。Feedback每run一次LOAD、每candidate一次Fire，删除同phase整批重拍与接受observer故障的旧策略；Pulse fault不再以observer_error遮蔽engine error。直接有限capture/fault矩阵、Task失败后Figure/Context保存、Survival 2/3/4frame及SLM stale/unknown用例通过。没有实验板/build或长100-shot验收。
+
 - 必要性整改的目录切面：已有目录0次重复flush，缺失层逐层创建并flush新child/parent；创建flush失败携published路径，不自动修复旧失败。5个既有直接case通过，文件atomic write顺序未改；没有新增marker、回滚删除或重试机制。
 
 - Device Control未变owner的idle beat为0次policy/form投影，本地编辑及命令完成继续事件更新；所有写入仍在DeviceUse锁内核最新权限。三个既有直接用例通过，含风险失效和pending写取消；没有额外硬件读取或权限缓存。

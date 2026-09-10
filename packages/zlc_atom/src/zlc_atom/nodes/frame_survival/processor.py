@@ -118,6 +118,8 @@ class FrameSurvivalProcessor:
         self.source_signal = (
             None if source_signal is None else str(source_signal).strip()
         )
+        # Event and canonical geometry coexist; neither evicts the other's plan.
+        self._plans: dict[bool, tuple[DatasetSchema, tuple]] = {}
 
     # -- schema -------------------------------------------------------------
 
@@ -215,15 +217,27 @@ class FrameSurvivalProcessor:
 
     # -- evaluation ---------------------------------------------------------
 
+    def _plan(self, schema: DatasetSchema, *, canonical: bool = False) -> tuple:
+        saved = self._plans.get(canonical)
+        if saved is not None and (saved[0] is schema or saved[0] == schema):
+            return saved[1]
+        frame_axis, _site_axis = self._source_axes(schema)
+        rows = _frame_rows(schema, frame_axis)
+        output = self._output_schema(schema, frame_rows=rows)
+        if canonical:
+            # Groups are inserted in first-physical-row order by _frame_rows.
+            plan = (output, np.min(rows, axis=1), np.max(rows, axis=1))
+        else:
+            pairs = np.asarray(_forward_pairs(frame_axis.size), dtype=np.intp)
+            plan = (output, rows[:, pairs[:, 0]].reshape(-1), rows[:, pairs[:, 1]].reshape(-1))
+        self._plans[canonical] = (schema, plan)
+        return plan
+
     def _pair(self, occupied: OwnedSnapshot) -> OwnedSnapshot:
         schema = occupied.block.schema
-        frame_axis, _site_axis = self._source_axes(schema)
-        frame_rows = _frame_rows(schema, frame_axis)
-        pairs = np.asarray(_forward_pairs(frame_axis.size), dtype=np.intp)
+        output_schema, condition, later = self._plan(schema)
         values = np.asarray(occupied.block.values, dtype=bool)
         valid = np.asarray(occupied.expanded_validity(), dtype=bool)
-        condition = frame_rows[:, pairs[:, 0]].reshape(-1)
-        later = frame_rows[:, pairs[:, 1]].reshape(-1)
         # The denominator stays per-site validity, independently in each
         # Point group: loaded before and judgeable in both frames.
         eligible = (
@@ -231,7 +245,7 @@ class FrameSurvivalProcessor:
         )
         survival = eligible & values[:, later, :]
         return owned_snapshot_from_arrays(
-            self._output_schema(schema, frame_rows=frame_rows),
+            output_schema,
             survival,
             occupied.block.revision,
             validity=eligible,
@@ -268,9 +282,7 @@ class FrameSurvivalProcessor:
                 or signal_value.cell_origin is None
             ):
                 raise ValueError("finite source event lacks canonical placement")
-            canonical_frame, _site_axis = self._source_axes(signal_value.canonical_schema)
-            rows = _frame_rows(signal_value.canonical_schema, canonical_frame)
-            canonical = self._output_schema(signal_value.canonical_schema, frame_rows=rows)
+            canonical, first_rows, last_rows = self._plan(signal_value.canonical_schema, canonical=True)
             # The source ledger counts (cycles x frames) cells; this output
             # counts (cycles x pairs).  A cycle publishes all of its frames
             # together, so the translation is exact -- and refused loudly
@@ -290,13 +302,13 @@ class FrameSurvivalProcessor:
             )
             start = signal_value.cell_origin[1]
             end = start + source_schema.point_domain.size
-            groups = np.flatnonzero(np.all((rows >= start) & (rows < end), axis=1))
+            first, stop = np.searchsorted(first_rows, (start, end))
             if (
-                len(groups) * frames != end - start
-                or np.any(np.diff(groups) != 1)
+                (stop - first) * frames != end - start
+                or np.any(last_rows[first:stop] >= end)
             ):
                 raise ValueError("frame survival event placement must contain whole cycles")
-            origin = (signal_value.cell_origin[0], int(groups[0]) * pair_count)
+            origin = (signal_value.cell_origin[0], int(first) * pair_count)
         elif signal_value.coverage is None:
             canonical = survival.block.schema
             coverage = DatasetCoverage(total, total)

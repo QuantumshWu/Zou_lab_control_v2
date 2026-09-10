@@ -669,8 +669,16 @@ def test_remote_slm_caches_reads_and_only_calls_the_server_to_send_phase(
         assert remote.last_command_receipt["outcome"] == "unknown"
         assert calls == ["describe"]
 
+        normalizations = []
+        original_canonical = device_module.canonical_phase
+        def counted_canonical(values, shape):
+            normalizations.append(True)
+            return original_canonical(values, shape)
+        monkeypatch.setattr(device_module, 'canonical_phase', counted_canonical)
         expected = np.full(remote.shape_yx, np.pi / 3.0, dtype=np.float32)
         applied = remote.apply_phase(expected)
+        assert len(normalizations) == 1, 'successful Apply normalized its owned phase again'
+        assert applied is remote.last_commanded_phase
         assert calls == ["describe", "apply"]
         assert sdk.write_count == 1
         assert remote.command_revision == 1

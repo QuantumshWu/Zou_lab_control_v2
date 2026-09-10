@@ -143,6 +143,7 @@ Node new chunk
 
 - Occupancy对每个Repeat/Point cell的图像独立应用校准，只检查SPATIAL_Y/X图像及校准尺寸，不限制Point具名轴数量；frame、scan及其它领先轴连同codes/坐标/单位原样传递，只有图像Cell-data转为site判决/计数。Live仍只处理event，terminal处理完整保留数据。
 - Frame Survival按唯一READOUT_EVENT定位frame轴，在每组其它Point坐标内部做forward pair；只把frame替换为pair，保留scan轴，不跨扫描点配对。finite coverage与placement按同一canonical frame-row映射转成pair-row，不把所有事件写到point origin 0。
+- 不变的event/canonical frame拓扑各在现有Processor中规划一次；placement只定位本event覆盖的有序group范围，不每shot扫描整份canonical frame表。
 - SignalDescription持有不可变canonical schema，physical shape由该schema派生。Logic/Panel Outputs与Source列表从Plot公共schema_structure读取三domain轴大小，只显示三组数字维度，不添加轴名或单位；长度1的轴也保留乘1，不再只打印扁平Point carrier长度。原signal name和Panel标题的轴名行不变，UI仍只接收投影后的文本。
 
 - Generation标识一次run/restart；generation内schema和stream generation固定。
@@ -391,6 +392,8 @@ Node new chunk
 - `SystemCorrectionArtifact`明确区分pupil phase map与target response map；不得把per-geometry site weights冒充通用wavefront correction。
 
 ### 8.3 Solver与Feedback
+
+- Feedback独占run期间只装载一次已解析Pulse，每个candidate只执行一次用户指定的shot batch；正常DONE不追加SAFE，异常/Stop才SAFE。任何board fault或无法证明DONE都不能用camera帧数代替完成证明，也不能同phase自动重拍一整批。已完成candidate仍按现有partial出口保存，不改变控制权重算法。
 
 - 保留sparse WGS-Kim、fixed far-field phase、selected DFT和caller-owned optimizer state。
 - Inner solve走到canonical numerical gate，不为省几十毫秒增加physical candidate。
