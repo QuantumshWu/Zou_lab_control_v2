@@ -62,7 +62,7 @@ def test_layout_rejected_replace_rolls_back_completely() -> None:
     finally:
         session.close()
 
-def test_a_refused_configure_restores_the_picture_with_the_state() -> None:
+def test_a_refused_configure_restores_the_picture_with_the_state(monkeypatch) -> None:
     """The rollback is the whole front: fields AND pixels.
 
     ``configure`` rolls its fields back and rebuilds the axes on the old
@@ -86,6 +86,27 @@ def test_a_refused_configure_restores_the_picture_with_the_state() -> None:
         assert np.array_equal(session.rgba(), before), (
             "the restored axes must hold the accepted picture, not defaults"
         )
+
+        # Unlike pre-draw refusal, a failure after drawing can leave the
+        # actual canvas overwritten. That branch must restore its pixels.
+        renderer = session._renderer
+        compose = renderer._compose_frame
+        fail_once = True
+
+        def fail_after_drawing(*args, **kwargs):
+            nonlocal fail_once
+            compose(*args, **kwargs)
+            if fail_once:
+                fail_once = False
+                raise RuntimeError("failed after touching canvas")
+
+        monkeypatch.setattr(renderer, "_compose_frame", fail_after_drawing)
+        with pytest.raises(RuntimeError, match="after touching canvas"):
+            session.configure(parameters={"title": "must not survive"})
+        assert np.array_equal(renderer.capture_rgba(), before)
+        assert session.describe_display().limits == limits
+        session.redraw_surface()
+        assert np.array_equal(session.rgba(), before)
     finally:
         session.close()
 

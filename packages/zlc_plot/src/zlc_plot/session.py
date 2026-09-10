@@ -1589,6 +1589,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
     def _apply_layout_plan(
         self,
         plan: SurfacePlan,
+        *,
+        compose: bool = True,
     ) -> None:
         with self._render_lock:
             self._cancel_gesture()
@@ -1599,7 +1601,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 facet_index=self._focused_facet_index,
                 facet_focus_index=self._facet_focus_index,
             )
-            self._update_renderer(renderer, RenderEffect.LAYOUT)
+            self._update_renderer(renderer, RenderEffect.LAYOUT, compose=compose)
             with self._lock:
                 self._assert_open()
 
@@ -1725,6 +1727,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             self._configuration_display_events = []
             self._configuration_fit_events = []
             self._configuration_fit_commit_actions = []
+            render_started = False
             try:
                 self._apply_configuration(
                     semantic=semantic,
@@ -1849,21 +1852,21 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._configuration_display_events = None
                 self._configuration_fit_events = None
                 if effects != RenderEffect.NONE:
+                    render_started = True
                     self._render_current(effects)
                 fit_commit_actions = tuple(
                     self._configuration_fit_commit_actions or ()
                 )
                 self._configuration_fit_commit_actions = None
             except BaseException:
-                # Leave the deferred envelope BEFORE restoring: the restore
-                # has to paint, and a paint requested inside the envelope
-                # is only recorded.  Nothing the refused transaction
-                # produced is notified.
+                # Restore the renderer outside the deferred envelope. Before
+                # final drawing, the accepted buffer has not been touched;
+                # only a failed drawing may require recomposing those pixels.
                 self._configuration_effects = None
                 self._configuration_display_events = None
                 self._configuration_fit_events = None
                 self._configuration_fit_commit_actions = None
-                self._restore_configuration_state(previous_state)
+                self._restore_configuration_state(previous_state, compose=render_started)
                 raise
 
         for action in fit_commit_actions:
@@ -1885,16 +1888,14 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         })
         return snapshot
 
-    def _restore_configuration_state(self, snapshot: Mapping[str, object]) -> None:
-        """Put the session AND its picture back to the accepted state.
+    def _restore_configuration_state(
+        self, snapshot: Mapping[str, object], *, compose: bool,
+    ) -> None:
+        """Restore fields and prepared artists, plus pixels only if touched.
 
-        A refused configure rolls the session's fields back and rebuilds
-        the renderer's axes on the old plan -- and a rebuilt Figure holds
-        nothing until it is presented.  Restoring the fields alone left the
-        actual axes at default limits under a description that still named
-        the accepted range: the old pixels lingered in the raster buffer
-        until the next redraw threw them away.  The restored frame is
-        presented here, so the state and the picture are one front again.
+        Relayout may have cleared the axes before a later target was refused.
+        Always prepare the accepted scene so a subsequent redraw is correct;
+        do not redraw and publish the untouched accepted buffer a second time.
         """
 
         display_store = snapshot["_display_store"]
@@ -1913,7 +1914,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         assert self._renderer is not None
         self._renderer.spec = self._spec
         try:
-            self._apply_layout_plan(snapshot["renderer_plan"])
+            self._apply_layout_plan(snapshot["renderer_plan"], compose=compose)
         except Exception:
             self.redraw_surface()
 

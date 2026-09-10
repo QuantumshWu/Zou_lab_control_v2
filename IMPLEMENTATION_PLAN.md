@@ -65,6 +65,7 @@
 - 必要性整改的终态/输入切面：删除Seal的全量物化和sealing中间态，保留coverage校验、终态数据与EOS；删除Processor终态暂存与latest Start的弃置预取。4个既有测试入口（13个参数化case）通过，验证无人读取时Seal零物化、真实terminal输入在worker中取得且siblings/窗口语义保留。
 
 - 必要性整改的classifier/交互切面：authored Gaussian/fallback初态贯通Figure、本地/远程Host，0自动fit；移除单cell组件只求解该cell。配置只产生一次最终description，拒绝overview/单series hover不物化native。4个既有定向case通过；新worktree首次缓存触发过超时，未修改timeout、只在缓存就绪后重跑受影响case。无GUI/硬件/build。
+- Configure拒绝恢复以最终绘制是否已经开始为界：尚未绘制只恢复旧renderer准备态，不生成重复front；绘制失败仍完整恢复旧像素。字段、坐标与后续redraw共用原事务恢复owner，不保留假旧图。
 
 - 必要性整改的数据存储切面：finite extend/indexed hole/roll直接组装compact validity，VALUE和各component组合与233基线结果一致；公共restriction复用未变Axis/Domain。4个既有直接案例通过；独立四种validity的A/B证明输出相同且不再分配VALUE逐像素mask，未运行GUI或硬件。
 

@@ -227,6 +227,7 @@ Node new chunk
 - Display cadence按同一HarmonicClock的真实单调时间跨deadline判定；Qt延迟/合并回调时只欠一次最新呈现，不按回调次数再等待若干逻辑拍，也不补画已错过的帧。Pause、容量与same-shot接纳规则不变。
 
 - PanelState一次应用是幂等transaction；no-op产生0 solve、0 render、0 front。
+- Configure在最终绘制前被拒绝时只恢复旧字段及renderer准备态，保留原已接受front，不重新compose/发布；最终绘制已开始后失败则必须完整恢复像素，后续主动redraw同样只能呈现旧状态。
 - `PanelState`是可编辑、可在拒绝后继续修复的authored target；只有Plot成功接受后返回的
   完整`DisplayDescription`才是当前Live/Frozen/Viewer pixels的accepted truth，其`spec`也是
   capability、selector、classifier、overlay和viewport判断的唯一依据。拒绝的target不得
