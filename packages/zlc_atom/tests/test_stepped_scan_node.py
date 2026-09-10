@@ -404,6 +404,12 @@ def test_each_resolved_point_is_preflighted_before_its_load(monkeypatch) -> None
             free_run_delay_seconds=0.0,
         )
         validations = 0
+        compilations = []
+        original_compile = bench.compile_pulse
+        def counted_compile(*args, **kwargs):
+            compilations.append(True)
+            return original_compile(*args, **kwargs)
+        monkeypatch.setattr(bench, 'compile_pulse', counted_compile)
 
         def validate(*_args, **_kwargs) -> None:
             nonlocal validations
@@ -419,6 +425,7 @@ def test_each_resolved_point_is_preflighted_before_its_load(monkeypatch) -> None
             host.poll()
         assert "invalid second camera cadence" in str(host.observation.error)
         assert validations == 2
+        assert len(compilations) == 2, 'a discarded default pulse was compiled before point one'
         assert bench.loads == 1, "the invalid second program reached LOAD"
         assert bench.fired_repeats == [(1, 1)]
     finally:
@@ -444,7 +451,7 @@ def test_shots_are_run_repeats_and_repeats_rescan_the_plan() -> None:
     assert all(source.bracket is None for source in bench.loaded_sources)
     assert bench.fired_repeats == [(2, 1)] * 4
     assert sum(kind == "fire" for kind, _when in bench.events) == 4
-    assert len(bench.stop_intervals()) == 4
+    assert len(bench.stop_intervals()) == 1, "only Start needs an explicit SAFE"
 
 
 def test_pulse_gated_keeps_exactly_one_publication_per_fired_shot() -> None:
@@ -459,16 +466,22 @@ def test_pulse_gated_keeps_exactly_one_publication_per_fired_shot() -> None:
     assert sum(kind == "fire" for kind, _when in bench.events) == 2
 
 
-def test_the_authored_settle_time_stops_the_board_before_every_point() -> None:
-    """The pulse is stopped, and stays stopped for the AUTHORED time."""
+def test_the_authored_settle_time_is_observed_before_every_fire(monkeypatch) -> None:
+    """The authored wait remains per point; DONE needs no repeated SAFE."""
 
+    import zlc_atom.nodes.stepped_scan.measurement as stepped_module
+    original_settle = stepped_module.settle
+    intervals = []
+    def timed_settle(context, seconds):
+        started = time.monotonic()
+        original_settle(context, seconds)
+        intervals.append(time.monotonic() - started)
+    monkeypatch.setattr(stepped_module, 'settle', timed_settle)
     _kept, bench = _scripted_run(
         gating="sw_gated", shots=1, settle=AUTHORED_SETTLE_SECONDS
     )
-    intervals = bench.stop_intervals()
-    assert len(intervals) == 2, (
-        f"one stop per plan point was expected, got {intervals}"
-    )
+    assert len(intervals) == 2
+    assert len(bench.stop_intervals()) == 1
     for interval in intervals:
         assert interval >= AUTHORED_SETTLE_SECONDS, (
             f"the board was stopped for only {interval:.3f}s, less than the "
@@ -527,7 +540,7 @@ def _device_stepped(knob: _Knob, sequencer: _FakeSequencer, source: _FakeSource)
     )
 
 
-def test_every_knob_the_scan_moved_is_put_back_however_the_scan_ends() -> None:
+def test_every_knob_the_scan_moved_is_put_back_however_the_scan_ends(monkeypatch) -> None:
     """The bench is handed back as it was found: complete, stopped or failed.
 
     A device axis left the instrument standing at the last scan point --
@@ -540,11 +553,26 @@ def test_every_knob_the_scan_moved_is_put_back_however_the_scan_ends() -> None:
     """
 
     knob, sequencer, source = _Knob(), _FakeSequencer(_template_sequence()), _FakeSource()
+    import zlc_atom.nodes.stepped_scan.measurement as stepped_module
+    observed_settles = []
+    original_settle = stepped_module.settle
+    def observe_settle(context, seconds):
+        observed_settles.append(knob.level)
+        original_settle(context, seconds)
+    monkeypatch.setattr(stepped_module, 'settle', observe_settle)
+    compiled = []
+    original_compile = sequencer.compile_pulse
+    def compile_once(*args, **kwargs):
+        compiled.append(True)
+        return original_compile(*args, **kwargs)
+    monkeypatch.setattr(sequencer, 'compile_pulse', compile_once)
     _device_stepped(knob, sequencer, source).execute(_Context())
+    assert observed_settles == [1.0, 2.0], 'settle happened before the device move'
+    assert len(compiled) == 1, 'a device-only scan compiled the unchanged pulse again'
     assert knob.tunes == [1.0, 2.0, 0.25]
     assert knob.level == 0.25
     assert sequencer.fires == 2
-    assert sequencer.safe_calls == 3, "SAFE before each point, and at the end"
+    assert sequencer.safe_calls == 1, "normal DONE is already safe"
 
     knob, sequencer = _Knob(), _FakeSequencer(_template_sequence())
     with pytest.raises(RuntimeError, match="scripted source failed") as failure:
@@ -564,7 +592,7 @@ def test_every_knob_the_scan_moved_is_put_back_however_the_scan_ends() -> None:
     knob, sequencer = _Knob(refuse_restore=True), _FakeSequencer(_template_sequence())
     with pytest.raises(RuntimeError, match="scripted device refused restore"):
         _device_stepped(knob, sequencer, _FakeSource()).execute(_Context())
-    assert sequencer.safe_calls == 3, "the board still went safe before the knobs"
+    assert sequencer.safe_calls == 1, "the completed pulse is safe before restore"
 
     knob, sequencer = _Knob(refuse_restore=True), _FakeSequencer(_template_sequence())
     with pytest.raises(RuntimeError, match="scripted source failed") as failure:
@@ -578,7 +606,7 @@ def test_every_knob_the_scan_moved_is_put_back_however_the_scan_ends() -> None:
     # A knob standing where no tune could put it back -- outside the range
     # its device says may be commanded -- is refused before it is moved.
     knob, sequencer = _Knob(level=5.0), _FakeSequencer(_template_sequence())
-    with pytest.raises(ValueError, match=r"stands at 5.0, outside \[0.0, 3.0\]"):
+    with pytest.raises(ValueError, match=r"stands at 5.0.*outside \[0.0, 3.0\]"):
         _device_stepped(knob, sequencer, _FakeSource()).execute(_Context())
     assert knob.tunes == [] and sequencer.fires == 0
 

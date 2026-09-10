@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- Stepped重复操作已清：device-only只编译/LOAD一次，API两点只编译两次（首个实际点直接用于run记录）；settle改到写设备之后。原case从等待时看到旧值[0.25,1]变为[1,2]，Stop、恢复及第二点拒绝路径通过；未删Stepped authored settle或Temperature等待。
+
 - History删除64MiB/100000的隐藏截短、错误nbytes预算和重复capacity状态，唯一保留量为max(active window)。3个原window/多lease/gap用例通过；两次带gap的真实publication A/B证明请求100001时旧路径只给100000并丢首valid，新路径完整100001（两端valid、中间gap invalid）。未执行100000 shots；大窗口内存成本由实际数据决定。
 
 - Plot按需计算：8×400 V→mV归约绘图只转换400个输出，不再额外转换8×400原数据；raw selector按需转换仍正确。完整初值自动initializer为0次、partial仍1次；停止warmer不生成后续样例，初始size/parameters不再多轮绘制。3个既有单位/预热直接用例通过，无全量warm/GUI运行。
