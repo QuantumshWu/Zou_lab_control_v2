@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- 必要性整改的Atom数值切面：删除BOX整帧float64转换、Camera二层stack、numeric count弃置数值归约、成功Gaussian threshold的弃置Empirical计算。5个既有直接用例通过；Derive与233基线在105个dtype/归约/轴组合上schema及validity一致、数值等价，std明确在float64做subtract避免float32中间运算。无科学阈值/shot/模型政策变化。
+
 - 必要性整改的UI切面：隐藏Setting按需prepare、Manual table只更新受影响cells、Pulse Scan与timeline保留未变控件、InfoPane复用未变度量、Form同schema adopt不重建依赖，删除无消费者choice序列化API。8个既有定向用例通过；实屏FigureViewer输入7.25、Preview、Save及NPZ读回确认完成，截图和过程证据不入Git，已关闭所开GUI与render子进程。
 
 - 必要性整改的记录切面：generation run record与atomic event record各自只冻结一次，内部构造复用owned记录；finite物化按现有有序chunks取增量，indexed删除重复raw record；DataBlock身份重包保留数值验证事实。10个既有定向case通过；三siblings计数由每shot 10次deep-freeze变为首shot 2次、后续1次，四次finite物化的metadata输入由1/2/3/4变为1/2/2/2。未把计数换算为耗时承诺。

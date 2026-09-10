@@ -260,7 +260,7 @@ def test_psf_dispatch_is_explicit_and_not_a_name_substring() -> None:
     np.testing.assert_allclose(calibration.signals(np.arange(9, dtype=float).reshape(3, 3) + 1.0), [5.0])
 
 
-def test_the_box_signal_is_the_total_of_the_box() -> None:
+def test_the_box_signal_is_the_total_of_the_box(monkeypatch) -> None:
     """One physical quantity: how much the site's footprint collected.
 
     The reducer knob (mean/median/max) is gone -- a mean is the same
@@ -272,3 +272,19 @@ def test_the_box_signal_is_the_total_of_the_box() -> None:
     image = np.asarray([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]])
     centers = np.asarray([[1.0, 1.0]])
     np.testing.assert_allclose(extract_box_signals(image, centers), [45.0])
+    original_asarray = np.asarray
+    watched = None
+
+    def asarray(value, *args, **kwargs):
+        if value is watched:
+            assert not args and kwargs.get("dtype") is None, "BOX must not convert unmeasured pixels"
+        return original_asarray(value, *args, **kwargs)
+
+    monkeypatch.setattr(np, "asarray", asarray)
+    for dtype in (np.uint16, np.float32, np.float64):
+        watched = np.arange(63, dtype=dtype).reshape(7, 9)
+        if np.issubdtype(dtype, np.floating):
+            watched[3, 4] = np.nan
+        region = watched[2:5, 3:6].astype(np.float64)
+        expected = np.sum(region[np.isfinite(region)])
+        np.testing.assert_array_equal(extract_box_signals(watched, [[4, 3]]), [expected])

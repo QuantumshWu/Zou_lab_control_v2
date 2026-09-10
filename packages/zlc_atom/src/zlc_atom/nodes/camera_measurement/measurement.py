@@ -172,13 +172,8 @@ def frames_snapshot(
     if len(sizes) != 1 or not sizes.pop():
         raise ValueError("every published camera cycle must have the same frames")
     return snapshot_from_array(
-        np.stack(
-            [
-                np.stack([np.asarray(record.image) for record in cycle], axis=0)
-                for cycle in frames
-            ],
-            axis=0,
-        ),
+        np.stack([np.asarray(record.image) for cycle in frames for record in cycle], axis=0)
+        .reshape(len(frames), len(frames[0]), *np.asarray(frames[0][0].image).shape),
         producer=producer,
         signal=CAMERA_FRAMES_OUTPUT.name,
         point_axes=(_frame_point_axis(producer, len(frames[0])),),

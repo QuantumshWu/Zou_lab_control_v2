@@ -182,18 +182,23 @@ class Operand(NDArrayOperatorsMixin):
             raise TypeError(f"{operation} needs boolean data")
         if operation in ("sum", "mean", "std", "min", "max") and source.dtype.kind == "b":
             raise TypeError("use count/any/all for boolean data")
-        values = source.values.astype(np.float64) if operation not in ("all", "any") else source.values
-        count = source.valid.astype(np.int64)
-        total = np.where(source.valid, values, 0)
-        center = float(values[source.valid].mean()) if operation == "std" and np.any(source.valid) else 0.0
-        squares = np.where(source.valid, (values-center)**2, 0) if operation == "std" else None
-        if operation == "std":
-            total = np.where(source.valid, values-center, 0)
-        if operation == "count" and source.dtype.kind == "b":
-            total = (source.valid & source.values).astype(np.int64)
-        if operation in ("min", "max", "all", "any"):
-            fill = {"min": np.inf, "max": -np.inf, "all": True, "any": False}[operation]
-            total = np.where(source.valid, values, fill)
+        count = source.valid
+        total = squares = None
+        if operation == "count":
+            if source.dtype.kind == "b":
+                total = source.valid & source.values
+        elif operation in ("all", "any"):
+            total = np.where(source.valid, source.values, operation == "all")
+        elif operation == "std":
+            center = (float(np.mean(source.values[source.valid], dtype=np.float64))
+                      if np.any(source.valid) else 0.0)
+            total = np.zeros(source.shape, dtype=np.float64)
+            np.subtract(source.values, center, out=total, where=source.valid, dtype=np.float64)
+            squares = np.square(total)
+        else:
+            fill = {"min": np.inf, "max": -np.inf}.get(operation, 0.0)
+            total = np.full(source.shape, fill, dtype=np.float64)
+            np.copyto(total, source.values, where=source.valid)
         domains = list(source.domains)
         # Sums/counts pass through all domains before division: averaging group
         # averages would weight partially valid groups incorrectly.
@@ -213,20 +218,23 @@ class Operand(NDArrayOperatorsMixin):
                 else:
                     inverse = np.zeros(domain.size, np.int64)
                     domains[d] = DomainSpec((1,), (), ())
-                total = _group_reduce(total, inverse, domains[d].size, d, operation)
-                count = _group_reduce(count, inverse, domains[d].size, d, "sum")
+                if total is not None:
+                    total = _group_reduce(total, inverse, domains[d].size, d, operation)
+                count = _group_reduce(count, inverse, domains[d].size, d, "count")
                 if squares is not None:
                     squares = _group_reduce(squares, inverse, domains[d].size, d, "sum")
             else:
                 positions = tuple(2+i for i,a in enumerate(domain.axes) if a.axis_id in ids)
                 reducer = getattr(np, operation) if operation in ("min", "max", "all", "any") else np.sum
-                total = reducer(total, axis=positions)
+                if total is not None:
+                    total = reducer(total, axis=positions)
                 count = np.sum(count, axis=positions)
                 if squares is not None:
                     squares = np.sum(squares, axis=positions)
                 domains[d] = DomainSpec(tuple(a.size for a in kept), kept) if kept else SCALAR_DOMAIN
                 if not kept:
-                    total, count = total[..., None], count[..., None]
+                    total = None if total is None else total[..., None]
+                    count = count[..., None]
                     squares = None if squares is None else squares[..., None]
         valid = count > 0
         if operation in ("mean", "std"):
@@ -234,7 +242,7 @@ class Operand(NDArrayOperatorsMixin):
             if squares is not None:
                 total = np.sqrt(np.maximum(0, np.divide(squares, count, out=np.zeros(total.shape), where=valid)-total**2))
         if operation == "count":
-            total = (total if source.dtype.kind == "b" else count).astype(np.int64)
+            total = (total if source.dtype.kind == "b" else count).astype(np.int64, copy=False)
         return Operand(_schema(domains, total.dtype, "1" if operation in ("count", "all", "any") else source.unit), total, valid)
 
     def mean(self, axis, *, where=None): return self._reduce("mean", axis, where=where)
@@ -295,7 +303,8 @@ def _group_reduce(values, codes, count, axis, operation):
         "min": (np.minimum, np.inf), "max": (np.maximum, -np.inf),
         "all": (np.logical_and, True), "any": (np.logical_or, False),
     }.get(operation, (np.add, 0))
-    out = np.full((count, *source.shape[1:]), fill, dtype=source.dtype)
+    out = np.full((count, *source.shape[1:]), fill,
+                  dtype=np.int64 if operation == "count" else source.dtype)
     reducer.at(out, codes, source)
     return np.moveaxis(out, 0, axis)
 
