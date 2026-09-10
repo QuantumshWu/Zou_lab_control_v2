@@ -343,6 +343,7 @@ Node new chunk
 - Same-shot保证采用continuous best-effort，不新增hardware marker或逐cycle arm/fire。
 - Camera Measurement只按自己的authored frames-per-cycle/repeat采集并核实际返回cardinality；Camera adapter不解析Pulse window数量，也不以exposure审查Pulse cadence。Adapter的source ordinal只编号实际采到的frames，必须从本次arm的0连续递增。
 - qCMOS的ROI、exposure、trigger/readout各由adapter的单一working-point owner管理；未变化字段不得在每次Start整套重写。Measurement冻结设置操作返回的authoritative readback，不再为同一capture额外读取完整property surface；相同exposure/ROI的restart因此不支付冗余sensor reconfiguration。
+- qCMOS区分last-successful requested设置与actual working point；量化后的actual不覆盖requested，重复同请求不因此重写。成功setter及arm后的readback形成一份actual，普通working_point读取复用；失败清除请求成功事实，后续setter真正重试。arm后真实读回、transfer reset及copy-overrun检测保留。
 - Camera auto Panel从canonical publication/preview signal建立；signal尚未publish时显示等待状态，但不得用重复device配置、额外generation或固定5秒轮询作为Panel接线条件。
 - Scan绑定的是声明的Dataset输出，不以首个value或generation是否已出现判定contract兼容。已配置Panel Fit的参数由同一model词汇提供声明，禁用的输出不提供；无数据时可Start并在现有source owner等待首次真实publication，不创建假值；未显式选择Acquisition logic时不自动启动Camera。首次arrival接入现有有序tap，首绑后继续严格固定generation，停止时退订且不重放旧sealed值。
 - Seamless Scan可显式选择一个`Acquisition logic`，只提供声明ready的Measurement，不硬编码Camera。每次Scan Start仅一次`Pulse SAFE → 原Logic Start/Restart → 本次host ready`，其后复用采集运行；manual Continue、device点和repeat均不重启。Seamless没有settle参数、UI、默认值或隐藏等待；设备写入后读取实际值，不比较与设定值相等，不把读回宣称为物理稳定。正常段尾以板端DONE为安全完成事实，不再追加SAFE；Stop/错误才发SAFE。程序只编译/完整load一次，后续Fire直接复用驻留程序，只重置计数、cursor及运行FIFO，不重抄DAC表、不清clock配置。源tap/shot写入和进度仍走既有owner。

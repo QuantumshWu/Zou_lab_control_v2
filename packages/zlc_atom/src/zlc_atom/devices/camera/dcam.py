@@ -126,6 +126,8 @@ class DcamCameraAdapter:
         if not isinstance(config, DcamCameraConfig):
             raise TypeError("config must be DcamCameraConfig")
         self._config = config
+        self._working_point: CameraWorkingPoint | None = None
+        self._requested_settings: dict[str, object] = {}
         self._driver = DcamSdkDriver() if driver is None else driver
         self._lane = CameraSdkOwnerLane("zlc-dcam-camera-owner")
         self._state_lock = threading.RLock()
@@ -173,7 +175,11 @@ class DcamCameraAdapter:
         try:
             self._device = self._driver.open_device(self._config.device_index)
             self._open = True
-            self._apply_settings_on_owner(self._config)
+            self._working_point = self._apply_settings_on_owner(self._config)
+            self._requested_settings = {
+                "roi_xywh": self._config.roi_xywh,
+                "exposure_seconds": self._config.exposure_seconds,
+            }
         except BaseException as primary:
             device = self._device
             self._device = None
@@ -348,7 +354,10 @@ class DcamCameraAdapter:
         binning = self._integral(prop(DcamProperty.BINNING), "binning", positive=True)
         if binning not in (1, 2, 4, 8, 16):
             raise RuntimeError(f"qCMOS returned unsupported binning {binning}")
-        *_steps, sensor_width, sensor_height = self._sensor_grid_on_owner()
+        _h_step, sensor_width = device.property_attributes(DcamProperty.SUBARRAY_HSIZE)
+        _v_step, sensor_height = device.property_attributes(DcamProperty.SUBARRAY_VSIZE)
+        sensor_width = self._integral(sensor_width, "sensor width", positive=True)
+        sensor_height = self._integral(sensor_height, "sensor height", positive=True)
         subarray_mode = self._integral(
             prop(DcamProperty.SUBARRAY_MODE), "subarray mode", positive=True
         )
@@ -417,7 +426,13 @@ class DcamCameraAdapter:
         )
 
     def working_point(self) -> CameraWorkingPoint:
-        return self._lane.call(self._read_working_point_on_owner)
+        """The latest successful settings/arm readback, not another property scan."""
+        def current() -> CameraWorkingPoint:
+            self._require_device()
+            if self._working_point is None:
+                self._working_point = self._read_working_point_on_owner()
+            return self._working_point
+        return self._lane.call(current)
 
     def set_exposure_seconds(self, seconds: float) -> CameraWorkingPoint:
         """Integrate for this long on every trigger, leaving the geometry."""
@@ -427,14 +442,19 @@ class DcamCameraAdapter:
         def apply() -> CameraWorkingPoint:
             if self._armed:
                 raise RuntimeError("qCMOS settings cannot change while armed")
-            if requested != self._config.exposure_seconds:
+            if self._working_point is not None and requested == self._requested_settings.get("exposure_seconds"):
+                return self._working_point
+            try:
                 self._require_device().set_get_property(
                     DcamProperty.EXPOSURE_TIME, requested
                 )
-            point = self._read_working_point_on_owner()
-            self._config = replace(
-                self._config, exposure_seconds=point.exposure_seconds
-            )
+                point = self._read_working_point_on_owner()
+            except BaseException:
+                self._working_point = None
+                self._requested_settings.clear()
+                raise
+            self._working_point = point
+            self._requested_settings["exposure_seconds"] = requested
             return point
 
         return self._lane.call(apply)
@@ -453,22 +473,21 @@ class DcamCameraAdapter:
         def apply() -> CameraWorkingPoint:
             if self._armed:
                 raise RuntimeError("qCMOS settings cannot change while armed")
-            if candidate.roi_xywh != self._config.roi_xywh:
+            if (
+                self._working_point is not None
+                and "roi_xywh" in self._requested_settings
+                and candidate.roi_xywh == self._requested_settings["roi_xywh"]
+            ):
+                return self._working_point
+            try:
                 self._apply_roi_on_owner(candidate.roi_xywh)
-            point = self._read_working_point_on_owner()
-            actual_roi = None
-            if candidate.roi_xywh is not None:
-                actual_roi = (
-                    point.roi_origin_yx[1],
-                    point.roi_origin_yx[0],
-                    point.roi_shape_yx[1],
-                    point.roi_shape_yx[0],
-                )
-            self._config = replace(
-                candidate,
-                exposure_seconds=point.exposure_seconds,
-                roi_xywh=actual_roi,
-            )
+                point = self._read_working_point_on_owner()
+            except BaseException:
+                self._working_point = None
+                self._requested_settings.clear()
+                raise
+            self._working_point = point
+            self._requested_settings["roi_xywh"] = candidate.roi_xywh
             return point
 
         return self._lane.call(apply)
@@ -516,7 +535,7 @@ class DcamCameraAdapter:
             if self._armed:
                 raise RuntimeError("qCMOS is already armed")
             device = self._require_device()
-            before = self._read_working_point_on_owner()
+            before = self.working_point()
             device.allocate_buffer(buffer_count)
             started = False
             try:
@@ -526,12 +545,15 @@ class DcamCameraAdapter:
                 after = self._read_working_point_on_owner()
                 if after != before:
                     raise RuntimeError("qCMOS working point changed across arm")
+                self._working_point = after
                 count, newest = device.transfer_info()
                 if int(count) != 0 or int(newest) != -1:
                     raise RuntimeError(
                         "qCMOS transfer counter did not reset at the arm boundary"
                     )
             except BaseException as primary:
+                self._working_point = None
+                self._requested_settings.clear()
                 stopped = not started
                 if started:
                     try:

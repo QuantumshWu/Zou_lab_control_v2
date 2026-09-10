@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- DCAM整改：同ROI setter由22次SDK属性调用降为0；相同exposure请求不再因硬件量化重写，arm保留一次真实工作点读回，Monitor复用该结果。失败后只读可恢复actual但不伪造请求成功，下一setter重试；原量化、读回失败及arm变更拒绝用例通过。源码满幅/裁剪arm链约20/24次SDK属性调用，不是通信往返或实测时延；未操作实验机。
+
 - Stepped重复操作已清：device-only只编译/LOAD一次，API两点只编译两次（首个实际点直接用于run记录）；settle改到写设备之后。原case从等待时看到旧值[0.25,1]变为[1,2]，Stop、恢复及第二点拒绝路径通过；未删Stepped authored settle或Temperature等待。
 
 - History删除64MiB/100000的隐藏截短、错误nbytes预算和重复capacity状态，唯一保留量为max(active window)。3个原window/多lease/gap用例通过；两次带gap的真实publication A/B证明请求100001时旧路径只给100000并丢首valid，新路径完整100001（两端valid、中间gap invalid）。未执行100000 shots；大窗口内存成本由实际数据决定。
