@@ -577,7 +577,16 @@ def _submit_figure_artifact(
         ):
             raise RuntimeError("settled save host differs from the frozen data")
         return write(
-            session._figure_recipe(),
+            encode_plot_recipe(
+                description.spec,
+                parameters=description.display_state.values,
+                size=description.size,
+                viewport=description.viewport,
+                classifier_thresholds=description.classifier_thresholds,
+                facet_focus=description.facet_focus,
+                fit=description.fit,
+                selectors=description.selectors,
+            ),
             lambda: session.save(_image_path),
         )
 
