@@ -1,4 +1,5 @@
 `timescale 1ns/1ps
+`include "zlc_geometry.vh"
 // FULL-CHAIN first-frame test: the REAL zlc_pulse_streamer_top + REAL engine + the FIVE REAL
 // blk_mem_gen IPs, with a frozen current-layout host word image (9 periods,
 // da_bias_y = edge -192(code320)@P0, edge 388(code900)@P1, HOLD after; one
@@ -163,7 +164,7 @@ module tb_safe_gate;
   wire [1:0] led;
   wire cooling,cooling_pgc,repump,probe,pushout,state_pre,trig,coil,grey_cooling,trap,UV,emCCD;
   wire microwave,address_w,cooling_shutter,repump_shutter,probe_shutter,bias;
-  wire GND1,GND4,GND5,GND6,GND7,GND8,GND9,GND10,GND11,GND12,GND13,GND14,GND15;
+  wire GND1,pgc_1D,GND5,GND6,GND7,GND8,GND9,GND10,GND11,GND12,GND13,GND14,GND15;
   wire [9:0] da_dipole,da_bias_y,da_bias_x,da_bias_z;
   wire da_clk0,da_clk1,da_clk2,da_clk3,uart_tx;
   zlc_pulse_streamer_top dut(
@@ -171,7 +172,7 @@ module tb_safe_gate;
     .cooling(cooling),.cooling_pgc(cooling_pgc),.repump(repump),.probe(probe),
     .pushout(pushout),.state_pre(state_pre),.trig(trig),.coil(coil),.grey_cooling(grey_cooling),
     .trap(trap),.UV(UV),.emCCD(emCCD),.microwave(microwave),.address(address_w),
-    .GND1(GND1),.GND4(GND4),.GND5(GND5),.GND6(GND6),.GND7(GND7),.GND8(GND8),
+    .GND1(GND1),.pgc_1D(pgc_1D),.GND5(GND5),.GND6(GND6),.GND7(GND7),.GND8(GND8),
     .GND9(GND9),.GND10(GND10),.GND11(GND11),.cooling_shutter(cooling_shutter),
     .GND12(GND12),.repump_shutter(repump_shutter),.GND13(GND13),.probe_shutter(probe_shutter),
     .GND14(GND14),.bias(bias),.GND15(GND15),.da_dipole(da_dipole),.da_clk0(da_clk0),
@@ -187,8 +188,8 @@ module tb_safe_gate;
   end endtask
 
   initial begin
-    force dut.clk_en = {62{1'b1}};
-    force dut.out = {62{1'b0}};
+    force dut.clk_en = {`ZLC_CHANNEL_COUNT{1'b1}};
+    force dut.out = {`ZLC_CHANNEL_COUNT{1'b0}};
     force dut.zlc_bus_out = {4{10'd37}};
     force dut.zlc_physical_active = 1'b1;
     force dut.eng_reset = 1'b1;
@@ -227,7 +228,7 @@ module tb_t_ff;
   wire [1:0] led;
   wire cooling, cooling_pgc, repump, probe, pushout, state_pre, trig, coil;
   wire grey_cooling, trap, UV, emCCD, microwave, address_w;
-  wire GND1,GND4,GND5,GND6,GND7,GND8,GND9,GND10,GND11,GND12,GND13,GND14,GND15;
+  wire GND1,pgc_1D,GND5,GND6,GND7,GND8,GND9,GND10,GND11,GND12,GND13,GND14,GND15;
   wire cooling_shutter, repump_shutter, probe_shutter, bias;
   wire [9:0] da_dipole, da_bias_y, da_bias_x, da_bias_z;
   wire da_clk0, da_clk1, da_clk2, da_clk3;
@@ -243,7 +244,7 @@ module tb_t_ff;
     .pushout(pushout), .state_pre(state_pre), .trig(trig), .coil(coil),
     .grey_cooling(grey_cooling), .trap(trap), .UV(UV), .emCCD(emCCD),
     .microwave(microwave), .address(address_w),
-    .GND1(GND1),.GND4(GND4),.GND5(GND5),.GND6(GND6),.GND7(GND7),.GND8(GND8),
+    .GND1(GND1),.pgc_1D(pgc_1D),.GND5(GND5),.GND6(GND6),.GND7(GND7),.GND8(GND8),
     .GND9(GND9),.GND10(GND10),.GND11(GND11),
     .cooling_shutter(cooling_shutter), .GND12(GND12), .repump_shutter(repump_shutter),
     .GND13(GND13), .probe_shutter(probe_shutter), .GND14(GND14), .bias(bias), .GND15(GND15),
@@ -258,7 +259,7 @@ module tb_t_ff;
   reg [9:0] bh [0:2*NFR*200];      // [fire*NFR*T_FRAME + t]
   reg       chh [0:2*NFR*200];
   reg [39:0] all_bus [0:2*NFR*200];
-  reg [17:0] all_ttl [0:2*NFR*200];
+  reg [18:0] all_ttl [0:2*NFR*200];
   always @(posedge clk) begin
     if (led[0] && !run_prev) begin
       $display("[TB] running (fire #%0d) at %0t", fire_n, $time);
@@ -269,7 +270,7 @@ module tb_t_ff;
       begin
         bh[fire_n*NFR*T_FRAME + ti] <= da_bias_y; chh[fire_n*NFR*T_FRAME + ti] <= cooling;
         all_bus[fire_n*NFR*T_FRAME + ti] <= {da_bias_z,da_bias_x,da_bias_y,da_dipole};
-        all_ttl[fire_n*NFR*T_FRAME + ti] <= {bias,probe_shutter,repump_shutter,cooling_shutter,address_w,microwave,emCCD,UV,trap,grey_cooling,coil,trig,state_pre,pushout,probe,repump,cooling_pgc,cooling};
+        all_ttl[fire_n*NFR*T_FRAME + ti] <= {pgc_1D,bias,probe_shutter,repump_shutter,cooling_shutter,address_w,microwave,emCCD,UV,trap,grey_cooling,coil,trig,state_pre,pushout,probe,repump,cooling_pgc,cooling};
       end
     run_prev <= led[0];
   end

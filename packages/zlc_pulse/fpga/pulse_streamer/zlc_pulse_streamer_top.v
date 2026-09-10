@@ -80,7 +80,7 @@ module zlc_pulse_streamer_top #(
     output wire pushout, output wire state_pre, output wire trig, output wire coil,
     output wire grey_cooling, output wire trap, output wire UV, output wire emCCD,
     output wire microwave, output wire address,
-    output wire GND1, output wire GND4, output wire GND5, output wire GND6, output wire GND7,
+    output wire GND1, output wire pgc_1D, output wire GND5, output wire GND6, output wire GND7,
     output wire GND8, output wire GND9, output wire GND10, output wire GND11,
     output wire cooling_shutter, output wire GND12, output wire repump_shutter, output wire GND13,
     output wire probe_shutter, output wire GND14, output wire bias, output wire GND15,
@@ -785,26 +785,27 @@ module zlc_pulse_streamer_top #(
     assign da_dipole[4] = bus_out_final[4]; assign da_dipole[5] = bus_out_final[5];
     assign da_dipole[6] = bus_out_final[6]; assign da_dipole[7] = bus_out_final[7];
     assign da_dipole[8] = bus_out_final[8]; assign da_dipole[9] = bus_out_final[9];
-    assign da_clk0 = out_final[28];
+    assign da_clk0 = out_final[29];
     assign da_bias_y[0] = bus_out_final[10]; assign da_bias_y[1] = bus_out_final[11];
     assign da_bias_y[2] = bus_out_final[12]; assign da_bias_y[3] = bus_out_final[13];
     assign da_bias_y[4] = bus_out_final[14]; assign da_bias_y[5] = bus_out_final[15];
     assign da_bias_y[6] = bus_out_final[16]; assign da_bias_y[7] = bus_out_final[17];
     assign da_bias_y[8] = bus_out_final[18]; assign da_bias_y[9] = bus_out_final[19];
-    assign da_clk1 = out_final[39];
+    assign da_clk1 = out_final[40];
     assign da_bias_x[0] = bus_out_final[20]; assign da_bias_x[1] = bus_out_final[21];
     assign da_bias_x[2] = bus_out_final[22]; assign da_bias_x[3] = bus_out_final[23];
     assign da_bias_x[4] = bus_out_final[24]; assign da_bias_x[5] = bus_out_final[25];
     assign da_bias_x[6] = bus_out_final[26]; assign da_bias_x[7] = bus_out_final[27];
     assign da_bias_x[8] = bus_out_final[28]; assign da_bias_x[9] = bus_out_final[29];
-    assign da_clk2 = out_final[50];
+    assign da_clk2 = out_final[51];
     assign da_bias_z[0] = bus_out_final[30]; assign da_bias_z[1] = bus_out_final[31];
     assign da_bias_z[2] = bus_out_final[32]; assign da_bias_z[3] = bus_out_final[33];
     assign da_bias_z[4] = bus_out_final[34]; assign da_bias_z[5] = bus_out_final[35];
     assign da_bias_z[6] = bus_out_final[36]; assign da_bias_z[7] = bus_out_final[37];
     assign da_bias_z[8] = bus_out_final[38]; assign da_bias_z[9] = bus_out_final[39];
-    assign da_clk3 = out_final[61];
-    assign GND1 = 1'b0; assign GND4 = 1'b0; assign GND5 = 1'b0; assign GND6 = 1'b0;
+    assign da_clk3 = out_final[62];
+    assign pgc_1D = out_final[18];
+    assign GND1 = 1'b0; assign GND5 = 1'b0; assign GND6 = 1'b0;
     assign GND7 = 1'b0; assign GND8 = 1'b0; assign GND9 = 1'b0; assign GND10 = 1'b0;
     assign GND11 = 1'b0; assign GND12 = 1'b0; assign GND13 = 1'b0; assign GND14 = 1'b0;
     assign GND15 = 1'b0;

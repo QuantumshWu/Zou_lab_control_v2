@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- `pgc_1D`通道正式入库：原`add_pulse_channel.bat`默认操作（P19、lane18、63 lanes）直接固化于manifest/XDC/top/header和仓库Pulse模板，删除本地修改器及其过时测试。V9仍为DAC bit0；旧通道状态按port key保持。当前几何fingerprint为`0x5A59C160`；更新后无需再运行add-channel，实验机自行build/program并重启server。本次不执行build/program。
+
 - 2026-09-10本次验证：真实UART串行帧证明LOAD完成回复及SAFE抢占；真实top＋既有Xilinx BRAM行为模型证明首次装载4shots与SAFE后驻留重放4shots的18 TTL/40 DAC data逐tick一致、4 DAC clock工作、同ID不重复Fire。没有运行FPGA build/synthesis/program，旧时序报告不代表新ABI已通过。相关软件定向验证覆盖驻留重用、丢ACK、pending LOAD取消、新server握手、device/manual扫描及错误恢复。
 - RF正常设频率/幅度为1 write＋1 query（两次发送、一个响应）；Control Apply与单位投影不额外读设备。没有未经厂商证实的复合SCPI；真实native UNIT切换另发一次必要写入。错误后的current/unit/range保持unknown直到必要操作或显式Refresh确认。Fabric与SLM remote各在原session内复用连接，断线不自动重放写入，关闭释放idle连接。
 - 窗口首个Close保留关闭意图；device read/tune/init/discovery完成后由原Qt owner继续完整关闭，不要求再次点击、不加timer或平行生命周期。直接Qt验证覆盖有/无TaskConsole的pending关闭，测试窗口均已关闭。原始探针/日志只在ignored目录，不进入git。
@@ -307,7 +309,7 @@
 - Camera restart selector顺序根修：`_refresh_signal_choices`原来把“首个surface尚未accept、因此`binding.host is None`”误当成“panel尚未mount”，在已有initial `PlotPanelPort`忙于首帧时又启动第二个retarget port；后完成的候选会关闭已接受crosshair的port。恢复路径现在只在唯一生命周期真相`binding.port is None`时创建port，Board继续独占已有port的首帧accept；没有新增状态、helper、selector/restart特判或测试函数。原必现的auto-inference→camera-restart顺序`2 passed`；Workbench全包该缺陷已消失，结果`436 passed`。
 - 长Task partial artifacts：Runtime在worker failure/Stop边界调用domain writer；Feedback普通异常从最后完成candidate生成6组Figure后rollback，Temperature从已提交survival保存partial curve/Figure，Calibration从最新完整三帧cycle保存partial capture（分析完成则保存完整报告）。`run.json`只索引这些已完成文件，不再是失败run唯一内容。
 - Feedback的`candidates/candidate-XXXX.npz`现为标准Science Context；operator可在既有Science Context输入中手动选择它作为新run起点。过程数组移至`data/measurements/measurement-XXXX.npz`。新run从candidate 1开始并使用本次authored update预算；没有resume输入、自动旧run查找、续编号或旧run预算继承。
-- Pulse STATUS位仍为LOADED/RUNNING/DONE/ENGINE_ERROR/UNDERFLOW/LINK_ERROR，新增独立完成命令协议和CTRL22..25的command/ACK信息；fingerprint为`0x5A83C4CA`，旧板或旧server不进入新执行路径。SAFE由板端隔离输出且保留clock/program；Fire回复丢失用同command ID重试，不猜旧LOADED gate。运行/完成读取一次status/cursor块，日志记录单一结果与command ID，不保存或伪造两次读回。既有Remote cancel旁路保留，正常DONE无需额外SAFE命令。
+- Pulse STATUS位仍为LOADED/RUNNING/DONE/ENGINE_ERROR/UNDERFLOW/LINK_ERROR，新增独立完成命令协议和CTRL22..25的command/ACK信息；fingerprint为`0x5A59C160`，旧板或旧server不进入新执行路径。SAFE由板端隔离输出且保留clock/program；Fire回复丢失用同command ID重试，不猜旧LOADED gate。运行/完成读取一次status/cursor块，日志记录单一结果与command ID，不保存或伪造两次读回。既有Remote cancel旁路保留，正常DONE无需额外SAFE命令。
 - 第一次installed software尝试曾在重负载下出现一次本地SLM测试TCP connect timeout；
   同一wheel的精确case随后连续5/5通过，第二次完整installed software lane通过，因此没有
   用该不可复现事件改动产品remote timeout或server逻辑。
@@ -316,7 +318,7 @@
 
 以下证据来自2026-09-03在当前三层repeat tree上强制执行的Vivado 2019.1纯build，不代替实验板验收：
 
-本节是旧命令ABI的历史build证据，不能用于确认当前`0x5A83C4CA`的资源或时序；当前版本由操作员在实验机build/program。
+本节是旧命令ABI的历史build证据，不能用于确认当前`0x5A59C160`的资源或时序；当前版本由操作员在实验机build/program。
 
 - Vivado 2019.1 fresh project完成全部IP、top synth、place/route、reports和bitstream。
 - Routed setup WNS `+0.193 ns`、TNS `0`；hold WHS `+0.036 ns`、THS `0`；全部约束MET。

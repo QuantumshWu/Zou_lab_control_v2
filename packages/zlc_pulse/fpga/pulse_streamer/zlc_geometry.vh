@@ -9,7 +9,7 @@
 // ==========================================================================
 `ifndef ZLC_GEOMETRY_VH
 `define ZLC_GEOMETRY_VH
-`define ZLC_CHANNEL_COUNT       62
+`define ZLC_CHANNEL_COUNT       63
 `define ZLC_NUM_SLOTS           4
 `define ZLC_COEFF_WIDTH         16
 `define ZLC_TICK_WIDTH          32
@@ -24,8 +24,8 @@
 `define ZLC_BUS_SEL_WIDTH       3
 `define ZLC_EVT_FIFO_DEPTH      64
 `define ZLC_BUS_EVT_FIFO_DEPTH  64
-`define ZLC_NUM_DELAY_CH        18
+`define ZLC_NUM_DELAY_CH        19
 `define ZLC_DELAY_CH_IDX_W      6
 `define ZLC_DELAY_REG_WORDS     128
-`define ZLC_LAYOUT_FINGERPRINT  32'h5A83C4CA
+`define ZLC_LAYOUT_FINGERPRINT  32'h5A59C160
 `endif // ZLC_GEOMETRY_VH

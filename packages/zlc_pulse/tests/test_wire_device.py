@@ -82,7 +82,7 @@ def test_build_fingerprint_covers_each_geometry_field_except_host_cap() -> None:
 
 
 def test_default_geometry_is_pinned_to_deployed_word63() -> None:
-    assert build_fingerprint(StreamerParams()) == 0x5A83C4CA
+    assert build_fingerprint(StreamerParams()) == 0x5A59C160
 
 
 def test_host_rejects_affine_geometry_beyond_the_shipped_four_dsp_lanes() -> None:
@@ -109,8 +109,9 @@ def test_pack_sparse_image_matches_frozen_byte_baseline() -> None:
     assert words[CtrlWords.SCAN_COUNT] == 0
     assert words[CtrlWords.RUN_REPEAT_COUNT] == 1
     assert words[CtrlWords.SCAN_REPEAT_COUNT] == 1
+    assert program.clk_enable == sum(1 << bit for bit in (29, 40, 51, 62))
     assert hashlib.sha256(payload).hexdigest() == (
-        "7dca4fa028b460fd5cd7e7d9d3303775b36789165395e34671b73c56d0ea28de"
+        "d15842da7f0ffa597b081ed27edeb2b1af76cefb290d6a705652bab5e9f2ea38"
     )
 
 

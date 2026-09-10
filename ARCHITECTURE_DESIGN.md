@@ -350,6 +350,8 @@ Node new chunk
 
 ### 7.4 Host/RTL/build invariants
 
+- 正式板配置直接包含`pgc_1D`：P19、raw lane 18；共63 lanes、19个TTL、4组10-bit DAC与4个clock。原DAC的物理引脚不变（`da_dipole[0]`仍为V9），只有raw lane编号随新增TTL后移。Manifest、XDC、RTL top、生成geometry及仓库Pulse模板一起提交；部署不再运行本地add-channel脚本。Pulse状态按port key保持，不按新旧raw数组相同下标猜对应通道。
+
 - Load前核target ABI、clock、geometry、counts和delay FIFO capacity；不把camera exposure或frames-per-cycle反向解释进Pulse program。
 - Count必须是合法hardware range内整数，不clamp/wrap。
 - Hardware SAFE独立gate TTL/DAC data/clock；LOAD/FIRE前pins保持safe。

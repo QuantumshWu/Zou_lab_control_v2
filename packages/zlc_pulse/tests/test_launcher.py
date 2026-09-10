@@ -5,7 +5,6 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-import types
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,8 +17,6 @@ ESTIMATE_LAUNCHER = ROOT.parents[1] / "bin" / "estimate_resources.bat"
 INSTALL_LAUNCHER = ROOT.parents[1] / "bin" / "install_requirements.bat"
 TOOLS_RESOLVER = ROOT / "fpga" / "_resolve_tools.bat"
 FPGA_SOURCES = ROOT / "fpga" / "pulse_streamer"
-ADD_CHANNEL_LAUNCHER = ROOT.parents[1] / "bin" / "add_pulse_channel.bat"
-EMBEDDED_MARKER = "### ZLC-EMBEDDED-PYTHON ###"
 
 
 def _fake_python(path: Path) -> Path:
@@ -134,18 +131,6 @@ def test_real_batch_wrapper_forwards_exact_modes_without_inner_argument(tmp_path
     assert "failed with code 7" in failed.stdout
 
 
-def _embedded_script(source: str) -> str:
-    """What the launcher extracts: every line after the marker LINE.
-
-    The launcher finds its marker with ``findstr /b`` -- at the start of a
-    line -- because the command that searches for it names it too.
-    """
-
-    marker = re.search(rf"^{re.escape(EMBEDDED_MARKER)}$", source, re.MULTILINE)
-    assert marker is not None, "the add-channel launcher lost its embedded-script marker"
-    return source[marker.end():]
-
-
 def _assert_every_python_line_enters_through_the_bootstrap(launcher: Path) -> None:
     """Each ``%ZLC_PY_CMD%`` line of one launcher imports ``zou_lab_control`` first."""
 
@@ -164,70 +149,30 @@ def _assert_every_python_line_enters_through_the_bootstrap(launcher: Path) -> No
                     "zlc_"
                 ), (launcher.name, text)
             continue
-        if '"%ZLC_PY_SCRIPT%"' in text:
-            script = _embedded_script(source)
-            first_layer = re.search(r"^\s*(from|import) zlc_", script, re.MULTILINE)
-            assert first_layer is not None, launcher.name
-            assert script.index("import zou_lab_control") < first_layer.start(), (
-                launcher.name
-            )
-            continue
         raise AssertionError(f"{launcher.name}: unrecognised Python invocation: {text}")
 
 
-def _embedded_add_channel_tool() -> types.ModuleType:
-    """The Python the add-channel launcher extracts after its marker, as a module."""
+def test_shipped_board_includes_pgc_1d_without_a_local_mutation_step() -> None:
+    from zlc_pulse import PulsePeriod, PulseSequence, compile_sequence, pulse_target_from_xdc
+    from zlc_pulse.wire import default_params
 
-    script = _embedded_script(ADD_CHANNEL_LAUNCHER.read_text(encoding="utf-8"))
-    module = types.ModuleType("zlc_add_pulse_channel_embedded")
-    module.__file__ = str(ADD_CHANNEL_LAUNCHER)
-    exec(compile(script, str(ADD_CHANNEL_LAUNCHER), "exec"), module.__dict__)
-    return module
-
-
-def test_a_board_change_that_fails_its_own_check_is_put_back(tmp_path, capsys) -> None:
-    """The edited files and the regenerated header go back as they were found.
-
-    The change is one set -- manifest, XDC, top, bench and the header derived
-    from them -- and a reconciliation that failed left all of them written
-    with only the .bak files behind: a board no tool could reconcile, for the
-    operator to reassemble by hand.  A file that cannot go back is named, a
-    run that wrote nothing says so, and an over-budget estimate is its own
-    outcome (4, "the board change is IN") rather than the refusal (1,
-    "nothing was written") the wrapper reported for it.
-    """
-
-    tool = _embedded_add_channel_tool()
-    manifest = tmp_path / "streamer_config.json"
-    header = tmp_path / "zlc_geometry.vh"
-    originals = {manifest: b'{"lanes": 1}\r\n', header: None}
-    manifest.write_bytes(b'{"lanes": 2}\r\n')
-    header.write_bytes(b"`define ZLC_NEW\n")
-    tool.put_back(originals)
-    assert manifest.read_bytes() == b'{"lanes": 1}\r\n'
-    assert not header.exists()
-    assert "every edited file was put back" in capsys.readouterr().out
-
-    stuck = tmp_path / "board.xdc"
-    stuck.mkdir()  # a directory where the file was: no byte can go back
-    tool.put_back({stuck: b"set_property PACKAGE_PIN P19\n"})
-    told = capsys.readouterr().out
-    assert "could NOT put back: board.xdc" in told and ".bak files" in told
-
-    tool.put_back({})
-    assert "nothing was written by this run" in capsys.readouterr().out
-
-    source = ADD_CHANNEL_LAUNCHER.read_text(encoding="utf-8")
-    failure = source[source.index("except Exception as error:", source.index("target = pulse_target_from_xdc()")):]
-    assert failure.index("put_back(originals)") < failure.index("return 2")
-    over_budget = source[source.index("if estimate.returncode == 1:"):]
-    assert over_budget.index("return 4") < over_budget.index("return 3 if problems else 0")
-    wrapper = source[:len(source) - len(_embedded_script(source))]
-    refused = wrapper[wrapper.index('if "%ZLC_STATUS%"=="1"'):]
-    assert "REFUSED -- nothing was written" in refused[:refused.index(") else if")]
-    budget = wrapper[wrapper.index('if "%ZLC_STATUS%"=="4"'):]
-    assert "the board change is IN" in budget[:budget.index(") else")]
-    assert "OVER" in budget[:budget.index(") else")]
+    target = pulse_target_from_xdc()
+    geometry = default_params()
+    assert len(target.raw_lanes) == geometry.channel_count == 63
+    assert geometry.num_delay_ch == 19
+    channel = target.by_key["pgc_1D"]
+    assert channel.kind == "digital" and channel.lanes == ("ch18",)
+    assert target.package_pins[channel.lanes[0]] == "P19"
+    dipole = target.by_key["da_dipole"]
+    assert target.package_pins[dipole.lanes[0]] == "V9"
+    states = [0] * geometry.channel_count
+    states[18] = 1
+    pulse = PulseSequence(name="pgc_pin", target=target, time_step_ns=20,
+                          periods=(PulsePeriod("on", 1000, "ns", tuple(states)),
+                                   PulsePeriod("off", 1000, "ns", (0,) * geometry.channel_count)))
+    program = compile_sequence(pulse, geometry, 50e6)
+    assert program.masks[0] == 1 << 18 and program.masks[-1] == 0
+    assert not (ROOT.parents[1] / "bin" / "add_pulse_channel.bat").exists()
 
 
 def test_a_stored_python_path_is_honoured_under_either_expansion_mode(tmp_path) -> None:

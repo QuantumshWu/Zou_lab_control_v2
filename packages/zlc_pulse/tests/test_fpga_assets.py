@@ -112,7 +112,7 @@ def test_geometry_header_regenerates_through_the_documented_package_command(tmp_
 def test_geometry_guard_rejects_macro_and_fingerprint_mutations() -> None:
     header = (ROOT / "fpga/pulse_streamer/zlc_geometry.vh").read_text(encoding="utf-8")
     for name, replacement in (
-        ("ZLC_CHANNEL_COUNT", "63"),
+        ("ZLC_CHANNEL_COUNT", str(default_params().channel_count + 1)),
         ("ZLC_LAYOUT_FINGERPRINT", "32'h00000000"),
     ):
         mutated = re.sub(
@@ -182,17 +182,17 @@ def test_frozen_35t_uses_98_percent_without_weakening_the_90_percent_default() -
         config["params"], part=config["fpga_part"], target_pct=config["target_pct"]
     )
     assert frozen["lut"] == {
-        "used": 20075,
+        "used": 20144,
         "budget": 20384,
         "total": 20800,
-        "pct": 96.5,
+        "pct": 96.8,
         "ok": True,
     }
     at_default = estimate_resources(config["params"], part=config["fpga_part"])
     assert at_default["lut"]["ok"] is False
     assert at_default["lut"]["budget"] == 18720
 
-    with pytest.raises(ValueError, match=r"90% planning target: LUT 20075 > 18720"):
+    with pytest.raises(ValueError, match=r"90% planning target: LUT 20144 > 18720"):
         solve_capacity(config["fpga_part"])
 
     planning = solve_capacity("xc7a50t")

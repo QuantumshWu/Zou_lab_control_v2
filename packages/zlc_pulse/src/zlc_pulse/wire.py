@@ -133,7 +133,7 @@ def _geom(name: str, fallback: int) -> int:
 @dataclass(frozen=True)
 class StreamerParams:
     # Defaults come from streamer_config.json; literals are offline fallbacks.
-    channel_count: int = _geom("channel_count", 62)
+    channel_count: int = _geom("channel_count", 63)
     num_slots: int = _geom("num_slots", 4)
     coeff_width: int = _geom("coeff_width", 16)
     tick_width: int = _geom("tick_width", 32)
@@ -854,7 +854,7 @@ def estimate_resources(params: StreamerParams, *, part, target_pct: float = DEFA
         "dsp": res(engine_dsp, prof.dsp),
     }
 
-def solve_capacity(part, *, channel_count: int = 62, num_slots: int = 4, coeff_width: int = 16,
+def solve_capacity(part, *, channel_count: int = 63, num_slots: int = 4, coeff_width: int = 16,
                    tick_width: int = 32, coeff_frac_bits: int = 8, bus_count: int = 4,
                    bus_width: int = 10, bus_seg_addr_width: int = 6, bus_sel_width: int = 3,
                    slot_mul_width: int = 25,
