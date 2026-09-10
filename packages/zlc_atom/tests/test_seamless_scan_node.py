@@ -90,6 +90,7 @@ class _FakeSequencer(ConfigValueHolder):
             }
         )
         self.fires = 0
+        self.loads = 0
         self.safe_calls = 0
         self.on_safe = None
 
@@ -102,6 +103,7 @@ class _FakeSequencer(ConfigValueHolder):
             self.on_safe()
 
     def load(self, program, **_kwargs) -> None:
+        self.loads += 1
         self.program = program
 
     def fire(self, **_kwargs) -> None:
@@ -345,7 +347,7 @@ def test_device_axes_alone_repeat_a_fixed_pulse_and_restore_the_device() -> None
         frequencies=(1.0, 1.5, 2.0), values=None, unit="GHz", shots=2, repeats=2,
     )
     assert bench.fired_repeats == [(2, 1)] * 6
-    assert bench.loads == 6 and bench.scan_tables == []
+    assert bench.loads == 1 and bench.scan_tables == []
     assert all(not sequence.slots for sequence in bench.loaded_sources)
     assert bench._loaded_rows == () and bench._loaded_program.slot_count == 0
     assert bench.published[1:] == list(range(12))
@@ -1097,7 +1099,7 @@ def test_manual_axes_alone_repeat_a_fixed_pulse_at_each_confirmation() -> None:
         manual=(("power", (1.0, 2.0)),), values=None, shots=2, repeats=2,
     )
     assert bench.fired_repeats == [(2, 1)] * 4
-    assert bench.loads == 4 and bench.scan_tables == []
+    assert bench.loads == 1 and bench.scan_tables == []
     assert all(not sequence.slots for sequence in bench.loaded_sources)
     assert bench._loaded_rows == () and bench._loaded_program.slot_count == 0
     assert bench.published[1:] == list(range(8))
@@ -1289,6 +1291,7 @@ def _device_seamless(
     knob: _Knob, sequencer: _FakeSequencer, source: _FakeSource, *,
     shots: int = 1, acquisition_logic: str = "", restart_logic=None,
     settle_seconds: float = 0.0,
+    repeats: int = 1,
 ):
     sequence = _template_sequence()
     pulse_port = hardware_scan_ports_for(sequence)[0]
@@ -1308,7 +1311,7 @@ def _device_seamless(
         ),
         ports=(device_port, pulse_port),
         tunables={"knob": knob},
-        repeats=1,
+        repeats=repeats,
         shots_per_point=shots,
         settle_seconds=settle_seconds,
         acquisition_logic=acquisition_logic,
@@ -1316,7 +1319,7 @@ def _device_seamless(
     )
 
 
-def test_a_device_axis_is_put_back_however_the_table_ends() -> None:
+def test_a_device_axis_is_put_back_however_the_table_ends(monkeypatch) -> None:
     """The outer device knob goes back to its pre-run value: complete,
     stopped or failed. Each ready/fire segment reports its committed shots
     while it runs, replacing the preceding acquisition preparation."""
@@ -1324,26 +1327,37 @@ def test_a_device_axis_is_put_back_however_the_table_ends() -> None:
     knob, sequencer, source = _Knob(), _FakeSequencer(_template_sequence()), _FakeSource()
     context = _Context()
     prepared = []
+    import zlc_atom.nodes.scan.seamless as scan_module
+    wait_calls = []
+    actual_settle = scan_module.settle
+    def measured_settle(context, seconds):
+        wait_calls.append((knob.level, context.commits, seconds))
+        actual_settle(context, seconds)
+    monkeypatch.setattr(scan_module, "settle", measured_settle)
     readout_progress = []
     source.on_take = lambda _taken: readout_progress.append(context.progress[-1])
     _device_seamless(
-        knob, sequencer, source, shots=3, acquisition_logic="camera_measurement",
+        knob, sequencer, source, shots=3, repeats=2, acquisition_logic="selected_acquisition",
         restart_logic=lambda name, _context: prepared.append((name, context.commits)),
         settle_seconds=0.001,
     ).execute(context)
-    assert knob.tunes == [1.0, 2.0, 0.25] and knob.level == 0.25
-    assert sequencer.fires == 2, "one fire per device point"
-    assert prepared == [("camera_measurement", 0), ("camera_measurement", 6)]
+    assert knob.tunes == [1.0, 2.0, 1.0, 2.0, 0.25] and knob.level == 0.25
+    assert sequencer.fires == 4 and sequencer.loads == 1
+    assert sequencer.safe_calls == 5, "one initial SAFE and one per finished segment"
+    assert prepared == [("selected_acquisition", 0)], "prepare the selected logic once per Scan Start"
+    assert wait_calls == [(0.25, 0, 0.001), (1.0, 0, 0.001), (2.0, 6, 0.001),
+                          (1.0, 12, 0.001), (2.0, 18, 0.001)]
+    monkeypatch.setattr(scan_module, "settle", actual_settle)
     assert all(message.startswith("Scanning point") for message, *_rest in readout_progress)
     scanning = [entry for entry in context.progress if entry[1] is not None]
     assert [(current, total, committed) for _message, current, total, committed in scanning] == [
-        (current, 12, current) for current in (*range(7), *range(6, 13))
+        (current, 24, current) for base in (0, 6, 12, 18) for current in range(base, base + 7)
     ], "Fire starts at the retained shot count; every committed shot advances it"
-    assert scanning[0][0] == "Scanning point 1/4; shots"
-    assert scanning[7][0] == "Scanning point 3/4; shots"
-    assert scanning[-1][0] == "Scanning point 4/4; shots"
+    assert scanning[0][0] == "Scanning point 1/8; shots"
+    assert scanning[7][0] == "Scanning point 3/8; shots"
+    assert scanning[-1][0] == "Scanning point 8/8; shots"
     assert [committed for message, _current, _total, committed in context.progress
-            if message == "Settling"] == [0, 6]
+            if message == "Settling"] == [0]
 
     knob, sequencer = _Knob(), _FakeSequencer(_template_sequence())
     with pytest.raises(RuntimeError, match="scripted source failed"):
@@ -1374,8 +1388,7 @@ def test_a_stop_received_while_the_board_goes_safe_fires_no_table() -> None:
     with pytest.raises(RuntimeError, match="cancelled"):
         _device_seamless(knob, sequencer, source).execute(context)
     assert sequencer.fires == 0
-    # The device axis was applied before the segment's SAFE, and is put back.
-    assert knob.tunes == [1.0, 0.25] and knob.level == 0.25
+    assert knob.tunes == [] and knob.level == 0.25, "do not change a device before initial SAFE completes"
 
 
 def test_a_device_readback_does_not_replace_the_authored_scan_coordinates() -> None:

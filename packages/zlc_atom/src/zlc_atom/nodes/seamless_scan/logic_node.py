@@ -46,7 +46,7 @@ from zlc_atom.nodes.scan import (
 #: How long the pulse stays stopped before the table plays.  Half a
 #: second is the default settling allowance after acquisition is ready;
 #: it is authored because only the operator knows their apparatus.
-DEFAULT_SETTLE_SECONDS = 0.5
+DEFAULT_SETTLE_SECONDS = 0.01
 
 
 SEAMLESS_SCAN_SCHEMA = AuthoringSchema(

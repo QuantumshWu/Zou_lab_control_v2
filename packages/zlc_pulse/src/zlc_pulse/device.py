@@ -630,8 +630,16 @@ class PulseStreamer(ConfigValueHolder):
             )
             # DONE/SAFE clear the RTL's LOADED gate; replay only its resident mini-loader.
             self._last_fire_reloaded = not self._hardware_loaded
+            self._clear_safe_readback_locked()
             if self._last_fire_reloaded:
-                self._write(self._scan_bank_arming(), stop=self._stop)
+                # SAFE clears live clock enables, not the resident program.
+                self._write(
+                    tuple((CtrlWords.CLK_ENABLE + i,
+                           (self._program.clk_enable >> (32 * i)) & 0xFFFFFFFF)
+                          for i in range(self.geom.clk_enable_words))
+                    + self._scan_bank_arming(),
+                    stop=self._stop,
+                )
                 self._strobe(CMD_LOAD, repeatable=True, stop=self._stop)
                 self._await_loaded(stop=self._stop)
                 self._hardware_loaded = True
@@ -648,7 +656,6 @@ class PulseStreamer(ConfigValueHolder):
             self._resends_at_fire = int(getattr(self.transport, "resends", 0) or 0)
             self._terminal_status = STATUS_RUNNING
             self._fire_started = time.monotonic()
-            self._clear_safe_readback_locked()
             self._fire_gate = threading.Event()
             self._worker = threading.Thread(target=self._observe, name="zlc-pulse-observer", daemon=True)
             self._worker.start()

@@ -5,7 +5,8 @@ declared slots and advance inside a fire; without them, each host point
 plays the fixed Pulse with no table. Run repeats supplies shots_per_point,
 without rewriting PulseBracket or adding artificial scan coordinates.
 
-The original acquisition preparation and Stop checks precede each fire.
+Acquisition preparation happens once at Scan Start. Device writes are followed
+by their authored settle; manual changes are controlled by the operator.
 Committed source publications are placed in scan/repeat order by the shared
 Dataset writer. Tasks using acquire may attach typed companions to the same
 event bundle. Device knobs return to their original values and units on
@@ -239,9 +240,8 @@ class SeamlessScanMeasurement:
         """Move the installed knobs this row names, through the one owner
         of the device-axis law.
 
-        The board is already SAFE here (the segment loop runs between
-        fires), and the per-fire settle that follows covers the device's
-        own settling too.
+        The board is already SAFE here. Each device write owns its settling;
+        a manual acknowledgement or another repeat adds no device wait.
         """
 
         for port, value, index, points in changed:
@@ -252,6 +252,7 @@ class SeamlessScanMeasurement:
             axis = next(axis for axis in self.outer_axes if axis.port == port)
             bound = next(bound for bound in self.ports if bound.port == port)
             knobs.move(port, value, axis.unit or bound.unit)
+            settle(context, self.settle_seconds)
 
     def _ask_for_setting(
         self,
@@ -288,11 +289,9 @@ class SeamlessScanMeasurement:
         self,
         context: object,
         *,
-        board: object,
         streamed: PulseSequence,
         program: object,
         wire: object,
-        slot_tick_scales: Sequence[int],
         writer: ScanDatasetWriter,
         rows: Sequence[Sequence[float]],
         inner_count: int,
@@ -305,22 +304,10 @@ class SeamlessScanMeasurement:
         run_record: dict,
         on_point: object,
     ) -> None:
-        """One load, one fire, and every readout it plays, placed.
-
-        The apparatus is stopped ONCE per fire, because the whole table
-        plays from it: the settle is what the world is given to reach the
-        state this fire's first point starts from.
-        """
+        """Play a segment of the one prepared acquisition and resident program."""
 
         readouts = sweeps * inner_count * shots
-        self.sequencer.safe()
-        if self.acquisition_logic:
-            check_cancelled(context)
-            context.report_progress(f"Preparing {self.acquisition_logic}")
-            self._restart_logic(self.acquisition_logic, context)
-        if self.settle_seconds:
-            context.report_progress("Settling")
-        settle(context, self.settle_seconds)
+        first = progress_base == 0
         self.source.open(context, cycles=readouts)
         try:
             self.source.validate(
@@ -329,7 +316,8 @@ class SeamlessScanMeasurement:
                 run_repeats=shots,
                 scan_repeats=sweeps,
             )
-            self.sequencer.load(program, source=streamed, rows=wire)
+            if first:
+                self.sequencer.load(program, source=streamed, rows=wire)
             self.source.arm()
             check_cancelled(context)
             self.sequencer.fire(
@@ -477,11 +465,9 @@ class SeamlessScanMeasurement:
         )
         inner_count = len(effective_inner)
         segment = dict(
-            board=board,
             streamed=streamed,
             program=program,
             wire=wire,
-            slot_tick_scales=slot_tick_scales,
             writer=writer,
             rows=effective_rows,
             inner_count=inner_count,
@@ -496,6 +482,14 @@ class SeamlessScanMeasurement:
         # back where they were, however it ended.
         release = (("restoring the scanned device fields", knobs.restore),)
         try:
+            self.sequencer.safe()
+            check_cancelled(context)
+            if self.acquisition_logic:
+                context.report_progress(f"Preparing {self.acquisition_logic}")
+                self._restart_logic(self.acquisition_logic, context)
+            if self.settle_seconds:
+                context.report_progress("Settling")
+                settle(context, self.settle_seconds)
             if not self.outer_axes:
                 self._play_table(
                     context,

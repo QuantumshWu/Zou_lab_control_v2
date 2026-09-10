@@ -634,19 +634,51 @@ def test_repeated_fire_reloads_the_resident_image_before_the_rtl_gate() -> None:
     assert edge_uploads_after == edge_uploads_before
 
 
-def test_fire_after_safe_reloads_the_resident_image_before_firing() -> None:
+def test_fire_after_safe_reloads_the_resident_image_before_firing(monkeypatch) -> None:
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
-    program = compile_sequence(_sequence(), geom, 50e6)
+    program = compile_sequence(_sequence(slotted=True), geom, 50e6)
     transport = _RtlFireGateTransport(geom=geom, auto_done=True)
     streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
-    streamer.load(program)
-    streamer.safe()
+    try:
+        rows = ((1,), (2,), (1,))
+        streamer.load(program, rows=rows)
+        clock_addresses = tuple(CtrlWords.CLK_ENABLE + i for i in range(geom.clk_enable_words))
+        loaded_clocks = tuple(transport.read_word(address) for address in clock_addresses)
+        assert program.clk_enable and any(loaded_clocks), "the loaded Pulse has real clock ports"
+        uploaded = len(transport.write_batches)
+        streamer.fire(run_repeats=1)
+        assert streamer.wait_done(1.0) is not None
+        streamer.safe()
+        assert not any(transport.read_word(address) for address in clock_addresses)
 
-    streamer.fire(run_repeats=1)
-    assert streamer.wait_done(1.0) is not None
-    assert transport.accepted_loads == 2
-    assert transport.accepted_fires == 1
+        streamer.fire(run_repeats=1)
+        assert streamer.wait_done(1.0) is not None
+        assert tuple(transport.read_word(address) for address in clock_addresses) == loaded_clocks
+        assert transport.accepted_loads == 2
+        assert transport.accepted_fires == 2
+        assert transport.read_word(CtrlWords.BANK0_CHUNK) == 0
+        assert transport.read_word(CtrlWords.BANK1_CHUNK) == 1
+        assert transport.read_word(CtrlWords.BANK_READY) == 0b11
+        for bank in (0, 1):
+            for address, value in pack_scan_rows(rows, geom, bank, bank).items():
+                assert transport.read_word(address) == value
+        bases = region_bases(geom)
+        assert not any(bases["tick"] <= address < bases["scan"]
+                       for batch in transport.write_batches[uploaded:] for address, _value in batch)
+
+        # Restoring the clock mask changes the SAFE facts even if LOAD fails.
+        streamer.safe()
+        def fail_load(*, stop=None):
+            raise RuntimeError("resident LOAD failed")
+        monkeypatch.setattr(streamer, "_await_loaded", fail_load)
+        with pytest.raises(RuntimeError, match="resident LOAD failed"):
+            streamer.fire(run_repeats=1)
+        assert tuple(transport.read_word(address) for address in clock_addresses) == loaded_clocks
+        streamer.safe()
+        assert not any(transport.read_word(address) for address in clock_addresses)
+    finally:
+        streamer.close()
 
 
 def test_runtime_slot_rows_reject_colliding_affine_edges() -> None:

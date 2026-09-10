@@ -10,6 +10,7 @@
 
 ## 1. 当前实施范围
 
+- Seamless按2026-09-10最新裁决收口：选定Acquisition logic仅每次Scan Start准备一次，运行中不再按point/repeat重启；settle默认10ms，只在启动和每次set device操作后等待，manual/repeat不额外等。完整Pulse仅load一次，重复Fire复用驻留程序；同源driver已补SAFE后clock mask恢复及恢复失败时SAFE cache失效，不改RTL。原每段入口SAFE删掉，首次SAFE移到任何设备写入前，段尾确认保留。
 - Repeat标题已撤掉擅自添加的min/max统计及区间格式：其余所有轴固定于同一数据当前坐标，Cell-data也先选定坐标，再沿目标Repeat数valid；每轴只返回整数，Point/Cell尺寸不变，不受Plot Scope影响，也不改为采集次数。旧多context汇总分支删除，GUI探针同步同一标量契约。
 - Pulse Bracket编辑已统一Period/post的光标、chrome命中、拖动、gap指示和Add目标；旧分立MIME/端点drag/只数Period的gap路径删除。结构编辑一次提交period与Bracket，移动原边界不再留旧锚造成逆序。空Bracket在首/中/尾均保留，可改count及重新插入修复；On Pulse、Save Pulse/Preview与compile/codec共用同一错误提示，未改RTL或有效文件格式。直接边界/空编辑用例和可见Qt事件链及截图验证，证据在ignored research，不入Git。
 - Repeat标题统计已从全局any改为本次publication当前坐标的条件有效数，不受呈现fate/Scope/Focus影响。正式Qt Scan第一power50次、下一power7次显示50→7；同publication切Scope135/200均为7，Point/Cell维度不改。完整panel_data_shape每case300次：Site35 P50/P95/max=0.094/0.253/0.575ms，207万像素但compact有效性=0.086/0.111/0.349ms；不包含Qt paint，未展开像素mask，首次统计也<1ms。原始计时与截图只在ignored research。
@@ -37,7 +38,7 @@
 
 - 2026-09-08 按最终用户裁决，扫描彻底采用author unit：Plan直接存135…247与mVpp，Seamless/Stepped输出同一单位，仅设备/编译边界换算；display_unit旧路径及8ULP/相等检查均删除。5个单位/Plan直接实例通过；真实Runtime的Seamless十点例在设备回读偏离设定时完成，Dataset coordinates逐位等于135→247的十点且unit为mVpp，run record一致；设备异常与restore传播仍保留。曾添加的独立readback event字段不符合现有merge grammar，已撤掉，不扩格式，设备原有tune回读路径保留。未做真实硬件验收。
 
-- 2026-09-08 Seamless可选`Acquisition logic`已接入原Start/Restart，manual与device外层点共用每Fire前入口，FPGA内部scan slot保持连续。新NodeHost ready由Camera真实arm后报告，settle默认0.5s。6项Host/Camera直接验证及2项Workbench复用Restart/选择保存验证通过；真实Qt两个manual点完成新代采集与Scan，ready→Fire为501.7363/500.4511ms，两代首帧ordinal均0/1/2，Scan参数各匹配其新Fit parent/Camera root。原始Camera signal不支持indexed history，该实屏案的独立history oracle未通过，不冒称history复验；按用户指示不再扩大验证。所有测试窗口与child已退出，证据只留ignored目录。Layout中未指定的可选authoring字段使用schema默认，显式settle值和Acquisition引用按原Layout owner保留。2026-09-09修复Preparing提示一直留到整点结束：原Scan owner在settle与Fire成功时更新状态，每个已commit shot更新全run进度，复用NodeProgress/Runtime/UI文字通道，无新增进度条。既有直接用例红绿及正式Qt纯manual两点×8shots通过，原无slot imaging_template经真实文件加载、Acquisition重启两代，截图分别显示1/16与9/16，最终16/16→done、errors空且窗口关闭；证据仅在ignored `bench/results/gui-fuzz-round2/scan-progress/`。
+- Seamless的Acquisition logic复用原Start/Restart及ready入口，不含Camera类型分支；按2026-09-10裁决每次Scan仅调用一次。当前正式Qt两轮repeat×两manual点、每点2shots：4次Fire共享同一采集generation，Restart=1、完整load=1、settle=1且10.53ms，24/24 frame数据完成，errors空、窗口和子进程已关闭。每次device写后的等待由直接用例验证，manual/repeat不额外等待。进度仍每shot更新，已有草稿/布局显式settle值保留；所有原始证据只在ignored research。
 
 - 2026-09-08 当前worktree完成六项：Pulse DAC保留disabled全开按钮并实屏确认四列对齐；Layout递归编码authoring rows并完成真实Save/Load；Derive以普通Fluent下拉选择atomic producer bundle、不新增Runtime数据；声明过的Panel fit在无首帧/无reserved generation时允许Scan Start，首次arrival复用有序tap。真实Qt验证单点单shot，Scan输入与新一代首个Fit publication数值/validity相同，唯一根为重启后的Camera首event，未自动启动Camera。GUI及渲染children全部关闭；退出曾有Device Manager等待sequencer control关闭的短暂拒绝日志，最终正常退出，未冒称无日志。
 - `Saturation`按用户新裁决改为`f(x)=(A*x+B)/(x+C)`，使用`asymptote/numerator/shift`（A/B/C），headline为asymptote；参数单位依次为y、y*x、x。C可负，仅限制拟合域`x+C>0`，不把增长条件`A*C>B`设成不可配置门槛；固定B/C、绝对坐标裁剪、single/batch与uncertainty继续共用现有fit机制。公式/Jacobian/负C/下降数据/固定参数、normal/hard single与B1/B8/B64、headline及复合单位的显示/表达式/派生Dataset共8项目标验证通过。B的单位复用通用乘积解析，同单位原样通过，前缀转换保留符号，非线性换算不得冒充乘积倍率。
