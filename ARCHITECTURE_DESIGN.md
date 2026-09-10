@@ -214,6 +214,8 @@ Node new chunk
 
 ### 5.2 Performance与state
 
+- 数值显示单位仅在真实消费者需要的表示上转换；归约后绘图不得预先转换全量raw values，raw selector确实读取display时才按需取得。完整用户初值直接进入solver，不计算马上覆盖的自动初值；partial初值仍补自动值。预热停止在构造下一个样例前生效，size/parameters按最终初态进入共享Host。
+
 - Display cadence按同一HarmonicClock的真实单调时间跨deadline判定；Qt延迟/合并回调时只欠一次最新呈现，不按回调次数再等待若干逻辑拍，也不补画已错过的帧。Pause、容量与same-shot接纳规则不变。
 
 - PanelState一次应用是幂等transaction；no-op产生0 solve、0 render、0 front。

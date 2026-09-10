@@ -3259,7 +3259,11 @@ def _initial_values(
         unknown = set(initial) - set(model.parameter_names)
         if unknown:
             raise ValueError(f"initial values name unknown parameters: {sorted(unknown)}")
-        defaults = dict(zip(model.parameter_names, model.initializer(coordinates, values), strict=True))
+        defaults = (
+            {}
+            if len(initial) == len(model.parameters)
+            else dict(zip(model.parameter_names, model.initializer(coordinates, values), strict=True))
+        )
         defaults.update({key: float(value) for key, value in initial.items()})
         seed = np.asarray([defaults[name] for name in model.parameter_names], dtype=np.float64)
     else:

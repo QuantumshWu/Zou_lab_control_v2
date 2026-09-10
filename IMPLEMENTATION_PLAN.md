@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- Plot按需计算：8×400 V→mV归约绘图只转换400个输出，不再额外转换8×400原数据；raw selector按需转换仍正确。完整初值自动initializer为0次、partial仍1次；停止warmer不生成后续样例，初始size/parameters不再多轮绘制。3个既有单位/预热直接用例通过，无全量warm/GUI运行。
+
 - Feedback报告已删除binned Histogram二次fit，candidate与selected都复用本次科学fit的分量/threshold；invalid显式无模型/阈值，公共classifier target与Figure/远程roundtrip不再把null变成自动fit。既有classifier case和失败后partial Figure/Context case通过，报告参数按site坐标逐项一致；首次测试误按target列表顺序配site，已改为按真实coordinate核对，未改生产数值掩盖测试。
 
 - 信号目录必要性整改：Plane缓存未变目录、删除无消费者的description revision；Console一次生成rows/overlay offers且直接交View。真实Plane＋Console纯metadata探针中首次4panel/2signals只生成2 descriptors及1次rows，20次idle与普通数值更新后均0重建/0菜单push；Stop→Start的overlay候选失效与恢复正确，4个原目录/拓扑用例通过。此证据不宣称像素或GUI验收。
