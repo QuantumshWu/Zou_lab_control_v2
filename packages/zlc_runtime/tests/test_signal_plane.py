@@ -698,6 +698,9 @@ def test_commit_mints_runtime_identity_and_freezes_run_record() -> None:
         assert "new" not in value.run_record
         assert isinstance(value.run_record, MappingProxyType)
         assert isinstance(value.run_record["camera"], MappingProxyType)
+        publication = plane.latest_publication("camera/frame")
+        assert publication.run_record is value.run_record
+        assert publication.event_record is value.event_record
         assert value.snapshot.ref.stream_generation == generation
         assert value.snapshot.ref.revision.value == 1
         assert value.snapshot.ref.block_id == BlockId("camera/frame.event")
@@ -738,6 +741,7 @@ def test_finite_prefix_merges_event_epochs_without_changing_run_identity() -> No
                 )
             },
         )["epoch-camera/frame"]
+        plane.current_dataset_view("epoch-camera/frame")
         second = plane.commit_live(
             node,
             {
@@ -767,7 +771,9 @@ def test_finite_prefix_merges_event_epochs_without_changing_run_identity() -> No
         prefix_camera = prefix_record["device_settings"]["camera"]
         assert prefix_camera["epoch_ranges"] == ((0, 0), (2, 2))
         assert prefix_camera["mixed"] is True
-        assert first.run_record == second.run_record == {"run": "same"}
+        assert first.run_record is second.run_record
+        assert first.canonical_schema is second.canonical_schema
+        assert first.run_record == {"run": "same"}
     finally:
         plane.close()
 
@@ -925,6 +931,15 @@ def test_watching_a_run_grow_costs_the_shot_not_the_run() -> None:
     # Counted on EVERY assembler the plane owns, named or not, so the
     # measurement is of the work done and not of which function did it.
     placed: list[int] = []
+    merged: list[int] = []
+    merge_records = plane_module._merge_event_records
+
+    def merge_new_records(records):
+        records = tuple(records)
+        merged.append(len(records))
+        return merge_records(records)
+
+    plane_module._merge_event_records = merge_new_records
     assemblers = {
         name: getattr(plane_module, name)
         for name in ("_assembled_planes", "_extended_planes")
@@ -959,11 +974,13 @@ def test_watching_a_run_grow_costs_the_shot_not_the_run() -> None:
             view = plane.current_dataset("grid-cost/scan")
             assert view.block.values[0, point, 0] == float(point)
         assert placed == [1, 1, 1, 1], placed
+        assert merged == [1, 2, 2, 2], "one owned prefix plus the new shot, never a historical rescan"
         np.testing.assert_allclose(
             plane.current_dataset("grid-cost/scan").block.values[0, :, 0],
             (0.0, 1.0, 2.0, 3.0),
         )
     finally:
+        plane_module._merge_event_records = merge_records
         for name, original in assemblers.items():
             setattr(plane_module, name, original)
         plane.close()

@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- 必要性整改的记录切面：generation run record与atomic event record各自只冻结一次，内部构造复用owned记录；finite物化按现有有序chunks取增量，indexed删除重复raw record；DataBlock身份重包保留数值验证事实。10个既有定向case通过；三siblings计数由每shot 10次deep-freeze变为首shot 2次、后续1次，四次finite物化的metadata输入由1/2/3/4变为1/2/2/2。未把计数换算为耗时承诺。
+
 - 必要性整改的终态/输入切面：删除Seal的全量物化和sealing中间态，保留coverage校验、终态数据与EOS；删除Processor终态暂存与latest Start的弃置预取。4个既有测试入口（13个参数化case）通过，验证无人读取时Seal零物化、真实terminal输入在worker中取得且siblings/窗口语义保留。
 
 - 必要性整改的classifier/交互切面：authored Gaussian/fallback初态贯通Figure、本地/远程Host，0自动fit；移除单cell组件只求解该cell。配置只产生一次最终description，拒绝overview/单series hover不物化native。4个既有定向case通过；新worktree首次缓存触发过超时，未修改timeout、只在缓存就绪后重跑受影响case。无GUI/硬件/build。

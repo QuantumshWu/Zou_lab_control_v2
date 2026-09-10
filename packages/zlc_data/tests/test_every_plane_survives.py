@@ -88,16 +88,22 @@ def _derived_ref(schema: DatasetSchema):
     )
 
 
-def test_replacing_carries_the_planes_it_was_not_asked_about() -> None:
+def test_replacing_carries_the_planes_it_was_not_asked_about(monkeypatch) -> None:
     """Change the identity; the content -- all of it -- comes along."""
 
     block = _snapshot().block
-    restamped = block.replacing(
-        block_id=BlockId("elsewhere"), revision=DatasetRevision(9)
-    )
+    with monkeypatch.context() as identity_only:
+        identity_only.setattr(np, "isfinite", lambda *_args: pytest.fail("identity change rescanned values"))
+        restamped = block.replacing(
+            block_id=BlockId("elsewhere"), revision=DatasetRevision(9)
+        )
     assert str(restamped.block_id) == "elsewhere"
     assert int(restamped.revision.value) == 9
     np.testing.assert_array_equal(restamped.sigma, SIGMA)
+    assert restamped.values is block.values
+    assert restamped.sigma is block.sigma
+    with pytest.raises(TypeError, match="revision"):
+        block.replacing(revision=9)
 
 
 def test_the_cutter_cuts_the_error_with_the_sample() -> None:

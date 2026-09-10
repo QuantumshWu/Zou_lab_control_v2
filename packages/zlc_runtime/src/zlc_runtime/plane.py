@@ -90,13 +90,26 @@ class RetainedPublicationExpired(CancelledError):
 
 
 def _run_records_equal(
-    left: Mapping[str, object],
-    right: Mapping[str, object],
+    left: object,
+    right: object,
 ) -> bool:
-    try:
-        return dict(left) == dict(right)
-    except (TypeError, ValueError):
-        return False
+    """Compare authored and owned trees without freezing a second copy."""
+
+    if left is right:
+        return True
+    if isinstance(left, Mapping) and isinstance(right, Mapping):
+        return left.keys() == right.keys() and all(
+            _run_records_equal(value, right[key]) for key, value in left.items()
+        )
+    if isinstance(left, (list, tuple)) and isinstance(right, (list, tuple)):
+        return len(left) == len(right) and all(
+            _run_records_equal(a, b) for a, b in zip(left, right)
+        )
+    return (
+        type(left) in (str, bool, int, float, type(None))
+        and type(right) in (str, bool, int, float, type(None))
+        and left == right
+    )
 
 
 def _freeze_run_record_value(value: object, path: str) -> object:
@@ -185,6 +198,32 @@ class SignalValue:
     event_record: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        self._validate_fields()
+        object.__setattr__(self, "run_record", _freeze_run_record(self.run_record))
+        object.__setattr__(self, "event_record", _freeze_run_record(self.event_record))
+
+    @classmethod
+    def _from_owned_records(
+        cls, name: str, snapshot: OwnedSnapshot,
+        coverage: DatasetCoverage | MonitorCoverage | None, *,
+        run_record: Mapping[str, object], event_record: Mapping[str, object],
+        canonical_schema: DatasetSchema | None = None,
+        cell_origin: tuple[int, int] | None = None, primary_index: int | None = None,
+    ) -> "SignalValue":
+        """Plane-only construction from its already frozen bundle records."""
+
+        result = object.__new__(cls)
+        for key, value in (
+            ("name", name), ("snapshot", snapshot), ("coverage", coverage),
+            ("run_record", run_record), ("event_record", event_record),
+            ("canonical_schema", canonical_schema), ("cell_origin", cell_origin),
+            ("primary_index", primary_index),
+        ):
+            object.__setattr__(result, key, value)
+        result._validate_fields()
+        return result
+
+    def _validate_fields(self) -> None:
         name = canonical_text(self.name, "signal name")
         if not isinstance(self.snapshot, OwnedSnapshot):
             raise TypeError("signal snapshot must be OwnedSnapshot")
@@ -214,10 +253,6 @@ class SignalValue:
         ):
             raise TypeError("signal primary_index must be a non-negative integer or None")
         object.__setattr__(self, "name", name)
-        object.__setattr__(self, "run_record", _freeze_run_record(self.run_record))
-        object.__setattr__(
-            self, "event_record", _freeze_run_record(self.event_record)
-        )
 
     # The block is the value; these read off it rather than copying, so two
     # consumers describing "the same signal" cannot describe different data.
@@ -385,6 +420,29 @@ class SignalPublication:
     event_record: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        self._validate_fields()
+        object.__setattr__(self, "run_record", _freeze_run_record(self.run_record))
+        object.__setattr__(self, "event_record", _freeze_run_record(self.event_record))
+
+    @classmethod
+    def _from_owned_records(
+        cls, event_ref: EventRef, signals: Mapping[str, SignalValue], _issuer: object, *,
+        run_record: Mapping[str, object], event_record: Mapping[str, object],
+        direct_parent_refs: tuple[EventRef, ...] = (),
+    ) -> "SignalPublication":
+        """Plane-only construction; every sibling shares these owned records."""
+
+        result = object.__new__(cls)
+        for key, value in (
+            ("event_ref", event_ref), ("signals", signals), ("_issuer", _issuer),
+            ("direct_parent_refs", direct_parent_refs),
+            ("run_record", run_record), ("event_record", event_record),
+        ):
+            object.__setattr__(result, key, value)
+        result._validate_fields()
+        return result
+
+    def _validate_fields(self) -> None:
         if not isinstance(self.event_ref, EventRef):
             raise TypeError("signal publication event_ref must be EventRef")
         signals = dict(self.signals)
@@ -406,8 +464,8 @@ class SignalPublication:
             raise TypeError("signal publication run_record must be a mapping")
         if not isinstance(self.event_record, Mapping):
             raise TypeError("signal publication event_record must be a mapping")
-        run_record = _freeze_run_record(self.run_record)
-        event_record = _freeze_run_record(self.event_record)
+        run_record = self.run_record
+        event_record = self.event_record
         if any(
             not _run_records_equal(value.run_record, run_record)
             for value in signals.values()
@@ -424,8 +482,6 @@ class SignalPublication:
             )
         object.__setattr__(self, "signals", MappingProxyType(signals))
         object.__setattr__(self, "direct_parent_refs", parents)
-        object.__setattr__(self, "run_record", run_record)
-        object.__setattr__(self, "event_record", event_record)
 
     def value(self, name: str) -> SignalValue | None:
         return self.signals.get(str(name))
@@ -882,14 +938,6 @@ class _MaterializedIndexed:
     sequence: int
     snapshot: OwnedSnapshot
     record: Mapping[str, object]
-    #: The UNFROZEN merged event record.  Kept because the merge is
-    #: re-entrant while the window only GROWS -- merging this with each
-    #: appended event's record gives the same result as merging every
-    #: retained record from scratch -- while the frozen form is not a
-    #: valid merge input.  Once the window has rolled, rows this record
-    #: describes are gone, and the next record is merged from the
-    #: retained rows instead.
-    raw_record: Mapping[str, object]
     start: int
     latest: int
 
@@ -945,7 +993,6 @@ class _IndexedMaterialization:
     latest: int
     basis: _MaterializedIndexed | None
     record: Mapping[str, object]
-    raw_record: Mapping[str, object]
     #: The history's ``replaced_at`` at this materialization: the last
     #: sequence at which a retained shot was overwritten.  Stamped on the
     #: block so a consumer carrying work from an earlier revision knows
@@ -1097,14 +1144,14 @@ def _indexed_materialization_input(
     if basis is not None and start == basis.start:
         # Pure growth: every row the basis described is still here, so
         # its record plus the appended ones is the window's record.
-        raw_record = _merge_event_records((basis.raw_record, *appended_records))
+        merged_record = _merge_event_records((basis.record, *appended_records))
     else:
         # The window ROLLED (or there is no basis): rows left it, and a
         # union of epoch ranges cannot subtract what they contributed.
         # The record is the union of the rows actually retained, however
         # the values themselves were assembled -- otherwise how often a
         # panel was read decided which device epochs its picture claimed.
-        raw_record = _merge_event_records(window_records)
+        merged_record = _merge_event_records(window_records)
     schema = None
     if (
         cached is not None
@@ -1125,8 +1172,7 @@ def _indexed_materialization_input(
         start,
         primary_index,
         basis,
-        _freeze_run_record(raw_record),
-        raw_record,
+        _freeze_run_record(merged_record),
         stable_since=history.replaced_at,
     )
 
@@ -1993,13 +2039,13 @@ class SignalDataPlane:
         basis = state.materialized.get(signal_name)
         if basis is not None and basis.sequence >= sequence:
             basis = None
-        floor = -1 if basis is None else basis.sequence
+        floor = 0 if basis is None else basis.sequence
+        # Every successful atomic commit appends exactly one entry per finite
+        # output; sequence 1 occupies slot 0.  The owned list is already the
+        # index, so finding the new suffix needs no scan of earlier shots.
         chunks = tuple(
             (value.snapshot, origin)
-            for commit_sequence, value, origin, _parents in state.commit_chunks.get(
-                signal_name, ()
-            )
-            if floor < commit_sequence <= sequence
+            for _sequence, value, origin, _parents in state.commit_chunks[signal_name][floor:sequence]
         )
         return schema, state.generation, chunks, basis
 
@@ -2234,13 +2280,13 @@ class SignalDataPlane:
                 and state.exact_outputs != exact_qualified
             ):
                 raise ValueError("live extent kinds changed inside one generation")
-            run_record = _freeze_run_record(_shared_run_record(outputs))
-            event_record = _freeze_run_record(_shared_event_record(outputs))
-            if (
-                state.committed_run_record is not None
-                and not _run_records_equal(state.committed_run_record, run_record)
-            ):
+            authored_record = _shared_run_record(outputs)
+            run_record = state.committed_run_record
+            if run_record is None:
+                run_record = _freeze_run_record(authored_record)
+            elif not _run_records_equal(run_record, authored_record):
                 raise ValueError("run_record changed inside one generation")
+            event_record = _freeze_run_record(_shared_event_record(outputs))
 
             canonical_schemas = dict(state.canonical_schemas)
             occupied_cells = dict(state.occupied_cells)
@@ -2294,6 +2340,8 @@ class SignalDataPlane:
                         raise ValueError(
                             "canonical Dataset schema changed inside one generation"
                         )
+                    if previous_schema is not None:
+                        schema = previous_schema
                     canonical_schemas[qualified] = schema
                     origins[qualified] = origin
                     mask = occupied_cells.get(qualified)
@@ -2337,12 +2385,12 @@ class SignalDataPlane:
                             "finite coverage does not equal committed cell extent"
                     )
                     occupied_updates.append((qualified, mask, target))
-                values[qualified] = SignalValue(
+                values[qualified] = SignalValue._from_owned_records(
                     name=qualified,
                     snapshot=event,
                     coverage=output.coverage,
                     run_record=run_record,
-                    canonical_schema=output.canonical_schema,
+                    canonical_schema=canonical_schemas.get(qualified),
                     cell_origin=output.cell_origin,
                     primary_index=primary_index,
                     event_record=event_record,
@@ -2476,12 +2524,8 @@ class SignalDataPlane:
             elif state.exact_outputs is None or name not in state.exact_outputs:
                 return value.snapshot, value.event_record
             else:
-                if not any(
-                    commit_sequence == sequence
-                    for commit_sequence, _value, _origin, _parents in state.commit_chunks[
-                        name
-                    ]
-                ):
+                committed = state.commit_chunks[name]
+                if not 1 <= sequence <= len(committed):
                     raise ValueError("publication is not a canonical commit of this run")
                 cached = state.materialized.get(name)
                 if cached is not None and cached.sequence == sequence:
@@ -2491,15 +2535,15 @@ class SignalDataPlane:
                     name,
                     sequence,
                 )
-                materialized_record = _freeze_run_record(
-                    _merge_event_records(
-                        value.event_record
-                        for commit_sequence, value, _origin, _parents in (
-                            state.commit_chunks[name]
-                        )
-                        if commit_sequence <= sequence
-                    )
+                basis = finite_input[-1]
+                floor = 0 if basis is None else basis.sequence
+                records = (
+                    value.event_record for _sequence, value, _origin, _parents
+                    in committed[floor:sequence]
                 )
+                materialized_record = _freeze_run_record(_merge_event_records(
+                    records if basis is None else (basis.record, *records)
+                ))
         snapshot = (
             _materialize_indexed_dataset(indexed_input)
             if indexed_input is not None
@@ -2524,7 +2568,6 @@ class SignalDataPlane:
                                 sequence,
                                 snapshot,
                                 materialized_record,
-                                indexed_input.raw_record,
                                 indexed_input.start,
                                 indexed_input.latest,
                             )
@@ -2847,7 +2890,7 @@ class SignalDataPlane:
                                     "exact sibling outputs have different parents"
                                 )
                             signals[name] = sibling
-                        publication = SignalPublication(
+                        publication = SignalPublication._from_owned_records(
                             EventRef(
                                 StreamId(state.owner_id),
                                 state.generation,
@@ -3252,7 +3295,7 @@ class SignalDataPlane:
             self._slim_publication_locked(parent, parent_signal, memo)
             for parent in parents
         )
-        slim = SignalPublication(
+        slim = SignalPublication._from_owned_records(
             publication.event_ref,
             values,
             self._publication_issuer,
@@ -3379,7 +3422,7 @@ class SignalDataPlane:
             frozen,
             terminal=False,
         )
-        publication = SignalPublication(
+        publication = SignalPublication._from_owned_records(
             event_ref=EventRef(
                 StreamId(state.owner_id),
                 state.generation,

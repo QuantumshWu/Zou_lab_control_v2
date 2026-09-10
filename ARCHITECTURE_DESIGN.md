@@ -148,6 +148,7 @@ Node new chunk
 - Producer与latest/frozen/follow Processor的Start共用同一终态世代交接：旧结果在结束/Shutdown后仍保留，直到下一次Start才退休旧owner及派生closure。cleanup在Plane锁外，最终source exact校验与新state安装在同一锁内，`_starting`由同一入口释放；仍active的owner不得被覆盖。不得用关闭时清数据或为Derive另建重启路径绕过。
 - Revision严格递增，不接受重复、倒退或同ref不同内容。
 - 一次commit的siblings共享revision、run record和causal parent。
+- Run record在generation内只冻结一次，event record每次atomic commit只冻结一次，内部siblings/publication复用同一不可变记录；外部构造仍独立冻结和校验。finite物化仅合并新增chunks与已有prefix，indexed窗口滚动时记录只覆盖仍保留的事件。仅更换DataBlock身份不重扫已验证且未改变的数值内容。
 - Exact scientific Processor逐publication有序处理；pure display derivation可latest。交付策略由input contract声明，不从coverage猜；同一交付publication的event/run/window输入范围是另一项显式选择，exact并不强制只读event chunk。
 - 不同Processor可并发，同一Processor保持有序。
 

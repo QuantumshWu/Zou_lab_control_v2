@@ -1174,7 +1174,7 @@ class NodeHost:
                 history_window=self._input_window if view == "window" else None,
                 history_signals=tuple(signal_names.values()) if view == "window" else (),
             )
-            inputs[input_name] = SignalValue(
+            inputs[input_name] = SignalValue._from_owned_records(
                 signal_name,
                 snapshot,
                 None,

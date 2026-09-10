@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from copy import copy
 from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import uuid4
@@ -130,10 +131,7 @@ class DataBlock:
     __hash__ = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.block_id, BlockId):
-            raise TypeError("block_id must be BlockId")
-        if not isinstance(self.revision, DatasetRevision):
-            raise TypeError("revision must be DatasetRevision")
+        self._validate_identity()
         if not isinstance(self.schema, DatasetSchema):
             raise TypeError("schema must be DatasetSchema")
         _validate_dataset_validity(self.validity, self.schema)
@@ -160,6 +158,12 @@ class DataBlock:
         if self.window is not None and not isinstance(self.window, IndexedWindow):
             raise TypeError("window must be IndexedWindow or None")
 
+    def _validate_identity(self) -> None:
+        if not isinstance(self.block_id, BlockId):
+            raise TypeError("block_id must be BlockId")
+        if not isinstance(self.revision, DatasetRevision):
+            raise TypeError("revision must be DatasetRevision")
+
     def ref(self, stream_generation: StreamGenerationId) -> DatasetRevisionRef:
         return DatasetRevisionRef(
             block_id=self.block_id,
@@ -184,6 +188,17 @@ class DataBlock:
         construction instead of by three people remembering.
         """
 
+        if not changes:
+            return self
+        if changes.keys() <= {"block_id", "revision"}:
+            # The content is already immutable and validated. Renaming it
+            # cannot change sigma's sign or any other numerical property.
+            # Copy the object, not a manually maintained list of its planes.
+            result = copy(self)
+            for name, value in changes.items():
+                object.__setattr__(result, name, value)
+            result._validate_identity()
+            return result
         return dataclasses.replace(self, **changes)
 
 
