@@ -1089,7 +1089,7 @@ def test_threshold_classifier_is_independent_and_covers_every_facet(monkeypatch,
                     },
                 },
                 {
-                    "value": 0.75,
+                    "value": None,
                     "scope": (
                         {
                             "domain": "point",
@@ -1122,6 +1122,8 @@ def test_threshold_classifier_is_independent_and_covers_every_facet(monkeypatch,
         )
         assert float(left_curve[0]) == pytest.approx(float(right_curve[0]))
         assert session._classifier_results[1] is None
+        assert configured.value.classifier_thresholds[1]["value"] is None
+        assert session._classifier_thresholds_settled()[1] is None
         assert unnecessary_solves == []
 
         from zlc_plot import RenderProcess, open_figure_host, save_figure_artifact
@@ -1198,6 +1200,7 @@ def test_threshold_classifier_is_independent_and_covers_every_facet(monkeypatch,
         assert batches == [("bimodal_gaussian", 1)]
         assert session._classifier_results[0] is first
         assert session._classifier_results[1] is not None
+        assert session._classifier_thresholds_settled()[1] is None
     finally:
         host.close(timeout=10)
 

@@ -164,7 +164,7 @@ class _ProjectionPresentation:
     previous_accepted_fit: _AcceptedFit | None
     previous_classifier_results: tuple["FitResult | None", ...]
     previous_classifier_overlays: tuple[FitOverlay, ...]
-    previous_classifier_thresholds: tuple[float | None, ...]
+    previous_classifier_thresholds: dict[int, float | None]
     previous_classifier_gaussian_components: tuple[
         Mapping[str, float] | None, ...
     ]

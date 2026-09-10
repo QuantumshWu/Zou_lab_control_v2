@@ -1310,7 +1310,7 @@ class FitSessionMixin:
         if not self._threshold_classifier_enabled():
             self._classifier_results = ()
             self._classifier_overlays = ()
-            self._classifier_thresholds = ()
+            self._classifier_thresholds = {}
             self._classifier_gaussian_components = ()
             try:
                 self._selector_controller.remove(SelectorKind.THRESHOLD)
@@ -1325,6 +1325,7 @@ class FitSessionMixin:
         components = self._classifier_gaussian_components
         if len(components) != count:
             components = self._classifier_gaussian_components = (None,) * count
+            self._classifier_thresholds = {}
         if len(self._classifier_results) != count:
             indices = None
             results = [None] * count
@@ -1388,18 +1389,8 @@ class FitSessionMixin:
         self._remember_classifier_warm_starts(model, results)
         self._classifier_results = tuple(results)
         self._classifier_overlays = tuple(overlays)
-        # ``_classifier_thresholds`` holds what somebody CHOSE, and nothing
-        # else; the fit's own optimum is derived from the results above
-        # whenever it is needed.  They shared this one slot, so every new
-        # revision recomputed over the operator's dragged threshold and threw
-        # it away without saying anything -- measured as a threshold dragged
-        # to 150 reading 175.5 one shot later.
-        chosen = self._classifier_thresholds
-        # A different number of distributions is a different set of them, and
-        # a decision about the old ones says nothing about these.
-        self._classifier_thresholds = (
-            chosen if len(chosen) == len(results) else (None,) * len(results)
-        )
+        # Only authored choices are stored. A missing key asks for the fit's
+        # optimum; an explicit None asks for no threshold at this distribution.
         try:
             self._selector_controller.remove(SelectorKind.THRESHOLD)
         except KeyError:
@@ -1444,10 +1435,10 @@ class FitSessionMixin:
         if not results:
             return ()
         return tuple(
-            self._fitted_classifier_threshold(result) if chosen is None else chosen
-            for chosen, result in zip(
-                self._classifier_thresholds, results, strict=True
-            )
+            self._classifier_thresholds[index]
+            if index in self._classifier_thresholds
+            else self._fitted_classifier_threshold(result)
+            for index, result in enumerate(results)
         )
 
     def _classifier_thresholds_for_render(self) -> tuple[float | None, ...]:
@@ -1541,7 +1532,7 @@ class FitSessionMixin:
         for index in range(count):
             target = self._classifier_threshold_target_for_index(
                 index if facet_grid else None,
-                0.0,
+                None,
             )
             identity = _classifier_threshold_key(target)
             if identity in expected:
@@ -1549,7 +1540,7 @@ class FitSessionMixin:
                     "classifier distributions are not uniquely coordinate-addressed"
                 )
             expected[identity] = index
-        normalized: list[float | None] = [None] * count
+        normalized: dict[int, float | None] = {}
         components: list[Mapping[str, float] | None] = [None] * count
         for target in selected:
             identity = _classifier_threshold_key(target)
@@ -1560,7 +1551,9 @@ class FitSessionMixin:
                 raise ValueError(
                     "classifier threshold target does not match a current distribution"
                 )
-            normalized[index] = float(target["value"])
+            normalized[index] = (
+                None if target["value"] is None else float(target["value"])
+            )
             if "gaussian_components" in target:
                 gaussian = target["gaussian_components"]
                 components[index] = (
@@ -1569,7 +1562,7 @@ class FitSessionMixin:
                     else MappingProxyType(dict(gaussian))
                 )
         previous_components = self._classifier_gaussian_components
-        self._classifier_thresholds = tuple(normalized)
+        self._classifier_thresholds = normalized
         self._classifier_gaussian_components = tuple(components)
         if refresh or len(self._classifier_results) != count:
             self._refresh_threshold_classifier()
@@ -1593,12 +1586,11 @@ class FitSessionMixin:
         facet_grid = isinstance(self._spec, FacetGridPlot)
         targets: list[Mapping[str, object]] = []
         values = (
-            self._classifier_thresholds_settled()
-            if settled
-            else self._classifier_thresholds
+            enumerate(self._classifier_thresholds_settled())
+            if settled else sorted(self._classifier_thresholds.items())
         )
-        for index, value in enumerate(values):
-            if value is None:
+        for index, value in values:
+            if value is None and index not in self._classifier_thresholds:
                 continue
             target = dict(
                 self._classifier_threshold_target_for_index(

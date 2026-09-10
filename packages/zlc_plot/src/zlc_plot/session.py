@@ -523,7 +523,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         self._fit_expression_failure: tuple[str, str] | None = None
         self._classifier_results: tuple[FitResult | None, ...] = ()
         self._classifier_overlays = ()
-        self._classifier_thresholds: tuple[float | None, ...] = ()
+        self._classifier_thresholds: dict[int, float | None] = {}
         self._classifier_gaussian_components: tuple[
             Mapping[str, float] | None, ...
         ] = ()
@@ -2668,7 +2668,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 # replacement: equal result counts may name wholly different
                 # facets.  The exact old targets captured above are remapped
                 # only after the new projection has resolved its identities.
-                self._classifier_thresholds = ()
+                self._classifier_thresholds = {}
                 self._classifier_gaussian_components = ()
                 self._layout_revision += 1
             try:
@@ -3606,13 +3606,12 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 if (
                     stored.kind is SelectorKind.THRESHOLD
                     and self._threshold_classifier_enabled()
-                    and self._classifier_thresholds
                 ):
                     index = 0 if stored.facet_index is None else stored.facet_index
-                    if 0 <= index < len(self._classifier_thresholds):
-                        updated = list(self._classifier_thresholds)
+                    if 0 <= index < len(self._classifier_results):
+                        updated = dict(self._classifier_thresholds)
                         updated[index] = float(stored.value)
-                        self._classifier_thresholds = tuple(updated)
+                        self._classifier_thresholds = updated
                 affects_fit = self._selector_change_affects_fit(
                     stored.kind,
                     request,
@@ -3853,10 +3852,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 chosen_previous = self._classifier_thresholds
                 if kind is SelectorKind.THRESHOLD and self._classifier_thresholds:
                     index = 0 if state.facet_index is None else state.facet_index
-                    if 0 <= index < len(self._classifier_thresholds):
-                        cleared = list(self._classifier_thresholds)
-                        cleared[index] = None
-                        self._classifier_thresholds = tuple(cleared)
+                    cleared = dict(self._classifier_thresholds)
+                    cleared.pop(index, None)
+                    self._classifier_thresholds = cleared
                 if affects_fit:
                     self._fit_context_generation += 1
                     if bound_request:
@@ -4008,14 +4006,12 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         facet_index: int | None,
         value: object,
     ) -> Mapping[str, object]:
-        state = SelectorState(
-            SelectorKind.THRESHOLD,
-            float(value),
-            facet_index=facet_index,
+        subject = self._view.selection_subject(
+            self._spec, self._payload, facet_index=facet_index,
         )
         return _classifier_threshold_target_from_subject(
-            self._selection_subject(state),
-            state.value,
+            subject,
+            value,
         )
 
     def selector_data(self, kind: SelectorKind) -> SelectorData:

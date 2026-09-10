@@ -222,11 +222,14 @@ def normalize_classifier_threshold_targets(
         ):
             raise ValueError("classifier threshold target fields differ")
         value = target["value"]
-        if isinstance(value, bool) or not isinstance(value, Real):
-            raise TypeError("classifier threshold values must be finite numbers")
-        threshold = float(value)
-        if not math.isfinite(threshold):
-            raise ValueError("classifier threshold values must be finite numbers")
+        if value is None:
+            threshold = None
+        else:
+            if isinstance(value, bool) or not isinstance(value, Real):
+                raise TypeError("classifier threshold values must be finite numbers or None")
+            threshold = float(value)
+            if not math.isfinite(threshold):
+                raise ValueError("classifier threshold values must be finite numbers or None")
         scope = target["scope"]
         if isinstance(scope, (str, bytes)) or not isinstance(scope, Sequence):
             raise TypeError("classifier threshold scope must be a sequence")

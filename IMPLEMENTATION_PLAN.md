@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- Feedback报告已删除binned Histogram二次fit，candidate与selected都复用本次科学fit的分量/threshold；invalid显式无模型/阈值，公共classifier target与Figure/远程roundtrip不再把null变成自动fit。既有classifier case和失败后partial Figure/Context case通过，报告参数按site坐标逐项一致；首次测试误按target列表顺序配site，已改为按真实coordinate核对，未改生产数值掩盖测试。
+
 - 信号目录必要性整改：Plane缓存未变目录、删除无消费者的description revision；Console一次生成rows/overlay offers且直接交View。真实Plane＋Console纯metadata探针中首次4panel/2signals只生成2 descriptors及1次rows，20次idle与普通数值更新后均0重建/0菜单push；Stop→Start的overlay候选失效与恢复正确，4个原目录/拓扑用例通过。此证据不宣称像素或GUI验收。
 
 - Figure单次读取与初态切面：read_archive返回(info, arrays, datasets)，删除read_dataset重复解码，所有生产消费者统一复用已验证Dataset；raw typed成员复用其不可变bytes。36个原格式/命名空间用例和3个Viewer/Calibration入口通过。Host共用initial_configuration，首次呈现已有最终fit，临时export不恢复废弃display；4个原Plot直接case覆盖固定limits、初始fit、零额外present及真实远程初态。未改磁盘格式。
@@ -252,7 +254,7 @@
 - Feedback报告固定包含uniformity history、site signal evolution、weight evolution、selected
   site histograms、initial/selected camera mean和initial/selected phase；每个完整candidate另存
   `candidate_site_fits/candidate-XXXX` Figure NPZ与PNG，使用真正的Histogram cell和Figure API
-  的per-site bimodal Gaussian fit，不加入Monitor preview。normal或Stop只产生一个final Science Context。
+  的per-site authored full-data mixture fit，不在分箱值上二次求解，不加入Monitor preview。normal或Stop只产生一个final Science Context。
 - Feedback Monitor固定自动打开四张图：canonical Camera Measurement逐帧publication经mean reduction得到的带编号site map实时图、observable
   uniformity、site signal evolution和Target share evolution；phase保留为信号和最终Figure但不自动开panel。
 - Feedback每shot每site的信号是BOX读出（Calibration BOX几何内像素求和的真实光子计数；不用Calibration的matched-filter权重，也不为未观测site借uniform PSF）；每site只在完整shot batch上做受约束双高斯与full-data ΔBIC>10判定。dark site按bracket（最新观测优先）向loaded share二分或沿方向逐分辨率爬行，在share空间由本轮loop步不与之相反的loaded sites（loop送它同向、或对它无所求；hold的site除外）出资（总功率精确守恒、每site每candidate至多一个分辨率、绝不把任何site压向其自身方向的反面、hold的site份额不动）；bright fraction低于全阵中位数一半的loaded site视为在loading ramp上：hold、不出资、不被识别excitation扰动；probe episode每site一次，方向只由verdict改变。formal-double使用loop gain除以实测plant slope（前6个ordinary update携带±2%识别excitation：正负平衡的log图样在被激励site内平移一个公共对数保持总份额，未激励site绝对份额不变），无adaptive scalar。`probe_combined`计入`maximum feedback updates`，diagnostic candidates不计。

@@ -3922,13 +3922,24 @@ def test_failure_after_a_completed_candidate_saves_figures_and_context(
         _plot_input, recipe = read_figure_plot(info, arrays, datasets, "data")
         assert isinstance(recipe["spec"], FacetGridPlot)
         assert isinstance(recipe["spec"].cell, HistogramPlot)
-        # The two-population fit states the evidence it demanded, at the
-        # default, so the saved figure says how its populations were decided.
-        assert recipe["fit"] == {
-            "model": "bimodal_gaussian",
-            "fit_all_facets": True,
-            "min_bic_gain": 10.0,
-        }
+        # The report reuses the decision's full-data model, not a second
+        # optimizer applied to binned counts.
+        assert recipe["fit"] == {}
+        fitted = _fitted_result(np.linspace(1.0, 2.0, 35))
+        targets = recipe["classifier_thresholds"]
+        assert len(targets) == 35
+        axis = _plot_input.block.schema.cell_domain.axes[0]
+        by_coordinate = {axis.coordinate_at(index): index for index in range(35)}
+        for target in targets:
+            index = by_coordinate[target["scope"][0]["coordinate"]]
+            assert target["value"] == fitted["threshold"][index]
+            assert target["gaussian_components"] == {
+                "center": fitted["dark_mean"][index],
+                "sigma": fitted["dark_sigma"][index],
+                "delta_center": fitted["bright_mean"][index] - fitted["dark_mean"][index],
+                "sigma_B": fitted["bright_sigma"][index],
+                "ratio": fitted["bright_fraction"][index],
+            }
         run = json.loads((run_root / "run.json").read_text(encoding="utf-8"))
         artifact_roles = {
             item["name"]: item["role"] for item in run["artifacts"]

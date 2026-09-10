@@ -2714,7 +2714,7 @@ class SlmFeedbackTask:
         size: str = "4x4",
         artifact_name: str | None = None,
         image_role: str = "preview",
-        fit: Mapping[str, object] | None = None,
+        classifier_thresholds: object = (),
         device_event_record: Mapping[str, object],
     ) -> tuple[Path, Path]:
         if not isinstance(device_event_record, Mapping):
@@ -2731,7 +2731,7 @@ class SlmFeedbackTask:
                 spec=spec,
                 parameters={} if parameters is None else parameters,
                 size=size,
-                fit=fit,
+                classifier_thresholds=classifier_thresholds,
                 source={
                     "task": self.instance_id,
                     "report": name,
@@ -2802,12 +2802,38 @@ class SlmFeedbackTask:
             AxisRef.cell_data(str(site_axis.axis_id)),
             HistogramPlot(
                 labels=PlotLabels(
-                    title=f"Candidate {candidate} ({kind}) site histograms and fits",
+                    title=f"Candidate {candidate} ({kind}) full-data mixture fits",
                     x="site signal",
                     y="shots",
                 ),
             ),
         )
+
+    def _candidate_fit_targets(self, measurement: Mapping[str, object]) -> tuple:
+        """Draw the same full-data mixture used in the candidate decision."""
+
+        axis = self._registered_site_map.site_axis
+        ref = AxisRef.cell_data(str(axis.axis_id))
+        targets = []
+        for index in range(self._site_count):
+            invalid = bool(measurement["fit_invalid"][index])
+            components = None
+            if not invalid:
+                center = float(measurement["dark_mean"][index])
+                components = {
+                    "center": center,
+                    "sigma": float(measurement["dark_sigma"][index]),
+                    "delta_center": float(measurement["bright_mean"][index]) - center,
+                    "sigma_B": float(measurement["bright_sigma"][index]),
+                    "ratio": float(measurement["bright_fraction"][index]),
+                }
+            targets.append({
+                "value": None if invalid else measurement["fit_threshold"][index],
+                "scope": ({"domain": ref.domain.value, "axis_id": ref.axis_id,
+                           "coordinate": axis.coordinate_at(index)},),
+                "gaussian_components": components,
+            })
+        return tuple(targets)
 
     def _save_candidate_fit_figures(
         self,
@@ -2832,11 +2858,12 @@ class SlmFeedbackTask:
                 snapshot=snapshot,
                 spec=spec,
                 parameters={
-                    "bin_count": min(60, max(10, samples.shape[0] // 2))
+                    "bin_count": min(60, max(10, samples.shape[0] // 2)),
+                    "threshold_classifier": True,
                 },
                 size="8x8",
                 image_role="figure",
-                fit={"model": "bimodal_gaussian", "fit_all_facets": True},
+                classifier_thresholds=self._candidate_fit_targets(measurement),
                 device_event_record=measurement["device_event_record"],
             )
 
@@ -3015,7 +3042,9 @@ class SlmFeedbackTask:
                     )
                 ),
             ),
-            parameters={"bin_count": min(60, max(10, self.shots // 2))},
+            parameters={"bin_count": min(60, max(10, self.shots // 2)),
+                        "threshold_classifier": True},
+            classifier_thresholds=self._candidate_fit_targets(selected_history),
             device_event_record=selected_device_record,
         )
 
