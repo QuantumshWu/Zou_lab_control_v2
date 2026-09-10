@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- Device Control未变owner的idle beat为0次policy/form投影，本地编辑及命令完成继续事件更新；所有写入仍在DeviceUse锁内核最新权限。三个既有直接用例通过，含风险失效和pending写取消；没有额外硬件读取或权限缓存。
+
 - 必要性整改的display clock：HarmonicClock改按monotonic elapsed跨deadline，保留harmonic周期、owed/debt及Pause；Qt采用不会提早唤醒的PreciseTimer。6个既有直接case通过，延迟跨过多个800ms周期只产生一次due，不补画漏帧。该问题只解释慢周期延迟，不能归因默认100ms四图的全部耗时。
 
 - Pulse装载不再为未请求的1×1执行计算delay FIFO占用；Fire使用实际repeat数的原有检查和驻留验证复用。既有TTL/DAC溢出及repeat seam/terminal SAFE直接用例通过，溢出在FIRE命令前拒绝；没有RTL修改或FPGA build。
