@@ -310,6 +310,12 @@ def test_camera_frame_record_copies_reusable_storage() -> None:
     assert np.all(record.image == 0)
     with pytest.raises(ValueError):
         record.image[0, 0] = 4
+    source = np.arange(24, dtype='>u2').reshape(4, 6)[::-1, ::2]
+    expected = np.array(source, copy=True)
+    record = CameraFrameRecord(source, 1, host_received_at_ns=2)
+    source.fill(7)
+    np.testing.assert_array_equal(record.image, expected)
+    assert record.image.dtype == np.dtype('<u2') and not record.image.flags.writeable
 
 
 def test_broker_helper_is_the_single_identity_binding_ritual() -> None:

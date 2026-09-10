@@ -152,9 +152,8 @@ class CameraFrameRecord:
         array = np.asarray(self.image)
         array = array.astype(array.dtype.newbyteorder("<"), copy=False)
         owned = np.frombuffer(
-            np.ascontiguousarray(array).tobytes(), dtype=array.dtype
+            array.tobytes(order="C"), dtype=array.dtype
         ).reshape(array.shape)
-        owned.setflags(write=False)
         object.__setattr__(self, "image", owned)
 
 
