@@ -371,7 +371,7 @@ class RasterPlotHost:
         *,
         size: str | None = None,
         parameters: Mapping[str, object] | None = None,
-        classifier_thresholds: object = (),
+        initial_configuration: Mapping[str, object] | None = None,
         defaults: PlotLibraryDefaults = DEFAULTS,
         unit_registry: UnitRegistry | None = None,
         device_pixel_ratio: float = 1.0,
@@ -382,9 +382,7 @@ class RasterPlotHost:
         if parameters is not None and not isinstance(parameters, Mapping):
             raise TypeError("parameters must be a mapping or None")
         initial_parameters = None if parameters is None else dict(parameters)
-        from .selectors import normalize_classifier_threshold_targets
-
-        initial_thresholds = normalize_classifier_threshold_targets(classifier_thresholds)
+        initial = None if initial_configuration is None else dict(initial_configuration)
 
         def create_session() -> "PlotSession":
             from .session import PlotSession
@@ -394,7 +392,7 @@ class RasterPlotHost:
                 spec,
                 size=size,
                 parameters=initial_parameters,
-                classifier_thresholds=initial_thresholds,
+                initial_configuration=initial,
                 defaults=defaults,
                 unit_registry=unit_registry,
                 device_pixel_ratio=device_pixel_ratio,

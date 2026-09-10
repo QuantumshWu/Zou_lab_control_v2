@@ -274,7 +274,7 @@ def main(argv: list[str] | None = None) -> int:
             from zlc_data.figure_archive import read_archive
             from ..viewer import describe_archive
 
-            description = describe_archive(*read_archive(arguments.path))
+            description = describe_archive(*read_archive(arguments.path)[:2])
             print(
                 f"figure ready: {description.name!r}, "
                 f"{len(description.datasets)} dataset(s), "

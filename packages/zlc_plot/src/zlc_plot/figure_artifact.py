@@ -14,7 +14,7 @@ from zlc_data import (
     snapshot_from_manifest,
     snapshot_manifest,
 )
-from zlc_data.figure_archive import read_dataset, write_figure_archive
+from zlc_data.figure_archive import write_figure_archive
 from zlc_durable import atomic_write_file, durable_makedirs
 
 from .config import DEFAULTS
@@ -378,10 +378,11 @@ def figure_plot_recipe(info: Mapping[str, Any], dataset: str) -> dict[str, objec
 
 
 def read_figure_plot(
-    info: Mapping[str, Any], arrays: Mapping[str, np.ndarray], dataset: str,
+    info: Mapping[str, Any], arrays: Mapping[str, np.ndarray],
+    datasets: Mapping[str, OwnedSnapshot], dataset: str,
 ) -> tuple[object, dict[str, object]]:
     recipe = figure_plot_recipe(info, dataset)
-    snapshot = read_dataset(info, arrays, str(dataset))
+    snapshot = datasets[str(dataset)]
     return _restore_overlay(snapshot, arrays, recipe.pop("overlay")), recipe
 
 
@@ -391,7 +392,7 @@ def build_figure_host(
     *,
     parameters: Mapping[str, object],
     size: str,
-    classifier_thresholds: object = (),
+    initial_configuration: Mapping[str, object] | None = None,
     device_pixel_ratio: float = 1.0,
     build_host: Callable[..., object] | None = None,
 ) -> object:
@@ -409,7 +410,7 @@ def build_figure_host(
         spec,
         size=size,
         parameters=parameters,
-        classifier_thresholds=classifier_thresholds,
+        initial_configuration=initial_configuration,
         device_pixel_ratio=device_pixel_ratio,
     )
 
@@ -433,19 +434,16 @@ def open_figure_host(
         entry["spec"],
         size=entry["size"],
         parameters=entry["parameters"],
-        classifier_thresholds=entry["classifier_thresholds"],
+        initial_configuration={
+            name: entry[name] for name in (
+                "viewport", "classifier_thresholds", "facet_focus", "selectors", "fit",
+            )
+        } | {"fit_live": False},
         device_pixel_ratio=device_pixel_ratio,
         build_host=build_host,
     )
     try:
-        pending = host.configure(
-            viewport=entry["viewport"],
-            classifier_thresholds=entry["classifier_thresholds"],
-            facet_focus=entry["facet_focus"],
-            selectors=entry["selectors"],
-            fit=entry["fit"],
-            fit_live=False,
-        )
+        pending = host.describe_display()
         if hasattr(pending, "result"):
             pending.result()
     except BaseException:
@@ -641,22 +639,22 @@ def save_figure_artifact(
         spec,
         parameters=parameters,
         size=size,
-        classifier_thresholds=classifier_thresholds,
+        initial_configuration={
+            "viewport": viewport,
+            "classifier_thresholds": classifier_thresholds,
+            "facet_focus": facet_focus,
+            "selectors": selectors,
+            "fit": {} if fit is None else fit,
+            "fit_live": False,
+        },
     )
     try:
-        configured = owned_host.configure(
-            viewport=viewport,
-            classifier_thresholds=classifier_thresholds,
-            facet_focus=facet_focus,
-            selectors=selectors,
-            fit={} if fit is None else fit,
-            fit_live=False,
-        )
+        configured = owned_host.describe_display()
         operation = configured.result() if hasattr(configured, "result") else configured
         description = operation.value
         return write(
             description,
-            lambda: owned_host.save(image_path).result(),
+            lambda: owned_host.save(image_path, restore_display=False).result(),
         )
     finally:
         owned_host.close()

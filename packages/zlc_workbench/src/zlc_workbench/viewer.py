@@ -2491,11 +2491,11 @@ class FigureViewerPresenter:
             import zlc_plot
 
             resolved = requested.resolve()
-            info, arrays = read_archive(resolved)
+            info, arrays, datasets = read_archive(resolved)
             description = describe_archive(info, arrays)
             loaded = []
             for index, key in enumerate(description.dataset_keys):
-                plot_input, recipe = read_figure_plot(info, arrays, key)
+                plot_input, recipe = read_figure_plot(info, arrays, datasets, key)
                 described = None
                 if index == 0:
                     # Only the default card restores a saved DisplayDescription.

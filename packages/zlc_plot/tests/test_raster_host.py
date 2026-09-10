@@ -358,9 +358,9 @@ def test_render_process_preserves_host_front_events_and_pixel_leases(
         from zlc_data.figure_archive import read_archive
         from zlc_plot import read_figure_plot
 
-        saved_info, saved_arrays = read_archive(archive)
+        saved_info, saved_arrays, saved_datasets = read_archive(archive)
         _saved_input, saved_recipe = read_figure_plot(
-            saved_info, saved_arrays, "data"
+            saved_info, saved_arrays, saved_datasets, "data"
         )
         assert saved_recipe["parameters"]["title"] == "Remote title"
 
@@ -1127,6 +1127,20 @@ def test_threshold_classifier_is_independent_and_covers_every_facet(monkeypatch,
         from zlc_plot import RenderProcess, open_figure_host, save_figure_artifact
         from zlc_plot.figure_artifact import encode_plot_recipe, decode_plot_recipe
 
+        presentations, restores = [], []
+        original_present, original_draw = MatplotlibRenderer.present, MatplotlibRenderer.draw
+
+        def present_final(self, frame, **kwargs):
+            presentations.append(frame)
+            return original_present(self, frame, **kwargs)
+
+        def restore_display(self):
+            restores.append(True)
+            return original_draw(self)
+
+        monkeypatch.setattr(MatplotlibRenderer, "present", present_final)
+        monkeypatch.setattr(MatplotlibRenderer, "draw", restore_display)
+
         targets = configured.value.classifier_thresholds
         snapshot = _site_distribution_snapshot()
         spec = FacetGridPlot(AxisRef.point("site"), HistogramPlot())
@@ -1138,8 +1152,11 @@ def test_threshold_classifier_is_independent_and_covers_every_facet(monkeypatch,
         restored = open_figure_host(snapshot, recipe)
         try:
             assert restored.describe_display().result(timeout=10).value.classifier_thresholds == targets
+            assert len(presentations) == 1
         finally:
             restored.close(timeout=10)
+        presentations.clear()
+        restores.clear()
         save_figure_artifact(
             tmp_path / "known-model.png", plot_input=snapshot, spec=spec,
             parameters=configured.value.display_state.values,
@@ -1148,13 +1165,17 @@ def test_threshold_classifier_is_independent_and_covers_every_facet(monkeypatch,
         assert (tmp_path / "known-model.png").is_file()
         assert (tmp_path / "known-model.npz").is_file()
         assert unnecessary_solves == []
+        assert len(presentations) == 1
+        assert restores == []
+        monkeypatch.setattr(MatplotlibRenderer, "present", original_present)
+        monkeypatch.setattr(MatplotlibRenderer, "draw", original_draw)
 
         service = RenderProcess("authored-classifier-test")
         remote = None
         try:
             remote = service.build_host(
                 snapshot, spec, parameters=configured.value.display_state.values,
-                classifier_thresholds=targets,
+                initial_configuration={"classifier_thresholds": targets},
             )
             description = remote.describe_display().result(timeout=30).value
             assert description.classifier_thresholds == targets

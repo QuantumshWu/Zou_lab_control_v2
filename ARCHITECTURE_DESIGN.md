@@ -67,6 +67,7 @@
 ### 3.2 Figure archive
 
 - 一个writer、一个reader、一个format owner。
+- Figure reader直接返回metadata、NPZ成员和已经完整验证的typed datasets；typed成员与Dataset共享同一不可变buffer，消费者不再次decode或copy。初始Host配置使用同一configure事务，在第一张front之前应用viewport/selectors/focus/classifier/fit；临时export-only Host保存后不重画即将关闭的屏幕。
 - Writer写入前规划全部member namespace并拒绝碰撞。
 - Reader在解释内容前严格验证format、required members、shape、duplicates和non-finite metadata。Figure与Dataset archive的每个member都按其物理ZIP名（`<key>.npy`）读取，不用NpzFile按逻辑名的猜测查找：`signal`与`signal.npy`是两个合法key，各自读回各自的数组；同名重复entry是含糊的archive，拒绝而不选一个。
 - 未知metadata类型拒绝，不自动字符串化。

@@ -251,7 +251,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
             "psf_kernels.png",
         }
         for figure_path in (run_folder / "figures").glob("*.npz"):
-            info, arrays = read_archive(figure_path)
+            info, arrays, datasets = read_archive(figure_path)
             assert describe_archive(info, arrays).dataset_keys == ("data",)
         # The numbers are only readable beside what produced them, so the
         # file a person opens keeps the same provenance a saved panel does:

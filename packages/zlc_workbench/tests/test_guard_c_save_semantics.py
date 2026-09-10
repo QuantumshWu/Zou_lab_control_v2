@@ -20,7 +20,7 @@ from zlc_atom.nodes.calibration import (
     TrapCalibration,
 )
 from zlc_runtime import NodeHost
-from zlc_data.figure_archive import read_archive, read_dataset
+from zlc_data.figure_archive import read_archive
 from zlc_workbench.console import ConsolePresenter
 from zlc_workbench.logic import stable_signal_key
 from zlc_workbench.panel_catalog import task_console_fitting_spec
@@ -272,12 +272,12 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
 
         with np.load(archives[0], allow_pickle=False) as payload:
             assert "info" in payload.files
-        info, arrays = read_archive(archives[0])
+        info, arrays, datasets = read_archive(archives[0])
         sections = info["sections"]
         datasets = sections["dataset"]
         assert len(datasets) == 1 and other_panel_id not in datasets
         dataset_name = next(iter(datasets))
-        restored = read_dataset(info, arrays, dataset_name)
+        restored = datasets[dataset_name]
         np.testing.assert_array_equal(restored.block.values, frozen_values)
 
         recipe = sections["plot"][dataset_name]

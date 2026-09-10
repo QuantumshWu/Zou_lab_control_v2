@@ -2081,7 +2081,7 @@ class MatplotlibRenderer:
             facet_focus_index=facet_focus_index,
         )
 
-    def present(self, frame: RenderFrame) -> None:
+    def present(self, frame: RenderFrame, *, compose: bool = True) -> None:
         """Mutate all layers and publish exactly one complete canvas front."""
 
         if not isinstance(frame, RenderFrame):
@@ -2239,6 +2239,8 @@ class MatplotlibRenderer:
                     else getattr(cell, "facet_value_canonical", None),
                 )
             self._settle_owned_boxes()
+            if not compose:
+                return
             self._compose_frame(
                 chrome_stable=not bool(
                     selected_effects
@@ -10789,7 +10791,7 @@ class MatplotlibRenderer:
             self.draw()
         return self._rgba_buffer()
 
-    def save(self, path: str | Path | BytesIO, *, dpi: float | None = None, **kwargs: Any) -> None:
+    def save(self, path: str | Path | BytesIO, *, dpi: float | None = None, restore_display: bool = True, **kwargs: Any) -> None:
         locked, hover = self._series_locked, self._series_hover
         try:
             self._series_locked = self._series_hover = None
@@ -10821,7 +10823,8 @@ class MatplotlibRenderer:
         finally:
             self._series_locked, self._series_hover = locked, hover
             self._apply_series_focus()
-            self.draw()
+            if restore_display:
+                self.draw()
 
 
 __all__ = ["MatplotlibRenderer", "RenderFrame"]

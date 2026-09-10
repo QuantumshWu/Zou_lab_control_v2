@@ -4230,12 +4230,12 @@ def test_panel_edit_projects_the_direct_producer_link_and_ages(
     assert presenter.view.panel_editor_update_count.get(panel.panel_id, 0) == full_updates
     from zlc_ui.console.panel_editor_view import PanelEditorView
     assert "earlier run" in PanelEditorView._snapshot_text(projection, stale=False)
-    from zlc_data.figure_archive import read_archive, read_dataset
+    from zlc_data.figure_archive import read_archive
     saved_path = tmp_path / "earlier-run.png"
     assert presenter.save_panel_figure(panel.panel_id, str(saved_path))
     _wait_for_panel_save(presenter, saved_path)
-    document, arrays = read_archive(saved_path.with_suffix(".npz"))
-    saved = read_dataset(document, arrays, "data")
+    document, arrays, datasets = read_archive(saved_path.with_suffix(".npz"))
+    saved = datasets["data"]
     assert saved.ref == previous.snapshot.ref
     np.testing.assert_array_equal(saved.block.values, previous.snapshot.block.values)
     latest_front = SimpleNamespace(
@@ -4679,7 +4679,7 @@ def test_partial_grid_points_mount_and_reproject_one_canonical_snapshot(
         StreamGenerationId,
         ValueSchema,
     )
-    from zlc_data.figure_archive import read_archive, read_dataset
+    from zlc_data.figure_archive import read_archive
     from zlc_runtime.dataset import DatasetCoverage
     from zlc_runtime.dataset_output import (
         DatasetOutputDeclaration,
@@ -4823,8 +4823,8 @@ def test_partial_grid_points_mount_and_reproject_one_canonical_snapshot(
     ) is True
     archive = tmp_path / "partial-grid.npz"
     _wait_for_panel_save(presenter, archive)
-    info, arrays = read_archive(archive)
-    saved = read_dataset(info, arrays, "data")
+    info, arrays, datasets = read_archive(archive)
+    saved = datasets["data"]
     assert saved.block.schema == updated_snapshot.block.schema
     np.testing.assert_array_equal(saved.block.values, updated_snapshot.block.values)
     np.testing.assert_array_equal(
@@ -7228,7 +7228,7 @@ def test_a_refresh_still_travelling_leaves_save_the_editors_picture(
 
     from threading import Event
 
-    from zlc_data.figure_archive import read_archive, read_dataset
+    from zlc_data.figure_archive import read_archive
 
     node, snap = _one_shot(session)
     panel = presenter.add_panel(node.signal_key("frames"), snap, kind="image")
@@ -7276,8 +7276,8 @@ def test_a_refresh_still_travelling_leaves_save_the_editors_picture(
         target = tmp_path / "pending-refresh.png"
         assert presenter.save_panel_figure(panel.panel_id, str(target)) is True
         _wait_for_panel_save(presenter, target)
-        info, arrays = read_archive(target.with_suffix(".npz"))
-        saved = read_dataset(info, arrays, "data")
+        info, arrays, datasets = read_archive(target.with_suffix(".npz"))
+        saved = datasets["data"]
         assert saved.ref.revision == opened.snapshot.ref.revision, (
             "Save wrote a picture Edit had not reached"
         )

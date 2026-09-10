@@ -1892,7 +1892,7 @@ def test_uniformity_history_is_one_latest_curve_paired_with_candidate_phase(
         axis = output.snapshot.block.schema.point_domain.axes[0]
         assert axis.name == "candidate"
         assert axis.coordinates == (1, 2, 3, 4, 5, 6, 7)
-        info, _arrays = read_archive(tmp_path / "figures" / "uniformity_history.npz")
+        info, _arrays, _datasets = read_archive(tmp_path / "figures" / "uniformity_history.npz")
         assert set(
             info["sections"]["source"]["run_record"]["device_snapshots"]
         ) == {"camera", "sequencer", "slm"}
@@ -3749,9 +3749,9 @@ def test_measured_plant_slope_sets_the_step_and_proven_uniformity_stops_the_run(
         text = (tmp_path / "summary.txt").read_text()
         assert "Final plant slope:" in text and "estimated" in text
         assert result["true_uniformity_cv"] == summary["selected_true_uniformity_cv"]
-        info, arrays = read_archive(tmp_path / "figures" / "uniformity_history.npz")
+        info, arrays, datasets = read_archive(tmp_path / "figures" / "uniformity_history.npz")
         assert info["sections"]["source"]["run_record"]["readout_model_kind"] == "box"
-        plot_input, _recipe = read_figure_plot(info, arrays, "data")
+        plot_input, _recipe = read_figure_plot(info, arrays, datasets, "data")
         metric_axis = next(
             spec
             for spec in plot_input.block.schema.cell_domain.axes
@@ -3906,7 +3906,7 @@ def test_failure_after_a_completed_candidate_saves_figures_and_context(
         assert [path.name for path in candidate_figures.glob("*.png")] == [
             "candidate-0001.png"
         ]
-        info, arrays = read_archive(candidate_figures / "candidate-0001.npz")
+        info, arrays, datasets = read_archive(candidate_figures / "candidate-0001.npz")
         archived_slm = info["sections"]["source"]["run_record"][
             "device_snapshots"
         ]["slm"]
@@ -3919,7 +3919,7 @@ def test_failure_after_a_completed_candidate_saves_figures_and_context(
         # The phase measured for candidate 1 is the phase the failed run
         # leaves on the SLM: no command follows the measurement.
         assert archived_slm["command_revision"] == slm.command_revision
-        _plot_input, recipe = read_figure_plot(info, arrays, "data")
+        _plot_input, recipe = read_figure_plot(info, arrays, datasets, "data")
         assert isinstance(recipe["spec"], FacetGridPlot)
         assert isinstance(recipe["spec"].cell, HistogramPlot)
         # The two-population fit states the evidence it demanded, at the

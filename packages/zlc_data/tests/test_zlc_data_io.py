@@ -16,7 +16,6 @@ from zlc_data.axis import AxisId, AxisSpec, REPEAT, SCAN_POINT, SITE, SPATIAL_X
 from zlc_data.figure_archive import (
     FIGURE_SCHEMA,
     read_archive,
-    read_dataset,
     write_figure_archive,
 )
 from zlc_data.io import NPZFormatError, load_npz, save_npz, snapshot_manifest
@@ -396,7 +395,18 @@ def _figure_payload(members: dict[str, np.ndarray]) -> bytes:
     return stream.getvalue()
 
 
-def test_figure_archive_round_trip_validates_members_and_dataset_shape():
+def test_figure_archive_round_trip_validates_members_and_dataset_shape(monkeypatch):
+    import zlc_data.figure_archive as figures
+
+    decoded = []
+    original = figures.snapshot_from_manifest
+
+    def decode(*args, **kwargs):
+        result = original(*args, **kwargs)
+        decoded.append(result)
+        return result
+
+    monkeypatch.setattr(figures, "snapshot_from_manifest", decode)
     snapshot = _snapshot(CellValidity(np.array([[True, False], [False, True]])))
     stream = _figure_stream(
         "strict figure",
@@ -404,12 +414,17 @@ def test_figure_archive_round_trip_validates_members_and_dataset_shape():
         sections={"panel": {"kind": "image"}},
     )
 
-    info, arrays = read_archive(stream)
+    info, arrays, datasets = read_archive(stream)
 
     assert info["schema"] == FIGURE_SCHEMA
     assert set(info["members"]) == {"data", "data.validity", "trace"}
     assert set(arrays) == {"data", "data.validity", "trace"}
-    assert read_dataset(info, arrays, "data").exactly_equals(snapshot)
+    assert datasets["data"].exactly_equals(snapshot)
+    assert decoded == [datasets["data"]]
+    assert datasets["data"].block.values is arrays["data"]
+    assert datasets["data"].block.validity.mask is arrays["data.validity"]
+    with pytest.raises(ValueError):
+        arrays["data"].setflags(write=True)
 
 
 def test_figure_archive_compresses_only_members_that_shrink_materially(monkeypatch):
@@ -439,7 +454,7 @@ def test_figure_archive_compresses_only_members_that_shrink_materially(monkeypat
         assert archive.getinfo("compressible.npy").compress_type == zipfile.ZIP_DEFLATED
         assert archive.getinfo("camera_noise.npy").compress_type == zipfile.ZIP_STORED
 
-    _info, arrays = read_archive(stream)
+    _info, arrays, datasets = read_archive(stream)
     np.testing.assert_array_equal(arrays["compressible"], compressible)
     np.testing.assert_array_equal(arrays["camera_noise"], camera_noise)
 
@@ -487,7 +502,7 @@ def test_figure_members_are_read_by_their_own_physical_names():
         sections={},
     )
     stream.seek(0)
-    _info, arrays = read_archive(stream)
+    _info, arrays, datasets = read_archive(stream)
     assert arrays["signal"].tolist() == [11]
     assert arrays["signal.npy"].tolist() == [22]
 
@@ -507,11 +522,11 @@ def test_figure_members_are_read_by_their_own_physical_names():
         typed, "two datasets", arrays={"signal": first, "signal.npy": second}, sections={}
     )
     typed.seek(0)
-    info, arrays = read_archive(typed)
-    assert read_dataset(info, arrays, "signal").block.values.tolist() == (
+    info, arrays, datasets = read_archive(typed)
+    assert datasets["signal"].block.values.tolist() == (
         first.block.values.tolist()
     )
-    assert read_dataset(info, arrays, "signal.npy").block.values.tolist() == (
+    assert datasets["signal.npy"].block.values.tolist() == (
         second.block.values.tolist()
     )
 

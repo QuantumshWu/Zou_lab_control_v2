@@ -26,7 +26,7 @@ from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementNode,
     CameraMeasurementRequest,
 )
-from zlc_data.figure_archive import read_archive, read_dataset
+from zlc_data.figure_archive import read_archive
 from zlc_workbench.panel_save import capture_run_chain, save_panel_figure
 from zlc_workbench.apps.task_console import build_panel_host
 from zlc_workbench.panel_state import (
@@ -498,8 +498,8 @@ def test_a_saved_dataset_comes_back_with_its_axes(saved) -> None:
     """
 
     path, original = saved
-    info, arrays = read_archive(path)
-    restored = read_dataset(info, arrays, "data")
+    info, arrays, datasets = read_archive(path)
+    restored = datasets["data"]
 
     np.testing.assert_array_equal(
         np.asarray(restored.block.values), np.asarray(original.block.values)
@@ -637,8 +637,8 @@ def test_manual_data_uses_runtime_panel_and_the_one_figure_writer(tmp_path) -> N
         )
         _wait_until(lambda: target.is_file() and not presenter._busy)
 
-        info, arrays = read_archive(target)
-        restored = read_dataset(info, arrays, "data")
+        info, arrays, datasets = read_archive(target)
+        restored = datasets["data"]
         assert restored.block.values.shape == (2, 16, 1)
         assert restored.block.values[0, 3, 0] == 7.25
         assert restored.block.schema.repeat_domain.axes[-1].coordinates == (10, 20)
@@ -985,7 +985,7 @@ def test_existing_archive_manual_edit_saves_reopens_and_keeps_lineage(
     saved, tmp_path, source_only
 ) -> None:
     path, original = saved
-    original_info, original_arrays = read_archive(path)
+    original_info, original_arrays, original_datasets = read_archive(path)
     duplicate = {
         **original_info,
         "sections": {**original_info["sections"], "source": {
@@ -1047,8 +1047,8 @@ def test_existing_archive_manual_edit_saves_reopens_and_keeps_lineage(
             },
         )
         _wait_until(lambda: target.is_file() and not presenter._busy)
-        info, arrays = read_archive(target)
-        restored = read_dataset(info, arrays, "data")
+        info, arrays, datasets = read_archive(target)
+        restored = datasets["data"]
         assert restored.block.values.shape == original.block.values.shape
         assert restored.block.values.reshape(-1)[0] == 123
         assert restored.block.schema == original.block.schema
@@ -1067,7 +1067,7 @@ def test_existing_archive_manual_edit_saves_reopens_and_keeps_lineage(
         copied = tmp_path / "manual-panel-copy.npz"
         view.panel_save_figure_requested.emit(str(draft["panel_id"]), str(copied.with_suffix(".png")))
         _wait_until(lambda: copied.is_file() and not presenter._busy)
-        copied_info, _ = read_archive(copied)
+        copied_info, _, _datasets = read_archive(copied)
         assert copied_info["sections"]["source"] == info["sections"]["source"]
         assert copied_info["sections"]["lineage"] == lineage
 
@@ -1116,7 +1116,7 @@ def test_a_played_pulse_is_offered_on_the_device_tab_and_drawn_on_its_own(saved)
     from zlc_pulse import sequence_to_tree
 
     path, _snapshot = saved
-    info, arrays = read_archive(path)
+    info, arrays, datasets = read_archive(path)
     node = info["sections"]["lineage"]["nodes"][0]
     played_sequence = ordinary_imaging_sequence()
     record = dict(node["record"])
@@ -1225,7 +1225,7 @@ def test_a_played_pulse_is_offered_on_the_device_tab_and_drawn_on_its_own(saved)
 
 def test_the_description_reports_only_facts_saved_in_the_archive(saved) -> None:
     path, _snapshot = saved
-    info, arrays = read_archive(path)
+    info, arrays, datasets = read_archive(path)
     description = describe_archive(info, arrays)
     tabs = dict(description.tabs)
     assert tuple(tabs) == ("Plot", "Logic", "Devices", "Flow", "Raw")
@@ -1291,7 +1291,7 @@ def test_describing_an_archive_reads_recipes_without_rebuilding_datasets(
     import zlc_workbench.viewer as viewer_module
 
     path, _snapshot = saved
-    info, arrays = read_archive(path)
+    info, arrays, datasets = read_archive(path)
 
     def rebuilt(*_args, **_kwargs):
         raise AssertionError("describe_archive rebuilt a Dataset")
@@ -1303,7 +1303,7 @@ def test_describing_an_archive_reads_recipes_without_rebuilding_datasets(
 
 def test_the_flow_projection_is_the_saved_exact_node_edge_graph(saved) -> None:
     path, _snapshot = saved
-    description = describe_archive(*read_archive(path))
+    description = describe_archive(*read_archive(path)[:2])
     nodes = {node["id"]: node for node in description.flow["nodes"]}
     edges = description.flow["edges"]
     assert {node["kind"] for node in nodes.values()} == {"logic", "device"}
@@ -1322,7 +1322,7 @@ def test_the_flow_projection_is_the_saved_exact_node_edge_graph(saved) -> None:
     )
 
     # A convergent DAG keeps its shared event and shared device unique.
-    info, arrays = read_archive(path)
+    info, arrays, datasets = read_archive(path)
     camera_record = next(
         node["record"]
         for node in info["sections"]["lineage"]["nodes"]
@@ -1378,7 +1378,7 @@ def test_the_raw_tab_is_the_typed_document_not_a_node_probe(saved) -> None:
     hundreds of dotted paths."""
 
     path, _snapshot = saved
-    info, arrays = read_archive(path)
+    info, arrays, datasets = read_archive(path)
     raw = dict(dict(describe_archive(info, arrays).tabs)["Raw"])
     assert tuple(raw) == ("dataset", "plot", "lineage", "source")
     assert raw["source"] is info["sections"]["source"]
@@ -1425,8 +1425,8 @@ def test_opening_shows_the_figure_and_its_record(presenter, saved, tmp_path) -> 
     copied = copied_image.with_suffix(".npz")
     presenter.view.panel_save_figure_requested.emit(panel_id, str(copied_image))
     _wait_until(lambda: copied.is_file())
-    original_info, _original_arrays = read_archive(path)
-    copied_info, _copied_arrays = read_archive(copied)
+    original_info, _original_arrays, _original_datasets = read_archive(path)
+    copied_info, _copied_arrays, _copied_datasets = read_archive(copied)
     assert copied_info["sections"]["lineage"] == original_info["sections"]["lineage"]
     boolean = next(
         field
