@@ -667,7 +667,6 @@ def test_manual_axis_metadata_edit_preserves_its_existing_scientific_role(saved)
         source_path=None,
         source_dataset="data",
         recipe=None,
-        described=None,
         overlay=None,
     )
     axis = next(
@@ -704,7 +703,6 @@ def _manual_draft(editor_id: str = "draft") -> dict:
         source_path=None,
         source_dataset="",
         recipe=None,
-        described=None,
         overlay=None,
     )
 
@@ -839,7 +837,6 @@ def test_renaming_an_implicit_axis_keeps_its_coordinate_origin() -> None:
         source_path=None,
         source_dataset="data",
         recipe=None,
-        described=None,
         overlay=None,
     )
     viewer_module._edit_axis(
@@ -908,7 +905,6 @@ def test_manual_interaction_projection_does_not_rebuild_domains(monkeypatch) -> 
         source_path=None,
         source_dataset="",
         recipe=None,
-        described=None,
         overlay=None,
     )
     point = draft["point_axes"][0]
@@ -956,7 +952,6 @@ def test_manual_value_edit_preserves_a_sparse_serpentine_domain() -> None:
         source_path=None,
         source_dataset="data",
         recipe=None,
-        described=None,
         overlay=None,
     )
 
@@ -986,6 +981,8 @@ def test_manual_value_edit_preserves_a_sparse_serpentine_domain() -> None:
 def test_existing_archive_manual_edit_saves_reopens_and_keeps_lineage(
     saved, tmp_path, source_only
 ) -> None:
+    from zlc_data.figure_archive import write_figure_archive
+
     path, original = saved
     original_info, original_arrays, original_datasets = read_archive(path)
     duplicate = {
@@ -1001,8 +998,6 @@ def test_existing_archive_manual_edit_saves_reopens_and_keeps_lineage(
     for tab in ("Logic", "Devices"):
         assert dict(repeated.tabs)[tab] == dict(actual.tabs)[tab]
     if source_only:
-        from zlc_data.figure_archive import write_figure_archive
-
         sections = original_info["sections"]
         sections["source"]["run_record"] = sections["lineage"]["nodes"][-1]["record"]
         sections["lineage"] = {"root": None, "nodes": [], "device_settings": []}
@@ -1011,6 +1006,15 @@ def test_existing_archive_manual_edit_saves_reopens_and_keeps_lineage(
             write_figure_archive(
                 stream, original_info["name"], arrays=original_arrays, sections=sections
             )
+    else:
+        sections = {key: value for key, value in original_info["sections"].items() if key != "dataset"}
+        sections["plot"] = {**sections["plot"], "other": sections["plot"]["data"]}
+        path = tmp_path / "multiple-datasets.npz"
+        with path.open("wb") as stream:
+            write_figure_archive(
+                stream, original_info["name"],
+                arrays={"data": original, "other": original}, sections=sections,
+            )
     original_lineage = original_info["sections"]["lineage"]
     original_source = original_info["sections"]["source"]
     view = _ViewerView()
@@ -1018,8 +1022,23 @@ def test_existing_archive_manual_edit_saves_reopens_and_keeps_lineage(
     try:
         presenter.open(str(path))
         _wait_until(lambda: not presenter._busy)
-        view.edit_data_requested.emit("archive:data")
+        monitor_build = presenter._panel_presenter._make_monitor_host
+        builds = []
+        def build_monitor(*args, **kwargs):
+            builds.append(args)
+            return monitor_build(*args, **kwargs)
+        presenter._panel_presenter._make_monitor_host = build_monitor
+        previous_builder = presenter._build_figure_host
+        presenter._build_figure_host = lambda *args, **kwargs: pytest.fail("data editing built a throwaway C Host")
+        view.edit_data_requested.emit("archive:data" if source_only else "archive:other")
         editor_id, draft = next(iter(presenter._data_drafts.items()))
+        assert not presenter._busy and not builds
+        presenter._build_figure_host = previous_builder
+        view.data_editor_intent.emit(
+            editor_id, {"op": "set_cells", "component": "values", "cells": ((0, 0, "invalid"),)},
+        )
+        assert draft["message"] and editor_id in view.data_editors
+        assert not builds
         view.data_editor_intent.emit(
             editor_id,
             {
@@ -1039,6 +1058,7 @@ def test_existing_archive_manual_edit_saves_reopens_and_keeps_lineage(
                 and presenter.panels[str(draft["panel_id"])].frozen_data is not None
             )
         )
+        assert len(builds) == 1
         target = tmp_path / "edited-existing.npz"
         view.data_editor_intent.emit(
             editor_id,
