@@ -52,7 +52,7 @@ def test_the_block_mean_kernel_matches_reduceat_bit_for_bit() -> None:
 
     Covers the shapes a real panel produces -- a marginal reduction whose
     blocks are one or two samples wide, an exactly halving one, a ragged
-    one -- and the masked case the kernel must decline.
+    one -- and the masked sum/count path.
     """
 
     pytest.importorskip("numba")
@@ -63,15 +63,24 @@ def test_the_block_mean_kernel_matches_reduceat_bit_for_bit() -> None:
         (300, 97),    # ragged, blocks of 3 and 4
         (64, 63),     # one block of two, the rest of one
     )
-    for source, target in cases:
-        values = rng.integers(0, 65535, size=(source, source), dtype=np.uint16)
-        starts = _reduction_starts(source, target, 1.25)
-        valid = np.broadcast_to(np.True_, values.shape)
-        reference, compiled = _both_engines(
-            lambda: _area_mean(values, valid, starts, starts)
-        )
-        np.testing.assert_array_equal(reference, compiled)
-        assert reference.dtype == compiled.dtype
+    for dtype in (np.uint8, np.uint16):
+        for source, target in cases:
+            values = rng.integers(0, np.iinfo(dtype).max, size=(source, source), dtype=dtype)
+            starts = _reduction_starts(source, target, 1.25)
+            valid = np.broadcast_to(np.True_, values.shape)
+            reference, compiled = _both_engines(
+                lambda: _area_mean(values, valid, starts, starts)
+            )
+            np.testing.assert_array_equal(reference, compiled)
+            assert reference.dtype == compiled.dtype
+
+    # Ragged rectangular blocks use their complete sample count.
+    values = rng.integers(0, 65535, size=(73, 101), dtype=np.uint16)
+    valid = np.broadcast_to(np.True_, values.shape)
+    rows = _reduction_starts(73, 29, 1.25)
+    columns = _reduction_starts(101, 43, 1.25)
+    reference, compiled = _both_engines(lambda: _area_mean(values, valid, rows, columns))
+    np.testing.assert_array_equal(reference, compiled)
 
     # A partly invalid plane sums and counts in one compiled pass rather
     # than materialising np.where(valid, values, 0) and reducing twice.
@@ -86,25 +95,17 @@ def test_the_block_mean_kernel_matches_reduceat_bit_for_bit() -> None:
     np.testing.assert_array_equal(np.asarray(reference), np.asarray(compiled))
 
 
-def test_the_block_mean_kernel_declines_sums_float32_cannot_hold() -> None:
-    """Exactness is the kernel's licence, and it is judged from the dtype.
+def test_the_block_mean_keeps_wide_integer_sums() -> None:
+    """Unsigned pixels do not narrow a large block sum before dividing."""
 
-    A block wide enough to sum past 2**24 would round inside the
-    reference's float32 accumulator, and an exact integer total would no
-    longer be that reduction's answer -- so the kernel must not answer.
-    """
-
+    values = np.full((1024, 1024), 65535, dtype=np.uint16)
+    values[0, 0] = 0
+    valid = np.broadcast_to(np.True_, values.shape)
     starts = np.array([0], dtype=np.intp)
-    assert not kernels.block_sums_are_exact(
-        np.dtype(np.uint16), starts, starts, (1024, 1024)
-    )
-    narrow = np.arange(0, 512, 2, dtype=np.intp)
-    assert kernels.block_sums_are_exact(
-        np.dtype(np.uint16), narrow, narrow, (512, 512)
-    )
-    assert not kernels.block_sums_are_exact(
-        np.dtype(np.float32), narrow, narrow, (512, 512)
-    )
+    expected = np.float32(values.sum(dtype=np.float64) / values.size)
+    for result in _both_engines(lambda: _area_mean(values, valid, starts, starts)):
+        assert result.dtype == np.float32
+        assert result[0, 0] == expected
 
 
 def test_the_uniform_histogram_kernel_matches_numpy_bit_for_bit() -> None:
@@ -120,7 +121,7 @@ def test_the_uniform_histogram_kernel_matches_numpy_bit_for_bit() -> None:
     edges = np.linspace(-3.0, 7.0, 41)
     pools = (
         rng.normal(size=200_003) * 2.0,
-        np.concatenate([edges, edges - 1e-12, edges + 1e-12]),
+        np.concatenate([edges, edges - 1e-12, edges + 1e-12, [np.nan, -np.inf, np.inf]]),
         np.concatenate([rng.random(5_000) * 20.0 - 10.0, [-3.0, 7.0]]),
         (rng.random(50_000) * 6000).astype(np.uint16).astype(np.float64),
         np.full(1000, 7.0),
@@ -140,7 +141,7 @@ def test_the_uniform_histogram_kernel_matches_numpy_bit_for_bit() -> None:
 
     values = rng.normal(size=(5, 7, 3, 11))
     valid = rng.random(values.shape) > 0.2
-    facet_codes = np.asarray([2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0])
+    facet_codes = np.asarray([2, -1, 1, 2, 0, 1, 2, 0, 1, 2, 0])
     expected = []
     previous = kernels.ENGINE
     try:
@@ -160,6 +161,10 @@ def test_the_uniform_histogram_kernel_matches_numpy_bit_for_bit() -> None:
         kernels.ENGINE = previous
     assert batched is not None
     np.testing.assert_array_equal(np.asarray(expected), batched)
+    single = _facet_kernel_counts(
+        values, valid, np.zeros(values.shape[3], dtype=np.int64), 3, 1, edges
+    )
+    np.testing.assert_array_equal(single[0], histogram_counts(values, edges, valid))
 
 
 def test_the_histogram_kernel_declines_a_float32_pool() -> None:

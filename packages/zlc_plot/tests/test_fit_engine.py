@@ -1047,6 +1047,7 @@ def test_compiled_batch_judges_finiteness_on_the_points_it_fitted() -> None:
         np.stack([clean, holed]),
         base_lower=np.asarray([parameter.bounds[0] for parameter in model.parameters]),
         base_upper=np.asarray([parameter.bounds[1] for parameter in model.parameters]),
+        free_indices=np.asarray([3, 1, 2, 0]),
         # One plan for both cells, as the engine hands a bucket: a plan built
         # per cell from its finite points would differ in shape here.
         context=descriptor.context_builder((x,)),
@@ -1055,6 +1056,12 @@ def test_compiled_batch_judges_finiteness_on_the_points_it_fitted() -> None:
     assert output.covariance_valid.tolist() == [True, True]
     assert np.all(np.isfinite(output.standard_errors))
     np.testing.assert_allclose(output.parameters[1], output.parameters[0], rtol=1e-3)
+    for cell, observations in enumerate((clean, holed)):
+        finite = np.isfinite(observations)
+        jacobian = model.evaluate_jacobian((x[finite],), output.parameters[cell])
+        _, singular, right = np.linalg.svd(jacobian, full_matrices=False)
+        expected = (right.T / singular**2) @ right * output.reduced_chi_square[cell]
+        np.testing.assert_allclose(output.covariance[cell], expected, rtol=1e-9, atol=1e-12)
 
 
 @pytest.mark.parametrize("fallback", ("custom_model", "custom_engine"))
@@ -1606,7 +1613,26 @@ def test_rectangular_mask_crops_to_the_closed_form_and_keeps_original_indices() 
     )
 
 
-def test_regular_image_result_arrays_are_deferred_until_first_access() -> None:
+def test_regular_image_result_arrays_are_deferred_until_first_access(monkeypatch) -> None:
+    compile_exact = _fit_compiled._compile_exact
+    solve_compiled = _fit_compiled._solve_compiled
+
+    def only_consumed_callbacks(dispatcher, signature, name):
+        assert name not in {"value/Jacobian callback", "finalizer"}
+        return compile_exact(dispatcher, signature, name)
+
+    monkeypatch.setattr(_fit_compiled, "_compile_exact", only_consumed_callbacks)
+
+    def no_discarded_results(*args, **kwargs):
+        result = solve_compiled(*args, **kwargs)
+        assert kwargs["finalize"] is False
+        assert all(getattr(result, field).size == 0 for field in (
+            "covariance", "standard_errors", "reduced_chi_square",
+            "covariance_valid", "fitted_values", "residuals",
+        ))
+        return result
+
+    monkeypatch.setattr(_fit_compiled, "_solve_compiled", no_discarded_results)
     engine = FitEngine()
     x, y, image = _separable_image(radial=True, size=48)
     result = engine.fit(

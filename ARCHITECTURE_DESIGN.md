@@ -221,9 +221,10 @@ Node new chunk
 
 ### 5.2 Performance与state
 
-- 数值显示单位仅在真实消费者需要的表示上转换；归约后绘图不得预先转换全量raw values，raw selector确实读取display时才按需取得。完整用户初值直接进入solver，不计算马上覆盖的自动初值；partial初值仍补自动值。预热停止在构造下一个样例前生效，size/parameters按最终初态进入共享Host。
+- 数值显示单位仅在真实消费者需要的表示上转换；归约后绘图不得预先转换全量raw values，raw selector确实读取display时才按需取得。完整用户初值直接进入solver，不计算马上覆盖的自动初值；partial初值仍补自动值。compiled prepare的零行seed输出表示仅请求必要的自动bounds，模型内部只计算这些bounds真实依赖的统计，不产生弃置seed；普通cold/warm竞争不变。预热停止在构造下一个样例前生效，size/parameters按最终初态进入共享Host。
 - 内置模型的值、Jacobian与single/batch求解共用同一逐点数学primitive；只有需要导数的求解/协方差消费者才请求Jacobian。只画曲线不生成N×P导数矩阵，也不为可写ABI复制一维坐标。已筛finite的数据在同一私有数值入口复用该事实，新的坐标变换/分箱、RegularImage原始masked输入仍检查实际有效性；不移除cold/warm不同初值竞争或custom fallback。
 - 数值core只读取validity，其ABI接受readonly strided mask；已知全有效输入用一字节True广播，不分配B×N的全True矩阵。外部/RegularImage真实mask仍按其实际布局与有效性处理。configure中的spec替换仅修改状态，最外层统一生成一次最终description；public replace_spec仍返回完整真实描述。
+- 显示用图像块平均统一float64累加、除完整有效样本数后才转换到输出dtype；NumPy参考与compiled采用同一数学，不为保留整数图像旧的float32中间舍入另建sum kernel或2^24分流。Histogram单组与Facet使用同一分箱kernel及真实边界修正规则，普通分布只是一组内部输出，不向Dataset伪造axis。入口统一的性能代价单独量化，不能当作提速。
 
 - Display cadence按同一HarmonicClock的真实单调时间跨deadline判定；Qt延迟/合并回调时只欠一次最新呈现，不按回调次数再等待若干逻辑拍，也不补画已错过的帧。Pause、容量与same-shot接纳规则不变。
 
@@ -281,6 +282,8 @@ Node new chunk
 - RegularImage live batch即使具有完整warm seed也必须保留cold proxy竞争，再以选出的seed做full refinement；warm不能跳过cold证据、成为不可恢复的authority。
 - RegularImage的single是同一批量数值流程的一条lane；不得按cell数量维护不同full-refinement算法。规则网格以明确的内部shape/axis包交给同一TRF，不展开重复的逐像素坐标，也不改变Dataset或Plot轴语义。现有数值context同时供prepare与objective使用，可保留每cell一次计算的中心化统计量；原始物理参数、bounds和损失/收敛含义保持不变。最终质量仍由真实数据的直接残差核对，不能用不稳定的大数相减或放松精度换取提速。
 - 编译Fit中未启用权重时，由既有use_weights表示并传递空权重行，所有objective/finalizer只在启用时读取权重数据；不得为默认权重1建立完整B×N数组。前景仍由Agg/FreeType/MathText产生字形/覆盖率，现有compose按原顺序批量重放；未纳入批量覆盖的artist在原顺序位置保留既有draw，不另建科学数据路线。Image的备用像素在fallback/export消费时才由公共owner物化，普通native帧不重复生成一份未绘制RGBA。
+- 编译、磁盘加载与数值执行都按本次实际请求的输出决定；RegularImage由自身信息矩阵收尾时，通用TRF不编译/加载未使用的普通finalizer/value-Jacobian，也不分配其弃置协方差/误差占位矩阵。全部参数固定的通用收尾只求模型值与质量，不求导数。需要普通收尾的消费者仍沿同一既有路径得到完整结果。
+- 普通fit收尾的模型Jacobian是本次owned工作区；自由列选择与权重/robust缩放写入其前缀，不另建N×free矩阵。只有列重排存在写后读覆盖时才使用一行scratch；invalid行归零。通过Numba现有原生LAPACK Householder QR只取R，再对小R做SVD，保留奇异值/右向量与原秩阈值，不生成不被消费的Q及N×free左向量，也不改成平方条件数的JᵀJ求逆。成功路径直接使用模型返回的owned预测数组，不复制另一份fitted。秩与协方差始终来自最终参数的Jacobian，不读取上一trial的信息矩阵冒充最终导数；single/batch共用同一数学流程。
 - Fit的warm记忆只保留当前request/model/cell最近一次成功参数tuple，失败清除；前次参数仅是与当前数据自动候选竞争的初值，不再通过半径/幅度/history chi-square阈值另设资格状态或扫描原图。RegularImage的线性least-squares proxy只负责寻找初值盆地，可使用与最终输出不同的收敛精度；robust loss仍保留原proxy精度。所有fresh正负候选仍参与，最终参数、残差与协方差必须继续来自完整数据及既有full-refinement精度，不能把proxy结果直接当成最终拟合。
 - Title/layout等非plot变化不得re-fit。
 - Histogram classifier先按distribution选择模型来源：调用方已提供Gaussian components就直接呈现该模型，显式空模型直接不画；仅未提供模型的分布自动求解。完整classifier初态必须先于Host首次计算传入，不能先fit再覆盖。拒绝overview/单series的line交互不得物化native artists。

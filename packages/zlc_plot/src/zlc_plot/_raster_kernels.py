@@ -139,54 +139,7 @@ def readable(array: Any) -> Any:
     return view
 
 
-# --------------------------------------------------------------- block sums
-#: Largest exactly-representable integer in float32.  A block sum above it
-#: would round, and the reference accumulates in float32 too -- so the exact
-#: integer sum this kernel computes is the reference's answer only below it.
-FLOAT32_EXACT_INTEGER = 1 << 24
-
-
-def block_sums_are_exact(dtype: Any, row_starts: Any, column_starts: Any,
-                         shape: tuple[int, int]) -> bool:
-    """Whether every block sum is exact in float32, for any values of *dtype*.
-
-    The reference reduces with ``dtype=float32``; each partial sum is exact
-    while it stays under 2**24, and then the whole reduction equals the
-    integer sum this kernel computes.  Bounded by the dtype rather than by
-    the data so the answer costs no pass over the pixels.
-    """
-
-    if dtype.kind not in "u" or dtype.itemsize > 4:
-        return False
-    rows, columns = shape
-    row_block = int(np.diff(np.r_[np.asarray(row_starts), rows]).max())
-    column_block = int(np.diff(np.r_[np.asarray(column_starts), columns]).max())
-    return (row_block * column_block * int(np.iinfo(dtype).max)
-            < FLOAT32_EXACT_INTEGER)
-
-
-@njit(cache=True, parallel=True, nogil=True)
-def block_sum_unsigned(values, row_starts, column_starts, out):
-    """Sum each block of an unsigned plane into ``out`` as float32.
-
-    Mirrors ``np.add.reduceat`` twice over: a block's samples are summed in
-    row-major order, which for exact integers is every order.
-    """
-
-    row_count = row_starts.size
-    column_count = column_starts.size
-    rows, columns = values.shape
-    for i in prange(row_count):
-        row_stop = row_starts[i + 1] if i + 1 < row_count else rows
-        for j in range(column_count):
-            column_stop = column_starts[j + 1] if j + 1 < column_count else columns
-            total = np.uint64(0)
-            for r in range(row_starts[i], row_stop):
-                for c in range(column_starts[j], column_stop):
-                    total += np.uint64(values[r, c])
-            out[i, j] = np.float32(total)
-
-
+# -------------------------------------------------------------- block means
 @njit(cache=True, parallel=True, nogil=True)
 def block_mean_valid(values, valid, use_valid, row_starts, column_starts, out, counts):
     """Mean each block, accumulating wide -- and count, when there is a mask.
@@ -206,7 +159,7 @@ def block_mean_valid(values, valid, use_valid, row_starts, column_starts, out, c
     a zero count, which the caller masks.
 
     It accumulates in float64 whatever the plane's dtype and divides
-    BEFORE writing, so the block's sum never meets ``out``'s dtype: a
+    BEFORE writing, so a floating block's sum never meets ``out``'s dtype: a
     finite float32 plane near its range has block totals past it, and a
     sum written back as float32 came back as an infinite mean of finite
     samples.  For a float32 plane this is not a looser answer than
@@ -214,6 +167,7 @@ def block_mean_valid(values, valid, use_valid, row_starts, column_starts, out, c
     relative away from a float64 reduction, where this lands on it
     exactly.  For a float64 plane the two differ only by summation order,
     measured at two ulps.
+
     """
 
     row_count = row_starts.size
@@ -304,50 +258,7 @@ def gather_rows_columns(rgba, row_map, column_map, out):
 
 # ---------------------------------------------------------------- histogram
 @njit(cache=True, parallel=True, nogil=True)
-def uniform_histogram(values, edges, bins, partials, out):
-    """Count uniformly binned samples in one pass.
-
-    Mirrors numpy's equal-bin path operation for operation: the same
-    inclusive range filter, the same ``((a - first) / (last - first)) *
-    bins`` index, the same truncating cast, and the same two corrections
-    against the real edges that make the answer independent of the last
-    ULP.  ``partials`` is a caller-owned ``(threads, bins)`` scratch plane
-    so this kernel holds no global state and can be cached.
-    """
-
-    first = edges[0]
-    last = edges[bins]
-    denominator = last - first
-    threads = partials.shape[0]
-    chunk = (values.size + threads - 1) // threads
-    for t in prange(threads):
-        stop = min((t + 1) * chunk, values.size)
-        for b in range(bins):
-            partials[t, b] = 0
-        for p in range(t * chunk, stop):
-            # numpy filters on the raw dtype and only then casts to the edge
-            # dtype; against float64 scalars every integer and float32
-            # comparison promotes the same way, so one cast here is both.
-            sample = np.float64(values[p])
-            if not (sample >= first and sample <= last):
-                continue
-            index = np.int64(((sample - first) / denominator) * bins)
-            if index == bins:
-                index -= 1
-            if sample < edges[index]:
-                index -= 1
-            if sample >= edges[index + 1] and index != bins - 1:
-                index += 1
-            partials[t, index] += 1
-    for b in range(bins):
-        total = np.int64(0)
-        for t in range(threads):
-            total += partials[t, b]
-        out[b] = total
-
-
-@njit(cache=True, parallel=True, nogil=True)
-def uniform_facet_histograms(
+def uniform_histogram(
     values,
     valid,
     use_valid,
@@ -358,18 +269,23 @@ def uniform_facet_histograms(
     partials,
     out,
 ):
-    """Count every tensor facet into ``out[facet, bin]`` in one pass.
+    """Count one or more uniform distributions into ``out[group, bin]``.
 
     ``facet_codes`` maps the physical tensor index to the value-sorted
     Facet cell. It therefore handles duplicate and non-monotonic authored
-    coordinates without building one facet code per sample. Binning is the
-    exact operation used by :func:`uniform_histogram` above.
+    coordinates without building one facet code per sample. An empty code
+    array is the ungrouped distribution: no per-sample division or modulo.
+    Binning retains NumPy's inclusive last edge and its two rounding
+    corrections against the actual edges.
     """
 
     facets = out.shape[0]
     threads = partials.shape[0]
     chunk = (values.size + threads - 1) // threads
     axis_size = facet_codes.size
+    first = edges[0]
+    last = edges[bins]
+    denominator = last - first
     for t in prange(threads):
         stop = min((t + 1) * chunk, values.size)
         for facet in range(facets):
@@ -378,15 +294,15 @@ def uniform_facet_histograms(
         for p in range(t * chunk, stop):
             if use_valid and not valid[p]:
                 continue
-            facet = facet_codes[(p // facet_stride) % axis_size]
+            facet = 0
+            if axis_size:
+                facet = facet_codes[(p // facet_stride) % axis_size]
             if facet < 0:
                 continue
             sample = np.float64(values[p])
-            if not (sample >= edges[0] and sample <= edges[bins]):
+            if not (sample >= first and sample <= last):
                 continue
-            index = np.int64(
-                ((sample - edges[0]) / (edges[bins] - edges[0])) * bins
-            )
+            index = np.int64(((sample - first) / denominator) * bins)
             if index == bins:
                 index -= 1
             if sample < edges[index]:
@@ -394,7 +310,7 @@ def uniform_facet_histograms(
             if sample >= edges[index + 1] and index != bins - 1:
                 index += 1
             partials[t, facet, index] += 1
-    for facet in prange(facets):
+    for facet in range(facets):
         for b in range(bins):
             total = np.int64(0)
             for t in range(threads):

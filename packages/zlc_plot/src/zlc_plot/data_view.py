@@ -4927,12 +4927,20 @@ def _kernel_counts(
     if flat.ndim != 1:
         return None
     threads = kernels.histogram_threads()
-    partials = np.empty((threads, count), dtype=np.int64)
-    counted = np.empty(count, dtype=np.int64)
+    partials = np.empty((threads, 1, count), dtype=np.int64)
+    counted = np.empty((1, count), dtype=np.int64)
     kernels.uniform_histogram(
-        flat, kernels.readable(produced), count, partials, counted
+        flat,
+        kernels.readable(np.empty(0, dtype=np.bool_)),
+        False,
+        kernels.readable(np.empty(0, dtype=np.int64)),
+        1,
+        kernels.readable(produced),
+        count,
+        partials,
+        counted,
     )
-    return counted
+    return counted[0]
 
 
 def _facet_kernel_counts(
@@ -4980,7 +4988,7 @@ def _facet_kernel_counts(
     threads = kernels.histogram_threads()
     partials = np.empty((threads, facet_count, count), dtype=np.int64)
     counted = np.empty((facet_count, count), dtype=np.int64)
-    kernels.uniform_facet_histograms(
+    kernels.uniform_histogram(
         flat,
         marks,
         use_valid,

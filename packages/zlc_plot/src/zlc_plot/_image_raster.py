@@ -26,7 +26,7 @@ class PreparedImageFront:
     extent: tuple[float, float, float, float]
 
 
-#: Untouched stand-ins for the merged block-sum kernel's masked face.
+#: Untouched stand-ins for the block-mean kernel's masked face.
 _NO_VALID = np.zeros((1, 1), dtype=np.bool_)
 _NO_VALID.setflags(write=False)
 _NO_COUNTS = np.zeros((1, 1), dtype=np.int64)
@@ -103,36 +103,15 @@ def _area_mean(
     block's SUM is never held in that dtype: a finite float32 plane near
     its range has block totals past it, and a sum narrowed before the
     division came back as an infinite mean of finite samples.  Every
-    engine below accumulates a floating plane in float64 and narrows only
-    the quotient; an integer plane keeps the float32 arithmetic that is
-    exact for it by construction.
+    engine below accumulates in float64 and narrows only the quotient,
+    without intermediate float32 sum/division rounding for integers.
     """
 
     all_valid = _all_true(valid)
     mean_dtype = np.result_type(values.dtype, np.float32)
     shape = (row_starts.size, column_starts.size)
     compiled = kernels.engaged()
-    if all_valid and compiled and kernels.block_sums_are_exact(
-        values.dtype, row_starts, column_starts, values.shape
-    ):
-        # The compiled kernel's exact integer sum IS this reduction's answer
-        # while every partial stays exactly representable, which the judge
-        # above establishes from the dtype alone.  ``reduceat`` books a
-        # segment per output cell -- two million of them, each one or two
-        # samples wide -- and that bookkeeping, not the addition, is the cost.
-        summed = np.empty(shape, dtype=np.float32)
-        kernels.block_sum_unsigned(
-            kernels.readable(values), row_starts, column_starts, summed
-        )
-        return _divided_by_block_sizes(summed, values.shape, row_starts, column_starts)
     if compiled:
-        # Everything the exact-integer judge turns away -- every floating
-        # plane, the wide integers whose partials would round, and any
-        # plane with missing samples, whose sum and count come out of ONE
-        # pass rather than a whole ``np.where(valid, values, 0)`` plane
-        # reduced twice.  The kernel accumulates in float64 and divides
-        # before it writes; measured 9.24 ms -> 0.25 ms on a 1200x1920
-        # plane, and 35.1 -> 0.46 on 2048x2048.
         means = np.empty(shape, dtype=mean_dtype)
         counts = _NO_COUNTS if all_valid else np.empty(shape, dtype=np.int64)
         kernels.block_mean_valid(
@@ -154,7 +133,7 @@ def _area_mean(
     # say the common one -- returned from here and the kernels never
     # ran at all: 7.18 ms against 1.01 reducing 2048 to 512, and 4.73
     # against 0.31 reducing it to 256, for the identical answer.
-    accumulate = np.float64 if values.dtype.kind == "f" else mean_dtype
+    accumulate = np.float64
     source = values if all_valid else np.where(valid, values, 0)
     rows, columns = values.shape
     row_block = rows // row_starts.size
@@ -186,25 +165,11 @@ def _divided_by_block_sizes(
     row_starts: np.ndarray,
     column_starts: np.ndarray,
 ) -> np.ndarray:
-    """``summed`` divided in place by each block's sample count.
+    """Divide wide sums once by each block's complete sample count."""
 
-    IN THE SUM'S OWN DTYPE.  ``np.diff`` answers in the index dtype, and
-    float32 divided by int64 is promoted to float64 for the whole array
-    and demoted again on the way into ``out`` -- two float64 passes over
-    one and three quarter million cells, which measured 3.86 ms against
-    0.55 for the float32 division they stand in for, and cost more than
-    the block sum they divide.
-    """
-
-    counts_dtype = summed.dtype
-    row_counts = np.diff(np.r_[row_starts, shape[0]]).astype(
-        counts_dtype, copy=False
-    )
-    column_counts = np.diff(np.r_[column_starts, shape[1]]).astype(
-        counts_dtype, copy=False
-    )
-    np.divide(summed, row_counts[:, np.newaxis], out=summed)
-    np.divide(summed, column_counts[np.newaxis, :], out=summed)
+    row_counts = np.diff(np.r_[row_starts, shape[0]])
+    column_counts = np.diff(np.r_[column_starts, shape[1]])
+    np.divide(summed, row_counts[:, np.newaxis] * column_counts[np.newaxis, :], out=summed)
     return summed
 
 
