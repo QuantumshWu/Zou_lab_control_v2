@@ -5128,6 +5128,71 @@ def test_a_facet_grid_panel_of_frames_carries_the_occupancy_overlay(
         root_event["sequence"],
     ) == event_identity(status_publication)
 
+    # Reproduce the live camera -> Occupancy + independent Rolling wiring.
+    live_camera = presenter.add_logic(
+        "camera_measurement",
+        node_id="live-camera",
+        values={
+            "exposure_seconds": 0.02,
+            "repeat": 0,
+            "frames_per_cycle": CAMERA_WINDOWS,
+        },
+        device_keys={"camera": "camera"},
+        open_editor=False,
+    )
+    assert presenter.start_logic(live_camera)
+    _settle_panel_hosts(presenter, lambda: bool(session.camera.capture_state()))
+    frames_signal = stable_signal_key(live_camera, "frames")
+    session.fire(shots=1)
+    _settle_panel_hosts(
+        presenter, lambda: session.signal_plane.latest_publication(frames_signal) is not None,
+    )
+    live_occupancy = presenter.add_logic(
+        "occupancy", node_id="live-occupancy",
+        artifact_inputs={"calibration_path": str(calibration_path)},
+        source_signal=frames_signal, open_editor=False,
+    )
+    assert presenter.start_logic(live_occupancy)
+    status_signal = stable_signal_key(live_occupancy, "occupied")
+    _settle_panel_hosts(
+        presenter, lambda: session.signal_plane.latest_publication(status_signal) is not None,
+    )
+    front = session.signal_plane.freeze()
+    status_publication = front.publication(status_signal)
+    rolling = presenter.add_panel(
+        status_signal,
+        status_publication.value(status_signal).snapshot,
+        kind="rolling",
+        display={"window": 100},
+    )
+    assert rolling is not None and rolling.history_lease is not None
+    session.fire(shots=1)
+    _settle_panel_hosts(
+        presenter,
+        lambda: session.signal_plane.latest_publication(status_signal)
+        is not status_publication,
+    )
+    front = session.signal_plane.freeze()
+    status_publication = front.publication(status_signal)
+    retained = session.signal_plane.current_dataset(status_signal)
+    assert retained.block.window is not None
+    assert retained.block.window.latest > retained.block.window.start
+    camera_publication = front.publication(frames_signal)
+    image = session.signal_plane.current_dataset(frames_signal, camera_publication)
+    assert image.block.window is None
+    result = presenter._image_point_overlay(
+        front, camera_publication, status_signal, image, 2,
+    )
+    assert result is not None
+    overlay = result[0]
+    assert overlay.status.block.schema.repeat_domain == image.block.schema.repeat_domain
+    assert overlay.status.block.schema.point_domain == image.block.schema.point_domain
+    np.testing.assert_array_equal(
+        overlay.status.block.values,
+        status_publication.value(status_signal).snapshot.block.values,
+    )
+    presenter.remove_panel(rolling.panel_id)
+
 
 def test_a_card_stops_wearing_an_error_once_the_panel_has_drawn_again(
     presenter, session
