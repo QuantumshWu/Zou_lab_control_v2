@@ -11,7 +11,10 @@ The callback ABI is deliberately small and write-oriented:
 
 ``prepare(coords, observations, valid, seeds, lower, upper, context) -> count``
     Fill *full-parameter* cold seeds and model-derived bounds for one cell.
-    ``seeds`` has ``descriptor.max_candidates`` rows.  The common preparation
+    ``seeds`` has ``descriptor.max_candidates`` rows when automatic seeds are
+    needed, or zero rows when the caller supplies its own. A zero-row target
+    still asks for model-derived bounds, never for discarded cold seeds.
+    The common preparation
     owner subsequently applies explicit requested bounds/fixed parameters,
     inserts a warm seed first, chooses authored seeds instead of cold seeds when
     requested, clips, and exactly de-duplicates candidates.
@@ -1006,7 +1009,7 @@ def _prepare_one(
         output_lower[index] = base_lower[index]
         output_upper[index] = base_upper[index]
     cold = np.full(
-        (max_cold_candidates, parameter_count),
+        (0 if use_authored else max_cold_candidates, parameter_count),
         np.nan,
         dtype=np.float64,
     )
@@ -1800,7 +1803,9 @@ def _finalize_one(
                 covariance[row, column] = math.nan
         return fitted, residuals, covariance, errors, math.inf, False
 
-    predicted, full_jacobian = value_jacobian_callback(coordinates, parameters, True)
+    predicted, full_jacobian = value_jacobian_callback(
+        coordinates, parameters, free_count != 0,
+    )
     if predicted.size != point_count:
         for row in range(parameter_count):
             errors[row] = math.nan
@@ -2208,6 +2213,7 @@ def _ensure_compiled_abi(
     descriptor: CompiledFitDescriptor,
     *,
     parallel: bool,
+    finalize: bool,
 ) -> None:
     """Lazily compile callbacks and generic kernels through stable ABI types."""
 
@@ -2223,28 +2229,28 @@ def _ensure_compiled_abi(
             _OBJECTIVE_CALLBACK_SIGNATURE,
             "objective callback",
         )
-        _compile_exact(
-            descriptor.value_jacobian,
-            _VALUE_JACOBIAN_CALLBACK_SIGNATURE,
-            "value/Jacobian callback",
-        )
         if parallel:
             if not _PARALLEL_ABI_READY:
                 _prepare_parallel.compile(_PREPARE_KERNEL_SIGNATURE)
                 _solve_parallel.compile(_SOLVE_KERNEL_SIGNATURE)
-                _finalize_parallel.compile(_FINALIZE_KERNEL_SIGNATURE)
                 _prepare_parallel.disable_compile()
                 _solve_parallel.disable_compile()
-                _finalize_parallel.disable_compile()
                 _PARALLEL_ABI_READY = True
         elif not _SERIAL_ABI_READY:
             _prepare_serial.compile(_PREPARE_KERNEL_SIGNATURE)
             _solve_serial.compile(_SOLVE_KERNEL_SIGNATURE)
-            _finalize_serial.compile(_FINALIZE_KERNEL_SIGNATURE)
             _prepare_serial.disable_compile()
             _solve_serial.disable_compile()
-            _finalize_serial.disable_compile()
             _SERIAL_ABI_READY = True
+        if finalize:
+            _compile_exact(
+                descriptor.value_jacobian,
+                _VALUE_JACOBIAN_CALLBACK_SIGNATURE,
+                "value/Jacobian callback",
+            )
+            finalizer = _finalize_parallel if parallel else _finalize_serial
+            if not finalizer.signatures:
+                _compile_exact(finalizer, _FINALIZE_KERNEL_SIGNATURE, "finalizer")
 
 
 def _solve_compiled(
@@ -2281,7 +2287,7 @@ def _solve_compiled(
     grid = descriptor.coordinate_layout == "rectangular-grid"
     if grid and (finalize or context is None):
         raise ValueError("rectangular-grid fits require explicit context and caller finalization")
-    _ensure_compiled_abi(descriptor, parallel=parallel)
+    _ensure_compiled_abi(descriptor, parallel=parallel, finalize=finalize)
     values = np.asarray(observations)
     if values.ndim == 1:
         values = values.reshape(1, -1)
@@ -2574,15 +2580,13 @@ def _solve_compiled(
         contexts,
     )
 
-    covariance = np.full(
-        (cells, parameter_count, parameter_count),
-        np.nan,
-        dtype=np.float64,
-    )
-    standard_errors = np.full((cells, parameter_count), np.nan, dtype=np.float64)
-    reduced = np.full(cells, math.inf, dtype=np.float64)
-    covariance_valid = np.zeros(cells, dtype=np.bool_)
     if finalize:
+        covariance = np.full(
+            (cells, parameter_count, parameter_count), np.nan, dtype=np.float64,
+        )
+        standard_errors = np.full((cells, parameter_count), np.nan, dtype=np.float64)
+        reduced = np.full(cells, math.inf, dtype=np.float64)
+        covariance_valid = np.zeros(cells, dtype=np.bool_)
         fitted = np.full((cells, points), np.nan, dtype=np.float64)
         residuals = np.full((cells, points), np.nan, dtype=np.float64)
         finalize_kernel = _finalize_parallel if parallel else _finalize_serial
@@ -2604,14 +2608,18 @@ def _solve_compiled(
             reduced,
             covariance_valid,
         )
+        covariance_valid &= statuses >= STATUS_MAX_NFEV
     else:
         # Regular-image fits retain the source image and materialize fitted
         # values only when a consumer asks.  They need the common independent
         # TRF result, not an eager B x N x P Jacobian and two B x N planes.
         fitted = np.empty((cells, 0), dtype=np.float64)
         residuals = np.empty((cells, 0), dtype=np.float64)
+        covariance = np.empty((cells, 0, 0), dtype=np.float64)
+        standard_errors = np.empty((cells, 0), dtype=np.float64)
+        reduced = np.empty(0, dtype=np.float64)
+        covariance_valid = np.empty(0, dtype=np.bool_)
     success = statuses > STATUS_MAX_NFEV
-    covariance_valid &= statuses >= STATUS_MAX_NFEV
     return CompiledFitOutput(
         parameters=parameters,
         standard_errors=standard_errors,
@@ -3662,7 +3670,7 @@ def _unique_step(values):
 @njit(cache=True)
 def _prepare_lorentzian(coords, observations, valid, seeds, lower, upper, context):
     compact, values = _compact_observations(coords, observations, valid)
-    if values.size == 0 or seeds.shape[0] < 2:
+    if values.size == 0 or 0 < seeds.shape[0] < 2:
         return 0
     x = compact[0]
     xlow, xhigh = _minimum_maximum(x)
@@ -3670,6 +3678,12 @@ def _prepare_lorentzian(coords, observations, valid, seeds, lower, upper, contex
     xspan = max(xhigh - xlow, EPSILON)
     value_range = yhigh - ylow
     width = xspan / 4.0
+    lower[0] = max(lower[0], xlow); upper[0] = min(upper[0], xhigh)
+    lower[1] = max(lower[1], width / 10.0); upper[1] = min(upper[1], width * 10.0)
+    lower[2] = max(lower[2], -10.0 * value_range); upper[2] = min(upper[2], 10.0 * value_range)
+    lower[3] = max(lower[3], ylow - 10.0 * value_range); upper[3] = min(upper[3], yhigh + 10.0 * value_range)
+    if seeds.shape[0] == 0:
+        return 0
     seeds[0, 0] = x[_array_argmax(values)]
     seeds[0, 1] = width
     seeds[0, 2] = value_range
@@ -3678,15 +3692,13 @@ def _prepare_lorentzian(coords, observations, valid, seeds, lower, upper, contex
     seeds[1, 1] = width
     seeds[1, 2] = -value_range
     seeds[1, 3] = yhigh
-    lower[0] = max(lower[0], xlow); upper[0] = min(upper[0], xhigh)
-    lower[1] = max(lower[1], width / 10.0); upper[1] = min(upper[1], width * 10.0)
-    lower[2] = max(lower[2], -10.0 * value_range); upper[2] = min(upper[2], 10.0 * value_range)
-    lower[3] = max(lower[3], ylow - 10.0 * value_range); upper[3] = min(upper[3], yhigh + 10.0 * value_range)
     return 2
 
 
 @njit(cache=True)
 def _prepare_gaussian(coords, observations, valid, seeds, lower, upper, context):
+    if seeds.shape[0] == 0:
+        return 0
     compact, values = _compact_observations(coords, observations, valid)
     if values.size == 0:
         return 0
@@ -3719,6 +3731,8 @@ def _prepare_gaussian(coords, observations, valid, seeds, lower, upper, context)
 
 @njit(cache=True)
 def _prepare_histogram(coords, observations, valid, seeds, lower, upper, context):
+    if seeds.shape[0] == 0:
+        return 0
     compact, values = _compact_observations(coords, observations, valid)
     if values.size == 0:
         return 0
@@ -3890,6 +3904,8 @@ def _two_state_cuts(x, values, total, split_values):
 
 @njit(cache=True)
 def _prepare_bimodal(coords, observations, valid, seeds, lower, upper, context):
+    if seeds.shape[0] == 0:
+        return 0
     compact, raw_values = _compact_observations(coords, observations, valid)
     count = raw_values.size
     if count == 0:
@@ -3984,6 +4000,8 @@ def _poisson_moments(x, values, split, side, step):
 
 @njit(cache=True)
 def _prepare_poisson_histogram(coords, observations, valid, seeds, lower, upper, context):
+    if seeds.shape[0] == 0:
+        return 0
     compact, raw_values = _compact_observations(coords, observations, valid)
     if raw_values.size == 0:
         return 0
@@ -4057,6 +4075,8 @@ def _try_poisson_split(x, counts, split_value, step, output):
 
 @njit(cache=True)
 def _prepare_poisson_bimodal(coords, observations, valid, seeds, lower, upper, context):
+    if seeds.shape[0] == 0:
+        return 0
     compact, raw_values = _compact_observations(coords, observations, valid)
     count = raw_values.size
     if count == 0:
@@ -4197,30 +4217,36 @@ def _prepare_doublet(coords, observations, valid, seeds, lower, upper, context):
     xspan = max(xhigh - xlow, EPSILON)
     value_range = yhigh - ylow
     step = _unique_step(x)
-    count = _append_doublet_sign(x, values, 1.0, value_range, step, seeds, 0)
-    count = _append_doublet_sign(x, values, -1.0, value_range, step, seeds, count)
+    # The first measured width also defines the automatic bound. When no
+    # seeds are requested, retain only that necessary peak measurement.
+    candidates = seeds if seeds.shape[0] else np.empty((1, 5), dtype=np.float64)
+    count = _append_doublet_sign(x, values, 1.0, value_range, step, candidates, 0)
+    if count < candidates.shape[0]:
+        count = _append_doublet_sign(x, values, -1.0, value_range, step, candidates, count)
     if count == 0:
-        if seeds.shape[0] < 2:
-            return 0
         width = xspan / 8.0
-        high_index = _array_argmax(values)
-        low_index = _array_argmin(values)
-        seeds[0, 0] = x[high_index]; seeds[0, 1] = width; seeds[0, 2] = value_range; seeds[0, 3] = ylow; seeds[0, 4] = 2.0 * width
-        seeds[1, 0] = x[low_index]; seeds[1, 1] = width; seeds[1, 2] = -value_range; seeds[1, 3] = yhigh; seeds[1, 4] = 2.0 * width
-        count = 2
-    width = seeds[0, 1]
+        if seeds.shape[0]:
+            if seeds.shape[0] < 2:
+                return 0
+            high_index = _array_argmax(values)
+            low_index = _array_argmin(values)
+            seeds[0, 0] = x[high_index]; seeds[0, 1] = width; seeds[0, 2] = value_range; seeds[0, 3] = ylow; seeds[0, 4] = 2.0 * width
+            seeds[1, 0] = x[low_index]; seeds[1, 1] = width; seeds[1, 2] = -value_range; seeds[1, 3] = yhigh; seeds[1, 4] = 2.0 * width
+            count = 2
+    else:
+        width = candidates[0, 1]
     lower[0] = max(lower[0], xlow); upper[0] = min(upper[0], xhigh)
     lower[1] = max(lower[1], width / 10.0); upper[1] = min(upper[1], width * 10.0)
     lower[2] = max(lower[2], -10.0 * value_range); upper[2] = min(upper[2], 10.0 * value_range)
     lower[3] = max(lower[3], ylow - 10.0 * value_range); upper[3] = min(upper[3], yhigh + 10.0 * value_range)
     lower[4] = max(lower[4], 0.0); upper[4] = min(upper[4], 2.0 * xspan)
-    return count
+    return count if seeds.shape[0] else 0
 
 
 @njit(cache=True)
 def _prepare_damped(coords, observations, valid, seeds, lower, upper, context):
     compact, raw_values = _compact_observations(coords, observations, valid)
-    if raw_values.size == 0 or seeds.shape[0] < 3:
+    if raw_values.size == 0 or 0 < seeds.shape[0] < 3:
         return 0
     order = np.argsort(compact[0])
     x = compact[0, order]
@@ -4264,6 +4290,12 @@ def _prepare_damped(coords, observations, valid, seeds, lower, upper, context):
     )
     frequency = max(frequency, EPSILON)
     decay = _array_span(x)
+    lower[0] = max(lower[0], amplitude / 5.0); upper[0] = min(upper[0], amplitude * 5.0)
+    lower[1] = max(lower[1], low); upper[1] = min(upper[1], high)
+    lower[2] = max(lower[2], frequency / 5.0); upper[2] = min(upper[2], frequency * 5.0)
+    lower[3] = max(lower[3], decay / 5.0); upper[3] = min(upper[3], decay * 5.0)
+    if seeds.shape[0] == 0:
+        return 0
     # Three blind phases on purpose: a measured DFT phase was tried and
     # made the solve basin-sensitive (batch and single diverged on
     # ordinary data); the third lane is robustness, priced in.
@@ -4274,17 +4306,13 @@ def _prepare_damped(coords, observations, valid, seeds, lower, upper, context):
         seeds[seed, 2] = frequency
         seeds[seed, 3] = decay
         seeds[seed, 4] = phases[seed]
-    lower[0] = max(lower[0], amplitude / 5.0); upper[0] = min(upper[0], amplitude * 5.0)
-    lower[1] = max(lower[1], low); upper[1] = min(upper[1], high)
-    lower[2] = max(lower[2], frequency / 5.0); upper[2] = min(upper[2], frequency * 5.0)
-    lower[3] = max(lower[3], decay / 5.0); upper[3] = min(upper[3], decay * 5.0)
     return 3
 
 
 @njit(cache=True)
 def _prepare_exponential(coords, observations, valid, seeds, lower, upper, context):
     compact, raw_values = _compact_observations(coords, observations, valid)
-    if raw_values.size == 0 or seeds.shape[0] < 2:
+    if raw_values.size == 0 or 0 < seeds.shape[0] < 2:
         return 0
     order = np.argsort(compact[0])
     x = compact[0, order]
@@ -4298,14 +4326,16 @@ def _prepare_exponential(coords, observations, valid, seeds, lower, upper, conte
         amplitude = high - low
         if amplitude == 0.0:
             amplitude = 1.0
-    seeds[0, 0] = amplitude; seeds[0, 1] = offset; seeds[0, 2] = decay
-    seeds[1, 0] = -amplitude; seeds[1, 1] = offset; seeds[1, 2] = decay
     low, high = _minimum_maximum(values)
     value_range = high - low
     limit = max(4.0 * value_range, 10.0 * abs(amplitude))
     lower[0] = max(lower[0], -limit); upper[0] = min(upper[0], limit)
     lower[1] = max(lower[1], low - 10.0 * value_range); upper[1] = min(upper[1], high + 10.0 * value_range)
     lower[2] = max(lower[2], decay / 10.0); upper[2] = min(upper[2], decay * 10.0)
+    if seeds.shape[0] == 0:
+        return 0
+    seeds[0, 0] = amplitude; seeds[0, 1] = offset; seeds[0, 2] = decay
+    seeds[1, 0] = -amplitude; seeds[1, 1] = offset; seeds[1, 2] = decay
     return 2
 
 
@@ -4349,22 +4379,23 @@ def _radial_seed(compact, values, sign, output):
 @njit(cache=True)
 def _prepare_radial(coords, observations, valid, seeds, lower, upper, context):
     compact, values = _compact_observations(coords, observations, valid)
-    if values.size == 0 or seeds.shape[0] < 2:
+    if values.size == 0 or 0 < seeds.shape[0] < 2:
         return 0
-    _radial_seed(compact, values, 1.0, seeds[0])
-    _radial_seed(compact, values, -1.0, seeds[1])
+    candidates = seeds if seeds.shape[0] else np.empty((2, 5), dtype=np.float64)
+    _radial_seed(compact, values, 1.0, candidates[0])
+    _radial_seed(compact, values, -1.0, candidates[1])
     xlow, xhigh = _minimum_maximum(compact[0])
     ylow, yhigh = _minimum_maximum(compact[1])
     low, high = _minimum_maximum(values)
     value_range = high - low
-    radius_low = max(min(seeds[0, 2], seeds[1, 2]) / 10.0, EPSILON)
-    radius_high = max(seeds[0, 2], seeds[1, 2]) * 10.0
+    radius_low = max(min(candidates[0, 2], candidates[1, 2]) / 10.0, EPSILON)
+    radius_high = max(candidates[0, 2], candidates[1, 2]) * 10.0
     lower[0] = max(lower[0], -4.0 * value_range); upper[0] = min(upper[0], 4.0 * value_range)
     lower[1] = max(lower[1], low - value_range); upper[1] = min(upper[1], high + value_range)
     lower[2] = max(lower[2], radius_low); upper[2] = min(upper[2], radius_high)
     lower[3] = max(lower[3], xlow); upper[3] = min(upper[3], xhigh)
     lower[4] = max(lower[4], ylow); upper[4] = min(upper[4], yhigh)
-    return 2
+    return 2 if seeds.shape[0] else 0
 
 
 @njit(cache=True, inline="always")
@@ -4412,23 +4443,24 @@ def _anisotropic_seed(compact, values, sign, output):
 @njit(cache=True)
 def _prepare_anisotropic(coords, observations, valid, seeds, lower, upper, context):
     compact, values = _compact_observations(coords, observations, valid)
-    if values.size == 0 or seeds.shape[0] < 2:
+    if values.size == 0 or 0 < seeds.shape[0] < 2:
         return 0
-    _anisotropic_seed(compact, values, 1.0, seeds[0])
-    _anisotropic_seed(compact, values, -1.0, seeds[1])
+    candidates = seeds if seeds.shape[0] else np.empty((2, 6), dtype=np.float64)
+    _anisotropic_seed(compact, values, 1.0, candidates[0])
+    _anisotropic_seed(compact, values, -1.0, candidates[1])
     xlow, xhigh = _minimum_maximum(compact[0])
     ylow, yhigh = _minimum_maximum(compact[1])
     low, high = _minimum_maximum(values)
     value_range = high - low
-    radius_x = max(seeds[0, 2], seeds[1, 2])
-    radius_y = max(seeds[0, 3], seeds[1, 3])
+    radius_x = max(candidates[0, 2], candidates[1, 2])
+    radius_y = max(candidates[0, 3], candidates[1, 3])
     lower[0] = max(lower[0], -4.0 * value_range); upper[0] = min(upper[0], 4.0 * value_range)
     lower[1] = max(lower[1], low - value_range); upper[1] = min(upper[1], high + value_range)
     lower[2] = max(lower[2], max(radius_x / 10.0, EPSILON)); upper[2] = min(upper[2], radius_x * 10.0)
     lower[3] = max(lower[3], max(radius_y / 10.0, EPSILON)); upper[3] = min(upper[3], radius_y * 10.0)
     lower[4] = max(lower[4], xlow); upper[4] = min(upper[4], xhigh)
     lower[5] = max(lower[5], ylow); upper[5] = min(upper[5], yhigh)
-    return 2
+    return 2 if seeds.shape[0] else 0
 
 
 def lorentzian_descriptor() -> CompiledFitDescriptor:
@@ -4638,6 +4670,8 @@ def _objective_release_recapture(coords, obs, valid, params, free, weights, use_
 
 @njit(cache=True)
 def _prepare_release_recapture(coords, observations, valid, seeds, lower, upper, context):
+    if seeds.shape[0] == 0:
+        return 0
     low = math.inf
     high = -math.inf
     for point in range(observations.size):
@@ -4741,10 +4775,13 @@ def _prepare_saturation(coords, observations, valid, seeds, lower, upper, contex
             low = min(low, x)
             high = max(high, x)
             count += 1
-            mean_y += (observations[point] - mean_y) / count
+            if seeds.shape[0]:
+                mean_y += (observations[point] - mean_y) / count
     if count < 2 or not high > low:
         return 0
     lower[2] = max(lower[2], np.nextafter(-low, math.inf))
+    if seeds.shape[0] == 0:
+        return 0
     span = high - low
     for index, factor in enumerate((0.1, 1.0, 10.0)):
         shift = max(lower[2], min(upper[2], span * factor - low))

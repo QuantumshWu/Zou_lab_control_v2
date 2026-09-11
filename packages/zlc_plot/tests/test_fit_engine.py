@@ -1606,7 +1606,26 @@ def test_rectangular_mask_crops_to_the_closed_form_and_keeps_original_indices() 
     )
 
 
-def test_regular_image_result_arrays_are_deferred_until_first_access() -> None:
+def test_regular_image_result_arrays_are_deferred_until_first_access(monkeypatch) -> None:
+    compile_exact = _fit_compiled._compile_exact
+    solve_compiled = _fit_compiled._solve_compiled
+
+    def only_consumed_callbacks(dispatcher, signature, name):
+        assert name not in {"value/Jacobian callback", "finalizer"}
+        return compile_exact(dispatcher, signature, name)
+
+    monkeypatch.setattr(_fit_compiled, "_compile_exact", only_consumed_callbacks)
+
+    def no_discarded_results(*args, **kwargs):
+        result = solve_compiled(*args, **kwargs)
+        assert kwargs["finalize"] is False
+        assert all(getattr(result, field).size == 0 for field in (
+            "covariance", "standard_errors", "reduced_chi_square",
+            "covariance_valid", "fitted_values", "residuals",
+        ))
+        return result
+
+    monkeypatch.setattr(_fit_compiled, "_solve_compiled", no_discarded_results)
     engine = FitEngine()
     x, y, image = _separable_image(radial=True, size=48)
     result = engine.fit(

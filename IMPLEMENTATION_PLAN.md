@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- Kernel必要性后续：compiled prepare用零行seed表示只请求auto bounds，完整authored初值不再计算弃置cold seeds；依赖峰宽/频谱/矩的真实bounds仍保留。RegularImage不加载普通finalizer/value-Jacobian或分配弃置收尾矩阵，全部fixed不求Jacobian。既有6个直接fit案例及7种prepare输出边界通过；4模型×B1/B8参数、误差与质量前后相同。缓存首用与稳态分别记录于ignored研究，未声称小样本波动为整体加速。
+
 - `pgc_1D`通道正式入库：原`add_pulse_channel.bat`默认操作（P19、lane18、63 lanes）直接固化于manifest/XDC/top/header和仓库Pulse模板，删除本地修改器及其过时测试。V9仍为DAC bit0；旧通道状态按port key保持。当前几何fingerprint为`0x5A59C160`；更新后无需再运行add-channel，实验机自行build/program并重启server。本次不执行build/program。
 
 - R8数值子项补齐：Mean/Sum-only整数ROI不再bincount，scalar/stacked均复用一次总和；完整尾部统计仍用原计数路线。3个原直接case通过，完整统计逐位一致，已选Mean/Sum证明0bincount、1次累加；未改默认输出开关，不新增订阅机制。

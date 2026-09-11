@@ -208,6 +208,8 @@ def _prepare_regular_radial_compiled(
     upper,
     context,
 ):
+    """Keep automatic bounds and sampling floors for zero-row seed requests."""
+
     coordinates = _expanded_regular_coordinates(coordinates)
     count = _compiled_fit._prepare_radial(
         coordinates, observations, valid, seeds, lower, upper, context
@@ -226,6 +228,8 @@ def _prepare_regular_anisotropic_compiled(
     upper,
     context,
 ):
+    """Keep automatic bounds and sampling floors for zero-row seed requests."""
+
     coordinates = _expanded_regular_coordinates(coordinates)
     count = _compiled_fit._prepare_anisotropic(
         coordinates, observations, valid, seeds, lower, upper, context
