@@ -2120,7 +2120,7 @@ def test_viewer_reenabling_facet_fit_solves_every_cell(tmp_path) -> None:
         semantic={
             "fate:point:facet": "facet",
             "fate:point:x": "x",
-            "fate:repeat": "reduce",
+            f"fate:repeat:{schema.repeat_domain.axes[0].axis_id}": "reduce",
             "reduction": "mean",
         },
         fit={"model": "gaussian_offset", "fit_all_facets": True},

@@ -16,6 +16,8 @@
 
 - 完成核对补齐非默认Dataset Edit data漏点：Viewer整条described传递链及隐藏C预绘删除。原双Dataset案例编辑第二个other时0Host、Preview1个A，123保存typed读回/lineage、无效输入后继续编辑恢复均通过；production净减41行。
 
+- Layout仅接受当前完整grammar：每panel必须有真实`panel_id`，fate只接受`fate:<domain>:<axis>`（`repeat/point/cell_data`）。删除旧fate前缀转换、裸repeat展开及缺失identity的顺序补全；旧格式明确拒绝，不新增兼容层、迁移工具或修改用户workspace文件。加载时铸造新panel identity并统一重映射派生signal/overlay/Logic source引用仍保留，这是当前运行时接线机制而非兼容代码。
+
 - Viewer去掉临时C Host，直接一个A首accept，旧板在新图成功前保留；菜单纯投影，延迟mount回Host生命周期入口，修掉交叉验证暴露的递归。保存/选区/viewport/typed overlay及Manual保存重开原case通过；短实屏确认7.25、三域title、1A/0临时C，窗口/children关闭。后续又验证真实Area手势后新generation：同Host offset随数据+7、ROI/Fit exact parent更新，selection revision不虚增，drawn-only不重算；未削弱same-shot或旧revision拒绝。探针的控件API/路径/等待fit错误均在ignored记录，不当产品证据。
 
 - 新世代自派生front根修：Manual新data+overlay共同parent旧同名bundle时，旧front算法直接永久pending。现只在leaf内撞名时从本次已读DAG选唯一因果后代，独立分支和跨leaf同shot判据不放松。原source-sibling案例扩展红绿、三个front直接case通过，不删除旧parent、不用latest冒充。

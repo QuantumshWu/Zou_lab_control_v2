@@ -16,15 +16,15 @@ Loading never reuses a written identity: the console mints fresh ones and
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 from typing import Any
 
 from zlc_durable import write_readable_json
-from zlc_plot.kinds import AxisDomain, AxisRef
-from zlc_plot.semantics import FATE_PREFIX, fate_field_name
+from zlc_plot.kinds import AxisDomain
+from zlc_plot.semantics import FATE_PREFIX
 
 from .logic import (
     LogicBinding,
@@ -45,17 +45,6 @@ LAYOUT_FORMAT = "zlc.console-board"
 #: reference to a panel from a reference to a logic row.
 PANEL_ID_PREFIX = "panel-"
 
-#: Saved fate keys spelled in the axis vocabulary that preceded the unified
-#: Dataset domains, keyed by the prefix that identifies each: the axis a key
-#: names is kept as written, only its domain is respelled.
-_RENAMED_FATE_PREFIXES = {
-    f"{FATE_PREFIX}point_dimension:": f"{FATE_PREFIX}{AxisDomain.POINT.value}:",
-    f"{FATE_PREFIX}data:": f"{FATE_PREFIX}{AxisDomain.CELL_DATA.value}:",
-}
-#: The one old fate that named a whole domain rather than an axis.  Which
-#: Repeat axes a signal has is the data's to say, so this key survives the
-#: parse and is expanded onto today's axes when the board is loaded.
-REPEAT_DOMAIN_FATE = f"{FATE_PREFIX}{AxisDomain.REPEAT.value}"
 _FATE_DOMAINS = frozenset(domain.value for domain in AxisDomain)
 
 
@@ -74,28 +63,6 @@ def _names_a_panel(producer: str) -> bool:
         producer.startswith(PANEL_ID_PREFIX)
         and producer[len(PANEL_ID_PREFIX):].isdigit()
     )
-
-
-def current_fate_key(key: str) -> str:
-    """The current spelling of one saved semantic key.
-
-    A non-fate key is the plot kind's own vocabulary and passes through (the
-    projection checks it against the kind).  A fate key is respelled by its
-    old prefix, kept when it already reads in today's ``fate:<domain>:<axis>``
-    grammar, and refused by name otherwise: a saved fate nobody can read is
-    a saved fate silently lost, and the operator would only learn that from
-    a plot drawn along the wrong axis.
-    """
-
-    if not key.startswith(FATE_PREFIX) or key == REPEAT_DOMAIN_FATE:
-        return key
-    for old, new in _RENAMED_FATE_PREFIXES.items():
-        if key.startswith(old):
-            return new + key[len(old):]
-    domain, _separator, axis_id = key[len(FATE_PREFIX):].partition(":")
-    if domain in _FATE_DOMAINS and axis_id.strip():
-        return key
-    raise LayoutError(f"unknown fate key {key!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,15 +166,7 @@ class LayoutDocument:
             _panel_from_tree(entry, index)
             for index, entry in enumerate(_sequence(document["panels"], "panels"))
         )
-        named = tuple(panel_id for panel_id, _state in entries if panel_id is not None)
-        if named and len(named) != len(entries):
-            raise LayoutError("either every panel entry carries a panel_id or none does")
-        if not named:
-            # A board written before identities were kept: its panels were
-            # minted in saved order on a fresh console, so the first entry is
-            # the first identity that console ever minted -- which is all
-            # such a file can mean, and enough for its references to resolve.
-            named = tuple(panel_id_for(index + 1) for index in range(len(entries)))
+        named = tuple(panel_id for panel_id, _state in entries)
         logic = tuple(
             _logic_from_tree(entry, index)
             for index, entry in enumerate(_sequence(document["logic"], "logic"))
@@ -402,9 +361,8 @@ def load_layout(
     resolved: ResolvedLayout,
     *,
     panel_ids: Sequence[str],
-    schema_for: Callable[[str], object | None],
 ) -> LoadedLayout:
-    """Put a resolved board onto fresh panel identities, on today's data.
+    """Put a resolved board onto fresh panel identities.
 
     ``panel_ids`` are the identities the console minted for this load, in
     saved order.  Every ``@logic/<saved panel id>/<output>`` in the document
@@ -414,11 +372,6 @@ def load_layout(
     reference to a panel the board does not carry cannot be resolved: it is
     dropped (the field left blank, the panel or row kept for rewiring) and
     said in ``notes``.
-
-    ``schema_for(signal)`` is what that signal publishes today, or None.  A
-    saved whole-domain repeat fate names an axis only the data can name, so
-    it is expanded onto every Repeat axis of that schema; with no schema, or
-    no Repeat axis, it is dropped and said.
     """
 
     fresh = tuple(str(panel_id).strip() for panel_id in panel_ids)
@@ -438,9 +391,6 @@ def load_layout(
                 state,
                 signal=signal,
                 overlay_signal=overlay_signal,
-                semantic=_repeat_fate_on_todays_axes(
-                    state.semantic, signal, schema_for, who, notes
-                ),
             )
         )
     logic = tuple(
@@ -480,37 +430,6 @@ def _respelled_reference(
         )
         return ""
     return reference
-
-
-def _repeat_fate_on_todays_axes(
-    semantic: Mapping[str, Any],
-    signal: str,
-    schema_for: Callable[[str], object | None],
-    who: str,
-    notes: list[str],
-) -> Mapping[str, Any]:
-    if REPEAT_DOMAIN_FATE not in semantic:
-        return semantic
-    current = dict(semantic)
-    fate = current.pop(REPEAT_DOMAIN_FATE)
-    schema = schema_for(signal) if signal else None
-    axes = () if schema is None else tuple(schema.repeat_domain.axes)
-    if not axes:
-        reason = (
-            "it has no signal to name them"
-            if not signal
-            else f"nothing is publishing {signal} to name them"
-            if schema is None
-            else f"{signal} has no Repeat axis"
-        )
-        notes.append(
-            f"{who}: its saved repeat fate {fate!r} names the Repeat axes and "
-            f"{reason}; the fate was dropped"
-        )
-        return current
-    for axis in axes:
-        current.setdefault(fate_field_name(AxisRef.repeat(str(axis.axis_id))), fate)
-    return current
 
 
 def _mapping(value: object, where: str) -> Mapping[str, Any]:
@@ -572,37 +491,24 @@ def _logic_from_tree(value: object, index: int) -> LogicLayoutEntry:
     )
 
 
-def _panel_from_tree(value: object, index: int) -> tuple[str | None, PanelState]:
+def _panel_from_tree(value: object, index: int) -> tuple[str, PanelState]:
     where = f"panel entry {index + 1}"
     entry = dict(_mapping(value, where))
-    panel_id = None
-    if "panel_id" in entry:
-        panel_id = _string(entry.pop("panel_id"), f"{where} panel_id").strip()
-        if not panel_id:
-            raise LayoutError(f"{where} panel_id must not be blank")
-    if isinstance(entry.get("semantic"), Mapping):
-        entry["semantic"] = _current_semantic(entry["semantic"], where)
+    if "panel_id" not in entry:
+        raise LayoutError(f"{where} requires panel_id")
+    panel_id = _string(entry.pop("panel_id"), f"{where} panel_id").strip()
+    if not panel_id:
+        raise LayoutError(f"{where} panel_id must not be blank")
     try:
-        return panel_id, PanelState.from_document(entry)
+        state = PanelState.from_document(entry)
     except Exception as error:
         raise LayoutError(f"{where}: {error}") from error
-
-
-def _current_semantic(semantic: Mapping[str, Any], where: str) -> dict[str, Any]:
-    current: dict[str, Any] = {}
-    spelled: dict[str, str] = {}
-    for key, value in semantic.items():
-        try:
-            name = current_fate_key(str(key))
-        except LayoutError as error:
-            raise LayoutError(f"{where}: {error}") from error
-        if name in current:
-            raise LayoutError(
-                f"{where}: fate keys {spelled[name]!r} and {key!r} both mean {name!r}"
-            )
-        current[name] = value
-        spelled[name] = str(key)
-    return current
+    for key in state.semantic:
+        if key.startswith(FATE_PREFIX):
+            domain, _separator, axis_id = key[len(FATE_PREFIX):].partition(":")
+            if domain not in _FATE_DOMAINS or not axis_id.strip():
+                raise LayoutError(f"{where}: unknown fate key {key!r}")
+    return panel_id, state
 
 
 def _string(value: object, where: str) -> str:
@@ -620,13 +526,11 @@ def _boolean(value: object, where: str) -> bool:
 __all__ = [
     "LAYOUT_FORMAT",
     "PANEL_ID_PREFIX",
-    "REPEAT_DOMAIN_FATE",
     "LayoutDocument",
     "LayoutError",
     "LoadedLayout",
     "LogicLayoutEntry",
     "ResolvedLayout",
-    "current_fate_key",
     "load_layout",
     "panel_id_for",
     "resolve_layout",

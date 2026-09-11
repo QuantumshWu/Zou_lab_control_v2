@@ -5045,16 +5045,7 @@ class ConsolePresenter:
         )
         serial += len(resolved.panels)
 
-        def schema_for(signal: str):
-            value = front.value(signal)
-            if value is None:
-                return None
-            return (
-                getattr(value, "canonical_schema", None)
-                or value.snapshot.block.schema
-            )
-
-        loaded = load_layout(resolved, panel_ids=fresh_ids, schema_for=schema_for)
+        loaded = load_layout(resolved, panel_ids=fresh_ids)
         panels: list[PanelBinding] = []
         missing: list[str] = []
         incompatible: list[tuple[str, str]] = []
