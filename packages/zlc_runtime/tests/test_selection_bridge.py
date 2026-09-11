@@ -40,6 +40,7 @@ from zlc_runtime.dataset_output import (
 from zlc_runtime.plane import SignalDataPlane
 from zlc_runtime.selection_bridge import (
     FacetCondition,
+    DrawnRegion,
     FitEventValue,
     SelectionBridge,
     SelectionChange,
@@ -432,7 +433,7 @@ def test_image_area_catalog_statistics_and_publication_choice_share_one_owner() 
         _close(bridge, plane, source)
 
 
-def test_selection_commit_republishes_same_source_and_source_revision_follows() -> None:
+def test_selection_commit_republishes_same_source_and_source_revision_follows(monkeypatch) -> None:
     schema = _image_schema()
     values = np.arange(12, dtype=np.float64).reshape(1, 1, 4, 3)
     plane, source, slot, state, _initial = _source_setup(schema, values)
@@ -470,6 +471,21 @@ def test_selection_commit_republishes_same_source_and_source_revision_follows() 
         assert second.event_ref.sequence == 1
         assert second.direct_parent_refs == first.direct_parent_refs
         assert float(second_front.value("@logic/image/roi_mean").snapshot.block.values.reshape(-1)[0]) == 9.0
+        with monkeypatch.context() as same_source:
+            same_source.setattr(
+                bridge, "_materialize_selection_outputs",
+                lambda *args, **kwargs: pytest.fail("unchanged region prepared again"),
+            )
+            events.emit_selection(SelectionChange.COMMITTED, second_state)
+            events.emit_selection(
+                SelectionChange.COMMITTED,
+                replace(second_state, drawn=DrawnRegion("area", 0.0, 10.0)),
+            )
+        assert plane.latest_publication("@logic/image/roi_mean") is second
+        with pytest.raises(ValueError, match="revisions must increase"):
+            events.emit_selection(SelectionChange.COMMITTED, first_state)
+        with pytest.raises(ValueError, match="revisions must increase"):
+            events.emit_selection(SelectionChange.COMMITTED, replace(first_state, revision=2))
 
         state["frame"] = LiveDatasetOutput(
             state["frame"].declaration,
@@ -2974,7 +2990,7 @@ def test_a_box_that_names_no_sample_is_a_condition_that_clears() -> None:
         _close(bridge, plane, source)
 
 
-def test_the_stacked_reduction_gives_the_per_cell_numbers() -> None:
+def test_the_stacked_reduction_gives_the_per_cell_numbers(monkeypatch) -> None:
     """Whichever machine the cell count picks, the numbers are the same.
 
     A scan cut is thousands of short rows and a camera window is one long
@@ -3018,6 +3034,33 @@ def test_the_stacked_reduction_gives_the_per_cell_numbers() -> None:
                 f"{label}: {name} disagrees between the stacked and per-cell paths"
             )
             assert bool(np.all(answered[name][1]))
+
+    import zlc_runtime.selection_bridge as module
+    totals = []
+    original_sum = np.sum
+    original_sum_rows = module._sum_rows
+
+    def total(values, *args, **kwargs):
+        totals.append(values.shape)
+        return original_sum(values, *args, **kwargs)
+
+    def total_rows(values):
+        totals.append(values.shape)
+        return original_sum_rows(values)
+
+    with monkeypatch.context() as selected:
+        selected.setattr(np, "bincount", lambda *_args: pytest.fail("Mean/Sum do not need a distribution"))
+        selected.setattr(np, "sum", total)
+        selected.setattr(module, "_sum_rows", total_rows)
+        selected.setattr(module, "_ROW_REDUCERS", {module._mean: module._mean_rows, module._sum: total_rows})
+        for shape in ((1, 1, 20, 30), (2, 3, 20, 30)):
+            values = np.arange(np.prod(shape), dtype=np.uint16).reshape(shape)
+            totals.clear()
+            answers = _roi_statistics(values, np.ones(shape, dtype=bool),
+                                      {"mean": module._mean, "sum": module._sum})
+            assert len(totals) == 1
+            assert np.array_equal(answers["sum"][0], values.sum(axis=(-2, -1), dtype=np.float64))
+            assert np.array_equal(answers["mean"][0], values.mean(axis=(-2, -1), dtype=np.float64))
 
 
 def test_a_selection_on_a_stopped_run_still_derives() -> None:

@@ -131,7 +131,7 @@ def test_every_model_recovers_the_occupancy_that_produced_the_frames() -> None:
         assert worst >= SITE_FIDELITY_FLOOR, (name, worst)
 
 
-def test_a_threshold_is_the_weighted_crossing_of_the_unlabelled_fit() -> None:
+def test_a_threshold_is_the_weighted_crossing_of_the_unlabelled_fit(monkeypatch) -> None:
     """Gaussian calibration fits values only; labels evaluate its result."""
 
     result, _truth = _calibration()
@@ -205,6 +205,16 @@ def test_a_threshold_is_the_weighted_crossing_of_the_unlabelled_fit() -> None:
     labels_a = np.arange(samples.shape[0])[:, np.newaxis] >= 80
     labels_b = ~labels_a
     fitted = []
+    from zlc_atom.nodes.calibration import calibration as calibration_module
+
+    empirical_calls = []
+    empirical_threshold = calibration_module._empirical_threshold
+
+    def empirical(*args, **kwargs):
+        empirical_calls.append(1)
+        return empirical_threshold(*args, **kwargs)
+
+    monkeypatch.setattr(calibration_module, "_empirical_threshold", empirical)
     for labels in (labels_a, labels_b):
         fitted.append(
             _fit_readout_model(
@@ -219,6 +229,7 @@ def test_a_threshold_is_the_weighted_crossing_of_the_unlabelled_fit() -> None:
                 model_parameters={"integration_half_width": 0},
             )
         )
+    assert not empirical_calls, "accepted Gaussian thresholds do not consume empirical estimates"
     for field in (
         "gaussian_thresholds",
         "gaussian_dark_mean",
@@ -232,6 +243,7 @@ def test_a_threshold_is_the_weighted_crossing_of_the_unlabelled_fit() -> None:
     assert fitted[0][1]["site_fidelity"][0] != fitted[1][1]["site_fidelity"][0]
 
     empirical, _truth = _calibration("empirical")
+    assert empirical_calls, "explicit empirical mode still computes its operating threshold"
     for model in empirical.calibration.models:
         report = empirical.report["models"][model.kind.value]
         assert model.threshold_method == "empirical"

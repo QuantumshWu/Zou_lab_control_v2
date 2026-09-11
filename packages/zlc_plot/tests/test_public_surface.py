@@ -278,7 +278,7 @@ def test_session_fit_all_facets_returns_one_result_per_painted_cell() -> None:
     finally:
         session.close()
 
-def test_an_identical_static_fit_target_does_no_work() -> None:
+def test_an_identical_static_fit_target_does_no_work(monkeypatch) -> None:
     """A second identical static target IS the fit already painted.
 
     Only the live target answered "same request" with silence; a static one
@@ -288,13 +288,27 @@ def test_an_identical_static_fit_target_does_no_work() -> None:
     what makes the same target solve again.
     """
 
-    session = PlotSession(_snapshot(), CurvePlot(AxisRef.point("x")))
-    fronts: list[None] = []
-    release = session.subscribe_surface(lambda: fronts.append(None))
     target = {
         "model": "gaussian_offset",
         "fixed": {"amplitude": 1.0, "center": 2.5, "sigma": 1.0, "offset": 0.0},
     }
+    from zlc_plot.rendering import MatplotlibRenderer
+
+    presented = []
+    original_present = MatplotlibRenderer.present
+
+    def present(self, frame, **kwargs):
+        presented.append(bool(frame.fit_overlays))
+        return original_present(self, frame, **kwargs)
+
+    monkeypatch.setattr(MatplotlibRenderer, "present", present)
+    session = PlotSession(
+        _snapshot(), CurvePlot(AxisRef.point("x")),
+        initial_configuration={"fit": target, "fit_live": False},
+    )
+    assert presented == [True]
+    fronts: list[None] = []
+    release = session.subscribe_surface(lambda: fronts.append(None))
     try:
         session.configure(fit=target, fit_live=False)
         first = session.last_fit

@@ -1063,6 +1063,7 @@ class RenderProcess:
         *,
         size: str | None = None,
         parameters: Mapping[str, object] | None = None,
+        initial_configuration: Mapping[str, object] | None = None,
         device_pixel_ratio: float = 1.0,
     ) -> _RemoteRasterPlotHost:
         self._ensure_running()
@@ -1089,6 +1090,7 @@ class RenderProcess:
                 size,
                 None if parameters is None else dict(parameters),
                 float(device_pixel_ratio),
+                _plain(initial_configuration),
                 host_id=host_id,
                 input_tokens=tuple(input_tokens),
                 input_transition="create",
@@ -2147,6 +2149,7 @@ def _render_process_main(connection: Connection, name: str) -> None:
     from .config import DEFAULTS
     from .raster import RasterPlotHost
     from .session import PlotSession
+    from . import _raster_kernels as kernels
 
     state_lock = RLock()
     hosts: dict[str, RasterPlotHost] = {}
@@ -2159,7 +2162,8 @@ def _render_process_main(connection: Connection, name: str) -> None:
     subscriptions: dict[int, tuple[str, Callable[[], object]]] = {}
     fronts = _SharedFrontPool()
     save_worker = ThreadPoolExecutor(
-        max_workers=1, thread_name_prefix=f"zlc-render-{name}-save"
+        max_workers=1, thread_name_prefix=f"zlc-render-{name}-save",
+        initializer=kernels.configure_worker_threads,
     )
     closer_threads: set[Thread] = set()
 
@@ -2384,6 +2388,7 @@ def _render_process_main(connection: Connection, name: str) -> None:
         size: str | None,
         parameters: Mapping[str, object] | None,
         device_pixel_ratio: float,
+        initial_configuration: Mapping[str, object] | None,
     ) -> None:
         requested.set()
         plot_input = _resolve_inputs(input_ref, inputs)
@@ -2396,6 +2401,7 @@ def _render_process_main(connection: Connection, name: str) -> None:
                 parameters=parameters,
                 defaults=DEFAULTS,
                 device_pixel_ratio=device_pixel_ratio,
+                initial_configuration=initial_configuration,
             )
 
         host = RasterPlotHost(factory, host_id=host_id)

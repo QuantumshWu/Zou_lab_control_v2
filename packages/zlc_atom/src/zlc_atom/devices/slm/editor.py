@@ -124,6 +124,7 @@ class SlmEditorControl(QtCore.QObject):
         #: device's I/O belongs, never on the Qt thread; one question in
         #: flight at a time.
         self._device_state_in_flight = False
+        self._phase_match: tuple[np.ndarray, np.ndarray, bool] | None = None
         self._device_state = self._read_device_state()
         command_revision, mapping_revision, _phase, receipt = self._device_state
         self._context_command_receipt = dict(receipt)
@@ -929,13 +930,19 @@ class SlmEditorControl(QtCore.QObject):
         )
         prefix = f"Device {receipt['transport']} · {receipt['outcome']} · command r{command_revision} · mapping r{mapping_revision}"
         if self._device_diverged:
+            self._phase_match = None
             text = f"{prefix} · changed externally; Adopt or Load before Send"
         elif phase is None:
+            self._phase_match = None
             text = f"{prefix} · command is unknown; draft is unsent"
-        elif np.array_equal(phase, self._phase):
-            text = f"{prefix} · draft matches device"
         else:
-            text = f"{prefix} · authoring draft differs from device"
+            compared = self._phase_match
+            if compared is None or compared[0] is not phase or compared[1] is not self._phase:
+                compared = (phase, self._phase, bool(np.array_equal(phase, self._phase)))
+                self._phase_match = compared
+            text = f"{prefix} · " + (
+                "draft matches device" if compared[2] else "authoring draft differs from device"
+            )
         if self._phase_metadata.get("source") == "science-context":
             text += f" · context provenance {self._context_command_receipt['identity']}"
         self._device_status.setText(text)

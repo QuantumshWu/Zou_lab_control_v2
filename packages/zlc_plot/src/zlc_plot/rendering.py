@@ -1580,35 +1580,6 @@ def _span_landing_on(
     return base
 
 
-def _fraction_landing_on(target: float, scale: float, base: float) -> float:
-    """A fraction near *base* whose product with *scale* IS *target*.
-
-    An axes box is stored as a fraction of the figure and multiplied back
-    out, and ``(k / scale) * scale`` is only within an ulp of ``k``.  That
-    last ulp is not cosmetic: Matplotlib rounds an image's output size UP
-    whenever the box is not an exactly integral float, and scales the
-    transform to match, so a box measuring 93 plus one part in a
-    quadrillion is resampled into 94 rows.  The neighbouring
-    representable fractions are searched for one that lands exactly; if
-    none does, the caller keeps the plain quotient and the compose simply
-    declines its copy.
-    """
-
-    if scale == 0.0:
-        return base
-    candidate = base
-    for _ in range(6):
-        if candidate * scale == target:
-            return candidate
-        candidate = np.nextafter(candidate, np.inf)
-    candidate = base
-    for _ in range(6):
-        candidate = np.nextafter(candidate, -np.inf)
-        if candidate * scale == target:
-            return candidate
-    return base
-
-
 def _pooled_store(block: bytearray) -> object:
     """A weak-referenceable buffer owner supported by Python 3.11+.
 
@@ -2110,7 +2081,7 @@ class MatplotlibRenderer:
             facet_focus_index=facet_focus_index,
         )
 
-    def present(self, frame: RenderFrame) -> None:
+    def present(self, frame: RenderFrame, *, compose: bool = True) -> None:
         """Mutate all layers and publish exactly one complete canvas front."""
 
         if not isinstance(frame, RenderFrame):
@@ -2268,6 +2239,8 @@ class MatplotlibRenderer:
                     else getattr(cell, "facet_value_canonical", None),
                 )
             self._settle_owned_boxes()
+            if not compose:
+                return
             self._compose_frame(
                 chrome_stable=not bool(
                     selected_effects
@@ -5682,7 +5655,6 @@ class MatplotlibRenderer:
         guard written against it would never fire.
         """
 
-        self._materialize_prepared_curve()
         return axes is not None and axes.get_visible() and (
             self._series_focus_allowed(id(axes))
         )
@@ -5692,6 +5664,14 @@ class MatplotlibRenderer:
 
         if isinstance(self.spec, FacetGridPlot) and self._facet_focus_index is None:
             return False
+        prepared = self._artists.get("curve:prepared")
+        if isinstance(prepared, dict) and "series" in prepared:
+            series = prepared["series"]
+            return (
+                axis_id == id(self.primary_axes)
+                and len(series) == 1
+                and len(series[0]) > 1
+            )
         return len(self._series_lines.get(axis_id, ())) > 1
 
     def series_focus(self, action: str, axes: Any | None, px: float, py: float, *,
@@ -6794,6 +6774,39 @@ class MatplotlibRenderer:
         box = axes.bbox
         box_w = max(int(round(float(box.width))), 8)
         box_h = max(int(round(float(box.height))), 8)
+        from matplotlib.font_manager import FontProperties
+        from matplotlib.ticker import MaxNLocator
+        import matplotlib as _matplotlib
+
+        # Plan the actual labels once, before fitting the scene. Their room
+        # is measured in canvas pixels, not a percentage of the bar geometry.
+        z_ticks = tuple(
+            (float(tick), f"{tick:g}")
+            for tick in MaxNLocator(nbins=2).tick_values(low, high)
+            if low - 1e-12 <= tick <= high + 1e-12
+        )
+        left, right, bottom, top = extent
+        ny, nx = heights.shape
+        coordinate_ticks = []
+        for count, start, end in ((nx, left, right), (ny, top, bottom)):
+            indices = sorted({int(round(v)) for v in np.linspace(0, count - 1, min(count, 6))})
+            coordinate_ticks.append(tuple(
+                (index, f"{start + (index + 0.5) * (end - start) / count:g}")
+                for index in indices
+            ))
+        font = FontProperties(family=self.style.fonts.sans_serif, size=self.style.fonts.tick_pt)
+        text_renderer = axes.figure.canvas.get_renderer()
+        metrics = [text_renderer.get_text_width_height_descent(label, font, False)
+                   for group in (z_ticks, *coordinate_ticks) for _, label in group]
+        line_height = text_renderer.get_text_width_height_descent("lp", font, False)[1]
+        dots_per_point = float(axes.figure.dpi) / 72.0
+        tick_length_px = float(_matplotlib.rcParams["xtick.major.size"]) * dots_per_point
+        label_gap_px = tick_length_px + float(_matplotlib.rcParams["xtick.major.pad"]) * dots_per_point
+        inset_px = (
+            max(metric[0] for metric in metrics) + label_gap_px,
+            max(line_height, *(metric[1] for metric in metrics)) + label_gap_px,
+        )
+        tick_layout = (z_ticks, *coordinate_ticks, font, tick_length_px, label_gap_px)
         # One resolution.  A drag used to render at half and the release
         # repaint at full, so the picture changed character under the hand
         # -- and it bought 11 ms of a 93 ms move once the rims became
@@ -6819,7 +6832,6 @@ class MatplotlibRenderer:
             1.0, float(np.hypot(heights.shape[1], heights.shape[0]))
         )
         supersample = max(1, min(4, screen_taps, int(bar_px) or 1))
-        import matplotlib as _matplotlib
         from matplotlib.colors import to_rgb
 
         rim_rgb = tuple(float(v) for v in to_rgb(policy.height_bars_axis_color))
@@ -6840,6 +6852,7 @@ class MatplotlibRenderer:
             zero_rgb=zero_rgb,
             width=box_w,
             height=box_h,
+            inset_px=inset_px,
             supersample=supersample,
             render_cache=self._artists.setdefault("image:h3d_cache", {}),
             side_shades=policy.height_bars_side_shades,
@@ -6898,7 +6911,7 @@ class MatplotlibRenderer:
         self._home_limits[id(axes)] = ((0.0, 1.0), (0.0, 1.0))
         self._set_xlim(axes, 0.0, 1.0)
         self._set_ylim(axes, 0.0, 1.0)
-        self._update_height_bars_chrome(axes, key, scene, box_w, box_h)
+        self._update_height_bars_chrome(axes, key, scene, box_w, box_h, tick_layout)
         return image, cmap
 
     def _height_bars_fraction(
@@ -6961,7 +6974,8 @@ class MatplotlibRenderer:
         }
 
     def _update_height_bars_chrome(
-        self, axes: Any, key: str, scene: Any, box_w: int, box_h: int
+        self, axes: Any, key: str, scene: Any, box_w: int, box_h: int,
+        tick_layout: tuple,
     ) -> None:
         """The scene's axis chrome: z ticks/labels and base coordinate labels.
 
@@ -6970,8 +6984,6 @@ class MatplotlibRenderer:
         typography as every 2D panel.
         """
 
-        from matplotlib.ticker import MaxNLocator
-
         chrome_key = f"{key}:h3d_chrome"
         artists = self._artists.get(chrome_key)
         if artists is None:
@@ -6979,6 +6991,7 @@ class MatplotlibRenderer:
             self._artists[chrome_key] = artists
 
         import matplotlib as _matplotlib
+        z_ticks, x_ticks, y_ticks, font, tick_length_px, label_gap_px = tick_layout
 
         segments_x: list[float] = []
         segments_y: list[float] = []
@@ -6995,14 +7008,6 @@ class MatplotlibRenderer:
         # The SAME chrome metrics every 2D panel runs under: tick length,
         # tick pad and line width come from the style's rc context, in
         # points, converted at this figure's dpi.
-        dots_per_point = float(axes.figure.dpi) / 72.0
-        tick_length_px = (
-            float(_matplotlib.rcParams["xtick.major.size"]) * dots_per_point
-        )
-        tick_pad_px = (
-            float(_matplotlib.rcParams["xtick.major.pad"]) * dots_per_point
-        )
-        label_gap_px = tick_length_px + tick_pad_px
         # Point metrics are CANVAS pixels; fractions must divide by the
         # canvas box, not the scene raster.
 
@@ -7030,12 +7035,7 @@ class MatplotlibRenderer:
         # nbins=2 is the reference's tick sparseness: a [0, 1] scale
         # reads 0 / 0.5 / 1 exactly as the MATLAB panels do (nbins=3
         # picked a 0.4 step whose top tick fell outside the range).
-        z_ticks = [
-            float(tick)
-            for tick in MaxNLocator(nbins=2).tick_values(z_low, z_high)
-            if z_low - 1e-12 <= tick <= z_high + 1e-12
-        ]
-        for tick in z_ticks:
+        for tick, _label in z_ticks:
             grid_edges.append(
                 ((near_a, far_b, tick), (far_a, far_b, tick))
             )
@@ -7080,7 +7080,7 @@ class MatplotlibRenderer:
         axis_edges.append(
             ((left_a, left_b, wall_low), (left_a, left_b, wall_high))
         )
-        for tick in z_ticks:
+        for tick, label in z_ticks:
             # The z ticks leave along c -> d, the ruling: the direction the
             # cd axis departs the scene in, carried up the vertical axis.
             (ux, uy), f = outward(
@@ -7088,25 +7088,17 @@ class MatplotlibRenderer:
                 scene.project(near_a, near_b, float(tick)),
             )
             add_tick(
-                (left_a, left_b, float(tick)), (ux, uy), f, f"{tick:g}"
+                (left_a, left_b, float(tick)), (ux, uy), f, label
             )
 
         # ---- base coordinate labels along the two front edges
         data_frame = getattr(self, "_height_bars_data_frame", None)
         if data_frame is not None:
-            (left, right, bottom, top_c), source_nx, source_ny = data_frame
             # Labels hug the lowest geometry actually drawn: the floor at
             # z=0, or the deepest hanging bar.  Anchoring at the colour
             # limit floated them mid-air below the scene whenever the
             # limits reach below the data.
             base_value = getattr(self, "_height_bars_floor_value", 0.0)
-
-            def picks(count: int) -> list[int]:
-                shown = min(count, 6)
-                return sorted({
-                    int(round(v))
-                    for v in np.linspace(0, count - 1, shown)
-                })
 
             # The two front floor edges are the scene's x/y axis lines,
             # carrying the tick marks exactly as a 2D panel's spines do.
@@ -7117,7 +7109,7 @@ class MatplotlibRenderer:
                 ((near_a, near_b, base_value), (near_a, far_b, base_value))
             )
 
-            def a_tick(centre: float, value: float) -> None:
+            def a_tick(centre: float, label: str) -> None:
                 grid_edges.append(
                     ((centre, far_b, wall_low), (centre, far_b, wall_high))
                 )
@@ -7129,10 +7121,10 @@ class MatplotlibRenderer:
                     scene.project(centre, near_b + in_b, base_value),
                 )
                 add_tick(
-                    (centre, near_b, base_value), (ux, uy), f, f"{value:g}"
+                    (centre, near_b, base_value), (ux, uy), f, label
                 )
 
-            def b_tick(centre: float, value: float) -> None:
+            def b_tick(centre: float, label: str) -> None:
                 grid_edges.append(
                     ((far_a, centre, wall_low), (far_a, centre, wall_high))
                 )
@@ -7144,40 +7136,37 @@ class MatplotlibRenderer:
                     scene.project(near_a + in_a, centre, base_value),
                 )
                 add_tick(
-                    (near_a, centre, base_value), (ux, uy), f, f"{value:g}"
+                    (near_a, centre, base_value), (ux, uy), f, label
                 )
 
             # The rot90 fold hands each source axis to a DIFFERENT front
             # edge on odd quadrants: whichever folded coordinate a source
             # cell varies along decides which edge carries its labels.
             even = scene.quadrant % 2 == 0
-            x_picks = picks(source_nx)
-            y_picks = picks(source_ny)
-            trimmed = y_picks if even else x_picks
-            if len(trimmed) > 2:
+            if even and len(y_ticks) > 2:
                 # The shared far corner keeps one label, not two.
-                del trimmed[-1]
-            # ``picks`` returns SOURCE indices -- the very indices the
+                y_ticks = y_ticks[:-1]
+            elif not even and len(x_ticks) > 2:
+                x_ticks = x_ticks[:-1]
+            # The tick table carries SOURCE indices -- the very indices the
             # label value is computed from -- and fold_cell speaks source
             # indices too (it does the pooling divide itself).  Multiplying
             # by the pool factor first cancelled that divide, so on any
             # grid dense enough to pool (the large scans pooling exists
             # for) every tick but the first stood at up to pool_y times
             # its own position, and the far ones fell off the scene.
-            for column in x_picks:
+            for column, label in x_ticks:
                 a, b = scene.fold_cell(0, column)
-                value = left + (column + 0.5) * (right - left) / source_nx
                 if even:
-                    a_tick(a + 0.5, value)
+                    a_tick(a + 0.5, label)
                 else:
-                    b_tick(b + 0.5, value)
-            for row in y_picks:
+                    b_tick(b + 0.5, label)
+            for row, label in y_ticks:
                 a, b = scene.fold_cell(row, 0)
-                value = top_c + (row + 0.5) * (bottom - top_c) / source_ny
                 if even:
-                    b_tick(b + 0.5, value)
+                    b_tick(b + 0.5, label)
                 else:
-                    a_tick(a + 0.5, value)
+                    a_tick(a + 0.5, label)
 
         # ---- what the scene does not hide of its own ticks
         if ticks:
@@ -7262,7 +7251,7 @@ class MatplotlibRenderer:
                 text = axes.text(
                     0, 0, "",
                     transform=axes.transAxes,
-                    fontsize=self.style.fonts.tick_pt,
+                    fontproperties=font,
                     zorder=6,
                 )
                 texts.append(text)
@@ -10811,7 +10800,7 @@ class MatplotlibRenderer:
             self.draw()
         return self._rgba_buffer()
 
-    def save(self, path: str | Path | BytesIO, *, dpi: float | None = None, **kwargs: Any) -> None:
+    def save(self, path: str | Path | BytesIO, *, dpi: float | None = None, restore_display: bool = True, **kwargs: Any) -> None:
         locked, hover = self._series_locked, self._series_hover
         try:
             self._series_locked = self._series_hover = None
@@ -10843,7 +10832,8 @@ class MatplotlibRenderer:
         finally:
             self._series_locked, self._series_hover = locked, hover
             self._apply_series_focus()
-            self.draw()
+            if restore_display:
+                self.draw()
 
 
 __all__ = ["MatplotlibRenderer", "RenderFrame"]

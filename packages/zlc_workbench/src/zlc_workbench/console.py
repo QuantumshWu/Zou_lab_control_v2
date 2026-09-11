@@ -312,6 +312,8 @@ class PanelBinding:
     selection_revision: int = 0
     configuration: Any = None
     editor_configuration: Any = None
+    #: An exact initial request, cleared when the real first host accepts it.
+    initial_recipe: tuple[PanelState, Mapping[str, object], object] | None = None
 
     @property
     def accepted_surface(self) -> object | None:
@@ -456,7 +458,7 @@ class ConsolePresenter:
         session: object,
         view: object,
         *,
-        make_monitor_host: Callable[[object, PanelState], Any],
+        make_monitor_host: Callable[..., Any],
         make_editor_host: Callable[[object, PanelState], Any],
         build_figure_host: Callable[..., object] | None = None,
         save_figure_artifact: Callable[..., object],
@@ -536,6 +538,8 @@ class ConsolePresenter:
         # the offer really changed.
         self._offered_groups: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = ()
         self._offered_overlays: tuple = ()
+        self._catalog_projection: tuple | None = None
+        self._signal_choice_context: tuple | None = None
         self._shown_panel_publishers: tuple[
             tuple[str, tuple[tuple[str, str, str], ...]], ...
         ] = ()
@@ -829,6 +833,7 @@ class ConsolePresenter:
         fit: Mapping[str, Any] | None = None,
         overlay_signal: str = "",
         initial_publication: object | None = None,
+        initial_recipe: Mapping[str, object] | None = None,
     ) -> PanelBinding:
         """Show a signal under one complete ``kind + cell_kind`` identity.
 
@@ -858,6 +863,8 @@ class ConsolePresenter:
         ):
             publication = front.publication(signal_name)
         exact_value = self._publication_value(publication, signal_name)
+        if initial_recipe is not None and publication is None:
+            raise ValueError("an initial plot recipe requires its exact publication")
 
         wanted = str(kind)
         if not wanted:
@@ -898,6 +905,8 @@ class ConsolePresenter:
             parameter_surface=self._unbound_panel_parameters(state),
         )
         parameter_snapshot = initial
+        if initial_recipe is not None:
+            binding.initial_recipe = (state, dict(initial_recipe), publication.event_ref)
         if exact_value is not None and publication is not None:
             parameter_snapshot = (
                 getattr(exact_value, "canonical_schema", None)
@@ -923,16 +932,16 @@ class ConsolePresenter:
         self._refresh_console_projection()
         return binding
 
-    def restore_panel_description(
+    def _restore_initial_panel_description(
         self,
-        panel_id: str,
+        binding: PanelBinding,
         description: object,
-    ) -> PanelBinding:
-        """Seed one shared Panel from an accepted archived Figure recipe."""
+        plot_input: object,
+    ) -> PanelState:
+        """Read initial interactions from the host's real accepted subject."""
 
         from zlc_plot.selectors import CrosshairPoint
 
-        binding = self.panels[str(panel_id)]
         accepted_kind, accepted_cell_kind = task_console_panel_identity_for_spec(
             description.spec
         )
@@ -961,10 +970,8 @@ class ConsolePresenter:
             classifier_thresholds=tuple(description.classifier_thresholds),
             focused_cell=description.facet_focus,
         )
-        binding.state = state
-        current = self.session.signal_plane.freeze().value(state.signal)
-        snapshot = None if current is None else current.snapshot
-        if description.viewport is not None and snapshot is not None:
+        snapshot = getattr(plot_input, "snapshot", plot_input)
+        if description.viewport is not None:
             binding.interaction_viewport = (
                 self._panel_view_identity(
                     binding,
@@ -973,11 +980,7 @@ class ConsolePresenter:
                 ),
                 description.viewport,
             )
-        if binding.port is not None:
-            binding.port.retarget(state)
-        self._publish_panel_state(binding)
-        self.board.owe_presentation((binding.panel_id,))
-        return binding
+        return state
 
     @staticmethod
     def _publication_value(publication: object | None, signal: str) -> object | None:
@@ -996,12 +999,13 @@ class ConsolePresenter:
         selected = binding.state if target is None else target
         port: PlotPanelPort | None = None
 
-        def presented(surface: object) -> None:
+        def presented(surface: object) -> object | None:
             # A retarget is rendered and accepted before it replaces the live
             # port.  Ignore that one candidate callback; once this exact port
             # is installed, every later accepted surface advances the card.
             if binding.port is port:
-                self._panel_presented(binding, surface)
+                return self._panel_presented(binding, surface)
+            return None
 
         port = PlotPanelPort(
             binding.panel_id,
@@ -1444,7 +1448,7 @@ class ConsolePresenter:
         self,
         binding: PanelBinding,
         surface: object,
-    ) -> None:
+    ) -> object | None:
         """Track the exact live event separately from Panel Edit's frozen one."""
 
         publication = surface.publication
@@ -1460,10 +1464,14 @@ class ConsolePresenter:
                 surface.host,
                 description.display_state,
             )
-            accepted_state = panel_state_from_description(
-                binding.state,
-                description,
-            )
+            initial = binding.initial_recipe
+            if (initial is not None
+                    and _same_panel_plot_target(initial[0], surface.target)
+                    and publication.event_ref == initial[2]):
+                accepted_state = self._restore_initial_panel_description(binding, description, plot_input)
+            else:
+                accepted_state = panel_state_from_description(binding.state, description)
+            binding.initial_recipe = None
             state_changed = accepted_state != binding.state
             binding.state = accepted_state
             frozen_target = binding.state
@@ -1504,12 +1512,22 @@ class ConsolePresenter:
                 for name, value in accepted_shape.items()
             )
         interaction_changed = self._normalize_panel_interaction(binding)
+        if describes_current_target:
+            frozen_target = binding.state
+            if binding.state.selector and binding.bridge is not None:
+                binding.bridge.commit_selection(
+                    replace(
+                        panel_selection_from_document(binding.state.selector),
+                        revision=binding.selection_revision,
+                    ),
+                    source_publication=publication,
+                )
         if binding.frozen_data is not None and not binding.refresh_requested:
             if state_changed or ui_changed or shape_changed or interaction_changed:
                 self._publish_panel_state(binding, data_shape=accepted_shape)
             else:
                 self._refresh_panel_snapshot_status(binding)
-            return
+            return frozen_target if describes_current_target else None
         binding.refresh_requested = False
         try:
             self._freeze_panel(
@@ -1530,6 +1548,7 @@ class ConsolePresenter:
                 severity="error",
             )
         self._publish_panel_state(binding)
+        return frozen_target if describes_current_target else None
 
     # ------------------------------------------------------------ presentation
     #
@@ -2259,9 +2278,23 @@ class ConsolePresenter:
                 focused_cell=current.focused_cell,
             )
 
-        host = self._make_monitor_host(plot_input, state)
+        initial = binding.initial_recipe
+        first = (initial is not None and _same_panel_plot_target(initial[0], state)
+                 and publication.event_ref == initial[2])
+        options = {}
+        if first:
+            recipe = initial[1]
+            options = {
+                "initial_spec": recipe["spec"],
+                "initial_configuration": {
+                    name: recipe[name] for name in (
+                        "viewport", "classifier_thresholds", "facet_focus", "selectors", "fit",
+                    )
+                },
+            }
+        host = self._make_monitor_host(plot_input, state, **options)
         try:
-            operation = self._match_host_to_panel(
+            operation = host.describe_display() if first else self._match_host_to_panel(
                 binding,
                 host,
                 state=state,
@@ -2343,6 +2376,31 @@ class ConsolePresenter:
             overlay_current=binding.state.overlay_signal,
         )
 
+    def _signal_projection(self) -> tuple:
+        """Project the Plane's directory only when its owned facts change."""
+
+        descriptions = self.session.signal_plane.describe_signals()
+        cached = self._catalog_projection
+        if cached is None or cached[0] is not descriptions:
+            families = {}
+            for description in descriptions:
+                if description.contract_id != IMAGE_POINT_OVERLAY_CONTRACT:
+                    continue
+                publication = self.session.signal_plane.latest_publication(description.name)
+                if publication is not None:
+                    try:
+                        families[description.name] = self._publication_families(publication)
+                    except (LookupError, RuntimeError, ValueError):
+                        continue
+            cached = (
+                descriptions,
+                {item.name: item for item in descriptions},
+                project_signals(descriptions),
+                families,
+            )
+            self._catalog_projection = cached
+        return cached
+
     def signal_groups(self) -> tuple[tuple[str, tuple[tuple[str, str], ...]], ...]:
         """Every signal a card may be pointed at, gathered under its producer.
 
@@ -2372,13 +2430,10 @@ class ConsolePresenter:
         signal: str,
         publication: object | None,
     ) -> tuple[tuple[str, tuple[tuple[str, str], ...]], ...]:
-        """Site-status judgements describing the SAME SHOT as this image.
+        """Site-status offers from the same generation family as this image.
 
-        Chosen by CONTRACT, so the console never learns a signal name.  Same
-        shot, not same publication: occupancy reads the camera and publishes
-        its own event, so requiring one publication hid the only pairing an
-        operator ever wants -- a frame annotated with the judgement of that
-        frame.
+        This is menu eligibility, not permission to mix actual frames.
+        Same-shot admission remains with Plane/Surface at presentation time.
         """
 
         selected = str(signal).strip()
@@ -2390,27 +2445,13 @@ class ConsolePresenter:
         except (LookupError, RuntimeError, ValueError):
             return ()
 
-        contracts = dict(self._external_signal_contracts())
-        for binding in self.logic.values():
-            for output in self._logic_outputs(binding):
-                contracts[stable_signal_key(binding.node_id, output.name)] = str(
-                    output.contract_id
-                )
+        _directory, descriptions, rows, families = self._signal_projection()
         groups: dict[str, list[tuple[str, str]]] = {}
-        for name, label, _state, producer, _derived in self.offered_signals(
-            include_shown=True
-        ):
-            if contracts.get(name) != IMAGE_POINT_OVERLAY_CONTRACT:
+        for row in rows:
+            if descriptions[row.name].contract_id != IMAGE_POINT_OVERLAY_CONTRACT:
                 continue
-            candidate = self.session.signal_plane.latest_publication(name)
-            if candidate is None:
-                continue
-            try:
-                candidate_families = self._publication_families(candidate)
-            except (LookupError, RuntimeError, ValueError):
-                continue
-            if candidate_families == primary_families:
-                groups.setdefault(producer or "signals", []).append((label, name))
+            if families.get(row.name) == primary_families:
+                groups.setdefault(row.producer or "signals", []).append((row.label, row.name))
         return tuple(
             (producer, tuple(leaves)) for producer, leaves in groups.items()
         )
@@ -2422,10 +2463,15 @@ class ConsolePresenter:
         beat is a combo that closes itself while an operator is reading it.
         """
 
-        descriptions = {
-            item.name: item for item in self.session.signal_plane.describe_signals()
-        }
-        projected = project_signals(self.session.signal_plane)
+        directory, descriptions, projected, _families = self._signal_projection()
+        wiring = tuple(
+            (panel_id, binding.state.signal, binding.state.overlay_signal,
+             binding.port is None, binding.vacancy)
+            for panel_id, binding in self.panels.items()
+        )
+        previous = self._signal_choice_context
+        if previous is not None and previous[0] is directory and previous[1] == wiring:
+            return
         panel_publishers = tuple(
             (
                 panel_id,
@@ -2452,14 +2498,17 @@ class ConsolePresenter:
         # and restart the groups settled back to equal while occupancy's
         # eligibility flipped, and the one refresh that would have offered
         # it never ran: the overlay combobox stayed empty for good.
-        front = self.session.signal_plane.freeze()
+        publications = {
+            binding.state.signal: self.session.signal_plane.latest_publication(binding.state.signal)
+            for binding in self.panels.values() if binding.state.signal
+        }
         overlay_offers = tuple(
             (
                 panel_id,
                 self.overlay_signal_groups(
                     binding.state.signal,
                     (
-                        front.publication(binding.state.signal)
+                        publications.get(binding.state.signal)
                         if binding.state.signal
                         else None
                     ),
@@ -2467,41 +2516,25 @@ class ConsolePresenter:
             )
             for panel_id, binding in self.panels.items()
         )
-        if (
-            groups == self._offered_groups
-            and overlay_offers == self._offered_overlays
-        ):
-            return
-        self._offered_groups = groups
-        self._offered_overlays = overlay_offers
-        for panel_id in self.view.panel_ids():
-            binding = self.panels.get(panel_id)
-            self.view.set_panel_signal_choices(
-                panel_id,
-                groups,
-                current=binding.state.signal if binding is not None else "",
-                overlay_groups=self.overlay_signal_groups(
-                    binding.state.signal if binding is not None else "",
-                    (
-                        front.publication(binding.state.signal)
-                        if binding is not None and binding.state.signal
-                        else None
+        offers_changed = groups != self._offered_groups or overlay_offers != self._offered_overlays
+        if offers_changed:
+            overlays_by_panel = dict(overlay_offers)
+            for panel_id in self.view.panel_ids():
+                binding = self.panels.get(panel_id)
+                self.view.set_panel_signal_choices(
+                    panel_id,
+                    groups,
+                    current=binding.state.signal if binding is not None else "",
+                    overlay_groups=overlays_by_panel.get(panel_id, ()),
+                    overlay_current=(
+                        binding.state.overlay_signal if binding is not None else ""
                     ),
-                ),
-                overlay_current=(
-                    binding.state.overlay_signal if binding is not None else ""
-                ),
-            )
-        for panel_id, binding in tuple(self.panels.items()):
-            if (
-                binding.port is None
-                and binding.state.signal
-                and not binding.vacancy
-                and front.value(binding.state.signal) is not None
-            ):
-                self.update_panel_state(panel_id, {"signal": binding.state.signal})
+                )
+            self._offered_groups = groups
+            self._offered_overlays = overlay_offers
         for node_id in tuple(self.logic):
             self.refresh_logic_editor(node_id)
+        self._signal_choice_context = (directory, wiring)
 
     def edit_panel(self, panel_id: str) -> bool:
         """Open or focus the panel's non-modal Edit projection.
@@ -3570,6 +3603,12 @@ class ConsolePresenter:
         """Project metadata and selectors only after each initial render finished."""
 
         for binding in tuple(self.panels.values()):
+            if (binding.port is None and binding.configuration is None
+                    and binding.state.signal and not binding.vacancy
+                    and self.session.signal_plane.latest_publication(binding.state.signal) is not None):
+                # Source arrival starts the ordinary mount here, never while
+                # projecting menus (which update_panel_state also projects).
+                self.update_panel_state(binding.panel_id, {"signal": binding.state.signal})
             host = binding.host
             configuration_entry = binding.configuration
             if (
@@ -4768,14 +4807,12 @@ class ConsolePresenter:
         of the choices it offers.
         """
 
-        rows = project_signals(
-            self.session.signal_plane,
-            shown={binding.signal for binding in self.panels.values()},
-        )
+        rows = self._signal_projection()[2]
+        shown = {binding.signal for binding in self.panels.values()}
         return tuple(
             (row.name, row.label, row.state, row.producer, row.derived_from)
             for row in rows
-            if include_shown or not row.shown
+            if include_shown or row.name not in shown
         )
 
     def _remove_panel_now(self, panel_id: str) -> bool:
@@ -5008,16 +5045,7 @@ class ConsolePresenter:
         )
         serial += len(resolved.panels)
 
-        def schema_for(signal: str):
-            value = front.value(signal)
-            if value is None:
-                return None
-            return (
-                getattr(value, "canonical_schema", None)
-                or value.snapshot.block.schema
-            )
-
-        loaded = load_layout(resolved, panel_ids=fresh_ids, schema_for=schema_for)
+        loaded = load_layout(resolved, panel_ids=fresh_ids)
         panels: list[PanelBinding] = []
         missing: list[str] = []
         incompatible: list[tuple[str, str]] = []
@@ -5107,6 +5135,7 @@ class ConsolePresenter:
         self._panel_serial = candidate.panel_serial
         self._offered_groups = ()
         self._offered_overlays = ()
+        self._signal_choice_context = None
         self._shown_console_summary = None
 
         for binding in candidate.logic:
@@ -5354,6 +5383,8 @@ class ConsolePresenter:
         if binding.accepted_display is None:
             return
         initial_selection = panel_selection_from_document(binding.state.selector)
+        if initial_selection is not None:
+            initial_selection = replace(initial_selection, revision=binding.selection_revision)
         initial_publication = None
         bridge_selection = initial_selection
         if bridge_selection is not None:
@@ -7638,10 +7669,7 @@ class ConsolePresenter:
             )
         )
         if descriptions is None:
-            descriptions = {
-                item.name: item
-                for item in self.session.signal_plane.describe_signals()
-            }
+            descriptions = self._signal_projection()[1]
         names = tuple(dict.fromkeys(direct_names))
         published = []
         for name in names:
@@ -7764,14 +7792,14 @@ class ConsolePresenter:
         every one of them the same question about a plane that had not moved.
         """
 
-        descriptions = tuple(self.session.signal_plane.describe_signals())
+        descriptions, _by_name, projected, _families = self._signal_projection()
         options = self._source_options(
             descriptor, consumer_node_id, descriptions=descriptions
         )
         compatible = set(options)
         rows = tuple(
             row
-            for row in project_signals(self.session.signal_plane)
+            for row in projected
             if row.name in compatible
         )
         labels = {row.name: row.label for row in rows}
@@ -8198,10 +8226,7 @@ class ConsolePresenter:
         if self._panel_only:
             self._refresh_signal_choices()
             return
-        descriptions = {
-            item.name: item
-            for item in self.session.signal_plane.describe_signals()
-        }
+        descriptions = self._signal_projection()[1]
         for binding in tuple(self.logic.values()):
             self._show_logic(binding, descriptions)
         self._project_task_takeover()

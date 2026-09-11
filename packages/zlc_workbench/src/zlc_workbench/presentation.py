@@ -114,7 +114,7 @@ class PlotPanelPort:
         ) = None,
         accept_host: Callable[[object], None] | None = None,
         retire_host: Callable[[object], None] | None = None,
-        on_presented: Callable[[object], None] | None = None,
+        on_presented: Callable[[object], object | None] | None = None,
         present: Callable[[object, object], bool] | None = None,
         invalidate: Callable[[str], None] | None = None,
     ) -> None:
@@ -602,7 +602,7 @@ class PlotPanelPort:
 
         if notify_presented is not None:
             if self._on_presented is not None:
-                self._on_presented(notify_presented)
+                self._notify_presented(notify_presented)
             return None
         assert serial is not None and host_token is not None
 
@@ -1070,7 +1070,7 @@ class PlotPanelPort:
                 callback_error = error
         if self._on_presented is not None:
             try:
-                self._on_presented(accepted)
+                self._notify_presented(accepted)
             except BaseException as error:
                 callback_error = error
         if callback_error is not None:
@@ -1159,10 +1159,29 @@ class PlotPanelPort:
         if advanced and self._on_presented is not None:
             # The screen changed what it shows, exactly as an accept does.
             try:
-                self._on_presented(accepted)
+                accepted = self._notify_presented(accepted)
             except BaseException as error:
                 with self._state_lock:
                     self.last_error = error
+        return accepted
+
+    def _notify_presented(self, accepted: _Prepared) -> _Prepared:
+        """Adopt the owner's normalized target in this same acceptance.
+
+        A newer user request is not replaced by the description of an older
+        picture. Only the surface being reported and its unchanged request
+        can adopt the target returned by their presentation callback.
+        """
+
+        target = self._on_presented(accepted)
+        if target is None:
+            return accepted
+        with self._state_lock:
+            if self._surface is accepted:
+                self._surface = replace(accepted, target=target)
+                if self._projection_target is accepted.target:
+                    self._projection_target = target
+                return self._surface
         return accepted
 
     @classmethod

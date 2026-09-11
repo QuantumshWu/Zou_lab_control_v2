@@ -567,6 +567,7 @@ class FitSessionMixin:
         cancelled: Callable[[], bool] | None,
         request_generation: int | None = None,
         selector_kind: SelectorKind | None = None,
+        facet_indices: Sequence[int] | None = None,
     ) -> tuple[FacetFitBatchResult, tuple[FitSelection | None, ...]]:
         """Fit every projected cell and construct overlays through one path.
 
@@ -585,6 +586,10 @@ class FitSessionMixin:
         cells = tuple(getattr(payload, "cells", ()))
         if not cells:
             raise ValueError("facet grid has no cells to fit")
+        requested = (
+            frozenset(range(len(cells)))
+            if facet_indices is None else frozenset(facet_indices)
+        )
         # Warm starts are resolved on the calling thread so cell workers never
         # touch session locks (the classifier solves under the session lock).
         warm_starts = tuple(
@@ -606,6 +611,10 @@ class FitSessionMixin:
             selection_failures = [str(error) or type(error).__name__] * len(cells)
         else:
             for index in range(len(cells)):
+                if index not in requested:
+                    selections.append(None)
+                    selection_failures.append("fit not requested")
+                    continue
                 try:
                     selections.append(select_cell(index))
                     selection_failures.append(None)
@@ -1240,26 +1249,9 @@ class FitSessionMixin:
         delta_center = float(components["delta_center"])
         sigma_b = float(components["sigma_B"])
         ratio = float(components["ratio"])
-        x = np.asarray(selection.coordinates[0], dtype=float).reshape(-1)
         observed = np.asarray(selection.observations, dtype=float).reshape(-1)
-        # The pair is authored in shape; only its area is the histogram's,
-        # and that is what the counts say it is.
-        shape = (
-            (1.0 - ratio)
-            / (sigma * math.sqrt(2.0 * math.pi))
-            * np.exp(-0.5 * ((x - center) / sigma) ** 2)
-            + ratio
-            / (sigma_b * math.sqrt(2.0 * math.pi))
-            * np.exp(-0.5 * ((x - center - delta_center) / sigma_b) ** 2)
-        )
-        denominator = float(np.dot(shape, shape))
-        amplitude = (
-            max(0.0, float(np.dot(shape, observed)) / denominator)
-            if denominator > 0.0
-            else 0.0
-        )
         values = {
-            "amplitude": amplitude,
+            "amplitude": 1.0,
             "center": center,
             "sigma": sigma,
             "delta_center": delta_center,
@@ -1272,7 +1264,16 @@ class FitSessionMixin:
         parameters = np.asarray(
             [values[name] for name in model.parameter_names], dtype=float
         )
-        fitted = model.evaluate(selection.coordinates, parameters).reshape(-1)
+        # The caller owns the Gaussian shape; only its area is the current
+        # histogram's. Use the model's one evaluator, not a second PDF here.
+        shape = model.evaluate(selection.coordinates, parameters).reshape(-1)
+        denominator = float(np.dot(shape, shape))
+        amplitude = (
+            max(0.0, float(np.dot(shape, observed)) / denominator)
+            if denominator > 0.0 else 0.0
+        )
+        parameters[model.parameter_index("amplitude")] = amplitude
+        fitted = shape * amplitude
         residuals = observed - fitted
         count = len(parameters)
         result = FitResult(
@@ -1295,54 +1296,13 @@ class FitSessionMixin:
             self._projected._fit_parameter_units(model)
         )
 
-    def _apply_authored_classifier_components(
-        self,
-        model: FitModelSpec,
-        results: Sequence[FitResult | None],
-        overlays: Sequence[FitOverlay],
-    ) -> tuple[tuple[FitResult | None, ...], tuple[FitOverlay, ...]]:
-        components = self._classifier_gaussian_components
-        if len(components) != len(results):
-            components = (None,) * len(results)
-            self._classifier_gaussian_components = components
-        selected_results = list(results)
-        selected_overlays = list(overlays)
-        facet_grid = isinstance(self._spec, FacetGridPlot)
-        for index, authored in enumerate(components):
-            if authored is None:
-                continue
-            if not authored:
-                selected_results[index] = None
-                selected_overlays[index] = FitOverlay(
-                    facet_index=index if facet_grid else None
-                )
-                continue
-            selection = self._projected.fit_selection(
-                model,
-                facet_index=index if facet_grid else None,
-            )
-            result = self._authored_classifier_result(
-                model, selection, authored
-            )
-            selected_results[index] = result
-            selected_overlays[index] = self._projected._make_fit_overlay(
-                result, selection
-            )
-        return tuple(selected_results), tuple(selected_overlays)
-
-    def _refresh_threshold_classifier(self) -> None:
-        """Solve the Distribution classifier without touching accepted fit state.
-
-        The solve is synchronous: the threshold overlay publishes in the same
-        front as the data it classifies.  Steady live revisions stay cheap
-        because every cell warm-starts from its previous solution (through the
-        stable classifier request generation) and cells solve in parallel.
-        """
+    def _refresh_threshold_classifier(self, *, indices: set[int] | None = None) -> None:
+        """Present caller-owned models; solve only distributions that need one."""
 
         if not self._threshold_classifier_enabled():
             self._classifier_results = ()
             self._classifier_overlays = ()
-            self._classifier_thresholds = ()
+            self._classifier_thresholds = {}
             self._classifier_gaussian_components = ()
             try:
                 self._selector_controller.remove(SelectorKind.THRESHOLD)
@@ -1352,7 +1312,25 @@ class FitSessionMixin:
 
         projection = self._projected
         model = self._resolve_fit_model("bimodal_gaussian")
-        if isinstance(self._spec, FacetGridPlot):
+        facet_grid = isinstance(self._spec, FacetGridPlot)
+        count = len(projection.payload.cells) if facet_grid else 1
+        components = self._classifier_gaussian_components
+        if len(components) != count:
+            components = self._classifier_gaussian_components = (None,) * count
+            self._classifier_thresholds = {}
+        if len(self._classifier_results) != count:
+            indices = None
+            results = [None] * count
+            overlays = [
+                FitOverlay(facet_index=index if facet_grid else None)
+                for index in range(count)
+            ]
+        else:
+            results = list(self._classifier_results)
+            overlays = list(self._classifier_overlays)
+        requested = set(range(count)) if indices is None else indices
+        automatic = tuple(index for index in requested if components[index] is None)
+        if automatic and facet_grid:
             batch, _selections = self._fit_facet_batch(
                 projection,
                 model,
@@ -1361,10 +1339,12 @@ class FitSessionMixin:
                 options=None,
                 cancelled=None,
                 request_generation=_CLASSIFIER_REQUEST_GENERATION,
+                facet_indices=automatic,
             )
-            results = batch.results
-            overlays = batch.overlays
-        else:
+            for index in automatic:
+                results[index] = batch.results[index]
+                overlays[index] = batch.overlays[index]
+        elif automatic:
             selection = projection.fit_selection(model)
             warm = self._fit_warm_start(
                 model,
@@ -1383,26 +1363,26 @@ class FitSessionMixin:
                 request_generation=_CLASSIFIER_REQUEST_GENERATION,
                 warm_start=warm,
             )
-            results = (result,)
-            overlays = (projection._make_fit_overlay(result, selection),)
+            results[0] = result
+            overlays[0] = projection._make_fit_overlay(result, selection)
+        for index in requested:
+            authored = components[index]
+            if authored is None:
+                continue
+            facet_index = index if facet_grid else None
+            if authored:
+                selection = projection.fit_selection(model, facet_index=facet_index)
+                result = self._authored_classifier_result(model, selection, authored)
+                results[index] = result
+                overlays[index] = projection._make_fit_overlay(result, selection)
+            else:
+                results[index] = None
+                overlays[index] = FitOverlay(facet_index=facet_index)
         self._remember_classifier_warm_starts(model, results)
-        results, overlays = self._apply_authored_classifier_components(
-            model, results, overlays
-        )
-        self._classifier_results = results
-        self._classifier_overlays = overlays
-        # ``_classifier_thresholds`` holds what somebody CHOSE, and nothing
-        # else; the fit's own optimum is derived from the results above
-        # whenever it is needed.  They shared this one slot, so every new
-        # revision recomputed over the operator's dragged threshold and threw
-        # it away without saying anything -- measured as a threshold dragged
-        # to 150 reading 175.5 one shot later.
-        chosen = self._classifier_thresholds
-        # A different number of distributions is a different set of them, and
-        # a decision about the old ones says nothing about these.
-        self._classifier_thresholds = (
-            chosen if len(chosen) == len(results) else (None,) * len(results)
-        )
+        self._classifier_results = tuple(results)
+        self._classifier_overlays = tuple(overlays)
+        # Only authored choices are stored. A missing key asks for the fit's
+        # optimum; an explicit None asks for no threshold at this distribution.
         try:
             self._selector_controller.remove(SelectorKind.THRESHOLD)
         except KeyError:
@@ -1447,10 +1427,10 @@ class FitSessionMixin:
         if not results:
             return ()
         return tuple(
-            self._fitted_classifier_threshold(result) if chosen is None else chosen
-            for chosen, result in zip(
-                self._classifier_thresholds, results, strict=True
-            )
+            self._classifier_thresholds[index]
+            if index in self._classifier_thresholds
+            else self._fitted_classifier_threshold(result)
+            for index, result in enumerate(results)
         )
 
     def _classifier_thresholds_for_render(self) -> tuple[float | None, ...]:
@@ -1533,16 +1513,18 @@ class FitSessionMixin:
         thresholds: object,
         *,
         discard_unmatched: bool = False,
+        refresh: bool = False,
     ) -> None:
         if not self._threshold_classifier_enabled():
             raise RuntimeError("threshold classifier is not enabled")
         selected = normalize_classifier_threshold_targets(thresholds)
         expected: dict[tuple[object, ...], int] = {}
         facet_grid = isinstance(self._spec, FacetGridPlot)
-        for index in range(len(self._classifier_results)):
+        count = len(self._payload.cells) if facet_grid else 1
+        for index in range(count):
             target = self._classifier_threshold_target_for_index(
                 index if facet_grid else None,
-                0.0,
+                None,
             )
             identity = _classifier_threshold_key(target)
             if identity in expected:
@@ -1550,10 +1532,8 @@ class FitSessionMixin:
                     "classifier distributions are not uniquely coordinate-addressed"
                 )
             expected[identity] = index
-        normalized: list[float | None] = [None] * len(self._classifier_results)
-        components: list[Mapping[str, float] | None] = [
-            None
-        ] * len(self._classifier_results)
+        normalized: dict[int, float | None] = {}
+        components: list[Mapping[str, float] | None] = [None] * count
         for target in selected:
             identity = _classifier_threshold_key(target)
             index = expected.get(identity)
@@ -1563,7 +1543,9 @@ class FitSessionMixin:
                 raise ValueError(
                     "classifier threshold target does not match a current distribution"
                 )
-            normalized[index] = float(target["value"])
+            normalized[index] = (
+                None if target["value"] is None else float(target["value"])
+            )
             if "gaussian_components" in target:
                 gaussian = target["gaussian_components"]
                 components[index] = (
@@ -1572,28 +1554,17 @@ class FitSessionMixin:
                     else MappingProxyType(dict(gaussian))
                 )
         previous_components = self._classifier_gaussian_components
-        self._classifier_thresholds = tuple(normalized)
+        self._classifier_thresholds = normalized
         self._classifier_gaussian_components = tuple(components)
-        if any(
-            current is None and previous is not None
-            for current, previous in zip(
-                self._classifier_gaussian_components,
-                previous_components
-                if len(previous_components) == len(components)
-                else (None,) * len(components),
-                strict=True,
-            )
-        ):
+        if refresh or len(self._classifier_results) != count:
             self._refresh_threshold_classifier()
         else:
-            model = self._resolve_fit_model("bimodal_gaussian")
-            results, overlays = self._apply_authored_classifier_components(
-                model,
-                self._classifier_results,
-                self._classifier_overlays,
-            )
-            self._classifier_results = results
-            self._classifier_overlays = overlays
+            changed = {
+                index for index, current in enumerate(components)
+                if index >= len(previous_components) or current != previous_components[index]
+            }
+            if changed:
+                self._refresh_threshold_classifier(indices=changed)
         try:
             self._selector_controller.remove(SelectorKind.THRESHOLD)
         except KeyError:
@@ -1607,12 +1578,11 @@ class FitSessionMixin:
         facet_grid = isinstance(self._spec, FacetGridPlot)
         targets: list[Mapping[str, object]] = []
         values = (
-            self._classifier_thresholds_settled()
-            if settled
-            else self._classifier_thresholds
+            enumerate(self._classifier_thresholds_settled())
+            if settled else sorted(self._classifier_thresholds.items())
         )
-        for index, value in enumerate(values):
-            if value is None:
+        for index, value in values:
+            if value is None and index not in self._classifier_thresholds:
                 continue
             target = dict(
                 self._classifier_threshold_target_for_index(

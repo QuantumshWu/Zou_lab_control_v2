@@ -90,7 +90,7 @@ def test_two_datasets_that_both_state_errors_keep_their_own() -> None:
     exactly this, never saw the name because nothing claimed it.
     """
 
-    _info, members = _round_trip(
+    _info, members, _datasets = _round_trip(
         {"first": _snapshot("first", 1.0), "second": _snapshot("second", 10.0)}
     )
     assert "first.sigma" in members and "second.sigma" in members
@@ -98,7 +98,7 @@ def test_two_datasets_that_both_state_errors_keep_their_own() -> None:
 
 
 def test_a_dataset_that_states_no_error_writes_no_member_for_one() -> None:
-    _info, members = _round_trip({"data": _snapshot("data", 1.0, sigma=False)})
+    _info, members, _datasets = _round_trip({"data": _snapshot("data", 1.0, sigma=False)})
     assert not [name for name in members if name.endswith(".sigma")]
 
 
@@ -111,7 +111,7 @@ def test_every_member_a_dataset_writes_lives_under_its_own_name() -> None:
     after next, without anyone editing anything.
     """
 
-    _info, members = _round_trip(
+    _info, members, _datasets = _round_trip(
         {"alpha": _snapshot("alpha", 1.0), "beta": _snapshot("beta", 2.0)}
     )
     for member in members:

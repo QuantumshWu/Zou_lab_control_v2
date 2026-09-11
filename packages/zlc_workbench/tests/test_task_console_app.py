@@ -959,8 +959,10 @@ view._view.kind_combo.setCurrentIndex(task_index)
 QtTest.QTest.mouseClick(view._view.add_panel_button, QtCore.Qt.LeftButton)
 application.processEvents()
 editor = view._logic_editors['calibration']
+editor.form.widget_for('pulse_template').setText('imaging_template.json')
 editor.form.widget_for('repeats').setValue(200)
 application.processEvents()
+until(editor.start_button.isEnabled)
 
 QtTest.QTest.mouseClick(editor.start_button, QtCore.Qt.LeftButton)
 application.processEvents()
@@ -1208,12 +1210,13 @@ try:
     assert again.session is again.devices.presenter.active_session
     assert again.session is not first_session
     assert again.device_controls == {}
-    again.devices.close()
+    devices_again = again.devices
+    devices_again.close()
     closed_again = QtCore.QDeadlineTimer(5000)
-    while again.devices.is_visible() and not closed_again.hasExpired():
+    while devices_again.is_visible() and not closed_again.hasExpired():
         application.processEvents()
         QtTest.QTest.qWait(10)
-    assert not again.devices.is_visible()
+    assert not devices_again.is_visible()
     assert again.session is None
     assert again.console is None
     assert again.device_controls == {}
@@ -1755,6 +1758,11 @@ def test_a_policy_change_projects_each_control_once(workspace) -> None:
     tune was cancelled by the new policy and the status it shows changed."""
 
     flow = _bare_flow(workspace)
+    from types import SimpleNamespace
+    from zlc_workbench.device_use import DeviceClaim, DeviceUseCoordinator
+
+    coordinator = DeviceUseCoordinator()
+    flow.session = SimpleNamespace(device_use=coordinator)
     control = _RecordingControl()
     flow._device_control_models["rf"] = {"control": control, "spec": object(), "status": {}}
     computed: list[str] = []
@@ -1762,15 +1770,23 @@ def test_a_policy_change_projects_each_control_once(workspace) -> None:
     def projection(key: str) -> dict:
         computed.append(key)
         editable = len(computed) > 1
-        return {"fields": {"frequency": {"editable": editable}}}
+        return {"fields": {"frequency": {"editable": editable}},
+                "owner_revision": coordinator.owner_revision(key)}
 
     flow._device_control_projection = projection
     flow._refresh_device_control_policies()
     assert computed == ["rf"]
     assert len(control.projections) == 1
     assert control.projections[0] is not None
+    flow._refresh_device_control_policies()
+    assert computed == ["rf"]
+    assert len(control.projections) == 1
 
     computed.clear()
+    lease = coordinator.prepare_logic(
+        object(), "scan", (DeviceClaim("rf", "rf", object(), ("frequency",)),),
+        stop=lambda _reason: None, superseded=lambda: None,
+    ).commit()
     flow._device_tune_pending[("rf", "frequency")] = 1.0e9
     flow._refresh_device_control_policies()
     assert computed == ["rf", "rf"]
@@ -1779,3 +1795,4 @@ def test_a_policy_change_projects_each_control_once(workspace) -> None:
         "frequency": ("Cancelled because field ownership changed", "warning")
     }
     assert len(control.projections) == 2
+    lease.release()

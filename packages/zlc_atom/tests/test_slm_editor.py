@@ -2003,6 +2003,11 @@ def test_the_status_poll_never_waits_behind_a_remote_apply(
         # delivery -- held, so only the delivery can say what the board is.
         control._adopt_device_command()
         assert not control._device_diverged
+        control._render_device_state()
+        compared = control._phase_match
+        assert compared is not None
+        control._render_device_state()
+        assert control._phase_match is compared, 'an unchanged poll compared the phase again'
         control._device_poll.stop()
         _pump(app, lambda: not control._device_state_in_flight)
         reads: list[int] = []

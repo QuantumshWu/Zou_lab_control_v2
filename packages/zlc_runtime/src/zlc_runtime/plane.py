@@ -31,18 +31,24 @@ from weakref import WeakKeyDictionary
 
 import numpy as np
 from zlc_data import (
+    INVALID,
     PRIMARY_INDEX,
     AxisSpec,
     BlockId,
+    CellValidity,
+    DatasetComponentValidity,
     DatasetRevision,
     DatasetSchema,
     DomainSpec,
     IndexedWindow,
+    Invalid,
     OwnedSnapshot,
     StreamGenerationId,
+    Valid,
     owned_snapshot_from_arrays,
 )
 from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
+from zlc_data.value import dataset_validity_storage, compact_dataset_validity
 from .dataset_output import (
     DatasetOutputDeclaration,
     LiveDatasetOutput,
@@ -84,13 +90,26 @@ class RetainedPublicationExpired(CancelledError):
 
 
 def _run_records_equal(
-    left: Mapping[str, object],
-    right: Mapping[str, object],
+    left: object,
+    right: object,
 ) -> bool:
-    try:
-        return dict(left) == dict(right)
-    except (TypeError, ValueError):
-        return False
+    """Compare authored and owned trees without freezing a second copy."""
+
+    if left is right:
+        return True
+    if isinstance(left, Mapping) and isinstance(right, Mapping):
+        return left.keys() == right.keys() and all(
+            _run_records_equal(value, right[key]) for key, value in left.items()
+        )
+    if isinstance(left, (list, tuple)) and isinstance(right, (list, tuple)):
+        return len(left) == len(right) and all(
+            _run_records_equal(a, b) for a, b in zip(left, right)
+        )
+    return (
+        type(left) in (str, bool, int, float, type(None))
+        and type(right) in (str, bool, int, float, type(None))
+        and left == right
+    )
 
 
 def _freeze_run_record_value(value: object, path: str) -> object:
@@ -179,6 +198,32 @@ class SignalValue:
     event_record: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        self._validate_fields()
+        object.__setattr__(self, "run_record", _freeze_run_record(self.run_record))
+        object.__setattr__(self, "event_record", _freeze_run_record(self.event_record))
+
+    @classmethod
+    def _from_owned_records(
+        cls, name: str, snapshot: OwnedSnapshot,
+        coverage: DatasetCoverage | MonitorCoverage | None, *,
+        run_record: Mapping[str, object], event_record: Mapping[str, object],
+        canonical_schema: DatasetSchema | None = None,
+        cell_origin: tuple[int, int] | None = None, primary_index: int | None = None,
+    ) -> "SignalValue":
+        """Plane-only construction from its already frozen bundle records."""
+
+        result = object.__new__(cls)
+        for key, value in (
+            ("name", name), ("snapshot", snapshot), ("coverage", coverage),
+            ("run_record", run_record), ("event_record", event_record),
+            ("canonical_schema", canonical_schema), ("cell_origin", cell_origin),
+            ("primary_index", primary_index),
+        ):
+            object.__setattr__(result, key, value)
+        result._validate_fields()
+        return result
+
+    def _validate_fields(self) -> None:
         name = canonical_text(self.name, "signal name")
         if not isinstance(self.snapshot, OwnedSnapshot):
             raise TypeError("signal snapshot must be OwnedSnapshot")
@@ -208,10 +253,6 @@ class SignalValue:
         ):
             raise TypeError("signal primary_index must be a non-negative integer or None")
         object.__setattr__(self, "name", name)
-        object.__setattr__(self, "run_record", _freeze_run_record(self.run_record))
-        object.__setattr__(
-            self, "event_record", _freeze_run_record(self.event_record)
-        )
 
     # The block is the value; these read off it rather than copying, so two
     # consumers describing "the same signal" cannot describe different data.
@@ -272,7 +313,6 @@ class SignalDescription:
     contract_id: str | None
     live: bool
     source_name: str | None
-    revision: int
     schema: DatasetSchema | None
 
     @property
@@ -379,6 +419,29 @@ class SignalPublication:
     event_record: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        self._validate_fields()
+        object.__setattr__(self, "run_record", _freeze_run_record(self.run_record))
+        object.__setattr__(self, "event_record", _freeze_run_record(self.event_record))
+
+    @classmethod
+    def _from_owned_records(
+        cls, event_ref: EventRef, signals: Mapping[str, SignalValue], _issuer: object, *,
+        run_record: Mapping[str, object], event_record: Mapping[str, object],
+        direct_parent_refs: tuple[EventRef, ...] = (),
+    ) -> "SignalPublication":
+        """Plane-only construction; every sibling shares these owned records."""
+
+        result = object.__new__(cls)
+        for key, value in (
+            ("event_ref", event_ref), ("signals", signals), ("_issuer", _issuer),
+            ("direct_parent_refs", direct_parent_refs),
+            ("run_record", run_record), ("event_record", event_record),
+        ):
+            object.__setattr__(result, key, value)
+        result._validate_fields()
+        return result
+
+    def _validate_fields(self) -> None:
         if not isinstance(self.event_ref, EventRef):
             raise TypeError("signal publication event_ref must be EventRef")
         signals = dict(self.signals)
@@ -400,8 +463,8 @@ class SignalPublication:
             raise TypeError("signal publication run_record must be a mapping")
         if not isinstance(self.event_record, Mapping):
             raise TypeError("signal publication event_record must be a mapping")
-        run_record = _freeze_run_record(self.run_record)
-        event_record = _freeze_run_record(self.event_record)
+        run_record = self.run_record
+        event_record = self.event_record
         if any(
             not _run_records_equal(value.run_record, run_record)
             for value in signals.values()
@@ -418,8 +481,6 @@ class SignalPublication:
             )
         object.__setattr__(self, "signals", MappingProxyType(signals))
         object.__setattr__(self, "direct_parent_refs", parents)
-        object.__setattr__(self, "run_record", run_record)
-        object.__setattr__(self, "event_record", event_record)
 
     def value(self, name: str) -> SignalValue | None:
         return self.signals.get(str(name))
@@ -636,19 +697,6 @@ def _restamp_snapshot(
     return OwnedSnapshot(block.ref(generation), block)
 
 
-_INDEXED_HISTORY_BYTES = 64 << 20
-_INDEXED_HISTORY_COUNT = 100_000
-
-
-def _indexed_capacity(snapshot: OwnedSnapshot) -> int:
-    values = snapshot.block.values
-    bytes_per_index = max(1, int(values.nbytes) + int(values.size))
-    return max(
-        1,
-        min(_INDEXED_HISTORY_COUNT, _INDEXED_HISTORY_BYTES // bytes_per_index),
-    )
-
-
 def _indexed_schema(
     event_schema: DatasetSchema,
     indices: tuple[int, ...],
@@ -718,14 +766,12 @@ def _materialize_indexed_dataset(
     basis = materialization.basis
     if basis is None:
         values, validity, sigma = _assembled_planes(
-            schema.physical_shape,
-            event_schema.value_schema.dtype,
+            schema,
             placements(),
         )
     else:
         values, validity, sigma = _rolled_planes(
-            schema.physical_shape,
-            event_schema.value_schema.dtype,
+            schema,
             basis,
             start,
             point_count,
@@ -745,14 +791,13 @@ def _materialize_indexed_dataset(
 
 
 def _rolled_planes(
-    shape: tuple[int, ...],
-    dtype: object,
+    schema: DatasetSchema,
     basis: _MaterializedIndexed,
     start: int,
     point_count: int,
     trailing: tuple[slice, ...],
     placements: tuple,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+) -> tuple[np.ndarray, Valid | Invalid | CellValidity | DatasetComponentValidity, np.ndarray | None]:
     """Planes for a window that only ROLLED FORWARD from a known basis.
 
     The overlapping indices are copied out of the basis planes in one
@@ -766,10 +811,11 @@ def _rolled_planes(
     keep = (basis.latest - start + 1) * point_count
     source = (slice(None), slice((start - basis.start) * point_count, (start - basis.start) * point_count + keep), *trailing)
     target = (slice(None), slice(0, keep), *trailing)
-    values = np.zeros(shape, dtype=dtype)
-    validity = np.zeros(shape, dtype=np.bool_)
+    shape = schema.physical_shape
+    values = np.zeros(shape, dtype=schema.value_schema.dtype)
+    validity = np.zeros(dataset_validity_storage(INVALID, schema).shape, dtype=np.bool_)
     values[target] = block.values[source]
-    validity[target] = basis.snapshot.expanded_validity()[source]
+    validity[target[:2]] = dataset_validity_storage(block.validity, block.schema)[source[:2]]
     sigma: np.ndarray | None = None
     if block.sigma is not None or any(
         snapshot.block.sigma is not None for _place, snapshot in placements
@@ -779,18 +825,17 @@ def _rolled_planes(
             sigma[target] = block.sigma[source]
     for place, snapshot in placements:
         values[place] = snapshot.block.values
-        validity[place] = snapshot.expanded_validity()
+        validity[place[:2]] = dataset_validity_storage(snapshot.block.validity, snapshot.block.schema)
         if snapshot.block.sigma is not None:
             sigma[place] = snapshot.block.sigma
-    return values, validity, sigma
+    return values, compact_dataset_validity(validity, schema), sigma
 
 
 def _extended_planes(
-    shape: tuple[int, ...],
-    dtype: object,
+    schema: DatasetSchema,
     basis: OwnedSnapshot,
     placements: tuple,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+) -> tuple[np.ndarray, Valid | Invalid | CellValidity | DatasetComponentValidity, np.ndarray | None]:
     """Planes for a dataset that only GAINED cells since a known basis.
 
     Re-placing every chunk rebuilt an answer that could not have changed:
@@ -805,26 +850,26 @@ def _extended_planes(
     """
 
     block = basis.block
-    values = np.array(block.values, dtype=dtype)
-    validity = np.array(basis.expanded_validity(), dtype=np.bool_)
+    shape = schema.physical_shape
+    values = np.array(block.values, dtype=schema.value_schema.dtype)
+    validity = np.array(dataset_validity_storage(block.validity, block.schema), dtype=np.bool_)
     sigma = None if block.sigma is None else np.array(block.sigma)
     for target, snapshot in placements:
         values[target] = snapshot.block.values
-        validity[target] = snapshot.expanded_validity()
+        validity[target[:2]] = dataset_validity_storage(snapshot.block.validity, snapshot.block.schema)
         stated = snapshot.block.sigma
         if stated is None:
             continue
         if sigma is None:
             sigma = np.full(shape, np.nan, dtype=np.float64)
         sigma[target] = stated
-    return values, validity, sigma
+    return values, compact_dataset_validity(validity, schema), sigma
 
 
 def _assembled_planes(
-    shape: tuple[int, ...],
-    dtype: object,
+    schema: DatasetSchema,
     placements: object,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+) -> tuple[np.ndarray, Valid | Invalid | CellValidity | DatasetComponentValidity, np.ndarray | None]:
     """Allocate and fill EVERY plane of a rebuilt dataset, as a set.
 
     Both materializers wrote out "allocate values, allocate validity, fill
@@ -839,19 +884,20 @@ def _assembled_planes(
     nobody stated is unknown, and zero would read as certainty.
     """
 
-    values = np.zeros(shape, dtype=dtype)
-    validity = np.zeros(shape, dtype=np.bool_)
+    shape = schema.physical_shape
+    values = np.zeros(shape, dtype=schema.value_schema.dtype)
+    validity = np.zeros(dataset_validity_storage(INVALID, schema).shape, dtype=np.bool_)
     sigma: np.ndarray | None = None
     for target, snapshot in placements:
         values[target] = snapshot.block.values
-        validity[target] = snapshot.expanded_validity()
+        validity[target[:2]] = dataset_validity_storage(snapshot.block.validity, snapshot.block.schema)
         stated = snapshot.block.sigma
         if stated is None:
             continue
         if sigma is None:
             sigma = np.full(shape, np.nan, dtype=np.float64)
         sigma[target] = stated
-    return values, validity, sigma
+    return values, compact_dataset_validity(validity, schema), sigma
 
 
 @dataclass(slots=True)
@@ -878,14 +924,6 @@ class _MaterializedIndexed:
     sequence: int
     snapshot: OwnedSnapshot
     record: Mapping[str, object]
-    #: The UNFROZEN merged event record.  Kept because the merge is
-    #: re-entrant while the window only GROWS -- merging this with each
-    #: appended event's record gives the same result as merging every
-    #: retained record from scratch -- while the frozen form is not a
-    #: valid merge input.  Once the window has rolled, rows this record
-    #: describes are gone, and the next record is merged from the
-    #: retained rows instead.
-    raw_record: Mapping[str, object]
     start: int
     latest: int
 
@@ -918,7 +956,6 @@ class _IndexedHistory:
 
     events: dict[int, tuple[int, OwnedSnapshot, Mapping[str, object]]]
     first_index: int
-    capacity: int
     materialized: _MaterializedIndexed | None = None
     replaced_at: int = -1
 
@@ -941,7 +978,6 @@ class _IndexedMaterialization:
     latest: int
     basis: _MaterializedIndexed | None
     record: Mapping[str, object]
-    raw_record: Mapping[str, object]
     #: The history's ``replaced_at`` at this materialization: the last
     #: sequence at which a retained shot was overwritten.  Stamped on the
     #: block so a consumer carrying work from an earlier revision knows
@@ -986,7 +1022,6 @@ def _update_indexed_history(
             _IndexedHistory(
                 {primary_index: (sequence, event, selected_record)},
                 primary_index,
-                min(demand, _indexed_capacity(event)),
             ),
             True,
         )
@@ -1006,10 +1041,9 @@ def _update_indexed_history(
             event,
             selected_record,
         )
-    history.capacity = min(demand, _indexed_capacity(event))
     previous_first = history.first_index
     history.first_index = max(
-        previous_first, primary_index - history.capacity + 1
+        previous_first, primary_index - demand + 1
     )
     while events and next(iter(events)) < history.first_index:
         events.pop(next(iter(events)))
@@ -1035,8 +1069,9 @@ def _indexed_materialization_input(
             "publication precedes retained indexed history"
         )
     events = history.events
-    capacity = history.capacity if window is None else min(history.capacity, window)
-    start = max(history.first_index, primary_index - capacity + 1)
+    start = history.first_index
+    if window is not None:
+        start = max(start, primary_index - window + 1)
     if first_index is not None:
         start = max(start, first_index)
     if start > primary_index:
@@ -1093,14 +1128,14 @@ def _indexed_materialization_input(
     if basis is not None and start == basis.start:
         # Pure growth: every row the basis described is still here, so
         # its record plus the appended ones is the window's record.
-        raw_record = _merge_event_records((basis.raw_record, *appended_records))
+        merged_record = _merge_event_records((basis.record, *appended_records))
     else:
         # The window ROLLED (or there is no basis): rows left it, and a
         # union of epoch ranges cannot subtract what they contributed.
         # The record is the union of the rows actually retained, however
         # the values themselves were assembled -- otherwise how often a
         # panel was read decided which device epochs its picture claimed.
-        raw_record = _merge_event_records(window_records)
+        merged_record = _merge_event_records(window_records)
     schema = None
     if (
         cached is not None
@@ -1121,8 +1156,7 @@ def _indexed_materialization_input(
         start,
         primary_index,
         basis,
-        _freeze_run_record(raw_record),
-        raw_record,
+        _freeze_run_record(merged_record),
         stable_since=history.replaced_at,
     )
 
@@ -1173,7 +1207,6 @@ class _GenerationState:
     materialized: dict[str, _MaterializedFinite] = field(default_factory=dict)
     indexed_history: dict[str, _IndexedHistory] = field(default_factory=dict)
     committed_run_record: Mapping[str, object] | None = None
-    sealing: bool = False
     processor_cleanup_complete: bool = False
     publication_stream_cleaned: bool = False
 
@@ -1497,6 +1530,7 @@ class SignalDataPlane:
             tuple[str, ...],
         ] = WeakKeyDictionary()
         self._states: dict[str, _GenerationState] = {}
+        self._signal_descriptions: tuple[SignalDescription, ...] | None = None
         self._starting: set[str] = set()
         self._indexed_history_demands: dict[str, dict[object, int]] = {}
         self._front_signals: frozenset[str] = frozenset()
@@ -1766,6 +1800,7 @@ class SignalDataPlane:
         ):
             return
         self._states.pop(state.owner_id)
+        self._signal_descriptions = None
         state.retired = True
         state.publication = None
 
@@ -1861,6 +1896,7 @@ class SignalDataPlane:
             ),
         )
         self._states[identity] = state
+        self._signal_descriptions = None
         self._membership_changed = True
         return state
 
@@ -1990,13 +2026,13 @@ class SignalDataPlane:
         basis = state.materialized.get(signal_name)
         if basis is not None and basis.sequence >= sequence:
             basis = None
-        floor = -1 if basis is None else basis.sequence
+        floor = 0 if basis is None else basis.sequence
+        # Every successful atomic commit appends exactly one entry per finite
+        # output; sequence 1 occupies slot 0.  The owned list is already the
+        # index, so finding the new suffix needs no scan of earlier shots.
         chunks = tuple(
             (value.snapshot, origin)
-            for commit_sequence, value, origin, _parents in state.commit_chunks.get(
-                signal_name, ()
-            )
-            if floor < commit_sequence <= sequence
+            for _sequence, value, origin, _parents in state.commit_chunks[signal_name][floor:sequence]
         )
         return schema, state.generation, chunks, basis
 
@@ -2026,14 +2062,12 @@ class SignalDataPlane:
 
         if basis is None:
             values, validity, sigma = _assembled_planes(
-                schema.physical_shape,
-                schema.value_schema.dtype,
+                schema,
                 placements(),
             )
         else:
             values, validity, sigma = _extended_planes(
-                schema.physical_shape,
-                schema.value_schema.dtype,
+                schema,
                 basis.snapshot,
                 tuple(placements()),
             )
@@ -2160,7 +2194,6 @@ class SignalDataPlane:
                 )
             if (
                 state.terminal
-                or state.sealing
                 or state.node is not node
                 or state.kind != kind
             ):
@@ -2234,13 +2267,13 @@ class SignalDataPlane:
                 and state.exact_outputs != exact_qualified
             ):
                 raise ValueError("live extent kinds changed inside one generation")
-            run_record = _freeze_run_record(_shared_run_record(outputs))
-            event_record = _freeze_run_record(_shared_event_record(outputs))
-            if (
-                state.committed_run_record is not None
-                and not _run_records_equal(state.committed_run_record, run_record)
-            ):
+            authored_record = _shared_run_record(outputs)
+            run_record = state.committed_run_record
+            if run_record is None:
+                run_record = _freeze_run_record(authored_record)
+            elif not _run_records_equal(run_record, authored_record):
                 raise ValueError("run_record changed inside one generation")
+            event_record = _freeze_run_record(_shared_event_record(outputs))
 
             canonical_schemas = dict(state.canonical_schemas)
             occupied_cells = dict(state.occupied_cells)
@@ -2294,6 +2327,8 @@ class SignalDataPlane:
                         raise ValueError(
                             "canonical Dataset schema changed inside one generation"
                         )
+                    if previous_schema is not None:
+                        schema = previous_schema
                     canonical_schemas[qualified] = schema
                     origins[qualified] = origin
                     mask = occupied_cells.get(qualified)
@@ -2337,12 +2372,12 @@ class SignalDataPlane:
                             "finite coverage does not equal committed cell extent"
                     )
                     occupied_updates.append((qualified, mask, target))
-                values[qualified] = SignalValue(
+                values[qualified] = SignalValue._from_owned_records(
                     name=qualified,
                     snapshot=event,
                     coverage=output.coverage,
                     run_record=run_record,
-                    canonical_schema=output.canonical_schema,
+                    canonical_schema=canonical_schemas.get(qualified),
                     cell_origin=output.cell_origin,
                     primary_index=primary_index,
                     event_record=event_record,
@@ -2476,12 +2511,8 @@ class SignalDataPlane:
             elif state.exact_outputs is None or name not in state.exact_outputs:
                 return value.snapshot, value.event_record
             else:
-                if not any(
-                    commit_sequence == sequence
-                    for commit_sequence, _value, _origin, _parents in state.commit_chunks[
-                        name
-                    ]
-                ):
+                committed = state.commit_chunks[name]
+                if not 1 <= sequence <= len(committed):
                     raise ValueError("publication is not a canonical commit of this run")
                 cached = state.materialized.get(name)
                 if cached is not None and cached.sequence == sequence:
@@ -2491,15 +2522,15 @@ class SignalDataPlane:
                     name,
                     sequence,
                 )
-                materialized_record = _freeze_run_record(
-                    _merge_event_records(
-                        value.event_record
-                        for commit_sequence, value, _origin, _parents in (
-                            state.commit_chunks[name]
-                        )
-                        if commit_sequence <= sequence
-                    )
+                basis = finite_input[-1]
+                floor = 0 if basis is None else basis.sequence
+                records = (
+                    value.event_record for _sequence, value, _origin, _parents
+                    in committed[floor:sequence]
                 )
+                materialized_record = _freeze_run_record(_merge_event_records(
+                    records if basis is None else (basis.record, *records)
+                ))
         snapshot = (
             _materialize_indexed_dataset(indexed_input)
             if indexed_input is not None
@@ -2524,7 +2555,6 @@ class SignalDataPlane:
                                 sequence,
                                 snapshot,
                                 materialized_record,
-                                indexed_input.raw_record,
                                 indexed_input.start,
                                 indexed_input.latest,
                             )
@@ -2552,125 +2582,37 @@ class SignalDataPlane:
         return self.current_dataset_view(signal_name, publication)[0]
 
     def seal_committed(self, node: object, *, cut_short: bool = False) -> bool:
-        """Seal one commit generation without publishing a duplicate full event."""
+        """End production while retaining its chunks and exact publications.
+
+        Sealing does not consume the data.  A complete canonical buffer is
+        built only when a reader actually asks for it, through the same
+        current_dataset_view path used while the run is live.
+        """
 
         if type(cut_short) is not bool:
             raise TypeError("cut_short must be bool")
         owner_id = _node_instance_id(node)
-        producer = None
-        state = None
-        sequence = 0
-        retain_latest_monitor = False
-        materialized: dict[str, _MaterializedFinite] = {}
-        pending: dict[
-            str,
-            tuple[
-                tuple[
-                    DatasetSchema,
-                    StreamGenerationId,
-                    tuple[tuple[OwnedSnapshot, tuple[int, int]], ...],
-                    _MaterializedFinite | None,
-                ],
-                Mapping[str, object],
-            ],
-        ] = {}
         with self._lock:
             state = self._states.get(owner_id)
             if (
                 state is None
                 or state.retired
                 or state.terminal
-                or state.sealing
                 or state.node is not node
                 or state.exact_outputs is None
                 or state.publication is None
             ):
                 raise RuntimeError("committed generation is not active")
-            exact_outputs = state.exact_outputs
-            if exact_outputs:
-                if not cut_short and not all(
-                    isinstance(state.publication.signals[name].coverage, DatasetCoverage)
-                    and state.publication.signals[name].coverage.complete
-                    for name in exact_outputs
-                ):
-                    raise RuntimeError(
-                        "exact committed terminal Dataset coverage is incomplete"
-                    )
-                state.sealing = True
-                sequence = state.publication.event_ref.sequence
-                for name in exact_outputs:
-                    cached = state.materialized.get(name)
-                    if cached is not None and cached.sequence == sequence:
-                        materialized[name] = cached
-                    else:
-                        pending[name] = (
-                            self._materialization_input_locked(
-                                state,
-                                name,
-                                sequence,
-                            ),
-                            _freeze_run_record(
-                                _merge_event_records(
-                                    value.event_record
-                                    for commit_sequence, value, _origin, _parents in (
-                                        state.commit_chunks[name]
-                                    )
-                                    if commit_sequence <= sequence
-                                )
-                            ),
-                        )
-            else:
-                producer = state.publication_stream
-                # STOP ENDS PRODUCTION, NEVER THE DATA.  The last monitor
-                # publication is the picture still on every panel that
-                # views this signal, and an operator draws ROIs and arms
-                # fits on a stopped run exactly as on a live one -- the
-                # bridge's terminal route exists for that.  Retention was
-                # once a per-origin opt-in flag, so the policy lived in N
-                # node declarations and the origins that forgot it (the
-                # camera, the calibration preview) had their whole derived
-                # chain answer "this run is no longer held" the moment a
-                # measurement stopped.  The plane is the one owner of
-                # retention; the next begin_generation replaces the state,
-                # so the cost is bounded at one publication per signal.
-                retain_latest_monitor = bool(state.publication.signals) and all(
-                    isinstance(value.coverage, MonitorCoverage)
-                    for value in state.publication.signals.values()
-                )
-                if retain_latest_monitor:
-                    state.terminal = True
-                    self._membership_changed = True
-        if not exact_outputs:
-            if producer is not None:
-                producer.finish()
-            if retain_latest_monitor:
-                return True
-            self._withdraw_owner(owner_id)
-            return False
-        try:
-            for name, (inputs, event_record) in pending.items():
-                materialized[name] = _MaterializedFinite(
-                    sequence,
-                    self._materialize_dataset(name, sequence, *inputs),
-                    event_record,
-                )
-        except BaseException:
-            with self._lock:
-                if self._states.get(owner_id) is state:
-                    state.sealing = False
-            raise
-        with self._lock:
-            if (
-                self._states.get(owner_id) is not state
-                or state.retired
-                or not state.sealing
-                or state.publication is None
-                or state.publication.event_ref.sequence != sequence
+            if not cut_short and not all(
+                state.publication.signals[name].coverage.complete
+                for name in state.exact_outputs
             ):
-                raise RuntimeError("committed generation changed while sealing")
-            state.materialized = materialized
-            state.sealing = False
+                raise RuntimeError("exact committed terminal Dataset coverage is incomplete")
+            # Both Monitor and finite results stay available after Stop.
+            # Terminal state prevents all further commits under this lock;
+            # neither a second sealing state nor a full buffer is needed.
             state.terminal = True
+            self._signal_descriptions = None
             self._membership_changed = True
             producer = state.publication_stream
         if producer is not None:
@@ -2738,6 +2680,8 @@ class SignalDataPlane:
         """
 
         with self._lock:
+            if self._signal_descriptions is not None:
+                return self._signal_descriptions
             states = tuple(self._states.values())
             descriptions = []
             for state in states:
@@ -2762,11 +2706,6 @@ class SignalDataPlane:
                             ),
                             live=not state.terminal,
                             source_name=state.source_name,
-                            revision=(
-                                0
-                                if state.publication is None
-                                else state.publication.event_ref.sequence
-                            ),
                             schema=(
                                 None
                                 if value is None
@@ -2778,7 +2717,8 @@ class SignalDataPlane:
                             ),
                         )
                     )
-        return tuple(sorted(descriptions, key=lambda item: item.name))
+            self._signal_descriptions = tuple(sorted(descriptions, key=lambda item: item.name))
+            return self._signal_descriptions
 
     def is_generation_live(self, signal_name: str) -> bool:
         """Whether more publications can still arrive for one signal.
@@ -2936,7 +2876,7 @@ class SignalDataPlane:
                                     "exact sibling outputs have different parents"
                                 )
                             signals[name] = sibling
-                        publication = SignalPublication(
+                        publication = SignalPublication._from_owned_records(
                             EventRef(
                                 StreamId(state.owner_id),
                                 state.generation,
@@ -3341,7 +3281,7 @@ class SignalDataPlane:
             self._slim_publication_locked(parent, parent_signal, memo)
             for parent in parents
         )
-        slim = SignalPublication(
+        slim = SignalPublication._from_owned_records(
             publication.event_ref,
             values,
             self._publication_issuer,
@@ -3468,7 +3408,7 @@ class SignalDataPlane:
             frozen,
             terminal=False,
         )
-        publication = SignalPublication(
+        publication = SignalPublication._from_owned_records(
             event_ref=EventRef(
                 StreamId(state.owner_id),
                 state.generation,
@@ -3481,6 +3421,15 @@ class SignalDataPlane:
             event_record=event_record,
         )
         self._publication_parents[publication] = parents
+        previous = state.publication
+        if previous is None or frozenset(
+            (ref.stream_id, ref.generation) for ref in previous.direct_parent_refs
+        ) != frozenset(
+            (parent.event_ref.stream_id, parent.event_ref.generation) for parent in parents
+        ):
+            # Data revisions do not change the directory. A first value or a
+            # changed causal generation can change shape/overlay eligibility.
+            self._signal_descriptions = None
         state.next_sequence += 1
         state.publication = publication
         state.terminal = False
@@ -3521,6 +3470,7 @@ class SignalDataPlane:
                 self._starting.update(owners)
                 for state in states:
                     state.retired = True
+                self._signal_descriptions = None
                 self._membership_changed = True
                 return states
             self._generation_ready.wait()
@@ -3642,6 +3592,7 @@ class SignalDataPlane:
             self._closed = True
             states = tuple(self._states.values())
             self._states.clear()
+            self._signal_descriptions = None
             self._indexed_history_demands.clear()
             self._front_signals = frozenset()
             self._front = SignalFront({})

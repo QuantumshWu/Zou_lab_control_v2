@@ -29,7 +29,7 @@ from zlc_atom.nodes.calibration.task import (
     read_saved_samples,
 )
 from zlc_data import StreamGenerationId
-from zlc_data.figure_archive import FIGURE_SCHEMA, read_archive, read_dataset
+from zlc_data.figure_archive import FIGURE_SCHEMA, read_archive
 from zlc_runtime import TaskRun
 from zlc_runtime.host import NodeHost
 from zlc_runtime.plane import SignalDataPlane
@@ -142,11 +142,11 @@ def test_saved_samples_are_written_as_they_arrive_and_calibrate_again(
     assert len(archives) == 12
     assert len(pictures) == 12
 
-    info, arrays = read_archive(archives[0])
-    snapshot = read_dataset(info, arrays, "data")
+    info, arrays, datasets = read_archive(archives[0])
+    snapshot = datasets["data"]
     assert np.asarray(snapshot.block.values).shape[:2] == (1, 3)
     assert set(info["sections"]["plot"]) == {"data"}
-    reopened, recipe = read_figure_plot(info, arrays, "data")
+    reopened, recipe = read_figure_plot(info, arrays, datasets, "data")
     assert reopened.block.schema == snapshot.block.schema
     assert recipe["spec"].kind.value == "facet_grid"
     assert info["sections"]["source"]["run_record"], (
@@ -390,7 +390,7 @@ def test_failed_calibration_analysis_saves_partial_capture_figure(
             assert run_root is not None
             assert (run_root / "figures" / "partial_capture.npz").is_file()
             assert (run_root / "figures" / "partial_capture.png").is_file()
-            partial_info, _partial_arrays = read_archive(
+            partial_info, _partial_arrays, _partial_datasets = read_archive(
                 run_root / "figures" / "partial_capture.npz"
             )
             assert set(
@@ -433,16 +433,16 @@ def test_nothing_is_written_unless_the_operator_asks(tmp_path: Path) -> None:
     for preview in sorted(figures.glob("*.png")):
         archive = preview.with_suffix(".npz")
         assert archive.is_file()
-        info, arrays = read_archive(archive)
+        info, arrays, datasets = read_archive(archive)
         assert info["schema"] == FIGURE_SCHEMA
         assert set(info["sections"]["plot"]) == {"data"}
-        reopened, recipe = read_figure_plot(info, arrays, "data")
+        reopened, recipe = read_figure_plot(info, arrays, datasets, "data")
         snapshot = getattr(reopened, "snapshot", reopened)
         assert snapshot.block.values.size
         assert recipe["spec"].kind.value in {"curve", "image", "facet_grid"}
 
-    box_info, box_arrays = read_archive(figures / "box.npz")
-    _box_figure, box_recipe = read_figure_plot(box_info, box_arrays, "data")
+    box_info, box_arrays, box_datasets = read_archive(figures / "box.npz")
+    _box_figure, box_recipe = read_figure_plot(box_info, box_arrays, box_datasets, "data")
     box_model = next(
         model for model in result.calibration.models if model.kind.value == "box"
     )
@@ -500,15 +500,15 @@ def test_nothing_is_written_unless_the_operator_asks(tmp_path: Path) -> None:
         else:
             assert components is None
 
-    actual_info, actual_arrays = read_archive(figures / "actual_fidelity.npz")
+    actual_info, actual_arrays, actual_datasets = read_archive(figures / "actual_fidelity.npz")
     actual_figure, _actual_recipe = read_figure_plot(
-        actual_info, actual_arrays, "data"
+        actual_info, actual_arrays, actual_datasets, "data"
     )
-    gaussian_info, gaussian_arrays = read_archive(
+    gaussian_info, gaussian_arrays, gaussian_datasets = read_archive(
         figures / "gaussian_fidelity.npz"
     )
     gaussian_figure, _gaussian_recipe = read_figure_plot(
-        gaussian_info, gaussian_arrays, "data"
+        gaussian_info, gaussian_arrays, gaussian_datasets, "data"
     )
     model_names = tuple(model.kind.value for model in result.calibration.models)
     expected_actual = np.stack(
@@ -529,13 +529,13 @@ def test_nothing_is_written_unless_the_operator_asks(tmp_path: Path) -> None:
         gaussian_figure.block.values[0, 0], expected_gaussian, equal_nan=True
     )
 
-    site_info, site_arrays = read_archive(figures / "site_map.npz")
+    site_info, site_arrays, site_datasets = read_archive(figures / "site_map.npz")
     report_source = site_info["sections"]["source"]
     assert report_source["task"] == "calibration"
     assert set(report_source["run_record"]["actual_devices"]) == {
         "camera", "sequencer"
     }
-    site_figure, _site_recipe = read_figure_plot(site_info, site_arrays, "data")
+    site_figure, _site_recipe = read_figure_plot(site_info, site_arrays, site_datasets, "data")
     assert isinstance(site_figure, ImageFrame)
     site_map = result.calibration.site_map
     contract = result.calibration.frame_contract

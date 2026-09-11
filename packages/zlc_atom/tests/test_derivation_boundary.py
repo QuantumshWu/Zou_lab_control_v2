@@ -123,7 +123,7 @@ def _single_site_calibration(node, source) -> TrapCalibration:
     )
 
 
-def test_site_geometry_uses_sensor_axes_after_nonzero_roi_and_binning() -> None:
+def test_site_geometry_uses_sensor_axes_after_nonzero_roi_and_binning(monkeypatch) -> None:
     point = CameraWorkingPoint(
         "EXTERNAL_TRIGGERED",
         (4, 3),
@@ -139,6 +139,14 @@ def test_site_geometry_uses_sensor_axes_after_nonzero_roi_and_binning() -> None:
         1.0,
         "default",
     )
+    stack = np.stack
+    stacks = []
+
+    def stack_frames(values, *args, **kwargs):
+        stacks.append(len(values))
+        return stack(values, *args, **kwargs)
+
+    monkeypatch.setattr(np, "stack", stack_frames)
     frame = frames_snapshot(
         ((CameraFrameRecord(np.zeros((4, 3), dtype="<u2"), 0),),),
         producer="roi-camera",
@@ -147,6 +155,7 @@ def test_site_geometry_uses_sensor_axes_after_nonzero_roi_and_binning() -> None:
         working_point=point,
         value_unit=point.count_unit,
     )
+    assert stacks == [1], "camera publication assembles one final array, not two stacked copies"
     site_map = SiteMap(
         ("site-1",),
         np.asarray(((1.5, 2.0),)),

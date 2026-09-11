@@ -12,6 +12,67 @@
 
 - `pgc_1D`通道正式入库：原`add_pulse_channel.bat`默认操作（P19、lane18、63 lanes）直接固化于manifest/XDC/top/header和仓库Pulse模板，删除本地修改器及其过时测试。V9仍为DAC bit0；旧通道状态按port key保持。当前几何fingerprint为`0x5A59C160`；更新后无需再运行add-channel，实验机自行build/program并重启server。本次不执行build/program。
 
+- R8数值子项补齐：Mean/Sum-only整数ROI不再bincount，scalar/stacked均复用一次总和；完整尾部统计仍用原计数路线。3个原直接case通过，完整统计逐位一致，已选Mean/Sum证明0bincount、1次累加；未改默认输出开关，不新增订阅机制。
+
+- 完成核对补齐P8/P11：spec替换不再生成被外层configure丢弃的description；known-finite的全True mask改为广播，prepare/objective/solve/finalizer共用readonly strided ABI。5个既有直接case通过（包括拒绝回滚、NaN/σ、RegularImage与saturation初始化），无CFFI validity原始指针假设、缓存重复signature为空；没有运行全量warmer。
+
+- 完成核对补齐非默认Dataset Edit data漏点：Viewer整条described传递链及隐藏C预绘删除。原双Dataset案例编辑第二个other时0Host、Preview1个A，123保存typed读回/lineage、无效输入后继续编辑恢复均通过；production净减41行。
+
+- Layout仅接受当前完整grammar：每panel必须有真实`panel_id`，fate只接受`fate:<domain>:<axis>`（`repeat/point/cell_data`）。删除旧fate前缀转换、裸repeat展开及缺失identity的顺序补全；旧格式明确拒绝，不新增兼容层、迁移工具或修改用户workspace文件。加载时铸造新panel identity并统一重映射派生signal/overlay/Logic source引用仍保留，这是当前运行时接线机制而非兼容代码。
+
+- Viewer去掉临时C Host，直接一个A首accept，旧板在新图成功前保留；菜单纯投影，延迟mount回Host生命周期入口，修掉交叉验证暴露的递归。保存/选区/viewport/typed overlay及Manual保存重开原case通过；短实屏确认7.25、三域title、1A/0临时C，窗口/children关闭。后续又验证真实Area手势后新generation：同Host offset随数据+7、ROI/Fit exact parent更新，selection revision不虚增，drawn-only不重算；未削弱same-shot或旧revision拒绝。探针的控件API/路径/等待fit错误均在ignored记录，不当产品证据。
+
+- 新世代自派生front根修：Manual新data+overlay共同parent旧同名bundle时，旧front算法直接永久pending。现只在leaf内撞名时从本次已读DAG选唯一因果后代，独立分支和跨leaf同shot判据不放松。原source-sibling案例扩展红绿、三个front直接case通过，不删除旧parent、不用latest冒充。
+
+- 第二轮独立交叉检查修复U1/U2遗漏：隐藏Setting丢force/父Tab Show不刷新会留下旧fates和Signal目录，现延期事实在原Card由Show或open消费一次；Pulse容器已正确缩小，不恢复adjustSize，只修gap indicator 228/286高度不同为228/228。4个既有直接case在Windows Qt正文通过，隐藏0 reconcile、未变Show0重建，无长期GUI残留。
+
+- Pylon复用未变成功请求/读回，mode与gain变更仍真实失效；gain.previous不多读一次。二轮删除SDK→mutable整图→immutable的中间副本，在Release前完成唯一ownership copy；CameraFrameRecord直接打包非连续数据。10个既有direct case通过，包含SDK Release后立刻覆写仍保留原图、负stride/大端、失败回滚、mode与mixed epoch。没有缩小finite ring。
+
+- Fit数学owner收敛：13内置模型删NumPy/bulk重复公式，value-only不求Jacobian（2M点/4参数少生成64MB导数输出），一维坐标借只读view；已有finite筛选不重复执行。4个production文件净减127行；14项相关既有用例覆盖独立数学锚/差分、single/batch、Poisson、RegularImage、fixed/NaN、custom及cold/warm竞争，均通过。未把测试含编译耗时当fit性能，未做全量预热，实际缓存重复signature检查为空。
+
+- Evidence去掉TaskConsole逐item第二层进程包装：当前完整test_task_console_app在同一pytest进程顺序28 passed/55.07s。发现的两处旧测试问题分别是未选择必填Pulse、关闭后访问已清owner；改为真实选择及检查原窗口handle，没有修改产品默认值或生命周期来迁就测试。测试内部真正需要的独立app进程仍保留，运行后无本worktree Python残留。
+
+- UI复核发现Manual与Panel的公共标题函数会隐藏无具名axis的域，与固定三域contract冲突；现保留该组，显示(1)/(—)，不创建新axis。3个既有title直接用例通过。
+
+- Simulation同site geometry不再重采样全部camera PSF；原35个plane重建变为复用同一不可变对象。原add/remove/move下一帧物理图像用例红绿通过，FFT/像差/PSF尾部/随机序列未改；未量化毫秒收益。
+
+- DCAM整改：同ROI setter由22次SDK属性调用降为0；相同exposure请求不再因硬件量化重写，arm保留一次真实工作点读回，Monitor复用该结果。失败后只读可恢复actual但不伪造请求成功，下一setter重试；原量化、读回失败及arm变更拒绝用例通过。源码满幅/裁剪arm链约20/24次SDK属性调用，不是通信往返或实测时延；未操作实验机。
+
+- Stepped重复操作已清：device-only只编译/LOAD一次，API两点只编译两次（首个实际点直接用于run记录）；settle改到写设备之后。原case从等待时看到旧值[0.25,1]变为[1,2]，Stop、恢复及第二点拒绝路径通过；未删Stepped authored settle或Temperature等待。
+
+- History删除64MiB/100000的隐藏截短、错误nbytes预算和重复capacity状态，唯一保留量为max(active window)。3个原window/多lease/gap用例通过；两次带gap的真实publication A/B证明请求100001时旧路径只给100000并丢首valid，新路径完整100001（两端valid、中间gap invalid）。未执行100000 shots；大窗口内存成本由实际数据决定。
+
+- Plot按需计算：8×400 V→mV归约绘图只转换400个输出，不再额外转换8×400原数据；raw selector按需转换仍正确。完整初值自动initializer为0次、partial仍1次；停止warmer不生成后续样例，初始size/parameters不再多轮绘制。3个既有单位/预热直接用例通过，无全量warm/GUI运行。
+
+- Feedback报告已删除binned Histogram二次fit，candidate与selected都复用本次科学fit的分量/threshold；invalid显式无模型/阈值，公共classifier target与Figure/远程roundtrip不再把null变成自动fit。既有classifier case和失败后partial Figure/Context case通过，报告参数按site坐标逐项一致；首次测试误按target列表顺序配site，已改为按真实coordinate核对，未改生产数值掩盖测试。
+
+- 信号目录必要性整改：Plane缓存未变目录、删除无消费者的description revision；Console一次生成rows/overlay offers且直接交View。真实Plane＋Console纯metadata探针中首次4panel/2signals只生成2 descriptors及1次rows，20次idle与普通数值更新后均0重建/0菜单push；Stop→Start的overlay候选失效与恢复正确，4个原目录/拓扑用例通过。此证据不宣称像素或GUI验收。
+
+- Figure单次读取与初态切面：read_archive返回(info, arrays, datasets)，删除read_dataset重复解码，所有生产消费者统一复用已验证Dataset；raw typed成员复用其不可变bytes。36个原格式/命名空间用例和3个Viewer/Calibration入口通过。Host共用initial_configuration，首次呈现已有最终fit，临时export不恢复废弃display；4个原Plot直接case覆盖固定limits、初始fit、零额外present及真实远程初态。未改磁盘格式。
+
+- Atom必要性整改：FrameSurvival的8cycle映射从16次规划变为event/canonical各1次；SLM command规范化从3次变1次，未变phase的idle状态不重扫像素。Feedback每run一次LOAD、每candidate一次Fire，删除同phase整批重拍与接受observer故障的旧策略；Pulse fault不再以observer_error遮蔽engine error。直接有限capture/fault矩阵、Task失败后Figure/Context保存、Survival 2/3/4frame及SLM stale/unknown用例通过。没有实验板/build或长100-shot验收。
+
+- 目录切面完成核对纠正：撤回existing目录0 flush，因为真实Start/Save重试会漏确认之前失败的父目录项。保留published错误信息，恢复child/parent与最近existing anchor确认，不新建marker/cache/回滚机制、不刷全祖先链。两条恢复case从失败转通过，完整durability文件17 passed；不能把这两次必要确认算作可删除开销。
+
+- Device Control未变owner的idle beat为0次policy/form投影，本地编辑及命令完成继续事件更新；所有写入仍在DeviceUse锁内核最新权限。三个既有直接用例通过，含风险失效和pending写取消；没有额外硬件读取或权限缓存。
+
+- 必要性整改的display clock：HarmonicClock改按monotonic elapsed跨deadline，保留harmonic周期、owed/debt及Pause；Qt采用不会提早唤醒的PreciseTimer。6个既有直接case通过，延迟跨过多个800ms周期只产生一次due，不补画漏帧。该问题只解释慢周期延迟，不能归因默认100ms四图的全部耗时。
+
+- Pulse装载不再为未请求的1×1执行计算delay FIFO占用；Fire使用实际repeat数的原有检查和驻留验证复用。既有TTL/DAC溢出及repeat seam/terminal SAFE直接用例通过，溢出在FIRE命令前拒绝；没有RTL修改或FPGA build。
+
+- 必要性整改的Atom数值切面：删除BOX整帧float64转换、Camera二层stack、numeric count弃置数值归约、成功Gaussian threshold的弃置Empirical计算。5个既有直接用例通过；Derive与233基线在105个dtype/归约/轴组合上schema及validity一致、数值等价，std明确在float64做subtract避免float32中间运算。无科学阈值/shot/模型政策变化。
+
+- 必要性整改的UI切面：隐藏Setting按需prepare、Manual table只更新受影响cells、Pulse Scan与timeline保留未变控件、InfoPane复用未变度量、Form同schema adopt不重建依赖，删除无消费者choice序列化API。8个既有定向用例通过；实屏FigureViewer输入7.25、Preview、Save及NPZ读回确认完成，截图和过程证据不入Git，已关闭所开GUI与render子进程。
+
+- 必要性整改的记录切面：generation run record与atomic event record各自只冻结一次，内部构造复用owned记录；finite物化按现有有序chunks取增量，indexed删除重复raw record；DataBlock身份重包保留数值验证事实。10个既有定向case通过；三siblings计数由每shot 10次deep-freeze变为首shot 2次、后续1次，四次finite物化的metadata输入由1/2/3/4变为1/2/2/2。未把计数换算为耗时承诺。
+
+- 必要性整改的终态/输入切面：删除Seal的全量物化和sealing中间态，保留coverage校验、终态数据与EOS；删除Processor终态暂存与latest Start的弃置预取。4个既有测试入口（13个参数化case）通过，验证无人读取时Seal零物化、真实terminal输入在worker中取得且siblings/窗口语义保留。
+
+- 必要性整改的classifier/交互切面：authored Gaussian/fallback初态贯通Figure、本地/远程Host，0自动fit；移除单cell组件只求解该cell。配置只产生一次最终description，拒绝overview/单series hover不物化native。4个既有定向case通过；新worktree首次缓存触发过超时，未修改timeout、只在缓存就绪后重跑受影响case。无GUI/硬件/build。
+- Configure拒绝恢复以最终绘制是否已经开始为界：尚未绘制只恢复旧renderer准备态，不生成重复front；绘制失败仍完整恢复旧像素。字段、坐标与后续redraw共用原事务恢复owner，不保留假旧图。
+
+- 必要性整改的数据存储切面：finite extend/indexed hole/roll直接组装compact validity，VALUE和各component组合与233基线结果一致；公共restriction复用未变Axis/Domain。4个既有直接案例通过；独立四种validity的A/B证明输出相同且不再分配VALUE逐像素mask，未运行GUI或硬件。
+
 - 2026-09-10本次验证：真实UART串行帧证明LOAD完成回复及SAFE抢占；真实top＋既有Xilinx BRAM行为模型证明首次装载4shots与SAFE后驻留重放4shots的18 TTL/40 DAC data逐tick一致、4 DAC clock工作、同ID不重复Fire。没有运行FPGA build/synthesis/program，旧时序报告不代表新ABI已通过。相关软件定向验证覆盖驻留重用、丢ACK、pending LOAD取消、新server握手、device/manual扫描及错误恢复。
 - RF正常设频率/幅度为1 write＋1 query（两次发送、一个响应）；Control Apply与单位投影不额外读设备。没有未经厂商证实的复合SCPI；真实native UNIT切换另发一次必要写入。错误后的current/unit/range保持unknown直到必要操作或显式Refresh确认。Fabric与SLM remote各在原session内复用连接，断线不自动重放写入，关闭释放idle连接。
 - 窗口首个Close保留关闭意图；device read/tune/init/discovery完成后由原Qt owner继续完整关闭，不要求再次点击、不加timer或平行生命周期。直接Qt验证覆盖有/无TaskConsole的pending关闭，测试窗口均已关闭。原始探针/日志只在ignored目录，不进入git。
@@ -178,7 +239,7 @@
 
 - 公共Figure API严格编码/解码PlotSpec、parameters、size、viewport、selectors、facet focus、classifier、fit与
   typed image overlay；archive先发布，preview后渲染。
-- Panel Save只是公共Figure API的adapter，不再维护第二套writer或restore grammar。
+- Panel Save只是公共Figure API的adapter，不再维护第二套writer或restore grammar。纯文件保存复用Session配置/投影/fit与renderer，在最终导出DPI准备，不创建临时screen Host、compose、capture或restore；交互Host保存仍按原屏幕恢复。Curve/Histogram/Image/3D实际导出均0 screen compose、0 capture、1 savefig，与同最终DPI的普通Host导出逐像素相同；相对旧默认screen DPR准备的PNG有像素变化，不宣称旧PNG exact。现有artifact/configuration与失败保留用例9项通过，证据不入Git。
 - FigureViewer把archive typed Dataset发布为sealed Runtime signals，默认panel从archive exact recipe恢复，且不按shape推断plot kind；保存spec的`kind + cell_kind`在Panel创建前经同一个catalog identity owner解析，semantic vocabulary随后才投影。Add Panel只建立空的fixed-kind `panel-N`，Signal/ROI/Fit派生及后续compose全部走与TaskConsole相同的ConsolePresenter、SelectionBridge和Plot host，不再保留static panel owner。静态host在Bridge订阅前已有accepted fit时，Fit subscription只replay该immutable FitEvent，不重复solve/render；因此ROI与Fit参数都继续发布给后续Panel。
 - FigureViewer与TaskConsole Live/Frozen使用同一个accepted PlotSpec、parameter、selector/
   viewport capability contract以及完整Panel Edit：Frozen snapshot/Refresh、Interaction、
@@ -228,7 +289,7 @@
 - Feedback报告固定包含uniformity history、site signal evolution、weight evolution、selected
   site histograms、initial/selected camera mean和initial/selected phase；每个完整candidate另存
   `candidate_site_fits/candidate-XXXX` Figure NPZ与PNG，使用真正的Histogram cell和Figure API
-  的per-site bimodal Gaussian fit，不加入Monitor preview。normal或Stop只产生一个final Science Context。
+  的per-site authored full-data mixture fit，不在分箱值上二次求解，不加入Monitor preview。normal或Stop只产生一个final Science Context。
 - Feedback Monitor固定自动打开四张图：canonical Camera Measurement逐帧publication经mean reduction得到的带编号site map实时图、observable
   uniformity、site signal evolution和Target share evolution；phase保留为信号和最终Figure但不自动开panel。
 - Feedback每shot每site的信号是BOX读出（Calibration BOX几何内像素求和的真实光子计数；不用Calibration的matched-filter权重，也不为未观测site借uniform PSF）；每site只在完整shot batch上做受约束双高斯与full-data ΔBIC>10判定。dark site按bracket（最新观测优先）向loaded share二分或沿方向逐分辨率爬行，在share空间由本轮loop步不与之相反的loaded sites（loop送它同向、或对它无所求；hold的site除外）出资（总功率精确守恒、每site每candidate至多一个分辨率、绝不把任何site压向其自身方向的反面、hold的site份额不动）；bright fraction低于全阵中位数一半的loaded site视为在loading ramp上：hold、不出资、不被识别excitation扰动；probe episode每site一次，方向只由verdict改变。formal-double使用loop gain除以实测plant slope（前6个ordinary update携带±2%识别excitation：正负平衡的log图样在被激励site内平移一个公共对数保持总份额，未激励site绝对份额不变），无adaptive scalar。`probe_combined`计入`maximum feedback updates`，diagnostic candidates不计。
@@ -251,7 +312,7 @@
 
 ### 2.6 Plot三进程边界
 
-- TaskConsole/FigureViewer采用固定B/A/C拓扑：B拥有Qt、Runtime、Logic、device通信、PanelState、SelectionBridge与same-shot accept；单一A拥有全部Monitor的DataView/Fit/Render/Compose；单一C拥有Panel Edit、point review、Panel/FigureViewer Save以及Calibration/Temperature/SLM Feedback的Figure render/export。A/C复用同一`RasterPlotHost/PlotSession`，正式Workbench没有B进程内Plot fallback。
+- TaskConsole/FigureViewer采用固定B/A/C拓扑：B拥有Qt、Runtime、Logic、device通信、PanelState、SelectionBridge与same-shot accept；单一A拥有全部Monitor的DataView/Fit/Render/Compose；单一C拥有Panel Edit、point review、Panel/FigureViewer Save以及Calibration/Temperature/SLM Feedback的Figure render/export。A/C交互Host复用`RasterPlotHost/PlotSession`；C纯文件save worker直接使用同一Session/renderer、不建立无消费者screen front。正式Workbench没有B进程内Plot fallback。
 - 同一application只有一对A/C；TaskConsole打开的FigureViewer共享并分别持有owner lease，最后窗口关闭才shutdown。A/C崩溃由现有Panel replacement lifecycle恢复，旧完整Front继续可读，不能把partial frame或latest publication伪装成旧surface。
 - B→A/C的同一Dataset revision每service只传一次并按host/pending引用计数；A/C→B的RGBA使用只读shared-memory lease，QImage不复制像素。父子消息统一使用owned `send_bytes(pickle.dumps)`/`pickle.loads(recv_bytes())`，避开Python3.13 `Connection.send`临时BytesIO export生命周期错误。
 - Domain Task仍在B决定科学数据、路径及非Figure NPZ/JSON并register artifact；只把Figure执行能力由composition注入C。direct/notebook显式使用本地Plot，不把TaskArtifactContext或Runtime变成Plot owner。
@@ -418,7 +479,7 @@ heatmap 的**中键 pan**（同样整幅重画）**30.3 ms**；静源 3D orbit *
   所以只有触到最新一发的窗口才有数据。现在会明说，不再发布一整帧无效数据（`ea462c6`）。
   要真的切到那些 shot，需要用面板已经租下的 indexed history 重新派生——那是能力，不是修补。
 - **`_reduce_blocks` 4.2 ms 出现在半数 image 帧上**（裁决见上，记录在此备查）。
-- **z 刻度标签被切**（"0.8" 印成 ".8"）：场景 fit 只留 4% 几何 margin。先于本轮存在。
+- **z刻度裁剪已修复**：原fit仅计4%几何margin；现真实tick字符串与字体像素度量作为同一scene fit的对称inset，axes边界保持不变，原user zoom继续作用于同一个变换。DPR2同图`2500`由左端−41.53px移至46.46px（axes左界16px），屏幕与导出均完整；原直接bbox/picking案例通过。
 - **`test_guard_c_save_semantics` 红**：保存面板图时 matplotlib mathtext
   `ParseException`。**在 master 上同样红**，与本轮无关。
 - **`Github\zlc_*` 是拆包残留的旧副本**（`zlc_runtime/selection_bridge.py` 56KB vs 树内 96KB，

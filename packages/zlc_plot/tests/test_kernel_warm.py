@@ -397,6 +397,14 @@ def test_the_warming_stops_before_its_next_picture_once_a_panel_asks(monkeypatch
     it, as before."""
 
     rendered: list[str] = []
+    constructed = []
+    image_snapshot = _kernel_warm._image_snapshot
+
+    def make_image(*args, **kwargs):
+        constructed.append(args)
+        return image_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr(_kernel_warm, "_image_snapshot", make_image)
     monkeypatch.setattr(
         _kernel_warm, "_render",
         lambda snapshot, spec, parameters=None, **kw: rendered.append(type(spec).__name__),
@@ -404,6 +412,13 @@ def test_the_warming_stops_before_its_next_picture_once_a_panel_asks(monkeypatch
     answers = iter((True, True, False))
     _kernel_warm.warm_process(proceed=lambda: next(answers))
     assert rendered == ["FacetGridPlot", "ImagePlot"]
+    assert len(constructed) == 1
     rendered.clear()
+    constructed.clear()
+    monkeypatch.setattr(
+        _kernel_warm, "_series_snapshot",
+        lambda *args: (_ for _ in ()).throw(AssertionError("stopped warmup created data")),
+    )
     _kernel_warm.warm_process(proceed=lambda: False)
     assert rendered == []
+    assert constructed == []

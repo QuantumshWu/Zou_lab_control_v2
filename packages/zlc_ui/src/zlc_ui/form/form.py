@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from enum import Enum
 import math
 import re
 from typing import Literal, TypeAlias
@@ -70,39 +69,6 @@ def _typed_equal(left: object, right: object) -> bool:
     """Compare choice values without conflating ``1``, ``1.0`` and ``True``."""
 
     return type(left) is type(right) and bool(left == right)
-
-
-def choice_value_to_tree(field: "FormFieldProps", value: object) -> object:
-    """Encode one exact typed choice as its current JSON scalar."""
-
-    if not isinstance(field, FormFieldProps) or field.kind != "choice":
-        raise TypeError("choice serialization requires a choice FormFieldProps")
-    choice = field.choice_for(value)
-    if choice is None:
-        raise ValueError(f"field {field.key!r} received an undeclared choice")
-    encoded = choice.value.value if isinstance(choice.value, Enum) else choice.value
-    if encoded is None or isinstance(encoded, (dict, list, tuple, set)):
-        raise TypeError(
-            f"choice field {field.key!r} needs an owner scalar serializer"
-        )
-    if isinstance(encoded, float) and not math.isfinite(encoded):
-        raise ValueError(f"choice field {field.key!r} encoded a non-finite float")
-    return encoded
-
-
-def choice_value_from_tree(field: "FormFieldProps", payload: object) -> object:
-    """Decode one current JSON scalar back to the declared typed choice."""
-
-    if not isinstance(field, FormFieldProps) or field.kind != "choice":
-        raise TypeError("choice decoding requires a choice FormFieldProps")
-    matches = tuple(
-        choice
-        for choice in field.choices
-        if _typed_equal(choice_value_to_tree(field, choice.value), payload)
-    )
-    if len(matches) != 1:
-        raise ValueError(f"field {field.key!r} has no unique encoded choice {payload!r}")
-    return matches[0].value
 
 
 def _require_immutable_scalar(value: object, *, where: str) -> None:
@@ -498,8 +464,6 @@ class FormSpec:
 
 
 __all__ = [
-    "choice_value_from_tree",
-    "choice_value_to_tree",
     "FormChoice",
     "FormFieldKind",
     "FormFieldProps",

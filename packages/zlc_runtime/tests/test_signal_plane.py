@@ -698,6 +698,9 @@ def test_commit_mints_runtime_identity_and_freezes_run_record() -> None:
         assert "new" not in value.run_record
         assert isinstance(value.run_record, MappingProxyType)
         assert isinstance(value.run_record["camera"], MappingProxyType)
+        publication = plane.latest_publication("camera/frame")
+        assert publication.run_record is value.run_record
+        assert publication.event_record is value.event_record
         assert value.snapshot.ref.stream_generation == generation
         assert value.snapshot.ref.revision.value == 1
         assert value.snapshot.ref.block_id == BlockId("camera/frame.event")
@@ -738,6 +741,7 @@ def test_finite_prefix_merges_event_epochs_without_changing_run_identity() -> No
                 )
             },
         )["epoch-camera/frame"]
+        plane.current_dataset_view("epoch-camera/frame")
         second = plane.commit_live(
             node,
             {
@@ -767,7 +771,9 @@ def test_finite_prefix_merges_event_epochs_without_changing_run_identity() -> No
         prefix_camera = prefix_record["device_settings"]["camera"]
         assert prefix_camera["epoch_ranges"] == ((0, 0), (2, 2))
         assert prefix_camera["mixed"] is True
-        assert first.run_record == second.run_record == {"run": "same"}
+        assert first.run_record is second.run_record
+        assert first.canonical_schema is second.canonical_schema
+        assert first.run_record == {"run": "same"}
     finally:
         plane.close()
 
@@ -860,6 +866,7 @@ def test_finite_signal_reports_full_point_grid_geometry_while_cells_arrive() -> 
     plane = SignalDataPlane()
     try:
         plane.begin_generation(node)
+        waiting_directory = plane.describe_signals()
         plane.commit_live(
             node,
             {
@@ -871,7 +878,10 @@ def test_finite_signal_reports_full_point_grid_geometry_while_cells_arrive() -> 
                 )
             },
         )
-        description = plane.describe_signals()[0]
+        directory = plane.describe_signals()
+        assert directory is not waiting_directory
+        assert plane.describe_signals() is directory
+        description = directory[0]
         assert description.shape == (1, 4, 1)
         first = plane.current_dataset(description.name)
         assert first.block.schema.point_domain.logical_shape == (2, 2)
@@ -894,6 +904,7 @@ def test_finite_signal_reports_full_point_grid_geometry_while_cells_arrive() -> 
             },
         )
         second = plane.current_dataset(description.name)
+        assert plane.describe_signals() is directory, "new values do not rebuild the directory"
         assert second.block.values[0, :, 0].tolist() == [10.0, 0.0, 0.0, 40.0]
         assert second.expanded_validity()[0, :, 0].tolist() == [
             True,
@@ -902,6 +913,7 @@ def test_finite_signal_reports_full_point_grid_geometry_while_cells_arrive() -> 
             True,
         ]
         assert plane.seal_committed(node, cut_short=True)
+        assert plane.describe_signals() is not directory
         assert plane.describe_signals()[0].shape == (1, 4, 1)
     finally:
         plane.close()
@@ -925,6 +937,15 @@ def test_watching_a_run_grow_costs_the_shot_not_the_run() -> None:
     # Counted on EVERY assembler the plane owns, named or not, so the
     # measurement is of the work done and not of which function did it.
     placed: list[int] = []
+    merged: list[int] = []
+    merge_records = plane_module._merge_event_records
+
+    def merge_new_records(records):
+        records = tuple(records)
+        merged.append(len(records))
+        return merge_records(records)
+
+    plane_module._merge_event_records = merge_new_records
     assemblers = {
         name: getattr(plane_module, name)
         for name in ("_assembled_planes", "_extended_planes")
@@ -959,11 +980,13 @@ def test_watching_a_run_grow_costs_the_shot_not_the_run() -> None:
             view = plane.current_dataset("grid-cost/scan")
             assert view.block.values[0, point, 0] == float(point)
         assert placed == [1, 1, 1, 1], placed
+        assert merged == [1, 2, 2, 2], "one owned prefix plus the new shot, never a historical rescan"
         np.testing.assert_allclose(
             plane.current_dataset("grid-cost/scan").block.values[0, :, 0],
             (0.0, 1.0, 2.0, 3.0),
         )
     finally:
+        plane_module._merge_event_records = merge_records
         for name, original in assemblers.items():
             setattr(plane_module, name, original)
         plane.close()
@@ -1178,21 +1201,21 @@ def test_repeat_100_publication_cost_and_retained_arrays_stay_linear(monkeypatch
         placement_bytes = state.occupied_cells["linear/frame"].nbytes
         assert retained_array_bytes + placement_bytes == 100 * (8 + 1) + 100
 
+        assert plane.seal_committed(node)
+        assert calls == 0, "ending production must not consume an unread Dataset"
+        assert state.materialized == {}
         current = plane.current_dataset("linear/frame")
         assert calls == 1
         assert current.expanded_validity().all()
-        assert plane.seal_committed(node)
-        assert calls == 1
     finally:
         plane.close()
 
 
-@pytest.mark.parametrize("operation", ("current", "seal"))
-def test_full_materialization_does_not_hold_plane_lock(monkeypatch, operation: str) -> None:
+def test_full_materialization_does_not_hold_plane_lock(monkeypatch) -> None:
     import zlc_runtime.plane as plane_module
 
     declaration = DatasetOutputDeclaration("frame", "test.frame")
-    node = _node(f"nonblocking-{operation}", declaration)
+    node = _node("nonblocking-current", declaration)
     entered = threading.Event()
     release = threading.Event()
     reader_done = threading.Event()
@@ -1224,10 +1247,7 @@ def test_full_materialization_does_not_hold_plane_lock(monkeypatch, operation: s
 
         def materialize() -> None:
             try:
-                if operation == "seal":
-                    plane.seal_committed(node)
-                else:
-                    plane.current_dataset(node.signal_key("frame"))
+                plane.current_dataset(node.signal_key("frame"))
             except BaseException as error:
                 errors.append(error)
 

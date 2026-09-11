@@ -56,18 +56,45 @@ def _collect_ancestry(
 ) -> Mapping[str, SignalPublication] | None:
     pending = [publication]
     by_name: dict[str, SignalPublication] = {}
-    seen: set[object] = set()
+    collisions: dict[str, list[SignalPublication]] = {}
+    parents: dict[object, tuple[SignalPublication, ...]] = {}
     while pending:
         current = pending.pop()
-        if current.event_ref in seen:
+        if current.event_ref in parents:
             continue
-        seen.add(current.event_ref)
+        parents[current.event_ref] = tuple(resolve_parents(current))
         for name in current.signals:
             previous = by_name.get(name)
             if previous is not None and previous.event_ref != current.event_ref:
-                return None
-            by_name[name] = current
-        pending.extend(resolve_parents(current))
+                collisions.setdefault(name, [previous]).append(current)
+            else:
+                by_name[name] = current
+        pending.extend(parents[current.event_ref])
+    # A run may derive from an older run of the same signal. Its ancestor
+    # remains lineage, but does not compete as another visible value. Only
+    # a candidate descending from every same-named event may replace them;
+    # independent branches still have no coherent answer. Defer the choice
+    # until traversal finishes so parent ordering cannot change the result.
+    ancestors: dict[object, set[object]] = {}
+    for name, candidates in collisions.items():
+        required = {candidate.event_ref for candidate in candidates}
+        for candidate in candidates:
+            reachable = ancestors.get(candidate.event_ref)
+            if reachable is None:
+                reachable = set()
+                pending = [candidate]
+                while pending:
+                    current = pending.pop()
+                    if current.event_ref in reachable:
+                        continue
+                    reachable.add(current.event_ref)
+                    pending.extend(parents[current.event_ref])
+                ancestors[candidate.event_ref] = reachable
+            if required.issubset(reachable):
+                by_name[name] = candidate
+                break
+        else:
+            return None
     return by_name
 
 

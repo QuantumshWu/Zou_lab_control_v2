@@ -134,6 +134,8 @@ class PylonCameraAdapter:
         self._configured = False
         self._capture_incomplete = False
         self._monitor_mode = False
+        self._working_point: CameraWorkingPoint | None = None
+        self._requested_settings: dict[str, object] = {}
 
     # ------------------------------------------------------------------ open
 
@@ -152,6 +154,7 @@ class PylonCameraAdapter:
 
         if self._configured:
             return
+        requested = self.config
         try:
             if self._camera is None:
                 self._attach()
@@ -160,13 +163,18 @@ class PylonCameraAdapter:
             self._apply_exposure(self.config.exposure_seconds)
             self._apply_gain()
             self._apply_roi(self.config.roi_xywh)
+            self._configured = True
+            self._record_readback()
+            self._requested_settings = {
+                "exposure_seconds": requested.exposure_seconds,
+                "roi_xywh": requested.roi_xywh,
+            }
         except BaseException as primary:
             try:
                 self.close()
             except BaseException as secondary:
                 primary.add_note(f"pylon close after open failure also failed: {secondary}")
             raise
-        self._configured = True
 
     def _attach(self) -> None:
         from pypylon import pylon  # noqa: PLC0415 -- lazy on purpose, see open()
@@ -193,6 +201,8 @@ class PylonCameraAdapter:
 
     @_serialized
     def close(self) -> None:
+        self._working_point = None
+        self._requested_settings.clear()
         camera = self._camera
         if camera is None:
             self._armed = False
@@ -319,10 +329,13 @@ class PylonCameraAdapter:
                 f"gain must lie in [{field.minimum:g}, {field.maximum:g}] dB"
             )
         node = self._gain_node()
-        previous = float(node.GetValue())
+        previous = float(tunable.current)
         if gain != previous:
+            self._working_point = None
             node.SetValue(gain)
         effective = float(node.GetValue())
+        if effective != self.config.gain_db:
+            self._working_point = None
         self.config = replace(self.config, gain_db=effective)
         if effective != previous:
             previous_epoch = self._settings_epoch
@@ -366,6 +379,7 @@ class PylonCameraAdapter:
     def _stop_and_restore_external(self) -> None:
         """Attempt both terminal actions and preserve the first failure."""
 
+        self._working_point = None
         camera = self._camera
         if camera is None:
             return
@@ -458,7 +472,7 @@ class PylonCameraAdapter:
         exposure = float(seconds)
         if not np.isfinite(exposure) or exposure <= 0:
             raise ValueError("exposure_seconds must be positive and finite")
-        return self._reconfigure(replace(self.config, exposure_seconds=exposure))
+        return self._reconfigure(replace(self.config, exposure_seconds=exposure), "exposure_seconds")
 
     @_serialized
     def set_roi(
@@ -471,31 +485,27 @@ class PylonCameraAdapter:
         """
 
         return self._reconfigure(
-            replace(self.config, roi_xywh=_roi_request(roi_xywh))
+            replace(self.config, roi_xywh=_roi_request(roi_xywh)), "roi_xywh"
         )
 
-    def _reconfigure(self, candidate: PylonCameraConfig) -> CameraWorkingPoint:
-        """Write the fields that changed, and keep the config at what the sensor did.
-
-        Only a changed field is written.  The exposure and the ROI have
-        different owners -- the run and the bench -- and re-sending the one
-        that did not change is how an exposure the sensor refused went on
-        refusing every later ROI change.  The config is never the candidate:
-        it is the sensor's readback, taken after the writes whether they
-        succeeded or not, so a refused value never becomes "current" and a
-        partially written ROI is recorded as the region the sensor holds.
-        """
+    def _reconfigure(self, candidate: PylonCameraConfig, field: str) -> CameraWorkingPoint:
+        """Apply one requested field; keep requested and sensor-quantized facts distinct."""
 
         if self._armed:
             raise RuntimeError("pylon settings cannot change while armed")
         self.open()
-        current = self.config
+        requested = getattr(candidate, field)
+        if field in self._requested_settings and requested == self._requested_settings[field]:
+            return self.working_point()
+        self._working_point = None
         try:
-            if candidate.exposure_seconds != current.exposure_seconds:
+            if field == "exposure_seconds":
                 self._apply_exposure(candidate.exposure_seconds)
-            if candidate.roi_xywh != current.roi_xywh:
+            else:
                 self._apply_roi(candidate.roi_xywh)
+            point = self._record_readback()
         except BaseException as primary:
+            self._requested_settings.clear()
             try:
                 self._record_readback()
             except BaseException as secondary:
@@ -503,12 +513,13 @@ class PylonCameraAdapter:
                     f"pylon readback after the refused setting also failed: {secondary}"
                 )
             raise
-        return self._record_readback()
+        self._requested_settings[field] = requested
+        return point
 
     def _record_readback(self) -> CameraWorkingPoint:
         """The sensor's own state, as the config.  The whole sensor is ``None``."""
 
-        point = self.working_point()
+        point = self._read_working_point()
         top, left = point.roi_origin_yx
         height, width = point.roi_shape_yx
         whole_sensor = (top, left) == (0, 0) and (height, width) == point.sensor_shape_yx
@@ -517,12 +528,16 @@ class PylonCameraAdapter:
             exposure_seconds=point.exposure_seconds,
             roi_xywh=None if whole_sensor else (left, top, width, height),
         )
+        self._working_point = point
         return point
 
     @_serialized
     def working_point(self) -> CameraWorkingPoint:
-        """Read the sensor's state back, rather than repeating what we asked for."""
+        """Reuse actual readback until a setting or acquisition mode changes."""
+        self.open()
+        return self._working_point or self._record_readback()
 
+    def _read_working_point(self) -> CameraWorkingPoint:
         self.open()
         camera = self._camera
         width = int(camera.Width.GetValue())
@@ -674,6 +689,7 @@ class PylonCameraAdapter:
         self._armed = True
         self._capture_incomplete = False
         self._monitor_mode = monitor
+        self._working_point = None
 
     @_serialized
     def read_frame_records(
@@ -727,22 +743,22 @@ class PylonCameraAdapter:
                             "a triggered acquisition returned a failed frame"
                         )
                     continue
-                image = np.array(result.Array, copy=True)
+                image = np.asarray(result.Array)
                 if image.dtype != np.dtype("uint8"):
                     raise RuntimeError(
                         f"pylon Mono8 capture returned dtype {image.dtype}, expected uint8"
                     )
-            finally:
-                result.Release()
-            self._grabbed += 1
-            records.append(
-                CameraFrameRecord(
+                # Own the immutable pixels while the SDK result still holds them.
+                record = CameraFrameRecord(
                     image,
-                    self._grabbed - 1,
+                    self._grabbed,
                     settings_session_id=self._device_session_id,
                     settings_epochs=frame_epochs,
                 )
-            )
+            finally:
+                result.Release()
+            self._grabbed += 1
+            records.append(record)
 
         if exact and len(records) < int(n):
             raise RuntimeError(

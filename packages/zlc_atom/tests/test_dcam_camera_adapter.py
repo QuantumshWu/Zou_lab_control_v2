@@ -191,7 +191,7 @@ def _config(*, roi=(4, 4, 8, 8)) -> DcamCameraConfig:
     )
 
 
-def test_working_point_is_live_readback_and_all_sdk_calls_share_owner() -> None:
+def test_working_point_reuses_applied_readback_and_all_sdk_calls_share_owner(monkeypatch) -> None:
     driver = _FakeDcamDriver()
     adapter = DcamCameraAdapter(_config(), driver=driver)
     try:
@@ -209,7 +209,7 @@ def test_working_point_is_live_readback_and_all_sdk_calls_share_owner() -> None:
         assert point.electrons_per_count == 0.107
         driver.calls.clear()
         adapter.set_roi((4, 4, 8, 8))
-        assert not any(name.startswith("set:") for name, _thread in driver.calls)
+        assert driver.calls == [], 'an unchanged ROI re-read the property surface'
         # A region can only be placed and sized on the steps the sensor
         # declares, so it is snapped OUTWARDS to COVER what was asked for.
         # Rounded inwards, x 5..11 came back as 4..7 and the right of the
@@ -223,37 +223,73 @@ def test_working_point_is_live_readback_and_all_sdk_calls_share_owner() -> None:
             if name.startswith("set:")
         }
         assert roi_writes and all(name.startswith("SUBARRAY_") for name in roi_writes)
+        assert {'attr:SUBARRAY_HPOS', 'attr:SUBARRAY_VPOS',
+                'attr:SUBARRAY_HSIZE', 'attr:SUBARRAY_VSIZE'} <= {name for name, _ in driver.calls}
+        original_set = driver.device.set_get_property
+        def quantized(property_id, value):
+            return original_set(property_id, value + 0.0000244
+                                if property_id is DcamProperty.EXPOSURE_TIME else value)
+        monkeypatch.setattr(driver.device, 'set_get_property', quantized)
         driver.calls.clear()
         point = adapter.set_exposure_seconds(0.015)
         assert {
             name for name, _thread in driver.calls if name.startswith("set:")
         } == {"set:EXPOSURE_TIME"}
-        assert point.exposure_seconds == 0.015
+        assert point.exposure_seconds == pytest.approx(0.0150244)
         assert point.roi_origin_yx == (4, 4)
         assert point.roi_shape_yx == (8, 8)
         applied_y, applied_x = point.roi_origin_yx
         applied_height, applied_width = point.roi_shape_yx
         assert applied_x <= 5 and applied_x + applied_width >= 5 + 7
         assert applied_y <= 5 and applied_y + applied_height >= 5 + 7
-        # Position and size are separate properties with separate steps, and
-        # each is asked for its own rather than one standing in for both.
+        # Readout needs sensor extents, not the ROI position-step metadata.
         asked = {name for name, _thread in driver.calls}
         assert {
-            "attr:SUBARRAY_HPOS",
-            "attr:SUBARRAY_VPOS",
             "attr:SUBARRAY_HSIZE",
             "attr:SUBARRAY_VSIZE",
         } <= asked
+        assert 'attr:SUBARRAY_HPOS' not in asked and 'attr:SUBARRAY_VPOS' not in asked
+        driver.calls.clear()
+        assert adapter.set_exposure_seconds(0.015) is point
+        assert adapter.set_roi((5, 5, 7, 7)) is point
+        assert adapter.working_point() is point
+        assert not driver.calls, 'same authored requests were rewritten because readback was quantized'
         adapter.arm(
             None,
             source_group_sizes=(3,),
             buffer_frame_count=3,
             timeout=1.0,
         )
+        adapter.working_point()
+        assert sum(name == 'get:EXPOSURE_TIME' for name, _ in driver.calls) == 1
         with pytest.raises(RuntimeError, match="while armed"):
             adapter.set_roi(None)
             adapter.set_exposure_seconds(0.02)
         adapter.finish_record_capture()
+        getter = driver.device.get_property
+        failed = False
+        def fail_once(property_id):
+            nonlocal failed
+            if property_id is DcamProperty.EXPOSURE_TIME and not failed:
+                failed = True
+                raise RuntimeError('readback failed')
+            return getter(property_id)
+        monkeypatch.setattr(driver.device, 'get_property', fail_once)
+        with pytest.raises(RuntimeError, match='readback failed'):
+            adapter.set_exposure_seconds(0.025)
+        recovered = adapter.working_point()
+        driver.calls.clear()
+        assert adapter.working_point() is recovered and not driver.calls
+        adapter.set_exposure_seconds(0.025)
+        assert any(name == 'set:EXPOSURE_TIME' for name, _ in driver.calls)
+        start_capture = driver.device.start_capture
+        def changing_start():
+            start_capture()
+            driver.device.properties[DcamProperty.EXPOSURE_TIME] += 0.001
+        monkeypatch.setattr(driver.device, 'start_capture', changing_start)
+        with pytest.raises(RuntimeError, match='working point changed across arm'):
+            adapter.arm(None, source_group_sizes=(3,), buffer_frame_count=3, timeout=1.0)
+        assert not adapter.capture_state()
     finally:
         adapter.close()
     owner_threads = {thread_id for _name, thread_id in driver.calls}

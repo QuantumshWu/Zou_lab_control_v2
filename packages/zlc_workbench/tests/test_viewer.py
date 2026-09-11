@@ -26,7 +26,7 @@ from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementNode,
     CameraMeasurementRequest,
 )
-from zlc_data.figure_archive import read_archive, read_dataset
+from zlc_data.figure_archive import read_archive
 from zlc_workbench.panel_save import capture_run_chain, save_panel_figure
 from zlc_workbench.apps.task_console import build_panel_host
 from zlc_workbench.panel_state import (
@@ -371,7 +371,7 @@ def _display_description(plot_input, recipe):
 
 def _built_presenter(view) -> FigureViewerPresenter:
     from zlc_workbench.apps.figure_viewer import build
-    from zlc_workbench.board import attach_qt_worker
+    from zlc_workbench.board import attach_qt_owner_turn, attach_qt_worker
     from zlc_ui.qt import ensure_qt_app
     from test_console_presenter import _async_writer
 
@@ -388,7 +388,7 @@ def _built_presenter(view) -> FigureViewerPresenter:
         save_figure_artifact=_async_writer(save_figure_artifact),
         save_front=_async_writer(save_front),
     )
-    return build(
+    presenter = build(
         view,
         run_off_thread=run_off_thread,
         close_worker=close_worker,
@@ -397,6 +397,8 @@ def _built_presenter(view) -> FigureViewerPresenter:
         editor_render=editor_render,
         close_render_processes=lambda: True,
     )
+    presenter._panel_presenter.board.wake.set_notify(attach_qt_owner_turn(presenter.commit_surfaces))
+    return presenter
 
 def _close_presenter(presenter: FigureViewerPresenter) -> None:
     _wait_until(presenter.close)
@@ -498,8 +500,8 @@ def test_a_saved_dataset_comes_back_with_its_axes(saved) -> None:
     """
 
     path, original = saved
-    info, arrays = read_archive(path)
-    restored = read_dataset(info, arrays, "data")
+    info, arrays, datasets = read_archive(path)
+    restored = datasets["data"]
 
     np.testing.assert_array_equal(
         np.asarray(restored.block.values), np.asarray(original.block.values)
@@ -606,6 +608,9 @@ def test_manual_data_uses_runtime_panel_and_the_one_figure_writer(tmp_path) -> N
                 "cells": ((0, 3, "7.25"),),
             },
         )
+        projected = view.data_editors[editor_id]["projection"]
+        assert projected["table"]["changed_cells"] == ((0, 3),)
+        assert projected["axis_values"]["changed_cells"] == ()
         view.data_editor_intent.emit(
             editor_id,
             {"op": "apply_preview", "note": "manual Figure check"},
@@ -634,8 +639,8 @@ def test_manual_data_uses_runtime_panel_and_the_one_figure_writer(tmp_path) -> N
         )
         _wait_until(lambda: target.is_file() and not presenter._busy)
 
-        info, arrays = read_archive(target)
-        restored = read_dataset(info, arrays, "data")
+        info, arrays, datasets = read_archive(target)
+        restored = datasets["data"]
         assert restored.block.values.shape == (2, 16, 1)
         assert restored.block.values[0, 3, 0] == 7.25
         assert restored.block.schema.repeat_domain.axes[-1].coordinates == (10, 20)
@@ -662,7 +667,6 @@ def test_manual_axis_metadata_edit_preserves_its_existing_scientific_role(saved)
         source_path=None,
         source_dataset="data",
         recipe=None,
-        described=None,
         overlay=None,
     )
     axis = next(
@@ -699,7 +703,6 @@ def _manual_draft(editor_id: str = "draft") -> dict:
         source_path=None,
         source_dataset="",
         recipe=None,
-        described=None,
         overlay=None,
     )
 
@@ -834,7 +837,6 @@ def test_renaming_an_implicit_axis_keeps_its_coordinate_origin() -> None:
         source_path=None,
         source_dataset="data",
         recipe=None,
-        described=None,
         overlay=None,
     )
     viewer_module._edit_axis(
@@ -903,7 +905,6 @@ def test_manual_interaction_projection_does_not_rebuild_domains(monkeypatch) -> 
         source_path=None,
         source_dataset="",
         recipe=None,
-        described=None,
         overlay=None,
     )
     point = draft["point_axes"][0]
@@ -951,7 +952,6 @@ def test_manual_value_edit_preserves_a_sparse_serpentine_domain() -> None:
         source_path=None,
         source_dataset="data",
         recipe=None,
-        described=None,
         overlay=None,
     )
 
@@ -981,8 +981,10 @@ def test_manual_value_edit_preserves_a_sparse_serpentine_domain() -> None:
 def test_existing_archive_manual_edit_saves_reopens_and_keeps_lineage(
     saved, tmp_path, source_only
 ) -> None:
+    from zlc_data.figure_archive import write_figure_archive
+
     path, original = saved
-    original_info, original_arrays = read_archive(path)
+    original_info, original_arrays, original_datasets = read_archive(path)
     duplicate = {
         **original_info,
         "sections": {**original_info["sections"], "source": {
@@ -996,8 +998,6 @@ def test_existing_archive_manual_edit_saves_reopens_and_keeps_lineage(
     for tab in ("Logic", "Devices"):
         assert dict(repeated.tabs)[tab] == dict(actual.tabs)[tab]
     if source_only:
-        from zlc_data.figure_archive import write_figure_archive
-
         sections = original_info["sections"]
         sections["source"]["run_record"] = sections["lineage"]["nodes"][-1]["record"]
         sections["lineage"] = {"root": None, "nodes": [], "device_settings": []}
@@ -1006,6 +1006,15 @@ def test_existing_archive_manual_edit_saves_reopens_and_keeps_lineage(
             write_figure_archive(
                 stream, original_info["name"], arrays=original_arrays, sections=sections
             )
+    else:
+        sections = {key: value for key, value in original_info["sections"].items() if key != "dataset"}
+        sections["plot"] = {**sections["plot"], "other": sections["plot"]["data"]}
+        path = tmp_path / "multiple-datasets.npz"
+        with path.open("wb") as stream:
+            write_figure_archive(
+                stream, original_info["name"],
+                arrays={"data": original, "other": original}, sections=sections,
+            )
     original_lineage = original_info["sections"]["lineage"]
     original_source = original_info["sections"]["source"]
     view = _ViewerView()
@@ -1013,8 +1022,23 @@ def test_existing_archive_manual_edit_saves_reopens_and_keeps_lineage(
     try:
         presenter.open(str(path))
         _wait_until(lambda: not presenter._busy)
-        view.edit_data_requested.emit("archive:data")
+        monitor_build = presenter._panel_presenter._make_monitor_host
+        builds = []
+        def build_monitor(*args, **kwargs):
+            builds.append(args)
+            return monitor_build(*args, **kwargs)
+        presenter._panel_presenter._make_monitor_host = build_monitor
+        previous_builder = presenter._build_figure_host
+        presenter._build_figure_host = lambda *args, **kwargs: pytest.fail("data editing built a throwaway C Host")
+        view.edit_data_requested.emit("archive:data" if source_only else "archive:other")
         editor_id, draft = next(iter(presenter._data_drafts.items()))
+        assert not presenter._busy and not builds
+        presenter._build_figure_host = previous_builder
+        view.data_editor_intent.emit(
+            editor_id, {"op": "set_cells", "component": "values", "cells": ((0, 0, "invalid"),)},
+        )
+        assert draft["message"] and editor_id in view.data_editors
+        assert not builds
         view.data_editor_intent.emit(
             editor_id,
             {
@@ -1034,6 +1058,7 @@ def test_existing_archive_manual_edit_saves_reopens_and_keeps_lineage(
                 and presenter.panels[str(draft["panel_id"])].frozen_data is not None
             )
         )
+        assert len(builds) == 1
         target = tmp_path / "edited-existing.npz"
         view.data_editor_intent.emit(
             editor_id,
@@ -1044,8 +1069,8 @@ def test_existing_archive_manual_edit_saves_reopens_and_keeps_lineage(
             },
         )
         _wait_until(lambda: target.is_file() and not presenter._busy)
-        info, arrays = read_archive(target)
-        restored = read_dataset(info, arrays, "data")
+        info, arrays, datasets = read_archive(target)
+        restored = datasets["data"]
         assert restored.block.values.shape == original.block.values.shape
         assert restored.block.values.reshape(-1)[0] == 123
         assert restored.block.schema == original.block.schema
@@ -1064,7 +1089,7 @@ def test_existing_archive_manual_edit_saves_reopens_and_keeps_lineage(
         copied = tmp_path / "manual-panel-copy.npz"
         view.panel_save_figure_requested.emit(str(draft["panel_id"]), str(copied.with_suffix(".png")))
         _wait_until(lambda: copied.is_file() and not presenter._busy)
-        copied_info, _ = read_archive(copied)
+        copied_info, _, _datasets = read_archive(copied)
         assert copied_info["sections"]["source"] == info["sections"]["source"]
         assert copied_info["sections"]["lineage"] == lineage
 
@@ -1113,7 +1138,7 @@ def test_a_played_pulse_is_offered_on_the_device_tab_and_drawn_on_its_own(saved)
     from zlc_pulse import sequence_to_tree
 
     path, _snapshot = saved
-    info, arrays = read_archive(path)
+    info, arrays, datasets = read_archive(path)
     node = info["sections"]["lineage"]["nodes"][0]
     played_sequence = ordinary_imaging_sequence()
     record = dict(node["record"])
@@ -1222,7 +1247,7 @@ def test_a_played_pulse_is_offered_on_the_device_tab_and_drawn_on_its_own(saved)
 
 def test_the_description_reports_only_facts_saved_in_the_archive(saved) -> None:
     path, _snapshot = saved
-    info, arrays = read_archive(path)
+    info, arrays, datasets = read_archive(path)
     description = describe_archive(info, arrays)
     tabs = dict(description.tabs)
     assert tuple(tabs) == ("Plot", "Logic", "Devices", "Flow", "Raw")
@@ -1288,7 +1313,7 @@ def test_describing_an_archive_reads_recipes_without_rebuilding_datasets(
     import zlc_workbench.viewer as viewer_module
 
     path, _snapshot = saved
-    info, arrays = read_archive(path)
+    info, arrays, datasets = read_archive(path)
 
     def rebuilt(*_args, **_kwargs):
         raise AssertionError("describe_archive rebuilt a Dataset")
@@ -1300,7 +1325,7 @@ def test_describing_an_archive_reads_recipes_without_rebuilding_datasets(
 
 def test_the_flow_projection_is_the_saved_exact_node_edge_graph(saved) -> None:
     path, _snapshot = saved
-    description = describe_archive(*read_archive(path))
+    description = describe_archive(*read_archive(path)[:2])
     nodes = {node["id"]: node for node in description.flow["nodes"]}
     edges = description.flow["edges"]
     assert {node["kind"] for node in nodes.values()} == {"logic", "device"}
@@ -1319,7 +1344,7 @@ def test_the_flow_projection_is_the_saved_exact_node_edge_graph(saved) -> None:
     )
 
     # A convergent DAG keeps its shared event and shared device unique.
-    info, arrays = read_archive(path)
+    info, arrays, datasets = read_archive(path)
     camera_record = next(
         node["record"]
         for node in info["sections"]["lineage"]["nodes"]
@@ -1375,7 +1400,7 @@ def test_the_raw_tab_is_the_typed_document_not_a_node_probe(saved) -> None:
     hundreds of dotted paths."""
 
     path, _snapshot = saved
-    info, arrays = read_archive(path)
+    info, arrays, datasets = read_archive(path)
     raw = dict(dict(describe_archive(info, arrays).tabs)["Raw"])
     assert tuple(raw) == ("dataset", "plot", "lineage", "source")
     assert raw["source"] is info["sections"]["source"]
@@ -1384,10 +1409,22 @@ def test_the_raw_tab_is_the_typed_document_not_a_node_probe(saved) -> None:
     # The dataset manifest is part of the document too, however verbose.
     assert "data" in raw["dataset"]
 
-def test_opening_shows_the_figure_and_its_record(presenter, saved, tmp_path) -> None:
+def test_opening_shows_the_figure_and_its_record(presenter, saved, tmp_path, monkeypatch) -> None:
     path, _snapshot = saved
-    presenter.view.path_committed.emit(str(path))
-    _wait_until(lambda: not presenter._busy)
+    builds = []
+    make_monitor = presenter._panel_presenter._make_monitor_host
+
+    def monitor(*args, **kwargs):
+        builds.append(kwargs)
+        return make_monitor(*args, **kwargs)
+
+    with monkeypatch.context() as first_open:
+        first_open.setattr(presenter._panel_presenter, "_make_monitor_host", monitor)
+        first_open.setattr(presenter, "_build_figure_host", lambda *_args, **_kwargs: pytest.fail("Open built an unused edit/save host"))
+        presenter.view.path_committed.emit(str(path))
+        _wait_until(lambda: not presenter._busy)
+    assert len(builds) == 1
+    assert builds[0]["initial_spec"] is not None
 
     assert presenter.description is not None, presenter.view.status
     assert presenter.view.title == "run.png"
@@ -1422,8 +1459,8 @@ def test_opening_shows_the_figure_and_its_record(presenter, saved, tmp_path) -> 
     copied = copied_image.with_suffix(".npz")
     presenter.view.panel_save_figure_requested.emit(panel_id, str(copied_image))
     _wait_until(lambda: copied.is_file())
-    original_info, _original_arrays = read_archive(path)
-    copied_info, _copied_arrays = read_archive(copied)
+    original_info, _original_arrays, _original_datasets = read_archive(path)
+    copied_info, _copied_arrays, _copied_datasets = read_archive(copied)
     assert copied_info["sections"]["lineage"] == original_info["sections"]["lineage"]
     boolean = next(
         field
@@ -1452,6 +1489,18 @@ def test_opening_shows_the_figure_and_its_record(presenter, saved, tmp_path) -> 
     assert presenter.panels[added].host is None
     presenter.view.panel_remove_requested.emit(added)
     assert tuple(presenter.panels) == (panel_id,)
+
+    previous = dict(presenter.panels)
+    with monkeypatch.context() as refused:
+        def refuse_monitor(*_args, **_kwargs):
+            assert all(key in presenter.panels for key in previous)
+            raise ValueError("initial figure cannot be drawn")
+        refused.setattr(presenter._panel_presenter, "_make_monitor_host", refuse_monitor)
+        presenter.open(str(path))
+        _wait_until(lambda: not presenter._busy)
+    assert presenter.panels == previous
+    assert presenter.path == path
+    assert "cannot be drawn" in presenter.view.status[-1][0]
 
 def test_a_file_that_cannot_be_read_is_answered_not_raised(presenter, tmp_path) -> None:
     """An operator types paths.  Most of what they type is not an archive."""
@@ -1545,7 +1594,7 @@ def test_formal_window_waits_for_guarded_host_work_without_blocking_or_hiding(
     release_close = Event()
 
     class GuardedHost:
-        """A raster host whose configure waits, staged like every panel."""
+        """The initial Monitor host can be cancelled before its front is ready."""
 
         host_id = "guarded-host"
         startup_failure = None
@@ -1575,6 +1624,9 @@ def test_formal_window_waits_for_guarded_host_work_without_blocking_or_hiding(
         def subscribe_front(self, _callback):
             return lambda: None
 
+        def describe_display(self):
+            return self.configure()
+
         def set_device_pixel_ratio(self, _ratio):
             done = Future()
             done.set_result(None)
@@ -1596,7 +1648,8 @@ def test_formal_window_waits_for_guarded_host_work_without_blocking_or_hiding(
         _wait_until(configured.is_set)
         _wait_until(lambda: len(owner_turns) >= 3)
         assert window.is_visible()
-        assert not window.presenter.panels
+        assert window.presenter._opening_archive is not None
+        assert all(binding.host is None for binding in window.presenter.panels.values())
 
         window.close()
         application.processEvents()
@@ -1839,6 +1892,67 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
             )
         )
 
+        # Initial archive fit is synchronously primed and remains live. A
+        # later data+overlay publication must fit again without a Fit UI edit.
+        assert host._session._live_fit_request is not None
+        from zlc_workbench.viewer import _ArchiveDatasetProducer
+        from test_selection import _draw_area
+
+        plane = real_presenter._signal_plane
+        offset_signal = fit_center.rsplit("/", 1)[0] + "/offset"
+        before_offset = plane.current_dataset(offset_signal).block.values.item()
+        previous = plane.latest_publication(source_signal)
+        shifted = owned_snapshot_from_arrays(
+            snapshot.block.schema,
+            snapshot.block.values + np.asarray(7, dtype=snapshot.block.values.dtype),
+            2,
+            validity=snapshot.block.validity,
+        )
+        producer = _ArchiveDatasetProducer(
+            1, 0, "data", ImageFrame(shifted, overlay), archive,
+            owner_id=real_presenter._archive_producers[0].instance_id,
+            data_signal=source_signal, run_record={"operation": "manual-edit"},
+        )
+        updated = producer.publish(
+            plane, source_publication=(source_signal, previous),
+        )
+        real_presenter._archive_producers = (producer,)
+        front = plane.freeze()
+        assert front.publication(source_signal) is updated
+        assert front.publication(active["state"].overlay_signal) is updated
+
+        def refitted():
+            real_presenter.beat()
+            publication = plane.latest_publication(offset_signal)
+            return (
+                publication is not None
+                and publication.direct_parent_refs == (updated.event_ref,)
+                and real_presenter.panels[source_panel_id].display_publication is updated
+            )
+
+        _wait_until(refitted)
+        assert real_presenter.panels[source_panel_id].host is host
+        after_offset = plane.current_dataset(offset_signal).block.values.item()
+        assert after_offset == pytest.approx(before_offset + 7.0, abs=1e-3)
+        assert real_presenter.panels[source_panel_id].state.selector
+        roi_publication = plane.latest_publication(derived_roi)
+        assert roi_publication is not None
+        assert roi_publication.direct_parent_refs == (updated.event_ref,)
+
+        # A real gesture has a nonzero owner revision; the persisted region
+        # document deliberately does not carry that lifecycle counter.
+        _draw_area(host, span=(0.1, 0.1, 0.8, 0.8))
+        binding = real_presenter.panels[source_panel_id]
+        _wait_until(lambda: real_presenter.beat() or (
+            binding.selection_revision > 0 and binding.configuration is None
+        ))
+        region_revision = binding.selection_revision
+        updated = producer.publish(plane, source_publication=(source_signal, updated))
+        _wait_until(refitted)
+        assert binding.host is host and binding.selection_revision == region_revision
+        assert binding.bridge.last_error is None
+        assert plane.latest_publication(derived_roi).direct_parent_refs == (updated.event_ref,)
+
         panel_id = source_panel_id
         center_x = float(state.fit["fixed"]["center_x"])
         # A fit edit configures the accepted common Panel host in place; it
@@ -2006,7 +2120,7 @@ def test_viewer_reenabling_facet_fit_solves_every_cell(tmp_path) -> None:
         semantic={
             "fate:point:facet": "facet",
             "fate:point:x": "x",
-            "fate:repeat": "reduce",
+            f"fate:repeat:{schema.repeat_domain.axes[0].axis_id}": "reduce",
             "reduction": "mean",
         },
         fit={"model": "gaussian_offset", "fit_all_facets": True},
@@ -2152,20 +2266,12 @@ def test_panel_save_reports_that_the_archive_survived_an_image_failure(
     state = PanelState("camera", "image", "2x2", 400, "camera")
     frozen = _frozen_surface(state, snapshot)
 
-    def fail_image(_path) -> None:
+    from zlc_plot.rendering import MatplotlibRenderer
+
+    def fail_image(self, _path, **_kwargs) -> None:
         raise OSError("renderer failed")
 
-    monkeypatch.setattr(
-        figure_module,
-        "build_figure_host",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            configure=lambda **_kwargs: SimpleNamespace(
-                result=lambda: SimpleNamespace(value=frozen.description)
-            ),
-            save=fail_image,
-            close=lambda: None,
-        ),
-    )
+    monkeypatch.setattr(MatplotlibRenderer, "save", fail_image)
 
     with pytest.raises(RuntimeError, match="archive.*saved.*image") as failure:
         save_panel_figure(

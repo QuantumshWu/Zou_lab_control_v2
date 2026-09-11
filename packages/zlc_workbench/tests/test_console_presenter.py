@@ -3946,7 +3946,7 @@ def _saved_panel(signal: str, title: str, **fields) -> dict:
     return entry
 
 
-def _loaded_board(tree: dict, fresh_ids: tuple[str, ...], schema_for=lambda _signal: None):
+def _loaded_board(tree: dict, fresh_ids: tuple[str, ...]):
     """Parse, resolve and load ``tree`` exactly as the console does."""
 
     from zlc_workbench.console_layout import load_layout, resolve_layout
@@ -3959,7 +3959,7 @@ def _loaded_board(tree: dict, fresh_ids: tuple[str, ...], schema_for=lambda _sig
         installation=SimpleNamespace(devices={}),
         panel_kinds=("image",),
     )
-    return document, load_layout(resolved, panel_ids=fresh_ids, schema_for=schema_for)
+    return document, load_layout(resolved, panel_ids=fresh_ids)
 
 
 def test_a_loaded_board_reads_its_panels_derived_signals_by_their_fresh_ids(
@@ -4074,14 +4074,8 @@ def test_a_board_names_its_panels_and_a_load_respells_every_reference_to_them() 
         _loaded_board(tree, ("panel-3", "panel-4"))
 
 
-def test_a_board_written_without_ids_is_read_in_saved_order() -> None:
-    """A file from before identities were kept means its panels in order.
-
-    Such a board was minted on a fresh console, so its first entry was that
-    console's ``panel-1``; that is the only reading under which the
-    references it saved resolve.  A file naming ids for some entries only
-    is two files and refused, and a writer must always know its ids.
-    """
+def test_a_board_requires_each_saved_panel_identity() -> None:
+    """Missing identities are rejected, not inferred from saved order."""
 
     tree = {
         "format": "zlc.console-board",
@@ -4091,31 +4085,22 @@ def test_a_board_written_without_ids_is_read_in_saved_order() -> None:
         ],
         "logic": [],
     }
+    with pytest.raises(LayoutError, match="panel entry 1 requires panel_id"):
+        _loaded_board(tree, ("panel-8", "panel-9"))
+    tree["panels"][0]["panel_id"] = "panel-1"
+    with pytest.raises(LayoutError, match="panel entry 2 requires panel_id"):
+        LayoutDocument.from_tree(tree)
+    tree["panels"][1]["panel_id"] = "panel-2"
     document, loaded = _loaded_board(tree, ("panel-8", "panel-9"))
     assert document.panel_ids == ("panel-1", "panel-2")
     assert loaded.panels[1].signal == "@logic/panel-8/roi_frame"
     assert loaded.notes == ()
-
-    tree["panels"][0]["panel_id"] = "panel-1"
-    with pytest.raises(LayoutError, match="every panel entry carries a panel_id or none"):
-        LayoutDocument.from_tree(tree)
     with pytest.raises(TypeError, match="panel_ids"):
         LayoutDocument((), ())
 
 
 def test_saved_fates_are_read_in_todays_vocabulary_or_refused_by_name() -> None:
-    """An old fate key is respelled by its prefix; an unknown one is refused.
-
-    ``fate:point_dimension:<axis>`` and ``fate:data:<axis>`` name the same
-    axes today's ``fate:point:`` and ``fate:cell_data:`` do.  The bare
-    ``fate:repeat`` named the whole Repeat domain, and which axes that is
-    only the data can say, so a load expands it onto the Repeat axes of
-    what the signal publishes today, or drops it and says so.  A key
-    nobody can read is refused naming the key: dropped silently it would
-    surface as a plot drawn along the wrong axis.
-    """
-
-    from zlc_workbench.console_layout import current_fate_key
+    """Current fates survive without a live source; old spellings fail."""
 
     tree = {
         "format": "zlc.console-board",
@@ -4125,9 +4110,10 @@ def test_saved_fates_are_read_in_todays_vocabulary_or_refused_by_name() -> None:
                 "camera",
                 panel_id="panel-1",
                 semantic={
-                    "fate:point_dimension:cm.x": "x",
-                    "fate:data:cm.site": "reduce",
-                    "fate:repeat": "reduce",
+                    "fate:point:cm.x": "x",
+                    "fate:cell_data:cm.site": "reduce",
+                    "fate:repeat:cm.shot": "reduce",
+                    "fate:repeat:cm.cycle": "reduce",
                     "fate:cell_data:cm.row": "y",
                     "reduction": "mean",
                 },
@@ -4135,46 +4121,21 @@ def test_saved_fates_are_read_in_todays_vocabulary_or_refused_by_name() -> None:
         ],
         "logic": [],
     }
-    repeat_axes = SimpleNamespace(
-        repeat_domain=SimpleNamespace(
-            axes=(SimpleNamespace(axis_id="cm.shot"), SimpleNamespace(axis_id="cm.cycle"))
-        )
-    )
-    document, loaded = _loaded_board(tree, ("panel-2",), lambda _signal: repeat_axes)
-    assert dict(document.panels[0].semantic) == {
-        "fate:point:cm.x": "x",
-        "fate:cell_data:cm.site": "reduce",
-        "fate:repeat": "reduce",
-        "fate:cell_data:cm.row": "y",
-        "reduction": "mean",
-    }
-    assert dict(loaded.panels[0].semantic) == {
-        "fate:point:cm.x": "x",
-        "fate:cell_data:cm.site": "reduce",
-        "fate:repeat:cm.shot": "reduce",
-        "fate:repeat:cm.cycle": "reduce",
-        "fate:cell_data:cm.row": "y",
-        "reduction": "mean",
-    }
+    document, loaded = _loaded_board(tree, ("panel-2",))
+    expected = tree["panels"][0]["semantic"]
+    assert dict(document.panels[0].semantic) == expected
+    assert dict(loaded.panels[0].semantic) == expected
+    assert document.to_tree()["panels"][0]["semantic"] == expected
     assert loaded.notes == ()
-
-    _document, unpublished = _loaded_board(tree, ("panel-2",))
-    assert "fate:repeat" not in unpublished.panels[0].semantic
-    assert unpublished.notes == (
-        "panel 'camera': its saved repeat fate 'reduce' names the Repeat axes "
-        "and nothing is publishing @logic/cm/frames to name them; the fate was "
-        "dropped",
-    )
-
-    assert current_fate_key("fate:point:cm.x") == "fate:point:cm.x"
-    for unknown in ("fate:point_row", "fate:point_coordinate:cm.x", "fate:point:"):
-        with pytest.raises(LayoutError, match=repr(unknown)):
-            current_fate_key(unknown)
+    for unknown in (
+        "fate:point_dimension:cm.x", "fate:data:cm.site", "fate:repeat",
+        "fate:point_row", "fate:point_coordinate:cm.x", "fate:point:",
+    ):
         tree["panels"][0]["semantic"] = {unknown: "x"}
         with pytest.raises(LayoutError, match=repr(unknown)):
             LayoutDocument.from_tree(tree)
     tree["panels"][0]["semantic"] = {"fate:point_dimension:cm.x": "x", "fate:point:cm.x": "y"}
-    with pytest.raises(LayoutError, match="both mean 'fate:point:cm.x'"):
+    with pytest.raises(LayoutError, match="unknown fate key 'fate:point_dimension:cm.x'"):
         LayoutDocument.from_tree(tree)
 
 
@@ -4230,12 +4191,12 @@ def test_panel_edit_projects_the_direct_producer_link_and_ages(
     assert presenter.view.panel_editor_update_count.get(panel.panel_id, 0) == full_updates
     from zlc_ui.console.panel_editor_view import PanelEditorView
     assert "earlier run" in PanelEditorView._snapshot_text(projection, stale=False)
-    from zlc_data.figure_archive import read_archive, read_dataset
+    from zlc_data.figure_archive import read_archive
     saved_path = tmp_path / "earlier-run.png"
     assert presenter.save_panel_figure(panel.panel_id, str(saved_path))
     _wait_for_panel_save(presenter, saved_path)
-    document, arrays = read_archive(saved_path.with_suffix(".npz"))
-    saved = read_dataset(document, arrays, "data")
+    document, arrays, datasets = read_archive(saved_path.with_suffix(".npz"))
+    saved = datasets["data"]
     assert saved.ref == previous.snapshot.ref
     np.testing.assert_array_equal(saved.block.values, previous.snapshot.block.values)
     latest_front = SimpleNamespace(
@@ -4679,7 +4640,7 @@ def test_partial_grid_points_mount_and_reproject_one_canonical_snapshot(
         StreamGenerationId,
         ValueSchema,
     )
-    from zlc_data.figure_archive import read_archive, read_dataset
+    from zlc_data.figure_archive import read_archive
     from zlc_runtime.dataset import DatasetCoverage
     from zlc_runtime.dataset_output import (
         DatasetOutputDeclaration,
@@ -4823,8 +4784,8 @@ def test_partial_grid_points_mount_and_reproject_one_canonical_snapshot(
     ) is True
     archive = tmp_path / "partial-grid.npz"
     _wait_for_panel_save(presenter, archive)
-    info, arrays = read_archive(archive)
-    saved = read_dataset(info, arrays, "data")
+    info, arrays, datasets = read_archive(archive)
+    saved = datasets["data"]
     assert saved.block.schema == updated_snapshot.block.schema
     np.testing.assert_array_equal(saved.block.values, updated_snapshot.block.values)
     np.testing.assert_array_equal(
@@ -7228,7 +7189,7 @@ def test_a_refresh_still_travelling_leaves_save_the_editors_picture(
 
     from threading import Event
 
-    from zlc_data.figure_archive import read_archive, read_dataset
+    from zlc_data.figure_archive import read_archive
 
     node, snap = _one_shot(session)
     panel = presenter.add_panel(node.signal_key("frames"), snap, kind="image")
@@ -7276,8 +7237,8 @@ def test_a_refresh_still_travelling_leaves_save_the_editors_picture(
         target = tmp_path / "pending-refresh.png"
         assert presenter.save_panel_figure(panel.panel_id, str(target)) is True
         _wait_for_panel_save(presenter, target)
-        info, arrays = read_archive(target.with_suffix(".npz"))
-        saved = read_dataset(info, arrays, "data")
+        info, arrays, datasets = read_archive(target.with_suffix(".npz"))
+        saved = datasets["data"]
         assert saved.ref.revision == opened.snapshot.ref.revision, (
             "Save wrote a picture Edit had not reached"
         )

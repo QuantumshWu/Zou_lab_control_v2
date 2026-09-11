@@ -145,12 +145,9 @@ def data_structure_fragments(
     to say everything still show how many groups there are, in which colours,
     paired line to line.
 
-    A domain with no axes is not a factor of anything and contributes no
-    group.  It used to render as an empty "()" behind its own multiplication
-    sign, which reads as a bracket somebody forgot to fill.  The colour
-    belongs to the DOMAIN rather than to the printed position, so the domains
-    that do appear keep their own colour instead of shifting up into the
-    missing one's.
+    An axis-free domain still exists and has one scalar carrier. Its number
+    is 1 and its name is a dash, not an invented axis. Keep all three domain
+    groups and their colours, including after a manual axis deletion.
     """
 
     landed = tuple(valid or ())
@@ -163,8 +160,6 @@ def data_structure_fragments(
     sizes: list[tuple[str, str | None, object]] = []
     names: list[tuple[str, str | None, object]] = []
     for index, group in enumerate(tuple(structure or ())):
-        if not group:
-            continue
         colour = AXIS_GROUP_COLORS[index % len(AXIS_GROUP_COLORS)]
         if sizes:
             sizes.append((" × ", None, None))
@@ -175,9 +170,9 @@ def data_structure_fragments(
                 " × ".join(
                     count_text(index, position, size)
                     for position, (_name, size) in enumerate(group)
-                ),
+                ) or "1",
             ),
-            (names, " × ".join(str(name) for name, _size in group)),
+            (names, " × ".join(str(name) for name, _size in group) or "—"),
         ):
             line.append(("(", colour, None))
             line.append((inner, colour, QtCore.Qt.ElideMiddle))
@@ -288,6 +283,8 @@ class PanelCardView(FluentGroupBox):
         self._settings_scroll: FluentScrollArea | None = None
         self._settings_body: QtWidgets.QWidget | None = None
         self._settings_form: FluentParameterForm | None = None
+        # None means current; a deferred request retains whether keyed choices changed.
+        self._settings_pending_rebuild: bool | None = None
         #: What the card's status dot says, kept so the Setting frame can say
         #: it too, whenever it is opened.
         self._status_text = ""
@@ -796,6 +793,12 @@ class PanelCardView(FluentGroupBox):
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt API
         popup = self._settings_popup
+        if (
+            watched is popup
+            and event.type() == QtCore.QEvent.Show
+            and self._settings_pending_rebuild is not None
+        ):
+            self._rebuild_settings_form(opening=True)
         if watched is self._settings_drag_handle and popup is not None:
             if (
                 event.type() == QtCore.QEvent.MouseButtonPress
@@ -1093,14 +1096,24 @@ class PanelCardView(FluentGroupBox):
                 values[f"{section}__{key}"] = value
         return values
 
-    def _rebuild_settings_form(self, *, force: bool = False) -> None:
+    def _rebuild_settings_form(self, *, force: bool = False, opening: bool = False) -> None:
+        if not opening and (
+            self._settings_popup is None or not self._settings_popup.isVisible()
+        ):
+            self._settings_pending_rebuild = bool(force or self._settings_pending_rebuild)
+            return
         if self._settings_form is not None:
             spec = self._form_spec()
             values = self._form_values()
-            if force or not self._settings_form.adopt_projection(spec, values):
+            if (
+                force
+                or self._settings_pending_rebuild
+                or not self._settings_form.adopt_projection(spec, values)
+            ):
                 self._settings_form.reconcile(spec, values)
             self._apply_settings_enabled_state()
-            self._sync_settings_body_size()
+            self._sync_settings_body_size(opening=opening)
+            self._settings_pending_rebuild = None
 
     def _apply_settings_enabled_state(self) -> None:
         """Apply standing edit policy without one-frame enabled flicker."""
@@ -1121,7 +1134,7 @@ class PanelCardView(FluentGroupBox):
                 if key in form.spec.keys:
                     form.widget_for(key).setEnabled(False)
 
-    def _sync_settings_body_size(self) -> None:
+    def _sync_settings_body_size(self, *, opening: bool = False) -> None:
         """Measure the content.  Do NOT move the frame it is sitting in.
 
         This used to re-run the whole placement -- size AND position, derived
@@ -1137,6 +1150,10 @@ class PanelCardView(FluentGroupBox):
         sized from -- but they end here.  Content goes into the scroll.
         """
 
+        if not opening and (
+            self._settings_popup is None or not self._settings_popup.isVisible()
+        ):
+            return
         body = self._settings_body
         scroll = self._settings_scroll
         if body is None or body.layout() is None or scroll is None:
@@ -1228,7 +1245,8 @@ class PanelCardView(FluentGroupBox):
         )
 
     def _open_settings(self) -> None:
-        if self._settings_popup is None:
+        created = self._settings_popup is None
+        if created:
             # A frame INSIDE the page, not a window.  It lives in the panel
             # area's viewport, so it is clipped to that area, hides and
             # returns with the tab, and travels/minimises/closes with the
@@ -1282,6 +1300,7 @@ class PanelCardView(FluentGroupBox):
                 runtime=self._signal_runtime,
                 parent=body,
             )
+            self._settings_pending_rebuild = None
             self._settings_form.changed.connect(self._setting_changed)
             self._apply_settings_enabled_state()
             body_layout.addWidget(self._settings_form)
@@ -1314,12 +1333,13 @@ class PanelCardView(FluentGroupBox):
             # LayoutRequest-driven measurement: the body says when its own
             # geometry went stale (see eventFilter).
             body.installEventFilter(self)
-            self._sync_settings_body_size()
+            popup.installEventFilter(self)
+            self._sync_settings_body_size(opening=True)
             popup.hide()
         anchor = self._settings_anchor
         anchor.toggle(
             self._settings_body,
-            prepare=self._rebuild_settings_form,
+            prepare=None if created else lambda: self._rebuild_settings_form(opening=True),
             # The card's own placement call: it reads the width the rebuild
             # just measured, where a value passed alongside ``prepare`` would
             # be the one measured BEFORE it ran.

@@ -20,7 +20,6 @@ from zlc_data import (
 from zlc_data.figure_archive import (
     FIGURE_SCHEMA,
     read_archive,
-    read_dataset,
     write_figure_archive,
 )
 from zlc_durable import (
@@ -397,8 +396,8 @@ class SampleWriter:
         from zlc_plot import open_figure_host, read_figure_plot
 
         for index, archive_path in sorted(self._samples.items()):
-            info, arrays = read_archive(archive_path)
-            plot_input, recipe = read_figure_plot(info, arrays, "data")
+            info, arrays, datasets = read_archive(archive_path)
+            plot_input, recipe = read_figure_plot(info, arrays, datasets, "data")
             image_path, _archive_path = self._paths(index)
             plot = open_figure_host(
                 plot_input,
@@ -463,8 +462,8 @@ def read_saved_samples(
                 "saved calibration sample indices must be contiguous from zero; "
                 f"expected {ordinal:04d}, got {saved_index:04d}"
             )
-        info, arrays = read_archive(path)
-        snapshot = read_dataset(info, arrays, "data")
+        info, arrays, datasets = read_archive(path)
+        snapshot = datasets["data"]
         if info["name"] != f"{SAVED_SAMPLE_STEM}_{ordinal:04d}.png":
             raise ValueError(f"{path.name} metadata names another sample")
         if snapshot.ref.revision.value != ordinal + 1:

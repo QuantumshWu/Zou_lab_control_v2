@@ -12,7 +12,7 @@ import pytest
 from zlc_data.figure_archive import read_archive
 from zlc_pulse import PulseSequence
 from zlc_pulse.device import DoneReport
-from zlc_pulse.wire import STATUS_DONE, STATUS_ERROR
+from zlc_pulse.wire import STATUS_DONE, STATUS_ERROR, STATUS_RUNNING, STATUS_UNDERFLOW, STATUS_LINK_ERROR
 from zlc_plot import FacetGridPlot, HistogramPlot, Reduction, read_figure_plot
 from zlc_runtime import NodeHost, SignalDataPlane
 
@@ -38,7 +38,7 @@ from zlc_atom.nodes.calibration import (
     TrapCalibration,
 )
 from zlc_plot.fit import DECISIVE_BIC_GAIN
-from zlc_atom.nodes.calibration.pulse import resolve_pulse
+from zlc_atom.nodes.calibration.pulse import ResolvedPulse, resolve_pulse
 from zlc_atom.nodes.slm_feedback import task as feedback_module
 from zlc_atom.nodes.slm_feedback.task import (
     SlmFeedbackTask,
@@ -502,24 +502,23 @@ def _task(
 def _measured(task: SlmFeedbackTask, result):
     """Give a mocked shot batch the exact device facts the real path freezes.
 
-    A mocked batch is a clean shot: the pulse verdict the real path returns
-    fifth is "" here.
     """
 
     task._actual_device_snapshots = {
         "camera": {"exposure_seconds": 0.020},
         "sequencer": {"state": {"loaded": True}},
     }
-    return (*result, "")
+    return result
 
 
 _PROGRAM_DIGEST = "5e7c0f1a9b3d4e6f8a2c1b0d9e8f7a6c"
 
 
-def _resolved_pulse(*_args, **_kwargs) -> SimpleNamespace:
-    """A resolved pulse with the one program fact the task reads: its digest."""
+def _resolved_pulse(*_args, **_kwargs) -> ResolvedPulse:
+    """Run preparation owns loading; numerical tests use a resolved source."""
 
-    return SimpleNamespace(program=SimpleNamespace(digest=_PROGRAM_DIGEST))
+    return ResolvedPulse("test", Path("test.json"), FEEDBACK_PULSE_SEQUENCE,
+                         SimpleNamespace(digest=_PROGRAM_DIGEST))
 
 
 def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
@@ -1625,7 +1624,7 @@ def test_feedback_applies_science_context_then_measures_before_solving_update(
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration: _measured(self, (
+        lambda self, context, iteration: _measured(self, (
             np.zeros((self.shots, 35)),
             (),
             (),
@@ -1634,6 +1633,7 @@ def test_feedback_applies_science_context_then_measures_before_solving_update(
     )
     plane = SignalDataPlane()
 
+    loaded_programs = []
     def build(
         *,
         selected_context=science_context,
@@ -1643,7 +1643,8 @@ def test_feedback_applies_science_context_then_measures_before_solving_update(
             tmp_path,
             slm=slm,
             camera=object(),
-            sequencer=SimpleNamespace(describe=lambda: object()),
+            sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None,
+                                      load=lambda *args, **kwargs: loaded_programs.append((args, kwargs))),
             plane=plane,
             calibration=selected_calibration,
             science_context=selected_context,
@@ -1670,6 +1671,7 @@ def test_feedback_applies_science_context_then_measures_before_solving_update(
     task = build()
     try:
         result = task.execute(_Context(tmp_path))
+        assert len(loaded_programs) == 1, 'run preparation must load once, not once per candidate'
         artifact = load_science_context(result["artifact_path"])
         expected = canonical_phase(
             frozen_solved_pattern.astype(float) + wavefront.astype(float), shape
@@ -1743,7 +1745,7 @@ def test_arbitrary_sparse_geometry_matches_calibration_sites_before_updating_tar
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration: _measured(self, (
+        lambda self, context, iteration: _measured(self, (
             np.zeros((self.shots, len(rows))),
             (),
             (),
@@ -1755,7 +1757,7 @@ def test_arbitrary_sparse_geometry_matches_calibration_sites_before_updating_tar
         tmp_path,
         slm=_Slm(target.shape),
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object()),
+        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=target,
         calibration=calibration,
@@ -1831,8 +1833,8 @@ def test_uniformity_history_is_one_latest_curve_paired_with_candidate_phase(
         "_fit_contrasts",
         lambda samples, **_kwargs: _fitted_result(next(contrasts)),
     )
-    def measure(self, pulse, run_context, iteration):
-        del pulse, run_context, iteration
+    def measure(self, run_context, iteration):
+        del run_context, iteration
         return _measured(self, (
             np.zeros((self.shots, 35)),
             (),
@@ -1845,7 +1847,7 @@ def test_uniformity_history_is_one_latest_curve_paired_with_candidate_phase(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object()),
+        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=_grid_target(slm.shape_yx),
         updates=2,
@@ -1890,7 +1892,7 @@ def test_uniformity_history_is_one_latest_curve_paired_with_candidate_phase(
         axis = output.snapshot.block.schema.point_domain.axes[0]
         assert axis.name == "candidate"
         assert axis.coordinates == (1, 2, 3, 4, 5, 6, 7)
-        info, _arrays = read_archive(tmp_path / "figures" / "uniformity_history.npz")
+        info, _arrays, _datasets = read_archive(tmp_path / "figures" / "uniformity_history.npz")
         assert set(
             info["sections"]["source"]["run_record"]["device_snapshots"]
         ) == {"camera", "sequencer", "slm"}
@@ -2202,7 +2204,7 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
 
         def wait_done(self, timeout=None):
             del timeout
-            return SimpleNamespace(fault=None)
+            return DoneReport(status=STATUS_DONE, cursor=0, underflow=False, elapsed_seconds=0.0)
 
         def safe(self):
             return None
@@ -2254,10 +2256,8 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
             return current_dataset(*args, **kwargs)
 
         monkeypatch.setattr(plane, "current_dataset", one_result_lookup)
-        samples, saturated, missing, _mean, pulse_warning = task._measure(
-            pulse, _Context(), 0
-        )
-        assert pulse_warning == ""
+        sequencer.load(pulse.program, source=pulse.sequence)
+        samples, saturated, missing, _mean = task._measure(_Context(), 0)
         assert lookup_count == 1
         monkeypatch.setattr(plane, "current_dataset", current_dataset)
         np.testing.assert_allclose(samples, np.broadcast_to(fluorescence, (10, 35)))
@@ -2335,8 +2335,8 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
 
         monkeypatch.setattr(feedback_module, "extract_box_signals", partial_signals)
         slm.apply_phase(np.full(slm.shape_yx, 0.25, dtype=np.float32))
-        partial_samples, _saturated, partial_missing, _mean, _warning = (
-            task._measure(pulse, _Context(), 1)
+        partial_samples, _saturated, partial_missing, _mean = (
+            task._measure(_Context(), 1)
         )
         second_camera = plane.current_dataset(signal)
         assert second_camera.ref.stream_generation != first_camera_generation
@@ -2389,7 +2389,7 @@ def test_electron_measurement_uses_current_conversion_and_saturation(
             self.camera.trigger(int(run_repeats))
 
         def wait_done(self, timeout=None):
-            return SimpleNamespace(fault=None)
+            return DoneReport(status=STATUS_DONE, cursor=0, underflow=False, elapsed_seconds=0.0)
 
         def safe(self):
             return None
@@ -2435,9 +2435,8 @@ def test_electron_measurement_uses_current_conversion_and_saturation(
             calibration=calibration(),
         )
         try:
-            _samples, saturated, missing, _mean, _warning = task._measure(
-                pulse, _Context(), 0
-            )
+            task.sequencer.load(pulse.program, source=pulse.sequence)
+            _samples, saturated, missing, _mean = task._measure(_Context(), 0)
             assert saturated == (17,) and not missing
             assert task._effective_photoelectrons is effective_photoelectrons
         finally:
@@ -2449,18 +2448,10 @@ def test_electron_measurement_uses_current_conversion_and_saturation(
     run(recorded_offset, 0.6, True)
 
 
-def test_measure_keeps_observer_only_faults_repeats_board_faults_and_loads_every_batch(
+def test_measure_refuses_faults_without_repeating_the_authored_batch(
     tmp_path: Path,
 ) -> None:
-    """The real-run failure: one lost UART poll byte at shot 85 of 200.
-
-    An observer-only fault with every frame delivered is a good batch; a
-    board fault -- reported after every trigger, or mid-batch so that the
-    camera times out first -- repeats the batch once with the first fault on
-    record, and the second fault is fatal naming both; the program is loaded
-    for every batch, a repeat included, the way calibration loads it for
-    every shot (see ``_shoot``): one LOAD per FIRE.
-    """
+    """A board/observer failure must not add shots or masquerade as completion."""
 
     def frame_source(ordinal: int, exposure: float) -> np.ndarray:
         del ordinal, exposure
@@ -2542,84 +2533,32 @@ def test_measure_keeps_observer_only_faults_repeats_board_faults_and_loads_every
     finally:
         installation.close()
     try:
-        # Observer-only fault, all ten frames in hand: kept, with the fault
-        # recorded as the batch's warning, in one fire.
-        sequencer.reports = [
-            report(status=STATUS_ERROR, observer_error=observer_error)
-        ]
-        samples, _saturated, _missing, _mean, warning = task._measure(
-            pulse, _Context(), 0
+        sequencer.load(pulse.program, source=pulse.sequence)
+        failures = (
+            (report(status=STATUS_DONE, observer_error=observer_error), None, "observer failed"),
+            (report(status=STATUS_ERROR, observer_error=observer_error), None, "board reported an error"),
+            (report(status=STATUS_ERROR), 3, "board reported an error"),
+            (report(status=STATUS_DONE | STATUS_UNDERFLOW), None, "underran"),
+            (report(status=0), None, "did not confirm DONE"),
+            (report(status=STATUS_DONE | STATUS_RUNNING), None, "did not confirm DONE"),
         )
+        for iteration, (answer, limit, reason) in enumerate(failures):
+            slm.apply_phase(np.full(slm.shape_yx, 0.1 * (iteration + 1), dtype=np.float32))
+            sequencer.trigger_limit = limit
+            sequencer.reports = [answer]
+            before = len(sequencer.fires)
+            with pytest.raises(RuntimeError, match=reason):
+                task._measure(_Context(), iteration)
+            assert len(sequencer.fires) == before + 1, "the failed phase was shot again"
+            assert sequencer.loads == 1, "an unchanged program was loaded again"
+            assert not sequencer.reports and not camera.capture_state()
+
+        slm.apply_phase(np.full(slm.shape_yx, 1.25, dtype=np.float32))
+        sequencer.reports = [report(status=STATUS_DONE | STATUS_LINK_ERROR)]
+        samples, _saturated, _missing, _mean = task._measure(_Context(), len(failures))
         assert samples.shape == (10, 35)
-        assert warning == (
-            "batch accepted with a pulse fault: pulse observer failed: "
-            f"{observer_error}"
-        )
-        assert sequencer.fires == [10]
         assert sequencer.loads == 1
-
-        # The board itself reporting an error repeats the batch once; the
-        # clean repeat is the candidate's measurement, and the first fault
-        # is on record.
-        slm.apply_phase(np.full(slm.shape_yx, 0.25, dtype=np.float32))
-        sequencer.reports = [
-            report(status=STATUS_ERROR),
-            report(status=STATUS_DONE),
-        ]
-        _samples, _saturated, _missing, _mean, warning = task._measure(
-            pulse, _Context(), 1
-        )
-        assert warning == (
-            "batch repeated after a pulse fault: the board reported an error"
-        )
-        assert sequencer.fires == [10, 10, 10]
-        # The repeat is a whole new batch: safe, LOAD, arm, fire.
-        assert sequencer.loads == 3
-
-        # The board stops after three of ten triggers: the camera times out
-        # first, the board's report is read before the camera is blamed,
-        # and the batch is repeated -- the archived rule's mid-batch case.
-        slm.apply_phase(np.full(slm.shape_yx, 0.375, dtype=np.float32))
-        sequencer.trigger_limit = 3
-        sequencer.reports = [
-            report(status=STATUS_ERROR),
-            report(status=STATUS_DONE),
-        ]
-        samples, _saturated, _missing, _mean, warning = task._measure(
-            pulse, _Context(), 2
-        )
-        assert samples.shape == (10, 35)
-        assert warning == (
-            "batch repeated after a pulse fault: the board reported an error"
-        )
-        assert sequencer.fires == [10, 10, 10, 10, 10]
-
-        # The board stops mid-batch and reports nothing wrong: that is the
-        # camera's fault, and the camera's complaint is what comes out.
-        slm.apply_phase(np.full(slm.shape_yx, 0.4375, dtype=np.float32))
-        sequencer.trigger_limit = 3
-        sequencer.reports = []
-        with pytest.raises(RuntimeError, match="the camera returned 0 frame"):
-            task._measure(pulse, _Context(), 3)
-        assert sequencer.fires == [10] * 6
-
-        # An observer fault that also saw the bank underrun is a board fact;
-        # a second fault on the repeat is the candidate's failure, naming both.
-        slm.apply_phase(np.full(slm.shape_yx, 0.5, dtype=np.float32))
-        sequencer.reports = [
-            report(status=STATUS_ERROR, observer_error=observer_error, underflow=True),
-            report(status=STATUS_ERROR),
-        ]
-        with pytest.raises(
-            RuntimeError,
-            match="failed twice for one candidate: first pulse observer failed.*"
-            "the scan bank underran; then the board reported an error",
-        ):
-            task._measure(pulse, _Context(), 4)
-        assert sequencer.fires == [10] * 8
-        assert sequencer.loads == len(sequencer.fires)
-        assert not sequencer.reports
-        assert not camera.capture_state()
+        assert len(sequencer.fires) == len(failures) + 1
     finally:
         plane.close()
         camera.close()
@@ -2690,7 +2629,7 @@ def test_single_population_sites_probe_both_sides_then_measure_combined_target(
         )
     )
 
-    def measure(self, pulse, context, iteration):
+    def measure(self, context, iteration):
         measured_phases.append(np.array(self.slm.last_commanded_phase, copy=True))
         return _measured(self, (
             np.zeros((self.shots, 35)),
@@ -2713,7 +2652,7 @@ def test_single_population_sites_probe_both_sides_then_measure_combined_target(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object()),
+        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         calibration=calibration,
         science_context=context_mapping,
@@ -2877,7 +2816,7 @@ def test_baseline_single_with_formal_history_steps_to_bracket_midpoint_without_p
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration: _measured(self, (
+        lambda self, context, iteration: _measured(self, (
             np.zeros((self.shots, 35)),
             (),
             (),
@@ -2914,7 +2853,7 @@ def test_baseline_single_with_formal_history_steps_to_bracket_midpoint_without_p
             run_directory,
             slm=slm,
             camera=object(),
-            sequencer=SimpleNamespace(describe=lambda: object()),
+            sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
             plane=plane,
             calibration=_calibration_at(
                 np.column_stack((columns, rows)), shape=target.shape
@@ -3025,7 +2964,7 @@ def test_probe_combined_counts_once_and_a_probed_site_is_never_probed_again(
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration: _measured(self, (
+        lambda self, context, iteration: _measured(self, (
             np.zeros((self.shots, 35)),
             (),
             (),
@@ -3041,7 +2980,7 @@ def test_probe_combined_counts_once_and_a_probed_site_is_never_probed_again(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object()),
+        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=target,
         calibration=_calibration_with_unresolved_site(target, missing=17),
@@ -3124,7 +3063,7 @@ def test_all_single_population_sites_stall_at_baseline_without_fake_probe(
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration: _measured(self, (
+        lambda self, context, iteration: _measured(self, (
             measured.append(np.array(self.slm.last_commanded_phase, copy=True)),
             np.zeros((self.shots, 35)),
             (),
@@ -3140,7 +3079,7 @@ def test_all_single_population_sites_stall_at_baseline_without_fake_probe(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object()),
+        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=target,
         calibration=_calibration_with_unresolved_site(target, missing=17),
@@ -3197,7 +3136,7 @@ def test_unchanged_solved_phase_stops_without_a_second_shot_batch(
     )
     calls = 0
 
-    def measure(self, pulse, context, iteration):
+    def measure(self, context, iteration):
         nonlocal calls
         calls += 1
         return _measured(self, (
@@ -3215,7 +3154,7 @@ def test_unchanged_solved_phase_stops_without_a_second_shot_batch(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object()),
+        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=target,
         calibration=_calibration_with_unresolved_site(target, missing=17),
@@ -3278,7 +3217,7 @@ def test_persistently_single_site_probes_both_sides_then_extrapolates_deeper(
         ),
     )
 
-    def measure(self, pulse, run_context, iteration):
+    def measure(self, run_context, iteration):
         measured_phases.append(np.array(self.slm.last_commanded_phase, copy=True))
         return _measured(self, (
             np.zeros((self.shots, 35)),
@@ -3296,7 +3235,7 @@ def test_persistently_single_site_probes_both_sides_then_extrapolates_deeper(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object()),
+        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=target,
         calibration=calibration,
@@ -3584,7 +3523,7 @@ def test_completed_run_selects_best_candidate_without_extra_shots(
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration: _measured(self, (
+        lambda self, context, iteration: _measured(self, (
             requested_shots.append(self.shots),
             np.zeros((self.shots, 35)),
             (),
@@ -3607,7 +3546,7 @@ def test_completed_run_selects_best_candidate_without_extra_shots(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object()),
+        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=_grid_target(slm.shape_yx),
         updates=2,
@@ -3697,7 +3636,7 @@ def test_measured_plant_slope_sets_the_step_and_proven_uniformity_stops_the_run(
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration: _measured(self, (
+        lambda self, context, iteration: _measured(self, (
             np.zeros((self.shots, 35)),
             (),
             (),
@@ -3708,7 +3647,7 @@ def test_measured_plant_slope_sets_the_step_and_proven_uniformity_stops_the_run(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object()),
+        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=base,
         updates=24,
@@ -3810,9 +3749,9 @@ def test_measured_plant_slope_sets_the_step_and_proven_uniformity_stops_the_run(
         text = (tmp_path / "summary.txt").read_text()
         assert "Final plant slope:" in text and "estimated" in text
         assert result["true_uniformity_cv"] == summary["selected_true_uniformity_cv"]
-        info, arrays = read_archive(tmp_path / "figures" / "uniformity_history.npz")
+        info, arrays, datasets = read_archive(tmp_path / "figures" / "uniformity_history.npz")
         assert info["sections"]["source"]["run_record"]["readout_model_kind"] == "box"
-        plot_input, _recipe = read_figure_plot(info, arrays, "data")
+        plot_input, _recipe = read_figure_plot(info, arrays, datasets, "data")
         metric_axis = next(
             spec
             for spec in plot_input.block.schema.cell_domain.axes
@@ -3856,7 +3795,7 @@ def test_stop_during_failed_first_checkpoint_retains_measured_candidate(
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration: _measured(self, (
+        lambda self, context, iteration: _measured(self, (
             np.zeros((self.shots, 35)),
             (),
             (),
@@ -3876,7 +3815,7 @@ def test_stop_during_failed_first_checkpoint_retains_measured_candidate(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object()),
+        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=_grid_target(slm.shape_yx),
     )
@@ -3923,7 +3862,7 @@ def test_failure_after_a_completed_candidate_saves_figures_and_context(
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration: _measured(self, (
+        lambda self, context, iteration: _measured(self, (
             _mixture_samples(np.linspace(1.0, 2.0, 35), self.shots),
             (),
             (),
@@ -3944,7 +3883,7 @@ def test_failure_after_a_completed_candidate_saves_figures_and_context(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object()),
+        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=_grid_target(slm.shape_yx),
         shots=100,
@@ -3967,7 +3906,7 @@ def test_failure_after_a_completed_candidate_saves_figures_and_context(
         assert [path.name for path in candidate_figures.glob("*.png")] == [
             "candidate-0001.png"
         ]
-        info, arrays = read_archive(candidate_figures / "candidate-0001.npz")
+        info, arrays, datasets = read_archive(candidate_figures / "candidate-0001.npz")
         archived_slm = info["sections"]["source"]["run_record"][
             "device_snapshots"
         ]["slm"]
@@ -3980,16 +3919,27 @@ def test_failure_after_a_completed_candidate_saves_figures_and_context(
         # The phase measured for candidate 1 is the phase the failed run
         # leaves on the SLM: no command follows the measurement.
         assert archived_slm["command_revision"] == slm.command_revision
-        _plot_input, recipe = read_figure_plot(info, arrays, "data")
+        _plot_input, recipe = read_figure_plot(info, arrays, datasets, "data")
         assert isinstance(recipe["spec"], FacetGridPlot)
         assert isinstance(recipe["spec"].cell, HistogramPlot)
-        # The two-population fit states the evidence it demanded, at the
-        # default, so the saved figure says how its populations were decided.
-        assert recipe["fit"] == {
-            "model": "bimodal_gaussian",
-            "fit_all_facets": True,
-            "min_bic_gain": 10.0,
-        }
+        # The report reuses the decision's full-data model, not a second
+        # optimizer applied to binned counts.
+        assert recipe["fit"] == {}
+        fitted = _fitted_result(np.linspace(1.0, 2.0, 35))
+        targets = recipe["classifier_thresholds"]
+        assert len(targets) == 35
+        axis = _plot_input.block.schema.cell_domain.axes[0]
+        by_coordinate = {axis.coordinate_at(index): index for index in range(35)}
+        for target in targets:
+            index = by_coordinate[target["scope"][0]["coordinate"]]
+            assert target["value"] == fitted["threshold"][index]
+            assert target["gaussian_components"] == {
+                "center": fitted["dark_mean"][index],
+                "sigma": fitted["dark_sigma"][index],
+                "delta_center": fitted["bright_mean"][index] - fitted["dark_mean"][index],
+                "sigma_B": fitted["bright_sigma"][index],
+                "ratio": fitted["bright_fraction"][index],
+            }
         run = json.loads((run_root / "run.json").read_text(encoding="utf-8"))
         artifact_roles = {
             item["name"]: item["role"] for item in run["artifacts"]
@@ -4066,7 +4016,7 @@ def test_stop_after_terminal_commit_keeps_host_success_and_artifact(
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration: _measured(self, (
+        lambda self, context, iteration: _measured(self, (
             np.zeros((self.shots, 35)),
             (),
             (),
@@ -4086,7 +4036,7 @@ def test_stop_after_terminal_commit_keeps_host_success_and_artifact(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object()),
+        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=_grid_target(slm.shape_yx),
         updates=2,
@@ -4175,7 +4125,7 @@ def test_terminal_save_failure_restores_incoming_and_fails_host(
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration: _measured(self, (
+        lambda self, context, iteration: _measured(self, (
             np.zeros((self.shots, 35)),
             (),
             (),
@@ -4186,7 +4136,7 @@ def test_terminal_save_failure_restores_incoming_and_fails_host(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object()),
+        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=_grid_target(slm.shape_yx),
         updates=2,
@@ -4243,7 +4193,7 @@ def test_invalid_site_holds_weight_and_never_retries_the_same_phase(
     )
     measured_phases: list[np.ndarray] = []
 
-    def measure(self, pulse, context, iteration):
+    def measure(self, context, iteration):
         measured_phases.append(np.array(self.slm.last_commanded_phase, copy=True))
         return _measured(self, (
             first,
@@ -4261,7 +4211,7 @@ def test_invalid_site_holds_weight_and_never_retries_the_same_phase(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object()),
+        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=_grid_target(slm.shape_yx),
         updates=2,
@@ -4340,7 +4290,7 @@ def test_stop_before_first_candidate_accepts_incoming_as_formal_artifact(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object()),
+        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=_grid_target(slm.shape_yx),
     )
@@ -4499,7 +4449,7 @@ def test_loading_rate_feedback_evens_the_lattice_against_a_rising_saturating_pla
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration: _measured(self, (
+        lambda self, context, iteration: _measured(self, (
             np.zeros((self.shots, 35)),
             (),
             (),
@@ -4510,7 +4460,7 @@ def test_loading_rate_feedback_evens_the_lattice_against_a_rising_saturating_pla
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object()),
+        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=base,
         updates=24,

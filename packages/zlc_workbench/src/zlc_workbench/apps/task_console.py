@@ -48,14 +48,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _beat_interval_ms(presenter) -> int:
-    """Return the one wall cadence owned by the display clock.
-
-    ``HarmonicClock.advance`` credits one clock base per beat, so the wall-time
-    truth of every panel's labeled refresh interval requires the timer to fire
-    at exactly that base.  An independent override silently rescales every
-    panel's admission cadence, so it is rejected rather than retained as a
-    second clock truth.
-    """
+    """Poll at the display clock's base; overdue deadlines use monotonic time."""
 
     return int(presenter.board.base_interval_ms)
 
@@ -81,6 +74,8 @@ def build_panel_host(
     *,
     build_host,
     device_pixel_ratio: float = 1.0,
+    initial_spec=None,
+    initial_configuration=None,
 ):
     """One panel host from one panel state: THE mount path for every card.
 
@@ -102,9 +97,8 @@ def build_panel_host(
         raise TypeError("build_host must be callable")
 
     snapshot = getattr(plot_input, "snapshot", plot_input)
-    spec = task_console_fitting_spec(
-        snapshot.block.schema, state.kind, state.cell_kind
-    )
+    spec = initial_spec if initial_spec is not None else task_console_fitting_spec(
+        snapshot.block.schema, state.kind, state.cell_kind)
     if spec is None:
         raise ValueError(
             f"{state.signal!r} cannot be drawn as {state.kind or 'anything'}"
@@ -122,6 +116,7 @@ def build_panel_host(
         size=state.size,
         parameters=parameters,
         device_pixel_ratio=device_pixel_ratio,
+        initial_configuration=initial_configuration,
     )
 
 
@@ -189,7 +184,7 @@ def build_console(session, *, window_ratio=None, request_close=None, run_device_
         )
         return bool(reads_closed and monitor_closed and editor_closed)
 
-    def _build_monitor_host(plot_input, state):
+    def _build_monitor_host(plot_input, state, **initial):
         return build_panel_host(
             plot_input,
             state,
@@ -199,6 +194,7 @@ def build_console(session, *, window_ratio=None, request_close=None, run_device_
             # it must not touch Qt here; it must also not retain the scale of
             # the screen on which the console originally opened.
             device_pixel_ratio=float(view.device_pixel_ratio()),
+            **initial,
         )
 
     def _build_editor_host(plot_input, state):
@@ -953,22 +949,20 @@ class ExperimentGuiFlow:
         model = self._device_control_models.get(str(key))
         if model is None:
             return
-        model["control"].set_projection(
-            model["spec"], self._device_control_projection(str(key))
-        )
+        projection = self._device_control_projection(str(key))
+        model["control"].set_projection(model["spec"], projection)
+        model["shown_owner_revision"] = projection["owner_revision"]
 
     def _refresh_device_control_policies(self) -> None:
-        """Re-project every open control after the field policies moved.
+        """Project changed claims; local edits and command results project directly."""
 
-        The projection is computed once per control and handed to it; only
-        a pending tune cancelled by the new policy changes what the control
-        should show, and only then is it computed again.  Computing it twice
-        on every beat of every control was the ordinary case.
-        """
-
+        if self.session is None:
+            return
         for key in tuple(self._device_control_models):
             model = self._device_control_models[key]
             if not model["control"].is_visible():
+                continue
+            if model.get("shown_owner_revision") == self.session.device_use.owner_revision(key):
                 continue
             projection = self._device_control_projection(key)
             cancelled = False
@@ -985,6 +979,7 @@ class ExperimentGuiFlow:
             if cancelled:
                 projection = self._device_control_projection(key)
             model["control"].set_projection(model["spec"], projection)
+            model["shown_owner_revision"] = projection["owner_revision"]
 
     def _set_device_control_risk(self, key: str, accepted: bool) -> None:
         model = self._device_control_models.get(str(key))
@@ -1031,6 +1026,7 @@ class ExperimentGuiFlow:
         live = dict(model.get("live", {}))
         live[str(field)] = bool(enabled)
         model["live"] = live
+        self._project_device_control(str(key))
 
     def _queue_device_tune(self, key: str, field: str, requested: object, unit: str) -> None:
         key, field = str(key), str(field)

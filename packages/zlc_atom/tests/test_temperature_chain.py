@@ -306,14 +306,14 @@ def test_the_temperature_task_publishes_release_recapture_survival(
         figure_path = host.run_directory / "figures" / "survival.npz"
         preview_path = host.run_directory / "figures" / "survival.png"
         assert figure_path.is_file() and preview_path.is_file()
-        info, arrays = read_archive(figure_path)
+        info, arrays, datasets = read_archive(figure_path)
         assert info["schema"] == FIGURE_SCHEMA
         assert set(
             info["sections"]["source"]["run_record"]["device_snapshots"]
         ) == {"camera", "sequencer"}
         from zlc_plot import PlotKind, read_figure_plot
 
-        figure_data, recipe = read_figure_plot(info, arrays, "data")
+        figure_data, recipe = read_figure_plot(info, arrays, datasets, "data")
         assert recipe["spec"].kind is PlotKind.CURVE
         np.testing.assert_array_equal(
             figure_data.block.values,

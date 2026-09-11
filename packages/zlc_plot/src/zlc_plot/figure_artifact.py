@@ -14,7 +14,7 @@ from zlc_data import (
     snapshot_from_manifest,
     snapshot_manifest,
 )
-from zlc_data.figure_archive import read_dataset, write_figure_archive
+from zlc_data.figure_archive import write_figure_archive
 from zlc_durable import atomic_write_file, durable_makedirs
 
 from .config import DEFAULTS
@@ -378,10 +378,11 @@ def figure_plot_recipe(info: Mapping[str, Any], dataset: str) -> dict[str, objec
 
 
 def read_figure_plot(
-    info: Mapping[str, Any], arrays: Mapping[str, np.ndarray], dataset: str,
+    info: Mapping[str, Any], arrays: Mapping[str, np.ndarray],
+    datasets: Mapping[str, OwnedSnapshot], dataset: str,
 ) -> tuple[object, dict[str, object]]:
     recipe = figure_plot_recipe(info, dataset)
-    snapshot = read_dataset(info, arrays, str(dataset))
+    snapshot = datasets[str(dataset)]
     return _restore_overlay(snapshot, arrays, recipe.pop("overlay")), recipe
 
 
@@ -391,6 +392,7 @@ def build_figure_host(
     *,
     parameters: Mapping[str, object],
     size: str,
+    initial_configuration: Mapping[str, object] | None = None,
     device_pixel_ratio: float = 1.0,
     build_host: Callable[..., object] | None = None,
 ) -> object:
@@ -408,6 +410,7 @@ def build_figure_host(
         spec,
         size=size,
         parameters=parameters,
+        initial_configuration=initial_configuration,
         device_pixel_ratio=device_pixel_ratio,
     )
 
@@ -431,18 +434,16 @@ def open_figure_host(
         entry["spec"],
         size=entry["size"],
         parameters=entry["parameters"],
+        initial_configuration={
+            name: entry[name] for name in (
+                "viewport", "classifier_thresholds", "facet_focus", "selectors", "fit",
+            )
+        } | {"fit_live": False},
         device_pixel_ratio=device_pixel_ratio,
         build_host=build_host,
     )
     try:
-        pending = host.configure(
-            viewport=entry["viewport"],
-            classifier_thresholds=entry["classifier_thresholds"],
-            facet_focus=entry["facet_focus"],
-            selectors=entry["selectors"],
-            fit=entry["fit"],
-            fit_live=False,
-        )
+        pending = host.describe_display()
         if hasattr(pending, "result"):
             pending.result()
     except BaseException:
@@ -458,9 +459,8 @@ def _prepare_figure_artifact(
 ) -> tuple[OwnedSnapshot, Path, object]:
     """The paths and the data of one archive, and the write that makes it.
 
-    The recipe is not an input: it is read off the settled
-    ``DisplayDescription`` the write is handed, which is the one truth of
-    what the host was showing when the archive was taken.
+    The recipe comes from the same Session state as the image. Export-only
+    preparation needs no screen front or invented accepted description.
     """
 
     selected = Path(base_path).expanduser().resolve()
@@ -476,20 +476,10 @@ def _prepare_figure_artifact(
         raise TypeError("data-backed figure requires an OwnedSnapshot")
     overlay_arrays, overlay = _overlay_payload(plot_input, "data.overlay")
 
-    def write(description: object, save_image: object) -> tuple[Path, Path]:
-        recipe = encode_plot_recipe(
-            description.spec,
-            parameters=description.display_state.values,
-            size=description.size,
-            viewport=description.viewport,
-            classifier_thresholds=description.classifier_thresholds,
-            facet_focus=description.facet_focus,
-            fit=description.fit,
-            selectors=description.selectors,
-            overlay=overlay,
-        )
+    def write(recipe: Mapping[str, object], save_image: object) -> tuple[Path, Path]:
+        recipe = {**recipe, "overlay": overlay}
         source_document = dict(source or {})
-        title = getattr(getattr(description.spec, "labels", None), "title", None)
+        title = recipe["spec"]["labels"]["title"]
         if title is not None:
             source_document.setdefault("title", title)
         sections = {
@@ -587,7 +577,16 @@ def _submit_figure_artifact(
         ):
             raise RuntimeError("settled save host differs from the frozen data")
         return write(
-            description,
+            encode_plot_recipe(
+                description.spec,
+                parameters=description.display_state.values,
+                size=description.size,
+                viewport=description.viewport,
+                classifier_thresholds=description.classifier_thresholds,
+                facet_focus=description.facet_focus,
+                fit=description.fit,
+                selectors=description.selectors,
+            ),
             lambda: session.save(_image_path),
         )
 
@@ -607,7 +606,8 @@ def save_figure_artifact(
 
     A caller-owned host is validated against the frozen recipe and data, then
     archives and renders in one ordered host transaction.  Without ``host``,
-    this function owns the temporary local host it creates.
+    this function prepares the same PlotSession on its caller's export worker,
+    without creating a screen host or a redundant raster worker.
     """
 
     if host is not None:
@@ -633,29 +633,31 @@ def save_figure_artifact(
         base_path, plot_input=plot_input, lineage=lineage, source=source
     )
 
-    owned_host = build_figure_host(
+    from .session import PlotSession
+
+    session = PlotSession(
         plot_input,
         spec,
         parameters=parameters,
         size=size,
+        device_pixel_ratio=DEFAULTS.layout.export_scale,
+        _for_export=True,
+        initial_configuration={
+            "viewport": viewport,
+            "classifier_thresholds": classifier_thresholds,
+            "facet_focus": facet_focus,
+            "selectors": selectors,
+            "fit": {} if fit is None else fit,
+            "fit_live": False,
+        },
     )
     try:
-        configured = owned_host.configure(
-            viewport=viewport,
-            classifier_thresholds=classifier_thresholds,
-            facet_focus=facet_focus,
-            selectors=selectors,
-            fit={} if fit is None else fit,
-            fit_live=False,
-        )
-        operation = configured.result() if hasattr(configured, "result") else configured
-        description = operation.value
         return write(
-            description,
-            lambda: owned_host.save(image_path).result(),
+            session._figure_recipe(),
+            lambda: session.save(image_path, restore_display=False),
         )
     finally:
-        owned_host.close()
+        session.close()
 
 
 __all__ = [

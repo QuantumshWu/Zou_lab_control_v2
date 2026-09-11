@@ -16,7 +16,7 @@ import zlib
 import numpy as np
 from numpy.lib.format import write_array
 
-from .io import manifest_array_keys, snapshot_from_manifest, snapshot_manifest
+from .io import NPZFormatError, manifest_array_keys, snapshot_from_manifest, snapshot_manifest
 from .validity import CellValidity, DatasetComponentValidity
 from .value import OwnedSnapshot
 
@@ -24,7 +24,6 @@ from .value import OwnedSnapshot
 __all__ = [
     "FIGURE_SCHEMA",
     "read_archive",
-    "read_dataset",
     "write_figure_archive",
 ]
 
@@ -336,12 +335,13 @@ def _validate_current_info(info: dict[str, Any]) -> dict[str, Any]:
     return info
 
 
-def _validate_datasets(
-    info: Mapping[str, Any], arrays: Mapping[str, np.ndarray]
-) -> None:
+def _read_datasets(
+    info: Mapping[str, Any], arrays: dict[str, np.ndarray]
+) -> dict[str, OwnedSnapshot]:
+    datasets: dict[str, OwnedSnapshot] = {}
     raw = info["sections"].get("dataset")
     if raw is None:
-        return
+        return datasets
     if not isinstance(raw, dict):
         raise ValueError("figure dataset section must be an object")
     referenced: set[str] = set()
@@ -350,7 +350,6 @@ def _validate_datasets(
             raise ValueError("figure dataset names must be non-empty text")
         if not isinstance(manifest, Mapping) or manifest.get("values_key") != name:
             raise ValueError(f"figure dataset {name!r} must own its same-named array")
-        snapshot_from_manifest(manifest, arrays, embedded=True)
         keys = manifest_array_keys(manifest)
         # THE NAMESPACE RULE, not a list of the names in it.  Comparing
         # against a fixed pair meant every plane a block grew had to be
@@ -368,10 +367,23 @@ def _validate_datasets(
                 f"{sorted(duplicate)!r}"
             )
         referenced.update(keys)
+        # The decoded NPY buffers cross the ownership boundary once. Both
+        # raw-member consumers and typed consumers retain these same bytes.
+        for member in keys:
+            if member not in arrays:
+                raise NPZFormatError(f"missing array {member!r}")
+            array = arrays[member]
+            arrays[member] = np.frombuffer(
+                array.tobytes(order="C"), dtype=array.dtype
+            ).reshape(array.shape)
+        datasets[name] = snapshot_from_manifest(manifest, arrays, embedded=True)
+    return datasets
 
 
-def read_archive(path: object) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
-    """Read and fully validate one figure before returning any member."""
+def read_archive(path: object) -> tuple[
+    dict[str, Any], dict[str, np.ndarray], dict[str, OwnedSnapshot]
+]:
+    """Read once, returning metadata, members and the validated typed datasets."""
 
     with np.load(path, allow_pickle=False) as archive:
         zip_names = archive.zip.namelist()
@@ -415,24 +427,5 @@ def read_archive(path: object) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
                     f"figure member {name!r} dtype {array.dtype.str!r} "
                     f"does not match metadata {descriptor['dtype']!r}"
                 )
-        _validate_datasets(info, arrays)
-    return info, arrays
-
-
-def read_dataset(
-    info: Mapping[str, Any],
-    arrays: Mapping[str, np.ndarray],
-    name: str,
-) -> OwnedSnapshot:
-    """Rebuild one typed dataset from an already validated figure."""
-
-    sections = info.get("sections")
-    if not isinstance(sections, Mapping):
-        raise ValueError("figure metadata has no valid sections object")
-    manifests = sections.get("dataset")
-    if not isinstance(manifests, Mapping):
-        raise KeyError(f"{name!r} was saved as a bare array")
-    manifest = manifests.get(name)
-    if manifest is None:
-        raise KeyError(f"{name!r} was saved as a bare array")
-    return snapshot_from_manifest(manifest, arrays, embedded=True)
+        datasets = _read_datasets(info, arrays)
+    return info, arrays, datasets

@@ -28,6 +28,7 @@ from zlc_data.snapshot_projection import (
 )
 from zlc_durable import atomic_write_file, atomic_write_text, write_readable_json
 from zlc_pulse import PulseSequence
+from zlc_pulse.wire import STATUS_DONE, STATUS_ERROR, STATUS_RUNNING, STATUS_UNDERFLOW
 from zlc_plot import (
     AxisRef,
     CurvePlot,
@@ -180,41 +181,6 @@ _FEEDBACK_SOLVE_MINIMUM_ITERATIONS = 5
 def _check_cancelled(context: object) -> None:
     if context.cancel_requested():
         raise RuntimeError("SLM feedback was cancelled")
-
-
-def _accepted_pulse_fault(
-    report: object, *, delivered_cycles: int, requested_cycles: int
-) -> bool:
-    """Whether a shot batch the board REPORTED as faulted is still a good batch.
-
-    The rule: keep the batch when the only thing that failed is the host's
-    OBSERVATION of the board -- the pulse observer's own UART poll -- and the
-    camera delivered every requested cycle.  Every cycle plays exactly one
-    trigger edge and yields exactly one frame, so a full frame count is the
-    board's own proof that the whole batch played; an underflow the observer
-    saw before it died is a board fact and keeps the batch refused.
-
-    The failure this fixes: one CURSOR poll lost its last byte at shot 85 of
-    200, the observer thread died and stamped the report with a fabricated
-    ERROR status, the board played the remaining 115 shots on its own and the
-    camera handed over all 200 frames -- and the whole batch, then the whole
-    four-hour run, was thrown away on that one poll.
-
-    Only the fault text and the ``observer_error``/``underflow`` fields are
-    read: the observer clause must be the whole fault (no second ``;``-joined
-    reason next to it), so a report that learns to say more is refused rather
-    than misread.
-    """
-
-    observer_error = str(getattr(report, "observer_error", "") or "")
-    fault = str(report.fault or "")
-    if not observer_error or observer_error not in fault:
-        return False
-    if ";" in fault.replace(observer_error, ""):
-        return False
-    if bool(getattr(report, "underflow", False)):
-        return False
-    return int(delivered_cycles) == int(requested_cycles)
 
 
 def _readout_frames(snapshot: object, *, shots: int) -> np.ndarray:
@@ -2419,7 +2385,6 @@ class SlmFeedbackTask:
 
     def _measure(
         self,
-        pulse: object,
         context: object,
         iteration: int,
     ) -> tuple[
@@ -2427,25 +2392,8 @@ class SlmFeedbackTask:
         tuple[int, ...],
         tuple[int, ...],
         np.ndarray,
-        str,
     ]:
-        """Shoot one candidate and return its samples plus the pulse verdict.
-
-        The fifth value is the pulse warning the candidate carries: "" for a
-        clean shot, else the fault the batch was ACCEPTED with (see
-        ``_accepted_pulse_fault``) and/or the fault a first batch was REPEATED
-        after -- both spelled out, because a run whose first attempt's
-        failure is not written down cannot be understood afterwards (the
-        UART transport already lost its first two attempts' shortfalls that
-        way).  A fault the batch cannot be accepted with -- the board
-        reporting an error or an underflow, whether it played every trigger
-        or stopped so that the camera timed out (``_shoot`` asks the board
-        then) -- repeats the whole batch once (safe, arm, fire, collect); a
-        second fault is the candidate's, and names both.  The unchanged-phase
-        guard below is checked once per CANDIDATE: a repeat inside this call
-        is the same candidate being measured, not a second batch at the same
-        phase.
-        """
+        """Measure one authored shot batch; a failed batch is never repeated."""
 
         requested = self.shots
         if requested < 4:
@@ -2462,42 +2410,10 @@ class SlmFeedbackTask:
             )
         self._last_measured_phase = np.array(phase, copy=True)
         camera_owner = f"{context.instance_id}/camera"
-        repeated_after = ""
-        while True:
-            result, saturation_value, report = self._shoot(
-                pulse, context, iteration, camera_owner=camera_owner
-            )
-            delivered = 0 if result is None else int(result.cycle_count)
-            fault = str(report.fault or "")
-            if not fault:
-                accepted_with = ""
-            elif _accepted_pulse_fault(
-                report, delivered_cycles=delivered, requested_cycles=requested
-            ):
-                accepted_with = fault
-            elif not repeated_after:
-                repeated_after = fault
-                context.report_progress(
-                    f"Repeating the shot batch of candidate {iteration + 1} "
-                    f"after a pulse fault: {fault}"
-                )
-                continue
-            else:
-                raise RuntimeError(
-                    "the pulse failed twice for one candidate: first "
-                    f"{repeated_after}; then {fault}"
-                )
-            break
-        pulse_warning = "; ".join(
-            text
-            for text in (
-                f"batch repeated after a pulse fault: {repeated_after}"
-                if repeated_after else "",
-                f"batch accepted with a pulse fault: {accepted_with}"
-                if accepted_with else "",
-            )
-            if text
-        )
+        result, saturation_value = self._shoot(context, iteration, camera_owner=camera_owner)
+        delivered = 0 if result is None else int(result.cycle_count)
+        if delivered != requested:
+            raise RuntimeError(f"Feedback acquired {delivered} cycles, expected {requested}")
         context.report_progress(
             f"Reading mean qCMOS brightness for candidate {iteration + 1}",
             current=requested,
@@ -2523,33 +2439,16 @@ class SlmFeedbackTask:
             tuple(sorted(saturated_sites)),
             tuple(sorted(missing_sites)),
             mean_frame,
-            pulse_warning,
         )
 
     def _shoot(
         self,
-        pulse: object,
         context: object,
         iteration: int,
         *,
         camera_owner: str,
-    ) -> tuple[object, object, object]:
-        """One shot batch: safe, load, arm the camera, fire, collect, report.
-
-        The program is LOADED for every batch, the way calibration loads it
-        for every shot.  It used to be loaded once per run and then left
-        resident, with ``fire`` replaying the board's mini-loader after each
-        SAFE -- a saving of one image upload per candidate.  That replay is a
-        path nothing else in the product takes: the editor's On Pulse and
-        calibration both upload before they fire.  On the bench it is the
-        one difference between a batch that plays and one that does not: the
-        first candidate, whose program the board did not yet hold, was
-        loaded and played; the second, whose digest matched, was replayed
-        and the field never came, and the run sat waiting for a report.  A
-        board that is asked the same way every time answers the same way.
-        ``safe()`` first stays: the camera must be armed while no trigger
-        edge can play, and on a board already safe it costs no traffic.
-        """
+    ) -> tuple[object, object]:
+        """Arm one finite batch and fire the run\'s resident program once."""
 
         contract = self.calibration.frame_contract
         requested = self.shots
@@ -2567,9 +2466,8 @@ class SlmFeedbackTask:
             producer=camera_owner,
         )
         capture = None
+        completed = False
         try:
-            self.sequencer.safe()
-            arm_sequencer(self.sequencer, pulse)
             capture = node.prepare(should_stop=context.cancel_requested)
             actual = node.actual_working_point
             if actual is None:
@@ -2655,31 +2553,30 @@ class SlmFeedbackTask:
                     retain_cycles=False,
                 )
             except Exception:
-                # THE BOARD IS ASKED BEFORE THE CAMERA IS BLAMED.  A board
-                # that errs or underruns mid-batch stops playing triggers,
-                # and the first thing to notice is the camera's frame
-                # timeout -- which used to leave here as the candidate's
-                # failure before the board's report was ever read, so the
-                # one-repeat rule of ``_measure`` never saw a mid-batch
-                # board fault.  One poll, no wait: a board still playing
-                # (a genuine camera fault) reports nothing and the camera's
-                # complaint stands; a board that has faulted hands its
-                # report back and the batch is the board's fault, with no
-                # frames to keep.
+                # Preserve a board fault that stopped the triggers; otherwise
+                # retain the camera's original failure. Never repeat the batch.
                 report = self.sequencer.wait_done(0.0)
                 if report is None or not report.fault:
                     raise
-                result = None
+                raise RuntimeError(f"the pulse failed: {report.fault}")
             else:
                 _check_cancelled(context)
                 report = wait_for_report(self.sequencer, context)
+                if report.fault:
+                    raise RuntimeError(f"the pulse failed: {report.fault}")
+                if not report.status & STATUS_DONE or report.status & (
+                    STATUS_RUNNING | STATUS_ERROR | STATUS_UNDERFLOW
+                ):
+                    raise RuntimeError(f"the pulse did not confirm DONE: status={report.status:#x}")
+                completed = True
         finally:
             try:
-                self.sequencer.safe()
+                if not completed:
+                    self.sequencer.safe()
             finally:
                 if capture is not None and not capture.closed:
                     capture.close()
-        return result, saturation_value, report
+        return result, saturation_value
 
     def _prepare_artifacts(self, context: object) -> dict[str, Path]:
         root = Path(context.run_directory).expanduser().resolve()
@@ -2817,7 +2714,7 @@ class SlmFeedbackTask:
         size: str = "4x4",
         artifact_name: str | None = None,
         image_role: str = "preview",
-        fit: Mapping[str, object] | None = None,
+        classifier_thresholds: object = (),
         device_event_record: Mapping[str, object],
     ) -> tuple[Path, Path]:
         if not isinstance(device_event_record, Mapping):
@@ -2834,7 +2731,7 @@ class SlmFeedbackTask:
                 spec=spec,
                 parameters={} if parameters is None else parameters,
                 size=size,
-                fit=fit,
+                classifier_thresholds=classifier_thresholds,
                 source={
                     "task": self.instance_id,
                     "report": name,
@@ -2905,12 +2802,38 @@ class SlmFeedbackTask:
             AxisRef.cell_data(str(site_axis.axis_id)),
             HistogramPlot(
                 labels=PlotLabels(
-                    title=f"Candidate {candidate} ({kind}) site histograms and fits",
+                    title=f"Candidate {candidate} ({kind}) full-data mixture fits",
                     x="site signal",
                     y="shots",
                 ),
             ),
         )
+
+    def _candidate_fit_targets(self, measurement: Mapping[str, object]) -> tuple:
+        """Draw the same full-data mixture used in the candidate decision."""
+
+        axis = self._registered_site_map.site_axis
+        ref = AxisRef.cell_data(str(axis.axis_id))
+        targets = []
+        for index in range(self._site_count):
+            invalid = bool(measurement["fit_invalid"][index])
+            components = None
+            if not invalid:
+                center = float(measurement["dark_mean"][index])
+                components = {
+                    "center": center,
+                    "sigma": float(measurement["dark_sigma"][index]),
+                    "delta_center": float(measurement["bright_mean"][index]) - center,
+                    "sigma_B": float(measurement["bright_sigma"][index]),
+                    "ratio": float(measurement["bright_fraction"][index]),
+                }
+            targets.append({
+                "value": None if invalid else measurement["fit_threshold"][index],
+                "scope": ({"domain": ref.domain.value, "axis_id": ref.axis_id,
+                           "coordinate": axis.coordinate_at(index)},),
+                "gaussian_components": components,
+            })
+        return tuple(targets)
 
     def _save_candidate_fit_figures(
         self,
@@ -2935,11 +2858,12 @@ class SlmFeedbackTask:
                 snapshot=snapshot,
                 spec=spec,
                 parameters={
-                    "bin_count": min(60, max(10, samples.shape[0] // 2))
+                    "bin_count": min(60, max(10, samples.shape[0] // 2)),
+                    "threshold_classifier": True,
                 },
                 size="8x8",
                 image_role="figure",
-                fit={"model": "bimodal_gaussian", "fit_all_facets": True},
+                classifier_thresholds=self._candidate_fit_targets(measurement),
                 device_event_record=measurement["device_event_record"],
             )
 
@@ -3118,7 +3042,9 @@ class SlmFeedbackTask:
                     )
                 ),
             ),
-            parameters={"bin_count": min(60, max(10, self.shots // 2))},
+            parameters={"bin_count": min(60, max(10, self.shots // 2)),
+                        "threshold_classifier": True},
+            classifier_thresholds=self._candidate_fit_targets(selected_history),
             device_event_record=selected_device_record,
         )
 
@@ -3696,6 +3622,7 @@ class SlmFeedbackTask:
         termination_reason = "all authored feedback updates completed"
         try:
             _check_cancelled(context)
+            self.sequencer.safe()
             # Science Context is the requested starting CONTENT, not proof of
             # what a previous process happens to have commanded. This Task owns
             # the SLM now, so establish and confirm that starting state itself.
@@ -3708,6 +3635,7 @@ class SlmFeedbackTask:
                 sequencer=self.sequencer,
                 api_values={},
             )
+            arm_sequencer(self.sequencer, pulse)
             self._program_digest = str(pulse.program.digest)
             _check_cancelled(context)
             current_target = self.target
@@ -3894,8 +3822,7 @@ class SlmFeedbackTask:
                     saturated_sites,
                     missing_sites,
                     mean_frame,
-                    pulse_warning,
-                ) = self._measure(pulse, context, iteration)
+                ) = self._measure(context, iteration)
                 if initial_mean_frame is None:
                     initial_mean_frame = np.array(mean_frame, copy=True)
                 fitted = _fit_contrasts(samples)
@@ -4298,7 +4225,6 @@ class SlmFeedbackTask:
                         probe_control_boundary
                     ),
                     "missing_sites": list(missing_sites),
-                    "pulse_warning": pulse_warning or None,
                     "single_population_sites": [
                         int(value) for value in np.flatnonzero(fit_single)
                     ],

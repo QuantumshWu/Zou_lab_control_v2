@@ -359,11 +359,8 @@ def _render(
     from . import PlotSession  # noqa: PLC0415
     from .selectors import NumericRange  # noqa: PLC0415
 
-    session = PlotSession(snapshot, spec)
+    session = PlotSession(snapshot, spec, size=size, parameters=parameters)
     try:
-        session.set_size(size)
-        if parameters:
-            session.set_parameters(dict(parameters))
         session.rgba()
         if not zoom_steps:
             return
@@ -415,11 +412,8 @@ def _save(
     from . import PlotSession  # noqa: PLC0415
     from .selectors import NumericRange  # noqa: PLC0415
 
-    session = PlotSession(snapshot, spec)
+    session = PlotSession(snapshot, spec, size="2x2", parameters=parameters)
     try:
-        session.set_size("2x2")
-        if parameters:
-            session.set_parameters(dict(parameters))
         with tempfile.TemporaryDirectory() as folder:
             target = pathlib.Path(folder) / "warm.png"
             session.save(target)
@@ -619,31 +613,32 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
         ImagePlot,
     )
 
+    if not proceed():
+        return
     image = ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y"))
-    series = _series_snapshot(8, 400)
-    pictures = (
-        # The camera panel: a grid of frames, each drawn larger than it is
-        # -- through the direct colour table and the gather -- with the
-        # cell titles that measure the first text.
-        (_image_snapshot(96, 128, np.uint16), FacetGridPlot(None, image), None, "4x4"),
-        (_image_snapshot(96, 128, np.uint16), image, None, "4x4"),
-        # A frame wider than the raster reduces first: the exact unsigned
-        # block sum, or the counting block mean of a floating plane.
-        (_image_snapshot(600, 800, np.uint16), image, None, "2x2"),
-        (_image_snapshot(600, 800, np.float32), image, None, "2x2"),
-        (series, CurvePlot(AxisRef.point("x")), {"uncertainty": True}, "2x2"),
-        (series, HistogramPlot(), None, "2x2"),
-        (
-            _image_snapshot(24, 32, np.float64),
-            FacetGridPlot(AxisRef.cell_data("y"), HistogramPlot()),
-            None,
-            "2x2",
-        ),
-    )
-    for snapshot, spec, parameters, size in pictures:
+    camera = _image_snapshot(96, 128, np.uint16)
+    _render(camera, FacetGridPlot(None, image), size="4x4")
+    if not proceed():
+        return
+    _render(camera, image, size="4x4")
+    for dtype in (np.uint16, np.float32):
         if not proceed():
             return
-        _render(snapshot, spec, parameters, size=size)
+        _render(_image_snapshot(600, 800, dtype), image, size="2x2")
+    if not proceed():
+        return
+    series = _series_snapshot(8, 400)
+    _render(series, CurvePlot(AxisRef.point("x")), {"uncertainty": True}, size="2x2")
+    if not proceed():
+        return
+    _render(series, HistogramPlot(), size="2x2")
+    if not proceed():
+        return
+    _render(
+        _image_snapshot(24, 32, np.float64),
+        FacetGridPlot(AxisRef.cell_data("y"), HistogramPlot()),
+        size="2x2",
+    )
 
 
 # ------------------------------------------------------------ the warmer

@@ -373,7 +373,7 @@ def extract_box_signals(image: object, centers_xy: object, *, radius: int = 1) -
     readout model's signal, threshold and histogram share a meaning.
     """
 
-    array = np.asarray(image.values if hasattr(image, "values") else image, dtype=float)
+    array = np.asarray(image.values if hasattr(image, "values") else image)
     if array.ndim != 2:
         raise ValueError("image must be two-dimensional")
     radius = int(radius)
@@ -383,7 +383,7 @@ def extract_box_signals(image: object, centers_xy: object, *, radius: int = 1) -
     for index, center in enumerate(np.asarray(centers_xy, dtype=float).reshape(-1, 2)):
         x, y, width, height = _box_bounds(tuple(center), radius, array.shape)
         values = array[y : y + height, x : x + width]
-        finite = values[np.isfinite(values)]
+        finite = values if values.dtype.kind in "biu" else values[np.isfinite(values)]
         if not finite.size:
             continue
         output[index] = float(np.sum(finite, dtype=np.float64))
@@ -2163,21 +2163,12 @@ def _fit_readout_model(
                     dark_weight,
                     bright_weight,
                 )[2]
-        empirical_threshold = (
-            _empirical_threshold(
-                dark,
-                bright_values,
-                bright_above=True,
+        threshold = gaussian_threshold
+        if threshold_method == "empirical" or not np.isfinite(gaussian_threshold):
+            threshold = (
+                _empirical_threshold(dark, bright_values, bright_above=True)
+                if dark.size and bright_values.size else float("nan")
             )
-            if dark.size and bright_values.size
-            else float("nan")
-        )
-        threshold = (
-            empirical_threshold
-            if threshold_method == "empirical"
-            or not np.isfinite(gaussian_threshold)
-            else gaussian_threshold
-        )
         if np.isfinite(threshold):
             thresholds[site] = threshold
             if np.isfinite(gaussian_threshold) and threshold_method == "gaussian":

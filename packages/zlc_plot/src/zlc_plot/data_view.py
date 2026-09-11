@@ -150,15 +150,16 @@ class QuantityArray:
     """Canonical and display representations of the same physical values."""
 
     canonical: NDArray[Any] | ArrayLike
-    display: NDArray[Any] | ArrayLike
+    _display: NDArray[Any] | ArrayLike | None
     canonical_unit: Unit
     display_unit: Unit
     label: str
 
     def __post_init__(self) -> None:
         canonical = _readonly(self.canonical)
-        display = _readonly(self.display)
-        _require_same_shape(canonical, display, "quantity")
+        display = None if self._display is None else _readonly(self._display)
+        if display is not None:
+            _require_same_shape(canonical, display, "quantity")
         if not isinstance(self.canonical_unit, Unit) or not isinstance(
             self.display_unit, Unit
         ):
@@ -168,7 +169,16 @@ class QuantityArray:
         if not isinstance(self.label, str) or not self.label:
             raise ValueError("quantity label must be a non-empty string")
         object.__setattr__(self, "canonical", canonical)
-        object.__setattr__(self, "display", display)
+        object.__setattr__(self, "_display", display)
+
+    @property
+    def display(self) -> NDArray[Any]:
+        if self._display is None:
+            displayed = self.canonical_unit.convert_value_to(self.canonical, self.display_unit)
+            if displayed.flags.writeable:
+                displayed.setflags(write=False)
+            object.__setattr__(self, "_display", displayed)
+        return self._display
 
 
 @dataclass(frozen=True, slots=True)
@@ -729,9 +739,6 @@ class DataView:
         if not value_canonical_unit.compatible_with(value_display):
             raise DataViewError("value display unit is incompatible with dataset values")
         value_canonical = values
-        value_displayed = value_canonical_unit.convert_value_to(
-            value_canonical, value_display
-        )
         # Integer and boolean samples are finite by construction.  Reuse the
         # snapshot's immutable validity plane instead of allocating two more
         # megapixel boolean arrays for the ordinary camera path.
@@ -799,7 +806,7 @@ class DataView:
             shape=schema_shape(schema),
             value=QuantityArray(
                 canonical=value_canonical,
-                display=value_displayed,
+                _display=None,
                 canonical_unit=value_canonical_unit,
                 display_unit=value_display,
                 label="value",

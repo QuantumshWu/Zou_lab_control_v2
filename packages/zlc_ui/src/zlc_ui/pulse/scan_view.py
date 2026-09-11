@@ -208,10 +208,10 @@ class PulseScanView(QtWidgets.QWidget):
             )
             for index, record in enumerate(records)
         )
-        self.bindings_form.reconcile(
-            FormSpec(fields),
-            {field.key: field.default for field in fields},
-        )
+        spec = FormSpec(fields)
+        values = {field.key: field.default for field in fields}
+        if not self.bindings_form.adopt_projection(spec, values):
+            self.bindings_form.reconcile(spec, values)
         self.bindings_form.setVisible(bool(records))
 
     def _binding_committed(self, key: str) -> None:
@@ -232,7 +232,9 @@ class PulseScanView(QtWidgets.QWidget):
         self.scan_progress_label.setText(str(text))
 
     def set_scan_table_text(self, text: str) -> None:
-        self.scan_table_view.setPlainText(str(text))
+        text = str(text)
+        if text != self.scan_table_view.toPlainText():
+            self.scan_table_view.setPlainText(text)
 
     def set_run_dirty(self, dirty: bool) -> None:
         self.scan_run_button.set_dirty(bool(dirty))

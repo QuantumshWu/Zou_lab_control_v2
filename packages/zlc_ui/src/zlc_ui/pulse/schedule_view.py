@@ -9,7 +9,6 @@ only :mod:`zlc_ui.pulse.models` records.
 from __future__ import annotations
 
 import json
-from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -154,9 +153,10 @@ class PeriodCard(FluentGroupBox):
         self._period = period
         self.setTitle(f"Period {int(index) + 1}/{max(1, int(total_periods))}")
         with signals_blocked(self.unit_combo):
-            self.unit_combo.clear()
             choices = period.unit_choices or (period.unit,)
-            self.unit_combo.addItems([str(value) for value in choices])
+            if tuple(self.unit_combo.itemText(i) for i in range(self.unit_combo.count())) != choices:
+                self.unit_combo.clear()
+                self.unit_combo.addItems([str(value) for value in choices])
             self.unit_combo.setCurrentText(period.unit)
         _apply_field(self.duration_edit, period.duration)
         self.name_edit.setText(period.name)
@@ -170,9 +170,12 @@ class PeriodCard(FluentGroupBox):
 
     def _set_analog_mode(self, combo: FluentComboBox, mode: str) -> None:
         with signals_blocked(combo):
-            combo.clear()
-            for choice in self._analog_mode_choices:
-                combo.addItem(choice.label, choice.value)
+            existing = tuple((combo.itemText(i), combo.itemData(i)) for i in range(combo.count()))
+            desired = tuple((choice.label, choice.value) for choice in self._analog_mode_choices)
+            if existing != desired:
+                combo.clear()
+                for label, value in desired:
+                    combo.addItem(label, value)
             selected = combo.findData(mode)
             if selected < 0:
                 raise ValueError(f"analog mode {mode!r} was not supplied to the view")
@@ -641,7 +644,7 @@ class PulseDragContainer(QtWidgets.QWidget):
     bracket_clicked = QtCore.pyqtSignal(str)
     gap_clicked = QtCore.pyqtSignal(int)
     reorder_items_requested = QtCore.pyqtSignal(object)
-    bracket_committed = QtCore.pyqtSignal(object, object, int)
+    bracket_count_committed = QtCore.pyqtSignal(int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -676,51 +679,39 @@ class PulseDragContainer(QtWidgets.QWidget):
         order: tuple[tuple[str, str], ...],
         minimum_bracket: int = 2,
     ) -> None:
-        while self.layout_main.count():
-            item = self.layout_main.takeAt(0)
-            widget = item.widget()
-            if widget is None:
-                continue
-            widget.removeEventFilter(self)
-            if widget in cards:
-                # About to be re-added below.  Taking it out of the LAYOUT is
-                # the whole job; detaching it as well would make it a
-                # top-level window, which is a different thing and one this
-                # widget would spend the rest of the function undoing.
-                continue
-            # Not wanted any more.  Hidden AND deleted: hiding alone left
-            # every reopened pulse's predecessor cards alive, six per load,
-            # still holding their text.
-            retire_widget(widget)
+        previous = self.items()
         self._cards = tuple(cards)
         widgets = {("period", card.period_id): card for card in cards}
         if bracket is not None:
-            start = BracketPost("start", minimum=minimum_bracket)
-            end = BracketPost(
-                "end", count=bracket.count, minimum=minimum_bracket
-            )
-            for post in (start, end):
+            if not self._posts:
+                start = BracketPost("start", minimum=minimum_bracket)
+                end = BracketPost("end", count=bracket.count, minimum=minimum_bracket)
+                end.count_committed.connect(self.bracket_count_committed)
+                self._posts = (start, end)
+            for post in self._posts:
                 widgets[("bracket", post.kind)] = post
-            end.count_committed.connect(
-                lambda count,
-                s=bracket.start_period_id,
-                e=bracket.end_period_id: self.bracket_committed.emit(
-                    s, e, int(count)
-                )
-            )
-            self._posts = (start, end)
+                with signals_blocked(post.count_spin):
+                    post.count_spin.setMinimum(minimum_bracket)
+                    if not being_edited(post.count_spin):
+                        post.count_spin.setValue(float(bracket.count))
         else:
             self._posts = ()
-        for key in order:
-            widget = widgets[key]
+        desired = tuple(widgets[key] for key in order)
+        for widget in previous:
+            if widget not in desired:
+                self.layout_main.removeWidget(widget)
+                widget.removeEventFilter(self)
+                retire_widget(widget)
+        for index, widget in enumerate(desired):
+            if self.layout_main.indexOf(widget) != index:
+                self.layout_main.removeWidget(widget)
+                self.layout_main.insertWidget(index, widget)
+            # A retained card may have new channel rows after Hide/Show.
             self.watch_item_chrome(widget)
-            self.layout_main.addWidget(widget)
+        if desired == previous:
+            return
         self._pressed = None
-        self.setMinimumSize(0, 0)
-        self.adjustSize()
-        # A rebuild drops every outline, and a selection that names a period
-        # this strip no longer holds would aim the next edit at nothing.  A gap
-        # keeps its meaning only while the count it counted into is unchanged.
+        # Only a changed timeline can retire the currently selected item/gap.
         card = self._selected_card
         if card is not None and not any(item.period_id == card for item in self._cards):
             card = None
@@ -736,6 +727,12 @@ class PulseDragContainer(QtWidgets.QWidget):
             self.show_selection(post=post)
         else:
             self.show_selection(gap=gap)
+
+    def event(self, event):
+        handled = super().event(event)
+        if event.type() == QtCore.QEvent.LayoutRequest and self._selected_gap is not None:
+            self._show_indicator_at_gap(self._selected_gap)
+        return handled
 
     #: Widgets that need their own clicks: typing in them, ticking them and
     #: opening them ARE the click.  Everything else on a card is chrome, and a
@@ -1295,7 +1292,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.channel_panel.scan_array_load_requested.connect(self.scan_array_load_requested)
         self.channel_panel.run_repeats_committed.connect(self.run_repeats_committed)
         self.drag_container.reorder_items_requested.connect(self.reorder_items_requested)
-        self.drag_container.bracket_committed.connect(self.bracket_committed)
+        self.drag_container.bracket_count_committed.connect(self._commit_bracket_count)
         self.run_button.clicked.connect(self.run_requested)
         self.stop_button.clicked.connect(self.stop_requested)
         self.sync_button.clicked.connect(self.sync_requested)
@@ -1331,42 +1328,10 @@ class PulseScheduleView(QtWidgets.QWidget):
         self._reconcile(vm)
         return True
 
-    @contextmanager
-    def _kept_scroll(self):
-        """Rebuild without throwing the operator back to the top.
-
-        Every schedule update tears the period cards out of their layout and
-        re-adds them, which resets each scroll area to zero.  So pressing On
-        Pulse -- or editing anything at all -- jumped the board back to the
-        first period and the leftmost time, losing the place of anyone working
-        on period nine.
-
-        The position is restored clamped to the new range: a rebuild that
-        removed a period cannot restore a scroll past the end.  It is restored
-        twice -- now, and once the layout has settled -- because a scroll bar's
-        range is recomputed when the rebuilt content is laid out, which is a
-        turn later, and restoring only now would clamp against a stale range of
-        zero.
-        """
-
-        bars = tuple(
-            widget
-            for area in (self.timeline_scroll, self.left_scroll)
-            for widget in (area.horizontalScrollBar(), area.verticalScrollBar())
-        ) + (self.dataset_panes.scrollbar,)
-        before = tuple(bar.value() for bar in bars)
-
-        def _restore() -> None:
-            for bar, value in zip(bars, before):
-                if value:
-                    bar.setValue(min(int(value), bar.maximum()))
-
-        try:
-            yield
-        finally:
-            _restore()
-            if any(before):
-                QtCore.QTimer.singleShot(0, _restore)
+    def _commit_bracket_count(self, count: int) -> None:
+        bracket = self._schedule.bracket
+        if bracket is not None:
+            self.bracket_committed.emit(bracket.start_period_id, bracket.end_period_id, count)
 
     @staticmethod
     def _visible_delay_rows(vm: ScheduleVM) -> tuple[DelayRowVM, ...]:
@@ -1387,19 +1352,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         return tuple(row for row in vm.delay_rows if row.port_key in visible)
 
     def _reconcile(self, vm: ScheduleVM) -> None:
-        """Rebuild the page from one model, keeping the operator's place.
-
-        The scroll keeper wraps THIS rather than its callers: rebuilding is
-        what resets the scroll areas, so whoever rebuilds is who has to
-        restore.  It used to sit around one call site, so the value-level
-        setters -- set_visible_ports among them -- threw the board back to the
-        top of an 22-row list every time.
-        """
-
-        with self._kept_scroll():
-            self._reconcile_now(vm)
-
-    def _reconcile_now(self, vm: ScheduleVM) -> None:
+        """Update existing rows and move timeline items only when their order changes."""
         self.title_label.setText(vm.document_name)
         self.summary_label.setText(vm.summary_text)
         visible_count = sum(1 for port in vm.ports if port.visible)
@@ -1433,9 +1386,6 @@ class PulseScheduleView(QtWidgets.QWidget):
                     analog_mode_choices=vm.analog_mode_choices,
                 )
             desired[period.period_id] = card
-        for key, card in self._cards.items():
-            if key not in desired:
-                retire_widget(card)
         self._cards = desired
         self.drag_container.set_items(
             tuple(desired[p.period_id] for p in vm.periods),

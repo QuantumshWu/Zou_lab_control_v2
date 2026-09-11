@@ -2035,11 +2035,18 @@ class FitEngine:
                         solver_coords, solver_values, weights = compressed
                         binned = True
                 compiled_coords = solver_coords
+                all_finite = not binned or all(
+                    bool(np.all(np.isfinite(array)))
+                    for array in (*solver_coords, solver_values)
+                )
                 if descriptor.coordinate_origin is not None:
                     origin_axis = descriptor.coordinate_origin
                     compiled_coords = tuple(
                         axis - origin if index == origin_axis else axis
                         for index, axis in enumerate(solver_coords)
+                    )
+                    all_finite = all_finite and bool(
+                        np.all(np.isfinite(compiled_coords[origin_axis]))
                     )
             except Exception as error:
                 failures[cell] = str(error) or type(error).__name__
@@ -2074,6 +2081,7 @@ class FitEngine:
                 "indices": indices,
                 "solver_coords": solver_coords,
                 "compiled_coords": compiled_coords,
+                "all_finite": all_finite,
                 "solver_values": solver_values,
                 "weights": weights,
                 "binned": binned,
@@ -2306,6 +2314,7 @@ class FitEngine:
                     coordinates_are_canonical=(
                         descriptor.coordinate_origin is not None
                     ),
+                    all_finite=all(item["all_finite"] for item in items),
                 )
                 check()
             except (FitCancelled, FitDeadlineExceeded):
@@ -3259,7 +3268,11 @@ def _initial_values(
         unknown = set(initial) - set(model.parameter_names)
         if unknown:
             raise ValueError(f"initial values name unknown parameters: {sorted(unknown)}")
-        defaults = dict(zip(model.parameter_names, model.initializer(coordinates, values), strict=True))
+        defaults = (
+            {}
+            if len(initial) == len(model.parameters)
+            else dict(zip(model.parameter_names, model.initializer(coordinates, values), strict=True))
+        )
         defaults.update({key: float(value) for key, value in initial.items()})
         seed = np.asarray([defaults[name] for name in model.parameter_names], dtype=np.float64)
     else:
@@ -3453,45 +3466,23 @@ def _value_range(values: np.ndarray) -> float:
 
 
 def _lorentzian(x, center, fwhm, amplitude, offset):
-    half_squared = (fwhm / 2.0) ** 2
-    return amplitude * half_squared / ((x - center) ** 2 + half_squared) + offset
+    coordinates, values = _compiled_model_input((x,), (center, fwhm, amplitude, offset))
+    return _compiled_fit._value_jacobian_lorentzian(coordinates, values, False)[0]
 
 
 def _lorentzian_jacobian(x, center, fwhm, amplitude, offset):
-    half = fwhm / 2.0
-    half_squared = half**2
-    delta = x - center
-    denominator = delta**2 + half_squared
-    denominator_squared = denominator**2
-    return np.column_stack((
-        amplitude * half_squared * 2.0 * delta / denominator_squared,
-        amplitude * half * delta**2 / denominator_squared,
-        half_squared / denominator,
-        np.ones_like(x, dtype=float),
-    ))
+    coordinates, values = _compiled_model_input((x,), (center, fwhm, amplitude, offset))
+    return _compiled_fit._value_jacobian_lorentzian(coordinates, values, True)[1]
 
 
 def _gaussian_offset(x, amplitude, offset, sigma, center):
-    return amplitude * np.exp(-0.5 * ((x - center) / sigma) ** 2) + offset
+    coordinates, values = _compiled_model_input((x,), (amplitude, offset, sigma, center))
+    return _compiled_fit._value_jacobian_gaussian(coordinates, values, False)[0]
 
 
 def _gaussian_offset_jacobian(x, amplitude, offset, sigma, center):
-    delta = x - center
-    gaussian = np.exp(-0.5 * (delta / sigma) ** 2)
-    return np.column_stack((
-        gaussian,
-        np.ones_like(x, dtype=float),
-        amplitude * gaussian * delta**2 / sigma**3,
-        amplitude * gaussian * delta / sigma**2,
-    ))
-
-
-_SQRT_TWO_PI = math.sqrt(2.0 * math.pi)
-
-
-def _gaussian_density(x, center, sigma):
-    delta = (x - center) / sigma
-    return np.exp(-0.5 * delta * delta) / (sigma * _SQRT_TWO_PI)
+    coordinates, values = _compiled_model_input((x,), (amplitude, offset, sigma, center))
+    return _compiled_fit._value_jacobian_gaussian(coordinates, values, True)[1]
 
 
 def _histogram_gaussian(x, amplitude, center, sigma, background):
@@ -3504,28 +3495,21 @@ def _histogram_gaussian(x, amplitude, center, sigma, background):
     population into a plateau across the axis -- and because the nested
     one-population model carries it too, the evidence for a second
     population is about the second population and nothing else."""
-
-    return amplitude * _gaussian_density(x, center, sigma) + background
+    coordinates, values = _compiled_model_input((x,), (amplitude, center, sigma, background))
+    return _compiled_fit._value_jacobian_histogram(coordinates, values, False)[0]
 
 
 def _histogram_gaussian_jacobian(x, amplitude, center, sigma, background):
-    delta = x - center
-    density = _gaussian_density(x, center, sigma)
-    value = amplitude * density
-    return np.column_stack((
-        density,
-        value * delta / sigma**2,
-        value * (delta**2 / sigma**3 - 1.0 / sigma),
-        np.ones_like(x, dtype=float),
-    ))
+    coordinates, values = _compiled_model_input((x,), (amplitude, center, sigma, background))
+    return _compiled_fit._value_jacobian_histogram(coordinates, values, True)[1]
 
 
 def _bimodal_a(x, amplitude, center, sigma, delta_center, sigma_b, ratio, background):
-    return amplitude * (1.0 - ratio) * _gaussian_density(x, center, sigma)
+    return _histogram_gaussian(x, amplitude * (1.0 - ratio), center, sigma, 0.0)
 
 
 def _bimodal_b(x, amplitude, center, sigma, delta_center, sigma_b, ratio, background):
-    return amplitude * ratio * _gaussian_density(x, center + delta_center, sigma_b)
+    return _histogram_gaussian(x, amplitude * ratio, center + delta_center, sigma_b, 0.0)
 
 
 def _bimodal_background(
@@ -3535,40 +3519,27 @@ def _bimodal_background(
 
 
 def _bimodal_gaussian(x, *parameters):
-    return (
-        _bimodal_a(x, *parameters)
-        + _bimodal_b(x, *parameters)
-        + _bimodal_background(x, *parameters)
-    )
+    coordinates, values = _compiled_model_input((x,), parameters)
+    return _compiled_fit._value_jacobian_bimodal(coordinates, values, False)[0]
 
 
 def _bimodal_gaussian_jacobian(
     x, amplitude, center, sigma, delta_center, sigma_b, ratio, background
 ):
-    delta_a = x - center
-    delta_b = x - center - delta_center
-    density_a = _gaussian_density(x, center, sigma)
-    density_b = _gaussian_density(x, center + delta_center, sigma_b)
-    value_a = amplitude * (1.0 - ratio) * density_a
-    value_b = amplitude * ratio * density_b
-    return np.column_stack((
-        (1.0 - ratio) * density_a + ratio * density_b,
-        value_a * delta_a / sigma**2 + value_b * delta_b / sigma_b**2,
-        value_a * (delta_a**2 / sigma**3 - 1.0 / sigma),
-        value_b * delta_b / sigma_b**2,
-        value_b * (delta_b**2 / sigma_b**3 - 1.0 / sigma_b),
-        amplitude * (density_b - density_a),
-        np.ones_like(x, dtype=float),
-    ))
+    coordinates, values = _compiled_model_input((x,), (amplitude, center, sigma, delta_center, sigma_b, ratio, background))
+    return _compiled_fit._value_jacobian_bimodal(coordinates, values, True)[1]
 
 
-def _compiled_series_input(x, values) -> tuple[np.ndarray, np.ndarray]:
-    """Fresh, writable, C-contiguous arrays: the one array type the compiled
-    model callbacks are specialised for (a read-only view would be
-    a second compilation of the same kernel)."""
+def _compiled_model_input(coordinates, values) -> tuple[np.ndarray, np.ndarray]:
+    """Borrow immutable model inputs; pack only genuinely separate axes."""
 
-    coords = np.array(np.reshape(x, (1, -1)), dtype=np.float64, order="C")
-    return coords, np.array(values, dtype=np.float64)
+    axes = tuple(np.asarray(axis, dtype=np.float64).reshape(-1) for axis in coordinates)
+    packed = axes[0].reshape(1, -1) if len(axes) == 1 else np.stack(axes)
+    packed = np.ascontiguousarray(packed).view()
+    parameters = np.ascontiguousarray(values, dtype=np.float64).reshape(-1).view()
+    packed.setflags(write=False)
+    parameters.setflags(write=False)
+    return packed, parameters
 
 
 def _histogram_poisson_gaussian(x, amplitude, rate, sigma, background):
@@ -3584,18 +3555,13 @@ def _histogram_poisson_gaussian(x, amplitude, rate, sigma, background):
     implementation, the compiled kernel; the frozen anchors hold it to an
     independent one.  (A NumPy twin evaluated over a pixel-value histogram
     cost forty cells' overlays 240 ms.)"""
-
-    coords, parameters = _compiled_series_input(
-        x, (amplitude, rate, sigma, background)
-    )
-    return _compiled_fit._value_jacobian_poisson(coords, parameters)[0]
+    coordinates, values = _compiled_model_input((x,), (amplitude, rate, sigma, background))
+    return _compiled_fit._value_jacobian_poisson(coordinates, values, False)[0]
 
 
 def _histogram_poisson_gaussian_jacobian(x, amplitude, rate, sigma, background):
-    coords, parameters = _compiled_series_input(
-        x, (amplitude, rate, sigma, background)
-    )
-    return _compiled_fit._value_jacobian_poisson(coords, parameters)[1]
+    coordinates, values = _compiled_model_input((x,), (amplitude, rate, sigma, background))
+    return _compiled_fit._value_jacobian_poisson(coordinates, values, True)[1]
 
 
 def _poisson_bimodal_a(x, amplitude, rate, sigma, delta_rate, sigma_b, ratio, background):
@@ -3615,40 +3581,40 @@ def _poisson_bimodal_background(
 
 
 def _bimodal_poisson_gaussian(x, *parameters):
-    coords, values = _compiled_series_input(x, parameters)
-    return _compiled_fit._value_jacobian_poisson_bimodal(coords, values)[0]
+    coordinates, values = _compiled_model_input((x,), parameters)
+    return _compiled_fit._value_jacobian_poisson_bimodal(coordinates, values, False)[0]
 
 
 def _bimodal_poisson_gaussian_jacobian(x, *parameters):
-    coords, values = _compiled_series_input(x, parameters)
-    return _compiled_fit._value_jacobian_poisson_bimodal(coords, values)[1]
+    coordinates, values = _compiled_model_input((x,), parameters)
+    return _compiled_fit._value_jacobian_poisson_bimodal(coordinates, values, True)[1]
 
 
 def _symmetric_lorentzian_doublet(x, center, common_fwhm, component_amplitude, offset, center_splitting):
-    return _lorentzian(x, center - center_splitting / 2, common_fwhm, component_amplitude, offset) + _lorentzian(
-        x, center + center_splitting / 2, common_fwhm, component_amplitude, 0.0
-    )
+    coordinates, values = _compiled_model_input((x,), (center, common_fwhm, component_amplitude, offset, center_splitting))
+    return _compiled_fit._value_jacobian_doublet(coordinates, values, False)[0]
 
 
 def _saturation(x, asymptote, numerator, shift):
     """Rational saturation (A*x+B)/(x+C), to the right of its pole."""
-    coords, values = _compiled_series_input(x, (asymptote, numerator, shift))
-    return _compiled_fit._value_jacobian_saturation(coords, values)[0]
+    coordinates, values = _compiled_model_input((x,), (asymptote, numerator, shift))
+    return _compiled_fit._value_jacobian_saturation(coordinates, values, False)[0]
 
 
 def _saturation_jacobian(x, asymptote, numerator, shift):
-    coords, values = _compiled_series_input(x, (asymptote, numerator, shift))
-    return _compiled_fit._value_jacobian_saturation(coords, values)[1]
+    coordinates, values = _compiled_model_input((x,), (asymptote, numerator, shift))
+    return _compiled_fit._value_jacobian_saturation(coordinates, values, True)[1]
 
 
 def _saturation_preparation(coordinates, observations):
     coords = np.array(coordinates, dtype=np.float64, order="C")
+    coords.setflags(write=False)
     values = np.array(observations, dtype=np.float64, order="C")
     descriptor = _compiled_fit.saturation_descriptor()
     seeds = np.empty((descriptor.max_candidates, 3), dtype=np.float64)
     lower, upper = np.full(3, -np.inf), np.full(3, np.inf)
     count = descriptor.prepare(
-        coords, values, np.ones(values.size, dtype=np.bool_), seeds,
+        coords, values, np.broadcast_to(np.asarray(True), values.shape), seeds,
         lower, upper,
         np.array(descriptor.context_builder(tuple(coords)), copy=True),
     )
@@ -3671,22 +3637,22 @@ def _init_saturation(coordinates, observations):
 
 def _release_recapture(t, amplitude, offset, eta, frequency):
     """Sudden radial 2D recapture, normalized at t=0; frequency is in cycles/time."""
-
-    coords, values = _compiled_series_input(t, (amplitude, offset, eta, frequency))
-    return _compiled_fit._value_jacobian_release_recapture(coords, values)[0]
+    coordinates, values = _compiled_model_input((t,), (amplitude, offset, eta, frequency))
+    return _compiled_fit._value_jacobian_release_recapture(coordinates, values, False)[0]
 
 
 def _release_recapture_jacobian(t, amplitude, offset, eta, frequency):
-    coords, values = _compiled_series_input(t, (amplitude, offset, eta, frequency))
-    return _compiled_fit._value_jacobian_release_recapture(coords, values)[1]
+    coordinates, values = _compiled_model_input((t,), (amplitude, offset, eta, frequency))
+    return _compiled_fit._value_jacobian_release_recapture(coordinates, values, True)[1]
 
 
 def _release_recapture_candidates(coordinates, observations):
     """The same cold seeds in the SciPy and compiled solver lanes."""
 
     coords = np.array(coordinates, dtype=np.float64, order="C")
+    coords.setflags(write=False)
     values = np.array(observations, dtype=np.float64, order="C")
-    valid = np.ones(values.size, dtype=np.bool_)
+    valid = np.broadcast_to(np.asarray(True), values.shape)
     descriptor = _compiled_fit.release_recapture_descriptor()
     seeds = np.empty((descriptor.max_candidates, 4), dtype=np.float64)
     lower = np.array((0.0, -np.inf, np.nextafter(0.0, 1.0), np.nextafter(0.0, 1.0)))
@@ -3712,65 +3678,33 @@ def _symmetric_lorentzian_doublet_jacobian(
     offset,
     center_splitting,
 ):
-    left = _lorentzian_jacobian(
-        x,
-        center - center_splitting / 2.0,
-        common_fwhm,
-        component_amplitude,
-        offset,
-    )
-    right = _lorentzian_jacobian(
-        x,
-        center + center_splitting / 2.0,
-        common_fwhm,
-        component_amplitude,
-        0.0,
-    )
-    return np.column_stack((
-        left[:, 0] + right[:, 0],
-        left[:, 1] + right[:, 1],
-        left[:, 2] + right[:, 2],
-        left[:, 3],
-        -0.5 * left[:, 0] + 0.5 * right[:, 0],
-    ))
+    coordinates, values = _compiled_model_input((x,), (center, common_fwhm, component_amplitude, offset, center_splitting))
+    return _compiled_fit._value_jacobian_doublet(coordinates, values, True)[1]
 
 
 def _damped_sine(x, amplitude, offset, baseband_frequency, decay_time, phase):
-    return offset + amplitude * np.exp(-x / decay_time) * np.sin(
-        2 * np.pi * baseband_frequency * x + phase
-    )
+    coordinates, values = _compiled_model_input((x,), (amplitude, offset, baseband_frequency, decay_time, phase))
+    return _compiled_fit._value_jacobian_damped(coordinates, values, False)[0]
 
 
 def _damped_sine_jacobian(x, amplitude, offset, baseband_frequency, decay_time, phase):
-    exponential = np.exp(-x / decay_time)
-    argument = 2.0 * np.pi * baseband_frequency * x + phase
-    sine = np.sin(argument)
-    cosine = np.cos(argument)
-    return np.column_stack((
-        exponential * sine,
-        np.ones_like(x, dtype=float),
-        amplitude * exponential * cosine * 2.0 * np.pi * x,
-        amplitude * exponential * sine * x / decay_time**2,
-        amplitude * exponential * cosine,
-    ))
+    coordinates, values = _compiled_model_input((x,), (amplitude, offset, baseband_frequency, decay_time, phase))
+    return _compiled_fit._value_jacobian_damped(coordinates, values, True)[1]
 
 
 def _exponential_decay(x, amplitude, offset, decay_time):
-    return offset + amplitude * np.exp(-x / decay_time)
+    coordinates, values = _compiled_model_input((x,), (amplitude, offset, decay_time))
+    return _compiled_fit._value_jacobian_exponential(coordinates, values, False)[0]
 
 
 def _exponential_decay_jacobian(x, amplitude, offset, decay_time):
-    exponential = np.exp(-x / decay_time)
-    return np.column_stack((
-        exponential,
-        np.ones_like(x, dtype=float),
-        amplitude * exponential * x / decay_time**2,
-    ))
+    coordinates, values = _compiled_model_input((x,), (amplitude, offset, decay_time))
+    return _compiled_fit._value_jacobian_exponential(coordinates, values, True)[1]
 
 
 def _radial_gaussian_center(x, y, amplitude, offset, one_over_e_radius, center_x, center_y):
-    radius_squared = (x - center_x) ** 2 + (y - center_y) ** 2
-    return offset + amplitude * np.exp(-radius_squared / one_over_e_radius**2)
+    coordinates, values = _compiled_model_input((x, y), (amplitude, offset, one_over_e_radius, center_x, center_y))
+    return _compiled_fit._value_jacobian_radial(coordinates, values, False)[0]
 
 
 def _radial_gaussian_center_jacobian(
@@ -3782,17 +3716,8 @@ def _radial_gaussian_center_jacobian(
     center_x,
     center_y,
 ):
-    delta_x = x - center_x
-    delta_y = y - center_y
-    radius_squared = delta_x**2 + delta_y**2
-    gaussian = np.exp(-radius_squared / one_over_e_radius**2)
-    return np.column_stack((
-        gaussian,
-        np.ones_like(x, dtype=float),
-        amplitude * gaussian * 2.0 * radius_squared / one_over_e_radius**3,
-        amplitude * gaussian * 2.0 * delta_x / one_over_e_radius**2,
-        amplitude * gaussian * 2.0 * delta_y / one_over_e_radius**2,
-    ))
+    coordinates, values = _compiled_model_input((x, y), (amplitude, offset, one_over_e_radius, center_x, center_y))
+    return _compiled_fit._value_jacobian_radial(coordinates, values, True)[1]
 
 
 def _anisotropic_gaussian_center(
@@ -3805,11 +3730,8 @@ def _anisotropic_gaussian_center(
     center_x,
     center_y,
 ):
-    exponent = (
-        (x - center_x) ** 2 / radius_x**2
-        + (y - center_y) ** 2 / radius_y**2
-    )
-    return offset + amplitude * np.exp(-exponent)
+    coordinates, values = _compiled_model_input((x, y), (amplitude, offset, radius_x, radius_y, center_x, center_y))
+    return _compiled_fit._value_jacobian_anisotropic(coordinates, values, False)[0]
 
 
 def _anisotropic_gaussian_center_jacobian(
@@ -3822,19 +3744,8 @@ def _anisotropic_gaussian_center_jacobian(
     center_x,
     center_y,
 ):
-    delta_x = x - center_x
-    delta_y = y - center_y
-    gaussian = np.exp(
-        -(delta_x**2 / radius_x**2 + delta_y**2 / radius_y**2)
-    )
-    return np.column_stack((
-        gaussian,
-        np.ones_like(x, dtype=float),
-        amplitude * gaussian * 2.0 * delta_x**2 / radius_x**3,
-        amplitude * gaussian * 2.0 * delta_y**2 / radius_y**3,
-        amplitude * gaussian * 2.0 * delta_x / radius_x**2,
-        amplitude * gaussian * 2.0 * delta_y / radius_y**2,
-    ))
+    coordinates, values = _compiled_model_input((x, y), (amplitude, offset, radius_x, radius_y, center_x, center_y))
+    return _compiled_fit._value_jacobian_anisotropic(coordinates, values, True)[1]
 
 
 def _init_lorentzian(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:

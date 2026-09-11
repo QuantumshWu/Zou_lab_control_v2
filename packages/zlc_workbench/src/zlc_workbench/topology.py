@@ -44,16 +44,12 @@ class SignalRow:
     state: str
     #: The signal this one was cut from, or "" when it was acquired.
     derived_from: str
-    #: Whether a panel is already showing it.
-    shown: bool
 
 
 def project_signals(
-    plane: object,
-    *,
-    shown: object = (),
+    descriptions: object,
 ) -> tuple[SignalRow, ...]:
-    """Project the plane's signals into rows, live producers first.
+    """Project one already-read signal directory, live producers first.
 
     Ordering is a decision, not an accident: what is still arriving is what an
     operator is most likely to want on screen, and within a producer the plane's
@@ -61,7 +57,6 @@ def project_signals(
     moving underneath.
     """
 
-    displayed = {str(name) for name in shown}
     rows = [
         SignalRow(
             name=description.name,
@@ -72,9 +67,8 @@ def project_signals(
             producer=_producer(description.name, description.owner_id),
             state=_state(description),
             derived_from=description.source_name or "",
-            shown=description.name in displayed,
         )
-        for description in plane.describe_signals()
+        for description in descriptions
     ]
     order = {"live": 0, "waiting": 1, "finished": 2, "failed": 3}
     return tuple(

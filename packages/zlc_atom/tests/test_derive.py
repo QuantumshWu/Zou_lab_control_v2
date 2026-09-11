@@ -166,7 +166,7 @@ def test_sparse_logical_axes_reduce_without_densifying_or_averaging_means() -> N
     np.testing.assert_array_equal(reordered.valid, valid[:, [1, 4, 0, 2], :])
 
 
-def test_where_and_reductions_keep_invalid_and_empty_groups_explicit() -> None:
+def test_where_and_reductions_keep_invalid_and_empty_groups_explicit(monkeypatch) -> None:
     values = np.array([[[10., 20., 30.]], [[40., 50., 60.]]])
     source = _operand(values, valid=np.array([[[False, False, False]], [[True, False, True]]]))
     mask = _operand(np.array([[[True, False, True]], [[False, True, True]]]), "1")
@@ -189,6 +189,19 @@ def test_where_and_reductions_keep_invalid_and_empty_groups_explicit() -> None:
         assert not getattr(source, operation)(("cycle", "site"), where=empty).valid.any()
     for operation in ("all", "any", "count"):
         assert not getattr(mask, operation)(("cycle", "site"), where=empty).valid.any()
+    from zlc_atom.nodes.derive import expression
+
+    grouped = expression._group_reduce
+    count_inputs = []
+
+    def group_reduce(values, codes, count, axis, operation):
+        count_inputs.append(values.dtype.kind)
+        return grouped(values, codes, count, axis, operation)
+
+    monkeypatch.setattr(expression, "_group_reduce", group_reduce)
+    counted = source.count("cycle")
+    assert count_inputs == ["b"], "numeric count consumes validity, not a discarded value sum"
+    np.testing.assert_array_equal(counted.values, [[[1, 0, 1]]])
 
 
 def test_python_locals_numpy_and_previous_outputs_do_not_create_a_second_schema() -> None:

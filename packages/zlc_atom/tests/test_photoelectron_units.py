@@ -354,7 +354,7 @@ def test_calibration_preview_and_saved_sample_keep_raw_count_unit(
     from zlc_atom.devices.camera.contract import CameraFrameRecord, CameraWorkingPoint
     from zlc_atom.nodes.calibration.outputs import capture_preview_output
     from zlc_atom.nodes.calibration.task import SampleWriter
-    from zlc_data.figure_archive import read_archive, read_dataset
+    from zlc_data.figure_archive import read_archive
     from zlc_runtime import TaskRun
 
     point = CameraWorkingPoint(
@@ -405,8 +405,8 @@ def test_calibration_preview_and_saved_sample_keep_raw_count_unit(
         artifact_context=artifact_run,
     )
     archive = writer.write(0, cycle).with_suffix(".npz")
-    info, arrays = read_archive(archive)
-    saved = read_dataset(info, arrays, "data")
+    info, arrays, datasets = read_archive(archive)
+    saved = datasets["data"]
     assert saved.block.schema.value_schema.value_unit == "count"
 
 
@@ -423,7 +423,7 @@ def test_saved_samples_and_the_preview_keep_the_unit_they_were_read_in(
     came from while the analysis it was saved beside was correct.
     """
 
-    from zlc_data.figure_archive import read_archive, read_dataset
+    from zlc_data.figure_archive import read_archive
 
     result = _task(
         replace(
@@ -440,8 +440,8 @@ def test_saved_samples_and_the_preview_keep_the_unit_they_were_read_in(
     samples = sorted((tmp_path / "calibration" / "figures").glob("sample_*.npz"))
     assert samples, "save_frames must leave the samples it paid for"
     for path in samples:
-        info, arrays = read_archive(path)
-        saved = read_dataset(info, arrays, "data")
+        info, arrays, datasets = read_archive(path)
+        saved = datasets["data"]
         assert saved.block.schema.value_schema.value_unit is None
         values = np.asarray(saved.block.values)
         assert values.dtype == np.float32, f"{path.name} was re-quantised"

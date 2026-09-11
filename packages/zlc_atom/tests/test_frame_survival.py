@@ -230,7 +230,8 @@ def test_evaluate_translates_exact_coverage_by_whole_cycles() -> None:
 
 
 @pytest.mark.parametrize("frames", (2, 3, 4))
-def test_scan_pairing_preserves_coordinates_and_live_terminal_placement(frames) -> None:
+def test_scan_pairing_preserves_coordinates_and_live_terminal_placement(frames, monkeypatch) -> None:
+    import zlc_atom.nodes.frame_survival.processor as processor_module
     from types import SimpleNamespace
     from zlc_atom.nodes.scan import SCAN_OUTPUT, ScanDatasetWriter
     from zlc_atom.nodes.frame_survival import SURVIVAL_OUTPUTS
@@ -249,6 +250,12 @@ def test_scan_pairing_preserves_coordinates_and_live_terminal_placement(frames) 
         (("frame", "V"), ("other", "Hz")), run_repeats=2,
     )
     processor = FrameSurvivalProcessor(producer="survival")
+    layouts = []
+    original_rows = processor_module._frame_rows
+    def tracked_rows(schema, axis):
+        layouts.append(schema)
+        return original_rows(schema, axis)
+    monkeypatch.setattr(processor_module, '_frame_rows', tracked_rows)
     scan = SimpleNamespace(instance_id="scan", dataset_output_declarations=(SCAN_OUTPUT,),
                            signal_key=lambda name: f"@logic/scan/{name}")
     result = SimpleNamespace(instance_id="survival", dataset_output_declarations=SURVIVAL_OUTPUTS,
@@ -288,9 +295,11 @@ def test_scan_pairing_preserves_coordinates_and_live_terminal_placement(frames) 
                 live = plane.current_dataset("@logic/survival/survival")
                 np.testing.assert_array_equal(live.block.values, expected.reshape(2, -1, 3))
                 np.testing.assert_array_equal(live.expanded_validity(), eligible.reshape(2, -1, 3))
+        assert len(layouts) == 2, 'unchanged event/canonical geometry was rebuilt per shot'
         plane.seal_committed(scan)
         source = plane.current_dataset("@logic/scan/scan")
         terminal = processor.evaluate(SignalValue("scan", source, None))["survival"]
+        assert len(layouts) == 3, 'terminal input must plan its actual complete geometry'
         assert terminal.snapshot.block.schema == live.block.schema
         assert terminal.coverage == DatasetCoverage(8 * pair_count, 8 * pair_count)
         np.testing.assert_array_equal(terminal.snapshot.block.values, live.block.values)

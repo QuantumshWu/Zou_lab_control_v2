@@ -194,6 +194,24 @@ def test_a_source_sibling_joins_a_lagging_processor_at_the_processor_s_shot() ->
     assert siblings_only.publication("occ/counts") is second
     assert siblings_only.publication("occ/occupied") is second
 
+    # A replaced generation can be an edit of the previous atomic bundle.
+    # Its older, same-named ancestor is lineage, not another visible shot.
+    edited = _publication("occ", "g3", 1, bundle, (second,))
+    parents[edited] = (second,)
+    states = [_state("occ", "g3", "producer", bundle, edited)]
+    edited_front = build_front(states, set(bundle), None, parents.__getitem__)
+    assert edited_front.publication("occ/counts") is edited
+    assert edited_front.publication("occ/occupied") is edited
+
+    # Two independent branches of that same root remain incompatible, even
+    # when their roots match; only causal ancestry permits replacement.
+    branch = _publication("occ", "g4", 1, bundle, (second,))
+    combined = _publication("combined", "g5", 1, "combined/value", (edited, branch))
+    parents.update({branch: (second,), combined: (edited, branch)})
+    states.append(_state("combined", "g5", "processor", ("combined/value",), combined, "occ/counts"))
+    refused = build_front(states, {"occ/counts", "combined/value"}, None, parents.__getitem__)
+    assert refused.publication("combined/value") is None
+
 
 def test_a_presentation_paced_follower_never_holds_its_source() -> None:
     """A coherent=False route keeps lineage but joins no same-shot component.

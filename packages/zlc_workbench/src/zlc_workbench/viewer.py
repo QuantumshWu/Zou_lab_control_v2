@@ -301,7 +301,6 @@ def _draft_from_snapshot(
     source_path: Path | None,
     source_dataset: str,
     recipe: Mapping[str, object] | None,
-    described: object | None,
     overlay: object | None,
     source_publication: tuple[str, object] | None = None,
 ) -> dict[str, object]:
@@ -342,7 +341,6 @@ def _draft_from_snapshot(
         "source_point_domain": schema.point_domain,
         "source_overlay": overlay,
         "recipe": None if recipe is None else dict(recipe),
-        "described": described,
         "repeat_axes": list(schema.repeat_domain.axes),
         "point_axes": list(schema.point_domain.axes),
         "cell_axes": list(schema.cell_domain.axes),
@@ -2215,12 +2213,12 @@ class FigureViewerPresenter:
         self._data_drafts: dict[str, dict[str, object]] = {}
         self._data_source_editors: dict[str, str] = {}
         self._archive_serial = 0
+        self._opening_archive: tuple | None = None
         self._data_serial = 0
         self._runtime_closed = False
         self.timer: object | None = None
         self.path: Path | None = None
         self.description: ArchiveDescription | None = None
-        self.panels = panel_presenter.panels
         self._active_panel_id = ""
         self._busy = False
         #: How a played pulse's timeline becomes a picture -- the Pulse
@@ -2232,6 +2230,10 @@ class FigureViewerPresenter:
         self._close_requested = False
         self._closed = False
         self._connect()
+
+    @property
+    def panels(self):
+        return self._panel_presenter.panels
 
     def _connect(self) -> None:
         self.view.path_committed.connect(self.open)
@@ -2485,34 +2487,14 @@ class FigureViewerPresenter:
             return
         requested = Path(path)
         serial = self._archive_serial + 1
-        device_pixel_ratio = float(self.view.device_pixel_ratio())
-
         def prepare() -> object:
-            import zlc_plot
-
             resolved = requested.resolve()
-            info, arrays = read_archive(resolved)
+            info, arrays, datasets = read_archive(resolved)
             description = describe_archive(info, arrays)
             loaded = []
-            for index, key in enumerate(description.dataset_keys):
-                plot_input, recipe = read_figure_plot(info, arrays, key)
-                described = None
-                if index == 0:
-                    # Only the default card restores a saved DisplayDescription.
-                    # Other datasets become ordinary Runtime signals and are
-                    # composed only if the operator chooses them later.
-                    host = zlc_plot.open_figure_host(
-                        plot_input,
-                        recipe,
-                        device_pixel_ratio=device_pixel_ratio,
-                        build_host=self._build_figure_host,
-                    )
-                    try:
-                        described = self._await(host.describe_display())
-                        described = getattr(described, "value", described)
-                    finally:
-                        self._close_host(host)
-                loaded.append((key, plot_input, recipe, described))
+            for key in description.dataset_keys:
+                plot_input, recipe = read_figure_plot(info, arrays, datasets, key)
+                loaded.append((key, plot_input, recipe))
             sections = info["sections"]
             return (
                 resolved,
@@ -2530,19 +2512,23 @@ class FigureViewerPresenter:
             f"cannot open {requested.name}",
         )
 
-    def _accept_runtime_archive(self, result: object) -> None:
+    def _accept_runtime_archive(self, result: object) -> bool:
         from .panel_catalog import task_console_panel_identity_for_spec
         from .panel_save import _IMPORTED_LINEAGE_KEY
+        from zlc_plot.semantics import describe_semantics
+
+        if self._close_requested:
+            return True
 
         resolved, description, loaded, serial, source_lineage, source_document = result
         panel_presenter = self._panel_presenter
         plane = self._signal_plane
         previous_panels = tuple(panel_presenter.panels)
         producers: list[_ArchiveDatasetProducer] = []
-        published: list[tuple[object, object, object, object, object]] = []
+        published: list[tuple[object, object, object, object]] = []
         new_panel_id = ""
         try:
-            for index, (key, plot_input, recipe, described) in enumerate(loaded):
+            for index, (key, plot_input, recipe) in enumerate(loaded):
                 producer = _ArchiveDatasetProducer(
                     serial,
                     index,
@@ -2557,15 +2543,16 @@ class FigureViewerPresenter:
                 producers.append(producer)
                 publication = producer.publish(plane)
                 published.append(
-                    (producer, plot_input, recipe, described, publication)
+                    (producer, plot_input, recipe, publication)
                 )
             if published:
-                producer, plot_input, _recipe, described, publication = published[0]
-                spec = described.spec
+                producer, plot_input, recipe, publication = published[0]
+                spec = recipe["spec"]
                 kind, cell_kind = task_console_panel_identity_for_spec(spec)
+                snapshot = getattr(plot_input, "snapshot", plot_input)
                 semantic = {
                     str(name): value
-                    for name, value in described.semantics.values.items()
+                    for name, value in describe_semantics(snapshot.block.schema, spec).values.items()
                     if str(name) != "kind"
                 }
                 label = dict(description.datasets).get(
@@ -2578,19 +2565,15 @@ class FigureViewerPresenter:
                     title=label,
                     kind=kind,
                     cell_kind=cell_kind,
-                    size=described.size,
+                    size=recipe["size"],
                     semantic=semantic,
-                    display=dict(described.display_state.values),
-                    fit=dict(described.fit),
+                    display=dict(recipe["parameters"]),
+                    fit=dict(recipe["fit"]),
                     overlay_signal=producer.overlay_signal,
                     initial_publication=publication,
+                    initial_recipe=recipe,
                 )
                 new_panel_id = binding.panel_id
-                panel_presenter.restore_panel_description(
-                    binding.panel_id,
-                    described,
-                )
-                self._active_panel_id = binding.panel_id
         except BaseException:
             if new_panel_id:
                 panel_presenter.remove_panel(new_panel_id)
@@ -2601,6 +2584,47 @@ class FigureViewerPresenter:
                     pass
             raise
 
+        self._opening_archive = (
+            resolved, description, published, serial, source_document,
+            previous_panels, new_panel_id,
+        )
+        if new_panel_id:
+            panel_presenter.board.owe_presentation((new_panel_id,))
+        panel_presenter.beat()
+        self._settle_runtime_archive()
+        return False
+
+    def _settle_runtime_archive(self) -> None:
+        """Commit the open only after its one real Monitor host accepts it."""
+
+        pending = self._opening_archive
+        if pending is None:
+            return
+        resolved, description, published, serial, source_document, previous_panels, new_panel_id = pending
+        panel_presenter, plane = self._panel_presenter, self._signal_plane
+        binding = panel_presenter.panels.get(new_panel_id) if new_panel_id else None
+        cancelled = self._close_requested or bool(new_panel_id and binding is None)
+        error = None if binding is None or binding.port is None else binding.port.last_error
+        if cancelled or error is not None:
+            self._opening_archive = None
+            if binding is not None:
+                panel_presenter.remove_panel(new_panel_id)
+            for producer, *_rest in published:
+                plane.retire(producer)
+            if self._active_panel_id not in self.panels:
+                self._active_panel_id = next(reversed(self.panels), "")
+            self.view.set_status(
+                "opening cancelled" if cancelled else f"cannot open {resolved.name}: {error}",
+                error=not cancelled,
+            )
+            self._finish_operation()
+            return
+        if binding is not None:
+            if binding.accepted_display is None:
+                return
+            self._active_panel_id = new_panel_id
+        self._opening_archive = None
+        producers = tuple(row[0] for row in published)
         for panel_id in previous_panels:
             panel_presenter.remove_panel(panel_id)
         for producer in self._archive_producers:
@@ -2622,7 +2646,7 @@ class FigureViewerPresenter:
         self._close_pulse_tabs()
         labels = dict(description.datasets)
         source_title = str(source_document.get("title") or "").strip()
-        for producer, plot_input, recipe, described, publication in published:
+        for producer, plot_input, recipe, publication in published:
             key = producer.dataset
             snapshot = getattr(plot_input, "snapshot", plot_input)
             overlay = getattr(plot_input, "overlay", None)
@@ -2634,7 +2658,6 @@ class FigureViewerPresenter:
                 "snapshot": snapshot,
                 "overlay": overlay,
                 "recipe": dict(recipe),
-                "described": described,
                 "path": resolved,
                 "source_publication": (producer.data_signal, publication),
             }
@@ -2650,14 +2673,16 @@ class FigureViewerPresenter:
             if not published
             else f"showing {published[0][0].data_signal}"
         )
-        panel_presenter.beat()
+        self._finish_operation()
 
     def beat(self) -> None:
         self._panel_presenter.beat()
+        self._settle_runtime_archive()
         self._refresh_data_save_states()
 
     def commit_surfaces(self) -> None:
         self._panel_presenter.commit_surfaces()
+        self._settle_runtime_archive()
         self._refresh_data_save_states()
 
     def _project_data_choices(self, current: str = "") -> None:
@@ -2683,9 +2708,14 @@ class FigureViewerPresenter:
         )
         setter(tuple(rows), current=str(current))
 
-    def _show_data_draft(self, draft: Mapping[str, object]) -> None:
+    def _show_data_draft(
+        self, draft: Mapping[str, object], *, changed_cells: tuple | None = None,
+    ) -> None:
         editor_id = str(draft["editor_id"])
         projection = _data_projection(draft)
+        if changed_cells is not None:
+            projection["table"]["changed_cells"] = changed_cells
+            projection["axis_values"]["changed_cells"] = ()
         if bool(getattr(self.view, "has_data_editor", lambda _key: False)(editor_id)):
             self.view.update_data_editor(editor_id, projection)
             self.view.focus_data_editor(editor_id)
@@ -2712,7 +2742,6 @@ class FigureViewerPresenter:
             source_path=None,
             source_dataset="",
             recipe=None,
-            described=None,
             overlay=None,
         )
         self._data_drafts[editor_id] = draft
@@ -2733,7 +2762,6 @@ class FigureViewerPresenter:
             source_dataset=str(source["key"]),
             source_publication=source["source_publication"],
             recipe=source["recipe"],
-            described=source["described"],
             overlay=source["overlay"],
         )
         self._data_drafts[editor_id] = draft
@@ -2756,41 +2784,7 @@ class FigureViewerPresenter:
         if source is None:
             self.view.set_status(f"unknown editable Dataset {key!r}", error=True)
             return
-        if source["described"] is not None:
-            self._open_archive_data_draft(key)
-            return
-        device_pixel_ratio = float(self.view.device_pixel_ratio())
-
-        def describe() -> object:
-            import zlc_plot
-
-            plot_input = (
-                source["snapshot"]
-                if source["overlay"] is None
-                else zlc_plot.ImageFrame(source["snapshot"], source["overlay"])
-            )
-            host = zlc_plot.open_figure_host(
-                plot_input,
-                source["recipe"],
-                device_pixel_ratio=device_pixel_ratio,
-                build_host=self._build_figure_host,
-            )
-            try:
-                result = self._await(host.describe_display())
-                return getattr(result, "value", result)
-            finally:
-                self._close_host(host)
-
-        def accepted(description: object) -> None:
-            source["described"] = description
-            self._open_archive_data_draft(key)
-
-        self._submit(
-            f"preparing {source['name']} for editing…",
-            describe,
-            accepted,
-            f"cannot edit {source['name']}",
-        )
+        self._open_archive_data_draft(key)
 
     def _agrees_to_lose(self, what: str) -> bool:
         """Ask once whether unsaved edits may go, and take the answer.
@@ -2846,7 +2840,6 @@ class FigureViewerPresenter:
                 "source_snapshot",
                 "source_overlay",
                 "recipe",
-                "described",
                 "producer_serial",
                 "producer",
                 "publication",
@@ -2869,7 +2862,6 @@ class FigureViewerPresenter:
             source_dataset=str(draft["source_dataset"]),
             source_publication=draft["source_publication"],
             recipe=draft["recipe"],
-            described=draft["described"],
             overlay=draft["source_overlay"],
         )
         restored.update(persistent)
@@ -2905,6 +2897,7 @@ class FigureViewerPresenter:
             self.view.set_status(f"unknown data editor {editor_id!r}", error=True)
             return
         try:
+            changed_cells = None
             command = dict(intent)
             operation = str(command.pop("op"))
             draft["message"] = ""
@@ -2991,9 +2984,11 @@ class FigureViewerPresenter:
                     if draft["component"] == "sigma":
                         draft["component"] = "values"
             elif operation == "set_cells":
+                cells = tuple(command["cells"])
                 marks_dirty = _set_table_cells(
-                    draft, str(command["component"]), command["cells"]
+                    draft, str(command["component"]), cells
                 )
+                changed_cells = tuple((int(row), int(column)) for row, column, _text in cells)
             elif operation == "discard":
                 if bool(draft["modified"]):
                     self._restore_data_draft(draft)
@@ -3012,7 +3007,7 @@ class FigureViewerPresenter:
                 raise ValueError(f"unknown data edit operation {operation!r}")
             if marks_dirty:
                 draft["modified"] = True
-            self._show_data_draft(draft)
+            self._show_data_draft(draft, changed_cells=changed_cells)
             self._project_data_choices(f"manual:{editor_id}")
         except (KeyError, IndexError, TypeError, ValueError, RuntimeError) as error:
             draft["message"] = str(error)
@@ -3021,6 +3016,7 @@ class FigureViewerPresenter:
 
     def _apply_data_draft(self, draft: dict[str, object]) -> None:
         from .panel_catalog import task_console_panel_identity_for_spec
+        from zlc_plot.semantics import describe_semantics
 
         validity = np.asarray(draft["validity"], dtype=np.bool_)
         values = np.asarray(draft["values"])
@@ -3094,8 +3090,8 @@ class FigureViewerPresenter:
             )
             self._panel_presenter.board.owe_presentation((panel_id,))
         else:
-            described = draft["described"]
-            if described is None:
+            recipe = draft["recipe"]
+            if recipe is None:
                 binding = self._panel_presenter.add_panel(
                     signal,
                     snapshot,
@@ -3104,10 +3100,11 @@ class FigureViewerPresenter:
                     initial_publication=publication,
                 )
             else:
-                kind, cell_kind = task_console_panel_identity_for_spec(described.spec)
+                spec = recipe["spec"]
+                kind, cell_kind = task_console_panel_identity_for_spec(spec)
                 semantic = {
                     str(name): value
-                    for name, value in described.semantics.values.items()
+                    for name, value in describe_semantics(snapshot.block.schema, spec).values.items()
                     if str(name) != "kind"
                 }
                 binding = self._panel_presenter.add_panel(
@@ -3116,16 +3113,13 @@ class FigureViewerPresenter:
                     title=str(draft["name"]),
                     kind=kind,
                     cell_kind=cell_kind,
-                    size=described.size,
+                    size=recipe["size"],
                     semantic=semantic,
-                    display=dict(described.display_state.values),
-                    fit=dict(described.fit),
+                    display=dict(recipe["parameters"]),
+                    fit=dict(recipe["fit"]),
                     overlay_signal=producer.overlay_signal,
                     initial_publication=publication,
-                )
-                self._panel_presenter.restore_panel_description(
-                    binding.panel_id,
-                    described,
+                    initial_recipe=draft["recipe"],
                 )
             draft["panel_id"] = binding.panel_id
             self._active_panel_id = binding.panel_id
@@ -3370,6 +3364,8 @@ class FigureViewerPresenter:
                 return False
             self._discard_agreed = True
         self._close_requested = True
+        if self._opening_archive is not None:
+            self._settle_runtime_archive()
         if self._busy:
             self.view.set_status("closing after the current operation…")
             return False

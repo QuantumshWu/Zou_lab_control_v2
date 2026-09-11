@@ -313,6 +313,11 @@ scan = PulseScanView(); scan.set_page(ScanPageRecord(source_text="committed", so
 edited = []; runs = []; scan.source_edited.connect(edited.append); scan.run_requested.connect(lambda: runs.append("run"))
 scan.scan_code.setPlainText("typing"); scan.scan_run_button.click()
 assert edited == ["typing"] and runs == ["run"]
+scan.set_page(ScanPageRecord(source_text="typing", table_text="1 2 3"))
+table_changes = []
+scan.scan_table_view.textChanged.connect(lambda: table_changes.append(True))
+scan.set_page(ScanPageRecord(source_text="typing more", table_text="1 2 3", source_dirty=True))
+assert not table_changes, 'typing source replaced the unchanged scan-table document'
 assert not hasattr(scan, "_code_dirty") and not hasattr(scan, "_source_revision")
 scan.set_repeats((1 << 32) - 1)
 assert int(scan.scan_repeats_spin.maximum()) == (1 << 32) - 1
@@ -444,13 +449,13 @@ app = ensure_qt_app(["schedule-selection"])
 port = PortRowVM("d0", "digital", "Gate", "d0")
 periods = tuple(
     PeriodVM(f"p{n}", f"P{n}", FieldVM("1"), "us", ("ns", "us"), digital=(("d0", False),))
-    for n in range(3)
+    for n in range(8)
 )
 view = PulseScheduleView()
 view.resize(1200, 500); view.show()
 view.set_schedule(ScheduleVM(
     document_generation=0, revision=0, document_name="x", clock_text="50 MHz",
-    total_text="3 us", total_tooltip="", period_count=3, visible_text="1/1",
+    total_text="8 us", total_tooltip="", period_count=8, visible_text="1/1",
     summary_text="x", ports=(port,), periods=periods,
 ))
 app.processEvents()
@@ -462,7 +467,7 @@ view.remove_period_requested.connect(lambda pid: asked.append(("remove", pid)))
 
 # nothing selected -> append, and Remove takes the last
 view.add_button.click(); view.remove_button.click()
-assert asked == [("add", None), ("remove", "p2")], asked
+assert asked == [("add", None), ("remove", "p7")], asked
 
 # a selected CARD inserts after it, and Remove takes that one
 asked.clear()
@@ -484,6 +489,8 @@ assert container.selection() == (None, None, None)
 
 # a selection naming a period the strip no longer holds cannot survive a rebuild
 container.period_clicked.emit("p1"); app.processEvents()
+before_width = container.width()
+before_scroll = view.timeline_scroll.horizontalScrollBar().maximum()
 view.set_schedule(ScheduleVM(
     document_generation=0, revision=1, document_name="x", clock_text="50 MHz",
     total_text="1 us", total_tooltip="", period_count=1, visible_text="1/1",
@@ -491,6 +498,13 @@ view.set_schedule(ScheduleVM(
 ))
 app.processEvents()
 assert container.selection() == (None, None, None), container.selection()
+print('removed period geometry', before_width, container.width(), before_scroll,
+      view.timeline_scroll.horizontalScrollBar().maximum())
+assert container.width() < before_width
+assert container.size() == container.sizeHint()
+assert view.timeline_scroll.horizontalScrollBar().maximum() < before_scroll
+view.close(); view.deleteLater()
+app.processEvents()
 """
     )
 
@@ -545,7 +559,7 @@ def test_hiding_a_port_takes_its_delay_row_with_it() -> None:
         """
 from PyQt5 import QtCore
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.pulse import DelayRowVM, FieldVM, PeriodVM, PortRowVM, PulseScheduleView, ScheduleVM
+from zlc_ui.pulse import BracketVM, DelayRowVM, FieldVM, PeriodVM, PortRowVM, PulseScheduleView, ScheduleVM
 app = ensure_qt_app(["schedule-hide-delay"])
 
 ports = tuple(PortRowVM(f"d{n}", "digital", f"Out {n}", f"d{n}") for n in range(3))
@@ -561,14 +575,41 @@ view.set_schedule(ScheduleVM(
     delay_rows=tuple(
         DelayRowVM(port.key, FieldVM("0"), "ns", (("ns", 1.0),)) for port in ports
     ),
+    bracket=BracketVM('p0', 'p0', 4),
 ))
 app.processEvents()
 assert set(view.channel_panel._rows) == {"d0", "d1", "d2"}
+strip = view.drag_container
+timeline = strip.items()
+posts = strip._posts
+strip.show_selection(post='end')
+layout_moves = []
+original_take = strip.layout_main.takeAt
+strip.layout_main.takeAt = lambda index: (layout_moves.append(index), original_take(index))[1]
 
 view.set_visible_ports(("d0", "d2"))
 app.processEvents()
+assert strip.items() == timeline and strip._posts == posts
+assert not layout_moves, 'hiding a port detached the unchanged timeline'
+assert strip.selection() == (None, 'end', None)
 assert set(view.channel_panel._rows) == {"d0", "d2"}, "a hidden port keeps no delay row"
 assert set(view._cards["p0"].port_rows) == {"d0", "d2"}, "and the card agrees"
+
+strip.show_selection(gap=1)
+before_height = strip.height()
+view.set_visible_ports(("d0",))
+for _ in range(4):
+    app.processEvents()
+print('hidden row geometry', before_height, strip.height(), strip._indicator.height())
+assert strip.height() < before_height
+assert strip.size() == strip.sizeHint()
+assert strip._indicator.height() == strip.height(), 'selected gap did not follow the real layout'
+assert strip.items() == timeline and strip._posts == posts
+assert strip.selection() == (None, None, 1)
+view.set_visible_ports(("d0", "d2"))
+for _ in range(4):
+    app.processEvents()
+assert strip._indicator.height() == strip.height()
 
 # The single-row push is the other way into that column, and it must obey the
 # same rule -- otherwise one API binding brings a hidden row back.
@@ -762,6 +803,15 @@ assert view._schedule.bracket == right_only.bracket
 orders.clear()
 assert not drop("start", strip.items()[-1].geometry().right() + 40)
 assert orders == [] and bracket_requests == []
+end_post = next(post for post in strip._posts if post.kind == 'end')
+end_post.count_spin.setValue(7)
+assert bracket_requests == [('p2', 'p2', 7)], 'retained post used stale bracket anchors'
+empty = replace(right_only, revision=5, bracket=BracketVM('p2', 'p1', 7))
+assert view.set_schedule(empty)
+app.processEvents()
+assert end_post in strip._posts and start_post in strip._posts
+keys = tuple(strip._item_key(item) for item in strip.items())
+assert keys.index(('bracket', 'end')) == keys.index(('bracket', 'start')) + 1
 
 view.close(); view.deleteLater()
 app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete); app.processEvents()

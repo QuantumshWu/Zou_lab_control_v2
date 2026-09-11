@@ -438,8 +438,6 @@ class NodeHost:
         self._progress_reported = False
         self._processor_path: str | None = None
         self._source_publication: SignalPublication | None = None
-        self._terminal_source: SignalValue | None = None
-        self._terminal_inputs: Mapping[str, SignalValue] | None = None
         self._follow_tap: FollowTap[SignalPublication] | None = None
         self._task_run: TaskRun | None = None
         self._partial_exit_writer: Callable[[str, BaseException], None] | None = None
@@ -694,8 +692,6 @@ class NodeHost:
         self._progress_reported = False
         self._processor_path = None
         self._source_publication = None
-        self._terminal_source = None
-        self._terminal_inputs = None
         self._resolved_input_signals = None
         self._follow_tap = None
         self._task_run = None
@@ -1178,7 +1174,7 @@ class NodeHost:
                 history_window=self._input_window if view == "window" else None,
                 history_signals=tuple(signal_names.values()) if view == "window" else (),
             )
-            inputs[input_name] = SignalValue(
+            inputs[input_name] = SignalValue._from_owned_records(
                 signal_name,
                 snapshot,
                 None,
@@ -1259,11 +1255,8 @@ class NodeHost:
             self._error = "processor publication lost its selected input signal"
             raise RuntimeError(self._error)
         if not self._data_plane.is_generation_live(self._source_signal):
-            self._terminal_inputs = self._publication_inputs(publication, terminal=True)
-            assert self._input_name is not None
-            self._terminal_source = self._terminal_inputs[self._input_name]
             self._processor_path = "frozen"
-            self._start_frozen_processor(publication, self._terminal_source)
+            self._start_frozen_processor(publication, source)
             return
         if self._input_delivery == "latest":
             self._processor_path = "latest"
@@ -1278,7 +1271,6 @@ class NodeHost:
     def _start_latest_processor(self, publication: SignalPublication) -> None:
         assert self._source_signal is not None
         self.validate_processor_source(publication.value(self._source_signal))
-        self._publication_inputs(publication)
         self._active = True
         try:
             self._data_plane.attach_latest_only_processor(
@@ -1333,10 +1325,13 @@ class NodeHost:
         if self._stop_event.is_set():
             raise _StartSuppressed()
         publication = self._source_publication
-        source = self._terminal_source
-        inputs = self._terminal_inputs
-        if publication is None or source is None or inputs is None:
+        if publication is None:
             raise RuntimeError("frozen Processor lost its exact source publication")
+        # Preparing the input is part of consuming it, not Start admission.
+        # In particular a sealed run may have no materialized buffer yet.
+        inputs = self._publication_inputs(publication, terminal=True)
+        assert self._input_name is not None
+        source = inputs[self._input_name]
         return self._evaluate_processor_outputs(
             source,
             publication,

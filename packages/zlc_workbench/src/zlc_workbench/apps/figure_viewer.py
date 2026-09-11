@@ -78,7 +78,7 @@ def build(
         resolve_device_setting_records=lambda _records: (),
     )
 
-    def make_monitor_host(plot_input, state):
+    def make_monitor_host(plot_input, state, **initial):
         from .task_console import build_panel_host
 
         return build_panel_host(
@@ -86,6 +86,7 @@ def build(
             state,
             build_host=monitor_render.build_host,
             device_pixel_ratio=float(view.device_pixel_ratio()),
+            **initial,
         )
 
     def make_editor_host(plot_input, state):
@@ -274,7 +275,7 @@ def main(argv: list[str] | None = None) -> int:
             from zlc_data.figure_archive import read_archive
             from ..viewer import describe_archive
 
-            description = describe_archive(*read_archive(arguments.path))
+            description = describe_archive(*read_archive(arguments.path)[:2])
             print(
                 f"figure ready: {description.name!r}, "
                 f"{len(description.datasets)} dataset(s), "

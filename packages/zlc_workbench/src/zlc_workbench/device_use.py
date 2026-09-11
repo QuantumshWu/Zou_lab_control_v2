@@ -163,6 +163,12 @@ class DeviceUseCoordinator:
         self._maintenance: dict[object, DeviceMaintenance] = {}
         self._device_owner_revisions: dict[str, int] = {}
 
+    def owner_revision(self, device_key: str) -> int:
+        """Current Logic-claim revision; no field-policy projection is needed."""
+
+        with self._lock:
+            return self._device_owner_revisions.get(str(device_key), 0)
+
     def logic_owners(self, device_key: str) -> tuple[str, ...]:
         key = str(device_key).strip()
         if not key:

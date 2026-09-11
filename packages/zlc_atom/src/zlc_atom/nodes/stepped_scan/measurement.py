@@ -1,8 +1,8 @@
 """The stepped scan engine: the HOST advances the points, one applied at a time.
 
-Per point the host stops the pulse, lets the bench settle, moves every device
-knob the plan names, resolves the template with this point's parameters,
-loads it and fires.  That is slower than a board-advanced table and it is the
+Per point the host moves the device knobs, observes the authored settle time,
+and fires. Only changed pulse parameters require resolving and loading another
+program. That is slower than a board-advanced table and it is the
 only way to scan a knob the board does not own -- a camera exposure, a laser
 driver, anything whose value is a call rather than a slot.  A plan with no
 pulse parameters at all is still a scan here.
@@ -190,6 +190,12 @@ class SteppedScanMeasurement:
         board = self.sequencer.describe()
         rows = self.plan.rows()
         shots = self.shots_per_point
+        first_pulse_values, _device_moves = self._split_row(rows[0])
+        api_values = self._api_values(first_pulse_values)
+        resolved = resolve_api_parameters(self.sequence, api_values)
+        if resolved.target != board.target:
+            raise ValueError("pulse target differs from the connected board")
+        source, program = self.sequencer.compile_pulse(resolved, board.geometry, board.clock_hz)
         tunable_roles = {
             f"tunable:{key}": key
             for port in self.ports
@@ -224,15 +230,9 @@ class SteppedScanMeasurement:
                 "sequencer": sequencer_archive_snapshot(
                     description=board,
                     config=self.sequencer.config_values(),
-                    # The template the points are compiled from, at its
-                    # authored API values and filled with the board's config
-                    # values: every point plays it with its own API values,
-                    # which the plan records.
-                    source=self.sequencer.compile_pulse(
-                        resolve_api_parameters(self.sequence),
-                        board.geometry,
-                        board.clock_hz,
-                    )[0],
+                    # The first actual point's filled source; the plan records
+                    # every later API coordinate applied to this same template.
+                    source=source,
                 ),
                 **tunable_snapshots,
             },
@@ -253,16 +253,15 @@ class SteppedScanMeasurement:
             run_record=run_record,
         )
         knobs = ScanDeviceKnobs(self._tunables)
-        self.source.open(context, cycles=self.repeats * len(rows) * shots)
-        # What ending the scan owes the bench, in the order the bench needs
-        # it: the source released, the board safe, then the knobs back where
-        # they were -- whether the plan finished, was stopped, or failed.
         release = (
             ("closing the scan source", self.source.close),
-            ("driving the board safe", self.sequencer.safe),
             ("restoring the scanned device fields", knobs.restore),
         )
         try:
+            check_cancelled(context)
+            self.sequencer.safe()
+            check_cancelled(context)
+            self.source.open(context, cycles=self.repeats * len(rows) * shots)
             # Sweeps are the OUTERMOST host loop. Shots are one fire's finite
             # Run repeats, so one point is loaded once while the board plays
             # all of its complete-Pulse shots.
@@ -270,13 +269,28 @@ class SteppedScanMeasurement:
             for sweep in range(self.repeats):
                 for index, row in enumerate(rows):
                     check_cancelled(context)
-                    source, program = self._apply(context, knobs, row, board)
+                    pulse_values, device_moves = self._split_row(row)
+                    for port, value in device_moves:
+                        check_cancelled(context)
+                        axis = next(axis for axis in self.plan.axes if axis.port == port)
+                        bound = next(bound for bound in self.ports if bound.port == port)
+                        knobs.move(port, value, axis.unit or bound.unit)
+                    settle(context, self.settle_seconds)
+                    requested = self._api_values(pulse_values)
+                    changed = requested != api_values
+                    if changed:
+                        resolved = resolve_api_parameters(self.sequence, requested)
+                        source, program = self.sequencer.compile_pulse(
+                            resolved, board.geometry, board.clock_hz
+                        )
+                        api_values = requested
                     self.source.validate(
                         program,
                         run_repeats=shots,
                         scan_repeats=1,
                     )
-                    self.sequencer.load(program, source=source)
+                    if changed or (sweep == 0 and index == 0):
+                        self.sequencer.load(program, source=source)
                     self.source.arm()
                     self._collect(
                         context,
@@ -288,38 +302,12 @@ class SteppedScanMeasurement:
                     )
             check_cancelled(context)
         except BaseException as error:
-            release_after_scan(release, error)
+            release_after_scan(
+                (release[0], ("driving the board safe", self.sequencer.safe), release[1]), error
+            )
             raise
         release_after_scan(release, None)
         return context.current_dataset(SCAN_OUTPUT.name)
-
-    def _apply(
-        self,
-        context: object,
-        knobs: ScanDeviceKnobs,
-        row: Sequence[float],
-        board: object,
-    ):
-        """Stop the pulse, settle, move the knobs, load this point's program."""
-
-        pulse_values, device_moves = self._split_row(row)
-        self.sequencer.safe()
-        settle(context, self.settle_seconds)
-        for port, value in device_moves:
-            axis = next(axis for axis in self.plan.axes if axis.port == port)
-            bound = next(bound for bound in self.ports if bound.port == port)
-            knobs.move(port, value, axis.unit or bound.unit)
-        resolved = resolve_api_parameters(
-            self.sequence, self._api_values(pulse_values)
-        )
-        if resolved.target != board.target:
-            raise ValueError("pulse target differs from the connected board")
-        # Filled by the board, then compiled: a config parameter is the
-        # apparatus's calibrated number, baked in at compile.  Both halves come
-        # back because the filled one is what ``load(source=...)`` must carry.
-        return self.sequencer.compile_pulse(
-            resolved, board.geometry, board.clock_hz
-        )
 
     def _collect(
         self,

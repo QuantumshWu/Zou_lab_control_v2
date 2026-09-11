@@ -108,6 +108,8 @@ def _validated_state(
     command_revision: object,
     mapping_revision: object,
     receipt: object,
+    *,
+    commanded_phase: np.ndarray | None = None,
 ) -> tuple[str, tuple[int, int], np.ndarray | None, int, int, dict[str, object]]:
     if (
         not isinstance(identity, str)
@@ -144,8 +146,11 @@ def _validated_state(
         or frozen_receipt["mapping_revision"] > mapping_revision
     ):
         raise ValueError("SLM command receipt mapping is newer than device truth")
-    canonical = None if phase is None else canonical_phase(phase, shape)
-    if phase is not None and (
+    # A successful ACK returns metadata, not new phase pixels. Its local
+    # commanded snapshot was already canonicalized at the input boundary.
+    known_command = commanded_phase is not None and phase is commanded_phase
+    canonical = phase if known_command else None if phase is None else canonical_phase(phase, shape)
+    if phase is not None and not known_command and (
         np.asarray(phase).flags.writeable or not np.array_equal(phase, canonical)
     ):
         raise ValueError("SLM last_commanded_phase must be an immutable canonical snapshot")
@@ -422,10 +427,11 @@ class _RemoteSlmAdapter:
                 raise ValueError("SLM remote phase byte count differs from its shape")
             phase = np.frombuffer(payload, dtype="<f4").reshape(shape)
         else:
-            phase = None if commanded is None else canonical_phase(commanded, shape)
+            phase = commanded
         identity, shape, phase, command_revision, mapping_revision, receipt = (
             _validated_state(
-                identity, shape, phase, command_revision, mapping_revision, receipt
+                identity, shape, phase, command_revision, mapping_revision, receipt,
+                commanded_phase=commanded,
             )
         )
         if self._identity and (identity != self._identity or shape != self._shape_yx):

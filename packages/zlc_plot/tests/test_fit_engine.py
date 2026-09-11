@@ -715,7 +715,7 @@ def test_damped_sine_context_stays_linear_in_the_sample_count() -> None:
     assert large.nbytes == small.nbytes * 4096 // 64
 
 
-def test_public_batch_sigma_weights_and_nan_filter_keep_original_indices() -> None:
+def test_public_batch_sigma_weights_and_nan_filter_keep_original_indices(monkeypatch) -> None:
     engine = FitEngine()
     model_id = "gaussian_offset"
     model = engine.registry.get(model_id)
@@ -745,6 +745,18 @@ def test_public_batch_sigma_weights_and_nan_filter_keep_original_indices() -> No
         indices.append(np.arange(x.size, dtype=np.int64) + 1_000 * cell)
         finite_masks.append(finite)
 
+    original_ones = np.ones
+
+    def no_repeated_validity(shape, *args, **kwargs):
+        if (
+            kwargs.get("dtype") is np.bool_
+            and isinstance(shape, tuple) and len(shape) == 2
+            and shape[1] > len(model.parameters)
+        ):
+            raise AssertionError("finite point fits must broadcast their known validity")
+        return original_ones(shape, *args, **kwargs)
+
+    monkeypatch.setattr(np, "ones", no_repeated_validity)
     results, failures = engine.fit_batch(
         model_id,
         tuple(coordinates),
@@ -752,6 +764,7 @@ def test_public_batch_sigma_weights_and_nan_filter_keep_original_indices() -> No
         observation_sigmas=tuple(sigmas),
         selected_indices=tuple(indices),
     )
+    monkeypatch.setattr(np, "ones", original_ones)
     assert failures == (None,) * len(coordinates)
     reference_model = replace(model, compiled_descriptor=None)
     for cell, result in enumerate(results):
@@ -1107,6 +1120,9 @@ def test_public_batch_uses_per_cell_fit_route_for_explicit_customization(
 
 
 def test_frozen_anchors_cover_all_builtin_evaluators() -> None:
+    from scipy.optimize._numdiff import approx_derivative
+    from zlc_plot.fit import _compiled_model_input
+
     engine = FitEngine()
     anchors = _anchors()
     assert set(anchors) == set(PARAMETERS)
@@ -1131,6 +1147,20 @@ def test_frozen_anchors_cover_all_builtin_evaluators() -> None:
         # accuracy, not to the closed forms' rounding.
         tolerance = 1e-6 if model in _POISSON_MODELS else 2e-12
         assert np.allclose(actual, expected, rtol=tolerance, atol=tolerance), model
+        flat = tuple(np.asarray(axis, dtype=np.float64).reshape(-1) for axis in coordinates)
+        packed, values = _compiled_model_input(flat, parameters)
+        predicted, no_jacobian = spec.compiled_descriptor.value_jacobian(packed, values, False)
+        assert no_jacobian.shape == (0, len(parameters))
+        np.testing.assert_array_equal(predicted, actual.reshape(-1))
+        if len(flat) == 1:
+            assert np.shares_memory(packed, flat[0])
+        derivative = approx_derivative(
+            lambda point: spec.evaluate(flat, point), np.asarray(parameters), method="3-point",
+        )
+        np.testing.assert_allclose(
+            spec.evaluate_jacobian(flat, parameters), derivative, rtol=2e-5, atol=2e-7,
+            err_msg=model,
+        )
 
 
 @pytest.mark.parametrize("model", tuple(PARAMETERS))

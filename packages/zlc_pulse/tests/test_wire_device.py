@@ -354,7 +354,7 @@ def test_repeat_counts_are_strict_and_zero_is_the_only_infinite_value() -> None:
         scan.fire(run_repeats=1, scan_repeats=(1 << 31) + 1)
 
 
-def test_delay_capacity_covers_load_repeat_seams_and_terminal_safe() -> None:
+def test_delay_capacity_covers_execution_repeat_seams_and_terminal_safe() -> None:
     geom = replace(
         StreamerParams(),
         max_edges=256,
@@ -398,9 +398,11 @@ def test_delay_capacity_covers_load_repeat_seams_and_terminal_safe() -> None:
         transport = MemoryRegisterTransport(geom=geom, auto_done=True)
         streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
         streamer.open()
+        streamer.load(program)
+        before = list(transport.write_batches)
         with pytest.raises(ValueError, match=label):
-            streamer.load(program)
-        assert transport.write_batches == []
+            streamer.fire(run_repeats=1)
+        assert transport.write_batches == before
 
     # One delayed DAC descriptor per four-tick Pulse fits a two-entry FIFO for
     # one sweep.  With two finite one-row sweeps, the terminal SAFE descriptor
@@ -923,6 +925,8 @@ def test_recovered_link_error_is_visible_but_not_an_engine_fault() -> None:
     assert report.link_error is True
     assert report.fault == ""
     assert report.elapsed_seconds == pytest.approx(1.5)
+    failed = replace(report, status=STATUS_ERROR, observer_error="link failed")
+    assert failed.fault == "pulse observer failed: link failed; the board reported an error"
 
 
 def test_pack_scan_rows_only_targets_the_requested_bank_chunk() -> None:

@@ -262,7 +262,7 @@ def test_measurement_configuration_returns_sdk_readback_and_is_idle_only(fake_py
     )
     adapter.open()
     adapter.set_roi((101, 51, 641, 481))
-    point = adapter.set_exposure_seconds(0.012345)
+    point = adapter.set_exposure_seconds(0.0123457)
     assert point.exposure_seconds == pytest.approx(0.012345)
     assert point.required_external_trigger_interval_seconds == pytest.approx(0.012345)
     # COVERED, not clipped.  Width increments by 4 and Height by 2 on this
@@ -276,12 +276,24 @@ def test_measurement_configuration_returns_sdk_readback_and_is_idle_only(fake_py
     height, width = point.roi_shape_yx
     assert left <= 101 and left + width >= 101 + 641
     assert top <= 51 and top + height >= 51 + 481
+    exposure_reads = []
+    original_get = camera.ExposureTime.GetValue
+    camera.ExposureTime.GetValue = lambda: (exposure_reads.append(True), original_get())[1]
+    writes = len(camera.ExposureTime.writes)
+    assert adapter.set_exposure_seconds(0.0123457) is point
+    assert adapter.set_roi((101, 51, 641, 481)) is point
+    assert adapter.working_point() is point
+    assert not exposure_reads and len(camera.ExposureTime.writes) == writes
 
     adapter.arm(None, source_group_sizes=None, buffer_frame_count=1, timeout=0.5)
+    assert adapter.working_point().acquisition_mode is CameraAcquisitionMode.FREE_RUNNING
+    assert len(exposure_reads) == 1
     with pytest.raises(RuntimeError, match="while armed"):
         adapter.set_roi(None)
         adapter.set_exposure_seconds(0.02)
     adapter.finish_record_capture()
+    assert adapter.working_point().acquisition_mode is CameraAcquisitionMode.EXTERNAL_TRIGGERED
+    adapter.close()
 
 
 def test_a_refused_setting_is_not_the_config_and_does_not_block_the_next_one(
@@ -448,14 +460,19 @@ def test_camera_measurement_monitor_arms_the_pylon_mode_for_a_whole_cycle(
 
 
 def test_triggered_finite_and_repeat_zero_sessions_both_preserve_frame_order(
-    fake_pypylon,
+    fake_pypylon, monkeypatch,
 ) -> None:
     """One trigger, one frame, one shot -- strictly.
 
     A resident latest-only stream could hand shot K+1 a late frame from shot K.
     """
 
-    camera = _FakeCamera(frames=[np.zeros((4, 4), np.uint8)] * 6)
+    camera = _FakeCamera(frames=[np.full((4, 4), index, np.uint8) for index in range(6)])
+    original_release = _Result.Release
+    def reuse_on_release(result):
+        result.Array.fill(255)
+        original_release(result)
+    monkeypatch.setattr(_Result, 'Release', reuse_on_release)
     adapter = PylonCameraAdapter(_config(), camera=camera)
     adapter.open()
 
@@ -463,7 +480,8 @@ def test_triggered_finite_and_repeat_zero_sessions_both_preserve_frame_order(
     assert camera.TriggerMode.GetValue() == "On"
     assert camera.TriggerSource.GetValue() == "Line1"
     assert "StartGrabbingMax(3)" in camera.grab_calls
-    adapter.read_frame_records(3, timeout=0.5, exact=True)
+    captured = adapter.read_frame_records(3, timeout=0.5, exact=True)
+    assert [int(record.image[0, 0]) for record in captured] == [0, 1, 2]
     adapter.finish_record_capture()
     assert not camera.IsGrabbing()
 
@@ -478,7 +496,8 @@ def test_triggered_finite_and_repeat_zero_sessions_both_preserve_frame_order(
         adapter.config.exposure_seconds
     )
     assert continuous_point.readout_mode == "pylon:Mono8;external=Line1;grab=OneByOne"
-    assert len(adapter.read_frame_records(3, timeout=0.5, exact=False)) == 3
+    captured = adapter.read_frame_records(3, timeout=0.5, exact=False)
+    assert [int(record.image[0, 0]) for record in captured] == [3, 4, 5]
     adapter.finish_record_capture()
     assert not camera.IsGrabbing()
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import CancelledError, Future
+from itertools import count
 
 import numpy as np
 import pytest
@@ -75,14 +76,26 @@ class _Sink:
         self.calls += 1
 
 
+def _clock(intervals):
+    return HarmonicClock(intervals, now_ns=count(0, min(intervals) * 1_000_000).__next__)
+
+
 def test_harmonic_clock_uses_the_global_smallest_tick_and_group_maximum() -> None:
-    clock = HarmonicClock((100, 200, 800))
+    now = [0]
+    clock = HarmonicClock((100, 200, 800), now_ns=lambda: now[0])
     assert clock.base_ms == 100
+    now[0] = 100_000_000
     assert clock.advance() == 100
     assert not clock.group_due(100, (100, 800))
     assert clock.group_due(800, (100, 800))
     with pytest.raises(ValueError):
         HarmonicClock((100, 250))
+    # One delayed callback crossed two slow deadlines. It is due now, not
+    # after seven more callbacks, and does not replay either missed frame.
+    now[0] = 1_650_000_000
+    assert clock.group_due(clock.advance(), (100, 800))
+    now[0] += 1_000_000
+    assert not clock.group_due(clock.advance(), (100, 800))
 
 
 class _Port:
@@ -202,7 +215,7 @@ def test_companion_only_currency_change_schedules_the_panel_again() -> None:
     )
     scheduler = BoardScheduler(
         plane,
-        HarmonicClock((100, 200, 400, 800)),
+        _clock((100, 200, 400, 800)),
         arbiter,
         lambda: (port,),
     )
@@ -306,7 +319,7 @@ def test_same_shot_siblings_commit_together_in_one_cohort() -> None:
     arbiter = SurfaceBatchArbiter(channels)
     scheduler = BoardScheduler(
         _Plane(front),
-        HarmonicClock((100, 200, 400, 800)),
+        _clock((100, 200, 400, 800)),
         arbiter,
         lambda: ports,
     )
@@ -514,7 +527,7 @@ def test_due_panel_stages_on_the_next_publication_wake_without_advancing_clock()
     arbiter = SurfaceBatchArbiter(_Sink())
     scheduler = BoardScheduler(
         plane,
-        HarmonicClock((100, 200)),
+        _clock((100, 200)),
         arbiter,
         lambda: (port,),
     )
@@ -561,7 +574,7 @@ def test_explicit_presentation_debt_restages_an_unchanged_screen_front() -> None
     arbiter = SurfaceBatchArbiter(_Sink())
     scheduler = BoardScheduler(
         plane,
-        HarmonicClock((100, 200)),
+        _clock((100, 200)),
         arbiter,
         lambda: (port,),
     )
@@ -591,7 +604,7 @@ def test_two_views_of_one_signal_flip_together_as_one_cohort() -> None:
     arbiter = SurfaceBatchArbiter(channels)
     fast = _Port("fast", "camera/frame", interval=100)
     slow = _Port("slow", "camera/frame", interval=100)
-    clock = HarmonicClock((100, 200, 400, 800))
+    clock = _clock((100, 200, 400, 800))
     scheduler = BoardScheduler(plane, clock, arbiter, lambda: (fast, slow))
 
     scheduler.on_tick()
@@ -648,7 +661,7 @@ def test_a_displayed_follower_joins_its_shot_within_the_open_window() -> None:
     arbiter = SurfaceBatchArbiter(channels)
     camera = _Port("camera", "camera/frame", interval=100)
     trace = _Port("trace", "@logic/panel/center", interval=100)
-    clock = HarmonicClock((100, 200, 400, 800))
+    clock = _clock((100, 200, 400, 800))
     scheduler = BoardScheduler(plane, clock, arbiter, lambda: (camera, trace))
 
     # Tick 1: the camera's pair is on the plane, the follower is not yet.
@@ -701,7 +714,7 @@ def test_completion_wake_does_not_bypass_a_not_due_follower() -> None:
     trace = _Port("trace", "@logic/panel/center", interval=200)
     scheduler = BoardScheduler(
         plane,
-        HarmonicClock((100, 200)),
+        _clock((100, 200)),
         arbiter,
         lambda: (camera, trace),
     )
@@ -758,7 +771,7 @@ def test_due_coherent_component_stages_on_its_completion_wake() -> None:
     arbiter = SurfaceBatchArbiter(_Sink())
     scheduler = BoardScheduler(
         plane,
-        HarmonicClock((100, 200)),
+        _clock((100, 200)),
         arbiter,
         lambda: (camera, roi),
     )
@@ -794,7 +807,7 @@ def test_board_scheduler_declares_its_port_signals_on_every_tick() -> None:
     channels = _Sink()
     arbiter = SurfaceBatchArbiter(channels)
     ports: list[_Port] = [_Port("panel", "camera/frame", interval=100)]
-    clock = HarmonicClock((100, 200, 400, 800))
+    clock = _clock((100, 200, 400, 800))
     scheduler = BoardScheduler(plane, clock, arbiter, lambda: tuple(ports))
 
     scheduler.on_tick()
@@ -816,7 +829,7 @@ def test_board_scheduler_owes_a_failed_slow_beat_to_the_next_base_tick() -> None
     channels = sink
     arbiter = SurfaceBatchArbiter(channels)
     port = _Port("panel", "camera/frame", interval=2000, fail_prepare=1)
-    clock = HarmonicClock((100, 2000))
+    clock = _clock((100, 2000))
     scheduler = BoardScheduler(plane, clock, arbiter, lambda: (port,))
 
     for _ in range(19):
@@ -837,7 +850,7 @@ def test_board_scheduler_owes_missing_value_until_the_next_base_tick() -> None:
     channels = _Sink()
     arbiter = SurfaceBatchArbiter(channels)
     port = _Port("panel", "camera/frame", interval=2000)
-    clock = HarmonicClock((100, 2000))
+    clock = _clock((100, 2000))
     scheduler = BoardScheduler(plane, clock, arbiter, lambda: (port,))
     for _ in range(20):
         scheduler.on_tick()
@@ -869,7 +882,7 @@ def test_a_paused_display_still_freezes_the_plane_and_advances_the_clock() -> No
     plane = _Plane(_front())
     arbiter = SurfaceBatchArbiter(_Sink())
     port = _Port("camera", "camera/frame")
-    clock = HarmonicClock((100, 200, 400, 800))
+    clock = _clock((100, 200, 400, 800))
     scheduler = BoardScheduler(plane, clock, arbiter, lambda: (port,))
 
     scheduler.on_tick(stage=False)
@@ -910,7 +923,7 @@ def test_a_missing_companion_holds_the_group_until_completion_wake() -> None:
     raw = _Port("raw", "camera/frame")
     ports = {raw.panel_id: raw, port.panel_id: port}
     scheduler = BoardScheduler(
-        plane, HarmonicClock((100, 2000)), arbiter, lambda: tuple(ports.values())
+        plane, _clock((100, 2000)), arbiter, lambda: tuple(ports.values())
     )
     scheduler.on_tick()
     assert raw.futures == port.futures == []

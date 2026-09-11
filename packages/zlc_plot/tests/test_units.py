@@ -45,6 +45,15 @@ def test_selector_round_trip_and_fit_parameters_follow_display_units() -> None:
     try:
         session.set_axis_unit(AxisRef.point("x"), "mm")
         session.set_value_unit("mV")
+        raw_quantity = session._view.samples.value
+        assert raw_quantity._display is None
+        np.testing.assert_allclose(
+            session._payload.series[0].y.display,
+            session._payload.series[0].y.canonical * 1000.0,
+        )
+        np.testing.assert_allclose(raw_quantity.display, raw_quantity.canonical * 1000.0)
+        assert raw_quantity.display is raw_quantity._display
+        assert not raw_quantity.display.flags.writeable
         session.set_x_selector(1000.0, 2000.0, display=True)
         canonical = session.selector_state(SelectorKind.X_RANGE, display=False)
         displayed = session.selector_state(SelectorKind.X_RANGE, display=True)
