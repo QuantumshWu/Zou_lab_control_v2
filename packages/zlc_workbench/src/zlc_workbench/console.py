@@ -1365,9 +1365,25 @@ class ConsolePresenter:
         status = overlay_publication.value(overlay_signal)
         if status is None:
             return None
-        snapshot, event_record = self._presentation_snapshot(
-            overlay_signal, status, overlay_publication
+        # A companion follows the range of the picture, not the retention
+        # requested by another consumer of that companion (e.g. a Rolling).
+        # Without a window this still reads the full canonical finite run,
+        # rather than substituting its final event chunk.
+        window = image_snapshot.block.window
+        snapshot, event_record = self.session.signal_plane.current_dataset_view(
+            overlay_signal,
+            overlay_publication,
+            indexed_history=window is not None,
+            history_window=(
+                None if window is None else window.latest - window.start + 1
+            ),
         )
+        if window is not None:
+            status_window = snapshot.block.window
+            if status_window is None or (
+                status_window.start, status_window.latest
+            ) != (window.start, window.latest):
+                return None
         geometry = overlay_publication.run_record.get(
             IMAGE_POINT_OVERLAY_GEOMETRY_RECORD
         )

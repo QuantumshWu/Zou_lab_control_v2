@@ -1104,6 +1104,7 @@ class PlotPanelPort:
             if self._closed or surface is None:
                 return None
             host = surface.host
+            presentation_epoch = self._presentation_epoch
             handed = tuple(
                 record
                 for record in self._handed.values()
@@ -1115,7 +1116,10 @@ class PlotPanelPort:
         if not hasattr(description, "spec"):
             raise TypeError("a live plot configuration must return DisplayDescription")
         basis = self._front_basis(operation, surface, handed)
-        if basis is None:
+        # A configure can finish on the old, still-visible Dataset after its
+        # representation was invalidated. It cannot restore that Dataset's
+        # vocabulary while the replacement presentation is being prepared.
+        if basis is None or basis.presentation_epoch != presentation_epoch:
             self._request_invalidation()
             return None
         presented, error = self._put_on_screen(host, operation)
