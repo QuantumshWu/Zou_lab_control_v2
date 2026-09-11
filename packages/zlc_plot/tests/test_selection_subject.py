@@ -24,7 +24,6 @@ from zlc_plot import (
     FacetGridPlot,
     HistogramPlot,
     ImagePlot,
-    LATEST_COORDINATE,
     PlotKind,
     PlotSession,
     RollingPlot,
@@ -243,12 +242,12 @@ def test_rolling_ordinal_is_not_reported_as_an_upstream_axis() -> None:
     finally:
         session.close()
 
-def test_pure_subject_resolves_tagged_latest_scope_to_canonical_identity() -> None:
+def test_pure_subject_keeps_the_explicit_scope_coordinate() -> None:
     snapshot = _named_facet_snapshot()
     site = AxisRef.point("site")
     spec = CurvePlot(
         AxisRef.point("detuning"),
-        scope=((site, LATEST_COORDINATE),),
+        scope=((site, 20),),
     )
     session = PlotSession(snapshot, spec)
     try:

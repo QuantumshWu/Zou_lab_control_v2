@@ -138,7 +138,7 @@
   viewport、selectors、facet focus和causal lineage graph；FigureViewer与TaskConsole使用同一个Plot host路径。
 - Figure NPZ唯一writer现按member做有界1MiB可压缩性probe：结构化/平滑数据继续Deflate，低收益大camera数组使用标准ZIP Stored。20×1200×1920 uint16 noise的Panel Save实测`4.23s→0.73s`，archive阶段`3.63s→0.18s`；92.16MB原始数据原压至79.12MB，现为92.16MB，明确以13MB换约3.45s。平滑1200×1920 float32仍Deflate为2.98MB、总时约0.33s。
 - Plot axis/semantic identity已收口为`AxisRef(domain, axis_id)`稳定key；scope只接受tagged
-  latest或tagged typed coordinate value，不再让display label或裸文本控制字进入truth。
+  typed coordinate value，不提供Latest，也不让display label或裸文本控制字进入truth。
 - Dataset三组结构现统一为同级`DomainSpec(shape, axes, axis_codes)`：Repeat/Point使用
   explicit row codes，Cell-data使用不物化pixel codes的dense implicit stride；`ValueSchema`
   只保留dtype/unit/validity。旧的平行row-coordinate/topology与Plot双身份路径整体删除；

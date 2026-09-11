@@ -2460,23 +2460,21 @@ class FluentComboBox(QtWidgets.QAbstractButton):
             return
         self.setCurrentIndex(index.row())
         self.hidePopup()
-        # The click completed a choice in the popup, but the popup view owned
-        # keyboard focus when it disappeared.  Return focus to the collapsed
-        # control: a cycle choice such as Scope deliberately interprets the
-        # next wheel notch only while this control is focused, and otherwise
-        # it is impossible to enter that state through the real popup path.
-        # Popup teardown itself posts a later focus change, so an immediate
+        # A completed popup choice returns keyboard focus to its collapsed
+        # control. Popup teardown itself posts a later focus change, so an immediate
         # setFocus is overwritten after this callback returns.  Restore on
         # the next owner turn, after that teardown has completed.
         QtCore.QTimer.singleShot(0, self._restore_collapsed_focus)
         self.activated.emit(index.row())
 
-    def _restore_collapsed_focus(self) -> None:
+    def _restore_collapsed_focus(self) -> bool:
         try:
             if self.isVisible() and self.isEnabled():
                 self.setFocus(QtCore.Qt.MouseFocusReason)
+                return True
         except RuntimeError:
             pass
+        return False
 
     def _ensure_popup_view(self) -> QtWidgets.QAbstractItemView:
         view = self._popup_view
@@ -2658,10 +2656,11 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         radius = float(_radius())
         outer = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        outline = QtGui.QPen(QtGui.QColor(PLACEHOLDER))
-        outline.setWidthF(1.0)
+        active = self.isEnabled() and self.isChecked()
+        outline = QtGui.QPen(QtGui.QColor(ACCENT if active else PLACEHOLDER))
+        outline.setWidthF(2.0 if active else 1.0)
         painter.setPen(QtCore.Qt.NoPen)
-        painter.setBrush(QtGui.QColor("white" if self.isEnabled() else BG))
+        painter.setBrush(QtGui.QColor(ACCENT_TINT if active else "white" if self.isEnabled() else BG))
         painter.drawRoundedRect(outer, radius, radius)
         painter.setPen(outline)
         painter.setBrush(QtCore.Qt.NoBrush)
@@ -3007,7 +3006,9 @@ class FluentCycleComboBox(FluentComboBox):
 
     The popup contains ordinary actions plus one action such as ``Scope``.
     Selecting that action paints ``Scope: <value>`` in the collapsed control;
-    a wheel changes ``<value>`` only after the control has focus.  The
+    its text toggles wheel activation without opening the popup, while the
+    arrow still opens the ordinary choices. A wheel changes ``<value>`` only
+    while activated, focused and under the pointer. The
     sub-domain never enters the Qt item model, so a large scientific axis does
     not create a large popup or thousands of QStandardItems.
     """
@@ -3018,7 +3019,74 @@ class FluentCycleComboBox(FluentComboBox):
         self._cycle_row = -1
         self._cycle_position = -1
         super().__init__(parent)
+        self.setCheckable(True)
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
+
+    def _set_cycle_active(self, active: bool) -> None:
+        if active == self.isChecked():
+            return
+        self.setChecked(active)
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            if active:
+                app.installEventFilter(self)
+            else:
+                app.removeEventFilter(self)
+
+    def nextCheckState(self) -> None:  # noqa: N802 - Qt API name
+        # Arrow clicks are ordinary popup actions, not activation toggles.
+        pass
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        _left, _right, drop_width = self._collapsed_text_chrome()
+        if (
+            event.button() == QtCore.Qt.LeftButton
+            and self.isCycleSelected()
+            and event.pos().x() < self.width() - drop_width
+        ):
+            self.setFocus(QtCore.Qt.MouseFocusReason)
+            self._set_cycle_active(not self.isChecked())
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def showPopup(self) -> None:  # noqa: N802 - Qt API name
+        self._set_cycle_active(False)
+        super().showPopup()
+
+    def _restore_collapsed_focus(self) -> bool:
+        restored = super()._restore_collapsed_focus()
+        if restored:
+            self._set_cycle_active(self.hasFocus() and self.isCycleSelected())
+        return restored
+
+    def focusOutEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        self._set_cycle_active(False)
+        super().focusOutEvent(event)
+
+    def hideEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        self._set_cycle_active(False)
+        super().hideEvent(event)
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt API name
+        if (
+            event.type() == QtCore.QEvent.MouseButtonPress
+            and self.isChecked()
+            and isinstance(watched, QtWidgets.QWidget)
+            and watched is not self
+            and not self.isAncestorOf(watched)
+        ):
+            # Blank labels/pages may have NoFocus, so focusOut alone cannot
+            # represent an explicit click elsewhere. Listen only while active.
+            self._set_cycle_active(False)
+        return super().eventFilter(watched, event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        if event.key() == QtCore.Qt.Key_Escape and self.isChecked():
+            self._set_cycle_active(False)
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     @staticmethod
     def _typed_equal(left: object, right: object) -> bool:
@@ -3153,6 +3221,10 @@ class FluentCycleComboBox(FluentComboBox):
         if selected == self._cycle_row and self._cycle_position < 0:
             self._cycle_position = 0
         super().setCurrentIndex(selected)
+        # A form may clear/rebuild ordinary rows before restoring its cycle
+        # value. Keep activation across that intermediate row population.
+        if self._cycle_row >= 0 and selected != self._cycle_row:
+            self._set_cycle_active(False)
 
     def currentData(self, role: int = QtCore.Qt.UserRole) -> object:  # noqa: N802
         if (
@@ -3173,7 +3245,12 @@ class FluentCycleComboBox(FluentComboBox):
         if view is not None and view.isVisible():
             super().wheelEvent(event)
             return
-        if not self.hasFocus() or self.currentIndex() != self._cycle_row:
+        if (
+            not self.isChecked()
+            or not self.hasFocus()
+            or not self.isCycleSelected()
+            or not self.rect().contains(event.pos())
+        ):
             event.ignore()
             return
         delta = int(event.angleDelta().y())

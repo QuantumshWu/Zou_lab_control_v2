@@ -2603,6 +2603,23 @@ def test_history_transition_is_immediate_and_interactions_follow_indexed_front(
         for entry in histogram.parameter_surface["semantic"]
     )
 
+    # First connect through Setting: the new port starts on the event, then
+    # its own Rolling lease introduces history. No extra semantic edit is
+    # needed before the accepted axis vocabulary reaches the Setting form.
+    rolling = presenter.add_selected_panel("rolling")
+    assert presenter.update_panel_state(rolling.panel_id, {"signal": roi_signal})
+    _settle_panel_hosts(
+        presenter,
+        lambda: rolling.accepted_surface is not None
+        and rolling.port.presentation_current
+        and rolling.accepted_surface.plot_input.block.window is not None,
+    )
+    assert any(
+        entry["label"] == "source index"
+        for entry in rolling.parameter_surface["semantic"]
+    )
+    assert rolling.accepted_surface.target.semantic == rolling.state.semantic
+
 
 def test_one_failing_panel_interaction_is_a_line_not_the_instrument(
     presenter,

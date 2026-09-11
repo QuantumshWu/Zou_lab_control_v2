@@ -602,7 +602,7 @@ class PlotPanelPort:
 
         if notify_presented is not None:
             if self._on_presented is not None:
-                self._notify_presented(notify_presented)
+                self.notify_presented(notify_presented)
             return None
         assert serial is not None and host_token is not None
 
@@ -1070,7 +1070,7 @@ class PlotPanelPort:
                 callback_error = error
         if self._on_presented is not None:
             try:
-                self._notify_presented(accepted)
+                self.notify_presented(accepted)
             except BaseException as error:
                 callback_error = error
         if callback_error is not None:
@@ -1163,18 +1163,20 @@ class PlotPanelPort:
         if advanced and self._on_presented is not None:
             # The screen changed what it shows, exactly as an accept does.
             try:
-                accepted = self._notify_presented(accepted)
+                accepted = self.notify_presented(accepted)
             except BaseException as error:
                 with self._state_lock:
                     self.last_error = error
         return accepted
 
-    def _notify_presented(self, accepted: _Prepared) -> _Prepared:
+    def notify_presented(self, accepted: _Prepared) -> _Prepared:
         """Adopt the owner's normalized target in this same acceptance.
 
         A newer user request is not replaced by the description of an older
         picture. Only the surface being reported and its unchanged request
         can adopt the target returned by their presentation callback.
+        A replacement port calls this after installation, when its owner
+        can receive the initially deferred notification through this same path.
         """
 
         target = self._on_presented(accepted)

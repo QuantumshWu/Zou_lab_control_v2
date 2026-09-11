@@ -80,7 +80,6 @@ def panel_data_shape(
         schema_structure,
         scope_coordinate_from_fate,
     )
-    from zlc_data import LATEST_COORDINATE
 
     def pinned_text(field: object) -> str:
         value = getattr(field, "value", None)
@@ -88,8 +87,6 @@ def panel_data_shape(
             if choice_value == value:
                 return str(label).removeprefix("= ")
         coordinate = scope_coordinate_from_fate(value)
-        if coordinate is LATEST_COORDINATE:
-            return "Latest"
         if coordinate is None:
             return "(null)"
         if isinstance(coordinate, (int, float)):
