@@ -17,7 +17,6 @@ package you must load.
 from importlib import import_module as _import_module
 
 _EXPORTS = {
-    "LATEST_COORDINATE": ("zlc_data", "LATEST_COORDINATE"),
     "curve": ("zlc_plot.api", "curve"),
     "facet_grid": ("zlc_plot.api", "facet_grid"),
     "histogram": ("zlc_plot.api", "histogram"),
@@ -171,7 +170,6 @@ __all__ = [
     "ImagePlot",
     "ImagePointOverlay",
     "ImagePointReviewSurface",
-    "LATEST_COORDINATE",
     "IMAGE_POINT_OVERLAY_CONTRACT",
     "IMAGE_POINT_OVERLAY_GEOMETRY_RECORD",
     "image_point_overlay_from_signal",

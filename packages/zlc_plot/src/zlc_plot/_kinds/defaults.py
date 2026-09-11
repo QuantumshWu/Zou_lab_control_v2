@@ -21,7 +21,7 @@ answer whichever kind is asked:
   facet.
   A scan dimension nothing claims is reduced, and the fate table says so.
 * E is a choice of sub-measurement.  A grid gives each event a cell, a
-  curve with no scan walks them, and anything else shows the LATEST one:
+  curve with no scan walks them, and anything else pins its last coordinate:
   the mean of two different frames is not a frame.
 * D is the payload.  A declared picture, or two content axes, is an image;
   one content axis left over is a group when the palette can tell its
@@ -45,9 +45,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from zlc_data import LATEST_COORDINATE, DatasetSchema
+from zlc_data import DatasetSchema
 
-from ..data_contract import AxisFamilies, classify_axes
+from ..data_contract import AxisFamilies, classify_axes, resolve_axis
 from ..kinds import AxisRef, PlotKind
 from ..specs import (
     GRID_CELL_KINDS,
@@ -121,16 +121,16 @@ def default_spec(
         raise ValueError("only a facet grid has a cell kind")
     families = classify_axes(schema)
     if kind is PlotKind.FACET_GRID:
-        return _grid(families, cell_kind)
+        return _grid(schema, families, cell_kind)
     if kind is PlotKind.CURVE:
-        return _curve_spec(families, _curve_plan(families, facet=None))
+        return _curve_spec(schema, families, _curve_plan(families, facet=None))
     if kind is PlotKind.IMAGE:
         plan = _image_plan(families)
-        return None if plan is None else _image_spec(families, plan)
+        return None if plan is None else _image_spec(schema, families, plan)
     if kind is PlotKind.HISTOGRAM:
         return HistogramPlot()
     if kind is PlotKind.ROLLING:
-        return _rolling_spec(families)
+        return _rolling_spec(schema, families)
     raise ValueError(f"{kind!r} has no table entry; its handler owns its default")
 
 
@@ -182,23 +182,23 @@ def _densest_cell_kind(families: AxisFamilies) -> PlotKind:
     return PlotKind.CURVE
 
 
-def _grid(families: AxisFamilies, cell_kind: PlotKind | None) -> FacetGridPlot | None:
+def _grid(schema: DatasetSchema, families: AxisFamilies, cell_kind: PlotKind | None) -> FacetGridPlot | None:
     kind = _densest_cell_kind(families) if cell_kind is None else cell_kind
     if kind not in GRID_CELL_KINDS:
         raise ValueError(f"a grid cell cannot be a {kind.value}")
     if kind is PlotKind.HISTOGRAM:
         facet = _facet(families, _Plan())
         return FacetGridPlot(
-            facet, HistogramPlot(), scope=_latest_events(families, (facet,))
+            facet, HistogramPlot(), scope=_event_scope(schema, families, (facet,))
         )
     if kind is PlotKind.IMAGE:
         plan = _image_plan(families)
         if plan is None:
             return None
         facet = _facet(families, plan)
-        cell = _image_spec(families, plan, scoped=False)
+        cell = _image_spec(schema, families, plan, scoped=False)
         return FacetGridPlot(
-            facet, cell, scope=_latest_events(families, plan.consumed + (facet,))
+            facet, cell, scope=_event_scope(schema, families, plan.consumed + (facet,))
         )
     # A curve cell walks the innermost scan dimension itself only when a
     # dimension outside it is left for the grid to face; with one scan
@@ -215,11 +215,11 @@ def _grid(families: AxisFamilies, cell_kind: PlotKind | None) -> FacetGridPlot |
     else:
         facet = _facet(families, _Plan())
     plan = _curve_plan(families, facet=facet)
-    cell = _curve_spec(families, plan, scoped=False)
+    cell = _curve_spec(schema, families, plan, scoped=False)
     if cell is None:
         return None
     return FacetGridPlot(
-        facet, cell, scope=_latest_events(families, plan.consumed + (facet,))
+        facet, cell, scope=_event_scope(schema, families, plan.consumed + (facet,))
     )
 
 
@@ -286,13 +286,13 @@ def _image_plan(families: AxisFamilies) -> _Plan | None:
 
 
 def _image_spec(
-    families: AxisFamilies, plan: _Plan, *, scoped: bool = True
+    schema: DatasetSchema, families: AxisFamilies, plan: _Plan, *, scoped: bool = True
 ) -> ImagePlot:
     return ImagePlot(
         plan.x,
         plan.y,
         reduction=Reduction.MEAN,
-        scope=_latest_events(families, plan.consumed) if scoped else (),
+        scope=_event_scope(schema, families, plan.consumed) if scoped else (),
     )
 
 
@@ -341,7 +341,7 @@ def _curve_plan(families: AxisFamilies, *, facet: AxisRef | None) -> _Plan:
 
 
 def _curve_spec(
-    families: AxisFamilies, plan: _Plan, *, scoped: bool = True
+    schema: DatasetSchema, families: AxisFamilies, plan: _Plan, *, scoped: bool = True
 ) -> CurvePlot | None:
     if plan.x is None:
         return None
@@ -349,15 +349,15 @@ def _curve_spec(
         plan.x,
         group=plan.group,
         reduction=Reduction.MEAN,
-        scope=_latest_events(families, plan.consumed) if scoped else (),
+        scope=_event_scope(schema, families, plan.consumed) if scoped else (),
     )
 
 
-def _rolling_spec(families: AxisFamilies) -> RollingPlot:
+def _rolling_spec(schema: DatasetSchema, families: AxisFamilies) -> RollingPlot:
     return RollingPlot(
         group=_group(families, ()),
         reduction=Reduction.MEAN,
-        scope=_latest_events(families, ()),
+        scope=_event_scope(schema, families, ()),
     )
 
 
@@ -377,14 +377,14 @@ def _group(
     return None
 
 
-def _latest_events(
-    families: AxisFamilies, consumed: tuple[AxisRef | None, ...]
+def _event_scope(
+    schema: DatasetSchema, families: AxisFamilies, consumed: tuple[AxisRef | None, ...]
 ) -> tuple[ScopeTerm, ...]:
-    """Every live event axis with no role shows its latest event."""
+    """Pin an unused event axis to its actual last declared coordinate."""
 
     used = {ref for ref in consumed if ref is not None}
     return tuple(
-        (ref, LATEST_COORDINATE)
+        (ref, resolve_axis(schema, ref).coordinates[-1])
         for ref, _size in families.live_events()
         if ref not in used
     )

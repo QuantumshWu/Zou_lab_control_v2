@@ -56,7 +56,6 @@ class SemanticCycleChoices(Sequence[SemanticChoice]):
 
     coordinates: Sequence[object]
     labels: tuple[str, ...] | None = None
-    include_latest: bool = False
     unit: str = ""
     locate: Callable[[object], int | None] | None = field(
         default=None,
@@ -78,15 +77,13 @@ class SemanticCycleChoices(Sequence[SemanticChoice]):
             if any(not isinstance(label, str) or not label for label in labels):
                 raise ValueError("scope labels must be non-empty strings")
             object.__setattr__(self, "labels", labels)
-        if not isinstance(self.include_latest, bool):
-            raise TypeError("include_latest must be bool")
         if not isinstance(self.unit, str):
             raise TypeError("scope unit must be text")
         if not callable(self.locate):
             raise TypeError("scope choices require a direct coordinate locator")
 
     def __len__(self) -> int:
-        return len(self.coordinates) + int(self.include_latest)
+        return len(self.coordinates)
 
     def __getitem__(self, index: int | slice) -> SemanticChoice | tuple[SemanticChoice, ...]:
         if isinstance(index, slice):
@@ -96,10 +93,6 @@ class SemanticCycleChoices(Sequence[SemanticChoice]):
             selected += len(self)
         if selected < 0 or selected >= len(self):
             raise IndexError(index)
-        if self.include_latest:
-            if selected == 0:
-                return scope_fate(LATEST_COORDINATE), "Latest"
-            selected -= 1
         raw = self.coordinates[selected]
         coordinate = canonical_coordinate_scalar(raw, "scope coordinate")
         label = (
@@ -121,8 +114,6 @@ class SemanticCycleChoices(Sequence[SemanticChoice]):
         if not is_scope_fate(value):
             return False
         coordinate = scope_coordinate_from_fate(value)
-        if coordinate is LATEST_COORDINATE:
-            return self.include_latest
         assert self.locate is not None
         return self.locate(coordinate) is not None
 
@@ -428,16 +419,13 @@ FATE_REDUCE = "reduce"
 FATE_POOL = "pool"
 
 _SCOPE_VALUE_TAG = "scope-value"
-_SCOPE_LATEST_TAG = "scope-latest"
 
 
 def scope_fate(
-    coordinate: CoordinateScalar | CoordinateSelector,
+    coordinate: CoordinateScalar,
 ) -> tuple[object, ...]:
-    """Tagged fate value for one pinned coordinate (or Runtime latest)."""
+    """Tagged fate value for one actual pinned coordinate."""
 
-    if coordinate is LATEST_COORDINATE:
-        return (_SCOPE_LATEST_TAG,)
     return (
         _SCOPE_VALUE_TAG,
         canonical_coordinate_scalar(coordinate, "scope coordinate"),
@@ -448,22 +436,17 @@ def is_scope_fate(value: object) -> bool:
     if not isinstance(value, (tuple, list)):
         return False
     tagged = tuple(value)
-    return bool(
-        tagged == (_SCOPE_LATEST_TAG,)
-        or len(tagged) == 2 and tagged[0] == _SCOPE_VALUE_TAG
-    )
+    return len(tagged) == 2 and tagged[0] == _SCOPE_VALUE_TAG
 
 
 def scope_coordinate_from_fate(
     value: object,
-) -> CoordinateScalar | CoordinateSelector:
+) -> CoordinateScalar:
     """Decode one tagged pin without confusing text coordinates with verbs."""
 
     if not isinstance(value, (tuple, list)):
         raise TypeError("scope fate must be a tagged sequence")
     tagged = tuple(value)
-    if tagged == (_SCOPE_LATEST_TAG,):
-        return LATEST_COORDINATE
     if len(tagged) == 2 and tagged[0] == _SCOPE_VALUE_TAG:
         return canonical_coordinate_scalar(tagged[1], "scope coordinate")
     raise ValueError("scope fate tag is invalid")
@@ -620,8 +603,6 @@ def _fate_row_axes(
 def _scope_coordinates(
     schema: DatasetSchema,
     ref: AxisRef,
-    *,
-    include_latest: bool = False,
 ) -> SemanticCycleChoices | None:
     """The real coordinate domain behind this axis's one Scope fate.
 
@@ -636,7 +617,6 @@ def _scope_coordinates(
     return SemanticCycleChoices(
         resolved.coordinates,
         resolved.coordinate_labels,
-        bool(include_latest),
         locate=resolved.coordinate_position,
     )
 
@@ -660,8 +640,6 @@ def axis_admits_scope(
     if not is_scope_fate(value):
         return False
     coordinate = scope_coordinate_from_fate(value)
-    if coordinate is LATEST_COORDINATE:
-        return resolve_axis(schema, ref).size > 0
     return resolve_axis(schema, ref).coordinate_position(coordinate) is not None
 
 
@@ -1168,19 +1146,7 @@ def describe_semantics(
             # replace/layout transaction owns cell capacity and projection
             # validation and reports a refusal without rewriting this table.
             offered.append((role, _ROLE_LABELS[role]))
-        authored_latest = bool(
-            is_scope_fate(current)
-            and scope_coordinate_from_fate(current) is LATEST_COORDINATE
-        )
-        # Latest is a valid programmatic spec intent and remains dynamic as
-        # data grows, but it is not injected into ordinary UI vocabulary.
-        # Relative history therefore exposes/pins coordinate 0; only a spec
-        # that explicitly authored Latest sees that one extra cycle value.
-        pins = _scope_coordinates(
-            schema,
-            ref,
-            include_latest=authored_latest,
-        )
+        pins = _scope_coordinates(schema, ref)
         fields.append(
             SemanticField(
                 name,

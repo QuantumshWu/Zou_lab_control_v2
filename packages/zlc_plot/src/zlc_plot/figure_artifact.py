@@ -8,7 +8,6 @@ from typing import Any
 
 import numpy as np
 from zlc_data import (
-    LATEST_COORDINATE,
     OwnedSnapshot,
     canonical_coordinate_scalar,
     snapshot_from_manifest,
@@ -77,11 +76,7 @@ def _scope_document(scope: object) -> list[object]:
     return [
         {
             "axis": _axis_document(axis),
-            "coordinate": (
-                {"kind": "latest"}
-                if coordinate is LATEST_COORDINATE
-                else {"kind": "value", "value": coordinate}
-            ),
+            "coordinate": {"kind": "value", "value": coordinate},
         }
         for axis, coordinate in scope
     ]
@@ -97,19 +92,10 @@ def _scope(value: object) -> tuple[tuple[AxisRef, object], ...]:
         if axis is None:
             raise ValueError("plot scope axis cannot be null")
         coordinate = entry["coordinate"]
-        if not isinstance(coordinate, Mapping) or coordinate.get("kind") not in {
-            "latest",
-            "value",
-        }:
+        if not isinstance(coordinate, Mapping) or coordinate.get("kind") != "value":
             raise ValueError("plot scope coordinate is not tagged")
-        if coordinate["kind"] == "latest":
-            _keys(coordinate, {"kind"}, "latest plot scope coordinate")
-            resolved = LATEST_COORDINATE
-        else:
-            _keys(coordinate, {"kind", "value"}, "plot scope coordinate")
-            resolved = canonical_coordinate_scalar(
-                coordinate["value"], "plot scope coordinate"
-            )
+        _keys(coordinate, {"kind", "value"}, "plot scope coordinate")
+        resolved = canonical_coordinate_scalar(coordinate["value"], "plot scope coordinate")
         terms.append((axis, resolved))
     return tuple(terms)
 

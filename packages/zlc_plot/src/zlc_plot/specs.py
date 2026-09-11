@@ -19,8 +19,6 @@ from typing import ClassVar, get_args, TypeAlias
 from zlc_data.units import DEFAULT_UNITS, UnitError, resolve_unit
 from zlc_data import (
     CoordinateScalar,
-    CoordinateSelector,
-    LATEST_COORDINATE,
     canonical_coordinate_scalar,
 )
 
@@ -190,7 +188,7 @@ class PlotLabels:
 #: that.  It is a fate an axis can be given, exactly like being x or being
 #: grouped by, which is why it lives on the specification and not among the
 #: display parameters: it changes WHAT is plotted, not how it looks.
-ScopeTerm: TypeAlias = tuple[AxisRef, CoordinateScalar | CoordinateSelector]
+ScopeTerm: TypeAlias = tuple[AxisRef, CoordinateScalar]
 
 
 def _require_distinct_axes(
@@ -227,11 +225,7 @@ def _validated_scope(value: object) -> tuple[ScopeTerm, ...]:
         axis, coordinate = term
         if not isinstance(axis, AxisRef):
             raise TypeError("scope term axis must be AxisRef")
-        coordinate = (
-            LATEST_COORDINATE
-            if coordinate is LATEST_COORDINATE
-            else canonical_coordinate_scalar(coordinate, "scope coordinate")
-        )
+        coordinate = canonical_coordinate_scalar(coordinate, "scope coordinate")
         if axis in seen:
             raise ValueError(f"axis {axis!r} is scoped twice")
         seen.add(axis)

@@ -3714,7 +3714,7 @@ class ConsolePresenter:
                                 binding.port.close()
                                 binding.port = None
                         else:
-                            self._panel_presented(binding, accepted)
+                            candidate_port.notify_presented(accepted)
                         binding.reported_condition = _error_text(error)
                         self._report(
                             f"{binding.panel_id}: {_error_text(error)}",
@@ -3730,7 +3730,7 @@ class ConsolePresenter:
                                 f"{binding.panel_id}: {_error_text(error)}",
                                 severity="error",
                             )
-                        self._panel_presented(binding, accepted)
+                        candidate_port.notify_presented(accepted)
                 configuration_entry = binding.configuration
             if (
                 configuration_entry is not None

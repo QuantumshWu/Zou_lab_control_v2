@@ -11,10 +11,10 @@ from data_factory import (
     mapped_domain_from_columns,
     repeat_domain,
 )
-from zlc_data import OwnedSnapshot, REPEAT, DomainSpec, LATEST_COORDINATE
+from zlc_data import OwnedSnapshot, REPEAT, DomainSpec
 from zlc_plot import DEFAULTS, AxisRef, CurvePlot, HistogramPlot, ImagePlot, FacetGridPlot, RollingPlot, Reduction
 from zlc_plot._fit_projection import FitProjection, FitScope, ProjectionContext
-from zlc_plot.data_contract import DEFAULT_UNITS
+from zlc_plot.data_contract import DEFAULT_UNITS, resolve_axis
 from zlc_plot.selectors import NumericRange, RectangleRange, SelectorKind, SelectorSnapshot, SelectorState
 from zlc_plot.specs import parameter_schema_for
 from zlc_plot.state import DisplayStateStore
@@ -291,7 +291,7 @@ def test_last_reduction_replays_the_same_scope_for_payload_and_selection(kind, h
         "rolling": (RollingPlot(group=x, reduction=Reduction.LAST), (slow, y)),
     }
     spec, reduced = specs[kind]
-    scope = tuple((ref, LATEST_COORDINATE) for ref in reduced)
+    scope = tuple((ref, resolve_axis(schema, ref).coordinates[-1]) for ref in reduced)
     expected_spec = (
         replace(spec, cell=replace(spec.cell, reduction=Reduction.MEAN,
                                   **({"reduced": ()} if isinstance(spec.cell, HistogramPlot) else {})), scope=scope)
@@ -346,7 +346,7 @@ def test_last_on_a_missing_sparse_end_is_the_same_empty_scope() -> None:
         lambda: _projection(spec, snapshot=snapshot),
         lambda: DataView(snapshot).curve(spec.x, aggregation=Reduction.LAST),
         lambda: _projection(replace(spec, reduction=Reduction.MEAN, scope=(
-            (AxisRef.point("a"), LATEST_COORDINATE), (AxisRef.point("b"), LATEST_COORDINATE))), snapshot=snapshot),
+            (AxisRef.point("a"), 1), (AxisRef.point("b"), 1))), snapshot=snapshot),
     ):
         with pytest.raises(EmptySelection):
             build()

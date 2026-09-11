@@ -19,7 +19,6 @@ from data_factory import (
     repeat_domain,
 )
 from zlc_data import (
-    LATEST_COORDINATE,
     PRIMARY_INDEX,
     READOUT_EVENT,
     REPEAT,
@@ -162,14 +161,20 @@ def test_a_scanned_picture_facets_the_scan_and_reduces_the_repeats() -> None:
     assert default_spec(schema, PlotKind.FACET_GRID) == FacetGridPlot(None, ImagePlot(D("x"), D("y")))
 
 
-def test_a_cycle_gives_each_frame_a_cell_and_a_single_image_shows_the_latest() -> None:
+def test_a_cycle_gives_each_frame_a_cell_and_a_single_image_pins_the_last_coordinate() -> None:
     schema = _cycle(2, repeats=30, cell_axes=_picture())
     assert default_spec(schema, PlotKind.FACET_GRID) == FacetGridPlot(P("frame"), ImagePlot(D("x"), D("y")))
     # One image cannot give two frames a role: it shows the latest, never
     # the mean of two different frames.
     assert default_spec(schema, PlotKind.IMAGE) == ImagePlot(
-        D("x"), D("y"), scope=((P("frame"), LATEST_COORDINATE),)
+        D("x"), D("y"), scope=((P("frame"), 1),)
     )
+    named = make_dataset_schema(
+        repeat_domain(size=1),
+        DomainSpec((2,), (axis("frame", values=(17, 5), role=READOUT_EVENT),), ((0, 1),)),
+        cell_axes=_picture(),
+    )
+    assert default_spec(named, PlotKind.IMAGE).scope == ((P("frame"), 5),)
     # A curve with no scan walks the events.
     assert default_spec(schema, PlotKind.CURVE) == CurvePlot(P("frame"))
 
@@ -193,7 +198,7 @@ def test_judged_frames_facet_by_frame_and_walk_the_sites() -> None:
     # Rolling groups the sites when the palette can tell them apart.
     few = _cycle(3, repeats=20, cell_axes=_sites(5))
     assert default_spec(few, PlotKind.ROLLING) == RollingPlot(
-        group=D("site"), scope=((P("frame"), LATEST_COORDINATE),)
+        group=D("site"), scope=((P("frame"), 2),)
     )
 
 

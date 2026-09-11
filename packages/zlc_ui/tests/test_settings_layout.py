@@ -261,13 +261,14 @@ assert form.auto_switch_for('title').isChecked()
     )
 
 
-def test_compound_choice_only_cycles_its_large_domain_when_focused() -> None:
+def test_compound_choice_only_cycles_its_large_domain_when_activated() -> None:
     """Scope stays one popup fate; its real coordinates belong to the wheel."""
 
     _run_qt(
         """
-import zou_lab_control
-from PyQt5 import QtCore, QtGui, QtWidgets
+import zou_lab_control, zlc_ui
+print(zou_lab_control.__file__, zlc_ui.__file__, flush=True)
+from PyQt5 import QtCore, QtGui, QtWidgets, QtTest
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.form import FormChoice, FormFieldProps, FormSpec
 from zlc_ui.form.qt_form import FluentParameterForm
@@ -292,6 +293,7 @@ layout.addWidget(form)
 layout.addStretch()
 body.setMinimumHeight(1200)
 scroll = QtWidgets.QScrollArea()
+scroll.setWidgetResizable(True)
 scroll.setWidget(body)
 scroll.resize(420, 240)
 scroll.show()
@@ -299,10 +301,11 @@ app.processEvents()
 bar = scroll.verticalScrollBar()
 assert bar.maximum() > 0
 
-def send(delta):
+def send(delta, position=None):
+    position = combo.rect().center() if position is None else position
     event = QtGui.QWheelEvent(
-        QtCore.QPointF(combo.rect().center()),
-        QtCore.QPointF(combo.mapToGlobal(combo.rect().center())),
+        QtCore.QPointF(position),
+        QtCore.QPointF(combo.mapToGlobal(position)),
         QtCore.QPoint(), QtCore.QPoint(0, delta),
         QtCore.Qt.NoButton, QtCore.Qt.NoModifier,
         QtCore.Qt.NoScrollPhase, False,
@@ -316,21 +319,42 @@ combo.setFocus(QtCore.Qt.MouseFocusReason)
 assert not send(-120)
 assert form.read_value('fate:y') == 'reduce'
 
-# Scope begins at the first real coordinate.  Selecting it through the real
-# popup commit returns focus to the collapsed control, so the next wheel
-# notch can advance it without an extra click that would reopen the popup.
+# A non-Scope text click is still an ordinary popup choice. Choosing Scope
+# through that popup activates it and returns focus to the collapsed control.
 scroll.activateWindow()
 app.processEvents()
-combo._commit_flat_index(combo.model().index(2, 0))
+text_position = combo._collapsed_text_rect().center()
+QtTest.QTest.mouseClick(combo, QtCore.Qt.LeftButton, pos=text_position)
+app.processEvents()
+assert combo._popup is not None and combo._popup.isVisible()
+view = combo.view()
+QtTest.QTest.mouseClick(
+    view.viewport(), QtCore.Qt.LeftButton,
+    pos=view.visualRect(combo.model().index(2, 0)).center(),
+)
 app.processEvents()
 assert combo.currentText() == 'Scope: 0'
 assert combo.hasFocus()
+assert combo.isChecked()
 seen = []
 form.changed.connect(seen.append)
 assert send(-120)
 assert form.read_value('fate:y') == ('scope-value', 1)
 assert combo.currentText() == 'Scope: 1'
 assert seen == ['fate:y']
+
+# Existing Scope text is an activation toggle, never a second menu button.
+QtTest.QTest.mouseClick(combo, QtCore.Qt.LeftButton, pos=text_position)
+app.processEvents()
+assert not combo.isChecked() and not combo._popup.isVisible()
+assert not send(-120)
+inactive_fill = combo.grab().toImage().pixelColor(5, combo.height() // 2)
+QtTest.QTest.mouseClick(combo, QtCore.Qt.LeftButton, pos=text_position)
+app.processEvents()
+assert combo.isChecked() and not combo._popup.isVisible()
+assert combo.grab().toImage().pixelColor(5, combo.height() // 2) != inactive_fill
+assert not send(-120, QtCore.QPoint(-3, -3)), 'focused wheel outside the control is page scrolling'
+assert form.read_value('fate:y') == ('scope-value', 1)
 
 # Choosing Scope changes the plot vocabulary while the combo still owns
 # focus: X/Y may disappear from this row when those roles move elsewhere.
@@ -347,9 +371,39 @@ form.reconcile(
 )
 assert form.read_value('fate:y') == ('scope-value', 1)
 assert combo.currentText() == 'Scope: 1'
+assert combo.isChecked() and combo.hasFocus(), 'live row refresh must keep activation'
+
+# Clicking a NoFocus blank page must cancel even when Qt retains the focus.
+QtTest.QTest.mouseClick(body, QtCore.Qt.LeftButton, pos=QtCore.QPoint(300, 180))
+app.processEvents()
+assert not combo.isChecked() and not send(-120)
+QtTest.QTest.mouseClick(combo, QtCore.Qt.LeftButton, pos=text_position)
+QtTest.QTest.keyClick(combo, QtCore.Qt.Key_Escape)
+assert not combo.isChecked() and not send(-120)
+
+QtTest.QTest.mouseClick(combo, QtCore.Qt.LeftButton, pos=text_position)
+combo.hide()
+app.processEvents()
+assert not combo.isChecked()
+combo.show()
+app.processEvents()
+
+# The separate arrow still opens the complete fate menu without changing it.
+drop_width = combo._collapsed_text_chrome()[2]
+QtTest.QTest.mouseClick(
+    combo, QtCore.Qt.LeftButton,
+    pos=QtCore.QPoint(combo.width() - drop_width // 2, combo.height() // 2),
+)
+app.processEvents()
+assert combo._popup.isVisible() and not combo.isChecked()
+assert form.read_value('fate:y') == ('scope-value', 1)
+combo.hidePopup()
+app.processEvents()
 
 # The same wheel without focus is left to the containing page.
+QtTest.QTest.mouseClick(combo, QtCore.Qt.LeftButton, pos=text_position)
 scroll.setFocus(QtCore.Qt.MouseFocusReason)
+assert not combo.isChecked()
 assert not send(-120)
 assert form.read_value('fate:y') == ('scope-value', 1)
 scroll.close()

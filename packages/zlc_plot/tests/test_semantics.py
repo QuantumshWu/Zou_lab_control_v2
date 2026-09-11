@@ -358,7 +358,11 @@ def test_categorical_scope_values_do_not_collide_with_fate_tokens() -> None:
         "reduce": scope_fate("reduce"),
         "latest": scope_fate("latest"),
     }
-    assert scope_fate("latest") != scope_fate(LATEST_COORDINATE)
+    with pytest.raises(TypeError):
+        scope_fate(LATEST_COORDINATE)
+    with pytest.raises(TypeError):
+        HistogramPlot(scope=((ref, LATEST_COORDINATE),))
+    assert not is_scope_fate(("scope-latest",))
 
     for coordinate in ("x", "reduce", "latest"):
         selected = updated_spec(
@@ -371,6 +375,13 @@ def test_categorical_scope_values_do_not_collide_with_fate_tokens() -> None:
         assert describe_semantics(schema, selected).fate(ref) == scope_fate(
             coordinate
         )
+
+    from zlc_plot.figure_artifact import encode_plot_recipe, decode_plot_recipe
+    recipe = encode_plot_recipe(selected, parameters={}, size="2x2")
+    assert decode_plot_recipe(recipe)["spec"].scope == ((ref, "latest"),)
+    recipe["spec"]["scope"][0]["coordinate"] = {"kind": "latest"}
+    with pytest.raises(ValueError, match="scope coordinate"):
+        decode_plot_recipe(recipe)
 
 def test_every_axis_may_take_every_role_its_kind_declares() -> None:
     """A size-one axis is still an axis the operator may draw along.
