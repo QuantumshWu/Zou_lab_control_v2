@@ -29,7 +29,8 @@ with_derivatives, context) -> (cost, raw_rss, finite)``
 
 ``value_jacobian(coords, full_parameters, with_jacobian) -> (values, jacobian)``
     Evaluate the model; a value-only consumer receives an empty Jacobian. The
-    common finalizer projects free columns, reconstructs SciPy's robust scaled
+    common finalizer consumes the owned Jacobian workspace to project free
+    columns, reconstructs SciPy's robust scaled
     Jacobian, and uses a strict SVD rank test for covariance.
 
 All Numba dispatchers are intentionally declared without explicit signatures.
@@ -1816,13 +1817,21 @@ def _finalize_one(
     selected = 0
     raw_rss = 0.0
     finite = True
-    scaled_jacobian = np.zeros((point_count, free_count), dtype=np.float64)
+    # Reuse the owned Jacobian's leading columns. Only a source column that
+    # an earlier prefix write would overwrite needs a separate row copy.
+    scaled_jacobian = full_jacobian[:, :free_count]
+    copy_row = False
+    for free in range(free_count):
+        copy_row = copy_row or free_indices[free] < free
+    jacobian_row = np.empty(free_count if copy_row else 0, dtype=np.float64)
     for point in range(point_count):
         fitted[point] = predicted[point]
         residuals[point] = observations[point] - predicted[point]
         if not valid[point]:
             # A masked point is outside the fit; its residual (NaN for a NaN
             # observation) says nothing about the solution's finiteness.
+            for free in range(free_count):
+                scaled_jacobian[point, free] = 0.0
             continue
         if not math.isfinite(fitted[point]) or not math.isfinite(residuals[point]):
             finite = False
@@ -1858,9 +1867,12 @@ def _finalize_one(
             residual_scale = weights[point] if use_weights else 1.0
         if not point_finite:
             finite = False
+        if copy_row:
+            for free in range(free_count):
+                jacobian_row[free] = full_jacobian[point, free_indices[free]]
         for free in range(free_count):
             value = (
-                full_jacobian[point, free_indices[free]]
+                (jacobian_row[free] if copy_row else full_jacobian[point, free_indices[free]])
                 * residual_scale
                 * robust_scale
             )

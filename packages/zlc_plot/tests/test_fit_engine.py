@@ -1047,6 +1047,7 @@ def test_compiled_batch_judges_finiteness_on_the_points_it_fitted() -> None:
         np.stack([clean, holed]),
         base_lower=np.asarray([parameter.bounds[0] for parameter in model.parameters]),
         base_upper=np.asarray([parameter.bounds[1] for parameter in model.parameters]),
+        free_indices=np.asarray([3, 1, 2, 0]),
         # One plan for both cells, as the engine hands a bucket: a plan built
         # per cell from its finite points would differ in shape here.
         context=descriptor.context_builder((x,)),
@@ -1055,6 +1056,12 @@ def test_compiled_batch_judges_finiteness_on_the_points_it_fitted() -> None:
     assert output.covariance_valid.tolist() == [True, True]
     assert np.all(np.isfinite(output.standard_errors))
     np.testing.assert_allclose(output.parameters[1], output.parameters[0], rtol=1e-3)
+    for cell, observations in enumerate((clean, holed)):
+        finite = np.isfinite(observations)
+        jacobian = model.evaluate_jacobian((x[finite],), output.parameters[cell])
+        _, singular, right = np.linalg.svd(jacobian, full_matrices=False)
+        expected = (right.T / singular**2) @ right * output.reduced_chi_square[cell]
+        np.testing.assert_allclose(output.covariance[cell], expected, rtol=1e-9, atol=1e-12)
 
 
 @pytest.mark.parametrize("fallback", ("custom_model", "custom_engine"))

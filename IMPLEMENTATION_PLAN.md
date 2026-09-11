@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- 普通fit收尾复用owned Jacobian前缀做free列与缩放，只在列重排会自覆盖时分配一行scratch，不再分配N×free暂存。15种linear/weighted-robust/Poisson、普通/乱序free与invalid组合的6类输出对原native收尾逐位相同，2个既有直接case通过；分解仍是原SVD，QR/其它不求U路线另作研究，未以新数值容差掩盖差异。
+
 - 图像块均值去掉独立unsigned sum/双重float32除法与2^24分流，统一float64数学；NumPy参考同步。Histogram单/多组只留一个分箱入口。raster独立kernel19→17；真2M unsigned mean约2.25/2.11→1.32/1.31ms，float路径持平。单图Histogram约2.33→2.77ms的0.44ms代价由用户明确接受，Facet64约3.73→3.47ms；不把数量下降说成全链提速。7个既有直接case通过，原始A/B及数学误差仅在ignored研究。
 
 - Kernel必要性后续：compiled prepare用零行seed表示只请求auto bounds，完整authored初值不再计算弃置cold seeds；依赖峰宽/频谱/矩的真实bounds仍保留。RegularImage不加载普通finalizer/value-Jacobian或分配弃置收尾矩阵，全部fixed不求Jacobian。既有6个直接fit案例及7种prepare输出边界通过；4模型×B1/B8参数、误差与质量前后相同。缓存首用与稳态分别记录于ignored研究，未声称小样本波动为整体加速。
