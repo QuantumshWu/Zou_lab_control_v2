@@ -639,6 +639,10 @@ frequency scan swapped its per-sample trig calls for Goertzel
 it made the solve basin-sensitive).  Refused with numbers:
 `uniform_histogram` into `uniform_facet_histograms` (+18% on the single
 histogram hot loop even with a hoisted single-facet branch).
+That historical rejection was superseded by the operator's explicit acceptance
+of the single-distribution cost in exchange for one counting implementation.
+The current single/Facet path shares `uniform_histogram`; this is an accepted
+tradeoff, not a claim that the earlier slowdown disappeared.
 
 Four-panel contention, measured on the MOT-ROI chain: worker-thread
 masks 2/4/8 move the causal critical path 90.0/84.5/79.2 ms (mild

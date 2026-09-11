@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- 协方差收尾统一为原生Householder R-only QR＋小矩阵SVD；不生成无用大Q/U，不放宽rank阈值，预测数组直接复用。独立高精度比较表明极端病态协方差会放大各稳定算法的舍入，旧SVD并非精确真值；生产只保留QR一个方案，DGESVD桥与原地转置候选只留ignored研究。15组加权/Poisson/fixed/order/masked收尾输出与原native基线一致，真实FitEngine普通数据参数/误差保持。默认32768源点案例的求解仍按既有4096上限，不能冒称全32768求解；报告区分完整输入链与隔离收尾。
+
 - 普通fit收尾复用owned Jacobian前缀做free列与缩放，只在列重排会自覆盖时分配一行scratch，不再分配N×free暂存。15种linear/weighted-robust/Poisson、普通/乱序free与invalid组合的6类输出对原native收尾逐位相同，2个既有直接case通过；分解仍是原SVD，QR/其它不求U路线另作研究，未以新数值容差掩盖差异。
 
 - 图像块均值去掉独立unsigned sum/双重float32除法与2^24分流，统一float64数学；NumPy参考同步。Histogram单/多组只留一个分箱入口。raster独立kernel19→17；真2M unsigned mean约2.25/2.11→1.32/1.31ms，float路径持平。单图Histogram约2.33→2.77ms的0.44ms代价由用户明确接受，Facet64约3.73→3.47ms；不把数量下降说成全链提速。7个既有直接case通过，原始A/B及数学误差仅在ignored研究。

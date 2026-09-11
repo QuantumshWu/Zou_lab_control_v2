@@ -38,7 +38,7 @@ import numpy as np
 from . import _kernel_cache
 
 #: The modules that define compiled kernels.  Import them here so discovery
-#: sees every dispatcher; adding a third module means adding it here, and
+#: sees every dispatcher; adding another kernel module means adding it here, and
 #: :func:`kernel_dispatchers` will then report its kernels cold until the
 #: work below asks for them.
 _KERNEL_MODULE_NAMES = (
@@ -485,9 +485,9 @@ def representative_work(
     # and is then coloured from the float mean.  A zoom crosses between the
     # two, which is the wheel notch that used to compile mid-gesture.
     #
-    # The narrow unsigned dtypes are the ones whose block sums are provably
-    # exact, so they alone take the integer kernel; everything else reduces
-    # through the floating one.
+    # Every dtype now shares the wide-accumulating block-mean kernel, but
+    # its input dtype remains part of the compiled signature. Small unsigned
+    # fronts also exercise the direct colour-table path before reduction.
     for dtype in (np.uint8, np.uint16):
         _render(_image_snapshot(96, 96, dtype), image)
         _render(_image_snapshot(1200, 1920, dtype), image, zoom_steps=5)

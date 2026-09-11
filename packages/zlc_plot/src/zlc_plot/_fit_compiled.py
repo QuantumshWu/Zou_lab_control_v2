@@ -61,6 +61,11 @@ from . import _kernel_cache
 _kernel_cache.install()
 
 from numba import njit, prange, types as nb_types  # noqa: E402
+from numba.np.linalg import _LAPACK  # noqa: E402
+
+# Signature declaration only: no LAPACK instance/import readiness or pointer
+# address cache. Numba resolves its own native wrapper when this fit is used.
+_GEQRF = _LAPACK.numba_ez_geqrf(nb_types.float64)
 
 
 EPSILON = np.finfo(np.float64).eps
@@ -1793,21 +1798,22 @@ def _finalize_one(
     point_count = observations.size
     parameter_count = parameters.size
     free_count = free_indices.size
-    fitted = np.full(point_count, np.nan, dtype=np.float64)
     residuals = np.full(point_count, np.nan, dtype=np.float64)
     covariance = np.zeros((parameter_count, parameter_count), dtype=np.float64)
     errors = np.zeros(parameter_count, dtype=np.float64)
     if not _seed_finite(parameters):
+        fitted = np.full(point_count, np.nan, dtype=np.float64)
         for row in range(parameter_count):
             errors[row] = math.nan
             for column in range(parameter_count):
                 covariance[row, column] = math.nan
         return fitted, residuals, covariance, errors, math.inf, False
 
-    predicted, full_jacobian = value_jacobian_callback(
+    fitted, full_jacobian = value_jacobian_callback(
         coordinates, parameters, free_count != 0,
     )
-    if predicted.size != point_count:
+    if fitted.size != point_count:
+        fitted = np.full(point_count, np.nan, dtype=np.float64)
         for row in range(parameter_count):
             errors[row] = math.nan
             for column in range(parameter_count):
@@ -1825,8 +1831,7 @@ def _finalize_one(
         copy_row = copy_row or free_indices[free] < free
     jacobian_row = np.empty(free_count if copy_row else 0, dtype=np.float64)
     for point in range(point_count):
-        fitted[point] = predicted[point]
-        residuals[point] = observations[point] - predicted[point]
+        residuals[point] = observations[point] - fitted[point]
         if not valid[point]:
             # A masked point is outside the fit; its residual (NaN for a NaN
             # observation) says nothing about the solution's finiteness.
@@ -1844,7 +1849,7 @@ def _finalize_one(
             _information_factor,
             point_finite,
         ) = compiled_point_terms(
-            predicted[point],
+            fitted[point],
             observations[point],
             poisson,
             weights[point] if use_weights else 1.0,
@@ -1855,7 +1860,7 @@ def _finalize_one(
         _rho0, rho1, rho2 = _rho(raw * raw, loss_code)
         robust_scale = math.sqrt(max(rho1 + 2.0 * rho2 * raw * raw, EPSILON))
         if poisson:
-            expected = max(predicted[point], COUNT_FLOOR)
+            expected = max(fitted[point], COUNT_FLOOR)
             absolute = abs(raw)
             residual_scale = (
                 abs(expected - observations[point])
@@ -1891,8 +1896,22 @@ def _finalize_one(
     )
     free_covariance = np.empty((free_count, free_count), dtype=np.float64)
     if covariance_valid:
+        # Only right singular vectors enter covariance. Factor J=Q*R using
+        # LAPACK Householder QR, without forming Q or the unused N-by-free U.
+        qr_columns = scaled_jacobian.T.copy()
+        tau = np.empty(free_count, dtype=np.float64)
+        info = _GEQRF(
+            ord("d"), point_count, free_count, qr_columns.ctypes,
+            point_count, tau.ctypes,
+        )
+        if info != 0:
+            raise np.linalg.LinAlgError("covariance QR factorization failed")
+        triangular = np.zeros((free_count, free_count), dtype=np.float64)
+        for row in range(free_count):
+            for column in range(row, free_count):
+                triangular[row, column] = qr_columns[column, row]
         _left, singular_values, right = np.linalg.svd(
-            scaled_jacobian,
+            triangular,
             full_matrices=False,
         )
         covariance_valid = (
