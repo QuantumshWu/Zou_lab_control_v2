@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- 图像块均值去掉独立unsigned sum/双重float32除法与2^24分流，统一float64数学；NumPy参考同步。Histogram单/多组只留一个分箱入口。raster独立kernel19→17；真2M unsigned mean约2.25/2.11→1.32/1.31ms，float路径持平。单图Histogram约2.33→2.77ms的0.44ms代价由用户明确接受，Facet64约3.73→3.47ms；不把数量下降说成全链提速。7个既有直接case通过，原始A/B及数学误差仅在ignored研究。
+
 - Kernel必要性后续：compiled prepare用零行seed表示只请求auto bounds，完整authored初值不再计算弃置cold seeds；依赖峰宽/频谱/矩的真实bounds仍保留。RegularImage不加载普通finalizer/value-Jacobian或分配弃置收尾矩阵，全部fixed不求Jacobian。既有6个直接fit案例及7种prepare输出边界通过；4模型×B1/B8参数、误差与质量前后相同。缓存首用与稳态分别记录于ignored研究，未声称小样本波动为整体加速。
 
 - `pgc_1D`通道正式入库：原`add_pulse_channel.bat`默认操作（P19、lane18、63 lanes）直接固化于manifest/XDC/top/header和仓库Pulse模板，删除本地修改器及其过时测试。V9仍为DAC bit0；旧通道状态按port key保持。当前几何fingerprint为`0x5A59C160`；更新后无需再运行add-channel，实验机自行build/program并重启server。本次不执行build/program。
