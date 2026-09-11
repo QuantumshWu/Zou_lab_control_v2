@@ -46,6 +46,7 @@ from zlc_data import (
     StreamGenerationId,
     Valid,
     owned_snapshot_from_arrays,
+    repeat_coordinate_counts,
 )
 from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
 from zlc_data.value import dataset_validity_storage, compact_dataset_validity
@@ -196,6 +197,9 @@ class SignalValue:
     cell_origin: tuple[int, int] | None = None
     primary_index: int | None = None
     event_record: Mapping[str, object] = field(default_factory=dict)
+    # Conditional written-coordinate counts belonging to this publication.
+    # They remain usable by an accepted/frozen view after the run advances.
+    repeat_counts: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         self._validate_fields()
@@ -209,6 +213,7 @@ class SignalValue:
         run_record: Mapping[str, object], event_record: Mapping[str, object],
         canonical_schema: DatasetSchema | None = None,
         cell_origin: tuple[int, int] | None = None, primary_index: int | None = None,
+        repeat_counts: tuple[int, ...] = (),
     ) -> "SignalValue":
         """Plane-only construction from its already frozen bundle records."""
 
@@ -218,6 +223,7 @@ class SignalValue:
             ("run_record", run_record), ("event_record", event_record),
             ("canonical_schema", canonical_schema), ("cell_origin", cell_origin),
             ("primary_index", primary_index),
+            ("repeat_counts", repeat_counts),
         ):
             object.__setattr__(result, key, value)
         result._validate_fields()
@@ -2372,6 +2378,25 @@ class SignalDataPlane:
                             "finite coverage does not equal committed cell extent"
                     )
                     occupied_updates.append((qualified, mask, target))
+                    # The event ends at one exact Point coordinate. Count
+                    # written Repeat rows there, including this pending block,
+                    # without copying the coverage plane or reading Cell-data.
+                    present = None
+                    if schema.repeat_domain.size > 1 and not output.coverage.complete:
+                        point = schema.point_domain
+                        point_rows = np.ones(point.size, dtype=bool)
+                        for axis in point.axes:
+                            codes = point.codes(axis.axis_id)
+                            point_rows &= codes == codes[target[1].stop - 1]
+                        present = np.any(mask[:, point_rows], axis=1)
+                        present[target[0]] = True
+                    repeat_counts = repeat_coordinate_counts(
+                        schema.repeat_domain, present,
+                        current_row=target[0].stop - 1,
+                    )
+                else:
+                    # Monitor publications are complete atomic datasets.
+                    repeat_counts = repeat_coordinate_counts(event.block.schema.repeat_domain)
                 values[qualified] = SignalValue._from_owned_records(
                     name=qualified,
                     snapshot=event,
@@ -2381,6 +2406,7 @@ class SignalDataPlane:
                     cell_origin=output.cell_origin,
                     primary_index=primary_index,
                     event_record=event_record,
+                    repeat_counts=repeat_counts,
                 )
 
             parent = source_publication if worker_parent is None else worker_parent

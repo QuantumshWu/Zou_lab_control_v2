@@ -78,9 +78,9 @@
 - 窗口首个Close保留关闭意图；device read/tune/init/discovery完成后由原Qt owner继续完整关闭，不要求再次点击、不加timer或平行生命周期。直接Qt验证覆盖有/无TaskConsole的pending关闭，测试窗口均已关闭。原始探针/日志只在ignored目录，不进入git。
 
 - 2026-09-10通信收口：Seamless仅Start准备一次Acquisition；按最新裁决删除全部settle参数/UI/等待/记录。正常DONE后不追加SAFE。Pulse使用带command ID的完成握手，驻留Fire不重load/不清clock，软件与RTL同一新ABI；实验机需重启server并自行build/program。本次不执行FPGA build/program，软件与RTL仿真证据单独列出。
-- Repeat标题已撤掉擅自添加的min/max统计及区间格式：其余所有轴固定于同一数据当前坐标，Cell-data也先选定坐标，再沿目标Repeat数valid；每轴只返回整数，Point/Cell尺寸不变，不受Plot Scope影响，也不改为采集次数。旧多context汇总分支删除，GUI探针同步同一标量契约。
+- Repeat标题改为同一publication当前Repeat/Point坐标下的条件写入数量。Runtime复用原写入覆盖记录，每次commit只固定几个整数；标题不再选site/pixel或读取科学validity，旧publication和Stop后的结果不被后来进度改写。删除原末site判定及重复Workbench坐标解析，Point/Cell完整维度、三组格式和Scope独立性不变。
+- Scan公共schema的轴name改为`repeat`、`shots per point`；只改名称，不改AxisId、坐标、排序或Pulse执行参数。真实Camera→Occupancy→FrameSurvival→Seamless自动图在1/401/801 shots显示1×1/2×1/3×1，科学eligibility变化不再影响标题；另20000次实际Runtime提交全部到50×1，标题metadata投影P50/P95/max为0.0019/0.0022/0.021ms（不含Qt绘图）。截图/原始数据只在ignored research。
 - Pulse Bracket编辑已统一Period/post的光标、chrome命中、拖动、gap指示和Add目标；旧分立MIME/端点drag/只数Period的gap路径删除。结构编辑一次提交period与Bracket，移动原边界不再留旧锚造成逆序。空Bracket在首/中/尾均保留，可改count及重新插入修复；On Pulse、Save Pulse/Preview与compile/codec共用同一错误提示，未改RTL或有效文件格式。直接边界/空编辑用例和可见Qt事件链及截图验证，证据在ignored research，不入Git。
-- Repeat标题统计已从全局any改为本次publication当前坐标的条件有效数，不受呈现fate/Scope/Focus影响。正式Qt Scan第一power50次、下一power7次显示50→7；同publication切Scope135/200均为7，Point/Cell维度不改。完整panel_data_shape每case300次：Site35 P50/P95/max=0.094/0.253/0.575ms，207万像素但compact有效性=0.086/0.111/0.349ms；不包含Qt paint，未展开像素mask，首次统计也<1ms。原始计时与截图只在ignored research。
 - Restart后的Frozen Edit旧代提示已补齐，纯数据/年龄变化仅更新状态文字，不reconcile表单；FigureViewer同一路径。真实Runtime/Host/Save直接用例及正式Qt确认revision同为1而generation不同仍正确提示，Refresh前保存ref/values精确为旧快照，Refresh后才更新；所有测试GUI/渲染子进程已关闭。
 
 - Scan Plan统一手动/device/pulse行的列结构与预算，单位slot固定、起终点等宽，保留原扫描/单位/草稿逻辑。正式Console真实Qt在正常和70%屏幕宽度下截图，原手动行起点错位50 logical px降为0，各行start/stop/points/remove位置与宽度一致；resize不改plan，单位切换通过，2项既有直接编辑/单位用例通过，测试窗口关闭。截图和探针留ignored research，不入Git。

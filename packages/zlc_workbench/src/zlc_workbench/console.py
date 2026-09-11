@@ -1504,7 +1504,6 @@ class ConsolePresenter:
             accepted_shape = panel_data_shape(
                 shown_schema,
                 description,
-                validity=getattr(getattr(shown, "block", None), "validity", None),
                 source=(None if publication is None else publication.value(surface.target.signal)),
             )
             shape_changed = any(
@@ -4720,7 +4719,6 @@ class ConsolePresenter:
                 else panel_data_shape(
                     schema,
                     binding.accepted_display,
-                    validity=getattr(getattr(snapshot, "block", None), "validity", None),
                     source=None if publication is None else publication.value(signal),
                 )
             )

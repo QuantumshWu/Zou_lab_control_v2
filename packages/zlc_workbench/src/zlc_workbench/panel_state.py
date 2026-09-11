@@ -71,54 +71,16 @@ def panel_data_shape(
     schema: object,
     description: object | None,
     *,
-    validity: object | None = None,
     source: object | None = None,
 ) -> dict[str, object]:
-    """Three-domain structure and data-only conditional Repeat counts.
-
-    ``source`` is the exact publication event underlying the snapshot, never
-    a separate read of latest. Its final written Repeat/Point position fixes
-    the other axes while each Repeat axis is counted in turn. Cell-data axes
-    are fixed at the same complete data block's final coordinates. Plot scope
-    only supplies the existing scope labels; it cannot change these counts.
-    No input validity means zero observed samples, not the planned capacity.
-    """
+    """Three-domain shape and the exact publication's written Repeat counts."""
 
     from zlc_plot.semantics import (
         is_scope_fate,
         schema_structure,
         scope_coordinate_from_fate,
     )
-    from zlc_data import LATEST_COORDINATE, repeat_validity_counts
-
-    # A title reports the DATA's progress, not its plot projection. The last
-    # Repeat/Point row in this exact publication's write block is its current
-    # position. Cell-data axes use the final coordinates of that atomic block,
-    # not an aggregation across sites or a choice taken from the plot.
-    domains = (schema.repeat_domain, schema.point_domain)
-    positions = {
-        axis.axis_id: int(domain.codes(axis.axis_id)[-1])
-        for domain in domains for axis in domain.axes
-    }
-    positions.update({axis.axis_id: axis.size - 1 for axis in schema.cell_domain.axes})
-    if source is not None:
-        event = source.snapshot.block.schema
-        declared = source.canonical_schema or event
-        origin = source.cell_origin or (0, 0)
-        for index, (domain, event_domain) in enumerate(zip(
-            (declared.repeat_domain, declared.point_domain),
-            (event.repeat_domain, event.point_domain), strict=True,
-        )):
-            last_row = int(origin[index]) + event_domain.size - 1
-            shown_axes = {axis.axis_id: axis for axis in domains[index].axes}
-            for axis in domain.axes:
-                shown_axis = shown_axes.get(axis.axis_id)
-                if shown_axis is None:
-                    continue
-                coordinate = axis.coordinate_at(int(domain.codes(axis.axis_id)[last_row]))
-                position = shown_axis.coordinate_position(coordinate)
-                if position is not None:
-                    positions[axis.axis_id] = position
+    from zlc_data import LATEST_COORDINATE
 
     def pinned_text(field: object) -> str:
         value = getattr(field, "value", None)
@@ -144,7 +106,7 @@ def panel_data_shape(
         "data_structure": schema_structure(schema),
         "data_valid": (
             tuple(0 for _axis in schema.repeat_domain.axes)
-            if validity is None else repeat_validity_counts(validity, schema, positions)
+            if source is None else source.repeat_counts
         ),
         "data_scope": pinned,
     }

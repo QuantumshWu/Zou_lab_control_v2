@@ -36,7 +36,7 @@ def _source_schema(*, shots: int) -> DatasetSchema:
 
 
 def test_the_repeat_domain_is_exactly_the_two_execution_facts() -> None:
-    """Scan repeats outer, run repeats inner -- the board's two counters.
+    """Repeat outer, shots per point inner -- independent of board counters.
 
     The domain used to carry the source's own Repeat carrier as a third
     axis named "repeat", of size one, beside these: a scan point's value is
@@ -45,7 +45,8 @@ def test_the_repeat_domain_is_exactly_the_two_execution_facts() -> None:
     """
 
     domain = scan_repeat_domain(scan_repeats=2, run_repeats=3)
-    assert tuple(axis.name for axis in domain.axes) == ("scan repeat", "run repeat")
+    assert tuple(axis.name for axis in domain.axes) == ("repeat", "shots per point")
+    assert tuple(axis.axis_id.value for axis in domain.axes) == ("scan.repeat", "pulse.run")
     assert tuple(axis.size for axis in domain.axes) == (2, 3)
     assert all(axis.role == REPEAT for axis in domain.axes)
     assert domain.shape == (6,)
@@ -68,8 +69,8 @@ def test_a_scan_dataset_carries_no_repeat_axis_but_its_own() -> None:
         run_repeats=2,
     )
     assert tuple(axis.name for axis in schema.repeat_domain.axes) == (
-        "scan repeat",
-        "run repeat",
+        "repeat",
+        "shots per point",
     )
     assert schema.repeat_domain.size == 8
 

@@ -10,10 +10,10 @@ where each later event belongs.  Runtime owns the chunks, invalid future cells,
 current materialization and terminal seal; this module never copies full scan
 history.
 
-SCAN AND RUN REPEATS ARE DISTINCT REPEAT-DOMAIN FACTS. ``run_repeats`` runs
-adjacent trials at one point; ``scan_repeats`` walks the whole plan again.
-The writer receives and records both facts directly. Source repeat axes remain
-separate logical axes in the same domain; no product axis is stored.
+REPEAT AND SHOTS PER POINT ARE DISTINCT REPEAT-DOMAIN FACTS. Adjacent trials
+at one point are inner; walking the whole plan again is outer. Their names
+describe the authored scan, not the board counters used by a particular mode.
+The source's one-shot Repeat carrier is consumed, not duplicated in the result.
 
 The dataset's axes ARE the plan's axes, carrying each port's name and unit.
 That identity is what makes a saved scan self-describing, and it is the hook
@@ -54,10 +54,9 @@ def scan_repeat_domain(
 ) -> DomainSpec:
     """A scan's Repeat domain: how the scan was executed, and nothing else.
 
-    Exactly the two facts the writer records and the board is fired with:
-    full sweeps of the table (scan repeats, ``SCAN_REPEAT_COUNT``) outer,
-    shots per point (run repeats, ``RUN_REPEAT_COUNT``) inner.  Both stay
-    present at length one because they state how this scan was executed.
+    Full repeats of the authored scan are outer, shots per point inner.
+    Either can be executed by the host or the board without changing these
+    data-axis names or identities. Both remain present at length one.
     A scan point's value is ONE shot; the source's own Repeat carrier is
     consumed by the scan, not carried beside these -- carried, it appeared
     as a third axis named "repeat" of size one, saying nothing twice.
@@ -72,14 +71,14 @@ def scan_repeat_domain(
 
     scan_axis = AxisSpec(
         _SCAN_REPEAT_AXIS_ID,
-        "scan repeat",
+        "repeat",
         REPEAT,
         scan_repeats,
         tuple(range(scan_repeats)),
     )
     run_axis = AxisSpec(
         _RUN_REPEAT_AXIS_ID,
-        "run repeat",
+        "shots per point",
         REPEAT,
         run_repeats,
         tuple(range(run_repeats)),

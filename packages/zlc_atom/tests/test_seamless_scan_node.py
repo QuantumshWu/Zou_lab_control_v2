@@ -964,8 +964,8 @@ def test_repeats_walk_the_whole_plan_again_and_stop_again() -> None:
     schema = value.block.schema
     assert schema.repeat_domain.size == 2
     assert tuple(axis.name for axis in schema.repeat_domain.axes) == (
-        "scan repeat",
-        "run repeat",
+        "repeat",
+        "shots per point",
     )
     assert tuple(axis.size for axis in schema.repeat_domain.axes) == (2, 1)
     assert schema.point_domain.size == 4

@@ -6007,7 +6007,7 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
     publication = session.signal_plane.freeze().publication(signal)
     expected = schema_structure(canonical)
     assert expected == (
-        (("scan repeat", 2), ("run repeat", 1)),
+        (("repeat", 2), ("shots per point", 1)),
         (
             ("pair", 3),
             ("field.x", 65),

@@ -869,7 +869,7 @@ def test_scan_planner_keeps_chunk_storage_linear_for_50_and_100_points() -> None
             assert output.cell_origin == (0, row)
             assert tuple(
                 axis.name for axis in output.canonical_schema.repeat_domain.axes
-            ) == ("scan repeat", "run repeat")
+            ) == ("repeat", "shots per point")
             payload += output.snapshot.block.values.nbytes
         assert not hasattr(writer, "_values")
         assert not hasattr(writer, "snapshot")

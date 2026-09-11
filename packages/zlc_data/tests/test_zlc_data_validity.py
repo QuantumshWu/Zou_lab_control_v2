@@ -2,20 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 import numpy as np
 
 from zlc_data.axis import AxisId, AxisSpec, REPEAT, SCAN_POINT, SPATIAL_X
 from zlc_data.schema import DatasetSchema, DomainSpec, ValueSchema
 from zlc_data.validity import DatasetComponentValidity, ValidityContract
-from zlc_data.validity import CellValidity, INVALID, VALID
 from zlc_data.value import (
     DataBlock,
     DatasetRevision,
     BlockId,
     expand_dataset_validity,
-    repeat_validity_counts,
+    repeat_coordinate_counts,
 )
 
 
@@ -57,76 +54,21 @@ def test_dataset_component_validity_expands_over_repeat_and_point_carriers():
 
 
 def test_a_repeat_axis_counts_the_samples_that_have_landed():
-    """Count at the other coordinates; never pool validity across contexts."""
-
+    """Count written rows at the other Repeat coordinates, not components."""
     repeat = _axis("repeat", REPEAT, 3)
     run = _axis("run", REPEAT, 2)
-    point = _axis("point", SCAN_POINT, 2)
-    site = _axis("site", SPATIAL_X, 2)
-    value_schema = ValueSchema(ValidityContract.value(), np.dtype(np.float64))
     # Four rows so far of a planned 3 x 2: repeat 0 whole, repeat 1 playing.
-    schema = DatasetSchema(
-        DomainSpec((4,), (repeat, run), ((0, 0, 1, 1), (0, 1, 0, 1))),
-        DomainSpec((2,), (point,), ((0, 1),)),
-        DomainSpec((2,), (site,)),
-        value_schema,
-    )
-    assert repeat_validity_counts(VALID, schema) == (2, 2)
-    assert repeat_validity_counts(INVALID, schema) == (0, 0)
-    # Row 3 is still missing Point 1. Its valid Point 0 cannot fill that hole.
-    cells = CellValidity(np.array([[True, True], [True, True], [True, True], [True, False]]))
-    assert repeat_validity_counts(cells, schema) == (1, 1)
-    assert repeat_validity_counts(cells, schema, {point.axis_id: 0}) == (2, 2)
-    assert repeat_validity_counts(cells, schema, {
-        repeat.axis_id: 1, run.axis_id: 1, point.axis_id: 1,
-    }) == (1, 1)
-    # A target ignores its own pin; an absent intersection for another target
-    # is genuinely empty. No undeclared Cartesian rows are invented.
-    assert repeat_validity_counts(VALID, schema, {
-        repeat.axis_id: 2, run.axis_id: 0, point.axis_id: 0,
-    }) == (2, 0)
-    # Rows 1 and 3 are run 1 of each repeat, and both faulted: run 1 never landed.
-    faulted = CellValidity(np.array([[True, True], [False, False], [True, True], [False, False]]))
-    assert repeat_validity_counts(faulted, schema) == (0, 1)
-    # A different site's valid value cannot stand in for an unjudged site.
-    component_schema = DatasetSchema(
-        schema.repeat_domain,
-        schema.point_domain,
-        schema.cell_domain,
-        ValueSchema(ValidityContract.components(site.axis_id), np.dtype(np.float64)),
-    )
-    components = DatasetComponentValidity(
-        (site.axis_id,),
-        np.array([
-            [[True, True], [True, True]],
-            [[True, True], [True, True]],
-            [[True, False], [True, True]],
-            [[True, True], [True, True]],
-        ]),
-    )
-    assert repeat_validity_counts(components, component_schema) == (2, 2)
-    # All other axes, including site, are fixed. An invalid current site must
-    # not borrow a neighbouring site's evidence or turn the count into a range.
-    assert repeat_validity_counts(components, component_schema, {point.axis_id: 0}) == (2, 1)
-    assert repeat_validity_counts(components, component_schema, {
-        point.axis_id: 0, site.axis_id: 0,
-    }) == (2, 2)
-    assert repeat_validity_counts(components, component_schema, {
-        repeat.axis_id: 1, run.axis_id: 0, point.axis_id: 0, site.axis_id: 1,
-    }) == (1, 1)
-    assert repeat_validity_counts(components, component_schema, {site.axis_id: 0}) == (2, 2)
-    # Reordered/duplicate storage rows still count distinct Repeat coordinates.
-    order = (3, 0, 2, 1, 2, 0)
-    repeated_schema = replace(schema,
-        repeat_domain=DomainSpec((6,), (repeat, run),
-            tuple(tuple(codes[i] for i in order) for codes in schema.repeat_domain.axis_codes)),
-        point_domain=DomainSpec((3,), (point,), ((1, 0, 0),)))
-    repeated = cells.mask[np.asarray(order)][:, (1, 0, 0)].copy()
-    repeated[:, 1] = False  # another row with the same Point coordinate is valid
-    repeated[1] = False    # another row with the same Repeat coordinates is valid
-    assert repeat_validity_counts(CellValidity(repeated), repeated_schema) == (2, 2)
-    assert repeat_validity_counts(CellValidity(repeated), repeated_schema,
-                                  {point.axis_id: 0}) == (2, 2)
+    domain = DomainSpec((4,), (repeat, run), ((0, 0, 1, 1), (0, 1, 0, 1)))
+    assert repeat_coordinate_counts(domain) == (2, 2)
+    assert repeat_coordinate_counts(domain, np.zeros(4, bool)) == (0, 0)
+    present = np.array([True, True, True, False])
+    assert repeat_coordinate_counts(domain, present) == (1, 1)
+    assert repeat_coordinate_counts(domain, present, current_row=2) == (2, 1)
+    assert repeat_coordinate_counts(domain, present, current_row=1) == (1, 2)
+    # Duplicate carrier rows count a coordinate only once.
+    duplicate = DomainSpec((6,), (repeat, run),
+                           ((1, 0, 1, 0, 1, 0), (1, 0, 0, 1, 0, 0)))
+    assert repeat_coordinate_counts(duplicate, np.array([False, False, True, True, True, True])) == (2, 2)
 
 
 def test_a_seamless_sweep_counts_the_runs_at_the_selected_point():
@@ -134,19 +76,9 @@ def test_a_seamless_sweep_counts_the_runs_at_the_selected_point():
 
     scan = AxisSpec(AxisId("scan"), "scan", REPEAT, 1, (0,))
     run = AxisSpec(AxisId("run"), "run", REPEAT, 3, (0, 1, 2))
-    point = _axis("point", SCAN_POINT, 4)
-    site = _axis("site", SPATIAL_X, 2)
-    schema = DatasetSchema(
-        DomainSpec((3,), (scan, run), ((0, 0, 0), (0, 1, 2))),
-        DomainSpec((4,), (point,), ((0, 1, 2, 3),)),
-        DomainSpec((2,), (site,)),
-        ValueSchema(ValidityContract.value(), np.dtype(np.float64)),
-    )
-    assert repeat_validity_counts(INVALID, schema) == (0, 0)
-    first_point = CellValidity(np.array([[True, False, False, False]] * 3))
-    assert repeat_validity_counts(first_point, schema) == (0, 0)
-    assert repeat_validity_counts(first_point, schema, {point.axis_id: 0}) == (1, 3)
-    assert repeat_validity_counts(first_point, schema, {point.axis_id: 1}) == (0, 0)
+    domain = DomainSpec((3,), (scan, run), ((0, 0, 0), (0, 1, 2)))
+    assert repeat_coordinate_counts(domain, np.zeros(3, bool)) == (0, 0)
+    assert repeat_coordinate_counts(domain, np.ones(3, bool)) == (1, 3)
 
 
 def test_two_repeat_axes_of_one_name_keep_their_own_counts():
@@ -159,21 +91,10 @@ def test_two_repeat_axes_of_one_name_keep_their_own_counts():
 
     first = AxisSpec(AxisId("first"), "repeat", REPEAT, 2, (0, 1))
     second = AxisSpec(AxisId("second"), "repeat", REPEAT, 3, (0, 1, 2))
-    point = AxisSpec(AxisId("point"), "repeat", SCAN_POINT, 2, (0, 1))
-    site = _axis("site", SPATIAL_X, 2)
-    schema = DatasetSchema(
-        DomainSpec((6,), (first, second), ((0, 0, 0, 1, 1, 1), (0, 1, 2, 0, 1, 2))),
-        DomainSpec((2,), (point,), ((0, 1),)),
-        DomainSpec((2,), (site,)),
-        ValueSchema(ValidityContract.value(), np.dtype(np.float64)),
-    )
-    assert repeat_validity_counts(VALID, schema) == (2, 3)
+    domain = DomainSpec((6,), (first, second), ((0, 0, 0, 1, 1, 1), (0, 1, 2, 0, 1, 2)))
+    assert repeat_coordinate_counts(domain) == (2, 3)
     # Rows 2 and 5 are second=2 of either first coordinate, and both
     # faulted: second=2 never landed, while every first coordinate did.
-    cells = CellValidity(
-        np.array([[True, True]] * 2 + [[False, False]] + [[True, True]] * 2 + [[False, False]])
-    )
-    assert repeat_validity_counts(cells, schema) == (0, 2)
-    assert repeat_validity_counts(cells, schema, {
-        first.axis_id: 0, second.axis_id: 2, point.axis_id: 0,
-    }) == (0, 2)
+    present = np.array([True, True, False, True, True, False])
+    assert repeat_coordinate_counts(domain, present) == (0, 2)
+    assert repeat_coordinate_counts(domain, present, current_row=0) == (2, 2)

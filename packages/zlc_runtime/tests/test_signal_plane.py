@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+from dataclasses import replace
 import threading
 from types import MappingProxyType
 from types import SimpleNamespace
@@ -22,6 +23,7 @@ from zlc_data import (
     CellValidity,
     DataBlock,
     DatasetRevision,
+    DatasetComponentValidity,
     DatasetSchema,
     DomainSpec,
     OwnedSnapshot,
@@ -915,6 +917,49 @@ def test_finite_signal_reports_full_point_grid_geometry_while_cells_arrive() -> 
         assert plane.seal_committed(node, cut_short=True)
         assert plane.describe_signals() is not directory
         assert plane.describe_signals()[0].shape == (1, 4, 1)
+    finally:
+        plane.close()
+
+
+def test_repeat_counts_follow_written_cells_not_survival_eligibility() -> None:
+    declaration = DatasetOutputDeclaration("survival", "test.survival")
+    node = _node("repeat-title", declaration)
+    plane = SignalDataPlane()
+    repeat = AxisSpec(AxisId("scan"), "repeat", REPEAT, 3, (0, 1, 2))
+    run = AxisSpec(AxisId("run"), "repeat", REPEAT, 2, (0, 1))
+    point = AxisSpec(AxisId("power"), "power", SCAN_POINT, 2, (135, 247))
+    site = AxisSpec(AxisId("site"), "site", SPATIAL_X, 2, (0, 1))
+    canonical = DatasetSchema(
+        DomainSpec((6,), (repeat, run), ((0, 0, 1, 1, 2, 2), (0, 1, 0, 1, 0, 1))),
+        DomainSpec((2,), (point,), ((0, 1),)), DomainSpec((2,), (site,)),
+        ValueSchema(ValidityContract.components(site.axis_id), np.dtype(bool)),
+    )
+    scalar_event = _event("survival", 0.0).block.schema
+    event_schema = replace(canonical, repeat_domain=scalar_event.repeat_domain,
+                           point_domain=scalar_event.point_domain)
+    # Missing scan cells stay absent; false/invalid sites in a committed cell
+    # do not erase the acquired trial. The two Repeat axes share a name.
+    steps = ((0, 0, (1, 1)), (0, 1, (1, 1)), (1, 0, (1, 2)),
+             (2, 0, (2, 1)), (3, 1, (1, 1)), (4, 0, (3, 1)), (5, 0, (2, 2)))
+    saved = []
+    try:
+        plane.begin_generation(node)
+        for written, (row, column, expected) in enumerate(steps, 1):
+            eligible = np.array([[[written % 2 == 0, False]]], dtype=bool)
+            block = DataBlock(BlockId("survival"), DatasetRevision(0),
+                              np.zeros((1, 1, 2), dtype=bool),
+                              DatasetComponentValidity((site.axis_id,), eligible), event_schema)
+            snapshot = OwnedSnapshot(block.ref(StreamGenerationId("source")), block)
+            value = plane.commit_live(node, {"survival": LiveDatasetOutput(
+                declaration, snapshot, DatasetCoverage(written, 12),
+                canonical_schema=canonical, cell_origin=(row, column),
+            )})[node.signal_key("survival")]
+            assert value.repeat_counts == expected
+            saved.append((value, expected))
+        assert plane.seal_committed(node, cut_short=True)
+        snapshot = plane.current_dataset(node.signal_key("survival"))
+        assert not snapshot.expanded_validity()[..., -1].any()
+        assert all(value.repeat_counts == expected for value, expected in saved)
     finally:
         plane.close()
 

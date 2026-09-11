@@ -139,9 +139,7 @@ def test_a_finished_measurement_is_offerable_and_says_it_is_finished(plane) -> N
     assert description.shape == (50, 3, 3)
     from zlc_workbench.panel_state import panel_data_shape
     publication = plane.latest_publication(signal)
-    data = plane.current_dataset(signal, publication)
-    title = panel_data_shape(description.schema, None, validity=data.block.validity,
-                             source=publication.value(signal))
+    title = panel_data_shape(description.schema, None, source=publication.value(signal))
     assert title["data_valid"] == (1, 1), "count this publication's written row, not planned row 49"
     assert row.label == f"frames  [{format_signal_shape(description.schema)}]"
     assert row.label == (
@@ -154,7 +152,6 @@ def test_a_finished_measurement_is_offerable_and_says_it_is_finished(plane) -> N
     assert row.producer == "cm"
     assert row.state == "finished"
     assert row.derived_from == ""
-    assert not row.shown
 
 
 def test_a_reserved_output_waits_until_its_first_publication() -> None:

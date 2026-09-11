@@ -406,62 +406,32 @@ def dataset_validity_storage(
     ]
 
 
-def repeat_validity_counts(
-    validity: Valid | Invalid | CellValidity | DatasetComponentValidity,
-    schema: DatasetSchema,
-    positions: Mapping[AxisId, int] | None = None,
+def repeat_coordinate_counts(
+    domain: DomainSpec,
+    present: np.ndarray | None = None,
+    *,
+    current_row: int = -1,
 ) -> tuple[int, ...]:
-    """Count distinct valid Repeat coordinates at the other named positions.
+    """Count present coordinates with other axes fixed at ``current_row``.
 
-    Each target Repeat axis ignores its own pin; every other axis is fixed.
-    Positions default to the dataset's final coordinates and can be supplied
-    from its exact publication. Count valid values, not arrived events. Only
-    duplicate storage rows at the same full coordinates may share evidence.
-    Component axes are sliced before counting; image pixels are never expanded.
+    ``present`` names written Repeat carrier rows at one Point coordinate,
+    not scientific validity. None means every physical row is present. There
+    is no Cell-data input: site/pixel eligibility cannot change these counts.
     """
-    _validate_dataset_validity(validity, schema)
-    repeat = schema.repeat_domain
-    if not repeat.axes:
+    if not domain.axes:
         return ()
-    if isinstance(validity, Invalid):
-        return (0,) * len(repeat.axes)
-    point = schema.point_domain
-    pins = {
-        axis.axis_id: int(domain.codes(axis.axis_id)[-1])
-        for domain in (repeat, point) for axis in domain.axes
-    }
-    pins.update({axis.axis_id: axis.size - 1 for axis in schema.cell_domain.axes})
-    if positions is not None:
-        pins.update(positions)
-    point_rows = np.ones(point.size, dtype=bool)
-    for axis in point.axes:
-        point_rows &= point.codes(axis.axis_id) == pins[axis.axis_id]
-    point_rows = np.flatnonzero(point_rows)
-    if not point_rows.size:
-        return (0,) * len(repeat.axes)
-
-    valid_rows = None
-    if not isinstance(validity, Valid):
-        # Slice component axes before selecting any carrier rows: one site
-        # must not copy a complete camera-sized component mask.
-        component_slice = (
-            tuple(pins[axis_id] for axis_id in validity.axis_ids)
-            if isinstance(validity, DatasetComponentValidity) else ()
-        )
-        mask = validity.mask[(slice(None), slice(None), *component_slice)]
-        if point_rows.size != point.size:
-            mask = mask[:, point_rows]
-        # Every selected Point row names the same fixed coordinates.
-        valid_rows = np.any(mask, axis=1)
-
-    codes = tuple(repeat.codes(axis.axis_id) for axis in repeat.axes)
+    if present is not None and (
+        present.dtype != np.dtype(bool) or present.shape != (domain.size,)
+    ):
+        raise ValueError("present rows must be a bool vector matching the Repeat carrier")
+    codes = tuple(domain.codes(axis.axis_id) for axis in domain.axes)
     result: list[int] = []
-    for target, axis in enumerate(repeat.axes):
-        rows = np.ones(repeat.size, dtype=bool) if valid_rows is None else valid_rows.copy()
-        for index, other in enumerate(repeat.axes):
+    for target in range(len(codes)):
+        rows = np.ones(domain.size, dtype=bool) if present is None else present.copy()
+        for index, other_codes in enumerate(codes):
             if index == target:
                 continue
-            rows &= codes[index] == pins[other.axis_id]
+            rows &= other_codes == other_codes[current_row]
         result.append(int(np.unique(codes[target][rows]).size))
     return tuple(result)
 

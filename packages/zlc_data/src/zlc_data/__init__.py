@@ -67,7 +67,7 @@ from .value import (
     expand_dataset_validity,
     expand_snapshot_validity,
     owned_snapshot_from_arrays,
-    repeat_validity_counts,
+    repeat_coordinate_counts,
 )
 # How a snapshot is written down and read back.  A figure archive IS a
 # snapshot plus its manifest, so the layer that writes one needs both, and
@@ -142,6 +142,6 @@ __all__ = [
     "load_npz",
     "materialize_derived_dataset",
     "owned_snapshot_from_arrays",
-    "repeat_validity_counts",
+    "repeat_coordinate_counts",
     "save_npz",
 ]
