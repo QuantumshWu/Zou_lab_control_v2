@@ -216,6 +216,9 @@ class SequencerDevice:
     def config_values(self) -> dict[str, tuple[float, str]]:
         return self.streamer.config_values()
 
+    def load_config_file(self, path: str) -> None:
+        self.streamer.load_config_file(path)
+
     def compile_pulse(
         self,
         sequence: PulseSequence,

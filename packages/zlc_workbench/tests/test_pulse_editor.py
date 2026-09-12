@@ -25,6 +25,7 @@ from types import SimpleNamespace
 
 import pytest
 from zlc_durable import readable_json_bytes
+from zlc_pulse.device import ConfigValueHolder
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("MPLBACKEND", "Agg")
@@ -938,9 +939,10 @@ class _AppliedEcho:
     rows: tuple
     run_repeats: int = 1
     scan_repeats: int = 1
+    authored_source: object = None
 
 
-class _Sequencer:
+class _Sequencer(ConfigValueHolder):
     """A board, with the register writes taken out.
 
     It keeps state rather than only recording calls, because what the editor
@@ -961,8 +963,7 @@ class _Sequencer:
         self.fail_on_fire = fail_on_fire
         self.never_done = never_done
         self._digest = ""
-        self._config_values: dict[str, tuple[float, str]] = {}
-        self._config_source = ""
+        self._init_config_values()
         self._firing = False
         self._run_repeats = 1
         self._scan_repeats = 1
@@ -981,14 +982,24 @@ class _Sequencer:
 
     def load(self, prog, *, source=None, rows=()) -> None:
         self.events.append("load")
+        authored = source
+        self._refresh_config_file()
+        prog, source = self._prepare_config_program(prog, authored, source)
         self._digest = prog.digest
         self._firing = False
         self.scan_rows = tuple(tuple(int(value) for value in row) for row in rows)
         # The real board keeps what it was handed, which is what Sync reads
         # back; a double that forgets it answers "nothing applied" forever.
-        self._applied = _AppliedEcho(prog, source, self.scan_rows)
+        self._applied = _AppliedEcho(prog, source, self.scan_rows, authored_source=authored)
 
     def fire(self, *, run_repeats: int, scan_repeats: int = 1) -> None:
+        self._refresh_config_file()
+        if self._applied is not None:
+            program, source = self._prepare_config_program(
+                self._applied.program, self._applied.authored_source, self._applied.source
+            )
+            self._applied = replace(self._applied, program=program, source=source)
+            self._digest = program.digest
         self.events.append(
             "fire forever" if run_repeats == 0 or scan_repeats == 0 else "fire"
         )
@@ -1028,32 +1039,10 @@ class _Sequencer:
             "config_source": self.config_source,
         }
 
-    # The config surface, performed the way the real board performs it: the
-    # numbers are written INTO the fields at compile, and BOTH halves come
-    # back, or the double proves a behaviour the product does not have.
+    # Reuse the production Config owner: compile stays pure, load/Fire apply it.
     def load_config_values(self, entries, *, source: str = "") -> None:
         self.events.append("load_config_values")
-        self._config_values = {
-            str(name): (float(value), str(unit))
-            for name, (value, unit) in dict(entries).items()
-        }
-        self._config_source = str(source or "")
-
-    def config_values(self) -> dict:
-        return dict(self._config_values)
-
-    @property
-    def config_source(self) -> str:
-        return self._config_source
-
-    def compile_pulse(self, sequence, geom, clock_hz, *, slot_tick_scales=None):
-        from zlc_pulse import apply_config_values, compile_sequence
-
-        held = dict(self._config_values)
-        filled, _applied, _unknown = apply_config_values(sequence, held)
-        return filled, compile_sequence(
-            filled, geom, clock_hz, slot_tick_scales=slot_tick_scales
-        )
+        super().load_config_values(entries, source=source)
 
 
 def test_on_pulse_runs_until_stop(sequence) -> None:
@@ -1552,17 +1541,10 @@ def _process_qt_until(application, predicate, seconds: float = 2.0) -> None:
     assert predicate(), "timed out waiting for the Pulse Editor owner turn"
 
 
-def test_a_config_file_is_decoded_before_anything_is_dialled(tmp_path, monkeypatch) -> None:
-    """A standalone Connect opens no connection it cannot hand over.
+def test_a_config_file_binding_failure_closes_the_new_connection(tmp_path, monkeypatch) -> None:
+    """The device reads Config files; Connect owns cleanup if binding fails."""
 
-    The presenter only ever receives the streamer or the error, so a board
-    dialled before the config file failed to decode was open and owned by
-    nobody.  The file is decoded first -- a refusal with no connection behind
-    it -- and a board that refuses the decoded entries after the dial is
-    closed by the one who opened it.
-    """
-
-    from zlc_atom.pulse_values import write_config_values
+    from zlc_pulse import read_config_values, write_config_values
     from zlc_workbench.apps import pulse_editor as application_module
 
     dials: list[tuple[str, str]] = []
@@ -1572,10 +1554,10 @@ def test_a_config_file_is_decoded_before_anything_is_dialled(tmp_path, monkeypat
         refuse = False
         loaded = None
 
-        def load_config_values(self, entries, *, source):
+        def load_config_file(self, path):
             if self.refuse:
                 raise RuntimeError("board refused the entries")
-            self.loaded = (dict(entries), source)
+            self.loaded = (read_config_values(path)[2], str(path))
 
         def close(self):
             self.closed = True
@@ -1599,13 +1581,14 @@ def test_a_config_file_is_decoded_before_anything_is_dialled(tmp_path, monkeypat
     try:
         with pytest.raises(ValueError):
             presenter._dial("virtual", "")
-        assert dials == [], "a board was dialled for a config file that does not decode"
+        assert dials == [("virtual", "")]
+        assert board.closed, "a device that could not bind its config was left open"
 
-        write_config_values(values, {"hold": (2.0, "ms")})
+        write_config_values(values, {"1": (2.0, "ms")})
         board.refuse = True
         with pytest.raises(RuntimeError, match="refused the entries"):
             presenter._dial("virtual", "")
-        assert dials == [("virtual", "")]
+        assert dials == [("virtual", ""), ("virtual", "")]
         assert board.closed, "a board that refused the entries was left open"
 
         board.refuse = False
@@ -1613,7 +1596,7 @@ def test_a_config_file_is_decoded_before_anything_is_dialled(tmp_path, monkeypat
         assert presenter._dial("virtual", "") is board
         assert not board.closed
         entries, source = board.loaded
-        assert entries["hold"][0] == 2.0 and source == str(values)
+        assert entries["1"][0] == 2.0 and source == str(values)
     finally:
         presenter.close()
 
@@ -4214,32 +4197,62 @@ def _bind_one_config_parameter(presenter, sequence):
     return declared[0]
 
 
-def test_a_pulse_shows_the_boards_numbers_the_moment_a_board_is_there(
-    presenter, sequence
+def test_config_execution_keeps_the_authored_pulse_and_its_bindings(
+    sequence, tmp_path
 ) -> None:
-    """What is on screen is what would play, not what the file was saved with.
+    """File refresh changes execution, not defaults/bindings or newer edits."""
+    from zlc_pulse import write_config_values
 
-    A matching loaded override wins in ``compile_pulse``. Reflecting that
-    same rule in the editor keeps the displayed and executed values aligned.
-    """
-
+    view = _EditorView()
     board = _Sequencer()
-    presenter.sequencer = board
-    assert presenter.adopt_board() is True
-    parameter = _bind_one_config_parameter(presenter, sequence)
-    period = sequence.periods[3].period_id
-    authored = presenter.sequence.period_by_id[period].duration
-
-    board.load_config_values(
-        {parameter.parameter_id: (authored + 20.0, parameter.unit)}, source="c.json"
+    worker = _DeviceWorker()
+    presenter = PulseEditorPresenter(
+        view, sequence, sequencer=board, run_device_work=worker,
+        run_safe_work=_run_preview_immediately,
     )
-    assert presenter.fire() is True
+    try:
+        parameter = _bind_one_config_parameter(presenter, sequence)
+        period = parameter.field_ref.period_id
+        api_period = sequence.periods[1]
+        for _ in range(2):
+            presenter.cycle_binding("duration", api_period.period_id, None)
+        presenter.cycle_binding("duration", sequence.periods[2].period_id, None)
+        authored_sequence = presenter.sequence
+        authored = authored_sequence.period_by_id[period].duration
+        path = tmp_path / "config.json"
+        write_config_values(path, {"1": (authored + 20.0, parameter.unit)})
+        view.open_answer = str(path)
+        assert presenter.load_config_values()
+        worker.deliver_until(lambda: not presenter._device_busy)
+        assert presenter.sequence is authored_sequence
+        for amount in (20.0, 40.0):
+            write_config_values(path, {"1": (authored + amount, parameter.unit)})
+            view.fire_requested.emit()
+            worker.deliver_until(lambda: not presenter._device_busy)
+            assert presenter.sequence is authored_sequence
+            assert board._applied.source.period_by_id[period].duration == authored + amount
+            assert presenter.synchronized
+            assert presenter._shown_digest() == board._applied.program.digest
+            assert presenter._effective_sequence(authored_sequence).period_by_id[period].duration == authored + amount
 
-    # The field itself moved, so the number the operator reads is the number
-    # the board was handed.
-    assert presenter.sequence.period_by_id[period].duration == authored + 20.0
-    applied = board._applied
-    assert applied.source.period_by_id[period].duration == authored + 20.0
+        # Removing an override restores the original default; meanwhile an
+        # author edit made before command delivery is never overwritten or
+        # falsely marked as the program that just started.
+        write_config_values(path, {})
+        view.fire_requested.emit()
+        presenter.set_duration(api_period.period_id, api_period.duration + 10.0, api_period.unit)
+        edited = presenter.sequence
+        worker.deliver_until(lambda: not presenter._device_busy)
+        assert presenter.sequence is edited
+        assert edited.api_parameters == authored_sequence.api_parameters
+        assert edited.slots == authored_sequence.slots
+        assert edited.config_parameters == authored_sequence.config_parameters
+        assert edited.period_by_id[period].duration == authored
+        assert board._applied.source.period_by_id[period].duration == authored
+        assert not presenter.synchronized
+        assert "applied" not in board.events, "On Pulse added an applied-state query"
+    finally:
+        presenter.close()
 
 
 def test_editor_config_can_be_saved_offline_and_loaded_without_firing_first(
@@ -4247,7 +4260,7 @@ def test_editor_config_can_be_saved_offline_and_loaded_without_firing_first(
 ) -> None:
     """Save reads the editor; Load supplies optional sequencer overrides."""
 
-    from zlc_atom.pulse_values import read_config_values
+    from zlc_pulse import read_config_values
     from zlc_pulse import pulse_field_value
 
     saved = tmp_path / "config.json"
@@ -4259,7 +4272,7 @@ def test_editor_config_can_be_saved_offline_and_loaded_without_firing_first(
     period = parameter.field_ref.period_id
     value = pulse_field_value(presenter.sequence, parameter.field_ref, parameter.unit)
     assert presenter.save_config_values()
-    assert read_config_values(saved)[2] == {parameter.parameter_id: (value, parameter.unit)}
+    assert read_config_values(saved)[2] == {"1": (value, parameter.unit)}
 
     board = _Sequencer()
     presenter.sequencer = board
@@ -4270,16 +4283,16 @@ def test_editor_config_can_be_saved_offline_and_loaded_without_firing_first(
     assert board.config_values() == {}
     presenter.stop()
 
-    board.load_config_values({parameter.parameter_id: (value, parameter.unit), "other": (1.0, "ns")})
+    board.load_config_values({"1": (value, parameter.unit), "99": (1.0, "ns")})
     presenter.view.duration_committed.emit(period, value + 40.0, parameter.unit)
     board.events.clear()
     assert presenter.save_config_values()
     assert board.events == []
-    assert board.config_values()[parameter.parameter_id][0] == value
-    assert read_config_values(saved)[2] == {parameter.parameter_id: (value + 40.0, parameter.unit)}
+    assert board.config_values()["1"][0] == value
+    assert read_config_values(saved)[2] == {"1": (value + 40.0, parameter.unit)}
     presenter.view.open_answer = str(saved)
     assert presenter.load_config_values()
-    assert board.config_values() == {parameter.parameter_id: (value + 40.0, parameter.unit)}
+    assert board.config_values() == {"1": (value + 40.0, parameter.unit)}
     assert presenter.fire()
     assert pulse_field_value(board._applied.source, parameter.field_ref, parameter.unit) == value + 40.0
 
@@ -4296,7 +4309,7 @@ def test_loading_a_set_moves_the_stale_dot_without_a_document_edit(
     a board is recalibrated, which is exactly why this has to be said.
     """
 
-    from zlc_atom.pulse_values import write_config_values
+    from zlc_pulse import write_config_values
 
     board = _Sequencer()
     presenter.sequencer = board
@@ -4307,7 +4320,7 @@ def test_loading_a_set_moves_the_stale_dot_without_a_document_edit(
     def give(value: float, name: str) -> None:
         path = tmp_path / name
         write_config_values(
-            path, {parameter.parameter_id: (value, parameter.unit)}, name=name
+            path, {"1": (value, parameter.unit)}, name=name
         )
         presenter.view.open_answer = str(path)
         assert presenter.load_config_values() is True

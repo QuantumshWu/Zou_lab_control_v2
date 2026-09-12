@@ -122,7 +122,7 @@ def seed_current_config_values(directory: Path) -> None:
     failure worth having.
     """
 
-    from zlc_atom.pulse_values import CURRENT_CONFIG_VALUES, write_config_values
+    from zlc_pulse import CURRENT_CONFIG_VALUES, write_config_values
 
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / CURRENT_CONFIG_VALUES
@@ -185,7 +185,7 @@ class Workspace:
         the one a session picks up by itself when it opens a board.
         """
 
-        from zlc_atom.pulse_values import CONFIG_VALUES_DIRECTORY
+        from zlc_pulse import CONFIG_VALUES_DIRECTORY
 
         return self.root / CONFIG_VALUES_DIRECTORY
 
@@ -843,20 +843,9 @@ class ExperimentSession:
                 self._load_current_config_values()
 
     def _load_current_config_values(self) -> None:
-        """Hand the board the calibration this workspace is running today.
+        """Bind this workspace's default file; the device refreshes it on Fire."""
 
-        Loaded ONCE per sequencer, here, because everything that fires a pulse
-        goes through this session's devices: a scan, a calibration, the Pulse
-        Editor bound to this session.  Doing it at each of those instead would
-        be the same three lines in six places, and the one that forgot would
-        play last month's bias without saying so.
-
-        A workspace with no set is silent.  A pulse that needs one is then
-        refused when it compiles, by name, which is the honest failure -- and
-        a pulse that declares none never notices.
-        """
-
-        from zlc_atom.pulse_values import CURRENT_CONFIG_VALUES, read_config_values
+        from zlc_pulse import CURRENT_CONFIG_VALUES
 
         path = self.workspace.config_values / CURRENT_CONFIG_VALUES
         if not path.is_file():
@@ -868,8 +857,7 @@ class ExperimentSession:
             device = self.installation.device("sequencer")
         except Exception:
             return
-        _name, _origin, entries = read_config_values(path)
-        device.load_config_values(entries, source=str(path))
+        device.load_config_file(path)
 
     def acquire_device_command(
         self, owner: object, label: str, key: str, device: object,

@@ -11,7 +11,7 @@ from .endpoint import (
 )
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 import argparse
 import json
 import logging
@@ -1007,7 +1007,7 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                     "applied",
                 }
                 expected = (
-                    {"program", "source", "rows"}
+                    {"program", "source", "authored_source", "rows"}
                     if method == "load"
                     else {"run_repeats", "scan_repeats"}
                     if method == "fire"
@@ -1061,7 +1061,10 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                     rows = params["rows"]
                     if isinstance(rows, (str, bytes, Mapping)) or not isinstance(rows, list):
                         raise TypeError("load rows must be a JSON array")
-                    self.streamer.load(program, source=source, rows=rows)
+                    self.streamer._load_program(
+                        program, source=source,
+                        authored_source=params["authored_source"], rows=rows,
+                    )
                     _server_log(
                         "LOAD",
                         client=client,
@@ -1070,7 +1073,7 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                             f"rows={len(rows)}{self._link_health()}"
                         ),
                     )
-                    result = None
+                    result = self.streamer.applied()
                 elif method == "fire":
                     run_repeats = params["run_repeats"]
                     scan_repeats = params["scan_repeats"]
@@ -1082,7 +1085,7 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                         scan_repeats, int
                     ):
                         raise TypeError("fire scan_repeats must be an integer")
-                    self.streamer.fire(
+                    self.streamer._fire_program(
                         run_repeats=run_repeats,
                         scan_repeats=scan_repeats,
                     )
@@ -1353,6 +1356,8 @@ class RemotePulseStreamer(ConfigValueHolder):
         #: How this client names itself on the cancel lane, from the
         #: server's answer to ``open``; None while there is no connection.
         self._cancel_token: str | None = None
+        self._description: BoardDescription | None = None
+        self._loaded_application: AppliedState | None = None
         self._init_config_values()
 
     def open(self) -> None:
@@ -1384,7 +1389,10 @@ class RemotePulseStreamer(ConfigValueHolder):
         layout handshake exists to catch, one layer up.
         """
 
-        return self._call("describe", {})
+        with self._io_lock:
+            if self._description is None:
+                self._description = self._call_locked("describe", {})
+            return self._description
 
     def close(self) -> None:
         with self._io_lock:
@@ -1408,20 +1416,49 @@ class RemotePulseStreamer(ConfigValueHolder):
         source: PulseSequence | None = None,
         rows=(),
     ) -> None:
-        self._call(
+        with self._io_lock:
+            self._refresh_config_file()
+            program, filled = self._prepare_config_program(prog, source, source)
+            self._load_program(program, source=filled, authored_source=source, rows=rows)
+
+    def _load_program(self, program, *, source, authored_source, rows) -> None:
+        self._loaded_application = None
+        applied = self._call_locked(
             "load",
             {
-                "program": prog,
+                "program": program,
                 "source": source,
+                "authored_source": authored_source,
                 "rows": tuple(tuple(row) for row in rows),
             },
         )
+        if not isinstance(applied, AppliedState):
+            raise RuntimeError("Pulse server did not return the loaded application; update run_server")
+        self._loaded_application = applied
 
     def fire(self, *, run_repeats: int, scan_repeats: int = 1) -> None:
-        self._call(
-            "fire",
-            {"run_repeats": run_repeats, "scan_repeats": scan_repeats},
-        )
+        with self._io_lock:
+            self._refresh_config_file()
+            if self._loaded_application is None:
+                self._loaded_application = self._call_locked("applied", {})
+            applied = self._loaded_application
+            if applied is not None:
+                program, source = self._prepare_config_program(
+                    applied.program, applied.authored_source, applied.source
+                )
+                if source != applied.source:
+                    self._load_program(
+                        program, source=source, authored_source=applied.authored_source,
+                        rows=applied.rows,
+                    )
+            self._call_locked(
+                "fire",
+                {"run_repeats": run_repeats, "scan_repeats": scan_repeats},
+            )
+            if self._loaded_application is not None:
+                self._loaded_application = replace(
+                    self._loaded_application, run_repeats=run_repeats, scan_repeats=scan_repeats
+                )
 
     def wait_done(self, timeout: float | None = None) -> DoneReport | None:
         """Poll the board until the shot reports done, or the deadline passes.
@@ -1554,6 +1591,8 @@ class RemotePulseStreamer(ConfigValueHolder):
     def _disconnect_locked(self) -> None:
         connection, self._socket = self._socket, None
         self._cancel_token = None
+        self._description = None
+        self._loaded_application = None
         if connection is not None:
             try:
                 connection.shutdown(socket.SHUT_RDWR)

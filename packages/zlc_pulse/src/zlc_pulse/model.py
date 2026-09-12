@@ -466,12 +466,12 @@ class PulseApiParameter:
 
 @dataclass(frozen=True)
 class PulseConfigParameter:
-    """One named field the PULSE supplies, refreshed from its config file.
+    """One local field, externally addressed by its position in config_parameters.
 
     Not a hole: a config parameter always has a value, because the value is
-    the field's own authored number.  What the declaration adds is a name, so
-    a saved set of calibrated numbers can find the field again, and a reason
-    to refresh it before the pulse plays.  Nothing may override one for a
+    the field's own authored number. ``parameter_id`` identifies this local
+    binding, not a field in another pulse. Config files match the displayed
+    one-based number independently of Scan/API bindings. Nothing may override one for a
     single run -- a field that a run needs to vary is an API parameter, and
     that is the whole difference between the two.
     """

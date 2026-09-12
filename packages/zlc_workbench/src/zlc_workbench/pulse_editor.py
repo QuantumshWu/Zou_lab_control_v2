@@ -57,11 +57,8 @@ from zlc_pulse import (
     prune_orphaned_bindings,
     resolve_api_parameters,
     resolve_scan_point,
-)
-from zlc_atom.pulse_values import (
     CONFIG_VALUES_DIRECTORY,
     CURRENT_CONFIG_VALUES,
-    read_config_values,
     write_config_values,
 )
 from zlc_data.units import format_quantity
@@ -618,9 +615,8 @@ def bindings_of(sequence: PulseSequence | None) -> dict[tuple, tuple[str, int]]:
     collection it belongs to -- the third config parameter of a pulse with two
     scan slots called itself 5, a position in a list that does not exist.
 
-    Nothing addresses a binding by this number: config and API values are
-    applied by parameter_id, and a scan table row is positional in
-    ``sequence.slots`` alone, which this still numbers 1..N first.
+    Config files address these Config numbers directly, 1..N. API parameters
+    retain their named IDs; scan table rows follow ``sequence.slots`` order.
     """
 
     if sequence is None:
@@ -1252,9 +1248,6 @@ class PulseEditorPresenter:
         self._saved_state = candidate
         self.path = str(path)
         self._accept_state(candidate)
-        # The board's own numbers, so a pulse opens showing what it would
-        # actually play rather than what it was last saved holding.
-        self._sync_config_values()
         self.refresh()
         return True
 
@@ -1336,7 +1329,7 @@ class PulseEditorPresenter:
         return True
 
     def load_config_values(self) -> bool:
-        """Load sequencer overrides and show matching values in this editor."""
+        """Bind a Config file on the device without changing the authored pulse."""
 
         sequencer = self.sequencer
         if sequencer is None:
@@ -1350,19 +1343,28 @@ class PulseEditorPresenter:
         )
         if not chosen:
             return False
+        def work(_operation: int) -> int:
+            sequencer.load_config_file(chosen)
+            return len(sequencer.config_values())
+
+        def delivered(count: object, error: BaseException | None) -> None:
+            if error is not None:
+                self._warn(f"cannot load {Path(chosen).name}: {error}")
+                return
+            self._digest_revision = -1
+            self.refresh()
+            self._done(f"the board is holding {count} config value(s)")
+
+        if self._run_device_work is not None:
+            if not self._device_available():
+                return False
+            return self._run_device_command(work, delivered, summary="Loading config...")
         try:
-            _name, _source, entries = read_config_values(chosen)
-            sequencer.load_config_values(entries, source=str(chosen))
+            count = work(0)
         except Exception as error:
-            self._warn(f"cannot load {Path(chosen).name}: {error}")
+            delivered(None, error)
             return False
-        # What the board compiles to has changed without the document moving,
-        # so the cached digest -- keyed on the document's revision -- would go
-        # on answering for the previous set.
-        self._digest_revision = -1
-        self._sync_config_values()
-        self.refresh()
-        self._done(f"the board is holding {len(entries)} config value(s)")
+        delivered(count, None)
         return True
 
     def save_config_values(self) -> bool:
@@ -1399,26 +1401,12 @@ class PulseEditorPresenter:
         self._done(f"saved {len(entries)} value(s) to {target.name}")
         return True
 
-    def _sync_config_values(self) -> bool:
-        """Show matching loaded overrides using the compiler's binding rule.
+    def _effective_sequence(self, sequence: PulseSequence) -> PulseSequence:
+        """Project cached Config overrides without changing the author's draft."""
 
-        Open/Load/On Pulse call this explicitly; ordinary refresh and Save
-        do not overwrite edits. Unmatched fields keep their current values.
-        """
-
-        sequencer = self.sequencer
-        sequence = self.sequence
-        if sequencer is None or sequence is None or not sequence.config_parameters:
-            return False
-        try:
-            held = sequencer.config_values()
-        except Exception:
-            return False
-        synced, applied, _unknown = apply_config_values(sequence, held)
-        if not applied or synced == sequence:
-            return False
-        self._accept_state(replace(self._state, sequence=synced))
-        return True
+        if self.sequencer is None or not sequence.config_parameters:
+            return sequence
+        return apply_config_values(sequence, self.sequencer.config_values())[0]
 
     def start_new_pulse(self) -> bool:
         """Begin a pulse on the board this bench actually has.
@@ -1824,12 +1812,9 @@ class PulseEditorPresenter:
         a preview that compiles for an imaginary board is exactly the kind of
         confirmation that survives until the bench proves it wrong.
 
-        BOTH halves, because a connected board fills the pulse's config
-        parameters with its own calibrated numbers on the way through, and
-        the sequence that comes back is the one that must be handed to
-        ``load(source=...)``.  Disconnected there is no board to ask, so the
-        authored numbers stand and the pair is the sequence unchanged -- an
-        offline preview is honest about being one.
+        Both halves retain the authored Config defaults. The device applies
+        its loaded Config at load/Fire; this pure compilation never reads a
+        file or replaces the draft with an executable resolved sequence.
         """
 
         from zlc_pulse import compile_sequence
@@ -2382,7 +2367,7 @@ class PulseEditorPresenter:
                 )
             )
         if wire_rows:
-            self._remember_applied_scan(program, source, wire_rows)
+            self._remember_applied_scan(program, source, wire_rows, digest=program.digest)
         else:
             self._applied_scan = None
         # EVERY execution fact the sync point later compares is adopted
@@ -2431,7 +2416,11 @@ class PulseEditorPresenter:
             return False
         try:
             self._load_prepared(prepared)
+            self._digest_revision = -1
             self._poll_board()
+            source, program, rows, _sweeps = prepared
+            self._remember_applied_scan(program, source, rows, digest=self._board_state.applied_digest)
+            self.refresh_preview()
             return True
         except Exception as error:
             self._warn(f"cannot load this pulse: {error}")
@@ -2495,13 +2484,14 @@ class PulseEditorPresenter:
     ) -> None:
         source, program, rows, _sweeps = prepared
         self.sequencer.load(program, source=source, rows=rows)
-        self._remember_applied_scan(program, source, rows)
 
     def _remember_applied_scan(
         self,
         program: object,
         source: PulseSequence,
         wire_rows: Sequence[Sequence[int]],
+        *,
+        digest: str,
     ) -> None:
         """Freeze the table that was actually handed to the sequencer."""
 
@@ -2519,7 +2509,7 @@ class PulseEditorPresenter:
             params=self._compiler_target()[0],
         )
         self._applied_scan = (
-            str(program.digest),
+            str(digest),
             tuple(column.name for column in columns),
             scan_rows_from_wire(wire_rows, columns),
         )
@@ -2581,11 +2571,7 @@ class PulseEditorPresenter:
         if sequencer is None:
             self._warn("this editor is not connected to a sequencer")
             return
-        # The board's calibrated numbers, BEFORE the request is built.  This
-        # path -- not fire() -- is the one the On Pulse button takes whenever
-        # the window has a device worker, which is always in the GUI.
-        if self._sync_config_values():
-            self.refresh()
+        authored_revision = self.revision
         try:
             source, rows, sweeps, slot_tick_scales = self._execution_request()
         except Exception as error:
@@ -2626,9 +2612,12 @@ class PulseEditorPresenter:
             self._board_state = state
             if error is None:
                 self._finite_drive = finite
-                self._remember_applied_scan(program, source, rows)
-                self._digest = program.digest
-                self._digest_revision = self.revision
+                self._remember_applied_scan(program, source, rows, digest=state.applied_digest)
+                self._digest_revision = -1
+                if self.revision == authored_revision:
+                    self._digest = state.applied_digest
+                    self._digest_revision = authored_revision
+                self.refresh_preview()
                 self.view.set_summary("Started")
             else:
                 if not state.firing:
@@ -2784,12 +2773,6 @@ class PulseEditorPresenter:
         if self.sequencer is None:
             self._warn("this editor is not connected to a sequencer")
             return False
-        # The board's own calibrated numbers, BEFORE the request is built, so
-        # what is on screen and what is about to play are the same pulse.
-        # ``compile_pulse`` would apply them anyway; doing it here is what
-        # makes the screen honest rather than merely the board correct.
-        if self._sync_config_values():
-            self.refresh()
         try:
             prepared = self._prepare_execution()
         except Exception as error:
@@ -2801,13 +2784,16 @@ class PulseEditorPresenter:
             return False
         try:
             self._load_prepared(prepared)
-            source, _program, _rows, sweeps = prepared
+            source, program, rows, sweeps = prepared
             self.sequencer.fire(
                 run_repeats=source.run_repeats,
                 scan_repeats=sweeps,
             )
             self._finite_drive = bool(source.run_repeats and sweeps)
+            self._digest_revision = -1
             self._poll_board()
+            self._remember_applied_scan(program, source, rows, digest=self._board_state.applied_digest)
+            self.refresh_preview()
         except Exception as error:
             self._warn(f"firing stopped: {error}")
             self._safe_drive(release=True)
@@ -3025,7 +3011,7 @@ class PulseEditorPresenter:
             try:
                 source, _rows, _sweeps, scales = self._execution_request()
                 self._digest = self.compile(
-                    source,
+                    self._effective_sequence(source),
                     slot_tick_scales=scales,
                 )[1].digest
             except Exception:
@@ -4206,7 +4192,7 @@ class PulseEditorPresenter:
             return recommended_pulse_preset(0, 0)
         try:
             return self._preview_candidate(
-                self.sequence,
+                self._effective_sequence(self.sequence),
                 bool(self.view.preview_include_off_rows),
                 None,
             )[1]
@@ -4278,7 +4264,7 @@ class PulseEditorPresenter:
         if self._preview_host is None and not self._preview_on_screen:
             return
         self._preview_pending = (
-            self.sequence,
+            self._effective_sequence(self.sequence),
             bool(self.view.preview_include_off_rows),
             self._pinned_size,
         )

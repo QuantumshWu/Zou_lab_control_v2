@@ -215,6 +215,9 @@ class ScriptedScanBench:
     def load_config_values(self, entries, *, source: str = "") -> None:
         self._sequencer.load_config_values(entries, source=source)
 
+    def load_config_file(self, path) -> None:
+        self._sequencer.load_config_file(path)
+
     def config_values(self) -> dict:
         return self._sequencer.config_values()
 

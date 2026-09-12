@@ -34,20 +34,31 @@ A pulse field's value comes from one of three places, and which one is the
 whole meaning of its binding. A SCAN slot is filled by the board, one value per
 point, out of the hardware's four. An API parameter is a hole a caller fills
 once per run; `compile_sequence` refuses one that is still open. A CONFIG
-parameter is neither: its value IS the field's own number. The sequencer's
-loaded set optionally overrides matching Config IDs; unmatched fields retain
-their authored values, including when the set is empty or entirely unrelated.
-`PulseStreamer.compile_pulse` applies this one binding rule before compiling,
-validates matched values and units, and returns BOTH the resulting sequence
-and its program. The resulting sequence must be handed back as `source=` so
-the recorded values are exactly those compiled. Local and remote clients use
-the same owner; this does not broadcast a loaded set to other clients.
+parameter is neither: its default IS the field's own number. Config files use
+the displayed Config numbers `1`, `2`, ... in declaration/click order, never
+local period/slot/parameter IDs. Scan and API bindings do not affect that order.
+Unmatched numbers keep the pulse's defaults; matched values and units are validated.
+`compile_pulse` is pure authoring compilation. Device `load`/`fire` share the
+override rule, retain the authored source separately from the actual source,
+and record the program actually loaded. Load also reads the bound file before
+preparing its upload, avoiding an obsolete upload immediately before Fire.
+Deleting an override restores its
+authored default, not a value left behind by an earlier override.
 
 Pulse Editor's **Save config** exports the current document's Config fields
 through `authored_config_entries`, including their declared units and an empty
 set when none are declared. It works offline and neither runs a pulse nor
-modifies the sequencer. **Load config**
-explicitly replaces the sequencer's override set. It is not a file watcher.
+modifies the sequencer. **Load config** binds the file with `load_config_file`.
+Every device `fire()` rereads that file before execution; unchanged effective
+values require neither recompilation nor a new hardware load. Changed values
+are recompiled/reloaded before firing, preserving scan rows, tick scales and
+the requested repeats. Invalid or missing bound files refuse that Fire, not
+silently execute old values. There is no background watcher or preview file I/O.
+`load_config_values(entries)` remains the explicit in-memory API and detaches
+any file binding; its `source` label is not guessed to be a path. Config files
+with old field-name keys must be re-saved as numbered files, not guessed across
+pulses. Local/Virtual/Remote devices share this behavior; a Remote client owns
+its own file binding, not a server-wide path.
 A field a run needs to vary is an API parameter, which is the
 whole difference between the two, so a field carries at most one binding and
 all three share one id namespace.

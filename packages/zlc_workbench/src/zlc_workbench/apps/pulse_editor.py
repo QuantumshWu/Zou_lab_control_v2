@@ -136,35 +136,14 @@ def build(
     from ..pulse_preview import build_pulse_preview_host, resize_pulse_preview_host
 
     def dial_and_calibrate(mode: str, endpoint: str):
-        """Dial, then hand the board this workspace's current calibration.
+        """Bind the selected file to the device, which refreshes it on Fire."""
 
-        A session does this for its own sequencer when it opens.  A standalone
-        editor dials its own, so it is the one that has to -- otherwise the
-        window a bench actually uses is the one place a pulse compiles against
-        an empty set.  Reading the file belongs here, at the composition root
-        that knows where the workspace is; zlc_pulse is handed entries.
-        """
-
-        # The file is decoded BEFORE anything is dialled: a config file that
-        # does not parse is a refusal with no connection behind it.  What can
-        # still fail after the dial is the board's own acceptance of the
-        # entries, and a connection that fails after it was opened is closed
-        # by the one who opened it -- the presenter only ever sees the error,
-        # never the streamer, so nobody else could.
-        entries = None
-        source = ""
-        if config_values:
-            from zlc_atom.pulse_values import read_config_values
-
-            path = Path(config_values)
-            if path.is_file():
-                _name, _origin, entries = read_config_values(path)
-                source = str(path)
         streamer = dial(mode, endpoint)
-        if entries is None:
+        path = Path(config_values) if config_values else None
+        if path is None or not path.is_file():
             return streamer
         try:
-            streamer.load_config_values(entries, source=source)
+            streamer.load_config_file(path)
         except BaseException:
             streamer.close()
             raise
@@ -293,7 +272,7 @@ def create_window(
     entry means the window under inspection is the window that ships.
     """
 
-    from zlc_atom.pulse_values import CURRENT_CONFIG_VALUES
+    from zlc_pulse import CURRENT_CONFIG_VALUES
     from zlc_ui import open_pulse_editor
     from ..board import attach_qt_owner_turn, attach_qt_worker
 

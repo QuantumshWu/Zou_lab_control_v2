@@ -23,6 +23,10 @@ class _Device:
         self.config = dict(entries)
         self.config_source = source
 
+    def load_config_file(self, path) -> None:
+        from zlc_pulse import read_config_values
+        self.load_config_values(read_config_values(path)[2], source=str(path))
+
 
 #: The one parameter these test types author: a device's settings are the
 #: fields its schema declares, which is also what a reconcile compares.
@@ -89,16 +93,16 @@ def _device(key: str, *, role: str | None = None, value: int = 0, dependent=Fals
 
 
 def test_reconcile_reuses_unchanged_leaf_and_only_builds_added_device(tmp_path):
-    from zlc_atom.pulse_values import write_config_values
+    from zlc_pulse import write_config_values
 
     events: list[str] = []
     catalog = _catalog(events)
     initial = InstallationConfig((_device("sequencer"),))
     session = ExperimentSession.from_config(tmp_path, initial, catalog=catalog)
     original = session.installation.device("sequencer")
-    original.load_config_values({"delay": (17.0, "ns")}, source="operator.json")
+    original.load_config_values({"1": (17.0, "ns")}, source="operator.json")
     current = session.workspace.config_values / "current.json"
-    write_config_values(current, {"delay": (5.0, "us")})
+    write_config_values(current, {"1": (5.0, "us")})
 
     wanted = InstallationConfig(
         (_device("sequencer", role="renamed"), _device("other"))
@@ -112,7 +116,7 @@ def test_reconcile_reuses_unchanged_leaf_and_only_builds_added_device(tmp_path):
     assert session.installation.device("sequencer") is original
     assert set(session.installation.devices) == {"sequencer", "other"}
     assert events == []
-    assert original.config == {"delay": (17.0, "ns")}
+    assert original.config == {"1": (17.0, "ns")}
     assert original.config_source == "operator.json"
 
     # A genuinely new sequencer still takes the workspace's current set.
@@ -120,7 +124,7 @@ def test_reconcile_reuses_unchanged_leaf_and_only_builds_added_device(tmp_path):
     session.reconcile_devices(session.plan_device_reconcile(replacement))
     rebuilt = session.installation.device("sequencer")
     assert rebuilt is not original
-    assert rebuilt.config == {"delay": (5.0, "us")}
+    assert rebuilt.config == {"1": (5.0, "us")}
     assert rebuilt.config_source == str(current)
     session.close()
     assert events == ["close:sequencer", "close:sequencer", "close:other"]

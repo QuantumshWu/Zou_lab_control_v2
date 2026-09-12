@@ -152,6 +152,9 @@ class CompiledProgram:
         object.__setattr__(self, "loop_end_slot_coeffs", loop_coeffs)
         object.__setattr__(self, "bus_segments", tuple(self.bus_segments))
         object.__setattr__(self, "bus_delays", tuple(self.bus_delays))
+        object.__setattr__(self, "bus_names", tuple(self.bus_names))
+        object.__setattr__(self, "logical_digital_outputs", tuple(tuple(item) for item in self.logical_digital_outputs))
+        object.__setattr__(self, "bus_safe_values", tuple(self.bus_safe_values))
         object.__setattr__(self, "channel_delays", tuple(int(value) for value in channel_delays))
         # Prove the derived scan-unit metadata now, while malformed programs
         # can still be refused at their construction boundary.
