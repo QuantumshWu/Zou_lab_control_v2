@@ -10,6 +10,7 @@
 
 ## 1. 当前实施范围
 
+- Config工作流已统一：Save从当前Editor的Config字段按声明单位导出，离线可用且不改sequencer；Load提供sequencer可选覆盖集，统一编译按ID交集覆盖、缺项保留Pulse原值。删除先On Pulse才Save和缺项拒绝旧策略。时间单位复用统一解析，包含us/µs；apparatus增删无关设备不再重载保留sequencer的配置，只有新建/替换时加载current.json。
 - 已删除Exponential按观测窗口跨度设定的A/B/tau自动硬边界，以及四种Histogram概率模型的平底beta及其分类扣除旁路；数学域、显式用户约束、普通Gaussian B和Poisson数值floor保留。
 - 协方差收尾统一为原生Householder R-only QR＋小矩阵SVD；不生成无用大Q/U，不放宽rank阈值，预测数组直接复用。独立高精度比较表明极端病态协方差会放大各稳定算法的舍入，旧SVD并非精确真值；生产只保留QR一个方案，DGESVD桥与原地转置候选只留ignored研究。15组加权/Poisson/fixed/order/masked收尾输出与原native基线一致，真实FitEngine普通数据参数/误差保持。默认32768源点案例的求解仍按既有4096上限，不能冒称全32768求解；报告区分完整输入链与隔离收尾。
 

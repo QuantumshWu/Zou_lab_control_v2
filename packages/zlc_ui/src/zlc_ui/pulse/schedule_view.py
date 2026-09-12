@@ -1181,18 +1181,18 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.collapse_button = FluentButton("Collapse", color=GREY)
         # The board's calibrated numbers -- a channel delay, a DAC bias --
         # which it then fills into every pulse it plays.  They belong to the
-        # apparatus, so these carry the whole set on and off the BOARD rather
-        # than editing the document that is open.
+        # apparatus. Load gives the sequencer an override set; Save exports
+        # the Config fields of the document currently being edited.
         self.load_values_button = FluentButton("Load config", color=ORANGE)
         self.save_values_button = FluentButton("Save config", color=YELLOW)
         self.load_values_button.setToolTip(
             "Give the connected board a set of calibrated values.  It holds "
-            "them until the next load and fills them into every pulse it "
-            "compiles, including ones fired from outside this window."
+            "them until the next load and overrides matching Config fields "
+            "in every pulse it compiles; unmatched fields keep their values."
         )
         self.save_values_button.setToolTip(
-            "Write what the connected board is holding now as a set it can be "
-            "given again."
+            "Save this editor's Config parameters, current values and units. "
+            "No connection or On Pulse is required; the sequencer is unchanged."
         )
         control_buttons = (
             self.run_button, self.stop_button, self.sync_button,

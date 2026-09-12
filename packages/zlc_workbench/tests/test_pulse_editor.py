@@ -1050,16 +1050,6 @@ class _Sequencer:
         from zlc_pulse import apply_config_values, compile_sequence
 
         held = dict(self._config_values)
-        absent = tuple(
-            parameter.parameter_id
-            for parameter in sequence.config_parameters
-            if parameter.parameter_id not in held
-        )
-        if absent:
-            raise ValueError(
-                f"{sequence.name!r} declares config parameter(s) {absent} that "
-                f"the loaded config values say nothing about"
-            )
         filled, _applied, _unknown = apply_config_values(sequence, held)
         return filled, compile_sequence(
             filled, geom, clock_hz, slot_tick_scales=slot_tick_scales
@@ -4229,10 +4219,8 @@ def test_a_pulse_shows_the_boards_numbers_the_moment_a_board_is_there(
 ) -> None:
     """What is on screen is what would play, not what the file was saved with.
 
-    A config parameter's number belongs to the board, so with one attached the
-    authored number is stale by definition.  ``compile_pulse`` overwrites it
-    on the way through anyway -- doing it here is what makes the SCREEN honest
-    rather than only the board correct.
+    A matching loaded override wins in ``compile_pulse``. Reflecting that
+    same rule in the editor keeps the displayed and executed values aligned.
     """
 
     board = _Sequencer()
@@ -4254,19 +4242,46 @@ def test_a_pulse_shows_the_boards_numbers_the_moment_a_board_is_there(
     assert applied.source.period_by_id[period].duration == authored + 20.0
 
 
-def test_a_declared_config_parameter_with_no_set_refuses_to_fire(
-    presenter, sequence
+def test_editor_config_can_be_saved_offline_and_loaded_without_firing_first(
+    presenter, sequence, tmp_path
 ) -> None:
-    """Refusing beats playing an authored placeholder under a calibrated name."""
+    """Save reads the editor; Load supplies optional sequencer overrides."""
+
+    from zlc_atom.pulse_values import read_config_values
+    from zlc_pulse import pulse_field_value
+
+    saved = tmp_path / "config.json"
+    presenter.view.save_answer = str(saved)
+    assert presenter.sequencer is None
+    assert presenter.save_config_values()
+    assert read_config_values(saved)[2] == {}
+    parameter = _bind_one_config_parameter(presenter, sequence)
+    period = parameter.field_ref.period_id
+    value = pulse_field_value(presenter.sequence, parameter.field_ref, parameter.unit)
+    assert presenter.save_config_values()
+    assert read_config_values(saved)[2] == {parameter.parameter_id: (value, parameter.unit)}
 
     board = _Sequencer()
     presenter.sequencer = board
     assert presenter.adopt_board() is True
-    _bind_one_config_parameter(presenter, sequence)
-
+    # Empty loaded set is legal and is not silently populated by On Pulse.
     board.events.clear()
-    assert presenter.fire() is False
-    assert "load" not in board.events, board.events
+    assert presenter.fire()
+    assert board.config_values() == {}
+    presenter.stop()
+
+    board.load_config_values({parameter.parameter_id: (value, parameter.unit), "other": (1.0, "ns")})
+    presenter.view.duration_committed.emit(period, value + 40.0, parameter.unit)
+    board.events.clear()
+    assert presenter.save_config_values()
+    assert board.events == []
+    assert board.config_values()[parameter.parameter_id][0] == value
+    assert read_config_values(saved)[2] == {parameter.parameter_id: (value + 40.0, parameter.unit)}
+    presenter.view.open_answer = str(saved)
+    assert presenter.load_config_values()
+    assert board.config_values() == {parameter.parameter_id: (value + 40.0, parameter.unit)}
+    assert presenter.fire()
+    assert pulse_field_value(board._applied.source, parameter.field_ref, parameter.unit) == value + 40.0
 
 
 def test_loading_a_set_moves_the_stale_dot_without_a_document_edit(

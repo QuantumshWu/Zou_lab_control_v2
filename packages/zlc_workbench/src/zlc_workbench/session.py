@@ -837,11 +837,10 @@ class ExperimentSession:
             self.installation = successor
             self._installation_config = target_config
             self._installation_revision += 1
-            # A successor holds NEW device objects, so the calibrated set the
-            # old sequencer was holding did not come with them.  Without this
-            # the bench keeps running after an apparatus edit and every pulse
-            # that declares a config parameter is refused.
-            self._load_current_config_values()
+            # Retained leaves keep the operator's loaded set. Only a newly
+            # built sequencer needs its initial workspace configuration.
+            if "sequencer" in plan.build_keys:
+                self._load_current_config_values()
 
     def _load_current_config_values(self) -> None:
         """Hand the board the calibration this workspace is running today.

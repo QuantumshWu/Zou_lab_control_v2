@@ -34,18 +34,21 @@ A pulse field's value comes from one of three places, and which one is the
 whole meaning of its binding. A SCAN slot is filled by the board, one value per
 point, out of the hardware's four. An API parameter is a hole a caller fills
 once per run; `compile_sequence` refuses one that is still open. A CONFIG
-parameter is neither: its value IS the field's own number, and the SEQUENCER
-supplies today's. A board is calibrated, not a pulse -- channel delays and DAC
-biases belong to the apparatus and are shared by every pulse it plays -- so the
-value set is loaded onto the device once and `PulseStreamer.compile_pulse` is
-the only way to compile for a board. It writes the held numbers into the
-period, the DAC step or the delay each parameter names and returns BOTH the
-filled sequence and the program, because the filled one is what must be handed
-back as `source=`. A declaration the held set says nothing about is refused
-there, before anything could play it: a stale number played while the run
-record claims it is fresh is the one outcome worse than refusing to run.
-`compile_sequence` itself stays blind to config parameters, so nothing but that
-one door is safe. A field a run needs to vary is an API parameter, which is the
+parameter is neither: its value IS the field's own number. The sequencer's
+loaded set optionally overrides matching Config IDs; unmatched fields retain
+their authored values, including when the set is empty or entirely unrelated.
+`PulseStreamer.compile_pulse` applies this one binding rule before compiling,
+validates matched values and units, and returns BOTH the resulting sequence
+and its program. The resulting sequence must be handed back as `source=` so
+the recorded values are exactly those compiled. Local and remote clients use
+the same owner; this does not broadcast a loaded set to other clients.
+
+Pulse Editor's **Save config** exports the current document's Config fields
+through `authored_config_entries`, including their declared units and an empty
+set when none are declared. It works offline and neither runs a pulse nor
+modifies the sequencer. **Load config**
+explicitly replaces the sequencer's override set. It is not a file watcher.
+A field a run needs to vary is an API parameter, which is the
 whole difference between the two, so a field carries at most one binding and
 all three share one id namespace.
 

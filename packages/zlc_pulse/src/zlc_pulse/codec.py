@@ -523,9 +523,8 @@ def config_values_to_tree(
 ) -> dict[str, Any]:
     """One named set of CONFIG parameter values, as a tree a file can hold.
 
-    What a calibration writes and a pulse refreshes itself from.  Same shape
-    as an API set and deliberately not the same root: handing one to the other
-    is a mistake a reader should catch, not carry out.
+    Pulse Editor exports its declared Config fields here; a sequencer can
+    load this set as optional overrides for later pulse compilation.
     """
 
     return {

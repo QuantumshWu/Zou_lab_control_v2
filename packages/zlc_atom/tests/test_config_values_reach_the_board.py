@@ -151,8 +151,8 @@ def test_a_session_hands_its_board_the_workspace_set(tmp_path, monkeypatch) -> N
 def test_a_workspace_with_no_set_is_silent(tmp_path) -> None:
     """An empty seed is deliberate: a seeded delay is a wrong calibration.
 
-    So the board simply holds nothing, every ordinary pulse still runs, and a
-    pulse that needs a calibrated number is refused by name when it compiles.
+    The board initially holds no overrides; pulses retain their authored
+    Config field values until a matching override is explicitly loaded.
     """
 
     from zlc_workbench.session import ExperimentSession, Workspace
