@@ -521,7 +521,7 @@ def test_a_read_that_never_completes_reports_every_attempt_by_shape() -> None:
     assert transport.resends == attempts - 1
 
 
-def test_a_slow_write_is_a_timeout_this_layer_can_retry() -> None:
+def test_a_slow_write_is_a_timeout_this_layer_can_retry(monkeypatch) -> None:
     """pyserial's write timeout is an OSError; the link translates it.
 
     ``SerialTimeoutException`` is not a ``TimeoutError``, so every retry
@@ -531,6 +531,7 @@ def test_a_slow_write_is_a_timeout_this_layer_can_retry() -> None:
     """
 
     import time
+    import os
 
     import pytest
     import serial
@@ -556,6 +557,47 @@ def test_a_slow_write_is_a_timeout_this_layer_can_retry() -> None:
     link._serial.write = lambda payload: len(payload) - 1
     with pytest.raises(TimeoutError, match="3 of 4 byte"):
         link.exchange(b"\x01\x02\x03\x04", deadline=time.monotonic() + 1.0)
+
+    if os.name == "nt":
+        import ctypes
+        from serial import serialwin32, win32
+
+        # A real backend object, never opened: no COM handle can be touched.
+        port = serialwin32.Serial(timeout=0.05, write_timeout=1.0)
+        calls = []
+        accepted = True
+        previous = (0.05, 1.0)
+        def forbidden_state(*args):
+            raise AssertionError("timeout changes must not reconfigure the DCB")
+        def set_timeouts(handle, pointer):
+            assert handle is None
+            assert (port.timeout, port.write_timeout) == previous
+            limits = ctypes.cast(pointer, ctypes.POINTER(win32.COMMTIMEOUTS)).contents
+            calls.append(tuple(getattr(limits, field) for field, _type in limits._fields_))
+            return accepted
+        for name in ("GetCommState", "SetCommState", "SetCommMask"):
+            monkeypatch.setattr(win32, name, forbidden_state)
+        monkeypatch.setattr(win32, "SetCommTimeouts", set_timeouts)
+        port.is_open = True
+        try:
+            link._set_timeout(port, "timeout", 0.01)
+            assert calls == [(0, 0, 10, 0, 1000)]
+            assert (port.timeout, port.write_timeout) == (0.01, 1.0)
+            link._set_timeout(port, "timeout", 0.01)
+            assert len(calls) == 1
+            previous = (0.01, 1.0)
+            link._set_timeout(port, "write_timeout", 0.008)
+            assert calls[-1] == (0, 0, 10, 0, 8)
+            previous = (0.01, 0.008)
+            accepted = False
+            with pytest.raises(serial.SerialException, match="Cannot set UART timeouts"):
+                link._set_timeout(port, "timeout", 0.005)
+            assert (port.timeout, port.write_timeout) == previous
+            accepted = True
+            link._set_timeout(port, "timeout", 0.0)
+            assert calls[-1] == (win32.MAXDWORD, 0, 0, 0, 8)
+        finally:
+            port.is_open = False
 
 
 def test_a_write_timeout_on_an_early_attempt_is_retried() -> None:

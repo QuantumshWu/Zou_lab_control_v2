@@ -11,6 +11,7 @@
 ## 1. 当前实施范围
 
 - UART接收改为实际read决定到达，队列为0仍提交短时read(1)；本机分包直接案例通过，但实验机仍收到64/65且crc_prefix_ok=false，因此该接收调整未解决现场故障，不能认定仅CRC尾字节迟到。失败诊断保存解析前有限前缀、请求及重试恢复后的真实回复hex；正常成功不格式化hex，不累计通信历史。真实RTL逐bit仿真13/14/15 words共585字节一致不代表实际USB/串口已验收。Remote旧socket现场已于takeover当时退出且NO_ACTION，不是活动LAN连接超时。Device日志按窗口宽度软换行，长无空格诊断可折行，复制仍保留原文。未build/program，探针及仿真产物不入Git。
+- 现场原始帧已确认不止一种缺失：seq32在CRC之前的末十个连续00中少一个，CRC ee1d完整；seq79的运行状态02对应CRC 4ec6，结合静态寄存器不变支持缺低CRC字节4e，重试状态04对应另一CRC fd52。不能把后者误解为fd52被截成c6。运行期timeout setter会重新下发整个Win32 DCB的冗余已移除，改用现有SetCommTimeouts；两项直接用例通过，保留deadline/取消、原读写及失败状态不提前更新。此修改是否消除真机丢字节尚待确认，不把离线CRC分析冒充物理链路定位。
 - UART已删除写后Win32 flush轮询，并按pending SEQ收取回复，旧/重复帧及坏CRC不再吞当前有效ACK；真实缺包/NAK/命令去重不变。直接PySerialLink模拟串口证明软件自发重发已消除，未操作实验板。Done计时分清command、终态观察和report retrieval，日志仅有真实重发时附最后原因；不能以日志口径修正代替真机延迟验收。
 - 设备Role已沿既有bench facts进入两个Scan factory及ScanPort.label，UI和新扫描Axis.name不再各自拼内部ID；port/AxisId和数值不变，纯Role重投不读设备。Config空路径统一解除绑定和清覆盖，下一次Fire恢复原稿；空JSON仍是绑定文件。Save Config的可选field说明使用Period/Channel显示名，只用于阅读，不进入编号匹配。
 - 数值名称贯通现有ValueSchema、生产节点、Scan/ROI/history、Plot与Figure codec；FrameSurvival的survival经过Scan不再变value/scan。Derive用户输出、Fit参数、ROI统计由各自owner命名；普通数值轴使用同一quantity label，显式标签优先。Facet外层轴标签归一到cell，解决其被忽略及换轴旧标签复活；无renderer分支。Data/Atom/Plot/Runtime/Viewer直接验证及真实FigureViewer截图通过，窗口关闭，截图不入Git。

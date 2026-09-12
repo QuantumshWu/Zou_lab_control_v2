@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 import math
+import os
 import threading
 import time
 from typing import Protocol
@@ -79,7 +80,7 @@ class PySerialLink:
             raise TransportAborted("UART request cancelled")
         serial_port = self._require_open()
         serial_port.reset_input_buffer()
-        serial_port.write_timeout = _remaining(deadline, "UART write")
+        self._set_timeout(serial_port, "write_timeout", _remaining(deadline, "UART write"))
         # Cleared BEFORE the write: a write that stalls raises past the read,
         # and whoever reports this attempt must not find the previous one's
         # shortfall still lying here.
@@ -105,11 +106,38 @@ class PySerialLink:
             return []
         serial_port = self._require_open()
         serial_port.reset_input_buffer()
-        serial_port.write_timeout = _remaining(deadline, "UART write")
+        self._set_timeout(serial_port, "write_timeout", _remaining(deadline, "UART write"))
         self.last_shortfall = ""
         self.last_read_summary = ""
         self._write(serial_port, (b"\xff" * 8).join(requests))
         return self._read_replies({request[3] for request in requests}, deadline=deadline, stop=stop)
+
+    def _set_timeout(self, serial_port, name: str, value: float) -> None:
+        """Change a deadline without reapplying the Windows baud/DCB settings."""
+
+        if getattr(serial_port, name) == value:
+            return
+        if os.name == "nt":
+            import ctypes
+            from serial import SerialException, serialwin32, win32
+
+            if isinstance(serial_port, serialwin32.Serial):
+                read = value if name == "timeout" else serial_port.timeout
+                write = value if name == "write_timeout" else serial_port.write_timeout
+                timeouts = win32.COMMTIMEOUTS()
+                if read == 0:
+                    timeouts.ReadIntervalTimeout = win32.MAXDWORD
+                elif read is not None:
+                    timeouts.ReadTotalTimeoutConstant = max(int(read * 1000), 1)
+                if write == 0:
+                    timeouts.WriteTotalTimeoutConstant = win32.MAXDWORD
+                elif write is not None:
+                    timeouts.WriteTotalTimeoutConstant = max(int(write * 1000), 1)
+                if not win32.SetCommTimeouts(serial_port._port_handle, ctypes.byref(timeouts)):
+                    raise SerialException(f"Cannot set UART timeouts: {ctypes.WinError()}")
+                setattr(serial_port, "_" + name, value)
+                return
+        setattr(serial_port, name, value)
 
     def _write(self, serial_port, payload: bytes) -> None:
         """Write the complete request; its matched ACK proves board receipt.
@@ -171,8 +199,7 @@ class PySerialLink:
                 raise TransportAborted("UART read cancelled")
             available = serial_port.in_waiting
             read_timeout = min(0.01, max(0.0, deadline - time.monotonic()))
-            if serial_port.timeout != read_timeout:
-                serial_port.timeout = read_timeout
+            self._set_timeout(serial_port, "timeout", read_timeout)
             started = time.monotonic()
             chunk = serial_port.read(max(1, available))
             read_calls += 1

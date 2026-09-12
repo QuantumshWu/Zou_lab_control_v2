@@ -396,6 +396,7 @@ Node new chunk
 ### 7.4 Host/RTL/build invariants
 
 - UART发送以完整write和本次匹配ACK为完成依据，不在等待ACK前调用Win32按50ms轮询的flush。接收在同一deadline内按本批待回复SEQ集合收齐；驱动队列长度只决定批量read大小，报0仍提交read(1)，单次阻塞以10ms和剩余deadline为界。旧/重复回复不占完成名额，CRC坏帧由同一extractor重同步；有效当前NAK、真正缺包、取消与总deadline仍归原Transport。重发计数只统计实际重发，另保留最后一次重发原因及固定大小读取摘要，不累计历史；缺CRC尾字节的诊断不补造字节、不放宽校验。DoneReport.elapsed_seconds在observer确认终态时固定；command_seconds是其内的命令确认区间，report_delay_seconds另列调用方取报告滞后，不能把GUI/采集等待冒充Pulse执行时间。
+- Windows串口的运行期deadline调整只更新COMMTIMEOUTS，不通过pyserial属性setter重新下发波特率/DCB；完整硬件配置只在open完成。仍复用原pyserial读写，超时系统调用成功后才更新其现有属性状态。
 - 正式板配置直接包含`pgc_1D`：P19、raw lane 18；共63 lanes、19个TTL、4组10-bit DAC与4个clock。原DAC的物理引脚不变（`da_dipole[0]`仍为V9），只有raw lane编号随新增TTL后移。Manifest、XDC、RTL top、生成geometry及仓库Pulse模板一起提交；部署不再运行本地add-channel脚本。Pulse状态按port key保持，不按新旧raw数组相同下标猜对应通道。
 
 - Load前核target ABI、clock、geometry与合法slot rows；delay FIFO capacity和循环接缝在Fire前按本次真实run/scan repeats验证，不先计算一个未请求的1×1执行。相同驻留程序与执行参数复用已验证结论；不把camera exposure或frames-per-cycle反向解释进Pulse program。
