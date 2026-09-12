@@ -112,10 +112,6 @@ def test_a_run_that_has_not_loaded_yet_publishes_no_threshold() -> None:
     Measured here: 15 of 220 fits put a component on one bin, and every one
     of them holds fewer than four shots.
 
-    The rarest state is one shot in twenty: with the flat background in the
-    one-population model as well, a state of nine shots in 430 is strong
-    evidence but not the very strong (a BIC gain of ten) that the default
-    asks for -- at one in fifty a threshold arrives after some 800 shots.
     """
 
     engine = FitEngine()

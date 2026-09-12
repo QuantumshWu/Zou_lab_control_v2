@@ -1322,9 +1322,8 @@ def _bimodal_classifier_metrics(
 
     right_weight = float(values["ratio"])
     fitted = np.asarray(result.fitted_values, dtype=float)
-    # The curve's counts over the bins are the shots it describes, less
-    # the flat background: those counts belong to no population.
-    shots = float(np.sum(fitted)) - float(values["background"]) * float(fitted.size)
+    # Both populations account for the complete fitted histogram.
+    shots = float(np.sum(fitted))
     if not (math.isfinite(right_weight) and 0.0 <= right_weight <= 1.0) or not (
         math.isfinite(shots) and shots > 0.0
     ):
@@ -3485,37 +3484,23 @@ def _gaussian_offset_jacobian(x, amplitude, offset, sigma, center):
     return _compiled_fit._value_jacobian_gaussian(coordinates, values, True)[1]
 
 
-def _histogram_gaussian(x, amplitude, center, sigma, background):
-    """Counts per bin of normally distributed shots over a flat background.
-    ``amplitude`` is the shots times the bin: the density's area over the
-    histogram.  ``background`` is the mixture's noise component, counts
-    per bin that belong to no population: without it a count between the
-    peaks is impossible to the model -- two such counts in sixty shots
-    (atoms lost part-way through the image, a hot pixel) turned a
-    population into a plateau across the axis -- and because the nested
-    one-population model carries it too, the evidence for a second
-    population is about the second population and nothing else."""
-    coordinates, values = _compiled_model_input((x,), (amplitude, center, sigma, background))
+def _histogram_gaussian(x, amplitude, center, sigma):
+    """Gaussian shot counts; amplitude is the density's area (shots × bin width)."""
+    coordinates, values = _compiled_model_input((x,), (amplitude, center, sigma))
     return _compiled_fit._value_jacobian_histogram(coordinates, values, False)[0]
 
 
-def _histogram_gaussian_jacobian(x, amplitude, center, sigma, background):
-    coordinates, values = _compiled_model_input((x,), (amplitude, center, sigma, background))
+def _histogram_gaussian_jacobian(x, amplitude, center, sigma):
+    coordinates, values = _compiled_model_input((x,), (amplitude, center, sigma))
     return _compiled_fit._value_jacobian_histogram(coordinates, values, True)[1]
 
 
-def _bimodal_a(x, amplitude, center, sigma, delta_center, sigma_b, ratio, background):
-    return _histogram_gaussian(x, amplitude * (1.0 - ratio), center, sigma, 0.0)
+def _bimodal_a(x, amplitude, center, sigma, delta_center, sigma_b, ratio):
+    return _histogram_gaussian(x, amplitude * (1.0 - ratio), center, sigma)
 
 
-def _bimodal_b(x, amplitude, center, sigma, delta_center, sigma_b, ratio, background):
-    return _histogram_gaussian(x, amplitude * ratio, center + delta_center, sigma_b, 0.0)
-
-
-def _bimodal_background(
-    x, amplitude, center, sigma, delta_center, sigma_b, ratio, background
-):
-    return np.full_like(np.asarray(x, dtype=float), background)
+def _bimodal_b(x, amplitude, center, sigma, delta_center, sigma_b, ratio):
+    return _histogram_gaussian(x, amplitude * ratio, center + delta_center, sigma_b)
 
 
 def _bimodal_gaussian(x, *parameters):
@@ -3524,9 +3509,9 @@ def _bimodal_gaussian(x, *parameters):
 
 
 def _bimodal_gaussian_jacobian(
-    x, amplitude, center, sigma, delta_center, sigma_b, ratio, background
+    x, amplitude, center, sigma, delta_center, sigma_b, ratio
 ):
-    coordinates, values = _compiled_model_input((x,), (amplitude, center, sigma, delta_center, sigma_b, ratio, background))
+    coordinates, values = _compiled_model_input((x,), (amplitude, center, sigma, delta_center, sigma_b, ratio))
     return _compiled_fit._value_jacobian_bimodal(coordinates, values, True)[1]
 
 
@@ -3542,42 +3527,35 @@ def _compiled_model_input(coordinates, values) -> tuple[np.ndarray, np.ndarray]:
     return packed, parameters
 
 
-def _histogram_poisson_gaussian(x, amplitude, rate, sigma, background):
+def _histogram_poisson_gaussian(x, amplitude, rate, sigma):
     """The Poisson law extended to a real photon number through the Gamma
     function, ``p(u) = rate^u e^-rate / Gamma(u+1)`` on ``u >= 0``,
     convolved with the camera's Gaussian read noise:
-    ``Nw / (sigma sqrt(2 pi)) int p(u) exp(-(x-u)^2 / 2 sigma^2) du``,
-    over a flat ``background`` of counts per bin.  A smooth function of
-    the bin centre like every other model; negative values (read noise
-    below zero photons) are ordinary.  ``Nw`` is the shots times the bin:
-    the extended law carries unit mass (from about two photons up), so the
-    curve's own area is the amplitude.  The quadrature has ONE
+    ``Nw / (sigma sqrt(2 pi)) int p(u) exp(-(x-u)^2 / 2 sigma^2) du``.
+    A smooth function of the bin centre like every other model; negative values (read noise
+    below zero photons) are ordinary. ``Nw`` is the shots times the bin:
+    the continuous law is normalized to unit mass, so the curve's own
+    area is the amplitude. The quadrature has ONE
     implementation, the compiled kernel; the frozen anchors hold it to an
     independent one.  (A NumPy twin evaluated over a pixel-value histogram
     cost forty cells' overlays 240 ms.)"""
-    coordinates, values = _compiled_model_input((x,), (amplitude, rate, sigma, background))
+    coordinates, values = _compiled_model_input((x,), (amplitude, rate, sigma))
     return _compiled_fit._value_jacobian_poisson(coordinates, values, False)[0]
 
 
-def _histogram_poisson_gaussian_jacobian(x, amplitude, rate, sigma, background):
-    coordinates, values = _compiled_model_input((x,), (amplitude, rate, sigma, background))
+def _histogram_poisson_gaussian_jacobian(x, amplitude, rate, sigma):
+    coordinates, values = _compiled_model_input((x,), (amplitude, rate, sigma))
     return _compiled_fit._value_jacobian_poisson(coordinates, values, True)[1]
 
 
-def _poisson_bimodal_a(x, amplitude, rate, sigma, delta_rate, sigma_b, ratio, background):
-    return _histogram_poisson_gaussian(x, amplitude * (1.0 - ratio), rate, sigma, 0.0)
+def _poisson_bimodal_a(x, amplitude, rate, sigma, delta_rate, sigma_b, ratio):
+    return _histogram_poisson_gaussian(x, amplitude * (1.0 - ratio), rate, sigma)
 
 
-def _poisson_bimodal_b(x, amplitude, rate, sigma, delta_rate, sigma_b, ratio, background):
+def _poisson_bimodal_b(x, amplitude, rate, sigma, delta_rate, sigma_b, ratio):
     return _histogram_poisson_gaussian(
-        x, amplitude * ratio, rate + delta_rate, sigma_b, 0.0
+        x, amplitude * ratio, rate + delta_rate, sigma_b
     )
-
-
-def _poisson_bimodal_background(
-    x, amplitude, rate, sigma, delta_rate, sigma_b, ratio, background
-):
-    return np.full_like(np.asarray(x, dtype=float), background)
 
 
 def _bimodal_poisson_gaussian(x, *parameters):
@@ -3798,7 +3776,7 @@ def _init_histogram(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
     else:
         center = float(np.sum(x * weights) / total)
         sigma = max(float(np.sqrt(np.sum(weights * (x - center) ** 2) / total)), _span(x) / 1000)
-    return total * _histogram_step(x), center, sigma, 0.0
+    return total * _histogram_step(x), center, sigma
 
 
 def _bimodal_candidates(
@@ -3827,8 +3805,7 @@ def _bimodal_candidates(
 
     A seed is the model's own parameters: the shots times the bin, the
     lower population's centre and width, the upper population's offset,
-    width and share, and the flat background: the counts per bin in the
-    gap between the two.
+    width and share.
     """
 
     x = np.asarray(coords[0], dtype=np.float64).reshape(-1)
@@ -3842,7 +3819,7 @@ def _bimodal_candidates(
     def fallback() -> tuple[tuple[float, ...], ...]:
         midpoint = float((np.min(x) + np.max(x)) / 2.0) if x.size else 0.0
         return (
-            (total * step, midpoint - span / 4.0, span / 10.0, span / 2.0, span / 10.0, 0.5, 0.0),
+            (total * step, midpoint - span / 4.0, span / 10.0, span / 2.0, span / 10.0, 0.5),
         )
 
     if x.size < 3 or total <= 0.0:
@@ -3869,7 +3846,6 @@ def _bimodal_candidates(
             ),
             step,
         )
-        gap = (x > left_center + 2.0 * left_sigma) & (x < right_center - 2.0 * right_sigma)
         seeds.append(
             (
                 total * step,
@@ -3878,7 +3854,6 @@ def _bimodal_candidates(
                 right_center - left_center,
                 right_sigma,
                 right_weight / total,
-                float(counts[gap].mean()) if bool(gap.any()) else 0.0,
             )
         )
     if not seeds:
@@ -3979,7 +3954,7 @@ def _init_poisson_histogram(coords: ArrayTuple, y: np.ndarray) -> Sequence[float
     x, counts = _sorted_histogram(coords, y)
     step = _histogram_step(x)
     total, rate, sigma = _poisson_moments(x, counts, step)
-    return total * step, rate, sigma, 0.0
+    return total * step, rate, sigma
 
 
 def _init_poisson_bimodal(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
@@ -4002,7 +3977,6 @@ def _init_poisson_bimodal(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
             span / 2.0,
             max(span / 10.0, step),
             0.5,
-            0.0,
         )
 
     if x.size < 3 or total <= 0.0:
@@ -4021,9 +3995,6 @@ def _init_poisson_bimodal(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
         )
         if not right_rate > left_rate:
             continue
-        gap = (
-            x > left_rate + 2.0 * math.sqrt(left_rate + left_sigma * left_sigma)
-        ) & (x < right_rate - 2.0 * math.sqrt(right_rate + right_sigma * right_sigma))
         seeds.append((
             total * step,
             left_rate,
@@ -4031,7 +4002,6 @@ def _init_poisson_bimodal(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
             right_rate - left_rate,
             right_sigma,
             right_total / total,
-            float(counts[gap].mean()) if bool(gap.any()) else 0.0,
         ))
     if not seeds:
         return fallback()
@@ -4045,8 +4015,8 @@ def _poisson_seed_distance(x: np.ndarray, counts: np.ndarray, seed: Sequence[flo
     as ``_fit_compiled._poisson_bimodal_score``, so both paths solve from
     the same cut."""
 
-    amplitude, rate, sigma, delta_rate, sigma_b, ratio, background = seed
-    predicted = np.full_like(counts, background)
+    amplitude, rate, sigma, delta_rate, sigma_b, ratio = seed
+    predicted = np.zeros_like(counts)
     for area, component_rate, component_sigma in (
         (amplitude * (1.0 - ratio), rate, sigma),
         (amplitude * ratio, rate + delta_rate, sigma_b),
@@ -4214,21 +4184,6 @@ def _exponential_candidates(
         (amplitude, offset, decay_time),
         (-amplitude, offset, decay_time),
     )
-
-
-def _exponential_bounds(
-    coords: ArrayTuple,
-    y: np.ndarray,
-) -> Mapping[str, tuple[float | None, float | None]]:
-    amplitude, _offset, decay_time = _init_exponential(coords, y)
-    y_low, y_high = _data_interval(y)
-    y_range = _value_range(y)
-    amplitude_limit = max(4.0 * y_range, 10.0 * abs(amplitude))
-    return {
-        "amplitude": (-amplitude_limit, amplitude_limit),
-        "offset": (y_low - 10.0 * y_range, y_high + 10.0 * y_range),
-        "decay_time": (decay_time / 10.0, decay_time * 10.0),
-    }
 
 
 def _init_radial(coords: ArrayTuple, values: np.ndarray) -> Sequence[float]:
@@ -4437,9 +4392,6 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
                 FitParameterSpec(
                     "sigma", AXIS_0, POSITIVE, display_label=r"$\sigma$"
                 ),
-                FitParameterSpec(
-                    "background", VALUE, NONNEGATIVE, display_label=r"$\beta$"
-                ),
             ),
             "center",
             _histogram_gaussian,
@@ -4447,7 +4399,7 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             (FitTarget.HISTOGRAM,),
             formula=(
                 r"$f(x)=\frac{Nw}{\sigma\sqrt{2\pi}}"
-                r"e^{-\frac{1}{2}((x-x_0)/\sigma)^2}+\beta$"
+                r"e^{-\frac{1}{2}((x-x_0)/\sigma)^2}$"
             ),
             jacobian=_histogram_gaussian_jacobian,
             compiled_descriptor=_compiled_fit.histogram_gaussian_descriptor(),
@@ -4481,9 +4433,6 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
                 FitParameterSpec(
                     "ratio", DIMENSIONLESS, UNIT_INTERVAL, display_label=r"$r$"
                 ),
-                FitParameterSpec(
-                    "background", VALUE, NONNEGATIVE, display_label=r"$\beta$"
-                ),
             ),
             "ratio",
             _bimodal_gaussian,
@@ -4493,14 +4442,13 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
                 r"$f(x)=Nw\left[\frac{1-r}{\sigma\sqrt{2\pi}}"
                 r"e^{-\frac{1}{2}((x-x_0)/\sigma)^2}"
                 r"+\frac{r}{\sigma_B\sqrt{2\pi}}"
-                r"e^{-\frac{1}{2}((x-x_0-\delta)/\sigma_B)^2}\right]+\beta$"
+                r"e^{-\frac{1}{2}((x-x_0-\delta)/\sigma_B)^2}\right]$"
             ),
             jacobian=_bimodal_gaussian_jacobian,
             presentation=FitPresentationSpec(
                 components=(
                     FitComponentSpec("A", _bimodal_a),
                     FitComponentSpec("B", _bimodal_b),
-                    FitComponentSpec("background", _bimodal_background),
                 ),
             ),
             default_for=(FitTarget.HISTOGRAM,),
@@ -4511,7 +4459,6 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
                     ("amplitude", "amplitude"),
                     ("center", "center"),
                     ("sigma", "sigma"),
-                    ("background", "background"),
                 ),
                 {"delta_center": 0.0, "sigma_B": "sigma", "ratio": 0.5},
             ),
@@ -4540,16 +4487,13 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
                 FitParameterSpec(
                     "sigma", AXIS_0, POSITIVE, display_label=r"$\sigma$"
                 ),
-                FitParameterSpec(
-                    "background", VALUE, NONNEGATIVE, display_label=r"$\beta$"
-                ),
             ),
             "rate",
             _histogram_poisson_gaussian,
             _init_poisson_histogram,
             (FitTarget.HISTOGRAM,),
             formula=(
-                r"$f(x)=Nw\,P(x;\lambda,\sigma)+\beta,\ "
+                r"$f(x)=Nw\,P(x;\lambda,\sigma),\ "
                 r"P(x;\lambda,\sigma)=\frac{1}{\sigma\sqrt{2\pi}}\int_0^{\infty}"
                 r"\frac{\lambda^u e^{-\lambda}}{\Gamma(u+1)}"
                 r"\,e^{-\frac{1}{2}((x-u)/\sigma)^2}\,du$"
@@ -4592,9 +4536,6 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
                 FitParameterSpec(
                     "ratio", DIMENSIONLESS, UNIT_INTERVAL, display_label=r"$r$"
                 ),
-                FitParameterSpec(
-                    "background", VALUE, NONNEGATIVE, display_label=r"$\beta$"
-                ),
             ),
             "ratio",
             _bimodal_poisson_gaussian,
@@ -4602,7 +4543,7 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             (FitTarget.HISTOGRAM,),
             formula=(
                 r"$f(x)=Nw\left[(1-r)\,P(x;\lambda,\sigma)"
-                r"+r\,P(x;\lambda+\delta,\sigma_B)\right]+\beta,\ "
+                r"+r\,P(x;\lambda+\delta,\sigma_B)\right],\ "
                 r"P(x;\lambda,\sigma)=\frac{1}{\sigma\sqrt{2\pi}}\int_0^{\infty}"
                 r"\frac{\lambda^u e^{-\lambda}}{\Gamma(u+1)}"
                 r"\,e^{-\frac{1}{2}((x-u)/\sigma)^2}\,du$"
@@ -4612,7 +4553,6 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
                 components=(
                     FitComponentSpec("A", _poisson_bimodal_a),
                     FitComponentSpec("B", _poisson_bimodal_b),
-                    FitComponentSpec("background", _poisson_bimodal_background),
                 ),
             ),
             compiled_descriptor=(
@@ -4624,7 +4564,6 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
                     ("amplitude", "amplitude"),
                     ("rate", "rate"),
                     ("sigma", "sigma"),
-                    ("background", "background"),
                 ),
                 {"delta_rate": 0.0, "sigma_B": "sigma", "ratio": 0.5},
             ),
@@ -4725,7 +4664,6 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             formula=r"$f(t)=A e^{-(t-t_0)/\tau}+B$",
             jacobian=_exponential_decay_jacobian,
             candidate_initializer=_exponential_candidates,
-            bounds_initializer=_exponential_bounds,
             capabilities=frozenset({_DOMAIN_ANCHORED}),
             compiled_descriptor=_compiled_fit.exponential_decay_descriptor(),
         ),

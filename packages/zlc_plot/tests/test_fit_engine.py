@@ -34,7 +34,7 @@ def _area(height: float, sigma: float) -> float:
 PARAMETERS = {
     "lorentzian": (0.35, 1.2, 2.5, 0.2),
     "gaussian_offset": (2.0, 0.15, 0.9, -0.3),
-    "histogram_gaussian": (_area(2.0, 0.9), 0.2, 0.9, 0.0),
+    "histogram_gaussian": (_area(2.0, 0.9), 0.2, 0.9),
     "bimodal_gaussian": (
         _area(1.2, 0.6) + _area(0.9, 0.8),
         -0.7,
@@ -42,14 +42,13 @@ PARAMETERS = {
         1.4,
         0.8,
         _area(0.9, 0.8) / (_area(1.2, 0.6) + _area(0.9, 0.8)),
-        0.0,
     ),
     "symmetric_lorentzian_doublet": (0.1, 1.0, 1.5, 0.1, 1.2),
     "damped_sine": (1.2, 0.1, 1.4, 3.0, 0.2),
     "exponential_decay": (2.2, 0.1, 2.5),
     "radial_gaussian_center": (3.0, 0.2, 0.8, 0.4, -0.3),
-    "histogram_poisson_gaussian": (2.0, 1.5, 0.6, 0.0),
-    "bimodal_poisson_gaussian": (2.1, 0.8, 0.5, 3.2, 0.7, 0.9 / 2.1, 0.0),
+    "histogram_poisson_gaussian": (2.0, 1.5, 0.6),
+    "bimodal_poisson_gaussian": (2.1, 0.8, 0.5, 3.2, 0.7, 0.9 / 2.1),
 }
 
 _ANCHOR_PATH = Path(__file__).with_name("fixtures") / "fit_anchors.json"
@@ -111,7 +110,7 @@ _POISSON_MODELS = frozenset(
 _BASE_PARAMETERS = {
     "lorentzian": (-0.4, 1.1, 2.2, 0.25),
     "gaussian_offset": (2.0, 0.2, 0.9, -0.3),
-    "histogram_gaussian": (_area(90.0, 0.8), -0.3, 0.8, 0.5),
+    "histogram_gaussian": (_area(90.0, 0.8), -0.3, 0.8),
     "bimodal_gaussian": (
         _area(60.0, 0.55) + _area(45.0, 0.75),
         -1.2,
@@ -119,7 +118,6 @@ _BASE_PARAMETERS = {
         2.4,
         0.75,
         _area(45.0, 0.75) / (_area(60.0, 0.55) + _area(45.0, 0.75)),
-        0.4,
     ),
     "symmetric_lorentzian_doublet": (0.1, 0.8, 1.4, 0.2, 2.5),
     "damped_sine": (1.2, 0.2, 0.25, 6.0, -0.3),
@@ -128,8 +126,7 @@ _BASE_PARAMETERS = {
     "anisotropic_gaussian_center": (3.0, 0.2, 0.9, 0.6, 0.35, -0.25),
     "radial_gaussian_center": (3.0, 0.2, 0.8, 0.35, -0.25),
     # Nw is the shots times the bin, the density's area: these put ~60
-    # counts in the tallest bin like the Gaussian rows do, over a flat
-    # background of a fraction of a count per bin.  The read noise is a fair
+    # counts in the tallest bin like the Gaussian rows do. The read noise is a fair
     # share of each state's variance (sigma^2 / (rate + sigma^2) of 26%, and
     # 45% / 32%): it is a resolved quantity, the optimum is sharp and two
     # solvers land on the same point.  At a 13% share, three outlier bins
@@ -137,8 +134,8 @@ _BASE_PARAMETERS = {
     # (the same total variance), leaving the width on its floor in a flat
     # valley two solvers stop in differently; at twenty photons a
     # 0.3-photon read noise would be a 0.5% share, unidentifiable outright.
-    "histogram_poisson_gaussian": (410.0, 4.0, 1.2, 0.3),
-    "bimodal_poisson_gaussian": (520.0, 1.0, 0.9, 6.0, 1.8, 320.0 / 520.0, 0.3),
+    "histogram_poisson_gaussian": (410.0, 4.0, 1.2),
+    "bimodal_poisson_gaussian": (520.0, 1.0, 0.9, 6.0, 1.8, 320.0 / 520.0),
     "saturation": (125.0, 10.0, 2.0),
 }
 
@@ -299,7 +296,7 @@ def _cell_parameters(model_id: str, cell: int) -> np.ndarray:
         parameters[[0, 1, 2]] += (24.0 * position, 0.6 * position, 0.12 * position)
     elif model_id == "bimodal_gaussian":
         parameters += np.asarray(
-            (22.5, 0.4, 0.08, 0.25, -0.08, 0.05, 0.01)
+            (22.5, 0.4, 0.08, 0.25, -0.08, 0.05)
         ) * position
     elif model_id == "symmetric_lorentzian_doublet":
         parameters[[0, 1, 2, 4]] += (
@@ -325,7 +322,7 @@ def _cell_parameters(model_id: str, cell: int) -> np.ndarray:
         parameters[[0, 1, 2]] += (60.0 * position, 0.8 * position, 0.15 * position)
     elif model_id == "bimodal_poisson_gaussian":
         parameters += np.asarray(
-            (50.0, 0.2, 0.08, 0.8, -0.08, 0.05, 0.01)
+            (50.0, 0.2, 0.08, 0.8, -0.08, 0.05)
         ) * position
     elif model_id == "anisotropic_gaussian_center":
         parameters[[0, 2, 3, 4, 5]] += (
@@ -1279,6 +1276,43 @@ def test_fit_bounds_are_enforced() -> None:
     assert not result.parameter_error_validity["sigma"]
     assert not result.parameter_error_validity["center"]
     assert result.parameter_error_validity["amplitude"]
+
+    # A short lifetime measurement window does not constrain the lifetime
+    # itself, or the free amplitude when its background is fixed.
+    from scipy.optimize import least_squares
+
+    x = np.linspace(10.0, 200.0, 20)
+    elapsed = x - x[0]
+    values = 0.985 * np.exp(-elapsed / 6000.0)
+    # The default gradient tolerance also applies to a lifetime in ms: use
+    # SciPy's same stopping contract, not exact recovery of the noiseless tau.
+    tau_only = least_squares(
+        lambda p: 0.985 * np.exp(-elapsed / p[0]) - values,
+        (np.ptp(x) / 3.0,),
+        jac=lambda p: (0.985 * np.exp(-elapsed / p[0]) * elapsed / p[0] ** 2)[:, None],
+        bounds=(np.finfo(float).eps, np.inf),
+        x_scale="jac",
+    ).x[0]
+    for fixed in ({"offset": 0.0}, {"amplitude": 0.985, "offset": 0.0}):
+        engine = FitEngine()
+        bounds = {name: (value, value) for name, value in fixed.items()}
+        single = engine.fit("exponential_decay", (x,), values, bounds=bounds)
+        batch, failures = engine.fit_batch(
+            "exponential_decay", ((x,), (x,)), (values, values), bounds=bounds
+        )
+        assert failures == (None, None)
+        for result in (single, *batch):
+            assert result is not None and result.success
+            assert result.fixed_parameter_names == tuple(fixed)
+            for name, value in fixed.items():
+                assert result.parameters[name] == value
+                assert not result.parameter_error_validity[name]
+            expected_tau = tau_only if "amplitude" in fixed else 6000.0
+            np.testing.assert_allclose(
+                result.parameter_values, (0.985, 0.0, expected_tau), rtol=1e-5
+            )
+            np.testing.assert_allclose(result.parameter_values, single.parameter_values, rtol=1e-12)
+            assert float(np.sum((result.fitted_values - values) ** 2)) < 2e-9
 
 
 def test_fit_cancellation_is_checked_before_work() -> None:

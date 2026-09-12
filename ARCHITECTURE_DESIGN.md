@@ -195,6 +195,8 @@ Node new chunk
 
 ### 5.1 Exact Data/Fit pairing
 
+- Exponential的短区间数据只能提供初值，不能据其x/y跨度限制A/B或寿命tau；只保留tau>0的数学域及用户显式约束。固定B后可需要远大于观测窗口的tau，不能用自动上限排除合法更低损失解。fixed/free映射及通用solver停止容差不因此另建分支。
+- Histogram的single/bimodal Gaussian及Poisson-Gaussian只包含其命名的概率分量，不默认添加每bin平底beta；已删除其参数、背景组件、gap-floor种子及从population/fidelity扣除K*beta的旁路。数值COUNT_FLOOR仍只为Poisson deviance计算服务，普通Series Gaussian的背景B保留。
 - `release_recapture`是普通Series模型：`q=exp(-W0((2π f t)^2))`、`P=A[1-exp(-eta*q)]/[1-exp(-eta)]+B`，参数为amplitude/offset/eta/frequency，显示符号A/B/eta/f；eta无量纲、f为普通频率并复用sine的inverse-axis单位，时间原点固定为物理t=0而非选区起点。A/B可经现有表达式固定。模型/Jacobian/自动初值只有同一套Numba实现，single/batch复用通用TRF与现有协方差；继续使用Series数值/SEM拟合契约，不隐式构造binomial trial counts或另建温度Task。
 - `display_interval`只控制Surface刷新deadline，不决定active history lease内的Measurement primary index是否存在。Runtime只在lease起点之后为indexed-derived Dataset写value或invalid；昂贵Surface计算同一same-shot group只允许一个active，并在忙时只保留Plane latest完整输入，中间indices仍以invalid存在而不排完整frame。
 - Panel只原子呈现`data@N + fit@N`。

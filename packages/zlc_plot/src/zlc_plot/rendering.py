@@ -10635,13 +10635,10 @@ class MatplotlibRenderer:
             ):
                 index = fallback if overlay.facet_index is None else overlay.facet_index
                 # The classifier paints the two populations and their sum.
-                # The bimodal model's components are A, B and the flat
-                # background, in that order; the background is nobody's
-                # population and is not a classifier curve.
                 curves = tuple(
                     polyline
                     for polyline in overlay.polylines
-                    if polyline.role == "component" and polyline.component_index < 2
+                    if polyline.role == "component"
                 ) + tuple(
                     polyline for polyline in overlay.polylines if polyline.role == "total"
                 )
