@@ -1195,6 +1195,59 @@ def test_a_finite_run_does_not_block_on_the_board(sequence) -> None:
         presenter.close()
 
 
+def test_finite_completion_arrives_without_a_status_tick_and_survives_sync(sequence) -> None:
+    from threading import Event
+    from zlc_workbench.device_use import DeviceUseCoordinator
+
+    finished, waiting, sampled = Event(), Event(), Event()
+
+    class Board(_ThreadWatchingSequencer):
+        capture_status = False
+
+        def wait_done(self, timeout=None):
+            assert timeout is None, "the completion worker must wait, not poll"
+            self.wait_timeouts.append(timeout)
+            waiting.set()
+            assert finished.wait(3)
+            self._firing = False
+            return object()
+
+        def snapshot(self):
+            state = super().snapshot()
+            if self.capture_status:
+                sampled.set()
+            return state
+
+    view, board = _EditorView(), Board(description=_board_description())
+    commands, completion = _DeviceWorker(), _DeviceWorker()
+    presenter = PulseEditorPresenter(
+        view, replace_sequence(sequence, run_repeats=1), sequencer=board,
+        device_use=DeviceUseCoordinator(), run_device_work=commands,
+        run_safe_work=_run_preview_immediately, run_completion_work=completion,
+    )
+    try:
+        view.fire_requested.emit()
+        commands.deliver_until(lambda: not presenter._device_busy)
+        assert waiting.wait(1)
+        run = presenter._finite_run
+        view.sync_requested.emit()
+        commands.deliver_until(lambda: not presenter._device_busy)
+        assert presenter._finite_run == run, "Sync must not cancel completion delivery"
+        board.capture_status = True
+        presenter.ask_run_state()
+        assert sampled.wait(1)
+        finished.set()
+        completion.deliver_until(lambda: presenter._finite_run is None)
+        assert presenter._drive_lease is None and not presenter.running
+        commands.deliver_until(lambda: not presenter._status_in_flight)
+        assert not presenter.running, "an old snapshot must not restore RUNNING"
+        assert board.wait_timeouts == [None]
+        assert not view.warnings, view.warnings
+    finally:
+        finished.set()
+        presenter.close()
+
+
 def test_without_a_sequencer_the_editor_says_so_rather_than_pretending(sequence) -> None:
     view = _EditorView()
     presenter = PulseEditorPresenter(view, sequence)

@@ -86,7 +86,7 @@ def _server(streamer: PulseStreamer):
 
 
 def _client(server: PulseRemoteServer) -> RemotePulseStreamer:
-    client = RemotePulseStreamer("127.0.0.1", server.server_address[1], poll_interval=0.001)
+    client = RemotePulseStreamer("127.0.0.1", server.server_address[1])
     client.open()
     return client
 
@@ -428,7 +428,7 @@ def test_remote_replays_device_path_with_short_done_poll(monkeypatch, tmp_path) 
             client.close()
 
 
-def test_remote_safe_interrupts_forever_fire_on_the_same_connection() -> None:
+def test_remote_safe_interrupts_forever_fire_on_the_same_connection(monkeypatch) -> None:
     geom = _sequence_geometry()
     source = _sequence()
     program = compile_sequence(source, geom, 50e6)
@@ -440,6 +440,32 @@ def test_remote_safe_interrupts_forever_fire_on_the_same_connection() -> None:
             client.load(program)
             client.fire(run_repeats=0)
             result: list[object] = []
+            waiting = threading.Event()
+            wait = streamer.wait_done
+            waits = []
+            retiring_id = None
+            retired = threading.Event()
+            release_retired = threading.Event()
+            def observed_wait(timeout=None, **kwargs):
+                if timeout and timeout > 0:
+                    waits.append((timeout, kwargs.get("command_id")))
+                    waiting.set()
+                report = wait(timeout, **kwargs)
+                if kwargs.get("command_id") == retiring_id:
+                    retired.set()
+                    assert release_retired.wait(1.0)
+                return report
+            monkeypatch.setattr(streamer, "wait_done", observed_wait)
+            reports = []
+            def await_done():
+                try:
+                    reports.append(client.wait_done(None))
+                except Exception as error:
+                    reports.append(error)
+            waiter = threading.Thread(target=await_done)
+            waiter.start()
+            assert waiting.wait(0.2), "the server must wait on DONE, not receive zero-time polls"
+            assert client.snapshot()["firing"] is True
 
             def interrupt() -> None:
                 result.append(client.safe())
@@ -451,6 +477,96 @@ def test_remote_safe_interrupts_forever_fire_on_the_same_connection() -> None:
             assert len(result) == 1
             assert result[0].stable
             assert client.snapshot()["firing"] is False
+            waiter.join(timeout=1.0)
+            assert not waiter.is_alive() and reports == [None]
+
+            # Expiring a wait leaves the same run available for notification.
+            client.fire(run_repeats=1)
+            command_id = client._fire_command_id
+            assert client.wait_done(0.0) is None
+            assert client.wait_done(0.02) is None
+            assert client.snapshot()["firing"] is True
+            waits.clear()
+            reports.clear()
+            waiting.clear()
+            waiter = threading.Thread(target=await_done)
+            waiter.start()
+            assert waiting.wait(1.0)
+            assert client.snapshot()["firing"] is True
+            transport.publish_execution_readback(status=4, cursor=0)
+            waiter.join(timeout=1.0)
+            assert not waiter.is_alive() and len(reports) == 1
+            assert reports[0].command_id == command_id
+            assert waits == [(1.0, command_id)], "one Event wait must deliver DONE without client polling"
+
+            # An old waiter returning after Stop and the next FIRE cannot
+            # consume that next run's completed report.
+            client.fire(run_repeats=1)
+            retiring_id = client._fire_command_id
+            reports.clear()
+            waiting.clear()
+            waiter = threading.Thread(target=await_done)
+            waiter.start()
+            assert waiting.wait(1.0)
+            client.safe()
+            assert retired.wait(1.0)
+            client.fire(run_repeats=1)
+            new_id = client._fire_command_id
+            transport.publish_execution_readback(status=4, cursor=0)
+            release_retired.set()
+            waiter.join(timeout=1.0)
+            assert not waiter.is_alive() and reports == [None]
+            assert client.wait_done(1.0).command_id == new_id
+
+            # DONE can already be constructed while its reply is delayed.
+            # A subsequent successful SAFE still retires that delivery.
+            client.fire(run_repeats=1)
+            retiring_id = client._fire_command_id
+            reports.clear()
+            waiting.clear()
+            retired.clear()
+            release_retired.clear()
+            waiter = threading.Thread(target=await_done)
+            waiter.start()
+            assert waiting.wait(1.0)
+            transport.publish_execution_readback(status=4, cursor=0)
+            assert retired.wait(1.0)
+            client.safe()
+            assert client._fire_command_id is None
+            release_retired.set()
+            waiter.join(timeout=1.0)
+            assert not waiter.is_alive() and reports == [None]
+
+            # Owner revocation wakes the side connection without letting it
+            # claim the board or return the new owner's run.
+            client.fire(run_repeats=1)
+            reports.clear()
+            waiting.clear()
+            waiter = threading.Thread(target=await_done)
+            waiter.start()
+            assert waiting.wait(1.0)
+            other = _client(server)
+            try:
+                waiter.join(timeout=1.0)
+                assert not waiter.is_alive() and isinstance(reports[0], RemoteError)
+                other.fire(run_repeats=1)
+                transport.publish_execution_readback(status=4, cursor=0)
+                assert other.wait_done(1.0).command_id == other._fire_command_id
+            finally:
+                other.disconnect()
+
+            client.disconnect()
+            client.open()
+            client.fire(run_repeats=1)
+            reports.clear()
+            waiting.clear()
+            waiter = threading.Thread(target=await_done)
+            waiter.start()
+            assert waiting.wait(1.0)
+            client.disconnect()
+            waiter.join(timeout=1.0)
+            assert not waiter.is_alive()
+            assert reports == [None] or isinstance(reports[0], (ConnectionError, RemoteError))
         finally:
             client.disconnect()
 
@@ -1152,7 +1268,7 @@ def test_client_that_drops_its_socket_is_not_a_server_error(capsys) -> None:
             return original(request, client_address)
 
         server.handle_error = spy
-        client = RemotePulseStreamer("127.0.0.1", server.server_address[1], poll_interval=0.001)
+        client = RemotePulseStreamer("127.0.0.1", server.server_address[1])
         client.open()
         client._socket.setsockopt(
             socket_module.SOL_SOCKET,
@@ -1170,8 +1286,8 @@ def test_client_that_drops_its_socket_is_not_a_server_error(capsys) -> None:
 def test_a_poll_is_logged_only_when_its_answer_changes(capsys) -> None:
     """A poll is a question, not an event.
 
-    wait_done is asked every 10 ms by a client that owns its own poll loop, so
-    one five-second shot printed four hundred identical "state=PENDING" lines
+    The former wait_done poll loop asked every 10 ms, so one five-second
+    shot printed four hundred identical "state=PENDING" lines
     and buried the run they were about.  The same rule makes CURSOR useful for
     the first time: a cursor that stays at 3 says nothing, and a cursor that
     becomes 4 is the scan advancing.
@@ -1356,7 +1472,7 @@ def test_local_pulse_service_serves_a_supplied_streamer_and_narrates(caplog) -> 
             try:
                 assert service.port > 0
                 client = RemotePulseStreamer(
-                    "127.0.0.1", service.port, poll_interval=0.001
+                    "127.0.0.1", service.port
                 )
                 with client:
                     assert client.safe().stable

@@ -656,7 +656,7 @@ class PulseStreamer(ConfigValueHolder):
                              *arming), stop=self._stop)
                 self._scan_armed = True
             self._safe_readback = None
-            self._done.clear()
+            self._done = threading.Event()
             self._underflow = False
             self._cursor_value = 0
             self._scan_last_cursor = 0
@@ -678,19 +678,23 @@ class PulseStreamer(ConfigValueHolder):
             self._worker = threading.Thread(target=self._observe, name="zlc-pulse-observer", daemon=True)
             self._worker.start()
 
-    def wait_done(self, timeout: float | None = None) -> DoneReport | None:
+    def wait_done(self, timeout: float | None = None, *, command_id: int | None = None) -> DoneReport | None:
         with self._lock:
             self._require_open()
-            if not self._firing:
+            if not self._firing or (command_id is not None and command_id != self._fire_command_id):
                 return None
-        if not self._done.wait(timeout):
+            command_id = self._fire_command_id
+            done, worker = self._done, self._worker
+        if not done.wait(timeout):
             return None
-        worker = self._worker
         if worker is not None and worker is not threading.current_thread():
             worker.join(timeout=1.0)
             if worker.is_alive():
                 raise RuntimeError("pulse observer did not exit after terminal readback")
         with self._lock:
+            if (not self._firing or self._stop.is_set()
+                    or command_id != self._fire_command_id or done is not self._done):
+                return None
             report = DoneReport(
                 status=self._terminal_status,
                 cursor=self._cursor_value,
@@ -724,7 +728,6 @@ class PulseStreamer(ConfigValueHolder):
                     raise RuntimeError(f"SAFE did not complete (STATUS=0x{status:08X})")
                 self._safe_readback = readback
             self._firing = False
-            self._done.clear()
             self._terminal_status = self._safe_readback.status
             return self._safe_readback
     def describe(self) -> BoardDescription:
@@ -1216,6 +1219,7 @@ class PulseStreamer(ConfigValueHolder):
 
     def _stop_worker(self) -> None:
         self._stop.set()
+        self._done.set()
         worker = self._worker
         if worker is None:
             return

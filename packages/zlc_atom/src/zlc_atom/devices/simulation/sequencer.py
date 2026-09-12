@@ -88,21 +88,33 @@ class VirtualPulseStreamer(PulseStreamer):
             super().safe()
             raise
 
-    def wait_done(self, timeout: float | None = None) -> DoneReport | None:
+    def wait_done(self, timeout: float | None = None, *, command_id: int | None = None) -> DoneReport | None:
         started = time.monotonic()
-        worker = self._world_thread
+        with self._lock:
+            if command_id is None:
+                command_id = self._fire_command_id
+            worker = self._world_thread
         if worker is not None and worker is not threading.current_thread():
             worker.join(None if timeout is None else max(0.0, float(timeout)))
             if worker.is_alive():
                 return None
-            self._world_thread = None
+            with self._lock:
+                if command_id != self._fire_command_id:
+                    return None
+                if self._world_thread is worker:
+                    self._world_thread = None
         if timeout is not None:
             timeout = max(0.0, float(timeout) - (time.monotonic() - started))
-        report = super().wait_done(timeout)
+        with self._lock:
+            if command_id != self._fire_command_id:
+                return None
+            error = self._world_error
+        report = super().wait_done(timeout, command_id=command_id)
         if report is None:
             return None
         with self._lock:
-            error, self._world_error = self._world_error, None
+            if command_id == self._fire_command_id:
+                self._world_error = None
         if error is not None:
             raise RuntimeError("virtual world playback failed") from error
         return report

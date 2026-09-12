@@ -190,7 +190,9 @@ class SequencerDevice:
             scan_repeats=scan_repeats,
         )
 
-    def wait_done(self, timeout: float | None = None) -> DoneReport | None:
+    def wait_done(self, timeout: float | None = None, *, command_id: int | None = None) -> DoneReport | None:
+        if command_id is not None:
+            return self.streamer.wait_done(timeout, command_id=command_id)
         return self.streamer.wait_done(timeout)
 
     def cursor(self) -> int | None:

@@ -679,6 +679,39 @@ def test_wait_done_uses_one_observer_owned_status_cursor_block(monkeypatch) -> N
     assert report.report_delay_seconds == pytest.approx(0.4)
     assert 0 <= report.command_seconds <= report.elapsed_seconds
     assert transport.read_log == list(range(CtrlWords.STATUS, CtrlWords.CURSOR + 1))
+
+    # Stop wakes a waiter tied to the old Event. Even if the next FIRE has
+    # completed before that waiter resumes, its report remains unconsumed.
+    transport.auto_done = False
+    streamer.fire(run_repeats=1)
+    old_id = streamer._fire_command_id
+    done = streamer._done
+    entered = threading.Event()
+    awake = threading.Event()
+    release = threading.Event()
+    event_wait = done.wait
+    def paused_wait(timeout=None):
+        entered.set()
+        answer = event_wait(timeout)
+        awake.set()
+        assert release.wait(1.0)
+        return answer
+    monkeypatch.setattr(done, "wait", paused_wait)
+    reports = []
+    waiter = threading.Thread(target=lambda: reports.append(streamer.wait_done(1.0)))
+    waiter.start()
+    assert entered.wait(1.0)
+    streamer.safe()
+    assert awake.wait(1.0)
+    transport.auto_done = True
+    streamer.fire(run_repeats=1)
+    new_id = streamer._fire_command_id
+    assert streamer._done.wait(1.0)
+    release.set()
+    waiter.join(timeout=1.0)
+    assert not waiter.is_alive() and reports == [None]
+    assert streamer.wait_done(0.0, command_id=old_id) is None
+    assert streamer.wait_done(0.0, command_id=new_id).command_id == new_id
     streamer.close()
 
 

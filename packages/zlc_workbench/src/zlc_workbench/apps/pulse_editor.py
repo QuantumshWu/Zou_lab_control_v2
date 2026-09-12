@@ -127,6 +127,7 @@ def build(
     run_off_thread=None,
     run_device_work=None,
     run_safe_work=None,
+    run_completion_work=None,
     request_close=None,
 ) -> object:
     """Wire one editor window, with or without a pulse in it."""
@@ -166,6 +167,7 @@ def build(
         run_preview_work=run_off_thread,
         run_device_work=run_device_work,
         run_safe_work=run_safe_work,
+        run_completion_work=run_completion_work,
         request_preview_close=request_close,
     )
 
@@ -285,7 +287,8 @@ def create_window(
     run_off_thread, close_preview_worker = attach_qt_worker("zlc-pulse-preview")
     run_device_work, close_device_worker = attach_qt_worker("zlc-pulse-command")
     run_safe_work, close_safe_worker = attach_qt_worker("zlc-pulse-safe")
-    close_workers = (close_preview_worker, close_device_worker, close_safe_worker)
+    run_completion_work, close_completion_worker = attach_qt_worker("zlc-pulse-completion")
+    close_workers = (close_preview_worker, close_device_worker, close_safe_worker, close_completion_worker)
     request_close = attach_qt_owner_turn(window.close)
     try:
         window.presenter = build(
@@ -301,6 +304,7 @@ def create_window(
             run_off_thread=run_off_thread,
             run_device_work=run_device_work,
             run_safe_work=run_safe_work,
+            run_completion_work=run_completion_work,
             request_close=request_close,
         )
     except BaseException:
@@ -351,7 +355,8 @@ def create_bound_window(
     run_off_thread, close_preview_worker = attach_qt_worker("zlc-pulse-preview")
     run_device_work, close_device_worker = attach_qt_worker("zlc-pulse-command")
     run_safe_work, close_safe_worker = attach_qt_worker("zlc-pulse-safe")
-    close_workers = (close_preview_worker, close_device_worker, close_safe_worker)
+    run_completion_work, close_completion_worker = attach_qt_worker("zlc-pulse-completion")
+    close_workers = (close_preview_worker, close_device_worker, close_safe_worker, close_completion_worker)
     request_close = attach_qt_owner_turn(window.close)
     try:
         window.presenter = build(
@@ -366,6 +371,7 @@ def create_bound_window(
             run_off_thread=run_off_thread,
             run_device_work=run_device_work,
             run_safe_work=run_safe_work,
+            run_completion_work=run_completion_work,
             request_close=request_close,
         )
     except BaseException:

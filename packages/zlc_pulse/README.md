@@ -78,7 +78,7 @@ grammar, so unsupported workspace files are refused.
 For a separated FPGA machine, the bench serves the board in-process (the
 `sequencer.local` device type), or the headless `pulse_server` command
 starts the same thin length-prefixed-JSON facade. The server process is the only hardware-transport
-owner. The first valid RPC claims the board; a newer valid client takes over
+owner. The first valid control RPC claims the board; a newer valid client takes over
 only after the old physical state reaches verified SAFE. A real disconnect or
 server shutdown also drives SAFE. There is no normal-connection idle timeout,
 authentication, or TLS in this trusted-lab protocol.
@@ -87,8 +87,13 @@ The launcher distinguishes the listen bind from client addresses. With the
 default bind `0.0.0.0:18861`, use `127.0.0.1:18861` from the same computer or a
 printed LAN address from another computer; never use `0.0.0.0` as a client
 host. `RemotePulseStreamer` mirrors the local device surface and adds only its
-TCP connection lifecycle. `wait_done()` uses short client-side polls, so SAFE
-can interrupt an infinite fire over the same connection.
+TCP connection lifecycle. `wait_done()` waits on a separate, non-owning connection
+bound to the current owner's token and FIRE command ID. The server waits on the
+run's completion event and replies immediately when it completes; status queries
+and SAFE retain the control connection. A timeout does not consume the result,
+and Stop, disconnect or a replacement run cannot hand an old waiter a new result.
+Update and restart both client and server for this completion protocol; no FPGA
+rebuild is needed. The former client-side `poll_interval` option is removed.
 
 The default `auto` policy enumerates COM ports, tries USB VID/PID descriptors
 first, and accepts a UART only after the deployed word-63 geometry fingerprint

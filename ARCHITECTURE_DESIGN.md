@@ -387,6 +387,7 @@ Node new chunk
 - 无密码、认证、TLS或权限UI。
 - Second client默认last-client-wins；旧handler立即失效，takeover前旧active command必须成功Stop/SAFE。旧socket由server主动shutdown并close，不等待旧client再次发话；其退出不对新owner执行SAFE，日志明确标记已被替换的连接。
 - 同一client的Stop不排队：其command lane正在等LOAD/FIRE的回复时，client用`open`回复里的cancel token在另一条自己的连接上发一次`cancel`，server执行与takeover/disconnect相同的第一步——command lane旁的SAFE，其stop event打断pending transport——而owner、epoch与command lane都不变；最终SAFE readback仍来自command lane上串行的`safe`。cancel连接一问一答后关闭、从不claim；token不是当前owner的按名拒绝且不碰板子；任何socket始终只有一个线程读写，timeout不因此缩短。
+- 完成等待同样走不claim的旁路连接，以现有owner token和本次FIRE command_id绑定；server等待本run既有DONE Event，完成即回复，不占command lane或owner锁等待。有限timeout到期不消费结果；长等待以最长1秒的Event等待续接，不加客户端轮询sleep。Stop/Close唤醒旧Event，下一Fire更换Event；旧等待不能消费或覆盖下一run。两端握手确认completion_notifications，删除旧poll_interval参数。Pulse Editor复用独立后台worker在FIRE返回后立即发起等待，Qt仅通过完成投递更新；状态定时器不再取走有限run报告，Sync不取消本run等待，旧snapshot不得重新显示RUNNING。
 - 正常连接无idle timeout；控制进程/socket/连接真正断开时自动SAFE。
 - UART auto枚举COM、优先USB VID/PID，并只在word-63 fingerprint匹配后选用；
   显式port把探测限制为该端口。auto探测失败才回退JTAG，显式UART失败则报错。

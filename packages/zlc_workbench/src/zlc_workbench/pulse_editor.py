@@ -984,6 +984,7 @@ class PulseEditorPresenter:
         run_preview_work: Callable[..., None] | None = None,
         run_device_work: Callable[..., None] | None = None,
         run_safe_work: Callable[..., None] | None = None,
+        run_completion_work: Callable[..., None] | None = None,
         request_preview_close: Callable[[], None] | None = None,
     ) -> None:
         self.view = view
@@ -1007,6 +1008,7 @@ class PulseEditorPresenter:
         self._request_preview_close = request_preview_close
         self._run_device_work = run_device_work
         self._run_safe_work = run_safe_work
+        self._run_completion_work = run_completion_work
         if (run_device_work is None) != (run_safe_work is None):
             raise ValueError("device command and SAFE workers must be supplied together")
         if run_device_work is not None and (
@@ -1051,7 +1053,7 @@ class PulseEditorPresenter:
         self.device_use = device_use if device_use is not None else DeviceUseCoordinator()
         self._device_owner = object()
         self._drive_lease: DeviceLease | None = None
-        self._finite_drive = False
+        self._finite_run: int | None = None
         self._device_busy = False
         self._device_operation = 0
         self._device_done: Event | None = None
@@ -2540,7 +2542,7 @@ class PulseEditorPresenter:
 
     def _release_drive(self) -> None:
         lease, self._drive_lease = self._drive_lease, None
-        self._finite_drive = False
+        self._finite_run = None
         if lease is not None:
             lease.release()
 
@@ -2585,6 +2587,8 @@ class PulseEditorPresenter:
         if not self._acquire_command():
             return
         finite = bool(source.run_repeats and sweeps)
+        previous_run = self._finite_run
+        self._finite_run = None
 
         def work(operation: int) -> object:
             program = None
@@ -2606,6 +2610,8 @@ class PulseEditorPresenter:
                         scan_repeats=sweeps,
                         current=lambda: operation == self._device_operation,
                     )
+                    if error is None and operation == self._device_operation:
+                        self._watch_completion()
             except BaseException as caught:  # noqa: BLE001 -- delivered, not lost
                 error = caught
             return program, self._board_state_for(sequencer), error
@@ -2616,7 +2622,6 @@ class PulseEditorPresenter:
             )
             self._board_state = state
             if error is None:
-                self._finite_drive = finite
                 self._remember_applied_scan(program, source, rows, digest=state.applied_digest)
                 self._digest_revision = -1
                 if self.revision == authored_revision:
@@ -2627,12 +2632,15 @@ class PulseEditorPresenter:
             else:
                 if not state.firing:
                     self._release_drive()
+                elif previous_run is not None:
+                    self._finite_run = previous_run
+                    self._watch_completion()
                 message = f"firing stopped: {error}"
                 self.view.set_summary(message)
                 self._warn(message)
             self._render_run_state()
 
-        self._run_device_command(work, delivered, summary="Starting...")
+        self._run_device_command(work, delivered, summary="Starting...", finite_run=finite)
 
     def _device_available(self) -> bool:
         if self._device_busy or self._stop_busy:
@@ -2646,6 +2654,7 @@ class PulseEditorPresenter:
         delivered: Callable[[object, BaseException | None], None],
         *,
         summary: str,
+        finite_run: bool | None = None,
     ) -> bool:
         """Change the board on the device worker; show the outcome here.
 
@@ -2663,6 +2672,8 @@ class PulseEditorPresenter:
         assert runner is not None
         self._device_operation += 1
         operation = self._device_operation
+        if finite_run is not None:
+            self._finite_run = operation if finite_run else None
         done = Event()
         self._device_done = done
         self._device_busy = True
@@ -2680,6 +2691,7 @@ class PulseEditorPresenter:
             self._device_busy = False
             if operation == self._device_operation:
                 delivered(result, error)
+            self._run_status_followups()
             self._wake_close_guard()
 
         return self._submit_work(
@@ -2785,6 +2797,8 @@ class PulseEditorPresenter:
             return False
         if not self._acquire_command():
             return False
+        self._finite_run = None
+        self._device_operation += 1
         if not self._board_ready_for_a_program():
             return False
         try:
@@ -2794,7 +2808,8 @@ class PulseEditorPresenter:
                 run_repeats=source.run_repeats,
                 scan_repeats=sweeps,
             )
-            self._finite_drive = bool(source.run_repeats and sweeps)
+            self._finite_run = self._device_operation if source.run_repeats and sweeps else None
+            self._watch_completion()
             self._digest_revision = -1
             self._poll_board()
             self._remember_applied_scan(program, source, rows, digest=self._board_state.applied_digest)
@@ -2875,7 +2890,7 @@ class PulseEditorPresenter:
             else:
                 self._board_state = self.board_state()
         if worked and not self.running:
-            self._finite_drive = False
+            self._finite_run = None
             if release:
                 self._release_drive()
             return True
@@ -2892,6 +2907,7 @@ class PulseEditorPresenter:
         if self._stop_busy:
             return
         self._device_operation += 1
+        self._finite_run = None
         if self._run_safe_work is None:
             self._safe_drive(release=True)
             return
@@ -3051,8 +3067,47 @@ class PulseEditorPresenter:
         """
 
         sequencer = self.sequencer
-        finite = self._finite_drive and self._drive_lease is not None
+        finite = self._finite_run is not None and self._drive_lease is not None
         self._adopt_board_answer(self._board_answer(sequencer, finite))
+
+    def _watch_completion(self) -> None:
+        """Await this finite run off both Qt and the device command worker."""
+
+        runner = self._run_completion_work
+        sequencer = self.sequencer
+        if runner is None or self._finite_run is None or self._drive_lease is None:
+            return
+        run = self._finite_run
+
+        def current() -> bool:
+            return (
+                run == self._finite_run and sequencer is self.sequencer
+                and not self._preview_close_requested
+            )
+
+        def work() -> object:
+            if not current():
+                return None
+            try:
+                answer = ("done", sequencer.wait_done(None))
+            except Exception as error:
+                answer = ("failed", error)
+            return (answer, self._board_state_for(sequencer)) if current() else None
+
+        def delivered(answer: object) -> None:
+            if answer is not None and current():
+                if self._device_busy:
+                    self._status_followups.append(lambda: delivered(answer))
+                    return
+                self._adopt_board_answer(answer)
+            self._wake_close_guard()
+
+        def failed(error: BaseException) -> None:
+            if current():
+                self._warn(f"finite pulse completion failed: {error}")
+            self._wake_close_guard()
+
+        self._submit_work(runner, work, delivered, failed)
 
     def ask_run_state(self, *, then: Callable[[], None] | None = None) -> bool:
         """Ask the board what it is doing; show the answer when it comes.
@@ -3070,7 +3125,7 @@ class PulseEditorPresenter:
         """
 
         sequencer = self.sequencer
-        finite = self._finite_drive and self._drive_lease is not None
+        finite = self._finite_run is not None and self._drive_lease is not None
         return self._ask_board(
             lambda: self._board_answer(sequencer, finite),
             self._adopt_board_answer,
@@ -3133,6 +3188,7 @@ class PulseEditorPresenter:
             self._run_status_followups()
             return False
         operation = self._device_operation
+        finite_run = self._finite_run
         sequencer = self.sequencer
         self._status_in_flight = True
 
@@ -3140,7 +3196,10 @@ class PulseEditorPresenter:
             self._status_in_flight = False
             if error is not None:
                 self._warn(f"board status failed: {error}")
-            elif operation == self._device_operation and sequencer is self.sequencer:
+            elif (
+                operation == self._device_operation and sequencer is self.sequencer
+                and finite_run == self._finite_run
+            ):
                 answered(answer)
             self._run_status_followups()
 
@@ -3172,7 +3231,7 @@ class PulseEditorPresenter:
         if sequencer is None:
             return None, BoardState()
         finite_answer: tuple[str, object] | None = None
-        if finite:
+        if finite and self._run_completion_work is None:
             try:
                 finite_answer = ("done", sequencer.wait_done(0))
             except Exception as error:  # noqa: BLE001 -- reported on the owner
@@ -3189,6 +3248,8 @@ class PulseEditorPresenter:
                 fault = str(getattr(payload, "fault", "") or "")
                 if fault:
                     self._warn(f"finite pulse stopped: {fault}")
+                self._release_drive()
+            elif state.answering and not state.firing:
                 self._release_drive()
         self._adopt_board_state(state)
 
@@ -3903,6 +3964,7 @@ class PulseEditorPresenter:
         if not self._acquire_command():
             return False
         sequencer = self.sequencer
+        previous_run = self._finite_run
         if worker is None:
             held = self._hold_scan_point(point, count, sequencer)
             self._held_point = held
@@ -3911,6 +3973,7 @@ class PulseEditorPresenter:
             except Exception as error:
                 self._hold_failed(held, error)
                 return False
+            self._finite_run = None
             error = self._drive_program(
                 sequencer,
                 program,
@@ -3924,6 +3987,7 @@ class PulseEditorPresenter:
             return error is None
         if not self._device_available():
             return False
+        self._finite_run = None
 
         def work(operation: int) -> object:
             held = self._hold_scan_point(point, count, sequencer)
@@ -3950,6 +4014,9 @@ class PulseEditorPresenter:
             )
             self._held_point = held
             self._settle_hold(held, count, state, error)
+            if error is not None and state.firing and previous_run is not None:
+                self._finite_run = previous_run
+                self._watch_completion()
 
         return self._run_device_command(work, delivered, summary="Holding...")
 
@@ -3995,7 +4062,7 @@ class PulseEditorPresenter:
         """Show what holding a point left the board doing."""
 
         if error is None:
-            self._finite_drive = False
+            self._finite_run = None
             self._scan_progress = f"held at scan point {held} of {count}"
         else:
             self._scan_progress = f"cannot hold that point: {error}"

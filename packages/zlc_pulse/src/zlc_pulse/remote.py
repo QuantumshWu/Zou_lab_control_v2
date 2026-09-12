@@ -77,13 +77,8 @@ REMOTE_METHODS = (
     "applied",
 )
 
-#: The cancel lane.  Not a command: it is the one request a client may make
-#: on a connection OTHER than its command lane, and the only thing it may
-#: say there.  A client whose command lane is waiting for a reply (a LOAD
-#: or FIRE in flight) cannot say "stop" on that connection until the reply
-#: arrives, so it says it on a connection of its own, naming itself by the
-#: token its ``open`` was answered with.  One request, then the connection
-#: closes; it never claims the board.
+#: Stop and completion waits use separate, non-claiming owner-token
+#: connections, leaving the command connection available for control.
 CANCEL_METHOD = "cancel"
 
 _TREE_TYPES = {
@@ -155,10 +150,7 @@ def _server_log(event: str, *, client: str | None = None, detail: str = "") -> N
     _LOG.info(line)
 
 
-#: The last line each client got for each POLLED event.  A poll is a question,
-#: not an event: wait_done is asked every 10 ms by a client that owns its own
-#: poll loop, so one five-second shot printed four hundred identical lines and
-#: buried the run around them.  A log narrates what HAPPENED.
+#: Suppress unchanged status/cursor projections on the command connection.
 _LAST_POLL: dict[tuple[str, str], str] = {}
 _POLL_LOCK = threading.Lock()
 
@@ -314,7 +306,7 @@ def _print_client_endpoints(bind_host: str, port: int) -> None:
         "CLIENT CONNECT EXAMPLE",
         detail=(
             f'same_computer=RemotePulseStreamer("{same_computer_host}", {port}, '
-            f"request_timeout={DEFAULT_REQUEST_TIMEOUT:g}, poll_interval=0.01)"
+            f"request_timeout={DEFAULT_REQUEST_TIMEOUT:g})"
         ),
     )
     if other_computer_hosts:
@@ -325,7 +317,7 @@ def _print_client_endpoints(bind_host: str, port: int) -> None:
             "CLIENT CONNECT EXAMPLE",
             detail=(
                 f'other_computer=RemotePulseStreamer("{other_computer_hosts[0]}", {port}, '
-                f"request_timeout={DEFAULT_REQUEST_TIMEOUT:g}, poll_interval=0.01)"
+                f"request_timeout={DEFAULT_REQUEST_TIMEOUT:g})"
             ),
         )
     else:
@@ -724,16 +716,18 @@ class _RemoteHandler(socketserver.BaseRequestHandler):
                     # server cannot read costs the client its answer and
                     # nothing else.
                     params = decode_tree(params)
-                    if method == CANCEL_METHOD:
-                        # The cancel lane never claims: the connection that
-                        # sent this closes after its one answer, below,
-                        # because ``claimed`` stays False.
+                    if method in {CANCEL_METHOD, "wait_done"}:
+                        # These owner-token requests never claim the board.
                         if claimed:
                             raise ValueError(
-                                "cancel travels on a connection of its own, "
+                                f"{method} travels on a connection of its own, "
                                 "beside the command lane"
                             )
-                        result = server.cancel_owner_command(params, client=client)
+                        result = (
+                            server.cancel_owner_command(params, client=client)
+                            if method == CANCEL_METHOD
+                            else server.wait_owner_done(params)
+                        )
                     else:
                         if not claimed:
                             server.claim_client(client, self.request)
@@ -825,11 +819,12 @@ class _RemoteHandler(socketserver.BaseRequestHandler):
                 if outputs_safe is False
                 else "NO_ACTION"
             )
-            _server_log(
-                "CLIENT DISCONNECTED",
-                client=client,
-                detail=_log_fields(outputs=status, reason=disconnect_reason),
-            )
+            if claimed:
+                _server_log(
+                    "CLIENT DISCONNECTED",
+                    client=client,
+                    detail=_log_fields(outputs=status, reason=disconnect_reason),
+                )
 
 
 class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
@@ -1002,7 +997,6 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                     "open",
                     "describe",
                     "close",
-                    "wait_done",
                     "cursor",
                     "safe",
                     "snapshot",
@@ -1031,7 +1025,8 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                     # already proved the token is this connection's.
                     with self._client_lock:
                         result = {"cancel_token": self._owner_token,
-                                  "command_protocol": LAYOUT_STRUCT_VERSION}
+                                  "command_protocol": LAYOUT_STRUCT_VERSION,
+                                  "completion_notifications": True}
                 elif method == "describe":
                     result = self.streamer.describe()
                     _server_log(
@@ -1120,37 +1115,7 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                         detail=f"{fire_fields} "
                         f"{_program_summary(program, source=applied.source if applied is not None else None)}",
                     )
-                    result = None
-                elif method == "wait_done":
-                    # Never honor a network timeout here: the client owns the short poll loop.
-                    result = self.streamer.wait_done(0.0)
-                    if result is not None:
-                        _server_log(
-                            "ERROR" if result.fault else "DONE",
-                            client=client,
-                            detail=_log_fields(
-                                status=f"0x{result.status:02X}",
-                                cursor=result.cursor,
-                                underflow=result.underflow,
-                                link_error=result.link_error,
-                                elapsed_ms=f"{result.elapsed_seconds * 1e3:.3f}",
-                                total_ms=f"{(result.elapsed_seconds + result.report_delay_seconds) * 1e3:.3f}",
-                                command_ms=f"{result.command_seconds * 1e3:.3f}",
-                                report_delay_ms=f"{result.report_delay_seconds * 1e3:.3f}",
-                                command_id=result.command_id,
-                                observer_error=result.observer_error or None,
-                                # Quiet while zero, like resent_frames on LOAD:
-                                # a line that is degrading shows up here shot
-                                # by shot before it fails one.
-                                poll_failures=result.poll_failures or None,
-                                resent_frames=result.resent_frames or None,
-                                retry_reason=(
-                                    getattr(self.streamer.transport, "last_retry_reason", "") or None
-                                ) if result.resent_frames else None,
-                            ),
-                        )
-                    else:
-                        _server_log_change("WAIT DONE", client=client, detail="state=PENDING")
+                    result = {"command_id": self.streamer._fire_command_id}
                 elif method == "cursor":
                     result = self.streamer.cursor()
                     _server_log_change("CURSOR", client=client, detail=_log_fields(value=result))
@@ -1222,6 +1187,48 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                 ):
                     raise RuntimeError("this connection no longer owns the pulse server")
             return result
+
+    def wait_owner_done(self, params: Mapping[str, Any]) -> dict[str, Any]:
+        """Wait for one FIRE beside its owner's command connection."""
+
+        if (set(params) != {"token", "command_id", "timeout"}
+                or not isinstance(params["token"], str)
+                or type(params["command_id"]) is not int or params["command_id"] <= 0
+                or type(params["timeout"]) not in (int, float)
+                or not 0 <= params["timeout"] <= 1.0):
+            raise ValueError("wait_done requires token, positive command_id and timeout in [0, 1]")
+        with self._client_lock:
+            owner = self._owner_client
+            if owner is None or self._fault is not None or params["token"] != self._owner_token:
+                raise RuntimeError("the wait token does not name the current owner")
+        result = self.streamer.wait_done(params["timeout"], command_id=params["command_id"])
+        with self.streamer._lock:
+            current = (not self.streamer._stop.is_set()
+                       and params["command_id"] == self.streamer._fire_command_id
+                       and params["command_id"] == self.streamer._command_id)
+            pending = self.streamer._firing and current
+            if not current:
+                result = None
+        with self._client_lock:
+            if self._fault is not None or params["token"] != self._owner_token:
+                raise RuntimeError("the wait token no longer names the current owner")
+        if result is not None:
+            _server_log(
+                "ERROR" if result.fault else "DONE", client=owner,
+                detail=_log_fields(
+                    status=f"0x{result.status:02X}", cursor=result.cursor,
+                    underflow=result.underflow, link_error=result.link_error,
+                    elapsed_ms=f"{result.elapsed_seconds * 1e3:.3f}",
+                    total_ms=f"{(result.elapsed_seconds + result.report_delay_seconds) * 1e3:.3f}",
+                    command_ms=f"{result.command_seconds * 1e3:.3f}",
+                    report_delay_ms=f"{result.report_delay_seconds * 1e3:.3f}",
+                    command_id=result.command_id, observer_error=result.observer_error or None,
+                    poll_failures=result.poll_failures or None, resent_frames=result.resent_frames or None,
+                    retry_reason=(getattr(self.streamer.transport, "last_retry_reason", "") or None)
+                    if result.resent_frames else None,
+                ),
+            )
+        return {"report": result, "pending": pending}
 
     def cancel_owner_command(
         self, params: Mapping[str, Any], *, client: str
@@ -1346,7 +1353,7 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 
 class RemotePulseStreamer(ConfigValueHolder):
-    """The local ``PulseStreamer`` method surface backed by one TCP connection."""
+    """Pulse control and completion waits on independent TCP connections."""
 
     def __init__(
         self,
@@ -1355,7 +1362,6 @@ class RemotePulseStreamer(ConfigValueHolder):
         *,
         request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
         connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
-        poll_interval: float = 0.01,
     ) -> None:
         if not isinstance(host, str) or not host:
             raise ValueError("remote host is required")
@@ -1365,13 +1371,10 @@ class RemotePulseStreamer(ConfigValueHolder):
             raise ValueError("request_timeout must be finite and positive")
         if connect_timeout <= 0 or not math.isfinite(float(connect_timeout)):
             raise ValueError("connect_timeout must be finite and positive")
-        if poll_interval <= 0 or not math.isfinite(float(poll_interval)):
-            raise ValueError("poll_interval must be finite and positive")
         self.host = host
         self.port = port
         self.request_timeout = float(request_timeout)
         self.connect_timeout = float(connect_timeout)
-        self.poll_interval = float(poll_interval)
         self._socket: socket.socket | None = None
         self._request_id = 0
         #: One request in flight per connection: the lock IS the command
@@ -1380,6 +1383,7 @@ class RemotePulseStreamer(ConfigValueHolder):
         #: How this client names itself on the cancel lane, from the
         #: server's answer to ``open``; None while there is no connection.
         self._cancel_token: str | None = None
+        self._fire_command_id: int | None = None
         self._description: BoardDescription | None = None
         self._loaded_application: AppliedState | None = None
         self._init_config_values()
@@ -1391,8 +1395,9 @@ class RemotePulseStreamer(ConfigValueHolder):
                 answer = self._call_locked("open", {})
                 if (
                     not isinstance(answer, Mapping)
-                    or set(answer) != {"cancel_token", "command_protocol"}
+                    or set(answer) != {"cancel_token", "command_protocol", "completion_notifications"}
                     or answer.get("command_protocol") != LAYOUT_STRUCT_VERSION
+                    or answer.get("completion_notifications") is not True
                     or not isinstance(answer["cancel_token"], str)
                     or not answer["cancel_token"]
                 ):
@@ -1471,6 +1476,7 @@ class RemotePulseStreamer(ConfigValueHolder):
             program=program, source=source, authored_source=authored_source,
             rows=rows, **receipt,
         )
+        self._fire_command_id = None
 
     def fire(self, *, run_repeats: int, scan_repeats: int = 1) -> None:
         with self._io_lock:
@@ -1487,36 +1493,72 @@ class RemotePulseStreamer(ConfigValueHolder):
                         program, source=source, authored_source=applied.authored_source,
                         rows=applied.rows,
                     )
-            self._call_locked(
+            self._fire_command_id = None
+            receipt = self._call_locked(
                 "fire",
                 {"run_repeats": run_repeats, "scan_repeats": scan_repeats},
             )
+            if (not isinstance(receipt, dict) or set(receipt) != {"command_id"}
+                    or type(receipt["command_id"]) is not int or receipt["command_id"] <= 0):
+                raise ConnectionError("Pulse server did not return the FIRE command identity")
+            self._fire_command_id = receipt["command_id"]
             if self._loaded_application is not None:
                 self._loaded_application = replace(
                     self._loaded_application, run_repeats=run_repeats, scan_repeats=scan_repeats
                 )
 
-    def wait_done(self, timeout: float | None = None) -> DoneReport | None:
-        """Poll the board until the shot reports done, or the deadline passes.
+    def wait_done(self, timeout: float | None = None, *, command_id: int | None = None) -> DoneReport | None:
+        """Await this FIRE's completion without occupying the command lane."""
 
-        One request per poll.  It used to send three and throw two away, so a
-        wait ran at 300 round trips a second instead of 100 -- and every one of
-        them made the server print a log line, on the machine whose job is to
-        keep a scan bank ahead of the engine.
-        """
-
+        if timeout is not None and not math.isfinite(float(timeout)):
+            raise ValueError("wait timeout must be finite or None")
         deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
+        with self._io_lock:
+            if self._socket is None:
+                raise ConnectionError("remote PulseStreamer is not open")
+            if command_id is not None and command_id != self._fire_command_id:
+                return None
+            token, command_id = self._cancel_token, self._fire_command_id
+        if command_id is None:
+            return None
         while True:
-            result = self._call("wait_done", {})
-            if result is not None:
-                return result
+            duration = min(1.0, self.request_timeout / 2)
             if deadline is not None:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
+                duration = min(duration, max(0.0, deadline - time.monotonic()))
+            try:
+                with socket.create_connection((self.host, self.port), timeout=self.connect_timeout) as lane:
+                    lane.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    lane.settimeout(self.request_timeout)
+                    _send_frame(lane, {"id": 1, "method": "wait_done", "params": {
+                        "token": token, "command_id": command_id, "timeout": duration,
+                    }})
+                    answer = _recv_frame(lane)
+            except OSError as error:
+                raise ConnectionError(f"{_CONNECTION_ENDED} ({type(error).__name__})") from error
+            if (not isinstance(answer, Mapping) or answer.get("id") != 1
+                    or type(answer.get("ok")) is not bool
+                    or set(answer) != ({"id", "ok", "result"} if answer["ok"] else {"id", "ok", "error"})):
+                raise ConnectionError("invalid Pulse completion response")
+            if not answer["ok"]:
+                error = answer["error"]
+                if (not isinstance(error, Mapping) or set(error) != {"type", "message"}
+                        or not isinstance(error["type"], str) or not isinstance(error["message"], str)):
+                    raise ConnectionError("invalid Pulse completion error")
+                raise RemoteError(error["type"], error["message"])
+            result = decode_tree(answer["result"])
+            if (not isinstance(result, dict) or set(result) != {"report", "pending"}
+                    or type(result["pending"]) is not bool):
+                raise ConnectionError("invalid Pulse completion result")
+            report = result["report"]
+            if report is not None and (not isinstance(report, DoneReport) or report.command_id != command_id):
+                raise ConnectionError("Pulse completion belongs to another FIRE")
+            with self._io_lock:
+                if token != self._cancel_token or command_id != self._fire_command_id:
                     return None
-                time.sleep(min(self.poll_interval, remaining))
-            else:
-                time.sleep(self.poll_interval)
+            if report is not None or not result["pending"]:
+                return report
+            if deadline is not None and time.monotonic() >= deadline:
+                return None
 
     def cursor(self) -> int | None:
         return self._call("cursor", {})
@@ -1535,11 +1577,13 @@ class RemotePulseStreamer(ConfigValueHolder):
 
         if self._io_lock.acquire(blocking=False):
             try:
+                self._fire_command_id = None
                 return self._call_locked("safe", {})
             finally:
                 self._io_lock.release()
         self._cancel_pending_command()
         with self._io_lock:
+            self._fire_command_id = None
             return self._call_locked("safe", {})
 
     def _cancel_pending_command(self) -> None:
@@ -1628,6 +1672,7 @@ class RemotePulseStreamer(ConfigValueHolder):
     def _disconnect_locked(self) -> None:
         connection, self._socket = self._socket, None
         self._cancel_token = None
+        self._fire_command_id = None
         self._description = None
         self._loaded_application = None
         if connection is not None:
@@ -1991,7 +2036,7 @@ def _main(argv: list[str] | None = None) -> int:
         print(f"geometry={config['params']}")
         print(f"xdc={DEFAULT_XDC_PATH}")
         print(f"target_ports={len(target.ports)}")
-        print("remote RPC: length-prefixed JSON, one client, non-blocking wait_done polls")
+        print("remote RPC: length-prefixed JSON, one owner, separate completion wait connection")
         return 0
     _server_log(
         "SERVER STARTING",
