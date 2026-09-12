@@ -195,7 +195,6 @@ Node new chunk
 
 ### 5.1 Exact Data/Fit pairing
 
-- `loading`是普通Series模型：`f(t)=B+A[1-exp(-k*g(t))]`，`g=t-tau[1-exp(-t/tau)]`（t≥0，t≤0为B）；参数amplitude/offset/rate/build_time，显示A/B/k/tau，headline为k。tau=0取瞬时供给极限g=t，小t使用稳定展开并共享解析Jacobian；时间原点是物理0，不随选区起点移动。该模型假设有效捕获速率指数建立、额外单原子损失可忽略，不能凭拟合外观宣称机制已确认；single/batch、固定值、协方差、显示和保存走现有FitEngine，无MOT专属Task或数据路径。
 - Exponential的短区间数据只能提供初值，不能据其x/y跨度限制A/B或寿命tau；只保留tau>0的数学域及用户显式约束。固定B后可需要远大于观测窗口的tau，不能用自动上限排除合法更低损失解。fixed/free映射及通用solver停止容差不因此另建分支。
 - Histogram的single/bimodal Gaussian及Poisson-Gaussian只包含其命名的概率分量，不默认添加每bin平底beta；已删除其参数、背景组件、gap-floor种子及从population/fidelity扣除K*beta的旁路。数值COUNT_FLOOR仍只为Poisson deviance计算服务，普通Series Gaussian的背景B保留。
 - `release_recapture`是普通Series模型：`q=exp(-W0((2π f t)^2))`、`P=A[1-exp(-eta*q)]/[1-exp(-eta)]+B`，参数为amplitude/offset/eta/frequency，显示符号A/B/eta/f；eta无量纲、f为普通频率并复用sine的inverse-axis单位，时间原点固定为物理t=0而非选区起点。A/B可经现有表达式固定。模型/Jacobian/自动初值只有同一套Numba实现，single/batch复用通用TRF与现有协方差；继续使用Series数值/SEM拟合契约，不隐式构造binomial trial counts或另建温度Task。

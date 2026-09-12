@@ -4589,112 +4589,6 @@ def _release_recapture_w(frequency, time):
 
 
 @njit(cache=True, inline="always")
-def _loading_exposure(time, build_time):
-    """Integral of 1-exp(-t/build_time) and its build_time derivative."""
-    if time <= 0.0:
-        return 0.0, 0.0
-    if build_time == 0.0:
-        return time, -1.0
-    z = time / build_time
-    if z < 1.0e-3:
-        # Direct subtraction loses both the t**2 onset and its Jacobian.
-        exposure = time * z * (0.5 + z * (-1.0/6.0 + z * (
-            1.0/24.0 + z * (-1.0/120.0 + z / 720.0))))
-        derivative = z*z * (-0.5 + z * (1.0/3.0 + z * (
-            -1.0/8.0 + z * (1.0/30.0 - z / 144.0))))
-        return exposure, derivative
-    tail = math.exp(-z)
-    return time + build_time * math.expm1(-z), math.expm1(-z) + (z * tail if tail else 0.0)
-
-
-@njit(cache=True, inline="always")
-def _point_loading(coords, point, parameters, row):
-    amplitude, offset, rate, build_time = parameters
-    exposure, derivative = _loading_exposure(coords[0, point], build_time)
-    exponent = rate * exposure
-    remaining = math.exp(-exponent)
-    loaded = -math.expm1(-exponent)
-    if row.size:
-        row[0] = loaded
-        row[1] = 1.0
-        row[2] = amplitude * remaining * exposure
-        row[3] = amplitude * remaining * rate * derivative
-    return offset + amplitude * loaded
-
-
-@njit(cache=True)
-def _value_jacobian_loading(coords, parameters, with_jacobian):
-    output = np.empty(coords.shape[1], dtype=np.float64)
-    jacobian = np.empty((output.size if with_jacobian else 0, parameters.size), dtype=np.float64)
-    no_derivatives = np.empty(0, dtype=np.float64)
-    for point in range(output.size):
-        output[point] = _point_loading(
-            coords, point, parameters,
-            jacobian[point] if with_jacobian else no_derivatives,
-        )
-    return output, jacobian
-
-
-@njit(cache=True)
-def _objective_loading(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives, context):
-    if derivatives:
-        compiled_reset_accumulators(gradient, info)
-    cost = 0.0
-    rss = 0.0
-    full = np.empty(params.size if derivatives else 0, dtype=np.float64)
-    for point in range(obs.size):
-        if not valid[point]:
-            continue
-        predicted = _point_loading(coords, point, params, full)
-        pc, pr, ok = _accumulate_model_point(
-            predicted, obs[point], full, free,
-            weights[point] if use_w else 1.0, use_w, poisson, loss,
-            gradient, info, row, derivatives,
-        )
-        if not ok:
-            return math.inf, math.inf, False
-        cost += pc
-        rss += pr
-    if derivatives:
-        compiled_finish_information(info)
-    return cost, rss, True
-
-
-@njit(cache=True)
-def _prepare_loading(coords, observations, valid, seeds, lower, upper, context):
-    if seeds.shape[0] == 0:
-        return 0
-    compact, values = _compact_observations(coords, observations, valid)
-    if values.size < 2:
-        return 0
-    order = np.argsort(compact[0])
-    time = compact[0, order]
-    values = values[order]
-    span = _array_span(time)
-    tail_count = max(1, values.size // 10)
-    offset = _median(values[:tail_count])
-    amplitude = max(_median(values[-tail_count:]) - offset, EPSILON)
-    best = -1
-    distance = math.inf
-    for point in range(time.size):
-        if time[point] > 0.0:
-            error = abs((values[point] - offset) / amplitude - 0.5)
-            if error < distance:
-                best = point
-                distance = error
-    if best < 0:
-        return 0
-    for index, fraction in enumerate((0.02, 0.2, 1.0, 5.0)):
-        build_time = span * fraction
-        exposure, _derivative = _loading_exposure(time[best], build_time)
-        seeds[index, 0] = amplitude
-        seeds[index, 1] = offset
-        seeds[index, 2] = math.log(2.0) / exposure
-        seeds[index, 3] = build_time
-    return 4
-
-
-@njit(cache=True, inline="always")
 def _point_release_recapture(coords, point, parameters, row):
     amplitude, offset, eta, frequency = parameters
     time = coords[0, point]
@@ -4914,17 +4808,6 @@ def saturation_descriptor() -> CompiledFitDescriptor:
     )
 
 
-def loading_descriptor() -> CompiledFitDescriptor:
-    return CompiledFitDescriptor(
-        prepare=_prepare_loading,
-        objective=_objective_loading,
-        value_jacobian=_value_jacobian_loading,
-        context_builder=series_context_builder,
-        max_candidates=4,
-        cache_key="loading-buildup",
-    )
-
-
 def release_recapture_descriptor() -> CompiledFitDescriptor:
     return CompiledFitDescriptor(
         prepare=_prepare_release_recapture,
@@ -4978,7 +4861,6 @@ def production_dispatchers() -> tuple[Any, ...]:
         _prepare_damped,
         _prepare_exponential,
         _prepare_release_recapture,
-        _prepare_loading,
         _prepare_saturation,
         _prepare_radial,
         _prepare_anisotropic,
@@ -4992,7 +4874,6 @@ def production_dispatchers() -> tuple[Any, ...]:
         _objective_damped,
         _objective_exponential,
         _objective_release_recapture,
-        _objective_loading,
         _objective_saturation,
         _objective_radial,
         _objective_anisotropic,
@@ -5006,7 +4887,6 @@ def production_dispatchers() -> tuple[Any, ...]:
         _value_jacobian_damped,
         _value_jacobian_exponential,
         _value_jacobian_release_recapture,
-        _value_jacobian_loading,
         _value_jacobian_saturation,
         _value_jacobian_radial,
         _value_jacobian_anisotropic,
@@ -5209,18 +5089,6 @@ def warm_production_cache() -> dict[str, Any]:
         np.full(3, infinity),
     )
 
-    loading_time = np.linspace(0.0, 0.4, 97, dtype=np.float64)
-    loading = np.asarray((0.55, 0.01, 20.0, 0.08), dtype=np.float64)
-    run_single(
-        "loading",
-        loading_descriptor(),
-        (loading_time,),
-        sample_values(_value_jacobian_loading, loading_time.reshape(1, -1), loading),
-        loading,
-        np.asarray((0.0, -infinity, positive, 0.0)),
-        np.full(4, infinity),
-    )
-
     release_time = np.linspace(0.0, 0.0001, 97, dtype=np.float64)
     release = np.asarray((0.9, 0.03, 5.0, 1.6e4), dtype=np.float64)
     release_values = sample_values(_value_jacobian_release_recapture, np.ascontiguousarray(release_time.reshape(1, -1)), release)
@@ -5358,7 +5226,6 @@ __all__ = [
     "production_dispatchers",
     "radial_gaussian_center_descriptor",
     "release_recapture_descriptor",
-    "loading_descriptor",
     "saturation_descriptor",
     "self_check",
     "solve_compiled_batch",

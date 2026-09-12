@@ -20,7 +20,6 @@ def test_builtin_models_declare_a_parameter_headline() -> None:
         "damped_sine": "decay_time",
         "exponential_decay": "decay_time",
         "release_recapture": "eta",
-        "loading": "rate",
         "saturation": "asymptote",
         "anisotropic_gaussian_center": "center_x",
         "radial_gaussian_center": "center_x",

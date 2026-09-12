@@ -3613,38 +3613,6 @@ def _init_saturation(coordinates, observations):
     return _saturation_candidates(coordinates, observations)[0]
 
 
-def _loading(t, amplitude, offset, rate, build_time):
-    coordinates, values = _compiled_model_input((t,), (amplitude, offset, rate, build_time))
-    return _compiled_fit._value_jacobian_loading(coordinates, values, False)[0]
-
-
-def _loading_jacobian(t, amplitude, offset, rate, build_time):
-    coordinates, values = _compiled_model_input((t,), (amplitude, offset, rate, build_time))
-    return _compiled_fit._value_jacobian_loading(coordinates, values, True)[1]
-
-
-def _loading_candidates(coordinates, observations):
-    coords = np.array(coordinates, dtype=np.float64, order="C")
-    coords.setflags(write=False)
-    values = np.array(observations, dtype=np.float64, order="C")
-    valid = np.broadcast_to(np.asarray(True), values.shape)
-    descriptor = _compiled_fit.loading_descriptor()
-    seeds = np.empty((descriptor.max_candidates, 4), dtype=np.float64)
-    lower = np.array((0.0, -np.inf, np.nextafter(0.0, 1.0), 0.0))
-    upper = np.full(4, np.inf)
-    count = descriptor.prepare(
-        coords, values, valid, seeds, lower, upper,
-        np.array(descriptor.context_builder(tuple(coords)), copy=True),
-    )
-    if count == 0:
-        raise ValueError("loading fit requires finite data at positive times")
-    return tuple(seeds[:count])
-
-
-def _init_loading(coordinates, observations):
-    return _loading_candidates(coordinates, observations)[0]
-
-
 def _release_recapture(t, amplitude, offset, eta, frequency):
     """Sudden radial 2D recapture, normalized at t=0; frequency is in cycles/time."""
     coordinates, values = _compiled_model_input((t,), (amplitude, offset, eta, frequency))
@@ -4717,28 +4685,6 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             candidate_initializer=_saturation_candidates,
             bounds_initializer=_saturation_bounds,
             compiled_descriptor=_compiled_fit.saturation_descriptor(),
-        ),
-        FitModelSpec(
-            "loading",
-            "Loading buildup",
-            1,
-            (
-                FitParameterSpec("amplitude", VALUE, NONNEGATIVE, display_label=r"$A$"),
-                FitParameterSpec("offset", VALUE, display_label=r"$B$", affine_point=True),
-                FitParameterSpec("rate", INVERSE_AXIS_0, POSITIVE, display_label=r"$k$"),
-                FitParameterSpec("build_time", AXIS_0, NONNEGATIVE, display_label=r"$\tau$"),
-            ),
-            "rate",
-            _loading,
-            _init_loading,
-            (FitTarget.SERIES,),
-            formula=(
-                r"$f(t)=A[1-e^{-k g}]+B$" "\n"
-                r"$g=t-\tau(1-e^{-t/\tau}),\quad t\geq0$"
-            ),
-            jacobian=_loading_jacobian,
-            candidate_initializer=_loading_candidates,
-            compiled_descriptor=_compiled_fit.loading_descriptor(),
         ),
         FitModelSpec(
             "release_recapture",

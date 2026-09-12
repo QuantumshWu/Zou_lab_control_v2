@@ -132,10 +132,6 @@ virtual Camera Measurement publication交给普通Image `NotebookView`并完整�
 
 ## 快速显示参数更新
 
-Series 拟合另提供 `loading`（Loading buildup）：`f(t)=B+A[1-exp(-k*g)]`，
-`g=t-tau[1-exp(-t/tau)]`。参数符号为 A/B/k/tau，表示幅度、offset、稳态动力学速率和
-供给建立时间；tau=0取普通指数上升极限，t=0不随选区移动。只在“有效捕获速率指数建立”
-假设下解释这些参数，不把任意S形数据当作该机制的证明。固定/guess仍使用原Fit表达式。
 Exponential 的自动估计只用于初值，不再把观测窗口跨度当作寿命或振幅的硬上限。
 
 Notebook 直接修改已有 plot surface；Qt 控件把同一调用提交给 raster host：

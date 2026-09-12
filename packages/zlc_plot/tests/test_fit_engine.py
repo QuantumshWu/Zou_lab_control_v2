@@ -92,7 +92,6 @@ _BUILTIN_MODEL_IDS = (
     "damped_sine",
     "exponential_decay",
     "release_recapture",
-    "loading",
     "anisotropic_gaussian_center",
     "radial_gaussian_center",
     "histogram_poisson_gaussian",
@@ -124,7 +123,6 @@ _BASE_PARAMETERS = {
     "damped_sine": (1.2, 0.2, 0.25, 6.0, -0.3),
     "exponential_decay": (1.6, 0.2, 3.0),
     "release_recapture": (0.8, 0.05, 6.0, 0.4),
-    "loading": (0.55, 0.02, 2.0, 0.4),
     "anisotropic_gaussian_center": (3.0, 0.2, 0.9, 0.6, 0.35, -0.25),
     "radial_gaussian_center": (3.0, 0.2, 0.8, 0.35, -0.25),
     # Nw is the shots times the bin, the density's area: these put ~60
@@ -193,47 +191,6 @@ def test_release_recapture_matches_lambert_reference_and_recovers_parameters() -
     )
     assert fixed.fixed_parameter_names == ("amplitude", "offset")
     np.testing.assert_allclose(fixed.parameter_values, (1.0, 0.0, *truth[2:]), rtol=2e-5)
-
-
-def test_loading_buildup_matches_rate_equation_and_shared_fit() -> None:
-    from scipy.integrate import solve_ivp
-    from scipy.optimize._numdiff import approx_derivative
-
-    engine = FitEngine()
-    model = engine.registry.get("loading")
-    assert model.parameter_names == ("amplitude", "offset", "rate", "build_time")
-    t = np.linspace(0.0, 0.4, 97)
-    truth = np.array((0.55, 0.02, 20.0, 0.08))
-    integrated = solve_ivp(
-        lambda time, p: truth[2] * (-np.expm1(-time / truth[3])) * (1.0 - p),
-        (0.0, t[-1]), (0.0,), t_eval=t, rtol=1e-11, atol=1e-13,
-    ).y[0]
-    expected = truth[1] + truth[0] * integrated
-    np.testing.assert_allclose(model.evaluate((t,), truth), expected, rtol=2e-10, atol=2e-12)
-    np.testing.assert_allclose(
-        model.evaluate_jacobian((t,), truth),
-        approx_derivative(lambda p: model.evaluate((t,), p), truth, method="3-point"),
-        rtol=2e-7, atol=1e-9,
-    )
-    tiny = np.array((0.0, 1e-10, 1e-8))
-    np.testing.assert_allclose(
-        model.evaluate((tiny,), (1.0, 0.0, 20.0, 0.08)),
-        20.0 * tiny**2 / (2.0 * 0.08), rtol=5e-8, atol=0.0,
-    )
-    np.testing.assert_allclose(
-        model.evaluate((t,), (0.55, 0.02, 20.0, 0.0)),
-        0.02 - 0.55 * np.expm1(-20.0 * t), rtol=2e-15,
-    )
-    single = engine.fit(model, (t,), expected)
-    assert single.success and single.covariance_valid
-    np.testing.assert_allclose(single.parameter_values, truth, rtol=2e-5, atol=1e-8)
-    bounds = {"offset": (truth[1], truth[1])}
-    fixed = engine.fit(model, (t,), expected, bounds=bounds)
-    batch, failures = engine.fit_batch(model, ((t,), (t,)), (expected, expected), bounds=bounds)
-    assert failures == (None, None)
-    for result in batch:
-        _assert_fit_equal(result, fixed)
-        assert result.parameters["offset"] == truth[1]
 
 
 def test_saturation_response_jacobian_and_fixed_parameters_share_compiled_fit() -> None:
@@ -310,7 +267,7 @@ def test_saturation_response_jacobian_and_fixed_parameters_share_compiled_fit() 
 def _coordinates(model_id: str) -> tuple[np.ndarray, ...]:
     if model_id == "saturation":
         return (np.linspace(0.0, 10.0, 112),)
-    if model_id in {"release_recapture", "loading"}:
+    if model_id == "release_recapture":
         return (np.linspace(0.0, 3.0, 112),)
     if model_id in _POISSON_MODELS:
         return (np.linspace(-2.0, 16.0, 73),)
@@ -359,8 +316,6 @@ def _cell_parameters(model_id: str, cell: int) -> np.ndarray:
         parameters[[0, 2]] += (0.2 * position, 0.5 * position)
     elif model_id == "release_recapture":
         parameters += np.asarray((0.04, 0.01, 0.5, 0.03)) * position
-    elif model_id == "loading":
-        parameters += np.asarray((0.04, 0.01, 0.15, 0.03)) * position
     elif model_id == "saturation":
         parameters += np.asarray((12.0, 0.4, 0.5)) * position
     elif model_id == "histogram_poisson_gaussian":
