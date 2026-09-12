@@ -141,6 +141,9 @@ class _RecordingSequencer:
     def load_config_values(self, entries, *, source: str = "") -> None:
         self.sequencer.load_config_values(entries, source=source)
 
+    def load_config_file(self, path) -> None:
+        self.sequencer.load_config_file(path)
+
     def config_values(self) -> dict:
         return self.sequencer.config_values()
 

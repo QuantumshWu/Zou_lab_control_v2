@@ -61,11 +61,11 @@ class VirtualPulseStreamer(PulseStreamer):
             target=pulse_target_from_xdc(config_path=config["source"]),
         )
 
-    def fire(self, *, run_repeats: int, scan_repeats: int = 1) -> None:
+    def _fire_program(self, *, run_repeats: int, scan_repeats: int = 1) -> None:
         worker = self._world_thread
         if worker is not None and worker.is_alive():
             raise RuntimeError("the previous virtual pulse is still playing")
-        super().fire(
+        super()._fire_program(
             run_repeats=run_repeats,
             scan_repeats=scan_repeats,
         )

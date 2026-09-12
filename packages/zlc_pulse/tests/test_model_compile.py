@@ -259,9 +259,9 @@ def test_a_config_parameter_reads_the_number_the_pulse_already_carries() -> None
         for parameter in configured.config_parameters
     } == {"probe_time": 20.0, "bias_x": 0.0, "gate_delay": 40.0}
     assert authored_config_entries(configured) == {
-        "probe_time": (20.0, "ns"),
-        "bias_x": (0.0, "value"),
-        "gate_delay": (40.0, "ns"),
+        "1": (20.0, "ns"),
+        "2": (0.0, "value"),
+        "3": (40.0, "ns"),
     }
 
 
@@ -276,13 +276,13 @@ def test_applying_a_config_set_overwrites_the_authored_numbers() -> None:
     sequence, applied, unknown = apply_config_values(
         _configured(),
         {
-            "probe_time": (80, "ns"),
-            "bias_x": (1, "value"),
-            "somebody_elses": (1, "ns"),
+            "1": (80, "ns"),
+            "2": (1, "value"),
+            "99": (1, "ns"),
         },
     )
-    assert sorted(applied) == ["bias_x", "probe_time"]
-    assert unknown == ("somebody_elses",)
+    assert sorted(applied) == ["1", "2"]
+    assert unknown == ("99",)
     # Written into the fields themselves, not kept beside them.
     assert sequence.period_by_id["p1"].duration == 80
     assert sequence.period_by_id["p0"].analog_steps[0].value == 1
@@ -290,6 +290,19 @@ def test_applying_a_config_set_overwrites_the_authored_numbers() -> None:
     assert pulse_field_value(sequence, PulseFieldRef("delay", port="d1"), "ns") == 40.0
     # The declarations survive an apply; only the numbers moved.
     assert len(sequence.config_parameters) == 3
+
+    # The other Pulse's Config 1 can be an entirely different local field.
+    other = replace(
+        _configured(),
+        name="other_pulse",
+        config_parameters=(PulseConfigParameter(
+            "different_local_id", PulseFieldRef("duration", "p0"), "ns"
+        ),),
+    )
+    changed, applied, unknown = apply_config_values(other, {"1": (100.0, "ns")})
+    assert applied == ("1",) and unknown == ()
+    assert changed.period_by_id["p0"].duration == 100
+    assert changed.period_by_id["p1"].duration == other.period_by_id["p1"].duration
 
 
 def test_a_declared_config_parameter_needs_no_resolving_to_compile() -> None:

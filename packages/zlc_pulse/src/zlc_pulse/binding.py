@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import replace
 from fractions import Fraction
+from numbers import Integral
 
 from .model import (
     FIELD_DAC,
@@ -278,15 +279,27 @@ def authored_api_values(sequence: PulseSequence) -> dict[str, float]:
     }
 
 
+def config_parameter_key(value: object) -> str:
+    """The displayed, one-based Config number, in canonical JSON key form."""
+
+    if isinstance(value, Integral) and not isinstance(value, bool) and value > 0:
+        return str(int(value))
+    if isinstance(value, str) and value.isascii() and value.isdecimal():
+        number = int(value)
+        if number > 0 and str(number) == value:
+            return value
+    raise ValueError(f"Config parameter key must be a positive number (1, 2, ...), not {value!r}")
+
+
 def authored_config_entries(sequence: PulseSequence) -> dict[str, tuple[float, str]]:
-    """Read each Config binding from the pulse's actual field, in its own unit."""
+    """Read Config 1..N in declaration order, exactly as numbered in the UI."""
 
     return {
-        parameter.parameter_id: (
+        str(number): (
             float(pulse_field_value(sequence, parameter.field_ref, parameter.unit)),
             parameter.unit,
         )
-        for parameter in _sequence_of(sequence).config_parameters
+        for number, parameter in enumerate(_sequence_of(sequence).config_parameters, 1)
     }
 
 
@@ -294,7 +307,7 @@ def apply_config_values(
     sequence: PulseSequence,
     entries: Mapping[str, tuple[int | float, str]],
 ) -> tuple[PulseSequence, tuple[str, ...], tuple[str, ...]]:
-    """Overwrite the authored value of every config parameter the set names.
+    """Apply Config values by their displayed 1..N numbers, not local field IDs.
 
     THE OVERWRITE IS THE STORAGE.  A config parameter keeps no value of its
     own beside the field: filling one writes the number into the period's
@@ -302,18 +315,26 @@ def apply_config_values(
     back and the program compiled from it describe the same pulse -- which is
     why the filled one, not the authored one, is what a load must carry.
 
-    Returns the sequence, the ids applied, and the ids the set named that this
+    Returns the sequence, the numbers applied, and the numbers the set named that this
     pulse does not declare -- one calibrated set serves every pulse a board
     plays, most of which declare only part of it. A binding absent from the
     set retains its authored field value; an empty intersection is a no-op.
     """
 
+    if not isinstance(entries, Mapping):
+        raise TypeError("config values must be a mapping")
+    normalized = {}
+    for number, entry in entries.items():
+        key = config_parameter_key(number)
+        if key in normalized:
+            raise ValueError(f"duplicate Config parameter number {key}")
+        normalized[key] = entry
     return _apply_named_values(
         sequence,
-        entries,
+        normalized,
         {
-            parameter.parameter_id: parameter
-            for parameter in _sequence_of(sequence).config_parameters
+            str(number): parameter
+            for number, parameter in enumerate(_sequence_of(sequence).config_parameters, 1)
         },
         "config value",
     )
@@ -358,9 +379,9 @@ def _apply_named_values(
             parameter.field_ref,
             authored,
             parameter.unit,
-            field_name=parameter.parameter_id,
+            field_name=str(parameter_id),
         )
-        applied.append(parameter.parameter_id)
+        applied.append(str(parameter_id))
     return result, tuple(applied), tuple(unknown)
 
 

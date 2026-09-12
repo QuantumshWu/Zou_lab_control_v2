@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import replace
 import socket
+import json
 import threading
 import time
 from types import SimpleNamespace
@@ -259,7 +260,7 @@ def test_takeover_revokes_and_cancels_an_active_old_command(monkeypatch) -> None
         try:
             server.dispatch(
                 "load",
-                {"program": program, "source": source, "rows": []},
+                {"program": program, "source": source, "authored_source": source, "rows": []},
                 client="A",
                 connection=a_server,
             )
@@ -323,12 +324,14 @@ def test_takeover_revokes_and_cancels_an_active_old_command(monkeypatch) -> None
         streamer.close()
 
 
-def test_remote_replays_device_path_with_short_done_poll(monkeypatch) -> None:
+def test_remote_replays_device_path_with_short_done_poll(monkeypatch, tmp_path) -> None:
     geom = _sequence_geometry()
-    source = _sequence(slotted=True)
-    program = compile_sequence(source, geom, 50e6)
+    source = _sequence(slotted=True, configured=True)
+    program = compile_sequence(source, geom, 50e6, slot_tick_scales=(2,))
     transport = MemoryRegisterTransport(geom=geom, auto_done=True)
     streamer = PulseStreamer(transport, geom, 50e6, target=source.target)
+    # The client owns Config; a distinct set on the server must not reapply.
+    streamer.load_config_values({"1": (300, "ns")})
     with _server(streamer) as server:
         dispatch = server.dispatch
         def old_open(method, params, **kwargs):
@@ -342,17 +345,63 @@ def test_remote_replays_device_path_with_short_done_poll(monkeypatch) -> None:
                 _client(server)
         client = _client(server)
         try:
+            path = tmp_path / "current.json"
+            path.write_text(json.dumps(pulse_codec.config_values_to_tree({"1": (100, "ns")})), encoding="utf-8")
+            client.load_config_file(path)
             client.load(program, source=source, rows=((1,),))
+            calls = []
+            call = client._call_locked
+            def counted(method, params):
+                calls.append(method)
+                return call(method, params)
+            monkeypatch.setattr(client, "_call_locked", counted)
+            for values, duration, reload in (
+                ({"1": (100, "ns")}, 100, False),
+                ({"1": (200, "ns")}, 200, True),
+                ({}, 40, True),
+                ({"9": (99, "value")}, 40, False),
+            ):
+                path.write_text(json.dumps(pulse_codec.config_values_to_tree(values)), encoding="utf-8")
+                calls.clear()
+                client.fire(run_repeats=2, scan_repeats=3)
+                assert calls == (["load", "fire"] if reload else ["fire"])
+                report = client.wait_done(1.0)
+                assert report is not None
+                assert report.status == 4 and report.command_id > 0
+                assert report.cursor == 2
+                state = client.applied()
+                assert state.authored_source == source
+                assert state.source.period_by_id["p1"].duration == duration
+                assert state.program.slot_tick_scales == (2,)
+                assert state.program == compile_sequence(state.source, geom, 50e6, slot_tick_scales=(2,))
+                assert state.rows == ((1,),)
+                assert state.run_repeats == 2 and state.scan_repeats == 3
+            # A new connection can Fire the resident pulse without another Load.
+            # Only this first unknown-state Fire reads applied/description.
+            client.disconnect()
+            client.open()
+            path.write_text(json.dumps(pulse_codec.config_values_to_tree({"1": (160, "ns")})), encoding="utf-8")
+            calls.clear()
             client.fire(run_repeats=2, scan_repeats=3)
-            report = client.wait_done(1.0)
-            assert report is not None
-            assert report.status == 4 and report.command_id > 0
-            assert report.cursor == 2
+            assert calls == ["applied", "describe", "load", "fire"]
+            assert client.wait_done(1.0) is not None
+            state = client.applied()
+            assert state.authored_source == source
+            assert state.source.period_by_id["p1"].duration == 160
+            calls.clear()
+            client.fire(run_repeats=2, scan_repeats=3)
+            assert calls == ["fire"]
+            assert client.wait_done(1.0) is not None
+            path.write_text("{", encoding="utf-8")
+            calls.clear()
+            with pytest.raises(ValueError):
+                client.fire(run_repeats=2, scan_repeats=3)
+            assert calls == []
             safe = client.safe()
             assert safe.stable
             state = client.applied()
             assert state is not None
-            assert state.source == source
+            assert state.source.period_by_id["p1"].duration == 160
             assert state.rows == ((1,),)
             assert state.run_repeats == 2
             assert state.scan_repeats == 3

@@ -1,10 +1,13 @@
-"""Local and remote boards apply optional Config overrides before compiling."""
+"""Config is applied at load and refreshed from its bound file at Fire."""
 
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 
 import pytest
+import zlc_pulse.device as device_module
+from zlc_pulse.codec import config_values_to_tree
 
 from zlc_pulse import (
     PulseConfigParameter,
@@ -64,45 +67,88 @@ def streamer():
     return PulseStreamer(transport, geom, 50e6, target=sequence.target), geom
 
 
-def test_compiling_for_a_board_uses_the_held_set_not_the_authored_number(streamer):
-    """The whole point: what plays is today's calibration, not the file's."""
-
+def test_compilation_is_pure_and_load_applies_the_held_set(streamer):
     device, geom = streamer
     sequence = _configured()
 
-    device.load_config_values({"probe_time": (100, "ns")}, source="today.json")
-    filled, program = device.compile_pulse(sequence, geom, 50e6)
-
-    assert device.config_values() == {"probe_time": (100.0, "ns")}
+    device.load_config_values({1: (100, "ns")}, source="today.json")
+    source, program = device.compile_pulse(sequence, geom, 50e6)
+    assert source is sequence
+    assert program == compile_sequence(sequence, geom, 50e6)
+    assert device.config_values() == {"1": (100.0, "ns")}
     assert device.config_source == "today.json"
-    # The number moved into the field, and the program is that field's.
-    assert filled.period_by_id["p1"].duration == 100
-    assert program.ticks != compile_sequence(sequence, geom, 50e6).ticks
-    assert program.ticks == compile_sequence(filled, geom, 50e6).ticks
-    # The declaration survives, so the next fill still knows what to fill.
-    assert filled.config_parameters == sequence.config_parameters
+    device.open()
+    try:
+        device.load(program, source=source)
+        applied = device.applied()
+        assert applied.authored_source is sequence
+        assert applied.source.period_by_id["p1"].duration == 100
+        assert applied.program != program
+        assert applied.program == compile_sequence(applied.source, geom, 50e6)
+        assert applied.source.config_parameters == sequence.config_parameters
+    finally:
+        device.close()
 
 
-def test_the_filled_sequence_is_what_recompiles_to_what_played(streamer):
-    """``load(source=...)`` must be handed the filled one, not the authored one.
-
-    Nothing fails if it is not -- the board plays calibrated numbers while the
-    applied state, the archive and the editor's stale-dot all describe the
-    authored ones.  The record simply lies, which is why compile_pulse hands
-    back both halves rather than only the program.
-    """
-
+def test_fire_refreshes_file_and_keeps_the_original_defaults(streamer, tmp_path, monkeypatch):
     device, geom = streamer
-    device.load_config_values({"probe_time": (100, "ns")})
-    filled, program = device.compile_pulse(_configured(), geom, 50e6)
+    path = tmp_path / "current.json"
+    def write(values):
+        path.write_text(json.dumps(config_values_to_tree(values)), encoding="utf-8")
+    write({"1": (80, "ns")})
+    device.load_config_file(path)
+    write({"1": (100, "ns")})
+    source, program = device.compile_pulse(_configured(), geom, 50e6)
+    assert device.config_values() == {"1": (80.0, "ns")}
+    counts = {"compile": 0, "load": 0, "fire": 0}
+    for key, owner, name in (
+        ("compile", device_module, "compile_sequence"),
+        ("load", device, "_load_program"),
+        ("fire", device, "_fire_program"),
+    ):
+        original = getattr(owner, name)
+        def counted(*args, _key=key, _original=original, **kwargs):
+            counts[_key] += 1
+            return _original(*args, **kwargs)
+        monkeypatch.setattr(owner, name, counted)
 
     device.open()
     try:
-        device.load(program, source=filled)
-        state = device.applied()
-        assert state is not None
-        rebuilt = compile_sequence(state.source, geom, 50e6)
-        assert rebuilt.ticks == program.ticks
+        device.load(program, source=source)
+        assert counts == {"compile": 1, "load": 1, "fire": 0}
+        assert device.applied().source.period_by_id["p1"].duration == 100
+        for entries, duration, repeats, recompiles in (
+            ({"1": (100, "ns")}, 100, 1, 0),
+            ({"1": (0.2, "us")}, 200, 3, 1),
+            ({}, 40, 2, 1),
+            ({"9": (700, "value")}, 40, 1, 0),
+        ):
+            write(entries)
+            before = counts.copy()
+            device.fire(run_repeats=repeats)
+            assert device.wait_done(1.0) is not None
+            assert counts == {"compile": before["compile"] + recompiles,
+                              "load": before["load"] + recompiles,
+                              "fire": before["fire"] + 1}
+            state = device.applied()
+            assert state.authored_source is source
+            assert state.source.period_by_id["p1"].duration == duration
+            assert state.program == compile_sequence(state.source, geom, 50e6)
+            assert state.run_repeats == repeats
+        before = counts.copy()
+        write({"1": (100, "Hz")})
+        with pytest.raises(ValueError, match="time unit"):
+            device.fire(run_repeats=1)
+        assert counts == before
+        path.write_text("{", encoding="utf-8")
+        with pytest.raises(ValueError):
+            device.fire(run_repeats=1)
+        assert counts == before
+        # Explicit in-memory data unbinds the file; its label is not a path.
+        device.load_config_values({"1": (120, "ns")}, source=str(path))
+        device.fire(run_repeats=1)
+        assert device.wait_done(1.0) is not None
+        assert device.applied().source.period_by_id["p1"].duration == 120
     finally:
         device.close()
 
@@ -113,25 +159,29 @@ def test_unmatched_config_ids_keep_authored_values(streamer):
     sequence = replace(sequence, config_parameters=sequence.config_parameters + (
         PulseConfigParameter("prep_time", PulseFieldRef("duration", "p0"), "ns"),
     ))
-    for entries in ({}, {"somebody_else": (1, "value")}):
-        device.load_config_values(entries)
-        filled, program = device.compile_pulse(sequence, geom, 50e6)
-        assert filled is sequence
-        assert program.ticks == compile_sequence(sequence, geom, 50e6).ticks
-
-    device.load_config_values({"probe_time": (0.1, "us"), "somebody_else": (1, "value")})
-    filled, program = device.compile_pulse(sequence, geom, 50e6)
-    assert filled.period_by_id["p0"].duration == 40
-    assert filled.period_by_id["p1"].duration == 100
-    assert filled.config_parameters == sequence.config_parameters
-    assert sequence.period_by_id["p1"].duration == 40
-    assert program.ticks == compile_sequence(filled, geom, 50e6).ticks
-
-    for bad_unit in ("value", "Hz"):
-        device.load_config_values({"probe_time": (100, bad_unit)})
-        with pytest.raises(ValueError, match="declares|time unit"):
-            device.compile_pulse(sequence, geom, 50e6)
+    source, program = device.compile_pulse(sequence, geom, 50e6)
+    device.open()
+    try:
+        for entries in ({}, {"9": (1, "value")}):
+            device.load_config_values(entries)
+            device.load(program, source=source)
+            assert device.applied().source is sequence
+            assert device.applied().program == program
+        device.load_config_values({"1": (0.1, "us"), "9": (1, "value")})
+        device.load(program, source=source)
+        applied = device.applied()
+        assert applied.source.period_by_id["p0"].duration == 40
+        assert applied.source.period_by_id["p1"].duration == 100
+        assert applied.source.config_parameters == sequence.config_parameters
         assert sequence.period_by_id["p1"].duration == 40
+        assert applied.program == compile_sequence(applied.source, geom, 50e6)
+        for bad_unit in ("value", "Hz"):
+            device.load_config_values({"1": (100, bad_unit)})
+            with pytest.raises(ValueError, match="declares|time unit"):
+                device.load(program, source=source)
+            assert device.applied() is applied
+    finally:
+        device.close()
 
 
 def test_a_pulse_declaring_nothing_needs_no_set(streamer):
@@ -154,25 +204,18 @@ def test_the_set_survives_a_close_and_reopen(streamer):
     """A calibration is a fact about the apparatus, not about a connection."""
 
     device, _geom = streamer
-    device.load_config_values({"probe_time": (100, "ns")}, source="today.json")
+    device.load_config_values({"1": (100, "ns")}, source="today.json")
     device.open()
     device.close()
     device.open()
     try:
-        assert device.config_values() == {"probe_time": (100.0, "ns")}
+        assert device.config_values() == {"1": (100.0, "ns")}
         assert device.snapshot()["config_source"] == "today.json"
     finally:
         device.close()
 
 
-def test_the_remote_client_holds_its_own_set_and_sends_nothing() -> None:
-    """The wire is unchanged: the values never leave the host that compiles.
-
-    A remote board is driven by a client that compiles locally and ships the
-    program, so holding the set client-side is what lets a server built
-    before config parameters existed keep serving a host that has them.
-    """
-
+def test_the_remote_client_holds_its_own_set_and_compiles_without_io() -> None:
     from zlc_pulse.remote import REMOTE_METHODS
 
     assert REMOTE_METHODS == (
@@ -187,12 +230,12 @@ def test_the_remote_client_holds_its_own_set_and_sends_nothing() -> None:
     filled, program = client.compile_pulse(sequence, geom, 50e6)
     assert filled is sequence
     assert program.ticks == compile_sequence(sequence, geom, 50e6).ticks
-    client.load_config_values({"probe_time": (100, "ns")}, source="today.json")
-    assert client.config_values() == {"probe_time": (100.0, "ns")}
+    client.load_config_values({"1": (100, "ns")}, source="today.json")
+    assert client.config_values() == {"1": (100.0, "ns")}
     assert client.config_source == "today.json"
 
     filled, program = client.compile_pulse(sequence, geom, 50e6)
-    assert filled.period_by_id["p1"].duration == 100
+    assert filled is sequence
     assert program.ticks == compile_sequence(filled, geom, 50e6).ticks
 
 
@@ -201,10 +244,12 @@ def test_a_set_that_is_not_a_set_is_refused_at_the_door(streamer) -> None:
 
     device, _geom = streamer
     for bad, message in (
-        ({"probe_time": 100}, "must be"),
-        ({"probe_time": (float("nan"), "ns")}, "finite"),
-        ({"probe_time": (100, "")}, "unit"),
-        ({"": (100, "ns")}, "non-empty"),
+        ({"1": 100}, "must be"),
+        ({"1": (float("nan"), "ns")}, "finite"),
+        ({"1": (100, "")}, "unit"),
+        ({"": (100, "ns")}, "positive"),
+        ({"probe_time": (100, "ns")}, "positive"),
+        ({1: (100, "ns"), "1": (200, "ns")}, "duplicate"),
     ):
         with pytest.raises((TypeError, ValueError), match=message):
             device.load_config_values(bad)

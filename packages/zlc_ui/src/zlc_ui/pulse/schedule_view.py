@@ -1186,12 +1186,12 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.load_values_button = FluentButton("Load config", color=ORANGE)
         self.save_values_button = FluentButton("Save config", color=YELLOW)
         self.load_values_button.setToolTip(
-            "Give the connected board a set of calibrated values.  It holds "
-            "them until the next load and overrides matching Config fields "
-            "in every pulse it compiles; unmatched fields keep their values."
+            "Bind a Config file to the device. Before every Fire it rereads "
+            "the file and applies matching Config numbers (1, 2, ...); "
+            "unmatched fields keep the pulse's original values."
         )
         self.save_values_button.setToolTip(
-            "Save this editor's Config parameters, current values and units. "
+            "Save this editor's Config numbers, current values and units. "
             "No connection or On Pulse is required; the sequencer is unchanged."
         )
         control_buttons = (

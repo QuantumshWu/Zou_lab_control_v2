@@ -7,10 +7,8 @@ file" -- was true and answered a different question.  A pulse is saved as JSON
 beside the module, with that fact owned by the package that owns the model
 rather than re-derived by whoever happens to be writing a file.
 
-Trees only, with one exception that earns itself: :func:`read_pulse_document`,
-which turns one path into the pulse it names.  A pulse is the one document
-this package owns end to end, so the three lines that open it belong here
-rather than copied into every consumer.
+Pulse and numbered Config files share their grammar and file I/O here;
+devices and editors do not maintain alternative readers or writers.
 """
 
 from __future__ import annotations
@@ -21,6 +19,10 @@ import os
 from pathlib import Path
 from numbers import Real
 from typing import Any
+
+from zlc_durable import atomic_write_bytes, readable_json_bytes
+
+from .binding import config_parameter_key
 
 from .model import (
     AnalogStep,
@@ -40,9 +42,10 @@ from .model import (
 
 #: What a reader checks before trusting the rest.
 PULSE_TREE_FORMAT = "zlc.pulse"
-#: ...and the same for one saved set of CONFIG parameter values: the board's
-#: own calibrated numbers, which a pulse refreshes itself from.
+#: Config keys are the one-based numbers displayed by Pulse Editor.
 CONFIG_VALUES_FORMAT = "zlc.pulse.config_values"
+CONFIG_VALUES_DIRECTORY = "config_values"
+CURRENT_CONFIG_VALUES = "current.json"
 PULSE_EDITOR_FIELDS = (
     "visible_ports",
     "scan_source",
@@ -469,15 +472,16 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
 def _named_values_tree(
     values: Mapping[str, tuple[int | float, str]], label: str
 ) -> dict[str, Any]:
-    """The ``values`` body both value-set grammars carry."""
+    """The numbered Config values body."""
 
     if not isinstance(values, Mapping):
         raise TypeError(f"{label}s must be a mapping")
     entries: dict[str, Any] = {}
     for parameter_id, entry in values.items():
+        parameter_id = config_parameter_key(parameter_id)
+        if parameter_id in entries:
+            raise ValueError(f"duplicate Config parameter number {parameter_id}")
         number, unit = entry
-        if not isinstance(parameter_id, str) or not parameter_id:
-            raise ValueError(f"{label} ids must be non-empty text")
         if not isinstance(number, Real) or isinstance(number, bool):
             raise TypeError(f"{label} {parameter_id!r} must be a number")
         if not isinstance(unit, str) or not unit:
@@ -502,8 +506,7 @@ def _named_values_from_tree(
         raise TypeError(f"{label}s body must be an object")
     entries: dict[str, tuple[float, str]] = {}
     for parameter_id, entry in body.items():
-        if not isinstance(parameter_id, str) or not parameter_id:
-            raise ValueError(f"{label} ids must be non-empty text")
+        parameter_id = config_parameter_key(parameter_id)
         entry = _object(entry, ("value", "unit"), f"{label} {parameter_id!r}")
         number = entry["value"]
         if not isinstance(number, Real) or isinstance(number, bool):
@@ -543,17 +546,47 @@ def config_values_from_tree(
     return _named_values_from_tree(tree, CONFIG_VALUES_FORMAT, "config value")
 
 
+def read_config_values(path: str | Path) -> tuple[str, str, dict[str, tuple[float, str]]]:
+    """Read the selected Config file through its sole numbered grammar."""
+
+    source = Path(path).expanduser().resolve()
+    if source.suffix.lower() != ".json":
+        raise ValueError(f"config values must be JSON: {source}")
+    return config_values_from_tree(parse_pulse_tree_json(source.read_text(encoding="utf-8")))
+
+
+def write_config_values(
+    path: str | Path,
+    entries: Mapping[str, tuple[float, str]],
+    *,
+    name: str = "",
+    source: str = "hand",
+) -> None:
+    """Write Config numbers and values atomically through the same grammar."""
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_bytes(
+        target,
+        readable_json_bytes(config_values_to_tree(entries, name=name, source=source)),
+    )
+
+
 def _plain_number(value: float) -> int | float:
     return int(value) if float(value).is_integer() else float(value)
 
 
 
 __all__ = [
+    "CONFIG_VALUES_DIRECTORY",
+    "CURRENT_CONFIG_VALUES",
     "CONFIG_VALUES_FORMAT",
     "PULSE_TREE_FORMAT",
     "PULSE_EDITOR_FIELDS",
     "config_values_from_tree",
     "config_values_to_tree",
+    "read_config_values",
+    "write_config_values",
     "parse_pulse_tree_json",
     "read_pulse_document",
     "sequence_from_tree",

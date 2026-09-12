@@ -9,11 +9,15 @@ if _PACKAGE_DIR.name != "zlc_pulse" or __package__ != "zlc_pulse":
     raise ImportError(f"unexpected zlc_pulse installation path: {_PACKAGE_DIR}")
 
 from .codec import (
+    CONFIG_VALUES_DIRECTORY,
+    CURRENT_CONFIG_VALUES,
     read_pulse_document,
     PULSE_TREE_FORMAT,
     CONFIG_VALUES_FORMAT,
     config_values_from_tree,
     config_values_to_tree,
+    read_config_values,
+    write_config_values,
     sequence_from_tree,
     sequence_to_tree,
 )
@@ -77,6 +81,10 @@ from .transport import (  # noqa: E402
 # This is the final user-facing package surface.  Keep implementation types
 # and test transports importable from their owning submodules, not this file.
 __all__ = [
+    "CONFIG_VALUES_DIRECTORY",
+    "CURRENT_CONFIG_VALUES",
+    "read_config_values",
+    "write_config_values",
     "PulseStreamer",
     "RemotePulseStreamer",
     "connect",

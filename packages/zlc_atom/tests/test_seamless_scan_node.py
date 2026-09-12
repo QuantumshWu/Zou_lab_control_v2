@@ -30,7 +30,6 @@ from zlc_pulse import (
     PulseBracket,
     compile_sequence,
     load_streamer_config,
-    pulse_field_value,
     resolve_api_parameters,
 )
 from zlc_pulse.device import BoardDescription, ConfigValueHolder
@@ -80,15 +79,8 @@ class _FakeSequencer(ConfigValueHolder):
         self.board = BoardDescription(
             sequence.target, settings["params"], settings["clock_hz"]
         )
-        self.load_config_values(
-            {
-                parameter.parameter_id: (
-                    pulse_field_value(sequence, parameter.field_ref, parameter.unit),
-                    parameter.unit,
-                )
-                for parameter in sequence.config_parameters
-            }
-        )
+        from zlc_pulse import authored_config_entries
+        self.load_config_values(authored_config_entries(sequence))
         self.fires = 0
         self.loads = 0
         self.safe_calls = 0

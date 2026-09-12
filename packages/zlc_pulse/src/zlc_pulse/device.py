@@ -6,12 +6,13 @@ from dataclasses import dataclass, replace
 from collections.abc import Sequence
 import math
 from numbers import Integral
+from pathlib import Path
 import threading
 import time
 
 from collections.abc import Mapping
 
-from .binding import apply_config_values
+from .binding import apply_config_values, config_parameter_key
 from .compile import (
     CompiledProgram,
     compile_sequence,
@@ -136,12 +137,15 @@ class AppliedState:
     run_repeats: int
     scan_repeats: int
     loaded_at: float
+    authored_source: PulseSequence | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.program, CompiledProgram):
             raise TypeError("applied program must be CompiledProgram")
         if self.source is not None and not isinstance(self.source, PulseSequence):
             raise TypeError("applied source must be PulseSequence or None")
+        if self.authored_source is not None and not isinstance(self.authored_source, PulseSequence):
+            raise TypeError("authored source must be PulseSequence or None")
         rows = tuple(tuple(row) for row in self.rows)
         if any(len(row) != self.program.slot_count for row in rows):
             raise ValueError("applied row width differs from the compiled program")
@@ -209,44 +213,35 @@ class BoardDescription:
 
 
 class ConfigValueHolder:
-    """The calibrated set a board holds, and the only door to compiling for it.
-
-    Inherited by both the local streamer and the remote client, so the rule
-    is stated once.  Two copies of "what a config parameter means" is exactly
-    how the two ends of one board come to disagree about what played.
-
-    The set is client-side even for a remote board: nothing about it crosses
-    the wire, so the protocol is unchanged and a server can be older than the
-    host driving it.
-    """
+    """Config overrides applied by the local or remote device's load/fire owner."""
 
     def _init_config_values(self) -> None:
         self._config_lock = threading.RLock()
         self._config_values: dict[str, tuple[float, str]] = {}
         self._config_source = ""
+        self._config_file: Path | None = None
 
     def load_config_values(
         self,
-        entries: "Mapping[str, tuple[float, str]]",
+        entries: "Mapping[int | str, tuple[float, str]]",
         *,
         source: str = "",
     ) -> None:
-        """Hold optional overrides for matching Config IDs in every pulse.
+        """Hold in-memory overrides and stop following any previously bound file.
 
         Unmatched fields keep the pulse's authored values. The set stays on
         this streamer until another set is loaded, including across reconnects.
 
-        Entries arrive already decoded.  Reading the file is the job of
-        whoever knows where the operator's files live, which is not a package
-        that talks to a register bus.
+        ``source`` is an informational label, never an implicit file binding.
         """
 
         if not isinstance(entries, Mapping):
             raise TypeError("config values must be a mapping")
         held: dict[str, tuple[float, str]] = {}
         for name, entry in entries.items():
-            if not isinstance(name, str) or not name.strip():
-                raise ValueError("a config value id must be non-empty text")
+            name = config_parameter_key(name)
+            if name in held:
+                raise ValueError(f"duplicate config value number {name!r}")
             try:
                 value, unit = entry
             except (TypeError, ValueError):
@@ -263,6 +258,23 @@ class ConfigValueHolder:
         with self._config_lock:
             self._config_values = held
             self._config_source = str(source or "")
+            self._config_file = None
+
+    def load_config_file(self, path: str | Path) -> None:
+        """Bind this file and read it now; each subsequent Fire reads it again."""
+
+        from .codec import read_config_values
+
+        path = Path(path).expanduser().resolve()
+        with self._config_lock:
+            _name, _source, entries = read_config_values(path)
+            self.load_config_values(entries, source=str(path))
+            self._config_file = path
+
+    def _refresh_config_file(self) -> None:
+        with self._config_lock:
+            if self._config_file is not None:
+                self.load_config_file(self._config_file)
 
     def config_values(self) -> dict[str, tuple[float, str]]:
         """The calibrated set this board is holding, as a copy."""
@@ -278,22 +290,32 @@ class ConfigValueHolder:
         *,
         slot_tick_scales: "Sequence[int] | None" = None,
     ) -> tuple[PulseSequence, CompiledProgram]:
-        """Apply matching Config overrides, then compile without transport I/O.
-
-        Missing IDs keep their authored values; the ordinary field/unit
-        validation still applies to matched overrides. Return the resulting
-        sequence as well as its program so ``load(source=...)`` and the run
-        record describe exactly the values that were compiled.
-        """
+        """Compile the authored pulse without Config mutation or file/device I/O."""
 
         if not isinstance(sequence, PulseSequence):
             raise TypeError("sequence must be PulseSequence")
-        with self._config_lock:
-            held = dict(self._config_values)
-        filled, _applied, _unknown = apply_config_values(sequence, held)
-        return filled, compile_sequence(
-            filled, geom, clock_hz, slot_tick_scales=slot_tick_scales
+        return sequence, compile_sequence(
+            sequence, geom, clock_hz, slot_tick_scales=slot_tick_scales
         )
+
+    def _prepare_config_program(
+        self,
+        program: CompiledProgram,
+        authored_source: PulseSequence | None,
+        compiled_source: PulseSequence | None,
+    ) -> tuple[CompiledProgram, PulseSequence | None]:
+        if not isinstance(program, CompiledProgram):
+            raise TypeError("prog must be CompiledProgram")
+        if authored_source is None:
+            return program, compiled_source
+        with self._config_lock:
+            filled, _applied, _unknown = apply_config_values(authored_source, self._config_values)
+        if filled == compiled_source:
+            return program, compiled_source
+        return compile_sequence(
+            filled, self.describe().geometry, program.clock_hz,
+            slot_tick_scales=program.slot_tick_scales,
+        ), filled
 
     @property
     def config_source(self) -> str:
@@ -453,10 +475,25 @@ class PulseStreamer(ConfigValueHolder):
         source: PulseSequence | None = None,
         rows: Sequence[Sequence[int]] = (),
     ) -> None:
+        with self._lock:
+            self._refresh_config_file()
+            program, filled = self._prepare_config_program(prog, source, source)
+            self._load_program(program, source=filled, authored_source=source, rows=rows)
+
+    def _load_program(
+        self,
+        prog: CompiledProgram,
+        *,
+        source: PulseSequence | None,
+        authored_source: PulseSequence | None,
+        rows: Sequence[Sequence[int]],
+    ) -> None:
         if not isinstance(prog, CompiledProgram):
             raise TypeError("prog must be CompiledProgram")
         if source is not None and not isinstance(source, PulseSequence):
             raise TypeError("source must be PulseSequence or None")
+        if authored_source is not None and not isinstance(authored_source, PulseSequence):
+            raise TypeError("authored source must be PulseSequence or None")
         if (
             source is not None
             and source.target.abi_fingerprint != prog.target_abi_fingerprint
@@ -486,7 +523,7 @@ class PulseStreamer(ConfigValueHolder):
                 self.safe()
                 self._stop.clear()
                 assert self._applied is not None
-                self._applied = replace(self._applied, source=source)
+                self._applied = replace(self._applied, source=source, authored_source=authored_source)
                 return
             self._validate_application(prog, normalized)
             words = pack_program(prog, self.geom)
@@ -522,6 +559,7 @@ class PulseStreamer(ConfigValueHolder):
             self._applied = AppliedState(
                 program=prog,
                 source=source,
+                authored_source=authored_source,
                 rows=normalized,
                 run_repeats=1,
                 scan_repeats=1,
@@ -530,6 +568,21 @@ class PulseStreamer(ConfigValueHolder):
             self._applied_digest = prog.digest
 
     def fire(self, *, run_repeats: int, scan_repeats: int = 1) -> None:
+        with self._lock:
+            self._refresh_config_file()
+            applied = self._applied
+            if applied is not None:
+                program, source = self._prepare_config_program(
+                    applied.program, applied.authored_source, applied.source
+                )
+                if source != applied.source:
+                    self._load_program(
+                        program, source=source, authored_source=applied.authored_source,
+                        rows=applied.rows,
+                    )
+            self._fire_program(run_repeats=run_repeats, scan_repeats=scan_repeats)
+
+    def _fire_program(self, *, run_repeats: int, scan_repeats: int = 1) -> None:
         run_repeats = _repeat_count(run_repeats, "run_repeats")
         scan_repeats = _repeat_count(scan_repeats, "scan_repeats")
         with self._lock:
