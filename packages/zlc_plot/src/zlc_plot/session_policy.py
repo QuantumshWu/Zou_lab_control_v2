@@ -133,12 +133,12 @@ def merge_labels(old_spec: PlotSpec, new_spec: PlotSpec) -> PlotLabels:
     a histogram x axis reading "Time (mV)".
     """
 
-    old_labels = old_spec.labels
-    carriers = {
-        role: getattr(old_labels, slot)
-        for slot, role in handler_for(old_spec).label_roles(old_spec)
-        if getattr(old_labels, slot)
-    }
+    old_labels = semantic_spec(old_spec).labels
+    carriers = {}
+    for slot, role in handler_for(old_spec).label_roles(old_spec):
+        label = old_spec.labels.title if slot == "title" else getattr(old_labels, slot)
+        if label:
+            carriers[role] = label
     slots = {
         slot: carriers[role]
         for slot, role in handler_for(new_spec).label_roles(new_spec)

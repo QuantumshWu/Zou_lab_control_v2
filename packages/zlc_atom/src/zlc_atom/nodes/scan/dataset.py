@@ -121,11 +121,13 @@ def scan_dataset_schema(
     *,
     scan_repeats: int = 1,
     run_repeats: int = 1,
+    axis_names: Sequence[str] | None = None,
 ) -> DatasetSchema:
     """The scan dataset's schema: the plan's axes layered over the source's.
 
     ``rows`` carries one coordinate row per PLAN POINT; ``axes`` carries one
-    ``(name, unit)`` per column of those rows. ``scan_repeats`` and
+    stable ``(identity, unit)`` per column. ``axis_names`` optionally supplies
+    display names without changing those identities. ``scan_repeats`` and
     ``run_repeats`` are the Repeat domain, and the only Repeat axes there
     are: a scan point's value is one shot, so the source must publish one
     shot per event -- its own Repeat carrier is consumed here.  The source's
@@ -180,6 +182,7 @@ def scan_dataset_schema(
         domain, indices = _unique_domain(tuple(row[index] for row in rows))
         axis_domains.append(domain)
         per_axis_indices.append(indices)
+    names = tuple(name for name, _unit in axes) if axis_names is None else tuple(axis_names)
     scan_axes = tuple(
         AxisSpec(
             axis_id,
@@ -191,8 +194,8 @@ def scan_dataset_schema(
             # the same way.  An empty string is neither layer's spelling.
             unit=str(unit) if unit else None,
         )
-        for axis_id, domain, (name, unit) in zip(
-            axis_ids, axis_domains, axes, strict=True
+        for axis_id, domain, (_identity, unit), name in zip(
+            axis_ids, axis_domains, axes, names, strict=True
         )
     )
     scan_cells = tuple(
@@ -247,11 +250,13 @@ class ScanDatasetWriter:
         scan_repeats: int = 1,
         run_repeats: int = 1,
         run_record: Mapping[str, object] | None = None,
+        axis_names: Sequence[str] | None = None,
     ) -> None:
         self._rows = tuple(tuple(float(value) for value in row) for row in rows)
         if not self._rows:
             raise ValueError("a scan writes at least one point")
         self._axes = tuple((str(name), str(unit)) for name, unit in axes)
+        self._axis_names = None if axis_names is None else tuple(axis_names)
         self._scan_repeats = int(scan_repeats)
         self._run_repeats = int(run_repeats)
         if self._scan_repeats < 1:
@@ -325,6 +330,7 @@ class ScanDatasetWriter:
             self._axes,
             scan_repeats=self._scan_repeats,
             run_repeats=self._run_repeats,
+            axis_names=self._axis_names,
         )
         self._source_points = source_schema.point_domain.size
 

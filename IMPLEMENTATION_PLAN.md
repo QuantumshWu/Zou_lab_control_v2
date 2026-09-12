@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- 数值名称贯通现有ValueSchema、生产节点、Scan/ROI/history、Plot与Figure codec；FrameSurvival的survival经过Scan不再变value/scan。Derive用户输出、Fit参数、ROI统计由各自owner命名；普通数值轴使用同一quantity label，显式标签优先。Facet外层轴标签归一到cell，解决其被忽略及换轴旧标签复活；无renderer分支。Data/Atom/Plot/Runtime/Viewer直接验证及真实FigureViewer截图通过，窗口关闭，截图不入Git。
+- Pulse/Scan字段显示使用可编辑Period Name，如MOT.duration；有效显示名重名在Pulse模型拒绝，空Name保留ID。Scan的Axis.name与稳定AxisId分离，保存port/绑定编号/量化值及selector回写不变；重名编辑回显原值，新period ID避开已有显示名。既有Pulse及Scan直接用例通过，无硬件或RTL操作。
 - Remote Load消除未变原稿的重复传输/解码，复用原有AppliedState；仅新实际执行稿重建，原稿变化仍完整发送。类型级序列化字段metadata复用不改变wire对象grammar；文件刷新、原稿恢复、scan/reconnect及takeover直接用例通过。未增加源记录或新通信方法，客户端/server需同步Python版本，不涉及RTL。
 - Scan/API/Config编号保存到各binding本身，三种类别各自分配最小空正整数；删除、取消、重排和改ID不重编号。Config文件按稳定number匹配，硬件Scan列仍保持原紧凑tuple顺序。模型/文件保存重开及Editor三种cycle的直接用例通过；未新增编号管理器或迁移器。
 - Device UI名称统一投影accepted Role，内部key/端口/保存引用不变；卡片、通用及Pulse/SLM Control、Logic/Scan选择与设备日志使用相同label/value分离。重复Role保留为草稿，在Init/Save统一拒绝，Role-only reconcile不重建设备。Windows真实Qt点击与截图确认；Loaded卡片身份列避免Role被按钮挤掉，所有验收窗口关闭，截图仅保留ignored research。
@@ -147,7 +149,7 @@
   typed coordinate value，不提供Latest，也不让display label或裸文本控制字进入truth。
 - Dataset三组结构现统一为同级`DomainSpec(shape, axes, axis_codes)`：Repeat/Point使用
   explicit row codes，Cell-data使用不物化pixel codes的dense implicit stride；`ValueSchema`
-  只保留dtype/unit/validity。旧的平行row-coordinate/topology与Plot双身份路径整体删除；
+  保留dtype/unit/validity及可选数值name。旧的平行row-coordinate/topology与Plot双身份路径整体删除；
   scan、history、selection、fit与Figure只读取同一axis domain/code truth。
 - Fate Setting不再预跑candidate render/layout feasibility：所有axis始终列出plot kind声明的全部roles；
   64-cell等容量限制只在真实replace/layout transaction执行。旧semantic probe、cache和kind validate

@@ -98,11 +98,10 @@ class ScanPort:
 
 
 def port_label(port: str) -> str:
-    """The human name of a port, derived from the port itself.
+    """The stable axis-identity spelling derived from an authored port.
 
-    THE definition, so a label and its port cannot drift: a pulse parameter
-    is named by its parameter id, and a device knob by the device and the
-    field it belongs to.
+    Display names belong to ScanPort.label; changing a Period name must
+    not change the axis ID selectors and saved plans reference.
     """
 
     text = str(port)
@@ -207,7 +206,7 @@ def _ports_from_columns(columns) -> tuple[ScanPort, ...]:
         ports.append(
             ScanPort(
                 port,
-                port_label(port),
+                column.label,
                 "code" if column.is_dac else str(column.unit),
                 lo,
                 hi,

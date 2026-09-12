@@ -174,6 +174,7 @@ class ValueSchema:
     validity_contract: ValidityContract
     dtype: np.dtype
     value_unit: str | None = None
+    name: str | None = None
     #: Cached on first request.  Computed eagerly it cost 23 us per schema,
     #: paid by every intermediate schema construction that never names it.
     _fingerprint: str | None = field(init=False, repr=False, compare=False, default=None)
@@ -184,6 +185,8 @@ class ValueSchema:
         object.__setattr__(self, "dtype", canonical_dtype(self.dtype))
         if self.value_unit is not None:
             canonical_text(self.value_unit, "value_unit")
+        if self.name is not None:
+            canonical_text(self.name, "value name")
         object.__setattr__(self, "_fingerprint", None)
 
     @classmethod
@@ -191,11 +194,14 @@ class ValueSchema:
         cls,
         dtype: np.dtype,
         value_unit: str | None = None,
+        *,
+        name: str | None = None,
     ) -> "ValueSchema":
         return cls(
             ValidityContract.value(),
             dtype,
             value_unit,
+            name,
         )
 
     @property

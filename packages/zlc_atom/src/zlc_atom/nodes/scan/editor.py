@@ -49,7 +49,7 @@ from zlc_ui.fluent import (
 from zlc_ui.form import FluentParameterForm, FormFieldProps, FormSpec, being_edited
 
 from zlc_data.units import DEFAULT_UNITS
-from zlc_pulse import api_parameter_columns_for, authored_api_entries, field_label
+from zlc_pulse import api_parameter_columns_for, authored_api_entries
 
 from .plan import (
     MANUAL_PARAM_FAMILY,
@@ -220,7 +220,13 @@ class _AxisRow(QtWidgets.QWidget):
             except ValueError:
                 return "unavailable"
 
-        labels = {port.port: port_leaf(port.port) for port in self._ports}
+        labels = {
+            port.port: (
+                port.label.removeprefix(f"{port_group(port.port)}.")
+                if port.port.startswith(DEVICE_PARAM_FAMILY) else port.label
+            )
+            for port in self._ports
+        }
         sources = {port.port: (branch(port.port),) for port in self._ports}
         chosen = str(current or "")
         offered = {port.port for port in self._ports}
@@ -735,14 +741,14 @@ class ScanPlanEditor(QtWidgets.QWidget):
             # below is in that unit and nothing converts at this editor's
             # edge.  The range is what the board can be given -- the
             # column's limit -- not a number guessed here.
-            code = unit == "value"
+            code = column.is_dac
             number = float(overrides.get(name, authored))
             values[name] = int(number) if code else number
             fields.append(
                 FormFieldProps(
                     key=name,
                     kind="int" if code else "float",
-                    label=field_label(sequence, parameter.field_ref),
+                    label=column.label,
                     default=values[name],
                     required=True,
                     unit="" if code else unit,

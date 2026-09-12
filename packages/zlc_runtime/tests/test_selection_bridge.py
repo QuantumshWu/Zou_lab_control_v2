@@ -326,6 +326,7 @@ def _close(bridge: SelectionBridge, plane: SignalDataPlane, source: _Source) -> 
 
 def test_image_area_materializes_closed_roi_and_mean_with_lineage() -> None:
     schema = _image_schema()
+    schema = replace(schema, value_schema=replace(schema.value_schema, name="photons"))
     values = np.arange(12, dtype=np.float64).reshape(1, 1, 4, 3)
     plane, source, _slot, _state, initial = _source_setup(schema, values)
     events = _Events()
@@ -358,6 +359,8 @@ def test_image_area_materializes_closed_roi_and_mean_with_lineage() -> None:
         roi_frame = front.value("@logic/image/roi_frame")
         roi_mean = front.value("@logic/image/roi_mean")
         assert roi_frame is not None and roi_mean is not None
+        assert roi_frame.snapshot.block.schema.value_schema.name == "photons"
+        assert roi_mean.snapshot.block.schema.value_schema.name == "roi_mean"
         np.testing.assert_array_equal(
             roi_frame.snapshot.block.values,
             values[:, :, 1:3, 1:3],
@@ -1125,6 +1128,7 @@ def test_a_fitted_parameter_is_published_carrying_its_own_error() -> None:
         front = plane.freeze()
         parameter = front.value("@logic/fit/x0")
         assert parameter is not None
+        assert parameter.snapshot.block.schema.value_schema.name == "x0"
         assert float(parameter.snapshot.block.values.reshape(-1)[0]) == 2.5
         # THE UNCERTAINTY RIDES WITH THE VALUE.
         sigma = parameter.snapshot.block.sigma

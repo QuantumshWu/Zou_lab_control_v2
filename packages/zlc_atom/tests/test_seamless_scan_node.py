@@ -212,7 +212,7 @@ BIAS_X_PORT = PULSE_PARAM_FAMILY + "da_bias_x"
 
 
 def _point_axis_values(schema, name: str) -> tuple[object, ...]:
-    axis = next(axis for axis in schema.point_domain.axes if axis.name == name)
+    axis = next(axis for axis in schema.point_domain.axes if axis.axis_id.value == f"scan.{name}")
     return tuple(
         axis.coordinate_at(code) for code in schema.point_domain.codes(axis.axis_id)
     )
@@ -474,7 +474,7 @@ def test_the_table_is_the_plan_and_the_shots_are_run_repeats(monkeypatch) -> Non
     sequence = replace(
         sequence,
         periods=tuple(
-            replace(period, duration=700.0, unit="ms")
+            replace(period, name="MOT", duration=700.0, unit="ms")
             if period.period_id == period_id
             else period
             for period in sequence.periods
@@ -522,6 +522,8 @@ def test_the_table_is_the_plan_and_the_shots_are_run_repeats(monkeypatch) -> Non
     assert played != requested, "this case must exercise visible tick quantization"
 
     schema = canonical[0].canonical_schema
+    assert next(axis.name for axis in schema.point_domain.axes
+                if axis.axis_id.value == "scan.da_bias_x") == "MOT.duration"
     assert _point_axis_values(schema, "da_bias_x") == pytest.approx(played)
     run_record = canonical[0].run_record
     assert run_record["slot_tick_scales"] == [2]

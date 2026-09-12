@@ -254,10 +254,11 @@ class OccupancyProcessor:
                     site_validity,
                     np.dtype("<f4"),
                     source.value_schema.value_unit,
+                    name="counts",
                 )
             ),
             "occupied": with_value(
-                ValueSchema(site_validity, np.dtype("?"), "1")
+                ValueSchema(site_validity, np.dtype("?"), "1", name="occupied")
             ),
         }
 

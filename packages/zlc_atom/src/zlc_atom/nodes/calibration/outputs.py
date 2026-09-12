@@ -181,6 +181,7 @@ def _with_component_validity(
             ValidityContract.components(*axis_ids),
             value_schema.dtype,
             value_schema.value_unit,
+            name=value_schema.name,
         ),
     )
     block = source.replacing(

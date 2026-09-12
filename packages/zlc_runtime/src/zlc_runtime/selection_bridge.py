@@ -2287,12 +2287,11 @@ class SelectionBridge:
                     derived_schema.repeat_domain,
                     derived_schema.point_domain,
                     derived_schema.cell_domain,
-                    ValueSchema(
-                        ValidityContract.components(
+                    replace(
+                        value_schema,
+                        validity_contract=ValidityContract.components(
                             *(axis.axis_id for axis in derived_schema.cell_domain.axes)
                         ),
-                        value_schema.dtype,
-                        value_schema.value_unit,
                     ),
                 )
         catalog = (
@@ -2338,17 +2337,18 @@ class SelectionBridge:
             _countable(values, valid_values),
             scalar_outputs,
         )
-        scalar_schema = DatasetSchema(
-            derived_schema.repeat_domain,
-            derived_schema.point_domain,
-            SCALAR_DOMAIN,
-            ValueSchema.scalar(
-                np.dtype("float64"),
-                source_schema.value_schema.value_unit,
-            ),
-        )
-        total = scalar_schema.repeat_domain.size * scalar_schema.point_domain.size
+        total = derived_schema.repeat_domain.size * derived_schema.point_domain.size
         for name in scalar_outputs:
+            scalar_schema = DatasetSchema(
+                derived_schema.repeat_domain,
+                derived_schema.point_domain,
+                SCALAR_DOMAIN,
+                ValueSchema.scalar(
+                    np.dtype("float64"),
+                    source_schema.value_schema.value_unit,
+                    name=name,
+                ),
+            )
             answer, validity = statistics[name]
             derived = materialize_derived_dataset(
                 source.ref,
@@ -2457,7 +2457,7 @@ class SelectionBridge:
                 repeat_domain,
                 point_domain,
                 SCALAR_DOMAIN,
-                ValueSchema.scalar(np.dtype("float64"), unit),
+                ValueSchema.scalar(np.dtype("float64"), unit, name=parameter),
             )
             if parameter not in enabled:
                 continue

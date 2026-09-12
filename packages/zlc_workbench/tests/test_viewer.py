@@ -642,6 +642,7 @@ def test_manual_data_uses_runtime_panel_and_the_one_figure_writer(tmp_path) -> N
         info, arrays, datasets = read_archive(target)
         restored = datasets["data"]
         assert restored.block.values.shape == (2, 16, 1)
+        assert restored.block.schema.value_schema.name == draft["name"]
         assert restored.block.values[0, 3, 0] == 7.25
         assert restored.block.schema.repeat_domain.axes[-1].coordinates == (10, 20)
         assert restored.block.schema.point_domain.axes[0].name == "detuning"

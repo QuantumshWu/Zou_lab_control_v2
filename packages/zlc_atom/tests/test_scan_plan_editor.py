@@ -276,7 +276,7 @@ def test_a_devices_knobs_hang_under_that_device_not_in_one_flat_list() -> None:
         return ScanPort(name, port_label(name), "", lo, hi)
 
     ports = (
-        port("pulse:param:mot_duration", 0.0, 1.0),
+        ScanPort("pulse:param:mot_duration", "MOT.duration", "", 0.0, 1.0),
         port("device:rf_source:frequency", 1e5, 5e6),
         port("device:rf_source:power", -30.0, 10.0),
         port("device:slm:tilt_x", -1.0, 1.0),
@@ -296,7 +296,7 @@ def test_a_devices_knobs_hang_under_that_device_not_in_one_flat_list() -> None:
             for index in range(model.rowCount())
         }
         assert tree == {
-            "pulse": ["mot_duration"],
+            "pulse": ["MOT.duration"],
             "Cooling RF": ["frequency", "power"],
             "Tweezers": ["tilt_x"],
         }, tree
@@ -417,18 +417,21 @@ def test_api_values_are_reconciled_under_the_operators_wheel() -> None:
     """
 
     from PyQt5 import QtCore
+    from dataclasses import replace
 
     app = ensure_qt_app(["scan-editor-values"])
     sequence = _bound_sequence()
+    sequence = replace(sequence, periods=(replace(sequence.periods[0], name="MOT"), *sequence.periods[1:]))
     editor = scan_plan_editor_factory(device_ports=False, hardware_slots=False)
     editor.show()
     editor.update_projection(_projection(sequence))
     app.processEvents()
     form = editor.values_form
     assert form.keys == ("hold", "level")
+    assert next(field.label for field in form.spec.fields if field.key == "hold") == "MOT.duration"
     hold = form.widget_for("hold")
     level = form.widget_for("level")
-    assert level.value() == 1 and type(level.value()) is int, "a DAC level is whole codes"
+    assert form.read_value("level") == 1 and type(form.read_value("level")) is int, "a DAC level is whole codes"
     assert hold.value() == 200.0 and hold.valueUnit() == "ns"
     assert form.unit_picker_for("hold") is not None, "a duration has a ladder"
     assert form.unit_picker_for("level") is None, "a code has none"

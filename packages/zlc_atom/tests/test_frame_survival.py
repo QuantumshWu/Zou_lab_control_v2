@@ -158,6 +158,16 @@ def test_pair_axis_carries_one_label_per_pair() -> None:
     assert labelled.block.schema.point_domain.axes[0].coordinate_labels == (
         "before-after",
     )
+    from zlc_atom.nodes.scan.dataset import scan_dataset_schema
+
+    value_schema = labelled.block.schema.value_schema
+    assert value_schema.name == "survival"
+    scanned = scan_dataset_schema(
+        labelled.block.schema, ((1.0,), (2.0,)), (("power", "mW"),),
+        run_repeats=3,
+    )
+    assert scanned.value_schema is value_schema
+    assert scanned.physical_shape == (3, 2, 2)
 
 
 def test_single_frame_and_wrong_shapes_are_refused() -> None:

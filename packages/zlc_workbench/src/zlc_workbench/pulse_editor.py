@@ -382,7 +382,8 @@ def _scan_table_text(rows: Sequence[Sequence[float]], columns: Sequence[object])
         return "(no scan table yet -- write a program and press Run)"
     specs = list(columns)
     header = "  ".join(
-        f"{getattr(column, 'name', index):>14}" for index, column in enumerate(specs)
+        f"{getattr(column, 'label', '') or getattr(column, 'name', index):>14}"
+        for index, column in enumerate(specs)
     )
     units = "  ".join(f"{getattr(column, 'unit', ''):>14}" for column in specs)
     lines = [header, units] if specs else []
@@ -1496,6 +1497,7 @@ class PulseEditorPresenter:
 
     def set_period_name(self, period_id: str, name: str) -> None:
         self._edit_period(period_id, lambda period: replace(period, name=str(name)))
+        self._refresh_scan_page()
 
     def set_duration(self, period_id: str, value: object, unit: str) -> None:
         """How long this period lasts, rounded onto the board's clock.
@@ -1597,7 +1599,7 @@ class PulseEditorPresenter:
         position = order.index(before_item) if before_item is not None else len(order)
         period_position = sum(kind == "period" for kind, _key in order[:position])
         model = periods[max(0, period_position - 1)] if periods else None
-        new_id = _unique_id(ids, "period")
+        new_id = _unique_id((*ids, *(period.name for period in periods)), "period")
         period = PulsePeriod(
             period_id=new_id,
             duration=model.duration if model else self.sequence.time_step_ns,
@@ -4443,8 +4445,15 @@ class PulseEditorPresenter:
         if ripples_forward:
             order = [item.period_id for item in periods]
             following = tuple(order[order.index(str(period_id)) + 1 :])
+        candidate = self._rebuilt(periods=tuple(periods))
+        if candidate is None:
+            self.view.set_period(project_period(
+                self.sequence, self.sequence.period_by_id[str(period_id)],
+                visible_ports=self._state.visible_ports,
+            ))
+            return
         self._apply_value(
-            self._rebuilt(periods=tuple(periods)),
+            candidate,
             period_id=str(period_id),
             also=following,
         )

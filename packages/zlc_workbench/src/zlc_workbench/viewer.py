@@ -421,6 +421,7 @@ def _draft_schema(draft: Mapping[str, object]) -> object:
             contract,
             np.dtype(draft["dtype"]),
             None if draft["unit"] is None else str(draft["unit"]),
+            name=draft["source_snapshot"].block.schema.value_schema.name or str(draft["name"]),
         ),
     )
 
@@ -1246,6 +1247,7 @@ class _ArchiveDatasetProducer:
                 ValidityContract.components(site_axis.axis_id),
                 np.dtype("?"),
                 "1",
+                name="occupied",
             ),
         )
         occupied = np.asarray(

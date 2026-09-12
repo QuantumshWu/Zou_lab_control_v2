@@ -809,7 +809,7 @@ class DataView:
                 _display=None,
                 canonical_unit=value_canonical_unit,
                 display_unit=value_display,
-                label="value",
+                label=schema.value_schema.name or "value",
             ),
             valid_mask=valid,
             sigma=snapshot_sigma(snapshot),

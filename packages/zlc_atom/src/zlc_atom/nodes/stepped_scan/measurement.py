@@ -64,6 +64,7 @@ from zlc_atom.nodes.scan.devices import (
     release_after_scan,
 )
 from zlc_atom.nodes.scan.source import settle
+from zlc_atom.nodes.scan.plan import port_label
 from zlc_atom.devices.sequencer import sequencer_archive_snapshot
 from zlc_atom.nodes._framework.descriptor import ResolvedDeviceClaim
 
@@ -247,10 +248,11 @@ class SteppedScanMeasurement:
         }
         writer = ScanDatasetWriter(
             rows,
-            [(port.label, axis.unit or port.unit) for axis, port in zip(self.plan.axes, self.ports)],
+            [(port_label(axis.port), axis.unit or port.unit) for axis, port in zip(self.plan.axes, self.ports)],
             scan_repeats=self.repeats,
             run_repeats=shots,
             run_record=run_record,
+            axis_names=tuple(port.label for port in self.ports),
         )
         knobs = ScanDeviceKnobs(self._tunables)
         release = (

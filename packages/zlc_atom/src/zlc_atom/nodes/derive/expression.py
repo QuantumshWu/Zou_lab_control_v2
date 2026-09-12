@@ -22,11 +22,11 @@ class ExpressionError(ValueError):
 _DOMAINS = ("repeat_domain", "point_domain", "cell_domain")
 
 
-def _schema(domains, dtype, unit):
+def _schema(domains, dtype, unit, name=None):
     cell = domains[2]
     validity = (ValidityContract.value() if cell == SCALAR_DOMAIN
                 else ValidityContract.components(*(a.axis_id for a in cell.axes)))
-    return DatasetSchema(*domains, ValueSchema(validity, np.dtype(dtype), unit or "1"))
+    return DatasetSchema(*domains, ValueSchema(validity, np.dtype(dtype), unit or "1", name=name))
 
 
 def _unit_power(unit, exponent):
@@ -62,7 +62,9 @@ class Operand(NDArrayOperatorsMixin):
         valid.setflags(write=False)
         object.__setattr__(self, "values", values)
         object.__setattr__(self, "valid", valid)
-        object.__setattr__(self, "schema", _schema(self.domains, values.dtype, self.unit))
+        object.__setattr__(self, "schema", _schema(
+            self.domains, values.dtype, self.unit, self.schema.value_schema.name,
+        ))
 
     @property
     def domains(self): return tuple(getattr(self.schema, name) for name in _DOMAINS)
@@ -84,7 +86,8 @@ class Operand(NDArrayOperatorsMixin):
             mask = ~np.ma.getmaskarray(values)
             valid = self.valid & mask if valid is None else valid & mask
             values = values.data
-        return Operand(_schema(self.domains, np.asarray(values).dtype, self.unit if unit is None else unit),
+        return Operand(_schema(self.domains, np.asarray(values).dtype, self.unit if unit is None else unit,
+                               self.schema.value_schema.name),
                        values, self.valid if valid is None else valid)
 
     def _axis(self, name):
@@ -149,7 +152,8 @@ class Operand(NDArrayOperatorsMixin):
                 domains[d] = DomainSpec(tuple(a.size for a in axes), axes) if axes else SCALAR_DOMAIN
                 if not axes:
                     values, valid = values[..., None], valid[..., None]
-            result = Operand(_schema(domains, values.dtype, result.unit), values, valid)
+            result = Operand(_schema(domains, values.dtype, result.unit,
+                                     result.schema.value_schema.name), values, valid)
         return result
 
     def sel(self, coordinates=None, **kwargs):

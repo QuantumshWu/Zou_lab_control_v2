@@ -2781,6 +2781,14 @@ def test_renaming_a_period_does_not_make_the_board_stale(presenter, sequence) ->
     assert presenter.view.status_token == "running-synced"
 
 
+    second = sequence.periods[1]
+    presenter.view.period_name_committed.emit(second.period_id, "MOT load")
+    assert presenter.sequence.period_by_id[second.period_id].name == second.name
+    shown = next(card for card in presenter.view.schedule_view.schedule.periods
+                 if card.period_id == second.period_id)
+    assert shown.name == (second.name or second.period_id)
+
+
 def test_the_window_never_reports_a_board_that_did_not_answer(presenter) -> None:
     """Attached and silent is its own state, and has to look like one.
 

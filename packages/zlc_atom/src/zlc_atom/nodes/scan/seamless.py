@@ -439,8 +439,15 @@ class SeamlessScanMeasurement:
                 (port_label(axis.port), axis.unit or ("" if port is None else port.unit))
                 for axis, port in zip(self.outer_axes, self.outer_ports)
             ]
-            + [(port.label, axis.unit or port.unit)
+            + [(port_label(axis.port), axis.unit or port.unit)
                for axis, port in zip(self.board_axes, self.board_ports)]
+        )
+        axis_names = tuple(
+            port_label(axis.port) if port is None else port.label
+            for axis, port in zip(
+                (*self.outer_axes, *self.board_axes),
+                (*self.outer_ports, *self.board_ports),
+            )
         )
         run_record = self.run_record(
             effective_rows=effective_rows,
@@ -457,6 +464,7 @@ class SeamlessScanMeasurement:
             scan_repeats=self.repeats,
             run_repeats=shots,
             run_record=run_record,
+            axis_names=axis_names,
         )
         inner_count = len(effective_inner)
         segment = dict(

@@ -181,13 +181,17 @@ def value_schema_to_tree(schema: ValueSchema) -> dict[str, Any]:
         },
         "dtype": schema.dtype.str,
         "value_unit": schema.value_unit,
+        **({"name": schema.name} if schema.name is not None else {}),
     }
 
 
 def value_schema_from_tree(tree: Any) -> ValueSchema:
+    fields = {"schema", "validity_contract", "dtype", "value_unit"}
+    if isinstance(tree, dict) and "name" in tree:
+        fields.add("name")
     data = _exact_map(
         tree,
-        {"schema", "validity_contract", "dtype", "value_unit"},
+        fields,
         VALUE_SCHEMA,
     )
     validity = data["validity_contract"]
@@ -203,6 +207,7 @@ def value_schema_from_tree(tree: Any) -> ValueSchema:
         validity_contract=contract,
         dtype=np.dtype(_text(data["dtype"], "dtype")),
         value_unit=unit,
+        name=data.get("name"),
     )
     if _encode(value_schema_to_tree(schema)) != _encode(tree):
         raise ValueError("ValueSchema tree is typed but non-canonical")

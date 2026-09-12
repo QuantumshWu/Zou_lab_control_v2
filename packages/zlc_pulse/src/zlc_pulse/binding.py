@@ -223,14 +223,14 @@ def field_label(sequence: PulseSequence, reference: PulseFieldRef) -> str:
 
     _check_inputs(sequence, reference)
     if reference.kind == FIELD_DELAY:
-        return f"{_port_text(sequence, reference.port)} delay"
+        return f"{_port_text(sequence, reference.port)}.delay"
     period = sequence.period_by_id.get(str(reference.period_id))
     period_text = (
         str(reference.period_id) if period is None else (period.name or period.period_id)
     )
     if reference.kind == FIELD_DURATION:
-        return f"{period_text} duration"
-    return f"{period_text} · {_port_text(sequence, reference.port)}"
+        return f"{period_text}.duration"
+    return f"{period_text}.{_port_text(sequence, reference.port)}"
 
 
 def _port_text(sequence: PulseSequence, port: str | None) -> str:

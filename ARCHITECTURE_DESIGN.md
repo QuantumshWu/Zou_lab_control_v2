@@ -58,7 +58,7 @@
   axis_codes)`只有一个contract：`axis_codes=None`表示axis与dense physical dimensions逐位对应、
   映射由shape/stride隐式给出；显式axis-major codes则把physical carrier element映射到每个
   logical coordinate domain。Repeat与Point当前是扁平carrier，Cell-data保留连续dense tensor；
-  两百万像素图不物化广播coordinate codes。`ValueSchema`只拥有dtype、unit与validity，不拥有
+  两百万像素图不物化广播coordinate codes。`ValueSchema`拥有dtype、unit、validity与可选数值name，不拥有
   第四份axis容器。不得再并行保存逐row coordinate与另一份domain/mapping，或向Plot暴露
   同一Point axis的两种身份。domain是数据归属，Plot fate只属于PanelState；
   UI不得把role/fate写回Dataset truth。
@@ -195,6 +195,9 @@ Node new chunk
 
 ### 5.1 Exact Data/Fit pairing
 
+- 数值名称由生产该量的owner写入`ValueSchema.name`，不是Runtime地址或Plot猜测。普通named snapshot使用信号短名；Occupancy/FrameSurvival与用户Derive输出声明各自的新量名，Fit参数与ROI统计使用输出名。仅增加扫描/历史维度或裁剪ROI时保留输入value schema/name，Seamless接survival仍标survival而不是scan。Plot从同一QuantityArray.label读取：Curve/Rolling的Y、Histogram的X、Image/Heatmap/3D的色条或Z均用值名＋单位；Histogram的计数/密度轴仍由统计定义命名。显式Plot标签优先，真正无名Dataset才使用value占位。名称与Dataset/Figure同存同读，不另加标签注册表、来源追踪或图种/节点特判；Manual编辑已有Dataset保留值名，新建无名数据用其作者名称。
+- Facet的layout只拥有title，轴/值的显式标签由现有cell.labels唯一保存。构造时将外层显式x/y/value优先规范到cell后清外层对应项；renderer、Focus、label carry均读同一semantic cell，不在每次渲染时重建spec。换轴删除失去角色的旧标签，不能被旧cell fallback重新带回。
+- Pulse字段显示由field_label统一读取`period.name or period_id`：duration为`MOT.duration`，DAC为`MOT.<port label>`，delay为`<port label>.delay`。同一Pulse的有效Period显示名必须唯一，空Name允许使用唯一ID；错误输入只提示并恢复已有字段显示，不改执行程序。ScanColumn/ScanPort的name/port保留变量ID，label用于界面；扫描Dataset的AxisId继续由原port identity产生，Axis.name单独承接显示label，Period改名不得破坏Plan/selector接线或改写值/单位。
 - Exponential的短区间数据只能提供初值，不能据其x/y跨度限制A/B或寿命tau；只保留tau>0的数学域及用户显式约束。固定B后可需要远大于观测窗口的tau，不能用自动上限排除合法更低损失解。fixed/free映射及通用solver停止容差不因此另建分支。
 - Histogram的single/bimodal Gaussian及Poisson-Gaussian只包含其命名的概率分量，不默认添加每bin平底beta；已删除其参数、背景组件、gap-floor种子及从population/fidelity扣除K*beta的旁路。数值COUNT_FLOOR仍只为Poisson deviance计算服务，普通Series Gaussian的背景B保留。
 - `release_recapture`是普通Series模型：`q=exp(-W0((2π f t)^2))`、`P=A[1-exp(-eta*q)]/[1-exp(-eta)]+B`，参数为amplitude/offset/eta/frequency，显示符号A/B/eta/f；eta无量纲、f为普通频率并复用sine的inverse-axis单位，时间原点固定为物理t=0而非选区起点。A/B可经现有表达式固定。模型/Jacobian/自动初值只有同一套Numba实现，single/batch复用通用TRF与现有协方差；继续使用Series数值/SEM拟合契约，不隐式构造binomial trial counts或另建温度Task。

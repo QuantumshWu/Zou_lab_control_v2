@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import partial
 from typing import ClassVar, get_args, TypeAlias
@@ -371,6 +371,18 @@ class FacetGridPlot:
             )
         if not isinstance(self.labels, PlotLabels):
             raise TypeError("FacetGridPlot.labels must be PlotLabels")
+        # The layout owns its title; the cell owns all axis/value labels.
+        # Accept explicit outer labels at construction, then store them once.
+        axis_labels = {
+            name: getattr(self.labels, name)
+            for name in ("x", "y", "value")
+            if getattr(self.labels, name) is not None
+        }
+        if axis_labels:
+            object.__setattr__(self, "cell", replace(
+                self.cell, labels=replace(self.cell.labels, **axis_labels)
+            ))
+            object.__setattr__(self, "labels", PlotLabels(title=self.labels.title))
         if self.cell.scope:
             raise ValueError(
                 "FacetGrid cell.scope is invalid; scope belongs to FacetGridPlot"

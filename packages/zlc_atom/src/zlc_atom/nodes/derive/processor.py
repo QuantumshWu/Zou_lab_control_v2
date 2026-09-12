@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 
 from zlc_data import owned_snapshot_from_arrays
 from zlc_runtime import DatasetOutputDeclaration, LiveDatasetOutput, MonitorCoverage, SignalValue
@@ -68,8 +69,11 @@ class DeriveProcessor:
         outputs = {}
         for declaration in self.dataset_output_declarations:
             result = results[declaration.name]
+            schema = replace(result.schema, value_schema=replace(
+                result.schema.value_schema, name=declaration.name,
+            ))
             snapshot = owned_snapshot_from_arrays(
-                result.schema, result.values, primary.snapshot.block.revision,
+                schema, result.values, primary.snapshot.block.revision,
                 validity=result.valid, stream_generation=primary.snapshot.ref.stream_generation,
             )
             cells = result.schema.repeat_domain.size * result.schema.point_domain.size

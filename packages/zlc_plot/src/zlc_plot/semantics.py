@@ -29,6 +29,7 @@ from .layout import DEFAULT_LAYOUT, PlotLayoutConfig
 from .session_policy import merge_labels
 from .specs import (
     FacetGridPlot,
+    PlotLabels,
     PlotSpec,
     Reduction,
     semantic_spec,
@@ -946,7 +947,14 @@ def composed_spec(
         terms = tuple(pinned.items())
         if terms != tuple(_scope_terms(candidate).items()):
             candidate = replace(candidate, scope=terms)
-        return replace(candidate, labels=merge_labels(spec, candidate))
+        labels = merge_labels(spec, candidate)
+        if isinstance(candidate, FacetGridPlot):
+            return replace(
+                candidate,
+                labels=PlotLabels(title=labels.title),
+                cell=replace(candidate.cell, labels=replace(labels, title=None)),
+            )
+        return replace(candidate, labels=labels)
 
     if not rest:
         return _settled(candidate)

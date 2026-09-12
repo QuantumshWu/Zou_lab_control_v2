@@ -662,6 +662,9 @@ class PulseSequence:
         ids = tuple(period.period_id for period in periods)
         if len(ids) != len(set(ids)):
             raise ValueError("period ids must be unique")
+        display_names = tuple(period.name or period.period_id for period in periods)
+        if len(display_names) != len(set(display_names)):
+            raise ValueError("period names must be unique (empty Name uses the period ID)")
         lane_owner = {lane: port for port in target.ports for lane in port.lanes}
         for period in periods:
             if len(period.states) != len(target.raw_lanes):

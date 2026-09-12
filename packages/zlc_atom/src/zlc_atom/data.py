@@ -234,9 +234,9 @@ def snapshot_from_array(
             else ValidityContract.value()
         )
         value_schema = (
-            ValueSchema(validity_contract, array.dtype, value_unit)
+            ValueSchema(validity_contract, array.dtype, value_unit, name=signal)
             if normalized_cell_axes
-            else ValueSchema.scalar(array.dtype, value_unit)
+            else ValueSchema.scalar(array.dtype, value_unit, name=signal)
         )
         schema = DatasetSchema(
             DomainSpec(

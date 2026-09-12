@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from dataclasses import replace
 from fractions import Fraction
 from pathlib import Path
 
@@ -108,6 +109,23 @@ def test_intrinsically_immutable_strided_views_cross_value_and_dataset_without_c
     )
     assert np.shares_memory(block.values, transposed)
     assert is_intrinsically_immutable_array(block.values)
+
+    assert value_schema.name is None
+    assert "name" not in dataset_schema_to_tree(schema)["value_schema"]
+    named_value = ValueSchema.scalar(np.dtype("<u2"), "count", name="survival")
+    named_schema = replace(schema, value_schema=named_value)
+    renamed = block.replacing(schema=named_schema)
+    assert renamed.values is block.values
+    assert np.shares_memory(renamed.values, transposed)
+    tree = dataset_schema_to_tree(named_schema)
+    assert tree["value_schema"]["name"] == "survival"
+    assert dataset_schema_from_tree(tree) == named_schema
+    assert named_schema.fingerprint != schema.fingerprint
+    assert named_value.fingerprint != value_schema.fingerprint
+    assert replace(named_value, dtype=np.dtype("<f8"), value_unit="V").name == "survival"
+    assert dataset_schema_from_tree(dataset_schema_to_tree(schema)).value_schema.name is None
+    with pytest.raises(ValueError, match="non-canonical"):
+        dataset_schema_from_tree({**tree, "value_schema": {**tree["value_schema"], "name": None}})
 
     mutable[:] = 0
     assert np.any(block.values != 0)

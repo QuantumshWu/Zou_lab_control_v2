@@ -212,6 +212,7 @@ class FrameSurvivalProcessor:
                 ValidityContract.components(site_axis.axis_id),
                 np.dtype("?"),
                 "1",
+                name="survival",
             ),
         )
 

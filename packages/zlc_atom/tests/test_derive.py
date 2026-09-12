@@ -33,8 +33,9 @@ def _schema(cycles: int, frames: int, sites: int, dtype: np.dtype, unit: str) ->
     )
 
 
-def _snapshot(values, unit, valid=None, *, revision=0):
+def _snapshot(values, unit, valid=None, *, revision=0, name=None):
     schema = _schema(*values.shape, values.dtype, unit)
+    schema = replace(schema, value_schema=replace(schema.value_schema, name=name))
     return owned_snapshot_from_arrays(schema, values, revision,
         validity=np.ones(values.shape, bool) if valid is None else valid)
 
@@ -254,8 +255,11 @@ def test_processor_publishes_current_estimates_and_the_exact_program_provenance(
         input_outputs=("counts", "occupied"), input_view="run")
     assert processor.dataset_input_siblings == ("occupied",)
     assert processor.dataset_input_view == "run"
-    primary = SignalValue(COUNTS, _snapshot(values, "count", revision=3),
-        coverage=DatasetCoverage(6, 12), canonical_schema=_schema(6, 2, 3, values.dtype, "count"),
+    counts = _snapshot(values, "count", revision=3, name="counts")
+    canonical = replace(_schema(6, 2, 3, values.dtype, "count"),
+                        value_schema=counts.block.schema.value_schema)
+    primary = SignalValue(COUNTS, counts,
+        coverage=DatasetCoverage(6, 12), canonical_schema=canonical,
         cell_origin=(1, 0))
     outputs = processor.evaluate_inputs({
         "a": primary, "occupied": SignalValue(OCCUPIED, _snapshot(occupied, "1", revision=3),
@@ -263,6 +267,9 @@ def test_processor_publishes_current_estimates_and_the_exact_program_provenance(
             cell_origin=(1, 0)),
     })
     bright, mean = outputs["bright"], outputs["mean"]
+    assert bright.snapshot.block.schema.value_schema.name == "bright"
+    assert mean.snapshot.block.schema.value_schema.name == "mean"
+    assert primary.schema.value_schema.name == "counts"
     assert bright.snapshot.block.revision.value == 3
     assert bright.snapshot.block.values.shape == (3, 1, 3)
     assert bright.coverage == MonitorCoverage(3, 3)

@@ -19,7 +19,7 @@ from collections.abc import Sequence
 from fractions import Fraction
 from dataclasses import dataclass, replace
 
-from .binding import pulse_field_value, replace_pulse_field
+from .binding import field_label, pulse_field_value, replace_pulse_field
 from .model import (
     FIELD_DAC,
     FIELD_DELAY,
@@ -78,10 +78,16 @@ class ScanColumnSpec:
     #: directions read it.
     wire_scale: float = 1.0
     wire_offset: float = 0.0
+    #: Human-facing physical field; ``name`` remains the executable variable ID.
+    label: str | None = None
 
     def __post_init__(self) -> None:
         if not str(self.name).strip():
             raise ValueError("scan column name must be non-empty")
+        if self.label is None:
+            object.__setattr__(self, "label", str(self.name))
+        elif not isinstance(self.label, str) or not self.label.strip():
+            raise ValueError("scan column label must be non-empty text")
         if float(self.hi) <= float(self.lo):
             raise ValueError(f"scan column {self.name} needs hi > lo")
 
@@ -96,6 +102,7 @@ def _column_for_field(
     tick_scale: int = 1,
     maximum_tick_scale: int = 1,
 ) -> ScanColumnSpec:
+    label = field_label(sequence, reference)
     if reference.kind == FIELD_DAC:
         # The SIGNED code, which is what the operator types into that same
         # DAC's box three tabs away.  The wire holds offset-binary -- the
@@ -116,6 +123,7 @@ def _column_for_field(
             limit_lo=float(low),
             limit_hi=float(high),
             wire_offset=float(-low),
+            label=label,
         )
 
     quantum = _quantum(sequence, unit)
@@ -135,6 +143,7 @@ def _column_for_field(
             limit_lo=-longest,
             limit_hi=longest,
             wire_scale=_ticks_per(sequence, unit),
+            label=label,
         )
 
     nominal = abs(float(pulse_field_value(sequence, reference, unit)))
@@ -177,6 +186,7 @@ def _column_for_field(
         limit_hi=limit_hi,
         wire_scale=ticks_per_unit / tick_scale,
         wire_offset=wire_offset,
+        label=label,
     )
 
 

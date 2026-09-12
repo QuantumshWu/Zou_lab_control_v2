@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import numpy as np
 import pytest
 
@@ -95,6 +96,38 @@ def test_a_column_is_seeded_by_its_slot_kind() -> None:
     assert duration.wire_scale == 1e6 / 20.0
     # The sweep brackets the value the field actually holds: 5 ms.
     assert duration.lo < 5 < duration.hi
+
+    from zlc_pulse import PulseApiParameter, compile_sequence
+    from zlc_pulse.binding import field_label
+    from zlc_pulse.scan import api_parameter_columns_for
+    from zlc_pulse.wire import StreamerParams
+
+    renamed = replace(sequence, periods=(
+        sequence.periods[0], replace(sequence.periods[1], name="MOT"),
+    ))
+    named_duration, named_dac = scan_columns_for(renamed)
+    assert named_duration.name == duration.name == sequence.slots[0].slot_id
+    assert named_duration.label == "MOT.duration"
+    assert named_dac.label == f"MOT.{dac_port.label or dac_port.key}"
+    assert renamed.slots == sequence.slots
+    assert tuple(item.number for item in renamed.slots) == (1, 2)
+    original_time = replace(sequence, slots=sequence.slots[:1])
+    renamed_time = replace(renamed, slots=renamed.slots[:1])
+    assert compile_sequence(original_time, StreamerParams(), 50e6) == compile_sequence(renamed_time, StreamerParams(), 50e6)
+    digital = next(port for port in renamed.target.ports if port.kind == "digital")
+    delayed = replace(renamed, api_parameters=(PulseApiParameter(
+        "latency", PulseFieldRef("delay", port=digital.key), "ns"
+    ),))
+    delay_column, = api_parameter_columns_for(delayed)
+    assert delay_column.name == "latency"
+    assert delay_column.label == field_label(delayed, delayed.api_parameters[0].field_ref) == f"{digital.label or digital.key}.delay"
+    assert ScanColumnSpec("bare_variable", 1, 2).label == "bare_variable"
+    for periods in (
+        (replace(sequence.periods[0], name="MOT"), renamed.periods[1]),
+        (sequence.periods[0], replace(sequence.periods[1], name="load")),
+    ):
+        with pytest.raises(ValueError, match="period names must be unique"):
+            replace(sequence, periods=periods)
 
 
 def test_a_long_duration_uses_a_full_width_base_and_signed_scan_delta() -> None:

@@ -47,8 +47,17 @@ def _template_sequence():
 def test_the_mot_template_offers_the_three_bias_ports() -> None:
     """Ports come from the pulse's own declarations, nothing invented."""
 
-    ports = scan_ports_for(_template_sequence())
+    from dataclasses import replace
+    from zlc_pulse import field_label
+
+    sequence = _template_sequence()
+    sequence = replace(sequence, periods=(replace(sequence.periods[0], name="MOT"), *sequence.periods[1:]))
+    ports = scan_ports_for(sequence)
     assert tuple(port.port for port in ports) == BIAS_PORTS
+    assert tuple(port.label for port in ports) == tuple(
+        field_label(sequence, parameter.field_ref) for parameter in sequence.api_parameters
+    )
+    assert all(port.label.startswith("MOT.") for port in ports)
     for port in ports:
         # NOT dimensionless: a DAC code is a count of codes, and calling it
         # nothing is what an empty string says.  The registry has the unit
@@ -124,7 +133,7 @@ def test_binding_refuses_unknown_ports_and_out_of_range_values() -> None:
     bound = bind_plan(
         ScanPlan((ScanAxis(BIAS_PORTS[2], (-256.0, 0.0, 256.0)),)), ports
     )
-    assert bound[0].label == "da_bias_z"
+    assert bound[0] is ports[2]
 
     power = ScanPort("device:rf:ch1_power", "rf.ch1_power", "dBm", -30.0, 10.0)
     authored = ScanAxis(power.port, (135.0, 247.0), "mVpp")
@@ -246,8 +255,10 @@ def test_a_region_lands_on_the_axis_the_picture_drew_when_two_ports_share_a_name
     labels = ("bias", "bias")
     assert scan_axis_ids(labels) == ("scan.bias", "scan.bias.2")
     schema = scan_dataset_schema(
-        _source_schema(shots=1), plan.rows(), (("bias", "1"), ("bias", "code"))
+        _source_schema(shots=1), plan.rows(), (("bias", "1"), ("bias", "code")),
+        axis_names=("bias", "MOT.duration"),
     )
+    assert schema.point_domain.axes[-1].name == "MOT.duration"
     assert [axis.axis_id.value for axis in schema.point_domain.axes[-2:]] == [
         "scan.bias",
         "scan.bias.2",
