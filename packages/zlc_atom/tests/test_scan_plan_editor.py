@@ -270,6 +270,8 @@ def test_a_devices_knobs_hang_under_that_device_not_in_one_flat_list() -> None:
     from zlc_atom.nodes.scan.editor import _AxisRow
     from zlc_atom.nodes.scan.plan import ScanAxis, port_label
 
+    ensure_qt_app()
+
     def port(name: str, lo: float, hi: float) -> ScanPort:
         return ScanPort(name, port_label(name), "", lo, hi)
 
@@ -279,7 +281,11 @@ def test_a_devices_knobs_hang_under_that_device_not_in_one_flat_list() -> None:
         port("device:rf_source:power", -30.0, 10.0),
         port("device:slm:tilt_x", -1.0, 1.0),
     )
-    row = _AxisRow(ports, plan_input_rows(ScanPlan((ScanAxis("device:rf_source:power", (0.0, 1.0, 2.0)),)))[0])
+    row = _AxisRow(
+        ports,
+        plan_input_rows(ScanPlan((ScanAxis("device:rf_source:power", (0.0, 1.0, 2.0)),)))[0],
+        device_labels={"rf_source": "Cooling RF", "slm": "Tweezers"},
+    )
     try:
         model = row.port_combo._model
         tree = {
@@ -291,13 +297,20 @@ def test_a_devices_knobs_hang_under_that_device_not_in_one_flat_list() -> None:
         }
         assert tree == {
             "pulse": ["mot_duration"],
-            "rf_source": ["frequency", "power"],
-            "slm": ["tilt_x"],
+            "Cooling RF": ["frequency", "power"],
+            "Tweezers": ["tilt_x"],
         }, tree
         # The authored port is still the selection, and its own limits are
         # what the sweep is bounded by.
         assert row.port_combo.currentData() == "device:rf_source:power"
         assert (row.start_spin.minimum(), row.start_spin.maximum()) == (-30.0, 10.0)
+        row.set_device_labels({"rf_source": "Probe RF", "slm": "Tweezers"})
+        assert "Probe RF" in {
+            row.port_combo._model.item(index).text()
+            for index in range(row.port_combo._model.rowCount())
+        }
+        assert row.port_combo.currentData() == "device:rf_source:power"
+        assert row.axis().values == (0.0, 1.0, 2.0)
     finally:
         row.deleteLater()
 

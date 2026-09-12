@@ -967,6 +967,7 @@ projection = {
     'source_groups': {'camera-1.frames': 'camera-1'},
     'device_keys': {'camera': 'camera'},
     'device_options': {'camera': ('camera', 'mot_camera')},
+    'device_labels': {'camera': 'Science camera', 'mot_camera': 'MOT monitor'},
     'running': False,
     'pending': False,
     'can_start': False,
@@ -1084,6 +1085,7 @@ assert editor.source_combo is source_combo
 assert source_combo.current_choice_key() == 'camera-1.frames'
 assert not source_model_events
 camera_combo = editor._device_combos['camera']
+assert camera_combo.currentText() == 'Science camera'
 camera_model_events = []
 camera_combo.model().rowsRemoved.connect(
     lambda *_args: camera_model_events.append('removed')
@@ -1092,6 +1094,7 @@ camera_combo.model().rowsInserted.connect(
     lambda *_args: camera_model_events.append('inserted')
 )
 pick_from_popup(camera_combo, 'mot_camera')
+assert camera_combo.currentText() == 'MOT monitor'
 assert editor._device_combos['camera'] is camera_combo
 assert not camera_model_events
 app.processEvents()

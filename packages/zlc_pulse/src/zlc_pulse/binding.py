@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from fractions import Fraction
+import math
 from numbers import Integral
 
 from .model import (
     FIELD_DAC,
     FIELD_DELAY,
     FIELD_DURATION,
+    PORT_DAC,
+    PORT_DIGITAL,
     nanoseconds_per,
     OutputDelay,
     PulseFieldRef,
@@ -70,82 +73,78 @@ def replace_pulse_field(
     """
 
     _check_inputs(sequence, reference)
-    if reference.kind == FIELD_DELAY:
-        index = next(
-            (i for i, item in enumerate(sequence.delays) if item.port == reference.port),
-            None,
-        )
-        if index is None:
-            authored = align_to_grid(
-                value,
-                unit,
-                float(sequence.time_step_ns),
-                field_name,
-                minimum=None,
-            )
-            return replace(
-                sequence,
-                delays=sequence.delays + (
-                    OutputDelay(reference.port, _number_for(authored), unit),
-                ),
-            )
-        delays = list(sequence.delays)
-        authored = convert_time(value, unit, delays[index].unit)
-        delays[index] = replace(
-            delays[index],
-            value=_number_for(
-                align_to_grid(
-                    authored,
-                    delays[index].unit,
-                    float(sequence.time_step_ns),
-                    field_name,
-                    minimum=None,
-                )
-            ),
-        )
-        return replace(sequence, delays=tuple(delays))
+    return _replace_pulse_fields(sequence, ((reference, value, unit, field_name),))
 
-    index = next(
-        (i for i, item in enumerate(sequence.periods)
-         if item.period_id == reference.period_id),
-        None,
-    )
-    if index is None:
-        raise ValueError(f"{field_name!r} names no period on this sequence")
-    periods = list(sequence.periods)
-    period = periods[index]
-    if reference.kind == FIELD_DURATION:
-        authored = convert_time(value, unit, period.unit)
-        if authored <= 0:
-            raise ValueError(
-                f"{field_name!r} must be a positive duration, not {value} {unit}"
-            )
-        periods[index] = replace(
-            period,
-            duration=_number_for(
-                align_to_grid(
-                    authored,
-                    period.unit,
-                    float(sequence.time_step_ns),
-                    field_name,
-                )
-            ),
-        )
-        return replace(sequence, periods=tuple(periods))
 
-    if unit != "value":
-        raise ValueError("DAC fields use unit 'value'")
-    steps = list(period.analog_steps)
-    at = next(
-        (i for i, step in enumerate(steps) if step.port == reference.port), None
-    )
-    if at is None:
-        raise ValueError(
-            f"{field_name!r} names no DAC step in period {period.period_id!r}"
+def _replace_pulse_fields(
+    sequence: PulseSequence,
+    fields: Iterable[tuple[PulseFieldRef, int | float, str, str]],
+    *,
+    remove_api_parameters: bool = False,
+) -> PulseSequence:
+    """Normalize all edits, then validate one final immutable pulse."""
+
+    period_changes: dict[str, dict[str, object]] = {}
+    delay_changes: dict[str, OutputDelay] = {}
+    for reference, value, unit, field_name in fields:
+        if reference.kind == FIELD_DELAY:
+            port = sequence.target.by_key.get(reference.port)
+            if port is None or port.kind not in (PORT_DIGITAL, PORT_DAC):
+                raise ValueError(f"no delay output exists with port {reference.port!r}")
+            previous = next((item for item in sequence.delays if item.port == reference.port), None)
+            target_unit = previous.unit if previous is not None else unit
+            authored = convert_time(value, unit, target_unit)
+            if authored == (previous.value if previous is not None else 0):
+                continue
+            authored = _number_for(align_to_grid(
+                authored, target_unit, sequence.time_step_ns, field_name, minimum=None
+            ))
+            if authored != (previous.value if previous is not None else 0):
+                delay_changes[reference.port] = OutputDelay(reference.port, authored, target_unit)
+            continue
+
+        period = sequence.period_by_id.get(str(reference.period_id))
+        if period is None:
+            raise ValueError(f"{field_name!r} names no period on this sequence")
+        if reference.kind == FIELD_DURATION:
+            authored = convert_time(value, unit, period.unit)
+            if authored == period.duration:
+                continue
+            if authored <= 0:
+                raise ValueError(f"{field_name!r} must be a positive duration, not {value} {unit}")
+            authored = _number_for(align_to_grid(
+                authored, period.unit, sequence.time_step_ns, field_name
+            ))
+            if authored != period.duration:
+                period_changes.setdefault(period.period_id, {})["duration"] = authored
+            continue
+
+        if unit != "value":
+            raise ValueError("DAC fields use unit 'value'")
+        at = next((i for i, step in enumerate(period.analog_steps) if step.port == reference.port), None)
+        if at is None:
+            raise ValueError(f"{field_name!r} names no DAC step in period {period.period_id!r}")
+        authored = int(round(float(value)))
+        if authored != period.analog_steps[at].value:
+            changes = period_changes.setdefault(period.period_id, {})
+            if "analog_steps" not in changes:
+                changes["analog_steps"] = list(period.analog_steps)
+            changes["analog_steps"][at] = replace(period.analog_steps[at], value=authored)
+
+    changes: dict[str, object] = {}
+    if period_changes:
+        changes["periods"] = tuple(
+            replace(period, **period_changes[period.period_id])
+            if period.period_id in period_changes else period
+            for period in sequence.periods
         )
-    steps[at] = replace(steps[at], value=int(round(float(value))))
-    periods[index] = replace(period, analog_steps=tuple(steps))
-    return replace(sequence, periods=tuple(periods))
+    if delay_changes:
+        changes["delays"] = tuple(
+            delay_changes.pop(delay.port, delay) for delay in sequence.delays
+        ) + tuple(delay_changes.values())
+    if remove_api_parameters and sequence.api_parameters:
+        changes["api_parameters"] = ()
+    return replace(sequence, **changes) if changes else sequence
 
 
 def prune_orphaned_bindings(
@@ -292,28 +291,29 @@ def config_parameter_key(value: object) -> str:
 
 
 def authored_config_entries(sequence: PulseSequence) -> dict[str, tuple[float, str]]:
-    """Read Config 1..N in declaration order, exactly as numbered in the UI."""
+    """Read each stable Config number in the unit declared by its binding."""
 
     return {
-        str(number): (
+        str(parameter.number): (
             float(pulse_field_value(sequence, parameter.field_ref, parameter.unit)),
             parameter.unit,
         )
-        for number, parameter in enumerate(_sequence_of(sequence).config_parameters, 1)
+        for parameter in _sequence_of(sequence).config_parameters
     }
 
 
 def apply_config_values(
     sequence: PulseSequence,
     entries: Mapping[str, tuple[int | float, str]],
+    *,
+    current: PulseSequence | None = None,
 ) -> tuple[PulseSequence, tuple[str, ...], tuple[str, ...]]:
-    """Apply Config values by their displayed 1..N numbers, not local field IDs.
+    """Apply Config values by stable displayed numbers, not tuple positions/IDs.
 
-    THE OVERWRITE IS THE STORAGE.  A config parameter keeps no value of its
-    own beside the field: filling one writes the number into the period's
-    duration, the DAC step or the delay it names, so the sequence that comes
-    back and the program compiled from it describe the same pulse -- which is
-    why the filled one, not the authored one, is what a load must carry.
+    ``sequence`` provides authored defaults. ``current``, when supplied, is
+    that same pulse's existing Config projection: compare and update its
+    actual fields, restoring omitted values from the authored pulse. It is
+    not an independently edited pulse or a different topology.
 
     Returns the sequence, the numbers applied, and the numbers the set named that this
     pulse does not declare -- one calibrated set serves every pulse a board
@@ -330,13 +330,14 @@ def apply_config_values(
             raise ValueError(f"duplicate Config parameter number {key}")
         normalized[key] = entry
     return _apply_named_values(
-        sequence,
+        sequence if current is None else _sequence_of(current),
         normalized,
         {
-            str(number): parameter
-            for number, parameter in enumerate(_sequence_of(sequence).config_parameters, 1)
+            str(parameter.number): parameter
+            for parameter in _sequence_of(sequence).config_parameters
         },
         "config value",
+        defaults=sequence if current is not None and current is not sequence else None,
     )
 
 
@@ -351,12 +352,14 @@ def _apply_named_values(
     entries: Mapping[str, tuple[int | float, str]],
     declared: Mapping[str, object],
     label: str,
+    *,
+    defaults: PulseSequence | None = None,
 ) -> tuple[PulseSequence, tuple[str, ...], tuple[str, ...]]:
     """Write one set of named numbers into the fields their names point at."""
 
     if not isinstance(entries, Mapping):
         raise TypeError(f"{label}s must be a mapping")
-    result = sequence
+    fields = []
     applied: list[str] = []
     unknown: list[str] = []
     for parameter_id, entry in entries.items():
@@ -371,18 +374,21 @@ def _apply_named_values(
                     f"{label} {parameter_id!r} is in {unit!r} where the pulse "
                     f"declares {parameter.unit!r}"
                 )
-            authored = float(number)
-        else:
-            authored = convert_time(number, unit, parameter.unit)
-        result = replace_pulse_field(
-            result,
-            parameter.field_ref,
-            authored,
-            parameter.unit,
-            field_name=str(parameter_id),
-        )
+        # The field writer converts directly into the physical field's unit.
+        # Passing through the declaration's unit would repeat that conversion
+        # and round through an unnecessary intermediate float.
+        fields.append((parameter.field_ref, number, unit, str(parameter_id)))
         applied.append(str(parameter_id))
-    return result, tuple(applied), tuple(unknown)
+    if defaults is not None:
+        for parameter_id, parameter in declared.items():
+            if parameter_id not in entries:
+                fields.append((
+                    parameter.field_ref,
+                    pulse_field_value(defaults, parameter.field_ref, parameter.unit),
+                    parameter.unit,
+                    parameter_id,
+                ))
+    return _replace_pulse_fields(sequence, fields), tuple(applied), tuple(unknown)
 
 
 def apply_api_values(
@@ -452,16 +458,12 @@ def resolve_api_parameters(
                 f"missing={missing}, extra={extra}"
             )
 
-    result = sequence
-    for parameter in sequence.api_parameters:
-        result = replace_pulse_field(
-            result,
-            parameter.field_ref,
-            resolved_values[parameter.parameter_id],
-            parameter.unit,
-            field_name=parameter.parameter_id,
-        )
-    return replace(result, api_parameters=())
+    return _replace_pulse_fields(
+        sequence,
+        ((parameter.field_ref, resolved_values[parameter.parameter_id], parameter.unit,
+          parameter.parameter_id) for parameter in sequence.api_parameters),
+        remove_api_parameters=True,
+    )
 
 
 def _check_inputs(sequence: PulseSequence, reference: PulseFieldRef) -> None:
@@ -481,11 +483,16 @@ def convert_time(value: int | float, source_unit: str, target_unit: str) -> floa
     nothing said so.
     """
 
-    return float(
-        Fraction(str(float(value)))
-        * nanoseconds_per(source_unit)
-        / nanoseconds_per(target_unit)
-    )
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("time value must be finite")
+    source_scale = nanoseconds_per(source_unit)
+    if source_unit == target_unit:
+        return number
+    target_scale = nanoseconds_per(target_unit)
+    if source_scale == target_scale:
+        return number
+    return float(Fraction(str(number)) * source_scale / target_scale)
 
 
 def _number_for(value: float) -> int | float:

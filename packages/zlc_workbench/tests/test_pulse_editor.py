@@ -358,7 +358,7 @@ class _EditorView:
         "remove_period_requested", "bracket_committed",
         "run_repeats_committed",
         "visible_ports_committed", "fill_port_requested", "clear_port_requested",
-        "feedback_requested", "connection_requested", "fire_requested",
+        "feedback_requested", "connection_requested", "device_label_changed", "fire_requested",
         "stop_requested", "sync_requested", "save_requested", "load_requested",
         "values_save_requested", "values_load_requested", "binding_renamed",
         "scan_array_load_requested", "scan_source_edited",
@@ -3154,6 +3154,34 @@ def test_preview_keeps_run_repeats_and_bracket_as_separate_markers(sequence) -> 
         presenter.close()
 
 
+@pytest.mark.parametrize("steps,kind", ((1, "scan"), (2, "api"), (3, "config")))
+def test_binding_numbers_survive_unselection_and_reuse_the_first_gap(sequence, steps, kind) -> None:
+    view = _EditorView()
+    presenter = PulseEditorPresenter(view, sequence)
+    periods = tuple(period.period_id for period in sequence.periods[:4])
+
+    def numbers():
+        return {
+            card.period_id: card.duration.binding_number
+            for card in view.schedule_view.schedule.periods
+            if card.duration.binding_kind == kind
+        }
+
+    try:
+        for period in periods:
+            for _ in range(steps):
+                presenter.cycle_binding("duration", period, None)
+        assert numbers() == dict(zip(periods, (1, 2, 3, 4)))
+        for _ in range(4 - steps):
+            presenter.cycle_binding("duration", periods[1], None)
+        assert numbers() == dict(zip((periods[0], periods[2], periods[3]), (1, 3, 4)))
+        for _ in range(steps):
+            presenter.cycle_binding("duration", periods[1], None)
+        assert numbers() == dict(zip(periods, (1, 2, 3, 4)))
+    finally:
+        presenter.close()
+
+
 def test_every_bindable_field_shows_the_slot_it_is_bound_to(sequence) -> None:
     """The dot has always been able to say which column a field became.
 
@@ -3195,7 +3223,7 @@ def test_every_bindable_field_shows_the_slot_it_is_bound_to(sequence) -> None:
         row = next(item for item in schedule.delay_rows if item.port_key == delayable)
         assert row.value.binding_kind == "api"
 
-        # A number is a position in its OWN collection, so the two scan slots
+        # A number is allocated within its OWN collection, so the two scan slots
         # are 1 and 2 and the API parameter is 1 again -- what identifies a
         # binding on screen is the pair, and the dot is filled in the kind's
         # colour beside the digit.

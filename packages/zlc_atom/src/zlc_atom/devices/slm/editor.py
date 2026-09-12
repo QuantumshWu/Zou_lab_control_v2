@@ -1457,6 +1457,9 @@ class SlmEditorControl(QtCore.QObject):
     def is_visible(self) -> bool:
         return bool(self._window.isVisible())
 
+    def set_device_label(self, label: str) -> None:
+        self._window.setWindowTitle(f"{label} SLM Editor")
+
 
 def open_slm_control(session: object, device_key: str, window_ratio=None) -> SlmEditorControl:
     """Open one Editor against the named SLM of an existing session."""
@@ -1468,7 +1471,7 @@ def open_slm_control(session: object, device_key: str, window_ratio=None) -> Slm
 
     window = open_fluent_window(
         body,
-        title=f"{device_key} SLM Editor",
+        title=f"{session.device_labels.get(str(device_key), str(device_key))} SLM Editor",
         window_ratio=0.8 if window_ratio is None else float(window_ratio),
     )
     control = held["control"]

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 import json
+import math
 import os
 from pathlib import Path
 from numbers import Real
@@ -151,12 +152,14 @@ def read_pulse_document(
     return sequence_from_tree(sequence_tree), editor
 
 
-def _object(value: Any, expected: tuple[str, ...], name: str) -> Mapping[str, Any]:
+def _object(
+    value: Any, expected: tuple[str, ...], name: str, *, optional: tuple[str, ...] = ()
+) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise TypeError(f"{name} must be an object")
     if any(not isinstance(key, str) for key in value):
         raise TypeError(f"{name} keys must be text")
-    unknown = tuple(key for key in value if key not in expected)
+    unknown = tuple(key for key in value if key not in expected and key not in optional)
     if unknown:
         raise ValueError(f"unknown {name} field(s): {', '.join(unknown)}")
     missing = tuple(key for key in expected if key not in value)
@@ -219,6 +222,7 @@ def sequence_to_tree(sequence: PulseSequence) -> dict[str, Any]:
                 "kind": slot.kind,
                 "unit": slot.unit,
                 "slot_id": slot.slot_id,
+                "number": slot.number,
                 "field_ref": {
                     "kind": slot.field_ref.kind,
                     "period_id": slot.field_ref.period_id,
@@ -256,6 +260,7 @@ def _named_binding_tree(binding: Any) -> dict[str, Any]:
 
     return {
         "parameter_id": binding.parameter_id,
+        "number": binding.number,
         "unit": binding.unit,
         "field_ref": {
             "kind": binding.field_ref.kind,
@@ -270,7 +275,9 @@ def _named_bindings(items: Any, factory: Any, label: str) -> tuple[Any, ...]:
 
     rebuilt = []
     for item in _array(items, f"pulse {label}s"):
-        binding = _object(item, ("parameter_id", "unit", "field_ref"), f"pulse {label}")
+        binding = _object(
+            item, ("parameter_id", "unit", "field_ref"), f"pulse {label}", optional=("number",)
+        )
         field = _object(
             binding["field_ref"],
             ("kind", "period_id", "port"),
@@ -285,6 +292,7 @@ def _named_bindings(items: Any, factory: Any, label: str) -> tuple[Any, ...]:
                     port=field["port"],
                 ),
                 unit=binding["unit"],
+                number=binding.get("number"),
             )
         )
     return tuple(rebuilt)
@@ -408,6 +416,7 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
             ),
             unit=slot["unit"],
             slot_id=slot["slot_id"],
+            number=slot.get("number"),
         )
         for slot, field in (
             (
@@ -423,6 +432,7 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
                     item,
                     ("kind", "unit", "slot_id", "field_ref"),
                     "pulse slot",
+                    optional=("number",),
                 )
                 for item in _array(tree["slots"], "pulse slots")
             )
@@ -511,8 +521,10 @@ def _named_values_from_tree(
         number = entry["value"]
         if not isinstance(number, Real) or isinstance(number, bool):
             raise TypeError(f"{label} {parameter_id!r} must be a number")
+        if not math.isfinite(float(number)):
+            raise ValueError(f"{label} {parameter_id!r} must be finite")
         unit = entry["unit"]
-        if not isinstance(unit, str) or not unit:
+        if not isinstance(unit, str) or not unit.strip():
             raise ValueError(f"{label} {parameter_id!r} must carry a unit")
         entries[parameter_id] = (float(number), unit)
     return tree["name"], tree["source"], entries
@@ -549,7 +561,7 @@ def config_values_from_tree(
 def read_config_values(path: str | Path) -> tuple[str, str, dict[str, tuple[float, str]]]:
     """Read the selected Config file through its sole numbered grammar."""
 
-    source = Path(path).expanduser().resolve()
+    source = Path(path).expanduser()
     if source.suffix.lower() != ".json":
         raise ValueError(f"config values must be JSON: {source}")
     return config_values_from_tree(parse_pulse_tree_json(source.read_text(encoding="utf-8")))

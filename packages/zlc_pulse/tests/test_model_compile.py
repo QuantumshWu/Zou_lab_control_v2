@@ -265,7 +265,7 @@ def test_a_config_parameter_reads_the_number_the_pulse_already_carries() -> None
     }
 
 
-def test_applying_a_config_set_overwrites_the_authored_numbers() -> None:
+def test_applying_a_config_set_overwrites_the_authored_numbers(monkeypatch) -> None:
     """The overwrite is the storage: afterwards the pulse holds what was applied.
 
     The sequencer fills a config parameter by writing the number into the
@@ -303,6 +303,52 @@ def test_applying_a_config_set_overwrites_the_authored_numbers() -> None:
     assert applied == ("1",) and unknown == ()
     assert changed.period_by_id["p0"].duration == 100
     assert changed.period_by_id["p1"].duration == other.period_by_id["p1"].duration
+
+    # The duration and DAC field of p0 must survive one combined update.
+    authored = _configured()
+    authored = replace(authored, config_parameters=authored.config_parameters + (
+        PulseConfigParameter("load_time", PulseFieldRef("duration", "p0"), "ns"),
+    ))
+    constructions = []
+    original = PulseSequence.__init__
+    def count_construction(self, *args, **kwargs):
+        constructions.append(1)
+        original(self, *args, **kwargs)
+    monkeypatch.setattr(PulseSequence, "__init__", count_construction)
+    entries = {"1": (80, "ns"), "2": (1, "value"), "4": (60, "ns")}
+    current = apply_config_values(authored, entries)[0]
+    assert len(constructions) == 1
+    assert current.period_by_id["p0"].duration == 60
+    assert current.period_by_id["p0"].analog_steps[0].value == 1
+    constructions.clear()
+    # Different spelling / sub-grid values still describe the current pulse.
+    equivalent = {"1": (0.0801, "us"), "2": (1.1, "value"), "4": (60, "ns")}
+    assert apply_config_values(authored, equivalent, current=current)[0] is current
+    assert constructions == []
+    restored = apply_config_values(authored, {}, current=current)[0]
+    assert len(constructions) == 1
+    assert restored == authored
+    constructions.clear()
+    assert apply_config_values(authored, {}, current=restored)[0] is restored
+    assert constructions == []
+    with np.testing.assert_raises(ValueError):
+        apply_config_values(authored, {"1": (100, "ns"), "2": (1, "ns")}, current=current)
+    assert constructions == []
+    assert current.period_by_id["p1"].duration == 80
+    assert authored.period_by_id["p1"].duration == 20
+
+    api = replace(authored, config_parameters=(), api_parameters=tuple(
+        PulseApiParameter(item.parameter_id, item.field_ref, item.unit)
+        for item in authored.config_parameters
+    ))
+    constructions.clear()
+    resolved = resolve_api_parameters(api, {
+        "probe_time": 80, "bias_x": 1, "gate_delay": 40, "load_time": 60,
+    })
+    assert len(constructions) == 1
+    assert resolved.api_parameters == ()
+    assert resolved.periods == current.periods
+    assert resolved.delays == current.delays
 
 
 def test_a_declared_config_parameter_needs_no_resolving_to_compile() -> None:
@@ -456,5 +502,55 @@ def test_one_field_carries_one_binding_and_one_id_namespace() -> None:
                 ),
             ),
         )
+
+    fields = tuple(PulseFieldRef("duration", f"p{i}") for i in range(3)) + (
+        PulseFieldRef("dac", "p0", "dac"),
+    )
+    for member, factory in (
+        ("slots", PulseSlot), ("api_parameters", PulseApiParameter),
+        ("config_parameters", PulseConfigParameter),
+    ):
+        bindings = tuple(
+            factory(ref.kind, ref, "value" if ref.kind == "dac" else "ns", f"s{i}")
+            if member == "slots" else
+            factory(f"p{i}", ref, "value" if ref.kind == "dac" else "ns")
+            for i, ref in enumerate(fields)
+        )
+        numbered = replace(base, **{member: bindings})
+        allocated = getattr(numbered, member)
+        assert tuple(item.number for item in allocated) == (1, 2, 3, 4)
+        gap = replace(numbered, **{member: allocated[:1] + allocated[2:]})
+        reloaded = sequence_from_tree(sequence_to_tree(gap))
+        assert tuple(item.number for item in getattr(reloaded, member)) == (1, 3, 4)
+        inserted = replace(reloaded, **{member: getattr(reloaded, member) + (bindings[1],)})
+        assert tuple(item.number for item in getattr(inserted, member)) == (1, 3, 4, 2)
+        with np.testing.assert_raises_regex(ValueError, "numbers must be unique"):
+            replace(numbered, **{member: (allocated[0], replace(allocated[1], number=1))})
+        for invalid in (0, -1, True, 1.5):
+            with np.testing.assert_raises((TypeError, ValueError)):
+                replace(allocated[0], number=invalid)
+        if member == "config_parameters":
+            assert tuple(authored_config_entries(gap)) == ("1", "3", "4")
+            changed, applied, unknown = apply_config_values(gap, {"2": (200, "ns"), "3": (80, "ns")})
+            assert applied == ("3",) and unknown == ("2",)
+            assert changed.period_by_id["p2"].duration == 80
+            assert changed.period_by_id["p0"].duration == 20
+        elif member == "slots":
+            consecutive = replace(gap, slots=tuple(
+                replace(item, number=i) for i, item in enumerate(gap.slots, 1)
+            ))
+            geometry = StreamerParams(max_edges=8, bank_size=2)
+            assert compile_sequence(gap, geometry, 50e6) == compile_sequence(consecutive, geometry, 50e6)
+        document = sequence_to_tree(numbered)
+        for item in document[member]:
+            item.pop("number")
+        assert sequence_from_tree(document) == numbered
+
+    independent = replace(base,
+        slots=(PulseSlot("duration", fields[0], "ns", "scan"),),
+        api_parameters=(PulseApiParameter("api", fields[1], "ns"),),
+        config_parameters=(PulseConfigParameter("config", fields[2], "ns"),),
+    )
+    assert independent.slots[0].number == independent.api_parameters[0].number == independent.config_parameters[0].number == 1
 
 

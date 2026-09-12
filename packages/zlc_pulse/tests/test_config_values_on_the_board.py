@@ -125,12 +125,15 @@ def test_fire_refreshes_file_and_keeps_the_original_defaults(streamer, tmp_path,
         ):
             write(entries)
             before = counts.copy()
+            previous_source = device.applied().source
             device.fire(run_repeats=repeats)
             assert device.wait_done(1.0) is not None
             assert counts == {"compile": before["compile"] + recompiles,
                               "load": before["load"] + recompiles,
                               "fire": before["fire"] + 1}
             state = device.applied()
+            if not recompiles:
+                assert state.source is previous_source
             assert state.authored_source is source
             assert state.source.period_by_id["p1"].duration == duration
             assert state.program == compile_sequence(state.source, geom, 50e6)
@@ -140,10 +143,15 @@ def test_fire_refreshes_file_and_keeps_the_original_defaults(streamer, tmp_path,
         with pytest.raises(ValueError, match="time unit"):
             device.fire(run_repeats=1)
         assert counts == before
-        path.write_text("{", encoding="utf-8")
-        with pytest.raises(ValueError):
-            device.fire(run_repeats=1)
-        assert counts == before
+        for malformed in (
+            "{",
+            '{"format":"zlc.pulse.config_values","name":"","source":"hand",'
+            '"values":{"1":{"value":1e999,"unit":"ns"}}}',
+        ):
+            path.write_text(malformed, encoding="utf-8")
+            with pytest.raises(ValueError):
+                device.fire(run_repeats=1)
+            assert counts == before
         # Explicit in-memory data unbinds the file; its label is not a path.
         device.load_config_values({"1": (120, "ns")}, source=str(path))
         device.fire(run_repeats=1)

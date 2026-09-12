@@ -268,13 +268,17 @@ class ConfigValueHolder:
         path = Path(path).expanduser().resolve()
         with self._config_lock:
             _name, _source, entries = read_config_values(path)
-            self.load_config_values(entries, source=str(path))
+            self._config_values = entries
+            self._config_source = str(path)
             self._config_file = path
 
     def _refresh_config_file(self) -> None:
+        from .codec import read_config_values
+
         with self._config_lock:
             if self._config_file is not None:
-                self.load_config_file(self._config_file)
+                _name, _source, entries = read_config_values(self._config_file)
+                self._config_values = entries
 
     def config_values(self) -> dict[str, tuple[float, str]]:
         """The calibrated set this board is holding, as a copy."""
@@ -309,8 +313,10 @@ class ConfigValueHolder:
         if authored_source is None:
             return program, compiled_source
         with self._config_lock:
-            filled, _applied, _unknown = apply_config_values(authored_source, self._config_values)
-        if filled == compiled_source:
+            filled, _applied, _unknown = apply_config_values(
+                authored_source, self._config_values, current=compiled_source,
+            )
+        if filled is compiled_source:
             return program, compiled_source
         return compile_sequence(
             filled, self.describe().geometry, program.clock_hz,
@@ -575,7 +581,7 @@ class PulseStreamer(ConfigValueHolder):
                 program, source = self._prepare_config_program(
                     applied.program, applied.authored_source, applied.source
                 )
-                if source != applied.source:
+                if source is not applied.source:
                     self._load_program(
                         program, source=source, authored_source=applied.authored_source,
                         rows=applied.rows,

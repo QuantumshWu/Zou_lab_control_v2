@@ -348,7 +348,10 @@ class LogicEditorView(QtWidgets.QWidget):
                     name.replace("_", " ").title(), combo
                 )
             current = str(device_keys.get(name, ""))
-            self._fill_combo(combo, current, tuple(str(item) for item in offered), blank=True)
+            self._fill_combo(
+                combo, current, tuple(str(item) for item in offered), blank=True,
+                labels=projection.get("device_labels") or {},
+            )
 
         retired = set(self._device_combos).difference(
             str(name) for name in device_options

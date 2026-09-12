@@ -53,7 +53,7 @@ class _DeviceCard(FluentFrame):
         header = QtWidgets.QHBoxLayout()
         self.collapse_button = FluentButton("−", color=GREY)
         self.collapse_button.setFixedWidth(window_pad(2.0))
-        self.name_label = ElidedLabel(self.instance_id)
+        self.name_label = muted_note_label("Role")
         self.role_edit = FluentLineEdit()
         self.role_edit.setPlaceholderText("role")
         self.type_combo = FluentComboBox()
@@ -87,7 +87,7 @@ class _DeviceCard(FluentFrame):
         if index >= 0:
             with signals_blocked(self.type_combo):
                 self.type_combo.setCurrentIndex(index)
-        self.name_label.setToolTip(self.instance_id)
+        self.name_label.setToolTip(f"Internal ID: {self.instance_id}")
 
     def set_choices(self, choices: tuple[tuple[str, str], ...]) -> None:
         current = self.type_combo.currentData()
@@ -157,8 +157,12 @@ class _LiveDeviceCard(FluentFrame):
         #: its in-process server, and remote clients once published.
         self.log_button = FluentButton("Log", color=GREY)
         self.close_button = FluentButton("Close", color=ORANGE)
-        outer.addWidget(self.role_label)
-        outer.addWidget(self.detail_label, 1)
+        identity = QtWidgets.QVBoxLayout()
+        identity.setContentsMargins(0, 0, 0, 0)
+        identity.setSpacing(0)
+        identity.addWidget(self.role_label)
+        identity.addWidget(self.detail_label)
+        outer.addLayout(identity, 1)
         outer.addWidget(self.control_button)
         outer.addWidget(self.remote_button)
         outer.addWidget(self.log_button)
@@ -180,11 +184,11 @@ class _LiveDeviceCard(FluentFrame):
         self, role: str, type_id: str, *, remote: bool = False
     ) -> None:
         self.role_label.setText(str(role))
-        self.detail_label.setText(f"{type_id} · {self.instance_id}")
+        self.detail_label.setText(str(type_id))
         # Colour alone says published; the caption stays put so the row's
         # layout does not shuffle every time Remote is toggled.
         self.remote_button.set_color(ACCENT if remote else GREY)
-        self.setToolTip(self.instance_id)
+        self.setToolTip(f"Internal ID: {self.instance_id}")
 
 
 def _readable_value(value: object, unit: str, shown: str = "") -> str:
@@ -941,9 +945,12 @@ class DeviceManagerView(QtWidgets.QWidget):
                 str(type_id),
                 remote=instance_id in self._remoted,
             )
+            log = getattr(self, "_device_log_windows", {}).get(instance_id)
+            if log is not None:
+                log.setWindowTitle(f"{role} log@Zou lab")
         self.loaded_empty.setVisible(not devices)
 
-    def open_device_log(self, instance_id: str, snapshot) -> None:
+    def open_device_log(self, instance_id: str, snapshot, *, label: str) -> None:
         """Open (or re-front) the live log window of ONE published device."""
 
         key = str(instance_id)
@@ -952,6 +959,7 @@ class DeviceManagerView(QtWidgets.QWidget):
             windows = self._device_log_windows = {}
         window = windows.get(key)
         if window is not None and window.isVisible():
+            window.setWindowTitle(f"{label} log@Zou lab")
             window.showNormal()
             window.raise_()
             window.activateWindow()
@@ -960,7 +968,7 @@ class DeviceManagerView(QtWidgets.QWidget):
 
         window = windows[key] = open_fluent_window(
             lambda: _ServerLogView(snapshot),
-            title=f"{key} log@Zou lab",
+            title=f"{label} log@Zou lab",
             window_ratio=0.45,
         )
 

@@ -35,6 +35,7 @@ class PulseEditorHandle(QtCore.QObject):
     # -- the window ------------------------------------------------------
     close_requested = QtCore.pyqtSignal()
     closed = QtCore.pyqtSignal()
+    device_label_changed = QtCore.pyqtSignal(str)
 
     # -- the document ----------------------------------------------------
     document_name_committed = QtCore.pyqtSignal(str)
@@ -186,6 +187,10 @@ class PulseEditorHandle(QtCore.QObject):
     def window_title(self) -> str:
         target = self._window if self._window is not None else self._view
         return str(target.windowTitle())
+
+    def set_device_label(self, label: str) -> None:
+        self._window.setWindowTitle(f"{label} Pulse Editor")
+        self.device_label_changed.emit(str(label))
 
     # ---------------------------------------------------------- the document
 

@@ -327,6 +327,7 @@ def create_bound_window(
     sequencer: object,
     device_use: object,
     path: str = "",
+    device_label: str = "",
     window_ratio: float | None = None,
 ):
     """Open PulseGUI over a sequencer borrowed from an ExperimentSession.
@@ -344,7 +345,8 @@ def create_bound_window(
 
     space = workspace if isinstance(workspace, Workspace) else Workspace(workspace)
     window = open_pulse_editor(
-        title="PulseGUI@Zou lab", window_ratio=window_ratio
+        title=f"{device_label} Pulse Editor" if device_label else "PulseGUI@Zou lab",
+        window_ratio=window_ratio,
     )
     run_off_thread, close_preview_worker = attach_qt_worker("zlc-pulse-preview")
     run_device_work, close_device_worker = attach_qt_worker("zlc-pulse-command")
@@ -360,7 +362,7 @@ def create_bound_window(
             sequencer=sequencer,
             device_use=device_use,
             allow_dial=False,
-            connection_label="Experiment session",
+            connection_label=device_label or "Experiment session",
             run_off_thread=run_off_thread,
             run_device_work=run_device_work,
             run_safe_work=run_safe_work,

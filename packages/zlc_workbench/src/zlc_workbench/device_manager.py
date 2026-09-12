@@ -579,13 +579,8 @@ class DeviceManagerPresenter:
             self._report("a device needs a name", severity="warning")
             self._show()
             return False
-        if any(
-            item.role == role and item.instance_id != str(instance_id)
-            for item in self.devices
-        ):
-            self._report(f"another device is already called {role!r}", severity="warning")
-            self._show()
-            return False
+        # Duplicate names are an editable draft. InstallationConfig rejects
+        # that draft at Init/Apply/Save, rather than running the previous name.
         return self._replace(
             instance_id, lambda item: replace(item, role=role)
         )
@@ -697,7 +692,8 @@ class DeviceManagerPresenter:
         identity = getattr(leaf.device, "identity", None)
         identity_token = None if identity is None else f"device={identity}"
         config = next(
-            (item for item in self.devices if item.instance_id == key), None
+            (item for item in (() if self._active_config is None else self._active_config.devices)
+             if item.instance_id == key), None
         )
         descriptor = None if config is None else self.types.get(config.type_id)
         channels = tuple(getattr(descriptor, "log_channels", ()) or ())
@@ -724,7 +720,7 @@ class DeviceManagerPresenter:
             )
             return total, note + lines
 
-        self.view.open_device_log(key, snapshot)
+        self.view.open_device_log(key, snapshot, label=key if config is None else config.role)
         return True
 
     def toggle_remote(self, instance_id: str) -> bool:

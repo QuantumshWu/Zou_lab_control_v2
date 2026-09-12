@@ -69,8 +69,9 @@ class _ManagerView:
         self.values: dict = {}
         self.status: list[tuple[str, str]] = []
 
-    def open_device_log(self, instance_id, snapshot) -> None:
+    def open_device_log(self, instance_id, snapshot, *, label) -> None:
         self.device_logs_opened.append((str(instance_id), snapshot))
+        self.device_log_label = label
 
     def set_discovery_enabled(self, enabled, reason="") -> None:
         self.discovery_enabled = (bool(enabled), str(reason))
@@ -222,8 +223,14 @@ def test_two_devices_cannot_share_one_name(manager) -> None:
 
     manager.view.role_committed.emit("camera2", "camera")
 
-    assert [item.role for item in manager.devices] == ["camera", "camera2"]
-    assert "already called" in manager.view.status[-1][1]
+    assert [item.role for item in manager.devices] == ["camera", "camera"]
+    started = []
+    manager._initialize_session = lambda candidate: started.append(candidate)
+    assert manager.toggle_lifecycle() is False
+    assert not started
+    assert "role" in manager.view.status[-1][1]
+    assert not manager.save()
+    assert not manager.path.exists()
 
     manager.view.role_committed.emit("camera2", "qCMOS")
     assert manager.devices[1].instance_id == "camera2"

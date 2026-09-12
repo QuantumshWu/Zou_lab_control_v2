@@ -50,6 +50,7 @@ def open_sequencer_control(session, device_key: str, window_ratio=None):
         sequence=None,
         sequencer=session.installation.device(str(device_key)),
         device_use=session.device_use,
+        device_label=session.device_labels.get(str(device_key), str(device_key)),
         path="",
         window_ratio=window_ratio,
     )

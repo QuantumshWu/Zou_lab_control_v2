@@ -481,8 +481,9 @@ def snapshot():
     calls.append(True)
     return len(calls), ('line',)
 
-view.open_device_log('sensor', snapshot)
+view.open_device_log('sensor', snapshot, label='Science sensor')
 window = view._device_log_windows['sensor']
+assert window.windowTitle() == 'Science sensor log@Zou lab'
 body = window.loaded
 assert body._timer.isActive(), 'shown, it polls'
 window.close()
@@ -492,7 +493,7 @@ before = len(calls)
 QtTest.QTest.qWait(700)
 assert len(calls) == before, 'a closed log asks for nothing'
 assert sip.isdeleted(window), 'and it is retired, not kept'
-view.open_device_log('sensor', snapshot)
+view.open_device_log('sensor', snapshot, label='Science sensor')
 again = view._device_log_windows['sensor']
 assert again is not window and again.loaded._timer.isActive()
 again.close(); app.processEvents()

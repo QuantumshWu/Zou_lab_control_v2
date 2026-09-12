@@ -7,7 +7,7 @@ It deliberately has no editor state, run identity, or acquisition concepts.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 
 from zlc_data.units import PREFIXES, UnitError, resolve_unit
@@ -156,6 +156,35 @@ def _nonnegative_int(value: Any, field_name: str) -> int:
     if value < 0:
         raise ValueError(f"{field_name} must be non-negative")
     return value
+
+
+def _binding_number(value: int | None) -> int | None:
+    if value is None:
+        return None
+    number = _nonnegative_int(value, "binding number")
+    if number == 0:
+        raise ValueError("binding number must be positive")
+    return number
+
+
+def _number_bindings(bindings: tuple) -> tuple:
+    """Preserve assigned numbers; new declarations take the smallest free one."""
+
+    assigned = {item.number for item in bindings if item.number is not None}
+    if len(assigned) != sum(item.number is not None for item in bindings):
+        raise ValueError("binding numbers must be unique within their category")
+    if len(assigned) == len(bindings):
+        return bindings
+    result = []
+    available = 1
+    for item in bindings:
+        if item.number is None:
+            while available in assigned:
+                available += 1
+            item = replace(item, number=available)
+            assigned.add(available)
+        result.append(item)
+    return tuple(result)
 
 
 def _unit(value: Any, field_name: str) -> str:
@@ -405,6 +434,7 @@ class PulseSlot:
     field_ref: PulseFieldRef
     unit: str
     slot_id: str = ""
+    number: int | None = None
 
     def __post_init__(self) -> None:
         kind = _text(self.kind, "slot kind")
@@ -421,6 +451,7 @@ class PulseSlot:
         object.__setattr__(self, "kind", kind)
         object.__setattr__(self, "unit", unit)
         object.__setattr__(self, "slot_id", _identifier(slot_id, "slot_id"))
+        object.__setattr__(self, "number", _binding_number(self.number))
 
     @property
     def field(self) -> PulseFieldRef:
@@ -446,6 +477,7 @@ def _name_one_field(binding: object, label: str) -> None:
         raise ValueError(f"time {label}s use a time unit")
     object.__setattr__(binding, "parameter_id", parameter_id)
     object.__setattr__(binding, "unit", unit)
+    object.__setattr__(binding, "number", _binding_number(binding.number))
 
 
 @dataclass(frozen=True)
@@ -455,6 +487,7 @@ class PulseApiParameter:
     parameter_id: str
     field_ref: PulseFieldRef
     unit: str
+    number: int | None = None
 
     def __post_init__(self) -> None:
         _name_one_field(self, "API parameter")
@@ -466,12 +499,12 @@ class PulseApiParameter:
 
 @dataclass(frozen=True)
 class PulseConfigParameter:
-    """One local field, externally addressed by its position in config_parameters.
+    """One local field, externally addressed by its stable Config number.
 
     Not a hole: a config parameter always has a value, because the value is
     the field's own authored number. ``parameter_id`` identifies this local
     binding, not a field in another pulse. Config files match the displayed
-    one-based number independently of Scan/API bindings. Nothing may override one for a
+    positive number independently of Scan/API bindings. Nothing may override one for a
     single run -- a field that a run needs to vary is an API parameter, and
     that is the whole difference between the two.
     """
@@ -479,6 +512,7 @@ class PulseConfigParameter:
     parameter_id: str
     field_ref: PulseFieldRef
     unit: str
+    number: int | None = None
 
     def __post_init__(self) -> None:
         _name_one_field(self, "config parameter")
@@ -656,6 +690,7 @@ class PulseSequence:
         slot_values = tuple(slots)
         if any(not isinstance(slot, PulseSlot) for slot in slot_values):
             raise TypeError("slots must contain PulseSlot values")
+        slot_values = _number_bindings(slot_values)
         if len({slot.slot_id for slot in slot_values}) != len(slot_values):
             raise ValueError("slot ids must be unique")
         if len({slot.field_ref for slot in slot_values}) != len(slot_values):
@@ -663,6 +698,7 @@ class PulseSequence:
         api_values = tuple(api_parameters)
         if any(not isinstance(parameter, PulseApiParameter) for parameter in api_values):
             raise TypeError("api_parameters must contain PulseApiParameter values")
+        api_values = _number_bindings(api_values)
         parameter_ids = tuple(parameter.parameter_id for parameter in api_values)
         if len(parameter_ids) != len(set(parameter_ids)):
             raise ValueError("API parameter ids must be unique")
@@ -674,6 +710,7 @@ class PulseSequence:
             for parameter in config_values
         ):
             raise TypeError("config_parameters must contain PulseConfigParameter values")
+        config_values = _number_bindings(config_values)
         config_ids = tuple(parameter.parameter_id for parameter in config_values)
         if len(config_ids) != len(set(config_ids)):
             raise ValueError("config parameter ids must be unique")

@@ -97,7 +97,7 @@ class _AxisRow(QtWidgets.QWidget):
     remove_requested = QtCore.pyqtSignal(object)
     unit_change_requested = QtCore.pyqtSignal(object, object, str)
 
-    def __init__(self, ports, axis: Mapping | None, parent=None) -> None:
+    def __init__(self, ports, axis: Mapping | None, parent=None, *, device_labels=None) -> None:
         super().__init__(parent)
         # A DEVICE's knobs gather under the device, the way an operator looks
         # for one; the flat list put a laser current beside a pulse parameter
@@ -106,6 +106,7 @@ class _AxisRow(QtWidgets.QWidget):
         self.port_combo = FluentTreeComboBox()
         self._build_inputs(self.port_combo)
         self._ports = tuple(ports)
+        self._device_labels = dict(device_labels or {})
         self._fill_ports(None if axis is None else axis["port"])
         self._apply_port_limits()
         if axis is not None:
@@ -214,7 +215,8 @@ class _AxisRow(QtWidgets.QWidget):
 
         def branch(port: str) -> str:
             try:
-                return port_group(port)
+                group = port_group(port)
+                return self._device_labels.get(group, group) if port.startswith(DEVICE_PARAM_FAMILY) else group
             except ValueError:
                 return "unavailable"
 
@@ -240,6 +242,11 @@ class _AxisRow(QtWidgets.QWidget):
             current=chosen or (self._ports[0].port if self._ports else ""),
             empty_source_label="ports",
         )
+
+    def set_device_labels(self, labels: Mapping[str, str]) -> None:
+        if dict(labels) != self._device_labels:
+            self._device_labels = dict(labels)
+            self._fill_ports(str(self.port_combo.currentData() or ""))
 
     def _apply_port_limits(self, unit: str = "") -> None:
         port = next(
@@ -507,6 +514,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
         column.addWidget(self.values_note)
 
         self._ports: tuple = ()
+        self._device_labels: dict[str, str] = {}
         self._rows: list[_AxisRow] = []
         self._loading = False
         self._plan_text = ""
@@ -528,6 +536,12 @@ class ScanPlanEditor(QtWidgets.QWidget):
     # ------------------------------------------------------- host contract
 
     def update_projection(self, projection: Mapping[str, object]) -> None:
+        labels = dict(projection.get("device_labels") or {})
+        if labels != self._device_labels:
+            self._device_labels = labels
+            for row in self._rows:
+                if not row.manual:
+                    row.set_device_labels(labels)
         resources = projection.get("workspace_resources") or {}
         resource = resources.get("pulse_template") if isinstance(resources, Mapping) else None
         sequence = getattr(resource, "value", None)
@@ -940,7 +954,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self._align_columns()
 
     def _build_row(self, axis: Mapping | None) -> _AxisRow:
-        row = _AxisRow(self._ports, axis, self)
+        row = _AxisRow(self._ports, axis, self, device_labels=self._device_labels)
         if self._only_port is not None:
             row.remove_button.hide()
         row.edited.connect(self._emit_plan)

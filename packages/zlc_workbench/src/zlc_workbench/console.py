@@ -7178,6 +7178,7 @@ class ConsolePresenter:
             "output_bundle": output_bundle,
             "device_keys": dict(binding.draft.device_keys),
             "device_options": options,
+            "device_labels": self.session.device_labels,
             "ui_contributions": tuple(binding.descriptor.ui_contributions),
             "workspace_resources": dict(finalization.resources),
             "running": bool(binding.host is not None and binding.host.running),

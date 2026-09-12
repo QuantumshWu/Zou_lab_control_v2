@@ -604,19 +604,10 @@ def bindings_of(sequence: PulseSequence | None) -> dict[tuple, tuple[str, int]]:
     to slot 0 looked exactly like one that was not bound at all -- the bind
     took, and the screen never said so.
 
-    Scan, API and config bindings are three distinct domain collections, and a
-    binding's number is its place in ITS OWN -- the first config parameter is
-    config 1 whether or not the pulse also carries scan slots.  One shared
-    counter was used instead, to keep every mark on the form unique on its
-    own; but the mark on screen has never been the number alone.  The dot is
-    filled in the kind's colour and the preview badge is drawn in it, so what
-    identifies a binding is the PAIR, and a number that also had to be unique
-    across kinds could only buy that by saying something false about the
-    collection it belongs to -- the third config parameter of a pulse with two
-    scan slots called itself 5, a position in a list that does not exist.
-
-    Config files address these Config numbers directly, 1..N. API parameters
-    retain their named IDs; scan table rows follow ``sequence.slots`` order.
+    Scan, API and Config each keep their own stable authored numbers. Removing
+    one binding never renumbers another; a new binding takes the smallest
+    unused number. Config files use this number, API references use named IDs,
+    and hardware scan columns still follow ``sequence.slots`` order.
     """
 
     if sequence is None:
@@ -627,11 +618,11 @@ def bindings_of(sequence: PulseSequence | None) -> dict[tuple, tuple[str, int]]:
         ("api", sequence.api_parameters),
         ("config", sequence.config_parameters),
     ):
-        for number, binding in enumerate(bindings, start=1):
+        for binding in bindings:
             reference = binding.field_ref
             found[(reference.kind, reference.period_id, reference.port)] = (
                 kind,
-                number,
+                binding.number,
             )
     return found
 
@@ -1204,6 +1195,7 @@ class PulseEditorPresenter:
             self._guarded(self._scan_progress_from_view)
         )
         view.connection_requested.connect(self._guarded(self._connect_from_view))
+        view.device_label_changed.connect(self._guarded(self._set_device_label))
         view.fire_requested.connect(self._guarded(self._fire_from_view))
         view.stop_requested.connect(self._guarded(self.stop))
         view.sync_requested.connect(self._guarded(self._sync_from_view))
@@ -1250,6 +1242,11 @@ class PulseEditorPresenter:
         self._accept_state(candidate)
         self.refresh()
         return True
+
+    def _set_device_label(self, label: str) -> None:
+        if self._connection_locked:
+            self._connection_choices = (ConnectionChoiceVM(str(label), CONNECTION_GIVEN),)
+            self._show_connection(self._connection_status)
 
     def _config_values_directory(self) -> Path | None:
         """Where saved sets of the board's calibrated numbers live."""

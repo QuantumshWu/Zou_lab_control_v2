@@ -56,6 +56,9 @@ class DeviceControlHandle(QtCore.QObject):
         if hasattr(target, "activateWindow"):
             target.activateWindow()
 
+    def set_device_label(self, label: str) -> None:
+        self._window.setWindowTitle(f"{label} control")
+
     def close(self) -> None:
         """Retire the session's control; the window's own X only hides it."""
 
@@ -221,8 +224,8 @@ class DeviceManagerHandle(QtCore.QObject):
     def set_remoted(self, instance_ids) -> None:
         self._view.set_remoted(instance_ids)
 
-    def open_device_log(self, instance_id: str, snapshot) -> None:
-        self._view.open_device_log(instance_id, snapshot)
+    def open_device_log(self, instance_id: str, snapshot, *, label: str) -> None:
+        self._view.open_device_log(instance_id, snapshot, label=label)
 
     def set_loaded_devices(
         self,

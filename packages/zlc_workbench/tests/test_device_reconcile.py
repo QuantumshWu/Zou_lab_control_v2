@@ -114,6 +114,7 @@ def test_reconcile_reuses_unchanged_leaf_and_only_builds_added_device(tmp_path):
     session.reconcile_devices(plan)
 
     assert session.installation.device("sequencer") is original
+    assert session.device_labels["sequencer"] == "renamed"
     assert set(session.installation.devices) == {"sequencer", "other"}
     assert events == []
     assert original.config == {"1": (17.0, "ns")}

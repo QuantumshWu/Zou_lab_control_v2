@@ -30,6 +30,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
 import math
 import re
 from threading import RLock
@@ -399,6 +400,7 @@ class Unit:
 UnitLike = str | Unit
 
 
+@lru_cache(maxsize=512)
 def _prefixed(base: Unit, prefix: Prefix) -> Unit:
     """The unit that is ``prefix`` applied to ``base``."""
 

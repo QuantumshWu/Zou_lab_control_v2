@@ -420,6 +420,15 @@ class ExperimentSession:
         with self._reconcile_lock:
             return self._installation_config
 
+    @property
+    def device_labels(self) -> dict[str, str]:
+        """Accepted display roles; all device references remain instance keys."""
+
+        config = self.installation_config
+        return {} if config is None else {
+            item.instance_id: item.role for item in config.devices
+        }
+
     def record_device_tune(
         self,
         *,

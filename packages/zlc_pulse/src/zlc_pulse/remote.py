@@ -1073,7 +1073,12 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                             f"rows={len(rows)}{self._link_health()}"
                         ),
                     )
-                    result = self.streamer.applied()
+                    applied = self.streamer.applied()
+                    result = {
+                        "run_repeats": applied.run_repeats,
+                        "scan_repeats": applied.scan_repeats,
+                        "loaded_at": applied.loaded_at,
+                    }
                 elif method == "fire":
                     run_repeats = params["run_repeats"]
                     scan_repeats = params["scan_repeats"]
@@ -1423,18 +1428,24 @@ class RemotePulseStreamer(ConfigValueHolder):
 
     def _load_program(self, program, *, source, authored_source, rows) -> None:
         self._loaded_application = None
-        applied = self._call_locked(
+        rows = tuple(tuple(row) for row in rows)
+        receipt = self._call_locked(
             "load",
             {
                 "program": program,
                 "source": source,
                 "authored_source": authored_source,
-                "rows": tuple(tuple(row) for row in rows),
+                "rows": rows,
             },
         )
-        if not isinstance(applied, AppliedState):
-            raise RuntimeError("Pulse server did not return the loaded application; update run_server")
-        self._loaded_application = applied
+        if not isinstance(receipt, dict):
+            raise RuntimeError("Pulse server did not return the load receipt; update run_server")
+        # The server accepted these exact inputs. Only server-owned execution
+        # state comes back; do not serialize the whole program/source twice.
+        self._loaded_application = AppliedState(
+            program=program, source=source, authored_source=authored_source,
+            rows=rows, **receipt,
+        )
 
     def fire(self, *, run_repeats: int, scan_repeats: int = 1) -> None:
         with self._io_lock:
@@ -1446,7 +1457,7 @@ class RemotePulseStreamer(ConfigValueHolder):
                 program, source = self._prepare_config_program(
                     applied.program, applied.authored_source, applied.source
                 )
-                if source != applied.source:
+                if source is not applied.source:
                     self._load_program(
                         program, source=source, authored_source=applied.authored_source,
                         rows=applied.rows,

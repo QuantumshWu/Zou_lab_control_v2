@@ -533,6 +533,7 @@ class ExperimentGuiFlow:
     def _adopt_device_control(self, key: str, device: object, control: object) -> None:
         """This control is the one window for ``key`` until it closes."""
 
+        control.set_device_label(self.session.device_labels.get(key, key))
         self.device_controls[key] = control
         self._device_control_devices[key] = device
 
@@ -594,7 +595,7 @@ class ExperimentGuiFlow:
                 self._device_control_models[key] = model
                 self._device_control_risk[key] = None
                 control = open_device_control(
-                    title=f"{key} control",
+                    title=f"{self.session.device_labels.get(key, key)} control",
                     spec=model["spec"],
                     projection=self._device_control_projection(key),
                 )
@@ -1390,6 +1391,9 @@ class ExperimentGuiFlow:
         )
         if stale_controls:
             self._retire_device_controls(stale_controls)
+        labels = session.device_labels
+        for key, control in self.device_controls.items():
+            control.set_device_label(labels.get(key, key))
         if self.console_presenter is not None:
             self.console_presenter.installation_changed()
 
