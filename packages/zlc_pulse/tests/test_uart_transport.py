@@ -375,6 +375,10 @@ def test_a_reply_one_byte_short_is_asked_again_within_milliseconds() -> None:
 
     assert link._serial.exchanges == 4
     assert transport.resends == 3
+    expected_reply = framing.encode_reply(1, framing.ST_OK, (85,))
+    assert f"rx_prefix_hex={expected_reply[:-1].hex()}" in transport.last_retry_reason
+    assert f"request_hex={framing.encode_read(15, 1, seq=1).hex()}" in transport.last_retry_reason
+    assert f"recovered_reply_hex={expected_reply.hex()}" in transport.last_retry_reason
     gaps = [b - a for a, b in zip(link._serial.sent_at, link._serial.sent_at[1:])]
     assert all(budget - 0.005 <= gap <= budget + 0.05 for gap in gaps), (
         f"requests spaced {[f'{gap:.3f}' for gap in gaps]}s; the budget is {budget:.3f}s"

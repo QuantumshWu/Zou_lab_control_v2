@@ -88,6 +88,7 @@ class PySerialLink:
         self._write(serial_port, request)
         replies = self._read_replies({request[3]}, deadline=deadline, stop=stop)
         if not replies:
+            self.last_read_summary += f"; request_hex={request.hex()}"
             # _read_replies reports rather than judges, so the judging is here:
             # one request, no reply, and the caller may only retry if the
             # request is idempotent -- which is its decision, not the line's.
@@ -151,6 +152,9 @@ class PySerialLink:
 
         serial_port = self._require_open()
         buffer = bytearray()
+        # Bounded raw evidence before the parser, formatted only on failure.
+        received_prefix = bytearray()
+        prefix_limit = framing.reply_frame_len(framing.MAX_FRAME_WORDS)
         replies: list[bytes] = []
         pending = set(sequences)
         count = len(pending)
@@ -178,6 +182,7 @@ class PySerialLink:
             if chunk:
                 last_rx_at = received
                 read_bytes += len(chunk)
+                received_prefix.extend(chunk[:max(0, prefix_limit - len(received_prefix))])
                 buffer.extend(chunk)
                 while pending:
                     frame = _extract_reply(buffer)
@@ -207,8 +212,11 @@ class PySerialLink:
             age = "none" if last_rx_at is None else f"{(time.monotonic() - last_rx_at) * 1000:.1f}"
             self.last_read_summary = (
                 f"reads={read_calls}, returned={read_bytes}, last_rx_age_ms={age}, "
-                f"queued={serial_port.in_waiting}"
+                f"queued={serial_port.in_waiting}, pending_seq={sorted(pending)}, "
+                f"rx_prefix_hex={received_prefix.hex()}"
             )
+            if buffer != received_prefix:
+                self.last_read_summary += f"; partial_hex={buffer.hex()}"
         return replies
 
     def _require_open(self):
@@ -529,10 +537,12 @@ class UartRegisterTransport:
         """Exchange a read or identified command, preserving its request on retry."""
 
         value: tuple[int, ...] | None = None
+        accepted_reply = b""
+        resends_before = self.resends
         refused = False
 
         def attempt(attempt_deadline: float) -> str | None:
-            nonlocal value, refused
+            nonlocal value, accepted_reply, refused
             refused = False
             try:
                 reply = self._link.exchange(request, deadline=attempt_deadline, stop=stop)
@@ -551,6 +561,7 @@ class UartRegisterTransport:
                 return "the board rejected the request as damaged (CRC error)"
             if status != framing.ST_OK or len(words) != count:
                 raise UartError(f"UART read reply was invalid (status=0x{status:02X})")
+            accepted_reply = reply
             value = tuple(int(word) & 0xFFFFFFFF for word in words)
             return None
 
@@ -565,6 +576,8 @@ class UartRegisterTransport:
             stop=stop,
         )
         assert value is not None
+        if self.resends > resends_before:
+            self.last_retry_reason += f"; recovered_reply_hex={accepted_reply.hex()}"
         return value
 
     def _deadline(self, value: float | None, *, frames: int = 1, words: int = 1) -> float:
@@ -661,12 +674,9 @@ def _describe_shortfall(
 ) -> str:
     """What a short read looked like, in words that name the fault.
 
-    Three shapes with three causes, kept apart: nothing arrived at all; a
-    frame BEGAN and stopped ("incomplete frame: 12 of 13 bytes" -- every
-    field valid, one byte short, the board-to-host direction dropped it);
-    bytes arrived that formed no frame (noise, or a frame damaged past
-    resynchronisation).  One word, "unparsed", used to cover the last two,
-    and a reply missing only its final CRC byte was read as garbage.
+    Distinguish no bytes, a sync-led incomplete frame, and discarded bytes.
+    These describe the received buffer, not where corruption occurred: a
+    frame one byte short can have lost that byte anywhere, not just its tail.
     """
 
     if read_bytes == 0:

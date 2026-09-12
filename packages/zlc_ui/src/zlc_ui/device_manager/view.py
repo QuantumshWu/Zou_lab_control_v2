@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
     ACCENT,
@@ -626,7 +626,8 @@ class _ServerLogView(QtWidgets.QPlainTextEdit):
         self._snapshot = snapshot
         self._seen = -1
         self.setReadOnly(True)
-        self.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
+        self.setLineWrapMode(QtWidgets.QPlainTextEdit.WidgetWidth)
+        self.setWordWrapMode(QtGui.QTextOption.WrapAtWordBoundaryOrAnywhere)
         self.setMaximumBlockCount(4200)
         self._timer = QtCore.QTimer(self)
         self._timer.setInterval(500)
