@@ -52,6 +52,7 @@ from zlc_pulse import (
     nanoseconds_per,
     align_to_grid,
     apply_config_values,
+    authored_config_entries,
     field_label,
     prune_orphaned_bindings,
     resolve_api_parameters,
@@ -1335,14 +1336,7 @@ class PulseEditorPresenter:
         return True
 
     def load_config_values(self) -> bool:
-        """Give the BOARD a calibrated set, for every pulse it plays.
-
-        Not a document edit at all.  A channel delay or a DAC bias is a fact
-        about the apparatus, so it is held by the sequencer until the next
-        calibration replaces it, and it fills the config parameters of any
-        pulse compiled for that board -- this one, the next one, and the ones
-        a scan node fires without ever opening this window.
-        """
+        """Load sequencer overrides and show matching values in this editor."""
 
         sequencer = self.sequencer
         if sequencer is None:
@@ -1372,31 +1366,16 @@ class PulseEditorPresenter:
         return True
 
     def save_config_values(self) -> bool:
-        """Write what the board is holding now as a set it can be given again."""
+        """Export the current editor's Config fields, without applying them."""
 
-        sequencer = self.sequencer
-        if sequencer is None:
-            self._warn("connect to a sequencer before saving its config values")
+        sequence = self.sequence
+        if sequence is None:
+            self._warn("no pulse is open")
             return False
-        entries = sequencer.config_values()
-        if not entries:
-            # SAVE WRITES WHAT THE BOARD HOLDS, and a board holds a config
-            # value once a pulse has put one there.  Declaring a config
-            # parameter in this document is not that yet, so the refusal
-            # says which act is missing rather than only that something is.
-            declared = (
-                len(self.sequence.config_parameters)
-                if self.sequence is not None
-                else 0
-            )
-            self._warn(
-                "this board is holding no config values; press On Pulse to "
-                f"send this pulse's {declared} config parameter(s) to it "
-                "first, then save what it holds"
-                if declared
-                else "this board is holding no config values, and this pulse "
-                "declares no config parameter to give it one"
-            )
+        try:
+            entries = authored_config_entries(sequence)
+        except (TypeError, ValueError) as error:
+            self._warn(f"cannot save config values: {error}")
             return False
         directory = self._config_values_directory()
         chosen = self.view.ask_save_path(
@@ -1412,7 +1391,7 @@ class PulseEditorPresenter:
                 target,
                 entries,
                 name=target.stem,
-                source=self.connection[0] or "pulse editor",
+                source=self.path or f"pulse editor: {sequence.name}",
             )
         except Exception as error:
             self._warn(f"cannot save {target.name}: {error}")
@@ -1421,16 +1400,10 @@ class PulseEditorPresenter:
         return True
 
     def _sync_config_values(self) -> bool:
-        """Show, in the fields themselves, what the board would actually play.
+        """Show matching loaded overrides using the compiler's binding rule.
 
-        A config parameter's number belongs to the board, so with one attached
-        the document is showing a number that is not the one that will play.
-        Writing the board's in is the same overwrite ``compile_pulse`` does --
-        the editor simply does it early, so what is on screen is the truth
-        before On Pulse rather than after it.
-
-        Disconnected, nothing is claimed: the authored numbers stand, which is
-        what an offline preview compiles anyway.
+        Open/Load/On Pulse call this explicitly; ordinary refresh and Save
+        do not overwrite edits. Unmatched fields keep their current values.
         """
 
         sequencer = self.sequencer

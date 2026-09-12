@@ -10,7 +10,6 @@ from .model import (
     FIELD_DAC,
     FIELD_DELAY,
     FIELD_DURATION,
-    TIME_UNIT_CHOICES,
     nanoseconds_per,
     OutputDelay,
     PulseFieldRef,
@@ -279,6 +278,18 @@ def authored_api_values(sequence: PulseSequence) -> dict[str, float]:
     }
 
 
+def authored_config_entries(sequence: PulseSequence) -> dict[str, tuple[float, str]]:
+    """Read each Config binding from the pulse's actual field, in its own unit."""
+
+    return {
+        parameter.parameter_id: (
+            float(pulse_field_value(sequence, parameter.field_ref, parameter.unit)),
+            parameter.unit,
+        )
+        for parameter in _sequence_of(sequence).config_parameters
+    }
+
+
 def apply_config_values(
     sequence: PulseSequence,
     entries: Mapping[str, tuple[int | float, str]],
@@ -293,7 +304,8 @@ def apply_config_values(
 
     Returns the sequence, the ids applied, and the ids the set named that this
     pulse does not declare -- one calibrated set serves every pulse a board
-    plays, most of which declare only part of it.
+    plays, most of which declare only part of it. A binding absent from the
+    set retains its authored field value; an empty intersection is a no-op.
     """
 
     return _apply_named_values(
@@ -448,8 +460,6 @@ def convert_time(value: int | float, source_unit: str, target_unit: str) -> floa
     nothing said so.
     """
 
-    if source_unit not in TIME_UNIT_CHOICES or target_unit not in TIME_UNIT_CHOICES:
-        raise ValueError("time fields require time units")
     return float(
         Fraction(str(float(value)))
         * nanoseconds_per(source_unit)
@@ -467,6 +477,7 @@ __all__ = [
     "apply_config_values",
     "authored_api_entries",
     "authored_api_values",
+    "authored_config_entries",
     "convert_time",
     "field_label",
     "prune_orphaned_bindings",

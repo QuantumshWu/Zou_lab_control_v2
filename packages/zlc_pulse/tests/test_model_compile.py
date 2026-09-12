@@ -17,6 +17,7 @@ from zlc_pulse import (
     PulseTarget,
     analog_levels,
     apply_config_values,
+    authored_config_entries,
     compile_sequence,
     resolve_api_parameters,
     sequence_from_tree,
@@ -257,6 +258,11 @@ def test_a_config_parameter_reads_the_number_the_pulse_already_carries() -> None
         )
         for parameter in configured.config_parameters
     } == {"probe_time": 20.0, "bias_x": 0.0, "gate_delay": 40.0}
+    assert authored_config_entries(configured) == {
+        "probe_time": (20.0, "ns"),
+        "bias_x": (0.0, "value"),
+        "gate_delay": (40.0, "ns"),
+    }
 
 
 def test_applying_a_config_set_overwrites_the_authored_numbers() -> None:

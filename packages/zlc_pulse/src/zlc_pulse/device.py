@@ -231,13 +231,10 @@ class ConfigValueHolder:
         *,
         source: str = "",
     ) -> None:
-        """Hold the calibrated values every pulse this board plays will use.
+        """Hold optional overrides for matching Config IDs in every pulse.
 
-        A CONFIG PARAMETER IS THE BOARD'S NUMBER, NOT THE PULSE'S.  Channel
-        delays and DAC biases are facts about the apparatus: they are measured
-        once and then shared by every pulse fired at it until the next
-        calibration.  So the set is held here, for as long as this streamer
-        lives, and a pulse says only which of its fields are filled from it.
+        Unmatched fields keep the pulse's authored values. The set stays on
+        this streamer until another set is loaded, including across reconnects.
 
         Entries arrive already decoded.  Reading the file is the job of
         whoever knows where the operator's files live, which is not a package
@@ -281,41 +278,18 @@ class ConfigValueHolder:
         *,
         slot_tick_scales: "Sequence[int] | None" = None,
     ) -> tuple[PulseSequence, CompiledProgram]:
-        """The only way to compile a pulse for a board: filled, then compiled.
+        """Apply matching Config overrides, then compile without transport I/O.
 
-        A config parameter is baked in at compile -- a duration becomes ticks,
-        a DAC step becomes bus segments, a delay becomes a channel delay -- so
-        the fill cannot happen at load, and a caller that reaches
-        ``compile_sequence`` directly plays the authored placeholder with no
-        warning at all.  Routing every board compile through the device is
-        what makes that impossible rather than merely discouraged.
-
-        BOTH halves are returned because the fill writes the numbers INTO the
-        fields: the filled sequence is the one that must be handed back as
-        ``source=``, or the board plays calibrated numbers while the record
-        says authored ones.
-
-        Pure by design -- a dict lookup and a compile.  It runs once per scan
-        point and on every editor status refresh, so it never touches the
-        transport, and geometry is passed in rather than asked for.
+        Missing IDs keep their authored values; the ordinary field/unit
+        validation still applies to matched overrides. Return the resulting
+        sequence as well as its program so ``load(source=...)`` and the run
+        record describe exactly the values that were compiled.
         """
 
         if not isinstance(sequence, PulseSequence):
             raise TypeError("sequence must be PulseSequence")
         with self._config_lock:
             held = dict(self._config_values)
-        absent = tuple(
-            parameter.parameter_id
-            for parameter in sequence.config_parameters
-            if parameter.parameter_id not in held
-        )
-        if absent:
-            # Playing a stale number while the run record calls it calibrated
-            # is the one outcome worse than refusing to run.
-            raise ValueError(
-                f"{sequence.name!r} declares config parameter(s) {absent} that "
-                f"the loaded config values say nothing about"
-            )
         filled, _applied, _unknown = apply_config_values(sequence, held)
         return filled, compile_sequence(
             filled, geom, clock_hz, slot_tick_scales=slot_tick_scales
