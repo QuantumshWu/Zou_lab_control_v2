@@ -139,6 +139,7 @@ def _build(
     gating: str = "sw_gated",
     free_run_delay_seconds: float = DEFAULT_FREE_RUN_DELAY_SECONDS,
     tunable_devices: Mapping | None = None,
+    device_labels: Mapping[str, str] | None = None,
 ) -> SteppedScanMeasurement:
     if (
         not isinstance(pulse_resource, ResolvedWorkspaceResource)
@@ -159,6 +160,7 @@ def _build(
         parsed,
         scan_ports_for(sequence) + scan_ports_for_devices(
             tunable_devices, units={axis.port: axis.unit for axis in parsed.axes},
+            device_labels=device_labels,
         ),
     )
 

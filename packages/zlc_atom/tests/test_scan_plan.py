@@ -186,12 +186,12 @@ def test_tunable_devices_project_device_ports() -> None:
         ]
         assert exposure.live_write is True
         assert exposure.dependency_group == ("exposure",)
-        ports = scan_ports_for_devices(tunables)
+        ports = scan_ports_for_devices(tunables, device_labels={"mot_camera": "MOT monitor"})
         by_name = {port.port: port for port in ports}
         key = DEVICE_PARAM_FAMILY + "mot_camera:exposure"
         assert key in by_name
         port = by_name[key]
-        assert port.label == "mot_camera.exposure"
+        assert port.label == "MOT monitor.exposure"
         assert 0 < port.lo < port.hi
     finally:
         installation.close()

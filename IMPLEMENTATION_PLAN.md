@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- UART已删除写后Win32 flush轮询，并按pending SEQ收取回复，旧/重复帧及坏CRC不再吞当前有效ACK；真实缺包/NAK/命令去重不变。直接PySerialLink模拟串口证明软件自发重发已消除，未操作实验板。Done计时分清command、终态观察和report retrieval，日志仅有真实重发时附最后原因；不能以日志口径修正代替真机延迟验收。
+- 设备Role已沿既有bench facts进入两个Scan factory及ScanPort.label，UI和新扫描Axis.name不再各自拼内部ID；port/AxisId和数值不变，纯Role重投不读设备。Config空路径统一解除绑定和清覆盖，下一次Fire恢复原稿；空JSON仍是绑定文件。Save Config的可选field说明使用Period/Channel显示名，只用于阅读，不进入编号匹配。
 - 数值名称贯通现有ValueSchema、生产节点、Scan/ROI/history、Plot与Figure codec；FrameSurvival的survival经过Scan不再变value/scan。Derive用户输出、Fit参数、ROI统计由各自owner命名；普通数值轴使用同一quantity label，显式标签优先。Facet外层轴标签归一到cell，解决其被忽略及换轴旧标签复活；无renderer分支。Data/Atom/Plot/Runtime/Viewer直接验证及真实FigureViewer截图通过，窗口关闭，截图不入Git。
 - Pulse/Scan字段显示使用可编辑Period Name，如MOT.duration；有效显示名重名在Pulse模型拒绝，空Name保留ID。Scan的Axis.name与稳定AxisId分离，保存port/绑定编号/量化值及selector回写不变；重名编辑回显原值，新period ID避开已有显示名。既有Pulse及Scan直接用例通过，无硬件或RTL操作。
 - Remote Load消除未变原稿的重复传输/解码，复用原有AppliedState；仅新实际执行稿重建，原稿变化仍完整发送。类型级序列化字段metadata复用不改变wire对象grammar；文件刷新、原稿恢复、scan/reconnect及takeover直接用例通过。未增加源记录或新通信方法，客户端/server需同步Python版本，不涉及RTL。

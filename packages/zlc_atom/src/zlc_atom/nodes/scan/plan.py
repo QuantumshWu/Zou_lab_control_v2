@@ -245,8 +245,26 @@ def hardware_scan_ports_for(sequence: PulseSequence) -> tuple[ScanPort, ...]:
     return _ports_from_columns(scan_columns_for(sequence))
 
 
+def label_device_scan_ports(
+    ports: Sequence[ScanPort], device_labels: Mapping[str, str] | None,
+) -> tuple[ScanPort, ...]:
+    """Project accepted Role metadata without reading or renaming a device."""
+
+    labels = device_labels or {}
+    result = []
+    for port in ports:
+        if port.port.startswith(DEVICE_PARAM_FAMILY):
+            key, field = port.port[len(DEVICE_PARAM_FAMILY):].split(":", 1)
+            label = f"{labels.get(key, key)}.{field}"
+            if label != port.label:
+                port = replace(port, label=label)
+        result.append(port)
+    return tuple(result)
+
+
 def scan_ports_for_devices(
     tunables: Mapping | None, *, units: Mapping[str, str] | None = None,
+    device_labels: Mapping[str, str] | None = None,
 ) -> tuple[ScanPort, ...]:
     """Every port the bench's tunable devices offer, from their own words.
 
@@ -290,7 +308,7 @@ def scan_ports_for_devices(
                     float(field.maximum),
                 )
             )
-    return tuple(ports)
+    return label_device_scan_ports(ports, device_labels)
 
 
 @dataclass(frozen=True)

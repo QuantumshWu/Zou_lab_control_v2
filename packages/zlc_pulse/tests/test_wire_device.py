@@ -657,7 +657,7 @@ def test_layout_check_and_transport_self_test_use_the_frozen_ctrl_contract() -> 
     streamer.check_register_layout()
 
 
-def test_wait_done_uses_one_observer_owned_status_cursor_block() -> None:
+def test_wait_done_uses_one_observer_owned_status_cursor_block(monkeypatch) -> None:
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
     program = compile_sequence(_sequence(), geom, 50e6)
     transport = MemoryRegisterTransport(geom=geom, auto_done=True)
@@ -666,11 +666,20 @@ def test_wait_done_uses_one_observer_owned_status_cursor_block() -> None:
     streamer.load(program)
     transport.read_log.clear()
     streamer.fire(run_repeats=1)
-    report = streamer.wait_done(1.0)
+    assert streamer._done.wait(1.0)
+    finished = streamer._fire_finished
+    # Reading a completed report later is not additional execution time.
+    with monkeypatch.context() as clock:
+        clock.setattr("zlc_pulse.device.time.monotonic", lambda: finished + 0.4)
+        report = streamer.wait_done(0.0)
     assert report is not None
     assert report.status == STATUS_DONE and report.cursor == 0
     assert report.command_id > 0
+    assert report.elapsed_seconds == finished - streamer._fire_started
+    assert report.report_delay_seconds == pytest.approx(0.4)
+    assert 0 <= report.command_seconds <= report.elapsed_seconds
     assert transport.read_log == list(range(CtrlWords.STATUS, CtrlWords.CURSOR + 1))
+    streamer.close()
 
 
 class _BlockingObserverTransport(MemoryRegisterTransport):

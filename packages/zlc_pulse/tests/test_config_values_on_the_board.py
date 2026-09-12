@@ -138,6 +138,7 @@ def test_fire_refreshes_file_and_keeps_the_original_defaults(streamer, tmp_path,
             assert state.source.period_by_id["p1"].duration == duration
             assert state.program == compile_sequence(state.source, geom, 50e6)
             assert state.run_repeats == repeats
+            assert device.config_source == str(path), "an empty JSON set still follows its file"
         before = counts.copy()
         write({"1": (100, "Hz")})
         with pytest.raises(ValueError, match="time unit"):
@@ -157,6 +158,18 @@ def test_fire_refreshes_file_and_keeps_the_original_defaults(streamer, tmp_path,
         device.fire(run_repeats=1)
         assert device.wait_done(1.0) is not None
         assert device.applied().source.period_by_id["p1"].duration == 120
+        for cleared_path in (None, ""):
+            write({"1": (80, "ns")})
+            device.load_config_file(path)
+            device.fire(run_repeats=1)
+            assert device.wait_done(1.0) is not None
+            assert device.applied().source.period_by_id["p1"].duration == 80
+            path.write_text("{", encoding="utf-8")
+            device.load_config_file(cleared_path)
+            assert device.config_values() == {} and device.config_source == ""
+            device.fire(run_repeats=1)
+            assert device.wait_done(1.0) is not None
+            assert device.applied().source.period_by_id["p1"].duration == 40
     finally:
         device.close()
 

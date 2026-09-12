@@ -1130,6 +1130,9 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                                 underflow=result.underflow,
                                 link_error=result.link_error,
                                 elapsed_ms=f"{result.elapsed_seconds * 1e3:.3f}",
+                                total_ms=f"{(result.elapsed_seconds + result.report_delay_seconds) * 1e3:.3f}",
+                                command_ms=f"{result.command_seconds * 1e3:.3f}",
+                                report_delay_ms=f"{result.report_delay_seconds * 1e3:.3f}",
                                 command_id=result.command_id,
                                 observer_error=result.observer_error or None,
                                 # Quiet while zero, like resent_frames on LOAD:
@@ -1137,6 +1140,9 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                                 # by shot before it fails one.
                                 poll_failures=result.poll_failures or None,
                                 resent_frames=result.resent_frames or None,
+                                retry_reason=(
+                                    getattr(self.streamer.transport, "last_retry_reason", "") or None
+                                ) if result.resent_frames else None,
                             ),
                         )
                     else:

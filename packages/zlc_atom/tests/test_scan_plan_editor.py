@@ -508,8 +508,10 @@ def test_axis_rows_follow_the_ports_without_being_rebuilt(caplog) -> None:
                           Unit("Vpp", "power", VoltageIntoLoad(100.0), prefixable=True)))
     owner_thread = get_ident()
     gate = Event()
+    reads = []
 
     def read(unit="dBm"):
+        reads.append(unit)
         assert get_ident() != owner_thread, "device read ran on Qt"
         assert gate.wait(3.0)
         unit = unit or "dBm"
@@ -549,6 +551,15 @@ def test_axis_rows_follow_the_ports_without_being_rebuilt(caplog) -> None:
         gate.set()
         settled(lambda: bool(editor._rows))
         row = editor._rows[0]
+        before = len(reads)
+        projection["device_labels"] = {"rf": "Cooling RF"}
+        editor.update_projection(projection)
+        app.processEvents()
+        assert len(reads) == before and not editor._port_read_pending
+        assert editor._ports[0].label == "Cooling RF.ch1_power"
+        root = row.port_combo._model.item(0)
+        assert root.text() == "Cooling RF" and root.child(0).text() == "ch1_power"
+        assert row.port_combo.currentData() == "device:rf:ch1_power"
         row.values_edit.setText("-17, -13, -17")
         row.values_edit.editingFinished.emit()
         old_values = row.axis().values

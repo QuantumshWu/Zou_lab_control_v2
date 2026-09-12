@@ -60,6 +60,7 @@ class DoneReport:
     status: int
     cursor: int | None  # cumulative row-visit ordinal; table row = cursor % len(rows)
     underflow: bool
+    #: FIRE command start to observer-confirmed terminal status, not retrieval.
     elapsed_seconds: float
     command_id: int = 0
     observer_error: str = ""
@@ -70,6 +71,8 @@ class DoneReport:
     #: one that died.
     poll_failures: int = 0
     resent_frames: int = 0
+    command_seconds: float = 0.0  # Part of elapsed_seconds, not added to it.
+    report_delay_seconds: float = 0.0  # Terminal observation to report retrieval.
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "status", int(self.status))
@@ -80,6 +83,8 @@ class DoneReport:
         object.__setattr__(self, "observer_error", str(self.observer_error))
         object.__setattr__(self, "poll_failures", int(self.poll_failures))
         object.__setattr__(self, "resent_frames", int(self.resent_frames))
+        object.__setattr__(self, "command_seconds", float(self.command_seconds))
+        object.__setattr__(self, "report_delay_seconds", float(self.report_delay_seconds))
 
     @property
     def fault(self) -> str:
@@ -260,8 +265,12 @@ class ConfigValueHolder:
             self._config_source = str(source or "")
             self._config_file = None
 
-    def load_config_file(self, path: str | Path) -> None:
-        """Bind this file and read it now; each subsequent Fire reads it again."""
+    def load_config_file(self, path: str | Path | None) -> None:
+        """Bind and read a file, or clear overrides when the path is empty."""
+
+        if path is None or path == "":
+            self.load_config_values({}, source="")
+            return
 
         from .codec import read_config_values
 
@@ -410,6 +419,8 @@ class PulseStreamer(ConfigValueHolder):
         self._done = threading.Event()
         self._terminal_status = 0
         self._fire_started = 0.0
+        self._fire_acknowledged = 0.0
+        self._fire_finished = 0.0
         self._safe_readback: SafeReadback | None = None
         self._command_id: int | None = None
         self._fire_command_id = 0
@@ -654,8 +665,11 @@ class PulseStreamer(ConfigValueHolder):
             self._poll_failures = 0
             self._resends_at_fire = int(getattr(self.transport, "resends", 0) or 0)
             self._fire_started = time.monotonic()
+            self._fire_acknowledged = self._fire_started
+            self._fire_finished = self._fire_started
             status, _cursor = self._command(CMD_FIRE, run_repeats=run_repeats,
                                             scan_repeats=scan_repeats, stop=self._stop)
+            self._fire_acknowledged = time.monotonic()
             if not status & STATUS_RUNNING or status & STATUS_ERROR:
                 raise RuntimeError(f"FIRE was not accepted (STATUS=0x{status:08X})")
             self._fire_command_id = self._command_id
@@ -681,11 +695,13 @@ class PulseStreamer(ConfigValueHolder):
                 status=self._terminal_status,
                 cursor=self._cursor_value,
                 underflow=self._underflow,
-                elapsed_seconds=max(0.0, time.monotonic() - self._fire_started),
+                elapsed_seconds=max(0.0, self._fire_finished - self._fire_started),
                 command_id=self._fire_command_id,
                 observer_error=self._observer_error,
                 poll_failures=self._poll_failures,
                 resent_frames=int(getattr(self.transport, "resends", 0) or 0) - self._resends_at_fire,
+                command_seconds=max(0.0, self._fire_acknowledged - self._fire_started),
+                report_delay_seconds=max(0.0, time.monotonic() - self._fire_finished),
             )
             self._firing = False
             self._worker = None
@@ -828,11 +844,13 @@ class PulseStreamer(ConfigValueHolder):
     def _record_observer_failure(self, error: BaseException) -> None:
         with self._lock:
             self._observer_error = f"{type(error).__name__}: {error}"
+            self._fire_finished = time.monotonic()
 
     def _finish_observation(self, status: int, cursor: int) -> None:
         with self._lock:
             self._terminal_status = status
             self._cursor_value = cursor
+            self._fire_finished = time.monotonic()
 
     def _command(self, code: int, *, run_repeats: int = 1,
                  scan_repeats: int = 1, stop: threading.Event | None = None) -> tuple[int, int]:

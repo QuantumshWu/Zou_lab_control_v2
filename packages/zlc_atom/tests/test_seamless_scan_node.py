@@ -333,6 +333,7 @@ def _scripted_run(
 def test_device_axes_alone_repeat_a_fixed_pulse_and_restore_the_device() -> None:
     value, record, bench, source, claims = _device_run(
         frequencies=(1.0, 1.5, 2.0), values=None, unit="GHz", shots=2, repeats=2,
+        device_labels={"rf": "Cooling RF"},
     )
     assert bench.fired_repeats == [(2, 1)] * 6
     assert bench.loads == 1 and bench.scan_tables == []
@@ -341,7 +342,8 @@ def test_device_axes_alone_repeat_a_fixed_pulse_and_restore_the_device() -> None
     assert bench.published[1:] == list(range(12))
     schema = value.block.schema
     axes = tuple(axis for axis in schema.point_domain.axes if axis.axis_id.value.startswith("scan."))
-    assert tuple(axis.name for axis in axes) == ("rf.frequency",)
+    assert tuple(axis.name for axis in axes) == ("Cooling RF.frequency",)
+    assert axes[0].axis_id.value == "scan.rf.frequency"
     assert axes[0].unit == "GHz" and tuple(axes[0].coordinates) == (1.0, 1.5, 2.0)
     assert tuple(axis.size for axis in schema.repeat_domain.axes) == (2, 2)
     assert np.asarray(value.block.values).mean(axis=(2, 3)).tolist() == [
@@ -1086,6 +1088,7 @@ def _device_run(
     tunables=None,
     unit="",
     device_field="frequency",
+    device_labels=None,
 ):
     """Walk a plan whose outer axis is an installed device knob.
 
@@ -1139,6 +1142,7 @@ def _device_run(
                 pulse_sequence("mot_field_template.json") if values is None else _template_sequence()),
             plan=plan.to_tree(),
             tunable_devices=tunables,
+            device_labels=device_labels,
             repeats=repeats,
             shots_per_point=shots,
         )

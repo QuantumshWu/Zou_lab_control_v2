@@ -1327,7 +1327,7 @@ class PulseEditorPresenter:
         return True
 
     def load_config_values(self) -> bool:
-        """Bind a Config file on the device without changing the authored pulse."""
+        """Bind or clear Config without changing the authored pulse."""
 
         sequencer = self.sequencer
         if sequencer is None:
@@ -1339,24 +1339,25 @@ class PulseEditorPresenter:
             str(directory / CURRENT_CONFIG_VALUES) if directory else "",
             "ZLC config values (*.json);;All files (*)",
         )
-        if not chosen:
-            return False
         def work(_operation: int) -> int:
             sequencer.load_config_file(chosen)
             return len(sequencer.config_values())
 
         def delivered(count: object, error: BaseException | None) -> None:
             if error is not None:
-                self._warn(f"cannot load {Path(chosen).name}: {error}")
+                action = f"load {Path(chosen).name}" if chosen else "clear config"
+                self._warn(f"cannot {action}: {error}")
                 return
             self._digest_revision = -1
             self.refresh()
-            self._done(f"the board is holding {count} config value(s)")
+            self._done(f"the board is holding {count} config value(s)" if chosen else "Config cleared")
 
         if self._run_device_work is not None:
             if not self._device_available():
                 return False
-            return self._run_device_command(work, delivered, summary="Loading config...")
+            return self._run_device_command(
+                work, delivered, summary="Loading config..." if chosen else "Clearing config...",
+            )
         try:
             count = work(0)
         except Exception as error:
@@ -1392,6 +1393,11 @@ class PulseEditorPresenter:
                 entries,
                 name=target.stem,
                 source=self.path or f"pulse editor: {sequence.name}",
+                fields={
+                    parameter.number: field_label(sequence, parameter.field_ref)
+                    + (" (DAC)" if parameter.field_ref.kind == "dac" else "")
+                    for parameter in sequence.config_parameters
+                },
             )
         except Exception as error:
             self._warn(f"cannot save {target.name}: {error}")

@@ -67,6 +67,7 @@ from .plan import (
     scan_ports_for,
     DEVICE_PARAM_FAMILY,
     scan_ports_for_devices,
+    label_device_scan_ports,
 )
 
 
@@ -105,8 +106,8 @@ class _AxisRow(QtWidgets.QWidget):
         # grouped chooser the signal pickers use.
         self.port_combo = FluentTreeComboBox()
         self._build_inputs(self.port_combo)
-        self._ports = tuple(ports)
         self._device_labels = dict(device_labels or {})
+        self._ports = label_device_scan_ports(ports, self._device_labels)
         self._fill_ports(None if axis is None else axis["port"])
         self._apply_port_limits()
         if axis is not None:
@@ -222,7 +223,7 @@ class _AxisRow(QtWidgets.QWidget):
 
         labels = {
             port.port: (
-                port.label.removeprefix(f"{port_group(port.port)}.")
+                port.label.removeprefix(f"{branch(port.port)}.")
                 if port.port.startswith(DEVICE_PARAM_FAMILY) else port.label
             )
             for port in self._ports
@@ -252,6 +253,7 @@ class _AxisRow(QtWidgets.QWidget):
     def set_device_labels(self, labels: Mapping[str, str]) -> None:
         if dict(labels) != self._device_labels:
             self._device_labels = dict(labels)
+            self._ports = label_device_scan_ports(self._ports, labels)
             self._fill_ports(str(self.port_combo.currentData() or ""))
 
     def _apply_port_limits(self, unit: str = "") -> None:
@@ -543,8 +545,10 @@ class ScanPlanEditor(QtWidgets.QWidget):
 
     def update_projection(self, projection: Mapping[str, object]) -> None:
         labels = dict(projection.get("device_labels") or {})
-        if labels != self._device_labels:
+        labels_changed = labels != self._device_labels
+        if labels_changed:
             self._device_labels = labels
+            self._ports = label_device_scan_ports(self._ports, labels)
             for row in self._rows:
                 if not row.manual:
                     row.set_device_labels(labels)
@@ -578,6 +582,9 @@ class ScanPlanEditor(QtWidgets.QWidget):
             units = {axis["port"]: axis["unit"] for axis in axes}
             key = (id(sequence), plan_text, values_text,
                    tuple((name, id(device)) for name, device in sorted(self._tunable_devices.items())))
+            if (labels_changed and self._port_read_request is not None
+                    and self._port_read_request[0] == key):
+                return
             self._port_read_request = (
                 key, sequence, template_ports, self._tunable_devices, plan_text, values_text, units,
             )
@@ -625,6 +632,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
 
     def _apply_projection(self, ports, sequence, plan_text: str, values_text: str) -> None:
         """Adopt plain port metadata only on the widget's owner thread."""
+        ports = label_device_scan_ports(ports, self._device_labels)
         if self._only_port is not None:
             ports = tuple(port for port in ports if port.port == self._only_port)
 
@@ -681,6 +689,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 current.custom_label.setText(f"Cannot convert unit: {error}")
                 return
             values, port = result
+            (port,) = label_device_scan_ports((port,), owner._device_labels)
             owner._ports = tuple(port if item.port == port.port else item for item in owner._ports)
             current._ports = owner._ports
             current._show_converted(entry, unit, values)

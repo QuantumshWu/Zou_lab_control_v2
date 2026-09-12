@@ -107,6 +107,7 @@ def _build(
     plan: object,
     api_values: object = "",
     tunable_devices: object = None,
+    device_labels: object = None,
     repeats: int = 1,
     shots_per_point: int = 1,
     acquisition_logic: str = "",
@@ -138,7 +139,10 @@ def _build(
         ScanPlan(bindable),
         (
             *hardware_scan_ports_for(sequence),
-            *scan_ports_for_devices(tunable_devices, units={axis.port: axis.unit for axis in parsed.axes}),
+            *scan_ports_for_devices(
+                tunable_devices, units={axis.port: axis.unit for axis in parsed.axes},
+                device_labels=device_labels,
+            ),
         ),
     ) if bindable else ()
 

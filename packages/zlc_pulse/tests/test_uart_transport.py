@@ -322,7 +322,7 @@ class _TailDroppingPort:
     def reset_input_buffer(self) -> None:
         self._pending = b""
 
-    def write(self, payload: bytes) -> None:
+    def write(self, payload: bytes) -> int:
         import time
 
         from zlc_pulse.transport import uart_frame as framing
@@ -331,6 +331,7 @@ class _TailDroppingPort:
         self.sent_at.append(time.monotonic())
         reply = framing.encode_reply(payload[3], framing.ST_OK, (85,))
         self._pending = reply[:-1] if self.exchanges <= self.drops else reply
+        return len(payload)
 
     def flush(self) -> None: ...
 
@@ -378,6 +379,41 @@ def test_a_reply_one_byte_short_is_asked_again_within_milliseconds() -> None:
         f"requests spaced {[f'{gap:.3f}' for gap in gaps]}s; the budget is {budget:.3f}s"
     )
     assert elapsed < 4 * budget + 0.1, f"{elapsed:.3f}s for three lost bytes"
+
+    # Complete current replies are already in the same USB read as stale,
+    # duplicate and CRC-damaged frames. None requires a retransmission.
+    from zlc_pulse.wire import CMD_FIRE, STATUS_RUNNING
+
+    port = _TailDroppingPort(drops=0)
+    def complete_write(payload):
+        requests = payload.split(b"\xff" * 8)
+        port.exchanges += 1
+        replies = []
+        for request in reversed(requests):
+            words = (85,) if request[2] == framing.OP_READ else (
+                (int.from_bytes(request[10:14], "little"), STATUS_RUNNING, 0)
+                if request[2] == framing.OP_COMMAND else ()
+            )
+            reply = framing.encode_reply(request[3], framing.ST_OK, words)
+            replies.extend((reply, reply))
+        stale = framing.encode_reply((requests[0][3] - 1) & 255, framing.ST_OK, ())
+        damaged = bytearray(replies[0])
+        damaged[-1] ^= 1
+        port._pending = bytes(damaged) + stale + b"".join(replies)
+        return len(payload)
+    def forbidden_flush():
+        raise AssertionError("matched ACK must replace the Win32 50 ms flush polling")
+    port.write = complete_write
+    port.flush = forbidden_flush
+    link = PySerialLink("COM-COALESCED")
+    link._serial = port
+    transport = UartRegisterTransport(link=link)
+    transport.start()
+    assert transport.read_word(15) == 85
+    assert transport.command(CMD_FIRE, 42) == (STATUS_RUNNING, 0)
+    transport.write_words(((10, 7), (20, 8)))
+    assert port.exchanges == 3
+    assert transport.resends == 0
 
 
 def test_a_read_that_never_completes_reports_every_attempt_by_shape() -> None:
@@ -442,6 +478,9 @@ def test_a_slow_write_is_a_timeout_this_layer_can_retry() -> None:
         link.exchange(b"\x01\x02\x03\x04", deadline=time.monotonic() + 1.0)
     with pytest.raises(TimeoutError, match="UART write timed out on COM-TEST"):
         link.write_batch([b"\x01\x02"], deadline=time.monotonic() + 1.0)
+    link._serial.write = lambda payload: len(payload) - 1
+    with pytest.raises(TimeoutError, match="3 of 4 byte"):
+        link.exchange(b"\x01\x02\x03\x04", deadline=time.monotonic() + 1.0)
 
 
 def test_a_write_timeout_on_an_early_attempt_is_retried() -> None:

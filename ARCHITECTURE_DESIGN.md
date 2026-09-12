@@ -318,6 +318,7 @@ Node new chunk
 - Config刷新先按原稿默认值和最新编号覆盖计算各字段期望值，与当前实际source的同字段比较；全部相同直接复用原source/program，不重建Pulse。Config/API与单字段修改共用binding内的一次批量更新：变化字段先合并，最终只构造/校验一次PulseSequence。删除覆盖恢复原稿默认，单位与时钟对齐数学不变。Remote Load只返回服务端的repeat与装载时间确认，不把已经接受的完整program/source再回传；客户端现有AppliedState用被接受的输入加确认构造，public applied查询仍返回服务端真实记录。
 
 - Remote编码/解码按immutable dataclass类型复用字段metadata，JSON grammar与对象验证不变。Load可明确复用同连接已接受AppliedState中的未变authored_source，不反复传输/解码原稿；新实际source/program照常验证。原稿变化就完整传入，服务器无旧记录时拒绝复用，绝不把filled source当原稿。客户端在发送前清原有应用缓存，失败不缓存假成功；重连继续按原有applied查询恢复事实，不增加源缓存或后台同步。
+- Load Config的空路径（None或空字符串）解除文件绑定并清空覆盖，复用既有in-memory值入口；当前正在执行的Pulse不被改写，下一Fire恢复其作者默认值。空内容值集仍是绑定的有效文件。Save Config可在每个编号下附field文本（Period/Channel显示名与字段位置），只作人类说明；reader验证文本但不把它用于匹配或返回数值映射，Config只按稳定编号覆盖value/unit。
 
 ## 6. UI与Lifecycle
 
@@ -394,6 +395,7 @@ Node new chunk
 
 ### 7.4 Host/RTL/build invariants
 
+- UART发送以完整write和本次匹配ACK为完成依据，不在等待ACK前调用Win32按50ms轮询的flush。接收在同一deadline内按本批待回复SEQ集合收齐，旧/重复回复不占完成名额，CRC坏帧由同一extractor重同步；有效当前NAK、真正缺包、取消与总deadline仍归原Transport。重发计数只统计实际重发，另保留最后一次重发原因，不累计历史。DoneReport.elapsed_seconds在observer确认终态时固定；command_seconds是其内的命令确认区间，report_delay_seconds另列调用方取报告滞后，不能把GUI/采集等待冒充Pulse执行时间。
 - 正式板配置直接包含`pgc_1D`：P19、raw lane 18；共63 lanes、19个TTL、4组10-bit DAC与4个clock。原DAC的物理引脚不变（`da_dipole[0]`仍为V9），只有raw lane编号随新增TTL后移。Manifest、XDC、RTL top、生成geometry及仓库Pulse模板一起提交；部署不再运行本地add-channel脚本。Pulse状态按port key保持，不按新旧raw数组相同下标猜对应通道。
 
 - Load前核target ABI、clock、geometry与合法slot rows；delay FIFO capacity和循环接缝在Fire前按本次真实run/scan repeats验证，不先计算一个未请求的1×1执行。相同驻留程序与执行参数复用已验证结论；不把camera exposure或frames-per-cycle反向解释进Pulse program。

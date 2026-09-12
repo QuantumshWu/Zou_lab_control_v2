@@ -8084,7 +8084,10 @@ class ConsolePresenter:
 
         from zlc_atom.install import tunable_devices
 
-        return {"tunable_devices": tunable_devices(self.session.installation)}
+        return {
+            "tunable_devices": tunable_devices(self.session.installation),
+            "device_labels": self.session.device_labels,
+        }
 
     def _logic_extras(self) -> dict[str, Any]:
         """Facts a START can bind beyond its devices and the signal plane."""

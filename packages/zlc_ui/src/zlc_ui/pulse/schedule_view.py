@@ -1188,7 +1188,8 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.load_values_button.setToolTip(
             "Bind a Config file to the device. Before every Fire it rereads "
             "the file and applies matching Config numbers (1, 2, ...); "
-            "unmatched fields keep the pulse's original values."
+            "unmatched fields keep the pulse's original values. "
+            "An empty selection clears the previous file and overrides."
         )
         self.save_values_button.setToolTip(
             "Save this editor's Config numbers, current values and units. "

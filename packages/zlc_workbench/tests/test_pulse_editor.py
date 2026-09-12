@@ -4287,6 +4287,12 @@ def test_config_execution_keeps_the_authored_pulse_and_its_bindings(
         assert board._applied.source.period_by_id[period].duration == authored
         assert not presenter.synchronized
         assert "applied" not in board.events, "On Pulse added an applied-state query"
+        view.open_answer = ""
+        assert presenter.load_config_values()
+        assert presenter._device_busy, "clear must return through the device worker"
+        worker.deliver_until(lambda: not presenter._device_busy)
+        assert board.config_values() == {} and board.config_source == ""
+        assert presenter.sequence is edited and view.done[-1] == "Config cleared"
     finally:
         presenter.close()
 
@@ -4296,7 +4302,7 @@ def test_editor_config_can_be_saved_offline_and_loaded_without_firing_first(
 ) -> None:
     """Save reads the editor; Load supplies optional sequencer overrides."""
 
-    from zlc_pulse import read_config_values
+    from zlc_pulse import read_config_values, config_values_from_tree
     from zlc_pulse import pulse_field_value
 
     saved = tmp_path / "config.json"
@@ -4306,9 +4312,19 @@ def test_editor_config_can_be_saved_offline_and_loaded_without_firing_first(
     assert read_config_values(saved)[2] == {}
     parameter = _bind_one_config_parameter(presenter, sequence)
     period = parameter.field_ref.period_id
+    presenter.set_period_name(period, "MOT")
     value = pulse_field_value(presenter.sequence, parameter.field_ref, parameter.unit)
     assert presenter.save_config_values()
     assert read_config_values(saved)[2] == {"1": (value, parameter.unit)}
+    tree = json.loads(saved.read_text(encoding="utf-8"))
+    assert tree["values"]["1"]["field"] == "MOT.duration"
+    tree["values"]["1"]["field"] = "Cooling.delay"
+    assert config_values_from_tree(tree)[2] == {"1": (value, parameter.unit)}
+    tree["values"]["1"]["field"] = 1
+    with pytest.raises(TypeError, match="field must be text"):
+        config_values_from_tree(tree)
+    del tree["values"]["1"]["field"]
+    assert config_values_from_tree(tree)[2] == {"1": (value, parameter.unit)}
 
     board = _Sequencer()
     presenter.sequencer = board
@@ -4368,6 +4384,11 @@ def test_loading_a_set_moves_the_stale_dot_without_a_document_edit(
     give(authored * 2, "second.json")
     assert presenter._shown_digest() != first
     assert presenter.view.schedule_view.connection.config_source.endswith("second.json")
+    presenter.view.open_answer = ""
+    assert presenter.load_config_values() is True
+    assert board.config_values() == {} and board.config_source == ""
+    assert presenter._shown_digest() == first
+    assert presenter.view.schedule_view.connection.config_source == ""
 
 
 def test_the_connection_box_names_the_set_the_board_is_holding(

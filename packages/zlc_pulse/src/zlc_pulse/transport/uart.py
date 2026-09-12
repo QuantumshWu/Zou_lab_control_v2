@@ -84,7 +84,7 @@ class PySerialLink:
         # shortfall still lying here.
         self.last_shortfall = ""
         self._write(serial_port, request)
-        replies = self._read_replies(1, deadline=deadline, stop=stop)
+        replies = self._read_replies({request[3]}, deadline=deadline, stop=stop)
         if not replies:
             # _read_replies reports rather than judges, so the judging is here:
             # one request, no reply, and the caller may only retry if the
@@ -105,10 +105,10 @@ class PySerialLink:
         serial_port.write_timeout = _remaining(deadline, "UART write")
         self.last_shortfall = ""
         self._write(serial_port, (b"\xff" * 8).join(requests))
-        return self._read_replies(len(requests), deadline=deadline, stop=stop)
+        return self._read_replies({request[3] for request in requests}, deadline=deadline, stop=stop)
 
     def _write(self, serial_port, payload: bytes) -> None:
-        """Write and drain, speaking THIS layer's timeout vocabulary.
+        """Write the complete request; its matched ACK proves board receipt.
 
         pyserial reports a write that missed its timeout as
         ``SerialTimeoutException`` -- an OSError, not a TimeoutError -- so
@@ -124,37 +124,35 @@ class PySerialLink:
         import serial
 
         try:
-            serial_port.write(payload)
-            serial_port.flush()
+            written = serial_port.write(payload)
         except serial.SerialTimeoutException as error:
             raise TimeoutError(
                 f"UART write timed out on {self.port} at {self.baud} baud: "
                 f"{len(payload)} byte(s) were not accepted in time"
             ) from error
+        if written != len(payload):
+            raise TimeoutError(
+                f"UART write timed out on {self.port} at {self.baud} baud: "
+                f"{written} of {len(payload)} byte(s) accepted"
+            )
 
-    def _read_replies(self, count: int, *, deadline: float, stop: threading.Event | None) -> list[bytes]:
-        """Collect replies until there are ``count`` or the deadline passes.
+    def _read_replies(self, sequences: set[int], *, deadline: float, stop: threading.Event | None) -> list[bytes]:
+        """Collect one verified reply per pending SEQ under the same deadline.
 
-        The deadline is the ONLY judgement of a reply that has not arrived,
-        and it is the attempt budget the transport above derives from the
-        bytes in flight (``_attempt_budget``): a complete reply crosses the
-        wire in tens of microseconds and the adapter hands it over within
-        milliseconds, so a reply still incomplete when that budget ends --
-        12 of 13 bytes, every field valid -- is a lost byte, not a slow one.
-        There is deliberately no second, earlier judgement of a frame that
-        began and stopped: the transport charges every attempt its budget
-        before the next one goes out, so ending an attempt sooner would save
-        nothing, and a stray byte that reached the buffer before a merely
-        late reply would look like a frame that stopped, cutting the window
-        for the real reply short.  What was in the buffer when the budget
-        ended is reported (``_describe_shortfall``); it is not judged twice.
+        Old/duplicate replies cannot occupy a pending request's place. CRC
+        damage is resynchronized by the existing frame extractor; current
+        negative acknowledgements remain replies for the transport to judge.
         """
 
         serial_port = self._require_open()
         buffer = bytearray()
         replies: list[bytes] = []
+        pending = set(sequences)
+        count = len(pending)
         read_bytes = 0
-        while len(replies) < count:
+        ignored_bytes = 0
+        ignored_replies = 0
+        while pending:
             now = time.monotonic()
             if now >= deadline:
                 break
@@ -165,10 +163,15 @@ class PySerialLink:
                 chunk = serial_port.read(available)
                 read_bytes += len(chunk)
                 buffer.extend(chunk)
-                while len(replies) < count:
+                while pending:
                     frame = _extract_reply(buffer)
                     if frame is None:
                         break
+                    if frame[3] not in pending:
+                        ignored_bytes += len(frame)
+                        ignored_replies += 1
+                        continue
+                    pending.remove(frame[3])
                     replies.append(frame)
             else:
                 time.sleep(min(0.0005, max(0.0, deadline - now)))
@@ -176,7 +179,11 @@ class PySerialLink:
             # Carried, not raised.  Whether a short answer is fatal depends on
             # whether the frames that went unanswered may be sent again, and
             # only the transport above knows that.
-            self.last_shortfall = _describe_shortfall(replies, count, read_bytes, buffer)
+            self.last_shortfall = _describe_shortfall(replies, count, read_bytes - ignored_bytes, buffer)
+            if ignored_replies:
+                if self.last_shortfall == "no bytes":
+                    self.last_shortfall = "no matching reply"
+                self.last_shortfall += f", ignored {ignored_replies} stale/duplicate reply(s)"
         return replies
 
     def _require_open(self):
@@ -210,17 +217,14 @@ class UartRegisterTransport:
         #: (a successful attempt returns the moment its replies land).  Per
         #: FRAME because every frame is acknowledged.
         self.round_trip_allowance = 0.05
-        #: Host-side slack per attempt, beyond the bytes' own wire time: the
-        #: same USB delivery bound plus scheduler jitter.  Waiting too LITTLE
-        #: here is benign -- a write is idempotent, and a reply that was
-        #: merely late arrives as a duplicate the classifier drops by SEQ --
-        #: while waiting too much is a stall the operator feels on every lost
-        #: frame.  It started at half a second and a lossy cycle cost visible
-        #: over-a-second hangs; the physics needs ~20 ms.
+        #: Host delivery/scheduling allowance per unsuccessful attempt.
+        #: A matching response returns immediately; a timeout alone does not
+        #: identify physical packet loss as the cause.
         self.retry_slack = 0.08
         #: How many frames have had to be sent again, so a link that is quietly
         #: degrading can be seen before it fails.
         self.resends = 0
+        self.last_retry_reason = ""
         if (
             isinstance(max_frame_words, bool)
             or not isinstance(max_frame_words, int)
@@ -373,6 +377,7 @@ class UartRegisterTransport:
                 continue
             if failures:
                 self.resends += len(outstanding())
+                self.last_retry_reason = f"{what}: {failures[-1][2]}"
             attempts += 1
             next_at = now + self._attempt_budget(outstanding())
             failure = attempt(min(absolute, next_at))

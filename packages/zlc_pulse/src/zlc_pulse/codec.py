@@ -517,7 +517,9 @@ def _named_values_from_tree(
     entries: dict[str, tuple[float, str]] = {}
     for parameter_id, entry in body.items():
         parameter_id = config_parameter_key(parameter_id)
-        entry = _object(entry, ("value", "unit"), f"{label} {parameter_id!r}")
+        entry = _object(entry, ("value", "unit"), f"{label} {parameter_id!r}", optional=("field",))
+        if "field" in entry and not isinstance(entry["field"], str):
+            raise TypeError(f"{label} {parameter_id!r} field must be text")
         number = entry["value"]
         if not isinstance(number, Real) or isinstance(number, bool):
             raise TypeError(f"{label} {parameter_id!r} must be a number")
@@ -535,15 +537,24 @@ def config_values_to_tree(
     *,
     name: str = "",
     source: str = "hand",
+    fields: Mapping[int | str, str] | None = None,
 ) -> dict[str, Any]:
     """One named set of CONFIG parameter values, as a tree a file can hold.
 
     Pulse Editor exports its declared Config fields here; a sequencer can
-    load this set as optional overrides for later pulse compilation.
+    load this set as optional overrides. Field descriptions are only for people.
     """
 
+    body = _named_values_tree(values, "config value")
+    if fields is not None:
+        if not isinstance(fields, Mapping):
+            raise TypeError("config fields must be a mapping")
+        for number, text in fields.items():
+            if not isinstance(text, str):
+                raise TypeError("config field description must be text")
+            body["values"][config_parameter_key(number)]["field"] = text
     return {
-        **_named_values_tree(values, "config value"),
+        **body,
         "format": CONFIG_VALUES_FORMAT,
         "name": str(name),
         "source": str(source),
@@ -573,6 +584,7 @@ def write_config_values(
     *,
     name: str = "",
     source: str = "hand",
+    fields: Mapping[int | str, str] | None = None,
 ) -> None:
     """Write Config numbers and values atomically through the same grammar."""
 
@@ -580,7 +592,7 @@ def write_config_values(
     target.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_bytes(
         target,
-        readable_json_bytes(config_values_to_tree(entries, name=name, source=source)),
+        readable_json_bytes(config_values_to_tree(entries, name=name, source=source, fields=fields)),
     )
 
 
