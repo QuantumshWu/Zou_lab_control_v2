@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- 新增四参数Series `loading`及共享Numba evaluator/Jacobian/prepare；固定参数、single/batch、Figure与预热走现有机制。模型验证使用独立速率方程积分；照片估读仅作适用性对比，不作为原始实验数据，也不据此默默增加延迟参数。
+- 已删除Exponential按观测窗口跨度设定的A/B/tau自动硬边界，以及四种Histogram概率模型的平底beta及其分类扣除旁路；数学域、显式用户约束、普通Gaussian B和Poisson数值floor保留。
 - 协方差收尾统一为原生Householder R-only QR＋小矩阵SVD；不生成无用大Q/U，不放宽rank阈值，预测数组直接复用。独立高精度比较表明极端病态协方差会放大各稳定算法的舍入，旧SVD并非精确真值；生产只保留QR一个方案，DGESVD桥与原地转置候选只留ignored研究。15组加权/Poisson/fixed/order/masked收尾输出与原native基线一致，真实FitEngine普通数据参数/误差保持。默认32768源点案例的求解仍按既有4096上限，不能冒称全32768求解；报告区分完整输入链与隔离收尾。
 
 - 普通fit收尾复用owned Jacobian前缀做free列与缩放，只在列重排会自覆盖时分配一行scratch，不再分配N×free暂存。15种linear/weighted-robust/Poisson、普通/乱序free与invalid组合的6类输出对原native收尾逐位相同，2个既有直接case通过；分解仍是原SVD，QR/其它不求U路线另作研究，未以新数值容差掩盖差异。

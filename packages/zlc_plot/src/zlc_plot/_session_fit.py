@@ -1257,9 +1257,6 @@ class FitSessionMixin:
             "delta_center": delta_center,
             "sigma_B": sigma_b,
             "ratio": ratio,
-            # The calibration's pair has no background; presented as
-            # authored, there is none.
-            "background": 0.0,
         }
         parameters = np.asarray(
             [values[name] for name in model.parameter_names], dtype=float

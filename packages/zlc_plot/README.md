@@ -118,7 +118,7 @@ session.set_size("2x4")
 
 Panel的单行Fit表达式使用当前显示单位，参数名就是公式里印出来的符号（`FitModelSpec.symbols`）：exponential decay 画的是 $f(x)=A e^{-x/\tau}+B$，所以写 `A=2` 把参数精确固定并从优化自由度移除，`tau=guess(5)` 只替换初始猜测；省略参数即保持Auto。PanelState与Figure只保存canonical `fixed`/`initial` mappings。表达式无效时忽略这份optional override、继续同model自动fit并显示warning；fixed参数显示为`(fixed)`且没有估计误差。
 
-`session.fit_models` 与 `plot_host.fit_models()` 只返回当前 plot 语义和坐标单位都兼容的模型，并把该语义的默认模型排在第一位。Curve/Rolling 提供 Lorentzian、Gaussian with offset、symmetric Lorentzian doublet、damped sine 和 exponential decay；Histogram 提供 bimodal 与 single Gaussian，以及 single/bimodal Poisson-Gaussian（`histogram_poisson_gaussian`、`bimodal_poisson_gaussian`：泊松律经 Γ 函数延拓到实数光子数 $p(u)=\lambda^u e^{-\lambda}/\Gamma(u+1)$、归一化后与高斯读出噪声卷积，$f(x)=\frac{A}{\sigma\sqrt{2\pi}\,\int p}\int_0^\infty p(u)\,e^{-\frac{1}{2}((x-u)/\sigma)^2}du$，是 x 的光滑函数，和其他模型一样直接在 bin 中心与计数上拟合，不问数据来源；负值是读出噪声的正常结果而不是非法输入；所有直方图模型都用物理参数：single 为幅度 Nw（shot 数×bin 宽，即密度在直方图上的面积，一个参数）、中心 x₀（Poisson 为 λ）、σ，以及平坦背景 β（每 bin 的计数，不属于任何群：混合模型教科书里的 noise 分量。没有它，两峰之间的一个计数对模型就是不可能事件，六十发里两个中途丢失的 shot 就能把一群拉成横贯全轴的平台；single 也带 β，所以 ΔBIC 只问第二个群，杂散计数本身不构成「两个群」的证据）；bimodal 在 single 之上加 δ≥0（B 群相对 A 群的中心偏移，B 恒为上方群）、σ_B 与 r（两群之中落在 B 群的 shot 占比，0..1），headline 为 r，分量以 A/B/background 命名；直方图分辨得了的范围就是它的 bound：中心不出首末 bin 边缘、宽度在半个 bin 与整体跨度之间、间距不超跨度，调用方 bound 与之取交集、无交集则拒绝；bimodal 模型总能找到两个群，所以每次同时拟合嵌套的 single 模型并计算 ΔBIC=(D_single−D_bimodal)−Δk·ln N，只有 ΔBIC≥`FitOptions.min_bic_gain`（默认 `DECISIVE_BIC_GAIN`=10，Kass–Raftery 的 very strong）才报告两个群；否则结果以 bimodal 的参数名写出 single 的答案（δ=0、σ_B=σ、r=0.5，`FitResult.reduced=True`），`FitResult.evidence` 与 overlay 参数下方的一行都写明 ΔBIC 与判定；λ 低于约 3 光子时延拓律的均值高于 λ、拟合值偏低，低于 1 光子它已不是光子计数律）；Image 仅在 x/y 坐标量纲兼容时提供 radial Gaussian center；PulseTimeline 不伪造可用的数值 fit。
+`session.fit_models` 与 `plot_host.fit_models()` 只返回当前 plot 语义和坐标单位都兼容的模型，并把该语义的默认模型排在第一位。Curve/Rolling 提供 Lorentzian、Gaussian with offset、symmetric Lorentzian doublet、damped sine 和 exponential decay；Histogram 提供 bimodal 与 single Gaussian，以及 single/bimodal Poisson-Gaussian（`histogram_poisson_gaussian`、`bimodal_poisson_gaussian`：泊松律经 Γ 函数延拓到实数光子数 $p(u)=\lambda^u e^{-\lambda}/\Gamma(u+1)$、归一化后与高斯读出噪声卷积，$f(x)=\frac{A}{\sigma\sqrt{2\pi}\,\int p}\int_0^\infty p(u)\,e^{-\frac{1}{2}((x-u)/\sigma)^2}du$，是 x 的光滑函数，和其他模型一样直接在 bin 中心与计数上拟合，不问数据来源；负值是读出噪声的正常结果而不是非法输入；直方图分布模型只包含命名的概率分量：single 为幅度 Nw（shot 数×bin 宽）、中心 x₀（Poisson 为 λ）和 σ；bimodal 再加 δ≥0、σ_B 和 r（上方群的比例），分量仅 A/B，不默认增加均匀污染背景 β。读出偏置属于横轴分布的位置，Poisson deviance 的数值 COUNT_FLOOR 不是拟合参数。classifier threshold/理论 fidelity 使用这两个分量的完整归一化权重；普通 Curve Gaussian 的 offset B 不受影响；直方图分辨得了的范围就是它的 bound：中心不出首末 bin 边缘、宽度在半个 bin 与整体跨度之间、间距不超跨度，调用方 bound 与之取交集、无交集则拒绝；bimodal 模型总能找到两个群，所以每次同时拟合嵌套的 single 模型并计算 ΔBIC=(D_single−D_bimodal)−Δk·ln N，只有 ΔBIC≥`FitOptions.min_bic_gain`（默认 `DECISIVE_BIC_GAIN`=10，Kass–Raftery 的 very strong）才报告两个群；否则结果以 bimodal 的参数名写出 single 的答案（δ=0、σ_B=σ、r=0.5，`FitResult.reduced=True`），`FitResult.evidence` 与 overlay 参数下方的一行都写明 ΔBIC 与判定；λ 低于约 3 光子时延拓律的均值高于 λ、拟合值偏低，低于 1 光子它已不是光子计数律）；Image 仅在 x/y 坐标量纲兼容时提供 radial Gaussian center；PulseTimeline 不伪造可用的数值 fit。
 
 Live fit 的唯一自动触发源是宿主的通用 indexed-derived signal。只有真实Rolling/Histogram等history consumer取得window lease后，Runtime才从当时的current event开始记录；lease区间内每个Measurement primary index都在同一个普通Dataset中有value或invalid cell，之前的shot不回填。`display_interval`只控制Surface deadline。Host只保留一个active pair和一个latest完整输入，中间输入不排FIFO；现有Raster worker的active deadline超过1秒会loud发布invalid、取消该solve并继续latest。任何window/history按lease内source index连续，cadence skip与solver failure都显示为invalid/NaN，但只有后者是错误。主Panel的commit仍把`data@N + fit@N`原子画进同一front。
 
@@ -131,6 +131,12 @@ virtual Camera Measurement publication交给普通Image `NotebookView`并完整�
 其余plot kind和交互contract由本层API文档及自动测试覆盖，不再维护第二本教程。
 
 ## 快速显示参数更新
+
+Series 拟合另提供 `loading`（Loading buildup）：`f(t)=B+A[1-exp(-k*g)]`，
+`g=t-tau[1-exp(-t/tau)]`。参数符号为 A/B/k/tau，表示幅度、offset、稳态动力学速率和
+供给建立时间；tau=0取普通指数上升极限，t=0不随选区移动。只在“有效捕获速率指数建立”
+假设下解释这些参数，不把任意S形数据当作该机制的证明。固定/guess仍使用原Fit表达式。
+Exponential 的自动估计只用于初值，不再把观测窗口跨度当作寿命或振幅的硬上限。
 
 Notebook 直接修改已有 plot surface；Qt 控件把同一调用提交给 raster host：
 

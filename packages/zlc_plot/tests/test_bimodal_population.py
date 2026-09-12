@@ -43,22 +43,22 @@ def _shots(rng: np.random.Generator, count: int, bright_fraction: float) -> np.n
 
 
 def test_the_histogram_models_are_written_in_physical_parameters() -> None:
-    """An amplitude (the shots times the bin), a centre, a width and a flat
-    background; then an offset, a width and a share.  Nothing is a peak
+    """An amplitude (shots times the bin), a centre and a width;
+    then an offset, a width and a share. Nothing is a peak
     height or a midpoint."""
 
     models = {model.model_id: model for model in builtin_fit_models()}
     assert models["histogram_gaussian"].parameter_names == (
-        "amplitude", "center", "sigma", "background"
+        "amplitude", "center", "sigma"
     )
     assert models["bimodal_gaussian"].parameter_names == (
-        "amplitude", "center", "sigma", "delta_center", "sigma_B", "ratio", "background"
+        "amplitude", "center", "sigma", "delta_center", "sigma_B", "ratio"
     )
     assert models["histogram_poisson_gaussian"].parameter_names == (
-        "amplitude", "rate", "sigma", "background"
+        "amplitude", "rate", "sigma"
     )
     assert models["bimodal_poisson_gaussian"].parameter_names == (
-        "amplitude", "rate", "sigma", "delta_rate", "sigma_B", "ratio", "background"
+        "amplitude", "rate", "sigma", "delta_rate", "sigma_B", "ratio"
     )
     for model_id in ("bimodal_gaussian", "bimodal_poisson_gaussian"):
         model = models[model_id]
@@ -68,7 +68,7 @@ def test_the_histogram_models_are_written_in_physical_parameters() -> None:
             "bimodal_", "histogram_"
         )
         assert model.symbols == (
-            "Nw", "lambda" if "poisson" in model_id else "x_0", "sigma", "delta", "sigma_B", "r", "beta"
+            "Nw", "lambda" if "poisson" in model_id else "x_0", "sigma", "delta", "sigma_B", "r"
         )
 
 
@@ -83,10 +83,7 @@ def test_a_single_gaussian_is_the_shots_times_the_bin() -> None:
     assert result.parameters["amplitude"] == pytest.approx(2000.0 * bin_width, rel=0.03)
     assert result.parameters["center"] == pytest.approx(100.0, abs=1.0)
     assert result.parameters["sigma"] == pytest.approx(10.0, rel=0.05)
-    # The formula states the model: one amplitude, the shots times the bin,
-    # over a flat background that a clean histogram leaves at nothing.
-    assert result.model.symbols == ("Nw", "x_0", "sigma", "beta")
-    assert result.parameters["background"] < 0.5
+    assert result.model.symbols == ("Nw", "x_0", "sigma")
 
 
 def test_a_histogram_fit_stays_within_what_the_histogram_shows() -> None:
@@ -160,44 +157,6 @@ def test_two_populations_are_reported_with_their_share_and_evidence() -> None:
     assert fidelity > 0.99
 
 
-def test_counts_between_the_peaks_are_background_not_a_population() -> None:
-    """Sixty shots, four of them lost part-way through the exposure, and the
-    two-population fit turned a population into a plateau across the axis:
-    a count between the peaks was impossible to it.  The flat background,
-    the mixture's noise component, gives those counts somewhere to be --
-    and because the one-population model carries it too, they are no
-    evidence of a second population on their own."""
-
-    rng = np.random.default_rng(12)
-    bright = rng.random(60) < 0.4
-    shots = np.where(bright, rng.normal(3400.0, 90.0, 60), rng.normal(50.0, 40.0, 60))
-    samples = np.concatenate([shots, rng.uniform(600.0, 2800.0, 4)])
-    centres, counts = _histogram(samples, bins=40)
-    engine = FitEngine()
-    result = engine.fit("bimodal_gaussian", (centres,), counts)
-    assert result.success and not result.reduced
-    values = result.parameters
-    assert values["sigma"] < 150.0 and values["sigma_B"] < 250.0
-    assert values["center"] == pytest.approx(50.0, abs=40.0)
-    assert values["center"] + values["delta_center"] == pytest.approx(3400.0, abs=100.0)
-    assert values["ratio"] == pytest.approx(float(bright.sum()) / 60.0, abs=0.08)
-    assert values["background"] > 0.0
-    threshold, left, right, fidelity = _bimodal_classifier_metrics(result)
-    assert threshold is not None
-    assert values["center"] + 2.0 * values["sigma"] < threshold
-    assert threshold < values["center"] + values["delta_center"] - 2.0 * values["sigma_B"]
-    assert right == pytest.approx(values["ratio"], abs=0.03)
-    assert fidelity > 0.99
-    # One population and the same four stray counts: background, not a
-    # second population.
-    dark = np.concatenate([rng.normal(50.0, 40.0, 60), rng.uniform(600.0, 2800.0, 4)])
-    centres, counts = _histogram(dark, bins=40)
-    alone = engine.fit("bimodal_gaussian", (centres,), counts)
-    assert alone.success and alone.reduced
-    assert alone.parameters["background"] > 0.0
-    assert _bimodal_classifier_metrics(alone)[0] is None
-
-
 def test_one_population_stands_with_its_components_coinciding() -> None:
     """A single Gaussian of three hundred shots used to come back as a broad
     component with a narrow one on its tail, and a threshold through it."""
@@ -213,7 +172,7 @@ def test_one_population_stands_with_its_components_coinciding() -> None:
     assert values["sigma_B"] == values["sigma"]
     assert values["ratio"] == 0.5
     single = engine.fit("histogram_gaussian", (centres,), counts, data_revision=0)
-    for name in ("amplitude", "center", "sigma", "background"):
+    for name in ("amplitude", "center", "sigma"):
         assert values[name] == single.parameters[name]
         assert result.errors[name] == single.errors[name]
     np.testing.assert_array_equal(result.fitted_values, single.fitted_values)
