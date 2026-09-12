@@ -34,6 +34,7 @@ class PySerialLink:
         self._serial = None
         #: What the last short read looked like, for whoever decides it is fatal.
         self.last_shortfall = ""
+        self.last_read_summary = ""
 
     def open(self) -> None:
         import serial
@@ -83,6 +84,7 @@ class PySerialLink:
         # and whoever reports this attempt must not find the previous one's
         # shortfall still lying here.
         self.last_shortfall = ""
+        self.last_read_summary = ""
         self._write(serial_port, request)
         replies = self._read_replies({request[3]}, deadline=deadline, stop=stop)
         if not replies:
@@ -91,7 +93,7 @@ class PySerialLink:
             # request is idempotent -- which is its decision, not the line's.
             raise TimeoutError(
                 f"UART reply timed out on {self.port} at {self.baud} baud: "
-                f"{self.last_shortfall or 'no reply'}"
+                f"{self.last_shortfall or 'no reply'}; {self.last_read_summary}"
             )
         return replies[0]
 
@@ -104,6 +106,7 @@ class PySerialLink:
         serial_port.reset_input_buffer()
         serial_port.write_timeout = _remaining(deadline, "UART write")
         self.last_shortfall = ""
+        self.last_read_summary = ""
         self._write(serial_port, (b"\xff" * 8).join(requests))
         return self._read_replies({request[3] for request in requests}, deadline=deadline, stop=stop)
 
@@ -142,6 +145,8 @@ class PySerialLink:
         Old/duplicate replies cannot occupy a pending request's place. CRC
         damage is resynchronized by the existing frame extractor; current
         negative acknowledgements remain replies for the transport to judge.
+        Queue size only chooses the batch size; an empty queue still submits
+        a driver read, sliced so deadline and cancellation remain responsive.
         """
 
         serial_port = self._require_open()
@@ -152,6 +157,8 @@ class PySerialLink:
         read_bytes = 0
         ignored_bytes = 0
         ignored_replies = 0
+        read_calls = 0
+        last_rx_at = None
         while pending:
             now = time.monotonic()
             if now >= deadline:
@@ -159,8 +166,17 @@ class PySerialLink:
             if stop is not None and stop.is_set():
                 raise TransportAborted("UART read cancelled")
             available = serial_port.in_waiting
-            if available:
-                chunk = serial_port.read(available)
+            read_timeout = min(0.01, max(0.0, deadline - time.monotonic()))
+            if serial_port.timeout != read_timeout:
+                serial_port.timeout = read_timeout
+            started = time.monotonic()
+            chunk = serial_port.read(max(1, available))
+            read_calls += 1
+            received = time.monotonic()
+            if stop is not None and stop.is_set():
+                raise TransportAborted("UART read cancelled")
+            if chunk:
+                last_rx_at = received
                 read_bytes += len(chunk)
                 buffer.extend(chunk)
                 while pending:
@@ -173,8 +189,12 @@ class PySerialLink:
                         continue
                     pending.remove(frame[3])
                     replies.append(frame)
-            else:
-                time.sleep(min(0.0005, max(0.0, deadline - now)))
+            elif received - started < read_timeout:
+                pause = min(0.0005, max(0.0, deadline - received))
+                if stop is None:
+                    time.sleep(pause)
+                elif stop.wait(pause):
+                    raise TransportAborted("UART read cancelled")
         if len(replies) != count:
             # Carried, not raised.  Whether a short answer is fatal depends on
             # whether the frames that went unanswered may be sent again, and
@@ -184,6 +204,11 @@ class PySerialLink:
                 if self.last_shortfall == "no bytes":
                     self.last_shortfall = "no matching reply"
                 self.last_shortfall += f", ignored {ignored_replies} stale/duplicate reply(s)"
+            age = "none" if last_rx_at is None else f"{(time.monotonic() - last_rx_at) * 1000:.1f}"
+            self.last_read_summary = (
+                f"reads={read_calls}, returned={read_bytes}, last_rx_age_ms={age}, "
+                f"queued={serial_port.in_waiting}"
+            )
         return replies
 
     def _require_open(self):
@@ -378,6 +403,9 @@ class UartRegisterTransport:
             if failures:
                 self.resends += len(outstanding())
                 self.last_retry_reason = f"{what}: {failures[-1][2]}"
+                summary = getattr(self._link, "last_read_summary", "")
+                if summary:
+                    self.last_retry_reason += f"; {summary}"
             attempts += 1
             next_at = now + self._attempt_budget(outstanding())
             failure = attempt(min(absolute, next_at))
@@ -391,6 +419,9 @@ class UartRegisterTransport:
             f"on {self.port} at {self.baud} baud after {attempts} attempt(s) in "
             f"{time.monotonic() - started:.2f}s ({what}): {_attempt_record(failures)}"
         )
+        summary = getattr(self._link, "last_read_summary", "")
+        if summary:
+            record += f"; {summary}"
         if failures and refused():
             raise UartError(f"UART request rejected as damaged (request CRC) {record}")
         raise TimeoutError(f"UART reply timed out {record}")
@@ -646,10 +677,17 @@ def _describe_shortfall(
     partial = buffer if len(buffer) >= 2 or buffer[:1] == bytes((framing.SYNC0,)) else b""
     if len(partial) >= 7:
         words = int.from_bytes(partial[5:7], "little")
+        length = framing.reply_frame_len(words)
         parts.append(
             f"incomplete frame: {len(partial)} of "
-            f"{framing.reply_frame_len(words)} bytes (count={words})"
+            f"{length} bytes (count={words})"
         )
+        if len(partial) == length - 1:
+            crc = framing.crc16_ccitt(partial[framing.OFF_OP:-1])
+            parts.append(
+                f"crc_prefix_ok={str(partial[-1] == (crc & 0xff)).lower()}, "
+                f"missing_crc_byte=0x{crc >> 8:02x} (expected)"
+            )
     elif partial:
         parts.append(
             f"incomplete frame: {len(partial)} byte(s) of header "

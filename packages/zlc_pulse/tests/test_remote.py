@@ -680,10 +680,16 @@ def test_a_new_client_takes_the_board_and_the_old_connection_is_dropped(capsys) 
     with _server(streamer) as server:
         previous = _client(server)
         previous_address = server.owner_status()[0]
+        previous_connection = server._owner_connection
         newcomer = _client(server)
         try:
             assert server.owner_status()[0] not in {None, previous_address}
             assert newcomer.snapshot()["opened"] is True
+            deadline = time.monotonic() + 1.0
+            while previous_connection in server._connections and time.monotonic() < deadline:
+                time.sleep(0.001)
+            assert previous_connection not in server._connections, "takeover must retire the silent old handler"
+            assert previous_connection.fileno() == -1
             # The dropped connection learns it lost the next time it speaks,
             # and is told what happened rather than that a reply was malformed.
             with pytest.raises(OSError, match="that one now holds the board"):

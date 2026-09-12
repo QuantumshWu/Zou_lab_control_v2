@@ -385,7 +385,7 @@ Node new chunk
 ### 7.3 Remote
 
 - 无密码、认证、TLS或权限UI。
-- Second client默认last-client-wins；旧handler立即失效，takeover前旧active command必须成功Stop/SAFE。
+- Second client默认last-client-wins；旧handler立即失效，takeover前旧active command必须成功Stop/SAFE。旧socket由server主动shutdown并close，不等待旧client再次发话；其退出不对新owner执行SAFE，日志明确标记已被替换的连接。
 - 同一client的Stop不排队：其command lane正在等LOAD/FIRE的回复时，client用`open`回复里的cancel token在另一条自己的连接上发一次`cancel`，server执行与takeover/disconnect相同的第一步——command lane旁的SAFE，其stop event打断pending transport——而owner、epoch与command lane都不变；最终SAFE readback仍来自command lane上串行的`safe`。cancel连接一问一答后关闭、从不claim；token不是当前owner的按名拒绝且不碰板子；任何socket始终只有一个线程读写，timeout不因此缩短。
 - 正常连接无idle timeout；控制进程/socket/连接真正断开时自动SAFE。
 - UART auto枚举COM、优先USB VID/PID，并只在word-63 fingerprint匹配后选用；
@@ -395,7 +395,7 @@ Node new chunk
 
 ### 7.4 Host/RTL/build invariants
 
-- UART发送以完整write和本次匹配ACK为完成依据，不在等待ACK前调用Win32按50ms轮询的flush。接收在同一deadline内按本批待回复SEQ集合收齐，旧/重复回复不占完成名额，CRC坏帧由同一extractor重同步；有效当前NAK、真正缺包、取消与总deadline仍归原Transport。重发计数只统计实际重发，另保留最后一次重发原因，不累计历史。DoneReport.elapsed_seconds在observer确认终态时固定；command_seconds是其内的命令确认区间，report_delay_seconds另列调用方取报告滞后，不能把GUI/采集等待冒充Pulse执行时间。
+- UART发送以完整write和本次匹配ACK为完成依据，不在等待ACK前调用Win32按50ms轮询的flush。接收在同一deadline内按本批待回复SEQ集合收齐；驱动队列长度只决定批量read大小，报0仍提交read(1)，单次阻塞以10ms和剩余deadline为界。旧/重复回复不占完成名额，CRC坏帧由同一extractor重同步；有效当前NAK、真正缺包、取消与总deadline仍归原Transport。重发计数只统计实际重发，另保留最后一次重发原因及固定大小读取摘要，不累计历史；缺CRC尾字节的诊断不补造字节、不放宽校验。DoneReport.elapsed_seconds在observer确认终态时固定；command_seconds是其内的命令确认区间，report_delay_seconds另列调用方取报告滞后，不能把GUI/采集等待冒充Pulse执行时间。
 - 正式板配置直接包含`pgc_1D`：P19、raw lane 18；共63 lanes、19个TTL、4组10-bit DAC与4个clock。原DAC的物理引脚不变（`da_dipole[0]`仍为V9），只有raw lane编号随新增TTL后移。Manifest、XDC、RTL top、生成geometry及仓库Pulse模板一起提交；部署不再运行本地add-channel脚本。Pulse状态按port key保持，不按新旧raw数组相同下标猜对应通道。
 
 - Load前核target ABI、clock、geometry与合法slot rows；delay FIFO capacity和循环接缝在Fire前按本次真实run/scan repeats验证，不先计算一个未请求的1×1执行。相同驻留程序与执行参数复用已验证结论；不把camera exposure或frames-per-cycle反向解释进Pulse program。

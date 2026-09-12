@@ -312,6 +312,7 @@ class _TailDroppingPort:
     """
 
     write_timeout = None
+    timeout = 0.05
 
     def __init__(self, drops: int) -> None:
         self.drops = drops
@@ -415,6 +416,74 @@ def test_a_reply_one_byte_short_is_asked_again_within_milliseconds() -> None:
     assert port.exchanges == 3
     assert transport.resends == 0
 
+    # Queue length is a hint, not permission to submit the next driver read.
+    class _SplitPort(_TailDroppingPort):
+        def __init__(self, hidden_tail):
+            super().__init__(0)
+            self.hidden_tail = hidden_tail
+            self.read_sizes = []
+            self.timeout_updates = []
+            self._timeout = 0.05
+        @property
+        def timeout(self):
+            return self._timeout
+        @timeout.setter
+        def timeout(self, value):
+            self._timeout = value
+            self.timeout_updates.append(value)
+        def write(self, payload):
+            self.exchanges += 1
+            self._pending = framing.encode_reply(payload[3], framing.ST_OK, tuple(range(14)))
+            return len(payload)
+        @property
+        def in_waiting(self):
+            if self.hidden_tail and self.read_sizes:
+                return 0
+            return min(64, len(self._pending))
+        def read(self, size):
+            self.read_sizes.append(size)
+            return super().read(size)
+
+    for hidden_tail in (False, True):
+        split = _SplitPort(hidden_tail)
+        split.flush = forbidden_flush
+        link = PySerialLink("COM-SPLIT")
+        link._serial = split
+        transport = UartRegisterTransport(link=link)
+        transport.start()
+        assert transport.read_words(2, 14) == tuple(range(14))
+        assert split.read_sizes == [64, 1]
+        assert split.timeout_updates == [0.01]
+        assert split.exchanges == 1 and transport.resends == 0
+
+    import threading
+    import pytest
+    from zlc_pulse.transport.base import TransportAborted
+
+    empty = _SplitPort(False)
+    empty.write = lambda payload: len(payload)
+    def blocking_empty_read(size):
+        empty.read_sizes.append(size)
+        time.sleep(empty.timeout)
+        return b""
+    empty.read = blocking_empty_read
+    link = PySerialLink("COM-EMPTY")
+    link._serial = empty
+    request = framing.encode_read(2, 14, seq=5)
+    with pytest.raises(TimeoutError):
+        link.exchange(request, deadline=time.monotonic() + 0.025)
+    assert 1 <= len(empty.read_sizes) <= 4
+    assert all(0 <= value <= 0.01 for value in empty.timeout_updates)
+    assert f"reads={len(empty.read_sizes)}, returned=0" in link.last_read_summary
+    assert "last_rx_age_ms=none, queued=0" in link.last_read_summary
+    stop = threading.Event()
+    def cancelled_read(size):
+        stop.set()
+        return b""
+    empty.read = cancelled_read
+    with pytest.raises(TransportAborted):
+        link.exchange(request, deadline=time.monotonic() + 1, stop=stop)
+
 
 def test_a_read_that_never_completes_reports_every_attempt_by_shape() -> None:
     """What each attempt saw is the diagnosis; the last one alone is not.
@@ -443,6 +512,8 @@ def test_a_read_that_never_completes_reports_every_attempt_by_shape() -> None:
     assert f"after {attempts} attempt(s)" in message
     assert f"#1-{attempts}: 0 of 1 replies, incomplete frame: 12 of 13 bytes (count=1)" in message
     assert "unparsed" not in message
+    assert "crc_prefix_ok=true, missing_crc_byte=" in message
+    assert "reads=" in message and "returned=12" in message
     assert transport.resends == attempts - 1
 
 

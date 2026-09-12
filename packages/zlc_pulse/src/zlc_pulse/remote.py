@@ -189,15 +189,16 @@ def _forget_polls(client: str) -> None:
 def _drop_connection(connection: socket.socket) -> None:
     """End a connection nobody wants any more, from this side.
 
-    Shutting down our own half unblocks whatever handler is waiting on it, and
-    it works on a peer that is no longer there at all -- the kernel does not
-    have to reach anybody to stop listening.
+    Windows can leave a blocking recv waiting after shutdown alone. Close
+    the revoked socket here instead of waiting for its peer to speak again.
     """
 
     try:
         connection.shutdown(socket.SHUT_RDWR)
     except OSError:
         pass
+    finally:
+        connection.close()
 
 
 def _program_summary(program: object, *, source: object = None) -> str:
@@ -813,6 +814,8 @@ class _RemoteHandler(socketserver.BaseRequestHandler):
                 if claimed
                 else None
             )
+            if claimed and outputs_safe is None:
+                disconnect_reason = f"retired connection (no longer owner); {disconnect_reason}"
             _forget_polls(client)
             status = (
                 "SAFE"
