@@ -12,6 +12,7 @@ from .endpoint import (
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, fields, is_dataclass, replace
+from functools import lru_cache
 import argparse
 import json
 import logging
@@ -534,13 +535,8 @@ def encode_tree(value: Any) -> Any:
         return {
             "__type__": type(value).__name__,
             **{
-                field.name: encode_tree(getattr(value, field.name))
-                for field in fields(value)
-                if not field.name.startswith("_")
-            },
-            **{
                 name: encode_tree(getattr(value, name))
-                for name in _TREE_KEPT.get(type(value).__name__, ())
+                for name in _tree_fields(type(value))[0]
             },
         }
     raise TypeError(f"unsupported remote tree value: {type(value).__name__}")
@@ -554,6 +550,13 @@ def encode_tree(value: Any) -> Any:
 #: was empty while the description beside it still carried one -- two copies of
 #: the pin map, and the wire silently emptied the one nested deeper.
 _TREE_KEPT = {"PulseTarget": ("package_pins",)}
+
+
+@lru_cache(maxsize=64)
+def _tree_fields(model_type: type) -> tuple[tuple[str, ...], frozenset[str]]:
+    names = tuple(field.name for field in fields(model_type) if not field.name.startswith("_"))
+    names += _TREE_KEPT.get(model_type.__name__, ())
+    return names, frozenset(names)
 
 
 def decode_tree(value: Any) -> Any:
@@ -572,12 +575,7 @@ def decode_tree(value: Any) -> Any:
         if not isinstance(type_name, str) or type_name not in _TREE_TYPES:
             raise ValueError(f"unknown remote tree type: {type_name!r}")
         cls = _TREE_TYPES[type_name]
-        expected = {
-            field.name
-            for field in fields(cls)
-            if not field.name.startswith("_")
-        }
-        expected.update(_TREE_KEPT.get(type_name, ()))
+        _names, expected = _tree_fields(cls)
         actual = set(value).difference(("__type__",))
         unknown = sorted(actual.difference(expected))
         missing = sorted(expected.difference(actual))
@@ -1007,7 +1005,7 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                     "applied",
                 }
                 expected = (
-                    {"program", "source", "authored_source", "rows"}
+                    {"program", "source", "authored_source", "reuse_authored_source", "rows"}
                     if method == "load"
                     else {"run_repeats", "scan_repeats"}
                     if method == "fire"
@@ -1061,9 +1059,20 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                     rows = params["rows"]
                     if isinstance(rows, (str, bytes, Mapping)) or not isinstance(rows, list):
                         raise TypeError("load rows must be a JSON array")
+                    authored_source = params["authored_source"]
+                    reuse_authored = params["reuse_authored_source"]
+                    if not isinstance(reuse_authored, bool):
+                        raise TypeError("reuse_authored_source must be a boolean")
+                    if reuse_authored:
+                        if authored_source is not None:
+                            raise ValueError("a reused authored source must not also be supplied")
+                        previous = self.streamer.applied()
+                        if previous is None:
+                            raise RuntimeError("there is no loaded authored source to reuse")
+                        authored_source = previous.authored_source
                     self.streamer._load_program(
                         program, source=source,
-                        authored_source=params["authored_source"], rows=rows,
+                        authored_source=authored_source, rows=rows,
                     )
                     _server_log(
                         "LOAD",
@@ -1427,6 +1436,11 @@ class RemotePulseStreamer(ConfigValueHolder):
             self._load_program(program, source=filled, authored_source=source, rows=rows)
 
     def _load_program(self, program, *, source, authored_source, rows) -> None:
+        previous = self._loaded_application
+        reuse_authored = (
+            authored_source is not None and previous is not None
+            and authored_source == previous.authored_source
+        )
         self._loaded_application = None
         rows = tuple(tuple(row) for row in rows)
         receipt = self._call_locked(
@@ -1434,7 +1448,8 @@ class RemotePulseStreamer(ConfigValueHolder):
             {
                 "program": program,
                 "source": source,
-                "authored_source": authored_source,
+                "authored_source": None if reuse_authored else authored_source,
+                "reuse_authored_source": reuse_authored,
                 "rows": rows,
             },
         )

@@ -260,7 +260,8 @@ def test_takeover_revokes_and_cancels_an_active_old_command(monkeypatch) -> None
         try:
             server.dispatch(
                 "load",
-                {"program": program, "source": source, "authored_source": source, "rows": []},
+                {"program": program, "source": source, "authored_source": source,
+                 "reuse_authored_source": False, "rows": []},
                 client="A",
                 connection=a_server,
             )
@@ -349,10 +350,14 @@ def test_remote_replays_device_path_with_short_done_poll(monkeypatch, tmp_path) 
             path.write_text(json.dumps(pulse_codec.config_values_to_tree({"1": (100, "ns")})), encoding="utf-8")
             client.load_config_file(path)
             client.load(program, source=source, rows=((1,),))
+            resident_author = streamer.applied().authored_source
             calls = []
+            load_requests = []
             call = client._call_locked
             def counted(method, params):
                 calls.append(method)
+                if method == "load":
+                    load_requests.append(params)
                 return call(method, params)
             monkeypatch.setattr(client, "_call_locked", counted)
             for values, duration, reload in (
@@ -365,6 +370,10 @@ def test_remote_replays_device_path_with_short_done_poll(monkeypatch, tmp_path) 
                 calls.clear()
                 client.fire(run_repeats=2, scan_repeats=3)
                 assert calls == (["load", "fire"] if reload else ["fire"])
+                if reload:
+                    assert load_requests[-1]["reuse_authored_source"] is True
+                    assert load_requests[-1]["authored_source"] is None
+                assert streamer.applied().authored_source is resident_author
                 report = client.wait_done(1.0)
                 assert report is not None
                 assert report.status == 4 and report.command_id > 0
@@ -402,6 +411,14 @@ def test_remote_replays_device_path_with_short_done_poll(monkeypatch, tmp_path) 
             state = client.applied()
             assert state is not None
             assert state.source.period_by_id["p1"].duration == 160
+            # A genuinely changed author document must replace the resident
+            # original even when its executable instructions stay the same.
+            path.write_text(json.dumps(pulse_codec.config_values_to_tree({"1": (160, "ns")})), encoding="utf-8")
+            renamed = replace(source, name="another authored pulse")
+            client.load(program, source=renamed, rows=((1,),))
+            assert load_requests[-1]["reuse_authored_source"] is False
+            assert load_requests[-1]["authored_source"] is renamed
+            assert client.applied().authored_source == renamed
             assert state.rows == ((1,),)
             assert state.run_repeats == 2
             assert state.scan_repeats == 3

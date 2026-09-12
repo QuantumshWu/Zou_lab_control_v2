@@ -314,6 +314,8 @@ Node new chunk
 - Scan/API/Config各自的number是binding自身保存的稳定正整数，不是tuple位置。取消、删除、移动或改名不重编号；新建省略number时，PulseSequence在对应种类内分配最小空正整数，显式重号拒绝。文件保存总是写出number；省略number与程序构造的新binding走同一分配语义，不加迁移器。UI badge与Config文件覆盖读取同一number；API命名引用不变，硬件scan列仍按slots tuple紧凑排列，不把显示编号当硬件offset。
 - Config刷新先按原稿默认值和最新编号覆盖计算各字段期望值，与当前实际source的同字段比较；全部相同直接复用原source/program，不重建Pulse。Config/API与单字段修改共用binding内的一次批量更新：变化字段先合并，最终只构造/校验一次PulseSequence。删除覆盖恢复原稿默认，单位与时钟对齐数学不变。Remote Load只返回服务端的repeat与装载时间确认，不把已经接受的完整program/source再回传；客户端现有AppliedState用被接受的输入加确认构造，public applied查询仍返回服务端真实记录。
 
+- Remote编码/解码按immutable dataclass类型复用字段metadata，JSON grammar与对象验证不变。Load可明确复用同连接已接受AppliedState中的未变authored_source，不反复传输/解码原稿；新实际source/program照常验证。原稿变化就完整传入，服务器无旧记录时拒绝复用，绝不把filled source当原稿。客户端在发送前清原有应用缓存，失败不缓存假成功；重连继续按原有applied查询恢复事实，不增加源缓存或后台同步。
+
 ## 6. UI与Lifecycle
 
 - `zlc_ui`不拥有domain parser、device state或plot lifecycle。
