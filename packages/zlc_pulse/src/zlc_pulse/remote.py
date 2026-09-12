@@ -49,7 +49,7 @@ from .model import (
     PulseSlot,
     PulseTarget,
 )
-from .wire import LAYOUT_STRUCT_VERSION, StreamerParams, load_streamer_config
+from .wire import DEFAULT_UART_BAUD, LAYOUT_STRUCT_VERSION, StreamerParams, load_streamer_config
 
 
 MAX_FRAME_BYTES = 8 * 1024 * 1024
@@ -461,7 +461,7 @@ def resolve_backend(
     requested: str = "auto",
     *,
     uart_port: str | None = None,
-    uart_baud: int = 3_000_000,
+    uart_baud: int = DEFAULT_UART_BAUD,
     target: PulseTarget,
     params: StreamerParams,
     clock_hz: float,
@@ -663,6 +663,7 @@ class _RemoteHandler(socketserver.BaseRequestHandler):
         server = self.server
         assert isinstance(server, PulseRemoteServer)
         self.request.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        self.request.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         with server._client_lock:
             server._connections.add(self.request)
 
@@ -1621,6 +1622,7 @@ class RemotePulseStreamer(ConfigValueHolder):
                 f"could not reach a pulse server at {self.host}:{self.port} "
                 f"within {self.connect_timeout:g}s: {reason}"
             ) from exc
+        self._socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self._socket.settimeout(self.request_timeout)
 
     def _disconnect_locked(self) -> None:
@@ -1714,7 +1716,7 @@ def open_local_streamer(
     *,
     backend: str = "auto",
     uart_port: str | None = None,
-    uart_baud: int = 3_000_000,
+    uart_baud: int = DEFAULT_UART_BAUD,
     state_dir: str = "fpga/build/state",
 ) -> PulseStreamer:
     """Build, open and SAFE-check the one local board this process owns.
@@ -1797,6 +1799,7 @@ def open_local_streamer(
             dac_buses=config["params"].bus_count,
             target_ports=len(target.ports),
             clock_hz=f"{config['clock_hz']:.0f}",
+            uart_baud=int(uart_baud) if resolution.backend == "uart" else None,
         ),
     )
     _server_log("HARDWARE CONNECTING", detail=_log_fields(action="open_deployed_streamer"))
@@ -1839,7 +1842,7 @@ class LocalPulseService:
         *,
         backend: str = "auto",
         uart_port: str | None = None,
-        uart_baud: int = 3_000_000,
+        uart_baud: int = DEFAULT_UART_BAUD,
         state_dir: str = "fpga/build/state",
         host: str = DEFAULT_BIND_HOST,
         port: int = DEFAULT_PORT,
@@ -1946,7 +1949,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--state-dir", default="fpga/build/state")
     parser.add_argument("--uart-port", default=None, help="the one configured Pulse UART port")
-    parser.add_argument("--uart-baud", type=int, default=3_000_000)
+    parser.add_argument(
+        "--uart-baud", type=int, default=DEFAULT_UART_BAUD,
+        help="UART rate matching the programmed FPGA (default: board deployment manifest).",
+    )
     parser.add_argument("--check-config", action="store_true")
     return parser
 
@@ -1971,6 +1977,7 @@ def _main(argv: list[str] | None = None) -> int:
         print(f"python={sys.executable}")
         print(f"backend={args.backend}")
         print(f"uart_port={args.uart_port or 'auto-discover'}")
+        print(f"uart_baud={args.uart_baud}")
         print(f"listen_bind={args.host}:{args.port}")
         normalized_host = str(args.host).strip().lower()
         same_host = (

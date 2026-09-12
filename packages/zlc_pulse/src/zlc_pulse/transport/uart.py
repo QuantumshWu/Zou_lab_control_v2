@@ -1,4 +1,4 @@
-"""3 Mbaud-style CRC-framed UART register transport."""
+"""CRC-framed UART register transport at the deployed board's line rate."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import threading
 import time
 from typing import Protocol
 
+from ..wire import DEFAULT_UART_BAUD
 from . import uart_frame as framing
 from .base import UART_OBSERVER_INTERVAL, TransportAborted
 
@@ -25,7 +26,7 @@ class UartLink(Protocol):
 
 
 class PySerialLink:
-    def __init__(self, port: str, baud: int = 3_000_000) -> None:
+    def __init__(self, port: str, baud: int = DEFAULT_UART_BAUD) -> None:
         if not isinstance(port, str) or not port.strip():
             raise ValueError("UART port is required")
         if isinstance(baud, bool) or not isinstance(baud, int) or baud <= 0:
@@ -261,21 +262,15 @@ class UartRegisterTransport:
         *,
         link: UartLink | None = None,
         port: str | None = None,
-        baud: int = 3_000_000,
+        baud: int = DEFAULT_UART_BAUD,
         action_timeout: float = 5.0,
         max_frame_words: int = framing.MAX_FRAME_WORDS,
     ) -> None:
         if isinstance(action_timeout, bool) or not isinstance(action_timeout, (int, float)) or not math.isfinite(float(action_timeout)) or action_timeout <= 0:
             raise ValueError("action_timeout must be positive and finite")
         self.action_timeout = float(action_timeout)
-        #: What one request/reply round trip may cost beyond the bytes: the
-        #: host's USB delivery, not the board's answer (which takes
-        #: microseconds).  Sized for the slowest adapter this code has met, an
-        #: FTDI with its 16 ms latency timer; the CH340C on the board has no
-        #: such timer and hands over what it holds at every millisecond USB
-        #: poll, so for it this is generous, which is the benign direction
-        #: (a successful attempt returns the moment its replies land).  Per
-        #: FRAME because every frame is acknowledged.
+        #: Deadline allowance for host/USB delivery beyond actual wire time.
+        #: This is not a required wait or a claim about the adapter's latency.
         self.round_trip_allowance = 0.05
         #: Host delivery/scheduling allowance per unsuccessful attempt.
         #: A matching response returns immediately; a timeout alone does not
@@ -647,7 +642,7 @@ class UartRegisterTransport:
     def baud(self) -> int:
         """The link's baud, for anything that budgets time by how long bytes take."""
 
-        return int(getattr(self._link, "baud", 3_000_000))
+        return int(getattr(self._link, "baud", DEFAULT_UART_BAUD))
 
     def _next_sequence(self) -> int:
         self._sequence = (self._sequence + 1) & 0xFF

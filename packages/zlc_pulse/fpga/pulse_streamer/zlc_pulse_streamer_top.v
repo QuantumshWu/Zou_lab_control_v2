@@ -239,7 +239,7 @@ module zlc_pulse_streamer_top #(
     reg  [3:0]  uart_por = 4'h0;                            // power-on reset, independent of eng_reset
     always @(posedge clk) if (uart_por != 4'hF) uart_por <= uart_por + 1'b1;
     wire uart_rst = (uart_por != 4'hF);
-    zlc_uart_bridge #(.CLK_HZ(50_000_000), .BAUD(3_000_000), .ADDRESS_WORDS(R_TOTAL_WORDS)) zlc_uart_i (
+    zlc_uart_bridge #(.CLK_HZ(50_000_000), .BAUD(`ZLC_UART_BAUD), .ADDRESS_WORDS(R_TOTAL_WORDS)) zlc_uart_i (
         .clk(clk), .rst(uart_rst), .uart_rx(uart_rx), .uart_tx(uart_tx),
         .u_word_addr(u_word_addr), .u_wdata(u_wdata), .u_we(u_we), .u_active(u_active), .u_error(u_protocol_error),
         .u_rd_word(u_rd_word), .u_rd_data(u_rd_data),

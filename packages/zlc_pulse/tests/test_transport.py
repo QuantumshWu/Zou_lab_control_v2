@@ -10,7 +10,7 @@ from zlc_pulse.transport import uart_frame as framing
 from zlc_pulse.transport.axi import JTAG_AXI_OBSERVER_INTERVAL
 from zlc_pulse.transport.uart import PySerialLink, UartError, UartRegisterTransport
 from zlc_pulse.transport.memory import MemoryRegisterTransport
-from zlc_pulse.wire import CMD_FIRE, CtrlWords, STATUS_RUNNING
+from zlc_pulse.wire import CMD_FIRE, CtrlWords, DEFAULT_UART_BAUD, STATUS_RUNNING
 
 
 def test_uart_frame_round_trip_and_crc_guard() -> None:
@@ -93,9 +93,10 @@ def test_uart_open_disables_modem_control_lines_before_any_write(monkeypatch) ->
             records["closed"] = True
 
     monkeypatch.setitem(sys.modules, "serial", SimpleNamespace(Serial=FakeSerialPort))
-    link = PySerialLink("COM7", 3_000_000)
+    link = PySerialLink("COM7")
     link.open()
     serial_port = link._serial
+    assert records["args"] == ("COM7", DEFAULT_UART_BAUD)
     assert records["kwargs"] == {
         "timeout": 0.05,
         "write_timeout": 1.0,

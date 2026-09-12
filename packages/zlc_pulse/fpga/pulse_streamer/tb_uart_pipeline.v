@@ -1,4 +1,5 @@
 `timescale 1ns/1ps
+`include "zlc_geometry.vh"
 // Proof that the bridge handles PIPELINED writes: 4 WRITE frames sent BACK-TO-BACK on uart_rx with NO
 // inter-frame gap and WITHOUT reading each ACK first (what host-side batching does -- concatenate all
 // frames into one serial write).  The host optimisation relies on: (a) the decoder committing each
@@ -7,7 +8,7 @@
 // serializer is idle in time).  Verifies all 4 ACKs come back AND all 4 words committed (read back).
 // Compile: xvlog zlc_uart_bridge.v tb_uart_pipeline.v ; xelab tb_uart_pipeline -s t ; xsim t -R
 module tb_uart_pipeline;
-    real BITT = 333.333;
+    real BITT = 1.0e9 / `ZLC_UART_BAUD;
     reg clk = 1'b0; always #10 clk = ~clk;
     reg rst = 1'b1, uart_rx = 1'b1; wire uart_tx;
     wire [29:0] u_word_addr; wire [31:0] u_wdata; wire u_we, u_active, u_error;
@@ -41,7 +42,7 @@ module tb_uart_pipeline;
     end
     always @(*) u_rd_data = ctrl_reg[u_rd_word];
 
-    zlc_uart_bridge #(.CLK_HZ(50_000_000), .BAUD(3_000_000),
+    zlc_uart_bridge #(.CLK_HZ(50_000_000), .BAUD(`ZLC_UART_BAUD),
                       .ADDRESS_WORDS(64), .FRAME_TIMEOUT_CYCLES(2000)) dut (
         .clk(clk), .rst(rst), .uart_rx(uart_rx), .uart_tx(uart_tx),
         .u_word_addr(u_word_addr), .u_wdata(u_wdata), .u_we(u_we), .u_active(u_active), .u_error(u_error),
@@ -79,10 +80,24 @@ module tb_uart_pipeline;
         end
     endtask
 
+    task send_status_read;
+        reg [15:0] crc; reg [7:0] value; integer i;
+        begin
+            send_byte(8'h5a); send_byte(8'ha5); crc=16'hffff;
+            for (i=0;i<8;i=i+1) begin
+                case(i) 0:value=2; 1:value=8'h33; 2:value=2; 6:value=14; default:value=0; endcase
+                crc=dut.crc_byte(crc,value); send_byte(value);
+            end
+            send_byte(crc[7:0]); send_byte(crc[15:8]);
+        end
+    endtask
+
     reg [7:0] wr [0:63];    // 4 WRITE frames (16 B each) = 64 B, sent back-to-back
     reg [7:0] rd [0:47];    // 4 READ  frames (12 B each) = 48 B
     reg [7:0] rb [0:191];
     integer k, j, fails; integer nrx; integer bad_base; integer commits_before_faults;
+    reg [15:0] reply_crc;
+    reg [31:0] reply_word;
 
     initial begin : collector
         nrx = 0; forever begin recv_byte(rb[nrx]); nrx = nrx + 1; end
@@ -174,9 +189,24 @@ module tb_uart_pipeline;
             $fatal(1,"completion command reply payload or SAFE interruption failed");
         $display("UART-COMMAND-COMPLETION-INTERRUPT-OK");
 
+        bad_base=nrx;
+        send_status_read();
+        wait(nrx>=bad_base+65);
+        if(rb[bad_base+3]!==8'h33 || rb[bad_base+4]!==0 || rb[bad_base+5]!==14 || rb[bad_base+6]!==0)
+            $fatal(1,"14-word reply header differs");
+        for(k=0;k<14;k=k+1) begin
+            j=bad_base+7+4*k;
+            reply_word={rb[j+3],rb[j+2],rb[j+1],rb[j]};
+            if(reply_word!==(32'hDEAD0000+k+2)) $fatal(1,"14-word reply payload differs at %0d",k);
+        end
+        reply_crc=16'hffff;
+        for(k=2;k<63;k=k+1) reply_crc=dut.crc_byte(reply_crc,rb[bad_base+k]);
+        if({rb[bad_base+64],rb[bad_base+63]}!==reply_crc) $fatal(1,"65-byte reply CRC differs");
+        $display("UART-14-WORD-65-BYTE-CRC-OK baud=%0d",`ZLC_UART_BAUD);
+
         if (fails!=0) $fatal(1, "UART pipeline/watchdog/bounds had %0d error(s) (nrx=%0d)", fails, nrx);
         $display("UART-PIPELINE-WATCHDOG-BOUNDS-OK");
         $finish;
     end
-    initial begin #4000000 $fatal(1, "UART pipeline test timeout"); end
+    initial begin #(12000 * BITT) $fatal(1, "UART pipeline test timeout"); end
 endmodule

@@ -15,11 +15,12 @@
     "both the RTL top mapping and XDC; declaration order in either projection has no meaning.",
     "",
     "See '_field_docs' below for what each field means.  '_README' and '_field_docs' are",
-    "documentation only -- geometry loading consumes params/fpga_part/clock_hz/target_pct,",
+    "documentation only -- deployment loading consumes params/fpga_part/clock_hz/uart_baud/target_pct,",
     "while manifest loading consumes board."
   ],
 
   "_field_docs": {
+    "uart_baud": "USB_UART baud shared by host and generated RTL. The onboard CH340C is specified for 460800 bps continuous transfer; changing this requires rebuilding/programming the FPGA and restarting its server, not a host-only setting.",
     "fpga_part": "Xilinx part string (e.g. xc7a35tfgg484-2).  Selects the resource budgets (LUT/FF/DSP/RAMB36) the estimator checks against and the synthesis target.",
     "clock_hz": "FPGA fabric clock in Hz.  50 MHz -> 20 ns per tick.  THE single source for the compile + runtime tick rate (all timing is in ticks); must equal the board oscillator + the XDC create_clock.",
     "target_pct": "Resource-budget target for estimate_resources (percent of each resource the geometry may use).  The capacity report flags any axis over this.",
@@ -44,6 +45,7 @@
 
   "fpga_part": "xc7a35tfgg484-2",
   "clock_hz": 50000000,
+  "uart_baud": 460800,
   "target_pct": 98.0,
 
   "board": {

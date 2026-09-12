@@ -22,6 +22,7 @@ __all__ = [
     "REGISTER_LAYOUT_ID", "LAYOUT_STRUCT_VERSION", "build_fingerprint",
     "DEFAULT_CONFIG_PATH", "load_streamer_config", "params_from_config", "default_params",
     "FROZEN_CLOCK_HZ", "FROZEN_SLOT_MUL_WIDTH", "default_clock_hz",
+    "DEFAULT_UART_BAUD", "default_uart_baud",
 ]
 
 # CTRL word 63 is the single host/bitstream geometry handshake.  The RTL carries
@@ -108,20 +109,22 @@ class CtrlWords:
 
 CTRL_WORDS = 64
 
-def _shipped_config_params() -> dict:
-    """Read shipped geometry once so bare ``StreamerParams()`` follows the config."""
+def _shipped_config() -> dict:
+    """Read shipped deployment defaults once."""
     try:
         raw = json.loads(
             _fpga_asset_path("board_config", "streamer_config.json").read_text(
                 encoding="utf-8"
             )
         )
-        params = raw.get("params") if isinstance(raw, dict) else None
-        return params if isinstance(params, dict) else {}
+        return raw if isinstance(raw, dict) else {}
     except (OSError, ValueError):
         return {}
 
-_SHIPPED_PARAMS = _shipped_config_params()
+_SHIPPED_CONFIG = _shipped_config()
+_SHIPPED_PARAMS = _SHIPPED_CONFIG.get("params", {})
+if not isinstance(_SHIPPED_PARAMS, dict):
+    _SHIPPED_PARAMS = {}
 
 def _geom(name: str, fallback: int) -> int:
     """Return a shipped value, or its offline fallback."""
@@ -982,11 +985,19 @@ def params_from_config(params_map: Mapping | None) -> StreamerParams:
     kwargs = {k: v for k, v in dict(params_map or {}).items() if k in _PARAM_FIELD_NAMES}
     return StreamerParams(**kwargs)
 
+def _uart_baud(value: object, clock_hz: float) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral) or value <= 0:
+        raise ValueError("uart_baud must be a positive integer")
+    if int(value) * 16 > clock_hz:
+        raise ValueError("uart_baud requires more than one 16x oversampling tick per fabric clock")
+    return int(value)
+
+
 def load_streamer_config(path: str | Path | None = None) -> dict:
 
     """Load the single streamer config file.
 
-    Returns a normalized dict: ``{"params": StreamerParams, "fpga_part", "clock_hz",
+    Returns a normalized dict: ``{"params": StreamerParams, "fpga_part", "clock_hz", "uart_baud",
     "target_pct", "slot_mul_width", "source": Path|None, "warnings": [...]}``.  Missing
     file or unreadable JSON falls back to built-in defaults (so offline/GUI workflows
     never crash) and records a warning -- the estimator CLI surfaces these."""
@@ -1021,7 +1032,7 @@ def load_streamer_config(path: str | Path | None = None) -> dict:
                 )
         missing_top = tuple(
             name
-            for name in ("fpga_part", "clock_hz", "target_pct")
+            for name in ("fpga_part", "clock_hz", "uart_baud", "target_pct")
             if name not in raw
         )
         if missing_top:
@@ -1051,6 +1062,7 @@ def load_streamer_config(path: str | Path | None = None) -> dict:
         raise ValueError(
             f"clock_hz differs from the frozen RTL ({FROZEN_CLOCK_HZ:g} Hz)"
         )
+    uart_baud = _uart_baud(raw.get("uart_baud", _SHIPPED_CONFIG.get("uart_baud")), clock_hz)
     # Surface (don't fail) RTL-assumption violations at load time -- estimation should
     # still answer, but pack_program will hard-reject the same geometry before upload.
     try:
@@ -1061,6 +1073,7 @@ def load_streamer_config(path: str | Path | None = None) -> dict:
         "params": params,
         "fpga_part": str(raw.get("fpga_part", DEFAULT_FPGA_PART)),
         "clock_hz": clock_hz,
+        "uart_baud": uart_baud,
         "target_pct": float(raw.get("target_pct", DEFAULT_TARGET_PCT)),
         "slot_mul_width": slot_mul,
         "source": source,
@@ -1071,7 +1084,7 @@ def load_streamer_config(path: str | Path | None = None) -> dict:
 #: members included.  A build reads the file as one grammar and refuses a member
 #: it does not know rather than a geometry it did not mean.
 CONFIG_TOP_LEVEL_FIELDS = frozenset(
-    ("_README", "_field_docs", "fpga_part", "clock_hz", "target_pct", "params", "board")
+    ("_README", "_field_docs", "fpga_part", "clock_hz", "uart_baud", "target_pct", "params", "board")
 )
 
 
@@ -1138,6 +1151,13 @@ REGISTER_LAYOUT_ID = build_fingerprint(StreamerParams())
 
 def default_clock_hz(path: str | Path | None = None) -> float:
     return load_streamer_config(path)["clock_hz"]
+
+def default_uart_baud(path: str | Path | None = None) -> int:
+    return load_streamer_config(path)["uart_baud"]
+
+
+DEFAULT_UART_BAUD = default_uart_baud()
+
 
 def default_coeff_frac_bits(path: str | Path | None = None) -> int:
     """The affine-scan fixed-point fraction the RTL synthesizes with (``tick = base + (sum coeff*slot)
@@ -1240,7 +1260,7 @@ _GEOMETRY_VH_MACROS = (
     ("ZLC_DELAY_REG_WORDS", "delay_region_words"),
 )
 
-def emit_geometry_vh(params: "StreamerParams") -> str:
+def emit_geometry_vh(params: "StreamerParams", *, uart_baud: int = DEFAULT_UART_BAUD) -> str:
     """The Verilog geometry header (`include`d by BOTH the RTL sources and the testbenches).
 
     Carries EVERY config-derived geometry value the .v files need as a ``\\`define`` -- the primary
@@ -1268,6 +1288,7 @@ def emit_geometry_vh(params: "StreamerParams") -> str:
     ]
     for name, attr in _GEOMETRY_VH_MACROS:
         lines.append(f"`define {name:<{width}} {int(getattr(params, attr))}")
+    lines.append(f"`define {'ZLC_UART_BAUD':<{width}} {_uart_baud(uart_baud, FROZEN_CLOCK_HZ)}")
     lines.append(f"`define {'ZLC_LAYOUT_FINGERPRINT':<{width}} 32'h{build_fingerprint(params) & 0xFFFFFFFF:08X}")
     lines.append("`endif // ZLC_GEOMETRY_VH")
     lines.append("")
@@ -1325,8 +1346,10 @@ def _main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.emit_geometry_vh:
         import pathlib
-        params = default_params(args.config)
-        pathlib.Path(args.emit_geometry_vh).write_text(emit_geometry_vh(params), encoding="utf-8")
+        config = load_streamer_config(args.config)
+        pathlib.Path(args.emit_geometry_vh).write_text(
+            emit_geometry_vh(config["params"], uart_baud=config["uart_baud"]), encoding="utf-8"
+        )
         print(f"wrote geometry header -> {args.emit_geometry_vh}")
         return 0
 

@@ -13,7 +13,7 @@
 // Compile: xvlog zlc_uart_bridge.v tb_uart_read_tap.v ; xelab tb_uart_read_tap -s t ; xsim t -R
 module tb_uart_read_tap;
     localparam [31:0] LAYOUT = `ZLC_LAYOUT_FINGERPRINT;   // config-derived image.build_fingerprint (word-63 readback)
-    real BITT = 333.333;                            // 3 Mbaud bit period (ns)
+    real BITT = 1.0e9 / `ZLC_UART_BAUD;
 
     reg clk = 1'b0;  always #10 clk = ~clk;         // 50 MHz
     reg  rst = 1'b1;
@@ -42,7 +42,7 @@ module tb_uart_read_tap;
     always @(*)           u_rd_data  = (u_rd_word == 6'd63) ? LAYOUT : ctrl_reg[u_rd_word];
 `endif
 
-    zlc_uart_bridge #(.CLK_HZ(50_000_000), .BAUD(3_000_000)) dut (
+    zlc_uart_bridge #(.CLK_HZ(50_000_000), .BAUD(`ZLC_UART_BAUD)) dut (
         .clk(clk), .rst(rst), .uart_rx(uart_rx), .uart_tx(uart_tx),
         .u_word_addr(u_word_addr), .u_wdata(u_wdata), .u_we(u_we), .u_active(u_active), .u_error(u_error),
         .u_rd_word(u_rd_word), .u_rd_data(u_rd_data)
@@ -137,5 +137,5 @@ module tb_uart_read_tap;
         $display("UART-READ-WRITE-LASTWORD-LAYOUT-OK");
         $finish;
     end
-    initial begin #600000 $fatal(1, "UART read/write/last-word/layout timeout"); end
+    initial begin #(1800 * BITT) $fatal(1, "UART read/write/last-word/layout timeout"); end
 endmodule

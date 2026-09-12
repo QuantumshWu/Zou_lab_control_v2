@@ -148,7 +148,7 @@ _SINE_VPP_PER_VRMS = 2.0 * math.sqrt(2.0)
 _HIGH_Z_OHMS = 1e6
 
 #: Resource classes the probe will open.  VISA also lists ASRL serial ports,
-#: and on this bench one of them is the pulse streamer's 3 Mbaud UART: opening
+#: and on this bench one of them is the pulse streamer's UART: opening
 #: it to ask *IDN? would take the board's port from the server that owns it
 #: and get nothing back, so a scan for a signal generator must never touch
 #: one.  GPIB/PXI/VXI are absent for the plainer reason that nothing here has

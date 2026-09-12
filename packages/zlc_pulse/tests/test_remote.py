@@ -37,7 +37,7 @@ from zlc_pulse.remote import (
 from zlc_pulse.transport import MemoryRegisterTransport
 from zlc_pulse.transport.uart import UartError
 from zlc_pulse.transport import uart_frame as framing
-from zlc_pulse.wire import CMD_LOAD, CMD_SAFE, CtrlWords, StreamerParams, build_fingerprint, pack_program, pack_scan_rows
+from zlc_pulse.wire import CMD_LOAD, CMD_SAFE, CtrlWords, DEFAULT_UART_BAUD, StreamerParams, build_fingerprint, pack_program, pack_scan_rows
 
 
 _BOARD_TARGET = pulse_target_from_xdc()
@@ -347,6 +347,8 @@ def test_remote_replays_device_path_with_short_done_poll(monkeypatch, tmp_path) 
         client = _client(server)
         try:
             path = tmp_path / "current.json"
+            assert client._socket.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) == 1
+            assert server._owner_connection.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) == 1
             path.write_text(json.dumps(pulse_codec.config_values_to_tree({"1": (100, "ns")})), encoding="utf-8")
             client.load_config_file(path)
             client.load(program, source=source, rows=((1,),))
@@ -963,7 +965,6 @@ def test_uart_probe_reuses_pulse_streamer_word63_open(monkeypatch, tmp_path) -> 
 
     result = resolve_backend(
         "auto",
-        uart_baud=3_000_000,
         target=_BOARD_TARGET,
         params=params,
         clock_hz=50e6,
@@ -973,7 +974,7 @@ def test_uart_probe_reuses_pulse_streamer_word63_open(monkeypatch, tmp_path) -> 
     assert result.backend == "uart"
     assert result.uart_port == "COM7"
     assert result.attempts == ("COM7: word63 fingerprint matched",)
-    assert records == [("COM7", 3_000_000, 0.5)]
+    assert records == [("COM7", DEFAULT_UART_BAUD, 0.5)]
     assert len(open_calls) == 1
 
 
@@ -999,6 +1000,7 @@ def test_server_cli_defaults_to_auto_and_accepts_explicit_backends() -> None:
     parser = remote_module.build_arg_parser()
 
     assert parser.parse_args([]).backend == "auto"
+    assert parser.parse_args([]).uart_baud == DEFAULT_UART_BAUD
     assert parser.parse_args(["--backend", "jtag-axi"]).backend == "jtag-axi"
     assert parser.parse_args(["--backend", "uart", "--uart-port", "COM3"]).uart_port == "COM3"
     # No knob decides when a quiet client is disconnected, because nothing does.

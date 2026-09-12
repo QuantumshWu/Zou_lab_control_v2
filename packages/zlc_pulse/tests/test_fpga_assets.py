@@ -78,6 +78,8 @@ def _assert_geometry_header_matches(text: str) -> None:
 def test_deployed_geometry_header_matches_wire_projection() -> None:
     header = (ROOT / "fpga/pulse_streamer/zlc_geometry.vh").read_text(encoding="utf-8")
     _assert_geometry_header_matches(header)
+    from zlc_pulse.wire import DEFAULT_UART_BAUD, default_uart_baud
+    assert int(_defines(header)["ZLC_UART_BAUD"]) == DEFAULT_UART_BAUD == default_uart_baud() == 460800
 
 
 def test_geometry_header_regenerates_through_the_documented_package_command(tmp_path: Path) -> None:
@@ -172,6 +174,16 @@ def test_a_build_reads_the_config_as_one_exact_grammar(tmp_path: Path) -> None:
         require_streamer_config(written(json.dumps({**document, "board": []})))
     with pytest.raises(ValueError, match="fpga_part must be non-empty text"):
         require_streamer_config(written(json.dumps({**document, "fpga_part": " "})))
+    from zlc_pulse.wire import default_uart_baud
+    alternate = written(json.dumps({**document, "uart_baud": 921600}))
+    alternate_config = require_streamer_config(alternate)
+    assert default_uart_baud(alternate) == alternate_config["uart_baud"] == 921600
+    assert _defines(emit_geometry_vh(
+        alternate_config["params"], uart_baud=alternate_config["uart_baud"]
+    ))["ZLC_UART_BAUD"] == "921600"
+    for invalid in (0, -1, True, 460800.5, 4_000_000):
+        with pytest.raises(ValueError, match="uart_baud"):
+            require_streamer_config(written(json.dumps({**document, "uart_baud": invalid})))
 
 
 def test_frozen_35t_uses_98_percent_without_weakening_the_90_percent_default() -> None:

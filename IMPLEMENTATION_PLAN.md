@@ -10,6 +10,7 @@
 
 ## 1. 当前实施范围
 
+- 用户确认实验机使用板载USB_UART；board.xdc标明CH340C，但原Host/RTL均固定3M，超过WCH手册2Mbps范围及无流控连续应用建议。部署manifest现在统一uart_baud=460800，原header生成链投影给top/bridge，Host默认与CLI同源；Pulse执行时钟/geometry/fingerprint不变。实际RTL在该速率通过完整命令握手与14word/65byte含CRC回复，相关Host默认/strict manifest/NODELAY直接用例通过。用户必须在实验机build/program后才可真机验收，本机未执行build/synthesis/program；不能用仿真宣布现场丢字节已解决。厂商依据：WCH CH340 Datasheet §5.4（https://datasheet.lcsc.com/datasheet/pdf/e2f14e51aaa60c793f1f0cbc8a5d5faa.pdf），及WCH产品表的CH340C continuous 460800项。
 - UART接收改为实际read决定到达，队列为0仍提交短时read(1)；本机分包直接案例通过，但实验机仍收到64/65且crc_prefix_ok=false，因此该接收调整未解决现场故障，不能认定仅CRC尾字节迟到。失败诊断保存解析前有限前缀、请求及重试恢复后的真实回复hex；正常成功不格式化hex，不累计通信历史。真实RTL逐bit仿真13/14/15 words共585字节一致不代表实际USB/串口已验收。Remote旧socket现场已于takeover当时退出且NO_ACTION，不是活动LAN连接超时。Device日志按窗口宽度软换行，长无空格诊断可折行，复制仍保留原文。未build/program，探针及仿真产物不入Git。
 - 现场原始帧已确认不止一种缺失：seq32在CRC之前的末十个连续00中少一个，CRC ee1d完整；seq79的运行状态02对应CRC 4ec6，结合静态寄存器不变支持缺低CRC字节4e，重试状态04对应另一CRC fd52。不能把后者误解为fd52被截成c6。运行期timeout setter会重新下发整个Win32 DCB的冗余已移除，改用现有SetCommTimeouts；两项直接用例通过，保留deadline/取消、原读写及失败状态不提前更新。此修改是否消除真机丢字节尚待确认，不把离线CRC分析冒充物理链路定位。
 - UART已删除写后Win32 flush轮询，并按pending SEQ收取回复，旧/重复帧及坏CRC不再吞当前有效ACK；真实缺包/NAK/命令去重不变。直接PySerialLink模拟串口证明软件自发重发已消除，未操作实验板。Done计时分清command、终态观察和report retrieval，日志仅有真实重发时附最后原因；不能以日志口径修正代替真机延迟验收。

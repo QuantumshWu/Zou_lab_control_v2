@@ -1,12 +1,13 @@
 `timescale 1ns / 1ps
+`include "zlc_geometry.vh"
 // =============================================================================
 // zlc_uart_bridge -- UART fast-control side-channel decoder.
 //
 // A dedicated serial control link that writes the SAME flat, word-addressed
 // register/BRAM map as the JTAG-to-AXI path (host.image.region_bases), so a
 // program is BYTE-IDENTICAL on either transport -- a pure transport swap that
-// removes the ~1 s Vivado-Tcl/JTAG per-transaction overhead (a whole ~24 KB
-// program ~82 ms at 3 Mbaud, a scan-point step ~us).
+// removes the Vivado-Tcl/JTAG per-transaction overhead. The baud is the board
+// manifest's USB-UART rate, shared by host and generated RTL.
 //
 // It presents the top a write interface (u_word_addr/u_wdata/u_we) that the top
 // MUXes against the axi_bram_ctrl bram_* side before the region decode, and a
@@ -33,7 +34,7 @@
 
 module zlc_uart_bridge #(
     parameter integer CLK_HZ    = 50_000_000,
-    parameter integer BAUD      = 3_000_000,      // fractional NCO divider -> any FT/CP2102 rate
+    parameter integer BAUD      = `ZLC_UART_BAUD,
     parameter integer OVERSAMPLE = 16,            // samples per bit (RX + TX)
     parameter integer ADDR_WORD_WIDTH = 30,       // == top word_addr width
     parameter integer FRAME_WORDS = 256,          // max data words per frame (== host MAX_FRAME_WORDS)

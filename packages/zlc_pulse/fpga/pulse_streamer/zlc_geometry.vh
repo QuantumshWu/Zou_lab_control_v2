@@ -27,5 +27,6 @@
 `define ZLC_NUM_DELAY_CH        19
 `define ZLC_DELAY_CH_IDX_W      6
 `define ZLC_DELAY_REG_WORDS     128
+`define ZLC_UART_BAUD           460800
 `define ZLC_LAYOUT_FINGERPRINT  32'h5A59C160
 `endif // ZLC_GEOMETRY_VH
