@@ -21,6 +21,8 @@ from weakref import ref
 import logging
 from operator import attrgetter
 from pathlib import Path
+
+from zlc_durable import unique_path
 from queue import Empty, SimpleQueue
 import time
 from typing import Any
@@ -44,6 +46,7 @@ from zlc_plot.specs import semantic_spec, validate_authored_display
 from zlc_plot.ui import parameter_controls_for_kind
 from zlc_plot.specs import GRID_CELL_KINDS, non_portable_display_names
 from zlc_runtime import (
+    RunRecorder,
     IndexedHistoryLease,
     OperatorInputRequest,
     SelectionChange,
@@ -7851,6 +7854,23 @@ class ConsolePresenter:
             return tuple(bundled), bundled, {}
         return options, labels, groups
 
+    def _open_recording(self, node_id: str) -> RunRecorder:
+        """Where this run's published events land, once it publishes any.
+
+        The workspace already routes saved work by calendar day and gives a
+        run its own numbered folder inside it; a recording is saved work, so
+        it goes where the rest of it goes and a physicist finds it by date.
+
+        The allocation is deferred to the recorder because it is durable: a
+        node configured, started and stopped without publishing has not made
+        a run, and a numbered folder saying it did is worse than none.
+        """
+
+        def allocate() -> Path:
+            return unique_path(self.session.day_folder(), node_id, "")
+
+        return RunRecorder(allocate)
+
     def _build_logic_candidate(
         self,
         binding: LogicBinding,
@@ -7874,6 +7894,7 @@ class ConsolePresenter:
             source_signal=finalization.source_signal or None,
             values=finalization.values,
             request_owner_wake=self.board.wake.request_owner_wake,
+            recorder=self._open_recording(binding.node_id),
         )
         claims = tuple(
             DeviceClaim(

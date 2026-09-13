@@ -182,7 +182,12 @@ def test_formal_console_panel_state_and_histogram_edits_are_atomic(workspace) ->
         assert binding.host.front.device_pixel_ratio == view.device_pixel_ratio()
         monitor_pid = binding.host.process_pid
         assert monitor_pid is not None and monitor_pid != os.getpid()
-        assert binding.host.process_name == "zlc-monitor-render"
+        # The monitor side is a POOL, so its members are named for the family
+        # and numbered: a child's threads are named after it, and four panels
+        # reporting under one name is a diagnostic that cannot say whose
+        # frames those were.  What a live panel must never be on is the
+        # editor's child, which is the side that does one export at a time.
+        assert binding.host.process_name.startswith("zlc-monitor-render")
 
         view.panel_state_changed.emit(panel_id, {"title": "Card title only"})
         settle(lambda: binding.state.title == "Card title only")
@@ -200,12 +205,16 @@ def test_formal_console_panel_state_and_histogram_edits_are_atomic(workspace) ->
             lambda: histogram.host is not None
             and bool(histogram.parameter_surface.get("display"))
         )
-        assert histogram.host.process_pid == monitor_pid
-        assert histogram.host.process_name == "zlc-monitor-render"
+        assert histogram.host.process_name.startswith("zlc-monitor-render")
+        # The second live panel is in a DIFFERENT child.  That is the whole
+        # point of the monitor side being a pool: two panels that draw at the
+        # same time hold two interpreters, not one taken in turns.
+        assert histogram.host.process_pid != monitor_pid
 
-        # A process failure keeps both last complete cards visible, then the
-        # ordinary replacement lifecycle remounts every Monitor host in one
-        # fresh A generation.  The old shared pixels remain valid throughout.
+        # A child failure keeps that panel's last complete card visible and
+        # replaces its host; the panel in another child is not disturbed at
+        # all, which is what a pool buys besides throughput.  The old shared
+        # pixels stay valid throughout either way.
         old_facet_host = binding.host
         old_histogram_host = histogram.host
         retained = old_histogram_host.front.buffer.as_rgba()
@@ -214,16 +223,14 @@ def test_formal_console_panel_state_and_histogram_edits_are_atomic(workspace) ->
         monitor_service._process.terminate()
         monitor_service._process.join(timeout=10)
         settle(
-            lambda: binding.host is not old_facet_host
-            and histogram.host is not old_histogram_host
-            and binding.host is not None
+            lambda: histogram.host is not old_histogram_host
             and histogram.host is not None
-            and binding.host.front is not None
             and histogram.host.front is not None
         )
+        assert binding.host is old_facet_host
+        assert binding.host.front is not None
         monitor_pid = histogram.host.process_pid
         assert monitor_pid is not None
-        assert binding.host.process_pid == monitor_pid
         assert old_histogram_host.process_pid != monitor_pid
         np.testing.assert_array_equal(retained, retained_pixels)
 

@@ -334,6 +334,20 @@ Plot 只允许以下九个 named preset：
 
 Notebook 和 Qt 都消费同一个 `SurfacePlan`。宿主窗口或浏览器区域 resize 只改变外围留白；只有 `session.set_size(name)` 会改变 authored plot size、axes geometry 和 FacetGrid font tier。DPR 只增加对应 preset 的物理像素数，不改变逻辑布局或字体 tier。
 
+## 渲染进程
+
+`RenderProcess` 是一个装着任意多个 `RasterPlotHost` 的子进程；`RenderProcessPool`
+是若干个这样的子进程，`build_host` 先铺开再共用——成员没满先起新的，满了才挑活
+host 最少的那个。同时在画的面板因此各占一个解释器：编译核 `nogil` 本来就能逃出
+GIL，artist 更新、chrome 绘制和每帧 front 的 pickle 逃不掉。成员按需起，只开一块
+面板的窗口仍然只有一个子进程；上限 `default_render_process_count()` 是逻辑核的四
+分之一、封顶 4，因为一个子进程在画任何东西之前就是两百多兆。
+
+子进程发布 front 时不再拷贝像素：`rendering.install_publish_pool` 让该进程的
+renderer 直接写进 frontend 要映射的共享段，`publish_front` 只交接租约。块的归还是
+两手契约——子进程这边是它自己那份只读视图消失，frontend 那边是它释放租约，后到的
+一手才把块放回自由表。
+
 ## 持久化与应用边界
 
 - `zlc_data.save_npz/load_npz` 持有科学数据 snapshot 的 NPZ 格式。

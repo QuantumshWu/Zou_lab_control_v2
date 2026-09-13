@@ -77,6 +77,11 @@ _EXPORTS = {
     "image_axes": ("zlc_plot.data_contract", "image_axes"),
     "RasterPlotHost": ("zlc_plot.raster", "RasterPlotHost"),
     "RenderProcess": ("zlc_plot.render_process", "RenderProcess"),
+    "RenderProcessPool": ("zlc_plot.render_process", "RenderProcessPool"),
+    "default_render_process_count": (
+        "zlc_plot.render_process",
+        "default_render_process_count",
+    ),
     "NumericRange": ("zlc_plot.selectors", "NumericRange"),
     "SelectorKind": ("zlc_plot.selectors", "SelectorKind"),
     "normalize_classifier_threshold_targets": (
@@ -198,6 +203,7 @@ __all__ = [
     "Qt5PlotWidget",
     "RasterPlotHost",
     "RenderProcess",
+    "RenderProcessPool",
     "Reduction",
     "RollingPlot",
     "SelectionChange",

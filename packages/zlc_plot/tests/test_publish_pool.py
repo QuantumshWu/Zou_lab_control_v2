@@ -21,7 +21,13 @@ from data_factory import (
 
 from zlc_plot import AxisRef, CurvePlot, PlotSession
 from zlc_plot.raster import RasterBuffer
-from zlc_plot.rendering import PublishBufferPool
+from zlc_plot.rendering import PublishBufferPool, install_publish_pool
+
+
+def _free_blocks(pool) -> int:
+    """How many blocks the shared pool is holding spare, across all sizes."""
+
+    return len(pool._free)
 
 def _session() -> PlotSession:
     rng = np.random.default_rng(1)
@@ -61,15 +67,15 @@ def test_a_released_buffer_is_the_one_reissued(surfaces) -> None:
             shared.release(lease, surfaces)
         reissued = [shared.publish(bytes(1024)) for _ in range(surfaces)]
         assert {name for _lease, name, _size in reissued} == first_names
-        assert bytes(shared._leased[held_id].buf) == bytes([7]) * 1024
+        assert bytes(shared._leased[held_id].memory.buf) == bytes([7]) * 1024
         for lease, _name, _size in reissued:
             shared.release(lease, surfaces)
         shared.trim_free(1)
-        assert len(shared._free) == 1
+        assert _free_blocks(shared) == 1
         for size in range(2, 8):
             lease, _name, _size = shared.publish(bytes(size * 1024))
             shared.release(lease, surfaces)
-            assert len(shared._free) <= surfaces
+            assert _free_blocks(shared) <= surfaces
         shared.trim_free(0)
         assert not shared._free
         assert held_id in shared._leased
@@ -138,3 +144,87 @@ def test_a_front_kept_across_frames_keeps_its_own_pixels() -> None:
         np.testing.assert_array_equal(np.asarray(kept), first)
     finally:
         session.close()
+
+
+def test_a_front_written_in_the_shared_block_is_published_without_a_copy() -> None:
+    """The change: the block a renderer fills IS the one the frontend maps.
+
+    A front used to be written into private memory and copied into a shared
+    segment afterwards -- eighteen megabytes twice, per frame, per panel.
+    The claim is what says the copy is not needed, and a buffer that did not
+    come from this pool still has to be copied, so both are asserted.
+    """
+
+    from zlc_plot.render_process import _SharedFrontPool
+
+    shared = _SharedFrontPool()
+    try:
+        writable, published = shared.take(1024)
+        writable[:] = bytes([3]) * 1024
+        del writable
+        claimed = shared.claim(published)
+        assert claimed is not None
+        lease_id, name, nbytes = claimed
+        assert nbytes == 1024
+        block = shared._leased[lease_id]
+        assert block.memory.name == name
+        # No copy happened, so the segment already holds what was written.
+        assert bytes(block.memory.buf[:16]) == bytes([3]) * 16
+
+        # A buffer from anywhere else has no lease to give.
+        assert shared.claim(memoryview(bytes(1024))) is None
+    finally:
+        shared.close()
+
+
+def test_a_shared_block_is_free_only_when_both_hands_let_go() -> None:
+    """Two processes hold it; only one of them has an interpreter.
+
+    Recycled on either release alone, the renderer would be filling a block
+    the frontend is still painting from -- the failure this pool exists to
+    make impossible, and the one that cannot be seen in a screenshot.
+    """
+
+    from zlc_plot.render_process import _SharedFrontPool
+
+    shared = _SharedFrontPool()
+    try:
+        _writable, published = shared.take(1024)
+        lease_id, _name, _size = shared.claim(published)
+
+        # The frontend lets go first; the renderer still holds its view.
+        shared.release(lease_id, 4)
+        assert _free_blocks(shared) == 0
+        del published
+        assert _free_blocks(shared) == 1
+
+        # And the other order.
+        writable, published = shared.take(1024)
+        del writable
+        lease_id, _name, _size = shared.claim(published)
+        del published
+        assert _free_blocks(shared) == 0
+        shared.release(lease_id, 4)
+        assert _free_blocks(shared) == 1
+    finally:
+        shared.close()
+
+
+def test_an_installed_pool_is_the_one_a_new_renderer_publishes_through() -> None:
+    """The seam the child uses, asserted where it is, not where it is called."""
+
+    from zlc_plot.render_process import _SharedFrontPool
+
+    shared = _SharedFrontPool()
+    install_publish_pool(shared)
+    try:
+        session = _session()
+        try:
+            raw, _height, _width = session._raster_capture_rgba_bytes()
+            claimed = shared.claim(raw)
+            assert claimed is not None, "a front was not written in the pool"
+        finally:
+            session.close()
+    finally:
+        install_publish_pool(None)
+        shared.close()

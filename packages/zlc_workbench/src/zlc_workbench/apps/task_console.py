@@ -157,7 +157,7 @@ def build_console(session, *, window_ratio=None, request_close=None, run_device_
         window_ratio=window_ratio,
         plot_surface=staged_panel_surface,
     )
-    monitor_render = plot.RenderProcess("zlc-monitor-render")
+    monitor_render = plot.RenderProcessPool("zlc-monitor-render")
     try:
         editor_render = plot.RenderProcess("zlc-edit-save-render")
     except BaseException:

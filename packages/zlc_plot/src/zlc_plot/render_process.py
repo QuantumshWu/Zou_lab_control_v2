@@ -884,6 +884,151 @@ class _RemoteRasterPlotHost:
         return stopped
 
 
+def default_render_process_count() -> int:
+    """How many render children a machine of this size should run.
+
+    Each child is a whole renderer -- Matplotlib, the compiled kernels, its
+    own arena -- so this is a memory decision as much as a core one: a child
+    costs about two hundred megabytes before it draws anything.  A quarter of
+    the logical processors, capped at four, gives a sixteen-core workstation
+    the split a full board of panels can use and leaves a four-core laptop
+    exactly the one child it has today.
+    """
+
+    return max(1, min(4, (os.cpu_count() or 1) // 4))
+
+
+class RenderProcessPool:
+    """Several render children, so panels that draw together draw together.
+
+    One child holds every panel's renderer, and its workers share one
+    interpreter.  The compiled kernels release the GIL and NumPy releases it
+    for the large reductions, but the artist updates, the chrome drawing and
+    the pickle of each published front do not: those are the panels' Python,
+    and they run one at a time no matter how many cores are idle.
+
+    At the display beat that costs nothing -- four panels at ten hertz use a
+    third of one core, and nothing ever waits.  It is the whole ceiling at
+    thirty hertz, on a 2048-square camera frame, and during a gesture, which
+    is where an operator meets it.
+
+    Members are spawned as they are first needed, so a console showing one
+    panel still runs one child.  A new Host joins the member drawing for the
+    fewest Hosts; a member is never retired while the pool is open, because a
+    panel closed and reopened would otherwise pay a child's whole startup.
+
+    This is the SAME surface as one :class:`RenderProcess` -- ``build_host``,
+    ``retain``, ``release``, ``close`` -- so a caller chooses the count and
+    changes nothing else.
+    """
+
+    def __init__(self, name: str, *, size: int | None = None) -> None:
+        selected = str(name).strip()
+        if not selected:
+            raise ValueError("render pool name must be non-empty")
+        count = default_render_process_count() if size is None else int(size)
+        if count < 1:
+            raise ValueError("a render pool needs at least one process")
+        self.name = selected
+        self._size = count
+        self._lock = RLock()
+        self._members: list[RenderProcess] = []
+        self._owners = 1
+        self._closing = False
+
+    @property
+    def size(self) -> int:
+        """The most children this pool will ever spawn."""
+
+        return self._size
+
+    @property
+    def members(self) -> tuple["RenderProcess", ...]:
+        with self._lock:
+            return tuple(self._members)
+
+    @property
+    def pids(self) -> tuple[int, ...]:
+        return tuple(
+            pid for pid in (member.pid for member in self.members) if pid is not None
+        )
+
+    @property
+    def alive(self) -> bool:
+        with self._lock:
+            if self._closing:
+                return False
+            if not self._members:
+                # Nothing has been drawn yet; the first Host spawns member 0.
+                return True
+            return any(member.alive for member in self._members)
+
+    def _assign(self) -> "RenderProcess":
+        """The member a new Host belongs to: spawn before sharing.
+
+        Spreading first and only then sharing is what makes the common board
+        -- fewer panels than members -- a true one-panel-per-child split,
+        while a board larger than the pool still balances.
+        """
+
+        with self._lock:
+            if self._closing:
+                raise RuntimeError("render pool is closing")
+            if len(self._members) < self._size:
+                member = RenderProcess(f"{self.name}-{len(self._members)}")
+                self._members.append(member)
+                return member
+            return min(self._members, key=lambda candidate: candidate.host_count)
+
+    def build_host(self, *args: object, **kwargs: object) -> "_RemoteRasterPlotHost":
+        return self._assign().build_host(*args, **kwargs)
+
+    def retain(self) -> None:
+        """Add one application-window owner without spawning anything."""
+
+        with self._lock:
+            if self._closing:
+                raise RuntimeError("render pool is closing")
+            self._owners += 1
+
+    def release(self, timeout: float = 0.0) -> bool:
+        """Release one window owner; the last owner shuts every child down."""
+
+        if timeout < 0.0:
+            raise ValueError("timeout must be non-negative")
+        with self._lock:
+            if self._owners > 0:
+                self._owners -= 1
+            if self._owners > 0:
+                return True
+            self._closing = True
+            members = tuple(self._members)
+        # Every member is told to go FIRST, and only then waited for: told one
+        # at a time with the timeout each, a pool of four would wait four
+        # deadlines for shutdowns that all began at once.
+        settled = [member.release(0.0) for member in members]
+        if timeout:
+            settled = [
+                done or member._await_close(timeout)
+                for member, done in zip(members, settled, strict=True)
+            ]
+        return all(settled)
+
+    def close(self, timeout: float = 0.0) -> bool:
+        if timeout < 0.0:
+            raise ValueError("timeout must be non-negative")
+        with self._lock:
+            self._closing = True
+            members = tuple(self._members)
+        closed = [member.close(0.0) for member in members]
+        if timeout:
+            closed = [
+                done or member._await_close(timeout)
+                for member, done in zip(members, closed, strict=True)
+            ]
+        return all(closed)
+
+
 class RenderProcess:
     """One long-lived process containing any number of RasterPlotHosts."""
 
@@ -939,6 +1084,10 @@ class RenderProcess:
         self._owners = 1
         self._close_started: float | None = None
         self._closed = True
+        #: The last interaction map each Host was sent, so a front that
+        #: repeats one crosses the pipe as None.  Cleared with the child
+        #: that filled it: a restart begins the agreement again.
+        self._front_interaction: dict[str, RasterInteractionMap] = {}
         self._mapping_retirements: Queue = Queue()
         self._mapping_retirement_thread = Thread(
             target=_retire_shared_mappings,
@@ -957,6 +1106,7 @@ class RenderProcess:
     def _spawn_child(self) -> None:
         """Start one fresh child after the previous reader fully retired."""
 
+        self._front_interaction.clear()
         context = multiprocessing.get_context("spawn")
         parent, child = context.Pipe(duplex=True)
         stopped = Event()
@@ -1022,6 +1172,13 @@ class RenderProcess:
     @property
     def alive(self) -> bool:
         return bool(self._process.is_alive() and not self._closed)
+
+    @property
+    def host_count(self) -> int:
+        """How many Hosts this child is currently drawing for."""
+
+        with self._lock:
+            return len(self._hosts)
 
     def retain(self) -> None:
         """Add one application-window owner without creating another process."""
@@ -1659,7 +1816,7 @@ class RenderProcess:
         logical_size: tuple[int, int],
         logical_dpi: float,
         device_pixel_ratio: float,
-        interaction: RasterInteractionMap,
+        interaction: RasterInteractionMap | None,
         lease_id: str,
         shared_name: str,
         nbytes: int,
@@ -1667,6 +1824,20 @@ class RenderProcess:
         height: int,
         selector_handle_radius_px: float,
     ) -> None:
+        # None means "the same map you already have": a panel whose limits
+        # are not moving repeats it frame after frame, and on a 64-cell grid
+        # that is 128 transforms through pickle to say nothing changed.  The
+        # child only omits what it has already sent on this connection, and
+        # a restarted child sends a full one first, so a missing cache here
+        # is a protocol error rather than a frame to guess at.
+        if interaction is None:
+            interaction = self._front_interaction.get(str(host_id))
+            if interaction is None:
+                raise RuntimeError(
+                    "a front repeated an interaction map that was never sent"
+                )
+        else:
+            self._front_interaction[str(host_id)] = interaction
         shared = _open_shared_mapping(shared_name)
         # The retirement lane must know about this mapping before a Front can
         # escape the reader thread.  A caller may retain only an ndarray view
@@ -1814,6 +1985,7 @@ class RenderProcess:
     def _receive_host_closed(self, host_id: str) -> None:
         with self._lock:
             host = self._hosts.pop(host_id, None)
+            self._front_interaction.pop(str(host_id), None)
             event = self._host_closed.pop(host_id, None)
             tokens = tuple(self._host_inputs.pop(host_id, ()))
             subscription_ids = tuple(
@@ -1936,64 +2108,210 @@ class RenderProcess:
         return not self._process.is_alive()
 
 
+@dataclass(slots=True)
+class _SharedBlock:
+    """One shared segment, and the two hands that have to let go of it."""
+
+    memory: SharedMemory
+    nbytes: int
+    lease_id: str = ""
+    store_id: int = 0
+    #: The renderer's own read-only view of this block still exists.
+    child_holds: bool = False
+    #: The frontend was sent this lease and has not released it.
+    frontend_holds: bool = False
+
+
+#: How many blocks one live Host keeps moving: one being written, one on
+#: screen, one in flight.  This used to be two pools' business -- the
+#: renderer's private buffers were three deep and the shared segments one
+#: spare per Host -- and merging them without merging the depths left a
+#: single-panel window allocating a fresh segment most frames, which is the
+#: six milliseconds of page faults the pooling exists to avoid.
+FRONT_DEPTH = 3
+
+
 class _SharedFrontPool:
-    """Child-owned shared blocks, recycled only after the frontend releases."""
+    """Blocks that ARE the frontend's memory, freed when both hands let go.
+
+    The renderer used to write a front into private memory and this pool
+    copied it into a shared segment: eighteen megabytes written twice, per
+    frame, per panel, on the worker that has to keep up with a live camera.
+    The two are now one block -- the front is written once, where it will be
+    read -- and this pool hands that block out through the same
+    ``take(nbytes) -> (writable, published)`` the private pool offers.
+
+    WHO HOLDS A BLOCK is stated here rather than left to the interpreter,
+    because two processes hold it and only one of them has an interpreter
+    that could say.  A block is free when BOTH have let go:
+
+    * the child lets go when the renderer's read-only view of it dies -- the
+      same weakref release the private pool uses, and the reason a retained
+      Front cannot have its pixels rewritten underneath it;
+    * the frontend lets go when it releases the lease it was sent.
+
+    Neither is trusted to be the last: whichever arrives second returns the
+    block.  A block nobody frees is one this pool never sees again -- the
+    next ``take`` allocates.  The cost of every mistake here is another
+    segment, never somebody else's pixels.
+    """
 
     def __init__(self) -> None:
         self._lock = Lock()
-        self._leased: dict[str, SharedMemory] = {}
-        # One reusable block per current service Host, across ALL sizes.
-        # Old raster sizes must not each grow their own permanent cache.
-        self._free: deque[SharedMemory] = deque()
+        self._leased: dict[str, _SharedBlock] = {}
+        self._by_store: dict[int, _SharedBlock] = {}
+        # ONE list of free blocks across all sizes, searched by size.  A list
+        # per size would let every raster size a session ever used keep a
+        # permanent spare; a budget is a budget for the pool, not for each
+        # shape a panel has passed through.
+        self._free: deque[_SharedBlock] = deque()
 
-    def publish(self, pixels: object) -> tuple[str, str, int]:
-        source = memoryview(pixels).cast("B")
-        nbytes = source.nbytes
+    # -------------------------------------------------------------- writing
+    def take(self, nbytes: int) -> tuple[object, object]:
+        """One block to fill: ``(writable, published)``, in shared memory."""
+
+        size = int(nbytes)
         with self._lock:
             block = next(
-                (candidate for candidate in self._free if candidate.size == nbytes),
+                (candidate for candidate in self._free if candidate.nbytes == size),
                 None,
             )
             if block is not None:
                 self._free.remove(block)
-            else:
-                block = SharedMemory(create=True, size=nbytes)
-            block.buf[:nbytes] = source
-            # A Front from a crashed generation may outlive a restarted
-            # service.  A process-local integer would then collide with the
-            # new pool and release an unrelated live Front.
-            lease_id = uuid4().hex
-            self._leased[lease_id] = block
-        return lease_id, block.name, nbytes
+        if block is None:
+            # Outside the lock: mapping a segment is the expensive half, and
+            # four renderer threads queueing behind one allocation is the
+            # contention this whole change exists to remove.
+            block = _SharedBlock(SharedMemory(create=True, size=size), size)
+        # ctypes keeps the owner identity through memoryview/NumPy derivations,
+        # so everything made from the published view keeps the block alive and
+        # the finalizer fires exactly when the last reader in this process is
+        # gone -- never while a retained Front can still be read.
+        store = (ctypes.c_ubyte * size).from_buffer(block.memory.buf)
+        published = memoryview(store).toreadonly()
+        # A Front from a crashed generation may outlive a restarted service.
+        # A process-local integer would collide with the new pool and release
+        # an unrelated live Front, so every lease is named once, globally.
+        block.lease_id = uuid4().hex
+        block.store_id = id(store)
+        block.child_holds = True
+        block.frontend_holds = False
+        with self._lock:
+            self._leased[block.lease_id] = block
+            self._by_store[block.store_id] = block
+        # The callback holds the LEASE NAME, never the store: holding the
+        # store would keep it alive and the finalizer would never fire.
+        returner = weakref.finalize(
+            store, self._child_released, block.lease_id, block.store_id
+        )
+        returner.atexit = False
+        return memoryview(block.memory.buf)[:size], published
+
+    def claim(self, pixels: object) -> tuple[str, str, int] | None:
+        """This buffer's lease if this pool made it -- and no copy either way.
+
+        A buffer this pool did not make has no lease to give: a Front built
+        elsewhere, or one whose session published before the pool existed.
+        The caller copies instead, which is what every front used to do.
+        """
+
+        owner = getattr(pixels, "obj", None)
+        if owner is None:
+            return None
+        with self._lock:
+            block = self._by_store.get(id(owner))
+            if block is None or not block.child_holds:
+                return None
+            block.frontend_holds = True
+            return block.lease_id, block.memory.name, block.nbytes
+
+    def publish(self, pixels: object) -> tuple[str, str, int]:
+        """Copy a buffer this pool did not make into one it did."""
+
+        source = memoryview(pixels).cast("B")
+        writable, published = self.take(source.nbytes)
+        writable[:] = source
+        del writable
+        handoff = self.claim(published)
+        assert handoff is not None, "a block this pool just made is its own"
+        # Nothing in this process keeps the copy.  Dropping the view here
+        # runs the block's own child release, so the frontend's lease is
+        # immediately the only hand on it -- no separate path to get wrong.
+        del published
+        return handoff
+
+    # ------------------------------------------------------------ releasing
+    def _child_released(self, lease_id: str, store_id: int) -> None:
+        with self._lock:
+            self._by_store.pop(store_id, None)
+            block = self._leased.get(str(lease_id))
+            # A block already recycled and re-taken carries a NEW store id.
+            # Without this the late finalizer of the previous tenant would
+            # free a block the renderer is filling right now.
+            if block is None or block.store_id != store_id:
+                return
+            block.child_holds = False
+            self._recycle_locked(block)
 
     def release(self, lease_id: str, free_budget: int) -> None:
         with self._lock:
-            block = self._leased.pop(str(lease_id), None)
+            block = self._leased.get(str(lease_id))
             if block is None:
                 return
-            self._free.append(block)
+            block.frontend_holds = False
+            self._recycle_locked(block)
         self.trim_free(free_budget)
+
+    def _recycle_locked(self, block: _SharedBlock) -> None:
+        if block.child_holds or block.frontend_holds:
+            return
+        self._leased.pop(block.lease_id, None)
+        self._by_store.pop(block.store_id, None)
+        block.lease_id = ""
+        block.store_id = 0
+        self._free.append(block)
 
     def trim_free(self, free_budget: int) -> None:
         retired = []
         with self._lock:
-            while len(self._free) > free_budget:
+            while len(self._free) > int(free_budget):
                 retired.append(self._free.popleft())
         for block in retired:
-            block.close()
-            block.unlink()
+            _discard_shared(block.memory)
 
     def close(self) -> None:
         with self._lock:
             blocks = tuple(self._leased.values()) + tuple(self._free)
             self._leased.clear()
+            self._by_store.clear()
             self._free.clear()
         for block in blocks:
-            try:
-                block.close()
-                block.unlink()
-            except FileNotFoundError:
-                pass
+            _discard_shared(block.memory)
+
+
+def _discard_shared(memory: SharedMemory) -> None:
+    """Give a segment back, whether or not a reader is still holding it.
+
+    ``close`` releases this process's own view and raises BufferError while
+    anything still exports it -- and a Front this pool has already dropped
+    can still be on its way out.  Retrying that close is what
+    ``SharedMemory.__del__`` does, so leaving the wrapper intact turns one
+    ordinary race into an unraisable BufferError printed from a destructor.
+
+    Detached instead, the mapping simply outlives its wrapper and
+    deallocates when the last export goes, which is the lifetime that was
+    wanted all along.  The same detachment the frontend does on the way in.
+    """
+
+    try:
+        memory.close()
+    except BufferError:
+        memory._buf = None
+        memory._mmap = None
+    try:
+        memory.unlink()
+    except (FileNotFoundError, OSError):
+        pass
 
 
 def _owned_input(value: object, schemas: OrderedDict[str, object]) -> object:
@@ -2161,6 +2479,13 @@ def _render_process_main(connection: Connection, name: str) -> None:
     pending: dict[int, Future] = {}
     subscriptions: dict[int, tuple[str, Callable[[], object]]] = {}
     fronts = _SharedFrontPool()
+    # Imported here, not at module scope: the parent imports this module to
+    # talk to the child, and it must not pull Matplotlib in to do it.
+    from .rendering import install_publish_pool
+
+    # From now on every renderer built in this process writes its fronts
+    # straight into the shared segments, and publishing is a handover.
+    install_publish_pool(fronts)
     save_worker = ThreadPoolExecutor(
         max_workers=1, thread_name_prefix=f"zlc-render-{name}-save",
         initializer=kernels.configure_worker_threads,
@@ -2235,12 +2560,29 @@ def _render_process_main(connection: Connection, name: str) -> None:
 
     Thread(target=warm, name=f"zlc-render-{name}-warm", daemon=True).start()
 
+    #: The last interaction map each Host actually sent, so an unchanged one
+    #: crosses as ``None``.  Cleared with the Host, because the frontend's
+    #: cache is cleared with it too.
+    last_interaction: dict[str, object] = {}
+
     def publish_front(host_id: str, front: RasterFront) -> None:
         sequence = int(front.identity.sequence)
         if sequence <= last_front_sequence.get(host_id, -1):
             return
         last_front_sequence[host_id] = sequence
-        lease_id, shared_name, nbytes = fronts.publish(front.buffer.pixels)
+        handoff = fronts.claim(front.buffer.pixels)
+        if handoff is None:
+            handoff = fronts.publish(front.buffer.pixels)
+        lease_id, shared_name, nbytes = handoff
+        # The interaction map is the SAME object frame after frame on a panel
+        # whose limits are not moving, and it is the whole non-pixel weight of
+        # this message: a 64-cell grid carries 128 transforms through pickle
+        # on every frame to say nothing changed.  Send it once and name it.
+        interaction = front.interaction
+        if interaction == last_interaction.get(host_id):
+            interaction = None
+        else:
+            last_interaction[host_id] = interaction
         send(
             (
                 "front",
@@ -2249,7 +2591,7 @@ def _render_process_main(connection: Connection, name: str) -> None:
                 tuple(front.logical_size),
                 float(front.logical_dpi),
                 float(front.device_pixel_ratio),
-                front.interaction,
+                interaction,
                 lease_id,
                 shared_name,
                 nbytes,
@@ -2457,9 +2799,10 @@ def _render_process_main(connection: Connection, name: str) -> None:
                         if stopped:
                             hosts.pop(host_id, None)
                             last_front_sequence.pop(host_id, None)
+                            last_interaction.pop(host_id, None)
                         closing_hosts.discard(host_id)
                         closer_threads.discard(thread)
-                        fronts.trim_free(len(hosts))
+                        fronts.trim_free(len(hosts) * FRONT_DEPTH)
                 finally:
                     # A pool cleanup failure must not suppress this existing ack;
                     # it still propagates out of the close worker.
@@ -2615,7 +2958,7 @@ def _render_process_main(connection: Connection, name: str) -> None:
                 continue
             if kind == "release-front":
                 with state_lock:
-                    fronts.release(str(message[1]), len(hosts))
+                    fronts.release(str(message[1]), len(hosts) * FRONT_DEPTH)
                 continue
             if kind == "drop-input":
                 inputs.pop(int(message[1]), None)

@@ -32,6 +32,16 @@ Deflates small or materially compressible members and stores large camera-like
 noise members when Deflate would save less than 20%; readers need no alternate
 format or compatibility path.
 
+`zlc_data.store` is the grammar of an append-only publication log: one chunk
+is a run of consecutive events that agree on their schema, their validity
+shape and whether they carry sigma, stacked into one array per plane.
+`encode_chunk` returns the document and the arrays; `chunk_event` rebuilds one
+event given a way to read them.  What every event of a chunk says identically
+is said once, a bool plane is packed to one bit per value, and a plane every
+event repeats is stored once -- a million-shot day of hundred-site occupancy
+is forty megabytes rather than three hundred.  Where those arrays land is not
+this layer's business, exactly as with `save_npz`.
+
 Likewise, `save_npz(stream, snapshot)` only encodes a Dataset to caller-owned
 writable binary IO. A path consumer publishes it with
 `zlc_durable.atomic_write_file(path, lambda stream: save_npz(stream, snapshot))`;

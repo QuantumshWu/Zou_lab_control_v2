@@ -15,6 +15,7 @@ from .dataset_output import (
     LiveDatasetOutput,
 )
 from .owner_mailbox import RunOwnerMailbox
+from .recording import RunRecorder
 from .plane import (
     GenerationSchemaAdvanced,
     SignalDataPlane,
@@ -289,6 +290,7 @@ class NodeHost:
         required_artifacts: Mapping[str, str] | None = None,
         task_name: str | None = None,
         signal_namer: Callable[[str, str], str] | None = None,
+        recorder: RunRecorder | None = None,
     ) -> None:
         if not callable(getattr(data_plane, "freeze", None)):
             raise TypeError("data_plane must provide the SignalDataPlane surface")
@@ -300,6 +302,12 @@ class NodeHost:
             signal_namer = lambda owner, name: f"@logic/{owner}/{name}"
         if not callable(signal_namer):
             raise TypeError("signal_namer must be callable")
+        if recorder is not None and not isinstance(recorder, RunRecorder):
+            raise TypeError("recorder must be RunRecorder")
+        # Whether a run is recorded, and where, is decided by whoever knows
+        # the workspace -- not here.  None means what it has always meant:
+        # the events exist while the plane retains them and nowhere else.
+        self._recorder = recorder
 
         identity = canonical_text(instance_id, "node instance_id")
         normalized_kind = canonical_text(
@@ -481,6 +489,12 @@ class NodeHost:
     def run_directory(self) -> Path | None:
         run = self._task_run
         return None if run is None else run.directory
+
+    @property
+    def recorder(self) -> RunRecorder | None:
+        """Where this run's events are being written, if they are."""
+
+        return self._recorder
 
     @property
     def artifacts(self) -> tuple[TaskArtifact, ...]:
@@ -785,7 +799,7 @@ class NodeHost:
             self._phase = "running"
         except BaseException as error:
             self._active = False
-            self._terminal = True
+            self._mark_terminal()
             self._phase = "failed"
             self._error = f"{type(error).__name__}: {error}"
             self._ready_event.set()
@@ -906,7 +920,7 @@ class NodeHost:
         self._error = terminal_error_text
         self._progress = None
         self._active = False
-        self._terminal = True
+        self._mark_terminal()
         if self._task_run is not None:
             try:
                 if terminal_phase == "cancelled":
@@ -941,7 +955,7 @@ class NodeHost:
         self._error = None
         self._progress = None
         self._active = False
-        self._terminal = True
+        self._mark_terminal()
 
     def _finish_worker_failure(self, error: BaseException) -> None:
         # An error raised out of a run the operator STOPPED is the stop: the
@@ -1008,6 +1022,23 @@ class NodeHost:
         )
         with self._start_lock:
             self._live_commit_count += 1
+        if self._recorder is not None:
+            # On the committing thread, immediately after the plane has the
+            # event: recorded in the order published, and a recording that
+            # cannot keep up is felt as this node running slower rather than
+            # as a file that disagrees with the plane.
+            #
+            # Named by the DECLARATION -- "counts", "occupied" -- and not by
+            # the signal key the plane addresses it with, so what lands on
+            # disk is readable without knowing how a run names its signals.
+            self._recorder.record(
+                {
+                    name: published[key]
+                    for name in values
+                    for key in (self.signal_key(name),)
+                    if key in published
+                }
+            )
         self._request_owner_wake()
         return published
 
@@ -1106,6 +1137,21 @@ class NodeHost:
                 f"{type(record_error).__name__}: {record_error}"
             )
 
+    def _mark_terminal(self) -> None:
+        """This run will produce no further event.
+
+        Ten places used to say so by assigning the flag, which left the one
+        thing that has to happen exactly once when it becomes true -- the
+        recording's buffered tail reaching the disk -- with no owner.  The
+        seal is not that place: a finite run that seals retains nothing and
+        never reaches the retire below, and a cancelled one may not seal at
+        all.
+        """
+
+        self._terminal = True
+        if self._recorder is not None:
+            self._recorder.close()
+
     def _retire_plane_state(self) -> None:
         self._release_input_history()
         if not self._plane_state:
@@ -1203,7 +1249,7 @@ class NodeHost:
         operator's manual restart could cure.
         """
 
-        self._terminal = True
+        self._mark_terminal()
         if isinstance(
             error,
             (SourceGenerationEnded, SourceFailed, GenerationSchemaAdvanced),
@@ -1245,13 +1291,13 @@ class NodeHost:
                 self._refuse_start(error)
                 raise error
             self._phase = "failed"
-            self._terminal = True
+            self._mark_terminal()
             self._error = f"processor input signal {self._source_signal!r} is not active"
             raise LookupError(self._error)
         source = publication.value(self._source_signal)
         if not isinstance(source, SignalValue):
             self._phase = "failed"
-            self._terminal = True
+            self._mark_terminal()
             self._error = "processor publication lost its selected input signal"
             raise RuntimeError(self._error)
         if not self._data_plane.is_generation_live(self._source_signal):
@@ -1382,7 +1428,7 @@ class NodeHost:
                 self._finish_frozen_processor_failure(error)
             else:
                 self._active = False
-                self._terminal = True
+                self._mark_terminal()
                 self._phase = "done"
                 self._error = None
                 self._progress = None
@@ -1393,7 +1439,7 @@ class NodeHost:
         self._retire_plane_state()
         self._result = _UNRESOLVED
         self._active = False
-        self._terminal = True
+        self._mark_terminal()
         self._phase = "cancelled"
         self._error = None
         self._progress = None
@@ -1422,7 +1468,7 @@ class NodeHost:
         self._retire_plane_state()
         self._result = _UNRESOLVED
         self._active = False
-        self._terminal = True
+        self._mark_terminal()
         self._phase = "failed"
         self._error = f"{type(error).__name__}: {error}"
         self._progress = None
@@ -1543,7 +1589,7 @@ class NodeHost:
                 self._finish_follow_processor_cancelled()
             else:
                 self._active = False
-                self._terminal = True
+                self._mark_terminal()
                 self._phase = "done"
                 self._error = None
                 self._progress = None
@@ -1557,7 +1603,7 @@ class NodeHost:
         self._retire_plane_state()
         self._result = _UNRESOLVED
         self._active = False
-        self._terminal = True
+        self._mark_terminal()
         self._phase = "cancelled"
         self._error = None
         self._progress = None
@@ -1595,7 +1641,7 @@ class NodeHost:
         self._retire_plane_state()
         self._result = _UNRESOLVED
         self._active = False
-        self._terminal = True
+        self._mark_terminal()
         self._phase = "failed"
         self._error = f"{type(error).__name__}: {error}"
         self._progress = None
@@ -1676,7 +1722,7 @@ class NodeHost:
         self._data_plane.withdraw_processor(self)
         self._plane_state = False
         self._active = False
-        self._terminal = True
+        self._mark_terminal()
         self._phase = "failed"
         self._error = f"{type(error).__name__}: {error}"
         self._progress = None
@@ -1687,7 +1733,7 @@ class NodeHost:
         self._release_input_history()
         self._plane_state = False
         self._active = False
-        self._terminal = True
+        self._mark_terminal()
         self._phase = "cancelled"
         self._error = None
         self._progress = None

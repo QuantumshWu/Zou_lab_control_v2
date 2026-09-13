@@ -178,7 +178,7 @@ def create_window(
         )
     owns_render_processes = monitor_render is None
     if owns_render_processes:
-        monitor_render = plot.RenderProcess("zlc-monitor-render")
+        monitor_render = plot.RenderProcessPool("zlc-monitor-render")
         try:
             editor_render = plot.RenderProcess("zlc-edit-save-render")
         except BaseException:

@@ -10,6 +10,12 @@
 
 ## 1. 当前实施范围
 
+- 渲染发布改为零拷贝并按面板分进程；run 的已发布事件改为只追加落盘。测量在操作者真实密度（1470×1071、DPR 3）下取，分三层：console（display beat 100 ms 的真实窗口、py-spy 采样稳态 CPU）、capacity（去掉 beat、每个 host 前一帧到就喂下一帧，测管线自己的天花板）、store 微基准（百站、一天一百万 shot）。**run_host 那层是 DPR 1**（Qt5PlotWidget 在 ratio 3 的屏上报 1.0，前端 490×357），不能拿来读任何像素相关的数，本轮未用。
+  - **零拷贝**：raster worker 自时间里 `publish` 12.5→0 ms/s、合计 108→85 ms/s（−21%）；console 的渲染线程 4 面板 0.331→0.224 核、8 面板 0.396→0.237 核。满速下每帧渲染 CPU heatmap 4×4 进程 32.0→27.7 ms（−13%）、8 面板 32.1→28.2、curve 21.6→20.2（−7%）、camera 28.2→26.8（−5%）、facet64 36.1→34.7（−4%），单次 10 s 的运行间抖动约 ±3%。**零拷贝不省投影**：一帧的渲染 CPU 是 20–36 ms，被省掉的整帧搬运约 0.6 ms/帧/面板，所以它是 worker 自时间的 20%、整帧的 2–13%。
+  - **分进程**：4 面板满速 camera 4M 54.5→156.6 fps（2.87×）、facet64 image 35.1→104.6（2.98×）、heatmap 44.3→102.1（2.30×）、curve 65.8→108.2（1.64×）。**100 ms 的 beat 下不改任何帧率**（四面板 1.13 核，从没有人在等），代价是进程数与内存：4 面板 console 峰值 RSS 1037→1557 MB（3→6 进程），总 CPU 1.126→1.232 核。
+  - **落盘**：百站一天（1e6 shot）`occupied` 40 MB、float32 `counts` 410 MB、float64 791 MB；每事件写入 25–27 µs（10 shot/s 即 0.00025 核），读最近 1000 个事件 10–17 ms。接进 console 后 4 面板 1.232→1.208 核、9.1 fps 不变、无 stall。中途发现记录相机 monitor 会把 console 卡 6.9 秒、RSS 冲到 1.6 GB，已按「monitor 无历史可记」排除。
+  - 未做：display interval 仍是固定 beat（「不画没人看的帧」是产品判断，待用户拍板）；每事件仍有约 30 字节 JSON（占 occupancy 盘上开销的四分之三，把 revision 改成平面可再降一半）；标定/压缩/远端对象存储未做。真机未验收。
+
 - Pulse完成通知已改为独立、不claim的等待旁路，复用owner token、FIRE command_id与每run DONE Event；等待不占控制连接，Stop/超时/新Fire/接管/断线不会交付下一run的报告。Local/Remote/Virtual及installed forwarder使用同一wait_done接口，保留Virtual世界线程错误。Pulse Editor在后台Fire返回后开始等待，通过原Qt投递接收，删除有限run的100ms状态轮询依赖；保留其它状态显示定时器。直接并发及真实Qt按钮验证通过，运行中单次关闭可退出；无RTL/Config时序更改，客户端与server需同步更新。测试窗口已关闭，基准和探针不入Git。
 - 用户确认实验机使用板载USB_UART；board.xdc标明CH340C，但原Host/RTL均固定3M，超过WCH手册2Mbps范围及无流控连续应用建议。部署manifest现在统一uart_baud=460800，原header生成链投影给top/bridge，Host默认与CLI同源；Pulse执行时钟/geometry/fingerprint不变。实际RTL在该速率通过完整命令握手与14word/65byte含CRC回复，相关Host默认/strict manifest/NODELAY直接用例通过。用户必须在实验机build/program后才可真机验收，本机未执行build/synthesis/program；不能用仿真宣布现场丢字节已解决。厂商依据：WCH CH340 Datasheet §5.4（https://datasheet.lcsc.com/datasheet/pdf/e2f14e51aaa60c793f1f0cbc8a5d5faa.pdf），及WCH产品表的CH340C continuous 460800项。
 - UART接收改为实际read决定到达，队列为0仍提交短时read(1)；本机分包直接案例通过，但实验机仍收到64/65且crc_prefix_ok=false，因此该接收调整未解决现场故障，不能认定仅CRC尾字节迟到。失败诊断保存解析前有限前缀、请求及重试恢复后的真实回复hex；正常成功不格式化hex，不累计通信历史。真实RTL逐bit仿真13/14/15 words共585字节一致不代表实际USB/串口已验收。Remote旧socket现场已于takeover当时退出且NO_ACTION，不是活动LAN连接超时。Device日志按窗口宽度软换行，长无空格诊断可折行，复制仍保留原文。未build/program，探针及仿真产物不入Git。

@@ -1646,6 +1646,44 @@ class PublishBufferPool:
             self._free.append(block)
 
 
+#: Where this process's published fronts are written.  ``None`` means
+#: ordinary private memory, which is right for a notebook, a headless save
+#: and every in-process host: the front is read in the process that wrote it.
+_PUBLISH_POOL: Any = None
+
+
+def install_publish_pool(pool: Any) -> None:
+    """Publish this process's fronts through ``pool`` instead of private memory.
+
+    A front leaves the render child by being written twice: into a publish
+    block, and out of that block into the shared segment the frontend reads.
+    The second write exists only because the two are different memory.  The
+    child installs a pool whose blocks ARE those segments, and it is gone --
+    the same pixels, written once, where they will be read.
+
+    ``pool`` honours one method, ``take(nbytes) -> (writable, published)``: a
+    writable view for the worker that is about to fill it, and the read-only
+    view the front will carry.  WHO frees the block is the pool's own
+    business, and the two answers differ -- see :class:`PublishBufferPool`
+    and the render child's shared pool.
+
+    One pool per process, not per renderer: blocks are recycled BY SIZE and
+    every panel at one density publishes the same size, so a pool per
+    renderer would hold a spare frame each and share none of them.
+    """
+
+    global _PUBLISH_POOL
+    if pool is not None and not callable(getattr(pool, "take", None)):
+        raise TypeError("a publish pool must offer take(nbytes)")
+    _PUBLISH_POOL = pool
+
+
+def publish_pool() -> Any:
+    """The pool a renderer built now should publish through."""
+
+    return PublishBufferPool() if _PUBLISH_POOL is None else _PUBLISH_POOL
+
+
 class MatplotlibRenderer:
     """One fixed-layout Figure with persistent artists and selector overlays."""
 
@@ -1731,7 +1769,7 @@ class MatplotlibRenderer:
         #: locator and formatter, and a 35-cell facet paid for seventy such
         #: runs per steady frame in which nothing had moved.
         #: Recycled publish buffers; see PublishBufferPool.
-        self._publish_pool = PublishBufferPool()
+        self._publish_pool = publish_pool()
         #: Consecutive frames whose chrome background could not be reused.
         self._chrome_churn = 0
         #: Axes whose snapped box already honours their aspect, so
@@ -10713,8 +10751,13 @@ class MatplotlibRenderer:
             label.set_fontsize(self._annotation_size_that_fits(axis, content))
             label.set_visible(not interactive and bool(content))
 
-    def _rgba_buffer(self) -> np.ndarray:
-        """Return the already-painted canvas buffer in the surface contract."""
+    def _published_rgba(self) -> Any:
+        """The painted canvas as ONE publish block, read-only.
+
+        Every front leaves through here, as bytes or as an array, so the
+        block a front rests on is the block the pool made for it -- which is
+        what lets the render child publish without copying the frame again.
+        """
 
         source = np.asarray(self._figure.canvas.buffer_rgba(), dtype=np.uint8)
         target_width, target_height = self.plan.raster_size
@@ -10739,7 +10782,15 @@ class MatplotlibRenderer:
             copy_height = min(target_height, actual_height)
             pixels[:copy_height, :copy_width] = source[:copy_height, :copy_width]
         del pixels, writable
-        return np.frombuffer(published, dtype=np.uint8).reshape(shape)
+        return published
+
+    def _rgba_buffer(self) -> np.ndarray:
+        """Return the already-painted canvas buffer in the surface contract."""
+
+        target_width, target_height = self.plan.raster_size
+        return np.frombuffer(
+            self._published_rgba(), dtype=np.uint8
+        ).reshape((target_height, target_width, 4))
 
     def capture_rgba(
         self,
@@ -10761,25 +10812,16 @@ class MatplotlibRenderer:
         2x2 preset with DPR 2 that is 9 MB copied twice per published front,
         about 6 ms where 3 will do, on the worker that has to keep up with a
         live camera.
+
+        The block ITSELF is returned, never a view of a view of it: the
+        render child recognises its own pool's block and publishes it
+        without copying, and it can only recognise what it handed out.
         """
 
         if redraw:
             self.draw()
-        source = np.asarray(self._figure.canvas.buffer_rgba(), dtype=np.uint8)
         target_width, target_height = self.plan.raster_size
-        actual_height, actual_width = source.shape[:2]
-        if (actual_width, actual_height) == (target_width, target_height):
-            writable, published = self._publish_pool.take(source.nbytes)
-            np.copyto(
-                np.frombuffer(writable, dtype=np.uint8).reshape(source.shape),
-                source,
-            )
-            del writable
-            return published, target_height, target_width
-        # Fractional DPR takes the padded path, which builds the array on a
-        # pooled buffer anyway; its own read-only view is the front.
-        padded = self._rgba_buffer()
-        return padded.data, target_height, target_width
+        return self._published_rgba(), target_height, target_width
 
     def rgba(self) -> np.ndarray:
         """Return an immutable RGBA snapshot of the current scene.

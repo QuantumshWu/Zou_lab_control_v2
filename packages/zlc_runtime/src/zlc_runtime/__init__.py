@@ -5,6 +5,7 @@ from .dataset_output import (
     DatasetOutputDeclaration,
     LiveDatasetOutput,
 )
+from .recording import RECORDING_DIRECTORY, RunRecorder
 from .plane import (
     IndexedHistoryLease,
     RetainedPublicationExpired,
@@ -46,6 +47,8 @@ __all__ = (
     "SurfaceBatchArbiter",
     "SurfaceUpdate",
     "GenerationSchemaAdvanced",
+    "RECORDING_DIRECTORY",
+    "RunRecorder",
     "SignalDataPlane",
     "SignalValue",
     "SignalPublication",
