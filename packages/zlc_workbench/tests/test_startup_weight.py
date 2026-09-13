@@ -26,11 +26,15 @@ PACKAGES = REPO_ROOT / "packages"
 
 #: The engines.  A console composes the experiment, edits it and shows it;
 #: the pictures are drawn in render children, which import these in
-#: parallel, warm, before any panel asks.  ``scipy`` is not here: the
-#: VIRTUAL bench solves the startup hologram its simulated panel holds, and
-#: a simulated panel that has never been looked through is still a panel.
-FOREIGN_TO_A_CONSOLE = ("numba", "llvmlite", "IPython", "zlc_plot.fit",
-                        "zlc_plot.raster", "zlc_plot.session")
+#: parallel, warm, before any panel asks.  Matplotlib is among them: the
+#: console builds the plot STYLE to hand to those children and paints no
+#: artist of its own, and it used to import the renderer and scan the font
+#: list to construct that style.  ``scipy`` is not here, and only because
+#: the VIRTUAL bench's simulated panel holds a startup hologram -- 15 ms to
+#: solve and 0.39 s to import the transforms with; a real bench's console
+#: has no such device and no scipy.
+FOREIGN_TO_A_CONSOLE = ("numba", "llvmlite", "IPython", "matplotlib",
+                        "zlc_plot.fit", "zlc_plot.raster", "zlc_plot.session")
 
 
 def _sources() -> tuple[Path, ...]:

@@ -696,6 +696,36 @@ class RenderPolicyConfig:
         object.__setattr__(self, "distribution_count_shrink_ratio", shrink)
 
 
+#: The rc params a :class:`PlotStyleConfig` derives from its own typed
+#: policy, and therefore refuses to let an author set twice.  Declared
+#: here rather than read off ``_derived_rc_params`` because the check is
+#: about the vocabulary, not about any instance's values -- and valuing
+#: them resolves fonts.  ``test_style_rc_params`` keeps the two agreeing.
+DERIVED_RC_PARAM_NAMES = frozenset({
+    "font.size",
+    "font.weight",
+    "font.family",
+    "font.sans-serif",
+    "axes.labelsize",
+    "axes.labelweight",
+    "axes.titlesize",
+    "axes.titleweight",
+    "axes.titlepad",
+    "figure.titlesize",
+    "figure.titleweight",
+    "legend.fontsize",
+    "legend.title_fontsize",
+    "xtick.labelsize",
+    "ytick.labelsize",
+    "lines.linewidth",
+    "lines.linestyle",
+    "lines.marker",
+    "lines.markersize",
+    "image.cmap",
+    "image.origin",
+})
+
+
 @dataclass(frozen=True, slots=True)
 class PlotStyleConfig:
     """Complete backend-neutral visual style."""
@@ -724,7 +754,7 @@ class PlotStyleConfig:
         names = tuple(item.name for item in params)
         if len(names) != len(set(names)):
             raise ValueError("rc_params names must be unique")
-        conflicts = set(names) & set(self._derived_rc_params())
+        conflicts = set(names) & set(DERIVED_RC_PARAM_NAMES)
         if conflicts:
             raise ValueError(
                 "rc_params duplicate typed style policy: "
@@ -733,6 +763,18 @@ class PlotStyleConfig:
         object.__setattr__(self, "rc_params", params)
 
     def _derived_rc_params(self) -> dict[str, RcValue]:
+        """The rc params this style owns, VALUED -- so only for a renderer.
+
+        Reading ``fonts.sans_serif`` asks matplotlib which families this
+        machine has, which registers the shipped font and therefore imports
+        matplotlib.  That is the drawing process's business: a task console
+        builds this style to hand to its render children and never paints a
+        Matplotlib artist itself, so constructing one used to import
+        matplotlib and scan the font list -- 0.14 s of every console's open,
+        for an answer the process had no use for.  The construction-time
+        contract above needs the NAMES, which are declared once, above.
+        """
+
         fonts = self.fonts
         curve = self.artists.curve
         render = self.render

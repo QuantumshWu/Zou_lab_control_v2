@@ -11,12 +11,19 @@ serialized, and a lane at rest leaves the interpreter's rcParams alone.
 """
 from __future__ import annotations
 
+from pathlib import Path
+import subprocess
+import sys
 import threading
 
 import matplotlib
 import pytest
 
-from zlc_plot.style import build_plot_style, style_context
+from zlc_plot.style import (
+    DERIVED_RC_PARAM_NAMES,
+    build_plot_style,
+    style_context,
+)
 
 
 def _enter(style, overrides, entered, release, done):
@@ -104,6 +111,48 @@ def test_one_thread_may_not_hold_the_lane_with_two_different_styles() -> None:
         with pytest.raises(RuntimeError, match="enter the style once"):
             with style_context(style, {"lines.linewidth": 3.5}):
                 pass
+
+
+def test_the_names_a_style_owns_are_declared_once() -> None:
+    """The construction-time contract and the valued params must agree.
+
+    A style refuses an authored rc param it already derives, and the check
+    reads a declared NAME LIST rather than valuing the derived params --
+    because valuing them asks matplotlib which font families exist, which
+    registers the shipped font and imports matplotlib.  A task console
+    builds this style to hand to its render children and paints no
+    Matplotlib artist itself, so that cost 0.14 s of every console's open
+    plus the whole of matplotlib, for an answer it never read.
+
+    This is what keeps the declared list true.
+    """
+
+    style = build_plot_style()
+    assert set(style._derived_rc_params()) == set(DERIVED_RC_PARAM_NAMES)
+
+
+def test_building_a_style_does_not_reach_for_matplotlib(tmp_path) -> None:
+    """And the process that only DECLARES one never loads the renderer."""
+
+    script = (
+        "import sys" + chr(10)
+        + "import zou_lab_control" + chr(10)
+        + "from zlc_plot import DEFAULTS" + chr(10)
+        + "assert DEFAULTS.style.fonts.family" + chr(10)
+        + "found = sorted(" + chr(10)
+        + "    name for name in sys.modules" + chr(10)
+        + "    if name.split('.')[0] == 'matplotlib'" + chr(10)
+        + ")" + chr(10)
+        + "assert not found, found" + chr(10)
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[3],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 def test_the_math_font_is_this_library_s_decision() -> None:
