@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from enum import Enum
 import hashlib
 import math
@@ -4325,7 +4326,20 @@ def _anisotropic_bounds(
     }
 
 
+@lru_cache(maxsize=1)
 def builtin_fit_models() -> tuple[FitModelSpec, ...]:
+    """The catalogue, built once.
+
+    Thirteen frozen specs over module constants, so there is one right
+    answer and it never changes; built afresh on every call it was half a
+    millisecond each time, and every registry and every console beat that
+    asks about a fit model asks for it.
+    """
+
+    return _builtin_fit_models()
+
+
+def _builtin_fit_models() -> tuple[FitModelSpec, ...]:
     return (
         FitModelSpec(
             "lorentzian",

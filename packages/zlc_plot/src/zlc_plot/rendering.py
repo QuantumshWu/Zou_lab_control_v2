@@ -10747,9 +10747,17 @@ class MatplotlibRenderer:
                 or self._facet_focus_index == index
             )
             threshold_line.set_visible(not interactive)
-            label.set_text(content)
-            label.set_fontsize(self._annotation_size_that_fits(axis, content))
-            label.set_visible(not interactive and bool(content))
+            painted = not interactive and bool(content)
+            label.set_visible(painted)
+            if painted:
+                # MEASURED ONLY WHEN IT IS PAINTED.  Asking what size fits
+                # walks every line of the label through Matplotlib's text
+                # path, and on a facet grid that ran for every cell before
+                # the next line hid all but the focused one: three
+                # measurements a frame on a live histogram, none of which
+                # reached a pixel.
+                label.set_text(content)
+                label.set_fontsize(self._annotation_size_that_fits(axis, content))
 
     def _published_rgba(self) -> Any:
         """The painted canvas as ONE publish block, read-only.

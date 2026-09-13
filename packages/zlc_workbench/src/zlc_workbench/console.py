@@ -7005,10 +7005,22 @@ class ConsolePresenter:
         self._report(f"added {selected_id}", severity="task")
         return selected_id
 
-    def _logic_finalization_key(self, binding: LogicBinding) -> tuple:
-        """In-memory revisions that may change one draft's admission."""
+    def _logic_finalization_key(
+        self,
+        binding: LogicBinding,
+        source_options: tuple,
+        acquisition_options: object,
+    ) -> tuple:
+        """In-memory revisions that may change one draft's admission.
 
-        source_options = self._source_options(binding.descriptor, binding.node_id)
+        The two option sets are PASSED IN, not gathered here.  Building the
+        compatible-source set is the most expensive thing a finalization
+        does -- it walks every logic output and every published signal --
+        and this key existed to avoid doing it, so gathering it to decide
+        whether to gather it left the guard costing exactly what it saved,
+        every row, every beat.
+        """
+
         source = binding.draft.source_signal.strip()
         publication = (
             self.session.signal_plane.latest_publication(source)
@@ -7025,7 +7037,7 @@ class ConsolePresenter:
             source_options,
             publication is not None,
             armed,
-            self._acquisition_options(binding.node_id),
+            acquisition_options,
         )
 
     def _finalize_logic_binding(
@@ -7036,7 +7048,11 @@ class ConsolePresenter:
     ) -> LogicDraftFinalization:
         """Cache one owner finalization until its raw or external facts change."""
 
-        key = self._logic_finalization_key(binding)
+        source_options = self._source_options(binding.descriptor, binding.node_id)
+        acquisition_options = self._acquisition_options(binding.node_id)
+        key = self._logic_finalization_key(
+            binding, source_options, acquisition_options
+        )
         if force or binding.finalization is None or binding.finalization_key != key:
             binding.finalization = finalize_logic_draft(
                 binding.descriptor,
@@ -7044,10 +7060,8 @@ class ConsolePresenter:
                 installation=self.session.installation,
                 signal_plane=self.session.signal_plane,
                 workspace=self.session.workspace,
-                source_options=self._source_options(
-                    binding.descriptor, binding.node_id
-                ),
-                acquisition_options=self._acquisition_options(binding.node_id),
+                source_options=source_options,
+                acquisition_options=acquisition_options,
             )
             binding.finalization_key = key
         return binding.finalization

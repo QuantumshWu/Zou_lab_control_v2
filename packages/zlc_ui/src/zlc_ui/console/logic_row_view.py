@@ -38,6 +38,7 @@ class LogicRowView(FluentFrame):
         self.kind = str(kind)
         self._state = "idle"
         self._status_text = "idle"
+        self._status_colour = ""
         self._can_start = False
         self._can_stop = False
         self._task_takeover = False
@@ -125,9 +126,16 @@ class LogicRowView(FluentFrame):
         self._status_text = str(status_text or state)
         self.dot.set_color(self._STATE_COLORS[state])
         self.status_label.setText(self._status_text)
-        self.status_label.setStyleSheet(
-            f"color: {RED if state == 'error' else GREY}; background: transparent; border: none;"
-        )
+        # Written only when it CHANGES.  The colour has two values and a
+        # status tick arrives ten times a second, so almost every write said
+        # what the last one said -- and a stylesheet write re-parses the
+        # sheet, repolishes the widget and schedules a repaint regardless.
+        colour = RED if state == "error" else GREY
+        if colour != self._status_colour:
+            self._status_colour = colour
+            self.status_label.setStyleSheet(
+                f"color: {colour}; background: transparent; border: none;"
+            )
         running = state == "running"
         self.start_button.setText("Restart" if running else "Start")
 
