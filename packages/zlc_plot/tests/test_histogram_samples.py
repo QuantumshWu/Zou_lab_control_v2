@@ -35,6 +35,44 @@ def test_histogram_pools_the_whole_box() -> None:
     assert int(np.asarray(histogram.counts).sum()) == 8
 
 
+def test_a_steady_bin_grid_moves_its_bars_instead_of_rebuilding_them() -> None:
+    """The edges are the same numbers every frame; only the tops move.
+
+    ``set_verts`` builds one Path per bar to change two numbers in each --
+    four thousand of them on a sixty-four cell grid, every frame.  The
+    bars stay SEPARATE paths, because merging them into one compound path
+    would composite their shared edges once instead of twice.
+    """
+
+    session = PlotSession(_snapshot(1), HistogramPlot())
+    try:
+        session.rgba()
+        collection = next(
+            artist
+            for key, artist in session._renderer._artists.items()
+            if key.startswith("histogram") and hasattr(artist, "get_paths")
+        )
+        before = [id(path) for path in collection.get_paths()]
+        vertices = [path.vertices.copy() for path in collection.get_paths()]
+        session.update_data(_snapshot(2))
+        session.rgba()
+        after = collection.get_paths()
+        assert [id(path) for path in after] == before, (
+            "the bars were rebuilt for a bin grid that did not move"
+        )
+        # The same bars a rebuild would have produced, to the last number.
+        from zlc_plot.rendering import _histogram_vertices
+
+        edges, counts = session._renderer._artists["histogram:projection"]
+        rebuilt = _histogram_vertices(edges, counts)
+        for path, quad, original in zip(after, rebuilt, vertices):
+            assert np.array_equal(path.vertices[:4], quad)
+            assert np.array_equal(path.vertices[4], quad[0])
+            assert path.vertices.shape == original.shape
+    finally:
+        session.close()
+
+
 def test_histogram_spec_needs_no_axis_declaration() -> None:
     """No axis takes a ROLE here -- and every axis still has a fate.
 

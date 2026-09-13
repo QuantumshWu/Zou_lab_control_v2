@@ -1278,6 +1278,52 @@ def _image_cell_aspect(x: Any, y: Any) -> float | None:
     return pitches[0] / pitches[1]
 
 
+def _restyle_histogram_tops(
+    collection: Any, edges: np.ndarray, counts: np.ndarray, *, swapped: bool
+) -> bool:
+    """Move the bars' tops in place, or refuse and let the caller rebuild.
+
+    A histogram's bin EDGES are the same numbers frame after frame; only
+    the tops move.  ``set_verts`` rebuilds one Path per bar for that --
+    four thousand of them on a sixty-four cell grid, every frame -- to
+    change two numbers each.
+
+    The quad this wrote is (low, 0) (low, top) (high, top) (high, 0),
+    closed, so the tops are vertices 1 and 2 and everything else is the
+    bin's own geometry.  Anything that is not exactly that shape is
+    refused and rebuilt.  The bars stay SEPARATE paths on purpose:
+    merging them into one compound path would composite their shared
+    edges once instead of twice and change the picture.
+    """
+
+    paths = collection.get_paths()
+    counts = np.asarray(counts, dtype=float).reshape(-1)
+    lower = np.asarray(edges, dtype=float).reshape(-1)
+    if len(paths) != counts.size or lower.size != counts.size + 1:
+        return False
+    # The transposed rail draws the same quads with x and y swapped.
+    value = 0 if swapped else 1
+    across = 1 - value
+    for index, path in enumerate(paths):
+        vertices = path.vertices
+        if vertices.shape != (5, 2):
+            return False
+        if not (
+            vertices[0, across] == lower[index]
+            and vertices[1, across] == lower[index]
+            and vertices[2, across] == lower[index + 1]
+            and vertices[3, across] == lower[index + 1]
+            and vertices[0, value] == vertices[3, value] == vertices[4, value]
+        ):
+            return False
+    for path, top in zip(paths, counts):
+        vertices = path.vertices
+        vertices[1, value] = top
+        vertices[2, value] = top
+    collection.stale = True
+    return True
+
+
 def _histogram_vertices(edges: np.ndarray, counts: np.ndarray) -> np.ndarray:
     edges = np.asarray(edges, dtype=float).reshape(-1)
     counts = np.asarray(counts, dtype=float).reshape(-1)
@@ -5855,7 +5901,9 @@ class MatplotlibRenderer:
             )
             axes.add_collection(collection)
             self._artists[key] = collection
-        else:
+        elif not _restyle_histogram_tops(
+            collection, edges, counts, swapped=False
+        ):
             collection.set_verts(_histogram_vertices(edges, counts))
         self._artists[f"{key}:projection"] = (edges, counts)
         if limits is not None:
@@ -7917,7 +7965,9 @@ class MatplotlibRenderer:
                     right=False,
                     labelleft=False,
                 )
-        elif projection_changed:
+        elif projection_changed and not _restyle_histogram_tops(
+            collection, edges, counts, swapped=True
+        ):
             collection.set_verts(_histogram_vertices(edges, counts)[..., ::-1])
         peak = float(np.max(counts)) if counts.size else 0.0
         wanted = float(
