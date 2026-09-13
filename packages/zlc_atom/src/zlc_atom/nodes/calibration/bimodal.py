@@ -2,9 +2,11 @@
 
 This module is the single owner of the normal CDF, Gaussian overlap, and
 threshold classification primitives used by calibration and runtime readout.
-It intentionally has no device, runtime, or GUI imports; from the plot
-package it takes one number, the evidence two populations must show over
-one, which the plot's bimodal fit decides by as well.
+It intentionally has no device, runtime, or GUI imports, and none that
+carry a solver: from the plot package it takes one number, the evidence two
+populations must show over one, which the plot's bimodal fit decides by as
+well, and it takes it from the module that owns the number rather than from
+the fit engine that also reads it.
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ from dataclasses import dataclass
 from math import erf, isfinite, log, pi, sqrt
 
 import numpy as np
-from zlc_plot.fit import DECISIVE_BIC_GAIN
+from zlc_plot.evidence import DECISIVE_BIC_GAIN
 
 _SIGMA_FLOOR = 1e-12
 
@@ -27,7 +29,7 @@ _SIGMA_FLOOR = 1e-12
 #: neighbours: the uniformity ratio read 116 and the observable count 33.
 #: The calibration asks the same question of a site's reference frames: one
 #: that never loaded has no two states to label them by.  The number is
-#: ``zlc_plot.fit.DECISIVE_BIC_GAIN``: the plot's bimodal fit decides by it
+#: ``zlc_plot.evidence.DECISIVE_BIC_GAIN``: the plot's bimodal fit decides by it
 #: too, and it has one owner.
 
 #: What keeps a "state" off a handful of samples.  A Gaussian mixture's

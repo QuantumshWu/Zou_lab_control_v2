@@ -37,7 +37,7 @@ from zlc_atom.nodes.calibration import (
     SiteMap,
     TrapCalibration,
 )
-from zlc_plot.fit import DECISIVE_BIC_GAIN
+from zlc_plot.evidence import DECISIVE_BIC_GAIN
 from zlc_atom.nodes.calibration.pulse import ResolvedPulse, resolve_pulse
 from zlc_atom.nodes.slm_feedback import task as feedback_module
 from zlc_atom.nodes.slm_feedback.task import (

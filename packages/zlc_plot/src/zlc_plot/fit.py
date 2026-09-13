@@ -1,4 +1,16 @@
-"""Headless fit catalogue and solver used by every presentation backend."""
+"""Headless fit catalogue and solver used by every presentation backend.
+
+The CATALOGUE is what a model declares -- its parameters, their names and
+the symbols an operator types -- and the SOLVER is scipy.  Readers want
+different halves: a task console lists the parameters a panel publishes and
+never solves anything, while the render children solve and never list.  So
+the solvers are reached from inside the three functions that use them, and
+importing this module to read the catalogue costs neither scipy.optimize
+nor scipy.signal -- 0.64 s that a GUI process used to pay to learn a
+parameter's name.  A process that will solve warms them on purpose instead:
+see :func:`zlc_plot._kernel_warm.warm_process`, which every render child
+runs on a thread of its own before any panel asks it for anything.
+"""
 
 from __future__ import annotations
 
@@ -15,13 +27,11 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
 import numpy as np
-from scipy.ndimage import median_filter
-from scipy.optimize import least_squares, minimize, minimize_scalar
-from scipy.signal import find_peaks
 
 from . import _fit_compiled as _compiled_fit
 from ._validation import finite_real as _finite_real
 from ._validation import integer, text as _text
+from .evidence import DECISIVE_BIC_GAIN
 from .kinds import AxisRef
 
 if TYPE_CHECKING:
@@ -69,16 +79,6 @@ class ParameterDomain(str, Enum):
     PHASE_RADIANS = "phase_radians"
     #: A share of a whole: zero to one inclusive.
     UNIT_INTERVAL = "unit_interval"
-
-
-#: The evidence two populations must show over one before a two-population
-#: fit keeps its own parameters: the BIC gain of the pair over the nested
-#: single population, ten being Kass and Raftery's "very strong" (a Bayes
-#: factor of about 150).  A loaded site clears it by hundreds; a dark site
-#: whose one Gaussian the fitter split in two, 1.7 sigma apart, came in at
-#: +4.6 and was reported as loaded.  The readout's own two-state fit
-#: (``zlc_atom.nodes.calibration.bimodal``) decides by this same number.
-DECISIVE_BIC_GAIN = 10.0
 
 
 class UnitRelation(str, Enum):
@@ -1304,6 +1304,8 @@ def _bimodal_classifier_metrics(
     fidelity all disappear together until the shots arrive.
     """
 
+    from scipy.optimize import minimize_scalar  # noqa: PLC0415
+
     if result.model.model_id != "bimodal_gaussian" or not result.success:
         raise ValueError("threshold classification requires a successful bimodal fit")
     if result.reduced:
@@ -2527,6 +2529,8 @@ class FitEngine:
         options: FitOptions | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> FitResult:
+        from scipy.optimize import least_squares  # noqa: PLC0415
+
         spec = self.registry.get(model) if isinstance(model, str) else model
         if not isinstance(spec, FitModelSpec):
             raise TypeError("model must be a registered id or FitModelSpec")
@@ -4037,6 +4041,8 @@ def _doublet_candidates(
     coords: ArrayTuple,
     y: np.ndarray,
 ) -> Sequence[Sequence[float]]:
+    from scipy.signal import find_peaks  # noqa: PLC0415
+
     order = np.argsort(coords[0], kind="stable")
     x = coords[0][order]
     ordered_y = y[order]

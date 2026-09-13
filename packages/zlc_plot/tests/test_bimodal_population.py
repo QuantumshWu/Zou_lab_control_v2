@@ -23,8 +23,8 @@ from data_factory import (
     repeat_domain,
 )
 from zlc_plot import HistogramPlot, PlotSession
+from zlc_plot.evidence import DECISIVE_BIC_GAIN
 from zlc_plot.fit import (
-    DECISIVE_BIC_GAIN,
     FitEngine,
     FitOptions,
     _bimodal_classifier_metrics,

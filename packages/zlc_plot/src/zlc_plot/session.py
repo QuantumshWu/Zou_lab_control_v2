@@ -77,8 +77,8 @@ from ._selector_scene import (
 )
 from ._validation import readonly_copy as _readonly
 from .config import DEFAULTS, PlotLibraryDefaults
+from .evidence import DECISIVE_BIC_GAIN
 from .fit import (
-    DECISIVE_BIC_GAIN,
     FitCancelled,
     FitEngine,
     FacetFitBatchResult,

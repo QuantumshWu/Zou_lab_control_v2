@@ -97,6 +97,63 @@ assert "zlc_workbench" not in sys.modules
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
+def test_reading_the_node_descriptors_does_not_import_a_solver(
+    tmp_path: Path,
+) -> None:
+    """Discovery reads declarations; it must not load anybody's engine.
+
+    A logic node is discovered by importing the module that exports its
+    descriptor, so every module that module reaches is on the startup path
+    of every process that lists the nodes -- and the task console lists
+    them before it shows a window.  Three edges had grown across it: the
+    readout's two-state classification took one float from the plot's fit
+    engine, the feedback task took an inverse normal and an assignment
+    solver, and the SLM's file formats share a module with its phase
+    retrieval.  Together they cost 1.27 of the 1.40 s discovery took, and
+    put scipy, numba and llvmlite -- some two hundred megabytes -- into a
+    GUI process that renders nothing itself: the panels are drawn in the
+    render children, which import the engines in parallel, warm, before
+    any panel asks.
+
+    Each solver is still reached, unchanged, from inside the function that
+    uses it.  This is what keeps it that way.
+    """
+
+    blocked = ("scipy", "numba", "llvmlite", "matplotlib")
+    script = f'''
+import sys
+import traceback
+import zou_lab_control
+
+BLOCKED = {blocked!r}
+reached = []
+
+
+class NameTheImporter:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split(".", 1)[0] in BLOCKED and not reached:
+            reached.append((fullname, "".join(traceback.format_stack()[:-1])))
+        return None
+
+
+sys.meta_path.insert(0, NameTheImporter())
+from zlc_atom.nodes import discover_logic_nodes
+
+assert discover_logic_nodes(), "discovery found no logic nodes"
+if reached:
+    name, where = reached[0]
+    raise AssertionError("discovery imported " + name + ":" + chr(10) + where)
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
 def test_virtual_runtime_branch_scan_is_non_vacuous_and_clean() -> None:
     paths = _python_files("")
     pattern = re.compile(r"\bif[^\r\n]*\bvirtual\b|\bvirtual\b[^\r\n]*\bif\b", re.IGNORECASE)

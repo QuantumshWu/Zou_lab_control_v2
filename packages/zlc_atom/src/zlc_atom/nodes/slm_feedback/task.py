@@ -11,8 +11,6 @@ from types import MappingProxyType
 from typing import Any, Mapping
 
 import numpy as np
-from scipy import special
-from scipy.optimize import linear_sum_assignment
 from zlc_data import (
     COMPONENT,
     SCAN_POINT,
@@ -215,6 +213,26 @@ def _readout_frames(snapshot: object, *, shots: int) -> np.ndarray:
     return selected[:, 0]
 
 
+def _bonferroni_z(count: int) -> float:
+    """The two-sided 95% z for ``count`` simultaneous statements about sites.
+
+    One owner, because there are two such statements and they are the same
+    statement: the observable's ratio interval and the visibility margin
+    both have to hold for every site at once, and each used to spell out
+    the level and the inverse normal for itself.
+
+    The solver is reached from inside rather than at the top of this module.
+    Reading a node's descriptor imports this file -- a console discovers its
+    logic nodes before it draws anything -- and scipy on that path was 0.6 s
+    of every console's open, paid by every operator, for a function that is
+    called when the feedback loop runs.
+    """
+
+    from scipy.special import ndtri  # noqa: PLC0415
+
+    return float(ndtri(1.0 - 0.05 / (2.0 * int(count))))
+
+
 def _ratio_interval(
     values: np.ndarray,
     standard_error: np.ndarray,
@@ -231,9 +249,7 @@ def _ratio_interval(
     ):
         raise ValueError("observable and uncertainty must be finite and positive")
     relative = error / measured
-    z = float(
-        special.ndtri(1.0 - 0.05 / (2.0 * len(measured)))
-    )
+    z = _bonferroni_z(len(measured))
     logarithm = np.log(measured)
     estimate = float(np.exp(np.max(logarithm) - np.min(logarithm)))
     lower = float(
@@ -1114,6 +1130,11 @@ def _register_target_sites(
     the Calibration never sees a Target, and this roster, its provenance
     and its receipt exist only for the run that measures it.
     """
+
+    # Reached from inside for the same reason as ``_bonferroni_z``: this
+    # file is imported to read a descriptor, and the assignment is solved
+    # only when a Target is actually registered against detected sites.
+    from scipy.optimize import linear_sum_assignment  # noqa: PLC0415
 
     target = np.asarray(target_intensity, dtype=np.float32)
     if (
@@ -3895,11 +3916,8 @@ class SlmFeedbackTask:
                 else:
                     score = confidence_lower = confidence_upper = relative_sem = float("inf")
                 visibility = int(np.count_nonzero(observable_valid))
-                visible_margin = observed[observable_valid] - float(
-                    special.ndtri(
-                        1.0
-                        - 0.05 / (2.0 * self._site_count)
-                    )
+                visible_margin = observed[observable_valid] - _bonferroni_z(
+                    self._site_count
                 ) * error[observable_valid]
                 visibility_margin = (
                     None

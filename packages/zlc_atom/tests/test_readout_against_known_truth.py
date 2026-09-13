@@ -31,7 +31,7 @@ from zlc_atom.nodes.calibration.calibration import (
     detect_sites,
     fit_bimodal,
 )
-from zlc_plot.fit import DECISIVE_BIC_GAIN
+from zlc_plot.evidence import DECISIVE_BIC_GAIN
 from zlc_atom.nodes.slm_feedback.task import _support
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"

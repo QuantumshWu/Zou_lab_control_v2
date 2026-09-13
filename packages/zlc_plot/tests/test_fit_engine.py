@@ -1002,8 +1002,14 @@ def test_rank_deficient_cell_stays_on_compiled_batch_without_scalar_fallback(
     def forbidden_scalar(*_args, **_kwargs):
         raise AssertionError("compiled batch fell back to scipy least_squares")
 
+    # Patched where it LIVES, not where it was named: the engine reaches
+    # its solver from inside the function that solves, so that a process
+    # reading the catalogue never imports scipy, and a copy bound onto the
+    # engine's module at import time no longer exists to intercept.  This
+    # also makes the assertion stronger -- any route to the scalar solver
+    # trips it, not just the one spelling.
     monkeypatch.setattr(
-        import_module("zlc_plot.fit"),
+        import_module("scipy.optimize"),
         "least_squares",
         forbidden_scalar,
     )

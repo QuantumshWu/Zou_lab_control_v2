@@ -639,6 +639,20 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
         FacetGridPlot(AxisRef.cell_data("y"), HistogramPlot()),
         size="2x2",
     )
+    if not proceed():
+        return
+    # The fit solvers, last, and as imports rather than as a fit.  A panel
+    # is asked to draw before it is ever asked to fit, so these come after
+    # every picture; but they are 0.64 s to import, and the engine reaches
+    # them from inside the functions that solve precisely so that a process
+    # which only reads a model's declaration -- a task console listing the
+    # parameters a panel publishes -- never imports them at all.  This is
+    # the process that will solve, and this is the thread with nothing else
+    # to do, so it pays for them here rather than in the operator's first
+    # fit.  The kernels themselves are not run: their compiled code is on
+    # the disk cache already, which is what the rest of this file is for.
+    from scipy.optimize import least_squares, minimize_scalar  # noqa: F401, PLC0415
+    from scipy.signal import find_peaks  # noqa: F401, PLC0415
 
 
 # ------------------------------------------------------------ the warmer

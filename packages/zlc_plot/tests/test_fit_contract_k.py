@@ -69,8 +69,13 @@ def test_warm_start_is_extra_candidate_not_an_early_success_exit(monkeypatch) ->
             jac=np.ones((5, 1)),
         )
 
+    # Where the solver LIVES: the engine imports it inside the function
+    # that solves, so that reading the catalogue costs no scipy, and there
+    # is no copy bound onto the engine's module to replace instead.
+    monkeypatch.setattr(
+        import_module("scipy.optimize"), "least_squares", fake_least_squares
+    )
     fit_module = import_module("zlc_plot.fit")
-    monkeypatch.setattr(fit_module, "least_squares", fake_least_squares)
     registry = fit_module.FitModelRegistry((model,))
     result = FitEngine(registry).fit(
         model,

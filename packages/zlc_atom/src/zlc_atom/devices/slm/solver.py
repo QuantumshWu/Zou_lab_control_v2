@@ -13,7 +13,6 @@ import unicodedata
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-from scipy import fft, ndimage
 from zlc_durable import atomic_write_file, write_readable_json
 
 from .device import canonical_phase
@@ -757,6 +756,8 @@ def _canonical_unshifted_phase(field: np.ndarray) -> np.ndarray:
     return phase
 
 def _phase_snapshot(field: np.ndarray) -> np.ndarray:
+    from scipy import fft  # noqa: PLC0415
+
     return _readonly(fft.fftshift(_canonical_unshifted_phase(field)))
 
 def _cartesian_support(
@@ -801,6 +802,15 @@ def solve_phase(
     pattern on the sites each candidate -- three times the loop's own
     per-step correction, injected as noise the controller then chased.
     """
+
+    # The transforms are reached here, not at the top of this module.  This
+    # file declares the SLM's targets, presets and file formats as well as
+    # solving for phase, and a logic node's descriptor names one of those
+    # file readers as its artifact codec -- so discovering the nodes, which
+    # a task console does before it draws anything, used to import scipy.
+    # That was half a second of every console's open for a transform that
+    # runs when somebody actually solves a pattern.
+    from scipy import fft, ndimage  # noqa: PLC0415
 
     tolerance = float(support_tolerance)
     if not np.isfinite(tolerance) or tolerance < 1.0:
