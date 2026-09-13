@@ -713,6 +713,17 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
                 continue
             try:
                 engine.fit(models[0], coordinates, observations)
+                # A SECOND entry, and the one a grid uses: single fits take
+                # the serial wrapper and multi-cell fits the same routine
+                # under prange, so warming one leaves the other to the
+                # operator.  Measured on a four-cell curve grid: the first
+                # fit in a process cost 104 ms and the next 26, and the
+                # difference was this dispatch.
+                engine.fit_batch(
+                    models[0],
+                    (coordinates, coordinates),
+                    (observations, observations),
+                )
             except Exception:  # noqa: BLE001 -- warming, never fatal
                 traceback.print_exc()
 
