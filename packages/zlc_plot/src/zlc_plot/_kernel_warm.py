@@ -718,12 +718,60 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
                 continue
             try:
                 engine.fit(models[0], coordinates, observations)
-                # A SECOND entry, and the one a grid uses: single fits take
-                # the serial wrapper and multi-cell fits the same routine
-                # under prange, so warming one leaves the other to the
-                # operator.  Measured on a four-cell curve grid: the first
-                # fit in a process cost 104 ms and the next 26, and the
-                # difference was this dispatch.
+            except Exception:  # noqa: BLE001 -- warming, never fatal
+                traceback.print_exc()
+
+    def load_batch_solvers(proceed: Callable[[], bool]) -> None:
+        """The solver entries a GRID takes, once the drawing is warm.
+
+        A single fit takes the compiled routine's serial wrapper and a
+        grid's cells the same routine under prange; a camera fit hands the
+        engine a whole image and takes the separable stripe solver.  Three
+        dispatches, and warming the first leaves the operator the other
+        two: measured, a four-cell grid's first fit cost 104 ms in a fresh
+        process against 26 in the same one afterwards, and an image
+        panel's first fit 15 ms over its second.
+
+        They are LAST and they ask ``proceed``, unlike the imports above,
+        because compiling a parallel entry saturates the machine: run on
+        the uninterruptible thread it delayed a mounting panel's picture by
+        six seconds and let a live fit hit its one-second deadline.  A
+        child taken before it gets here pays the dispatch on its first grid
+        fit, which is what it paid before this existed; a spare child that
+        is left alone does not.
+        """
+
+        from .fit import (  # noqa: PLC0415
+            FitEngine,
+            FitTarget,
+            RegularImageFitInput,
+            default_fit_registry,
+        )
+
+        engine = FitEngine()
+        registry = default_fit_registry()
+        rows, columns = 24, 32
+        y_grid, x_grid = np.mgrid[0:rows, 0:columns].astype(np.float64)
+        series_x = np.linspace(-6.0, 6.0, 256)
+        series_y = 5.0 * np.exp(-0.5 * ((series_x - 0.4) / 1.3) ** 2) + 0.8
+        samples = np.concatenate(
+            [np.linspace(8.0, 16.0, 600), np.linspace(34.0, 46.0, 200)]
+        )
+        counts, edges = np.histogram(samples, bins=40)
+        batches = {
+            FitTarget.SERIES: ((series_x,), series_y),
+            FitTarget.HISTOGRAM: (
+                (0.5 * (edges[:-1] + edges[1:]),),
+                counts.astype(np.float64),
+            ),
+        }
+        for target, (coordinates, observations) in batches.items():
+            if not proceed():
+                return
+            models = registry.models_for(target)
+            if not models:
+                continue
+            try:
                 engine.fit_batch(
                     models[0],
                     (coordinates, coordinates),
@@ -731,15 +779,8 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
                 )
             except Exception:  # noqa: BLE001 -- warming, never fatal
                 traceback.print_exc()
-
-        # And the THIRD entry: a camera fit hands the engine a grid rather
-        # than flattened coordinates and takes the separable stripe solver,
-        # which the two above never touch.  Measured, it was the 15 ms an
-        # image panel's first fit cost over its second.
         image_models = registry.models_for(FitTarget.IMAGE)
-        if image_models:
-            rows_axis = np.arange(rows, dtype=np.float64)
-            columns_axis = np.arange(columns, dtype=np.float64)
+        if image_models and proceed():
             frame = (
                 120.0
                 * np.exp(
@@ -751,10 +792,17 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
                 )
                 + 4.0
             )
-            regular = RegularImageFitInput(columns_axis, rows_axis, frame)
+            regular = RegularImageFitInput(
+                np.arange(columns, dtype=np.float64),
+                np.arange(rows, dtype=np.float64),
+                frame,
+            )
             try:
                 engine.fit(image_models[0], regular)
-                engine.fit_batch(image_models[0], (regular, regular), (None, None))
+                if proceed():
+                    engine.fit_batch(
+                        image_models[0], (regular, regular), (None, None)
+                    )
             except Exception:  # noqa: BLE001 -- warming, never fatal
                 traceback.print_exc()
 
@@ -797,6 +845,7 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
         FacetGridPlot(AxisRef.cell_data("y"), HistogramPlot()),
         size="2x2",
     )
+    load_batch_solvers(proceed)
 
 
 # ------------------------------------------------------------ the warmer
