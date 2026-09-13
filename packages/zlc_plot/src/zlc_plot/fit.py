@@ -2023,7 +2023,7 @@ class FitEngine:
         #: keying on their bytes costs a hash.  Measured on a sixty-four
         #: cell histogram frame: 4.9 ms of the 21 ms both batches spent.
         histogram_bounds: dict[bytes, Any] = {}
-        confining = model.targets == (FitTarget.HISTOGRAM,)
+        confining = _confines_to_histogram(model)
         for cell, coordinate_item in enumerate(coordinates):
             check()
             try:
@@ -3261,6 +3261,17 @@ def _solver_bounds(
     return np.asarray(lower), np.asarray(upper)
 
 
+def _confines_to_histogram(model: FitModelSpec) -> bool:
+    """Whether :func:`_histogram_bounds` has anything to say about a model.
+
+    Asked by the batch loop before it spends a hash on remembering the
+    answer, and by the function itself before it computes one.  Two copies
+    of this question is how a cache outlives the rule it was keyed on.
+    """
+
+    return model.targets == (FitTarget.HISTOGRAM,)
+
+
 def _histogram_bounds(
     model: FitModelSpec,
     coordinates: ArrayTuple,
@@ -3287,7 +3298,7 @@ def _histogram_bounds(
     the limit is refused.
     """
 
-    if model.targets != (FitTarget.HISTOGRAM,):
+    if not _confines_to_histogram(model):
         return bounds
     x = np.asarray(coordinates[0], dtype=np.float64).reshape(-1)
     step = _histogram_step(x)
