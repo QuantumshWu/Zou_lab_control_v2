@@ -136,6 +136,48 @@ def _assert_shared_marks_boundary_labels(session: PlotSession) -> None:
     assert len(x_values) == 1
     assert len(y_values) == 1
 
+def test_the_ladder_is_walked_once_for_the_whole_grid() -> None:
+    """One answer per question, not one per cell.
+
+    Every cell of a facet grid carries the same span in the same size of
+    box, so the ladder has one answer for the grid's x and one for its y --
+    two more where a boundary cell's labels change the room it has.  Each
+    cell owning its own locator meant walking the same ladder once per
+    cell: measured at 88 ms of a sixty-four cell first frame, 1536 calls
+    for four distinct answers.
+    """
+
+    original = SmartOffsetLocator._unit
+
+    def walks_for(points: int) -> int:
+        walked: list[tuple[float, float]] = []
+
+        def counted(self, lower, upper):
+            walked.append((float(lower), float(upper)))
+            return original(self, lower, upper)
+
+        SmartOffsetLocator._unit = counted
+        try:
+            session = PlotSession(
+                _frames_snapshot(points=points), _FRAMES_SPEC, size="8x8"
+            )
+            try:
+                assert len(_visible_cells(session)) == points
+                _assert_shared_marks_boundary_labels(session)
+            finally:
+                session.close()
+        finally:
+            SmartOffsetLocator._unit = original
+        return len(walked)
+
+    nine = walks_for(9)
+    twenty_five = walks_for(25)
+    assert twenty_five == nine, (nine, twenty_five)
+    # An answer per axis, per distinct room -- a boundary cell carries
+    # labels and an interior one does not -- and nothing per cell.
+    assert nine <= 8, nine
+
+
 def test_frames_facet_cells_share_tick_marks_and_gate_labels() -> None:
     session = PlotSession(_frames_snapshot(), _FRAMES_SPEC, size="8x8")
     try:

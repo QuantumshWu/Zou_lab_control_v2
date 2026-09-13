@@ -554,13 +554,82 @@ class _MeasuredLocator(ticker.Locator):
         index = self._nearest(value)
         return "center" if index is None or index >= len(self.aligns) else self.aligns[index]
 
-    def _cache_key(self, vmin: float, vmax: float) -> tuple[object, ...]:
+    #: Where one figure keeps the ladder's answers.  A locator belongs to
+    #: one Axis, and a facet grid gives sixty-four cells the same span in
+    #: the same box, so the same ladder was walked once per cell for one
+    #: answer: measured at 88 ms of a sixty-four cell first frame, 1536
+    #: calls producing four distinct answers.  The figure is the scope the
+    #: inputs are constant over -- one dpi, one font set, one measurer --
+    #: and the lifetime the answers may be trusted for.
+    _PLACEMENT_CACHE_ATTRIBUTE = "_zlc_tick_placements"
+
+    def _shared_key(
+        self,
+        vmin: float,
+        vmax: float,
+        extra: tuple[object, ...],
+        geometry: tuple[float, float, float, float | None, bool] | None,
+    ) -> tuple[object, ...] | None:
+        """What the answer depends on -- which is not the axis it was asked on.
+
+        The geometry is passed in because the per-axis key already measured
+        it, and measuring it asks the layout for the room this axis was
+        given.
+        """
+
+        if geometry is None:
+            return None
+        return (
+            type(self).__name__,
+            float(vmin),
+            float(vmax),
+            getattr(self.axis, "axis_name", None),
+            geometry,
+            self.max_ticks,
+            self.label_pt,
+            id(self.measure),
+            tuple(rcParams.get("font.sans-serif", ())),
+            extra,
+        )
+
+    def _placement(
+        self,
+        key: tuple[object, ...] | None,
+        solve: "Callable[[], _Placement]",
+    ) -> "_Placement":
+        """The ladder's answer for ``key``, walked once per figure.
+
+        A ``_Placement`` is frozen and its fields are tuples, and every
+        consumer copies before it keeps anything, so one answer is safe to
+        hand to every axis that asked the same question.
+        """
+
+        axes = getattr(self.axis, "axes", None)
+        figure = getattr(axes, "figure", None)
+        if key is None or figure is None:
+            return solve()
+        cache = getattr(figure, self._PLACEMENT_CACHE_ATTRIBUTE, None)
+        if cache is None:
+            cache = {}
+            setattr(figure, self._PLACEMENT_CACHE_ATTRIBUTE, cache)
+        answer = cache.get(key)
+        if answer is None:
+            answer = solve()
+            cache[key] = answer
+        return answer
+
+    def _cache_key(
+        self,
+        vmin: float,
+        vmax: float,
+        geometry: tuple[float, float, float, float | None, bool] | None,
+    ) -> tuple[object, ...]:
         axis = self.axis
         axes = getattr(axis, "axes", None)
         return (
             float(vmin), float(vmax), id(axis),
             id(getattr(axes, "figure", None)), getattr(axis, "axis_name", None),
-            self._geometry(), self.max_ticks, self.label_pt, id(self.measure),
+            geometry, self.max_ticks, self.label_pt, id(self.measure),
             tuple(rcParams.get("font.sans-serif", ())),
         )
 
@@ -772,7 +841,8 @@ class SmartOffsetLocator(_MeasuredLocator):
         return self._settle(lower, upper, tiers)
 
     def tick_values(self, vmin: float, vmax: float) -> list[float]:
-        cache_key = (*self._cache_key(vmin, vmax), self.steps, self.oom)
+        geometry = self._geometry()
+        cache_key = (*self._cache_key(vmin, vmax, geometry), self.steps, self.oom)
         if self._tick_cache_key == cache_key:
             return self.ticks
         lower, upper = sorted((float(vmin), float(vmax)))
@@ -784,7 +854,10 @@ class SmartOffsetLocator(_MeasuredLocator):
             self.n_array = []
             self._tick_cache_key = cache_key
             return self.ticks
-        placement = self._unit(lower, upper)
+        placement = self._placement(
+            self._shared_key(vmin, vmax, (self.steps, self.oom), geometry),
+            lambda: self._unit(lower, upper),
+        )
         payload = placement.payload
         if payload is None:
             self._settled = None
@@ -1072,7 +1145,11 @@ class DeclaredLocator(_MeasuredLocator):
         self.FLOOR = 1 if self.zero_optional else 2
 
     def tick_values(self, vmin: float, vmax: float) -> list[float]:
-        cache_key = (*self._cache_key(vmin, vmax), self.count, self.text_lengths, self.zero_optional, self.span)
+        geometry = self._geometry()
+        cache_key = (
+            *self._cache_key(vmin, vmax, geometry),
+            self.count, self.text_lengths, self.zero_optional, self.span,
+        )
         if self._tick_cache_key == cache_key:
             return self.ticks
         lower, upper = sorted((float(vmin), float(vmax)))
@@ -1085,16 +1162,37 @@ class DeclaredLocator(_MeasuredLocator):
             self._store(_EMPTY, False)
             self._tick_cache_key = cache_key
             return self.ticks
-        ticks = tuple(float(value) for value in np.linspace(first, last, self.count))
-        tiers: list[list[_Candidate]] = []
-        for length in self.text_lengths:
-            texts = tuple(self.text(tick, length) for tick in ticks)
-            tier: list[_Candidate] = []
-            if self.zero_optional and ticks[0] == 0.0:
-                tier.append(_Candidate(ticks[1:], texts[1:]))
-            tier.append(_Candidate(ticks, texts))
-            tiers.append(tier)
-        self._store(self._settle(lower, upper, tiers), vmin > vmax)
+        def solve() -> _Placement:
+            ticks = tuple(
+                float(value) for value in np.linspace(first, last, self.count)
+            )
+            tiers: list[list[_Candidate]] = []
+            for length in self.text_lengths:
+                texts = tuple(self.text(tick, length) for tick in ticks)
+                tier: list[_Candidate] = []
+                if self.zero_optional and ticks[0] == 0.0:
+                    tier.append(_Candidate(ticks[1:], texts[1:]))
+                tier.append(_Candidate(ticks, texts))
+                tiers.append(tier)
+            return self._settle(lower, upper, tiers)
+
+        self._store(
+            self._placement(
+                self._shared_key(
+                    vmin,
+                    vmax,
+                    (
+                        self.count,
+                        self.text_lengths,
+                        self.zero_optional,
+                        self.span,
+                    ),
+                    geometry,
+                ),
+                solve,
+            ),
+            vmin > vmax,
+        )
         self._tick_cache_key = cache_key
         return self.ticks
 
