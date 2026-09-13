@@ -2952,12 +2952,30 @@ def _render_process_main(connection: Connection, name: str) -> None:
         the child.
         """
 
+        import gc
+
         from ._kernel_warm import warm_process
 
         try:
             warm_process(proceed=lambda: not requested.is_set())
         except Exception:  # noqa: BLE001 -- reported, never fatal
             traceback.print_exc()
+        # WHAT THE WARMING BUILT IS PERMANENT, so stop rescanning it.  A
+        # warmed child holds about two hundred thousand tracked objects --
+        # Matplotlib's font and style tables, numba's typing context, the
+        # compiled kernels -- none of which will ever become garbage, and
+        # the default thresholds walk all of them whenever enough new
+        # objects have been made.  Building a sixty-four cell grid makes
+        # tens of thousands, so it walked into a full collection partway
+        # through: measured, the same panel's first frame took 488 ms at
+        # best, 599 in the middle and 767 at worst.  Frozen, and with the
+        # collector asked less often now that a sweep is cheap, the same
+        # panel is 477 / 484 / 492 -- the tail is not shortened, it is
+        # gone.  Cycles made AFTER this are collected as they always were;
+        # what is frozen is what was already going to outlive the child.
+        gc.collect()
+        gc.freeze()
+        gc.set_threshold(20000, 50, 50)
 
     Thread(target=warm, name=f"zlc-render-{name}-warm", daemon=True).start()
 
