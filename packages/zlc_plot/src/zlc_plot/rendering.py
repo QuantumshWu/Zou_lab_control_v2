@@ -27,6 +27,7 @@ from typing import Any, Iterable, Iterator, Mapping, Sequence
 import weakref
 
 import numpy as np
+from matplotlib.artist import Artist
 from matplotlib.collections import LineCollection
 from matplotlib.patches import Rectangle
 
@@ -1505,6 +1506,63 @@ def _truncate_fit_diagnostic(message: str, maximum: int) -> str:
     return text[: maximum - 3] + "..."
 
 
+def _tick_params_key(axis: Any) -> tuple[object, ...]:
+    """One axis' tick configuration, minus the label size (see the caller)."""
+
+    return tuple(
+        sorted(
+            (name, value)
+            for name, value in axis.get_tick_params().items()
+            if name != "labelsize"
+        )
+    )
+
+
+def _tick_stroke(line: Any) -> tuple[object, ...]:
+    """What makes two tick artists the same stroke, so one can carry both."""
+
+    return (
+        str(line.get_marker()),
+        float(line.get_markersize()),
+        float(line.get_markeredgewidth()),
+        str(line.get_color()),
+        str(line.get_markeredgecolor()),
+        float(line.get_linewidth()),
+        str(line.get_linestyle()),
+        line.get_alpha(),
+        float(line.get_zorder()),
+    )
+
+
+class _FacetChromeLabels(Artist):
+    """One figure artist that paints a grid's boundary tick labels.
+
+    The labels are the CELLS' OWN ``Tick`` label artists and their offset
+    texts: their transform, their pad, their alignment and their position all
+    come from the same ``Axis`` machinery a per-cell draw would have run, so
+    nothing about where a label lands is re-derived here.  What changes is
+    only who draws them -- a grid cell's Axis is off -- and one figure child
+    is the cheapest way to say that.
+
+    They are the one piece of a grid's chrome that lies entirely OUTSIDE
+    every cell's box, so nothing a cell draws can cover them: they belong to
+    the composed background and are painted exactly once.
+    """
+
+    zorder = 3.0
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.texts: tuple[Any, ...] = ()
+
+    def draw(self, renderer: Any) -> None:
+        if not self.get_visible():
+            return
+        for text in self.texts:
+            text.draw(renderer)
+        self.stale = False
+
+
 @dataclass(frozen=True, slots=True)
 class RenderFrame:
     """Complete immutable input for one renderer presentation transaction."""
@@ -1857,6 +1915,24 @@ class MatplotlibRenderer:
             int, tuple[tuple[Any, ...], _RecordedDraw | None]
         ] = {}
         self._boundary_chrome_signature: tuple[object, ...] | None = None
+        #: What each visible grid cell's title says, from the pass that fits
+        #: it to the cell's room.  The chrome group paints them.
+        self._facet_cell_titles: dict[int, tuple[str, float]] = {}
+        #: What the grid's chrome was built from.  Cell boxes, view limits,
+        #: tick configuration and titles are everything its artists are a
+        #: function of, so an unchanged tuple is an unchanged picture.
+        self._facet_chrome_signature: tuple[object, ...] | None = None
+        #: Which CELL each chrome artist belongs to, by artist id.  A title
+        #: is a figure child and a mark is not, so ownership is not a thing
+        #: the artist can be asked -- and the compose asks it twice: to
+        #: decide, per cell, whether that cell's chrome is composed beside
+        #: its data, and to bring it forward when the kernels paint the cell.
+        self._facet_chrome_owners: dict[int, Any] = {}
+        #: How MANY of each the chrome needs, per cell.  Same shape, and the
+        #: artists already built are moved instead of replaced -- four
+        #: hundred artists retired and remade per revision is what a rebuild
+        #: costs, and a live grid's ticks move on every one.
+        self._facet_chrome_shape: tuple[object, ...] | None = None
         #: Canonical raw data behind each displayed line.  The artist may hold
         #: a display-resolution envelope, but fit-source presentation and any
         #: future redraw read this one source truth.  Artist retirement and
@@ -2083,6 +2159,22 @@ class MatplotlibRenderer:
                 if axes_plan.cell_index is not None
                 else axes_plan.role
             )
+            if axes_plan.role == "facet_cell":
+                # A grid cell carries the tick POLICY -- its locator, its
+                # formatter, which of its labels the boundary shows -- and
+                # draws none of the chrome that policy decides.  Matplotlib
+                # drawing sixty-four cells' spines and axes was 237-595 ms of
+                # a first frame, the larger half of it; the same marks,
+                # frames and labels are painted by the grouped artists
+                # :meth:`_sync_facet_cell_chrome` keeps, and this is what
+                # takes the per-cell draw out.  ``axison`` removes the two
+                # Axis objects, the four spines and the background patch from
+                # ``Axes.draw`` -- the patch is the figure's own white, so it
+                # leaves no pixel behind -- and leaves the title, which is
+                # why the title is pinned empty here: left to place itself a
+                # title measures the axes below it once per draw.
+                axis.set_axis_off()
+                axis.set_title("", y=1.0)
             axes.setdefault(axes_plan.role, []).append(axis)
         return axes
 
@@ -2113,6 +2205,12 @@ class MatplotlibRenderer:
             self.plan = plan
             self._axes = self._create_axes(figure, plan)
         self._artists.clear()
+        # ``figure.clear`` already took the grid's chrome group with the rest
+        # of the figure's children; what is left is the memory of it.
+        self._facet_chrome_signature = None
+        self._facet_chrome_shape = None
+        self._facet_chrome_owners = {}
+        self._facet_cell_titles = {}
         self._line_sources.clear()
         self._series_lines.clear(); self._series_indices.clear(); self._series_annotations.clear()
         self._series_bars.clear()
@@ -2518,6 +2616,7 @@ class MatplotlibRenderer:
         """Compose one complete Agg frame from the current artist state."""
 
         with style_context(self.style):
+            self._sync_facet_cell_chrome()
             if self._has_prepared_scene():
                 self._background_region = None
                 self._background_signature = None
@@ -2607,8 +2706,11 @@ class MatplotlibRenderer:
                 return True
             return _boxes_meet(axes.bbox, confined.bbox)
 
-        for value in self._artists.values():
-            add(value)
+        for key, value in self._artists.items():
+            # The grid's chrome group answers the same question the boundary
+            # chrome below does, and it is asked once, there.
+            if key not in self._FACET_CHROME_KEYS:
+                add(value)
         if confined is not None and getattr(confined, "axison", True):
             # Its ticks and labels move with the view being dragged, so
             # they cannot sit in the held background.
@@ -2661,7 +2763,8 @@ class MatplotlibRenderer:
             self._forget_chrome_commands()
             self._boundary_chrome_signature = signature
         commands_to_record: list[Any] = []
-        for axes in {entry[1].axes for entry in tuple(collected)}:
+        chrome_owners = {entry[1].axes for entry in tuple(collected)}
+        for axes in chrome_owners:
             if not axes.get_visible():
                 continue
             if confined is not None and not (
@@ -2734,6 +2837,53 @@ class MatplotlibRenderer:
                 if id(artist) not in self._boundary_chrome_commands:
                     commands_to_record.append(artist)
                 keyed(artist, owner, zorder)
+        # A cell's chrome is composed beside the data on exactly the
+        # condition its per-cell predecessor was: THAT CELL owns an artist
+        # that could overpaint it.  Asked of the grid instead -- any cell at
+        # all -- one cell holding a withdrawn line after a focus round trip
+        # moved all sixty-four cells' chrome to the other side of the
+        # kernel-stroked curve under it.  A cell whose picture is a kernel
+        # command owns no artist, so its chrome stays captured and the
+        # command paints over it, which is the shipped picture of a natively
+        # stroked grid and not this change's to alter.
+        #
+        # A cell's marks and frame stand ON that cell and key themselves from
+        # it, like any other of its artists, which is what keeps the order
+        # within a cell the full draw's: marks under the data, frame over it,
+        # and the cell's own annotations over the frame.  A grid TITLE
+        # belongs to no cell as an artist -- it is a figure child, which a
+        # full draw paints after every axes -- so it is keyed with no owner,
+        # the fallback slot past the last axes, at its own zorder.
+        live_cells = {
+            id(axes)
+            for index, axes in enumerate(self._axes.get("facet_cell", ()))
+            if index < self._visible_facet_count
+            and axes.get_visible()
+            and axes in chrome_owners
+        }
+        if live_cells:
+            for key in self._FACET_CHROME_KEYS:
+                value = self._artists.get(key)
+                if value is None or isinstance(value, _FacetChromeLabels):
+                    continue
+                for artist in value:
+                    owner = self._facet_chrome_owners.get(id(artist))
+                    if owner is None or id(owner) not in live_cells:
+                        continue
+                    if getattr(artist, "axes", None) is not None:
+                        add(artist)
+                    elif artist.get_visible():
+                        keyed(artist, None, artist.get_zorder())
+                    # Recorded like the per-cell chrome it replaces, and on
+                    # the same terms: a recording is trusted only between
+                    # frames that reused the background, and a tick that
+                    # moved took that background with it.  Without this a
+                    # composed frame re-transformed a hundred and twenty-eight
+                    # mark lines and two hundred and fifty-six frame paths
+                    # through Matplotlib every time, and the steady frame
+                    # paid what the first frame saved.
+                    if id(artist) not in self._boundary_chrome_commands:
+                        commands_to_record.append(artist)
         if commands_to_record:
             self._record_boundary_chrome_commands(commands_to_record)
         return collected
@@ -2831,18 +2981,37 @@ class MatplotlibRenderer:
                     return None
                 box = args[0].get_extents(args[1])
             else:
-                if len(args) != 5 or len(args[0].vertices) != 2 or len(args[2].vertices) != 1:
+                if len(args) != 5 or len(args[0].vertices) != 2:
                     return None
                 points = args[3].transform(args[2].vertices)
+                if not len(points):
+                    continue
+                # EVERY marker of the call, not just a lone one.  A grid cell
+                # carries its whole tick row in one marker call; measured one
+                # point at a time, those calls fell out of the memoized
+                # foreground and were drawn artist by artist -- a hundred and
+                # twenty-eight of them per composed frame, which is the
+                # steady frame the first frame was bought with.  The masked
+                # region is the row of marks and their marker extent, which
+                # is the thin strip along one edge of one cell.
                 marker = args[0].get_extents(args[1])
-                box = Bbox.from_extents(points[0, 0] + marker.x0, points[0, 1] + marker.y0,
-                                        points[0, 0] + marker.x1, points[0, 1] + marker.y1)
+                box = Bbox.from_extents(
+                    points[:, 0].min() + marker.x0, points[:, 1].min() + marker.y0,
+                    points[:, 0].max() + marker.x1, points[:, 1].max() + marker.y1,
+                )
             if dirty is not None:
                 top, bottom, left, right = dirty
                 pixels[top:bottom, left:right] = 0
             pad = int(math.ceil(gc.get_linewidth() * self._figure.dpi / 72.0)) + 4
             left, right = max(0, int(math.floor(box.x0)) - pad), min(width, int(math.ceil(box.x1)) + pad)
             top, bottom = max(0, height - int(math.ceil(box.y1)) - pad), min(height, height - int(math.floor(box.y0)) + pad)
+            # A mask must be read from a region THIS command alone drew
+            # into.  Clearing the previous command's region is not that: a
+            # grid cell's row of tick marks now arrives as one marker call
+            # whose region is a strip along the cell's edge, and any earlier
+            # stroke under that strip -- the frame it stands on -- would be
+            # read as part of it.
+            pixels[top:bottom, left:right] = 0
             dirty = top, bottom, left, right
             white = scratch.new_gc()
             white.copy_properties(gc)
@@ -4004,6 +4173,11 @@ class MatplotlibRenderer:
         capture path, so a stale background can never reach a front.
         """
 
+        # BEFORE the background is judged reusable: a grid's boundary tick
+        # labels are part of that background, so a chrome group that has to
+        # be rebuilt is a background that can no longer be restored, and the
+        # rebuild marks its cells dirty to say so.
+        self._sync_facet_cell_chrome()
         canvas = self._figure.canvas
         restore = getattr(canvas, "restore_region", None)
         capture = getattr(canvas, "copy_from_bbox", None)
@@ -4289,6 +4463,18 @@ class MatplotlibRenderer:
                     forward_ids.update(
                         id(artist) for artist, _owner, _zorder in entries
                     )
+            # A grid's chrome group IS the overview's cell chrome, and comes
+            # forward on the same terms.  Left behind, it was painted after
+            # the natively rastered fit ellipses instead of under them: an
+            # image grid carrying a fit drew its cell frames, marks and
+            # titles ON TOP of the ellipse the fit had just drawn across
+            # them, where a full draw puts the ellipse (zorder 6) above the
+            # frame (2.5).
+            forward_ids.update(
+                artist_id
+                for artist_id, owner in self._facet_chrome_owners.items()
+                if id(owner) in image_axis_ids
+            )
             paint(
                 subsequence(
                     lambda artist: id(artist) in forward_ids
@@ -6249,9 +6435,13 @@ class MatplotlibRenderer:
                 cmap,
                 valid_identity=valid_identity,
             )
-        if not axes.axison:
+        if not axes.axison and key in self._height_bars_calls:
             # Returning from the height-bar presentation restores the 2D
-            # chrome this artist path owns and hides the scene's.
+            # chrome this artist path owns and hides the scene's.  Only from
+            # THERE: a facet grid cell also draws no chrome of its own, and
+            # asking the question of the axes alone turned all sixty-four of
+            # them back on -- every cell drew the chrome the grid group had
+            # already painted, and it re-dirtied its own background doing it.
             axes.set_axis_on()
             self._hide_height_bars_chrome(key)
             self._mark_axes_chrome_dirty(axes)
@@ -8902,6 +9092,13 @@ class MatplotlibRenderer:
                 visible = index < self._visible_facet_count
                 if axis.get_visible() != visible:
                     axis.set_visible(visible)
+                if axis.axison:
+                    # Back from focus: the cell hands its chrome to the grid
+                    # group again.  ``axison`` is what a full draw reads, so
+                    # the background behind this cell is no longer current.
+                    axis.set_axis_off()
+                    axis.set_title("", y=1.0)
+                    self._mark_axes_chrome_dirty(axis)
             return
         selected_index = self._facet_focus_index
         if focus_plans is not None:
@@ -8914,16 +9111,348 @@ class MatplotlibRenderer:
         else:
             bounds = facet_focus_box(self.plan).matplotlib_bounds()
             declare_room(axes[selected_index], facet_focus_room(self.plan))
+        # One cell open is one panel: it is the only surface on screen, so it
+        # draws its own chrome the way every standalone panel does and the
+        # grid group stands down.
+        self._discard_facet_cell_chrome()
         for index, axis in enumerate(axes):
             visible = index == selected_index
             if axis.get_visible() != visible:
                 axis.set_visible(visible)
+            if axis.axison != visible:
+                axis.set_axis_on() if visible else axis.set_axis_off()
+                self._mark_axes_chrome_dirty(axis)
             # A focused cell takes the split's box, not a snapped one, so the
             # layout no longer owns it and Matplotlib gets its aspect back.
             self._quantized_bounds.pop(id(axis), None)
             self._box_exact[id(axis)] = False
         if tuple(axes[selected_index].get_position().bounds) != tuple(bounds):
             axes[selected_index].set_position(bounds)
+
+    #: The chrome group's artist keys.  Marks and frames live ON their cell,
+    #: because a cell's DATA is painted over its inward ticks and under its
+    #: frame and an artist holds one place in that order; titles are figure
+    #: children, above every cell; and the boundary labels, which lie outside
+    #: every box, are one carrier for the whole grid.
+    _FACET_CHROME_KEYS = (
+        "facet:chrome_marks",
+        "facet:chrome_spines",
+        "facet:chrome_titles",
+        "facet:chrome_labels",
+    )
+
+    def _discard_facet_cell_chrome(self) -> None:
+        """Retire the chrome artists; the next sync builds what is wanted."""
+
+        removed: list[Any] = []
+        for key in self._FACET_CHROME_KEYS:
+            value = self._artists.pop(key, None)
+            if value is None:
+                continue
+            if isinstance(value, _FacetChromeLabels):
+                # The Texts are the cells' own; only the carrier goes.
+                value.texts = ()
+                removed.append(value)
+            else:
+                removed.extend(value)
+        for artist in removed:
+            # A recording is addressed by object identity, and CPython hands
+            # a freed object's id to the next one allocated.
+            self._boundary_chrome_commands.pop(id(artist), None)
+        if removed:
+            self._remove_artists(removed)
+        self._facet_chrome_owners = {}
+        self._facet_chrome_signature = None
+        self._facet_chrome_shape = None
+
+    def _sync_facet_cell_chrome(self) -> None:
+        """Keep a grid's chrome current with the tick policy its cells carry.
+
+        Every cell keeps its Axis -- its locator, its formatter, which of its
+        labels the boundary shows -- and draws none of it.  What that policy
+        decided is read back here and painted by artists the renderer owns:
+
+        * one ``Line2D`` per axis per cell carrying that cell's tick marks,
+          at the Axis' own zorder;
+        * one ``PathPatch`` per side per cell, carrying the spine's own path
+          and transform -- the frame stands where Matplotlib would have
+          stroked it, not where arithmetic over the box says it should.  One
+          patch per cell for all four sides would be cheaper still and is
+          WRONG: Agg blends a corner pixel once per rasterization pass, so
+          four sides in one path differ from four strokes at every corner;
+        * one ``Text`` per cell title, at the cell's own pinned title
+          transform;
+        * one carrier for the boundary tick labels, which are the cells' own
+          ``Tick`` label artists drawn where Matplotlib placed them.
+
+        Each sits exactly where the chrome it replaces sat, so a full draw
+        stacks the frame over the cell's data and the cell's own annotations
+        over the frame, as before.  What is gone is the per-cell DRAW: two
+        Axis draws and four spine strokes, sixty-four times, and with them
+        the tick-label measuring an Axis draw does on the way.
+
+        The artists are a function of the cell boxes, the view limits, the
+        tick configuration and the titles, so an unchanged signature builds
+        nothing, and a changed one that keeps the same SHAPE moves the
+        artists it already has instead of replacing them.
+        """
+
+        if not isinstance(self.spec, FacetGridPlot):
+            if "facet:chrome_labels" in self._artists:
+                self._discard_facet_cell_chrome()
+            return
+        cells = self._axes.get("facet_cell", ())
+        if self._facet_focus_index is not None or not cells:
+            # One cell open is one panel: it draws its own chrome the way
+            # every standalone panel does, and the group stands down.
+            if "facet:chrome_labels" in self._artists:
+                self._discard_facet_cell_chrome()
+            return
+        visible = [
+            (index, axes)
+            for index, axes in enumerate(cells)
+            if index < self._visible_facet_count and axes.get_visible()
+        ]
+        titles = self._facet_cell_titles
+
+        def cell_key(index: int, axes: Any) -> tuple[object, ...]:
+            # Asked on EVERY compose, so it is written to be cheap: two tick
+            # dictionaries per cell rather than four, and the two boxes as
+            # their own bytes rather than eight Python floats.
+            return (
+                index,
+                # ROUNDED: a Bbox round-trips a box's far edge as (x0 +
+                # width), one ulp off the value the same box reported a
+                # moment earlier, and an exact compare rebuilt the whole
+                # grid's chrome twice per frame over that ulp.
+                np.round(axes.bbox.extents, 6).tobytes(),
+                axes.viewLim.extents.tobytes(),
+                getattr(axes.xaxis, "_zlc_tick_signature", None),
+                getattr(axes.yaxis, "_zlc_tick_signature", None),
+                # WHICH ticks, marks, gridlines and labels the cell carries --
+                # all of it, because every one of them is an artist this
+                # group owns.  The one exclusion is the label SIZE: the
+                # labels are the cells' own Tick artists, so they follow the
+                # policy without a rebuild, and the policy only ever resizes
+                # them when the limits or the tick entry above already said
+                # so -- included, the ladder's own resize during a refresh
+                # made every refresh ask for a second one.
+                _tick_params_key(axes.xaxis),
+                _tick_params_key(axes.yaxis),
+                axes.xaxis.get_offset_text().get_visible(),
+                axes.yaxis.get_offset_text().get_visible(),
+                titles.get(index),
+            )
+
+        signature = (
+            int(round(float(self._figure.bbox.width))),
+            int(round(float(self._figure.bbox.height))),
+            tuple(cell_key(index, axes) for index, axes in visible),
+        )
+        if signature == self._facet_chrome_signature and all(
+            key in self._artists for key in self._FACET_CHROME_KEYS
+        ):
+            return
+        self._refresh_facet_cell_chrome(visible, titles)
+        self._facet_chrome_signature = signature
+
+    def _refresh_facet_cell_chrome(
+        self,
+        visible: Sequence[tuple[int, Any]],
+        titles: Mapping[int, tuple[str, float]],
+    ) -> None:
+        """Read the cells' tick policy and move the chrome artists onto it."""
+
+        from matplotlib.lines import Line2D
+        from matplotlib.patches import PathPatch
+        from matplotlib.path import Path
+        from matplotlib.text import Text
+
+        marks_plan: list[tuple[Any, Any, list[float], list[float], float, bool]] = []
+        frames_plan: list[tuple[Any, Any, Any]] = []
+        titles_plan: list[tuple[Any, str, float]] = []
+        labels: list[Any] = []
+        shape: list[Any] = []
+        for index, axes in visible:
+            sides = 0
+            for name in ("left", "right", "bottom", "top"):
+                spine = axes.spines.get(name)
+                if spine is None or not spine.get_visible():
+                    continue
+                spine._adjust_location()
+                source = spine.get_path()
+                codes = source.codes
+                frames_plan.append(
+                    (
+                        axes,
+                        Path(
+                            np.array(source.vertices, copy=True),
+                            None if codes is None else np.array(codes, copy=True),
+                        ),
+                        spine,
+                    )
+                )
+                sides += 1
+            lanes_seen = 0
+            for axis in (axes.xaxis, axes.yaxis):
+                horizontal = axis is axes.xaxis
+                zorder = float(axis.get_zorder())
+                # One artist can carry every MARK of one axis that strokes
+                # the same way -- which major and minor ticks do not, so the
+                # stroke is part of a lane's identity.  A GRIDLINE crosses
+                # the box, so it cannot share a polyline with its
+                # neighbours and keeps an artist per line; the lane is only
+                # how its stroke is found.  Its clip is the difference that
+                # matters: Matplotlib clips a gridline to the cell patch and
+                # does not clip a tick mark.
+                grid_lanes: dict[tuple[object, ...], tuple[list[float], Any]] = {}
+                mark_lanes: dict[tuple[object, ...], tuple[list[float], Any]] = {}
+                for tick in axis._update_ticks():
+                    location = float(tick.get_loc())
+                    if tick.gridline.get_visible():
+                        grid_lanes.setdefault(
+                            _tick_stroke(tick.gridline), ([], tick.gridline)
+                        )[0].append(location)
+                    for which, line in ((1, tick.tick1line), (2, tick.tick2line)):
+                        if line.get_visible():
+                            mark_lanes.setdefault(
+                                (which, *_tick_stroke(line)), ([], line)
+                            )[0].append(location)
+                    for label in (tick.label1, tick.label2):
+                        if label.get_visible() and label.get_text():
+                            labels.append(label)
+                for locs, source in grid_lanes.values():
+                    across = source.get_xydata()
+                    for location in locs:
+                        if horizontal:
+                            xs = [location, location]
+                            ys = [float(across[0][1]), float(across[1][1])]
+                        else:
+                            xs = [float(across[0][0]), float(across[1][0])]
+                            ys = [location, location]
+                        marks_plan.append((axes, source, xs, ys, zorder, True))
+                        lanes_seen += 1
+                for locs, source in mark_lanes.values():
+                    across = source.get_xydata()[0]
+                    if horizontal:
+                        xs, ys = locs, [float(across[1])] * len(locs)
+                    else:
+                        xs, ys = [float(across[0])] * len(locs), locs
+                    marks_plan.append((axes, source, xs, ys, zorder, False))
+                    lanes_seen += 1
+                offset = axis.get_offset_text()
+                if offset.get_visible():
+                    # What ``Axis.draw`` does with it, in the same order: the
+                    # tick policy's own patched placement pins it to the
+                    # figure corner whatever the label extents say.
+                    axis._update_offset_text_position([], [])
+                    offset.set_text(axis.get_major_formatter().get_offset())
+                    if offset.get_text():
+                        labels.append(offset)
+            entry = titles.get(index)
+            if entry is not None:
+                titles_plan.append((axes, entry[0], float(entry[1])))
+            shape.append((index, sides, lanes_seen, entry is not None))
+        topology = tuple(shape)
+        reuse = topology == self._facet_chrome_shape and all(
+            key in self._artists for key in self._FACET_CHROME_KEYS
+        )
+        if not reuse:
+            self._discard_facet_cell_chrome()
+        figure = self._figure
+        pad = self.style.render.compact_axes_title_pad_pt
+        marks = self._artists.get("facet:chrome_marks", [])
+        frames = self._artists.get("facet:chrome_spines", [])
+        title_artists = self._artists.get("facet:chrome_titles", [])
+        for position, (axes, source, xs, ys, zorder, clipped) in enumerate(marks_plan):
+            if reuse:
+                line = marks[position]
+            else:
+                line = Line2D([], [])
+                line.update_from(source)
+                # A tick mark is painted when its Axis draws, at the AXIS'
+                # zorder -- not at the tick line's own.
+                line.set_zorder(zorder)
+                axes.add_artist(line)
+                # ``add_artist`` clips to the cell patch, which is what a
+                # GRIDLINE carries and a tick mark does not.  A tick stands
+                # ON the box edge, half outside it: clipped, every cell lost
+                # the twelve pixels of the mark at its bottom-left corner.  A
+                # gridline unclipped is the opposite error -- its projecting
+                # cap then reaches a pixel past the frame, all the way round.
+                # ``set_clip_path(None)`` alone does not undo the clip: a
+                # Rectangle clip path is stored as the clip BOX, which that
+                # call leaves standing.
+                if not clipped:
+                    line.set_clip_path(None)
+                    line.set_clip_box(None)
+                marks.append(line)
+            # The tick line's OWN blended transform, so the marks stay in
+            # data coordinates along the axis and in the box across it.
+            line.set_transform(source.get_transform())
+            line.set_data(xs, ys)
+        for position, (axes, path, spine) in enumerate(frames_plan):
+            if reuse:
+                patch = frames[position]
+            else:
+                patch = PathPatch(
+                    path,
+                    edgecolor=spine.get_edgecolor(),
+                    facecolor="none",
+                    linewidth=spine.get_linewidth(),
+                    linestyle=spine.get_linestyle(),
+                    capstyle=spine.get_capstyle(),
+                    joinstyle=spine.get_joinstyle(),
+                    antialiased=spine.get_antialiased(),
+                    alpha=spine.get_alpha(),
+                    zorder=float(spine.get_zorder()),
+                )
+                axes.add_artist(patch)
+                patch.set_clip_path(None)
+                patch.set_clip_box(None)
+                frames.append(patch)
+            patch.set_transform(spine.get_transform())
+            patch.set_path(path)
+        for position, (axes, text_value, size_pt) in enumerate(titles_plan):
+            if reuse:
+                title = title_artists[position]
+            else:
+                # The cell's own title stays empty and PINNED: it carries the
+                # transform (its box plus the pad) and the style, and the
+                # grid's copy carries the words.
+                axes.set_title("", pad=pad, y=1.0)
+                title = Text()
+                title.update_from(axes.title)
+                title.set_position(axes.title.get_position())
+                title.set_zorder(float(axes.title.get_zorder()))
+                figure.add_artist(title)
+                title_artists.append(title)
+            title.set_text(text_value)
+            title.set_fontsize(size_pt)
+        carrier = self._artists.get("facet:chrome_labels")
+        if not isinstance(carrier, _FacetChromeLabels):
+            carrier = _FacetChromeLabels()
+            figure.add_artist(carrier)
+        carrier.texts = tuple(labels)
+        self._artists["facet:chrome_marks"] = marks
+        self._artists["facet:chrome_spines"] = frames
+        self._artists["facet:chrome_titles"] = title_artists
+        self._artists["facet:chrome_labels"] = carrier
+        self._facet_chrome_shape = topology
+        self._facet_chrome_owners = {
+            id(artist): axes
+            for artists, plan in (
+                (marks, marks_plan), (frames, frames_plan), (title_artists, titles_plan)
+            )
+            for artist, (axes, *_rest) in zip(artists, plan, strict=True)
+        }
+        # A moved artist invalidates what was recorded and memoized of it, and
+        # the boundary labels are part of the composed BACKGROUND, so a
+        # refreshed group is a background that is no longer current.
+        for artist in (*marks, *frames, *title_artists):
+            self._boundary_chrome_commands.pop(id(artist), None)
+        self._foreground_batches.clear()
+        self._mark_axes_chrome_dirty(*(axes for _index, axes in visible))
 
     def _update_facets(self, payload: Any, state: DisplayState) -> None:
 
@@ -9210,6 +9739,7 @@ class MatplotlibRenderer:
             self._artists["image:prepared_signature"] = native_signature
         typography = self.plan.facet_typography
         rows, columns = self.plan.facet_shape or (1, max(len(cells), 1))
+        cell_titles: dict[int, tuple[str, float]] = {}
         for index, axis in visible_axes:
             cell = cells[index]
             label = str(_facet_cell_title(cell, index))
@@ -9222,27 +9752,16 @@ class MatplotlibRenderer:
                 )
             else:
                 title_text, title_pt = label, self.style.fonts.tick_pt
-            if (
-                axis.get_title() != title_text
-                or axis.title.get_fontsize() != title_pt
-            ):
-                axis.set_title(
-                    title_text,
-                    fontsize=title_pt,
-                    pad=self.style.render.compact_axes_title_pad_pt,
-                    # PINNED, as the panel title above this already is.
-                    # Left to place itself, Matplotlib recomputes a title's
-                    # position on every draw from a tight bounding box of
-                    # the axis below it -- which for a grid is one such
-                    # query per cell per draw, and measured 65 of the 165
-                    # ms a sixty-four cell grid spends drawing its chrome.
-                    # Nothing in this renderer ever puts ticks or labels
-                    # above an axes, so the answer is always the top of the
-                    # box and the pad, which is what this says.  Checked as
-                    # a pixel question: every case in the catalogue, zero
-                    # differing pixels.
-                    y=1.0,
-                )
+            # A GRID cell's title is the grid's, not the cell's: it is
+            # painted by the chrome group, above every cell's frame, exactly
+            # where ``Axes.title`` would have put it.  The cell's own title stays
+            # PINNED and empty -- left to place itself, Matplotlib recomputes
+            # a title's position on every draw from a tight bounding box of
+            # the axis below it, one such query per cell per draw, and that
+            # alone measured 65 of the 165 ms a sixty-four cell grid spends
+            # building its chrome.
+            if not focused:
+                cell_titles[index] = (title_text, float(title_pt))
             # The tick MARKS are the grid's; their label SIZE belongs to the
             # tick policy below, which may shrink it to keep two labels
             # apart and must be the last writer.
@@ -9305,6 +9824,15 @@ class MatplotlibRenderer:
                 axis.xaxis.get_offset_text().set_visible(corner)
             if axis.yaxis.get_offset_text().get_visible() != corner:
                 axis.yaxis.get_offset_text().set_visible(corner)
+
+        # The tick policy above is the last writer on every cell's ticks; what
+        # it decided is read back, and the chrome built from it, at compose
+        # time.  NOT here: an image cell's box is settled by ``apply_aspect``
+        # on the way into a draw, and asking a cell for its ticks before that
+        # asks against a box one ulp wide of the one every other cell reports
+        # -- which is a different question to the tick ladder, and a second
+        # walk of it for an answer that is the same.
+        self._facet_cell_titles = cell_titles
 
         outer_labels = (("x", outer_x, 0.5, 0.012, 0.0), ("y", outer_y, 0.008, 0.5, 90.0))
         for name, value, x_pos, y_pos, rotation in outer_labels:
