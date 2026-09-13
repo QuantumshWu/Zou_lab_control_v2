@@ -202,8 +202,15 @@ def _enable_ipython_qt_loop() -> None:
         "minimal",
     }:
         return
+    # A shell that could be running this has already imported IPython --
+    # that is how it exists.  So its absence from sys.modules is proof there
+    # is no shell, and it is the one answer that costs two thirds of a
+    # second to hear: importing IPython to be told "not in one" was paid by
+    # every widget a plain process created.
+    ipython_module = sys.modules.get("IPython")
+    if ipython_module is None:
+        return
     try:
-        ipython_module = importlib.import_module("IPython")
         get_ipython = getattr(ipython_module, "get_ipython")
         shell = get_ipython()
     except (AttributeError, ImportError, ModuleNotFoundError):

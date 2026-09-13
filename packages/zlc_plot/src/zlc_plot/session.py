@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
-from enum import Enum
 from numbers import Integral, Real
 from pathlib import Path
 from threading import Event, RLock, current_thread
@@ -37,26 +36,18 @@ from ._axis_transform import AxisTransform, canvas_physical_size
 from ._gesture_engine import (
     _OrbitGesture,
     _PickGesture,
-    _ColorGesture,
-    _ColorLimitDrag,
     _PanGesture,
     _PointerGesture,
     _SelectorGesture,
-    area_drag_handle,
-    pan_rectangle,
-    range_endpoint_hit,
 )
 from ._session_fit import FitSessionMixin
 from ._session_gesture import GestureSessionMixin
 from ._session_live import LiveSessionMixin
 from ._session_state import (
     _AcceptedFit,
-    _FitPresentation,
     _FitResolution,
     FitEvent,
     _LiveFitRequest,
-    _LiveFrameFinalization,
-    _LiveFrameSnapshot,
     _PointerUpdate,
     _PreparedLiveFrame,
     _ProjectionPresentation,
@@ -84,7 +75,6 @@ from .fit import (
     FacetFitBatchResult,
     FitModelSpec,
     FitOptions,
-    FitParameterDisplay,
     FitResult,
 )
 from .kinds import AxisRef, PlotKind

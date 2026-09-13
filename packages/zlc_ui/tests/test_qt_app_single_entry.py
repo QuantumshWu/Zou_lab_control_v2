@@ -134,6 +134,68 @@ assert app.font().pointSize() == fluent_font_size()
     assert completed.returncode == 0, completed.stderr or completed.stdout
 
 
+def _run(code: str) -> "subprocess.CompletedProcess[str]":
+    """Run one snippet against this checkout, the way the tests above do."""
+
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = (
+        ""
+        if environment.get("ZLC_TEST_INSTALLED") == "1"
+        else os.pathsep.join((str(ROOT.parents[1]), str(SRC)))
+    )
+    environment["QT_QPA_PLATFORM"] = "offscreen"
+    return subprocess.run(
+        [sys.executable, "-c", _BOOTSTRAP + code],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_opening_a_window_outside_a_notebook_never_imports_ipython() -> None:
+    """Two thirds of a second, paid by every window, to be told "no".
+
+    The Qt hook a Jupyter kernel needs is installed by asking IPython for
+    the running shell -- and asking used to IMPORT IPython, 0.64 s, in
+    every plain process that opened any window: a console, a device
+    manager, a pulse editor, a figure viewer.  A kernel that could own a
+    shell has already imported IPython, which is how the code asking is
+    running at all, so its absence from ``sys.modules`` IS the answer.
+    """
+
+    code = """
+import sys
+from zlc_ui.qt import ensure_qt_app
+ensure_qt_app(['probe'])
+found = sorted(name for name in sys.modules if name.startswith('IPython'))
+assert not found, found
+"""
+    completed = _run(code)
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+
+
+def test_a_shell_that_is_there_still_gets_the_qt_loop() -> None:
+    """And the hook still installs for the kernel it is FOR."""
+
+    code = """
+import sys, types
+asked = []
+shell = types.SimpleNamespace(
+    run_line_magic=lambda *args: asked.append(args), kernel=None
+)
+fake = types.ModuleType('IPython')
+fake.get_ipython = lambda: shell
+sys.modules['IPython'] = fake
+from zlc_ui.qt import ensure_qt_app
+ensure_qt_app(['probe'])
+assert asked == [('gui', 'qt')], asked
+"""
+    completed = _run(code)
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+
+
 def test_ensure_qt_app_rejects_preexisting_non_high_dpi_application() -> None:
     code = """
 from PyQt5 import QtWidgets

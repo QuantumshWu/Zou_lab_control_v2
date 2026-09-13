@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 import threading
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 
@@ -73,6 +73,51 @@ def test_ipykernel_wake_timer_ignores_shell_without_private_loop(monkeypatch) ->
     )
     backends._install_ipykernel_wake_timer(shell)
     assert backends._IPYKERNEL_WAKE_TIMER is None
+
+
+def test_the_notebook_hook_is_skipped_without_importing_ipython(monkeypatch) -> None:
+    """0.64 s, paid by every widget in a plain process, to be told "no".
+
+    The hook this installs is for a Jupyter kernel, and a kernel that could
+    own a shell has already imported IPython -- that is how the code asking
+    is running.  So its absence from ``sys.modules`` IS the answer, and
+    importing it to ask was two thirds of a second of nothing.
+    """
+
+    monkeypatch.setattr(backends, "_IPYTHON_QT_LOOP_ENABLED", False)
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    monkeypatch.delitem(sys.modules, "IPython", raising=False)
+    monkeypatch.setattr(
+        backends.importlib,
+        "import_module",
+        lambda name, *rest: (_ for _ in ()).throw(
+            AssertionError(f"nothing may be imported to ask: {name}")
+        ),
+    )
+
+    backends._enable_ipython_qt_loop()
+
+    assert backends._IPYTHON_QT_LOOP_ENABLED is False
+
+
+def test_a_shell_that_is_already_there_still_gets_the_hook(monkeypatch) -> None:
+    """And the kernel it is FOR must still be served."""
+
+    asked: list[tuple[str, str]] = []
+    shell = SimpleNamespace(
+        run_line_magic=lambda *args: asked.append(args), kernel=None
+    )
+    module = ModuleType("IPython")
+    module.get_ipython = lambda: shell
+    monkeypatch.setattr(backends, "_IPYTHON_QT_LOOP_ENABLED", False)
+    monkeypatch.setattr(backends, "_IPYKERNEL_WAKE_TIMER", None)
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    monkeypatch.setitem(sys.modules, "IPython", module)
+
+    backends._enable_ipython_qt_loop()
+
+    assert asked == [("gui", "qt5")]
+    assert backends._IPYTHON_QT_LOOP_ENABLED is True
 
 
 def test_a_widget_outliving_its_host_refuses_input_instead_of_raising() -> None:

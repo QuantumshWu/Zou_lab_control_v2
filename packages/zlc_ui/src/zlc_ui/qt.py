@@ -81,8 +81,16 @@ def _enable_ipython_qt_loop() -> None:
     global _QT_LOOP_ENABLED
     if _QT_LOOP_ENABLED:
         return
+    # A kernel that could own a shell has already imported IPython -- that
+    # is how the shell running this code exists.  So its ABSENCE from
+    # sys.modules is proof there is no shell, and asking IPython itself is
+    # the one answer that costs 0.64 s to hear "no": every window an
+    # operator opened from a plain process imported the whole of IPython to
+    # be told it was not in one.
+    ipython = sys.modules.get("IPython")
+    if ipython is None:
+        return
     try:
-        ipython = __import__("IPython", fromlist=["get_ipython"])
         shell = ipython.get_ipython()
     except Exception:
         return

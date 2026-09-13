@@ -17,7 +17,6 @@ from zlc_plot.fit import (
     RegularImageFitInput,
     _DeferredFitData,
     _FIT_RESULT_RAW,
-    builtin_fit_models,
 )
 
 
