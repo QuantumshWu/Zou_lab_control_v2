@@ -885,7 +885,7 @@ def test_public_batch_filters_a_nan_coordinate_after_temporaries_recycle_ids() -
             # act on otherwise.
             assert failures[cell] == (
                 f"{model.model_id} needs more points than its 0 free "
-                f"parameters; this cell has 0 finite"
+                f"parameters: 0 finite here"
             )
             continue
         assert failures[cell] is None, (cell, failures[cell])

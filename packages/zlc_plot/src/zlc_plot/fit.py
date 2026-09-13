@@ -2072,14 +2072,8 @@ class FitEngine:
                 )
                 free_index = np.asarray(free_indices, dtype=np.int64)
                 if values.size <= len(free_indices):
-                    # SAY THE NUMBERS.  "more observations than free
-                    # parameters" leaves an operator who picked a model on a
-                    # three-point curve with nothing to act on; the model's
-                    # name and the two counts say what to do about it.
-                    raise ValueError(
-                        f"{model.model_id} needs more points than its "
-                        f"{len(free_indices)} free parameters; this cell has "
-                        f"{int(values.size)} finite"
+                    raise _too_few_points(
+                        model, len(free_indices), int(values.size)
                     )
                 revision = integer(data_revisions[cell], "data_revision")
                 if revision < 0:
@@ -2811,11 +2805,7 @@ class FitEngine:
         )
         lower, upper = _solver_bounds(spec, default_bounds, bounds)
         if values.size <= len(free_indices):
-            raise ValueError(
-                f"{spec.model_id} needs more points than its "
-                f"{len(free_indices)} free parameters; this series has "
-                f"{int(values.size)} finite"
-            )
+            raise _too_few_points(spec, len(free_indices), int(values.size))
         if not free_indices:
             check()
             fitted = spec.evaluate(coords, lower).reshape(-1)
@@ -3338,6 +3328,24 @@ def _fixed_parameter_partition(
             for index, name in enumerate(model.parameter_names)
             if name not in fixed_names
         ),
+    )
+
+
+def _too_few_points(model: FitModelSpec, free_count: int, points: int) -> ValueError:
+    """The one refusal a fit shorter than its model gets.
+
+    Three solvers reach this -- the series path, the compiled batch and the
+    regular-image stripes -- and the operator cannot tell which of them ran,
+    so they must not word it three ways.  Say the model and both counts:
+    "more finite observations than free parameters" left whoever picked a
+    model from the panel's list on a three-point curve with nothing to act
+    on, and the refusal changes nothing else, so the message is the only
+    trace of why the panel went back to not fitting.
+    """
+
+    return ValueError(
+        f"{model.model_id} needs more points than its {free_count} free "
+        f"parameters: {points} finite here"
     )
 
 
