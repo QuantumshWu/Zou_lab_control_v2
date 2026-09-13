@@ -1280,7 +1280,12 @@ def _image_cell_aspect(x: Any, y: Any) -> float | None:
 
 
 def _restyle_histogram_tops(
-    collection: Any, edges: np.ndarray, counts: np.ndarray, *, swapped: bool
+    collection: Any,
+    previous: tuple[np.ndarray, np.ndarray] | None,
+    edges: np.ndarray,
+    counts: np.ndarray,
+    *,
+    swapped: bool,
 ) -> bool:
     """Move the bars' tops in place, or refuse and let the caller rebuild.
 
@@ -1289,36 +1294,36 @@ def _restyle_histogram_tops(
     four thousand of them on a sixty-four cell grid, every frame -- to
     change two numbers each.
 
-    The quad this wrote is (low, 0) (low, top) (high, top) (high, 0),
-    closed, so the tops are vertices 1 and 2 and everything else is the
-    bin's own geometry.  Anything that is not exactly that shape is
-    refused and rebuilt.  The bars stay SEPARATE paths on purpose:
-    merging them into one compound path would composite their shared
-    edges once instead of twice and change the picture.
+    ``previous`` is the projection the paths in hand were built from, which
+    is the only thing that decides whether they can be moved: same edges,
+    same bars.  Asking the PATHS instead means five comparisons per bar
+    per cell per frame to re-derive what the renderer already recorded.
+
+    The quad this writes is (low, 0) (low, top) (high, top) (high, 0),
+    closed, so the tops are vertices 1 and 2.  The bars stay SEPARATE
+    paths on purpose: merging them into one compound path would composite
+    their shared edges once instead of twice and change the picture.
     """
 
-    paths = collection.get_paths()
-    counts = np.asarray(counts, dtype=float).reshape(-1)
+    if previous is None:
+        return False
     lower = np.asarray(edges, dtype=float).reshape(-1)
-    if len(paths) != counts.size or lower.size != counts.size + 1:
+    counts = np.asarray(counts, dtype=float).reshape(-1)
+    held_edges = np.asarray(previous[0], dtype=float).reshape(-1)
+    paths = collection.get_paths()
+    if (
+        len(paths) != counts.size
+        or lower.size != counts.size + 1
+        or held_edges.shape != lower.shape
+        or not np.array_equal(held_edges, lower)
+    ):
         return False
     # The transposed rail draws the same quads with x and y swapped.
     value = 0 if swapped else 1
-    across = 1 - value
-    for index, path in enumerate(paths):
-        vertices = path.vertices
-        if vertices.shape != (5, 2):
-            return False
-        if not (
-            vertices[0, across] == lower[index]
-            and vertices[1, across] == lower[index]
-            and vertices[2, across] == lower[index + 1]
-            and vertices[3, across] == lower[index + 1]
-            and vertices[0, value] == vertices[3, value] == vertices[4, value]
-        ):
-            return False
     for path, top in zip(paths, counts):
         vertices = path.vertices
+        if vertices.shape != (5, 2) or not vertices.flags.writeable:
+            return False
         vertices[1, value] = top
         vertices[2, value] = top
     collection.stale = True
@@ -2529,10 +2534,19 @@ class MatplotlibRenderer:
             )
         else:
             line.set_data(drawn_x, drawn_y)
+            # The marker is the style's, and the style is not what moved:
+            # a facet grid re-set three properties on three lines in every
+            # one of sixty-four cells, every frame, to the values they
+            # already held.
             marker = self.style.artists.curve.marker
-            line.set_marker("None" if marker is None else marker)
-            line.set_markersize(self.style.artists.curve_marker_size_pt)
-            line.set_markevery(None)
+            wanted = "None" if marker is None else marker
+            if line.get_marker() != wanted:
+                line.set_marker(wanted)
+            size = self.style.artists.curve_marker_size_pt
+            if line.get_markersize() != size:
+                line.set_markersize(size)
+            if line.get_markevery() is not None:
+                line.set_markevery(None)
 
     def _refresh_enveloped_lines(self, axis: Any) -> None:
         for line_id, (line, owner, x, y, isolated_glyphs) in tuple(
@@ -6088,7 +6102,11 @@ class MatplotlibRenderer:
             axes.add_collection(collection)
             self._artists[key] = collection
         elif not _restyle_histogram_tops(
-            collection, edges, counts, swapped=False
+            collection,
+            self._artists.get(f"{key}:projection"),
+            edges,
+            counts,
+            swapped=False,
         ):
             collection.set_verts(_histogram_vertices(edges, counts))
         self._artists[f"{key}:projection"] = (edges, counts)
@@ -6611,7 +6629,6 @@ class MatplotlibRenderer:
             self._artists[f"{key}:color_mode"] = "scalar"
             for suffix in ("front_store", "prepared_current", "rgba_front", "view_front"):
                 self._artists.pop(f"{key}:{suffix}", None)
-        applied_key = f"{key}:applied_front"
         image = self._artists.get(key)
         if image is None:
             scalar_options = (
@@ -6638,7 +6655,6 @@ class MatplotlibRenderer:
                 assert color_limits is not None
                 image.set_clim(*color_limits)
             self._artists[key] = image
-            self._artists[applied_key] = shown
         else:
             # Unconditionally, because the composed front is now a KEPT
             # buffer written in place: "the artist already holds this
@@ -6648,7 +6664,6 @@ class MatplotlibRenderer:
             # ``_install_image_front`` assigns rather than copies, so this
             # costs nothing to repeat.
             self._install_image_front(image, shown)
-            self._artists[applied_key] = shown
             extent_key = f"{key}:applied_extent"
             if self._artists.get(extent_key) != drawn_extent:
                 # ``set_extent`` rebuilds transforms and re-autoscales;
@@ -7179,7 +7194,6 @@ class MatplotlibRenderer:
             if self._artists.get(extent_key) != scene_extent:
                 image.set_extent(scene_extent)
                 self._artists[extent_key] = scene_extent
-        self._artists[f"{key}:applied_front"] = frame
         self._artists[f"{key}:color_mode"] = "rgba"
         # The artist stays the clim/cmap authority every consumer reads.
         image.set_cmap(cmap)
@@ -8156,9 +8170,16 @@ class MatplotlibRenderer:
                     labelleft=False,
                 )
         elif projection_changed and not _restyle_histogram_tops(
-            collection, edges, counts, swapped=True
+            collection,
+            self._artists.get(f"{key}:projection"),
+            edges,
+            counts,
+            swapped=True,
         ):
             collection.set_verts(_histogram_vertices(edges, counts)[..., ::-1])
+        # What the bars in hand were built from, which is what decides
+        # whether the next revision can move their tops instead.
+        self._artists[f"{key}:projection"] = (edges, counts)
         peak = float(np.max(counts)) if counts.size else 0.0
         wanted = float(
             max(
@@ -10401,7 +10422,6 @@ class MatplotlibRenderer:
                 if composed is not None:
                     rgba, _drawn_extent = composed
                 self._install_image_front(image, rgba)
-                self._artists[f"{key}:applied_front"] = rgba
             # The artist clim stays authoritative for selector geometry and
             # snapshots in both modes.
             image.set_clim(*limits)

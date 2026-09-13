@@ -1474,7 +1474,7 @@ def fit_regular_separable_images(
                 use_warm=warm_flags,
                 poisson=False,
                 loss=options.loss,
-                max_nfev=options.max_nfev,
+                max_nfev=options.evaluation_budget(values.shape[-1]),
                 ftol=_REGULAR_IMAGE_PROXY_TOL if coarse_proxy else _REGULAR_IMAGE_FTOL,
                 xtol=_REGULAR_IMAGE_PROXY_TOL if coarse_proxy else _REGULAR_IMAGE_FTOL,
                 gtol=_REGULAR_IMAGE_PROXY_TOL if coarse_proxy else _REGULAR_IMAGE_GTOL,

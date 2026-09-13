@@ -746,6 +746,18 @@ class FitModelRegistry:
 class FitOptions:
     loss: str = "linear"
     max_nfev: int = 5000
+    #: What one solve may spend before it reports that it could not
+    #: converge, counted in POINT-evaluations: the points it sweeps times
+    #: the number of sweeps, which is what a solve actually costs.
+    #: ``max_nfev`` counts only the sweeps, and a sweep spans five orders
+    #: of magnitude across this product's data -- five thousand of them is
+    #: milliseconds on a histogram cell's sixty bins and seven seconds on
+    #: a camera frame's two million pixels.  Measured over every model in
+    #: the matrix, the most expensive solve that CONVERGED spent 2.9e7
+    #: point-evaluations; the ones that never converge spend the whole cap
+    #: -- 1.15e10 on a camera frame, four hundred times that, to report
+    #: that they could not.  ``None`` counts only the sweeps.
+    max_point_evaluations: int | None = 10**9
     deadline_seconds: float | None = None
     #: Curve fits with more finite points than this iterate on an x-binned
     #: sufficient-statistics compression (bin means weighted by counts) and
@@ -765,6 +777,11 @@ class FitOptions:
         max_nfev = integer(self.max_nfev, "max_nfev")
         if max_nfev <= 0:
             raise ValueError("max_nfev must be a positive integer")
+        if self.max_point_evaluations is not None:
+            budget = integer(self.max_point_evaluations, "max_point_evaluations")
+            if budget <= 0:
+                raise ValueError("max_point_evaluations must be positive")
+            object.__setattr__(self, "max_point_evaluations", budget)
         object.__setattr__(self, "loss", loss)
         object.__setattr__(self, "max_nfev", max_nfev)
         if self.deadline_seconds is not None:
@@ -786,6 +803,22 @@ class FitOptions:
             if math.isnan(gain):
                 raise ValueError("min_bic_gain cannot be NaN")
             object.__setattr__(self, "min_bic_gain", gain)
+
+    def evaluation_budget(self, points: int) -> int:
+        """How many sweeps a solve over ``points`` of them may take.
+
+        The two budgets meet here: never more sweeps than ``max_nfev``,
+        and never more arithmetic than ``max_point_evaluations``.  On a
+        histogram cell the second never binds; on a camera frame it is the
+        only one that means anything.
+        """
+
+        if self.max_point_evaluations is None:
+            return self.max_nfev
+        points = int(points)
+        if points <= 0:
+            return self.max_nfev
+        return max(1, min(self.max_nfev, self.max_point_evaluations // points))
 
 
 def _readonly(array: np.ndarray) -> np.ndarray:
@@ -1101,6 +1134,13 @@ class FitResult:
     def success_mask(self) -> np.ndarray:
         return _readonly(np.asarray((self.success,), dtype=np.bool_))
 
+    #: Fields that carry no array and decide nothing about one: a result
+    #: already validated stays validated when one of these is attached.
+    #: Re-validating for them cost a sixty-four cell histogram frame 3.5 ms
+    #: -- more than half its compiled solve -- because the two-population
+    #: verdict attaches its BIC gain to every cell, every frame.
+    _SCALAR_OVERRIDES = frozenset({"parameter_units", "batch_revision", "evidence"})
+
     def _clone(self, **overrides: Any) -> "FitResult":
         """Copy this result while preserving still-deferred arrays.
 
@@ -1133,10 +1173,16 @@ class FitResult:
             "evidence": self.evidence,
         }
         values.update(overrides)
-        if set(overrides).issubset({"parameter_units", "batch_revision"}):
+        if set(overrides).issubset(self._SCALAR_OVERRIDES):
             batch_revision = integer(values["batch_revision"], "batch_revision")
             if batch_revision < 0:
                 raise ValueError("batch_revision must be non-negative")
+            evidence = values["evidence"]
+            if isinstance(evidence, bool) or not isinstance(
+                evidence, (Real, np.number)
+            ):
+                raise TypeError("fit result evidence must be a real number")
+            values["evidence"] = float(evidence)
             units = dict(values["parameter_units"])
             unknown = set(units) - set(self.model.parameter_names)
             if unknown:
@@ -2003,6 +2049,14 @@ class FitEngine:
         #: a bare id outlives the temporary it named, and the next cell's
         #: axis would be answered with a stranger's finiteness.
         axis_all_finite: dict[int, tuple[np.ndarray, bool]] = {}
+        #: A histogram model's axis bounds are a function of the bin
+        #: CONTENT -- the pitch, the first centre and the last -- and a
+        #: grid's cells are one bin projection, so every cell asked the
+        #: same question.  Answering it costs a sort of the bin centres;
+        #: keying on their bytes costs a hash.  Measured on a sixty-four
+        #: cell histogram frame: 4.9 ms of the 21 ms both batches spent.
+        histogram_bounds: dict[bytes, Any] = {}
+        confining = _confines_to_histogram(model)
         for cell, coordinate_item in enumerate(coordinates):
             check()
             try:
@@ -2059,7 +2113,14 @@ class FitEngine:
                 # The bounds are the cell's: a histogram's parameters are
                 # confined to THIS cell's coordinates.  Cells with the same
                 # coordinates share them, and share a bucket below.
-                cell_bounds = _histogram_bounds(model, coords, bounds)
+                if confining:
+                    shape_key = coords[0].tobytes()
+                    cell_bounds = histogram_bounds.get(shape_key)
+                    if cell_bounds is None:
+                        cell_bounds = _histogram_bounds(model, coords, bounds)
+                        histogram_bounds[shape_key] = cell_bounds
+                else:
+                    cell_bounds = _histogram_bounds(model, coords, bounds)
                 requested_lower, requested_upper = _solver_bounds(
                     model, None, cell_bounds
                 )
@@ -2376,7 +2437,7 @@ class FitEngine:
                     ),
                     poisson=counted,
                     loss=opts.loss,
-                    max_nfev=opts.max_nfev,
+                    max_nfev=opts.evaluation_budget(value_stack.shape[-1]),
                     ftol=1.0e-8,
                     xtol=1.0e-8,
                     gtol=1.0e-8,
@@ -2935,7 +2996,7 @@ class FitEngine:
                     seed,
                     bounds=(free_lower, free_upper),
                     loss=opts.loss,
-                    max_nfev=opts.max_nfev,
+                    max_nfev=opts.evaluation_budget(values.size),
                     x_scale="jac",
                     jac=(analytic_jacobian if spec.jacobian is not None else "2-point"),
                 )
@@ -3233,6 +3294,17 @@ def _solver_bounds(
     return np.asarray(lower), np.asarray(upper)
 
 
+def _confines_to_histogram(model: FitModelSpec) -> bool:
+    """Whether :func:`_histogram_bounds` has anything to say about a model.
+
+    Asked by the batch loop before it spends a hash on remembering the
+    answer, and by the function itself before it computes one.  Two copies
+    of this question is how a cache outlives the rule it was keyed on.
+    """
+
+    return model.targets == (FitTarget.HISTOGRAM,)
+
+
 def _histogram_bounds(
     model: FitModelSpec,
     coordinates: ArrayTuple,
@@ -3259,7 +3331,7 @@ def _histogram_bounds(
     the limit is refused.
     """
 
-    if model.targets != (FitTarget.HISTOGRAM,):
+    if not _confines_to_histogram(model):
         return bounds
     x = np.asarray(coordinates[0], dtype=np.float64).reshape(-1)
     step = _histogram_step(x)
@@ -4300,6 +4372,56 @@ def _init_radial(coords: ArrayTuple, values: np.ndarray) -> Sequence[float]:
     return _radial_seed(coords, values, 1.0)
 
 
+def _sample_step(values: np.ndarray) -> float:
+    """The spacing the samples along one axis are actually laid out on."""
+
+    ordered = np.unique(values)
+    if ordered.size < 2:
+        return float(np.finfo(np.float64).eps)
+    return float(np.median(np.diff(ordered)))
+
+
+def _resolved_width(width: float, step: float) -> float:
+    """No width finer than half the spacing of the samples that show it.
+
+    Once the background's own scale is subtracted, what is left of a faint
+    or narrow object can be a single sample wide, and the second moment of
+    one point is zero.  A width of zero is not a narrow object, it is an
+    object the samples cannot resolve -- and a Gaussian that narrow is zero
+    everywhere with a Jacobian to match.
+    """
+
+    return max(width, 0.5 * step)
+
+
+def _signal_weights(
+    values: np.ndarray,
+    offset: float,
+    sign: float,
+) -> np.ndarray:
+    """The part of an image that stands above the background's own scatter.
+
+    A weighted moment reports the width of whatever carries the weight, and
+    every sample above the median carries some.  On a frame that is mostly
+    background that is a million pixels of noise against a few hundred of
+    signal, so the moment reports the SENSOR and a compact spot is seeded as
+    a bump the size of the frame -- a seed the solver cannot walk back from,
+    because a Gaussian that wide is flat everywhere the spot is.  Subtracting
+    the level the background clears by chance about once in a sample this
+    size leaves the object carrying the weight.  When nothing clears it the
+    object is not distinguishable from the background, or fills the frame,
+    and the plain moment is the most the data supports.
+    """
+
+    deviation = sign * (values - offset)
+    scale = float(np.median(np.abs(values - offset))) * _compiled_fit.MAD_TO_SIGMA
+    floor = scale * math.sqrt(2.0 * math.log(max(values.size, 2)))
+    weights = np.maximum(deviation - floor, 0.0)
+    if float(np.sum(weights)) > 0.0:
+        return weights
+    return np.maximum(deviation, 0.0)
+
+
 def _radial_seed(
     coords: ArrayTuple,
     values: np.ndarray,
@@ -4307,7 +4429,7 @@ def _radial_seed(
 ) -> tuple[float, ...]:
     x, y = coords
     offset = float(np.median(values))
-    weights = np.maximum(sign * (values - offset), 0.0)
+    weights = _signal_weights(values, offset, sign)
     total = float(np.sum(weights))
     if total <= 0:
         center_x, center_y = float(np.mean(x)), float(np.mean(y))
@@ -4315,9 +4437,11 @@ def _radial_seed(
     else:
         center_x = float(np.sum(x * weights) / total)
         center_y = float(np.sum(y * weights) / total)
-        radius = max(
+        # One radius spans both axes, so the finer pitch is what it
+        # resolves at.
+        radius = _resolved_width(
             float(np.sqrt(np.sum(weights * ((x - center_x) ** 2 + (y - center_y) ** 2)) / total)),
-            np.finfo(float).eps,
+            min(_sample_step(x), _sample_step(y)),
         )
     amplitude = (
         float(np.max(values) - offset)
@@ -4366,7 +4490,7 @@ def _anisotropic_seed(
 ) -> tuple[float, ...]:
     x, y = coords
     offset = float(np.median(values))
-    weights = np.maximum(sign * (values - offset), 0.0)
+    weights = _signal_weights(values, offset, sign)
     total = float(np.sum(weights))
     if total <= 0.0:
         center_x, center_y = float(np.mean(x)), float(np.mean(y))
@@ -4380,9 +4504,8 @@ def _anisotropic_seed(
         radius_y = float(
             np.sqrt(np.sum(weights * (y - center_y) ** 2) / total)
         )
-    epsilon = np.finfo(np.float64).eps
-    radius_x = max(radius_x, epsilon)
-    radius_y = max(radius_y, epsilon)
+    radius_x = _resolved_width(radius_x, _sample_step(x))
+    radius_y = _resolved_width(radius_y, _sample_step(y))
     amplitude = (
         float(np.max(values) - offset)
         if sign > 0.0
@@ -4416,14 +4539,16 @@ def _anisotropic_bounds(
     value_low, value_high = _data_interval(values)
     value_range = _value_range(values)
     seeds = _anisotropic_candidates(coords, values)
-    radius_x = max(float(seed[2]) for seed in seeds)
-    radius_y = max(float(seed[3]) for seed in seeds)
+    # The box has to hold every candidate offered beside it, so the floor
+    # comes from the narrowest and the ceiling from the widest.
+    radii_x = [float(seed[2]) for seed in seeds]
+    radii_y = [float(seed[3]) for seed in seeds]
     epsilon = np.finfo(np.float64).eps
     return {
         "amplitude": (-4.0 * value_range, 4.0 * value_range),
         "offset": (value_low - value_range, value_high + value_range),
-        "radius_x": (max(radius_x / 10.0, epsilon), radius_x * 10.0),
-        "radius_y": (max(radius_y / 10.0, epsilon), radius_y * 10.0),
+        "radius_x": (max(min(radii_x) / 10.0, epsilon), max(radii_x) * 10.0),
+        "radius_y": (max(min(radii_y) / 10.0, epsilon), max(radii_y) * 10.0),
         "center_x": (x_low, x_high),
         "center_y": (y_low, y_high),
     }

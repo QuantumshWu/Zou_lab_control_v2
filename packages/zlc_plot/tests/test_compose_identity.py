@@ -190,13 +190,17 @@ def test_color_limit_preview_composes_without_touching_chrome() -> None:
 
         colorbar_axis = renderer._artists["image:colorbar"].ax
         colorbar_before = pixels_of(colorbar_axis)
-        before_front = np.array(renderer._artists["image:applied_front"], copy=True)
+        # The front the artist holds IS the applied front: the renderer
+        # installs it there and keeps no second reference to it.
+        before_front = np.array(
+            renderer._artists["image"].get_array(), copy=True
+        )
         current = renderer._resolved_color_limit_state()
         assert current is not None
         with renderer.raster_transaction():
             renderer.begin_color_limit_gesture(ColorLimitCandidate(current.value))
         np.testing.assert_array_equal(
-            renderer._artists["image:applied_front"], before_front
+            renderer._artists["image"].get_array(), before_front
         )
         np.testing.assert_array_equal(pixels_of(colorbar_axis), colorbar_before)
 
@@ -228,7 +232,7 @@ def test_color_limit_preview_composes_without_touching_chrome() -> None:
         assert renderer._background_signature == before
         image = renderer._artists["image"]
         assert tuple(map(float, image.get_clim())) == (20.0, 145.0)
-        preview_front = renderer._artists["image:applied_front"]
+        preview_front = image.get_array()
         assert preview_front.shape == before_front.shape
         background = renderer._axes_background_rgba(image.axes)
         # Check the picture the operator receives, not an optional fallback
