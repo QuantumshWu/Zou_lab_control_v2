@@ -1643,6 +1643,58 @@ class FitEngine:
             return None
         return descriptor if registered is model else None
 
+    def _nested_population_fit(
+        self,
+        spec: FitModelSpec,
+        coordinates: Sequence[Sequence[np.ndarray] | RegularImageFitInput],
+        observations: Sequence[np.ndarray | None],
+        *,
+        observation_sigmas: Sequence[np.ndarray | None] | None,
+        selected_indices: Sequence[np.ndarray | None] | None,
+        data_revisions: Sequence[int],
+        bounds: Mapping[str, tuple[float | None, float | None]] | None,
+        options: FitOptions | None,
+        cancelled: Callable[[], bool] | None,
+    ) -> tuple[FitResult | None, ...]:
+        """The nested one-population answer for these cells, in ONE batch.
+
+        A two-population model is weighed against it, so every cell of a
+        grid needs one -- and solved one cell at a time down the scalar
+        path while the wide model went through the compiled batch, a
+        sixty-four cell histogram grid ran one batch and then sixty-four
+        separate solves per frame.  That was the one panel on the board
+        that could not hold the display rate.  The nested model has a
+        compiled descriptor of its own and no reduction, so this is the
+        same batch call with no recursion.
+        """
+
+        reduction = spec.reduction
+        if reduction is None:
+            return (None,) * len(observations)
+        nested_spec = self.registry.get(reduction.nested_model_id)
+        narrow_for = dict(reduction.shared)
+        nested_bounds = (
+            {
+                narrow_for[name]: pair
+                for name, pair in bounds.items()
+                if name in narrow_for
+            }
+            if bounds
+            else None
+        )
+        solved, _failed = self.fit_batch(
+            nested_spec,
+            coordinates,
+            observations,
+            observation_sigmas=observation_sigmas,
+            selected_indices=selected_indices,
+            data_revisions=data_revisions,
+            bounds=nested_bounds or None,
+            options=options,
+            cancelled=cancelled,
+        )
+        return solved
+
     def fit_batch(
         self,
         model: str | FitModelSpec,
@@ -1838,6 +1890,46 @@ class FitEngine:
             options=options,
             cancelled=cancelled,
         )
+        # THE NESTED MODEL IS A BATCH TOO.  A two-population model is
+        # weighed against its nested one-population answer, and that answer
+        # used to be solved one cell at a time down the scalar path while
+        # the wide model went through the compiled batch above -- so a
+        # sixty-four cell histogram grid ran one batch and then sixty-four
+        # separate solves per frame, and was the one case on the board that
+        # could not hold the display rate: 6.3 fronts a second against a
+        # ten hertz ask, and 2.5 flat out.  The nested model has a compiled
+        # descriptor of its own, and no reduction, so batching it is the
+        # same call with no recursion.
+        nested_by_local: dict[int, FitResult | None] = {}
+        if spec.reduction is not None:
+            wanted = [
+                local for local in range(len(compiled_cells))
+                if solved[local] is not None
+            ]
+            if wanted:
+                nested_solved = self._nested_population_fit(
+                    spec,
+                    [compiled_coordinates[local] for local in wanted],
+                    [compiled_observations[local] for local in wanted],
+                    observation_sigmas=(
+                        [compiled_sigmas[local] for local in wanted]
+                        if compiled_sigmas is not None
+                        else None
+                    ),
+                    selected_indices=(
+                        [compiled_indices[local] for local in wanted]
+                        if compiled_indices is not None
+                        else None
+                    ),
+                    data_revisions=[compiled_revisions[local] for local in wanted],
+                    bounds=bounds,
+                    options=options,
+                    cancelled=cancelled,
+                )
+                nested_by_local = {
+                    local: nested_solved[index]
+                    for index, local in enumerate(wanted)
+                }
         for local, cell in enumerate(compiled_cells):
             result = solved[local]
             failure = failed[local]
@@ -1846,12 +1938,9 @@ class FitEngine:
                     result = self._settle_population(
                         spec,
                         result,
-                        tuple(compiled_coordinates[local]),
-                        compiled_observations[local],
+                        nested_by_local.get(local),
                         data_revision=compiled_revisions[local],
-                        bounds=bounds,
                         options=options or FitOptions(),
-                        cancelled=cancelled,
                     )
                 except FitCancelled:
                     raise
@@ -2592,12 +2681,19 @@ class FitEngine:
             return self._settle_population(
                 spec,
                 result,
-                tuple(coordinates),
-                observations,
+                self._nested_population_fit(
+                    spec,
+                    (tuple(coordinates),),
+                    (observations,),
+                    observation_sigmas=(observation_sigma,),
+                    selected_indices=(selected_indices,),
+                    data_revisions=(data_revision,),
+                    bounds=bounds,
+                    options=opts,
+                    cancelled=cancelled,
+                )[0],
                 data_revision=data_revision,
-                bounds=bounds,
                 options=opts,
-                cancelled=cancelled,
             )
 
         coords = _coordinate_arrays(tuple(coordinates), spec.independent_arity)
@@ -2930,28 +3026,35 @@ class FitEngine:
                 covariance_valid=covariance_valid,
                 fixed_parameter_names=fixed_names,
             ),
-            tuple(coordinates),
-            observations,
+            self._nested_population_fit(
+                spec,
+                (tuple(coordinates),),
+                (observations,),
+                observation_sigmas=(observation_sigma,),
+                selected_indices=(selected_indices,),
+                data_revisions=(data_revision,),
+                bounds=requested_bounds,
+                options=opts,
+                cancelled=cancelled,
+            )[0],
             data_revision=data_revision,
-            bounds=requested_bounds,
             options=opts,
-            cancelled=cancelled,
         )
 
     def _settle_population(
         self,
         spec: FitModelSpec,
         result: FitResult,
-        coordinates: Sequence[np.ndarray],
-        observations: np.ndarray,
+        nested: FitResult | None,
         *,
         data_revision: int,
-        bounds: Mapping[str, tuple[float | None, float | None]] | None,
         options: FitOptions,
-        cancelled: Callable[[], bool] | None,
     ) -> FitResult:
         """Weigh a two-population answer against its nested one-population
         answer, and let the nested one stand where the evidence falls short.
+
+        The nested answer is SOLVED BY THE CALLER, and in a batch, because
+        every cell of a grid needs one and they all fit the same model.
 
         The two-population model always finds two populations, because it
         has the parameters for them: a single Gaussian of three hundred
@@ -2969,28 +3072,10 @@ class FitEngine:
         threshold = options.min_bic_gain
         if reduction is None or threshold is None or not result.success:
             return result
+        if nested is None or not nested.success:
+            return result
         nested_spec = self.registry.get(reduction.nested_model_id)
         narrow_for = dict(reduction.shared)
-        nested_bounds = (
-            {
-                narrow_for[name]: pair
-                for name, pair in bounds.items()
-                if name in narrow_for
-            }
-            if bounds
-            else None
-        )
-        nested = self.fit(
-            nested_spec,
-            tuple(coordinates),
-            observations,
-            data_revision=data_revision,
-            bounds=nested_bounds or None,
-            options=options,
-            cancelled=cancelled,
-        )
-        if not nested.success:
-            return result
         wide_observed = np.asarray(result.fitted_values) + np.asarray(result.residuals)
         narrow_observed = np.asarray(nested.fitted_values) + np.asarray(nested.residuals)
         deviance_wide = _poisson_deviance_total(result.fitted_values, wide_observed)
