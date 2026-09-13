@@ -69,6 +69,10 @@ _GEQRF = _LAPACK.numba_ez_geqrf(nb_types.float64)
 
 
 EPSILON = np.finfo(np.float64).eps
+#: Median absolute deviation to standard deviation for a Gaussian.  A
+#: median is the only scale a frame's background can be measured by
+#: while an object sits in it, because half the samples may be anything.
+MAD_TO_SIGMA = 1.4826
 COUNT_FLOOR = 1.0e-9
 RSS_TIE_RELATIVE = 1.0e-10
 
@@ -4331,17 +4335,47 @@ def _prepare_exponential(coords, observations, valid, seeds, lower, upper, conte
 
 
 @njit(cache=True, inline="always")
+def _noise_floor(values, offset):
+    """The level the background clears by chance about once in this sample.
+
+    A weighted moment reports the width of whatever carries the weight.  Left
+    unfloored every sample above the median carries some, so a frame that is
+    mostly background seeds a compact spot as a bump the size of the sensor.
+    The median absolute deviation is the only scale the background can be
+    measured by while an object sits in it, and a Gaussian of that scale
+    reaches sqrt(2 log n) of it about once in n draws.
+    """
+
+    deviations = np.empty(values.size, dtype=np.float64)
+    for index in range(values.size):
+        deviations[index] = abs(values[index] - offset)
+    scale = _median(deviations) * MAD_TO_SIGMA
+    return scale * math.sqrt(2.0 * math.log(max(float(values.size), 2.0)))
+
+
+@njit(cache=True, inline="always")
 def _radial_seed(compact, values, sign, output):
     x, y = compact[0], compact[1]
     offset = _median(values)
+    floor = _noise_floor(values, offset)
     total = 0.0
     x_moment = 0.0
     y_moment = 0.0
-    for index in range(values.size):
-        weight = max(sign * (values[index] - offset), 0.0)
-        total += weight
-        x_moment += x[index] * weight
-        y_moment += y[index] * weight
+    for _attempt in range(2):
+        total = 0.0
+        x_moment = 0.0
+        y_moment = 0.0
+        for index in range(values.size):
+            weight = max(sign * (values[index] - offset) - floor, 0.0)
+            total += weight
+            x_moment += x[index] * weight
+            y_moment += y[index] * weight
+        if total > 0.0:
+            break
+        # Nothing stands above the background: the object is either not
+        # distinguishable from it or fills the frame, and the plain moment
+        # is the most the data supports.
+        floor = 0.0
     if total <= 0.0:
         center_x = np.mean(x)
         center_y = np.mean(y)
@@ -4351,7 +4385,7 @@ def _radial_seed(compact, values, sign, output):
         center_y = y_moment / total
         moment = 0.0
         for index in range(values.size):
-            weight = max(sign * (values[index] - offset), 0.0)
+            weight = max(sign * (values[index] - offset) - floor, 0.0)
             delta_x = x[index] - center_x
             delta_y = y[index] - center_y
             moment += weight * (delta_x * delta_x + delta_y * delta_y)
@@ -4367,6 +4401,22 @@ def _radial_seed(compact, values, sign, output):
     output[4] = center_y
 
 
+@njit(cache=True, inline="always")
+def _resolved_width(width, step):
+    """No width finer than half the spacing of the samples that show it.
+
+    Once the background's own scale is subtracted, what is left of a faint
+    or narrow object can be a single sample wide, and the second moment of
+    one point is zero.  A width of zero is not a narrow object, it is an
+    object the samples cannot resolve -- and a Gaussian that narrow is zero
+    everywhere with a Jacobian to match, so a solve seeded there answers
+    with nothing finite.  The refinement bounds already say half a pitch is
+    the finest a radius means anything at; the seed says it too.
+    """
+
+    return max(width, 0.5 * step)
+
+
 @njit(cache=True)
 def _prepare_radial(coords, observations, valid, seeds, lower, upper, context):
     compact, values = _compact_observations(coords, observations, valid)
@@ -4375,6 +4425,10 @@ def _prepare_radial(coords, observations, valid, seeds, lower, upper, context):
     candidates = seeds if seeds.shape[0] else np.empty((2, 5), dtype=np.float64)
     _radial_seed(compact, values, 1.0, candidates[0])
     _radial_seed(compact, values, -1.0, candidates[1])
+    # One radius spans both axes, so the finer pitch is what it resolves at.
+    step = min(_unique_step(compact[0]), _unique_step(compact[1]))
+    candidates[0, 2] = _resolved_width(candidates[0, 2], step)
+    candidates[1, 2] = _resolved_width(candidates[1, 2], step)
     xlow, xhigh = _minimum_maximum(compact[0])
     ylow, yhigh = _minimum_maximum(compact[1])
     low, high = _minimum_maximum(values)
@@ -4393,14 +4447,22 @@ def _prepare_radial(coords, observations, valid, seeds, lower, upper, context):
 def _anisotropic_seed(compact, values, sign, output):
     x, y = compact[0], compact[1]
     offset = _median(values)
+    floor = _noise_floor(values, offset)
     total = 0.0
     x_moment = 0.0
     y_moment = 0.0
-    for index in range(values.size):
-        weight = max(sign * (values[index] - offset), 0.0)
-        total += weight
-        x_moment += x[index] * weight
-        y_moment += y[index] * weight
+    for _attempt in range(2):
+        total = 0.0
+        x_moment = 0.0
+        y_moment = 0.0
+        for index in range(values.size):
+            weight = max(sign * (values[index] - offset) - floor, 0.0)
+            total += weight
+            x_moment += x[index] * weight
+            y_moment += y[index] * weight
+        if total > 0.0:
+            break
+        floor = 0.0
     if total <= 0.0:
         center_x = np.mean(x)
         center_y = np.mean(y)
@@ -4412,7 +4474,7 @@ def _anisotropic_seed(compact, values, sign, output):
         variance_x = 0.0
         variance_y = 0.0
         for index in range(values.size):
-            weight = max(sign * (values[index] - offset), 0.0)
+            weight = max(sign * (values[index] - offset) - floor, 0.0)
             variance_x += weight * (x[index] - center_x) ** 2
             variance_y += weight * (y[index] - center_y) ** 2
         radius_x = math.sqrt(variance_x / total)
@@ -4439,16 +4501,27 @@ def _prepare_anisotropic(coords, observations, valid, seeds, lower, upper, conte
     candidates = seeds if seeds.shape[0] else np.empty((2, 6), dtype=np.float64)
     _anisotropic_seed(compact, values, 1.0, candidates[0])
     _anisotropic_seed(compact, values, -1.0, candidates[1])
+    step_x, step_y = _unique_step(compact[0]), _unique_step(compact[1])
+    for row in range(2):
+        candidates[row, 2] = _resolved_width(candidates[row, 2], step_x)
+        candidates[row, 3] = _resolved_width(candidates[row, 3], step_y)
     xlow, xhigh = _minimum_maximum(compact[0])
     ylow, yhigh = _minimum_maximum(compact[1])
     low, high = _minimum_maximum(values)
     value_range = high - low
-    radius_x = max(candidates[0, 2], candidates[1, 2])
-    radius_y = max(candidates[0, 3], candidates[1, 3])
+    # The box has to hold every candidate this same function offers: the
+    # floor comes from the narrowest and the ceiling from the widest, as
+    # the radial bounds already say.  Taking both ends from the widest
+    # leaves a seed outside its own box, and a bounded solve started out
+    # of bounds answers with nothing finite at all.
+    radius_x_low = min(candidates[0, 2], candidates[1, 2])
+    radius_x_high = max(candidates[0, 2], candidates[1, 2])
+    radius_y_low = min(candidates[0, 3], candidates[1, 3])
+    radius_y_high = max(candidates[0, 3], candidates[1, 3])
     lower[0] = max(lower[0], -4.0 * value_range); upper[0] = min(upper[0], 4.0 * value_range)
     lower[1] = max(lower[1], low - value_range); upper[1] = min(upper[1], high + value_range)
-    lower[2] = max(lower[2], max(radius_x / 10.0, EPSILON)); upper[2] = min(upper[2], radius_x * 10.0)
-    lower[3] = max(lower[3], max(radius_y / 10.0, EPSILON)); upper[3] = min(upper[3], radius_y * 10.0)
+    lower[2] = max(lower[2], max(radius_x_low / 10.0, EPSILON)); upper[2] = min(upper[2], radius_x_high * 10.0)
+    lower[3] = max(lower[3], max(radius_y_low / 10.0, EPSILON)); upper[3] = min(upper[3], radius_y_high * 10.0)
     lower[4] = max(lower[4], xlow); upper[4] = min(upper[4], xhigh)
     lower[5] = max(lower[5], ylow); upper[5] = min(upper[5], yhigh)
     return 2 if seeds.shape[0] else 0

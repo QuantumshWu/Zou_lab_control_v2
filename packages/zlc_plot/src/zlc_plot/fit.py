@@ -4372,6 +4372,56 @@ def _init_radial(coords: ArrayTuple, values: np.ndarray) -> Sequence[float]:
     return _radial_seed(coords, values, 1.0)
 
 
+def _sample_step(values: np.ndarray) -> float:
+    """The spacing the samples along one axis are actually laid out on."""
+
+    ordered = np.unique(values)
+    if ordered.size < 2:
+        return float(np.finfo(np.float64).eps)
+    return float(np.median(np.diff(ordered)))
+
+
+def _resolved_width(width: float, step: float) -> float:
+    """No width finer than half the spacing of the samples that show it.
+
+    Once the background's own scale is subtracted, what is left of a faint
+    or narrow object can be a single sample wide, and the second moment of
+    one point is zero.  A width of zero is not a narrow object, it is an
+    object the samples cannot resolve -- and a Gaussian that narrow is zero
+    everywhere with a Jacobian to match.
+    """
+
+    return max(width, 0.5 * step)
+
+
+def _signal_weights(
+    values: np.ndarray,
+    offset: float,
+    sign: float,
+) -> np.ndarray:
+    """The part of an image that stands above the background's own scatter.
+
+    A weighted moment reports the width of whatever carries the weight, and
+    every sample above the median carries some.  On a frame that is mostly
+    background that is a million pixels of noise against a few hundred of
+    signal, so the moment reports the SENSOR and a compact spot is seeded as
+    a bump the size of the frame -- a seed the solver cannot walk back from,
+    because a Gaussian that wide is flat everywhere the spot is.  Subtracting
+    the level the background clears by chance about once in a sample this
+    size leaves the object carrying the weight.  When nothing clears it the
+    object is not distinguishable from the background, or fills the frame,
+    and the plain moment is the most the data supports.
+    """
+
+    deviation = sign * (values - offset)
+    scale = float(np.median(np.abs(values - offset))) * _compiled_fit.MAD_TO_SIGMA
+    floor = scale * math.sqrt(2.0 * math.log(max(values.size, 2)))
+    weights = np.maximum(deviation - floor, 0.0)
+    if float(np.sum(weights)) > 0.0:
+        return weights
+    return np.maximum(deviation, 0.0)
+
+
 def _radial_seed(
     coords: ArrayTuple,
     values: np.ndarray,
@@ -4379,7 +4429,7 @@ def _radial_seed(
 ) -> tuple[float, ...]:
     x, y = coords
     offset = float(np.median(values))
-    weights = np.maximum(sign * (values - offset), 0.0)
+    weights = _signal_weights(values, offset, sign)
     total = float(np.sum(weights))
     if total <= 0:
         center_x, center_y = float(np.mean(x)), float(np.mean(y))
@@ -4387,9 +4437,11 @@ def _radial_seed(
     else:
         center_x = float(np.sum(x * weights) / total)
         center_y = float(np.sum(y * weights) / total)
-        radius = max(
+        # One radius spans both axes, so the finer pitch is what it
+        # resolves at.
+        radius = _resolved_width(
             float(np.sqrt(np.sum(weights * ((x - center_x) ** 2 + (y - center_y) ** 2)) / total)),
-            np.finfo(float).eps,
+            min(_sample_step(x), _sample_step(y)),
         )
     amplitude = (
         float(np.max(values) - offset)
@@ -4438,7 +4490,7 @@ def _anisotropic_seed(
 ) -> tuple[float, ...]:
     x, y = coords
     offset = float(np.median(values))
-    weights = np.maximum(sign * (values - offset), 0.0)
+    weights = _signal_weights(values, offset, sign)
     total = float(np.sum(weights))
     if total <= 0.0:
         center_x, center_y = float(np.mean(x)), float(np.mean(y))
@@ -4452,9 +4504,8 @@ def _anisotropic_seed(
         radius_y = float(
             np.sqrt(np.sum(weights * (y - center_y) ** 2) / total)
         )
-    epsilon = np.finfo(np.float64).eps
-    radius_x = max(radius_x, epsilon)
-    radius_y = max(radius_y, epsilon)
+    radius_x = _resolved_width(radius_x, _sample_step(x))
+    radius_y = _resolved_width(radius_y, _sample_step(y))
     amplitude = (
         float(np.max(values) - offset)
         if sign > 0.0
@@ -4488,14 +4539,16 @@ def _anisotropic_bounds(
     value_low, value_high = _data_interval(values)
     value_range = _value_range(values)
     seeds = _anisotropic_candidates(coords, values)
-    radius_x = max(float(seed[2]) for seed in seeds)
-    radius_y = max(float(seed[3]) for seed in seeds)
+    # The box has to hold every candidate offered beside it, so the floor
+    # comes from the narrowest and the ceiling from the widest.
+    radii_x = [float(seed[2]) for seed in seeds]
+    radii_y = [float(seed[3]) for seed in seeds]
     epsilon = np.finfo(np.float64).eps
     return {
         "amplitude": (-4.0 * value_range, 4.0 * value_range),
         "offset": (value_low - value_range, value_high + value_range),
-        "radius_x": (max(radius_x / 10.0, epsilon), radius_x * 10.0),
-        "radius_y": (max(radius_y / 10.0, epsilon), radius_y * 10.0),
+        "radius_x": (max(min(radii_x) / 10.0, epsilon), max(radii_x) * 10.0),
+        "radius_y": (max(min(radii_y) / 10.0, epsilon), max(radii_y) * 10.0),
         "center_x": (x_low, x_high),
         "center_y": (y_low, y_high),
     }

@@ -933,6 +933,128 @@ def test_a_solve_is_bounded_by_arithmetic_not_by_sweeps() -> None:
     assert unbounded.evaluation_budget(frame) == unbounded.max_nfev
 
 
+def test_a_spot_smaller_than_its_frame_is_seeded_as_the_spot() -> None:
+    """A weighted moment reports the width of whatever carries the weight.
+
+    Every sample above the median carries some, so on a camera frame that is
+    mostly background the moment counts a million pixels of noise against a
+    few hundred of signal and reports the SENSOR.  A Gaussian that wide is
+    flat everywhere the spot is, so the solver has no gradient to walk back
+    on and answers with a shallow bump somewhere else -- and says it
+    succeeded.  Both image models are seeded this way, and both are asked.
+    """
+
+    generator = np.random.default_rng(20260913)
+    # Measured: the unfloored moment keeps the spot up to 360x576 and loses
+    # it from 480x768 on -- answering 298 px away with a flat bump, and
+    # calling that a success.  Half a megapixel is the cheapest frame that
+    # tells the two apart.
+    height, width = 480, 768
+    x = np.arange(width, dtype=np.float64)
+    y = np.arange(height, dtype=np.float64)
+    grid_x, grid_y = np.meshgrid(x, y)
+    center = (width / 2.0 - 0.5, height / 2.0 - 0.5)
+    radius = 8.0
+    image = 7.0 + 9.0 * np.exp(
+        -(((grid_x - center[0]) ** 2 + (grid_y - center[1]) ** 2) / radius**2)
+    )
+    image += generator.normal(0.0, 1.5, image.shape)
+
+    engine = FitEngine()
+    for model, widths in (
+        ("radial_gaussian_center", ("one_over_e_radius",)),
+        ("anisotropic_gaussian_center", ("radius_x", "radius_y")),
+    ):
+        result = engine.fit(model, RegularImageFitInput(x, y, image))
+        values = dict(
+            zip(
+                [parameter.name for parameter in result.model.parameters],
+                result.parameter_values,
+            )
+        )
+        assert result.success, f"{model}: {result.message}"
+        # On the spot, not on the frame: the centre within a radius of where
+        # the light is, a positive amplitude, and a width the size of the
+        # object rather than a fraction of the sensor.
+        assert abs(values["center_x"] - center[0]) < radius, model
+        assert abs(values["center_y"] - center[1]) < radius, model
+        assert values["amplitude"] > 0.0, model
+        for name in widths:
+            assert radius / 2.0 < values[name] < radius * 2.0, (
+                f"{model}.{name} = {values[name]:.1f}, spot radius {radius}"
+            )
+
+
+def test_a_width_the_samples_cannot_resolve_is_not_a_width() -> None:
+    """A seed's second moment over one sample is zero, and zero is not narrow.
+
+    Subtracting the background's own scale can leave what stands above it a
+    single sample wide -- a thin object on one row of the proxy, a dead
+    pixel for the other sign -- and the moment of one point is zero.  The
+    bounds derived from two such candidates are a box a thousandth of a
+    pixel wide; the model inside it is zero everywhere with a Jacobian to
+    match, and the solve comes back as nothing finite, which the refinement
+    stage then refuses as an invalid initializer.  Both image models derive
+    their seeds and their box from the same call, so both are asked, and
+    what is asked is the pair: no width finer than half a sample's spacing,
+    and a box that holds every candidate offered beside it.
+    """
+
+    # A background with a scale but no outliers of its own, on axes with
+    # DIFFERENT pitches so a single floor cannot pass for both.
+    pitch_x, pitch_y = 2.0, 7.0
+    columns, rows = 64, 48
+    x = np.arange(columns, dtype=np.float64) * pitch_x
+    y = np.arange(rows, dtype=np.float64) * pitch_y
+    grid_x, grid_y = np.meshgrid(x, y)
+    values = np.tile(
+        np.array([-1.0, 0.0, 1.0, 0.0]), grid_x.size // 4
+    ).reshape(grid_x.shape)
+    # Whatever the floor is, exactly these clear it: two samples in
+    # opposite corners, so the upward candidate is as wide as the frame,
+    # and one sample the other way, so the downward candidate has no width
+    # at all.  Two candidates an order of magnitude apart is what tells a
+    # box built from the narrowest from one built from the widest.
+    values[0, 0] = 1000.0
+    values[rows - 1, columns - 1] = 1000.0
+    values[rows // 3, columns // 3] = -1000.0
+
+    coordinates = np.ascontiguousarray(
+        np.stack([grid_x.ravel(), grid_y.ravel()])
+    )
+    observations = np.ascontiguousarray(values.ravel())
+    valid = np.ones(observations.size, dtype=np.bool_)
+    for prepare, count, widths in (
+        (_fit_compiled._prepare_radial, 5, {2: min(pitch_x, pitch_y)}),
+        (_fit_compiled._prepare_anisotropic, 6, {2: pitch_x, 3: pitch_y}),
+    ):
+        seeds = np.zeros((2, count))
+        lower = np.full(count, -np.inf)
+        upper = np.full(count, np.inf)
+        prepare(
+            coordinates,
+            observations,
+            valid,
+            seeds,
+            lower,
+            upper,
+            np.empty((0, 0), dtype=np.float64),
+        )
+        for slot, pitch in widths.items():
+            for row in range(2):
+                assert seeds[row, slot] >= 0.5 * pitch, (
+                    f"{prepare.__name__} candidate {row} parameter {slot} "
+                    f"is {seeds[row, slot]:g}, finer than half a {pitch:g} pitch"
+                )
+        for row in range(2):
+            assert np.all(seeds[row] >= lower), (
+                f"{prepare.__name__} candidate {row} is below its own box"
+            )
+            assert np.all(seeds[row] <= upper), (
+                f"{prepare.__name__} candidate {row} is above its own box"
+            )
+
+
 def test_invalid_public_batch_warm_start_raises() -> None:
     engine = FitEngine()
     cases = tuple(
