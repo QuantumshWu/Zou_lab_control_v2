@@ -9180,6 +9180,18 @@ class MatplotlibRenderer:
                     title_text,
                     fontsize=title_pt,
                     pad=self.style.render.compact_axes_title_pad_pt,
+                    # PINNED, as the panel title above this already is.
+                    # Left to place itself, Matplotlib recomputes a title's
+                    # position on every draw from a tight bounding box of
+                    # the axis below it -- which for a grid is one such
+                    # query per cell per draw, and measured 65 of the 165
+                    # ms a sixty-four cell grid spends drawing its chrome.
+                    # Nothing in this renderer ever puts ticks or labels
+                    # above an axes, so the answer is always the top of the
+                    # box and the pad, which is what this says.  Checked as
+                    # a pixel question: every case in the catalogue, zero
+                    # differing pixels.
+                    y=1.0,
                 )
             # The tick MARKS are the grid's; their label SIZE belongs to the
             # tick policy below, which may shrink it to keep two labels
@@ -9289,6 +9301,7 @@ class MatplotlibRenderer:
                 focused_title,
                 fontsize=self.style.fonts.figure_title_pt,
                 pad=self.style.render.compact_axes_title_pad_pt,
+                y=1.0,
             )
         if isinstance(semantic, ImagePlot):
             # The chrome authority already applied the standalone image
