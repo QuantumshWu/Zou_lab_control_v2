@@ -10498,8 +10498,14 @@ class MatplotlibRenderer:
         value_artist.set_visible(True)
 
     def _set_fit_line(self, line: Any, polyline: FitPolyline) -> None:
-        order = np.argsort(polyline.x)
-        self._apply_line_data(line.axes, line, polyline.x[order], polyline.y[order])
+        x, y = polyline.x, polyline.y
+        # A model is sampled along a linspace, so the order it arrives in
+        # is almost always the order it is drawn in.  Sorting anyway copied
+        # both arrays for every line of every cell, every frame.
+        if x.size > 1 and not bool(np.all(x[1:] >= x[:-1])):
+            order = np.argsort(x)
+            x, y = x[order], y[order]
+        self._apply_line_data(line.axes, line, x, y)
         line.set_visible(True)
 
     def _update_fit_primitives(self, family: str, overlay: FitOverlay) -> None:
