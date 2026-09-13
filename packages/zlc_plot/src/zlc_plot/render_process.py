@@ -632,7 +632,7 @@ class _RemoteRasterPlotHost:
         self,
         process: "RenderProcess",
         host_id: str,
-        defaults: object | None,
+        defaults: object,
     ) -> None:
         self._process = process
         self._process_pid = process.pid
@@ -672,10 +672,7 @@ class _RemoteRasterPlotHost:
 
     @property
     def defaults(self) -> object:
-        defaults = self._defaults
-        if defaults is None:
-            raise RuntimeError("remote raster host has not published frontend defaults")
-        return defaults
+        return self._defaults
 
     @property
     def front(self) -> RasterFront | None:
@@ -820,13 +817,6 @@ class _RemoteRasterPlotHost:
                 description,
                 tuple(getattr(description, "fit_models", ())),
             )
-
-    def _set_frontend_defaults(self, selector_handle_radius_px: float) -> None:
-        self._defaults = SimpleNamespace(
-            interaction=SimpleNamespace(
-                selector_handle_radius_px=float(selector_handle_radius_px)
-            )
-        )
 
     def _failed(
         self,
@@ -1445,6 +1435,8 @@ class RenderProcess:
         initial_configuration: Mapping[str, object] | None = None,
         device_pixel_ratio: float = 1.0,
     ) -> _RemoteRasterPlotHost:
+        from .config import DEFAULTS  # noqa: PLC0415
+
         self._ensure_running()
         with self._lock:
             if (
@@ -1454,7 +1446,12 @@ class RenderProcess:
             ):
                 raise RuntimeError("render process is not running")
             host_id = uuid4().hex
-            host = _RemoteRasterPlotHost(self, host_id, None)
+            # The same module constant this process and the child both
+            # hold.  It used to ride on EVERY front and be unpacked into two
+            # fresh namespaces per front per panel -- a process constant
+            # re-sent forty times a second on a four-card board to say what
+            # it said when the host was built.
+            host = _RemoteRasterPlotHost(self, host_id, DEFAULTS)
             self._hosts[host_id] = host
             self._host_closed[host_id] = Event()
         input_tokens: set[int] = set()
@@ -2044,7 +2041,6 @@ class RenderProcess:
         nbytes: int,
         width: int,
         height: int,
-        selector_handle_radius_px: float,
     ) -> None:
         # None means "the same map you already have": a panel whose limits
         # are not moving repeats it frame after frame, and on a 64-cell grid
@@ -2118,7 +2114,6 @@ class RenderProcess:
             pixels.release()
             del pixels, store
             return
-        host._set_frontend_defaults(selector_handle_radius_px)
         host._accept_front(front)
 
     def _receive_result(
@@ -2848,7 +2843,6 @@ def _render_process_main(connection: Connection, name: str) -> None:
                 nbytes,
                 int(front.buffer.width),
                 int(front.buffer.height),
-                float(DEFAULTS.interaction.selector_handle_radius_px),
             )
         )
 

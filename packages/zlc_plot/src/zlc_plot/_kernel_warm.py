@@ -371,9 +371,16 @@ def _render(
             # opens on, and a name typed here would go stale the day the
             # catalogue changed.  A plot with no valid model for its target
             # simply has no fit to warm.
+            #
+            # And THROUGH ``configure``, which is the call a panel makes.
+            # Warming with ``session.fit`` instead left the live request
+            # machinery -- arming, the facet batch a grid takes, accepting
+            # and presenting a result -- cold, and a child's first
+            # configure(fit=) still cost 140 ms after everything else was
+            # hot.
             models = session.fit_models
             if models:
-                session.fit(models[0], live=False)
+                session.configure(fit={"model": str(models[0].model_id)})
         if not zoom_steps:
             return
         # A ZOOM IS NOT THE SAME WORK.  Cropping the viewport changes the
