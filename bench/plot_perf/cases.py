@@ -69,6 +69,13 @@ def catalog() -> tuple[Case, ...]:
     AxisRef, CurvePlot, FacetGridPlot, HistogramPlot, ImagePlot, RollingPlot = _specs()
     lattice_2m = lambda: lattice_feed()
     lattice_20m = lambda: lattice_feed(repeats=200, buffers=2)
+    # A shot an operator actually takes early in a run: one repeat over a
+    # small scan.  A cost that is invisible at two million points is the
+    # whole of one here, and the panels these open on are the ones a
+    # console is judged by.
+    lattice_small = lambda: lattice_feed(
+        repeats=1, rows=200, frames=1, sites=4, dims=(10, 20)
+    )
     return (
         Case(
             "curve_2M",
@@ -239,6 +246,85 @@ def catalog() -> tuple[Case, ...]:
             ),
             ("dclick_cell",),
             notes="34 mixed-axis image cells",
+        ),
+        Case(
+            "curve_small",
+            lattice_small,
+            lambda: CurvePlot(AxisRef.point("ax")),
+            ("hover_series", "drag_main"),
+            notes="one repeat, 200 points",
+        ),
+        Case(
+            "curve_band_2M",
+            lattice_2m,
+            lambda: CurvePlot(AxisRef.point("ax")),
+            ("hover_series", "drag_main"),
+            parameters={"uncertainty": True},
+            notes="error bars: the band is drawn from the pooled spread",
+        ),
+        Case(
+            "curve_band_small",
+            lattice_small,
+            lambda: CurvePlot(AxisRef.point("ax")),
+            ("hover_series",),
+            parameters={"uncertainty": True},
+            notes="error bars on one repeat, where each bar is its own artist",
+        ),
+        Case(
+            "hist_small",
+            lattice_small,
+            lambda: HistogramPlot(),
+            ("drag_main", "drag_threshold"),
+            notes="pooled histogram of a small shot",
+        ),
+        Case(
+            "hist_classifier_2M",
+            lattice_2m,
+            lambda: HistogramPlot(),
+            ("drag_threshold",),
+            parameters={"threshold_classifier": True},
+            notes="the classifier's threshold bar and its label",
+        ),
+        Case(
+            "image_small",
+            lattice_small,
+            lambda: ImagePlot(AxisRef.point("ax"), AxisRef.point("ay")),
+            ("drag_clim", "click_main"),
+            notes="a 20x10 heatmap",
+        ),
+        Case(
+            "rolling_band_2M",
+            lattice_2m,
+            lambda: RollingPlot(),
+            ("hover_series",),
+            parameters={"uncertainty": True, "side_distribution": True},
+            notes="the rolling trace a fit publishes into, band and side",
+        ),
+        Case(
+            "facet4_curve_small",
+            lattice_small,
+            lambda: FacetGridPlot(
+                AxisRef.cell_data("site"), CurvePlot(AxisRef.point("ax"))
+            ),
+            ("dclick_cell",),
+            notes="four curve cells on a small shot",
+        ),
+        Case(
+            "facet4_histogram_small",
+            lattice_small,
+            lambda: FacetGridPlot(
+                AxisRef.cell_data("site"), HistogramPlot()
+            ),
+            ("dclick_cell",),
+            notes="four pooled histogram cells on a small shot",
+        ),
+        Case(
+            "fit_curve_small",
+            lattice_small,
+            lambda: CurvePlot(AxisRef.point("ax")),
+            (),
+            fit={"model": "gaussian_offset"},
+            notes="the first fit an operator asks for, on the first shot",
         ),
         Case(
             "fit_curve_2M",
