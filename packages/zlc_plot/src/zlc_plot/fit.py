@@ -1101,6 +1101,13 @@ class FitResult:
     def success_mask(self) -> np.ndarray:
         return _readonly(np.asarray((self.success,), dtype=np.bool_))
 
+    #: Fields that carry no array and decide nothing about one: a result
+    #: already validated stays validated when one of these is attached.
+    #: Re-validating for them cost a sixty-four cell histogram frame 3.5 ms
+    #: -- more than half its compiled solve -- because the two-population
+    #: verdict attaches its BIC gain to every cell, every frame.
+    _SCALAR_OVERRIDES = frozenset({"parameter_units", "batch_revision", "evidence"})
+
     def _clone(self, **overrides: Any) -> "FitResult":
         """Copy this result while preserving still-deferred arrays.
 
@@ -1133,10 +1140,16 @@ class FitResult:
             "evidence": self.evidence,
         }
         values.update(overrides)
-        if set(overrides).issubset({"parameter_units", "batch_revision"}):
+        if set(overrides).issubset(self._SCALAR_OVERRIDES):
             batch_revision = integer(values["batch_revision"], "batch_revision")
             if batch_revision < 0:
                 raise ValueError("batch_revision must be non-negative")
+            evidence = values["evidence"]
+            if isinstance(evidence, bool) or not isinstance(
+                evidence, (Real, np.number)
+            ):
+                raise TypeError("fit result evidence must be a real number")
+            values["evidence"] = float(evidence)
             units = dict(values["parameter_units"])
             unknown = set(units) - set(self.model.parameter_names)
             if unknown:
