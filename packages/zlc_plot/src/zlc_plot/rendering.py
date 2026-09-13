@@ -2431,10 +2431,19 @@ class MatplotlibRenderer:
             )
         else:
             line.set_data(drawn_x, drawn_y)
+            # The marker is the style's, and the style is not what moved:
+            # a facet grid re-set three properties on three lines in every
+            # one of sixty-four cells, every frame, to the values they
+            # already held.
             marker = self.style.artists.curve.marker
-            line.set_marker("None" if marker is None else marker)
-            line.set_markersize(self.style.artists.curve_marker_size_pt)
-            line.set_markevery(None)
+            wanted = "None" if marker is None else marker
+            if line.get_marker() != wanted:
+                line.set_marker(wanted)
+            size = self.style.artists.curve_marker_size_pt
+            if line.get_markersize() != size:
+                line.set_markersize(size)
+            if line.get_markevery() is not None:
+                line.set_markevery(None)
 
     def _refresh_enveloped_lines(self, axis: Any) -> None:
         for line_id, (line, owner, x, y, isolated_glyphs) in tuple(
