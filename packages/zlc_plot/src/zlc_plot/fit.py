@@ -746,6 +746,18 @@ class FitModelRegistry:
 class FitOptions:
     loss: str = "linear"
     max_nfev: int = 5000
+    #: What one solve may spend before it reports that it could not
+    #: converge, counted in POINT-evaluations: the points it sweeps times
+    #: the number of sweeps, which is what a solve actually costs.
+    #: ``max_nfev`` counts only the sweeps, and a sweep spans five orders
+    #: of magnitude across this product's data -- five thousand of them is
+    #: milliseconds on a histogram cell's sixty bins and seven seconds on
+    #: a camera frame's two million pixels.  Measured over every model in
+    #: the matrix, the most expensive solve that CONVERGED spent 2.9e7
+    #: point-evaluations; the ones that never converge spend the whole cap
+    #: -- 1.15e10 on a camera frame, four hundred times that, to report
+    #: that they could not.  ``None`` counts only the sweeps.
+    max_point_evaluations: int | None = 10**9
     deadline_seconds: float | None = None
     #: Curve fits with more finite points than this iterate on an x-binned
     #: sufficient-statistics compression (bin means weighted by counts) and
@@ -765,6 +777,11 @@ class FitOptions:
         max_nfev = integer(self.max_nfev, "max_nfev")
         if max_nfev <= 0:
             raise ValueError("max_nfev must be a positive integer")
+        if self.max_point_evaluations is not None:
+            budget = integer(self.max_point_evaluations, "max_point_evaluations")
+            if budget <= 0:
+                raise ValueError("max_point_evaluations must be positive")
+            object.__setattr__(self, "max_point_evaluations", budget)
         object.__setattr__(self, "loss", loss)
         object.__setattr__(self, "max_nfev", max_nfev)
         if self.deadline_seconds is not None:
@@ -786,6 +803,22 @@ class FitOptions:
             if math.isnan(gain):
                 raise ValueError("min_bic_gain cannot be NaN")
             object.__setattr__(self, "min_bic_gain", gain)
+
+    def evaluation_budget(self, points: int) -> int:
+        """How many sweeps a solve over ``points`` of them may take.
+
+        The two budgets meet here: never more sweeps than ``max_nfev``,
+        and never more arithmetic than ``max_point_evaluations``.  On a
+        histogram cell the second never binds; on a camera frame it is the
+        only one that means anything.
+        """
+
+        if self.max_point_evaluations is None:
+            return self.max_nfev
+        points = int(points)
+        if points <= 0:
+            return self.max_nfev
+        return max(1, min(self.max_nfev, self.max_point_evaluations // points))
 
 
 def _readonly(array: np.ndarray) -> np.ndarray:
@@ -2404,7 +2437,7 @@ class FitEngine:
                     ),
                     poisson=counted,
                     loss=opts.loss,
-                    max_nfev=opts.max_nfev,
+                    max_nfev=opts.evaluation_budget(value_stack.shape[-1]),
                     ftol=1.0e-8,
                     xtol=1.0e-8,
                     gtol=1.0e-8,
@@ -2963,7 +2996,7 @@ class FitEngine:
                     seed,
                     bounds=(free_lower, free_upper),
                     loss=opts.loss,
-                    max_nfev=opts.max_nfev,
+                    max_nfev=opts.evaluation_budget(values.size),
                     x_scale="jac",
                     jac=(analytic_jacobian if spec.jacobian is not None else "2-point"),
                 )

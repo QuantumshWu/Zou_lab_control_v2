@@ -896,6 +896,43 @@ def test_public_batch_filters_a_nan_coordinate_after_temporaries_recycle_ids() -
         assert result.selected_indices.size == x.size - 1
 
 
+def test_a_solve_is_bounded_by_arithmetic_not_by_sweeps() -> None:
+    """What a solve may spend is what it costs, not how often it sweeps.
+
+    A sweep spans five orders of magnitude across this product's data, so
+    a budget counted in sweeps means milliseconds on a histogram cell's
+    sixty bins and seconds on a camera frame's two million pixels.  Every
+    solve in the matrix that converges spends at most 2.9e7
+    point-evaluations; the ones that never converge spend the whole sweep
+    cap -- on a camera frame, 1.15e10 of them, to report that they could
+    not.
+    """
+
+    options = FitOptions()
+    budget = options.max_point_evaluations
+    assert budget is not None
+
+    # A histogram cell, a curve, a small image: the arithmetic budget has
+    # nothing to say and the sweep cap stands.
+    for points in (60, 400, 4096):
+        assert options.evaluation_budget(points) == options.max_nfev
+
+    # A camera frame: the sweep cap says nothing and this is the only
+    # bound there is.
+    frame = 1200 * 1920
+    assert options.evaluation_budget(frame) == budget // frame
+    assert options.evaluation_budget(frame) < options.max_nfev
+
+    # Monotone, and never nothing: a solve always gets at least one sweep.
+    assert options.evaluation_budget(2 * frame) < options.evaluation_budget(frame)
+    assert options.evaluation_budget(budget * 10) >= 1
+    assert options.evaluation_budget(0) == options.max_nfev
+
+    # Counting sweeps only is a choice a caller can still make.
+    unbounded = FitOptions(max_point_evaluations=None)
+    assert unbounded.evaluation_budget(frame) == unbounded.max_nfev
+
+
 def test_invalid_public_batch_warm_start_raises() -> None:
     engine = FitEngine()
     cases = tuple(
