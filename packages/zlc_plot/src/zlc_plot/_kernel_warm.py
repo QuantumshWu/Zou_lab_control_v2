@@ -638,9 +638,11 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
     * the remaining picture variety, which is the only part that is about
       what a panel happens to show rather than what every panel pays.
     * a grid's worth of empty cells, kept in :data:`CELL_RESERVE`.  It is
-      last because it is the only step that buys nothing for a panel that
-      is not a grid -- but for one that is, sixty-four cells were the
-      larger half of the mount, and this is the whole of it.
+      near the end because it buys nothing for a panel that is not a grid
+      -- but for one that is, sixty-four cells were the larger half of the
+      mount, and this is the whole of it.
+    * the 3D scene, last, for the same reason and a smaller one: 72 ms,
+      and only for a panel presented as height bars.
 
     Listed last, as the solvers were, none of it ran at all: a child is
     taken about a second into its warming, and the operator paid the fit
@@ -860,6 +862,19 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
 
         CELL_RESERVE.fill(
             DEFAULTS.style, int(DEFAULTS.layout.facet_max_cells)
+        )
+    if proceed():
+        # And the 3D scene, which was left out of the list above because it
+        # is a presentation only some panels open on.  It costs the process
+        # 72 ms the first time and nothing after -- measured, a second 3D
+        # panel in the same process opens in 98 ms against the first one's
+        # 170 -- and a render child hosts ONE panel, so without this every
+        # 3D panel there has ever been paid it.
+        _render(
+            _image_snapshot(24, 32, np.float64),
+            image,
+            {"presentation": "height_bars"},
+            size="2x2",
         )
 
 

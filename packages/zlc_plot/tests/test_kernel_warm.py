@@ -342,6 +342,47 @@ def test_the_zoom_the_warmer_renders_is_centred_on_the_image(monkeypatch) -> Non
     assert (y.high - y.low) / (x.high - x.low) == pytest.approx(3.0 / 5.0)
 
 
+def test_the_speculative_tail_runs_last_and_only_if_nothing_asked(monkeypatch) -> None:
+    """What the tail holds buys nothing for some panels, so it comes after
+    everything that buys something for every panel.
+
+    A grid's cells and the 3D scene are each worth more than they cost --
+    190 ms off a grid mount, 66 off a 3D one -- but only to a panel of that
+    kind, and a render child hosts one panel.  So they run at the end,
+    where a child taken early simply never reaches them.
+    """
+
+    from zlc_plot.config import DEFAULTS
+    from zlc_plot.rendering import CELL_RESERVE
+
+    rendered: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        _kernel_warm, "_render",
+        lambda snapshot, spec, parameters=None, **kw: rendered.append(
+            (type(spec).__name__,
+             None if not parameters else parameters.get("presentation"))
+        ),
+    )
+    filled: list[int] = []
+    monkeypatch.setattr(
+        CELL_RESERVE, "fill",
+        lambda style, cells: filled.append(cells),
+    )
+
+    _kernel_warm.warm_process()
+    assert filled == [int(DEFAULTS.layout.facet_max_cells)]
+    assert rendered[-1] == ("ImagePlot", "height_bars"), rendered
+    assert [entry for entry in rendered[:-1] if entry[1] == "height_bars"] == []
+
+    # Cut short anywhere before the tail and neither is reached.
+    rendered.clear()
+    filled.clear()
+    answers = iter((True, True, True, False))
+    _kernel_warm.warm_process(proceed=lambda: next(answers, False))
+    assert filled == []
+    assert ("ImagePlot", "height_bars") not in rendered
+
+
 def test_a_fresh_process_is_warmed_before_its_first_request() -> None:
     """A render child pays its first-render costs at start, on its own.  In
     a fresh interpreter, after ``warm_process`` alone, the panels a console
