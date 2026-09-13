@@ -1857,10 +1857,17 @@ class ConsolePresenter:
         classifier_thresholds: object = _UNCHANGED
         selectors: object = _UNCHANGED
         if restore_interaction:
+            # What a description is FOR here: proving that the region the
+            # operator drew belongs to the coordinates this surface draws.
+            # With nothing drawn there is nothing to prove, and asking anyway
+            # blocked the owner thread until a freshly built child had
+            # constructed its whole session -- 84 to 343 ms, measured, on
+            # every panel an operator adds.
+            selection = panel_selection_from_document(panel_state.selector)
             accepted_display = self._panel_accepted_display(binding, host)
             if accepted_display is None:
                 accepted_display = binding.accepted_display
-            if accepted_display is None:
+            if accepted_display is None and selection is not None:
                 describe = getattr(host, "describe_display", None)
                 if callable(describe):
                     answer = describe()
@@ -1902,7 +1909,6 @@ class ConsolePresenter:
             )
             if accepts_classifier_thresholds(target_spec, panel_state.display):
                 classifier_thresholds = panel_state.classifier_thresholds
-            selection = panel_selection_from_document(panel_state.selector)
             placeable = (
                 selection is not None
                 and selection_subject is not None
