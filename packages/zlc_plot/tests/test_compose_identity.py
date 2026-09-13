@@ -14,6 +14,8 @@ import matplotlib
 
 matplotlib.use("Agg", force=True)
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -671,6 +673,64 @@ def _site_grid_session(sites: int = 25, points: int = 5, repeats: int = 12):
         device_pixel_ratio=3.0,
     )
     return session, landed
+
+
+def test_a_grid_built_from_the_cell_reserve_paints_the_same_picture() -> None:
+    """Cells built before the panel arrived must be indistinguishable.
+
+    An Axes is fifteen thousand Matplotlib objects, and sixty-four of them
+    were the larger half of what mounting a grid costs, so a render child
+    builds a grid's worth while it warms.  A cell's construction reaches
+    the picture through the STYLE -- the grouped chrome copies each cell's
+    own spines and tick lines -- so cells built under a different style
+    paint different marks, and the reserve must refuse one.  What it does
+    hand over has to be exact.
+    """
+
+    from zlc_plot.config import DEFAULTS
+    from zlc_plot.rendering import CELL_RESERVE, CellReserve
+
+    def painted() -> np.ndarray:
+        session, landed = _site_grid_session()
+        try:
+            frame = np.array(session.rgba(), copy=True)
+            session.update_data(landed(3))
+            return np.stack([frame, np.array(session.rgba(), copy=True)])
+        finally:
+            session.close()
+
+    probe, _landed = _site_grid_session()
+    try:
+        grid_plan = probe._renderer.plan
+    finally:
+        probe.close()
+    cells = int(DEFAULTS.layout.facet_max_cells)
+    plain = painted()
+    CELL_RESERVE.fill(DEFAULTS.style, cells)
+    try:
+        reserved = painted()
+        # The reserve was consumed, so the next panel builds its own.
+        assert CELL_RESERVE.take(DEFAULTS.style, grid_plan) is None
+    finally:
+        CELL_RESERVE._held = None
+    assert np.array_equal(plain, reserved), (
+        f"{int(np.count_nonzero((plain != reserved).any(axis=-1)))} pixels "
+        "differ between a grid built from the reserve and one built fresh"
+    )
+
+    # A style the cells were not built under is a different picture, so the
+    # reserve answers for one style only.
+    other = CellReserve()
+    other.fill(DEFAULTS.style, cells)
+    changed = replace(
+        DEFAULTS.style,
+        artists=replace(
+            DEFAULTS.style.artists,
+            curve_marker_size_pt=DEFAULTS.style.artists.curve_marker_size_pt + 1.0,
+        ),
+    )
+    assert other.take(changed, grid_plan) is None
+    assert other.take(DEFAULTS.style, grid_plan) is not None
 
 
 @pytest.mark.parametrize("materialization", ("export", "compose_fallback"))

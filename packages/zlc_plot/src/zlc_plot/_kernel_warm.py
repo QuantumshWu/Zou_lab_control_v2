@@ -637,6 +637,10 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
       fit kernels, which needs the imports above and so waits for them.
     * the remaining picture variety, which is the only part that is about
       what a panel happens to show rather than what every panel pays.
+    * a grid's worth of empty cells, kept in :data:`CELL_RESERVE`.  It is
+      last because it is the only step that buys nothing for a panel that
+      is not a grid -- but for one that is, sixty-four cells were the
+      larger half of the mount, and this is the whole of it.
 
     Listed last, as the solvers were, none of it ran at all: a child is
     taken about a second into its warming, and the operator paid the fit
@@ -846,6 +850,17 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
         size="2x2",
     )
     load_batch_solvers(proceed)
+    if proceed():
+        # LAST, because it is the only step here that is speculative: a
+        # panel that is not a grid never asks for it.  A grid's cells are
+        # the larger half of what mounting one costs and none of it depends
+        # on the data, so a child with nothing else to do builds them now.
+        from .config import DEFAULTS  # noqa: PLC0415
+        from .rendering import CELL_RESERVE  # noqa: PLC0415
+
+        CELL_RESERVE.fill(
+            DEFAULTS.style, int(DEFAULTS.layout.facet_max_cells)
+        )
 
 
 # ------------------------------------------------------------ the warmer

@@ -1700,6 +1700,85 @@ def _pooled_store(block: bytearray) -> object:
     return (ctypes.c_ubyte * len(block)).from_buffer(block)
 
 
+class CellReserve:
+    """A figure and its grid cells, built before a panel asks for them.
+
+    One Axes is fifteen thousand Matplotlib objects and about seven
+    milliseconds of construction; a grid of sixty-four was the larger half
+    of what mounting a faceted panel costs, and none of it depends on the
+    data.  A render child has nothing else to do while it warms, so it
+    builds them there and a panel finds them waiting.
+
+    Two measurements decide the shape.  A cell's construction DOES reach
+    the picture, through the style: the grouped chrome copies each cell's
+    own spines and tick lines, so cells built under a different style paint
+    different marks.  The reserve therefore records the style it was built
+    under and answers only for that one.  And an Axes handed from one
+    figure to another keeps transforms bound to the figure it was built on
+    -- the spines kept the ``transAxes`` they were constructed with and
+    drew each cell's frame across the whole picture -- so nothing here
+    crosses between figures: the reserve holds the figure its cells belong
+    to and hands that over, resized.  A figure is made to be resized; that
+    is what a window does.
+    """
+
+    def __init__(self) -> None:
+        self._lock = RLock()
+        self._held: tuple[PlotStyleConfig, Any, list[Any]] | None = None
+
+    def fill(self, style: PlotStyleConfig, cells: int) -> None:
+        """Build one figure and ``cells`` grid cells detached on it."""
+
+        from matplotlib.backends.backend_agg import FigureCanvasAgg  # noqa: PLC0415
+        from matplotlib.figure import Figure  # noqa: PLC0415
+
+        if not isinstance(style, PlotStyleConfig):
+            raise TypeError("style must be PlotStyleConfig")
+        cells = int(cells)
+        if cells < 1:
+            raise ValueError("a reserve holds at least one cell")
+        with style_context(style, {}):
+            # The size is the panel's to decide and is set when it arrives;
+            # this one only has to exist.
+            figure = Figure(figsize=(1.0, 1.0), dpi=100.0, layout=None)
+            FigureCanvasAgg(figure)
+            spare = [
+                figure.add_axes((0.0, 0.0, 1.0, 1.0)) for _ in range(cells)
+            ]
+        for axis in spare:
+            # ``delaxes``, not ``remove``: removing an artist clears its
+            # figure, and ``add_axes`` refuses an Axes built on another
+            # figure -- the only way back would be ``set_figure``, which
+            # rebuilds the transform graph and leaves the spines behind.
+            figure.delaxes(axis)
+        with self._lock:
+            self._held = (style, figure, spare)
+
+    def take(
+        self,
+        style: PlotStyleConfig,
+        plan: SurfacePlan,
+    ) -> tuple[Any, list[Any]] | None:
+        """The waiting figure and the cells this plan needs, or nothing."""
+
+        wanted = sum(
+            1 for entry in plan.axes if entry.role == "facet_cell"
+        )
+        if not wanted:
+            return None
+        with self._lock:
+            held = self._held
+            if held is None or held[0] != style:
+                return None
+            self._held = None
+        _style, figure, spare = held
+        return figure, spare[:wanted]
+
+
+#: One reserve per process: a render child fills it while it warms.
+CELL_RESERVE = CellReserve()
+
+
 class PublishBufferPool:
     """Recycled publish buffers whose release point the interpreter owns.
 
@@ -2132,6 +2211,7 @@ class MatplotlibRenderer:
         from matplotlib.backends.backend_agg import FigureCanvasAgg
         from matplotlib.figure import Figure
 
+        reserved = CELL_RESERVE.take(self.style, self.plan)
         with style_context(
             self.style,
             {
@@ -2139,25 +2219,49 @@ class MatplotlibRenderer:
                 "figure.figsize": self.plan.figure_size_inches,
             },
         ):
-            figure = Figure(
-                figsize=self.plan.figure_size_inches,
-                dpi=self.plan.logical_dpi,
-                layout=None,
-            )
-            FigureCanvasAgg(figure)
+            if reserved is None:
+                figure = Figure(
+                    figsize=self.plan.figure_size_inches,
+                    dpi=self.plan.logical_dpi,
+                    layout=None,
+                )
+                FigureCanvasAgg(figure)
+                cells: Sequence[Any] = ()
+            else:
+                figure, cells = reserved
+                figure.set_size_inches(
+                    *self.plan.figure_size_inches, forward=False
+                )
             # Matplotlib native canvases derive physical DPI from this logical
             # baseline.  Materialise the Agg front at the requested screen DPR
             # without allowing a later frontend canvas to multiply it again.
             figure._original_dpi = self.plan.logical_dpi
             figure._set_dpi(self.plan.dpi, forward=False)
             self._figure = figure
-            self._axes = self._create_axes(figure, self.plan)
+            self._axes = self._create_axes(figure, self.plan, cells)
 
     @staticmethod
-    def _create_axes(figure: Any, plan: SurfacePlan) -> dict[str, list[Any]]:
+    def _create_axes(
+        figure: Any,
+        plan: SurfacePlan,
+        reserved: Sequence[Any] = (),
+    ) -> dict[str, list[Any]]:
         axes: dict[str, list[Any]] = {}
+        waiting = iter(reserved)
         for axes_plan in plan.axes:
-            axis = figure.add_axes(axes_plan.box.matplotlib_bounds())
+            bounds = axes_plan.box.matplotlib_bounds()
+            # A reserved cell is already this figure's, so it goes back on in
+            # the plan's own order and only its position is new.
+            axis = (
+                next(waiting, None)
+                if axes_plan.role == "facet_cell"
+                else None
+            )
+            if axis is None:
+                axis = figure.add_axes(bounds)
+            else:
+                figure.add_axes(axis)
+                axis.set_position(bounds)
             declare_room(axis, axes_plan.room)
             axis.set_gid(
                 f"{axes_plan.role}:{axes_plan.cell_index}"
