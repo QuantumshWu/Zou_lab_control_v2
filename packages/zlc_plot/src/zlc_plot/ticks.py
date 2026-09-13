@@ -38,6 +38,11 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
+
+#: The fewest ticks an axis may show.  Fewer than two says nothing
+#: about the scale between them, so every axis has at least this many
+#: and a reserve of cells can make that many before a panel arrives.
+TICKS_FLOOR = 2
 from numbers import Integral
 import math
 import types
@@ -280,7 +285,7 @@ class _MeasuredLocator(ticker.Locator):
     #: scale, and an axis that cannot afford two labels is better crowded
     #: than mute.  A count rail lowers this to one: its bound alone is the
     #: information, and its zero is the one optional label there is.
-    FLOOR = 2
+    FLOOR = TICKS_FLOOR
 
     def __init__(
         self,

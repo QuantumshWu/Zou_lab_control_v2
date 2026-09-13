@@ -708,6 +708,18 @@ def test_a_grid_built_from_the_cell_reserve_paints_the_same_picture() -> None:
     plain = painted()
     CELL_RESERVE.fill(DEFAULTS.style, cells)
     try:
+        # A tick is made when someone first asks, and the grouped chrome
+        # asks every cell -- so the reserve asks first, for the fewest an
+        # axis ever shows.
+        from zlc_plot.ticks import TICKS_FLOOR
+
+        _style, _figure, spare = CELL_RESERVE._held
+        for waiting in spare:
+            for axis in (waiting.xaxis, waiting.yaxis):
+                assert len(axis.majorTicks) >= TICKS_FLOOR, (
+                    f"a reserved cell carries {len(axis.majorTicks)} ticks, "
+                    f"fewer than the {TICKS_FLOOR} every axis shows"
+                )
         reserved = painted()
         # The reserve was consumed, so the next panel builds its own.
         assert CELL_RESERVE.take(DEFAULTS.style, grid_plan) is None

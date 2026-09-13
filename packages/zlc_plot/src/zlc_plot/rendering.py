@@ -77,6 +77,7 @@ from .state import DisplayState
 from .style import PlotStyleConfig, style_context
 from .ticks import (
     DeclaredLocator,
+    TICKS_FLOOR,
     apply_declared_ticks,
     apply_named_ticks,
     apply_smart_ticks,
@@ -1746,6 +1747,13 @@ class CellReserve:
                 figure.add_axes((0.0, 0.0, 1.0, 1.0)) for _ in range(cells)
             ]
         for axis in spare:
+            # A tick is made when someone first asks for it, and the
+            # grouped chrome asks every cell: sixty-four cells were 101 ms
+            # of the mount, once.  Every axis shows at least ``TICKS_FLOOR``
+            # of them -- that is what the floor means -- so making that many
+            # now is not a guess about this panel, and the rest stay lazy.
+            axis.xaxis.get_major_ticks(TICKS_FLOOR)
+            axis.yaxis.get_major_ticks(TICKS_FLOOR)
             # ``delaxes``, not ``remove``: removing an artist clears its
             # figure, and ``add_axes`` refuses an Axes built on another
             # figure -- the only way back would be ``set_figure``, which
