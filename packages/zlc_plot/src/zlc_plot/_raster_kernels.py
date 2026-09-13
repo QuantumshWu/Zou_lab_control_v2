@@ -334,7 +334,17 @@ def aggregate_axis_codes(
     counts,
     presence,
 ):
-    """Reduce a tensor by axis-sized codes, preserving row-major order."""
+    """Reduce a tensor by axis-sized codes, preserving row-major order.
+
+    The axis index of a flat position is ``(position // stride) % size``,
+    and evaluating that per element per axis is two integer divisions on
+    every one of a two-megapixel frame -- measured at twenty-two
+    milliseconds a frame on a mixed-topology image, against three for the
+    same frame with no aggregation to do.  A row-major walk knows the same
+    indices without dividing for them: each axis advances once every
+    ``stride`` positions and wraps at ``size``.  Identical arithmetic,
+    identical order, identical output.
+    """
 
     for bucket in range(bucket_count):
         counts[bucket] = 0
@@ -345,12 +355,24 @@ def aggregate_axis_codes(
             out[bucket] = -np.inf
         else:
             out[bucket] = 0.0
+    axis_count = axis_sizes.size
+    axis_index = np.zeros(axis_count, dtype=np.int64)
+    axis_tick = np.zeros(axis_count, dtype=np.int64)
     for position in range(values.size):
+        if position:
+            # Advanced at the TOP, so that every ``continue`` below leaves
+            # the walk where the next position expects it.
+            for axis in range(axis_count):
+                axis_tick[axis] += 1
+                if axis_tick[axis] == axis_strides[axis]:
+                    axis_tick[axis] = 0
+                    axis_index[axis] += 1
+                    if axis_index[axis] == axis_sizes[axis]:
+                        axis_index[axis] = 0
         bucket = 0
         admitted = True
-        for axis in range(axis_sizes.size):
-            index = (position // axis_strides[axis]) % axis_sizes[axis]
-            code = axis_codes[axis, index]
+        for axis in range(axis_count):
+            code = axis_codes[axis, axis_index[axis]]
             if code < 0:
                 admitted = False
                 break
