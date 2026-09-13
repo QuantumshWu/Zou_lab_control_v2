@@ -1206,7 +1206,10 @@ def test_threshold_classifier_is_independent_and_covers_every_facet(monkeypatch,
         automatic_second = dict(targets[1])
         automatic_second.pop("gaussian_components")
         host.configure(classifier_thresholds=(targets[0], automatic_second)).result(timeout=10)
-        assert batches == [("bimodal_gaussian", 1)]
+        # ONE cell, and the nested one-population model that a two-population
+        # answer is weighed against -- which is a batch of its own now, for
+        # the same reason the wide model is: every cell of a grid needs one.
+        assert batches == [("bimodal_gaussian", 1), ("histogram_gaussian", 1)]
         assert session._classifier_results[0] is first
         assert session._classifier_results[1] is not None
         assert session._classifier_thresholds_settled()[1] is None

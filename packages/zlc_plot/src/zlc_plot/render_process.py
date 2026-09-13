@@ -953,6 +953,13 @@ class _RemoteRasterPlotHost:
         return stopped
 
 
+#: How many finished input segments one child's transport keeps to fill
+#: again rather than destroying.  A producer's shot and its overlay are one
+#: or two blocks, and a couple of shots may be in flight, so four covers the
+#: rotation; past that a block is given back to the operating system, which
+#: is what keeps a session that changed raster size from holding both.
+_INPUT_FREE_BLOCKS = 4
+
 #: How many children stand warm and unused before anything is drawing, so
 #: a panel never waits for one.  Four, because a board is four cards: the
 #: console's own layouts and the saved boards sit at or under four, so a
@@ -1371,6 +1378,19 @@ class RenderProcess:
         self._input_refcounts: dict[int, int] = {}
         self._host_inputs: dict[str, set[int]] = {}
         self._input_uploads: dict[int, tuple[SharedMemory, ...]] = {}
+        #: Segments a child has finished reading, kept to be filled again.
+        #: A producer publishes the same shape shot after shot, so the block
+        #: its bytes are copied into is the same size every time -- and
+        #: making one costs the first-touch zero fill of the whole frame:
+        #: measured, 4.79 ms to create, fill and destroy eight megabytes
+        #: against 0.22 ms to fill one that already exists, and 0.74 against
+        #: 0.014 at one megabyte.  Per shot, per child.
+        #:
+        #: ONE deque searched by size, never a bucket per size: bucketed,
+        #: every raster size a session ever used kept a permanent cache of
+        #: its own, which is the shape the front pool was already taught not
+        #: to have.
+        self._input_free: deque[SharedMemory] = deque()
         self._closing = False
         self._owners = 1
         self._close_started: float | None = None
@@ -1896,12 +1916,21 @@ class RenderProcess:
         descriptors: list[tuple[str, int]] = []
 
         def discard_blocks() -> None:
-            for block in shared:
-                try:
-                    block.close()
-                    block.unlink()
-                except Exception:
-                    pass
+            # BACK ON THE FREE LIST, not destroyed.  The commonest way here
+            # is two panels sharing one signal: the second finds the token
+            # already published and drops the copy it just made -- and that
+            # copy is a segment of exactly the size the next shot wants.
+            with self._lock:
+                closing = self._closing or self._closed
+                spare = (
+                    tuple(shared)
+                    if closing
+                    else tuple(
+                        block for block in shared
+                        if not self._keep_input_block(block)
+                    )
+                )
+            self._discard_input_blocks(spare)
 
         try:
             payload = pickle.dumps(
@@ -1913,9 +1942,13 @@ class RenderProcess:
                 try:
                     source = memoryview(item).cast("B")
                     nbytes = source.nbytes
-                    block = SharedMemory(create=True, size=max(1, nbytes))
+                    block = self._take_input_block(nbytes)
                     shared.append(block)
-                    destination = block.buf
+                    # A DERIVED view, because releasing a SharedMemory's own
+                    # ``buf`` kills it for good -- which did not matter while
+                    # every block was destroyed after one use and is exactly
+                    # what a block being filled a second time cannot survive.
+                    destination = memoryview(block.buf)
                     if nbytes:
                         destination[:nbytes] = source
                     descriptors.append((block.name, nbytes))
@@ -2283,15 +2316,52 @@ class RenderProcess:
         except Exception:
             return
 
-    def _finish_input_upload(self, token: int) -> None:
+    def _take_input_block(self, nbytes: int) -> SharedMemory:
+        """One segment big enough to hold this buffer, reused if one is free."""
+
+        wanted = max(1, int(nbytes))
         with self._lock:
-            blocks = self._input_uploads.pop(token, ())
+            for index, block in enumerate(self._input_free):
+                if block.size >= wanted:
+                    del self._input_free[index]
+                    return block
+        return SharedMemory(create=True, size=wanted)
+
+    def _discard_input_blocks(self, blocks: Sequence[SharedMemory]) -> None:
         for block in blocks:
             try:
                 block.close()
                 block.unlink()
             except FileNotFoundError:
                 pass
+            except Exception:
+                pass
+
+    def _finish_input_upload(self, token: int) -> None:
+        """The child is done with this input; keep its segments to fill again.
+
+        Only reached once the child has acknowledged the drop, so nothing is
+        still reading what goes back on the free list.
+        """
+
+        with self._lock:
+            blocks = self._input_uploads.pop(token, ())
+            if self._closing or self._closed:
+                spare: tuple[SharedMemory, ...] = tuple(blocks)
+            else:
+                spare = tuple(
+                    block for block in blocks
+                    if not self._keep_input_block(block)
+                )
+        self._discard_input_blocks(spare)
+
+    def _keep_input_block(self, block: SharedMemory) -> bool:
+        """Put one segment back, up to the budget.  Called under the lock."""
+
+        if len(self._input_free) >= _INPUT_FREE_BLOCKS:
+            return False
+        self._input_free.append(block)
+        return True
 
     def _receive_host_closed(self, host_id: str) -> None:
         with self._lock:
@@ -2357,6 +2427,10 @@ class RenderProcess:
             event.set()
         for token in tuple(self._input_uploads):
             self._finish_input_upload(token)
+        with self._lock:
+            free = tuple(self._input_free)
+            self._input_free.clear()
+        self._discard_input_blocks(free)
         try:
             self._connection.close()
         except Exception:
