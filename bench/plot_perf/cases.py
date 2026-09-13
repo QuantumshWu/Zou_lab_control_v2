@@ -27,8 +27,13 @@ def open_session(case, feed):
 
     from .common import SIZE_PRESET
 
-    session = PlotSession(feed.next(), case.spec())
-    session.set_size(SIZE_PRESET)
+    # SIZE AT CONSTRUCTION, which is what the product does: build_host takes
+    # the panel's size and the renderer lays out once.  Set afterwards, the
+    # session lays out twice -- and on a sixty-four cell grid the second
+    # layout throws away a hundred and twenty-eight Axes and builds them
+    # again, so a bench that set it that way reported 1.43 s for a first
+    # frame the product paints in 0.56.
+    session = PlotSession(feed.next(), case.spec(), size=SIZE_PRESET)
     if case.parameters:
         session.set_parameters(dict(case.parameters))
     return session

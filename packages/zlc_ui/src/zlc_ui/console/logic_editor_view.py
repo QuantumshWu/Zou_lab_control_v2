@@ -53,6 +53,10 @@ class LogicEditorView(QtWidgets.QWidget):
         self.node_id = str(node_id)
         self._mutation_enabled = True
         self._projection: dict[str, object] = {}
+        #: The projection minus what the status half applies, as last
+        #: rebuilt from.  A beat that changes neither rebuilds nothing.
+        self._applied_structure: dict[str, object] | None = None
+        self._status_colour = ""
         self._device_combos: dict[str, FluentComboBox] = {}
         self._acquisition_combo: FluentComboBox | None = None
         self._artifact_result_readouts: dict[str, FluentReadoutEdit] = {}
@@ -177,15 +181,31 @@ class LogicEditorView(QtWidgets.QWidget):
             tuple(field for field in spec.fields
                   if field.key not in managed_fields and field.key != acquisition_key)
         )
-        self.artifact_form.reconcile(artifact_spec, dict(artifact_values))
-        self.artifact_form.setVisible(bool(artifact_spec.keys))
-        self.form.reconcile(
-            visible_spec,
-            {key: values[key] for key in visible_spec.keys},
-        )
-        self.form.setVisible(bool(visible_spec.keys))
-        self._reconcile_selectors(incoming)
-        self._rebuild_artifact_results(incoming.get("artifact_results", ()))
+        # THE PROJECTION ARRIVES ON EVERY BEAT, and almost always says
+        # what it said last time: a status word changed, or nothing did.
+        # These four rebuild three forms, refill a grouped tree over the
+        # whole signal list, re-parse the scan plan and re-measure a
+        # six-column table -- ten times a second, for an editor the
+        # operator is reading.  They read nothing but the projection, so
+        # an unchanged projection makes them all no-ops, and the fields
+        # below are excluded from the comparison precisely because the
+        # cheap half further down is what applies them.
+        volatile = ("running", "pending", "error", "issues", "status",
+                    "auto_preview", "can_start", "can_stop")
+        structure = {
+            key: value for key, value in incoming.items() if key not in volatile
+        }
+        if structure != self._applied_structure:
+            self._applied_structure = structure
+            self.artifact_form.reconcile(artifact_spec, dict(artifact_values))
+            self.artifact_form.setVisible(bool(artifact_spec.keys))
+            self.form.reconcile(
+                visible_spec,
+                {key: values[key] for key in visible_spec.keys},
+            )
+            self.form.setVisible(bool(visible_spec.keys))
+            self._reconcile_selectors(incoming)
+            self._rebuild_artifact_results(incoming.get("artifact_results", ()))
 
         offered = bool(incoming["preview_offered"])
         self.preview_switch.setVisible(offered and bool(self._show_actions))
@@ -205,9 +225,14 @@ class LogicEditorView(QtWidgets.QWidget):
         status = str(incoming.get("status") or state)
         issue = issues[0] if issues else ""
         self.status_label.setText(error or (f"Draft: {issue}" if issue else status))
-        self.status_label.setStyleSheet(
-            f"color: {'#D13438' if error else GREY}; background: transparent; border: none;"
-        )
+        # Written when it CHANGES: the sheet is re-parsed and the widget
+        # repolished on every write, and this one has two values.
+        colour = "#D13438" if error else GREY
+        if colour != self._status_colour:
+            self._status_colour = colour
+            self.status_label.setStyleSheet(
+                f"color: {colour}; background: transparent; border: none;"
+            )
 
     def set_mutation_enabled(self, enabled: bool) -> None:
         """Disable authored and lifecycle commands while a Task owns the console."""

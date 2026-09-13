@@ -80,6 +80,10 @@ class PanelEditorView(QtWidgets.QWidget):
         self._mutation_enabled = True
         self._science_locked = False
         self._projection: dict[str, object] = {}
+        #: The projection minus what the snapshot half applies, as last
+        #: reconciled from.  A shot that changes neither rebuilds nothing.
+        self._applied_structure: dict[str, object] | None = None
+        self._snapshot_colour = ""
         self._state: dict[str, Any] = {}
         self._parameter_fields: dict[str, dict[str, dict[str, object]]] = {
             "semantic": {},
@@ -328,29 +332,46 @@ class PanelEditorView(QtWidgets.QWidget):
         self._science_locked = bool(
             isinstance(surface, Mapping) and surface.get("science_locked")
         )
-        self.panel_form.reconcile(FormSpec(tuple(fields)), values)
-        self.panel_form.widget_for("signal").setEnabled(bool(self._signal_groups))
-
-        for section in ("semantic", "display", "fit"):
-            declared = parameter_fields(surface, section)
-            self._parameter_fields[section] = {
-                str(field["key"]): field for field in declared
-            }
-            if declared:
-                spec = parameter_form_spec(declared)
-                form_values = parameter_form_values(declared)
-            else:
-                spec = FormSpec(())
-                form_values = {}
-            unavailable = str(
-                surface.get(f"{section}_unavailable") or ""
-            ) if isinstance(surface, Mapping) else ""
-            self.parameter_unavailable[section].setText(unavailable)
-            self.parameter_unavailable[section].setVisible(bool(unavailable))
-            self.parameter_forms[section].reconcile(spec, form_values)
-            self.parameter_groups[section].setVisible(
-                bool(spec.fields) or bool(unavailable)
+        # FOUR FORMS AND TWO SIGNAL TREES, on a projection that arrives with
+        # every landed shot and almost always says what it said last time.
+        # The panel form declares the signal and overlay as keyed choices,
+        # so reconciling it walks the whole grouped signal list; the three
+        # parameter forms rebuild their specs from the surface.  All of it
+        # reads only the projection members compared here -- the snapshot
+        # age and the producer summary, which DO change every shot, are
+        # applied by the half below and are excluded for that reason.
+        volatile = ("stale", "frozen_snapshot", "data_advanced",
+                    "source_status", "producer_node_id")
+        structure = {
+            key: value for key, value in incoming.items() if key not in volatile
+        }
+        if structure != self._applied_structure:
+            self._applied_structure = structure
+            self.panel_form.reconcile(FormSpec(tuple(fields)), values)
+            self.panel_form.widget_for("signal").setEnabled(
+                bool(self._signal_groups)
             )
+
+            for section in ("semantic", "display", "fit"):
+                declared = parameter_fields(surface, section)
+                self._parameter_fields[section] = {
+                    str(field["key"]): field for field in declared
+                }
+                if declared:
+                    spec = parameter_form_spec(declared)
+                    form_values = parameter_form_values(declared)
+                else:
+                    spec = FormSpec(())
+                    form_values = {}
+                unavailable = str(
+                    surface.get(f"{section}_unavailable") or ""
+                ) if isinstance(surface, Mapping) else ""
+                self.parameter_unavailable[section].setText(unavailable)
+                self.parameter_unavailable[section].setVisible(bool(unavailable))
+                self.parameter_forms[section].reconcile(spec, form_values)
+                self.parameter_groups[section].setVisible(
+                    bool(spec.fields) or bool(unavailable)
+                )
 
         self._update_snapshot_status()
         producer_node_id = str(incoming.get("producer_node_id") or "")
@@ -376,9 +397,13 @@ class PanelEditorView(QtWidgets.QWidget):
         snapshot = self._projection.get("frozen_snapshot")
         aged = bool(self._projection.get("data_advanced") or self._projection.get("source_status"))
         self.snapshot_label.setText(self._snapshot_text(self._projection, stale=stale))
-        self.snapshot_label.setStyleSheet(
-            f"color: {ORANGE if stale or aged else GREY}; background: transparent; border: none;"
-        )
+        # Written when it CHANGES: two values, a re-parse and a repolish.
+        colour = ORANGE if stale or aged else GREY
+        if colour != self._snapshot_colour:
+            self._snapshot_colour = colour
+            self.snapshot_label.setStyleSheet(
+                f"color: {colour}; background: transparent; border: none;"
+            )
         self._snapshot_can_save = snapshot is not None and not stale
         self.save_button.setToolTip(
             "Refresh the stale snapshot before saving" if stale else ""
