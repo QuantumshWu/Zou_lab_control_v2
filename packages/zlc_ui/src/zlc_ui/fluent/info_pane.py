@@ -492,9 +492,23 @@ class InfoTree(QtWidgets.QTreeWidget):
 
 
 class _RowsTab(QtWidgets.QWidget):
-    """One tab: a filter over its tree."""
+    """One tab: a filter over its tree, built when someone looks at it.
 
-    def __init__(self, rows: Iterable[InfoRow], *, name_width: int, parent=None) -> None:
+    Every leaf of every row becomes a tree item, and a pane holds five
+    tabs of which the reader sees one.  Built eagerly, the four they are
+    not reading were charged to the owner thread the moment the rows
+    arrived: 32 ms on a small archive and 316 ms on ten thousand document
+    items, for pictures nobody had asked for.
+    """
+
+    def __init__(
+        self,
+        rows: Iterable[InfoRow],
+        *,
+        name_width: int,
+        action_requested: object = None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.setStyleSheet("background: transparent;")
         layout = QtWidgets.QVBoxLayout(self)
@@ -505,10 +519,44 @@ class _RowsTab(QtWidgets.QWidget):
         self.filter_edit.setPlaceholderText("filter names and values")
         self.filter_edit.setClearButtonEnabled(True)
         layout.addWidget(self.filter_edit)
-        self.tree = InfoTree(name_width=name_width)
-        self.tree.set_rows(rows)
-        layout.addWidget(self.tree, 1)
-        self.filter_edit.textChanged.connect(self.tree.apply_filter)
+        self._layout = layout
+        self._rows = tuple(rows)
+        self._name_width = int(name_width)
+        self._action_requested = action_requested
+        self._tree: InfoTree | None = None
+
+    @property
+    def built(self) -> bool:
+        """Whether this tab's tree exists yet."""
+
+        return self._tree is not None
+
+    def realize(self) -> InfoTree:
+        """Build this tab's tree if it has none, and return it."""
+
+        tree = self._tree
+        if tree is not None:
+            return tree
+        tree = InfoTree(name_width=self._name_width)
+        self._tree = tree
+        tree.set_rows(self._rows)
+        self._layout.addWidget(tree, 1)
+        self.filter_edit.textChanged.connect(tree.apply_filter)
+        # The filter box belongs to the TAB, so a tree built while it holds
+        # text is already being filtered: built and left whole, the tab a
+        # reader turns to would answer a question they had not asked.
+        needle = self.filter_edit.text()
+        if needle:
+            tree.apply_filter(needle)
+        if self._action_requested is not None:
+            tree.action_requested.connect(self._action_requested)
+        return tree
+
+    @property
+    def tree(self) -> InfoTree:
+        """The tree.  Asking for it is looking at it, so it gets built."""
+
+        return self.realize()
 
 
 class _FlowView(QtWidgets.QGraphicsView):
@@ -579,6 +627,10 @@ class InfoPane(QtWidgets.QWidget):
         #: Per graph tab, which row each node stands for: ``(tab, label)``.
         self._graph_rows: dict[str, dict[str, tuple[str, str]]] = {}
         self._rows_tabs: dict[str, _RowsTab] = {}
+        # Removing tabs walks "current" through every one of them on the way
+        # down, and a tab that is current for the length of a removeTab call
+        # is not a tab anyone turned to.
+        self._rebuilding = False
         self._fixed_pane_width: int | None = None
 
         layout = QtWidgets.QVBoxLayout(self)
@@ -616,6 +668,8 @@ class InfoPane(QtWidgets.QWidget):
             QtWidgets.QSizePolicy.Expanding,
             QtWidgets.QSizePolicy.Expanding,
         )
+        # Turning to a tab is the moment its rows are worth building.
+        self.info_tabs.currentChanged.connect(self._build_shown_tab)
         self.set_tabs(tabs)
         layout.addWidget(self.info_tabs, 1)
 
@@ -674,6 +728,17 @@ class InfoPane(QtWidgets.QWidget):
         # titles almost never do -- and the rebuilt stack starts at the
         # first tab, so a refresh threw anyone reading Devices back to Plot.
         showing = self.info_tabs.tabText(self.info_tabs.currentIndex())
+        self._rebuilding = True
+        try:
+            self._replace_tabs(normalized, showing)
+        finally:
+            self._rebuilding = False
+        self._build_shown_tab()
+        self._apply_pane_width()
+
+    def _replace_tabs(
+        self, normalized: tuple[InfoTab, ...], showing: str
+    ) -> None:
         while self.info_tabs.count():
             widget = self.info_tabs.widget(0)
             self.info_tabs.removeTab(0)
@@ -682,22 +747,45 @@ class InfoPane(QtWidgets.QWidget):
         self._rows_tabs.clear()
         self._graph_tabs.clear()
         self._graph_rows.clear()
+        # Which tab will be on screen is known before any of them is made:
+        # the one the reader was on, or the first.  It is built with its
+        # tree already in it, the way a tab that is about to be shown has
+        # to be -- a tree added to a page the stack has already laid out
+        # measures its wrapped rows against a width it does not have yet.
+        titles = [title for title, _rows in normalized]
+        shown = showing if showing in titles else (titles[0] if titles else "")
         for title, rows in normalized:
             if title in self._graph_tab_titles:
                 self._add_graph_tab(title)
             else:
-                self._add_rows_tab(title, rows)
+                self._add_rows_tab(title, rows, build=title == shown)
         for index in range(self.info_tabs.count()):
             if self.info_tabs.tabText(index) == showing:
                 self.info_tabs.setCurrentIndex(index)
                 break
-        self._apply_pane_width()
 
-    def _add_rows_tab(self, title: str, rows: tuple[InfoRow, ...]) -> None:
-        tab = _RowsTab(rows, name_width=self._label_width)
-        tab.tree.action_requested.connect(self.action_requested)
+    def _add_rows_tab(
+        self, title: str, rows: tuple[InfoRow, ...], *, build: bool = False
+    ) -> None:
+        tab = _RowsTab(
+            rows,
+            name_width=self._label_width,
+            action_requested=self.action_requested,
+        )
+        if build:
+            tab.realize()
         self.info_tabs.add_permanent_tab(tab, title)
         self._rows_tabs[title] = tab
+
+    def _build_shown_tab(self, index: object = None) -> None:
+        """Build the tab now on screen; the others wait to be turned to."""
+
+        del index
+        if self._rebuilding:
+            return
+        widget = self.info_tabs.currentWidget()
+        if isinstance(widget, _RowsTab):
+            widget.realize()
 
     def show_row(self, title: str, label: str) -> bool:
         """Open the tab ``title`` on its top-level row ``label``."""

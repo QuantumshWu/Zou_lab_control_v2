@@ -378,6 +378,53 @@ def test_drop_chooses_the_nearest_two_dimensional_gravity_anchor() -> None:
     assert nearest_anchor(probe, others, metrics, board_w=350) == (10, 10)
 
 
+def test_only_the_tab_on_screen_is_built() -> None:
+    """A pane holds five tabs and a reader reads one.
+
+    Every leaf of every row becomes a tree item, so building the four that
+    are not on screen charged the owner thread for pictures nobody had
+    asked for -- on a long run's document, hundreds of milliseconds of it.
+    """
+
+    _run_qt_smoke(
+        """
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import InfoPane
+app = ensure_qt_app(['zlc-ui-tests'])
+deep = {'a': {'b': {'c': tuple(range(40))}}}
+pane = InfoPane(
+    label_names=('Name', 'Description'),
+    tabs=(
+        ('Plot', (('Short', 'demo'),)),
+        ('Raw', (('document', deep),)),
+    ),
+)
+pane.resize(560, 600); pane.show(); app.processEvents()
+assert pane._rows_tabs['Plot'].built, 'the tab on screen is built'
+assert not pane._rows_tabs['Raw'].built, 'the tab nobody turned to is not'
+
+# Turning to it builds it, whole.
+tabs = pane.info_tabs
+tabs.setCurrentIndex(next(
+    index for index in range(tabs.count()) if tabs.tabText(index) == 'Raw'
+))
+app.processEvents()
+raw = pane._rows_tabs['Raw']
+assert raw.built
+assert raw.tree.topLevelItem(0).text(0) == 'document'
+
+# A filter standing in the box is applied to the tree it was typed for,
+# whenever that tree is built.
+pane.set_tabs((('Plot', (('Short', 'demo'), ('Other', 'x'))), ('Raw', (('document', deep),))))
+plot = pane._rows_tabs['Plot']
+assert not plot.built, 'the reader was on Raw, so Plot waits'
+plot.filter_edit.setText('Other')
+assert plot.tree.topLevelItem(0).isHidden()
+assert not plot.tree.topLevelItem(1).isHidden()
+"""
+    )
+
+
 def test_figure_info_construct() -> None:
     _run_qt_smoke(
         """

@@ -237,6 +237,12 @@ view.set_archive_info(
     (('Devices', (('sequencer pulse (scan)', {'text': 'Open scan', 'action': 'pulse:k'}),)), ('Flow', ())),
     {'nodes': (), 'edges': ()},
 )
+# A tab's rows exist once a reader turns to it, so turn to it: pressing
+# the button is what this is about, and nobody presses one they cannot see.
+tabs = view.info_pane.info_tabs
+tabs.setCurrentIndex(next(
+    index for index in range(tabs.count()) if tabs.tabText(index) == 'Devices'
+))
 buttons = [b for b in view.info_pane.findChildren(FluentButton) if b.text() == 'Open scan']
 assert len(buttons) == 1, [b.text() for b in view.info_pane.findChildren(FluentButton)]
 buttons[0].click()
