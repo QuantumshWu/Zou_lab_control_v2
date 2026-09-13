@@ -6439,7 +6439,6 @@ class MatplotlibRenderer:
             self._artists[f"{key}:color_mode"] = "scalar"
             for suffix in ("front_store", "prepared_current", "rgba_front", "view_front"):
                 self._artists.pop(f"{key}:{suffix}", None)
-        applied_key = f"{key}:applied_front"
         image = self._artists.get(key)
         if image is None:
             scalar_options = (
@@ -6466,7 +6465,6 @@ class MatplotlibRenderer:
                 assert color_limits is not None
                 image.set_clim(*color_limits)
             self._artists[key] = image
-            self._artists[applied_key] = shown
         else:
             # Unconditionally, because the composed front is now a KEPT
             # buffer written in place: "the artist already holds this
@@ -6476,7 +6474,6 @@ class MatplotlibRenderer:
             # ``_install_image_front`` assigns rather than copies, so this
             # costs nothing to repeat.
             self._install_image_front(image, shown)
-            self._artists[applied_key] = shown
             extent_key = f"{key}:applied_extent"
             if self._artists.get(extent_key) != drawn_extent:
                 # ``set_extent`` rebuilds transforms and re-autoscales;
@@ -7007,7 +7004,6 @@ class MatplotlibRenderer:
             if self._artists.get(extent_key) != scene_extent:
                 image.set_extent(scene_extent)
                 self._artists[extent_key] = scene_extent
-        self._artists[f"{key}:applied_front"] = frame
         self._artists[f"{key}:color_mode"] = "rgba"
         # The artist stays the clim/cmap authority every consumer reads.
         image.set_cmap(cmap)
@@ -9898,7 +9894,6 @@ class MatplotlibRenderer:
                 if composed is not None:
                     rgba, _drawn_extent = composed
                 self._install_image_front(image, rgba)
-                self._artists[f"{key}:applied_front"] = rgba
             # The artist clim stays authoritative for selector geometry and
             # snapshots in both modes.
             image.set_clim(*limits)
