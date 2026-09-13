@@ -880,8 +880,12 @@ def test_public_batch_filters_a_nan_coordinate_after_temporaries_recycle_ids() -
     for cell, mode in enumerate(modes):
         if mode == 0:
             assert results[cell] is None
+            # The refusal NAMES the model and both counts, because an
+            # operator who picked a model on a short series has nothing to
+            # act on otherwise.
             assert failures[cell] == (
-                "fit requires more finite observations than free parameters"
+                f"{model.model_id} needs more points than its 0 free "
+                f"parameters; this cell has 0 finite"
             )
             continue
         assert failures[cell] is None, (cell, failures[cell])

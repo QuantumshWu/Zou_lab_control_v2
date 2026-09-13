@@ -2072,8 +2072,14 @@ class FitEngine:
                 )
                 free_index = np.asarray(free_indices, dtype=np.int64)
                 if values.size <= len(free_indices):
+                    # SAY THE NUMBERS.  "more observations than free
+                    # parameters" leaves an operator who picked a model on a
+                    # three-point curve with nothing to act on; the model's
+                    # name and the two counts say what to do about it.
                     raise ValueError(
-                        "fit requires more finite observations than free parameters"
+                        f"{model.model_id} needs more points than its "
+                        f"{len(free_indices)} free parameters; this cell has "
+                        f"{int(values.size)} finite"
                     )
                 revision = integer(data_revisions[cell], "data_revision")
                 if revision < 0:
@@ -2805,7 +2811,11 @@ class FitEngine:
         )
         lower, upper = _solver_bounds(spec, default_bounds, bounds)
         if values.size <= len(free_indices):
-            raise ValueError("fit requires more finite observations than free parameters")
+            raise ValueError(
+                f"{spec.model_id} needs more points than its "
+                f"{len(free_indices)} free parameters; this series has "
+                f"{int(values.size)} finite"
+            )
         if not free_indices:
             check()
             fitted = spec.evaluate(coords, lower).reshape(-1)

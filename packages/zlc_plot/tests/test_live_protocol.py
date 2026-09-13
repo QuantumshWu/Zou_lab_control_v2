@@ -298,7 +298,7 @@ def test_a_failed_first_explicit_live_fit_settles_its_future() -> None:
     session = _session()
     try:
         logical = session.fit_async("gaussian_offset", live=True)
-        with pytest.raises(ValueError, match="more finite observations"):
+        with pytest.raises(ValueError, match="needs more points than its"):
             logical.result(timeout=10)
         assert session.last_fit is None
         assert session._live_fit_request is not None

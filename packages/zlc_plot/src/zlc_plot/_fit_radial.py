@@ -1541,7 +1541,9 @@ def fit_regular_separable_images(
                 )
             if observation_count <= len(free_indices):
                 raise ValueError(
-                    "fit requires more finite observations than free parameters"
+                    f"{model.model_id} needs more points than its "
+                    f"{len(free_indices)} free parameters; this cell has "
+                    f"{int(observation_count)} finite"
                 )
             degrees = max(observation_count - len(free_indices), 1)
             reduced = raw_rss / degrees
