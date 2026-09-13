@@ -201,6 +201,93 @@ def test_a_signal_that_changes_shape_starts_its_own_chunk(tmp_path) -> None:
     assert reader.snapshot(2).block.values.dtype == np.dtype("<f8")
 
 
+def test_a_window_across_a_schema_change_is_refused_not_guessed_at(tmp_path) -> None:
+    """A chunk boundary exists because the events stopped agreeing.
+
+    Stacked anyway, two different quantities either raise deep inside NumPy
+    or silently upcast into a shape nobody asked for.  Said out loud, the
+    caller reads one chunk's range at a time.
+    """
+
+    root = tmp_path / "run"
+    writer = PublicationWriter(root, events_per_chunk=100)
+    writer.append(_shot(0))
+    writer.append(_shot(1, dtype="<f8"))
+    writer.close()
+
+    reader = PublicationReader(root)
+    assert reader.values(0, 1).dtype == np.dtype("<f4")
+    assert reader.values(1, 2).dtype == np.dtype("<f8")
+    with pytest.raises(PublicationStoreError):
+        reader.values()
+
+
+def test_what_comes_back_is_shaped_the_same_whatever_the_window(tmp_path) -> None:
+    """Rank, dtype and mutability must not depend on where a window lands.
+
+    Inside one chunk the answer IS the file's mapping; across two it is a
+    fresh array; empty it used to be a bare float64 vector.  Three different
+    answers to one question is a trap for the caller who slices with numbers
+    that happen to move.
+    """
+
+    shots = [_shot(index) for index in range(10)]
+    _write(tmp_path / "run", shots, events_per_chunk=4)
+    reader = PublicationReader(tmp_path / "run")
+
+    inside = reader.values(0, 3)
+    across = reader.values(2, 9)
+    empty = reader.values(5, 5)
+    for window in (inside, across, empty):
+        assert window.ndim == inside.ndim
+        assert window.dtype == inside.dtype
+        assert not window.flags.writeable
+    assert empty.shape == (0, *inside.shape[1:])
+
+
+def test_a_flush_that_cannot_be_written_keeps_its_events(tmp_path, monkeypatch) -> None:
+    """The buffer is what a retry has left to try with.
+
+    Cleared before the write, a full disk took the events out of memory
+    without putting them anywhere -- and the writer went on counting them as
+    accepted.
+    """
+
+    from zlc_runtime import publication_store
+
+    root = tmp_path / "run"
+    writer = PublicationWriter(root, events_per_chunk=2)
+    real = publication_store._write_array
+    monkeypatch.setattr(
+        publication_store, "_write_array",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("no space left on device")),
+    )
+    with pytest.raises(OSError):
+        writer.append(_shot(0))
+        writer.append(_shot(1))
+    assert writer.durable_events == 0
+
+    monkeypatch.setattr(publication_store, "_write_array", real)
+    writer.close()
+    assert PublicationReader(root).events == 2
+
+
+def test_a_second_writer_refuses_the_store_it_would_have_emptied(tmp_path) -> None:
+    """Writing a store is a once.
+
+    The manifest IS the store, so a fresh writer's empty one would turn every
+    chunk already there into a file nothing references -- a day of a run lost
+    with nothing said.  Refusing costs a caller one message; the alternative
+    costs the data.
+    """
+
+    root = tmp_path / "run"
+    _write(root, [_shot(index) for index in range(4)], events_per_chunk=2)
+    with pytest.raises(PublicationStoreError):
+        PublicationWriter(root)
+    assert PublicationReader(root).events == 4
+
+
 def test_a_directory_that_is_not_a_store_says_so(tmp_path) -> None:
     (tmp_path / STORE_MANIFEST).write_text('{"format": "something else"}',
                                            encoding="utf-8")

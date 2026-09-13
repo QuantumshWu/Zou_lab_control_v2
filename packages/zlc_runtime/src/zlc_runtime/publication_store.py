@@ -90,6 +90,14 @@ def _read_json(path: Path) -> Mapping[str, Any]:
     return tree
 
 
+def _readonly(array: np.ndarray) -> np.ndarray:
+    """The same values, and not the caller's to change."""
+
+    view = array.view()
+    view.flags.writeable = False
+    return view
+
+
 def _write_array(path: Path, array: np.ndarray) -> None:
     """One plain ``.npy``, fsynced and atomically published."""
 
@@ -124,6 +132,15 @@ class PublicationWriter:
         if count < 1:
             raise ValueError("a chunk holds at least one event")
         self._root = durable_makedirs(Path(directory))
+        existing = self._root / STORE_MANIFEST
+        if existing.exists():
+            # Opening a writer here would replace that manifest with an empty
+            # one, and every chunk it named would become a file nothing
+            # references -- a day of a run lost with nothing said.  A store is
+            # written once; reading one is PublicationReader's job.
+            raise PublicationStoreError(
+                f"{self._root} already holds a publication store"
+            )
         self._chunk_root = durable_makedirs(self._root / CHUNK_DIRECTORY)
         self._events_per_chunk = count
         self._note = str(note)
@@ -171,7 +188,6 @@ class PublicationWriter:
         if self._closed or not self._buffer:
             return
         events = tuple(self._buffer)
-        self._buffer.clear()
         name = f"{len(self._chunks):06d}"
         first_event = self.durable_events
         document, arrays = encode_chunk(events)
@@ -182,23 +198,31 @@ class PublicationWriter:
             written += int(path.stat().st_size)
             document["planes"][key]["file"] = path.name
         _write_json(self._chunk_root / f"{name}.json", document)
-        self._chunks.append(
-            ChunkRecord(
-                name=name,
-                first_event=first_event,
-                events=len(events),
-                schema_fingerprint=str(events[0].ref.schema_fingerprint),
-                nbytes=written,
-            )
+        record = ChunkRecord(
+            name=name,
+            first_event=first_event,
+            events=len(events),
+            schema_fingerprint=str(events[0].ref.schema_fingerprint),
+            nbytes=written,
         )
         # The chunk's bytes are on disk and fsynced; naming it is what makes
         # it part of the store, and that replacement is atomic.  Between the
         # two, a crash leaves files nobody references -- which is exactly
         # what "the last chunk did not happen" should look like.
+        #
+        # The record joins this writer's own table only AFTER the manifest
+        # names it, so ``durable_events`` never claims an event a reader
+        # opening the store this instant could not produce.
         _write_json(
             self._root / STORE_MANIFEST,
-            store_document(self._chunks, note=self._note),
+            store_document([*self._chunks, record], note=self._note),
         )
+        self._chunks.append(record)
+        # LAST.  A write that raises -- a full disk, a locked file -- must
+        # leave these events where they still are, so the next flush can try
+        # again; cleared first, they were gone from memory, never reached the
+        # disk, and were still counted as accepted.
+        self._buffer.clear()
 
     def close(self) -> None:
         self.flush()
@@ -279,26 +303,67 @@ class PublicationReader:
         return chunk_plane(document, key, stored)
 
     def values(self, start: int = 0, stop: int | None = None) -> np.ndarray:
-        """Stacked values for ``[start, stop)``, read chunk by chunk."""
+        """One stacked array of the values in ``[start, stop)``.
+
+        Read-only whether or not it spans a chunk boundary: inside one chunk
+        it IS the file's mapping, and a result whose mutability depended on
+        where the window happened to land would be a trap.
+
+        A window that crosses a schema change has no one stacked array, and
+        that is said rather than guessed at: a chunk boundary exists exactly
+        because its events stopped agreeing, so concatenating across one
+        would either raise deep inside NumPy or silently upcast two different
+        quantities into a shape nobody asked for.  Ask per chunk instead.
+        """
 
         first = int(start)
         last = self._events if stop is None else int(stop)
         if first < 0 or last > self._events or first > last:
             raise IndexError(f"[{start}, {stop}) is outside {self._events} events")
-        if first == last:
-            return np.empty((0,), dtype=np.float64)
-        pieces = []
-        for record in self._records:
-            low = max(first, record.first_event)
-            high = min(last, record.first_event + record.events)
-            if low >= high:
-                continue
-            key = chunk_plane_keys(self._document(record))[0]
-            plane = self._plane(record, key)
-            pieces.append(
-                np.asarray(plane[low - record.first_event: high - record.first_event])
+        spanned = [
+            record
+            for record in self._records
+            if max(first, record.first_event)
+            < min(last, record.first_event + record.events)
+        ]
+        if not spanned:
+            # An empty window is an empty stack OF THIS STORE, so its rank and
+            # dtype are the store's; a bare float64 vector is a different
+            # answer from every non-empty one the same reader gives.
+            shape, dtype = self._plane_kind(
+                self._records[0] if self._records else None
             )
-        return np.concatenate(pieces) if len(pieces) > 1 else pieces[0]
+            return _readonly(np.empty((0, *shape), dtype=dtype))
+        fingerprints = {record.schema_fingerprint for record in spanned}
+        if len(fingerprints) > 1:
+            raise PublicationStoreError(
+                f"[{first}, {last}) spans {len(fingerprints)} schemas; "
+                "read one chunk's range at a time"
+            )
+        pieces = [
+            np.asarray(
+                self._plane(record, chunk_plane_keys(self._document(record))[0])[
+                    max(first, record.first_event) - record.first_event:
+                    min(last, record.first_event + record.events) - record.first_event
+                ]
+            )
+            for record in spanned
+        ]
+        return _readonly(
+            np.concatenate(pieces) if len(pieces) > 1 else pieces[0]
+        )
+
+    def _plane_kind(self, record: ChunkRecord | None) -> tuple[tuple[int, ...], object]:
+        """One event's value shape and dtype, so an empty answer has both."""
+
+        if record is None:
+            return (), np.float64
+        document = self._document(record)
+        entry = document["planes"][chunk_plane_keys(document)[0]]
+        return (
+            tuple(int(size) for size in entry["shape"][1:]),
+            np.dtype(str(entry["dtype"])),
+        )
 
     def snapshot(self, event: int) -> OwnedSnapshot:
         """One event, rebuilt exactly as it was published."""

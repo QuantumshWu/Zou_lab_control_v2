@@ -678,6 +678,10 @@ class NodeHost:
         # every retry re-run the whole thing and raise again -- and a console
         # that retries once per beat could never finish closing over it.
         self._closed = True
+        if self._recorder is not None:
+            # The host is retired, so the recording is over -- every
+            # generation of it.
+            self._recorder.close()
         self._ready_event.set()
         if self._owner is not None:
             self._owner.shutdown()
@@ -1022,24 +1026,51 @@ class NodeHost:
         )
         with self._start_lock:
             self._live_commit_count += 1
-        if self._recorder is not None:
-            # On the committing thread, immediately after the plane has the
-            # event: recorded in the order published, and a recording that
-            # cannot keep up is felt as this node running slower rather than
-            # as a file that disagrees with the plane.
-            #
-            # Named by the DECLARATION -- "counts", "occupied" -- and not by
-            # the signal key the plane addresses it with, so what lands on
-            # disk is readable without knowing how a run names its signals.
-            self._recorder.record(
-                {
-                    name: published[key]
-                    for name in values
-                    for key in (self.signal_key(name),)
-                    if key in published
-                }
-            )
+        self._record(published)
         self._request_owner_wake()
+        return published
+
+    def _record(self, published: Mapping[str, SignalValue]) -> None:
+        """Hand the recorder what this commit published and is asked to keep.
+
+        ONE owner for "what goes in the record", because there are four
+        places a commit happens -- the worker's and the three a processor
+        uses -- and a rule spelled at each of them is a rule three of them
+        can drift from.
+
+        Named by the DECLARATION -- "counts", "occupied" -- and not by the
+        signal key the plane addresses it with, so what lands on disk is
+        readable without knowing how a run names its signals.
+        """
+
+        if self._recorder is None:
+            return
+        keep = {
+            declaration.name: self.signal_key(declaration.name)
+            for declaration in self._dataset_outputs
+            if declaration.recorded
+        }
+        wanted = {
+            name: published[key]
+            for name, key in keep.items()
+            if key in published
+        }
+        if wanted:
+            self._recorder.record(wanted)
+
+    def _commit_processor(
+        self, outputs: Mapping[str, LiveDatasetOutput], **placement: object
+    ) -> Mapping[str, SignalValue]:
+        """Commit a derived bundle, and put what is recorded in the record.
+
+        A processor's outputs never pass through ``_commit_live`` -- that
+        path refuses processor mode outright -- so recording only there left
+        occupancy, survival and every other derived quantity out of the
+        record entirely, which is most of what a run is.
+        """
+
+        published = self._data_plane.commit_processor(self, outputs, **placement)
+        self._record(published)
         return published
 
     def _validate_worker_terminal_contract(self, result: object) -> None:
@@ -1138,19 +1169,24 @@ class NodeHost:
             )
 
     def _mark_terminal(self) -> None:
-        """This run will produce no further event.
+        """This generation will produce no further event.
 
-        Ten places used to say so by assigning the flag, which left the one
-        thing that has to happen exactly once when it becomes true -- the
+        Fourteen places used to say so by assigning the flag, which left the
+        one thing that has to happen exactly once when it becomes true -- the
         recording's buffered tail reaching the disk -- with no owner.  The
         seal is not that place: a finite run that seals retains nothing and
-        never reaches the retire below, and a cancelled one may not seal at
-        all.
+        never reaches the retire, and a cancelled one may not seal at all.
+
+        FLUSHED, not closed.  A host has as many generations as its source
+        has: a processor refused into CANCELLED is restarted by a standing
+        re-follow, and a recorder closed here would record nothing from the
+        second generation on, without saying so.  The recording ends with
+        the host, in :meth:`shutdown`.
         """
 
         self._terminal = True
         if self._recorder is not None:
-            self._recorder.close()
+            self._recorder.flush()
 
     def _retire_plane_state(self) -> None:
         self._release_input_history()
@@ -1414,8 +1450,7 @@ class NodeHost:
                 owner.mark_owner_reaped()
                 continue
             try:
-                self._data_plane.commit_processor(
-                    self,
+                self._commit_processor(
                     outputs,
                     source_publication=publication,
                     source_signals=tuple(
@@ -1555,8 +1590,7 @@ class NodeHost:
                 outputs = self._evaluate_processor_outputs(source, publication)
                 if self._stop_event.is_set():
                     raise _StartSuppressed()
-                self._data_plane.commit_processor(
-                    self,
+                self._commit_processor(
                     outputs,
                     source_publication=publication,
                     source_signals=tuple(
@@ -1695,8 +1729,7 @@ class NodeHost:
         if not self._active or self.cancel_requested:
             return
         self.validate_processor_source(source)
-        self._data_plane.commit_processor(
-            self,
+        self._commit_processor(
             outputs,
             source_publication=source_publication,
             source_signals=tuple(self._processor_signal_names().values()),

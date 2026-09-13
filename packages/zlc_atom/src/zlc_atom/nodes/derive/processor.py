@@ -11,7 +11,10 @@ from .expression import Operand, compiled_rows, execute, signal_rows
 
 
 def declared_outputs(rows: Sequence[Mapping[str, object]]) -> tuple[DatasetOutputDeclaration, ...]:
-    return tuple(DatasetOutputDeclaration(row["name"], f"derive.{row['name']}", index_by_source=True)
+    # Recorded: a derived row is a quantity the operator asked this run to
+    # produce, which is exactly what a record is for.
+    return tuple(DatasetOutputDeclaration(row["name"], f"derive.{row['name']}",
+                                          index_by_source=True, recorded=True)
                  for row in signal_rows(rows))
 
 

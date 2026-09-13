@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from threading import Event
+import time
 
 import numpy as np
 import pytest
@@ -21,6 +22,25 @@ from zlc_runtime.plane import SignalDataPlane
 from zlc_runtime.recording import RECORDING_DIRECTORY, RunRecorder
 
 from test_host import _finite_output, _wait
+
+
+def _settled(recorder: RunRecorder, timeout: float = 10.0) -> RunRecorder:
+    """Wait for what was handed over to reach the disk.
+
+    The flush a terminal asks for is asked, not awaited -- the threads that
+    reach a terminal are the ones polling the hosts, and on the console that
+    is Qt's.  What the contract promises is that the tail lands shortly
+    after, which is what this waits for.
+    """
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if recorder.durable_events == recorder.events or recorder.failure:
+            return recorder
+        time.sleep(0.01)
+    raise AssertionError(
+        f"{recorder.durable_events} of {recorder.events} events reached disk"
+    )
 
 
 def _host(node, plane, wake, *, instance_id, recorder, outputs=()):
@@ -43,7 +63,7 @@ def _host(node, plane, wake, *, instance_id, recorder, outputs=()):
 
 
 def _recorded_run(tmp_path: Path, recorder: RunRecorder, shots: int = 5):
-    declaration = DatasetOutputDeclaration("frame", "test.frame")
+    declaration = DatasetOutputDeclaration("frame", "test.frame", recorded=True)
     wake = Event()
     plane = SignalDataPlane()
 
@@ -154,30 +174,44 @@ def test_a_recording_that_cannot_be_written_does_not_stop_the_run(tmp_path) -> N
     _recorded_run(tmp_path, recorder, shots=3)
 
     assert isinstance(recorder.failure, PermissionError)
-    assert recorder.events == 0
+    # ``events`` counts what was handed over, so the first shot is in it: the
+    # disk is refused on the writing thread, after the producer has moved on.
+    # What must be zero is what reached disk.
+    assert recorder.durable_events == 0
     assert recorder.outputs == ()
+    # And somebody is told, exactly once: a recording that stops itself and
+    # says nothing is indistinguishable from a complete one.
+    assert recorder.take_failure() is recorder.failure
+    assert recorder.take_failure() is None
 
 
-def test_a_monitor_is_not_recorded_because_it_keeps_no_history(tmp_path) -> None:
-    """A monitor retains only its latest event, so there is none to write.
+def test_an_output_that_does_not_ask_to_be_recorded_is_not(tmp_path) -> None:
+    """The camera's finite output is its raw frames, and it must not land.
 
-    It is also the expensive one: the monitor in a real run is the camera,
-    eight megabytes a frame.  Recorded, one chunk is eight gigabytes and the
-    console stalls for seconds buffering it -- measured, not feared.
+    Four and a half megabytes a frame: a thousand-event chunk is four
+    gigabytes buffered before a byte reaches the disk.  So nothing is written
+    unless the declaration says so, and the producer is the only thing that
+    knows whether what it accumulates is the science or the pixels it read.
     """
 
-    from test_host import _monitor_output
-
-    declaration = DatasetOutputDeclaration("frame", "test.frame")
+    declaration = DatasetOutputDeclaration("frames", "test.frames")
+    assert declaration.recorded is False
     wake = Event()
     plane = SignalDataPlane()
     asked = []
 
     class Node:
         def execute(self, context):
-            context.report_progress("watching")
-            for index in range(4):
-                context.commit_live({"frame": _monitor_output(declaration, index + 1)})
+            context.report_progress("capturing", current=3, total=3)
+            for index in range(3):
+                context.commit_live(
+                    {
+                        "frames": _finite_output(
+                            declaration, value=float(index), total=3,
+                            origin=index, written=index + 1,
+                        )
+                    }
+                )
             return {"status": "ok"}
 
     recorder = RunRecorder(lambda: asked.append(True) or tmp_path)
@@ -194,6 +228,57 @@ def test_a_monitor_is_not_recorded_because_it_keeps_no_history(tmp_path) -> None
     assert recorder.events == 0
     assert recorder.failure is None
     assert not asked
+
+
+def test_a_second_generation_of_one_host_is_recorded_too(tmp_path) -> None:
+    """A host has as many generations as its source has.
+
+    A processor whose source ends is refused into CANCELLED and a standing
+    re-follow starts the SAME host again.  Closed at the first terminal, the
+    recording would end there and say nothing about it; what a terminal owes
+    is the buffered tail on disk, and the recording ends with the host.
+    """
+
+    root = tmp_path / "run"
+    root.mkdir()
+    declaration = DatasetOutputDeclaration("frame", "test.frame", recorded=True)
+    wake = Event()
+    plane = SignalDataPlane()
+    recorder = RunRecorder(lambda: root, events_per_chunk=2)
+
+    class Node:
+        def execute(self, context):
+            context.report_progress("capturing", current=1, total=1)
+            context.commit_live(
+                {
+                    "frame": _finite_output(
+                        declaration, value=1.0, total=1, origin=0, written=1
+                    )
+                }
+            )
+            return {"status": "ok"}
+
+    host = _host(
+        Node(), plane, wake, instance_id="camera",
+        outputs=(declaration,), recorder=recorder,
+    )
+    try:
+        for _generation in range(3):
+            host.start()
+            assert _wait(host, wake).phase == "done"
+            # Every terminal leaves what it committed on disk, not just the
+            # last one: this is what a flush buys over a close.
+            _settled(recorder)
+            assert PublicationReader(
+                root / RECORDING_DIRECTORY / "frame"
+            ).events == recorder.events
+    finally:
+        host.shutdown()
+        plane.close()
+
+    assert recorder.events == 3
+    assert recorder.failure is None
+    assert PublicationReader(root / RECORDING_DIRECTORY / "frame").events == 3
 
 
 def test_a_recorder_needs_a_way_to_open_its_directory() -> None:

@@ -206,17 +206,18 @@ def test_formal_console_panel_state_and_histogram_edits_are_atomic(workspace) ->
             and bool(histogram.parameter_surface.get("display"))
         )
         assert histogram.host.process_name.startswith("zlc-monitor-render")
-        # The second live panel is in a DIFFERENT child.  That is the whole
-        # point of the monitor side being a pool: two panels that draw at the
-        # same time hold two interpreters, not one taken in turns.
-        assert histogram.host.process_pid != monitor_pid
+        # WHICH child each panel lands in is the machine's business: the pool
+        # holds a quarter of the logical processors, so two panels share one
+        # child on anything smaller than eight.  That placement is asserted
+        # against a controlled pool in test_render_process_pool; what has to
+        # hold on every machine is asserted here.
 
         # A child failure keeps that panel's last complete card visible and
-        # replaces its host; the panel in another child is not disturbed at
-        # all, which is what a pool buys besides throughput.  The old shared
-        # pixels stay valid throughout either way.
+        # replaces its host, and every panel that child served comes back with
+        # a live front.  The old shared pixels stay valid throughout.
         old_facet_host = binding.host
         old_histogram_host = histogram.host
+        shared_child = old_facet_host.process_pid == old_histogram_host.process_pid
         retained = old_histogram_host.front.buffer.as_rgba()
         retained_pixels = retained.copy()
         monitor_service = old_histogram_host._process
@@ -226,9 +227,13 @@ def test_formal_console_panel_state_and_histogram_edits_are_atomic(workspace) ->
             lambda: histogram.host is not old_histogram_host
             and histogram.host is not None
             and histogram.host.front is not None
+            and (not shared_child or binding.host is not old_facet_host)
+            and binding.host is not None
+            and binding.host.front is not None
         )
-        assert binding.host is old_facet_host
-        assert binding.host.front is not None
+        # A panel the dead child was not serving is not disturbed at all --
+        # which is what a pool buys besides throughput.
+        assert shared_child or binding.host is old_facet_host
         monitor_pid = histogram.host.process_pid
         assert monitor_pid is not None
         assert old_histogram_host.process_pid != monitor_pid

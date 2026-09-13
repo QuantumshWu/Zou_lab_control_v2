@@ -884,20 +884,6 @@ class _RemoteRasterPlotHost:
         return stopped
 
 
-def default_render_process_count() -> int:
-    """How many render children a machine of this size should run.
-
-    Each child is a whole renderer -- Matplotlib, the compiled kernels, its
-    own arena -- so this is a memory decision as much as a core one: a child
-    costs about two hundred megabytes before it draws anything.  A quarter of
-    the logical processors, capped at four, gives a sixteen-core workstation
-    the split a full board of panels can use and leaves a four-core laptop
-    exactly the one child it has today.
-    """
-
-    return max(1, min(4, (os.cpu_count() or 1) // 4))
-
-
 class RenderProcessPool:
     """Several render children, so panels that draw together draw together.
 
@@ -907,26 +893,38 @@ class RenderProcessPool:
     the pickle of each published front do not: those are the panels' Python,
     and they run one at a time no matter how many cores are idle.
 
-    At the display beat that costs nothing -- four panels at ten hertz use a
-    third of one core, and nothing ever waits.  It is the whole ceiling at
-    thirty hertz, on a 2048-square camera frame, and during a gesture, which
-    is where an operator meets it.
+    ONE CHILD UNLESS THE CALLER ASKS FOR MORE, and both halves of that are
+    measured at the operator's density (1470x1071, DPR 3, four panels):
 
-    Members are spawned as they are first needed, so a console showing one
-    panel still runs one child.  A new Host joins the member drawing for the
-    fewest Hosts; a member is never retired while the pool is open, because a
-    panel closed and reopened would otherwise pay a child's whole startup.
+    * Flat out, four children draw 2.3 to 3.0 times the frames of one --
+      camera 4M 54.5 to 156.6 fps, facet64 image 35.1 to 104.6, heatmap 44.3
+      to 102.1, curve 65.8 to 108.2.
+    * At the display beat nothing is flat out.  Four panels at ten hertz use
+      a third of one core and nothing ever waits, so the extra children buy
+      no frame at all -- while costing 6.9 s of every console open (12.5 s to
+      19.4 s before the first panel paints, all of it the children's own
+      Matplotlib import and kernel warm-up) and about 200 MB each.
 
-    This is the SAME surface as one :class:`RenderProcess` -- ``build_host``,
-    ``retain``, ``release``, ``close`` -- so a caller chooses the count and
-    changes nothing else.
+    So the count is the operating point's to choose, not a default's: raise
+    it when the beat rises, when a 2048-square camera arrives, or when a
+    gesture has to keep up with a live board.  Spawning is lazy under that
+    cap, so asking for four and opening one panel still runs one child.
+
+    A new Host joins the member drawing for the fewest Hosts; a member is
+    never retired while the pool is open, because a panel closed and reopened
+    would otherwise pay a child's whole startup.
+
+    ``build_host``, ``retain``, ``release`` and ``close`` behave exactly as
+    one :class:`RenderProcess`'s do, so a caller chooses the count and
+    changes nothing else.  Nothing more is offered: a query the apps do not
+    ask is a query with no reader to keep it honest.
     """
 
-    def __init__(self, name: str, *, size: int | None = None) -> None:
+    def __init__(self, name: str, *, size: int = 1) -> None:
         selected = str(name).strip()
         if not selected:
             raise ValueError("render pool name must be non-empty")
-        count = default_render_process_count() if size is None else int(size)
+        count = int(size)
         if count < 1:
             raise ValueError("a render pool needs at least one process")
         self.name = selected
@@ -935,33 +933,6 @@ class RenderProcessPool:
         self._members: list[RenderProcess] = []
         self._owners = 1
         self._closing = False
-
-    @property
-    def size(self) -> int:
-        """The most children this pool will ever spawn."""
-
-        return self._size
-
-    @property
-    def members(self) -> tuple["RenderProcess", ...]:
-        with self._lock:
-            return tuple(self._members)
-
-    @property
-    def pids(self) -> tuple[int, ...]:
-        return tuple(
-            pid for pid in (member.pid for member in self.members) if pid is not None
-        )
-
-    @property
-    def alive(self) -> bool:
-        with self._lock:
-            if self._closing:
-                return False
-            if not self._members:
-                # Nothing has been drawn yet; the first Host spawns member 0.
-                return True
-            return any(member.alive for member in self._members)
 
     def _assign(self) -> "RenderProcess":
         """The member a new Host belongs to: spawn before sharing.
@@ -1827,12 +1798,21 @@ class RenderProcess:
         # None means "the same map you already have": a panel whose limits
         # are not moving repeats it frame after frame, and on a 64-cell grid
         # that is 128 transforms through pickle to say nothing changed.  The
-        # child only omits what it has already sent on this connection, and
-        # a restarted child sends a full one first, so a missing cache here
-        # is a protocol error rather than a frame to guess at.
+        # child only omits what it has already sent on this connection, and a
+        # restarted child sends a full one first.
+        #
+        # A missing cache therefore means one of two different things, and
+        # they must not be treated alike.  For a host this side has already
+        # retired it means nothing at all -- the front is dropped below with
+        # every other front that crossed the pipe too late.  For a LIVE host
+        # it is a protocol violation, and the loud failure is the point: the
+        # quiet alternative is a panel keeping its last picture for ever with
+        # nothing anywhere saying why.
+        with self._lock:
+            known = str(host_id) in self._hosts
         if interaction is None:
             interaction = self._front_interaction.get(str(host_id))
-            if interaction is None:
+            if interaction is None and known:
                 raise RuntimeError(
                     "a front repeated an interaction map that was never sent"
                 )
@@ -1865,17 +1845,21 @@ class RenderProcess:
             self._mapping_retirements.put((_MAPPING_RELEASED, shared))
             raise
         finalizer.atexit = False
-        front = RasterFront(
-            identity=identity,
-            buffer=RasterBuffer(width, height, pixels),
-            logical_size=logical_size,
-            logical_dpi=logical_dpi,
-            device_pixel_ratio=device_pixel_ratio,
-            interaction=interaction,
+        front = (
+            None
+            if interaction is None
+            else RasterFront(
+                identity=identity,
+                buffer=RasterBuffer(width, height, pixels),
+                logical_size=logical_size,
+                logical_dpi=logical_dpi,
+                device_pixel_ratio=device_pixel_ratio,
+                interaction=interaction,
+            )
         )
         with self._lock:
             host = self._hosts.get(str(host_id))
-        if host is None:
+        if host is None or front is None:
             # The host was retired while this front crossed the pipe.  Let the
             # buffer exporter die only after both local views are gone; calling
             # its finalizer here would close SharedMemory under live exports.
@@ -2243,13 +2227,16 @@ class _SharedFrontPool:
     # ------------------------------------------------------------ releasing
     def _child_released(self, lease_id: str, store_id: int) -> None:
         with self._lock:
-            self._by_store.pop(store_id, None)
             block = self._leased.get(str(lease_id))
             # A block already recycled and re-taken carries a NEW store id.
             # Without this the late finalizer of the previous tenant would
-            # free a block the renderer is filling right now.
+            # free a block the renderer is filling right now -- and would
+            # unregister an id CPython has since handed to a live store,
+            # which costs the next front a copy for no reason.
             if block is None or block.store_id != store_id:
                 return
+            if self._by_store.get(store_id) is block:
+                self._by_store.pop(store_id, None)
             block.child_holds = False
             self._recycle_locked(block)
 
@@ -2266,7 +2253,14 @@ class _SharedFrontPool:
         if block.child_holds or block.frontend_holds:
             return
         self._leased.pop(block.lease_id, None)
-        self._by_store.pop(block.store_id, None)
+        # BY IDENTITY.  CPython reuses ctypes addresses aggressively, so a
+        # recycled block's stale store id is very likely the id of a store a
+        # LIVE block now owns: popped blindly, that block's claim entry goes
+        # with it, its next front finds no lease and is copied -- the exact
+        # copy this pool exists to remove, disappearing at random intervals
+        # with correct pixels and nothing to show for it.
+        if self._by_store.get(block.store_id) is block:
+            self._by_store.pop(block.store_id, None)
         block.lease_id = ""
         block.store_id = 0
         self._free.append(block)
@@ -2796,10 +2790,16 @@ def _render_process_main(connection: Connection, name: str) -> None:
                         # A worker that did NOT stop stays in the table: after the
                         # pop this is the only handle on it, and the shutdown
                         # sweep could no longer see the thread it must still join.
+                        # The interaction cache is dropped whether or not
+                        # the worker stopped, because the ACK below is what
+                        # makes the frontend drop its own: a worker that did
+                        # not stop can still publish, and the two sides
+                        # disagreeing about what has been sent is exactly the
+                        # protocol violation the frontend refuses loudly.
+                        last_interaction.pop(host_id, None)
                         if stopped:
                             hosts.pop(host_id, None)
                             last_front_sequence.pop(host_id, None)
-                            last_interaction.pop(host_id, None)
                         closing_hosts.discard(host_id)
                         closer_threads.discard(thread)
                         fronts.trim_free(len(hosts) * FRONT_DEPTH)

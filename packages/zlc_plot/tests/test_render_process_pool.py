@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from zlc_plot.render_process import RenderProcessPool, default_render_process_count
+from zlc_plot.render_process import RenderProcessPool
 
 
 class _Member:
@@ -29,14 +29,6 @@ class _Member:
     @property
     def host_count(self) -> int:
         return len(self.hosts)
-
-    @property
-    def alive(self) -> bool:
-        return True
-
-    @property
-    def pid(self) -> int:
-        return 1000 + len(self.name)
 
     def build_host(self, tag: object) -> object:
         self.hosts.append(tag)
@@ -129,24 +121,24 @@ def test_the_last_window_owner_shuts_every_child_it_spawned(spawned) -> None:
 
 def test_a_pool_nobody_drew_on_has_nothing_to_shut_down(spawned) -> None:
     pool = RenderProcessPool("test", size=4)
-    assert pool.alive
     assert pool.release(0.0) is True
     assert pool.close(0.0) is True
     assert not spawned
 
 
-def test_the_default_count_is_a_quarter_of_the_machine(monkeypatch) -> None:
-    """Capped at four, and one on a machine too small to gain from more.
+def test_a_pool_nobody_sized_is_one_child(spawned) -> None:
+    """The count is the operating point's, and the default one is today's.
 
-    A child is memory as much as a core, so the cap is not the core count:
-    sixteen children on a sixteen-core workstation would be three gigabytes
-    of renderer for a board that never shows sixteen panels.
+    Four children draw up to three times the frames flat out and buy nothing
+    at the ten-hertz beat, where nothing ever waits -- while costing 6.9 s of
+    every console open and 200 MB each.  So the gain is available and not
+    charged for until somebody asks.
     """
 
-    for logical, expected in ((1, 1), (4, 1), (8, 2), (16, 4), (64, 4)):
-        monkeypatch.setattr("zlc_plot.render_process.os.cpu_count",
-                            lambda logical=logical: logical)
-        assert default_render_process_count() == expected
+    pool = RenderProcessPool("test")
+    pool.build_host("a")
+    pool.build_host("b")
+    assert len(spawned) == 1
 
 
 def test_a_pool_refuses_to_be_smaller_than_one_child() -> None:

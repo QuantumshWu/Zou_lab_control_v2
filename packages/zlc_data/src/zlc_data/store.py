@@ -7,6 +7,13 @@ and this module owns what one chunk of such a log means.  Where the bytes
 land is the caller's -- the same split :func:`save_npz` already makes, and
 for the same reason: this layer may not know about paths.
 
+WHAT A STORE IS.  A LOG of publications, so every event in it is
+self-contained.  That is exactly right for a day of per-shot quantities and
+exactly wrong for a finite run whose events carry a ``cell_origin`` into a
+canonical schema: that placement lives on the output, not in the snapshot,
+so an output that has one does not belong in a store until the store carries
+placement too.
+
 WHAT A CHUNK IS.  A run of consecutive events that agree on their schema,
 their validity shape and whether they carry sigma, stacked into one array
 per plane.  Disagreement is not an error, it starts the next chunk: a

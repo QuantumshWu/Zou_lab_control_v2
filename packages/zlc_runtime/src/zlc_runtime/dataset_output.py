@@ -41,6 +41,15 @@ class DatasetOutputDeclaration:
     name: str
     contract_id: str
     index_by_source: bool = field(default=False, kw_only=True)
+    #: Whether this output belongs in the run's durable record.
+    #:
+    #: OFF unless the producer says otherwise, for one measured reason: a
+    #: camera's finite output is its raw frames, four and a half megabytes
+    #: each, and a thousand-event chunk of them is four gigabytes buffered
+    #: before a byte reaches the disk.  An output belongs in the record when
+    #: what it accumulates IS the science -- occupancy, counts, survival, the
+    #: scan -- and the node that produces it is the only thing that knows.
+    recorded: bool = field(default=False, kw_only=True)
 
     def __post_init__(self) -> None:
         object.__setattr__(

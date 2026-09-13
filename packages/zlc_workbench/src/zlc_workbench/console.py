@@ -7541,6 +7541,24 @@ class ConsolePresenter:
         self._report(f"removed {binding.node_id}", severity="task")
         return True
 
+    def _report_recording_failure(self, binding: LogicBinding) -> None:
+        """Say once that a run is no longer being written down.
+
+        The recorder swallows a store failure so the experiment survives it,
+        which leaves a recording that stopped itself looking exactly like a
+        complete one.  This is the other half of that decision: the operator
+        finds out while the run is still going, in time to do something.
+        """
+
+        recorder = getattr(binding.host, "recorder", None)
+        failure = None if recorder is None else recorder.take_failure()
+        if failure is not None:
+            self._report(
+                f"{binding.node_id}: this run is no longer being recorded: "
+                f"{_error_text(failure)}",
+                severity="error",
+            )
+
     def poll_logic(self) -> None:
         """One look at every hosted node, and the rows that changed."""
 
@@ -7562,6 +7580,7 @@ class ConsolePresenter:
                     self._capture_artifact_results(binding)
                     self._ensure_node_previews(binding)
                     self._handle_operator_request(binding)
+                    self._report_recording_failure(binding)
                 if not binding.host.running and binding.lease is not None:
                     binding.lease.release()
                     binding.lease = None
@@ -7854,19 +7873,28 @@ class ConsolePresenter:
             return tuple(bundled), bundled, {}
         return options, labels, groups
 
-    def _open_recording(self, node_id: str) -> RunRecorder:
+    def _open_recording(self, binding: LogicBinding) -> RunRecorder:
         """Where this run's published events land, once it publishes any.
 
-        The workspace already routes saved work by calendar day and gives a
-        run its own numbered folder inside it; a recording is saved work, so
-        it goes where the rest of it goes and a physicist finds it by date.
+        A Task has ALREADY allocated a numbered directory for this run, and
+        its artifacts are in it: a recording beside that one would split one
+        run's evidence into two folders a day apart in the listing.  So a
+        Task records inside its own run, and everything else gets a numbered
+        folder of its own under the same calendar day -- the workspace's own
+        routing, so a physicist finds either by date.
 
         The allocation is deferred to the recorder because it is durable: a
         node configured, started and stopped without publishing has not made
         a run, and a numbered folder saying it did is worse than none.
         """
 
+        node_id = binding.node_id
+
         def allocate() -> Path:
+            host = binding.host
+            owned = None if host is None else host.run_directory
+            if owned is not None:
+                return Path(owned)
             return unique_path(self.session.day_folder(), node_id, "")
 
         return RunRecorder(allocate)
@@ -7894,7 +7922,7 @@ class ConsolePresenter:
             source_signal=finalization.source_signal or None,
             values=finalization.values,
             request_owner_wake=self.board.wake.request_owner_wake,
-            recorder=self._open_recording(binding.node_id),
+            recorder=self._open_recording(binding),
         )
         claims = tuple(
             DeviceClaim(
