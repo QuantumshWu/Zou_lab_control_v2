@@ -1306,7 +1306,7 @@ def _restyle_histogram_tops(
     across = 1 - value
     for index, path in enumerate(paths):
         vertices = path.vertices
-        if vertices.shape != (5, 2):
+        if vertices.shape != (5, 2) or not vertices.flags.writeable:
             return False
         if not (
             vertices[0, across] == lower[index]
