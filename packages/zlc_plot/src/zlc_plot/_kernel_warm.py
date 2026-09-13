@@ -30,6 +30,8 @@ import hashlib
 import os
 import pathlib
 import sys
+import threading
+import traceback
 import tempfile
 from typing import Any, Callable
 
@@ -355,6 +357,7 @@ def _render(
     *,
     zoom_steps: int = 0,
     size: str = "2x2",
+    fit: bool = False,
 ) -> None:
     from . import PlotSession  # noqa: PLC0415
     from .selectors import NumericRange  # noqa: PLC0415
@@ -362,6 +365,15 @@ def _render(
     session = PlotSession(snapshot, spec, size=size, parameters=parameters)
     try:
         session.rgba()
+        if fit:
+            # THE MODEL THE PRODUCT WOULD OFFER, not one named here: the
+            # registry sorts a target's default first, which is what a panel
+            # opens on, and a name typed here would go stale the day the
+            # catalogue changed.  A plot with no valid model for its target
+            # simply has no fit to warm.
+            models = session.fit_models
+            if models:
+                session.fit(models[0], live=False)
         if not zoom_steps:
             return
         # A ZOOM IS NOT THE SAME WORK.  Cropping the viewport changes the
@@ -594,15 +606,34 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
     panel most often opens on -- a camera frame drawn larger than it is
     and one reduced, a floating derived plane, a histogram, a curve with
     its band, a grid of cells -- on frames just big enough to take each
-    path; not the zooms, saves, 3D scene and fit solvers, which have first
-    uses of their own and whose compiled code the disk cache already
-    spares.  The grid of camera frames goes first: it is what a console
-    opens on, and it is where the imports and the font are paid.
+    path; not the zooms, saves or 3D scene, which have first uses of their
+    own.
 
-    ``proceed`` is asked before every picture.  A request that arrives
-    meanwhile is the operator's, and it comes first: the child answers
-    False from then on, and whatever this did not reach is paid by the
-    first panel that needs it, as it always was.
+    ORDER IS THE WHOLE DESIGN, because this gets cut off.  ``proceed`` is
+    asked before every step and answers False from the moment a panel is
+    built here, so a child taken early runs only the front of this list --
+    and the front had better hold what every renderer pays once, cheapest
+    first.  Measured on this machine, in the order they now run:
+
+    * THE SOLVER IMPORTS, on a thread of their own, started first and
+      never asked ``proceed``.  They buy the most: without them the
+      operator's FIRST fit costs 0.6 s against one or two milliseconds
+      after, and a live fit has a one-second deadline to expire against.
+      They are also the only part of this that is pure module loading, so
+      they overlap with the drawing below rather than queueing behind it
+      -- 1.65 s for the pair against 2.08 s in turn -- and, being off this
+      thread, they finish even when a panel cuts the rest of this short.
+    * the grid of camera frames, 1.3 s: Matplotlib's own import, the first
+      text measured loading the font, and the raster kernels' first
+      dispatch.  It is what a console opens on.
+    * a curve's fit and a histogram's fit: numba's first dispatch of the
+      fit kernels, which needs the imports above and so waits for them.
+    * the remaining picture variety, which is the only part that is about
+      what a panel happens to show rather than what every panel pays.
+
+    Listed last, as the solvers were, none of it ran at all: a child is
+    taken about a second into its warming, and the operator paid the fit
+    on the first shot of a running experiment.
     """
 
     from . import (  # noqa: PLC0415
@@ -613,6 +644,76 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
         ImagePlot,
     )
 
+    def load_solvers() -> None:
+        """Everything a first fit costs that has nothing to do with drawing.
+
+        The engine reaches scipy from inside the functions that solve, so
+        that a process which only reads a model's declaration -- a task
+        console listing the parameters a panel publishes -- never imports
+        it at all.  This is the process that solves.
+
+        And then one fit per target family, through the engine rather than
+        through a plot: numba's first dispatch of the fit kernels is the
+        other half of what a first fit costs, and it needs no figure, no
+        font and no Matplotlib.  Doing it here is what makes it survive the
+        panel that cuts the drawing below short.
+        """
+
+        from scipy.optimize import least_squares, minimize_scalar  # noqa: F401, PLC0415
+        from scipy.signal import find_peaks  # noqa: F401, PLC0415
+
+        from .fit import FitEngine, FitTarget, default_fit_registry  # noqa: PLC0415
+
+        engine = FitEngine()
+        registry = default_fit_registry()
+        rows, columns = 24, 32
+        y_grid, x_grid = np.mgrid[0:rows, 0:columns].astype(np.float64)
+        series_x = np.linspace(-6.0, 6.0, 256)
+        samples = np.concatenate(
+            [
+                np.linspace(8.0, 16.0, 600),
+                np.linspace(34.0, 46.0, 200),
+            ]
+        )
+        counts, edges = np.histogram(samples, bins=40)
+        inputs = {
+            FitTarget.SERIES: (
+                (series_x,),
+                5.0 * np.exp(-0.5 * ((series_x - 0.4) / 1.3) ** 2) + 0.8,
+            ),
+            FitTarget.HISTOGRAM: (
+                (0.5 * (edges[:-1] + edges[1:]),),
+                counts.astype(np.float64),
+            ),
+            FitTarget.IMAGE: (
+                (y_grid.ravel(), x_grid.ravel()),
+                (
+                    120.0
+                    * np.exp(
+                        -0.5
+                        * (
+                            ((x_grid - 16.0) / 4.0) ** 2
+                            + ((y_grid - 12.0) / 5.0) ** 2
+                        )
+                    )
+                    + 4.0
+                ).ravel(),
+            ),
+        }
+        for target, (coordinates, observations) in inputs.items():
+            models = registry.models_for(target)
+            if not models:
+                continue
+            try:
+                engine.fit(models[0], coordinates, observations)
+            except Exception:  # noqa: BLE001 -- warming, never fatal
+                traceback.print_exc()
+
+    solvers = threading.Thread(
+        target=load_solvers, name="zlc-warm-solvers", daemon=True
+    )
+    solvers.start()
+
     if not proceed():
         return
     image = ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y"))
@@ -620,18 +721,26 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
     _render(camera, FacetGridPlot(None, image), size="4x4")
     if not proceed():
         return
-    _render(camera, image, size="4x4")
+    # The fits below solve, so they need what that thread was loading.
+    solvers.join()
+    series = _series_snapshot(8, 400)
+    _render(
+        series,
+        CurvePlot(AxisRef.point("x")),
+        {"uncertainty": True},
+        size="2x2",
+        fit=True,
+    )
+    if not proceed():
+        return
+    _render(series, HistogramPlot(), size="2x2", fit=True)
+    if not proceed():
+        return
+    _render(camera, image, size="4x4", fit=True)
     for dtype in (np.uint16, np.float32):
         if not proceed():
             return
         _render(_image_snapshot(600, 800, dtype), image, size="2x2")
-    if not proceed():
-        return
-    series = _series_snapshot(8, 400)
-    _render(series, CurvePlot(AxisRef.point("x")), {"uncertainty": True}, size="2x2")
-    if not proceed():
-        return
-    _render(series, HistogramPlot(), size="2x2")
     if not proceed():
         return
     _render(
@@ -639,20 +748,6 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
         FacetGridPlot(AxisRef.cell_data("y"), HistogramPlot()),
         size="2x2",
     )
-    if not proceed():
-        return
-    # The fit solvers, last, and as imports rather than as a fit.  A panel
-    # is asked to draw before it is ever asked to fit, so these come after
-    # every picture; but they are 0.64 s to import, and the engine reaches
-    # them from inside the functions that solve precisely so that a process
-    # which only reads a model's declaration -- a task console listing the
-    # parameters a panel publishes -- never imports them at all.  This is
-    # the process that will solve, and this is the thread with nothing else
-    # to do, so it pays for them here rather than in the operator's first
-    # fit.  The kernels themselves are not run: their compiled code is on
-    # the disk cache already, which is what the rest of this file is for.
-    from scipy.optimize import least_squares, minimize_scalar  # noqa: F401, PLC0415
-    from scipy.signal import find_peaks  # noqa: F401, PLC0415
 
 
 # ------------------------------------------------------------ the warmer

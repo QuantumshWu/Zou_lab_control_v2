@@ -24,6 +24,7 @@ import pytest
 
 from zlc_plot.render_process import (
     DEFAULT_RENDER_LIMIT,
+    DEFAULT_RENDER_SETTLED_SPARES,
     DEFAULT_RENDER_SPARES,
     RenderProcessPool,
 )
@@ -233,12 +234,51 @@ def test_a_pool_keeps_at_least_one_child_warm_and_holds_at_least_that_many() -> 
     with pytest.raises(ValueError):
         RenderProcessPool("test", spares=4, limit=2)
     with pytest.raises(ValueError):
+        RenderProcessPool("test", spares=2, settled_spares=3)
+    with pytest.raises(ValueError):
+        RenderProcessPool("test", spares=2, settled_spares=0)
+    with pytest.raises(ValueError):
         RenderProcessPool("   ")
 
 
-def test_the_defaults_are_a_board_and_a_memory_ceiling() -> None:
-    """Four warm, because a board is four cards; ten at most, because a
+def test_a_board_that_has_arrived_stops_holding_a_board_in_reserve(
+    spawned,
+) -> None:
+    """Four warm is an answer to "a whole board at once", asked once.
+
+    A board arrives together and then GROWS one panel at a time, so the
+    opening count is the wrong answer for the rest of the session: four
+    more idle renderers is most of a gigabyte held against an operator who
+    adds one panel.  Past the settled count the pool holds the settled
+    count instead -- and comes back up when the board is closed, because
+    the next board arrives the same way the first did.
+    """
+
+    pool = RenderProcessPool("test", spares=4, settled_spares=2, limit=12)
+    _settled(pool, warm=4)
+
+    taken = []
+    for tag in ("a", "b"):
+        pool.build_host(tag)
+        taken.append(tag)
+        _settled(pool, warm=4)
+
+    # The third panel is what makes this a board rather than an opening.
+    pool.build_host("c")
+    _settled(pool, warm=2)
+    assert len([member for member in spawned if member.host_count]) == 3
+
+    for member in [item for item in spawned if item.host_count]:
+        member.retire_host()
+    _settled(pool, warm=4)
+
+
+def test_the_defaults_are_a_board_then_what_an_operator_adds() -> None:
+    """Four warm, because a board is four cards; two once one is drawing,
+    because a board grows one panel at a time; ten at most, because a
     child is two hundred megabytes."""
 
     assert DEFAULT_RENDER_SPARES == 4
+    assert DEFAULT_RENDER_SETTLED_SPARES == 2
+    assert DEFAULT_RENDER_SETTLED_SPARES < DEFAULT_RENDER_SPARES
     assert DEFAULT_RENDER_LIMIT >= DEFAULT_RENDER_SPARES

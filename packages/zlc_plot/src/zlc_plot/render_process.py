@@ -884,11 +884,19 @@ class _RemoteRasterPlotHost:
         return stopped
 
 
-#: How many children stand warm and unused, so a panel never waits for one.
-#: Four, because a board is four cards: the console's own layouts and the
-#: saved boards sit at or under four, so a whole board opened at once finds
-#: every panel a warm child of its own.
+#: How many children stand warm and unused before anything is drawing, so
+#: a panel never waits for one.  Four, because a board is four cards: the
+#: console's own layouts and the saved boards sit at or under four, so a
+#: whole board opened at once finds every panel a warm child of its own.
 DEFAULT_RENDER_SPARES = 4
+
+#: How many stand warm once a board IS drawing.  A board arrives all at
+#: once and then GROWS one panel at a time, so the opening count answers a
+#: question nobody asks twice: holding four more idle renderers for the
+#: rest of the session is most of a gigabyte against an operator who adds
+#: one panel.  Two covers that, and the same number is the mark of a board
+#: having arrived -- more than this many drawing is no longer an opening.
+DEFAULT_RENDER_SETTLED_SPARES = 2
 
 #: The most children one pool will ever hold at once.  A child is about two
 #: hundred megabytes of renderer, so a twelve-panel board with four spares
@@ -934,8 +942,13 @@ class RenderProcessPool:
     touched, and starts a replacement the moment one is taken.
 
     WHAT IT COSTS is memory, and only memory: about two hundred megabytes per
-    child, whether or not a panel ever lands on it.  ``limit`` is what keeps
-    that bounded; past it, panels share a child again.
+    child, whether or not a panel ever lands on it.  Two things bound that.
+    ``limit`` is the ceiling on children altogether; past it, panels share a
+    child again.  And the warm count itself steps down: a board arrives all
+    at once, which is what ``spares`` is sized for, and then grows one panel
+    at a time -- so once more than ``settled_spares`` children are drawing,
+    the opening count has answered its question and ``settled_spares`` stand
+    warm instead.
 
     FOUR RULES hold this together, and each of them is a way it would
     otherwise go wrong:
@@ -962,18 +975,30 @@ class RenderProcessPool:
         name: str,
         *,
         spares: int = DEFAULT_RENDER_SPARES,
+        settled_spares: int | None = None,
         limit: int = DEFAULT_RENDER_LIMIT,
     ) -> None:
         selected = str(name).strip()
         if not selected:
             raise ValueError("render pool name must be non-empty")
         wanted, ceiling = int(spares), int(limit)
-        if wanted < 1:
+        # A pool that opens with fewer than the standing count has already
+        # said what it wants; the default follows it down rather than
+        # refusing a perfectly sensible small pool.
+        settled = (
+            min(DEFAULT_RENDER_SETTLED_SPARES, wanted)
+            if settled_spares is None
+            else int(settled_spares)
+        )
+        if wanted < 1 or settled < 1:
             raise ValueError("a pool keeps at least one child warm")
+        if settled > wanted:
+            raise ValueError("a settled pool cannot keep more warm than an opening one")
         if ceiling < wanted:
             raise ValueError("a pool cannot hold fewer children than it keeps warm")
         self.name = selected
         self._spares = wanted
+        self._settled_spares = settled
         self._limit = ceiling
         self._lock = RLock()
         self._settled = Condition(self._lock)
@@ -991,6 +1016,17 @@ class RenderProcessPool:
         """Children no Host is drawing on.  Asked OUTSIDE this pool's lock."""
 
         return [member for member in members if member.host_count == 0]
+
+    def _warm_count(self, drawing: int) -> int:
+        """How many stand warm while ``drawing`` children have a panel on them.
+
+        The opening count answers "a whole board at once"; past that the
+        board grows one panel at a time and the answer is the smaller one.
+        Asked on every change of shape, so a board whose panels all close
+        comes back up to the opening count for the next one.
+        """
+
+        return self._spares if drawing <= self._settled_spares else self._settled_spares
 
     def _keep_warm(self) -> None:
         """Start whatever is missing, retire whatever is spare.
@@ -1012,13 +1048,14 @@ class RenderProcessPool:
             with self._lock:
                 if self._closing:
                     return
-                short = self._spares - len(idle) - pending
+                warm = self._warm_count(len(members) - len(idle))
+                short = warm - len(idle) - pending
                 room = self._limit - len(members) - pending
                 begin = max(0, min(short, room))
                 # A child is spare only beyond the warm count AND unused, and
                 # only ever one at a time: between deciding and acting a panel
                 # may have taken it, and the next turn sees that.
-                spare = idle[-1] if len(idle) > self._spares and not begin else None
+                spare = idle[-1] if len(idle) > warm and not begin else None
                 # The picture was read without the lock, so the child chosen
                 # may already have been taken, retired, or replaced.  Only one
                 # this pool still holds may be let go.

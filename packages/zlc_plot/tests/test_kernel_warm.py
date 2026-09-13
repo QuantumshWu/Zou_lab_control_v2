@@ -394,7 +394,12 @@ def test_the_warming_stops_before_its_next_picture_once_a_panel_asks(monkeypatch
     """A request shares the process with the warming, so the warming asks
     before every picture whether it may go on, and stops the moment the
     answer is no -- what it did not reach is paid by the panel that needs
-    it, as before."""
+    it, as before.
+
+    The order is asserted, not just the stopping, because the order is what
+    decides which costs a cut-off child has already paid.  The opening
+    picture comes first, then the two plots that are fitted.
+    """
 
     rendered: list[str] = []
     constructed = []
@@ -411,7 +416,7 @@ def test_the_warming_stops_before_its_next_picture_once_a_panel_asks(monkeypatch
     )
     answers = iter((True, True, False))
     _kernel_warm.warm_process(proceed=lambda: next(answers))
-    assert rendered == ["FacetGridPlot", "ImagePlot"]
+    assert rendered == ["FacetGridPlot", "CurvePlot"]
     assert len(constructed) == 1
     rendered.clear()
     constructed.clear()
