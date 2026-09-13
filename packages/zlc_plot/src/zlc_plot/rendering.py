@@ -2308,6 +2308,36 @@ class MatplotlibRenderer:
             raise TypeError("plan must be SurfacePlan")
         self._retire_composition_epoch()
         figure = self._figure
+        # A relayout changes where the cells ARE, not what they are, and an
+        # operator dragging a board makes this gesture more often than any
+        # other: rebuilding sixty-four of them was 235 ms of a 694-975 ms
+        # resize, with the chrome's ticks another 100 on top because a new
+        # cell has none.  Keeping them costs 4.7 ms -- the children a scene
+        # put there, which the caches below are about to forget anyway.
+        # ``delaxes``, not ``remove``: removing an artist clears its figure
+        # and ``add_axes`` would then refuse it back.  ``_children`` is the
+        # list of artists ADDED to an Axes; its spines, axes, patch and
+        # title are not in it and must not be taken.
+        kept: list[Any] = []
+        for role, entries in self._axes.items():
+            if role != "facet_cell":
+                continue
+            for axis in entries:
+                for child in list(axis._children):
+                    child.remove()
+                # A relayout IS a new configuration, and the tick policy
+                # installs once per configuration: a locator carries the
+                # step and decade it settled on so its ticks do not jitter
+                # frame to frame, and carried across a resize that
+                # hysteresis is the PREVIOUS layout's -- a cell twice as
+                # wide kept three labels where a new one shows five.
+                # Forgetting the signature is what makes a kept cell
+                # indistinguishable from a built one.
+                for coordinate in (axis.xaxis, axis.yaxis):
+                    if hasattr(coordinate, "_zlc_tick_signature"):
+                        del coordinate._zlc_tick_signature
+                figure.delaxes(axis)
+                kept.append(axis)
         with style_context(
             self.style,
             {
@@ -2320,7 +2350,7 @@ class MatplotlibRenderer:
             figure._original_dpi = plan.logical_dpi
             figure._set_dpi(plan.dpi, forward=False)
             self.plan = plan
-            self._axes = self._create_axes(figure, plan)
+            self._axes = self._create_axes(figure, plan, kept)
         self._artists.clear()
         # ``figure.clear`` already took the grid's chrome group with the rest
         # of the figure's children; what is left is the memory of it.

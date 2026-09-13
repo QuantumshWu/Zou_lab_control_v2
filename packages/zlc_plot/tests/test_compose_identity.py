@@ -675,6 +675,52 @@ def _site_grid_session(sites: int = 25, points: int = 5, repeats: int = 12):
     return session, landed
 
 
+def test_a_relayout_keeps_its_cells_and_gives_them_a_fresh_tick_policy() -> None:
+    """Resizing a board moves its cells; it does not make new ones.
+
+    An operator drags a board more often than any other gesture, and
+    rebuilding sixty-four cells was 1324 ms of a 685-1032 ms resize, the
+    chrome's ticks on top because a new cell has none.  So the cells are
+    kept -- and then the SECOND half of the claim has to hold too: a
+    locator carries the step it settled on so its ticks do not jitter frame
+    to frame, and carried across a resize that hysteresis is the PREVIOUS
+    layout's.  A cell twice as wide kept three labels where a new one shows
+    five, on four of the catalogue's grids, until a relayout was made to
+    reinstall the policy the way a new cell gets one.
+    """
+
+    # FOUR cells, resized between two presets that price their labels the
+    # same: the tick policy installs once per configuration, so a size that
+    # changes the label size would reinstall it anyway and hide the point.
+    session, _landed = _site_grid_session(sites=4)
+    try:
+        session.configure(size="2x2")
+        session.rgba()
+        cells = session._renderer._axes["facet_cell"]
+        before = [id(axis) for axis in cells]
+        policy = [
+            (id(axis.xaxis.get_major_locator()),
+             id(axis.yaxis.get_major_locator()))
+            for axis in cells
+        ]
+        session.configure(size="4x4")
+        session.rgba()
+        cells = session._renderer._axes["facet_cell"]
+        assert [id(axis) for axis in cells] == before, (
+            "a relayout built new cells instead of moving them"
+        )
+        after = [
+            (id(axis.xaxis.get_major_locator()),
+             id(axis.yaxis.get_major_locator()))
+            for axis in cells
+        ]
+        assert all(
+            new != old for new, old in zip(after, policy)
+        ), "a kept cell carried the previous layout's tick policy"
+    finally:
+        session.close()
+
+
 def test_a_grid_built_from_the_cell_reserve_paints_the_same_picture() -> None:
     """Cells built before the panel arrived must be indistinguishable.
 
