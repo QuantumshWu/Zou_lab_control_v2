@@ -669,7 +669,12 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
         from scipy.optimize import least_squares, minimize_scalar  # noqa: F401, PLC0415
         from scipy.signal import find_peaks  # noqa: F401, PLC0415
 
-        from .fit import FitEngine, FitTarget, default_fit_registry  # noqa: PLC0415
+        from .fit import (  # noqa: PLC0415
+            FitEngine,
+            FitTarget,
+            RegularImageFitInput,
+            default_fit_registry,
+        )
 
         engine = FitEngine()
         registry = default_fit_registry()
@@ -724,6 +729,32 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
                     (coordinates, coordinates),
                     (observations, observations),
                 )
+            except Exception:  # noqa: BLE001 -- warming, never fatal
+                traceback.print_exc()
+
+        # And the THIRD entry: a camera fit hands the engine a grid rather
+        # than flattened coordinates and takes the separable stripe solver,
+        # which the two above never touch.  Measured, it was the 15 ms an
+        # image panel's first fit cost over its second.
+        image_models = registry.models_for(FitTarget.IMAGE)
+        if image_models:
+            rows_axis = np.arange(rows, dtype=np.float64)
+            columns_axis = np.arange(columns, dtype=np.float64)
+            frame = (
+                120.0
+                * np.exp(
+                    -0.5
+                    * (
+                        ((x_grid - 16.0) / 4.0) ** 2
+                        + ((y_grid - 12.0) / 5.0) ** 2
+                    )
+                )
+                + 4.0
+            )
+            regular = RegularImageFitInput(columns_axis, rows_axis, frame)
+            try:
+                engine.fit(image_models[0], regular)
+                engine.fit_batch(image_models[0], (regular, regular), (None, None))
             except Exception:  # noqa: BLE001 -- warming, never fatal
                 traceback.print_exc()
 
