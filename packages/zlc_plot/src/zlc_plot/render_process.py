@@ -21,7 +21,7 @@ import os
 from pathlib import Path
 import pickle
 from queue import Empty, Queue
-from threading import Event, Lock, RLock, Thread
+from threading import Condition, Event, Lock, RLock, Thread, current_thread
 from time import monotonic
 import traceback
 from types import SimpleNamespace
@@ -884,83 +884,290 @@ class _RemoteRasterPlotHost:
         return stopped
 
 
-class RenderProcessPool:
-    """Several render children, so panels that draw together draw together.
+#: How many children stand warm and unused, so a panel never waits for one.
+#: Four, because a board is four cards: the console's own layouts and the
+#: saved boards sit at or under four, so a whole board opened at once finds
+#: every panel a warm child of its own.
+DEFAULT_RENDER_SPARES = 4
 
-    One child holds every panel's renderer, and its workers share one
-    interpreter.  The compiled kernels release the GIL and NumPy releases it
-    for the large reductions, but the artist updates, the chrome drawing and
-    the pickle of each published front do not: those are the panels' Python,
-    and they run one at a time no matter how many cores are idle.
+#: The most children one pool will ever hold at once.  A child is about two
+#: hundred megabytes of renderer, so a twelve-panel board with four spares
+#: would be three gigabytes of them; at this ceiling panels share a child
+#: again, exactly as they did when there was only ever one.
+DEFAULT_RENDER_LIMIT = 10
 
-    ONE CHILD UNLESS THE CALLER ASKS FOR MORE, and both halves of that are
-    measured at the operator's density (1470x1071, DPR 3, four panels):
 
-    * Flat out, four children draw 2.3 to 3.0 times the frames of one --
-      camera 4M 54.5 to 156.6 fps, facet64 image 35.1 to 104.6, heatmap 44.3
-      to 102.1, curve 65.8 to 108.2.
-    * At the display beat nothing is flat out.  Four panels at ten hertz use
-      a third of one core and nothing ever waits, so the extra children buy
-      no frame at all -- while costing 6.9 s of every console open (12.5 s to
-      19.4 s before the first panel paints, all of it the children's own
-      Matplotlib import and kernel warm-up) and about 200 MB each.
+def _retire_member(member: "RenderProcess") -> None:
+    """Tell one child to go, and do not wait for it to finish going.
 
-    So the count is the operating point's to choose, not a default's: raise
-    it when the beat rises, when a 2048-square camera arrives, or when a
-    gesture has to keep up with a live board.  Spawning is lazy under that
-    cap, so asking for four and opening one panel still runs one child.
-
-    A new Host joins the member drawing for the fewest Hosts; a member is
-    never retired while the pool is open, because a panel closed and reopened
-    would otherwise pay a child's whole startup.
-
-    ``build_host``, ``retain``, ``release`` and ``close`` behave exactly as
-    one :class:`RenderProcess`'s do, so a caller chooses the count and
-    changes nothing else.  Nothing more is offered: a query the apps do not
-    ask is a query with no reader to keep it honest.
+    NOT a close.  The reclaim can run on a child's own reader thread -- that
+    is the thread that reports a Host retired -- and ``close`` waits for that
+    very thread to stop, so waiting here is a thirty-second stall ending in a
+    terminate.  ``release`` sends the shutdown and returns; the child is
+    daemonic and finishes on its own, and the pool's own close is where
+    anybody waits.
     """
 
-    def __init__(self, name: str, *, size: int = 1) -> None:
+    try:
+        member.release(0.0)
+    except BaseException:  # noqa: BLE001 -- a child being let go cannot fail
+        pass
+
+
+class RenderProcessPool:
+    """Render children kept warm ahead of the panels that will need them.
+
+    One child held every live panel's renderer, and its workers shared one
+    interpreter: the compiled kernels release the GIL, but artist updates,
+    chrome drawing and the pickle of each published front do not, so four
+    panels' Python ran one at a time however many cores were idle.  Flat out
+    that is the whole ceiling -- at the operator's density four children draw
+    2.3 to 3.0 times the frames of one (camera 4M 54.5 to 156.6 fps, facet64
+    image 35.1 to 104.6, heatmap 44.3 to 102.1, curve 65.8 to 108.2).
+
+    WHY THEY ARE KEPT WARM AHEAD OF TIME.  A child is 2.3 s from spawn to its
+    first front.  Started when a panel first needed one, every mount waited
+    out its own child's boot: four panels painted 2.4, 4.7, 7.0 and 7.1 s
+    after the ask -- a 2.3 s staircase, one child's boot repeated.  Kept warm
+    ahead, the same four paint in 0.35 s, the same as one child serving all
+    four.  So the pool always holds ``spares`` children that no panel has
+    touched, and starts a replacement the moment one is taken.
+
+    WHAT IT COSTS is memory, and only memory: about two hundred megabytes per
+    child, whether or not a panel ever lands on it.  ``limit`` is what keeps
+    that bounded; past it, panels share a child again.
+
+    FOUR RULES hold this together, and each of them is a way it would
+    otherwise go wrong:
+
+    * Slow work -- spawning a child, shutting one down -- never happens
+      under this pool's lock, so a panel mounting never waits on a child
+      being reclaimed.
+    * This pool never calls INTO a child while holding its own lock.  A
+      child's reader thread reports a retired Host while holding the
+      child's, and a pool that asked a child anything under its own lock
+      would close that cycle.
+    * A child being retired is never handed out again, and a child that
+      finishes starting after the pool is closing is retired immediately
+      rather than joining it.
+    * Every thread this pool starts is joined before ``close`` returns.
+
+    ``build_host``, ``retain``, ``release`` and ``close`` behave exactly as
+    one :class:`RenderProcess`'s do, so a caller chooses the counts and
+    changes nothing else.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        spares: int = DEFAULT_RENDER_SPARES,
+        limit: int = DEFAULT_RENDER_LIMIT,
+    ) -> None:
         selected = str(name).strip()
         if not selected:
             raise ValueError("render pool name must be non-empty")
-        count = int(size)
-        if count < 1:
-            raise ValueError("a render pool needs at least one process")
+        wanted, ceiling = int(spares), int(limit)
+        if wanted < 1:
+            raise ValueError("a pool keeps at least one child warm")
+        if ceiling < wanted:
+            raise ValueError("a pool cannot hold fewer children than it keeps warm")
         self.name = selected
-        self._size = count
+        self._spares = wanted
+        self._limit = ceiling
         self._lock = RLock()
+        self._settled = Condition(self._lock)
         self._members: list[RenderProcess] = []
+        self._retiring: set[RenderProcess] = set()
+        self._starting: set[Thread] = set()
+        self._failures: list[BaseException] = []
+        self._serial = 0
         self._owners = 1
         self._closing = False
+        self._keep_warm()
 
-    def _assign(self) -> "RenderProcess":
-        """The member a new Host belongs to: spawn before sharing.
+    # ------------------------------------------------------------- shaping
+    def _idle(self, members: Sequence["RenderProcess"]) -> list["RenderProcess"]:
+        """Children no Host is drawing on.  Asked OUTSIDE this pool's lock."""
 
-        Spreading first and only then sharing is what makes the common board
-        -- fewer panels than members -- a true one-panel-per-child split,
-        while a board larger than the pool still balances.
+        return [member for member in members if member.host_count == 0]
+
+    def _keep_warm(self) -> None:
+        """Start whatever is missing, retire whatever is spare.
+
+        Called after every change of shape -- a Host built, a Host retired,
+        a child started.  It decides under the lock and acts outside it.
+        """
+
+        while True:
+            with self._lock:
+                if self._closing:
+                    return
+                members = [
+                    member for member in self._members
+                    if member not in self._retiring
+                ]
+                pending = len(self._starting)
+            idle = self._idle(members)
+            with self._lock:
+                if self._closing:
+                    return
+                short = self._spares - len(idle) - pending
+                room = self._limit - len(members) - pending
+                begin = max(0, min(short, room))
+                # A child is spare only beyond the warm count AND unused, and
+                # only ever one at a time: between deciding and acting a panel
+                # may have taken it, and the next turn sees that.
+                spare = idle[-1] if len(idle) > self._spares and not begin else None
+                # The picture was read without the lock, so the child chosen
+                # may already have been taken, retired, or replaced.  Only one
+                # this pool still holds may be let go.
+                surplus = spare if spare in self._members else None
+                threads = []
+                for _ in range(begin):
+                    self._serial += 1
+                    thread = Thread(
+                        target=self._start_member,
+                        args=(self._serial,),
+                        name=f"zlc-render-{self.name}-start-{self._serial}",
+                        daemon=True,
+                    )
+                    self._starting.add(thread)
+                    threads.append(thread)
+                if surplus is not None:
+                    self._retiring.add(surplus)
+                    self._members.remove(surplus)
+            for thread in threads:
+                thread.start()
+            if surplus is None:
+                return
+            _retire_member(surplus)
+            with self._lock:
+                self._retiring.discard(surplus)
+
+    def _start_member(self, serial: int) -> None:
+        member: RenderProcess | None = None
+        try:
+            member = RenderProcess(
+                f"{self.name}-{serial}", host_retired=self._host_retired
+            )
+        except BaseException as error:  # noqa: BLE001 -- raised to the asker
+            with self._lock:
+                self._failures.append(error)
+        stray = None
+        with self._lock:
+            self._starting.discard(current_thread())
+            if member is not None:
+                if self._closing:
+                    stray = member
+                else:
+                    self._members.append(member)
+            self._settled.notify_all()
+        if stray is not None:
+            # Closed while this one was starting: it must not outlive the
+            # pool merely because it was late.  This IS a close, and it can
+            # wait -- it runs on this starting thread, which the pool's own
+            # close joins.
+            if not stray.release(0.0):
+                stray.close(30.0)
+
+    def _host_retired(self) -> None:
+        """A child finished with a Host, so the shape may have changed.
+
+        Called from that child's reader thread, which is why this only shapes
+        the pool and never waits: the reclaim itself runs here, outside every
+        child's lock, and a pool closing takes precedence.
         """
 
         with self._lock:
             if self._closing:
-                raise RuntimeError("render pool is closing")
-            if len(self._members) < self._size:
-                member = RenderProcess(f"{self.name}-{len(self._members)}")
-                self._members.append(member)
-                return member
-            return min(self._members, key=lambda candidate: candidate.host_count)
+                return
+        self._keep_warm()
+
+    # ------------------------------------------------------------- serving
+    def _claim(self) -> "RenderProcess":
+        """The child a new Host belongs to: a warm one, or the least busy.
+
+        Never a wait, except at the very start before the first child is up:
+        making a panel wait out a boot is the staircase this pool exists to
+        remove, so once the pool is running a panel shares a busy child
+        rather than waiting for a warm one.
+        """
+
+        while True:
+            with self._lock:
+                if self._closing:
+                    raise RuntimeError("render pool is closing")
+                members = [
+                    member for member in self._members
+                    if member not in self._retiring
+                ]
+                pending = bool(self._starting)
+                failure = self._failures[0] if self._failures else None
+            if members:
+                idle = self._idle(members)
+                if idle:
+                    return idle[0]
+                return min(members, key=lambda member: member.host_count)
+            if not pending:
+                raise failure or RuntimeError("render pool has no child")
+            with self._lock:
+                if not self._members and self._starting and not self._closing:
+                    self._settled.wait(30.0)
 
     def build_host(self, *args: object, **kwargs: object) -> "_RemoteRasterPlotHost":
-        return self._assign().build_host(*args, **kwargs)
+        member = self._claim()
+        try:
+            return member.build_host(*args, **kwargs)
+        finally:
+            # Whether or not that Host was built, the warm count may now be
+            # short by one; topping up here is what keeps the next panel from
+            # waiting.
+            self._keep_warm()
 
+    # ------------------------------------------------------------- closing
     def retain(self) -> None:
-        """Add one application-window owner without spawning anything."""
+        """Add one application-window owner without starting anything."""
 
         with self._lock:
             if self._closing:
                 raise RuntimeError("render pool is closing")
             self._owners += 1
+
+    def _stop(self, timeout: float) -> tuple["RenderProcess", ...]:
+        """Close the pool to new work, waiting only if the caller may wait.
+
+        A window's close must return within a Qt turn -- the console asserts
+        fifty milliseconds -- and a child takes 2.3 s to start, so a close
+        that joined the starting threads unconditionally would hold the GUI
+        for seconds whenever the operator shut a console while one was still
+        coming up.  With no time to spend, this only shuts the door: a child
+        that finishes starting after it sees ``_closing`` retires itself.
+        The waiting close, which the app reaches after its Qt turns, is where
+        those threads are joined.
+        """
+
+        with self._lock:
+            self._closing = True
+            self._settled.notify_all()
+            starting = tuple(self._starting)
+        if timeout:
+            for thread in starting:
+                thread.join(timeout=timeout)
+        with self._lock:
+            return tuple(self._members)
+
+    def _quiet(self) -> bool:
+        """Whether anything is still in flight.
+
+        A child still starting is not a settled pool, and saying it is would
+        tell the caller there is nothing left to shut down while a whole
+        renderer is on its way up.  It will retire itself when it arrives,
+        but the caller has to be told to come back for it.
+        """
+
+        with self._lock:
+            return not self._starting
 
     def release(self, timeout: float = 0.0) -> bool:
         """Release one window owner; the last owner shuts every child down."""
@@ -972,32 +1179,29 @@ class RenderProcessPool:
                 self._owners -= 1
             if self._owners > 0:
                 return True
-            self._closing = True
-            members = tuple(self._members)
-        # Every member is told to go FIRST, and only then waited for: told one
-        # at a time with the timeout each, a pool of four would wait four
-        # deadlines for shutdowns that all began at once.
+        members = self._stop(timeout)
+        # Every child is told to go FIRST and only then waited for: told one
+        # at a time with the timeout each, a pool would wait one deadline per
+        # child for shutdowns that all began at once.
         settled = [member.release(0.0) for member in members]
         if timeout:
             settled = [
                 done or member._await_close(timeout)
                 for member, done in zip(members, settled, strict=True)
             ]
-        return all(settled)
+        return all(settled) and self._quiet()
 
     def close(self, timeout: float = 0.0) -> bool:
         if timeout < 0.0:
             raise ValueError("timeout must be non-negative")
-        with self._lock:
-            self._closing = True
-            members = tuple(self._members)
+        members = self._stop(timeout)
         closed = [member.close(0.0) for member in members]
         if timeout:
             closed = [
                 done or member._await_close(timeout)
                 for member, done in zip(members, closed, strict=True)
             ]
-        return all(closed)
+        return all(closed) and self._quiet()
 
 
 class RenderProcess:
@@ -1017,7 +1221,11 @@ class RenderProcess:
     SILENCE_DEADLINE_SECONDS = 10.0
 
     def __init__(
-        self, name: str, *, silence_deadline_seconds: float | None = None
+        self,
+        name: str,
+        *,
+        silence_deadline_seconds: float | None = None,
+        host_retired: Callable[[], None] | None = None,
     ) -> None:
         selected = str(name).strip()
         if not selected:
@@ -1031,6 +1239,12 @@ class RenderProcess:
             raise ValueError("silence deadline must be positive")
         self.name = selected
         self._silence_deadline = deadline
+        #: Told when this child finishes with a Host, so an owner that keeps
+        #: several children warm learns that one of them is free again.
+        #: Called on the reader thread and OUTSIDE this child's lock -- the
+        #: listener is a pool, and a pool asks a child things under its own
+        #: lock, so calling it under this one would close that cycle.
+        self._host_retired = host_retired
         self._last_alive: float | None = None
         self._lock = RLock()
         self._pending: dict[int, _Pending] = {}
@@ -1985,6 +2199,12 @@ class RenderProcess:
             host._mark_closed()
         if event is not None:
             event.set()
+        retired = self._host_retired
+        if retired is not None:
+            try:
+                retired()
+            except BaseException:  # noqa: BLE001 -- an owner's bookkeeping
+                traceback.print_exc()
 
     def _release_front(self, lease_id: str) -> None:
         try:
