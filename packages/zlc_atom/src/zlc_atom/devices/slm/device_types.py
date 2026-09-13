@@ -18,7 +18,6 @@ import time
 from typing import Callable, Mapping
 
 import numpy as np
-from PIL import Image
 
 from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
 from zlc_atom.devices.vendor import resolve_vendor_file
@@ -244,7 +243,7 @@ def _open_dvi_presenter(
         try:
             _set_dvi_thread_dpi_awareness()
             import tkinter as tk
-            from PIL import ImageTk
+            from PIL import Image, ImageTk
 
             root = tk.Tk(className="ZLC-X15213-DVI")
             root.withdraw()
@@ -693,6 +692,12 @@ def _load_correction(
     expected_serial: str,
     wavelength_nm: float,
 ) -> np.ndarray:
+    # Reached here rather than at module scope: discovering the device
+    # catalogue imports every device_types module to read one declaration,
+    # and a console that will never open an X15213 was loading Pillow for a
+    # correction bitmap it will never read.
+    from PIL import Image  # noqa: PLC0415
+
     if not path_text:
         values = np.zeros(_SHAPE_YX, dtype=np.uint8)
     else:

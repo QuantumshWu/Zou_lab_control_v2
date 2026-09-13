@@ -1,4 +1,12 @@
-"""Continuous SLM targets, phase retrieval, and their file formats."""
+"""Continuous SLM targets, phase retrieval, and their file formats.
+
+Pillow, unicodedata and scipy are all reached from inside the functions
+that use them.  A logic node's descriptor names one of the file readers
+here as its artifact codec, so DISCOVERING the nodes -- which a task
+console does before it shows anything -- imports this module; at module
+scope those three cost it a font stack and a solver stack for a target
+nobody has authored and a pattern nobody has solved.
+"""
 
 from __future__ import annotations
 
@@ -9,10 +17,8 @@ import os
 import weakref
 from pathlib import Path
 from typing import Any
-import unicodedata
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
 from zlc_durable import atomic_write_file, write_readable_json
 
 from .device import canonical_phase
@@ -227,6 +233,8 @@ _WINDOWS_CJK_FONTS = (
 )
 
 def _missing_font_characters(font_path: Path, text: str) -> tuple[str, ...]:
+    from PIL import ImageFont  # noqa: PLC0415
+
     font = ImageFont.truetype(
         str(font_path),
         size=64,
@@ -294,6 +302,8 @@ def _allowed_text_character(character: str) -> bool:
     )
 
 def _rasterized_text(text: str, font_path: Path, size: int) -> np.ndarray:
+    from PIL import Image, ImageDraw, ImageFont  # noqa: PLC0415
+
     font = ImageFont.truetype(
         str(font_path),
         size=size,
@@ -358,6 +368,8 @@ def preset_text(
     font_path: str | Path | None = None,
 ) -> np.ndarray:
     """Rasterize one centered line of Latin/CJK text into discrete sites."""
+
+    import unicodedata  # noqa: PLC0415
 
     shape = _pair(shape_yx, "shape_yx")
     if not isinstance(text, str):

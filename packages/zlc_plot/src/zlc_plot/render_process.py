@@ -509,16 +509,91 @@ def _unwire_value(value: object) -> object:
 def _release_shared_store(
     process: "RenderProcess",
     lease_id: str,
-    shared: object,
-    retirements: Queue,
+    cache: "_SharedMappingCache",
+    name: str,
 ) -> None:
     process._release_front(str(lease_id))
-    # A weakref finalizer runs while the exporting memoryview is itself being
-    # dismantled.  mmap.close at that exact instant still sees one exported
-    # pointer.  Hand the mapping to one process-owned retirement lane; its
-    # next turn is after memoryview teardown, and it retains the handle across
-    # a rare BufferError instead of letting SharedMemory.__del__ warn.
-    retirements.put((_MAPPING_RELEASED, shared))
+    cache.release(str(name))
+
+
+class _SharedMappingCache:
+    """One mapping per shared segment, kept while a frontend is reading it.
+
+    A child cycles a bounded set of front segments -- three per Host -- so
+    the same names come back frame after frame.  MAPPING one costs nothing,
+    about thirty microseconds; TOUCHING it costs the page faults of the
+    whole raster, and a fresh mapping faults every page again.  Measured at
+    the 2x2 preset, reading a 9.2 MB front through a new mapping is 1.8 to
+    2.9 ms of the GUI thread and through a kept one 0.03 ms.  On a
+    four-card board at the display rate that was eighty milliseconds a
+    second, on the one thread that has to stay answerable.
+
+    A name is never reused for a different segment -- the child names each
+    one when it creates it -- so a cached mapping is always the segment its
+    name meant.  What a mapping must outlive is the frontend's last view of
+    it, which may outlive the RenderProcess itself, so each is counted and
+    handed to the retirement lane only once nothing is reading it AND this
+    cache has been told to go.  Holding no reference back to the process,
+    it is what that process's own finalizer can retire.
+    """
+
+    __slots__ = ("_lock", "_entries", "_closing", "_retirements")
+
+    def __init__(self, retirements: Queue) -> None:
+        self._lock = Lock()
+        #: name -> [mapping, how many stores are reading it]
+        self._entries: dict[str, list] = {}
+        self._closing = False
+        self._retirements = retirements
+
+    def open(self, name: str) -> object:
+        """The mapping for one segment.  The reader thread alone calls it."""
+
+        with self._lock:
+            entry = self._entries.get(name)
+            if entry is not None:
+                entry[1] += 1
+                return entry[0]
+            closing = self._closing
+        mapping = _open_shared_mapping(name)
+        self._retirements.put(_MAPPING_OPENED)
+        if closing:
+            # A front that crossed the pipe after this was told to go: read
+            # it, and let the mapping follow its store straight out.
+            self._retirements.put((_MAPPING_RELEASED, mapping))
+            return mapping
+        with self._lock:
+            self._entries[name] = [mapping, 1]
+        return mapping
+
+    def release(self, name: str) -> None:
+        """One store finished with a segment; retire the map if it was last."""
+
+        with self._lock:
+            entry = self._entries.get(name)
+            if entry is None:
+                return
+            entry[1] -= 1
+            if entry[1] > 0 or not self._closing:
+                return
+            del self._entries[name]
+        self._retirements.put((_MAPPING_RELEASED, entry[0]))
+
+    def retire_all(self) -> None:
+        """Told to go: release what nothing is reading, and mark the rest."""
+
+        with self._lock:
+            self._closing = True
+            idle = [
+                (name, entry)
+                for name, entry in self._entries.items()
+                if entry[1] <= 0
+            ]
+            for name, _entry in idle:
+                del self._entries[name]
+        for _name, entry in idle:
+            self._retirements.put((_MAPPING_RELEASED, entry[0]))
+        self._retirements.put(_RETIRE_MAPPINGS)
 
 
 def _retire_shared_mappings(retirements: Queue) -> None:
@@ -527,7 +602,11 @@ def _retire_shared_mappings(retirements: Queue) -> None:
     stopping = False
     while True:
         try:
-            item = retirements.get(timeout=0.02 if not waiting else 0.002)
+            # Nothing retained means nothing to retry, and the next event is
+            # the only thing that can change that: WAITING on it costs one
+            # wake instead of fifty a second in the GUI process, whose
+            # thread has to stay answerable.
+            item = retirements.get(timeout=0.002 if waiting else None)
             if item is _RETIRE_MAPPINGS:
                 stopping = True
             elif item is _MAPPING_OPENED:
@@ -1301,6 +1380,7 @@ class RenderProcess:
         #: that filled it: a restart begins the agreement again.
         self._front_interaction: dict[str, RasterInteractionMap] = {}
         self._mapping_retirements: Queue = Queue()
+        self._mappings = _SharedMappingCache(self._mapping_retirements)
         self._mapping_retirement_thread = Thread(
             target=_retire_shared_mappings,
             args=(self._mapping_retirements,),
@@ -1308,10 +1388,11 @@ class RenderProcess:
             daemon=True,
         )
         self._mapping_retirement_thread.start()
+        # Bound to the CACHE, which holds no reference back: bound to this
+        # process, the finalizer would keep it alive and never run.
         self._mapping_retirement_finalizer = weakref.finalize(
             self,
-            self._mapping_retirements.put,
-            _RETIRE_MAPPINGS,
+            self._mappings.retire_all,
         )
         self._spawn_child()
 
@@ -2065,12 +2146,12 @@ class RenderProcess:
                 )
         else:
             self._front_interaction[str(host_id)] = interaction
-        shared = _open_shared_mapping(shared_name)
-        # The retirement lane must know about this mapping before a Front can
-        # escape the reader thread.  A caller may retain only an ndarray view
-        # after the RenderProcess itself is gone; STOP therefore waits for the
-        # matching store finalizer instead of exiting ahead of that last view.
-        self._mapping_retirements.put(_MAPPING_OPENED)
+        # Mapped once per SEGMENT, not once per front: see
+        # :class:`_SharedMappingCache`.  The retirement lane learns of a new
+        # mapping before a Front can escape the reader thread, because a
+        # caller may retain only an ndarray view after the RenderProcess is
+        # gone, and STOP waits for that last view.
+        shared = self._mappings.open(str(shared_name))
         # ctypes exposes the standard buffer protocol on every supported
         # Python (including 3.11), while still giving the finalizer a weak-
         # referenceable owner that all memoryview/NumPy/QImage consumers keep.
@@ -2083,13 +2164,13 @@ class RenderProcess:
                 _release_shared_store,
                 self,
                 str(lease_id),
-                shared,
-                self._mapping_retirements,
+                self._mappings,
+                str(shared_name),
             )
         except BaseException:
             if pixels is not None:
                 pixels.release()
-            self._mapping_retirements.put((_MAPPING_RELEASED, shared))
+            self._mappings.release(str(shared_name))
             raise
         finalizer.atexit = False
         front = (
