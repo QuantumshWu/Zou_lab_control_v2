@@ -85,17 +85,40 @@ def test_harmonic_clock_uses_the_global_smallest_tick_and_group_maximum() -> Non
     clock = HarmonicClock((100, 200, 800), now_ns=lambda: now[0])
     assert clock.base_ms == 100
     now[0] = 100_000_000
-    assert clock.advance() == 100
-    assert not clock.group_due(100, (100, 800))
-    assert clock.group_due(800, (100, 800))
+    assert clock.elapsed_ms() == 100
+    # A group that has shown nothing shows its first picture at once; after
+    # that the group's LONGEST interval is the cap, measured from it.
+    assert clock.group_due(100, (100, 800), None)
+    assert not clock.group_due(100, (100, 800), 0)
+    assert clock.group_due(800, (100, 800), 0)
     with pytest.raises(ValueError):
         HarmonicClock((100, 250))
     # One delayed callback crossed two slow deadlines. It is due now, not
     # after seven more callbacks, and does not replay either missed frame.
     now[0] = 1_650_000_000
-    assert clock.group_due(clock.advance(), (100, 800))
+    assert clock.group_due(clock.elapsed_ms(), (100, 800), 800)
     now[0] += 1_000_000
-    assert not clock.group_due(clock.advance(), (100, 800))
+    assert not clock.group_due(clock.elapsed_ms(), (100, 800), 1650)
+
+
+def test_an_interval_is_measured_from_the_last_picture_not_from_a_grid() -> None:
+    """The cap is a RATE, and a panel idle past it draws the moment it can.
+
+    Against a grid running since the board opened, the phase between the
+    crossings and the shots is arbitrary: a panel that had shown nothing
+    for a second still waited for the next crossing, which on a live
+    console was most of a beat on every shot.
+    """
+
+    now = [0]
+    clock = HarmonicClock((100,), now_ns=lambda: now[0])
+    assert clock.group_due(0, (100,), None)
+    # 99 ms after its picture the panel is inside its interval, whatever
+    # the wall clock is a multiple of.
+    assert not clock.group_due(99, (100,), 0)
+    assert clock.group_due(100, (100,), 0)
+    assert clock.group_due(1_000, (100,), 900)
+    assert not clock.group_due(1_000, (100,), 901)
 
 
 class _Port:
@@ -324,9 +347,6 @@ def test_same_shot_siblings_commit_together_in_one_cohort() -> None:
         lambda: ports,
     )
 
-    for _ in range(3):
-        scheduler.on_tick()
-    assert not ports[0].updates and not ports[1].updates
     scheduler.on_tick()
     assert len(ports[0].updates) == len(ports[1].updates) == 1
     ports[0].futures[0].set_result("first")
@@ -712,20 +732,89 @@ def test_completion_wake_does_not_bypass_a_not_due_follower() -> None:
     arbiter = SurfaceBatchArbiter(_Sink())
     camera = _Port("camera", "camera/frame", interval=100)
     trace = _Port("trace", "@logic/panel/center", interval=200)
+    now = [0]
     scheduler = BoardScheduler(
         plane,
-        _clock((100, 200)),
+        HarmonicClock((100, 200), now_ns=lambda: now[0]),
         arbiter,
         lambda: (camera, trace),
     )
 
-    scheduler.on_tick()
-    camera.futures[0].set_result("camera")
-    arbiter.drain(lambda panel_id: {"camera": camera, "trace": trace}.get(panel_id))
-    assert len(camera.accepted) == 1
+    # Both panels show their first picture at once -- an interval caps the
+    # rate, and neither has spent one yet -- so the follower's own 200 ms
+    # deadline starts here.
     plane.front = both
+    scheduler.on_tick()
+    assert len(camera.updates) == len(trace.updates) == 1
+    camera.futures[0].set_result("camera")
+    trace.futures[0].set_result("trace")
+    arbiter.drain(lambda panel_id: {"camera": camera, "trace": trace}.get(panel_id))
+    assert len(camera.accepted) == len(trace.accepted) == 1
+
+    # 100 ms later the camera's next shot arrives.  The camera may show it;
+    # the follower is inside its own interval and a completion wake does not
+    # let it in early.
+    newer_camera = _front("camera/frame", sequence=8)
+    newer_fit = _front("@logic/panel/center", sequence=2)
+    newer_camera_publication = newer_camera.publication("camera/frame")
+    newer_fit_publication = newer_fit.publication("@logic/panel/center")
+    assert newer_camera_publication is not None
+    assert newer_fit_publication is not None
+    object.__setattr__(
+        newer_fit_publication,
+        "direct_parent_refs",
+        (newer_camera_publication.event_ref,),
+    )
+    plane.parents = {newer_fit_publication: (newer_camera_publication,)}
+    plane.front = SignalFront(
+        {
+            "camera/frame": newer_camera.value("camera/frame"),
+            "@logic/panel/center": newer_fit.value("@logic/panel/center"),
+        },
+        {
+            "camera/frame": newer_camera_publication,
+            "@logic/panel/center": newer_fit_publication,
+        },
+    )
+    now[0] = 100_000_000
     scheduler.stage_owed()
-    assert not trace.updates
+    assert len(trace.updates) == 1
+
+
+def test_a_publication_wake_shows_a_panel_past_its_deadline_without_a_beat() -> None:
+    """The measured defect, stated: no beat is needed to spend a deadline.
+
+    An owner wake used to be able to spend only debt some earlier beat had
+    happened to record, so a panel whose deadline passed between beats
+    waited for the next one -- most of a hundred-millisecond beat on every
+    shot, on a live console.
+    """
+
+    now = [0]
+    plane = _Plane(_front("camera/frame", sequence=1))
+    arbiter = SurfaceBatchArbiter(_Sink())
+    port = _Port("panel", "camera/frame", interval=100)
+    scheduler = BoardScheduler(
+        plane,
+        HarmonicClock((100,), now_ns=lambda: now[0]),
+        arbiter,
+        lambda: (port,),
+    )
+
+    scheduler.on_tick()
+    port.futures[0].set_result("first")
+    arbiter.drain(lambda _panel_id: port)
+    assert len(port.accepted) == 1
+
+    # No beat happens at all from here on: only the publication wakes.
+    now[0] = 99_000_000
+    plane.front = _front("camera/frame", sequence=2)
+    scheduler.stage_owed()
+    assert len(port.updates) == 1
+
+    now[0] = 100_000_000
+    scheduler.stage_owed()
+    assert len(port.updates) == 2
 
 
 def test_due_coherent_component_stages_on_its_completion_wake() -> None:
@@ -832,12 +921,10 @@ def test_board_scheduler_owes_a_failed_slow_beat_to_the_next_base_tick() -> None
     clock = _clock((100, 2000))
     scheduler = BoardScheduler(plane, clock, arbiter, lambda: (port,))
 
-    for _ in range(19):
-        scheduler.on_tick()
-    scheduler.on_tick()  # elapsed 2000: the due prepare fails
+    scheduler.on_tick()  # the first picture is due at once; the prepare fails
     assert not port.updates
 
-    scheduler.on_tick()  # elapsed 2100: not due, but owed and retried
+    scheduler.on_tick()  # inside the 2000 ms interval, but owed and retried
     assert len(port.updates) == 1
     port.futures[0].set_result("ready")
     arbiter.drain(lambda _panel_id: port)
@@ -852,8 +939,7 @@ def test_board_scheduler_owes_missing_value_until_the_next_base_tick() -> None:
     port = _Port("panel", "camera/frame", interval=2000)
     clock = _clock((100, 2000))
     scheduler = BoardScheduler(plane, clock, arbiter, lambda: (port,))
-    for _ in range(20):
-        scheduler.on_tick()
+    scheduler.on_tick()
     assert port.waiting == ["camera/frame"]
 
     plane.front = complete

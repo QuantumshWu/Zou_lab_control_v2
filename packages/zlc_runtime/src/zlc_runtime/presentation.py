@@ -39,9 +39,23 @@ class WakeSink(Protocol):
 
 
 class HarmonicClock:
-    """Monotonic deadlines for one harmonic set of panel intervals."""
+    """Monotonic display deadlines for one harmonic set of panel intervals.
 
-    __slots__ = ("_allowed", "_base_ms", "_elapsed_ms", "_previous_ms", "_now_ns", "_origin_ns")
+    A panel's interval is a RATE CAP -- at most one picture per hundred
+    milliseconds -- and the cap is measured from the picture that panel last
+    staged.  Measured instead against a grid running since the board opened,
+    the phase between the grid and the shots is arbitrary: a shot landing
+    just after a crossing waited the whole interval even for a panel that
+    had been idle for a second, and the owner wake the publication raised
+    could only spend debt that some earlier beat happened to have recorded.
+    On a live console that was most of a beat on every shot.
+
+    Harmonic intervals still earn the constraint: two panels driven by the
+    same shots stay in step only while the longer interval is a multiple of
+    the shorter one.
+    """
+
+    __slots__ = ("_allowed", "_base_ms", "_now_ns", "_origin_ns")
 
     def __init__(self, intervals: Sequence[int], *, now_ns: Callable[[], int] | None = None) -> None:
         normalized = tuple(sorted({_positive_int(value, "display interval") for value in intervals}))
@@ -52,8 +66,6 @@ class HarmonicClock:
             raise ValueError("display intervals must be harmonic multiples of the base")
         self._allowed = frozenset(normalized)
         self._base_ms = base
-        self._elapsed_ms = 0
-        self._previous_ms = 0
         self._now_ns = monotonic_ns if now_ns is None else now_ns
         self._origin_ns = self._now_ns()
 
@@ -73,20 +85,31 @@ class HarmonicClock:
             )
         return normalized
 
-    def advance(self) -> int:
-        self._previous_ms = self._elapsed_ms
-        self._elapsed_ms = (self._now_ns() - self._origin_ns) // 1_000_000
-        return self._elapsed_ms
+    def elapsed_ms(self) -> int:
+        """Milliseconds since the board opened, read, not consumed."""
 
-    def group_due(self, elapsed_ms: int, member_intervals: Iterable[int]) -> bool:
+        return (self._now_ns() - self._origin_ns) // 1_000_000
+
+    def group_due(
+        self,
+        elapsed_ms: int,
+        member_intervals: Iterable[int],
+        staged_ms: int | None,
+    ) -> bool:
+        """Whether a group last staged at ``staged_ms`` may stage now.
+
+        A group that has never staged is due at once; a late or coalesced
+        wake owes one current picture and never replays the shots it missed,
+        because the deadline is relative to what was actually shown.
+        """
+
         elapsed = _nonnegative_int(elapsed_ms, "elapsed_ms")
         members = tuple(self._interval(value) for value in member_intervals)
         if not members:
             raise ValueError("a presentation group must have at least one interval")
-        interval = max(members)
-        # A late/coalesced timer can cross several deadlines.  Owe one
-        # current picture, never replay the ticks or shots that were missed.
-        return elapsed // interval > self._previous_ms // interval
+        if staged_ms is None:
+            return True
+        return elapsed - _nonnegative_int(staged_ms, "staged_ms") >= max(members)
 
 
 @dataclass(frozen=True, slots=True)
@@ -604,6 +627,7 @@ class BoardScheduler:
         "_admission_owed",
         "_plane",
         "_ports",
+        "_staged_ms",
     )
 
     def __init__(
@@ -636,6 +660,9 @@ class BoardScheduler:
         # already exist in Runtime.  Keeping this separate lets a travelling
         # cohort finish during Pause without advancing the frozen board.
         self._admission_owed: set[str] = set()
+        # When each panel last staged, which is what its interval caps.  A
+        # panel absent here has never staged and is due immediately.
+        self._staged_ms: dict[str, int] = {}
         self._closed = False
         self._last_front = SignalFront({})
 
@@ -797,9 +824,9 @@ class BoardScheduler:
         every selection- and fit-derived signal on the board stopped being
         computed too.  Freezing a picture is not idling an instrument.
 
-        Withholding staging accumulates nothing: ``group_due`` is a pure
-        function of the elapsed clock, so a resumed board stages on its own
-        next boundary with its cadence phase intact.
+        Withholding staging accumulates nothing: a paused panel stages
+        nothing, so its deadline stands where its last picture left it and
+        a resumed board shows the current one at once.
         """
 
         if self._closed:
@@ -819,7 +846,7 @@ class BoardScheduler:
         if not isinstance(front, SignalFront):
             raise TypeError("signal data plane freeze() must return SignalFront")
         self._last_front = front
-        elapsed = self._clock.advance()
+        elapsed = self._clock.elapsed_ms()
         if not stage:
             return front
         # A presentation-paced follower's batch (a rolling trace of a
@@ -836,7 +863,9 @@ class BoardScheduler:
         follower_outputs = {output for _source, output in edges}
         due = {
             SurfaceBatchArbiter._panel_id(port): self._clock.group_due(
-                elapsed, (getattr(port, "display_interval_ms"),)
+                elapsed,
+                (getattr(port, "display_interval_ms"),),
+                self._staged_ms.get(SurfaceBatchArbiter._panel_id(port)),
             )
             for port in ports
         }
@@ -933,13 +962,11 @@ class BoardScheduler:
                     # completion wake can spend it without another display tick.
                     self._owed.add(panel_id)
                     self._admission_owed.discard(panel_id)
-                elif due[panel_id]:
-                    # The authored surface deadline was reached before a new
-                    # source publication.  Its wake may spend this display
-                    # debt immediately instead of waiting for another beat.
-                    self._owed.discard(panel_id)
-                    self._admission_owed.add(panel_id)
                 else:
+                    # A deadline that passed with nothing new is not
+                    # remembered: ``stage_owed`` asks the clock itself when
+                    # the publication arrives, so the panel presents the
+                    # moment it is both allowed and has something to show.
                     self._owed.discard(panel_id)
                 continue
             if (
@@ -975,18 +1002,11 @@ class BoardScheduler:
                     else frozenset()
                 ),
             ):
-                self._owed.discard(panel_id)
-                self._admission_owed.discard(panel_id)
+                self._mark_staged(panel_id, elapsed)
             else:
                 if panel_id not in self._owed:
                     self._admission_owed.add(panel_id)
-        active_panels = {
-            SurfaceBatchArbiter._panel_id(port) for port in ports
-        }
-        for panel_id in tuple(self._owed | self._admission_owed):
-            if panel_id not in active_panels:
-                self._owed.discard(panel_id)
-                self._admission_owed.discard(panel_id)
+        self._forget_closed_panels(ports)
         self._arbiter.tick_boundary()
         return front
 
@@ -1002,32 +1022,33 @@ class BoardScheduler:
                 self._admission_owed.add(selected)
 
     def stage_owed(self, *, admit_new: bool = True) -> SignalFront:
-        """Stage already-due surfaces on the completion wake that makes them ready.
+        """Stage every due surface on the wake that makes it ready.
 
-        This covers both halves of the same contract: a coherent component
-        held while its derived sibling is produced, and a presentation-paced
-        follower produced while its source surface renders.  Only debt already
-        created by ``on_tick`` is eligible; this wake neither advances the
-        clock nor lets a not-due panel bypass its authored interval.
+        This covers three things the display beat must not be waited for:
+        a coherent component held while its derived sibling is produced, a
+        presentation-paced follower produced while its source surface
+        renders, and -- the common one -- a panel past its own deadline the
+        moment a publication arrives.  The interval is still honoured to
+        the millisecond; it is a cap on the rate, and a wake never lets a
+        panel inside it.
         """
 
-        eligible = self._owed | (self._admission_owed if admit_new else set())
-        if self._closed or not eligible:
+        if self._closed:
             return self._last_front
         ports = self._stage_order(tuple(self._ports()))
+        elapsed = self._clock.elapsed_ms()
+        eligible = self._owed | (self._admission_owed if admit_new else set())
+        if admit_new:
+            eligible |= self._due_with_unpresented(ports, eligible, elapsed)
+        if not eligible:
+            return self._last_front
         displayed = self._displayed_signals(ports)
         self._plane.set_front_signals(displayed)
         front = self._plane.freeze()
         if not isinstance(front, SignalFront):
             raise TypeError("signal data plane freeze() must return SignalFront")
         self._last_front = front
-        active_panels = {
-            SurfaceBatchArbiter._panel_id(port) for port in ports
-        }
-        for panel_id in tuple(self._owed | self._admission_owed):
-            if panel_id not in active_panels:
-                self._owed.discard(panel_id)
-                self._admission_owed.discard(panel_id)
+        self._forget_closed_panels(ports)
 
         blocked_surfaces, candidate_roots = self._blocked_surface_panels(
             ports,
@@ -1107,15 +1128,76 @@ class BoardScheduler:
                 formation_complete=not window_panels,
             ):
                 for member in members:
-                    panel_id = SurfaceBatchArbiter._panel_id(member)
-                    self._owed.discard(panel_id)
-                    self._admission_owed.discard(panel_id)
+                    self._mark_staged(
+                        SurfaceBatchArbiter._panel_id(member), elapsed
+                    )
         for port in unresolved:
             if self._arbiter.enqueue_group((port,), front):
-                panel_id = SurfaceBatchArbiter._panel_id(port)
+                self._mark_staged(SurfaceBatchArbiter._panel_id(port), elapsed)
+        return front
+
+    def _mark_staged(self, panel_id: str, elapsed_ms: int) -> None:
+        """Start this panel's interval again, and clear its debt.
+
+        The instant is the TURN's, read once by the caller: a turn that read
+        the clock again per panel would time each one from a different now.
+        """
+
+        self._staged_ms[panel_id] = elapsed_ms
+        self._owed.discard(panel_id)
+        self._admission_owed.discard(panel_id)
+
+    def _forget_closed_panels(self, ports: Sequence[SurfacePort]) -> None:
+        """Drop every trace of a panel that is no longer on the board."""
+
+        active = {SurfaceBatchArbiter._panel_id(port) for port in ports}
+        for panel_id in tuple(self._owed | self._admission_owed):
+            if panel_id not in active:
                 self._owed.discard(panel_id)
                 self._admission_owed.discard(panel_id)
-        return front
+        for panel_id in tuple(self._staged_ms):
+            if panel_id not in active:
+                del self._staged_ms[panel_id]
+
+    def _due_with_unpresented(
+        self,
+        ports: Sequence[SurfacePort],
+        already: set[str],
+        elapsed_ms: int,
+    ) -> set[str]:
+        """Panels past their deadline that the plane holds a new shot for.
+
+        The wake a publication raises is the first moment a panel can be
+        told about it, so the deadline is asked HERE rather than spent from
+        debt an earlier beat happened to record -- that is what makes the
+        interval a rate cap instead of a phase.  A panel with nothing
+        unpresented is skipped without freezing a front, so a wake that
+        concerns nobody still costs only this scan.
+        """
+
+        fresh: set[str] = set()
+        for port in ports:
+            panel_id = SurfaceBatchArbiter._panel_id(port)
+            if panel_id in already:
+                continue
+            # A panel whose render is still travelling cannot take another
+            # one, and naming it here would hold its whole same-shot group:
+            # the accept that frees it wakes the owner again.
+            if getattr(port, "surface_busy"):
+                continue
+            if not self._clock.group_due(
+                elapsed_ms,
+                (getattr(port, "display_interval_ms"),),
+                self._staged_ms.get(panel_id),
+            ):
+                continue
+            presented = set(self._presented_front_refs(port))
+            for name in SurfaceBatchArbiter._front_signals(port):
+                latest = self._plane.latest_publication(name)
+                if latest is not None and latest.event_ref not in presented:
+                    fresh.add(panel_id)
+                    break
+        return fresh
 
     def _port_shot_roots(
         self,
@@ -1139,6 +1221,7 @@ class BoardScheduler:
         self._closed = True
         self._owed.clear()
         self._admission_owed.clear()
+        self._staged_ms.clear()
         self._arbiter.close()
 
 
