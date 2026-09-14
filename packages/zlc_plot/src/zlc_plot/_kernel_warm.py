@@ -630,19 +630,24 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
       they overlap with the drawing below rather than queueing behind it
       -- 1.65 s for the pair against 2.08 s in turn -- and, being off this
       thread, they finish even when a panel cuts the rest of this short.
-    * the grid of camera frames, 1.3 s: Matplotlib's own import, the first
+    * the grid of camera frames, 0.5 s: Matplotlib's own import, the first
       text measured loading the font, and the raster kernels' first
       dispatch.  It is what a console opens on.
+    * the grid of histograms, 0.15 s, and then A GRID'S WORTH OF EMPTY
+      CELLS, 0.16 s, kept in :data:`CELL_RESERVE`.  The reserve is
+      single-shot and any grid takes it, so it must follow every grid drawn
+      here; and it must follow nothing else, because sixty-four cells were
+      the larger half of a grid's mount and a child taken at two seconds
+      used to be taken before this ran -- it sat behind the fits and the
+      picture variety.  Measured, a sixty-four cell mount on a child warmed
+      three seconds was 693 ms with the reserve still ahead and 368 once
+      it had run.
     * a curve's fit and a histogram's fit: numba's first dispatch of the
       fit kernels, which needs the imports above and so waits for them.
     * the remaining picture variety, which is the only part that is about
       what a panel happens to show rather than what every panel pays.
-    * a grid's worth of empty cells, kept in :data:`CELL_RESERVE`.  It is
-      near the end because it buys nothing for a panel that is not a grid
-      -- but for one that is, sixty-four cells were the larger half of the
-      mount, and this is the whole of it.
-    * the 3D scene, last, for the same reason and a smaller one: 72 ms,
-      and only for a panel presented as height bars.
+    * the 3D scene, last: 72 ms, and only for a panel presented as height
+      bars.
 
     Listed last, as the solvers were, none of it ran at all: a child is
     taken about a second into its warming, and the operator paid the fit
@@ -824,6 +829,27 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
     _render(camera, FacetGridPlot(None, image), size="4x4")
     if not proceed():
         return
+    _render(
+        _image_snapshot(24, 32, np.float64),
+        FacetGridPlot(AxisRef.cell_data("y"), HistogramPlot()),
+        size="2x2",
+    )
+    if not proceed():
+        return
+    # A GRID'S WORTH OF CELLS, RIGHT AFTER THE LAST GRID DRAWN HERE.  The
+    # reserve is single-shot and any grid takes it, so it must follow
+    # every grid this warming draws -- and nothing else: a grid's cells
+    # are the larger half of mounting one, none of it depends on the data,
+    # and a child taken at two seconds used to be taken before this ran,
+    # because it sat behind the fits and the picture variety.  Measured,
+    # a sixty-four cell mount on a child warmed three seconds was 693 ms
+    # with the reserve still ahead of it and 368 once it had run.
+    from .config import DEFAULTS  # noqa: PLC0415
+    from .rendering import CELL_RESERVE  # noqa: PLC0415
+
+    CELL_RESERVE.fill(DEFAULTS.style, int(DEFAULTS.layout.facet_max_cells))
+    if not proceed():
+        return
     # The fits below solve, so they need what that thread was loading.
     solvers.join()
     series = _series_snapshot(8, 400)
@@ -844,25 +870,7 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
         if not proceed():
             return
         _render(_image_snapshot(600, 800, dtype), image, size="2x2")
-    if not proceed():
-        return
-    _render(
-        _image_snapshot(24, 32, np.float64),
-        FacetGridPlot(AxisRef.cell_data("y"), HistogramPlot()),
-        size="2x2",
-    )
     load_batch_solvers(proceed)
-    if proceed():
-        # LAST, because it is the only step here that is speculative: a
-        # panel that is not a grid never asks for it.  A grid's cells are
-        # the larger half of what mounting one costs and none of it depends
-        # on the data, so a child with nothing else to do builds them now.
-        from .config import DEFAULTS  # noqa: PLC0415
-        from .rendering import CELL_RESERVE  # noqa: PLC0415
-
-        CELL_RESERVE.fill(
-            DEFAULTS.style, int(DEFAULTS.layout.facet_max_cells)
-        )
     if proceed():
         # And the 3D scene, which was left out of the list above because it
         # is a presentation only some panels open on.  It costs the process
