@@ -61,7 +61,12 @@ class SnapshotFeed:
     cost, the way a producer hands the panel already-materialized blocks.
     """
 
-    def __init__(self, schema: DatasetSchema, buffers: list[np.ndarray]):
+    def __init__(
+        self,
+        schema: DatasetSchema,
+        buffers: list[np.ndarray],
+        validity: list[np.ndarray] | None = None,
+    ):
         self.schema = schema
         # Bytes-backed immutable buffers, like a real producer's blocks:
         # zlc_data then adopts them without its ownership copy, so
@@ -75,16 +80,36 @@ class SnapshotFeed:
             flat.setflags(write=False)
             adopted.append(flat)
         self._buffers = adopted
+        # A shot that has not landed is not a zero: it is absent, and the
+        # reductions, the raster and the curve's isolated-point channel
+        # each take a different path for it.  Carrying validity is how
+        # this feed reaches those paths at all.
+        self._validity = None if validity is None else [
+            np.ascontiguousarray(mask, dtype=np.bool_) for mask in validity
+        ]
         self._revision = 0
 
     @property
     def size(self) -> int:
         return int(np.prod(self._buffers[0].shape))
 
+    @property
+    def landed_fraction(self) -> float:
+        """How much of this feed's data a panel may actually read."""
+
+        if self._validity is None:
+            return 1.0
+        mask = self._validity[0]
+        return float(np.count_nonzero(mask)) / float(mask.size)
+
     def next(self) -> OwnedSnapshot:
         self._revision += 1
-        buffer = self._buffers[self._revision % len(self._buffers)]
-        return make_snapshot(self.schema, buffer, revision=self._revision)
+        index = self._revision % len(self._buffers)
+        buffer = self._buffers[index]
+        validity = None if self._validity is None else self._validity[index]
+        return make_snapshot(
+            self.schema, buffer, revision=self._revision, validity=validity
+        )
 
 def lattice_feed(
     *,
@@ -95,6 +120,8 @@ def lattice_feed(
     dims: tuple[int, ...] = (10, 10, 10),
     buffers: int = 3,
     seed: int = 0,
+    landed: float | None = None,
+    hole_stride: int = 0,
 ) -> SnapshotFeed:
     """The bench-shaped signal: (R)x(rows)x(F)x(S) with a scan topology.
 
@@ -143,7 +170,29 @@ def lattice_feed(
         profile[None, :, None, None] + rng.normal(scale=0.25, size=shape)
         for _ in range(buffers)
     ]
-    return SnapshotFeed(schema, stack)
+    if landed is None and hole_stride <= 0:
+        return SnapshotFeed(schema, stack)
+    # A run that is still filling: the first repeats have landed and the
+    # rest have not, and a producer that dropped shots leaves holes inside
+    # the landed part.  An absent shot is NaN and invalid, not zero.
+    # VALUE validity may not vary along the CELL axes -- a shot landed or
+    # it did not, for every frame and site of it -- so the mask is decided
+    # over (repeat, row) and broadcast across the cell.
+    masks = []
+    for index, values in enumerate(stack):
+        shots = np.ones((repeats, rows), dtype=np.bool_)
+        if landed is not None:
+            kept = max(1, int(round(float(landed) * repeats)))
+            shots[kept:] = False
+        if hole_stride > 0:
+            flat = shots.reshape(-1)
+            flat[(index + 1) :: hole_stride] = False
+        mask = np.broadcast_to(
+            shots[:, :, None, None], shape
+        ).copy()
+        values[~mask] = np.nan
+        masks.append(mask)
+    return SnapshotFeed(schema, stack, masks)
 
 def camera_feed(
     *, height: int = 2048, width: int = 2048, buffers: int = 3, seed: int = 1

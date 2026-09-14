@@ -76,6 +76,16 @@ def catalog() -> tuple[Case, ...]:
     lattice_small = lambda: lattice_feed(
         repeats=1, rows=200, frames=1, sites=4, dims=(10, 20)
     )
+    # A run still filling: a quarter of the repeats have landed and the
+    # producer dropped shots inside them.  Every other feed here is wholly
+    # valid, which is the cheap half of three forks the product takes --
+    # masked reductions, the raster's masked path and its counts array,
+    # and the curve's isolated-point channel for a series with holes.
+    lattice_partial_2m = lambda: lattice_feed(landed=0.25, hole_stride=11)
+    lattice_partial_small = lambda: lattice_feed(
+        repeats=4, rows=200, frames=1, sites=4, dims=(10, 20),
+        landed=0.5, hole_stride=7,
+    )
     return (
         Case(
             "curve_2M",
@@ -255,20 +265,21 @@ def catalog() -> tuple[Case, ...]:
             notes="one repeat, 200 points",
         ),
         Case(
-            "curve_band_2M",
+            "curve_plain_2M",
             lattice_2m,
             lambda: CurvePlot(AxisRef.point("ax")),
             ("hover_series", "drag_main"),
-            parameters={"uncertainty": True},
-            notes="error bars: the band is drawn from the pooled spread",
+            parameters={"uncertainty": False},
+            notes="error bars OFF -- curve_2M is this same measurement with "
+            "them on, which is the default, so the pair prices the band",
         ),
         Case(
-            "curve_band_small",
+            "curve_plain_small",
             lattice_small,
             lambda: CurvePlot(AxisRef.point("ax")),
             ("hover_series",),
-            parameters={"uncertainty": True},
-            notes="error bars on one repeat, where each bar is its own artist",
+            parameters={"uncertainty": False},
+            notes="error bars OFF on one repeat, against curve_small",
         ),
         Case(
             "hist_small",
@@ -293,12 +304,13 @@ def catalog() -> tuple[Case, ...]:
             notes="a 20x10 heatmap",
         ),
         Case(
-            "rolling_band_2M",
+            "rolling_plain_2M",
             lattice_2m,
             lambda: RollingPlot(),
             ("hover_series",),
-            parameters={"uncertainty": True, "side_distribution": True},
-            notes="the rolling trace a fit publishes into, band and side",
+            parameters={"uncertainty": False, "side_distribution": False},
+            notes="band and side distribution OFF -- both DEFAULT to on, so "
+            "rolling_2M was this same measurement under a second name",
         ),
         Case(
             "facet4_curve_small",
