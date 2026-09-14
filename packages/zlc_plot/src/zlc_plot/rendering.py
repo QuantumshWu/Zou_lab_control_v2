@@ -31,7 +31,7 @@ import weakref
 
 import numpy as np
 from matplotlib.artist import Artist
-from matplotlib.collections import LineCollection
+from matplotlib.collections import LineCollection, PolyCollection
 from matplotlib.patches import Rectangle
 
 from ._image_raster import ImageFrontStore, PreparedImageFront, _all_true
@@ -498,6 +498,55 @@ class _SegmentBuffered(LineCollection):
     def get_segments(self) -> list[np.ndarray]:
         self._materialize()
         return super().get_segments()
+
+
+class _BarBuffered(PolyCollection):
+    """A PolyCollection whose bars live as edges and tops until asked for.
+
+    The bar kernel paints a histogram from its edges and counts and never
+    draws the collection, so the matplotlib Paths -- one object per bar,
+    five vertices each, four thousand of them on a sixty-four cell grid --
+    are built only when something asks for them: a full draw, an export,
+    ``get_paths``.  Asked again for the same edges, the paths in hand have
+    their tops moved in place, which is what a draw through Matplotlib
+    used to pay every frame.
+    """
+
+    def __init__(self, **style: Any) -> None:
+        super().__init__([], **style)
+        self._zlc_bars: tuple[np.ndarray, np.ndarray] | None = None
+        self._zlc_built: tuple[np.ndarray, np.ndarray] | None = None
+        self._zlc_swapped = False
+        self._zlc_bars_pending = False
+
+    def set_bars(self, edges: np.ndarray, counts: np.ndarray, *, swapped: bool) -> None:
+        """The bars this collection stands for: ``edges`` one longer than
+        ``counts``; ``swapped`` draws them along y, as the rail does."""
+
+        edges = np.asarray(edges, dtype=float).reshape(-1)
+        counts = np.asarray(counts, dtype=float).reshape(-1)
+        if edges.size != counts.size + 1:
+            raise ValueError("histogram edges must contain one more value than counts")
+        self._zlc_bars = (edges, counts)
+        self._zlc_swapped = bool(swapped)
+        self._zlc_bars_pending = True
+        self.stale = True
+
+    def _materialize(self) -> None:
+        if not self._zlc_bars_pending or self._zlc_bars is None:
+            return
+        self._zlc_bars_pending = False
+        edges, counts = self._zlc_bars
+        if not _restyle_histogram_tops(
+            self, self._zlc_built, edges, counts, swapped=self._zlc_swapped
+        ):
+            vertices = _histogram_vertices(edges, counts)
+            self.set_verts(vertices[..., ::-1] if self._zlc_swapped else vertices)
+        self._zlc_built = (edges, counts)
+
+    def get_paths(self) -> list[Any]:
+        self._materialize()
+        return super().get_paths()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1120,6 +1169,37 @@ def _box_on_aspect(
     if width < 2 or height < 2:
         return None
     return (width, height)
+
+
+def _normalize_arithmetic(
+    dtype: Any, vmin: float, vmax: float
+) -> tuple[bool, np.float32, np.float32, np.float64, np.float64]:
+    """The numbers ``Normalize`` scales a plane with, in the precision it does.
+
+    Two things about matplotlib's normalization decide a boundary sample's
+    colour slot.  The data is promoted with float32 -- a sixteen-bit camera
+    frame is scaled in float32, a float64 plane in float64.  And the limits
+    go through ``process_value`` as scalars, whose ``min_scalar_type`` is
+    the smallest float that holds their RANGE: float16, promoted to
+    float32 -- so ``vmin`` and ``vmax`` are float32 numbers however the
+    data is typed, and their difference is a float32 difference, which a
+    float64 plane is then divided by.  Returns ``(single, vmin32, span32,
+    vmin64, span64)``: whether the plane scales in float32, and the limit
+    and span for either precision.
+    """
+
+    single = np.promote_types(dtype, np.float32) == np.dtype(np.float32)
+    limit_dtype = np.promote_types(np.min_scalar_type(float(vmin)), np.float32)
+    low = np.asarray(float(vmin), dtype=limit_dtype)
+    high = np.asarray(float(vmax), dtype=np.promote_types(np.min_scalar_type(float(vmax)), np.float32))
+    span = high - low
+    return (
+        bool(single),
+        np.float32(low),
+        np.float32(span),
+        np.float64(low),
+        np.float64(span),
+    )
 
 
 def _view_nearest_map(
@@ -2376,6 +2456,10 @@ class MatplotlibRenderer:
         self._facet_chrome_memo: dict[tuple[object, ...], Any] = {}
         self._facet_chrome_exemplars: dict[tuple[object, ...], Any] = {}
         self._facet_chrome_recorder: tuple[float, Any] | None = None
+        #: An export is being drawn: the image artists then hold their data,
+        #: not a screen-sized front, so matplotlib resamples the data at the
+        #: export's resolution -- the picture the kernel paints live.
+        self._exporting = False
         self._foreground_scratch: Any = None
         #: The DYNAMIC axes -- a colour scale's, a distribution rail's, whose
         #: ticks move with the data -- keyed by the facts their draw is a
@@ -3495,19 +3579,18 @@ class MatplotlibRenderer:
                     owner = self._facet_chrome_owners.get(id(artist))
                     if owner is None or id(owner) not in live_cells:
                         continue
+                    # Nothing of the group is recorded: a stroke carries its
+                    # own masks, and a title's glyphs are laid once into the
+                    # foreground plan, which the group rebuilds whenever it
+                    # moves a title (``_paint_foreground``).  Recording the
+                    # titles drew sixty-four texts through a recording
+                    # renderer on every refresh, twenty-two milliseconds of
+                    # a first frame, a resize and a focus, for a replay that
+                    # renders the glyphs again anyway.
                     if getattr(artist, "axes", None) is not None:
                         add(artist)
                     elif artist.get_visible():
                         keyed(artist, None, artist.get_zorder())
-                    # A title is recorded like the per-cell chrome it
-                    # replaces, and on the same terms: a recording is
-                    # trusted only between frames that reused the
-                    # background.  A stroke carries its own masks.
-                    if (
-                        not isinstance(artist, _FacetChromeStroke)
-                        and id(artist) not in self._boundary_chrome_commands
-                    ):
-                        commands_to_record.append(artist)
         if commands_to_record:
             self._record_boundary_chrome_commands(commands_to_record)
         return collected
@@ -3892,12 +3975,18 @@ class MatplotlibRenderer:
                         else []
                     )
                 elif isinstance(artist, Text) and commands is None:
-                    if artist.get_rotation() == 0.0 and not artist.get_usetex() and not artist.get_path_effects():
+                    if id(artist) in self._facet_chrome_owners:
+                        # A grid title changes only when the group is
+                        # refreshed, which drops this plan: its glyphs are
+                        # as static here as a recorded stroke's masks.
+                        layers = self._foreground_text(artist, renderer) if artist.get_visible() else []
+                    elif artist.get_rotation() == 0.0 and not artist.get_usetex() and not artist.get_path_effects():
                         order.append((1, len(texts)))
                         texts.append([artist, None, ()])
                         group.append(artist)
                         continue
-                    layers = None
+                    else:
+                        layers = None
                 elif commands is not None:
                     layers = (self._foreground_text(artist, renderer, commands) if isinstance(artist, Text)
                               else self._foreground_strokes(commands, renderer)) if artist.get_visible() else []
@@ -4847,43 +4936,156 @@ class MatplotlibRenderer:
         values = np.asarray(command["values"])
         if values.ndim != 3 or len(surfaces) != values.shape[0]:
             return False, frozenset()
-        boxes = np.empty((len(surfaces), 4), dtype=np.int32)
-        views = np.empty((len(surfaces), 4), dtype=np.float64)
-        image_ids: set[int] = set()
-        for row, (key, axes, _index) in enumerate(surfaces):
-            box = axes.bbox
-            boxes[row] = (
-                max(0, int(math.floor(float(box.x0)))),
-                max(0, int(math.floor(float(height) - float(box.y1)))),
-                min(width, int(math.ceil(float(box.x1)))),
-                min(height, int(math.ceil(float(height) - float(box.y0)))),
-            )
-            x_limits = tuple(map(float, axes.get_xlim()))
-            y_limits = tuple(map(float, axes.get_ylim()))
-            views[row] = (*x_limits, *y_limits)
-            image = self._artists.get(key)
-            if image is not None:
-                image_ids.add(id(image))
-        low, high = map(float, command["limits"])
-        span = high - low
-        if not math.isfinite(span) or span <= 0.0:
+        extents = np.asarray(command["extents"], dtype=np.float64)
+        if extents.shape != (len(surfaces), 4):
             return False, frozenset()
         valid = np.asarray(command["valid"], dtype=np.bool_)
         if valid.shape != values.shape:
             return False, frozenset()
+        low, high = map(float, command["limits"])
+        span = high - low
+        if not math.isfinite(span) or span <= 0.0:
+            return False, frozenset()
+        rows, columns = values.shape[1:]
+        blits = np.zeros((len(surfaces), 4), dtype=np.int32)
+        clips = np.zeros((len(surfaces), 4), dtype=np.int32)
+        affines = np.zeros((len(surfaces), 6), dtype=np.float64)
+        image_ids: set[int] = set()
+        upper = self.style.render.image_origin == "upper"
+        for row, (key, axes, _index) in enumerate(surfaces):
+            image = self._artists.get(key)
+            if image is not None:
+                image_ids.add(id(image))
+            geometry = self._image_scene_geometry(
+                axes, tuple(map(float, extents[row])), rows, columns, height, upper
+            )
+            if geometry is None:
+                # A surface whose picture is out of view paints nothing;
+                # one on a transform the scene cannot serve refuses it.
+                if not axes.transData.is_affine:
+                    return False, frozenset()
+                continue
+            blits[row], clips[row], affines[row] = geometry
+        single, vmin32, span32, vmin64, span64 = _normalize_arithmetic(values.dtype, low, high)
         kernels.raster_prepared_images(
             kernels.readable(values),
             kernels.readable(valid),
             True,
-            kernels.readable(boxes),
-            kernels.readable(views),
-            kernels.readable(np.asarray(command["extents"], dtype=np.float64)),
+            kernels.readable(blits),
+            kernels.readable(clips),
+            kernels.readable(affines),
             kernels.readable(np.asarray(command["lut"], dtype=np.uint8)),
-            np.float64(low),
-            np.float64(255.0 / span),
+            vmin32,
+            span32,
+            vmin64,
+            span64,
+            single,
             canvas_rgba,
         )
         return True, frozenset(image_ids)
+
+    @staticmethod
+    def _image_scene_geometry(
+        axes: Any,
+        extent: tuple[float, float, float, float],
+        rows: int,
+        columns: int,
+        height: int,
+        upper: bool,
+    ) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int], tuple[float, ...]] | None:
+        """Where ``imshow`` puts one surface's picture, and how it maps.
+
+        The transform is BUILT AS ``_make_image`` BUILDS IT, operation for
+        operation on the same numbers, so its doubles are matplotlib's:
+        the array flipped for an ``upper`` origin, scaled and moved onto
+        the extent, through the data transform, moved onto the clipped
+        box, and stretched so a fractional box fills whole output pixels.
+        It is then inverted as Agg's ``trans_affine::invert`` inverts it.
+        Agg blits the picture with its bottom row against the box's bottom
+        edge rounded half up and its left column at the left edge rounded
+        half up, and clips it to the axes box -- left and top rounded half
+        up, right rounded half up and INCLUDED, bottom rounded half down --
+        measured on matplotlib, edge by edge, tie by tie.  Returns
+        ``(blit, clip, inverse)`` for the kernel, or None for a picture
+        with nothing to draw.
+        """
+
+        from matplotlib.transforms import (
+            Affine2D,
+            Bbox,
+            IdentityTransform,
+            TransformedBbox,
+        )
+
+        transform = axes.transData
+        if not transform.is_affine:
+            return None
+        x1, x2, y1, y2 = extent
+        in_bbox = Bbox(np.array([[x1, y1], [x2, y2]]))
+        out_bbox = TransformedBbox(in_bbox, transform)
+        clipped = Bbox.intersection(out_bbox, axes.bbox)
+        if clipped is None:
+            return None
+        width_base = float(clipped.width)
+        height_base = float(clipped.height)
+        if width_base == 0.0 or height_base == 0.0:
+            return None
+        if upper:
+            t0 = Affine2D().translate(0, -rows).scale(1, -1)
+        else:
+            t0 = IdentityTransform()
+        t0 += (
+            Affine2D()
+            .scale(in_bbox.width / columns, in_bbox.height / rows)
+            .translate(in_bbox.x0, in_bbox.y0)
+            + transform
+        )
+        t = t0 + (Affine2D().translate(-clipped.x0, -clipped.y0).scale(1.0))
+        if width_base % 1.0 != 0.0 or height_base % 1.0 != 0.0:
+            out_width = math.ceil(width_base)
+            out_height = math.ceil(height_base)
+            extra_width = (out_width - width_base) / width_base
+            extra_height = (out_height - height_base) / height_base
+            t += Affine2D().scale(1.0 + extra_width, 1.0 + extra_height)
+        else:
+            out_width = int(width_base)
+            out_height = int(height_base)
+        matrix = t.get_matrix()
+        # Agg's trans_affine(sx, shy, shx, sy, tx, ty) from the 3x3, and
+        # its invert(), in its order of operations.
+        sx = float(matrix[0, 0])
+        shy = float(matrix[1, 0])
+        shx = float(matrix[0, 1])
+        sy = float(matrix[1, 1])
+        tx = float(matrix[0, 2])
+        ty = float(matrix[1, 2])
+        determinant = sx * sy - shy * shx
+        if determinant == 0.0 or not math.isfinite(determinant):
+            return None
+        d = 1.0 / determinant
+        t0_ = sy * d
+        sy = sx * d
+        shy = -shy * d
+        shx = -shx * d
+        t4 = -tx * t0_ - ty * shx
+        ty = -tx * shy - ty * sy
+        sx = t0_
+        tx = t4
+        bottom = int(math.floor(float(height) - float(clipped.y0) + 0.5))
+        blit = (
+            int(math.floor(float(clipped.x0) + 0.5)),
+            bottom - int(out_height),
+            int(out_width),
+            int(out_height),
+        )
+        box = axes.bbox
+        clip = (
+            int(math.floor(float(box.x0) + 0.5)),
+            int(math.floor(float(height) - float(box.y1) + 0.5)),
+            int(math.floor(float(box.x1) + 0.5)) + 1,
+            int(math.ceil(float(height) - float(box.y0) - 0.5)),
+        )
+        return blit, clip, (sx, shy, shx, sy, tx, ty)
 
     def _raster_prepared_histograms(self, canvas: Any) -> tuple[bool, frozenset[int]]:
         """Paint every histogram surface's bars straight into the canvas.
@@ -5181,6 +5383,42 @@ class MatplotlibRenderer:
         except Exception:
             return True
 
+    def _facet_cells_drawing_nothing(self) -> list[Any]:
+        """The grid cells whose draw would paint no pixel.
+
+        A grid cell has its axis off, so a full draw of it paints none of
+        its patch, spines or axis; what is left is its children, its
+        titles, its legend and its inset axes, and a cell whose picture is
+        a kernel scene and whose chrome is the grid's has none of those
+        showing.  Drawing it is then ``get_children``, a sort and a title
+        placement for nothing -- sixty-four times, twenty milliseconds of
+        every background capture -- and the compose withholds such a cell
+        from the draw as it withholds a dynamic artist.
+        """
+
+        if (
+            not isinstance(self.spec, FacetGridPlot)
+            or self._facet_focus_index is not None
+        ):
+            return []
+        empty: list[Any] = []
+        for index, axes in enumerate(self._axes.get("facet_cell", ())):
+            if index >= self._visible_facet_count or not axes.get_visible():
+                continue
+            if (
+                getattr(axes, "axison", True)
+                or axes.legend_ is not None
+                or axes.child_axes
+                or any(child.get_visible() for child in axes._children)
+                or any(
+                    text.get_visible() and text.get_text()
+                    for text in (axes.title, axes._left_title, axes._right_title)
+                )
+            ):
+                continue
+            empty.append(axes)
+        return empty
+
     def _text_chrome_above(
         self,
         axes: Any,
@@ -5366,14 +5604,22 @@ class MatplotlibRenderer:
                     withheld.append(
                         (delegate, False, delegate.get_visible(), delegate.get_alpha())
                     )
+            empty_cells: list[Any] = []
             try:
                 for artist, is_text, _visible, _alpha in withheld:
                     if is_text:
                         artist.set_alpha(0.0)
                     else:
                         artist.set_visible(False)
+                # With the dynamics withheld, a grid cell that would paint
+                # nothing is withheld as well (``_facet_cells_drawing_nothing``).
+                empty_cells = self._facet_cells_drawing_nothing()
+                for axes in empty_cells:
+                    axes.set_visible(False)
                 self._native_draw(canvas)
             finally:
+                for axes in empty_cells:
+                    axes.set_visible(True)
                 for artist, is_text, visible, alpha in withheld:
                     if is_text:
                         artist.set_alpha(alpha)
@@ -6816,6 +7062,7 @@ class MatplotlibRenderer:
                 key,
                 command["limits"],
                 coordinate_aspect=command["coordinate_aspect"],
+                materialize=not self._exporting,
             )
             return
         cells = command.get("cells")
@@ -7251,14 +7498,11 @@ class MatplotlibRenderer:
         limits: tuple[tuple[float, float], tuple[float, float]] | None = None,
         paint_labels: bool = True,
     ) -> None:
-        from matplotlib.collections import PolyCollection
-
         edges, counts = self._histogram_arrays(payload, state) if arrays is None else arrays
         collection = self._artists.get(key)
         alpha = self.style.artists.histogram_fill_alpha
         if collection is None:
-            collection = PolyCollection(
-                _histogram_vertices(edges, counts),
+            collection = _BarBuffered(
                 facecolors=self.style.palette.hist_fill,
                 edgecolors="none",
                 alpha=alpha,
@@ -7268,14 +7512,7 @@ class MatplotlibRenderer:
             # every bar's path to arrive at numbers that are never read.
             axes.add_collection(collection, autolim=False)
             self._artists[key] = collection
-        elif not _restyle_histogram_tops(
-            collection,
-            self._artists.get(f"{key}:projection"),
-            edges,
-            counts,
-            swapped=False,
-        ):
-            collection.set_verts(_histogram_vertices(edges, counts))
+        collection.set_bars(edges, counts, swapped=False)
         self._artists[f"{key}:projection"] = (edges, counts)
         # THE BARS ARE PAINTED BY THE KERNEL, not by the collection's own
         # draw: sixty-four PolyCollections were fifteen milliseconds of
@@ -9484,6 +9721,17 @@ class MatplotlibRenderer:
                 and self._facet_focus_index is None
             )
         )
+        # A grid cell whose picture the grid's own scene paints (the scene
+        # is installed before its cells are rendered, and popped before
+        # they are rendered for an export or a fallback) keeps no front of
+        # its own either: preparing, colouring and view-filling a front
+        # per cell was a third of an image grid's first frame, for a
+        # picture no frame painted.
+        native_cell = (
+            isinstance(self.spec, FacetGridPlot)
+            and self._facet_focus_index is None
+            and isinstance(self._artists.get("image:prepared"), dict)
+        )
         image, cmap = self._update_image_artist(
             axes,
             z,
@@ -9493,7 +9741,7 @@ class MatplotlibRenderer:
             key,
             (vmin, vmax),
             coordinate_aspect=coordinate_aspect,
-            materialize=not native_primary,
+            materialize=not (native_primary or native_cell or self._exporting),
             valid_identity=(
                 None
                 if source_valid is None
@@ -9516,7 +9764,15 @@ class MatplotlibRenderer:
                 "lut": self._image_color_lut(cmap_name, cmap),
             }
         else:
-            self._artists.pop("image:prepared", None)
+            # Only the scene THIS surface installed goes.  A grid installs
+            # one scene for all its cells and then renders each cell
+            # through here; popping whatever was there took the grid's
+            # scene with the first cell, and every image grid's first
+            # frame -- and every frame after a display-state change -- was
+            # drawn through its sixty-four artists instead of the kernel.
+            command = self._artists.get("image:prepared")
+            if isinstance(command, dict) and command.get("key") == key:
+                self._artists.pop("image:prepared", None)
         if paint_labels:
             if axes.get_xlabel() != x_label:
                 axes.set_xlabel(x_label)
@@ -10690,12 +10946,9 @@ class MatplotlibRenderer:
             )
             for artist, (axes, *_rest) in zip(artists, plan, strict=True)
         }
-        # A moved title invalidates what was recorded and memoized of it (a
-        # moved stroke forgot its masks as it was placed), and the boundary
-        # labels are part of the composed BACKGROUND, so a refreshed group
-        # is a background that is no longer current.
-        for artist in title_artists:
-            self._boundary_chrome_commands.pop(id(artist), None)
+        # A moved title or stroke invalidates the foreground plan it was laid
+        # into, and the boundary labels are part of the composed BACKGROUND,
+        # so a refreshed group is a background that is no longer current.
         self._foreground_batches.clear()
         self._mark_axes_chrome_dirty(*(axes for _index, axes in visible))
 
@@ -12708,6 +12961,13 @@ class MatplotlibRenderer:
                 # draw() below composes from the materialized artists, and
                 # the next data update reinstalls the native scene.
                 self._materialize_prepared_curve()
+                # An image artist drawn for an export holds its DATA, and
+                # matplotlib resamples and colours it at the export's own
+                # resolution -- which is the picture the kernel paints
+                # live, byte for byte at the screen's.  A screen-sized RGBA
+                # front, made for the compose that never draws it, would
+                # have been resampled up instead.
+                self._exporting = True
                 self._materialize_prepared_images()
                 # A grid's chrome strokes exist for the compose; the export
                 # draws the artists they stand for, and withdraws them after.
@@ -12722,6 +12982,7 @@ class MatplotlibRenderer:
                 with _MATHTEXT_DRAW_LOCK:
                     self._figure.savefig(path, dpi=dpi or self.plan.dpi, **kwargs)
         finally:
+            self._exporting = False
             self._withdraw_facet_chrome()
             self._series_locked, self._series_hover = locked, hover
             self._apply_series_focus()

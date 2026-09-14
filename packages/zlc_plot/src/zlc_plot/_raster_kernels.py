@@ -1554,73 +1554,156 @@ def raster_polylines(
                     out[row, column, 3] = np.uint8(255)
 
 
+@njit(cache=True, inline="always")
+def _agg_iround(value):
+    """Agg's ``iround``: half away from zero, then truncation toward zero."""
+
+    if value < 0.0:
+        return int(value - 0.5)
+    return int(value + 0.5)
+
+
+@njit(cache=True, inline="always")
+def _agg_dda_start(y1, y2, count):
+    """The state of Agg's ``dda2_line_interpolator`` at its first pixel.
+
+    The forward-adjusted constructor, in C integer arithmetic: the quotient
+    truncates toward zero and the remainder takes the dividend's sign.
+    Returns ``(y, lft, rem, mod)``.
+    """
+
+    cnt = count if count > 0 else 1
+    delta = y2 - y1
+    if delta >= 0:
+        lft = delta // cnt
+    else:
+        lft = -((-delta) // cnt)
+    rem = delta - lft * cnt
+    mod = rem
+    if mod <= 0:
+        mod += count
+        rem += count
+        lft -= 1
+    mod -= count
+    return y1, lft, rem, mod
+
+
 @njit(cache=True, parallel=True, nogil=True)
 def raster_prepared_images(
     values,
     valid,
     use_valid,
-    boxes,
-    views,
-    extents,
+    blits,
+    clips,
+    affines,
     lut,
-    vmin,
-    scale,
+    vmin32,
+    span32,
+    vmin64,
+    span64,
+    single,
     out,
 ):
-    """Map prepared Image surfaces directly into their final canvas boxes."""
+    """Paint prepared Image surfaces the way ``imshow`` paints them.
+
+    Matplotlib resamples an image through Agg's nearest filter: a row of the
+    output is one span, whose source x runs from the span's first pixel
+    centre to its last in 1/256 pixel fixed point along Agg's DDA, and
+    whose source y is the row centre rounded to the same fixed point; a
+    sample is the floor of each.  The resampled picture is then blitted at
+    the truncated corner of its clipped box and cut to the graphics
+    context's clip, and each sample's colour is ``Normalize`` and the
+    colormap's 256 slots in the data's promoted dtype.  Every one of those
+    steps is here, so the picture is matplotlib's byte for byte.
+
+    ``blits`` holds each surface's (left, top, out_width, out_height) on
+    the canvas, ``clips`` its clip box rounded as Agg rounds one, and
+    ``affines`` the inverse of matplotlib's image transform as Agg holds
+    it -- ``(sx, shy, shx, sy, tx, ty)``, mapping a point of the resampled
+    picture, x rightward and y UPWARD from its bottom-left corner, to
+    array pixel coordinates.  ``single`` says the promoted dtype is
+    float32 (``vmin32``/``span32``), else float64.
+    """
 
     cells, source_rows, source_columns = values.shape
     height, width = out.shape[:2]
     for work in prange(cells * height):
         cell = work // height
         row = work - cell * height
-        left = max(0, boxes[cell, 0])
-        top = max(0, boxes[cell, 1])
-        right = min(width, boxes[cell, 2])
-        bottom = min(height, boxes[cell, 3])
-        if right <= left or bottom <= top or row < top or row >= bottom:
+        blit_left = blits[cell, 0]
+        blit_top = blits[cell, 1]
+        out_width = blits[cell, 2]
+        out_height = blits[cell, 3]
+        v = row - blit_top
+        if v < 0 or v >= out_height or out_width <= 0:
             continue
-        x0 = views[cell, 0]
-        x1 = views[cell, 1]
-        y0 = views[cell, 2]
-        y1 = views[cell, 3]
-        source_left = extents[cell, 0]
-        source_right = extents[cell, 1]
-        source_bottom = extents[cell, 2]
-        source_top = extents[cell, 3]
-        box_width = right - left
-        box_height = bottom - top
-        y_fraction = (np.float64(row - top) + 0.5) / box_height
-        y_value = y1 + y_fraction * (y0 - y1)
-        y_denominator = source_top - source_bottom
-        if y_denominator == 0.0:
+        clip_left = max(0, clips[cell, 0])
+        clip_top = max(0, clips[cell, 1])
+        clip_right = min(width, clips[cell, 2])
+        clip_bottom = min(height, clips[cell, 3])
+        if row < clip_top or row >= clip_bottom or clip_right <= clip_left:
             continue
-        source_y = (source_top - y_value) / y_denominator * source_rows
-        source_row = int(np.floor(source_y))
-        if source_row < 0 or source_row >= source_rows:
-            continue
-        for column in range(left, right):
-            x_fraction = (np.float64(column - left) + 0.5) / box_width
-            x_value = x0 + x_fraction * (x1 - x0)
-            x_denominator = source_right - source_left
-            if x_denominator == 0.0:
+        sx = affines[cell, 0]
+        shy = affines[cell, 1]
+        shx = affines[cell, 2]
+        sy = affines[cell, 3]
+        tx = affines[cell, 4]
+        ty = affines[cell, 5]
+        # The span is this row of the picture, counted upward from its
+        # bottom (matplotlib's transform maps to y-up coordinates and the
+        # blit flips the buffer), sampled at pixel centres; Agg interpolates
+        # both source coordinates along it in 1/256 pixel steps with its DDA.
+        y_up = np.float64(out_height - 1 - v) + 0.5
+        x_first = _agg_iround((0.5 * sx + y_up * shx + tx) * 256.0)
+        y_first = _agg_iround((0.5 * shy + y_up * sy + ty) * 256.0)
+        u_last = np.float64(out_width) + 0.5
+        x_last = _agg_iround((u_last * sx + y_up * shx + tx) * 256.0)
+        y_last = _agg_iround((u_last * shy + y_up * sy + ty) * 256.0)
+        x_fixed, x_lft, x_rem, x_mod = _agg_dda_start(x_first, x_last, out_width)
+        y_fixed, y_lft, y_rem, y_mod = _agg_dda_start(y_first, y_last, out_width)
+        for u in range(out_width):
+            if u > 0:
+                x_mod += x_rem
+                x_fixed += x_lft
+                if x_mod > 0:
+                    x_mod -= out_width
+                    x_fixed += 1
+                y_mod += y_rem
+                y_fixed += y_lft
+                if y_mod > 0:
+                    y_mod -= out_width
+                    y_fixed += 1
+            column = blit_left + u
+            if column < clip_left or column >= clip_right:
                 continue
-            source_x = (
-                (x_value - source_left) / x_denominator * source_columns
-            )
-            source_column = int(np.floor(source_x))
-            if source_column < 0 or source_column >= source_columns:
+            source_column = x_fixed >> 8
+            source_row = y_fixed >> 8
+            if (
+                source_column < 0
+                or source_column >= source_columns
+                or source_row < 0
+                or source_row >= source_rows
+            ):
                 continue
             if use_valid and not valid[cell, source_row, source_column]:
                 continue
-            scaled = (
-                np.float64(values[cell, source_row, source_column]) - vmin
-            ) * scale
+            if single:
+                scaled32 = (
+                    (np.float32(values[cell, source_row, source_column]) - vmin32)
+                    / span32
+                ) * np.float32(256.0)
+                scaled = np.float64(scaled32)
+            else:
+                scaled = (
+                    (np.float64(values[cell, source_row, source_column]) - vmin64)
+                    / span64
+                ) * 256.0
             if scaled < 0.0:
-                scaled = 0.0
-            elif scaled > 255.0:
-                scaled = 255.0
-            code = np.uint8(scaled)
+                code = 0
+            elif scaled >= 256.0:
+                code = 255
+            else:
+                code = int(scaled)
             out[row, column, 0] = lut[code, 0]
             out[row, column, 1] = lut[code, 1]
             out[row, column, 2] = lut[code, 2]
