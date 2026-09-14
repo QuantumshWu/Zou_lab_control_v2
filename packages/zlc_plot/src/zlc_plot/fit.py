@@ -701,6 +701,18 @@ class FitModelRegistry:
     def register(self, model: FitModelSpec, *, replace: bool = False) -> None:
         if not isinstance(model, FitModelSpec):
             raise TypeError("model must be FitModelSpec")
+        if model.bounds_initializer is not None and _confines_to_histogram(model):
+            # _histogram_bounds reaches the solver through the REQUESTED
+            # channel, and a requested bound replaces the model's own
+            # data-derived default for that parameter rather than meeting
+            # it.  So a model with both would silently lose its own bounds
+            # on exactly the axis parameters the histogram confines.  No
+            # model has both today; this is what keeps that true.
+            raise ValueError(
+                f"fit model {model.model_id!r} declares data-derived bounds and "
+                "is confined to a histogram; the solver has no rule for "
+                "combining those two"
+            )
         with self._lock:
             if model.model_id in self._models and not replace:
                 raise ValueError(f"fit model already registered: {model.model_id}")

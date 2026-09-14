@@ -219,6 +219,11 @@ class _FitParameterConversion:
     display_unit: Unit | None
     symbol: str
     crossing: _Crossing
+    #: What the SOLVER's number is in.  Not ``canonical_unit.symbol``: an
+    #: inverse parameter's conversion carries the AXIS's units and inverts
+    #: when it crosses, so its own canonical unit is their inverse.  An
+    #: empty string means the number has no unit.
+    canonical_symbol: str = ""
 
     def to_display(self, value: float) -> float:
         return self._convert(value, self.canonical_unit, self.display_unit)
@@ -1224,18 +1229,20 @@ class FitProjection:
             # keeps them apart: stacking two million points into one
             # (N, 2) array copies both coordinates again for no reader.
             points = np.column_stack((x_candidates, y_candidates))
-            try:
-                transformed = np.asarray(
-                    point_transform(np.vstack((points, target_point))),
-                    dtype=float,
-                )
-                if transformed.shape != (points.shape[0] + 1, 2):
-                    raise ValueError("point transform returned the wrong shape")
-                x_candidates = transformed[:-1, 0]
-                y_candidates = transformed[:-1, 1]
-                target_point = transformed[-1]
-            except (TypeError, ValueError):
-                pass
+            # A transform that fails is not a reason to measure in the wrong
+            # space.  It is the axes' own data-to-pixel transform, and the
+            # nearest sample is the nearest ON SCREEN -- falling back to data
+            # distances silently picked a different sample on any panel whose
+            # two axes are not to the same scale, which is most of them.
+            transformed = np.asarray(
+                point_transform(np.vstack((points, target_point))),
+                dtype=float,
+            )
+            if transformed.shape != (points.shape[0] + 1, 2):
+                raise ValueError("point transform returned the wrong shape")
+            x_candidates = transformed[:-1, 0]
+            y_candidates = transformed[:-1, 1]
+            target_point = transformed[-1]
         finite = np.isfinite(x_candidates) & np.isfinite(y_candidates)
         if not bool(finite.any()):
             return result
@@ -2110,45 +2117,16 @@ class FitProjection:
         })
 
     def _canonical_fit_parameter_unit(self, spec: Any) -> str:
-        """Resolve a fit parameter's unit without consulting display overrides."""
+        """The unit the SOLVER's number is in, read off the one crossing.
 
-        relation = spec.unit_relation
-        solver_relation = spec.solver_unit_relation
-        if relation is UnitRelation.VALUE_TIMES_AXIS_0:
-            if solver_relation is not relation:
-                raise ValueError("product parameters cannot cross unit relations")
-            return self._fit_product_unit(spec, display=False).symbol
-        if relation in {UnitRelation.DIMENSIONLESS, UnitRelation.RADIAN}:
-            if solver_relation is not relation:
-                raise ValueError("unit-free fit parameters cannot cross unit relations")
-            return "rad" if relation is UnitRelation.RADIAN else ""
-        if relation is UnitRelation.VALUE and self._is_histogram_plot():
-            if solver_relation is not UnitRelation.VALUE:
-                raise ValueError("histogram count parameters require value solver units")
-            return "count"
-        if isinstance(self._spec, RollingPlot) and relation in {
-            UnitRelation.AXIS_0,
-            UnitRelation.INVERSE_AXIS_0,
-        }:
-            if relation is UnitRelation.INVERSE_AXIS_0:
-                return "1/point"
-            return "point"
-        if relation is UnitRelation.INVERSE_AXIS_0:
-            quantity = self._fit_relation_quantity(UnitRelation.AXIS_0)
-            if quantity is None:
-                return ""
-            canonical = quantity.canonical_unit
-            registry = self._unit_registry or DEFAULT_UNITS
-            inverse = registry.inverse_for(canonical)
-            if inverse is not None:
-                return inverse.symbol
-            symbol = canonical.symbol
-            return "" if symbol == "1" else f"1/{symbol}"
-        quantity = self._fit_relation_quantity(solver_relation)
-        if quantity is None:
-            return ""
-        symbol = quantity.canonical_unit.symbol
-        return "" if symbol == "1" else symbol
+        Which unit a fit parameter is in -- product, unit-free, histogram
+        count, rolling ordinal, inverse axis, plain relation -- is one
+        decision, and the crossing already makes it for the display side.
+        Written out a second time here, the two answers were free to
+        disagree, and only one of them was memoised.
+        """
+
+        return self._fit_parameter_conversion(spec).canonical_symbol
 
     def _fit_product_unit(self, spec: Any, *, display: bool) -> Unit:
         """The same VALUE and AXIS_0 vocabulary, multiplied as authored."""
@@ -2210,22 +2188,22 @@ class FitProjection:
             if not canonical_unit.compatible_with(display_unit):
                 raise ValueError("fit product parameter units require compatible linear scales")
             return _FitParameterConversion(
-                name, canonical_unit, display_unit, display_unit.symbol, _Crossing.SPAN
+                name, canonical_unit, display_unit, display_unit.symbol,
+                _Crossing.SPAN, canonical_unit.symbol,
             )
         if relation in {UnitRelation.DIMENSIONLESS, UnitRelation.RADIAN}:
             if solver_relation is not relation:
                 raise ValueError("unit-free fit parameters cannot cross unit relations")
+            symbol = "rad" if relation is UnitRelation.RADIAN else ""
             return _FitParameterConversion(
-                name,
-                None,
-                None,
-                "rad" if relation is UnitRelation.RADIAN else "",
-                _Crossing.POINT,
+                name, None, None, symbol, _Crossing.POINT, symbol,
             )
         if relation is UnitRelation.VALUE and self._is_histogram_plot():
             if solver_relation is not UnitRelation.VALUE:
                 raise ValueError("histogram count parameters require value solver units")
-            return _FitParameterConversion(name, None, None, "count", _Crossing.POINT)
+            return _FitParameterConversion(
+                name, None, None, "count", _Crossing.POINT, "count",
+            )
         if isinstance(self._spec, RollingPlot) and relation in {
             UnitRelation.AXIS_0,
             UnitRelation.INVERSE_AXIS_0,
@@ -2234,12 +2212,11 @@ class FitProjection:
                 raise ValueError("rolling fit parameters cannot cross unit relations")
             # The rolling shot axis is a plain ordinal (canonical == display
             # == absolute shot index), so fit parameters cross unchanged.
+            symbol = (
+                "1/point" if relation is UnitRelation.INVERSE_AXIS_0 else "point"
+            )
             return _FitParameterConversion(
-                name,
-                None,
-                None,
-                "1/point" if relation is UnitRelation.INVERSE_AXIS_0 else "point",
-                _Crossing.POINT,
+                name, None, None, symbol, _Crossing.POINT, symbol,
             )
 
         if relation is UnitRelation.INVERSE_AXIS_0:
@@ -2247,23 +2224,40 @@ class FitProjection:
                 raise ValueError("inverse-axis parameters cannot cross unit relations")
             quantity = self._fit_relation_quantity(UnitRelation.AXIS_0)
             if quantity is None:
-                return _FitParameterConversion(name, None, None, "", _Crossing.INVERSE)
+                return _FitParameterConversion(
+                    name, None, None, "", _Crossing.INVERSE, "",
+                )
             canonical_unit = quantity.canonical_unit
             display_unit = quantity.display_unit
             registry = self._unit_registry or DEFAULT_UNITS
-            inverse = registry.inverse_for(display_unit)
-            if inverse is not None:
-                symbol = inverse.symbol
-            else:
-                symbol = "" if display_unit.symbol == "1" else f"1/{display_unit.symbol}"
+
+            def inverted(unit: Unit) -> str:
+                found = registry.inverse_for(unit)
+                if found is not None:
+                    return found.symbol
+                return "" if unit.symbol == "1" else f"1/{unit.symbol}"
+
             return _FitParameterConversion(
-                name, canonical_unit, display_unit, symbol, _Crossing.INVERSE
+                name, canonical_unit, display_unit, inverted(display_unit),
+                _Crossing.INVERSE, inverted(canonical_unit),
             )
 
         source_quantity = self._fit_relation_quantity(solver_relation)
         target_quantity = self._fit_relation_quantity(relation)
+
+        def plain(unit: Unit | None) -> str:
+            if unit is None:
+                return ""
+            return "" if unit.symbol == "1" else unit.symbol
+
         if source_quantity is None or target_quantity is None:
-            return _FitParameterConversion(name, None, None, "", _Crossing.POINT)
+            # The SOLVER's unit is still knowable when only the display side
+            # is missing: a parameter the plot cannot paint is still in the
+            # unit it was solved in.
+            return _FitParameterConversion(
+                name, None, None, "", _Crossing.POINT,
+                plain(None if source_quantity is None else source_quantity.canonical_unit),
+            )
         canonical_unit = source_quantity.canonical_unit
         display_unit = target_quantity.display_unit
         if not canonical_unit.compatible_with(display_unit):
@@ -2272,8 +2266,9 @@ class FitProjection:
             name,
             canonical_unit,
             display_unit,
-            "" if display_unit.symbol == "1" else display_unit.symbol,
+            plain(display_unit),
             _Crossing.POINT if spec.affine_point and not difference else _Crossing.SPAN,
+            plain(canonical_unit),
         )
 
     def _display_fit_parameter_value(

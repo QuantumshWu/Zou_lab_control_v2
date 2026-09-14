@@ -482,6 +482,13 @@ def representative_work(
         # Regular-image work shares the compiled solver and model callbacks.
         # Keep their complete samples together, including all storage dtypes.
         _fit_compiled.warm_production_cache()
+        # Compiling is not the same as being RIGHT.  The warm above starts
+        # every model AT its true parameters; this one solves a known
+        # Gaussian from the model's own initializer and checks the numbers
+        # that come back, which is the only thing here that would catch a
+        # kernel that converges to the wrong answer.  It was written to be
+        # called from the repository warmer and never was.
+        _fit_compiled.self_check()
         _fit_radial.warm_production_cache()
     if not include_render:
         return

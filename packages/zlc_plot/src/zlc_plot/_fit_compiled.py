@@ -207,10 +207,6 @@ _SOLVE_KERNEL_SIGNATURE = nb_types.void(
     _I32_1C,
     _I32_1C,
     _I32_1C,
-    _I32_2C,
-    _I32_2C,
-    _I32_2C,
-    _I32_2C,
     _F64_3C,
 )
 
@@ -311,10 +307,6 @@ class CompiledFitOutput:
     njev: np.ndarray
     iterations: np.ndarray
     winner_seed: np.ndarray
-    lane_status: np.ndarray
-    lane_nfev: np.ndarray
-    lane_njev: np.ndarray
-    lane_iterations: np.ndarray
     coordinate_origins: np.ndarray
 
 
@@ -1523,10 +1515,6 @@ def _solve_cell(
     gtol: float,
     warm_first: bool,
     prepare_status: int,
-    lane_status: np.ndarray,
-    lane_nfev: np.ndarray,
-    lane_njev: np.ndarray,
-    lane_iterations: np.ndarray,
     context: np.ndarray,
 ) -> tuple[np.ndarray, float, float, int, int, int, int, int]:
     full_count = full_lower.size
@@ -1585,10 +1573,6 @@ def _solve_cell(
             gtol,
             context,
         )
-        lane_status[seed_index] = status
-        lane_nfev[seed_index] = nfev
-        lane_njev[seed_index] = njev
-        lane_iterations[seed_index] = iterations
         successful = status > STATUS_MAX_NFEV
         choose = False
         if not have:
@@ -1669,10 +1653,6 @@ def _solve_serial(
     nfev: np.ndarray,
     njev: np.ndarray,
     winner_seed: np.ndarray,
-    lane_status: np.ndarray,
-    lane_nfev: np.ndarray,
-    lane_njev: np.ndarray,
-    lane_iterations: np.ndarray,
     contexts: np.ndarray,
 ) -> None:
     for cell in range(observations.shape[0]):
@@ -1705,10 +1685,6 @@ def _solve_serial(
             gtol,
             warm_first[cell],
             prepare_status[cell],
-            lane_status[cell],
-            lane_nfev[cell],
-            lane_njev[cell],
-            lane_iterations[cell],
             contexts[cell],
         )
 
@@ -1742,10 +1718,6 @@ def _solve_parallel(
     nfev: np.ndarray,
     njev: np.ndarray,
     winner_seed: np.ndarray,
-    lane_status: np.ndarray,
-    lane_nfev: np.ndarray,
-    lane_njev: np.ndarray,
-    lane_iterations: np.ndarray,
     contexts: np.ndarray,
 ) -> None:
     for cell in prange(observations.shape[0]):
@@ -1778,10 +1750,6 @@ def _solve_parallel(
             gtol,
             warm_first[cell],
             prepare_status[cell],
-            lane_status[cell],
-            lane_nfev[cell],
-            lane_njev[cell],
-            lane_iterations[cell],
             contexts[cell],
         )
 
@@ -2571,14 +2539,6 @@ def _solve_compiled(
     nfev = np.zeros(cells, dtype=np.int32)
     njev = np.zeros(cells, dtype=np.int32)
     winner_seed = np.full(cells, -1, dtype=np.int32)
-    lane_status = np.full(
-        (cells, seed_capacity),
-        STATUS_NO_CANDIDATE,
-        dtype=np.int32,
-    )
-    lane_nfev = np.zeros((cells, seed_capacity), dtype=np.int32)
-    lane_njev = np.zeros((cells, seed_capacity), dtype=np.int32)
-    lane_iterations = np.zeros((cells, seed_capacity), dtype=np.int32)
     solve_kernel = _solve_parallel if parallel else _solve_serial
     solve_kernel(
         descriptor.objective,
@@ -2608,10 +2568,6 @@ def _solve_compiled(
         nfev,
         njev,
         winner_seed,
-        lane_status,
-        lane_nfev,
-        lane_njev,
-        lane_iterations,
         contexts,
     )
 
@@ -2671,10 +2627,6 @@ def _solve_compiled(
         njev=njev,
         iterations=iterations,
         winner_seed=winner_seed,
-        lane_status=lane_status,
-        lane_nfev=lane_nfev,
-        lane_njev=lane_njev,
-        lane_iterations=lane_iterations,
         coordinate_origins=coordinate_origins,
     )
 
