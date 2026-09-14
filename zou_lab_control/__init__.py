@@ -56,6 +56,21 @@ def _configure_compiled_worker_threads() -> None:
     else:
         os.environ.setdefault("ZLC_NUMBA_WORKER_THREADS", authored)
     os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
+    # A CHILD PROCESS OF THIS PRODUCT DRAWS; the solvers that multiply
+    # matrices -- the SLM hologram solver, the feedback regressions -- live
+    # in the parent.  OpenBLAS commits a scratch buffer for every thread it
+    # may use the moment its library loads, and numpy and scipy each carry
+    # a copy of the library: measured, a process that imports both commits
+    # 1046 MB of address space at sixteen threads, 274 at four and 81 at
+    # one, for buffers a render child never touches.  With four warm
+    # children standing that was four gigabytes of commit charge against
+    # the machine's page file for nothing.  The child's name is set by the
+    # parent before this bootstrap runs there; the parent itself is
+    # ``MainProcess`` and keeps its threads.
+    import multiprocessing  # noqa: PLC0415
+
+    if multiprocessing.current_process().name != "MainProcess":
+        os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
 
 _configure_compiled_worker_threads()
