@@ -28,9 +28,32 @@ from types import SimpleNamespace
 from uuid import uuid4
 import weakref
 
-import numpy as np
+#: The name every render child is spawned under.  ``_spawn_child`` gives it,
+#: and the child reads it back below, before anything numerical has loaded.
+_CHILD_NAME_PREFIX = "zlc-render-"
 
-from .front import (
+# A RENDER CHILD USES ONE BLAS THREAD.  OpenBLAS commits a scratch buffer
+# for every thread it may use the moment its library loads, and numpy and
+# scipy each carry a copy of the library: measured, a child on a
+# sixteen-core machine committed 1258 MB of address space, about a gigabyte
+# of it two thread pools it never touches -- the solvers that multiply
+# matrices, the SLM hologram solver and the feedback regressions, live in
+# the parent.  With four warm children standing that was four gigabytes of
+# commit charge against the page file for nothing.
+#
+# HERE, because this is the first thing a child imports: its target is in
+# this module, so unpickling the Process brings this module in before numpy
+# has loaded, and the environment is read when the library loads.  The
+# product's own bootstrap never runs in a child -- a package ``__main__`` is
+# not re-run by a spawned process -- so the child's environment is the
+# parent's plus what this line adds.  The parent is ``MainProcess`` and
+# keeps its threads.
+if multiprocessing.current_process().name.startswith(_CHILD_NAME_PREFIX):
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
+import numpy as np  # noqa: E402
+
+from .front import (  # noqa: E402
     RasterBuffer,
     RasterFront,
     RasterIdentity,
@@ -1474,7 +1497,7 @@ class RenderProcess:
         process = context.Process(
             target=_render_process_main,
             args=(child, self.name),
-            name=f"zlc-render-{self.name}",
+            name=f"{_CHILD_NAME_PREFIX}{self.name}",
             # A renderer must never outlive the process it draws for.  Held
             # non-daemonic, multiprocessing's own exit hook JOINS it, so any
             # exit that skips close() -- an exception on the way out, a

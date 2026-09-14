@@ -22,12 +22,16 @@ it.  That a child can draw is the rest of this suite's business.
 
 from __future__ import annotations
 
+import multiprocessing
+import os
+import sys
 import threading
 import time
 
 import pytest
 
 from zlc_plot.render_process import (
+    _CHILD_NAME_PREFIX,
     DEFAULT_RENDER_SETTLED_SPARES,
     DEFAULT_RENDER_SPARES,
     RenderProcessPool,
@@ -366,3 +370,66 @@ def test_the_defaults_are_a_board_then_what_an_operator_adds() -> None:
     assert DEFAULT_RENDER_SPARES == 4
     assert DEFAULT_RENDER_SETTLED_SPARES == 2
     assert DEFAULT_RENDER_SETTLED_SPARES < DEFAULT_RENDER_SPARES
+
+
+def _child_report(connection) -> None:
+    """What a render child sees: its BLAS thread bound and its commit charge."""
+
+    import ctypes
+    from ctypes import wintypes
+
+    import numpy  # noqa: F401  -- the library whose thread pool is bounded
+
+    class Counters(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t),
+            ("PrivateUsage", ctypes.c_size_t),
+        ]
+
+    counters = Counters()
+    counters.cb = ctypes.sizeof(counters)
+    ctypes.WinDLL("psapi").GetProcessMemoryInfo(
+        ctypes.WinDLL("kernel32").GetCurrentProcess(), ctypes.byref(counters), counters.cb
+    )
+    connection.send(
+        (os.environ.get("OPENBLAS_NUM_THREADS"), counters.PrivateUsage / 2**20)
+    )
+    connection.close()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="commit charge is read through psapi")
+def test_a_render_child_uses_one_blas_thread() -> None:
+    """OpenBLAS commits a scratch buffer per thread it may use the moment it
+    loads, and a child never multiplies a matrix: a child on a sixteen-core
+    machine committed 1258 MB, about a gigabyte of it two thread pools.
+    The bound has to be in the child's environment BEFORE numpy loads, and
+    the product's bootstrap never runs in a child -- a package ``__main__``
+    is not re-run by a spawned process -- so the child sets it itself, in
+    the first module it imports, keyed on the name every child is spawned
+    under.  Spawned the way the pool spawns, the child says so, and its
+    commit charge says the library heard it.
+    """
+
+    context = multiprocessing.get_context("spawn")
+    parent, child = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_child_report, args=(child,), name=f"{_CHILD_NAME_PREFIX}test", daemon=True
+    )
+    process.start()
+    child.close()
+    try:
+        assert parent.poll(120.0), "the child never reported"
+        threads, private_mb = parent.recv()
+    finally:
+        process.join(30.0)
+        if process.is_alive():
+            process.terminate()
+    assert threads == "1"
+    # Numpy alone commits over five hundred megabytes with sixteen threads
+    # and under a hundred with one; the ceiling leaves room for a smaller
+    # machine's pool without admitting a full one.
+    assert private_mb < 250.0, f"a child still committed {private_mb:.0f} MB"
