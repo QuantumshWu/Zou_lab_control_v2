@@ -738,19 +738,7 @@ class ConsolePresenter:
             raise ValueError(f"panel size {normalized!r} is not in {self._sizes}")
         return normalized
 
-    def add_blank_panel(
-        self,
-        kind: str,
-        *,
-        signal: str = "",
-        title: str = "",
-        size: str = "",
-        interval_ms: int | None = None,
-        semantic: Mapping[str, Any] | None = None,
-        display: Mapping[str, Any] | None = None,
-        fit: Mapping[str, Any] | None = None,
-        overlay_signal: str = "",
-    ) -> PanelBinding | None:
+    def add_blank_panel(self, kind: str) -> PanelBinding | None:
         """Author one fixed-kind panel before any signal has published.
 
         A panel is configuration first and a plot host second.  The empty card
@@ -769,13 +757,7 @@ class ConsolePresenter:
             return None
         definition = self._panel_kind_definitions[wanted]
 
-        try:
-            selected_interval = self._panel_interval(
-                self._default_interval_ms if interval_ms is None else interval_ms
-            )
-        except (TypeError, ValueError) as error:
-            self._report(_error_text(error), severity="warning")
-            return None
+        selected_interval = self._panel_interval(self._default_interval_ms)
 
         self._panel_serial += 1
         panel_id = panel_id_for(self._panel_serial)
@@ -787,18 +769,18 @@ class ConsolePresenter:
             generated_title = f"{base_title} {suffix}"
             suffix += 1
         state = PanelState(
-            signal=str(signal).strip(),
+            signal="",
             kind=definition.kind.value,
             # Empty cell kind: the DATA decides.  The panel's settings offer
             # the explicit choice; the Add menu never composes one.
             cell_kind="",
-            size=str(size) or DEFAULTS.layout.default_preset,
+            size=DEFAULTS.layout.default_preset,
             interval_ms=selected_interval,
-            title=str(title).strip() or generated_title,
-            semantic=dict(semantic or {}),
-            display=dict(display or {}),
-            fit=dict(fit or {}),
-            overlay_signal=str(overlay_signal),
+            title=generated_title,
+            semantic={},
+            display={},
+            fit={},
+            overlay_signal="",
         )
         binding = PanelBinding(
             panel_id,
@@ -811,11 +793,6 @@ class ConsolePresenter:
         self.view.set_panel_selectors_enabled(panel_id, self._deriving)
         self._publish_panel_state(binding)
         self._refresh_console_projection()
-
-        # Layout restore may already name a live signal.  Re-enter the exact
-        # same state-replacement path Setting uses; no second mounting path.
-        if state.signal:
-            self.update_panel_state(panel_id, {"signal": state.signal})
         return binding
 
     def add_panel(

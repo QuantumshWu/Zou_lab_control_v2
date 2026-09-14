@@ -4368,11 +4368,11 @@ def test_a_running_task_freezes_logic_identity_but_not_panels(
     assert "occupancy" not in " ".join(presenter.logic)
     assert presenter.logic[other_id].draft.values["repeat"] == previous_repeat
 
-    preview = presenter.add_blank_panel(
-        "facet_grid",
-        signal="@logic/calibration/capture_preview",
-    )
+    preview = presenter.add_blank_panel("facet_grid")
     assert preview is not None
+    presenter.update_panel_state(
+        preview.panel_id, {"signal": "@logic/calibration/capture_preview"}
+    )
     assert presenter.update_panel_state(
         preview.panel_id,
         {"title": "Still monitorable", "display": {"colormap": "viridis"}},
@@ -4815,16 +4815,16 @@ def test_task_terminal_removes_only_its_auto_previews(
     node, snapshot = _one_shot(session, producer="sealed-preview")
     sealed_signal = node.signal_key("frames")
     retained = presenter.add_panel(sealed_signal, snapshot)
-    missing = presenter.add_blank_panel(
-        "image",
-        signal="@logic/task/retired-preview",
-    )
+    missing = presenter.add_blank_panel("image")
     assert missing is not None
-    manual = presenter.add_blank_panel(
-        "image",
-        signal="@logic/task/manual-panel",
+    presenter.update_panel_state(
+        missing.panel_id, {"signal": "@logic/task/retired-preview"}
     )
+    manual = presenter.add_blank_panel("image")
     assert manual is not None
+    presenter.update_panel_state(
+        manual.panel_id, {"signal": "@logic/task/manual-panel"}
+    )
     task_id = presenter.add_logic("calibration", open_editor=False)
     task = presenter.logic[task_id]
     presenter._auto_task_previews[task_id] = {
