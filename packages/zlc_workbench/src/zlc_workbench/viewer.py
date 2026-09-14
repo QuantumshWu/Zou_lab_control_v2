@@ -3213,10 +3213,6 @@ class FigureViewerPresenter:
         if binding is not None:
             self._active_panel_id = binding.panel_id
 
-    def update_panel(self, panel_id: str, patch: object) -> None:
-        self._active_panel_id = str(panel_id)
-        self._panel_presenter.update_panel_state(str(panel_id), patch)
-
     def remove_panel(self, panel_id: str) -> None:
         self._panel_presenter.remove_panel(str(panel_id))
         self._active_panel_id = next(reversed(self.panels), "")
@@ -3282,12 +3278,6 @@ class FigureViewerPresenter:
     @staticmethod
     def _await(operation: object) -> object:
         return operation.result() if hasattr(operation, "result") else operation
-
-    def resize_panel(self, panel_id: str, size: str) -> None:
-        self._panel_presenter.update_panel_state(
-            str(panel_id),
-            {"size": str(size)},
-        )
 
     def save_image(self) -> None:
         """Write the active shared Panel exactly as drawn beside its archive."""

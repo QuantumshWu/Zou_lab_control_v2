@@ -564,6 +564,19 @@ def presenter(sequence):
         presenter.close()
 
 
+
+def _preview_rows(presenter) -> int:
+    """How many rows the preview draws, from the projection that draws them."""
+
+    if presenter.sequence is None:
+        return 0
+    return presenter._preview_candidate(
+        presenter.sequence,
+        bool(presenter.view.preview_include_off_rows),
+        presenter._pinned_size,
+    )[2]
+
+
 def test_the_projection_shows_what_the_sequence_contains(presenter, sequence) -> None:
     vm = presenter.view.schedule_view.schedule
     assert vm.document_name == sequence.name
@@ -2251,7 +2264,7 @@ def test_the_preview_offers_its_sizes_and_the_content_picks_one(presenter) -> No
     view = presenter.view.preview_view
     assert view.size_names == PANEL_SIZE_NAMES
     assert view.size == recommended_pulse_preset(
-        presenter._preview_rows(), len(presenter.sequence.periods)
+        _preview_rows(presenter), len(presenter.sequence.periods)
     )
 
 
@@ -2277,15 +2290,15 @@ def test_show_all_channels_draws_the_ones_that_are_always_off(presenter, sequenc
     """"Show off rows" has to actually add rows, or it is a switch that lies."""
 
     view = presenter.view.preview_view
-    lean = presenter._preview_rows()
+    lean = _preview_rows(presenter)
 
     view._include_off = True
     presenter.view.preview_include_off_toggled.emit(True)
 
     from zlc_workbench.pulse_editor import programmable_ports
 
-    assert presenter._preview_rows() > lean
-    assert presenter._preview_rows() == len(programmable_ports(sequence.target))
+    assert _preview_rows(presenter) > lean
+    assert _preview_rows(presenter) == len(programmable_ports(sequence.target))
     assert str(lean) not in view.status or "channel" in view.status
 
 

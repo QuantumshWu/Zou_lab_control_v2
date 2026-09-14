@@ -349,12 +349,6 @@ class DeviceManagerPresenter:
         return True
 
     @property
-    def active_session(self) -> object | None:
-        """The exact session produced by Init, or ``None`` before/after it."""
-
-        return self._active_session
-
-    @property
     def device_operation_active(self) -> bool:
         """Whether controls must stay closed during change or refresh."""
 

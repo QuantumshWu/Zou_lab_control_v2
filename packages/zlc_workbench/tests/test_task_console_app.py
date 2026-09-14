@@ -1057,7 +1057,7 @@ try:
         application.processEvents()
         QtTest.QTest.qWait(10)
     assert flow.timer is not None
-    assert flow.session is flow.devices.presenter.active_session
+    assert flow.session is flow.devices.presenter._active_session
     assert flow.timer.interval() == flow.console_presenter.board.base_interval_ms == 100
     assert flow.console.is_visible()
     assert flow.console.session is flow.session
@@ -1219,7 +1219,7 @@ try:
         application.processEvents()
         QtTest.QTest.qWait(10)
     assert again.timer is not None
-    assert again.session is again.devices.presenter.active_session
+    assert again.session is again.devices.presenter._active_session
     assert again.session is not first_session
     assert again.device_controls == {}
     devices_again = again.devices

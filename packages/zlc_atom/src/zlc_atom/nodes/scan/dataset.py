@@ -41,13 +41,6 @@ from zlc_runtime import (
 )
 
 
-#: NOT recorded, and the reason is the store's shape rather than the size.
-#: A publication store is a LOG: every event in it is self-contained, which is
-#: exactly what a day of per-shot quantities is.  A scan's events are not --
-#: each one carries a ``cell_origin`` into the run's canonical schema, and
-#: that placement lives on the output, not in the snapshot, so a recorded
-#: scan would come back as a bag of points with nowhere to put them.  Keeping
-#: it needs the store to carry placement, which it does not yet.
 SCAN_OUTPUT = DatasetOutputDeclaration("scan", "scan.result")
 
 _SCAN_REPEAT_AXIS_ID = AxisId("scan.repeat")

@@ -103,7 +103,7 @@ def test_a_refused_configure_restores_the_picture_with_the_state(monkeypatch) ->
         monkeypatch.setattr(renderer, "_compose_frame", fail_after_drawing)
         with pytest.raises(RuntimeError, match="after touching canvas"):
             session.configure(parameters={"title": "must not survive"})
-        assert np.array_equal(renderer.capture_rgba(), before)
+        assert np.array_equal(renderer._rgba_buffer(), before)
         assert session.describe_display().limits == limits
         session.redraw_surface()
         assert np.array_equal(session.rgba(), before)

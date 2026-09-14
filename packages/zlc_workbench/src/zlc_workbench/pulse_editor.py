@@ -4263,20 +4263,6 @@ class PulseEditorPresenter:
         except Exception:
             return recommended_pulse_preset(0, len(self.sequence.periods))
 
-    def _preview_rows(self) -> int:
-        """How many rows the preview draws, from the projection that draws them."""
-
-        if self.sequence is None:
-            return 0
-        try:
-            return self._preview_candidate(
-                self.sequence,
-                bool(self.view.preview_include_off_rows),
-                self._pinned_size,
-            )[2]
-        except Exception:
-            return 0
-
     @staticmethod
     def _preview_candidate(
         sequence: PulseSequence,

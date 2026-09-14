@@ -1442,7 +1442,7 @@ def test_opening_shows_the_figure_and_its_record(presenter, saved, tmp_path, mon
     assert presenter.view.flow["nodes"]
 
     panel_id = presenter._active_panel_id
-    presenter.resize_panel(panel_id, "4x4")
+    presenter._panel_presenter.update_panel_state(panel_id, {"size": "4x4"})
     _wait_until(
         lambda: (
             presenter.beat()
@@ -1960,7 +1960,8 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         # must not rebuild the host merely because the window DPR snapshot
         # changed meanwhile.
         real_view.dpr = 2.25
-        real_presenter.update_panel(
+        real_presenter._active_panel_id = panel_id
+        real_presenter._panel_presenter.update_panel_state(
             panel_id,
             # x_0 is what the formula prints for center_x; the stored
             # target below still keys on the internal name.
@@ -2151,14 +2152,16 @@ def test_viewer_reenabling_facet_fit_solves_every_cell(tmp_path) -> None:
         assert isinstance(initial, FacetFitBatchResult)
         assert len(initial.results) == 2
 
-        presenter.update_panel(panel_id, {"fit": {"model": None}})
+        presenter._active_panel_id = panel_id
+        presenter._panel_presenter.update_panel_state(panel_id, {"fit": {"model": None}})
         _wait_until(
             lambda: (
                 presenter.beat()
                 or not _active_record(presenter)["state"].fit
             )
         )
-        presenter.update_panel(
+        presenter._active_panel_id = panel_id
+        presenter._panel_presenter.update_panel_state(
             panel_id,
             {"fit": {"model": "gaussian_offset"}},
         )

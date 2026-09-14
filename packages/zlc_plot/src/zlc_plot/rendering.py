@@ -12853,17 +12853,6 @@ class MatplotlibRenderer:
             self._published_rgba(), dtype=np.uint8
         ).reshape((target_height, target_width, 4))
 
-    def capture_rgba(
-        self,
-        *,
-        redraw: bool = False,
-    ) -> np.ndarray:
-        """Capture the already composed front without changing artist state."""
-
-        if redraw:
-            self.draw()
-        return self._rgba_buffer()
-
     def capture_rgba_bytes(self, *, redraw: bool = False) -> tuple[bytes, int, int]:
         """The composed front as raw bytes, with the size they are in.
 

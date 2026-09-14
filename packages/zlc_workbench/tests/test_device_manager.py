@@ -504,7 +504,7 @@ def test_a_standalone_editor_without_a_session_factory_cannot_fake_init(tmp_path
 
     assert view.lifecycle[:3] == ("Init devices", False, False)
     assert manager.toggle_lifecycle() is False
-    assert manager.active_session is None
+    assert manager._active_session is None
 
 
 def test_init_holds_the_exact_session_until_explicit_shutdown(tmp_path) -> None:
@@ -551,11 +551,11 @@ def test_init_holds_the_exact_session_until_explicit_shutdown(tmp_path) -> None:
     )
 
     assert tuple(manager.devices) == initial.devices
-    assert manager.active_session is None
+    assert manager._active_session is None
     manager.toggle_lifecycle()
 
     assert candidates == [initial]
-    assert manager.active_session is session
+    assert manager._active_session is session
     assert initialized == [session]
     assert shut_down == [], "Init must retain the session for both experiment windows"
     assert view.lifecycle[:3] == ("Shutdown devices", True, True)
@@ -567,7 +567,7 @@ def test_init_holds_the_exact_session_until_explicit_shutdown(tmp_path) -> None:
     assert view.lifecycle[:3] == ("Shutdown devices", True, True)
 
     manager.toggle_lifecycle()
-    assert manager.active_session is None
+    assert manager._active_session is None
     assert shut_down == [session]
     assert view.lifecycle[:3] == ("Init devices", True, False)
 
@@ -629,7 +629,7 @@ def test_an_active_draft_change_reconciles_without_replacing_or_shutting_session
     assert active is session
     assert candidate.devices[0].parameters["exposure_seconds"] == 0.03
     assert close_keys == ()
-    assert manager.active_session is session
+    assert manager._active_session is session
     assert reconciled == [session]
     assert shut_down == []
     assert view.loaded_devices == (
@@ -701,14 +701,14 @@ def test_loaded_close_targets_one_key_and_missing_device_remains_applyable(
         ("sequencer", "sequencer", "sequencer.virtual"),
     )
     assert view.lifecycle[:3] == ("Apply device changes", True, True)
-    assert manager.active_session is session
+    assert manager._active_session is session
     assert shut_down == []
 
     assert manager.toggle_lifecycle() is True
     assert prepared[-1] == (initial, ())
     assert set(installed) == {"camera", "sequencer"}
     assert view.lifecycle[:3] == ("Shutdown devices", True, True)
-    assert manager.active_session is session
+    assert manager._active_session is session
     assert shut_down == []
 
 
@@ -757,7 +757,7 @@ def test_reconcile_failure_keeps_the_active_session_and_apply_state(tmp_path) ->
 
     assert manager.toggle_lifecycle() is True
 
-    assert manager.active_session is session
+    assert manager._active_session is session
     assert manager.busy is False
     assert reconciled == []
     assert shut_down == []
@@ -930,7 +930,7 @@ def test_a_loaded_card_forwards_control_to_the_session_window_owner(tmp_path) ->
     assert manager.open_device("camera") is False
     assert opened == []
     assert manager.toggle_lifecycle() is True
-    assert manager.active_session is session
+    assert manager._active_session is session
     assert view.loaded_devices == (("camera", "camera", "camera.virtual"),)
     assert "1 device(s) initialized: camera · 1 failed" in view.status[-1][1]
 
