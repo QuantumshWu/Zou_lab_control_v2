@@ -1489,3 +1489,21 @@ def test_a_confined_pan_of_a_pulse_timeline_moves_its_badges_with_it(ratio) -> N
             renderer.set_view_dragging(None)
     finally:
         session.close()
+
+
+def test_a_closed_reserve_holds_nothing_and_takes_nothing_more() -> None:
+    """A render child builds one panel.  Once it has, the reserve is closed:
+    what it held goes, because a panel that was not a grid never asks, and
+    a fill that a cut-short warm-up still finishes afterwards must not put
+    sixty-four cells back for the life of the child."""
+
+    from zlc_plot.config import DEFAULTS
+    from zlc_plot.rendering import CellReserve
+
+    reserve = CellReserve()
+    reserve.fill(DEFAULTS.style, 4)
+    assert reserve._held is not None
+    reserve.close()
+    assert reserve._held is None
+    reserve.fill(DEFAULTS.style, 4)
+    assert reserve._held is None

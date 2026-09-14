@@ -3225,7 +3225,7 @@ def _render_process_main(connection: Connection, name: str) -> None:
         plot_input = _resolve_inputs(input_ref, inputs)
 
         def factory() -> PlotSession:
-            return PlotSession(
+            session = PlotSession(
                 plot_input,
                 spec,
                 size=size,
@@ -3234,6 +3234,12 @@ def _render_process_main(connection: Connection, name: str) -> None:
                 device_pixel_ratio=device_pixel_ratio,
                 initial_configuration=initial_configuration,
             )
+            # The one panel this child builds has been built: if it was a
+            # grid it took the reserve, and if it was not, nothing ever will.
+            from .rendering import CELL_RESERVE  # noqa: PLC0415
+
+            CELL_RESERVE.close()
+            return session
 
         host = RasterPlotHost(factory, host_id=host_id)
         with state_lock:

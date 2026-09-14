@@ -1832,6 +1832,7 @@ class CellReserve:
     def __init__(self) -> None:
         self._lock = RLock()
         self._held: tuple[PlotStyleConfig, Any, list[Any]] | None = None
+        self._closed = False
 
     def fill(self, style: PlotStyleConfig, cells: int) -> None:
         """Build one figure and ``cells`` grid cells detached on it."""
@@ -1844,11 +1845,31 @@ class CellReserve:
         cells = int(cells)
         if cells < 1:
             raise ValueError("a reserve holds at least one cell")
+        with self._lock:
+            if self._closed:
+                return
         # The same bytes a cold mount revives from: holding them ahead of
         # time saves the 61 ms of reviving, not the 207 of building.
         figure, spare = revive_grid_cells(style, cells)
         with self._lock:
-            self._held = (style, figure, spare)
+            if not self._closed:
+                self._held = (style, figure, spare)
+
+    def close(self) -> None:
+        """Let go of whatever is held, and hold nothing that arrives later.
+
+        A render child builds ONE panel.  The reserve is for the grid that
+        panel may turn out to be; once the panel is built and was not a
+        grid, sixty-four cells stand in that child for as long as it lives
+        -- 25 MB of a warm child's private working set, measured -- for a
+        mount that will never come.  And a warm-up cut short mid-fill
+        still finishes the fill it was on, so the door has to stay shut,
+        not merely be emptied once.
+        """
+
+        with self._lock:
+            self._closed = True
+            self._held = None
 
     def take(
         self,
