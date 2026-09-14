@@ -7,6 +7,7 @@ from PyQt5 import QtCore, QtWidgets
 from zlc_ui.board import (
     BoardMetrics,
     GeomProxy,
+    first_free_slot,
     nearest_anchor,
     min_board_width,
     pack,
@@ -22,10 +23,15 @@ class ConsoleBoardView(QtWidgets.QWidget):
     This is deliberately a two-phase interaction.  During a drag the card is
     an ordinary child widget at the operator's raw pointer position; the other
     cards do not move and there is no placeholder/ghost.  At release its
-    top-left chooses the nearest grid anchor from the settled board; that card
-    stays pinned while the others undergo the same north-west gravity used by
-    ordinary resize.  Thus a lower-left drop remains a lower-left intent rather
-    than being flattened into an insertion index.
+    top-left chooses the nearest grid anchor from the settled board, and that
+    anchor becomes the place that card was PUT.
+
+    Every card has one: authored by a drop, or seeded where it first appeared.
+    The board keeps them and never writes over them -- what is on screen is
+    those places settled under north-west gravity, for a board this wide.  So
+    a narrow window packs into one column without destroying the arrangement,
+    widening restores it, and a drop moves the card that was dropped rather
+    than releasing everything else to reflow.
     """
 
     order_committed = QtCore.pyqtSignal(tuple)
@@ -37,8 +43,16 @@ class ConsoleBoardView(QtWidgets.QWidget):
         self._metrics = metrics or BoardMetrics(gap=8)
         self._cards: dict[str, PanelCardView] = {}
         self._order: tuple[str, ...] = ()
-        self._anchor_id: str | None = None
-        self._anchor: tuple[int, int] | None = None
+        #: Where each card was PUT, by panel id.  Authored by a drop, seeded
+        #: on arrival, and never written by the packer: the packed position
+        #: is what this place comes to rest at on a board of the current
+        #: width, and writing that back would ratchet a narrow packing into
+        #: the arrangement itself.
+        self._authored: dict[str, tuple[int, int]] = {}
+        #: The card most recently released, which wins ties in the settling
+        #: order: when two cards want one place, the operator's is the one
+        #: that just asked for it.
+        self._dropped_id: str | None = None
         self._wired_cards: set[PanelCardView] = set()
         self._active_card: PanelCardView | None = None
 
@@ -64,9 +78,13 @@ class ConsoleBoardView(QtWidgets.QWidget):
                 self._wired_cards.discard(card)
                 retire_widget(card)
         self._cards = arriving
-        if self._anchor_id not in self._cards:
-            self._anchor_id = None
-            self._anchor = None
+        self._authored = {
+            panel_id: place
+            for panel_id, place in self._authored.items()
+            if panel_id in self._cards
+        }
+        if self._dropped_id not in self._cards:
+            self._dropped_id = None
         for card in incoming:
             card.setParent(self)
             card.show()
@@ -133,15 +151,28 @@ class ConsoleBoardView(QtWidgets.QWidget):
         proxies = {
             panel_id: self._proxy(self._cards[panel_id]) for panel_id in order
         }
-        pinned = None
-        if self._anchor_id in proxies and self._anchor is not None:
-            pinned = proxies[self._anchor_id]
-            pinned.col, pinned.row = self._anchor
+        board_w = self._board_width(proxies.values())
+        # Every card falls from the place it was PUT.  A card that has never
+        # been put anywhere takes the top-most then left-most free slot --
+        # which is how Add tiles the top row and wraps -- and that becomes
+        # its place, once this board has a real width to have tiled on: a
+        # seed taken before the first layout would be a single column, and
+        # gravity would then faithfully keep it one.
+        seeded: list = []
+        for panel_id in order:
+            proxy = proxies[panel_id]
+            place = self._authored.get(panel_id)
+            if place is None:
+                place = first_free_slot(proxy, seeded, board_w, self._metrics)
+                if self.width() > 0:
+                    self._authored[panel_id] = place
+            proxy.col, proxy.row = place
+            seeded.append(proxy)
         pack(
             tuple(proxies[panel_id] for panel_id in order),
             self._metrics,
-            self._board_width(proxies.values()),
-            pinned=pinned,
+            board_w,
+            dropped=proxies.get(self._dropped_id),
         )
         by_id: dict[str, GeomProxy] = {}
         right = bottom = 0
@@ -212,10 +243,9 @@ class ConsoleBoardView(QtWidgets.QWidget):
             self._metrics,
             self._board_width((dropped, *other_proxies)),
         )
-        self._anchor_id = card.panel_id
-        self._anchor = anchor
+        self._authored[card.panel_id] = anchor
+        self._dropped_id = card.panel_id
         self._active_card = None
-        self._order = others + (card.panel_id,)
         packed = self._pack_current()
         pin = packed[card.panel_id]
         index = sum(

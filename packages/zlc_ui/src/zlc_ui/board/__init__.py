@@ -6,6 +6,7 @@ from .board_layout import (
     board_width,
     nearest_anchor,
     first_free_slot,
+    gravity_slot,
     min_board_width,
     pack,
 )
@@ -23,6 +24,7 @@ __all__ = [
     "board_width",
     "nearest_anchor",
     "first_free_slot",
+    "gravity_slot",
     "min_board_width",
     "pack",
     "panel_display_size",

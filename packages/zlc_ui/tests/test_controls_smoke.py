@@ -5,7 +5,7 @@ import subprocess
 import sys
 from types import SimpleNamespace
 
-from zlc_ui.board import BoardMetrics, nearest_anchor, pack
+from zlc_ui.board import BoardMetrics, first_free_slot, nearest_anchor, pack
 
 
 ROOT = __import__("pathlib").Path(__file__).resolve().parents[1]
@@ -376,6 +376,77 @@ def test_drop_chooses_the_nearest_two_dimensional_gravity_anchor() -> None:
     assert nearest_anchor(probe, others, metrics, board_w=350) == (10, 100)
     probe.col, probe.row = 12, 14
     assert nearest_anchor(probe, others, metrics, board_w=350) == (10, 10)
+
+
+def _board_card(width: int, height: int, col: int = 0, row: int = 0):
+    return SimpleNamespace(width=width, height=height, col=col, row=row)
+
+
+def test_a_card_put_below_another_stays_below_it() -> None:
+    """Gravity stops a card at the first thing in its way.
+
+    A card put below a wide one, with a free slot beside that one, is BELOW
+    it: it may not cross the obstacle to fill a hole somewhere else.  Packing
+    every card into the first free slot on the board did exactly that -- the
+    card flew up beside the one it had been put under -- and the only
+    exemption available was for a single card at a time, so a board could
+    hold one placement and the next drop released it.
+    """
+
+    metrics = BoardMetrics(10)
+    above = _board_card(100, 80, 10, 10)
+    below = _board_card(100, 80, 10, 240)
+    pack([above, below], metrics, board_w=330, dropped=below)
+    assert (above.col, above.row) == (10, 10)
+    assert (below.col, below.row) == (10, 100), "the free slot at (120, 10) is not its place"
+
+
+def test_two_placements_survive_each_other() -> None:
+    """One board, two operator placements.  The second does not release the first."""
+
+    metrics = BoardMetrics(10)
+    first = _board_card(100, 80, 10, 10)
+    under = _board_card(100, 80, 10, 100)
+    beside = _board_card(100, 80, 200, 240)
+    pack([first, under, beside], metrics, board_w=330, dropped=beside)
+    assert (under.col, under.row) == (10, 100), "the earlier placement stands"
+    assert (beside.col, beside.row) == (120, 10), "nothing above it, so it rises and stops at `first`"
+
+
+def test_a_narrow_board_packs_one_column_and_the_places_are_not_rewritten() -> None:
+    """Narrowing the window may not destroy the arrangement.
+
+    The packer is given the places the cards were PUT and answers where they
+    rest on a board this wide.  A caller that kept those places gets its
+    two-column board back when the window widens again.
+    """
+
+    metrics = BoardMetrics(10)
+    places = ((10, 10), (120, 10), (10, 100))
+
+    def packed(board_w: int) -> tuple[tuple[int, int], ...]:
+        cards = [_board_card(100, 80, *place) for place in places]
+        pack(cards, metrics, board_w=board_w)
+        return tuple((card.col, card.row) for card in cards)
+
+    assert packed(330) == places
+    assert packed(120) == ((10, 10), (10, 100), (10, 190)), "one column, in order"
+    assert packed(330) == places
+
+
+def test_first_free_slot_tiles_the_top_row_then_wraps() -> None:
+    """Where a card that was never put anywhere goes: Add fills the width."""
+
+    metrics = BoardMetrics(10)
+    placed: list = []
+    slots = []
+    for _index in range(4):
+        card = _board_card(100, 80)
+        card.col, card.row = first_free_slot(card, placed, 330, metrics)
+        slots.append((card.col, card.row))
+        placed.append(card)
+    # Two 100-wide cards and their three gaps are all a 330 board holds.
+    assert slots == [(10, 10), (120, 10), (10, 100), (120, 100)]
 
 
 def test_only_the_tab_on_screen_is_built() -> None:

@@ -790,6 +790,55 @@ assert tuple(board._cards[panel_id].geometry().getRect()[:2] for panel_id in boa
     )
 
 
+def test_board_keeps_every_place_a_drop_authored() -> None:
+    """A drop moves the card that was dropped.  It does not release the others.
+
+    The board packed every card into the first free slot on the board and
+    exempted exactly one -- whichever had been dropped last -- so it could
+    hold one placement at a time.  A card put below another was released by
+    the NEXT drop and flew up into the hole beside it, which is the one thing
+    gravity never does: it stops a card at the first thing in its way.
+    """
+
+    _run_qt(
+        """
+from PyQt5 import QtCore, QtTest
+from zlc_ui.board import BoardMetrics
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.console import ConsoleBoardView, PanelCardView
+app = ensure_qt_app(['placements'])
+metrics = BoardMetrics(10)
+cards = tuple(PanelCardView(f'panel-{index}') for index in range(3))
+w, h = cards[0].size().width(), cards[0].size().height()
+board = ConsoleBoardView(metrics=metrics)
+board.resize(3 * w + 4 * 10, 3 * h + 4 * 10)
+board.set_cards(cards); board.show(); app.processEvents()
+assert tuple(card.geometry().getRect()[:2] for card in cards) == (
+    (10, 10), (20 + w, 10), (30 + 2 * w, 10)
+)
+
+def drop_top_left_at(card, top_left):
+    grab = QtCore.QPoint(18, 18)
+    target = card.mapFrom(board, QtCore.QPoint(top_left[0] + 18, top_left[1] + 18))
+    QtTest.QTest.mousePress(card, QtCore.Qt.LeftButton, pos=grab)
+    QtTest.QTest.mouseMove(card, target)
+    QtTest.QTest.mouseRelease(card, QtCore.Qt.LeftButton, pos=target)
+    app.processEvents()
+
+# panel-1 under panel-0; panel-2 slides left into the place it left.
+drop_top_left_at(cards[1], (12, h + 16))
+assert cards[1].geometry().getRect()[:2] == (10, 20 + h), cards[1].geometry()
+assert cards[2].geometry().getRect()[:2] == (20 + w, 10), cards[2].geometry()
+
+# A second drop, and the first placement still stands.
+drop_top_left_at(cards[2], (12, 2 * h + 40))
+assert cards[0].geometry().getRect()[:2] == (10, 10), cards[0].geometry()
+assert cards[1].geometry().getRect()[:2] == (10, 20 + h), cards[1].geometry()
+assert cards[2].geometry().getRect()[:2] == (10, 30 + 2 * h), cards[2].geometry()
+"""
+    )
+
+
 def test_board_qtest_drag_has_free_positions_without_ghost_or_live_reflow() -> None:
     _run_qt(
         """
