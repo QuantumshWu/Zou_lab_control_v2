@@ -500,8 +500,11 @@ def test_a_constant_bracket_body_does_not_crowd_the_runs_after_it() -> None:
     streamer = PulseStreamer(transport, geometry, 50e6, target=_BOARD_TARGET)
     streamer.open()
     try:
+        # LOAD cannot answer this: the walk is over the run the board will
+        # actually play, and how many times it plays is FIRE's argument.
+        streamer.load(program, source=crowded)
         with pytest.raises(ValueError, match="channel .* needs"):
-            streamer.load(program, source=crowded)
+            streamer.fire(run_repeats=3)
     finally:
         streamer.close()
 

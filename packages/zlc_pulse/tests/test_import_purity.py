@@ -17,58 +17,29 @@ SRC = ROOT / "src" / "zlc_pulse"
 #: cannot be the only layer with its own opinion about what "us" means -- that
 #: is how this package came to hold a second unit table with a different base,
 #: a different spelling set and different arithmetic from everybody else's.
+#: ``zlc_durable`` is here for the same one reason: it owns what an atomic
+#: write and a readable JSON document ARE.  A pulse saved beside its module
+#: is a file on disk like every other document this project writes, and a
+#: package with its own writer is a package whose files differ from the rest
+#: in line endings, temp-file discipline and crash behaviour.
+#:
 #: The allowance costs no isolation, which the test below is what keeps true.
 ALLOWED_TOP_LEVEL = {
     "numpy",
     "serial",
     "zlc_data",
+    "zlc_durable",
     "zlc_pulse",
 }
 
-DATA_SRC = ROOT.parents[0] / "zlc_data" / "src" / "zlc_data"
+#: The allowed layers, each of which must stay as light as this package is.
+LIGHT_LAYERS = ("zlc_data", "zlc_durable")
 
 
 def test_package_import_is_pure() -> None:
     import zlc_pulse
 
     assert Path(zlc_pulse.__file__).resolve().parent.name == "zlc_pulse"
-
-
-_STDLIB = {
-    "binascii",
-    "collections",
-    "dataclasses",
-    "enum",
-    "fractions",
-    "hashlib",
-    "json",
-    "math",
-    "numbers",
-    "os",
-    "pathlib",
-    "re",
-    "struct",
-    "subprocess",
-    "threading",
-    "time",
-    "typing",
-    "zlib",
-    "queue",
-    "shutil",
-    "sys",
-    "tempfile",
-    "contextlib",
-    "io",
-    "logging",
-    "warnings",
-    "abc",
-    "types",
-    "importlib",
-    "__future__",
-    "argparse",
-    "socket",
-    "socketserver",
-}
 
 
 def _imported_top_levels(path: Path) -> list[str]:
@@ -89,24 +60,26 @@ def test_source_imports_only_the_package_and_allowed_dependencies() -> None:
         (path.name, name)
         for path in SRC.rglob("*.py")
         for name in _imported_top_levels(path)
-        if name not in ALLOWED_TOP_LEVEL and name not in _STDLIB
+        if name not in ALLOWED_TOP_LEVEL
+        and name not in sys.stdlib_module_names
     ]
     assert offenders == []
 
 
-def test_the_one_allowed_layer_carries_nothing_in_behind_it() -> None:
-    """zlc_data may be imported only while it is as light as this package is.
+def test_the_allowed_layers_carry_nothing_in_behind_them() -> None:
+    """An allowed layer may be imported only while it is as light as this one.
 
     An allowance to import one layer is an allowance to import whatever that
-    layer imports.  Written down, it stays a unit vocabulary; unwritten, it is
-    the day zlc_pulse quietly needs matplotlib.
+    layer imports.  Written down, they stay a unit vocabulary and a file
+    writer; unwritten, it is the day zlc_pulse quietly needs matplotlib.
     """
 
     offenders = [
-        (path.name, name)
-        for path in DATA_SRC.rglob("*.py")
+        (layer, path.name, name)
+        for layer in LIGHT_LAYERS
+        for path in (ROOT.parents[0] / layer / "src" / layer).rglob("*.py")
         for name in _imported_top_levels(path)
-        if name not in {"numpy", "zlc_data"}
+        if name not in {"numpy", layer}
         and name not in sys.stdlib_module_names
     ]
     assert offenders == []
@@ -122,8 +95,34 @@ def test_negative_surface_is_absent() -> None:
         "sha256_text",
         "evidence",
     )
-    text = chr(10).join(path.read_text(encoding="utf-8") for path in SRC.rglob("*.py"))
-    assert not [token for token in banned if token in text]
+    # The ban is on a CODE surface, so it is read off the code.  Searching
+    # the file text made an English word in a comment -- "bounded raw
+    # evidence before the parser" -- indistinguishable from a resurrected
+    # subsystem, and the only repair available was to reword prose.
+    named = set()
+    for path in SRC.rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Name):
+                named.add(node.id)
+            elif isinstance(node, ast.Attribute):
+                named.add(node.attr)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                named.add(node.name)
+            elif isinstance(node, ast.arg):
+                named.add(node.arg)
+            elif isinstance(node, ast.keyword) and node.arg:
+                named.add(node.arg)
+            elif isinstance(node, ast.alias):
+                named.update(node.name.split("."))
+                if node.asname:
+                    named.add(node.asname)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                named.update(node.module.split("."))
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                named.add(node.value)
+    assert not [
+        token for token in banned if any(token in name for name in named)
+    ]
 
 
 def test_production_source_has_no_hardcoded_windows_com_number() -> None:

@@ -68,7 +68,10 @@ def test_real_camera_authoring_contains_only_operator_owned_settings() -> None:
         "offset_counts",
         "electrons_per_count",
     }
-    with pytest.raises(ValueError, match="required.*serial"):
+    # The refusal is read by the operator filling the card in, so it names
+    # the field the way the card labels it.
+    serial = next(f for f in PYLON_CAMERA_SCHEMA.fields if f.name == "serial")
+    with pytest.raises(ValueError, match=f"Enter {serial.label}"):
         PYLON_CAMERA_SCHEMA.project_values({})
     for schema, forbidden in (
         (DCAM_CAMERA_SCHEMA, {"binning", "timeout_seconds"}),
@@ -343,7 +346,8 @@ def test_a_draft_projects_without_completeness_and_init_still_refuses() -> None:
     assert draft["frequency_high_hz"] is None
     assert draft["power_low_dbm"] is None
     assert draft["power_high_dbm"] is None
-    with pytest.raises(ValueError, match="required authoring field 'resource'"):
+    resource = next(f for f in RIGOL_DG4000_SCHEMA.fields if f.name == "resource")
+    with pytest.raises(ValueError, match=f"Enter {resource.label}"):
         RIGOL_DG4000_SCHEMA.project_values({})
     with pytest.raises(ValueError, match="below its minimum"):
         RIGOL_DG4000_SCHEMA.draft_values({"timeout_seconds": 0.0})

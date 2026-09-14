@@ -1342,11 +1342,16 @@ class CalibrationTask:
             # board and a handshake, serialised the sequence against the
             # camera's own transfer, and could fail a run whose frames were
             # perfectly fine because a report arrived late.
+            # Armed BEFORE the call, not after it: FIRE is the operation
+            # that can leave the board running, and a FIRE that raises is
+            # exactly the case where it may already have started.  Setting
+            # the flag on the way out left that board firing with nobody
+            # coming back to SAFE it.
+            firing = True
             self.sequencer.fire(
                 run_repeats=self.request.repeats,
                 scan_repeats=1,
             )
-            firing = True
             # Archive the execution state, not LOAD's neutral counters.  FIRE
             # is the authority that applies this run's M/S values.
             sequencer_state = self.sequencer.snapshot()

@@ -71,9 +71,9 @@ def _write_fixture(
 
 def test_default_board_manifest_generates_host_and_validates_both_projections() -> None:
     target = pulse_target_from_xdc()
-    assert target.raw_lanes == tuple(f"ch{index:02d}" for index in range(62))
-    assert len(target.package_pins) == 62
-    assert sum(port.kind == "digital" for port in target.ports) == 18
+    assert target.raw_lanes == tuple(f"ch{index:02d}" for index in range(63))
+    assert len(target.package_pins) == 63
+    assert sum(port.kind == "digital" for port in target.ports) == 19
     buses = tuple(port for port in target.ports if port.kind == "dac")
     assert len(buses) == 4
     assert {port.width for port in buses} == {10}

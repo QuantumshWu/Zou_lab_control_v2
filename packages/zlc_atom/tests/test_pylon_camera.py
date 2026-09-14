@@ -547,12 +547,21 @@ def test_fault_loudness_follows_the_arm_mode(fake_pypylon) -> None:
 
 
 def test_mono8_is_verified_from_sdk_readback(fake_pypylon) -> None:
+    """Every readback verifies the format, and a setting change forces one.
+
+    ``working_point()`` reuses the last readback until a setting or the
+    acquisition mode changes, so the verification rides on the readback
+    rather than on the accessor: a full SDK readback per call was one on
+    every measurement.
+    """
+
     camera = _FakeCamera()
     adapter = PylonCameraAdapter(_config(), camera=camera)
     adapter.open()
+    # Changed behind the adapter's back, so only a real readback finds it.
     camera.PixelFormat.value = "Mono12"
     with pytest.raises(RuntimeError, match="Mono8"):
-        adapter.working_point()
+        adapter.set_exposure_seconds(0.031)
 
 
 def test_open_failure_closes_once_and_close_remains_idempotent(fake_pypylon) -> None:

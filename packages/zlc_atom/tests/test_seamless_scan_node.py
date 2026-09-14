@@ -369,6 +369,9 @@ def test_the_seamless_node_asks_nothing_about_gating_or_advance() -> None:
     assert set(names) == {
         "pulse_template",
         "plan",
+        # Restarted once before the scan and waited for; it says nothing
+        # about when a frame is taken or when the table advances.
+        "acquisition_logic",
         "api_values",
         "repeats",
         "shots_per_point",
@@ -917,7 +920,10 @@ def test_a_manual_axis_is_the_outer_loop_and_its_answers_are_the_axis() -> None:
     assert bench.fired_repeats == [(1, 1)] * 3, (
         "one fire per manual point, each playing the whole inner table"
     )
-    assert len(bench.scan_tables) == 3, "the inner table is written per fire"
+    assert len(bench.scan_tables) == 1, (
+        "the program and its table stay resident: every manual point re-fires "
+        "the one that is already on the board"
+    )
 
     schema = value.block.schema
     power = next(axis for axis in schema.point_domain.axes if axis.name == "power")

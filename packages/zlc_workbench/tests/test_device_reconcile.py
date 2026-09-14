@@ -528,7 +528,7 @@ def test_a_session_that_fails_after_its_devices_opened_closes_them(tmp_path):
             self.close_fails = close_fails
             self.closed = False
 
-        def load_config_values(self, entries, *, source: str) -> None:
+        def load_config_file(self, path) -> None:
             events.append("load config")
             raise RuntimeError("sequencer rejected config load")
 

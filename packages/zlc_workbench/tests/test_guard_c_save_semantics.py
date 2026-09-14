@@ -272,9 +272,10 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
 
         with np.load(archives[0], allow_pickle=False) as payload:
             assert "info" in payload.files
+        # The TYPED datasets the reader validated, not the raw section
+        # tree: what is asserted below is a block of values.
         info, arrays, datasets = read_archive(archives[0])
         sections = info["sections"]
-        datasets = sections["dataset"]
         assert len(datasets) == 1 and other_panel_id not in datasets
         dataset_name = next(iter(datasets))
         restored = datasets[dataset_name]

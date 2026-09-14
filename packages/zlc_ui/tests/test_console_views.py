@@ -1550,7 +1550,16 @@ handle.set_panel_projection('panel-1', state, locked_surface)
 assert handle.update_panel_editor(
     'panel-1', dict(projection, parameter_surface=locked_surface)
 )
-assert not card._settings_form.widget_for('signal').isEnabled()
+# Opening the Edit page retires the card's Setting overlay, so ask it the
+# way an operator does: open it again and read what it now offers.  A form
+# nobody can see has no enabled state worth asserting.
+card._open_settings()
+app.processEvents()
+assert not card._settings_form.widget_for('signal').isEnabled(), (
+    f'popup={card._settings_popup.isVisible()} '
+    f'locked={card._parameter_surface.get("science_locked")!r} '
+    f'groups={bool(card._groups)}'
+)
 assert not card._settings_form.widget_for('overlay_signal').isEnabled()
 assert not card._settings_form.widget_for('semantic__x').isEnabled()
 assert card._settings_form.widget_for('size').isEnabled()

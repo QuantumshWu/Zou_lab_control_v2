@@ -123,6 +123,9 @@ def bench(tmp_path):
             installation=_BenchInstallation(),
             workspace=SimpleNamespace(root=tmp_path, data=tmp_path),
             day_folder_path=lambda: str(tmp_path),
+            # No installation config, so no accepted roles -- what the real
+            # session answers in exactly that case.
+            device_labels={},
             nodes=(),
         )
     finally:
@@ -261,8 +264,10 @@ def test_starting_a_node_runs_it_and_the_row_says_so(presenter, session) -> None
     assert value is not None
     shape = value.shape
     # (repeat, frame, y, x): the cycle's frames ARE the point axis now.
-    assert shape[:2] == (1, 3)
-    expected = f"{shape[0]} × {shape[1]} × ({'×'.join(map(str, shape[2:]))})"
+    assert shape == (1, 3, 96, 128)
+    # One bracket per DOMAIN -- repeat, point, cell -- which is what
+    # format_signal_shape writes and what the row and the editor read.
+    expected = "(1) × (3) × (96 × 128)"
     assert tuple(value[1] for value in row.publishes) == (expected,)
     occupancy_id = presenter.add_logic("occupancy")
     assert presenter.logic_editor_projection(occupancy_id)["source_labels"] == {

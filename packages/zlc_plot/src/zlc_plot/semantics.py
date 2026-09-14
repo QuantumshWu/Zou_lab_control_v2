@@ -952,7 +952,7 @@ def composed_spec(
             return replace(
                 candidate,
                 labels=PlotLabels(title=labels.title),
-                cell=replace(candidate.cell, labels=replace(labels, title=None)),
+                cell=replace(semantic_spec(candidate), labels=replace(labels, title=None)),
             )
         return replace(candidate, labels=labels)
 

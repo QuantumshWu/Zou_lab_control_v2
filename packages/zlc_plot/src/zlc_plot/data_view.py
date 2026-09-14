@@ -4467,9 +4467,9 @@ class DataView:
         if cached_flat is None and not sparse:
             # One copy, sealed in place: the plane is this owner's own,
             # made this instant, so there is nothing to isolate it from.
-            cached_flat = np.array(
-                resolved.coordinate.indices, dtype=np.int64, copy=True
-            ).reshape(-1)
+            cached_flat = np.asarray(
+                resolved.coordinate.indices, dtype=np.int64
+            ).flatten()
             cached_flat.setflags(write=False)
             self._flat_cache[ref] = cached_flat
         if sparse:

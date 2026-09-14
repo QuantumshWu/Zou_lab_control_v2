@@ -535,7 +535,10 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
     assert defaults["feedback_mode"] == "qcmos_bright_dark"
     assert defaults["exposure_seconds"] == pytest.approx(0.1)
     assert defaults["pulse_template"] == ""
-    with pytest.raises(ValueError, match="pulse_template"):
+    template = next(
+        f for f in descriptor.authoring_schema.fields if f.name == "pulse_template"
+    )
+    with pytest.raises(ValueError, match=f"Enter {template.label}"):
         descriptor.authoring_schema.project_values()
     pulse_only = descriptor.authoring_schema.project_values(
         {"pulse_template": "operator-selected.json"}

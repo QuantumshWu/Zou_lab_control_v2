@@ -607,7 +607,11 @@ class RfSourceBase:
         channel, kind = routed
         with self._condition:
             # Compare the actual result with this session's latest reading;
-            # no extra before-query merely to count an epoch.
+            # no extra before-query merely to count an epoch.  The reading is
+            # replaced by a write that COMPLETED and never cleared ahead of
+            # one: dropping it first left a refused command -- an off-grid
+            # frequency, an out-of-range power -- with a blank current value
+            # that no reader would fill until the next explicit Refresh.
             before = self._current_values.get(selected)
             if kind == FREQUENCY_FIELD:
                 requested = float(value)
@@ -616,7 +620,6 @@ class RfSourceBase:
                     raise ValueError(
                         f"{selected} must lie in [{low!r}, {high!r}] Hz"
                     )
-                self._current_values.pop(selected, None)
                 effective: Any = float(self._write_frequency(channel, requested))
             elif kind == POWER_FIELD:
                 requested = float(value)
@@ -630,7 +633,6 @@ class RfSourceBase:
                     raise ValueError(
                         f"{selected} must lie in [{low!r}, {high!r}] {unit or 'dBm'}"
                     )
-                self._current_values.pop(selected, None)
                 effective = float(
                     self._write_power_in_unit(channel, requested, unit)
                     if unit else self._write_power(channel, requested)
@@ -638,7 +640,6 @@ class RfSourceBase:
             else:
                 if type(value) is not bool:
                     raise TypeError(f"{selected} takes a bool")
-                self._current_values.pop(selected, None)
                 effective = bool(self._write_output(channel, value))
             canonical = (
                 self.convert_tunable_value(selected, effective, unit, "dBm")

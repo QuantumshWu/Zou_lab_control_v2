@@ -443,11 +443,12 @@ pane.resize(560, 600); pane.show(); app.processEvents()
 tree = pane._rows_tabs['Summary'].tree
 rows = [tree.topLevelItem(index) for index in range(3)]
 assert [row.text(1) for row in rows] == ['demo', long_value, explicit]
-# A long value wraps under its name and a multi-line one keeps its lines:
-# both rows are taller than the one-word row, and nothing scrolls sideways.
+# A value is never wrapped or cut: a long one is read by scrolling to it,
+# and only a value carrying its own newlines is taller than a row.
 heights = [tree.visualItemRect(row).height() for row in rows]
-assert heights[1] > heights[0] and heights[2] > heights[0], heights
-assert tree.horizontalScrollBar().maximum() == 0
+assert heights[1] == heights[0], heights
+assert heights[2] > heights[0], heights
+assert tree.horizontalScrollBar().maximum() > 0
 """
     )
 

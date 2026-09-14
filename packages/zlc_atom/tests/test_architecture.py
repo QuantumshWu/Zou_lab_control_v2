@@ -625,14 +625,19 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         )
         # The pulse is the one field with no default: pulses are workspace
         # files the operator names, so a projection must name one.
-        with pytest.raises(ValueError, match="pulse_template"):
+        template = next(
+            field
+            for field in descriptors["calibration"].authoring_schema.fields
+            if field.name == "pulse_template"
+        )
+        with pytest.raises(ValueError, match=f"Enter {template.label}"):
             descriptors["calibration"].authoring_schema.project_values({})
         named = {"pulse_template": IMAGING_PULSE_RESOURCE.path.name}
         defaults = descriptors["calibration"].authoring_schema.project_values(named)
         assert defaults["repeats"] == 200
         assert defaults["threshold_method"] == "gaussian"
         assert defaults["review_detected_sites"] is False
-        with pytest.raises(ValueError, match="cannot exceed"):
+        with pytest.raises(ValueError, match="must be shorter than"):
             descriptors["calibration"].authoring_schema.project_values(
                 {
                     **named,

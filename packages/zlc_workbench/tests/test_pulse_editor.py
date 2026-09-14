@@ -1027,7 +1027,9 @@ class _Sequencer(ConfigValueHolder):
             scan_repeats=self._scan_repeats,
         )
 
-    def wait_done(self, timeout=None) -> object | None:
+    def wait_done(
+        self, timeout: float | None = None, *, command_id: int | None = None
+    ) -> DoneReport | None:
         self.events.append("wait_done")
         self.wait_timeouts.append(timeout)
         # None means "no shot finished", exactly as the real device reports it.

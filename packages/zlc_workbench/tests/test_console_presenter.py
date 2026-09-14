@@ -93,7 +93,6 @@ class _CardView:
         self.edit_requested = _Signal()
         self.dropped = _Signal()
         self.drag_started = _Signal()
-        self.drag_moved = _Signal()
         self.choices: tuple = ()
         self.chosen = ""
         self.size = ""
@@ -3731,6 +3730,7 @@ def test_task_console_layout_rejects_a_non_catalog_facet_cell(presenter) -> None
     document = presenter.layout()
     document["panels"].append(
         {
+            "panel_id": "panel-report-only",
             "signal": "",
             "title": "Report-only image facets",
             "kind": "facet_grid",
@@ -3756,7 +3756,9 @@ def test_task_console_layout_rejects_a_non_catalog_facet_cell(presenter) -> None
     expected = "cell kind must be one of " + ", ".join(
         kind.value for kind in GRID_CELL_KINDS
     )
-    assert any(expected in text for _severity, text in presenter.view.status)
+    assert any(expected in text for _severity, text in presenter.view.status), (
+        list(presenter.view.status)
+    )
 
 
 class _RunningHost:
@@ -7681,9 +7683,12 @@ def test_a_region_on_a_scan_curve_reaches_the_scan_as_its_next_sweep() -> None:
         expected_snapshot=frozen,
     )
     narrowed = ScanPlan((ScanAxis("pulse:param:bias", (0.2, 0.5, 0.8)),))
-    assert routed == [
-        ("scan-owner", {"values": {"plan": json.dumps(narrowed.to_tree())}})
-    ]
+    # What it MEANS, not its bytes: the routed draft is a plan document,
+    # and a document carries the row's authoring form beside its values.
+    assert [name for name, _patch in routed] == ["scan-owner"]
+    assert ScanPlan.from_tree(
+        json.loads(routed[0][1]["values"]["plan"])
+    ) == narrowed
 
     routed.clear()
     ConsolePresenter._route_exact_panel_selection(

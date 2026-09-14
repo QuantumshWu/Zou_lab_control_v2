@@ -86,7 +86,7 @@ assert picker.unit() == 'Hz'
 # its prefixes, dBm on its own and Vpp with its prefixes, never dBm under W.
 from zlc_ui.fluent import unit_choice_tree
 trunks = [trunk for trunk, _leaves in unit_choice_tree('dBm')]
-assert trunks == ['dBm', 'W', 'Vpp'], trunks
+assert trunks == ['dBm', 'W', 'Vpp', 'Vrms'], trunks
 assert [leaf for leaf, _k, _f in dict(unit_choice_tree('dBm'))['dBm']] == ['dBm']
 assert 'mVpp' in [leaf for leaf, _k, _f in dict(unit_choice_tree('dBm'))['Vpp']]
 # The popup's one column is never wider than the popup that holds it.
@@ -194,12 +194,16 @@ view = DeviceControlView(spec, projection)
 current = {key: widgets[0].text() for key, widgets in view._field_rows.items()}
 assert current['drive'] == '120 MHz', current
 assert current['mode'] == 'holding', 'a device may report a word, not a number'
-# Read the row in another spelling and the reading follows -- in exactly
-# that spelling, never re-prefixed into kilo-megahertz.
+# Reading the row in another spelling is the OWNER's arithmetic, not the
+# form's: dBm into a load is not a prefix change.  So the picker ASKS,
+# and the complete previous row stands until the answer arrives --
+# number, reading and bounds together, never a half-converted row.
+asked = []
+view.field_unit_requested.connect(lambda key, symbol: asked.append((key, symbol)))
 view.form._shown_unit_picked('drive', 'kHz')
-assert view._field_rows['drive'][0].text() == '120000 kHz', view._field_rows['drive'][0].text()
-view.form._shown_unit_picked('drive', 'GHz')
-assert view._field_rows['drive'][0].text() == '0.12 GHz'
+assert asked == [('drive', 'kHz')], asked
+assert view._field_rows['drive'][0].text() == '120 MHz', view._field_rows['drive'][0].text()
+assert view.form.widget_for('drive').shownUnit() == 'Hz'
 print('ok')
 """
     )

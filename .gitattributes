@@ -13,6 +13,10 @@
 # Verilog constraints and sources are read by Vivado on Windows only.
 *.xdc text eol=crlf
 
-# This packaged pulse is also the exact UTF-8 seed copied into a workspace.
-# Keep its readable-writer bytes unchanged by a Windows checkout.
-packages/zlc_atom/src/zlc_atom/nodes/calibration/imaging_template.json text eol=lf
+# Every JSON document this project writes comes out of
+# ``zlc_durable.readable_json_bytes``, which writes LF -- and several are
+# compared against exactly those bytes: a packaged pulse is the UTF-8 seed
+# copied into a workspace, and a board manifest is read back and diffed.  A
+# checkout with core.autocrlf=true rewrote them, so the comparison failed on
+# the line endings of a file nobody had edited.
+*.json text eol=lf

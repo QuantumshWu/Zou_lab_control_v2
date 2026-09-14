@@ -79,7 +79,10 @@ def _dispose(control, app) -> None:
     hosts = [control._target_host, control._phase_host]
     if hasattr(control, "_wavefront_host"):
         hosts.append(control._wavefront_host)
-    widgets = tuple(host.qt_widget() for host in hosts)
+    # Whatever is actually mounted: asking a CLOSING host for its widget
+    # BUILDS one, which the host rightly refuses -- and the tests that
+    # close the editor before disposing are exactly the close tests.
+    widgets = tuple(host.qt_widget() for host in hosts if not host.closing)
     body = control._body
     control._finish_close()
     deadline = time.monotonic() + 5.0

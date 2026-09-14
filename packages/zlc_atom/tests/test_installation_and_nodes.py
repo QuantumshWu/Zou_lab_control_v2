@@ -101,6 +101,9 @@ session = types.SimpleNamespace(
     ),
     workspace=workspace,
     device_use=device_use,
+    # The window is titled by the ROLE the operator accepted, while
+    # every reference stays the instance key.
+    device_labels={"named-sequencer": "Main sequencer"},
 )
 assert factory(session, "named-sequencer", window_ratio=0.4) == "window"
 assert calls == [{
@@ -108,6 +111,7 @@ assert calls == [{
     "sequence": None,
     "sequencer": named_device,
     "device_use": device_use,
+    "device_label": "Main sequencer",
     "path": "",
     "window_ratio": 0.4,
 }]
