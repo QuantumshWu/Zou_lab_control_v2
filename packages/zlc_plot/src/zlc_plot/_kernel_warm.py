@@ -534,8 +534,12 @@ def representative_work(
     series = _series_snapshot(8, 400)
     # The centred second moment and fused curve validity/bounds pass.
     _render(series, CurvePlot(AxisRef.point("x")), {"uncertainty": True})
-    # Uniform binning and the masked extrema that choose its domain.
-    _render(series, HistogramPlot())
+    # Uniform binning and the masked extrema that choose its domain -- and
+    # the fit a histogram panel opens on, whose lines the kernel strokes.
+    # The batch transform of the fit lines' vertices is asked only by a
+    # frame painted after a fit has landed; every render without one left
+    # it to compile on the operator's first fitted frame.
+    _render(series, HistogramPlot(), fit=True)
     _render(
         _image_snapshot(24, 32, np.float64),
         FacetGridPlot(AxisRef.cell_data("y"), HistogramPlot()),

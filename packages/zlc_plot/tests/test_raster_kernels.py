@@ -232,44 +232,6 @@ def test_joint_axis_extrema_preserve_nan_and_signed_zero(reduction) -> None:
     np.testing.assert_array_equal(presence, np.ones(2, dtype=np.bool_))
 
 
-def test_the_colour_and_gather_kernels_match_their_references() -> None:
-    """Colouring and nearest-neighbour resize, pixel for pixel.
-
-    Both are pure per-element maps, so equality here is exact by
-    construction -- the test exists to catch a kernel that stops mirroring
-    its reference, not to discover a tolerance.
-    """
-
-    pytest.importorskip("numba")
-    rng = np.random.default_rng(13)
-    lut = rng.integers(0, 255, size=(256, 4), dtype=np.uint8)
-
-    values = (rng.random((97, 131)) * 300.0 - 50.0).astype(np.float32)
-    vmin, scale = np.float32(-20.0), np.float32(256.0 / 200.0)
-    scaled = values.astype(np.float32, copy=True)
-    scaled -= vmin
-    scaled *= scale
-    np.clip(scaled, 0.0, 255.0, out=scaled)
-    reference = lut[scaled.astype(np.uint8)]
-    compiled = np.empty(values.shape + (4,), dtype=np.uint8)
-    kernels.colour_float32(np.ascontiguousarray(values), lut, vmin, scale,
-                           compiled)
-    np.testing.assert_array_equal(reference, compiled)
-
-    codes = rng.integers(0, 65535, size=(53, 71), dtype=np.uint16)
-    table = rng.integers(0, 255, size=(65536, 4), dtype=np.uint8)
-    compiled = np.empty(codes.shape + (4,), dtype=np.uint8)
-    kernels.colour_indexed(codes, table, compiled)
-    np.testing.assert_array_equal(table[codes], compiled)
-
-    rgba = rng.integers(0, 255, size=(64, 48, 4), dtype=np.uint8)
-    row_map = np.minimum(((np.arange(90) + 0.5) * (64 / 90)).astype(np.intp), 63)
-    column_map = np.minimum(((np.arange(37) + 0.5) * (48 / 37)).astype(np.intp), 47)
-    compiled = np.empty((row_map.size, column_map.size, 4), dtype=np.uint8)
-    kernels.gather_rows_columns(rgba, row_map, column_map, compiled)
-    np.testing.assert_array_equal(rgba[row_map][:, column_map], compiled)
-
-
 def test_the_extrema_kernel_matches_the_masked_reductions() -> None:
     """Same three numbers as isfinite + any + min(where=) + max(where=).
 

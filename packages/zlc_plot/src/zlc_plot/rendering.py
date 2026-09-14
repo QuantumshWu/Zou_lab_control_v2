@@ -8275,11 +8275,7 @@ class MatplotlibRenderer:
         if column_stop < box_w:
             front[row:row_stop, column_stop:] = background
         window = front[row : row + height, column : column + width]
-        source = np.ascontiguousarray(rgba)
-        if kernels.engaged() and window.flags.c_contiguous:
-            kernels.gather_rows_columns(source, row_map, column_map, window)
-        else:
-            window[...] = source[row_map][:, column_map]
+        window[...] = np.asarray(rgba)[row_map][:, column_map]
         return front, view_extent
 
     @staticmethod
@@ -9559,13 +9555,7 @@ class MatplotlibRenderer:
                     ).astype(np.uint8)
                 ]
                 self._artists["image:direct_color_table"] = (table_key, table)
-            if kernels.engaged():
-                rgba = np.empty(values.shape + (4,), dtype=np.uint8)
-                kernels.colour_indexed(
-                    kernels.readable(values), kernels.readable(table), rgba
-                )
-            else:
-                rgba = table[values]
+            rgba = table[values]
         else:
             # The offset comes off and the range is normalised at the
             # values' OWN precision: narrowing a 1e10 background to float32
@@ -9573,22 +9563,9 @@ class MatplotlibRenderer:
             # colour.  Only the residue, already inside [0, 256), is narrowed
             # for the lookup, where a 256-level quantisation is the same one
             # the colormap applies anyway.
-            scaled = (values - vmin) * (256.0 / (vmax - vmin))
-            if kernels.engaged():
-                # One pass for the clip, the cast and the gather, per pixel,
-                # in registers, with nothing materialised but the answer.
-                rgba = np.empty(values.shape + (4,), dtype=np.uint8)
-                kernels.colour_float32(
-                    kernels.readable(np.asarray(scaled, dtype=np.float32)),
-                    kernels.readable(lut),
-                    np.float32(0.0),
-                    np.float32(1.0),
-                    rgba,
-                )
-            else:
-                scaled = np.asarray(scaled, dtype=np.float32)
-                np.clip(scaled, 0.0, 255.0, out=scaled)
-                rgba = lut[scaled.astype(np.uint8)]
+            scaled = np.asarray((values - vmin) * (256.0 / (vmax - vmin)), dtype=np.float32)
+            np.clip(scaled, 0.0, 255.0, out=scaled)
+            rgba = lut[scaled.astype(np.uint8)]
         rgba.setflags(write=False)
         self._artists[cache_name] = (cache_key, rgba)
         return rgba

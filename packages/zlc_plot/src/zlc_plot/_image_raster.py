@@ -110,20 +110,6 @@ def _area_mean(
     all_valid = _all_true(valid)
     mean_dtype = np.result_type(values.dtype, np.float32)
     shape = (row_starts.size, column_starts.size)
-    compiled = kernels.engaged()
-    if compiled:
-        means = np.empty(shape, dtype=mean_dtype)
-        counts = _NO_COUNTS if all_valid else np.empty(shape, dtype=np.int64)
-        kernels.block_mean_valid(
-            kernels.readable(values),
-            _NO_VALID if all_valid else kernels.readable(valid),
-            not all_valid,
-            row_starts,
-            column_starts,
-            means,
-            counts,
-        )
-        return means if all_valid else _masked_where_empty(means, counts)
     # NO COMPILED KERNEL.  The reshape mean below is the fastest thing
     # numpy alone can do here and the ragged partition is the general
     # answer; both are slower than the kernels above, so this whole
