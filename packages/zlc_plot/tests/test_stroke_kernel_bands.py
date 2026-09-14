@@ -37,17 +37,21 @@ def _reference_polylines(vertices, offsets, colours, widths, clips, out):
             continue
         low = np.full(width, np.inf)
         high = np.full(width, -np.inf)
+        # A column's envelope: every vertex of a finite segment that falls
+        # in the column, and the height where the segment crosses the
+        # column's centre.
         for point in range(start, stop - 1):
             x0, y0 = float(vertices[point, 0]), float(vertices[point, 1])
             x1, y1 = float(vertices[point + 1, 0]), float(vertices[point + 1, 1])
             if not all(map(np.isfinite, (x0, y0, x1, y1))):
                 continue
+            for vertex_x, vertex_y in ((x0, y0), (x1, y1)):
+                column = int(np.floor(vertex_x))
+                if clip_left <= column < clip_right:
+                    low[column] = min(low[column], vertex_y)
+                    high[column] = max(high[column], vertex_y)
             dx = x1 - x0
             if abs(dx) < 1.0e-12:
-                column = int(np.floor(0.5 * (x0 + x1)))
-                if clip_left <= column < clip_right:
-                    low[column] = min(low[column], y0, y1)
-                    high[column] = max(high[column], y0, y1)
                 continue
             first = max(clip_left, int(np.floor(min(x0, x1))))
             last = min(clip_right, int(np.ceil(max(x0, x1))) + 1)
@@ -58,8 +62,10 @@ def _reference_polylines(vertices, offsets, colours, widths, clips, out):
                 y = y0 + along * (y1 - y0)
                 low[column] = min(low[column], y)
                 high[column] = max(high[column], y)
+        # The stroke is the envelope swept by a disc of the half-width; the
+        # half-pixel of antialiasing is the ramp's, not the disc's.
         radius = max(0.5, float(widths[line]) * 0.5)
-        reach = int(np.ceil(radius + 0.5))
+        reach = int(np.ceil(radius))
         alpha_code = float(colours[line, 3]) / 255.0
         for column in range(clip_left, clip_right):
             envelope_low, envelope_high = np.inf, -np.inf
@@ -69,7 +75,7 @@ def _reference_polylines(vertices, offsets, colours, widths, clips, out):
                 if not np.isfinite(low[source]):
                     continue
                 distance = abs(source - column)
-                squared = (radius + 0.5) * (radius + 0.5) - float(distance * distance)
+                squared = radius * radius - float(distance * distance)
                 if squared <= 0.0:
                     continue
                 vertical = np.sqrt(squared)

@@ -906,13 +906,21 @@ def raster_polylines(
             if paint_right <= paint_left:
                 continue
             radius = max(np.float64(0.5), np.float64(widths[line]) * 0.5)
-            reach = int(np.ceil(radius + np.float64(0.5)))
+            reach = int(np.ceil(radius))
             fill_left = max(clip_left, paint_left - reach)
             fill_right = min(clip_right, paint_right + reach + 1)
             for column in range(fill_left, fill_right):
                 low[column] = np.inf
                 high[column] = -np.inf
 
+            # A column's envelope is everything the line does inside that
+            # column: the height where it crosses the column's centre, and
+            # EVERY VERTEX that falls in the column.  Sampled at the centre
+            # alone, a column holding thousands of samples showed one of
+            # them, and a live noise trace was a thin wandering line where
+            # its export -- Agg over the per-column extremes -- was the
+            # band it is.  A vertex counts only with a segment on it: an
+            # isolated vertex is no stroke, as Agg draws none for it.
             for point in range(start, stop - 1):
                 x0 = vertices[point, 0]
                 y0 = vertices[point, 1]
@@ -925,12 +933,16 @@ def raster_polylines(
                     and np.isfinite(y1)
                 ):
                     continue
+                column = int(np.floor(x0))
+                if fill_left <= column < fill_right:
+                    low[column] = min(low[column], y0)
+                    high[column] = max(high[column], y0)
+                column = int(np.floor(x1))
+                if fill_left <= column < fill_right:
+                    low[column] = min(low[column], y1)
+                    high[column] = max(high[column], y1)
                 dx = x1 - x0
                 if abs(dx) < np.float64(1.0e-12):
-                    column = int(np.floor(np.float64(0.5) * (x0 + x1)))
-                    if fill_left <= column < fill_right:
-                        low[column] = min(low[column], y0, y1)
-                        high[column] = max(high[column], y0, y1)
                     continue
                 first = max(fill_left, int(np.floor(min(x0, x1))))
                 last = min(fill_right, int(np.ceil(max(x0, x1))) + 1)
@@ -943,13 +955,17 @@ def raster_polylines(
                     low[column] = min(low[column], y)
                     high[column] = max(high[column], y)
 
+            # The stroke is the envelope swept by a disc of the line's own
+            # half-width, and the pixel ramp below is the half-pixel of
+            # antialiasing on top of it -- so the disc carries no half-pixel
+            # of its own.  It used to, and every line came out a pixel
+            # thicker than Agg's with its edges twice as dark: measured
+            # against Line2D on the same geometry, the flat-column integral
+            # went 4.01 to 2.94 against Agg's 3.07 when the half-pixel came
+            # out of the disc.
             verticals = np.empty(reach + 1, dtype=np.float64)
             for distance in range(reach + 1):
-                squared = (
-                    (radius + np.float64(0.5))
-                    * (radius + np.float64(0.5))
-                    - np.float64(distance * distance)
-                )
+                squared = radius * radius - np.float64(distance * distance)
                 verticals[distance] = (
                     np.sqrt(squared) if squared > 0.0 else np.float64(-1.0)
                 )
