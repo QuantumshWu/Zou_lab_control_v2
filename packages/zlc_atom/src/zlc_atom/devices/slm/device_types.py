@@ -1200,7 +1200,9 @@ def _local_factory(context, key: str, values: Mapping[str, object]) -> Installed
         )
     )
     try:
-        server = _open_slm_server(adapter, "0.0.0.0", int(authored["port"]))
+        server = _open_slm_server(
+            adapter, "0.0.0.0", int(authored["port"]), peers=False
+        )
     except BaseException:
         adapter.close()
         raise
@@ -1243,7 +1245,7 @@ def _local_factory(context, key: str, values: Mapping[str, object]) -> Installed
         finally:
             _stop_server()
 
-    return replace(leaf, closer=_close)
+    return replace(leaf, closer=_close, admit_peers=server.admit_peers)
 
 
 def _announce_local(parameters: Mapping[str, object]) -> tuple[str, dict]:

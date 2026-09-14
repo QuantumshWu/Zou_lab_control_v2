@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .endpoint import (
+    is_loopback_host,
     DEFAULT_BIND_HOST,
     DEFAULT_CONNECT_TIMEOUT,
     DEFAULT_HOST,
@@ -839,10 +840,21 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self,
         address: tuple[str, int],
         streamer: PulseStreamer,
+        *,
+        peers: bool = True,
     ) -> None:
         if not isinstance(streamer, PulseStreamer):
             raise TypeError("streamer must be a PulseStreamer")
         self.streamer = streamer
+        #: Whether a client on ANOTHER machine is admitted.  A server run
+        #: for the bench (the CLI) admits peers from the start.  A server a
+        #: bench holds for its own board admits nobody but this machine
+        #: until the device is published, and refuses them again when it
+        #: is withdrawn: publication is what says the board is on offer,
+        #: and a peer that reached an unpublished board would have TAKEN
+        #: it -- the newcomer takeover below is the protocol's law for a
+        #: board that is on offer, not a way in for one that is not.
+        self._peers = bool(peers)
         self._client_lock = threading.RLock()
         self._command_lock = threading.Lock()
         self._owner_epoch = 0
@@ -871,6 +883,56 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         detail = _log_fields(error=f"{type(exc).__name__}: {str(exc).replace(chr(10), ' ')}")
         _server_log("HANDLER ERROR", client=client, detail=detail)
         super().handle_error(request, client_address)
+
+    @property
+    def peers(self) -> bool:
+        """Whether clients on other machines are admitted."""
+
+        return self._peers
+
+    def verify_request(self, request, client_address) -> bool:
+        """Admit this machine always; admit a peer only while on offer."""
+
+        host = client_address[0] if client_address else ""
+        if self._peers or is_loopback_host(host):
+            return True
+        _server_log(
+            "PEER REFUSED",
+            client=f"{client_address[0]}:{client_address[1]}",
+            detail=_log_fields(
+                reason="not published; a peer is admitted once the device is on the bench fabric"
+            ),
+        )
+        return False
+
+    def admit_peers(self, admitted: bool) -> None:
+        """Put the board on offer to other machines, or take it back.
+
+        Taking it back drops every peer's connection now, the owner's
+        included: its handler retires as on any lost connection, which is
+        the AUTO-SAFE path, so a board a peer was running is left SAFE.
+        This machine's own clients are not touched.
+        """
+
+        self._peers = bool(admitted)
+        if admitted:
+            _server_log(
+                "PEERS ADMITTED",
+                detail=_log_fields(endpoint=f"{self.server_address[0]}:{self.server_address[1]}"),
+            )
+            return
+        with self._client_lock:
+            connections = tuple(self._connections)
+        dropped = 0
+        for connection in connections:
+            try:
+                peer = connection.getpeername()[0]
+            except OSError:
+                continue
+            if not is_loopback_host(peer):
+                _drop_connection(connection)
+                dropped += 1
+        _server_log("PEERS REFUSED", detail=_log_fields(dropped=dropped))
 
     def claim_client(self, client: str, connection: socket.socket) -> None:
         """Transfer ownership only after the previous physical state is SAFE."""
@@ -1891,6 +1953,7 @@ class LocalPulseService:
         state_dir: str = "fpga/build/state",
         host: str = DEFAULT_BIND_HOST,
         port: int = DEFAULT_PORT,
+        peers: bool = False,
     ) -> None:
         _server_log(
             "SERVER STARTING",
@@ -1912,7 +1975,7 @@ class LocalPulseService:
             raise TypeError("streamer must be a PulseStreamer")
         self.streamer = streamer
         try:
-            self._server = PulseRemoteServer((host, int(port)), streamer)
+            self._server = PulseRemoteServer((host, int(port)), streamer, peers=peers)
         except BaseException:
             if self._owns_streamer:
                 streamer.close()
@@ -1931,7 +1994,29 @@ class LocalPulseService:
             listen_host = "0.0.0.0 (all interfaces)"
         _server_log("RPC LISTENING", detail=_log_fields(endpoint=f"{listen_host}:{self.port}"))
         _server_log("READY", detail=_log_fields(hardware="connected", waiting_for_client=True))
-        _print_client_endpoints(self.host, self.port)
+        if peers:
+            _print_client_endpoints(self.host, self.port)
+        else:
+            _server_log(
+                "PEERS REFUSED",
+                detail=_log_fields(
+                    reason="this machine only, until the device is published",
+                    same_computer=f"127.0.0.1:{self.port}",
+                ),
+            )
+
+    @property
+    def peers(self) -> bool:
+        """Whether clients on other machines are admitted."""
+
+        return self._server.peers
+
+    def admit_peers(self, admitted: bool) -> None:
+        """Put the board on offer to other machines, or take it back."""
+
+        self._server.admit_peers(admitted)
+        if admitted:
+            _print_client_endpoints(self.host, self.port)
 
     def close(self) -> None:
         """Stop listening, drop any client, and close what this service opened."""
@@ -1957,7 +2042,7 @@ def serve(
 ) -> None:
     """Serve one supplied device until interrupted."""
 
-    with PulseRemoteServer((host, int(port)), streamer) as server:
+    with PulseRemoteServer((host, int(port)), streamer, peers=True) as server:
         listen_host = host or "0.0.0.0"
         actual_port = int(server.server_address[1])
         if listen_host == "0.0.0.0":

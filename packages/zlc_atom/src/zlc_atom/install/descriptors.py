@@ -25,6 +25,13 @@ class InstalledLeaf:
     #: None means the leaf is independent physical infrastructure and may be
     #: retained while a simulation world is replaced.
     world_affinity: object | None = None
+    #: For a leaf that serves its own protocol from this process (a local
+    #: pulse board, a local SLM): how the bench opens that protocol to
+    #: other machines when the device is published, and closes it again
+    #: when it is withdrawn -- ``admit_peers(True)`` / ``admit_peers(False)``.
+    #: Until published, such a server answers nobody but this machine.
+    #: None for a leaf that serves nothing.
+    admit_peers: Callable[[bool], None] | None = None
 
     @property
     def physical_identity(self) -> PhysicalDeviceIdentity | None:

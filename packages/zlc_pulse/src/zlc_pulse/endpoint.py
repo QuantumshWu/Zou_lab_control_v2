@@ -14,6 +14,8 @@ selected.
 
 from __future__ import annotations
 
+import ipaddress
+
 
 __all__ = [
     "DEFAULT_BIND_HOST",
@@ -21,6 +23,7 @@ __all__ = [
     "DEFAULT_HOST",
     "DEFAULT_PORT",
     "DEFAULT_REQUEST_TIMEOUT",
+    "is_loopback_host",
 ]
 
 #: The port a pulse server listens on and a client dials.
@@ -47,3 +50,21 @@ DEFAULT_REQUEST_TIMEOUT = 30.0
 #: operator that nothing is there -- which is what a dropped SYN looks
 #: like, and a firewall drops rather than refuses.
 DEFAULT_CONNECT_TIMEOUT = 5.0
+
+
+def is_loopback_host(host: str) -> bool:
+    """Whether ``host`` is THIS machine talking to itself.
+
+    A server that listens on every interface sees its own machine's
+    clients arrive from 127.0.0.0/8 or ``::1`` (or the IPv4-mapped form of
+    either), and a peer's from that peer's address; this is the one test
+    both the pulse and the SLM server apply to tell them apart.  Text that
+    is not an address is not loopback.
+    """
+
+    try:
+        address = ipaddress.ip_address(str(host).strip())
+    except ValueError:
+        return False
+    mapped = getattr(address, "ipv4_mapped", None)
+    return bool((mapped or address).is_loopback)

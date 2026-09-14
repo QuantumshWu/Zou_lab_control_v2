@@ -184,6 +184,36 @@ def test_profile_is_strict_and_records_physical_provenance_boundaries(
         _load_profile("unknown-field")
 
 
+def test_the_slm_server_admits_peers_only_while_told_to(monkeypatch) -> None:
+    """A head a bench serves for itself answers nobody but this machine
+    until the device is published; the CLI's server admits peers from the
+    start."""
+
+    sdk = _UsbSdk()
+    _patch_usb(monkeypatch, sdk)
+    physical = X15213Adapter(_config())
+    try:
+        held = _open_slm_server(physical, "127.0.0.1", 0, peers=False)
+        try:
+            assert held.peers is False
+            assert held.verify_request(None, ("127.0.0.1", 40000)) is True
+            assert held.verify_request(None, ("10.0.0.5", 40000)) is False
+            held.admit_peers(True)
+            assert held.verify_request(None, ("10.0.0.5", 40000)) is True
+            held.admit_peers(False)
+            assert held.verify_request(None, ("10.0.0.5", 40000)) is False
+        finally:
+            held.server_close()
+        served = _open_slm_server(physical, "127.0.0.1", 0)
+        try:
+            assert served.peers is True
+            assert served.verify_request(None, ("10.0.0.5", 40000)) is True
+        finally:
+            served.server_close()
+    finally:
+        physical.close()
+
+
 def test_real_installation_dials_its_server_endpoint_and_starts_unknown(
     monkeypatch,
 ) -> None:
@@ -1156,8 +1186,8 @@ def test_a_local_server_whose_thread_cannot_start_releases_what_it_opened(
     servers = []
     open_server = module._open_slm_server
 
-    def capture(adapter, host, port):
-        server = open_server(adapter, host, port)
+    def capture(adapter, host, port, *, peers=True):
+        server = open_server(adapter, host, port, peers=peers)
         servers.append(server)
         return server
 

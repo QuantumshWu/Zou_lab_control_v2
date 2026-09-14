@@ -11,6 +11,7 @@ from threading import Lock
 from typing import TYPE_CHECKING, Mapping, Protocol, runtime_checkable
 
 import numpy as np
+from zlc_pulse.endpoint import is_loopback_host
 
 if TYPE_CHECKING:
     from zlc_atom.install.descriptors import InstalledLeaf
@@ -208,8 +209,17 @@ def _recv_packet(connection: socket.socket) -> tuple[dict[str, object], bytes]:
     return decoded, _recv_exact(connection, payload_size)
 
 
-def _open_slm_server(slm: SlmAdapter, host: str, port: int) -> socketserver.TCPServer:
-    """Return the one-command-at-a-time RPC owner for an existing SLM."""
+def _open_slm_server(
+    slm: SlmAdapter, host: str, port: int, *, peers: bool = True
+) -> socketserver.TCPServer:
+    """Return the one-command-at-a-time RPC owner for an existing SLM.
+
+    ``peers`` says whether a client on another machine is admitted.  A
+    server run for the bench (the CLI) admits peers from the start; a
+    server a bench holds for its own head admits nobody but this machine
+    until the device is published (``admit_peers(True)``), and drops every
+    peer when it is withdrawn (``admit_peers(False)``).
+    """
 
     if not isinstance(slm, SlmAdapter):
         raise TypeError("SLM server requires a canonical SlmAdapter")
@@ -324,7 +334,57 @@ def _open_slm_server(slm: SlmAdapter, host: str, port: int) -> socketserver.TCPS
             with connections_lock:
                 connections.discard(connection)
 
-    server = socketserver.ThreadingTCPServer((bind_host, port), handle)
+    class _Server(socketserver.ThreadingTCPServer):
+        """The listener, with the say over WHO it serves."""
+
+        peers = False
+
+        def verify_request(self, request, client_address) -> bool:
+            """Admit this machine always; admit a peer only while on offer."""
+
+            client_host = client_address[0] if client_address else ""
+            if self.peers or is_loopback_host(client_host):
+                return True
+            _LOG.info(
+                "SLM PEER REFUSED client=%s:%s reason=not published",
+                client_address[0], client_address[1],
+            )
+            return False
+
+        def admit_peers(self, admitted: bool) -> None:
+            """Put the head on offer to other machines, or take it back.
+
+            Taking it back drops every peer's connection now; this
+            machine's own clients are not touched.
+            """
+
+            self.peers = bool(admitted)
+            if admitted:
+                _LOG.info(
+                    "SLM PEERS ADMITTED endpoint=%s:%d",
+                    bind_host, int(self.server_address[1]),
+                )
+                return
+            with connections_lock:
+                active = tuple(connections)
+            dropped = 0
+            for connection in active:
+                try:
+                    peer = connection.getpeername()[0]
+                except OSError:
+                    continue
+                if is_loopback_host(peer):
+                    continue
+                try:
+                    connection.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                connection.close()
+                dropped += 1
+            _LOG.info("SLM PEERS REFUSED dropped=%d", dropped)
+
+    server = _Server((bind_host, port), handle)
+    server.peers = bool(peers)
     original_close = server.server_close
 
     def close() -> None:
@@ -342,8 +402,9 @@ def _open_slm_server(slm: SlmAdapter, host: str, port: int) -> socketserver.TCPS
 
     server.server_close = close
     _LOG.info(
-        "SLM SERVER LISTENING endpoint=%s:%d device=%s",
+        "SLM SERVER LISTENING endpoint=%s:%d device=%s peers=%s",
         bind_host, int(server.server_address[1]), slm.identity,
+        "admitted" if server.peers else "refused until published",
     )
     return server
 

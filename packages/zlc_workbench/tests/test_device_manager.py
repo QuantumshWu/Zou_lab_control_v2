@@ -1046,7 +1046,7 @@ def test_remote_toggle_publishes_and_withdraws_on_the_fabric(tmp_path) -> None:
     source = virtual_rf_source(VaunixLmsConfig(serial=1001))
     session = SimpleNamespace(
         installation=SimpleNamespace(
-            devices={"rf": SimpleNamespace(device=source)}, failures={}
+            devices={"rf": SimpleNamespace(device=source, admit_peers=None)}, failures={}
         ),
         device_use=DeviceUseCoordinator(),
     )
@@ -1113,7 +1113,7 @@ def test_a_published_device_refuses_local_control_until_withdrawn(tmp_path) -> N
     source = virtual_rf_source(VaunixLmsConfig(serial=1001))
     session = SimpleNamespace(
         installation=SimpleNamespace(
-            devices={"rf": SimpleNamespace(device=source)}, failures={}
+            devices={"rf": SimpleNamespace(device=source, admit_peers=None)}, failures={}
         ),
         device_use=DeviceUseCoordinator(),
     )
@@ -1179,9 +1179,13 @@ def test_a_self_serving_type_is_published_as_its_client_shape(tmp_path) -> None:
             ),
         )
     )
+    # The leaf's own server answers nobody but this machine until it is
+    # published; the presenter opens and closes that door.
+    admitted: list[bool] = []
     session = SimpleNamespace(
         installation=SimpleNamespace(
-            devices={"board": SimpleNamespace(device=object())}, failures={}
+            devices={"board": SimpleNamespace(device=object(), admit_peers=admitted.append)},
+            failures={},
         ),
         device_use=DeviceUseCoordinator(),
     )
@@ -1201,6 +1205,7 @@ def test_a_self_serving_type_is_published_as_its_client_shape(tmp_path) -> None:
         assert view.lifecycle[0] == "Apply device changes"
 
         assert manager.toggle_remote("board") is True
+        assert admitted == [True], "publishing opens the server to peers"
         announcer = manager._announcer
         assert announcer is not None
         (record,) = list_remote_devices("127.0.0.1", announcer.port)
@@ -1214,6 +1219,9 @@ def test_a_self_serving_type_is_published_as_its_client_shape(tmp_path) -> None:
         assert manager.devices[0].parameters["port"] == 18999, (
             "the draft stays on the form"
         )
+        assert manager.toggle_remote("board") is True
+        assert admitted == [True, False], "withdrawing closes the door on peers"
+        assert list_remote_devices("127.0.0.1", announcer.port) == ()
     finally:
         if manager._announcer is not None:
             manager._announcer.close()
@@ -1253,7 +1261,7 @@ def test_each_published_device_reads_only_its_own_log(tmp_path) -> None:
     source = virtual_rf_source(VaunixLmsConfig(serial=1001))
     session = SimpleNamespace(
         installation=SimpleNamespace(
-            devices={"rf": SimpleNamespace(device=source)}, failures={}
+            devices={"rf": SimpleNamespace(device=source, admit_peers=None)}, failures={}
         ),
         device_use=DeviceUseCoordinator(),
     )
@@ -1340,7 +1348,7 @@ def test_a_local_server_device_s_log_includes_its_declared_channels(tmp_path) ->
     )
     session = SimpleNamespace(
         installation=SimpleNamespace(
-            devices={"board": SimpleNamespace(device=object())}, failures={}
+            devices={"board": SimpleNamespace(device=object(), admit_peers=None)}, failures={}
         ),
         device_use=DeviceUseCoordinator(),
     )
@@ -1407,8 +1415,8 @@ def test_devices_from_the_fabric_or_another_machine_refuse_remote(tmp_path) -> N
     session = SimpleNamespace(
         installation=SimpleNamespace(
             devices={
-                "borrowed": SimpleNamespace(device=object()),
-                "faraway": SimpleNamespace(device=object()),
+                "borrowed": SimpleNamespace(device=object(), admit_peers=None),
+                "faraway": SimpleNamespace(device=object(), admit_peers=None),
             },
             failures={},
         )

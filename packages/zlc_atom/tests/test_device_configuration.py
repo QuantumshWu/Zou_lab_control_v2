@@ -275,6 +275,21 @@ def test_a_local_sequencer_serves_its_own_board_and_dials_loopback() -> None:
         leaf = installation.devices["sequencer"]
         assert leaf.type_id == "sequencer.local"
         assert leaf.device.safe().stable
+        # The server it holds answers nobody but this machine until the
+        # device is published: a peer's connection is accepted and shut
+        # at once, before a word of the protocol.
+        assert leaf.admit_peers is not None
+        from zlc_atom.devices.remote.fabric import local_lan_ip
+
+        lan = local_lan_ip()
+        if lan != "127.0.0.1":
+            with socket.create_connection((lan, free_port), timeout=2.0) as peer:
+                peer.settimeout(2.0)
+                try:
+                    greeting = peer.recv(1)
+                except ConnectionResetError:
+                    greeting = b""
+                assert greeting == b"", "a peer is refused before publication"
     finally:
         installation.close()
     # The leaf's closer stops the in-process server, not just the client.

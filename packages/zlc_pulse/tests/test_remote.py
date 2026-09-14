@@ -1493,6 +1493,51 @@ def test_local_pulse_service_serves_a_supplied_streamer_and_narrates(caplog) -> 
         streamer.close()
 
 
+def test_a_local_service_admits_peers_only_while_told_to() -> None:
+    """A bench-held server answers nobody but this machine until told.
+
+    ``serve`` (the CLI) admits peers from the start.  ``LocalPulseService``
+    does not: a board a bench opened for itself is not on offer, and a
+    peer that reached it anyway would TAKE it, by the protocol's newcomer
+    takeover.  Publishing the device opens the door; withdrawing it closes
+    the door and drops peers -- this machine's own client stays.
+    """
+
+    from zlc_pulse.remote import LocalPulseService
+
+    geom = replace(StreamerParams(), max_edges=8, bank_size=2)
+    streamer = PulseStreamer(
+        MemoryRegisterTransport(geom=geom), geom, 50e6, target=_BOARD_TARGET
+    )
+    streamer.open()
+    try:
+        served = PulseRemoteServer(("127.0.0.1", 0), streamer)
+        try:
+            assert served.peers is True
+            assert served.verify_request(None, ("10.0.0.5", 40000)) is True
+        finally:
+            served.server_close()
+        service = LocalPulseService(streamer, host="127.0.0.1", port=0)
+        try:
+            server = service._server
+            assert service.peers is False
+            assert server.verify_request(None, ("127.0.0.1", 40000)) is True
+            assert server.verify_request(None, ("::1", 40000)) is True
+            assert server.verify_request(None, ("10.0.0.5", 40000)) is False
+            with RemotePulseStreamer("127.0.0.1", service.port) as client:
+                assert client.safe().stable
+                service.admit_peers(True)
+                assert service.peers is True
+                assert server.verify_request(None, ("10.0.0.5", 40000)) is True
+                service.admit_peers(False)
+                assert server.verify_request(None, ("10.0.0.5", 40000)) is False
+                assert client.safe().stable, "this machine's own client is kept"
+        finally:
+            service.close()
+    finally:
+        streamer.close()
+
+
 def test_a_client_with_no_channel_speaks_connection_error() -> None:
     """"Not open" and "died mid-call" are the same fact and wear one type,
     so a caller (the pulse editor's close) classifies a lost connection

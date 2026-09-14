@@ -761,7 +761,7 @@ class DeviceManagerPresenter:
         )
 
         if key in self._remoted:
-            self._withdraw(key)
+            self._withdraw(key, leaf)
             self.view.set_remoted(tuple(sorted(self._remoted)))
             self._report(f"{key}: withdrawn from the bench fabric", severity="task")
             return True
@@ -855,6 +855,11 @@ class DeviceManagerPresenter:
                     f"the bench fabric could not start: {error}", severity="error"
                 )
                 return False
+        # The server this machine holds for the device has answered nobody
+        # else until now: on offer means reachable, so the door opens
+        # before the announcement that sends peers to it.
+        if leaf.admit_peers is not None:
+            leaf.admit_peers(True)
         self._announcer.publish(record)
         self._remoted[key] = lease
         self.view.set_remoted(tuple(sorted(self._remoted)))
@@ -865,16 +870,22 @@ class DeviceManagerPresenter:
         )
         return True
 
-    def _withdraw(self, key: str) -> None:
+    def _withdraw(self, key: str, leaf: object | None = None) -> None:
         """Take one device back from the fabric.
 
-        The announcement goes first, so no new peer request can reach the
-        device; the claim that kept local users off it is released after.
+        The announcement goes first, so no new peer finds the device; the
+        server this machine holds for it then refuses peers and drops the
+        ones connected, so no peer keeps it; the claim that kept local
+        users off it is released after.  ``leaf`` is None when the device
+        has already left the session, and its server with it.
         """
 
         lease = self._remoted.pop(key)
         if self._announcer is not None:
             self._announcer.withdraw(key)
+        admit_peers = None if leaf is None else leaf.admit_peers
+        if admit_peers is not None:
+            admit_peers(False)
         lease.release()
 
     def close_device(self, instance_id: str) -> bool:
@@ -1161,7 +1172,7 @@ class DeviceManagerPresenter:
         # Nothing stays published that this machine is about to stop
         # serving -- and the session's close insists that no claim is left.
         for key in tuple(self._remoted):
-            self._withdraw(key)
+            self._withdraw(key, session.installation.devices.get(key))
         self.busy = True
         self._show()
         self._report("shutting down devices")

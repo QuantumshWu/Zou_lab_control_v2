@@ -104,7 +104,10 @@ LOCAL_SEQUENCER_SCHEMA = AuthoringSchema(
 
 
 def _local_factory(context, key: str, values: dict) -> InstalledLeaf:
-    """Open the plugged-in board, serve it, and join as the loopback client."""
+    """Open the plugged-in board, serve it to this machine, and join as the
+    loopback client.  The server admits a peer only once the device is
+    published: ``admit_peers`` on the leaf is the bench's switch for that.
+    """
 
     from zlc_pulse import LocalPulseService
 
@@ -123,6 +126,7 @@ def _local_factory(context, key: str, values: dict) -> InstalledLeaf:
         backend=str(authored["backend"]),
         uart_port=str(authored["uart_port"]).strip() or None,
         port=int(authored["port"]),
+        peers=False,
     )
     device = None
     try:
@@ -149,7 +153,7 @@ def _local_factory(context, key: str, values: dict) -> InstalledLeaf:
         finally:
             service.close()
 
-    return replace(leaf, closer=_close)
+    return replace(leaf, closer=_close, admit_peers=service.admit_peers)
 
 
 def _announce_local(parameters) -> tuple[str, dict]:
