@@ -349,8 +349,7 @@ class GestureSessionMixin:
         )
         candidate = self._display_color_limit_candidate()
         assert candidate is not None
-        with self._renderer.raster_transaction():
-            self._renderer.begin_color_limit_gesture(candidate)
+        self._renderer.begin_color_limit_gesture(candidate)
         return True
 
     def _area_drag_handle(
@@ -750,11 +749,10 @@ class GestureSessionMixin:
                 # chrome beside it is background.  Nothing about the drag
                 # lowers the resolution -- the scene is rendered at the box
                 # size on every frame.
-                with self._renderer.raster_transaction():
-                    self.set_parameters({
-                        "camera_azimuth": camera.azimuth_deg,
-                        "camera_elevation": camera.elevation_deg,
-                    })
+                self.set_parameters({
+                    "camera_azimuth": camera.azimuth_deg,
+                    "camera_elevation": camera.elevation_deg,
+                })
             finally:
                 if orbit_lane:
                     gesture.lane_finished("orbit")
@@ -775,8 +773,7 @@ class GestureSessionMixin:
             candidate = self._display_color_limit_candidate()
             assert candidate is not None
             assert self._renderer is not None
-            with self._renderer.raster_transaction():
-                self._renderer.preview_color_limit_candidate(candidate)
+            self._renderer.preview_color_limit_candidate(candidate)
             return
         if isinstance(gesture, _SelectorGesture) and not gesture.started:
             # Press only arms the selector.  Native double-click delivery
@@ -827,17 +824,16 @@ class GestureSessionMixin:
         )
         if updated is not None and updated != current:
             assert self._renderer is not None
-            with self._renderer.raster_transaction():
-                if gesture.kind is SelectorKind.THRESHOLD:
-                    # The bar's reading -- threshold, L/R, fidelity -- is
-                    # the frame's, computed at the last present, and a drag
-                    # moves the bar between presents: the reading follows
-                    # the candidate here, or the bar reads one number while
-                    # standing at another.
-                    self._renderer.set_classifier_labels(
-                        self._classifier_frame_labels()[1]
-                    )
-                self._renderer.preview_selector(self._painted_selector_state(updated))
+            if gesture.kind is SelectorKind.THRESHOLD:
+                # The bar's reading -- threshold, L/R, fidelity -- is
+                # the frame's, computed at the last present, and a drag
+                # moves the bar between presents: the reading follows
+                # the candidate here, or the bar reads one number while
+                # standing at another.
+                self._renderer.set_classifier_labels(
+                    self._classifier_frame_labels()[1]
+                )
+            self._renderer.preview_selector(self._painted_selector_state(updated))
             self._emit_selection(SelectionChange.UPDATED, updated)
 
     def _on_button_release(self, event: Any) -> None:
@@ -857,8 +853,7 @@ class GestureSessionMixin:
             # materialize -- 20-40 ms on a 1200x1920 grid -- to arrive at a
             # bit-identical picture, on every single mouse-up.
             self._renderer.set_height_bars_dragging(False)
-            with self._renderer.raster_transaction():
-                self._renderer.capture_gesture_background()
+            self._renderer.capture_gesture_background()
             return
         if getattr(event, "button", None) == 2:
             if not isinstance(gesture, _PanGesture):
@@ -899,10 +894,9 @@ class GestureSessionMixin:
             ):
                 self.remove_selector(SelectorKind.CROSSHAIR)
             else:
-                with self._renderer.raster_transaction():
-                    self._render_current(
-                        RenderEffect.BASE_GEOMETRY
-                    )
+                self._render_current(
+                    RenderEffect.BASE_GEOMETRY
+                )
             return
         if isinstance(gesture, _ColorGesture):
             self._finish_color_gesture(event, gesture)

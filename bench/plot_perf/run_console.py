@@ -82,7 +82,6 @@ _COMPOSE_SEAMS = (
     "_dynamic_artists",
     "_raster_facet_curve_command",
     "_raster_prepared_error_bars",
-    "_raster_curve_lines",
     "_raster_prepared_images",
     "_thin_overlapping_chrome",
     "_height_bars_occluded_polyline",

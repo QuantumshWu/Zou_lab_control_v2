@@ -431,7 +431,6 @@ class SurfacePlan:
     axes: tuple[AxesPlan, ...]
     facet_topology: FacetTopology | None
     facet_shape: tuple[int, int] | None
-    recommended_preset: str | None
     facet_typography: FacetTypographyPlan | None
     #: FacetGrid only: the focused-cell geometry, resolved through the SAME
     #: image split the standalone Image kind gets -- (image, distribution,
@@ -1094,7 +1093,6 @@ def resolve_surface(
         axes=axes,
         facet_topology=facet_topology,
         facet_shape=shape,
-        recommended_preset=recommended_name,
         facet_typography=typography,
         facet_focus_axes=facet_focus_axes,
         rolling_side_distribution=show_distribution,

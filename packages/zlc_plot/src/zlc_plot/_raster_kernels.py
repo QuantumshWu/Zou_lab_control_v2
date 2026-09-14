@@ -2,9 +2,9 @@
 
 Like :mod:`_height3d_scanline`, this module exists for SPEED ONLY.  Each
 kernel mirrors a numpy reference that stays where it lives and stays the
-specification -- the block-mean in :mod:`_image_raster`, the colour pass and
-the box resize in :mod:`rendering`, the uniform histogram in
-:mod:`data_view`.  Every kernel here reproduces its reference operation for
+specification -- the uniform histogram and the code aggregations in
+:mod:`data_view`, the masked extrema and centred sums beside their own
+kernels here.  Every kernel here reproduces its reference operation for
 operation, in the same dtypes and the same order, and a standing contract
 test runs both and asserts bit equality, so the two can never drift apart
 silently.
@@ -139,9 +139,6 @@ def readable(array: Any) -> Any:
     return view
 
 
-# -------------------------------------------------------------- block means
-# ------------------------------------------------------------------- colour
-# ------------------------------------------------------------------- gather
 # ---------------------------------------------------------------- histogram
 @njit(cache=True, parallel=True, nogil=True)
 def uniform_histogram(

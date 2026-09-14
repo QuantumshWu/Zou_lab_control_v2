@@ -827,8 +827,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             with self._lock:
                 self._assert_open()
             assert self._renderer is not None
-            with self._renderer.raster_transaction():
-                return self._renderer.capture_rgba_bytes()
+            return self._renderer.capture_rgba_bytes()
 
     def _raster_presentation_epoch(self) -> int:
         with self._lock:
@@ -873,8 +872,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             with self._lock:
                 self._assert_open()
             assert self._renderer is not None
-            with self._renderer.raster_transaction():
-                self._renderer.draw()
+            self._renderer.draw()
 
     @property
     def parameter_schema(self) -> ParameterSchema:
@@ -1286,35 +1284,34 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         display_classifier_thresholds, classifier_labels = (
             self._classifier_frame_labels()
         )
-        with renderer.raster_transaction():
-            frame = RenderFrame(
-                payload=self._payload,
-                state=self.display_state,
-                effects=effects,
-                data_revision=self.data_revision,
-                fit_overlays=(
-                    ()
-                    if self._accepted_fit is None
-                    else self._accepted_fit.overlays
-                ),
-                fit_model_id=(
-                    None
-                    if self._accepted_fit is None
-                    else str(self._accepted_fit.result.model.model_id)
-                ),
-                classifier_overlays=self._classifier_overlays,
-                classifier_thresholds=display_classifier_thresholds,
-                classifier_labels=classifier_labels,
-                image_overlay=self._image_overlay,
-                selectors=self._painted_selector_snapshot(),
-                facet_index=self._focused_facet_index,
-                facet_focus_index=self._facet_focus_index,
-                view_limits=view_limits,
-            )
-            if compose:
-                renderer.present(frame)
-            else:
-                renderer.present(frame, compose=False)
+        frame = RenderFrame(
+            payload=self._payload,
+            state=self.display_state,
+            effects=effects,
+            data_revision=self.data_revision,
+            fit_overlays=(
+                ()
+                if self._accepted_fit is None
+                else self._accepted_fit.overlays
+            ),
+            fit_model_id=(
+                None
+                if self._accepted_fit is None
+                else str(self._accepted_fit.result.model.model_id)
+            ),
+            classifier_overlays=self._classifier_overlays,
+            classifier_thresholds=display_classifier_thresholds,
+            classifier_labels=classifier_labels,
+            image_overlay=self._image_overlay,
+            selectors=self._painted_selector_snapshot(),
+            facet_index=self._focused_facet_index,
+            facet_focus_index=self._facet_focus_index,
+            view_limits=view_limits,
+        )
+        if compose:
+            renderer.present(frame)
+        else:
+            renderer.present(frame, compose=False)
         if not compose:
             return
         self._presentation_epoch += 1
@@ -1403,14 +1400,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
 
             block = getattr(data, "block", None)
             schema = getattr(block, "schema", None)
-            if schema is None:
-                return None
-            fingerprint = getattr(schema, "structure_fingerprint", None)
-            if fingerprint is None:
-                fingerprint = getattr(schema, "fingerprint", None)
-            if callable(fingerprint):
-                fingerprint = fingerprint()
-            return None if fingerprint is None else str(fingerprint)
+            return None if schema is None else schema.structure_fingerprint
 
         # A new generation over the SAME geometry is the bench firing
         # again: the axes, the selectors' meaning and the fit seeds all
@@ -3175,18 +3165,16 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     # A new run over the SAME geometry keeps the operator's
                     # selectors: the axes still name the same world, and
                     # wiping the table per shot erased the very markers the
-                    # panel record had just mirrored.  Only a geometry
-                    # change (the event<->indexed representation flip is
-                    # the one reachable here) still clears them.
-                    previous_fingerprint = getattr(
-                        previous_schema, "fingerprint", None
-                    )
-                    next_fingerprint = getattr(next_schema, "fingerprint", None)
-                    selector_geometry_changed = generation_changed and not (
-                        previous_fingerprint is not None
-                        and previous_fingerprint == next_fingerprint
-                    )
-                    if selector_geometry_changed:
+                    # panel record had just mirrored.  ONE place decides
+                    # whether the world moved -- the projection transaction,
+                    # which retires the selector table when it does.  Asked
+                    # a second time here, off the FULL schema name, a
+                    # rolling panel sliding its shot window announced every
+                    # marker removed while that transaction kept every one
+                    # of them.  These are the events for a table it MAY
+                    # retire, built here while the old projection can still
+                    # display them and dropped below if it kept the table.
+                    if generation_changed:
                         removed_selection_events = tuple(
                             SelectionEvent(
                                 SelectionChange.REMOVED,
@@ -3219,7 +3207,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                             image_frame.overlay,
                         )
                 else:
-                    selector_geometry_changed = False
                     next_revision = (
                         self.data_revision + 1
                         if revision is None
@@ -3238,11 +3225,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 if generation_changed:
                     projection_context = ProjectionContext(
                         display_state=self.display_state,
-                        selector_snapshot=(
-                            SelectorSnapshot(())
-                            if selector_geometry_changed
-                            else self._selector_controller.snapshot()
-                        ),
+                        selector_snapshot=self._selector_controller.snapshot(),
                         viewport=self._viewport,
                         focused_facet_index=self._focused_facet_index,
                     )
@@ -3261,6 +3244,14 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             )
             if generation_changed:
                 withdrawn_fit = presentation.previous_accepted_fit is not None
+                if (
+                    presentation.previous_selector_controller
+                    is self._selector_controller
+                ):
+                    # The transaction kept the operator's table: the world
+                    # these markers name still stands, so none of them was
+                    # removed and none is announced.
+                    removed_selection_events = ()
                 with self._lock:
                     fit_cancel = self._fit_cancel
                     live_fit_cancel = self._live_fit_cancel
@@ -4797,24 +4788,22 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             with self._lock:
                 self._assert_open()
             assert self._renderer is not None
-            with self._renderer.raster_transaction():
-                atomic_write_file(
-                    target,
-                    lambda stream: self._renderer.save(
-                        stream,
-                        dpi=selected_dpi,
-                        restore_display=restore_display,
-                        **options,
-                    ),
-                )
+            atomic_write_file(
+                target,
+                lambda stream: self._renderer.save(
+                    stream,
+                    dpi=selected_dpi,
+                    restore_display=restore_display,
+                    **options,
+                ),
+            )
 
     def rgba(self) -> np.ndarray:
         with self._render_lock:
             with self._lock:
                 self._assert_open()
             assert self._renderer is not None
-            with self._renderer.raster_transaction():
-                return self._renderer.rgba()
+            return self._renderer.rgba()
 
     def close(self) -> None:
         logical_completion: Future[FitResult | FacetFitBatchResult] | None = None

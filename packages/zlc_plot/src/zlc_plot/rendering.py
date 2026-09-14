@@ -8,7 +8,6 @@ artists; fixed-size changes rebuild layout within the same Figure.
 from __future__ import annotations
 
 from collections import deque
-from contextlib import contextmanager
 import copy
 import ctypes
 from dataclasses import dataclass
@@ -26,7 +25,7 @@ from threading import RLock
 from enum import Enum
 from time import perf_counter
 from types import MappingProxyType
-from typing import Any, Iterable, Iterator, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 import weakref
 
 import numpy as np
@@ -2140,7 +2139,7 @@ def revive_axes(
     style: PlotStyleConfig,
     cells: int,
     plain: int,
-) -> tuple[Any, list[Any], list[Any]] | None:
+) -> tuple[Any, list[Any], list[Any]]:
     """``cells`` bare grid cells and ``plain`` ordinary axes, built once for
     a machine and not again.
 
@@ -2157,9 +2156,10 @@ def revive_axes(
     instead of once per panel.
 
     This is not a warm-up: it is available the moment a panel asks, on a
-    child that has done nothing else.  ``None`` says the bytes could not
-    be read or written and the caller should build its own -- slower, and
-    never wrong.
+    child that has done nothing else.  Bytes that cannot be read or
+    written are not a refusal: the axes are BUILT here instead -- slower,
+    and never wrong -- so every caller gets its axes and none of them
+    carries a second way to make one.
     """
 
     path = _axes_prototype_path(style, cells, plain)
@@ -2211,13 +2211,10 @@ def revive_axes(
 def revive_grid_cells(
     style: PlotStyleConfig,
     cells: int,
-) -> tuple[Any, list[Any]] | None:
+) -> tuple[Any, list[Any]]:
     """``cells`` bare grid cells on their figure: see :func:`revive_axes`."""
 
-    revived = revive_axes(style, cells, 0)
-    if revived is None:
-        return None
-    figure, made, _others = revived
+    figure, made, _others = revive_axes(style, cells, 0)
     return figure, made
 
 
@@ -2776,9 +2773,6 @@ class MatplotlibRenderer:
         self._visible_facet_count = count
 
     def _compose_figure(self) -> None:
-        from matplotlib.backends.backend_agg import FigureCanvasAgg
-        from matplotlib.figure import Figure
-
         reserved = CELL_RESERVE.take(self.style, self.plan)
         plain: Sequence[Any] = ()
         if reserved is None:
@@ -2789,19 +2783,19 @@ class MatplotlibRenderer:
             wanted = sum(
                 1 for entry in self.plan.axes if entry.role == "facet_cell"
             )
-            others = len(self.plan.axes) - wanted
             if wanted:
                 # Exactly what this plan asks for: the bytes are keyed by
                 # the count, so a ten-cell grid keeps its own small file
                 # rather than reviving sixty-four and dropping fifty-four.
                 reserved = revive_grid_cells(self.style, wanted)
-            elif others:
+            else:
                 # A single panel: its own axes revive the same way, a
-                # millisecond each where building one is seven.
-                revived = revive_axes(self.style, 0, others)
-                if revived is not None:
-                    reserved = (revived[0], ())
-                    plain = revived[2]
+                # millisecond each where building one is seven.  Every plan
+                # names at least one axes, so one of these two answers.
+                revived_figure, _cells, plain = revive_axes(
+                    self.style, 0, len(self.plan.axes)
+                )
+                reserved = (revived_figure, ())
         with style_context(
             self.style,
             {
@@ -2809,19 +2803,10 @@ class MatplotlibRenderer:
                 "figure.figsize": self.plan.figure_size_inches,
             },
         ):
-            if reserved is None:
-                figure = Figure(
-                    figsize=self.plan.figure_size_inches,
-                    dpi=self.plan.logical_dpi,
-                    layout=None,
-                )
-                FigureCanvasAgg(figure)
-                cells: Sequence[Any] = ()
-            else:
-                figure, cells = reserved
-                figure.set_size_inches(
-                    *self.plan.figure_size_inches, forward=False
-                )
+            figure, cells = reserved
+            figure.set_size_inches(
+                *self.plan.figure_size_inches, forward=False
+            )
             # Matplotlib native canvases derive physical DPI from this logical
             # baseline.  Materialise the Agg front at the requested screen DPR
             # without allowing a later frontend canvas to multiply it again.
@@ -4852,16 +4837,6 @@ class MatplotlibRenderer:
         if plan:
             kernels.raster_polylines(*plan, np.asarray(canvas.buffer_rgba()))
 
-    def _raster_curve_lines(self, lines: Sequence[Any], canvas: Any) -> bool:
-        """Stroke current Line2D geometry into the live Agg buffer in one
-        kernel, or refuse with nothing painted."""
-
-        plan = self._curve_stroke_plan(lines, canvas)
-        if plan is None:
-            return False
-        self._stroke_curve_plan(plan, canvas)
-        return True
-
     def _raster_prepared_images(self, canvas: Any) -> tuple[bool, frozenset[int]]:
         """Paint every prepared Image surface straight into the canvas."""
 
@@ -6153,12 +6128,6 @@ class MatplotlibRenderer:
         if callable(get_renderer):
             _prepare_renderer(get_renderer())
         draw()
-
-    @contextmanager
-    def raster_transaction(self) -> Iterator[None]:
-        """Group session mutations without exposing partial raster state."""
-
-        yield
 
     def begin_selector_gesture(
         self, kind: SelectorKind, *, compose: bool = True
@@ -9454,7 +9423,8 @@ class MatplotlibRenderer:
                 table = lut[
                     np.clip(
                         (domain - np.float32(vmin))
-                        * np.float32(256.0 / (vmax - vmin)),
+                        / np.float32(vmax - vmin)
+                        * np.float32(256.0),
                         0.0,
                         255.0,
                     ).astype(np.uint8)
@@ -9462,13 +9432,19 @@ class MatplotlibRenderer:
                 self._artists["image:direct_color_table"] = (table_key, table)
             rgba = table[values]
         else:
-            # The offset comes off and the range is normalised at the
-            # values' OWN precision: narrowing a 1e10 background to float32
-            # before subtracting it left a one-unit colour range as a single
-            # colour.  Only the residue, already inside [0, 256), is narrowed
-            # for the lookup, where a 256-level quantisation is the same one
-            # the colormap applies anyway.
-            scaled = np.asarray((values - vmin) * (256.0 / (vmax - vmin)), dtype=np.float32)
+            # ONE SLOT RULE, and the kernel owns it: the offset off, the
+            # range divided out, the colormap's 256 slots multiplied in,
+            # in that order.  Folding the last two into a single reciprocal
+            # was a different last bit from the scene that paints the same
+            # array, and the scene is the one that is imshow byte for byte.
+            # The three run at the values' OWN precision: narrowing a 1e10
+            # background to float32 before subtracting it left a one-unit
+            # colour range as a single colour.  Only the residue, already
+            # inside [0, 256), is narrowed for the lookup, where a 256-level
+            # quantisation is the same one the colormap applies anyway.
+            scaled = np.asarray(
+                (values - vmin) / (vmax - vmin) * 256.0, dtype=np.float32
+            )
             np.clip(scaled, 0.0, 255.0, out=scaled)
             rgba = lut[scaled.astype(np.uint8)]
         rgba.setflags(write=False)

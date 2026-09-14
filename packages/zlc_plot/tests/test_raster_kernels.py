@@ -6,12 +6,13 @@ engines and assert bit equality -- not closeness -- so a kernel cannot
 drift from its reference silently.  ``ZLC_PLOT_KERNELS`` is the switch the
 comparison turns.
 
-ONE kernel cannot promise that, and says so where it is tested: summing a
-floating plane in a different order is a different answer in the last
-bits, always.  Its contract is the one bit equality was standing in for:
-both engines accumulate a floating plane in float64 and narrow only the
-quotient, so each lands within float32 rounding of a float64 reduction,
-and a finite plane near float32's range comes back finite.
+The block mean in :mod:`zlc_plot._image_raster` has NO kernel -- numpy
+alone is the fastest thing there -- so it is held to ``reduceat`` written
+out rather than to a second engine, and its floating case to a float64
+reduction: summing a floating plane in a different order is a different
+answer in the last bits, always, so what it promises instead is to
+accumulate in float64 and narrow only the quotient, which keeps a finite
+plane near float32's range finite.
 """
 from __future__ import annotations
 
@@ -47,15 +48,14 @@ def _both_engines(call):
     return reference, compiled
 
 
-def test_the_block_mean_kernel_matches_reduceat_bit_for_bit() -> None:
-    """Every block sum the kernel takes is one ``reduceat`` would have made.
+def test_the_block_mean_matches_reduceat_bit_for_bit() -> None:
+    """Every block mean is the one ``reduceat`` and the block counts make.
 
     Covers the shapes a real panel produces -- a marginal reduction whose
     blocks are one or two samples wide, an exactly halving one, a ragged
     one -- and the masked sum/count path.
     """
 
-    pytest.importorskip("numba")
     rng = np.random.default_rng(11)
     cases = (
         (512, 378),   # the camera's own ratio, blocks of 1 and 2
@@ -68,31 +68,63 @@ def test_the_block_mean_kernel_matches_reduceat_bit_for_bit() -> None:
             values = rng.integers(0, np.iinfo(dtype).max, size=(source, source), dtype=dtype)
             starts = _reduction_starts(source, target, 1.25)
             valid = np.broadcast_to(np.True_, values.shape)
-            reference, compiled = _both_engines(
-                lambda: _area_mean(values, valid, starts, starts)
+            counts = np.diff(np.r_[starts, source])
+            sums = np.add.reduceat(
+                np.add.reduceat(values, starts, axis=0, dtype=np.float64),
+                starts,
+                axis=1,
+                dtype=np.float64,
             )
-            np.testing.assert_array_equal(reference, compiled)
-            assert reference.dtype == compiled.dtype
+            expected = (sums / np.outer(counts, counts)).astype(np.float32)
+            means = _area_mean(values, valid, starts, starts)
+            np.testing.assert_array_equal(means, expected)
+            assert means.dtype == np.float32
 
     # Ragged rectangular blocks use their complete sample count.
     values = rng.integers(0, 65535, size=(73, 101), dtype=np.uint16)
     valid = np.broadcast_to(np.True_, values.shape)
     rows = _reduction_starts(73, 29, 1.25)
     columns = _reduction_starts(101, 43, 1.25)
-    reference, compiled = _both_engines(lambda: _area_mean(values, valid, rows, columns))
-    np.testing.assert_array_equal(reference, compiled)
+    sums = np.add.reduceat(
+        np.add.reduceat(values, rows, axis=0, dtype=np.float64),
+        columns,
+        axis=1,
+        dtype=np.float64,
+    )
+    expected = (
+        sums / np.outer(np.diff(np.r_[rows, 73]), np.diff(np.r_[columns, 101]))
+    ).astype(np.float32)
+    np.testing.assert_array_equal(
+        _area_mean(values, valid, rows, columns), expected
+    )
 
-    # A partly invalid plane sums and counts in one compiled pass rather
-    # than materialising np.where(valid, values, 0) and reducing twice.
-    # For exact integers that is the reference's answer, bit for bit.
+    # A partly invalid plane divides each block by its OWN valid count,
+    # and a block with no valid sample comes back masked rather than
+    # divided by zero.
     values = rng.integers(0, 4095, size=(128, 128), dtype=np.uint16)
     valid = np.ones(values.shape, dtype=bool)
     valid[3:9, 4:20] = False
     starts = _reduction_starts(128, 90, 1.25)
-    reference, compiled = _both_engines(
-        lambda: _area_mean(values, valid, starts, starts)
+    sums = np.add.reduceat(
+        np.add.reduceat(
+            np.where(valid, values, 0), starts, axis=0, dtype=np.float64
+        ),
+        starts,
+        axis=1,
+        dtype=np.float64,
     )
-    np.testing.assert_array_equal(np.asarray(reference), np.asarray(compiled))
+    counts = np.add.reduceat(
+        np.add.reduceat(valid, starts, axis=0, dtype=np.int64),
+        starts,
+        axis=1,
+        dtype=np.int64,
+    )
+    assert int((counts == 0).sum()), "the fixture must empty at least one block"
+    expected = np.zeros(counts.shape, dtype=np.float64)
+    np.divide(sums, counts, out=expected, where=counts != 0)
+    means = _area_mean(values, valid, starts, starts)
+    np.testing.assert_array_equal(np.asarray(means), expected.astype(np.float32))
+    np.testing.assert_array_equal(np.ma.getmaskarray(means), counts == 0)
 
 
 def test_the_block_mean_keeps_wide_integer_sums() -> None:
@@ -103,9 +135,9 @@ def test_the_block_mean_keeps_wide_integer_sums() -> None:
     valid = np.broadcast_to(np.True_, values.shape)
     starts = np.array([0], dtype=np.intp)
     expected = np.float32(values.sum(dtype=np.float64) / values.size)
-    for result in _both_engines(lambda: _area_mean(values, valid, starts, starts)):
-        assert result.dtype == np.float32
-        assert result[0, 0] == expected
+    result = _area_mean(values, valid, starts, starts)
+    assert result.dtype == np.float32
+    assert result[0, 0] == expected
 
 
 def test_the_uniform_histogram_kernel_matches_numpy_bit_for_bit() -> None:
@@ -311,19 +343,17 @@ def test_the_extrema_kernel_matches_the_masked_reductions() -> None:
                 ))
 
 
-def test_the_float_block_mean_is_within_float32_rounding_on_both_engines() -> None:
+def test_the_float_block_mean_is_within_float32_rounding() -> None:
     """A floating plane cannot promise bit equality, so it promises this.
 
-    Both engines accumulate a floating plane in float64 and narrow only
-    the quotient, so each answer is within a few ulps of its own dtype
+    The block mean accumulates a floating plane in float64 and narrows
+    only the quotient, so its answer is within a few ulps of its own dtype
     from a float64 reduction -- for a float32 plane the rounding of the
-    quotient, for a float64 plane the summation order -- and the two
-    engines agree to the same.  A reference that accumulated a float32
-    plane in float32 landed 1e-7 relative away from the truth, and turned
-    a finite plane near float32's range into infinite means.
+    quotient, for a float64 plane the summation order.  Accumulating a
+    float32 plane in float32 landed 1e-7 relative away from the truth, and
+    turned a finite plane near float32's range into infinite means.
     """
 
-    pytest.importorskip("numba")
     rng = np.random.default_rng(29)
     cases = (
         (np.float32, 512, 378),
@@ -336,25 +366,18 @@ def test_the_float_block_mean_is_within_float32_rounding_on_both_engines() -> No
         values = (rng.random((source, source)) * 4000.0).astype(dtype)
         starts = _reduction_starts(source, target, 1.25)
         valid = np.broadcast_to(np.True_, values.shape)
-        reference, compiled = _both_engines(
-            lambda: _area_mean(values, valid, starts, starts)
-        )
-        assert reference.dtype == compiled.dtype == np.result_type(dtype, np.float32)
+        answer = _area_mean(values, valid, starts, starts)
+        assert answer.dtype == np.result_type(dtype, np.float32)
         truth = _area_mean(
             values.astype(np.float64), valid, starts, starts
         )
-        tolerance = 4 * np.finfo(reference.dtype).eps * np.abs(truth).max()
-        for engine, answer in (("reference", reference), ("compiled", compiled)):
-            error = np.abs(np.asarray(answer, dtype=np.float64) - truth).max()
-            assert error <= tolerance, (
-                "%s %d->%d: the %s answer is %.3e from a float64 reduction, "
-                "past float32 rounding (%.3e)"
-                % (np.dtype(dtype).name, source, target, engine, error, tolerance)
-            )
-        assert np.abs(
-            np.asarray(compiled, dtype=np.float64) - np.asarray(reference,
-                                                                dtype=np.float64)
-        ).max() <= tolerance
+        tolerance = 4 * np.finfo(answer.dtype).eps * np.abs(truth).max()
+        error = np.abs(np.asarray(answer, dtype=np.float64) - truth).max()
+        assert error <= tolerance, (
+            "%s %d->%d: the answer is %.3e from a float64 reduction, past "
+            "float32 rounding (%.3e)"
+            % (np.dtype(dtype).name, source, target, error, tolerance)
+        )
 
 
 def test_a_finite_float32_plane_near_its_range_has_a_finite_mean() -> None:
@@ -362,33 +385,26 @@ def test_a_finite_float32_plane_near_its_range_has_a_finite_mean() -> None:
 
     Four finite float32 samples of 3e38 have a block total of 1.2e39,
     past float32; written back as float32 on the way to the mean, the
-    mean of finite samples came out infinite on both engines.  The mean
-    itself, 3e38, is a float32 number, and that is the answer.
+    mean of finite samples came out infinite.  The mean itself, 3e38, is
+    a float32 number, and that is the answer.
     """
 
-    pytest.importorskip("numba")
     values = np.full((2, 2), 3.0e38, dtype=np.float32)
     values[0, 1] = np.float32(3.0000001e38)
     valid = np.broadcast_to(np.True_, values.shape)
     starts = np.array([0], dtype=np.intp)
     truth = np.float32(np.mean(values.astype(np.float64)))
-    reference, compiled = _both_engines(
-        lambda: _area_mean(values, valid, starts, starts)
-    )
-    for answer in (reference, compiled):
-        assert answer.dtype == np.float32
-        assert np.isfinite(answer).all()
-        assert answer[0, 0] == truth
+    answer = _area_mean(values, valid, starts, starts)
+    assert answer.dtype == np.float32
+    assert np.isfinite(answer).all()
+    assert answer[0, 0] == truth
     # With a hole the same total flows through the masked face.
     holed = np.ones(values.shape, dtype=bool)
     holed[1, 1] = False
     truth = np.float32(np.mean(values[holed].astype(np.float64)))
-    reference, compiled = _both_engines(
-        lambda: _area_mean(values, holed, starts, starts)
-    )
-    for answer in (reference, compiled):
-        assert np.isfinite(np.asarray(answer)).all()
-        assert np.asarray(answer)[0, 0] == truth
+    answer = _area_mean(values, holed, starts, starts)
+    assert np.isfinite(np.asarray(answer)).all()
+    assert np.asarray(answer)[0, 0] == truth
 
 
 def test_the_masked_block_mean_counts_what_it_summed() -> None:
@@ -399,34 +415,45 @@ def test_the_masked_block_mean_counts_what_it_summed() -> None:
     back masked, not as a division by zero.
     """
 
-    pytest.importorskip("numba")
     rng = np.random.default_rng(31)
     values = (rng.random((128, 128)) * 100.0).astype(np.float32)
     valid = np.ones(values.shape, dtype=bool)
     valid[3:9, 4:20] = False
     starts = _reduction_starts(128, 90, 1.25)
-    reference, compiled = _both_engines(
-        lambda: _area_mean(values, valid, starts, starts)
+    counts = np.add.reduceat(
+        np.add.reduceat(valid, starts, axis=0, dtype=np.int64),
+        starts,
+        axis=1,
+        dtype=np.int64,
+    )
+    sums = np.add.reduceat(
+        np.add.reduceat(
+            np.where(valid, values, 0), starts, axis=0, dtype=np.float64
+        ),
+        starts,
+        axis=1,
+        dtype=np.float64,
     )
     np.testing.assert_allclose(
-        np.asarray(compiled, dtype=np.float64),
-        np.asarray(reference, dtype=np.float64),
+        np.asarray(_area_mean(values, valid, starts, starts), dtype=np.float64),
+        np.divide(sums, counts, out=np.zeros(counts.shape), where=counts != 0),
         rtol=1e-6,
     )
 
-    # A block with no valid sample at all: masked on both engines, and the
-    # mask must agree cell for cell.
+    # A block with no valid sample at all comes back masked, cell for cell.
     valid[:] = True
     valid[:16, :16] = False
-    reference, compiled = _both_engines(
-        lambda: _area_mean(values, valid, starts, starts)
+    counts = np.add.reduceat(
+        np.add.reduceat(valid, starts, axis=0, dtype=np.int64),
+        starts,
+        axis=1,
+        dtype=np.int64,
     )
-    assert isinstance(compiled, np.ma.MaskedArray), (
+    means = _area_mean(values, valid, starts, starts)
+    assert isinstance(means, np.ma.MaskedArray), (
         "an empty block must come back masked, not divided by zero"
     )
-    np.testing.assert_array_equal(
-        np.ma.getmaskarray(compiled), np.ma.getmaskarray(reference)
-    )
+    np.testing.assert_array_equal(np.ma.getmaskarray(means), counts == 0)
 
 
 def test_the_kernel_cache_is_a_plainly_named_folder_in_the_checkout() -> None:

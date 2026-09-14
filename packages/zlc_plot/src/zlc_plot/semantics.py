@@ -577,7 +577,7 @@ def _role_holder(spec: PlotSpec, role: str) -> AxisRef | None:
     return getattr(semantic_spec(spec), role, None)
 
 
-def _is_primary_index_axis(schema: DatasetSchema, ref: AxisRef) -> bool:
+def _is_primary_index_axis(ref: AxisRef) -> bool:
     """Whether this fate row is the Runtime's materialized shot index."""
 
     return ref == AxisRef.point(PRIMARY_INDEX_AXIS_ID.value)
@@ -1141,7 +1141,7 @@ def describe_semantics(
             # Pooling is the default, not the only choice: an axis may be
             # collapsed under the reduction before the values are binned.
             offered.append((FATE_REDUCE, "reduced"))
-        if spec.kind is PlotKind.ROLLING and _is_primary_index_axis(schema, ref):
+        if spec.kind is PlotKind.ROLLING and _is_primary_index_axis(ref):
             # Rolling does not reduce the Runtime's shot index away -- it
             # ROLLS along it.  Its ordinary relative-coordinate pins genuinely
             # narrow the window; only the default's label stops lying about

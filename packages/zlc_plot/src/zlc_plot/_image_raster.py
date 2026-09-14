@@ -14,7 +14,6 @@ from typing import Any
 
 import numpy as np
 
-from . import _raster_kernels as kernels
 from . import style
 
 
@@ -24,12 +23,6 @@ class PreparedImageFront:
 
     values: np.ndarray | np.ma.MaskedArray
     extent: tuple[float, float, float, float]
-
-
-#: Untouched stand-ins for the block-mean kernel's masked face.
-_NO_VALID = np.zeros((1, 1), dtype=np.bool_)
-_NO_VALID.setflags(write=False)
-_NO_COUNTS = np.zeros((1, 1), dtype=np.int64)
 
 
 def _all_true(values: np.ndarray) -> bool:
@@ -111,14 +104,9 @@ def _area_mean(
     mean_dtype = np.result_type(values.dtype, np.float32)
     shape = (row_starts.size, column_starts.size)
     # NO COMPILED KERNEL.  The reshape mean below is the fastest thing
-    # numpy alone can do here and the ragged partition is the general
-    # answer; both are slower than the kernels above, so this whole
-    # branch is what the interpreter falls back to, never a shortcut
-    # taken ahead of them.  Standing above the dispatch, the evenly
-    # divisible case -- every power-of-two camera frame, which is to
-    # say the common one -- returned from here and the kernels never
-    # ran at all: 7.18 ms against 1.01 reducing 2048 to 512, and 4.73
-    # against 0.31 reducing it to 256, for the identical answer.
+    # numpy alone can do here -- the evenly divisible case is every
+    # power-of-two camera frame, which is to say the common one -- and
+    # the ragged partition beside it is the general answer.
     accumulate = np.float64
     source = values if all_valid else np.where(valid, values, 0)
     rows, columns = values.shape

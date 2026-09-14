@@ -199,18 +199,16 @@ def test_color_limit_preview_composes_without_touching_chrome() -> None:
         )
         current = renderer._resolved_color_limit_state()
         assert current is not None
-        with renderer.raster_transaction():
-            renderer.begin_color_limit_gesture(ColorLimitCandidate(current.value))
+        renderer.begin_color_limit_gesture(ColorLimitCandidate(current.value))
         np.testing.assert_array_equal(
             renderer._artists["image"].get_array(), before_front
         )
         np.testing.assert_array_equal(pixels_of(colorbar_axis), colorbar_before)
 
         before = renderer._background_signature
-        with renderer.raster_transaction():
-            renderer.preview_color_limit_candidate(
-                ColorLimitCandidate(NumericRange(20.0, 150.0))
-            )
+        renderer.preview_color_limit_candidate(
+            ColorLimitCandidate(NumericRange(20.0, 150.0))
+        )
         np.testing.assert_array_equal(pixels_of(colorbar_axis), colorbar_before)
         preview_pixels = np.array(
             renderer.figure.canvas.buffer_rgba(), copy=True
@@ -223,10 +221,9 @@ def test_color_limit_preview_composes_without_touching_chrome() -> None:
         )
         session.update_data(_snapshot(schema, size, 200.0, 3, seed=11))
         np.testing.assert_array_equal(pixels_of(colorbar_axis), colorbar_before)
-        with renderer.raster_transaction():
-            renderer.preview_color_limit_candidate(
-                ColorLimitCandidate(NumericRange(20.0, 145.0))
-            )
+        renderer.preview_color_limit_candidate(
+            ColorLimitCandidate(NumericRange(20.0, 145.0))
+        )
         np.testing.assert_array_equal(pixels_of(colorbar_axis), colorbar_before)
         # The preview repainted pixels without invalidating the chrome
         # background: no colorbar label rewrite, no full recapture.
@@ -554,14 +551,12 @@ def test_the_rails_left_spine_stays_on_its_box_when_its_limits_move_under_a_drag
         held_top = float(rail.get_ylim()[1])
         current = renderer._resolved_color_limit_state()
         assert current is not None
-        with renderer.raster_transaction():
-            renderer.begin_color_limit_gesture(ColorLimitCandidate(current.value))
-        with renderer.raster_transaction():
-            renderer.preview_color_limit_candidate(
-                ColorLimitCandidate(
-                    NumericRange(current.value.low, current.value.high * 1.6)
-                )
+        renderer.begin_color_limit_gesture(ColorLimitCandidate(current.value))
+        renderer.preview_color_limit_candidate(
+            ColorLimitCandidate(
+                NumericRange(current.value.low, current.value.high * 1.6)
             )
+        )
         session.update_data(_snapshot(schema, size, 4000.0, 2, seed=32))
         assert float(rail.get_ylim()[1]) > held_top, (
             "the fixture must move the rail's limits under the open gesture"
@@ -1509,7 +1504,7 @@ def test_a_closed_reserve_holds_nothing_and_takes_nothing_more() -> None:
     assert reserve._held is None
 
 
-def test_a_single_panel_built_from_revived_axes_paints_the_same_picture(monkeypatch) -> None:
+def test_a_single_panel_built_from_revived_axes_paints_the_same_picture() -> None:
     """A single panel's axes -- primary, colorbar, rail -- revive from bytes
     the way a grid's cells do, and the picture must be the one a panel
     that built its own axes paints, to the byte.  The bytes are keyed by
@@ -1541,9 +1536,13 @@ def test_a_single_panel_built_from_revived_axes_paints_the_same_picture(monkeypa
 
     revived, count = painted()
     assert count >= 2, "an image panel has more than one axes to revive"
-    assert rendering._axes_prototype_path(DEFAULTS.style, 0, count).is_file()
-    monkeypatch.setattr(rendering, "revive_axes", lambda *args, **kwargs: None)
+    prototype = rendering._axes_prototype_path(DEFAULTS.style, 0, count)
+    assert prototype.is_file()
+    # Without its bytes the panel BUILDS its axes -- what the first panel
+    # on a machine does -- and writes them back for the next one.
+    prototype.unlink()
     built, _count = painted()
+    assert prototype.is_file()
     assert np.array_equal(revived, built), (
         f"{int(np.count_nonzero((revived != built).any(axis=-1)))} pixels differ "
         "between a panel built from revived axes and one that built its own"
