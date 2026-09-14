@@ -4377,25 +4377,31 @@ class MatplotlibRenderer:
             # collection folds it, rounded the way Agg rounds it.
             colours[row] = np.floor(face[0] * 255.0 + 0.5).astype(np.uint8)
             # Edges along x and bar tops along y through the cell's data
-            # transform -- a log axis included -- to canvas pixels.
+            # transform to canvas pixels.  A linear cell's transData IS one
+            # affine, applied directly with Matplotlib's own operand order
+            # (a*x + c*y + e) so the pixels are the ones transform()
+            # produces; a log cell keeps the stack.
             transform = axes.transData
-            along = transform.transform(
-                np.column_stack((edges, np.zeros(edges.size)))
-            )
-            heights = transform.transform(
-                np.column_stack((np.full(counts.size, float(edges[0])), counts))
-            )
-            base = transform.transform((float(edges[0]), 0.0))
-            edges_px.append(np.asarray(along[:, 0], dtype=np.float64))
+            if transform.is_affine:
+                a, b, c, d, e, f = transform.get_affine().to_values()
+                along_x = a * edges + e
+                top_y = d * counts + f
+                base_y = f
+            else:
+                along = transform.transform(
+                    np.column_stack((edges, np.zeros(edges.size)))
+                )
+                heights = transform.transform(
+                    np.column_stack((np.full(counts.size, float(edges[0])), counts))
+                )
+                along_x = np.asarray(along[:, 0], dtype=np.float64)
+                top_y = np.asarray(heights[:, 1], dtype=np.float64)
+                base_y = float(transform.transform((float(edges[0]), 0.0))[1])
+            edges_px.append(np.asarray(along_x, dtype=np.float64))
             # One top per bar, padded to one per edge so that the kernel
             # indexes tops and edges alike across surfaces.
-            tops_px.append(
-                np.append(
-                    float(height) - np.asarray(heights[:, 1], dtype=np.float64),
-                    np.nan,
-                )
-            )
-            bases_px.append(float(height) - float(base[1]))
+            tops_px.append(np.append(float(height) - top_y, np.nan))
+            bases_px.append(float(height) - float(base_y))
             offsets.append(offsets[-1] + edges.size)
             # Agg rounds the clip box to whole pixels before it clips.
             box = axes.bbox
