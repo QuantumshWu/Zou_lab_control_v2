@@ -14,10 +14,12 @@ import ctypes
 from dataclasses import dataclass
 from functools import lru_cache
 import hashlib
+import pickle
 from io import BytesIO
 import math
 from numbers import Real
 from pathlib import Path
+import sys
 import re
 from threading import RLock
 from enum import Enum
@@ -1701,6 +1703,103 @@ def _pooled_store(block: bytearray) -> object:
     return (ctypes.c_ubyte * len(block)).from_buffer(block)
 
 
+def _grid_cell_prototype_path(style: PlotStyleConfig, cells: int) -> Any:
+    """Where the bytes that revive into ``cells`` bare grid cells are kept.
+
+    Keyed on everything the bytes depend on: this Python and this
+    Matplotlib build the objects, the STYLE is baked into a cell at
+    construction (which is why the reserve answers for one style only),
+    and the tick floor decides how many tick artists ride along.
+    """
+
+    import matplotlib  # noqa: PLC0415
+
+    from . import _kernel_cache  # noqa: PLC0415
+
+    parts = (
+        sys.version.split()[0],
+        matplotlib.__version__,
+        str(int(cells)),
+        str(int(TICKS_FLOOR)),
+        repr(style),
+    )
+    digest = hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:32]
+    return _kernel_cache.kernel_cache_dir() / "grid_cells" / f"{digest}.pickle"
+
+
+def _build_grid_cells(style: PlotStyleConfig, cells: int) -> tuple[Any, list[Any]]:
+    """One figure carrying ``cells`` bare grid cells, ticks and all."""
+
+    from matplotlib.backends.backend_agg import FigureCanvasAgg  # noqa: PLC0415
+    from matplotlib.figure import Figure  # noqa: PLC0415
+
+    with style_context(style, {}):
+        # The size is the panel's to decide and is set when it arrives;
+        # this one only has to exist.
+        figure = Figure(figsize=(1.0, 1.0), dpi=100.0, layout=None)
+        FigureCanvasAgg(figure)
+        made = [figure.add_axes((0.0, 0.0, 1.0, 1.0)) for _ in range(cells)]
+    for axis in made:
+        # A tick is made when someone first asks, and the grouped chrome
+        # asks every cell; every axis shows at least this many.
+        axis.xaxis.get_major_ticks(TICKS_FLOOR)
+        axis.yaxis.get_major_ticks(TICKS_FLOOR)
+    return figure, made
+
+
+def revive_grid_cells(
+    style: PlotStyleConfig,
+    cells: int,
+) -> tuple[Any, list[Any]] | None:
+    """``cells`` bare grid cells, built once for a machine and not again.
+
+    A grid cell is fifteen thousand Matplotlib objects, and a cell draws
+    none of them: the grouped chrome paints the marks, the frames and the
+    labels, and the cell is turned off.  Building sixty-four of them and
+    making their ticks is 207 ms, and it was paid by every panel on every
+    mount -- nothing in it depends on the data, the size, or even the
+    session.  The same sixty-four revive from bytes in 61 ms, ticks
+    included, and the bytes are written once for a given Matplotlib,
+    style and count instead of once per panel.
+
+    This is not a warm-up: it is available the moment a panel asks, on a
+    child that has done nothing else.  ``None`` says the bytes could not
+    be read or written and the caller should build its own -- slower, and
+    never wrong.
+    """
+
+    path = _grid_cell_prototype_path(style, cells)
+    try:
+        blob = path.read_bytes()
+    except OSError:
+        blob = None
+    if blob is not None:
+        try:
+            figure = pickle.loads(blob)
+            spare = list(figure.axes)
+        except Exception:  # noqa: BLE001 -- a cache that will not read missed
+            figure, spare = None, []
+        if figure is not None and len(spare) == cells:
+            from matplotlib.backends.backend_agg import (  # noqa: PLC0415
+                FigureCanvasAgg,
+            )
+
+            FigureCanvasAgg(figure)
+            for axis in spare:
+                figure.delaxes(axis)
+            return figure, spare
+
+    figure, spare = _build_grid_cells(style, cells)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(pickle.dumps(figure, protocol=pickle.HIGHEST_PROTOCOL))
+    except (OSError, Exception):  # noqa: BLE001 -- writing is an optimisation
+        pass
+    for axis in spare:
+        figure.delaxes(axis)
+    return figure, spare
+
+
 class CellReserve:
     """A figure and its grid cells, built before a panel asks for them.
 
@@ -1738,27 +1837,9 @@ class CellReserve:
         cells = int(cells)
         if cells < 1:
             raise ValueError("a reserve holds at least one cell")
-        with style_context(style, {}):
-            # The size is the panel's to decide and is set when it arrives;
-            # this one only has to exist.
-            figure = Figure(figsize=(1.0, 1.0), dpi=100.0, layout=None)
-            FigureCanvasAgg(figure)
-            spare = [
-                figure.add_axes((0.0, 0.0, 1.0, 1.0)) for _ in range(cells)
-            ]
-        for axis in spare:
-            # A tick is made when someone first asks for it, and the
-            # grouped chrome asks every cell: sixty-four cells were 101 ms
-            # of the mount, once.  Every axis shows at least ``TICKS_FLOOR``
-            # of them -- that is what the floor means -- so making that many
-            # now is not a guess about this panel, and the rest stay lazy.
-            axis.xaxis.get_major_ticks(TICKS_FLOOR)
-            axis.yaxis.get_major_ticks(TICKS_FLOOR)
-            # ``delaxes``, not ``remove``: removing an artist clears its
-            # figure, and ``add_axes`` refuses an Axes built on another
-            # figure -- the only way back would be ``set_figure``, which
-            # rebuilds the transform graph and leaves the spines behind.
-            figure.delaxes(axis)
+        # The same bytes a cold mount revives from: holding them ahead of
+        # time saves the 61 ms of reviving, not the 207 of building.
+        figure, spare = revive_grid_cells(style, cells)
         with self._lock:
             self._held = (style, figure, spare)
 
@@ -2220,6 +2301,19 @@ class MatplotlibRenderer:
         from matplotlib.figure import Figure
 
         reserved = CELL_RESERVE.take(self.style, self.plan)
+        if reserved is None:
+            # Nothing was held -- a child taken before its warming reached
+            # the reserve, or a second panel in the same child.  The cells
+            # still do not have to be BUILT: reviving them is 61 ms where
+            # building and ticking them is 207, and it needs no warm-up.
+            wanted = sum(
+                1 for entry in self.plan.axes if entry.role == "facet_cell"
+            )
+            if wanted:
+                # Exactly what this plan asks for: the bytes are keyed by
+                # the count, so a ten-cell grid keeps its own small file
+                # rather than reviving sixty-four and dropping fifty-four.
+                reserved = revive_grid_cells(self.style, wanted)
         with style_context(
             self.style,
             {
@@ -2325,17 +2419,19 @@ class MatplotlibRenderer:
             for axis in entries:
                 for child in list(axis._children):
                     child.remove()
-                # A relayout IS a new configuration, and the tick policy
-                # installs once per configuration: a locator carries the
-                # step and decade it settled on so its ticks do not jitter
-                # frame to frame, and carried across a resize that
-                # hysteresis is the PREVIOUS layout's -- a cell twice as
-                # wide kept three labels where a new one shows five.
-                # Forgetting the signature is what makes a kept cell
-                # indistinguishable from a built one.
+                # A locator holds the step it settled on so an axis does
+                # not restripe its labels every frame; across a resize
+                # that hysteresis is the PREVIOUS layout's, and a cell
+                # twice as wide kept three labels where a new one shows
+                # five.  Only that one field goes: dropping the policy's
+                # signature instead would reinstall a locator, a formatter
+                # and a whole tick-parameter pass on all 128 axes of a
+                # sixty-four cell grid, for the same answer.
                 for coordinate in (axis.xaxis, axis.yaxis):
-                    if hasattr(coordinate, "_zlc_tick_signature"):
-                        del coordinate._zlc_tick_signature
+                    locator = coordinate.get_major_locator()
+                    forget = getattr(locator, "forget_settled_step", None)
+                    if forget is not None:
+                        forget()
                 figure.delaxes(axis)
                 kept.append(axis)
         with style_context(

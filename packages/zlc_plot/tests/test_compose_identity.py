@@ -675,50 +675,70 @@ def _site_grid_session(sites: int = 25, points: int = 5, repeats: int = 12):
     return session, landed
 
 
-def test_a_relayout_keeps_its_cells_and_gives_them_a_fresh_tick_policy() -> None:
+def test_a_relayout_keeps_its_cells_and_reticks_them_as_a_new_one_would() -> None:
     """Resizing a board moves its cells; it does not make new ones.
 
     An operator drags a board more often than any other gesture, and
-    rebuilding sixty-four cells was 1324 ms of a 685-1032 ms resize, the
-    chrome's ticks on top because a new cell has none.  So the cells are
-    kept -- and then the SECOND half of the claim has to hold too: a
-    locator carries the step it settled on so its ticks do not jitter frame
-    to frame, and carried across a resize that hysteresis is the PREVIOUS
-    layout's.  A cell twice as wide kept three labels where a new one shows
-    five, on four of the catalogue's grids, until a relayout was made to
-    reinstall the policy the way a new cell gets one.
+    rebuilding sixty-four cells was 1324 ms of a 685-1032 ms resize.  So
+    the cells are kept -- and then the SECOND half of the claim has to
+    hold: a locator carries the step it settled on so its ticks do not
+    jitter frame to frame, and carried across a resize that hysteresis is
+    the PREVIOUS layout's.  A cell twice as wide kept three labels where a
+    new one shows five.  What the kept cell must end up with is what a
+    cell built at that size gets, and that is what is asked here.
+
+    WHAT THIS CATCHES is cells rebuilt instead of moved.  What it does NOT
+    catch is the hysteresis itself: these four cells settle on the same
+    step at both presets, and an isolated locator re-judges a widened axis
+    correctly whether or not it still holds one, so no fixture here
+    discriminates.  The case that does is a histogram grid with a LIVE fit,
+    resized away and back, compared byte for byte against another
+    checkout -- that found 1317-2504 pixels different on four of the
+    catalogue's grids, and it is the gate this half rests on.
     """
 
-    # FOUR cells, resized between two presets that price their labels the
-    # same: the tick policy installs once per configuration, so a size that
-    # changes the label size would reinstall it anyway and hide the point.
+    def read(session) -> tuple:
+        cells = session._renderer._axes["facet_cell"]
+        return (
+            [id(axis) for axis in cells],
+            tuple(
+                (
+                    tuple(np.round(axis.xaxis.get_ticklocs(), 9)),
+                    tuple(np.round(axis.yaxis.get_ticklocs(), 9)),
+                )
+                for axis in cells
+            ),
+        )
+
+    # FOUR cells resized between two presets that price their labels the
+    # same: a size that changed the label size would reinstall the policy
+    # anyway and hide the point.
     session, _landed = _site_grid_session(sites=4)
     try:
         session.configure(size="2x2")
         session.rgba()
-        cells = session._renderer._axes["facet_cell"]
-        before = [id(axis) for axis in cells]
-        policy = [
-            (id(axis.xaxis.get_major_locator()),
-             id(axis.yaxis.get_major_locator()))
-            for axis in cells
-        ]
+        before, _ticks = read(session)
         session.configure(size="4x4")
         session.rgba()
-        cells = session._renderer._axes["facet_cell"]
-        assert [id(axis) for axis in cells] == before, (
-            "a relayout built new cells instead of moving them"
-        )
-        after = [
-            (id(axis.xaxis.get_major_locator()),
-             id(axis.yaxis.get_major_locator()))
-            for axis in cells
-        ]
-        assert all(
-            new != old for new, old in zip(after, policy)
-        ), "a kept cell carried the previous layout's tick policy"
+        after, resized = read(session)
     finally:
         session.close()
+
+    fresh, _landed = _site_grid_session(sites=4)
+    try:
+        fresh.configure(size="4x4")
+        fresh.rgba()
+        _identities, built = read(fresh)
+    finally:
+        fresh.close()
+
+    assert after == before, (
+        "a relayout built new cells instead of moving them"
+    )
+    assert resized == built, (
+        "a kept cell carried the previous layout's tick policy: "
+        f"{resized[0]} against {built[0]} on the first cell"
+    )
 
 
 def test_a_grid_built_from_the_cell_reserve_paints_the_same_picture() -> None:

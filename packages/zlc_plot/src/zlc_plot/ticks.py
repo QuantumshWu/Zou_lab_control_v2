@@ -568,6 +568,22 @@ class _MeasuredLocator(ticker.Locator):
     #: and the lifetime the answers may be trusted for.
     _PLACEMENT_CACHE_ATTRIBUTE = "_zlc_tick_placements"
 
+    def forget_settled_step(self) -> None:
+        """Drop the step this axis settled on, keeping everything else.
+
+        A locator holds the lattice it last chose and offers it first, so
+        that an axis whose data shifts a little does not restripe its
+        labels every frame.  That hysteresis is about the axis STAYING the
+        same size; when the axis is given a new one the held step is the
+        previous layout's answer, and holding it kept three labels on a
+        cell that had grown wide enough for five.  Reinstalling the whole
+        policy would drop it too, at the price of a new locator, formatter
+        and a full tick-parameter pass on every axis of every cell -- this
+        is the one field that has to go.
+        """
+
+        self._settled = None
+
     def _shared_key(
         self,
         vmin: float,
