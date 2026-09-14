@@ -1614,6 +1614,48 @@ def _tick_params_key(axis: Any) -> tuple[object, ...]:
     )
 
 
+def _tick_marks_in_view(axis: Any) -> list[tuple[float, Any, Any, Any, tuple[Any, ...]]]:
+    """The marks ``Axis._update_ticks`` would place on ``axis``, without
+    placing them.
+
+    A mark is a location and the stroke every tick of its kind shares --
+    ``_copy_tick_props`` gives a new tick the first one's lines -- so an
+    axis that shows no labels needs no Tick artist placed to be painted:
+    each major and minor location inside the view, as ``_update_ticks``
+    admits them, with the first tick of its kind standing for its lines.
+    Placing them made the ticks the locator asked for, five artists each,
+    forty of them on a grid's first frame for marks the lane already knew.
+    Returns ``(location, gridline, tick1line, tick2line, labels)`` rows,
+    the labels empty.
+    """
+
+    from matplotlib import transforms as mtransforms
+
+    placed: list[tuple[float, Any, Any, Any, tuple[Any, ...]]] = []
+    view_low, view_high = axis.get_view_interval()
+    if view_low > view_high:
+        view_low, view_high = view_high, view_low
+    transform = axis.get_transform()
+    interval = transform.transform([view_low, view_high])
+    for locations, ticks in (
+        (axis.get_majorticklocs(), axis.majorTicks),
+        (axis.get_minorticklocs(), axis.minorTicks),
+    ):
+        if not len(locations) or not ticks:
+            continue
+        exemplar = ticks[0]
+        for location in locations:
+            try:
+                transformed = transform.transform(location)
+            except AssertionError:
+                continue
+            if mtransforms._interval_contains_close(interval, transformed):
+                placed.append(
+                    (float(location), exemplar.gridline, exemplar.tick1line, exemplar.tick2line, ())
+                )
+    return placed
+
+
 def _tick_stroke(line: Any) -> tuple[object, ...]:
     """What makes two tick artists the same stroke, so one can carry both."""
 
@@ -2041,24 +2083,27 @@ def _build_axes(
         FigureCanvasAgg(figure)
         made = [figure.add_axes((0.0, 0.0, 1.0, 1.0)) for _ in range(cells)]
         others = [figure.add_axes((0.0, 0.0, 1.0, 1.0)) for _ in range(plain)]
-    for axis in made:
-        # A tick is made when someone first asks, and the grouped chrome
-        # asks every cell; every axis shows at least this many.  An
-        # ordinary axes decides its own ticks when it is first drawn, as a
-        # fresh one would, so it is handed over as made.
-        axis.xaxis.get_major_ticks(TICKS_FLOOR)
-        axis.yaxis.get_major_ticks(TICKS_FLOOR)
-        # A GRID CELL ARRIVES AS A GRID CELL: its marks at the cell length
-        # and its labels off, which is what a grid tells fifty-six of its
-        # sixty-four cells first thing on every mount -- a hundred and
-        # seventy-five ``tick_params`` calls, twenty milliseconds of a
-        # first frame, to state what the cells could have been built
-        # knowing.  Said here, the bytes carry it, and the mount speaks
-        # only where the grid decides otherwise: the boundary cells that
-        # show their labels.
-        axis.tick_params(axis="both", length=style.render.facet_cell_tick_length_pt)
-        axis.tick_params(axis="x", labelbottom=False)
-        axis.tick_params(axis="y", labelleft=False)
+        for axis in made:
+            # A tick is made when someone first asks, and the grouped chrome
+            # asks every cell; every axis shows at least this many.  An
+            # ordinary axes decides its own ticks when it is first drawn,
+            # as a fresh one would, so it is handed over as made.
+            axis.xaxis.get_major_ticks(TICKS_FLOOR)
+            axis.yaxis.get_major_ticks(TICKS_FLOOR)
+            # A GRID CELL ARRIVES AS A GRID CELL: its marks at the cell
+            # length, its labels off and its own title empty and pinned,
+            # which is what a grid tells fifty-six of its sixty-four cells
+            # first thing on every mount -- a hundred and seventy-five
+            # ``tick_params`` calls and sixty-four ``set_title`` calls,
+            # twenty-five milliseconds of a first frame, to state what the
+            # cells could have been built knowing.  Said here, under the
+            # style the title reads its face from, the bytes carry it, and
+            # the mount speaks only where the grid decides otherwise: the
+            # boundary cells that show their labels.
+            axis.tick_params(axis="both", length=style.render.facet_cell_tick_length_pt)
+            axis.tick_params(axis="x", labelbottom=False)
+            axis.tick_params(axis="y", labelleft=False)
+            axis.set_title("", pad=style.render.compact_axes_title_pad_pt, y=1.0)
     return figure, made, others
 
 
@@ -2460,6 +2505,11 @@ class MatplotlibRenderer:
         #: not a screen-sized front, so matplotlib resamples the data at the
         #: export's resolution -- the picture the kernel paints live.
         self._exporting = False
+        #: Each image surface's scene geometry (``_image_scene_geometry``)
+        #: beside the facts it was computed from: the transform chain that
+        #: makes it is matplotlib's own objects, sixty microseconds a cell,
+        #: and a steady frame changes none of the facts.
+        self._image_scene_memo: dict[str, tuple[tuple[object, ...], Any]] = {}
         self._foreground_scratch: Any = None
         #: The DYNAMIC axes -- a colour scale's, a distribution rail's, whose
         #: ticks move with the data -- keyed by the facts their draw is a
@@ -4956,9 +5006,22 @@ class MatplotlibRenderer:
             image = self._artists.get(key)
             if image is not None:
                 image_ids.add(id(image))
-            geometry = self._image_scene_geometry(
-                axes, tuple(map(float, extents[row])), rows, columns, height, upper
+            extent = tuple(map(float, extents[row]))
+            facts = (
+                axes.bbox.extents.tobytes(),
+                axes.transData.get_matrix().tobytes() if axes.transData.is_affine else None,
+                extent,
+                rows,
+                columns,
+                height,
+                upper,
             )
+            remembered = self._image_scene_memo.get(key)
+            if remembered is not None and remembered[0] == facts:
+                geometry = remembered[1]
+            else:
+                geometry = self._image_scene_geometry(axes, extent, rows, columns, height, upper)
+                self._image_scene_memo[key] = (facts, geometry)
             if geometry is None:
                 # A surface whose picture is out of view paints nothing;
                 # one on a transform the scene cannot serve refuses it.
@@ -10812,18 +10875,34 @@ class MatplotlibRenderer:
                     # mark.
                     grid_lanes: dict[tuple[object, ...], tuple[list[float], Any]] = {}
                     mark_lanes: dict[tuple[object, ...], tuple[list[float], Any]] = {}
-                    for tick in axis._update_ticks():
-                        location = float(tick.get_loc())
-                        if tick.gridline.get_visible():
+                    # A labelled axis places its ticks: the labels the
+                    # boundary paints are those Tick artists.  An unlabelled
+                    # one only needs to know where its marks go and how they
+                    # are stroked (``_tick_marks_in_view``).
+                    if labelled:
+                        placed = [
+                            (
+                                float(tick.get_loc()),
+                                tick.gridline,
+                                tick.tick1line,
+                                tick.tick2line,
+                                (tick.label1, tick.label2),
+                            )
+                            for tick in axis._update_ticks()
+                        ]
+                    else:
+                        placed = _tick_marks_in_view(axis)
+                    for location, gridline, tick1line, tick2line, tick_labels in placed:
+                        if gridline.get_visible():
                             grid_lanes.setdefault(
-                                _tick_stroke(tick.gridline), ([], tick.gridline)
+                                _tick_stroke(gridline), ([], gridline)
                             )[0].append(location)
-                        for which, line in ((1, tick.tick1line), (2, tick.tick2line)):
+                        for which, line in ((1, tick1line), (2, tick2line)):
                             if line.get_visible():
                                 mark_lanes.setdefault(
                                     (which, *_tick_stroke(line)), ([], line)
                                 )[0].append(location)
-                        for label in (tick.label1, tick.label2):
+                        for label in tick_labels:
                             if label.get_visible() and label.get_text():
                                 labels.append(label)
                     for locs, source in grid_lanes.values():
@@ -10919,8 +10998,14 @@ class MatplotlibRenderer:
             else:
                 # The cell's own title stays empty and PINNED: it carries the
                 # transform (its box plus the pad) and the style, and the
-                # grid's copy carries the words.
-                axes.set_title("", pad=pad, y=1.0)
+                # grid's copy carries the words.  A reserve cell is born so
+                # (``_build_axes``); a cell that is not is told once.
+                if (
+                    axes.title.get_text()
+                    or getattr(axes, "_autotitlepos", True)
+                    or float(axes.title.get_position()[1]) != 1.0
+                ):
+                    axes.set_title("", pad=pad, y=1.0)
                 title = Text()
                 title.update_from(axes.title)
                 title.set_position(axes.title.get_position())
