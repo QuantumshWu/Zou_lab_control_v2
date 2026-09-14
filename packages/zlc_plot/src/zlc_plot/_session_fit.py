@@ -104,7 +104,20 @@ class FitSessionMixin:
         self,
         result: FitResult | FacetFitBatchResult,
     ) -> FitResult | FacetFitBatchResult:
-        """Assign one monotonic publication revision to a completed fit batch."""
+        """Number one fit batch where it becomes the session's answer.
+
+        Stamped at ACCEPTANCE, under the render lock, never at solve
+        completion: the order solves finish in is not the order their
+        events go out.  Re-arming installs the new request before the
+        owner thread solves it, so a frame prepared meanwhile freezes that
+        same request and solves it on the analysis executor -- and can
+        finish first.  Numbered as they finished, the pair took 1 and the
+        re-arm 2; delivered as they were accepted, 2 went out before 1, and
+        the bridge refused the pair with "fit batch_revision must increase
+        for every accepted batch".  Acceptance and the delivery that
+        follows it share one render-lock hold, so numbering here counts in
+        delivery order; a superseded solve takes no number.
+        """
 
         with self._lock:
             self._fit_batch_revision += 1
@@ -369,6 +382,7 @@ class FitSessionMixin:
             )
             if event is not None:
                 self._notify_fit(event.event)
+                return event.accepted.result
         return result
 
     def fit_async(
@@ -554,7 +568,7 @@ class FitSessionMixin:
         if presentation is None:
             raise FitCancelled("fit target was superseded before acceptance")
         self._notify_fit(presentation.event)
-        return result
+        return presentation.accepted.result
 
     def _fit_facet_batch(
         self,
@@ -987,7 +1001,7 @@ class FitSessionMixin:
             if completion is not None:
                 self._live_fit_completion = None
         if completion is not None:
-            resolution = _FitResolution(completion, result=result)
+            resolution = _FitResolution(completion, result=accepted.result)
         return accepted, resolution, event
 
     def _restore_live_fit_completion(
@@ -1098,7 +1112,7 @@ class FitSessionMixin:
                 request_generation=started.request_generation,
                 selector_kind=started.request.selector_kind,
             )
-            return self._stamp_fit_batch_revision(batch), selections
+            return batch, selections
         selection = started.selection
         if selection is None:
             # Deferred live restart: freeze the selection here, off the
@@ -1124,7 +1138,7 @@ class FitSessionMixin:
             cancelled=should_cancel,
             request_generation=started.request_generation,
         )
-        return self._stamp_fit_batch_revision(result), ()
+        return result, ()
 
     def _submit_started_fit(
         self,
@@ -1772,8 +1786,10 @@ class FitSessionMixin:
                     self._live_fit_completion = None
                 else:
                     accepted_completion = None
-            if accepted_completion is not None and result is not None:
-                resolution = _FitResolution(accepted_completion, result=result)
+            if accepted_completion is not None and presentation is not None:
+                resolution = _FitResolution(
+                    accepted_completion, result=presentation.accepted.result
+                )
             elif (
                 request_current
                 and not accepted
@@ -1793,8 +1809,10 @@ class FitSessionMixin:
         elif logical_completion is not None:
             if error is not None:
                 resolution = _FitResolution(logical_completion, error=error)
-            elif accepted and result is not None:
-                resolution = _FitResolution(logical_completion, result=result)
+            elif presentation is not None:
+                resolution = _FitResolution(
+                    logical_completion, result=presentation.accepted.result
+                )
             else:
                 resolution = _FitResolution(
                     logical_completion,
@@ -1814,6 +1832,7 @@ class FitSessionMixin:
     ) -> tuple[_AcceptedFit, tuple[FitSelection | None, ...]]:
         """Resolve one fit against exactly the projection it was solved from."""
 
+        result = self._stamp_fit_batch_revision(result)
         batch = result if isinstance(result, FacetFitBatchResult) else None
         selection = None if batch is not None else self._started_selection(started)
         if result.source_revision != projection.data_revision:
