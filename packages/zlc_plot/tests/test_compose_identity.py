@@ -1548,3 +1548,61 @@ def test_a_single_panel_built_from_revived_axes_paints_the_same_picture(monkeypa
         f"{int(np.count_nonzero((revived != built).any(axis=-1)))} pixels differ "
         "between a panel built from revived axes and one that built its own"
     )
+
+
+@pytest.mark.parametrize("fitted", [False, True], ids=["plain", "fitted"])
+def test_a_focused_cell_ticks_like_a_panel_of_its_size_whichever_cell_it_is(
+    fitted: bool,
+) -> None:
+    """Focusing a cell makes it eight times larger; its ticks are then the
+    ladder a panel that size shows, not the two the grid settled on.  A
+    boundary cell that placed the grid's ticks itself and an interior cell
+    that took a neighbour's lanes must agree, and the overview must come
+    back exactly once the focus is gone.
+
+    Exactly: a cell that was focused kept a withdrawn line and hidden bars,
+    and owning them composed its frame over its kernel-stroked data where
+    every other cell's frame lay under it.  With a fit on, the focused
+    view had hidden the cell's line behind its source scatter, and leaving
+    the focus restored the line the scene had withdrawn meanwhile -- stroked
+    a second time over the scene's own curve.  And the fit landing had moved
+    every cell's chrome out of the background while the background captured
+    with it was kept: titles, marks and frames painted twice from that
+    frame on, until something else redrew the background."""
+
+    def ticks_of(session) -> tuple:
+        renderer = session._renderer
+        cell = renderer._axes["facet_cell"][session._facet_focus_index]
+        return (
+            tuple(np.round(cell.xaxis.get_ticklocs(), 9)),
+            tuple(np.round(cell.yaxis.get_ticklocs(), 9)),
+        )
+
+    session, landed = _site_grid_session(sites=16)
+    try:
+        if fitted:
+            session.configure(
+                fit={"model": "damped_sine", "fit_all_facets": True}, fit_live=True
+            )
+            session.rgba()
+            _live_advance(session, landed(3))
+            assert session._renderer._fit_artists, "the grid carries a fit"
+            # The frame the fit lands on moves every cell's chrome from the
+            # held background to the composed side; the background captured
+            # before it must not be reused, or that chrome paints twice.
+            assert _composed_matches_full_draw(session) == 0
+        overview = np.array(session.rgba(), copy=True)
+        session.focus_facet(0)
+        session.rgba()
+        boundary = ticks_of(session)
+        session.show_facet_overview()
+        session.focus_facet(5)
+        session.rgba()
+        interior = ticks_of(session)
+        session.show_facet_overview()
+        back = np.array(session.rgba(), copy=True)
+    finally:
+        session.close()
+    assert boundary == interior, (boundary, interior)
+    assert len(boundary[0]) > 2 or len(boundary[1]) > 2, boundary
+    assert np.array_equal(overview, back), "the overview did not come back exactly"

@@ -2066,6 +2066,10 @@ class MatplotlibRenderer:
         #: published.
         self._background_region: Any = None
         self._background_signature: tuple[object, ...] | None = None
+        # The axes whose chrome the held background does NOT contain -- those
+        # composed beside their data when it was captured.
+        self._background_composed: frozenset[int] | None = None
+        self._chrome_composed: frozenset[int] = frozenset()
         #: The same cut, one artist deeper: everything a compose paints BELOW
         #: the gesture's own artists, captured while a gesture is in flight.
         #: A pointer move then costs a region restore and the handful of
@@ -2346,6 +2350,24 @@ class MatplotlibRenderer:
                 raise IndexError("facet index is outside the current grid")
             if facet_focus_index is not None and facet_focus_index != facet_index:
                 raise ValueError("the open facet must equal the selected facet")
+        if facet_focus_index != self._facet_focus_index:
+            # A focus change is a relayout: the cell entering or leaving
+            # focus changes size eight-fold, and the step its locator
+            # settled on was the OTHER layout's.  Kept, a focused cell drew
+            # the grid's two labels across a whole panel -- and only while
+            # that cell had happened to place ticks in the grid; a cell that
+            # had taken its lanes from a neighbour drew a fresh ladder.  The
+            # same forgetting a resize does, and for EVERY cell, as a resize
+            # does: the grid that comes back ticks as a new one would, all
+            # of a piece, rather than one cell fresh among siblings that
+            # kept what they had settled on.
+            for cell in self._axes.get("facet_cell", ()):
+                for coordinate in (cell.xaxis, cell.yaxis):
+                    forget = getattr(
+                        coordinate.get_major_locator(), "forget_settled_step", None
+                    )
+                    if forget is not None:
+                        forget()
         self._focused_facet_index = facet_index
         self._facet_focus_index = facet_focus_index
         self._visible_facet_count = count
@@ -2662,6 +2684,7 @@ class MatplotlibRenderer:
             # is the whole cost the confinement exists to avoid.
             self._background_region = None
             self._background_signature = None
+            self._background_composed = None
             self._chrome_churn = 0
         overview = isinstance(self.spec, FacetGridPlot) and self._facet_focus_index is None
         painted_selectors = SelectorSnapshot(()) if overview else frame.selectors
@@ -2930,6 +2953,7 @@ class MatplotlibRenderer:
 
         self._background_region = None
         self._background_signature = None
+        self._background_composed = None
         self._chrome_churn = 0
         self._boundary_chrome_cache.clear()
         self._forget_chrome_commands()
@@ -2964,6 +2988,7 @@ class MatplotlibRenderer:
             if self._has_prepared_scene():
                 self._background_region = None
                 self._background_signature = None
+                self._background_composed = None
                 self._chrome_churn = 0
                 self._compose_frame(chrome_stable=False)
                 self._chrome_dirty_axes.clear()
@@ -3107,7 +3132,19 @@ class MatplotlibRenderer:
             self._forget_chrome_commands()
             self._boundary_chrome_signature = signature
         commands_to_record: list[Any] = []
-        chrome_owners = {entry[1].axes for entry in tuple(collected)}
+        # What can overpaint chrome is what PAINTS: an artist that is hidden
+        # paints nothing in a full draw, so it makes its axes no owner.
+        # Counting hidden artists made the picture depend on history -- a
+        # cell that had once been focused kept its withdrawn line and bars,
+        # and its frame was composed over its kernel-stroked data while its
+        # neighbours' frames stayed under theirs: the overview did not come
+        # back the same picture after a focus round trip.
+        chrome_owners = {
+            artist.axes for _key, artist in collected if artist.get_visible()
+        }
+        self._chrome_composed = frozenset(
+            id(axes) for axes in chrome_owners if axes.get_visible()
+        )
         for axes in chrome_owners:
             if not axes.get_visible():
                 continue
@@ -3182,14 +3219,16 @@ class MatplotlibRenderer:
                     commands_to_record.append(artist)
                 keyed(artist, owner, zorder)
         # A cell's chrome is composed beside the data on exactly the
-        # condition its per-cell predecessor was: THAT CELL owns an artist
-        # that could overpaint it.  Asked of the grid instead -- any cell at
-        # all -- one cell holding a withdrawn line after a focus round trip
-        # moved all sixty-four cells' chrome to the other side of the
-        # kernel-stroked curve under it.  A cell whose picture is a kernel
-        # command owns no artist, so its chrome stays captured and the
-        # command paints over it, which is the shipped picture of a natively
-        # stroked grid and not this change's to alter.
+        # condition its per-cell predecessor was: THAT CELL owns a VISIBLE
+        # artist that could overpaint it.  Asked of the grid instead -- any
+        # cell at all -- one cell holding a withdrawn line after a focus
+        # round trip moved all sixty-four cells' chrome to the other side of
+        # the kernel-stroked curve under it.  A cell whose picture is a
+        # kernel command owns no painting artist, so its chrome stays
+        # captured and the command paints over it, which is the shipped
+        # picture of a natively stroked grid -- and, since a withdrawn
+        # artist is no owner, the picture of every cell of it whatever was
+        # focused before.
         #
         # A cell's marks and frame stand ON that cell and key themselves from
         # it, like any other of its artists, which is what keeps the order
@@ -4600,6 +4639,17 @@ class MatplotlibRenderer:
 
         dynamics = self._dynamic_artists()
         ordered, split = ordered_with_split(dynamics)
+        if reusable and self._chrome_composed != self._background_composed:
+            # WHICH chrome the background holds is part of what it is.  An
+            # axes' chrome is composed beside its data while a visible
+            # artist stands on it and captured in the background otherwise;
+            # an artist appearing (a grid's fit lines on the frame the fit
+            # lands) or withdrawn (the scene taking a cell back) moves that
+            # chrome to the other side of the split, and a background
+            # captured under the old split then paints it twice, or not at
+            # all.  The geometry is untouched, so the recorded chrome and
+            # the boundary cache stand; only the copy is stale.
+            reusable = False
         # Every owner call enters the renderer's style once around mutation
         # and compose.  Re-entering here copied the full rcParams mapping for
         # every frame without changing a property on any existing artist.
@@ -4662,10 +4712,12 @@ class MatplotlibRenderer:
                 # TIGHT mode went blank from its second frame on.
                 self._background_region = None
                 self._background_signature = None
+                self._background_composed = None
                 self._forget_gesture_region()
             else:
                 self._background_region = capture(self._figure.bbox)
                 self._background_signature = signature
+                self._background_composed = self._chrome_composed
         else:
             restore(self._background_region)
         renderer = _prepare_renderer(get_renderer())
@@ -5715,8 +5767,23 @@ class MatplotlibRenderer:
         they were built from.
         """
 
-        for line, _identity, _label in self._series_lines.get(id(axes), ()):
+        records = self._series_lines.get(id(axes), ())
+        for line, _identity, _label in records:
             line.set_visible(False)
+        if self._fit_hidden_source_lines:
+            # A line the fit mode hid behind its source scatter is on its
+            # way back: the mode ends with the focus, and its restore shows
+            # whatever it hid.  Withdrawn, the line has no picture to come
+            # back to -- the scene strokes its data -- and restored anyway
+            # it was stroked a second time over the scene's curve, and its
+            # cell, now owning a visible artist, composed its frame on the
+            # other side of the data from every other cell's.
+            withdrawn_ids = {id(line) for line, _identity, _label in records}
+            self._fit_hidden_source_lines = tuple(
+                entry
+                for entry in self._fit_hidden_source_lines
+                if id(entry[0]) not in withdrawn_ids
+            )
         for artists in self._series_bars.get(id(axes), {}).values():
             for artist in artists:
                 artist.set_visible(False)
@@ -7234,6 +7301,7 @@ class MatplotlibRenderer:
         self._confined_gesture_axes = axes
         self._background_region = None
         self._background_signature = None
+        self._background_composed = None
         self._chrome_churn = 0
         if axes is not None:
             self.capture_gesture_background()
@@ -9619,11 +9687,12 @@ class MatplotlibRenderer:
         from matplotlib.path import Path
         from matplotlib.text import Text
 
-        marks_plan: list[tuple[Any, Any, list[float], list[float], float, bool]] = []
+        marks_plan: list[tuple[Any, Any, Any, list[float], list[float], float, bool]] = []
         frames_plan: list[tuple[Any, Any, Any]] = []
         titles_plan: list[tuple[Any, str, float]] = []
         labels: list[Any] = []
         shape: list[Any] = []
+        shared_lanes: dict[tuple[object, ...], list[Any]] = {}
         # A spine's path is in axes coordinates, so every cell's left edge
         # is the same two vertices, and one frozen copy serves the grid:
         # the patch holds the cell's own transform, the path only the
@@ -9655,34 +9724,78 @@ class MatplotlibRenderer:
                 frames_plan.append((axes, path, spine))
                 sides += 1
             lanes_seen = 0
-            for axis in (axes.xaxis, axes.yaxis):
-                horizontal = axis is axes.xaxis
-                zorder = float(axis.get_zorder())
-                # One artist can carry every MARK of one axis that strokes
-                # the same way -- which major and minor ticks do not, so the
-                # stroke is part of a lane's identity.  A GRIDLINE crosses
-                # the box, so it cannot share a polyline with its
-                # neighbours and keeps an artist per line; the lane is only
-                # how its stroke is found.  Its clip is the difference that
-                # matters: Matplotlib clips a gridline to the cell patch and
-                # does not clip a tick mark.
-                grid_lanes: dict[tuple[object, ...], tuple[list[float], Any]] = {}
-                mark_lanes: dict[tuple[object, ...], tuple[list[float], Any]] = {}
-                for tick in axis._update_ticks():
-                    location = float(tick.get_loc())
-                    if tick.gridline.get_visible():
-                        grid_lanes.setdefault(
-                            _tick_stroke(tick.gridline), ([], tick.gridline)
-                        )[0].append(location)
-                    for which, line in ((1, tick.tick1line), (2, tick.tick2line)):
-                        if line.get_visible():
-                            mark_lanes.setdefault(
-                                (which, *_tick_stroke(line)), ([], line)
+            # THE CELLS OF A GRID ASK THE SAME QUESTION.  Cells with the
+            # same view, the same box and the same tick policy get the
+            # same ticks -- the ladder's answer is already cached per
+            # figure -- yet every cell used to walk its own Axis for them:
+            # making Tick artists, formatting labels nobody shows, aligning
+            # them.  Sixty-four cells were 128 such walks, three quarters of
+            # the chrome's cost on a first frame and on every resize.  The
+            # first cell of a kind walks; the rest take its lanes and put
+            # them on their own transforms.  A cell that SHOWS labels walks
+            # for itself, because the labels the boundary paints are that
+            # cell's own Tick artists.
+            share_key = (
+                axes.viewLim.extents.tobytes(),
+                np.round((float(axes.bbox.width), float(axes.bbox.height)), 6).tobytes(),
+                getattr(axes.xaxis, "_zlc_tick_signature", None),
+                getattr(axes.yaxis, "_zlc_tick_signature", None),
+                _tick_params_key(axes.xaxis),
+                _tick_params_key(axes.yaxis),
+            )
+            labelled = any(
+                axis._major_tick_kw.get(name, False)
+                for axis in (axes.xaxis, axes.yaxis)
+                for name in ("label1On", "label2On")
+            )
+            lanes = None if labelled else shared_lanes.get(share_key)
+            if lanes is None:
+                lanes = []
+                for axis in (axes.xaxis, axes.yaxis):
+                    horizontal = axis is axes.xaxis
+                    zorder = float(axis.get_zorder())
+                    # One artist can carry every MARK of one axis that
+                    # strokes the same way -- which major and minor ticks
+                    # do not, so the stroke is part of a lane's identity.
+                    # A GRIDLINE crosses the box, so it cannot share a
+                    # polyline with its neighbours and keeps an artist per
+                    # line; the lane is only how its stroke is found.  Its
+                    # clip is the difference that matters: Matplotlib clips
+                    # a gridline to the cell patch and does not clip a tick
+                    # mark.
+                    grid_lanes: dict[tuple[object, ...], tuple[list[float], Any]] = {}
+                    mark_lanes: dict[tuple[object, ...], tuple[list[float], Any]] = {}
+                    for tick in axis._update_ticks():
+                        location = float(tick.get_loc())
+                        if tick.gridline.get_visible():
+                            grid_lanes.setdefault(
+                                _tick_stroke(tick.gridline), ([], tick.gridline)
                             )[0].append(location)
-                    for label in (tick.label1, tick.label2):
-                        if label.get_visible() and label.get_text():
-                            labels.append(label)
-                for locs, source in grid_lanes.values():
+                        for which, line in ((1, tick.tick1line), (2, tick.tick2line)):
+                            if line.get_visible():
+                                mark_lanes.setdefault(
+                                    (which, *_tick_stroke(line)), ([], line)
+                                )[0].append(location)
+                        for label in (tick.label1, tick.label2):
+                            if label.get_visible() and label.get_text():
+                                labels.append(label)
+                    for locs, source in grid_lanes.values():
+                        lanes.append((horizontal, "grid", source, locs, zorder, True))
+                    for (which, *_stroke), (locs, source) in mark_lanes.items():
+                        lanes.append((horizontal, f"tick{which}", source, locs, zorder, False))
+                if not labelled:
+                    shared_lanes[share_key] = lanes
+            for horizontal, which, source, locs, zorder, clipped in lanes:
+                # The lane's transform is THIS cell's, whichever cell walked
+                # for it: a tick line's is its own axes' spine transform,
+                # a gridline's the axes' grid transform, and a source from
+                # another cell would place the marks on that cell.
+                transform = (
+                    axes.get_xaxis_transform(which=which)
+                    if horizontal
+                    else axes.get_yaxis_transform(which=which)
+                )
+                if clipped:
                     across = source.get_xydata()
                     for location in locs:
                         if horizontal:
@@ -9691,16 +9804,17 @@ class MatplotlibRenderer:
                         else:
                             xs = [float(across[0][0]), float(across[1][0])]
                             ys = [location, location]
-                        marks_plan.append((axes, source, xs, ys, zorder, True))
+                        marks_plan.append((axes, source, transform, xs, ys, zorder, True))
                         lanes_seen += 1
-                for locs, source in mark_lanes.values():
+                else:
                     across = source.get_xydata()[0]
                     if horizontal:
-                        xs, ys = locs, [float(across[1])] * len(locs)
+                        xs, ys = list(locs), [float(across[1])] * len(locs)
                     else:
-                        xs, ys = [float(across[0])] * len(locs), locs
-                    marks_plan.append((axes, source, xs, ys, zorder, False))
+                        xs, ys = [float(across[0])] * len(locs), list(locs)
+                    marks_plan.append((axes, source, transform, xs, ys, zorder, False))
                     lanes_seen += 1
+            for axis in (axes.xaxis, axes.yaxis):
                 offset = axis.get_offset_text()
                 if offset.get_visible():
                     # What ``Axis.draw`` does with it, in the same order: the
@@ -9725,7 +9839,7 @@ class MatplotlibRenderer:
         marks = self._artists.get("facet:chrome_marks", [])
         frames = self._artists.get("facet:chrome_spines", [])
         title_artists = self._artists.get("facet:chrome_titles", [])
-        for position, (axes, source, xs, ys, zorder, clipped) in enumerate(marks_plan):
+        for position, (axes, source, transform, xs, ys, zorder, clipped) in enumerate(marks_plan):
             if reuse:
                 line = marks[position]
             else:
@@ -9748,9 +9862,9 @@ class MatplotlibRenderer:
                     line.set_clip_path(None)
                     line.set_clip_box(None)
                 marks.append(line)
-            # The tick line's OWN blended transform, so the marks stay in
-            # data coordinates along the axis and in the box across it.
-            line.set_transform(source.get_transform())
+            # The cell's own blended transform, so the marks stay in data
+            # coordinates along the axis and in the box across it.
+            line.set_transform(transform)
             line.set_data(xs, ys)
         for position, (axes, path, spine) in enumerate(frames_plan):
             if reuse:
