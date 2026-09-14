@@ -1688,11 +1688,15 @@ def raster_prepared_images(
             if use_valid and not valid[cell, source_row, source_column]:
                 continue
             if single:
-                scaled32 = (
-                    (np.float32(values[cell, source_row, source_column]) - vmin32)
-                    / span32
-                ) * np.float32(256.0)
-                scaled = np.float64(scaled32)
+                # The plane is float32; the limit and the span are float64.
+                # NumPy subtracts and divides in float64 and stores each
+                # result back into the float32 plane, then scales by the
+                # colormap's 256 slots in float32 (exact, a power of two).
+                shifted = np.float32(
+                    np.float64(np.float32(values[cell, source_row, source_column])) - vmin64
+                )
+                unit = np.float32(np.float64(shifted) / span64)
+                scaled = np.float64(unit * np.float32(256.0))
             else:
                 scaled = (
                     (np.float64(values[cell, source_row, source_column]) - vmin64)

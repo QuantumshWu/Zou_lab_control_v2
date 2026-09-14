@@ -356,13 +356,15 @@ def test_overview_view_limits_apply_to_every_visible_cell() -> None:
         for axis in visible:
             assert tuple(map(float, axis.get_xlim())) == (9.5, 30.5)
             assert tuple(map(float, sorted(axis.get_ylim()))) == (4.5, 25.5)
-        # ...and every cell prepares its RASTER for the view it shows, which
-        # is what the standalone image does.  Honouring the request on the
-        # selected cell only left the rest showing a full-extent front cropped
-        # to a zoom: the same pixels, at a fraction of the resolution.
-        for index in range(len(visible)):
-            prepared = session._renderer._artists[f"facet:{index}:prepared_current"]
-            assert tuple(map(float, prepared.extent)) == (9.5, 30.5, 25.5, 4.5)
+        # ...and every cell's RASTER is painted for the view it shows, which
+        # is what the standalone image does: the grid's image scene reads
+        # each cell's own limits when it paints, and it carries the request
+        # every cell was moved to.  Honouring the request on the selected
+        # cell only left the rest showing a full-extent front cropped to a
+        # zoom: the same pixels, at a fraction of the resolution.
+        scene = session._renderer._artists["image:prepared"]
+        assert scene["values"].shape[0] == len(visible)
+        assert tuple(map(tuple, scene["view_limits"])) == ((9.5, 30.5), (25.5, 4.5))
     finally:
         session.close()
 

@@ -1176,30 +1176,21 @@ def _normalize_arithmetic(
 ) -> tuple[bool, np.float32, np.float32, np.float64, np.float64]:
     """The numbers ``Normalize`` scales a plane with, in the precision it does.
 
-    Two things about matplotlib's normalization decide a boundary sample's
-    colour slot.  The data is promoted with float32 -- a sixteen-bit camera
-    frame is scaled in float32, a float64 plane in float64.  And the limits
-    go through ``process_value`` as scalars, whose ``min_scalar_type`` is
-    the smallest float that holds their RANGE: float16, promoted to
-    float32 -- so ``vmin`` and ``vmax`` are float32 numbers however the
-    data is typed, and their difference is a float32 difference, which a
-    float64 plane is then divided by.  Returns ``(single, vmin32, span32,
-    vmin64, span64)``: whether the plane scales in float32, and the limit
-    and span for either precision.
+    The plane is promoted with float32 -- a sixteen-bit camera frame is
+    scaled in float32, a float64 plane in float64.  The limits go through
+    ``process_value`` as a one-element LIST, whose ``min_scalar_type`` is
+    float64, so they stay float64 numbers; the subtraction and the
+    division are then float64 operations whose results are stored back
+    into the plane's own dtype.  Returns ``(single, vmin32, span32, vmin64,
+    span64)``: whether the plane scales in float32, and the float64 limit
+    and span (the float32 pair is the same numbers, kept for a kernel that
+    reads the float32 plane through them).
     """
 
     single = np.promote_types(dtype, np.float32) == np.dtype(np.float32)
-    limit_dtype = np.promote_types(np.min_scalar_type(float(vmin)), np.float32)
-    low = np.asarray(float(vmin), dtype=limit_dtype)
-    high = np.asarray(float(vmax), dtype=np.promote_types(np.min_scalar_type(float(vmax)), np.float32))
-    span = high - low
-    return (
-        bool(single),
-        np.float32(low),
-        np.float32(span),
-        np.float64(low),
-        np.float64(span),
-    )
+    low = np.float64(float(vmin))
+    span = np.float64(float(vmax)) - low
+    return bool(single), np.float32(low), np.float32(span), low, span
 
 
 def _view_nearest_map(
