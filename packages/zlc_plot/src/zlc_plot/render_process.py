@@ -998,35 +998,6 @@ DEFAULT_RENDER_SPARES = 4
 DEFAULT_RENDER_SETTLED_SPARES = 2
 
 
-#: Windows priority classes: what a warming spare runs at, and what a child
-#: with a panel runs at.
-_BELOW_NORMAL_PRIORITY_CLASS = 0x4000
-_NORMAL_PRIORITY_CLASS = 0x20
-
-
-def _set_priority_class(priority_class: int) -> None:
-    """Move this process to ``priority_class``; nothing anywhere but Windows.
-
-    A WARMING SPARE YIELDS TO A MOUNTING SIBLING.  Four spares warm at
-    once when a console opens, each on a core or more for three seconds,
-    and the panels the console opens on mount into their own children at
-    the same moment: measured, the mounts right after a console opened
-    ran 30 to 300 ms slower than the same mounts on a settled machine,
-    which is the pool's own warming taking cores from the pictures the
-    operator is waiting for.  A spare's warming is speculative; a panel's
-    first frame is not.  Below normal, the scheduler gives a spare only
-    what nobody else wants, and the moment a panel arrives the child goes
-    back to normal and keeps it.
-    """
-
-    if os.name != "nt":
-        return
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
-    kernel32.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-    kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), priority_class)
-
-
 def _retire_member(member: "RenderProcess") -> None:
     """Tell one child to go, and do not wait for it to finish going.
 
@@ -3040,9 +3011,6 @@ def _render_process_main(connection: Connection, name: str) -> None:
     #: Set by the first create request: from then on the warming below
     #: stops before its next picture, so a panel never queues behind it.
     requested = Event()
-    # And until then this child is a spare: it warms with the cores nobody
-    # else wants, so a sibling mounting a panel is not slowed by it.
-    _set_priority_class(_BELOW_NORMAL_PRIORITY_CLASS)
 
     def warm() -> None:
         """Pay the process's first-render costs now, before a panel asks.
@@ -3254,9 +3222,6 @@ def _render_process_main(connection: Connection, name: str) -> None:
         initial_configuration: Mapping[str, object] | None,
     ) -> None:
         requested.set()
-        # A panel has arrived: this child is no longer a spare, and its
-        # picture competes on equal terms from here on.
-        _set_priority_class(_NORMAL_PRIORITY_CLASS)
         plot_input = _resolve_inputs(input_ref, inputs)
 
         def factory() -> PlotSession:

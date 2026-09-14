@@ -433,37 +433,3 @@ def test_a_render_child_uses_one_blas_thread() -> None:
     # and under a hundred with one; the ceiling leaves room for a smaller
     # machine's pool without admitting a full one.
     assert private_mb < 250.0, f"a child still committed {private_mb:.0f} MB"
-
-
-@pytest.mark.skipif(sys.platform != "win32", reason="priority classes are Windows scheduling")
-def test_a_spare_child_warms_below_normal_and_a_hosting_child_runs_normal() -> None:
-    """Four spares warming at once took cores from the panels mounting next
-    to them: the mounts right after a console opened ran 30 to 300 ms
-    slower than on a settled machine.  A spare warms below normal priority
-    and comes back to normal the moment a panel arrives."""
-
-    psutil = pytest.importorskip("psutil")
-
-    from zlc_plot import AxisRef, CurvePlot
-    from zlc_plot._kernel_warm import _series_snapshot
-    from zlc_plot.render_process import RenderProcess
-
-    process = RenderProcess("priority-test")
-    try:
-        deadline = time.monotonic() + 30.0
-        while time.monotonic() < deadline and process.pid is None:
-            time.sleep(0.05)
-        child = psutil.Process(process.pid)
-        deadline = time.monotonic() + 30.0
-        while time.monotonic() < deadline and child.nice() != psutil.BELOW_NORMAL_PRIORITY_CLASS:
-            time.sleep(0.05)
-        assert child.nice() == psutil.BELOW_NORMAL_PRIORITY_CLASS
-        host = process.build_host(
-            _series_snapshot(8, 400), CurvePlot(AxisRef.point("x")), size="2x2"
-        )
-        host.wait_for_front(120.0)
-        assert child.nice() == psutil.NORMAL_PRIORITY_CLASS
-        host.close(timeout=60.0)
-    finally:
-        process.release(0.0)
-        process.close(60.0)
