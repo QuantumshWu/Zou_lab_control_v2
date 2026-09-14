@@ -7,7 +7,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.fluent import (
     API_VIOLET, API_VIOLET_DARK, BG, CONFIG_GREEN, CONFIG_GREEN_DARK,
     EDIT_PADDING_H, FONT, ORANGE, ORANGE_DARK,
-    ORANGE_TINT, PADDING_V, PLACEHOLDER, RADIUS, SURFACE, FluentLineEdit, Metrics,
+    ORANGE_TINT, PADDING_V, PLACEHOLDER, RADIUS, SURFACE, FluentLineEdit,
     fluent_font_size, scaled_px,
 )
 
@@ -19,7 +19,7 @@ class _FluentScanDot(QtWidgets.QAbstractButton):
         self.setCursor(QtCore.Qt.PointingHandCursor)
         self._number: int | None = None
         self._kind: str | None = None
-        diameter = Metrics.dot()
+        diameter = scaled_px(15, minimum=12)
         self.setFixedSize(diameter, diameter)
         self.setToolTip(tooltip)
 
@@ -123,7 +123,7 @@ class FluentScanLineEdit(FluentLineEdit):
         return None if self._field_state is None else self._field_state[2]
 
     def _dot_size(self) -> int:
-        return Metrics.dot()
+        return scaled_px(15, minimum=12)
 
     def _reserve_right(self) -> None:
         self.setTextMargins(0, 0, self._dot_size() + scaled_px(3), 0)

@@ -183,10 +183,7 @@ def coerce_choice_labels(provider) -> dict:
 
     if not callable(provider):
         return {}
-    try:
-        return {str(key): str(value) for key, value in dict(provider()).items() if value}
-    except Exception:
-        return {}
+    return {str(key): str(value) for key, value in dict(provider()).items() if value}
 
 
 __all__ = [

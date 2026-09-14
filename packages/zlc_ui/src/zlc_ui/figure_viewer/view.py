@@ -638,7 +638,7 @@ class _DataEditorView(QtWidgets.QWidget):
                 continue
             widget, *_unused = self._axis_view_widgets.pop(axis_id)
             self._axis_view_layout.removeWidget(widget)
-            widget.deleteLater()
+            retire_widget(widget)
         for position, row in enumerate(projected):
             axis_id = str(row.get("axis_id", ""))
             controls = self._axis_view_widgets.get(axis_id)
@@ -1133,6 +1133,11 @@ class FigureViewerView(QtWidgets.QWidget):
         )
         editor.save_figure_requested.connect(
             lambda path, pid=key: self.panel_save_figure_requested.emit(pid, str(path))
+        )
+        # The Edit surface's failures travel the same channel as the card's:
+        # one relay rule, one place the viewer reports a plot.
+        editor.plot_error.connect(
+            lambda message, pid=key: self.panel_plot_error.emit(pid, str(message))
         )
         self._editors[key] = editor
         self.tabs.add_closable_tab(editor, str(title), focus=True)

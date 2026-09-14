@@ -991,8 +991,6 @@ class FluentSettingsPopupAnchor:
         present=None,
         minimum_width: int = 360,
         minimum_height: int = 300,
-        maximum_height: int | None = None,
-        content_width: int | None = None,
     ) -> None:
         """Close a visible popup, otherwise prepare and show it beside the anchor."""
 
@@ -1015,8 +1013,6 @@ class FluentSettingsPopupAnchor:
                 content,
                 minimum_width=minimum_width,
                 minimum_height=minimum_height,
-                maximum_height=maximum_height,
-                content_width=content_width,
             )
         else:
             present()
@@ -6089,34 +6085,6 @@ def open_fluent_window(
 # ---------------------------------------------------------------------------
 
 
-class Metrics:
-    """Scaled spacing/size tokens.  Call methods to read current pixel values."""
-
-    @staticmethod
-    def margin() -> int:
-        return scaled_px(8, minimum=5)
-
-    @staticmethod
-    def gap_row() -> int:
-        return scaled_px(6, minimum=4)
-
-    @staticmethod
-    def gap_item() -> int:
-        return scaled_px(5, minimum=3)
-
-    @staticmethod
-    def gap_tight() -> int:
-        return scaled_px(3, minimum=2)
-
-    @staticmethod
-    def row_h() -> int:
-        return scaled_px(28, minimum=22)
-
-    @staticmethod
-    def dot() -> int:
-        return scaled_px(15, minimum=12)
-
-
 def measure_text_width(texts, *, padding: int = 16, minimum: int = 0, maximum: int | None = None) -> int:
     """Return a label-column width that fits the widest of ``texts`` at the current scale."""
 
@@ -6234,13 +6202,6 @@ class FluentStatusStrip(FluentFrame):
                 f'QLabel {{ color: {colour}; font: {fluent_font_size()}pt "{FONT}"; background: transparent; }}')
         if str(text) != self.message.text():
             self.message.setText(str(text))
-
-    @property
-    def severity(self) -> str:
-        """The current line's severity key (one of :data:`SEVERITIES`) -- the DATA read-back
-        matching :meth:`text`, so a caller/test can assert the strip's state without poking
-        at colours."""
-        return self._severity
 
     def set_action_visible(self, visible: bool) -> None:
         """Show/hide the action button (a no-op when the strip was built without one)."""

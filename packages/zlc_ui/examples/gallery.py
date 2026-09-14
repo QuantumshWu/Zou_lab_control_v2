@@ -66,7 +66,6 @@ fill_grouped_choice_combo = _fluent.fill_grouped_choice_combo
 ElidedLabel = _fluent.ElidedLabel
 FluentWindow = _fluent.FluentWindow
 InfoPane = _fluent.InfoPane
-Metrics = _fluent.Metrics
 launch_qt_window = _fluent.launch_qt_window
 muted_note_label = _fluent.muted_note_label
 retire_widget = _fluent.retire_widget

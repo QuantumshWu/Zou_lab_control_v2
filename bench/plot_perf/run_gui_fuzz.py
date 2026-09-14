@@ -863,7 +863,7 @@ def perform_action(bench, action, beat, output):
     elif kind == "selectors":
         click(view.selectors_switch, bench.app)
     elif kind == "pause":
-        click(view.pause_button, bench.app)
+        click(view.pause_switch, bench.app)
     elif kind == "tab":
         tab(bench, action["index"])
     elif kind == "settings":

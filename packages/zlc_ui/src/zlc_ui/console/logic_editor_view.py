@@ -25,6 +25,7 @@ from zlc_ui.fluent import (
     FluentSwitch,
     FluentTreeComboBox,
     fill_grouped_choice_combo,
+    retire_widget,
     scaled_px,
 )
 from zlc_ui.form import FluentParameterForm, FormSpec
@@ -276,8 +277,7 @@ class LogicEditorView(QtWidgets.QWidget):
             if factory in factories:
                 continue
             widget = self._contributions.pop(factory)
-            widget.hide()
-            widget.deleteLater()
+            retire_widget(widget)
         managed: set[str] = set()
         for factory in factories:
             widget = self._contributions[factory]
@@ -420,8 +420,7 @@ class LogicEditorView(QtWidgets.QWidget):
                 continue
             widget = item.widget()
             if widget is not None:
-                widget.hide()
-                widget.deleteLater()
+                retire_widget(widget)
 
     @staticmethod
     def _fill_combo(

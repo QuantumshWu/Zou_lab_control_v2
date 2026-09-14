@@ -1630,9 +1630,6 @@ class FluentParameterForm(QtWidgets.QWidget):
             for field in spec.fields
         }
 
-    def write_all(self, values: Mapping[str, object]) -> None:
-        self.populate(values)
-
     def _layout_order(self) -> list[str]:
         """The keys in the order the layout is holding them right now."""
 

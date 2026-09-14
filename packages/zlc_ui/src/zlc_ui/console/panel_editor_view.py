@@ -464,11 +464,10 @@ class PanelEditorView(QtWidgets.QWidget):
         self._mutation_enabled = bool(enabled)
         self.panel_form.setEnabled(self._mutation_enabled)
         if self._mutation_enabled:
-            for key in ("signal", "overlay_signal", "cell_kind"):
-                if key in self.panel_form.spec.keys:
-                    self.panel_form.widget_for(key).setEnabled(
-                        not self._science_locked
-                    )
+            if "overlay_signal" in self.panel_form.spec.keys:
+                self.panel_form.widget_for("overlay_signal").setEnabled(
+                    not self._science_locked
+                )
             if "signal" in self.panel_form.spec.keys:
                 self.panel_form.widget_for("signal").setEnabled(
                     bool(self._signal_groups) and not self._science_locked

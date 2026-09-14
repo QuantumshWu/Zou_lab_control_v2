@@ -88,7 +88,6 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.name_label = FluentLabel("task")
         self.name_label.setFixedWidth(scaled_px(150, minimum=110))
         self.summary_label = ElidedLabel("")
-        self.summary = self.summary_label
         self.summary_label.setStyleSheet(f"color: {GREY}; background: transparent; border: none;")
 
         self.kind_combo = FluentComboBox()
@@ -105,7 +104,6 @@ class TaskConsoleView(QtWidgets.QWidget):
         # the command and the label carries the state.  It emits the state it
         # is asking FOR, which is what makes the command reversible.
         self.pause_switch = FluentButton("Pause", color=ORANGE)
-        self.pause_button = self.pause_switch
         self._paused = False
         self.selectors_switch = FluentSwitch("Selectors")
         self.save_screenshot_button = FluentButton("Save image", color=ACCENT)
@@ -179,7 +177,6 @@ class TaskConsoleView(QtWidgets.QWidget):
         self._logic_rows: tuple[LogicRowView, ...] = ()
         self.logic_scroll.set_width_bounded_widget(self.logic_body)
         logic_outer.addWidget(self.logic_scroll, 1)
-        self.logic_page = self.logic_scroll
         self.tabs.add_permanent_tab(logic_page, "Logic")
         outer.addWidget(self.tabs, 1)
 

@@ -150,7 +150,7 @@ def parameter_form_values(fields: object) -> dict[str, object]:
     }
 
 
-def decode_parameter_value(field: Mapping[str, object], edited: object) -> object:
+def decode_parameter_value(edited: object) -> object:
     """Recover the exact typed value declared by the plot control surface."""
 
     if edited is _ParameterChoice.NONE:
@@ -190,16 +190,12 @@ def parameter_edit_values(fields: object, key: str, read_value) -> dict[str, obj
     if selected not in declared:
         raise KeyError(selected)
     edited = {
-        selected: decode_parameter_value(
-            declared[selected], read_value(selected)
-        )
+        selected: decode_parameter_value(read_value(selected))
     }
     companion = str(declared[selected].get("co_edited_with") or "")
     if companion and companion in declared:
         try:
-            edited[companion] = decode_parameter_value(
-                declared[companion], read_value(companion)
-            )
+            edited[companion] = decode_parameter_value(read_value(companion))
         except (KeyError, TypeError, ValueError):
             # Theirs stands; the companion joins the next edit that can be
             # read.
@@ -263,7 +259,6 @@ def interval_form_field(intervals: object, current: object) -> FormFieldProps:
 
 
 __all__ = [
-    "decode_parameter_value",
     "interval_form_field",
     "panel_state_document",
     "parameter_fields",
