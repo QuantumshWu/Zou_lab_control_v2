@@ -98,6 +98,7 @@ def _column_for_field(
     reference: PulseFieldRef,
     unit: str,
     *,
+    geometry: StreamerParams,
     api_parameter: bool,
     tick_scale: int = 1,
     maximum_tick_scale: int = 1,
@@ -130,7 +131,7 @@ def _column_for_field(
     if api_parameter and reference.kind == FIELD_DELAY:
         nominal = float(pulse_field_value(sequence, reference, unit))
         longest = (
-            StreamerParams().ttl_delay_max_ticks
+            geometry.ttl_delay_max_ticks
             / _ticks_per(sequence, unit)
         )
         span = max(quantum, abs(nominal) * 0.5)
@@ -148,7 +149,7 @@ def _column_for_field(
 
     nominal = abs(float(pulse_field_value(sequence, reference, unit)))
     ticks_per_unit = _ticks_per(sequence, unit)
-    longest = ((1 << StreamerParams().tick_width) - 1) / ticks_per_unit
+    longest = ((1 << geometry.tick_width) - 1) / ticks_per_unit
     if api_parameter:
         limit_lo = quantum
         limit_hi = longest
@@ -227,6 +228,7 @@ def scan_columns_for(
             slot.slot_id,
             slot.field_ref,
             sequence.field_unit(slot.field_ref),
+            geometry=geometry,
             api_parameter=False,
             tick_scale=scale,
             maximum_tick_scale=maximum_tick_scale,
@@ -240,12 +242,14 @@ def api_parameter_columns_for(
 ) -> tuple[ScanColumnSpec, ...]:
     """The API-value columns declared by this sequence, in parameter order."""
 
+    geometry = StreamerParams()
     return tuple(
         _column_for_field(
             sequence,
             parameter.parameter_id,
             parameter.field_ref,
             parameter.unit,
+            geometry=geometry,
             api_parameter=True,
         )
         for parameter in sequence.api_parameters

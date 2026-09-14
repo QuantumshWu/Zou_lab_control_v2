@@ -1197,16 +1197,16 @@ def run_child(args, output):
             raise AssertionError("application error was captured, including during shutdown")
         # Read-back is evidence collection, not GUI work: keep decompression
         # outside the live application's lifetime and timing window.
-        from zlc_data.figure_archive import read_archive, read_dataset
+        from zlc_data.figure_archive import read_archive
         from zlc_plot.figure_artifact import figure_plot_recipe
         result["saved_checks"] = []
         for path, expected_ref, expected_selectors in bench.fuzz_saves:
             check = dict(path=str(path), archive_exists=path.exists(),
                          preview_exists=path.with_suffix(".png").exists())
             if path.exists():
-                info, arrays = read_archive(path)
+                info, arrays, datasets = read_archive(path)
                 check["snapshot_matches_click"] = (
-                    read_dataset(info, arrays, "data").ref == expected_ref)
+                    datasets["data"].ref == expected_ref)
                 check["selectors_match_click"] = (
                     tuple(figure_plot_recipe(info, "data")["selectors"]) == expected_selectors)
                 del arrays

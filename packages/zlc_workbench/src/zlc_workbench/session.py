@@ -958,9 +958,13 @@ class ExperimentSession:
                     "pulse drive failed and the sequencer did not go safe",
                     [error, safe_error],
                 ) from None
-            lease.release()
             raise
-        else:
+        finally:
+            # EVERY way out, as the load path above does.  Released in three
+            # written-out places, the one that mattered was missed: a drive
+            # that failed AND would not go safe kept the claim for good, so
+            # no later fire could take it and close() refused the session for
+            # a device still in use.
             lease.release()
 
     # ---------------------------------------------------------------- keeping
