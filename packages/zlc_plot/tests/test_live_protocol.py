@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-from threading import Event, Thread
+from threading import Event, Thread, current_thread
 import zlib
 
 import numpy as np
@@ -267,6 +267,66 @@ def test_live_fit_event_precedes_blocked_main_render_and_pair_stays_atomic(
         release_render.set()
         if thread is not None:
             thread.join(10)
+        if release_subscription is not None:
+            release_subscription()
+        session.close()
+
+
+def test_a_re_armed_fit_racing_the_pair_it_armed_counts_batches_in_delivery_order(
+    monkeypatch,
+) -> None:
+    """The console's "fit batch_revision must increase" on a model edit.
+
+    Re-arming installs the new request BEFORE the owner thread solves it
+    (``configure`` -> ``_begin_fit_request`` -> its own synchronous solve).
+    A frame prepared meanwhile freezes THAT request on the prepare thread and
+    solves it on the analysis executor -- and can finish first.  Stamped at
+    solve completion, the pair took batch 1 and the re-arm batch 2; delivered
+    at acceptance, the re-arm's event went out first and the pair's after it,
+    so the bridge saw 2 then 1 and refused the pair.  A batch counts where the
+    fit becomes the session's answer, in the order the answers go out.
+    """
+
+    initial, spec = _fit_snapshot("radial_gaussian_center", 0)
+    updated, _same_spec = _fit_snapshot("radial_gaussian_center", 1)
+    session = PlotSession(initial, spec)
+    events: list[object | None] = []
+    release_subscription = None
+    pair: dict[str, object] = {}
+    owner = current_thread()
+    try:
+        release_subscription = session.subscribe_fit(events.append)
+        model = next(
+            item for item in session.fit_models
+            if item.model_id == "radial_gaussian_center"
+        )
+        prepared = session.prepare_live_frame(updated).result(timeout=10)
+        solve_parts = session._solve_started_fit_parts
+
+        def pair_finishes_before_the_re_arm_solves(started, **kwargs):
+            if current_thread() is owner and "solved" not in pair:
+                solve = session.solve_live_frame(prepared)
+                assert solve is not None, "the re-armed request was not current"
+                pair["solved"] = solve.result(timeout=30)
+            return solve_parts(started, **kwargs)
+
+        monkeypatch.setattr(
+            session,
+            "_solve_started_fit_parts",
+            pair_finishes_before_the_re_arm_solves,
+        )
+        session.configure(fit={"model": model.model_id}, fit_live=True)
+        assert "solved" in pair
+        assert [event.result.source_revision for event in events] == [0]
+        finalization = session.commit_live_frame(prepared, pair["solved"])
+        assert finalization is not None
+        session.publish_live_frame(finalization)
+        assert [event.result.source_revision for event in events] == [0, 1]
+        revisions = [event.result.batch_revision for event in events]
+        assert revisions[0] < revisions[1], revisions
+        assert session.last_fit is not None
+        assert session.last_fit.batch_revision == revisions[1]
+    finally:
         if release_subscription is not None:
             release_subscription()
         session.close()
