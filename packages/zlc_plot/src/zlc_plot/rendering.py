@@ -2412,13 +2412,33 @@ class MatplotlibRenderer:
         # and ``add_axes`` would then refuse it back.  ``_children`` is the
         # list of artists ADDED to an Axes; its spines, axes, patch and
         # title are not in it and must not be taken.
+        # THE GRID'S CHROME GOES WITH THE CELLS.  Its marks and frames are
+        # the cells' own children and its titles and label carrier the
+        # figure's; a resize moves them, it does not change what they are
+        # -- the topology the reuse gate compares, sides and lanes per
+        # cell, is the same after every resize -- yet clearing the figure
+        # took them, and the next frame built 256 frame patches and 128
+        # mark lines again and measured every cell's ticks on the way.
+        chrome = {
+            key: self._artists[key]
+            for key in self._FACET_CHROME_KEYS
+            if key in self._artists
+        }
+        if len(chrome) != len(self._FACET_CHROME_KEYS):
+            chrome = {}
+        cell_chrome = {
+            id(artist)
+            for key in ("facet:chrome_marks", "facet:chrome_spines")
+            for artist in chrome.get(key, ())
+        }
         kept: list[Any] = []
         for role, entries in self._axes.items():
             if role != "facet_cell":
                 continue
             for axis in entries:
                 for child in list(axis._children):
-                    child.remove()
+                    if id(child) not in cell_chrome:
+                        child.remove()
                 # A locator holds the step it settled on so an axis does
                 # not restripe its labels every frame; across a resize
                 # that hysteresis is the PREVIOUS layout's, and a cell
@@ -2448,12 +2468,19 @@ class MatplotlibRenderer:
             self.plan = plan
             self._axes = self._create_axes(figure, plan, kept)
         self._artists.clear()
-        # ``figure.clear`` already took the grid's chrome group with the rest
-        # of the figure's children; what is left is the memory of it.
+        # ``figure.clear`` took the chrome's figure-level artists; the cells
+        # kept theirs.  Back on the figure and back in the table, the next
+        # sync finds the shape it remembers and moves the group instead of
+        # building it; the signature goes, because the positions did.
+        if chrome:
+            for title in chrome["facet:chrome_titles"]:
+                figure.add_artist(title)
+            figure.add_artist(chrome["facet:chrome_labels"])
+            self._artists.update(chrome)
+        else:
+            self._facet_chrome_shape = None
         self._facet_chrome_signature = None
-        self._facet_chrome_shape = None
         self._facet_chrome_owners = {}
-        self._facet_cell_titles = {}
         self._line_sources.clear()
         self._series_lines.clear(); self._series_indices.clear(); self._series_annotations.clear()
         self._series_bars.clear()

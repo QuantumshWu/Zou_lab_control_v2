@@ -741,6 +741,56 @@ def test_a_relayout_keeps_its_cells_and_reticks_them_as_a_new_one_would() -> Non
     )
 
 
+def test_a_relayout_keeps_the_grids_chrome_and_paints_what_a_new_one_would() -> None:
+    """The chrome group -- the frames, marks and titles the grid paints for
+    its cells -- has the same shape after every resize, so a resize moves
+    it and builds nothing: the artists are the same objects, and the
+    picture is the one a session opened at the new size paints.
+    """
+
+    def chrome(session) -> list[int]:
+        artists = session._renderer._artists
+        return [
+            id(artist)
+            for key in ("facet:chrome_marks", "facet:chrome_spines", "facet:chrome_titles")
+            for artist in artists[key]
+        ]
+
+    session, _landed = _site_grid_session(sites=4)
+    try:
+        session.configure(size="2x2")
+        session.rgba()
+        before = chrome(session)
+        session.configure(size="4x4")
+        resized = np.array(session.rgba(), copy=True)
+        after = chrome(session)
+        session.configure(size="2x2")
+        back = np.array(session.rgba(), copy=True)
+        returned = chrome(session)
+    finally:
+        session.close()
+    assert before, "a grid draws its chrome as a group"
+    assert after == before and returned == before, (
+        "a relayout rebuilt the grid's chrome instead of moving it"
+    )
+
+    fresh, _landed = _site_grid_session(sites=4)
+    try:
+        fresh.configure(size="4x4")
+        built = np.array(fresh.rgba(), copy=True)
+    finally:
+        fresh.close()
+    assert np.array_equal(resized, built), "moved chrome painted differently from built chrome"
+
+    fresh, _landed = _site_grid_session(sites=4)
+    try:
+        fresh.configure(size="2x2")
+        built_back = np.array(fresh.rgba(), copy=True)
+    finally:
+        fresh.close()
+    assert np.array_equal(back, built_back), "chrome moved back painted differently from built chrome"
+
+
 def test_a_grid_built_from_the_cell_reserve_paints_the_same_picture() -> None:
     """Cells built before the panel arrived must be indistinguishable.
 
