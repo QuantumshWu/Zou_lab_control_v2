@@ -4006,18 +4006,40 @@ class MatplotlibRenderer:
                 if transform.is_affine
                 else None
             )
+            # A dense series is thinned to each pixel column's extremes
+            # before it is stroked, exactly as the standalone panel thins
+            # the polyline it hands its Line2D: the stroke is exact, segment
+            # by segment, and owes nothing to how many samples share a
+            # column.  Sparse series pass through untouched.
+            columns = int(
+                min(
+                    _ENVELOPE_MAX_COLUMNS,
+                    max(_ENVELOPE_MIN_COLUMNS, float(box.width) * 2.0),
+                )
+            )
+            window = tuple(map(float, axes.get_xlim()))
             for item in cell_series:
                 plotted_y = np.where(item.valid, item.y, np.nan)
+                thinned = (
+                    _envelope_decimated(
+                        np.asarray(item.x, dtype=np.float64), plotted_y, window, columns
+                    )
+                    if item.x.size >= columns * _ENVELOPE_MIN_POINTS_PER_COLUMN
+                    else None
+                )
+                item_x = item.x if thinned is None else thinned[0]
+                if thinned is not None:
+                    plotted_y = thinned[1]
                 if affine is not None:
                     a, b, c, d, e, f = affine
-                    display = np.empty((item.x.shape[0], 2), dtype=np.float64)
-                    display[:, 0] = a * item.x + c * plotted_y + e
+                    display = np.empty((item_x.shape[0], 2), dtype=np.float64)
+                    display[:, 0] = a * item_x + c * plotted_y + e
                     display[:, 1] = float(height) - (
-                        b * item.x + d * plotted_y + f
+                        b * item_x + d * plotted_y + f
                     )
                 else:
                     points = transform.transform(
-                        np.column_stack((item.x, plotted_y))
+                        np.column_stack((item_x, plotted_y))
                     )
                     display = np.asarray(points, dtype=np.float64)
                     display[:, 1] = float(height) - display[:, 1]

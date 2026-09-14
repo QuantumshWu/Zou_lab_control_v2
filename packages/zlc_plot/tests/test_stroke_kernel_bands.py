@@ -12,6 +12,8 @@ count, including counts that do not divide the lane evenly.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 
@@ -21,8 +23,72 @@ if not kernels.HAVE_NUMBA:  # pragma: no cover - the kernels are the subject
     pytest.skip("compiled stroke kernels are absent", allow_module_level=True)
 
 
+def _clamped_line_integral(value):
+    if value <= 0.0:
+        return 0.0
+    if value <= 1.0:
+        return 0.5 * value * value
+    return value - 0.5
+
+
+def _slanted_cover(depth, grade):
+    if grade <= 1.0e-9:
+        return min(1.0, max(0.0, depth))
+    half = 0.5 * grade
+    return (_clamped_line_integral(depth + half) - _clamped_line_integral(depth - half)) / grade
+
+
+def _disc_cover(px, py, x, y, radius):
+    return min(1.0, max(0.0, radius + 0.5 - math.hypot(px - x, py - y)))
+
+
+def _segment_cover(px, py, x0, y0, x1, y1, nxt, radius, cap_start, cap_end):
+    """One piece's contribution: its band (intersection of the two slanted
+    edges), a projecting cap at a polyline end, and the round join's disc
+    for the wedge beyond this piece and before the next."""
+
+    dx, dy = x1 - x0, y1 - y0
+    length2 = dx * dx + dy * dy
+    if length2 <= 0.0:
+        return 0.0
+    along = ((px - x0) * dx + (py - y0) * dy) / length2
+    length = math.sqrt(length2)
+    beyond = 0.0
+    if along < 0.0:
+        if not cap_start:
+            return 0.0
+        beyond = -along * length
+    elif along > 1.0:
+        if not cap_end:
+            if nxt is not None:
+                nx, ny = nxt[0] - x1, nxt[1] - y1
+                next2 = nx * nx + ny * ny
+                if next2 > 0.0 and ((px - x1) * nx + (py - y1) * ny) / next2 >= 0.0:
+                    return 0.0
+            return _disc_cover(px, py, x1, y1, radius)
+        beyond = (along - 1.0) * length
+    if beyond > radius + 0.5:
+        return 0.0
+    if abs(dy) > abs(dx):
+        grade = abs(dx / dy)
+        centre = x0 + (py - y0) * dx / dy
+        half = radius * math.sqrt(1.0 + grade * grade)
+        cover = _slanted_cover(px - (centre - half) + 0.5, grade) + _slanted_cover((centre + half) - px + 0.5, grade) - 1.0
+    else:
+        grade = abs(dy / dx)
+        centre = y0 + (px - x0) * dy / dx
+        half = radius * math.sqrt(1.0 + grade * grade)
+        cover = _slanted_cover(py - (centre - half) + 0.5, grade) + _slanted_cover((centre + half) - py + 0.5, grade) - 1.0
+    if cover <= 0.0:
+        return 0.0
+    if beyond > 0.0:
+        cover *= min(1.0, radius + 0.5 - beyond)
+    return cover
+
+
 def _reference_polylines(vertices, offsets, colours, widths, clips, out):
-    """The serial column-envelope stroke, primitive by primitive."""
+    """The serial stroke: every pixel of the clip against every segment of
+    the line, the most any segment gives it, blended once per line."""
 
     height, width = out.shape[:2]
     for line in range(offsets.size - 1):
@@ -35,130 +101,41 @@ def _reference_polylines(vertices, offsets, colours, widths, clips, out):
         clip_bottom = min(height, int(clips[line, 3]))
         if clip_right <= clip_left or clip_bottom <= clip_top:
             continue
-        low = np.full(width, np.inf)
-        high = np.full(width, -np.inf)
-        left = np.full(width, np.inf)
-        right = np.full(width, -np.inf)
-        slope = np.zeros(width)
-        steep = np.zeros(width, dtype=bool)
-        # A column's envelope: every vertex of a finite segment that falls
-        # in the column, and the height where the segment crosses the
-        # column's centre; how far left and right those reach; the rise per
-        # column of the steepest shallow segment in it; and whether a steep
-        # segment (more rise than run) put anything in it.
+        radius = max(0.5, float(widths[line]) * 0.5)
+        finite_segments = [
+            (float(vertices[p, 0]), float(vertices[p, 1]), float(vertices[p + 1, 0]), float(vertices[p + 1, 1]))
+            for p in range(start, stop - 1)
+            if np.all(np.isfinite(vertices[p : p + 2]))
+        ]
+        # Agg snaps a rectilinear path of fewer than 1024 vertices to pixel centres.
+        snap = stop - start < 1024 and all(x0 == x1 or y0 == y1 for x0, y0, x1, y1 in finite_segments)
+        placed = vertices[start:stop].astype(float)
+        if snap:
+            offset = 0.5 if int(math.floor(float(widths[line]) + 0.5)) % 2 == 1 else 0.0
+            placed = np.where(np.isfinite(placed), np.floor(placed + 0.5) + offset, placed)
+        segments = []
         for point in range(start, stop - 1):
-            x0, y0 = float(vertices[point, 0]), float(vertices[point, 1])
-            x1, y1 = float(vertices[point + 1, 0]), float(vertices[point + 1, 1])
+            x0, y0 = float(placed[point - start, 0]), float(placed[point - start, 1])
+            x1, y1 = float(placed[point - start + 1, 0]), float(placed[point - start + 1, 1])
             if not all(map(np.isfinite, (x0, y0, x1, y1))):
                 continue
-            dx = x1 - x0
-            rising = abs(y1 - y0) > abs(dx)
-            grade = 0.0 if rising else abs(y1 - y0) / abs(dx)
-            for vertex_x, vertex_y in ((x0, y0), (x1, y1)):
-                column = int(np.floor(vertex_x))
-                if clip_left <= column < clip_right:
-                    low[column] = min(low[column], vertex_y)
-                    high[column] = max(high[column], vertex_y)
-                    left[column] = min(left[column], vertex_x)
-                    right[column] = max(right[column], vertex_x)
-                    slope[column] = max(slope[column], grade)
-                    steep[column] |= rising
-            if abs(dx) < 1.0e-12:
-                continue
-            first = max(clip_left, int(np.floor(min(x0, x1))))
-            last = min(clip_right, int(np.ceil(max(x0, x1))) + 1)
-            for column in range(first, last):
-                along = (column + 0.5 - x0) / dx
-                if along < 0.0 or along > 1.0:
-                    continue
-                y = y0 + along * (y1 - y0)
-                low[column] = min(low[column], y)
-                high[column] = max(high[column], y)
-                left[column] = min(left[column], column + 0.5)
-                right[column] = max(right[column], column + 0.5)
-                slope[column] = max(slope[column], grade)
-                steep[column] |= rising
-        # The stroke around a column's span: a disc of the half-width
-        # reaches a target column, whose centre is ``gap`` from the nearest
-        # thing the source holds, past the span's ends by sqrt(r² - gap²);
-        # in its own column a shallow span reaches r * sqrt(1 + slope²), the
-        # perpendicular half-width seen vertically.  A shallow span covers
-        # every column within the disc in full; a steep span covers a column
-        # by the capsule's own overlap with it, clamp(r - gap + 1/2).  A
-        # pixel takes the most any source gives it: that weight times the
-        # coverage of a slanted edge, the average over the pixel's width of
-        # the one-pixel ramp along an edge rising ``slope`` across it.
-        radius = max(0.5, float(widths[line]) * 0.5)
-        reach = int(np.ceil(radius))
+            cap_start = point == start or not np.all(np.isfinite(vertices[point - 1]))
+            cap_end = point + 2 >= stop or not np.all(np.isfinite(vertices[point + 2]))
+            segments.append((x0, y0, x1, y1, bool(cap_start), bool(cap_end)))
         alpha_code = float(colours[line, 3]) / 255.0
-
-        def integral(value):
-            if value <= 0.0:
-                return 0.0
-            if value <= 1.0:
-                return 0.5 * value * value
-            return value - 0.5
-
-        def cover(depth, grade):
-            if grade <= 1.0e-9:
-                return min(1.0, max(0.0, depth))
-            return (integral(depth + 0.5 * grade) - integral(depth - 0.5 * grade)) / grade
-
-        def reach_of(source, column):
-            centre = column + 0.5
-            if source < column:
-                gap = centre - right[source]
-            elif source > column:
-                gap = left[source] - centre
-            else:
-                gap = 0.0
-            gap = max(gap, 0.0)
-            squared = radius * radius - gap * gap
-            if steep[source]:
-                weight = min(1.0, max(0.0, radius - gap + 0.5))
-                grade = 0.0
-            else:
-                weight = 1.0 if squared > 0.0 else 0.0
-                grade = slope[source]
-            if source == column and not steep[source]:
-                vertical = radius * np.sqrt(1.0 + grade * grade)
-            else:
-                vertical = np.sqrt(squared) if squared > 0.0 else 0.0
-            return weight, vertical, grade
-
         for column in range(clip_left, clip_right):
-            sources = [
-                source
-                for source in range(
-                    max(clip_left, column - reach - 1),
-                    min(clip_right, column + reach + 2),
-                )
-                if np.isfinite(low[source]) and reach_of(source, column)[0] > 0.0
-            ]
-            if not sources:
-                continue
-            envelope_low = min(
-                low[s] - reach_of(s, column)[1] - 0.5 * reach_of(s, column)[2] for s in sources
-            )
-            envelope_high = max(
-                high[s] + reach_of(s, column)[1] + 0.5 * reach_of(s, column)[2] for s in sources
-            )
-            first_row = max(clip_top, int(np.floor(envelope_low - 0.5)))
-            last_row = min(clip_bottom, int(np.ceil(envelope_high + 0.5)))
-            for row in range(first_row, last_row):
+            px = column + 0.5
+            for row in range(clip_top, clip_bottom):
                 py = row + 0.5
                 amount = 0.0
-                for source in sources:
-                    weight, vertical, grade = reach_of(source, column)
-                    covered = min(
-                        cover(py - (low[source] - vertical) + 0.5, grade),
-                        cover((high[source] + vertical) - py + 0.5, grade),
-                    )
-                    if covered > 0.0:
-                        amount = max(amount, weight * covered)
-                if amount <= 0.0:
-                    continue
-                _blend(out, row, column, colours[line], alpha_code * amount)
+                for index, (x0, y0, x1, y1, cap_start, cap_end) in enumerate(segments):
+                    nxt = None
+                    if not cap_end and index + 1 < len(segments):
+                        nxt = segments[index + 1][2:4]
+                    amount += _segment_cover(px, py, x0, y0, x1, y1, nxt, radius, cap_start, cap_end)
+                amount = min(1.0, amount)
+                if amount > 1.0e-6:
+                    _blend(out, row, column, colours[line], alpha_code * amount)
 
 
 def _reference_error_bars(

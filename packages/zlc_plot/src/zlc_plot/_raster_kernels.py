@@ -857,12 +857,12 @@ def _clamped_line_integral(value):
 
 @njit(cache=True, inline="always")
 def _slanted_cover(depth, grade):
-    """How much of a pixel row lies inside an edge ``depth`` below its top
-    at the pixel's centre, when the edge rises ``grade`` across the pixel.
+    """How much of a pixel lies inside an edge ``depth`` past its centre,
+    when the edge slants by ``grade`` across the pixel.
 
     A level edge is the one-pixel ramp, clamp(depth); a slanted one is the
-    average of that ramp along the pixel's width, which is the integral of
-    the clamped line between the edge's height at either side.
+    average of that ramp along the pixel, which is the integral of the
+    clamped line between the edge's height at either side.
     """
 
     if grade <= np.float64(1.0e-9):
@@ -873,11 +873,241 @@ def _slanted_cover(depth, grade):
     ) / grade
 
 
+@njit(cache=True, inline="always")
+def _disc_cover(px, py, x, y, radius):
+    """The one-pixel ramp on a disc of ``radius`` about (x, y)."""
+
+    dx = px - x
+    dy = py - y
+    return min(
+        np.float64(1.0),
+        max(np.float64(0.0), radius + np.float64(0.5) - np.sqrt(dx * dx + dy * dy)),
+    )
+
+
+@njit(cache=True, inline="always")
+def _segment_cover(
+    px, py, x0, y0, x1, y1, x2, y2, radius, cap_start, cap_end, has_next
+):
+    """What one stroked piece adds to the pixel centred at (px, py).
+
+    THE STROKE OF A PIECE IS A BAND, 2r wide along the piece, whose two
+    edges cross a pixel at the piece's own slant: read along the piece's
+    MINOR axis -- horizontally for a steep piece at the pixel's row,
+    vertically for a shallow one at its column -- each edge is the
+    slanted-edge integral over the pixel, and the band's share of the
+    pixel is the intersection of the two half-planes, cL + cR - 1.
+
+    The band stops at the piece's ends.  Past the end of a polyline the
+    cap PROJECTS: the band runs on for r and is cut square, as Matplotlib
+    caps solid lines.  Past a vertex the join is ROUND, and the disc on
+    the vertex is added by ONE of the two pieces meeting there -- this
+    one, for the wedge outside both bands (beyond this piece's end and
+    before the next piece's start); inside either band the band already
+    counts.  Contributions ADD and saturate, which is the non-zero winding
+    rule Agg fills a stroke's outline with: a smooth polyline's bands meet
+    without overlap and sum to the union, and where a path folds back on
+    itself the overlapping bands count twice up to full cover, exactly as
+    Agg darkens the inner corner of a sharp turn.
+    """
+
+    dx = x1 - x0
+    dy = y1 - y0
+    length2 = dx * dx + dy * dy
+    if length2 <= np.float64(0.0):
+        return np.float64(0.0)
+    along = ((px - x0) * dx + (py - y0) * dy) / length2
+    length = np.sqrt(length2)
+    beyond = np.float64(0.0)
+    if along < np.float64(0.0):
+        if not cap_start:
+            return np.float64(0.0)
+        beyond = -along * length
+    elif along > np.float64(1.0):
+        if not cap_end:
+            if has_next:
+                nx = x2 - x1
+                ny = y2 - y1
+                next2 = nx * nx + ny * ny
+                if next2 > np.float64(0.0):
+                    along_next = ((px - x1) * nx + (py - y1) * ny) / next2
+                    if along_next >= np.float64(0.0):
+                        return np.float64(0.0)
+            return _disc_cover(px, py, x1, y1, radius)
+        beyond = (along - np.float64(1.0)) * length
+    if beyond > radius + np.float64(0.5):
+        return np.float64(0.0)
+    if abs(dy) > abs(dx):
+        grade = abs(dx / dy)
+        centre = x0 + (py - y0) * dx / dy
+        half = radius * np.sqrt(np.float64(1.0) + grade * grade)
+        cover = (
+            _slanted_cover(px - (centre - half) + np.float64(0.5), grade)
+            + _slanted_cover((centre + half) - px + np.float64(0.5), grade)
+            - np.float64(1.0)
+        )
+    else:
+        grade = abs(dy / dx)
+        centre = y0 + (px - x0) * dy / dx
+        half = radius * np.sqrt(np.float64(1.0) + grade * grade)
+        cover = (
+            _slanted_cover(py - (centre - half) + np.float64(0.5), grade)
+            + _slanted_cover((centre + half) - py + np.float64(0.5), grade)
+            - np.float64(1.0)
+        )
+    if cover <= np.float64(0.0):
+        return np.float64(0.0)
+    if beyond > np.float64(0.0):
+        # The square cut of a projecting cap: a one-pixel ramp along the
+        # axis, across the band's share.
+        cover *= min(np.float64(1.0), radius + np.float64(0.5) - beyond)
+    return cover
+
+
+@njit(cache=True, nogil=True)
+def _fold_pieces(
+    vertices,
+    start,
+    stop,
+    first,
+    last,
+    snap,
+    snap_offset,
+    piece_x0,
+    piece_y0,
+    piece_x1,
+    piece_y1,
+    piece_cap0,
+    piece_cap1,
+    base,
+    write,
+):
+    """Cut the vertices [first, last) of the line [start, stop) into pieces.
+
+    Every segment that crosses from one pixel column to another is a piece
+    of its own; a run of three or more consecutive samples inside ONE
+    column is folded into the vertical traversal from its lowest sample
+    to its highest, standing at the run's mean x, its ends round joins
+    (the path turned there).  A run of one or two samples has nothing to
+    fold and is kept as it is.  The vertex ``last`` -- the next chunk's
+    first -- ends the walk as the vertex the last run connects to, and is
+    not owned here; the sub-pixel segment into it, when it shares the
+    run's column, is inside that column's traversal already.
+
+    With ``write`` false only the count is taken, which is how the store
+    is sized exactly before the second walk fills it from ``base``.
+    """
+
+    count = 0
+    run_column = -1
+    run_samples = 0
+    run_low = np.float64(0.0)
+    run_high = np.float64(0.0)
+    run_sum = np.float64(0.0)
+    run_last_x = np.float64(0.0)
+    run_last_y = np.float64(0.0)
+    run_cap = True
+    subpath_pieces = 0
+    for point in range(first, last + 1):
+        finite = False
+        x = np.float64(0.0)
+        y = np.float64(0.0)
+        if point < stop:
+            x = vertices[point, 0]
+            y = vertices[point, 1]
+            finite = np.isfinite(x) and np.isfinite(y)
+            if finite and snap:
+                x = np.floor(x + np.float64(0.5)) + snap_offset
+                y = np.floor(y + np.float64(0.5)) + snap_offset
+        owned = point < last
+        column = int(np.floor(x)) if finite else -1
+        if finite and owned and column == run_column:
+            if run_samples == 2:
+                # Two samples were kept as their own segment; a third
+                # folds the run into its traversal instead.
+                count -= 1
+                subpath_pieces -= 1
+            run_samples += 1
+            run_low = min(run_low, y)
+            run_high = max(run_high, y)
+            run_sum += x
+            if run_samples == 2:
+                if write:
+                    piece_x0[base + count] = run_last_x
+                    piece_y0[base + count] = run_last_y
+                    piece_x1[base + count] = x
+                    piece_y1[base + count] = y
+                    piece_cap0[base + count] = run_cap
+                    piece_cap1[base + count] = False
+                count += 1
+                subpath_pieces += 1
+            run_last_x = x
+            run_last_y = y
+            continue
+        # The run ends here.
+        if run_samples >= 3:
+            if write:
+                mean_x = run_sum / np.float64(run_samples)
+                piece_x0[base + count] = mean_x
+                piece_y0[base + count] = run_low
+                piece_x1[base + count] = mean_x
+                piece_y1[base + count] = run_high
+                piece_cap0[base + count] = False
+                piece_cap1[base + count] = False
+            count += 1
+            subpath_pieces += 1
+        elif not finite and run_samples == 2:
+            if write:
+                piece_cap1[base + count - 1] = True
+        elif not finite and run_samples == 1 and subpath_pieces > 0:
+            # The path ends on a lone sample: the connector into it is
+            # its last piece, and takes the cap.
+            if write:
+                piece_cap1[base + count - 1] = True
+        if finite and run_samples >= 1 and column != run_column:
+            # The connector from the run's last sample to this one.
+            if write:
+                piece_x0[base + count] = run_last_x
+                piece_y0[base + count] = run_last_y
+                piece_x1[base + count] = x
+                piece_y1[base + count] = y
+                piece_cap0[base + count] = run_cap and run_samples == 1
+                piece_cap1[base + count] = point + 1 >= stop or not (
+                    np.isfinite(vertices[point + 1, 0])
+                    and np.isfinite(vertices[point + 1, 1])
+                )
+            count += 1
+            subpath_pieces += 1
+        if not owned:
+            break
+        if finite:
+            run_column = column
+            run_samples = 1
+            run_low = y
+            run_high = y
+            run_sum = x
+            run_last_x = x
+            run_last_y = y
+            run_cap = point == start or not (
+                np.isfinite(vertices[point - 1, 0])
+                and np.isfinite(vertices[point - 1, 1])
+            )
+        else:
+            run_column = -1
+            run_samples = 0
+            run_cap = True
+            subpath_pieces = 0
+    return count
+
+
+_FOLD_CHUNK = 65536
+
+
 @njit(cache=True, parallel=True, nogil=True)
 def raster_polylines(
     vertices, offsets, colours, widths, clips, lane_offsets, band_count, out
 ):
-    """Stroke monotonic display curves as one antialiased column envelope.
+    """Stroke display polylines, piece by piece, antialiased like Agg.
 
     One lane owns one axes-worth of lines, exactly as the error-bar kernel
     groups its stems: a Facet grid's cells are disjoint pixel boxes, so its
@@ -885,22 +1115,141 @@ def raster_polylines(
     lane keep their sequential painter order -- overlapping translucent
     strokes accumulate the way the artist scene composes them.  Callers
     prove disjointness (``_polyline_lane_offsets``); anything they cannot
-    prove arrives as one lane, which is the old serial behaviour.
+    prove arrives as one lane, which is the serial behaviour.
 
-    A lane with fewer peers than the pool has threads is cut into column
-    bands, each stroking every line of the lane in order over its own
-    columns; a column's envelope reads its neighbours up to the stroke
-    reach, so each band samples that margin beyond its edge and paints
-    none of it.  The column envelopes are the band's own scratch, sized to
-    the canvas width, not a per-line plane the caller had to keep.
+    THE STROKE IS READ AT PIXEL RESOLUTION.  Each line is first cut into
+    pieces (``_fold_pieces``): the segments that cross between pixel
+    columns, and the vertical traversal of every run of samples that
+    shares one column -- inside a column the samples are less than a
+    pixel apart, and the union of their strokes is that traversal to
+    within the pixel's own width.  Reading a sub-pixel zigzag segment by
+    segment cost seconds on a two-million-sample trace and painted the
+    same pixels.  The cut is made in vertex chunks across the pool, a
+    counting walk sizing the piece store exactly before a filling walk.
 
-    The half-thickness the envelope adds at each column offset is the
-    same square root for every column of a line; it is taken once per
-    offset and read back, not recomputed per pair -- a fifth of the
-    serial time, measured.
+    AGG SNAPS A RECTILINEAR PATH.  A line whose every segment is level or
+    vertical, with fewer than 1024 vertices, has its vertices moved onto
+    the pixel grid before it is stroked -- to pixel centres when the
+    rounded stroke width is odd, to pixel edges when it is even, so the
+    stroke's edges land on pixel edges either way.  The export draws
+    through Agg, so this stroke snaps by the same rule.
+
+    A lane with fewer peers than the pool has threads is then cut into
+    column bands, each stroking every line of the lane in order over its
+    own columns.  Within a line every piece is bucketed by the columns its
+    centreline spans, and a column takes its coverage from the pieces
+    bucketed within the stroke's reach of it: for each, over the rows it
+    can touch at that column, the pixel ADDS what the piece gives it and
+    saturates at full cover -- the non-zero winding accumulation Agg fills
+    a stroke's outline with -- and is blended once.  A vertical piece
+    covers each row of its length by the same amount at a given column,
+    so those rows are set, not computed; only its ends are read pixel by
+    pixel.
     """
 
     height, width = out.shape[:2]
+    line_count = offsets.size - 1
+
+    # Which lines snap, and by how much.
+    snaps = np.zeros(line_count, dtype=np.bool_)
+    snap_offsets = np.zeros(line_count, dtype=np.float64)
+    for line in prange(line_count):
+        start = offsets[line]
+        stop = offsets[line + 1]
+        snap = 2 <= stop - start < 1024
+        if snap:
+            for point in range(start, stop - 1):
+                x0 = vertices[point, 0]
+                y0 = vertices[point, 1]
+                x1 = vertices[point + 1, 0]
+                y1 = vertices[point + 1, 1]
+                if not (
+                    np.isfinite(x0)
+                    and np.isfinite(y0)
+                    and np.isfinite(x1)
+                    and np.isfinite(y1)
+                ):
+                    continue
+                if x0 != x1 and y0 != y1:
+                    snap = False
+                    break
+        snaps[line] = snap
+        snap_offsets[line] = (
+            np.float64(0.5)
+            if int(np.floor(np.float64(widths[line]) + np.float64(0.5))) % 2 == 1
+            else np.float64(0.0)
+        )
+
+    # Cut every line into pieces, in vertex chunks across the pool.
+    chunk_starts = np.zeros(line_count + 1, dtype=np.int64)
+    for line in range(line_count):
+        points = offsets[line + 1] - offsets[line]
+        chunk_starts[line + 1] = chunk_starts[line] + max(
+            1, (points + _FOLD_CHUNK - 1) // _FOLD_CHUNK
+        )
+    chunk_count = chunk_starts[line_count]
+    chunk_line = np.empty(chunk_count, dtype=np.int64)
+    chunk_first = np.empty(chunk_count, dtype=np.int64)
+    chunk_last = np.empty(chunk_count, dtype=np.int64)
+    for line in range(line_count):
+        start = offsets[line]
+        stop = offsets[line + 1]
+        for chunk in range(chunk_starts[line], chunk_starts[line + 1]):
+            index = chunk - chunk_starts[line]
+            chunk_line[chunk] = line
+            chunk_first[chunk] = min(stop, start + index * _FOLD_CHUNK)
+            chunk_last[chunk] = min(stop, start + (index + 1) * _FOLD_CHUNK)
+    counted = np.zeros(chunk_count + 1, dtype=np.int64)
+    scratch_f = np.empty(1, dtype=np.float64)
+    scratch_b = np.empty(1, dtype=np.bool_)
+    for chunk in prange(chunk_count):
+        line = chunk_line[chunk]
+        counted[chunk + 1] = _fold_pieces(
+            vertices,
+            offsets[line],
+            offsets[line + 1],
+            chunk_first[chunk],
+            chunk_last[chunk],
+            snaps[line],
+            snap_offsets[line],
+            scratch_f,
+            scratch_f,
+            scratch_f,
+            scratch_f,
+            scratch_b,
+            scratch_b,
+            0,
+            False,
+        )
+    for chunk in range(chunk_count):
+        counted[chunk + 1] += counted[chunk]
+    total_pieces = counted[chunk_count]
+    piece_x0 = np.empty(max(total_pieces, 1), dtype=np.float64)
+    piece_y0 = np.empty(max(total_pieces, 1), dtype=np.float64)
+    piece_x1 = np.empty(max(total_pieces, 1), dtype=np.float64)
+    piece_y1 = np.empty(max(total_pieces, 1), dtype=np.float64)
+    piece_cap0 = np.empty(max(total_pieces, 1), dtype=np.bool_)
+    piece_cap1 = np.empty(max(total_pieces, 1), dtype=np.bool_)
+    for chunk in prange(chunk_count):
+        line = chunk_line[chunk]
+        _fold_pieces(
+            vertices,
+            offsets[line],
+            offsets[line + 1],
+            chunk_first[chunk],
+            chunk_last[chunk],
+            snaps[line],
+            snap_offsets[line],
+            piece_x0,
+            piece_y0,
+            piece_x1,
+            piece_y1,
+            piece_cap0,
+            piece_cap1,
+            counted[chunk],
+            True,
+        )
+
     lane_count = lane_offsets.size - 1
     for task in prange(lane_count * band_count):
         lane = task // band_count
@@ -917,16 +1266,12 @@ def raster_polylines(
         band_right = lane_left + (span * (band + 1)) // band_count
         if band_right <= band_left:
             continue
-        low = np.empty(width, dtype=np.float64)
-        high = np.empty(width, dtype=np.float64)
-        left = np.empty(width, dtype=np.float64)
-        right = np.empty(width, dtype=np.float64)
-        slope = np.empty(width, dtype=np.float64)
-        steep = np.empty(width, dtype=np.bool_)
+        amount = np.zeros(height, dtype=np.float64)
+        counts = np.zeros(width + 1, dtype=np.int64)
         for line in range(lane_offsets[lane], lane_offsets[lane + 1]):
-            start = offsets[line]
-            stop = offsets[line + 1]
-            if stop - start < 2:
+            piece_first = counted[chunk_starts[line]]
+            piece_last = counted[chunk_starts[line + 1]]
+            if piece_last <= piece_first:
                 continue
             clip_left = max(0, clips[line, 0])
             clip_top = max(0, clips[line, 1])
@@ -939,185 +1284,168 @@ def raster_polylines(
             if paint_right <= paint_left:
                 continue
             radius = max(np.float64(0.5), np.float64(widths[line]) * 0.5)
-            reach = int(np.ceil(radius))
-            # A source one column past the disc's reach can still touch a
-            # target column: what it holds may sit at its near edge, a
-            # whole column closer than its centre.  So the band samples one
-            # more column of margin than the reach on each side.
-            fill_left = max(clip_left, paint_left - reach - 1)
-            fill_right = min(clip_right, paint_right + reach + 2)
+            # How far a stroke reaches from its centreline, measured along
+            # either axis: a steep band's horizontal half-width is at most
+            # r * sqrt(2), a projecting cap runs on r, and the pixel ramp
+            # adds a half pixel either side.
+            reach = radius * np.float64(1.4142135623730951) + np.float64(1.0)
+            reach_columns = int(np.ceil(reach))
+            fill_left = max(clip_left, paint_left - reach_columns)
+            fill_right = min(clip_right, paint_right + reach_columns + 1)
+            if fill_right <= fill_left:
+                continue
+            keep_left = np.float64(fill_left) - reach
+            keep_right = np.float64(fill_right) + reach
+
+            # Bucket this line's pieces by the columns their centrelines
+            # span; a piece wholly beyond the band's reach paints nothing.
+            piece_count = piece_last - piece_first
+            first_column = np.empty(piece_count, dtype=np.int64)
+            last_column = np.empty(piece_count, dtype=np.int64)
+            for column in range(fill_left, fill_right + 1):
+                counts[column] = 0
+            for index in range(piece_count):
+                x0 = piece_x0[piece_first + index]
+                x1 = piece_x1[piece_first + index]
+                if max(x0, x1) < keep_left or min(x0, x1) > keep_right:
+                    first_column[index] = 1
+                    last_column[index] = 0
+                    continue
+                low_column = max(fill_left, int(np.floor(min(x0, x1))))
+                high_column = min(fill_right - 1, int(np.floor(max(x0, x1))))
+                first_column[index] = low_column
+                last_column[index] = high_column
+                for column in range(low_column, high_column + 1):
+                    counts[column] += 1
+            total = 0
             for column in range(fill_left, fill_right):
-                low[column] = np.inf
-                high[column] = -np.inf
-                left[column] = np.inf
-                right[column] = -np.inf
-                slope[column] = np.float64(0.0)
-                steep[column] = False
+                held = counts[column]
+                counts[column] = total
+                total += held
+            counts[fill_right] = total
+            entries = np.empty(max(total, 1), dtype=np.int64)
+            for index in range(piece_count):
+                for column in range(first_column[index], last_column[index] + 1):
+                    entries[counts[column]] = index
+                    counts[column] += 1
+            for column in range(fill_right, fill_left, -1):
+                counts[column] = counts[column - 1]
+            counts[fill_left] = 0
 
-            # A column's envelope is everything the line does inside that
-            # column: the height where it crosses the column's centre, and
-            # EVERY VERTEX that falls in the column.  Sampled at the centre
-            # alone, a column holding thousands of samples showed one of
-            # them, and a live noise trace was a thin wandering line where
-            # its export -- Agg over the per-column extremes -- was the
-            # band it is.  A vertex counts only with a segment on it: an
-            # isolated vertex is no stroke, as Agg draws none for it.  The
-            # column also keeps how far LEFT and RIGHT what it holds
-            # reaches, and whether a STEEP segment -- more rise than run --
-            # put anything in it: both decide how its stroke reaches the
-            # columns beside it.
-            for point in range(start, stop - 1):
-                x0 = vertices[point, 0]
-                y0 = vertices[point, 1]
-                x1 = vertices[point + 1, 0]
-                y1 = vertices[point + 1, 1]
-                if not (
-                    np.isfinite(x0)
-                    and np.isfinite(y0)
-                    and np.isfinite(x1)
-                    and np.isfinite(y1)
-                ):
-                    continue
-                dx = x1 - x0
-                rising = abs(y1 - y0) > abs(dx)
-                # A shallow segment's rise per column, kept per column: it
-                # is what slants the stroke's edge across a pixel row.
-                grade = np.float64(0.0) if rising else abs(y1 - y0) / abs(dx)
-                column = int(np.floor(x0))
-                if fill_left <= column < fill_right:
-                    low[column] = min(low[column], y0)
-                    high[column] = max(high[column], y0)
-                    left[column] = min(left[column], x0)
-                    right[column] = max(right[column], x0)
-                    slope[column] = max(slope[column], grade)
-                    steep[column] |= rising
-                column = int(np.floor(x1))
-                if fill_left <= column < fill_right:
-                    low[column] = min(low[column], y1)
-                    high[column] = max(high[column], y1)
-                    left[column] = min(left[column], x1)
-                    right[column] = max(right[column], x1)
-                    slope[column] = max(slope[column], grade)
-                    steep[column] |= rising
-                if abs(dx) < np.float64(1.0e-12):
-                    continue
-                first = max(fill_left, int(np.floor(min(x0, x1))))
-                last = min(fill_right, int(np.ceil(max(x0, x1))) + 1)
-                for column in range(first, last):
-                    px = np.float64(column) + np.float64(0.5)
-                    along = (px - x0) / dx
-                    if along < 0.0 or along > 1.0:
-                        continue
-                    y = y0 + along * (y1 - y0)
-                    low[column] = min(low[column], y)
-                    high[column] = max(high[column], y)
-                    left[column] = min(left[column], px)
-                    right[column] = max(right[column], px)
-                    slope[column] = max(slope[column], grade)
-                    steep[column] |= rising
-
-            # THE STROKE AROUND A COLUMN'S SPAN, as it reaches the columns
-            # beside it.  A disc of the line's own half-width swept along
-            # the span reaches a target column whose centre is ``gap`` from
-            # the nearest thing the source column holds over the rows
-            # [low - sqrt(r² - gap²), high + sqrt(r² - gap²)], and the ramp
-            # below adds the half-pixel of antialiasing at those ends -- so
-            # the disc carries no half-pixel of its own.  It did, and every
-            # line was a pixel thicker than Agg's with edges twice as dark:
-            # flat columns held 4.01 px of coverage against Agg's 3.07.
-            #
-            # Across columns the two kinds of span differ.  A SHALLOW span
-            # is one sample of a line that runs on into its neighbours, and
-            # the stroke between two neighbouring samples is solid: every
-            # column within the disc's reach is covered in full, the way
-            # Agg fills the inside of a stroke.  A STEEP span is the line
-            # itself crossing the column, and the stroke beside it is the
-            # capsule's own edge: a target column is covered by the overlap
-            # of [x - r, x + r] with its pixel, clamp(r - gap + 1/2).
-            # Without that weight a steep segment had no antialiasing
-            # across columns at all -- its edge columns went 0 to full where
-            # Agg gives 0.02 and 0.69; with it applied to shallow spans too,
-            # the inside of every slanted stroke came out 4 per cent light.
-            # A pixel takes the most any source gives it: that weight times
-            # the one-pixel vertical ramp.
-            # THE EDGE OF A SLANTED STROKE IS SLANTED.  Across one pixel row
-            # a shallow stroke's edge rises by its slope, so the pixel's
-            # coverage is not a one-pixel ramp but the area under a line
-            # that climbs through it: the average over the pixel's width of
-            # the clamped distance below the edge, which is the difference
-            # of the integral of a clamped line, G, over the edge's rise.
-            # In the column the line passes through, its stroke reaches
-            # r * sqrt(1 + slope²) above and below the sample -- the
-            # perpendicular half-width seen vertically -- where the disc
-            # alone reached r; the neighbouring discs reached the rest and
-            # left the two edge rows one to two levels light against Agg.
-            span = 2 * reach + 3
-            source_weight = np.empty(span, dtype=np.float64)
-            source_low = np.empty(span, dtype=np.float64)
-            source_high = np.empty(span, dtype=np.float64)
-            source_slope = np.empty(span, dtype=np.float64)
             alpha_code = np.float64(colours[line, 3]) / np.float64(255.0)
             for column in range(paint_left, paint_right):
-                envelope_low = np.inf
-                envelope_high = -np.inf
-                centre = np.float64(column) + np.float64(0.5)
-                source_first = max(clip_left, column - reach - 1)
-                source_last = min(clip_right, column + reach + 2)
-                count = 0
-                for source_column in range(source_first, source_last):
-                    if not np.isfinite(low[source_column]):
-                        continue
-                    if source_column < column:
-                        gap = centre - right[source_column]
-                    elif source_column > column:
-                        gap = left[source_column] - centre
-                    else:
-                        gap = np.float64(0.0)
-                    gap = max(gap, np.float64(0.0))
-                    squared = radius * radius - gap * gap
-                    if steep[source_column]:
-                        weight = min(
-                            np.float64(1.0),
-                            max(np.float64(0.0), radius - gap + np.float64(0.5)),
-                        )
-                        grade = np.float64(0.0)
-                    else:
-                        weight = np.float64(1.0) if squared > 0.0 else np.float64(0.0)
-                        grade = slope[source_column]
-                    if weight <= 0.0:
-                        continue
-                    if source_column == column and not steep[source_column]:
-                        vertical = radius * np.sqrt(np.float64(1.0) + grade * grade)
-                    else:
-                        vertical = np.sqrt(squared) if squared > 0.0 else np.float64(0.0)
-                    source_weight[count] = weight
-                    source_low[count] = low[source_column] - vertical
-                    source_high[count] = high[source_column] + vertical
-                    source_slope[count] = grade
-                    envelope_low = min(envelope_low, source_low[count] - 0.5 * grade)
-                    envelope_high = max(envelope_high, source_high[count] + 0.5 * grade)
-                    count += 1
-                if count == 0:
-                    continue
-                first_row = max(clip_top, int(np.floor(envelope_low - 0.5)))
-                last_row = min(clip_bottom, int(np.ceil(envelope_high + 0.5)))
-                for row in range(first_row, last_row):
-                    py = np.float64(row) + np.float64(0.5)
-                    amount = np.float64(0.0)
-                    for index in range(count):
-                        weight = source_weight[index]
-                        if weight <= amount:
+                cx = np.float64(column) + np.float64(0.5)
+                window_left = cx - reach
+                window_right = cx + reach
+                rows_low = height
+                rows_high = 0
+                source_first = max(fill_left, column - reach_columns)
+                source_last = min(fill_right - 1, column + reach_columns)
+                for source in range(source_first, source_last + 1):
+                    for slot in range(counts[source], counts[source + 1]):
+                        index = entries[slot]
+                        # A piece spanning several columns sits in each of
+                        # them; it is read once per target column, from the
+                        # first of its columns within reach.
+                        if source != max(first_column[index], source_first):
                             continue
-                        grade = source_slope[index]
-                        covered = min(
-                            _slanted_cover(py - source_low[index] + np.float64(0.5), grade),
-                            _slanted_cover(source_high[index] - py + np.float64(0.5), grade),
-                        )
-                        if covered > 0.0:
-                            amount = max(amount, weight * covered)
-                    if amount <= 0.0:
+                        piece = piece_first + index
+                        x0 = piece_x0[piece]
+                        y0 = piece_y0[piece]
+                        x1 = piece_x1[piece]
+                        y1 = piece_y1[piece]
+                        cap_start = piece_cap0[piece]
+                        cap_end = piece_cap1[piece]
+                        has_next = (not cap_end) and piece + 1 < piece_last
+                        x2 = piece_x1[piece + 1] if has_next else x1
+                        y2 = piece_y1[piece + 1] if has_next else y1
+                        dx = x1 - x0
+                        if dx == np.float64(0.0):
+                            # A VERTICAL PIECE: along its length every row
+                            # is covered by the same amount at this column.
+                            level = min(
+                                np.float64(1.0),
+                                max(
+                                    np.float64(0.0),
+                                    radius + np.float64(0.5) - abs(cx - x0),
+                                ),
+                            )
+                            y_low = min(y0, y1)
+                            y_high = max(y0, y1)
+                            inner_first = max(
+                                clip_top, int(np.ceil(y_low - np.float64(0.5)))
+                            )
+                            inner_last = min(
+                                clip_bottom, int(np.floor(y_high - np.float64(0.5))) + 1
+                            )
+                            if level > np.float64(0.0):
+                                for row in range(inner_first, inner_last):
+                                    amount[row] += level
+                            row_first = max(clip_top, int(np.floor(y_low - reach)))
+                            row_last = min(
+                                clip_bottom, int(np.ceil(y_high + reach)) + 1
+                            )
+                            for row in range(row_first, row_last):
+                                if inner_first <= row < inner_last:
+                                    continue
+                                amount[row] += _segment_cover(
+                                    cx,
+                                    np.float64(row) + np.float64(0.5),
+                                    x0,
+                                    y0,
+                                    x1,
+                                    y1,
+                                    x2,
+                                    y2,
+                                    radius,
+                                    cap_start,
+                                    cap_end,
+                                    has_next,
+                                )
+                        else:
+                            # The rows this piece can touch AT THIS COLUMN:
+                            # its own heights across the reach window, and
+                            # the stroke's reach beyond them.
+                            t_low = (window_left - x0) / dx
+                            t_high = (window_right - x0) / dx
+                            if t_low > t_high:
+                                t_low, t_high = t_high, t_low
+                            t_low = min(np.float64(1.0), max(np.float64(0.0), t_low))
+                            t_high = min(np.float64(1.0), max(np.float64(0.0), t_high))
+                            y_a = y0 + t_low * (y1 - y0)
+                            y_b = y0 + t_high * (y1 - y0)
+                            row_first = max(
+                                clip_top, int(np.floor(min(y_a, y_b) - reach))
+                            )
+                            row_last = min(
+                                clip_bottom, int(np.ceil(max(y_a, y_b) + reach)) + 1
+                            )
+                            for row in range(row_first, row_last):
+                                amount[row] += _segment_cover(
+                                    cx,
+                                    np.float64(row) + np.float64(0.5),
+                                    x0,
+                                    y0,
+                                    x1,
+                                    y1,
+                                    x2,
+                                    y2,
+                                    radius,
+                                    cap_start,
+                                    cap_end,
+                                    has_next,
+                                )
+                        if row_last > row_first:
+                            rows_low = min(rows_low, row_first)
+                            rows_high = max(rows_high, row_last)
+                for row in range(rows_low, rows_high):
+                    covered = min(np.float64(1.0), amount[row])
+                    amount[row] = np.float64(0.0)
+                    # A share below a millionth is arithmetic noise from
+                    # the edge integrals, not ink.
+                    if covered <= np.float64(1.0e-6):
                         continue
-                    alpha = alpha_code * amount
+                    alpha = alpha_code * covered
                     inverse = np.float64(1.0) - alpha
                     for channel in range(3):
                         value = (
