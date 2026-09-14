@@ -13,6 +13,7 @@ import copy
 import ctypes
 from dataclasses import dataclass
 from functools import lru_cache
+import gc
 import hashlib
 import pickle
 from io import BytesIO
@@ -1759,6 +1760,17 @@ def _build_axes(
         # fresh one would, so it is handed over as made.
         axis.xaxis.get_major_ticks(TICKS_FLOOR)
         axis.yaxis.get_major_ticks(TICKS_FLOOR)
+        # A GRID CELL ARRIVES AS A GRID CELL: its marks at the cell length
+        # and its labels off, which is what a grid tells fifty-six of its
+        # sixty-four cells first thing on every mount -- a hundred and
+        # seventy-five ``tick_params`` calls, twenty milliseconds of a
+        # first frame, to state what the cells could have been built
+        # knowing.  Said here, the bytes carry it, and the mount speaks
+        # only where the grid decides otherwise: the boundary cells that
+        # show their labels.
+        axis.tick_params(axis="both", length=style.render.facet_cell_tick_length_pt)
+        axis.tick_params(axis="x", labelbottom=False)
+        axis.tick_params(axis="y", labelleft=False)
     return figure, made, others
 
 
@@ -1794,11 +1806,25 @@ def revive_axes(
     except OSError:
         blob = None
     if blob is not None:
+        # THE COLLECTOR IS OFF WHILE THE BYTES BECOME OBJECTS.  A grid's
+        # worth of cells is a hundred and forty thousand tracked objects
+        # arriving in one burst, and CPython's generational collector
+        # answers a burst that size with a full collection part-way
+        # through it: a walk of the whole heap for cycles a half-built
+        # graph cannot hold yet -- 110 ms of the 190 the load took, with
+        # the GIL held, on a child that may already be mounting a panel.
+        # Off for the load, the collector runs at its next threshold as
+        # it would have anyway; nothing here makes garbage.
+        collecting = gc.isenabled()
+        gc.disable()
         try:
             figure = pickle.loads(blob)
             spare = list(figure.axes)
         except Exception:  # noqa: BLE001 -- a cache that will not read missed
             figure, spare = None, []
+        finally:
+            if collecting:
+                gc.enable()
         if figure is not None and len(spare) == cells + plain:
             from matplotlib.backends.backend_agg import (  # noqa: PLC0415
                 FigureCanvasAgg,
@@ -3547,7 +3573,7 @@ class MatplotlibRenderer:
 
         if not (
             kernels.engaged()
-            and isinstance(self.semantic_spec, CurvePlot)
+            and isinstance(self.semantic_spec, (CurvePlot, HistogramPlot))
             and (
                 not isinstance(self.spec, FacetGridPlot)
                 or self._facet_focus_index is None
@@ -3579,10 +3605,19 @@ class MatplotlibRenderer:
             and artists[-1].axes.get_visible()
         )
         lines = data + fit
-        if (
+        if isinstance(self.semantic_spec, HistogramPlot):
+            # A histogram's data is its bars, a prepared scene of its own;
+            # what the kernel strokes on it is the fit drawn over the bars
+            # -- three lines a cell on a bimodal grid, which Agg drew one
+            # by one for a fifth of every frame.
+            if data or not fit:
+                return None
+        elif (
             not data
             and not isinstance(self._artists.get("curve:prepared"), dict)
-        ) or any(
+        ):
+            return None
+        if any(
             line.get_linestyle() not in ("-", "solid")
             or line.get_marker() not in (None, "None", "none", "")
             for line in lines
@@ -4982,10 +5017,43 @@ class MatplotlibRenderer:
             # the bars left undrawn.  Nothing comes forward: a histogram's
             # fit line lies between the marks and the frame, as it does in
             # a full draw, and forwarding the frame put it under the line.
-            paint(
-                subsequence(lambda artist: id(artist) not in native_bar_ids),
-                at_split=True,
-            )
+            # The fit lines themselves are stroked by the kernel, at their
+            # place in that order: what a full draw paints below a fit line
+            # goes first, then the lines, then the rest.  The cells' pixels
+            # are disjoint -- a fit line is clipped to its cell, and a
+            # neighbour's unclipped mark reaches only the gutter -- so the
+            # cut by zorder across the grid is the cut within each cell.
+            fit_lines = () if native_lines is None else native_lines[2]
+            stroked: frozenset[int] = frozenset()
+            if fit_lines:
+                stroked = frozenset(id(line) for line in fit_lines)
+                fit_zorder = min(float(line.get_zorder()) for line in fit_lines)
+                paint(
+                    [
+                        (index, entry)
+                        for index, entry in enumerate(ordered)
+                        if entry[0][1] < fit_zorder
+                        and id(entry[1]) not in native_bar_ids
+                    ],
+                    at_split=False,
+                )
+                if not self._raster_curve_lines(fit_lines, canvas):
+                    stroked = frozenset()
+                paint(
+                    [
+                        (index, entry)
+                        for index, entry in enumerate(ordered)
+                        if entry[0][1] >= fit_zorder
+                        and id(entry[1]) not in native_bar_ids
+                        and id(entry[1]) not in stroked
+                    ],
+                    at_split=True,
+                )
+            else:
+                paint(
+                    subsequence(lambda artist: id(artist) not in native_bar_ids),
+                    at_split=True,
+                )
             used_native = True
         if native_image:
             # Only the chrome the image raster may have OVERWRITTEN comes
@@ -5040,7 +5108,7 @@ class MatplotlibRenderer:
         if native_curve_command and native_lines is None:
             paint(list(enumerate(ordered)), at_split=True)
             used_native = True
-        if native_lines is not None:
+        if native_lines is not None and not native_bars:
             bar_groups, data_lines, fit_lines = native_lines
             bar_artists = tuple(
                 artist for group in bar_groups for artist in group
@@ -6641,7 +6709,10 @@ class MatplotlibRenderer:
                 edgecolors="none",
                 alpha=alpha,
             )
-            axes.add_collection(collection)
+            # No data limits: the limits are authored below, from the
+            # edges and the count policy, and the data-limit update walks
+            # every bar's path to arrive at numbers that are never read.
+            axes.add_collection(collection, autolim=False)
             self._artists[key] = collection
         elif not _restyle_histogram_tops(
             collection,
@@ -10404,11 +10475,12 @@ class MatplotlibRenderer:
             # The tick MARKS are the grid's; their label SIZE belongs to the
             # tick policy below, which may shrink it to keep two labels
             # apart and must be the last writer.
+            cell_tick_length = self.style.render.facet_cell_tick_length_pt
             if any(
-                item.get_tick_params().get("length") != 2
+                item.get_tick_params().get("length") != cell_tick_length
                 for item in (axis.xaxis, axis.yaxis)
             ):
-                axis.tick_params(axis="both", length=2)
+                axis.tick_params(axis="both", length=cell_tick_length)
             row, column = divmod(index, columns)
             if focused:
                 # The focused cell's ticks belong to the standalone-kind
