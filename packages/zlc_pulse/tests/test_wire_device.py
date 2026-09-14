@@ -38,7 +38,6 @@ from zlc_pulse.wire import (
     pack_scan_rows,
     region_bases,
     StreamerParams,
-    unpack_program,
 )
 
 
@@ -636,27 +635,6 @@ def test_open_rejects_mismatched_word63() -> None:
     assert transport.closed
 
 
-def test_layout_check_and_transport_self_test_use_the_frozen_ctrl_contract() -> None:
-    geom = replace(StreamerParams(), max_edges=8, bank_size=2)
-    transport = MemoryRegisterTransport(geom=geom)
-    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
-    streamer.open()
-
-    streamer.check_register_layout()
-    streamer.transport_self_test(count=3)
-
-    assert all(transport.words.get(geom.ctrl_scratch_base + index, 0) == 0 for index in range(3))
-
-    # A count past the scratch extent stops short of the layout fingerprint:
-    # the handshake answer is not scratch, and a self-test that wrote it left
-    # the next layout check refusing the board it had just passed.
-    assert geom.ctrl_scratch_words == CtrlWords.LAYOUT_ID - geom.ctrl_scratch_base
-    fingerprint = transport.read_word(CtrlWords.LAYOUT_ID)
-    streamer.transport_self_test(count=geom.ctrl_scratch_words + 5)
-    assert transport.read_word(CtrlWords.LAYOUT_ID) == fingerprint
-    streamer.check_register_layout()
-
-
 def test_wait_done_uses_one_observer_owned_status_cursor_block(monkeypatch) -> None:
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
     program = compile_sequence(_sequence(), geom, 50e6)
@@ -1000,24 +978,3 @@ def test_a_dac_bus_delay_reaches_the_board_word_it_was_asked_for() -> None:
     words = pack_program(program, geom)
     bases = region_bases(geom)
     assert words[bases["delay"] + geom.channel_count + 0] == 10
-
-
-def test_an_unpacked_bus_delay_can_be_packed_again_unchanged() -> None:
-    """Unpack and pack must use ONE name for this number, or the trip loses it."""
-
-    geom = replace(StreamerParams(), max_edges=8, bank_size=2)
-    sequence = replace(_sequence(), delays=(OutputDelay(_DAC_PORT.key, 200, "ns"),))
-    program = compile_sequence(sequence, geom, 50e6)
-    unpacked = unpack_program(pack_program(program, geom), geom)
-
-    assert unpacked["bus_delays"] == [{"bus_index": 0, "delay_ticks": 10}]
-
-    class _AsUnpacked:
-        bus_delays = unpacked["bus_delays"]
-
-    round_tripped = replace(program, bus_delays=tuple(
-        TargetBusDelay(**entry) for entry in unpacked["bus_delays"]
-    ))
-    assert pack_program(round_tripped, geom)[
-        region_bases(geom)["delay"] + geom.channel_count
-    ] == 10

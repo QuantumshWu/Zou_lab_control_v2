@@ -19,17 +19,6 @@ def _values(states_view: Mapping[object, object] | Iterable[object]) -> tuple[ob
     return tuple(states_view)
 
 
-def _state_for_signal(states: tuple[object, ...], name: str) -> object | None:
-    selected = None
-    for state in states:
-        if getattr(state, "retired") or name not in getattr(state, "output_names"):
-            continue
-        if selected is not None:
-            raise RuntimeError(f"signal {name!r} has more than one generation owner")
-        selected = state
-    return selected
-
-
 def _publication_roots(
     publication: SignalPublication,
     resolve_parents: Callable[[SignalPublication], Iterable[SignalPublication]],
@@ -131,14 +120,17 @@ def build_front(
     front_signals: Iterable[str],
     previous_front: SignalFront | None,
     resolve_parents: Callable[[SignalPublication], Iterable[SignalPublication]],
+    state_for_signal: Callable[[str], object | None],
 ) -> SignalFront:
     """Build one coherent front from an immutable state view.
 
     ``states_view`` is read once; its members must expose the seven state
     fields used by the algorithm (retired, publication, terminal,
     output_names, kind, source_name, and coherent).  ``resolve_parents`` is
-    the plane's read-only parent lookup.  No object in the input view is
-    mutated.
+    the plane's read-only parent lookup and ``state_for_signal`` its
+    live-owner lookup: which unretired generation owns a name, and the
+    refusal when two claim it, are the plane's rule, and were restated here
+    down to the message.  No object in the input view is mutated.
     """
 
     states = _values(states_view)
@@ -258,7 +250,7 @@ def build_front(
             fallback: dict[str, SignalPublication] = {}
             for name in component:
                 previous = previous_publications.get(name)
-                current_state = _state_for_signal(states, name)
+                current_state = state_for_signal(name)
                 if (
                     previous is None
                     or name not in active_names

@@ -239,7 +239,7 @@ class TaskConsoleHandle(QtCore.QObject):
             card.set_cell_kind_choices(values)
 
     def set_logic_kinds(
-        self, kinds: tuple[tuple[str, str, str, str], ...]
+        self, kinds: tuple[tuple[str, str, str], ...]
     ) -> None:
         self._view.set_logic_kinds(kinds)
 

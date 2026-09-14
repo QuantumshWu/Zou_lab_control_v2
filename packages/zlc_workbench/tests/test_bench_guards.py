@@ -58,17 +58,6 @@ def test_a_second_panel_cannot_hide_in_the_measurement() -> None:
     assert "2 panels" in str(refused.value)
 
 
-def test_a_quiet_window_that_was_not_quiet_is_refused() -> None:
-    """``repeat: 0`` keeps the virtual camera producing with no pulse fired."""
-
-    quiet = {"signal": "s", "distinct_revisions": 1, "per_second": 0.2, "quiet": True}
-    assert guards.require_quiet(quiet) is quiet
-    busy = {"signal": "s", "distinct_revisions": 96, "per_second": 19.2, "quiet": False}
-    with pytest.raises(guards.HarnessError) as refused:
-        guards.require_quiet(busy)
-    assert "meant to be quiet" in str(refused.value)
-
-
 def test_a_gesture_that_never_landed_is_refused() -> None:
     """Synthesised pointer calls build the gesture and drop its moves."""
 
@@ -77,14 +66,6 @@ def test_a_gesture_that_never_landed_is_refused() -> None:
     with pytest.raises(guards.HarnessError) as refused:
         guards.require_effect((55.0, 30.0), (55.0, 30.0), "the camera")
     assert "not delivered" in str(refused.value)
-
-
-def test_a_refused_state_change_is_not_read_as_a_product_defect() -> None:
-    """``update_panel_state`` takes a fixed vocabulary and says so."""
-
-    assert guards.applied(True, "size") is True
-    with pytest.raises(guards.HarnessError):
-        guards.applied(False, "selector")
 
 
 def test_the_committed_region_is_read_from_the_panel_itself() -> None:
@@ -189,9 +170,10 @@ def test_a_probe_must_not_break_what_it_measures() -> None:
     assert subject.helper(4) == 8
     assert subject.maker(5) == ("Subject", 5)
 
-    assert probe.calls("Subject.method") == 1
-    assert probe.calls("Subject.helper") == 1
-    assert probe.calls("Subject.maker") == 1
+    counts = {row["seam"]: row["calls"] for row in probe.rows(1.0)}
+    assert counts["Subject.method"] == 1
+    assert counts["Subject.helper"] == 1
+    assert counts["Subject.maker"] == 1
     probe.reset()
 
 

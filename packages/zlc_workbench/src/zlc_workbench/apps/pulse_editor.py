@@ -295,12 +295,8 @@ def create_window(
             window,
             state,
             path=path,
-            pulses_directory=str(space.pulses) if space is not None else "",
-            config_values=(
-                str(space.config_values / CURRENT_CONFIG_VALUES)
-                if space is not None
-                else ""
-            ),
+            pulses_directory=str(space.pulses),
+            config_values=str(space.config_values / CURRENT_CONFIG_VALUES),
             run_off_thread=run_off_thread,
             run_device_work=run_device_work,
             run_safe_work=run_safe_work,
@@ -404,10 +400,10 @@ def main(argv: list[str] | None = None) -> int:
     application = ensure_qt_app([])
     try:
         space, state, path = resolve(arguments.workspace, arguments.pulse)
-    except (FileNotFoundError, ValueError) as error:
+    except (FileNotFoundError, NotADirectoryError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
-    print(f"workspace: {space.root if space is not None else '(none found)'}")
+    print(f"workspace: {space.root}")
 
     if arguments.check:
         # The same composition, through the same entry: a smoke test, not
@@ -426,7 +422,7 @@ def main(argv: list[str] | None = None) -> int:
             view,
             state,
             path=path,
-            pulses_directory=str(space.pulses) if space is not None else "",
+            pulses_directory=str(space.pulses),
             run_off_thread=run_immediately,
             request_close=lambda: None,
         )

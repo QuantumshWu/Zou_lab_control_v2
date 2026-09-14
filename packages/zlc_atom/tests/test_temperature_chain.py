@@ -37,7 +37,7 @@ import numpy as np
 from zlc_data import SITE
 from zlc_data.figure_archive import FIGURE_SCHEMA, read_archive
 from zlc_pulse import compile_sequence, resolve_api_parameters
-from zlc_pulse.schedule import trigger_windows
+from zlc_pulse.schedule import trigger_windows_by_channel
 from zlc_runtime import NodeHost, SignalDataPlane
 
 from zlc_atom.install import create_installation
@@ -91,9 +91,9 @@ def test_temperature_template_spaces_twenty_millisecond_exposures() -> None:
         for release_ms in T_OFF_MS:
             sequence = resolve_api_parameters(authored, {"t_off": release_ms})
             program = compile_sequence(sequence, board.geometry, board.clock_hz)
+            windows = trigger_windows_by_channel(program, ("emCCD",))["emCCD"]
             starts = tuple(
-                start / program.clock_hz
-                for start, _end in trigger_windows(program, "emCCD")
+                start / program.clock_hz for start, _end in windows
             )
             assert len(starts) == 2
             assert starts[1] - starts[0] >= 0.02

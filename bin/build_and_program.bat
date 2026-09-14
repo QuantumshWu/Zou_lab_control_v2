@@ -414,10 +414,15 @@ rem The estimate is the config's own budget: it answers 1 when a resource
 rem exceeds the target_pct the config declares, and a build that starts anyway
 rem spends an hour of Vivado on a geometry the config already refused.  The
 rem answer is passed up, and the caller stops on it.
-set "ZLC_EST_PART=%ZLC_PS_FPGA_PART%"
-if "%ZLC_EST_PART%"=="" set "ZLC_EST_PART=xc7a35tfgg484-2"
+rem THE SAME FILE the geometry is emitted from: without --config the
+rem estimator looks for a config of its own -- ZLC_PS_CONFIG, the current
+rem directory, then the installed copy -- and forgives a missing one with
+rem built-in defaults, so the gate can pass a geometry that is not the one
+rem being synthesized.  The part stays an argument because ZLC_PS_FPGA_PART
+rem may override the configured board; :zlc_resolve_part already refuses an
+rem empty one, so there is nothing to fall back to here.
 pushd "%TEMP%"
-%ZLC_PY_CMD% -m zou_lab_control fpga --part "%ZLC_EST_PART%"
+%ZLC_PY_CMD% -m zou_lab_control fpga --config "%ZLC_CFG_JSON%" --part "%ZLC_PS_FPGA_PART%"
 set "ZLC_EST_STATUS=%ERRORLEVEL%"
 popd
 exit /b %ZLC_EST_STATUS%

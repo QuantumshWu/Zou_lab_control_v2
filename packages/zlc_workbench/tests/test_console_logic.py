@@ -927,9 +927,9 @@ def test_the_summary_counts_what_is_running(presenter) -> None:
 
 def test_the_add_offer_does_not_build_or_gate_unresolved_rows(presenter) -> None:
 
-    offer = {name: blocked for name, _kind, _publishes, blocked in presenter.logic_offer()}
-    assert offer["camera_measurement"] == ""
-    assert offer["occupancy"] == ""
+    offered = {name for name, _kind, _publishes in presenter.logic_offer()}
+    assert "camera_measurement" in offered
+    assert "occupancy" in offered
     for api_name in ("calibration", "occupancy"):
         node_id = presenter.add_logic(api_name)
         assert presenter.logic[node_id].host is None

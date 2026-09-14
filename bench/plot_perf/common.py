@@ -93,15 +93,6 @@ class SnapshotFeed:
     def size(self) -> int:
         return int(np.prod(self._buffers[0].shape))
 
-    @property
-    def landed_fraction(self) -> float:
-        """How much of this feed's data a panel may actually read."""
-
-        if self._validity is None:
-            return 1.0
-        mask = self._validity[0]
-        return float(np.count_nonzero(mask)) / float(mask.size)
-
     def next(self) -> OwnedSnapshot:
         self._revision += 1
         index = self._revision % len(self._buffers)

@@ -15,7 +15,7 @@ from typing import Mapping, Sequence
 
 __all__ = [
     "StreamerParams", "CtrlWords",
-    "pack_program", "unpack_program", "scan_bank_words", "region_bases",
+    "pack_program", "region_bases",
     "check_rtl_assumptions",
     "CMD_LOAD", "CMD_FIRE", "CMD_RESET", "CMD_SAFE",
     "STATUS_LOADED", "STATUS_RUNNING", "STATUS_DONE", "STATUS_ERROR", "STATUS_UNDERFLOW", "STATUS_LINK_ERROR",
@@ -304,21 +304,9 @@ def _checked_signed(value: int, width: int, name: str) -> int:
         raise ValueError(f"{name}={value} does not fit the signed {width}-bit wire field")
     return value
 
-def _from_unsigned(value: int, width: int) -> int:
-    value &= (1 << width) - 1
-    if value & (1 << (width - 1)):
-        value -= 1 << width
-    return value
-
 def _field_words(value: int, total_bits: int) -> list[int]:
     value &= (1 << total_bits) - 1
     return [(value >> (32 * i)) & 0xFFFFFFFF for i in range(_ceil(total_bits, 32))]
-
-def _unfield(words: Sequence[int], total_bits: int) -> int:
-    v = 0
-    for i, w in enumerate(words):
-        v |= (int(w) & 0xFFFFFFFF) << (32 * i)
-    return v & ((1 << total_bits) - 1)
 
 def _pack_coeffs(coeffs, p: StreamerParams) -> int:
     coeffs = list(coeffs or [])
@@ -327,10 +315,6 @@ def _pack_coeffs(coeffs, p: StreamerParams) -> int:
         c = coeffs[j] if j < len(coeffs) else 0
         acc |= _to_unsigned(_checked_signed(c, p.coeff_width, f"coefficient[{j}]"), p.coeff_width) << (j * p.coeff_width)
     return acc
-
-def _unpack_coeffs(value: int, p: StreamerParams) -> list[int]:
-    return [_from_unsigned((value >> (j * p.coeff_width)) & ((1 << p.coeff_width) - 1), p.coeff_width)
-            for j in range(p.num_slots)]
 
 def _is_pow2(v: int) -> bool:
     return int(v) > 0 and (int(v) & (int(v) - 1)) == 0
@@ -397,62 +381,7 @@ def _bus_mode_value(mode) -> int:
 def _raise_mode(m):
     raise ValueError(f"unsupported bus segment mode {m!r}.")
 
-def _bus_mode_name(v: int) -> str:
-    return {1: "edge", 2: "ramp"}.get(int(v)) or _raise_mode(v)
-
 # --------------------------------------------------------------------------- pack
-def scan_bank_words(rows, p: StreamerParams, chunk_index: int,
-                    target_bank: int | None = None) -> dict[int, int]:
-    """Words to (re)load scan chunk ``chunk_index`` into a ping-pong bank.
-
-    Chunk c = scan_points[c*bank_size:(c+1)*bank_size].  By default it lands in bank
-    c%2 (the initial preload).  For the CONTINUOUS CYCLIC re-sweep the host streams
-    chunks 0,1,..,K-1,0,1,.. into alternating banks.  The caller passes the
-    table-local ``chunk_index`` and, after a sweep wrap, the physical
-    ``target_bank`` chosen by the monotonic stream position.  Rows are packed
-    exactly once; Run repeats and Scan repeats are independent control words.
-    Returns a sparse ``{word_offset: value}`` for just that bank.  Empty if the
-    chunk is out of range."""
-    bases = region_bases(p)
-    points = [list(point) for point in rows]
-    if not points:
-        raise ValueError("scan rows must be non-empty")
-    slot_count = len(points[0])
-    if slot_count > p.num_slots:
-        raise ValueError(f"scan slot count {slot_count} exceeds wire capacity {p.num_slots}")
-    if any(len(point) != slot_count for point in points):
-        raise ValueError("scan rows must have equal widths")
-    if isinstance(chunk_index, bool) or not isinstance(chunk_index, Integral) or chunk_index < 0:
-        raise ValueError("chunk_index must be a non-negative integer")
-    first = chunk_index * p.bank_size
-    total = len(points)
-
-    if first >= total:
-        return {}
-    bank = chunk_index % 2 if target_bank is None else target_bank
-    if isinstance(bank, bool) or not isinstance(bank, Integral) or bank not in (0, 1):
-        raise ValueError("target_bank must be 0 or 1")
-    bank = int(bank)
-    base = bases["scan"] + bank * p.bank_size * p.scan_words
-    words: dict[int, int] = {}
-    for off in range(p.bank_size):
-        idx = first + off
-        if idx >= total:
-            break
-        point = points[idx]
-        row = base + off * p.scan_words
-        for j in range(p.num_slots):
-            val = point[j] if j < slot_count else 0
-            words[row + j] = _to_unsigned(
-                _checked_signed(
-                    val,
-                    p.tick_width,
-                    f"scan row {idx} slot {j}",
-                ),
-                p.tick_width,
-            )
-    return words
-
 def pack_program(program, params: StreamerParams | None = None) -> dict[int, int]:
     """Pack a CompiledProgram into the FINAL AXI write image (sparse).
 
@@ -622,78 +551,6 @@ def pack_program(program, params: StreamerParams | None = None) -> dict[int, int
     for i in range((p.channel_count + 31) // 32):
         w[CtrlWords.CLK_ENABLE + i] = (clk_enable >> (32 * i)) & 0xFFFFFFFF
     return w
-
-def unpack_program(words: Mapping[int, int], params: StreamerParams | None = None) -> dict:
-    """Reconstruct program fields from a packed image (host<->FPGA contract check).
-    Reads the static prepare image and its initial two bank-local scan chunks.
-
-    Later refill chunks are transport writes and are not present in this mapping.
-    """
-    p = params or StreamerParams()
-    bases = region_bases(p)
-
-    def g(o):
-        return int(words.get(o, 0)) & 0xFFFFFFFF
-
-    n_edges = g(CtrlWords.PROG_COUNT)
-    n_points = g(CtrlWords.SCAN_COUNT)
-    slot_count = g(CtrlWords.SLOT_COUNT)
-    ticks, masks, coeffs = [], [], []
-    for i in range(n_edges):
-        ticks.append(g(bases["tick"] + i))
-        coeffs.append(_unpack_coeffs(_unfield([g(bases["coeff"] + i * p.coeff_words + k) for k in range(p.coeff_words)], p.coeff_bits), p))
-
-        masks.append(_unfield([g(bases["mask"] + i * p.mask_words + k) for k in range(p.mask_words)], p.channel_count))
-    scan_points = []
-    resident = min(n_points, 2 * p.bank_size)
-    for idx in range(resident):
-        bank = (idx // p.bank_size) % 2
-        off = idx % p.bank_size
-        row = bases["scan"] + bank * p.bank_size * p.scan_words + off * p.scan_words
-        scan_points.append([_from_unsigned(g(row + j), p.tick_width) for j in range(slot_count)])
-    cnt_w = p.bus_seg_addr_width + 1
-    bus_counts = g(CtrlWords.BUS_COUNTS)
-    bus_segments = []
-    for b in range(p.bus_count):
-        count = (bus_counts >> (b * cnt_w)) & ((1 << cnt_w) - 1)
-        for addr in range(count):
-            row = bases["bus"] + (b * p.max_bus_segments + addr) * p.bus_words
-            flags = g(row + 2 + 2 * p.coeff_words)
-            bus_segments.append({
-                "bus_index": b, "start_tick": g(row + 0), "stop_tick": g(row + 1),
-                "start_tick_coeffs": _unpack_coeffs(_unfield([g(row + 2 + k) for k in range(p.coeff_words)], p.coeff_bits), p),
-                "stop_tick_coeffs": _unpack_coeffs(_unfield([g(row + 2 + p.coeff_words + k) for k in range(p.coeff_words)], p.coeff_bits), p),
-                "start_value": flags & ((1 << p.bus_width) - 1),
-                "stop_value": (flags >> p.bus_width) & ((1 << p.bus_width) - 1),
-                "mode": _bus_mode_name((flags >> (2 * p.bus_width)) & 0x3),
-                "value_select": (flags >> (2 * p.bus_width + 2)) & ((1 << p.bus_sel_width) - 1),
-                "stop_value_select": (flags >> (2 * p.bus_width + 2 + p.bus_sel_width)) & ((1 << p.bus_sel_width) - 1),
-            })
-    # PER-SIGNAL OUTPUT DELAY -- one 32b R_DELAY word per channel, then one per bus (both
-    # event-scheduled, 32b), exactly as zlc_pulse_streamer_top.v slices R_DELAY.
-    channel_delays = [int(g(bases["delay"] + ch)) for ch in range(p.channel_count)]
-    bus_delays = [{"bus_index": b, "delay_ticks": int(g(bases["delay"] + p.channel_count + b))}
-                  for b in range(p.bus_count)
-                  if int(g(bases["delay"] + p.channel_count + b)) != 0]
-    clk_enable = 0
-    for i in range((p.channel_count + 31) // 32):
-        clk_enable |= (g(CtrlWords.CLK_ENABLE + i) & 0xFFFFFFFF) << (32 * i)
-    clk_enable &= (1 << p.channel_count) - 1
-    return {
-        "ticks": ticks, "masks": masks, "tick_slot_coeffs": coeffs,
-        "channel_delays": channel_delays,
-        "clk_enable": clk_enable,
-        "scan_points_resident": scan_points, "scan_count": n_points, "slot_count": slot_count,
-        "run_repeat_count": g(CtrlWords.RUN_REPEAT_COUNT),
-        "scan_repeat_count": g(CtrlWords.SCAN_REPEAT_COUNT),
-        # LOOP_START belongs only to the finite PulseBracket.
-        "loop_start_index": g(CtrlWords.LOOP_START),
-        "loop_count": g(CtrlWords.LOOP_COUNT),
-        "loop_end_tick": g(CtrlWords.LOOP_END_TICK),
-        "loop_end_slot_coeffs": _unpack_coeffs(_unfield([g(CtrlWords.LOOP_END_LO), g(CtrlWords.LOOP_END_HI)], p.coeff_bits), p),
-        "bus_segments": bus_segments, "bank_size": g(CtrlWords.BANK_SIZE),
-        "bus_delays": bus_delays,
-    }
 
 # --------------------------------------------------------------------- capacity
 @dataclass(frozen=True)
@@ -1352,8 +1209,14 @@ def _main(argv: Sequence[str] | None = None) -> int:
 def pack_scan_rows(rows, geom: StreamerParams, bank: int, chunk: int) -> dict[int, int]:
     """Pack one bank-sized chunk of slot rows into a resident scan bank.
 
-    The caller supplies a table-local chunk.  Repetition is owned by the
-    independent Run/Scan repeat control words and never materialized here.
+    Chunk c is ``rows[c*bank_size:(c+1)*bank_size]``.  The caller supplies the
+    table-local chunk and the physical ping-pong bank the monotonic stream
+    position chose for it -- for the CONTINUOUS CYCLIC re-sweep the host
+    streams chunks 0,1,..,K-1,0,1,.. into alternating banks.  Rows are packed
+    exactly once: repetition is owned by the independent Run/Scan repeat
+    control words and never materialized here.  Returns a sparse
+    ``{word_offset: value}`` for just that bank, empty when the chunk is past
+    the end of the table.
     """
 
     if not isinstance(geom, StreamerParams):
@@ -1370,9 +1233,27 @@ def pack_scan_rows(rows, geom: StreamerParams, bank: int, chunk: int) -> dict[in
         raise ValueError("scan rows must have equal widths")
     if slot_count > geom.num_slots:
         raise ValueError("scan row has more slots than the wire geometry")
-    return scan_bank_words(
-        points,
-        geom,
-        int(chunk),
-        target_bank=int(bank),
-    )
+
+    first = int(chunk) * geom.bank_size
+    total = len(points)
+    if first >= total:
+        return {}
+    base = region_bases(geom)["scan"] + int(bank) * geom.bank_size * geom.scan_words
+    words: dict[int, int] = {}
+    for off in range(geom.bank_size):
+        idx = first + off
+        if idx >= total:
+            break
+        point = points[idx]
+        row = base + off * geom.scan_words
+        for j in range(geom.num_slots):
+            val = point[j] if j < slot_count else 0
+            words[row + j] = _to_unsigned(
+                _checked_signed(
+                    val,
+                    geom.tick_width,
+                    f"scan row {idx} slot {j}",
+                ),
+                geom.tick_width,
+            )
+    return words

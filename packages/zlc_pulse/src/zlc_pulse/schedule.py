@@ -17,57 +17,6 @@ from .compile import CompiledProgram, evaluate_affine_tick
 from .model import MAXIMUM_REPEAT_COUNT
 
 
-def trigger_times(
-    prog: CompiledProgram,
-    channel: str,
-    table: np.ndarray | None = None,
-    *,
-    run_repeats: int = 1,
-    scan_repeats: int = 1,
-) -> np.ndarray:
-    """Return rising-edge ticks for one physical digital lane.
-
-    This is an orchestration-side projection.  It never participates in the
-    wire image or device session.
-    """
-
-    return np.asarray(
-        _channel_edges(
-            prog,
-            (channel,),
-            table,
-            run_repeats,
-            scan_repeats,
-        )[0][0::2],
-        dtype=np.uint64,
-    )
-
-
-def trigger_windows(
-    prog: CompiledProgram,
-    channel: str,
-    table: np.ndarray | None = None,
-    *,
-    run_repeats: int = 1,
-    scan_repeats: int = 1,
-) -> tuple[tuple[int, int], ...]:
-    """Return (rise, fall) tick pairs for one lane, over one finite run.
-
-    The high time of each window is what an exposure IS, so a camera adapter
-    that needs exposures asks the program rather than walking the mask table
-    itself -- which is how a twin ends up with its own copy of the rising-edge
-    rule, drifting from the one the board plays.
-    """
-
-    return trigger_windows_by_channel(
-        prog,
-        (channel,),
-        table,
-        run_repeats=run_repeats,
-        scan_repeats=scan_repeats,
-    )[channel]
-
-
 def trigger_windows_by_channel(
     prog: CompiledProgram,
     channels: Sequence[str],
@@ -366,8 +315,6 @@ def _point_timing(
 __all__ = [
     "bracket_iterations",
     "run_duration_seconds",
-    "trigger_times",
-    "trigger_windows",
     "trigger_windows_by_channel",
     "trigger_edge_ticks",
 ]

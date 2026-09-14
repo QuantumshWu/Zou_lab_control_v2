@@ -87,13 +87,6 @@ def reset() -> None:
         _TOTALS.clear()
 
 
-def calls(name: str) -> int:
-    """How many times one named seam ran since the last reset."""
-
-    with _lock:
-        return int(_TOTALS.get(name, [0])[0])
-
-
 def watch(instance, *names: str, prefix: str = "") -> list[str]:
     """Time these methods ON THIS INSTANCE only.  Returns what was bound.
 

@@ -1652,7 +1652,7 @@ def main(argv: list[str] | None = None) -> int:
         # The same assembly, without a window: a smoke test, not acceptance.
         try:
             space, session = open_experiment(arguments.workspace, arguments.template)
-        except FileNotFoundError as error:
+        except (FileNotFoundError, NotADirectoryError) as error:
             print(f"error: {error}", file=sys.stderr)
             return 2
         print(f"workspace: {space.root}", flush=True)
@@ -1696,7 +1696,7 @@ def main(argv: list[str] | None = None) -> int:
             workspace=arguments.workspace,
             template=arguments.template,
         )
-    except (FileNotFoundError, KeyError, ValueError) as error:
+    except (FileNotFoundError, NotADirectoryError, KeyError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
     print(f"workspace: {flow.space.root}")

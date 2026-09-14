@@ -6854,13 +6854,10 @@ class ConsolePresenter:
             severity="error" if error else "task",
         )
 
-    def logic_offer(self) -> tuple[tuple[str, str, str, str], ...]:
+    def logic_offer(self) -> tuple[tuple[str, str, str], ...]:
         """Every addable row type without resolving or building a run."""
 
-        return tuple(
-            (api_name, kind, publishes, "")
-            for api_name, kind, publishes in self.catalog.rows()
-        )
+        return self.catalog.rows()
 
     def installation_changed(self) -> None:
         """Re-project stopped drafts against the current live device set."""

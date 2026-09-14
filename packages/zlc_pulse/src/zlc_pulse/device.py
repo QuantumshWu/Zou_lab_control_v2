@@ -443,32 +443,6 @@ class PulseStreamer(ConfigValueHolder):
                 raise
             self._opened = True
             self._command_id = None
-    def check_register_layout(self) -> None:
-        with self._lock:
-            self._require_open()
-            self._check_register_layout_locked()
-    def transport_self_test(self, *, count: int = 16) -> None:
-        """Write, read back and clear a pattern over the CTRL scratch words.
-
-        The pattern stays inside the scratch extent the geometry declares:
-        the word above it is the layout fingerprint the board answers the
-        handshake with, and a test that wrote it read its own pattern back
-        happily while leaving the next layout check refusing the board.
-        """
-
-        with self._lock:
-            self._require_open()
-            self._check_register_layout_locked()
-            length = max(2, min(int(count), self.geom.ctrl_scratch_words))
-            base = self.geom.ctrl_scratch_base
-            pattern = tuple((base + i, (0xC0DE0000 + i) & 0xFFFFFFFF) for i in range(length))
-            try:
-                self._write(pattern)
-                actual = tuple(self._read(base + i) for i in range(length))
-            finally:
-                self._write(tuple((base + i, 0) for i in range(length)))
-            if actual != tuple(value for _address, value in pattern):
-                raise RuntimeError(f"{getattr(self.transport, 'transport_id', 'register')} register self-test readback mismatch")
     def close(self) -> None:
         with self._lock:
             if not self._opened:

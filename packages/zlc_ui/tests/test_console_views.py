@@ -1818,9 +1818,9 @@ view.show(); app.processEvents()
 events = []
 handle.set_panel_kinds((('curve', 'Curve'), ('image', '2D image')), 'image')
 handle.set_logic_kinds((
-    ('calibration', 'task', 'nothing', ''),
-    ('occupancy', 'processor', 'occupied', ''),
-    ('camera_measurement', 'measurement', 'frames', ''),
+    ('calibration', 'task', 'nothing'),
+    ('occupancy', 'processor', 'occupied'),
+    ('camera_measurement', 'measurement', 'frames'),
 ))
 handle.add_panel_requested.connect(lambda kind: events.append(('panel', kind)))
 handle.add_logic_requested.connect(lambda api_name: events.append(('logic', api_name)))

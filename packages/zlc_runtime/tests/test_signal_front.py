@@ -107,6 +107,19 @@ def _state(
     )
 
 
+def _live_owner(states):
+    """The plane's live-owner lookup, over this test's state list."""
+
+    return lambda name: next(
+        (
+            state
+            for state in states
+            if not state.retired and name in state.output_names
+        ),
+        None,
+    )
+
+
 def test_build_front_is_transitive_and_falls_back_as_one_family() -> None:
     root = _publication("camera", "g1", 1, "camera/frame")
     roi = _publication("roi", "g2", 1, "roi/value", (root,))
@@ -118,7 +131,13 @@ def test_build_front_is_transitive_and_falls_back_as_one_family() -> None:
         _state("fit", "g3", "processor", ("fit/value",), fit, "roi/value"),
     ]
 
-    first = build_front(states, {"camera/frame", "roi/value", "fit/value"}, None, parents.__getitem__)
+    first = build_front(
+        states,
+        {"camera/frame", "roi/value", "fit/value"},
+        None,
+        parents.__getitem__,
+        _live_owner(states),
+    )
     assert first.names() == ("camera/frame", "roi/value", "fit/value")
     root2 = _publication("camera", "g1", 2, "camera/frame")
     roi2 = _publication("roi", "g2", 2, "roi/value", (root2,))
@@ -131,6 +150,7 @@ def test_build_front_is_transitive_and_falls_back_as_one_family() -> None:
         {"camera/frame", "roi/value", "fit/value"},
         first,
         parents.__getitem__,
+        _live_owner(states),
     )
     assert [held.publication(name).event_ref.sequence for name in held.names()] == [1, 1, 1]
 
@@ -142,6 +162,7 @@ def test_build_front_is_transitive_and_falls_back_as_one_family() -> None:
         {"camera/frame", "roi/value", "fit/value"},
         held,
         parents.__getitem__,
+        _live_owner(states),
     )
     assert [recovered.publication(name).event_ref.sequence for name in recovered.names()] == [2, 2, 2]
     roots = {
@@ -176,13 +197,15 @@ def test_a_source_sibling_joins_a_lagging_processor_at_the_processor_s_shot() ->
     ]
 
     through_sibling = build_front(
-        states, {"occ/occupied", "agreement/counts"}, None, parents.__getitem__
+        states, {"occ/occupied", "agreement/counts"}, None, parents.__getitem__,
+        _live_owner(states),
     )
     assert through_sibling.publication("agreement/counts") is agreement
     assert through_sibling.publication("occ/occupied") is first
     assert through_sibling.publication("occ/counts") is first
     through_source = build_front(
-        states, {"occ/counts", "agreement/counts"}, None, parents.__getitem__
+        states, {"occ/counts", "agreement/counts"}, None, parents.__getitem__,
+        _live_owner(states),
     )
     assert through_source.publication_by_signal == (
         through_sibling.publication_by_signal
@@ -190,7 +213,9 @@ def test_a_source_sibling_joins_a_lagging_processor_at_the_processor_s_shot() ->
 
     # Siblings of one owner are not each other's ancestors: asked for both
     # alone, the bundle simply flows at its latest shot.
-    siblings_only = build_front(states, set(bundle), None, parents.__getitem__)
+    siblings_only = build_front(
+        states, set(bundle), None, parents.__getitem__, _live_owner(states)
+    )
     assert siblings_only.publication("occ/counts") is second
     assert siblings_only.publication("occ/occupied") is second
 
@@ -199,7 +224,9 @@ def test_a_source_sibling_joins_a_lagging_processor_at_the_processor_s_shot() ->
     edited = _publication("occ", "g3", 1, bundle, (second,))
     parents[edited] = (second,)
     states = [_state("occ", "g3", "producer", bundle, edited)]
-    edited_front = build_front(states, set(bundle), None, parents.__getitem__)
+    edited_front = build_front(
+        states, set(bundle), None, parents.__getitem__, _live_owner(states)
+    )
     assert edited_front.publication("occ/counts") is edited
     assert edited_front.publication("occ/occupied") is edited
 
@@ -209,7 +236,10 @@ def test_a_source_sibling_joins_a_lagging_processor_at_the_processor_s_shot() ->
     combined = _publication("combined", "g5", 1, "combined/value", (edited, branch))
     parents.update({branch: (second,), combined: (edited, branch)})
     states.append(_state("combined", "g5", "processor", ("combined/value",), combined, "occ/counts"))
-    refused = build_front(states, {"occ/counts", "combined/value"}, None, parents.__getitem__)
+    refused = build_front(
+        states, {"occ/counts", "combined/value"}, None, parents.__getitem__,
+        _live_owner(states),
+    )
     assert refused.publication("combined/value") is None
 
 
@@ -235,12 +265,16 @@ def test_a_presentation_paced_follower_never_holds_its_source() -> None:
     ]
     requested = {"camera/frame", "fit/value"}
 
-    first = build_front(states, requested, None, parents.__getitem__)
+    first = build_front(
+        states, requested, None, parents.__getitem__, _live_owner(states)
+    )
     # The camera advances two shots; the follower's fit is still for shot 1.
     root3 = _publication("camera", "g1", 3, "camera/frame")
     states[0].publication = root3
     parents[root3] = ()
-    flowing = build_front(states, requested, first, parents.__getitem__)
+    flowing = build_front(
+        states, requested, first, parents.__getitem__, _live_owner(states)
+    )
     assert flowing.publication("camera/frame").event_ref.sequence == 3
     assert flowing.publication("fit/value").event_ref.sequence == 1
 
@@ -249,7 +283,9 @@ def test_a_presentation_paced_follower_never_holds_its_source() -> None:
     states[1] = _state(
         "fit", "g3", "processor", ("fit/value",), fit, "camera/frame"
     )
-    held = build_front(states, requested, first, parents.__getitem__)
+    held = build_front(
+        states, requested, first, parents.__getitem__, _live_owner(states)
+    )
     assert held.publication("camera/frame").event_ref.sequence == 1
 
 
@@ -395,16 +431,20 @@ def test_a_requested_companion_waits_for_its_first_same_shot_publication() -> No
     ]
     states[1].publication = None
     waiting = build_front(
-        states, {"camera/frame", "occ/sites"}, None, parents.__getitem__
+        states, {"camera/frame", "occ/sites"}, None, parents.__getitem__,
+        _live_owner(states),
     )
     assert waiting.names() == ()
     # An unselected processor does not hold an ordinary camera panel.
-    flowing = build_front(states, {"camera/frame"}, None, parents.__getitem__)
+    flowing = build_front(
+        states, {"camera/frame"}, None, parents.__getitem__, _live_owner(states)
+    )
     assert flowing.publication("camera/frame") is root
 
     states[1].publication = occupancy
     first = build_front(
-        states, {"camera/frame", "occ/sites"}, None, parents.__getitem__
+        states, {"camera/frame", "occ/sites"}, None, parents.__getitem__,
+        _live_owner(states),
     )
     assert first.names() == ("camera/frame", "occ/sites")
 
@@ -413,10 +453,13 @@ def test_a_requested_companion_waits_for_its_first_same_shot_publication() -> No
     advanced = _publication("camera", "g1", 2, "camera/frame")
     parents[advanced] = ()
     states[0].publication = advanced
-    camera_only = build_front(states, {"camera/frame"}, first, parents.__getitem__)
+    camera_only = build_front(
+        states, {"camera/frame"}, first, parents.__getitem__, _live_owner(states)
+    )
     states[1].publication = None
     waiting = build_front(
-        states, {"camera/frame", "occ/sites"}, camera_only, parents.__getitem__
+        states, {"camera/frame", "occ/sites"}, camera_only, parents.__getitem__,
+        _live_owner(states),
     )
     assert waiting.names() == ()
     states[0].publication = root
@@ -425,7 +468,8 @@ def test_a_requested_companion_waits_for_its_first_same_shot_publication() -> No
     # group. The surface keeps its previously accepted complete frame.
     states[1] = _state("occ", "g4", "processor", ("occ/sites",), None, "camera/frame")
     waiting = build_front(
-        states, {"camera/frame", "occ/sites"}, first, parents.__getitem__
+        states, {"camera/frame", "occ/sites"}, first, parents.__getitem__,
+        _live_owner(states),
     )
     assert waiting.names() == ()
 
@@ -436,7 +480,8 @@ def test_a_requested_companion_waits_for_its_first_same_shot_publication() -> No
         _state("occ", "g4", "processor", ("occ/sites",), None, "camera/frame"),
     ]
     resumed = build_front(
-        restarted, {"camera/frame", "occ/sites"}, first, parents.__getitem__
+        restarted, {"camera/frame", "occ/sites"}, first, parents.__getitem__,
+        _live_owner(restarted),
     )
     assert resumed.names() == ()
 
@@ -445,7 +490,8 @@ def test_a_requested_companion_waits_for_its_first_same_shot_publication() -> No
     parents[occupancy2] = (root2,)
     restarted[1].publication = occupancy2
     joined = build_front(
-        restarted, {"camera/frame", "occ/sites"}, resumed, parents.__getitem__
+        restarted, {"camera/frame", "occ/sites"}, resumed, parents.__getitem__,
+        _live_owner(restarted),
     )
     assert joined.publication("occ/sites") is occupancy2
     assert joined.publication("camera/frame") is root2

@@ -27,8 +27,6 @@ from .common import stats, write_result  # noqa: E402
 
 
 def run_case(case) -> dict:
-    from zlc_plot import PlotSession
-
     feed = case.feed()
     report: dict = {"case": case.name, "points": feed.size}
     t0 = time.perf_counter()

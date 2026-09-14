@@ -35,7 +35,6 @@ from zlc_pulse import schedule
 from zlc_pulse.schedule import (
     run_duration_seconds,
     trigger_edge_ticks,
-    trigger_windows,
     trigger_windows_by_channel,
 )
 
@@ -111,9 +110,9 @@ def test_asking_about_every_lane_at_once_answers_what_asking_one_by_one_does(
         program, _LANES, table, run_repeats=3, scan_repeats=2
     )
     for lane in _LANES:
-        assert windows[lane] == trigger_windows(
-            program, lane, table, run_repeats=3, scan_repeats=2
-        )
+        assert windows[lane] == trigger_windows_by_channel(
+            program, (lane,), table, run_repeats=3, scan_repeats=2
+        )[lane]
 
 
 def test_an_edge_stream_states_its_levels_by_position() -> None:
@@ -125,9 +124,9 @@ def test_an_edge_stream_states_its_levels_by_position() -> None:
         edges = trigger_edge_ticks(
             program, (lane,), table, run_repeats=2, scan_repeats=2
         )[lane]
-        windows = trigger_windows(
-            program, lane, table, run_repeats=2, scan_repeats=2
-        )
+        windows = trigger_windows_by_channel(
+            program, (lane,), table, run_repeats=2, scan_repeats=2
+        )[lane]
         assert tuple(zip(edges[0::2], edges[1::2])) == windows
         assert list(edges) == sorted(edges)
 
@@ -210,13 +209,13 @@ def test_run_repeats_hold_each_row_then_scan_repeats_replay_the_table() -> None:
     program = compile_sequence(sequence, StreamerParams(), 50e6)
     table = np.asarray(((-1,), (0,), (1,)), dtype=np.int64)
 
-    windows = trigger_windows(
+    windows = trigger_windows_by_channel(
         program,
-        lane,
+        (lane,),
         table,
         run_repeats=2,
         scan_repeats=2,
-    )
+    )[lane]
     assert [end - start for start, end in windows] == [1, 1, 2, 2, 3, 3] * 2
     assert run_duration_seconds(
         program,
@@ -228,7 +227,7 @@ def test_run_repeats_hold_each_row_then_scan_repeats_replay_the_table() -> None:
     for field in ("run_repeats", "scan_repeats"):
         arguments = {field: 0}
         with np.testing.assert_raises_regex(ValueError, field):
-            trigger_windows(program, lane, table, **arguments)
+            trigger_windows_by_channel(program, (lane,), table, **arguments)
     plain_program = compile_sequence(
         PulseSequence(
             target=_TARGET,
@@ -239,4 +238,4 @@ def test_run_repeats_hold_each_row_then_scan_repeats_replay_the_table() -> None:
         50e6,
     )
     with np.testing.assert_raises_regex(ValueError, "no scan table"):
-        trigger_windows(plain_program, lane, scan_repeats=2)
+        trigger_windows_by_channel(plain_program, (lane,), scan_repeats=2)

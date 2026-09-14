@@ -163,7 +163,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         path = apparatus_path(arguments.workspace)
-    except FileNotFoundError as error:
+    except NotADirectoryError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
     print(f"apparatus: {path}", flush=True)

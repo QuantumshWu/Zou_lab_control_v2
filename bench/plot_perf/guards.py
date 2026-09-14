@@ -200,7 +200,7 @@ def free_running(session) -> None:
 
 
 class SourceRate:
-    """How fast a signal is actually publishing, measured not assumed.
+    """Whether the producer delivered, asked of the plane and not assumed.
 
     ``camera_measurement`` with ``repeat: 0`` keeps the virtual camera
     producing whether or not a pulse is fired: about twenty distinct
@@ -213,42 +213,13 @@ class SourceRate:
         self._session = session
         self._name = str(signal_name)
 
-    def _revision(self):
+    def revision(self):
+        """This signal's current revision, or None while it has published none."""
+
         value = self._session.signal_plane.freeze().value(self._name)
         snapshot = getattr(value, "snapshot", value)
         ref = getattr(snapshot, "ref", None)
         return None if ref is None else int(ref.revision.value)
-
-    def measure(self, app, seconds: float) -> dict:
-        seen = set()
-        started = time.perf_counter()
-        deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline:
-            app.processEvents()
-            revision = self._revision()
-            if revision is not None:
-                seen.add(revision)
-            time.sleep(0.002)
-        elapsed = time.perf_counter() - started
-        return {
-            "signal": self._name,
-            "distinct_revisions": len(seen),
-            "per_second": round(len(seen) / elapsed, 1),
-            "quiet": len(seen) <= 1,
-        }
-
-
-def require_quiet(rate: dict) -> dict:
-    """Assert a "no producer" window really had none."""
-
-    if not rate["quiet"]:
-        raise HarnessError(
-            "%s published %d revisions (%.1f/s) during a window that was "
-            "meant to be quiet: whatever was timed includes rendering real "
-            "new data."
-            % (rate["signal"], rate["distinct_revisions"], rate["per_second"])
-        )
-    return rate
 
 
 # --------------------------------------------------------------- gestures
@@ -285,20 +256,3 @@ def committed_region(panel) -> tuple:
         )
         for item in state.get("ranges", ())
     )
-
-
-def applied(answer, what: str):
-    """Assert a state change was ACCEPTED, not silently refused.
-
-    ``update_panel_state`` takes a fixed vocabulary and returns whether it
-    took the patch.  A bench once sent a field that is not in it, never
-    looked at the answer, and read the resulting stale surface as a product
-    defect.
-    """
-
-    if answer is False or answer is None:
-        raise HarnessError(
-            "%s was refused by the product API; the surface still holds what "
-            "it held before." % what
-        )
-    return answer

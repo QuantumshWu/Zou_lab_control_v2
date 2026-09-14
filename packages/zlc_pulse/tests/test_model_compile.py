@@ -26,7 +26,7 @@ from zlc_pulse import (
 from zlc_pulse.compile import evaluate_affine_tick
 from zlc_pulse import pulse_field_value
 from zlc_pulse.model import PulseFieldRef
-from zlc_pulse.schedule import trigger_times, trigger_windows
+from zlc_pulse.schedule import trigger_edge_ticks, trigger_windows_by_channel
 from zlc_pulse.wire import StreamerParams
 
 
@@ -60,8 +60,9 @@ def test_static_compile_has_safe_terminal_row_and_pure_trigger_projection() -> N
     program = compile_sequence(_sequence(), StreamerParams(max_edges=8, bank_size=2), 50e6)
     assert program.masks[-1] == 0
     assert program.ticks[0] == 0
-    assert np.array_equal(trigger_times(program, "d0"), np.asarray([0], dtype=np.uint64))
-    assert np.array_equal(trigger_times(program, "d1"), np.asarray([1], dtype=np.uint64))
+    edges = trigger_edge_ticks(program, ("d0", "d1"))
+    assert edges["d0"][0::2] == (0,)
+    assert edges["d1"][0::2] == (1,)
 
 
 def test_slot_compile_changes_only_affine_data_and_dac_selectors() -> None:
@@ -144,8 +145,9 @@ def test_a_full_span_bracket_is_only_an_internal_timeline_loop() -> None:
     assert program.loop_start_index == 0
     assert program.loop_count == 3
     assert program.loop_end_tick == program.ticks[-1]
-    assert trigger_windows(program, "d0") == ((0, 1), (3, 4), (6, 7))
-    assert trigger_windows(program, "d1") == ((1, 2), (4, 5), (7, 8))
+    windows = trigger_windows_by_channel(program, ("d0", "d1"))
+    assert windows["d0"] == ((0, 1), (3, 4), (6, 7))
+    assert windows["d1"] == ((1, 2), (4, 5), (7, 8))
 
 
 def test_bracket_count_run_repeats_and_scan_slot_domain_are_strict() -> None:

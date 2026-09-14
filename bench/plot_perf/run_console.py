@@ -1107,7 +1107,7 @@ class ConsoleBench:
             def tick():
                 nonlocal last_revision
                 presented.poll()
-                revision = rate._revision()
+                revision = rate.revision()
                 if revision is not None and revision != last_revision:
                     last_revision = revision
                     revisions.append((time.perf_counter(), revision))

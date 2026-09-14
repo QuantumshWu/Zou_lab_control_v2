@@ -3593,6 +3593,7 @@ class SignalDataPlane:
             self._front_signals,
             self._front,
             self._resolved_direct_parents_locked,
+            self._state_for_signal_locked,
         )
 
     def freeze(self) -> SignalFront:

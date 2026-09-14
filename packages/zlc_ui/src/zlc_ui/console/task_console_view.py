@@ -93,7 +93,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.kind_combo = FluentComboBox()
         self._task_takeover = False
         self._panel_kind_choices: tuple[tuple[str, str], ...] = ()
-        self._logic_kind_choices: tuple[tuple[str, str, str, str], ...] = ()
+        self._logic_kind_choices: tuple[tuple[str, str, str], ...] = ()
         # Keep the full kind label and its arrow in the
         # same fixed slot on every screen scale.
         self.kind_combo.setFixedWidth(scaled_px(170, minimum=130))
@@ -203,16 +203,16 @@ class TaskConsoleView(QtWidgets.QWidget):
         self._rebuild_kind_combo(selected)
 
     def set_logic_kinds(
-        self, kinds: tuple[tuple[str, str, str, str], ...]
+        self, kinds: tuple[tuple[str, str, str], ...]
     ) -> None:
-        """Replace the ``(api_name, kind, publishes, blocked)`` Logic entries."""
+        """Replace the ``(api_name, kind, publishes)`` Logic entries."""
 
         layer_order = {"measurement": 0, "processor": 1, "task": 2}
         self._logic_kind_choices = tuple(
             sorted(
                 (
-                    (str(api_name), str(kind), str(publishes), str(blocked))
-                    for api_name, kind, publishes, blocked in kinds
+                    (str(api_name), str(kind), str(publishes))
+                    for api_name, kind, publishes in kinds
                 ),
                 key=lambda item: (layer_order.get(item[1], 3), item[0]),
             )
@@ -225,13 +225,14 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.kind_combo.clear()
         for key, label in self._panel_kind_choices:
             self.kind_combo.addItem(f"Plot: {label}", ("plot", key))
-        for api_name, kind, publishes, blocked in self._logic_kind_choices:
+        for api_name, kind, publishes in self._logic_kind_choices:
             title = api_name.replace("_", " ").strip().title()
             layer = kind.replace("_", " ").strip().title() or "Logic"
             self.kind_combo.addItem(f"{layer}: {title}", ("logic", api_name))
-            details = blocked or f"Publishes: {publishes}"
             self.kind_combo.setItemData(
-                self.kind_combo.count() - 1, details, QtCore.Qt.ToolTipRole
+                self.kind_combo.count() - 1,
+                f"Publishes: {publishes}",
+                QtCore.Qt.ToolTipRole,
             )
         if wanted is not None:
             index = next(

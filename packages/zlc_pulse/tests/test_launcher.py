@@ -276,6 +276,9 @@ def test_build_launcher_fails_closed_and_programs_by_default() -> None:
     assert 'set "ZLC_EST_STATUS=%ERRORLEVEL%"' in estimate_block
     assert "exit /b %ZLC_EST_STATUS%" in estimate_block
     assert "exit /b 0" not in estimate_block
+    # And it reads the config the bitstream is built from, not whatever the
+    # estimator would find on its own (env, cwd, installed copy, defaults).
+    assert '--config "%ZLC_CFG_JSON%"' in estimate_block
     assert (
         "call :zlc_print_capacity_estimate\nif errorlevel 1 exit /b 1"
         in source.replace("\r\n", "\n")

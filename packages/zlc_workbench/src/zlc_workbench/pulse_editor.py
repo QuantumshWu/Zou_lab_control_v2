@@ -407,6 +407,7 @@ def project_period(
     period: PulsePeriod,
     *,
     visible_ports: Sequence[str] | None = None,
+    bindings: Mapping[tuple, tuple[str, int]] | None = None,
 ) -> PeriodVM:
     """One period as its card.
 
@@ -421,7 +422,8 @@ def project_period(
     shown = None if visible_ports is None else {str(key) for key in visible_ports}
     lane_index = {lane: index for index, lane in enumerate(target.raw_lanes)}
     offered = programmable_ports(target)
-    bindings = bindings_of(sequence)
+    if bindings is None:
+        bindings = bindings_of(sequence)
     duration_binding, duration_number = _binding_for(
         bindings, "duration", period.period_id
     )
@@ -457,7 +459,11 @@ def project_period(
             if port.kind == "digital" and (shown is None or port.key in shown)
         ),
         analog=tuple(
-            (port.key, _analog_mode(period, port), _analog_field(sequence, period, port))
+            (
+                port.key,
+                _analog_mode(period, port),
+                _analog_field(sequence, period, port, bindings),
+            )
             for port in offered
             if port.kind == "dac" and (shown is None or port.key in shown)
         ),
@@ -498,8 +504,11 @@ def project_schedule(
 
     shown = None if visible_ports is None else {str(key) for key in visible_ports}
     ports = project_ports(target, pins=pins, visible=shown)
+    bindings = bindings_of(sequence)
     periods = tuple(
-        project_period(sequence, period, visible_ports=visible_ports)
+        project_period(
+            sequence, period, visible_ports=visible_ports, bindings=bindings
+        )
         for period in (() if sequence is None else sequence.periods)
     )
 
@@ -547,32 +556,7 @@ def project_schedule(
         # means, and it cannot be edited: a delay belongs to the pulse that
         # carries it, and there is not one yet to write into.
         delay_rows=tuple(
-            DelayRowVM(
-                port_key=port.key,
-                value=FieldVM(
-                    text=(
-                        format_quantity(
-                            float(_delay_of(sequence, port.key)[0]), "1"
-                        )
-                        if sequence is not None
-                        else "0"
-                    ),
-                    binding_kind=_binding_for(
-                        bindings_of(sequence), "delay", None, port.key
-                    )[0] or "",
-                    binding_number=_binding_for(
-                        bindings_of(sequence), "delay", None, port.key
-                    )[1] or 0,
-                    editable=sequence is not None,
-                    allow_any=False,
-                ),
-                unit=(
-                    _delay_of(sequence, port.key)[1] if sequence is not None else "ns"
-                ),
-                unit_quantums=tuple(
-                    (unit, float(nanoseconds_per(unit))) for unit in _TIME_UNITS
-                ),
-            )
+            _delay_row(sequence, port.key, bindings)
             for port in programmable_ports(target)
             if port.kind in ("digital", "dac")
         ),
@@ -671,7 +655,12 @@ def _held_value(sequence: PulseSequence, period: PulsePeriod, port: Any) -> int:
     return held
 
 
-def _analog_field(sequence: PulseSequence, period: PulsePeriod, port: Any) -> FieldVM:
+def _analog_field(
+    sequence: PulseSequence,
+    period: PulsePeriod,
+    port: Any,
+    bindings: Mapping[tuple, tuple[str, int]],
+) -> FieldVM:
     """One DAC's box on one card.
 
     A holding output shows the level it is holding and cannot be typed into:
@@ -684,9 +673,7 @@ def _analog_field(sequence: PulseSequence, period: PulsePeriod, port: Any) -> Fi
     step = next((item for item in period.analog_steps if item.port == port.key), None)
     low, high = port.signed_range or (0, 0)
     value = _held_value(sequence, period, port) if step is None else int(step.value)
-    binding, number = _binding_for(
-        bindings_of(sequence), "dac", period.period_id, port.key
-    )
+    binding, number = _binding_for(bindings, "dac", period.period_id, port.key)
     return FieldVM(
         text=str(value),
         binding_kind=binding or "",
@@ -724,6 +711,36 @@ def _delay_of(sequence: PulseSequence, port_key: str) -> tuple[float, str]:
 
     delay = next((item for item in sequence.delays if item.port == port_key), None)
     return (0.0, "ns") if delay is None else (float(delay.value), str(delay.unit))
+
+
+def _delay_row(
+    sequence: PulseSequence | None,
+    port_key: str,
+    bindings: Mapping[tuple, tuple[str, int]],
+) -> DelayRowVM:
+    """One output's delay row, wherever it is pushed from.
+
+    The whole-board projection and the single row a typed delay sends back both
+    come through here, so a targeted update cannot produce a row that differs
+    from the one a rebuild would have shown.
+    """
+
+    value, unit = (0.0, "ns") if sequence is None else _delay_of(sequence, port_key)
+    binding, number = _binding_for(bindings, "delay", None, port_key)
+    return DelayRowVM(
+        port_key=port_key,
+        value=FieldVM(
+            text="0" if sequence is None else format_quantity(float(value), "1"),
+            binding_kind=binding or "",
+            binding_number=number or 0,
+            editable=sequence is not None,
+            allow_any=False,
+        ),
+        unit=unit,
+        unit_quantums=tuple(
+            (name, float(nanoseconds_per(name))) for name in _TIME_UNITS
+        ),
+    )
 
 
 def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
@@ -4571,6 +4588,7 @@ class PulseEditorPresenter:
             return
         self._edit_state(sequence=candidate)
         schedule = self.view
+        bindings = bindings_of(candidate)
         for identifier in ((period_id,) if period_id is not None else ()) + tuple(also):
             period = next(
                 (item for item in candidate.periods if item.period_id == identifier),
@@ -4582,58 +4600,42 @@ class PulseEditorPresenter:
                         candidate,
                         period,
                         visible_ports=self._state.visible_ports,
+                        bindings=bindings,
                     )
                 )
         if port_key is not None:
-            row = next(
-                (
-                    row
-                    for row in project_schedule(
-                        candidate,
-                        visible_ports=self._state.visible_ports,
-                        pins=self.pins,
-                    ).delay_rows
-                    if row.port_key == port_key
-                ),
-                None,
-            )
-            if row is not None:
-                schedule.set_delay_row(row)
+            schedule.set_delay_row(_delay_row(candidate, port_key, bindings))
         self._refresh_summary()
         self._render_run_state()
         self.refresh_preview()
 
     def _refresh_summary(self) -> None:
-        """The totals a value edit can move, without touching the cards."""
+        """The totals a value edit can move, without touching the cards.
+
+        Read off the same projection that draws the page rather than worked out
+        a second time here.  The second derivation disagreed with the first: a
+        value edit rewrote the name label into "<path> - 3 period(s)" where the
+        page had been showing the file name, and the scan label into "1 scan
+        slot(s)" where the page says "1 slot - 21 pts".  Every label the page
+        shows is the projection's to word.
+        """
 
         if self.sequence is None:
             return
-        total_ns = sum(
-            _nanoseconds(period.duration, period.unit) for period in self.sequence.periods
-        )
-        ports = project_ports(
-            self.sequence.target,
+        shown = project_schedule(
+            self.sequence,
+            path=self.path,
+            visible_ports=self._state.visible_ports,
             pins=self.pins,
-            visible=self._state.visible_ports,
+            scan_points=len(self._state.scan_rows),
         )
-        visible = sum(1 for port in ports if port.visible)
         self.view.set_schedule_summary(
-            total_text=_readable(total_ns),
-            total_tooltip=(
-                f"{format_quantity(float(total_ns), '1')} ns over "
-                f"{len(self.sequence.periods)} period(s)"
-            ),
-            period_count=len(self.sequence.periods),
-            visible_text=f"{visible}/{len(ports)} ports",
-            summary_text=(
-                f"{self.path or self.sequence.name} - "
-                f"{len(self.sequence.periods)} period(s)"
-            ),
-            scan_summary_text=(
-                f"{len(self.sequence.slots)} scan slot(s)"
-                if self.sequence.slots
-                else "no scan slots"
-            ),
+            total_text=shown.total_text,
+            total_tooltip=shown.total_tooltip,
+            period_count=shown.period_count,
+            visible_text=shown.visible_text,
+            summary_text=shown.summary_text,
+            scan_summary_text=shown.scan_summary_text,
         )
 
     def _on_grid(self, value: object, unit: str, field: str,

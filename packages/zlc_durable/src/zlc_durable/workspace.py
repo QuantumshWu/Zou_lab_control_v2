@@ -25,15 +25,12 @@ from .paths import resolve_under
 
 
 __all__ = [
-    "DAY_FOLDER_PATTERN",
     "day_folder",
     "day_folder_path",
     "day_folder_name",
     "unique_path",
 ]
 
-
-DAY_FOLDER_PATTERN = re.compile(r"^\d{4}_\d{2}_\d{2}$")
 
 _UNSAFE = re.compile(r'[\x00-\x1f\x7f<>:"/\\|?*\s]+')
 _SUFFIX = re.compile(r"\.[A-Za-z0-9][A-Za-z0-9._-]*\Z")

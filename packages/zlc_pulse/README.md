@@ -66,9 +66,10 @@ all three share one id namespace.
 The package has no measurement, GUI, or run-planning layer. `applied()` is only
 the device's saved passive echo of the last program, source, rows, and repeat
 counts; it is not trigger scheduling, expected-frame accounting, or
-point-by-point reconciliation. `trigger_times()` and the other schedule queries
-are pure finite host-side projections. They take finite `run_repeats` and
-`scan_repeats` values (both at least one) and are not sent to the device.
+point-by-point reconciliation. `trigger_windows_by_channel()` and the other
+schedule queries are pure finite host-side projections. They take finite
+`run_repeats` and `scan_repeats` values (both at least one) and are not sent to
+the device.
 
 Pulse documents use the stable strict root `zlc.pulse` with no numeric format
 version. Their sequence root contains `bracket` and `run_repeats`; the removed

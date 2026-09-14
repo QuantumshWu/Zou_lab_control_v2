@@ -10,7 +10,7 @@ from threading import Barrier
 import pytest
 
 from zlc_durable import day_folder, day_folder_path, unique_path
-from zlc_durable.workspace import DAY_FOLDER_PATTERN, day_folder_name
+from zlc_durable.workspace import day_folder_name
 
 
 def _commit_process_payload(arguments: tuple[str, int]) -> tuple[str, bytes]:
@@ -25,11 +25,11 @@ def _commit_process_payload(arguments: tuple[str, int]) -> tuple[str, bytes]:
     return path.name, path.read_bytes()
 
 
-def test_day_folder_name_is_zero_padded_and_matches_the_declared_pattern() -> None:
+def test_day_folder_name_is_zero_padded() -> None:
     assert day_folder_name(date(2026, 8, 5)) == "2026_08_05"
     assert day_folder_name(date(2026, 12, 31)) == "2026_12_31"
-    for day in (date(2026, 1, 1), date(2026, 8, 5), date(1999, 10, 9)):
-        assert DAY_FOLDER_PATTERN.fullmatch(day_folder_name(day))
+    assert day_folder_name(date(2026, 1, 1)) == "2026_01_01"
+    assert day_folder_name(date(1999, 10, 9)) == "1999_10_09"
 
 
 def test_day_folder_creates_the_day_beneath_an_existing_root(tmp_path) -> None:
