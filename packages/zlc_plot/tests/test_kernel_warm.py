@@ -418,9 +418,13 @@ for snapshot, spec, parameters in (
 ):
     session = PlotSession(snapshot, spec, size="4x4", parameters=parameters, device_pixel_ratio=3.0)
     session.rgba()
+    models = session.fit_models
+    if models:
+        session.configure(fit={"model": str(models[0].model_id)})
     session.close()
 print(sorted(warmed - set(_kernel_warm.cold_kernels())))
 print(figure_ready)
+print(sorted(name for name in sys.modules if name.startswith("scipy.") and name.count(".") == 1 and not name.startswith("scipy._")))
 """
     completed = subprocess.run(
         [sys.executable, "-c", code],
@@ -430,9 +434,19 @@ print(figure_ready)
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
-    still_cold, figure_ready = completed.stdout.strip().splitlines()[-2:]
+    still_cold, figure_ready, scipy_loaded = completed.stdout.strip().splitlines()[-3:]
     assert still_cold == "[]", f"a first panel still had to warm {still_cold}"
     assert figure_ready == "True"
+    # No scipy of OURS: the solvers are compiled, and the seeds, the
+    # classifier threshold and the site rings do their own arithmetic.
+    # scipy.optimize, .signal, .ndimage and .spatial were 0.85 s of every
+    # child's warm-up and 45 MB it kept.  What remains is numba's: its
+    # version check touches the top-level package, and its array-math
+    # target binds scipy.linalg's BLAS and LAPACK when the first compiled
+    # kernel loads, which the compiled fit's QR steps need.
+    assert set(eval(scipy_loaded)) <= {"scipy.version", "scipy.linalg"}, (
+        f"a render child imported {scipy_loaded}"
+    )
 
 
 def test_the_warming_stops_before_its_next_picture_once_a_panel_asks(monkeypatch) -> None:

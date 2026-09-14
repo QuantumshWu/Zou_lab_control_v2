@@ -22,7 +22,6 @@ from typing import Callable, Mapping, Sequence
 
 import numpy as np
 from numba import njit, prange
-from scipy.ndimage import median_filter
 
 from . import _fit_compiled as _compiled_fit
 from .fit import (
@@ -1042,9 +1041,28 @@ def _regular_image_sample(
     if np.count_nonzero(valid) <= 5:
         raise ValueError("radial center fit needs a spatially coherent selection")
     offset = float(np.median(sampled[valid]))
-    filtered = median_filter(np.where(valid, sampled, offset), size=3, mode="nearest")
+    filtered = _median_3x3_nearest(np.where(valid, sampled, offset))
     x_grid, y_grid = np.meshgrid(data.x_coordinates[x_index], data.y_coordinates[y_index])
     return (x_grid[valid], y_grid[valid]), filtered[valid]
+
+
+def _median_3x3_nearest(values: np.ndarray) -> np.ndarray:
+    """The 3x3 median of every sample, the edges repeating their outermost
+    row and column: what ``scipy.ndimage.median_filter(size=3,
+    mode="nearest")`` returns, without scipy -- 318 ms and 17 MB of
+    imports every render child paid warm for nine numbers sorted, on a
+    path only a partly authored seed reaches.  A median is a selection,
+    so the two agree to the bit.
+    """
+
+    rows, columns = values.shape
+    padded = np.pad(values, 1, mode="edge")
+    neighbourhood = np.empty((9, rows, columns), dtype=values.dtype)
+    for index, (row_step, column_step) in enumerate(
+        (row, column) for row in range(3) for column in range(3)
+    ):
+        neighbourhood[index] = padded[row_step : row_step + rows, column_step : column_step + columns]
+    return np.partition(neighbourhood, 4, axis=0)[4]
 
 
 

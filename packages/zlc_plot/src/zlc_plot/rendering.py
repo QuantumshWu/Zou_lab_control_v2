@@ -936,10 +936,17 @@ def _point_ring_radius(
     points = np.asarray(points, dtype=float)
     if len(points) < 2 or not bool(np.all(np.isfinite(points))):
         return float(fallback)
-    from scipy.spatial import cKDTree
-
-    distances, _indices = cKDTree(points).query(points, k=2)
-    nearest = np.asarray(distances[:, 1], dtype=float)
+    # Each point's nearest other point, by the distances themselves: the
+    # points are a trap array's sites, a few hundred at most, and a k-d
+    # tree over them cost every render child scipy.spatial to build.  A
+    # thousand rows at a time keeps the pairwise block under sixteen
+    # megabytes whatever the count.
+    nearest = np.empty(len(points), dtype=float)
+    for start in range(0, len(points), 1024):
+        block = points[start : start + 1024]
+        squared = np.sum((block[:, None, :] - points[None, :, :]) ** 2, axis=2)
+        squared[np.arange(block.shape[0]), np.arange(start, start + block.shape[0])] = np.inf
+        nearest[start : start + block.shape[0]] = np.sqrt(np.min(squared, axis=1))
     nearest = nearest[np.isfinite(nearest) & (nearest > 0.0)]
     if nearest.size == 0:
         return float(fallback)

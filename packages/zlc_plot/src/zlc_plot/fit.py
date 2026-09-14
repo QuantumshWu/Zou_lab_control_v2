@@ -1,15 +1,20 @@
 """Headless fit catalogue and solver used by every presentation backend.
 
 The CATALOGUE is what a model declares -- its parameters, their names and
-the symbols an operator types -- and the SOLVER is scipy.  Readers want
-different halves: a task console lists the parameters a panel publishes and
-never solves anything, while the render children solve and never list.  So
-the solvers are reached from inside the three functions that use them, and
-importing this module to read the catalogue costs neither scipy.optimize
-nor scipy.signal -- 0.64 s that a GUI process used to pay to learn a
-parameter's name.  A process that will solve warms them on purpose instead:
-see :func:`zlc_plot._kernel_warm.warm_process`, which every render child
-runs on a thread of its own before any panel asks it for anything.
+the symbols an operator types -- and the SOLVER is the compiled engine in
+``_fit_compiled``.  Readers want different halves: a task console lists the
+parameters a panel publishes and never solves anything, while the render
+children solve and never list.  So the engine is reached from inside the
+functions that solve, and importing this module to read the catalogue costs
+a GUI process nothing it does not use.  A process that will solve warms the
+engine on purpose instead: see :func:`zlc_plot._kernel_warm.warm_process`,
+which every render child runs on a thread of its own before any panel asks
+it for anything.
+
+scipy stays out of the render child altogether.  The one scalar solver left
+here, ``least_squares`` for a model without a compiled descriptor, is
+reached by no registered model; it is imported where it is called, so a
+child that never calls it never loads it.
 """
 
 from __future__ import annotations
@@ -2730,8 +2735,6 @@ class FitEngine:
         options: FitOptions | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> FitResult:
-        from scipy.optimize import least_squares  # noqa: PLC0415
-
         spec = self.registry.get(model) if isinstance(model, str) else model
         if not isinstance(spec, FitModelSpec):
             raise TypeError("model must be a registered id or FitModelSpec")
@@ -3038,6 +3041,12 @@ class FitEngine:
         successful: list[tuple[float, float, Any]] = []
         unsuccessful: list[tuple[float, float, Any]] = []
         last_error: Exception | None = None
+        # The scalar solver, imported where it is used: no registered model
+        # reaches this path, and imported at the top of ``fit`` it cost every
+        # render child scipy.optimize -- and through it linalg, sparse, fft,
+        # special and spatial -- on the warm-up's first compiled fit.
+        from scipy.optimize import least_squares  # noqa: PLC0415
+
         for seed_index, seed in enumerate(seeds):
             check()
             try:
@@ -4263,12 +4272,84 @@ def _init_doublet(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
     return _doublet_candidates(coords, y)[0]
 
 
+def _find_peaks(
+    signal: np.ndarray,
+    *,
+    prominence: float,
+    width: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Peaks at least ``prominence`` above their surroundings and at least
+    ``width`` samples wide at half that prominence; the peaks and their widths.
+
+    What ``scipy.signal.find_peaks(x, prominence=p, width=w)`` answers, done
+    here so that the one model asking -- the symmetric doublet's seed --
+    does not cost every render child ``scipy.signal``: 443 ms and 23 MB of
+    imports, paid warm by each child for a model an operator selects.  The
+    same three definitions, in the same order:
+
+    * a peak is a sample above its left neighbour whose plateau of equal
+      samples ends in a lower one; the plateau's middle is the peak;
+    * its prominence is its height over the higher of the two lowest
+      samples reached walking out from it, each way, until a sample higher
+      than the peak or the end of the signal;
+    * its width is the distance between the two crossings, interpolated,
+      of the level half a prominence below the peak, walking out no
+      further than those two lowest samples.
+    """
+
+    values = np.asarray(signal, dtype=np.float64)
+    steps = np.diff(values)
+    changes = np.flatnonzero(steps != 0.0)
+    if changes.size < 2:
+        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64)
+    signs = steps[changes] > 0.0
+    rises = np.flatnonzero(signs[:-1] & ~signs[1:])
+    peaks = (changes[rises] + 1 + changes[rises + 1]) // 2
+    last = values.size - 1
+    kept: list[int] = []
+    widths: list[float] = []
+    for peak in peaks:
+        top = values[peak]
+        left_base = index = int(peak)
+        left_min = top
+        while index >= 0 and values[index] <= top:
+            if values[index] < left_min:
+                left_min, left_base = values[index], index
+            index -= 1
+        right_base = index = int(peak)
+        right_min = top
+        while index <= last and values[index] <= top:
+            if values[index] < right_min:
+                right_min, right_base = values[index], index
+            index += 1
+        rise = top - max(left_min, right_min)
+        if rise < prominence:
+            continue
+        level = top - 0.5 * rise
+        index = int(peak)
+        while left_base < index and level < values[index]:
+            index -= 1
+        left_crossing = float(index)
+        if values[index] < level:
+            left_crossing += (level - values[index]) / (values[index + 1] - values[index])
+        index = int(peak)
+        while index < right_base and level < values[index]:
+            index += 1
+        right_crossing = float(index)
+        if values[index] < level:
+            right_crossing -= (level - values[index]) / (values[index - 1] - values[index])
+        extent = right_crossing - left_crossing
+        if extent < width:
+            continue
+        kept.append(int(peak))
+        widths.append(extent)
+    return np.asarray(kept, dtype=np.int64), np.asarray(widths, dtype=np.float64)
+
+
 def _doublet_candidates(
     coords: ArrayTuple,
     y: np.ndarray,
 ) -> Sequence[Sequence[float]]:
-    from scipy.signal import find_peaks  # noqa: PLC0415
-
     order = np.argsort(coords[0], kind="stable")
     x = coords[0][order]
     ordered_y = y[order]
@@ -4284,15 +4365,10 @@ def _doublet_candidates(
     seeds: list[tuple[float, ...]] = []
     for sign in (1.0, -1.0):
         signed = sign * ordered_y
-        peaks, properties = find_peaks(
-            signed,
-            width=1,
-            prominence=y_range / 8.0,
-        )
+        peaks, widths = _find_peaks(signed, prominence=y_range / 8.0, width=1.0)
         if peaks.size == 0:
             continue
         strongest = peaks[np.argsort(signed[peaks])[::-1]][:4]
-        widths = properties.get("widths", np.ones(peaks.size))
         width_by_peak = {
             int(peak): max(float(widths[index]) * step, step)
             for index, peak in enumerate(peaks)

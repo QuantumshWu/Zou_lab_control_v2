@@ -2000,3 +2000,48 @@ def test_poisson_gaussian_recovers_two_state_photon_histograms() -> None:
     assert 148.0 < result.parameters["delta_rate"] < 152.0
     assert 2.0 < result.parameters["sigma"] < 4.5
     assert 1.5 < result.parameters["sigma_B"] < 5.0
+
+
+def test_the_doublet_seed_finds_the_peaks_scipy_finds() -> None:
+    """The symmetric doublet seeds itself from the signal's peaks -- by
+    prominence and by width at half prominence -- the way scipy defines
+    them, without scipy: across a thousand random signals with plateaus,
+    the peaks, and their widths, are scipy's own.
+    """
+
+    from scipy.signal import find_peaks
+
+    from zlc_plot.fit import _find_peaks
+
+    rng = np.random.default_rng(3)
+    for _ in range(1000):
+        size = int(rng.integers(3, 80))
+        signal = rng.normal(size=size)
+        if rng.random() < 0.5:
+            # Plateaus: repeated samples, sometimes at the top.
+            signal = np.round(signal * rng.uniform(0.5, 3.0)) / 2.0
+        prominence = float(rng.uniform(0.0, 2.0))
+        width = float(rng.uniform(0.5, 3.0))
+        peaks, widths = _find_peaks(signal, prominence=prominence, width=width)
+        expected, properties = find_peaks(signal, prominence=prominence, width=width)
+        np.testing.assert_array_equal(peaks, expected)
+        np.testing.assert_allclose(widths, properties["widths"], rtol=0, atol=1e-12)
+
+
+def test_the_camera_seed_filters_medians_the_way_scipy_does() -> None:
+    """The radial seed smooths its sample with a 3x3 median whose edges
+    repeat their outermost row and column; a median is a selection, so
+    the kernel and scipy's rank filter agree to the bit."""
+
+    from scipy.ndimage import median_filter
+
+    from zlc_plot._fit_radial import _median_3x3_nearest
+
+    rng = np.random.default_rng(9)
+    for rows, columns in ((1, 1), (1, 7), (5, 1), (2, 2), (3, 3), (17, 23), (64, 48)):
+        values = rng.normal(size=(rows, columns))
+        ties = rng.random(values.shape) < 0.3
+        values[ties] = np.round(values[ties] * 2.0) / 2.0
+        ours = _median_3x3_nearest(values)
+        theirs = median_filter(values, size=3, mode="nearest")
+        np.testing.assert_array_equal(ours, theirs)

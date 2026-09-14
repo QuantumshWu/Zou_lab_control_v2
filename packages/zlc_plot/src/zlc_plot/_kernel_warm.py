@@ -665,20 +665,19 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
     def load_solvers() -> None:
         """Everything a first fit costs that has nothing to do with drawing.
 
-        The engine reaches scipy from inside the functions that solve, so
-        that a process which only reads a model's declaration -- a task
-        console listing the parameters a panel publishes -- never imports
-        it at all.  This is the process that solves.
+        The engine's modules, and then one fit per target family through
+        the engine rather than through a plot: numba's first dispatch of
+        the fit kernels is the other half of what a first fit costs, and it
+        needs no figure, no font and no Matplotlib.  Doing it here is what
+        makes it survive the panel that cuts the drawing below short.
 
-        And then one fit per target family, through the engine rather than
-        through a plot: numba's first dispatch of the fit kernels is the
-        other half of what a first fit costs, and it needs no figure, no
-        font and no Matplotlib.  Doing it here is what makes it survive the
-        panel that cuts the drawing below short.
+        No scipy.  The solvers are compiled; the classifier threshold is a
+        quadratic's root; the doublet seed finds its own peaks; the camera
+        seed filters its own medians; the site rings measure their own
+        distances.  Importing scipy.optimize and scipy.signal here for the
+        one scalar fallback no registered model reaches cost every child
+        0.85 s of this thread and 45 MB it kept.
         """
-
-        from scipy.optimize import least_squares, minimize_scalar  # noqa: F401, PLC0415
-        from scipy.signal import find_peaks  # noqa: F401, PLC0415
 
         from .fit import (  # noqa: PLC0415
             FitEngine,
