@@ -1,12 +1,9 @@
-"""Strict, pickle-free NPZ persistence for role-axis data snapshots."""
+"""The strict, pickle-free NPZ manifest grammar for role-axis data snapshots."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, BinaryIO
-import json
-import os
-import zipfile
+from typing import Any
 
 import numpy as np
 
@@ -31,7 +28,6 @@ from .validity import (
 
 
 _FORMAT = "zlc.dataset"
-_MANIFEST = "manifest"
 _VALUES = "values"
 _VALIDITY = "validity"
 _SIGMA = "sigma"
@@ -41,20 +37,14 @@ class NPZFormatError(ValueError):
     """Raised when an NPZ payload is missing or violates the data contract."""
 
 
-def _strict_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise NPZFormatError(f"manifest JSON contains duplicate key {key!r}")
-        result[key] = value
-    return result
+def exact_keys(mapping: Mapping[str, Any], expected: set[str], path: str) -> None:
+    """Admit exactly the named keys, naming what is missing and what is extra.
 
+    This module owns the NPZ grammar, the figure archive's included.  A second
+    copy of the rule beside the figure reader is a second answer to what a
+    strict archive is, and the two answers were already spelled differently.
+    """
 
-def _reject_json_constant(value: str) -> None:
-    raise NPZFormatError(f"manifest JSON contains non-finite number {value}")
-
-
-def _exact_keys(mapping: Mapping[str, Any], expected: set[str], path: str) -> None:
     actual = set(mapping)
     if actual != expected:
         missing = sorted(expected - actual)
@@ -115,11 +105,10 @@ def snapshot_manifest(
 ) -> dict[str, Any]:
     """One snapshot's identity as plain data, putting its arrays in ``arrays``.
 
-    Separated from :func:`save_npz` so a file holding SEVERAL datasets can
-    carry each one's identity without re-deriving what identity means.  A saved
-    figure needs exactly that: without it the arrays survive but their axes,
-    units and revision do not, and what comes back is numbers nobody can plot
-    the way they were plotted.
+    A file holds SEVERAL datasets and carries each one's identity without
+    re-deriving what identity means.  A saved figure needs exactly that:
+    without it the arrays survive but their axes, units and revision do not,
+    and what comes back is numbers nobody can plot the way they were plotted.
 
     The array keys are parameters for the same reason -- one file, many
     datasets, no collisions.
@@ -175,7 +164,7 @@ def snapshot_from_manifest(
     expected = {"format", "schema", "ref", "values_key", "validity"}
     if "sigma_key" in manifest:
         expected.add("sigma_key")
-    _exact_keys(manifest, expected, "manifest")
+    exact_keys(manifest, expected, "manifest")
     if manifest["format"] != _FORMAT:
         raise NPZFormatError(f"unsupported data format {manifest['format']!r}")
     referenced: set[str] = set()
@@ -209,38 +198,6 @@ def snapshot_from_manifest(
     return OwnedSnapshot(ref, block)
 
 
-def save_npz(
-    stream: BinaryIO,
-    snapshot: OwnedSnapshot,
-) -> None:
-    """Encode one owned snapshot to caller-owned writable binary IO.
-
-    This function owns the dataset format, not filesystem publication.  A
-    caller saving to a path must give this stream to its durable write owner.
-    """
-
-    if not callable(getattr(stream, "write", None)):
-        raise TypeError(
-            "save_npz requires writable binary IO; path publication belongs "
-            "to the durable storage owner"
-        )
-
-    arrays: dict[str, np.ndarray] = {}
-    manifest = snapshot_manifest(snapshot, arrays)
-    try:
-        encoded = json.dumps(
-            manifest,
-            ensure_ascii=False,
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-    except (TypeError, ValueError) as exc:
-        raise NPZFormatError(f"metadata is not serializable: {exc}") from exc
-    arrays[_MANIFEST] = np.asarray(encoded)
-    np.savez_compressed(stream, **arrays)
-
-
 def _validity_from_manifest(
     raw: Any,
     arrays: Mapping[str, Any],
@@ -250,16 +207,16 @@ def _validity_from_manifest(
         raise NPZFormatError("manifest.validity must be a tagged object")
     kind = raw["kind"]
     if kind == "valid":
-        _exact_keys(raw, {"kind"}, "manifest.validity")
+        exact_keys(raw, {"kind"}, "manifest.validity")
         return VALID
     if kind == "invalid":
-        _exact_keys(raw, {"kind"}, "manifest.validity")
+        exact_keys(raw, {"kind"}, "manifest.validity")
         return INVALID
     if kind == "cell":
-        _exact_keys(raw, {"kind", "mask_key"}, "manifest.validity")
+        exact_keys(raw, {"kind", "mask_key"}, "manifest.validity")
         return CellValidity(_array(arrays, raw["mask_key"], expected_keys, "validity.mask_key"))
     if kind == "dataset_component":
-        _exact_keys(
+        exact_keys(
             raw,
             {"kind", "axis_ids", "mask_key"},
             "manifest.validity",
@@ -276,58 +233,10 @@ def _validity_from_manifest(
     raise NPZFormatError(f"invalid validity kind {kind!r}")
 
 
-def load_npz(path: str | os.PathLike[str] | BinaryIO) -> OwnedSnapshot:
-    """Load and exhaustively validate a :func:`save_npz` file."""
-
-    try:
-        with np.load(path, allow_pickle=False) as npz:
-            if "manifest" not in npz.files:
-                raise NPZFormatError("missing manifest array")
-            manifest_array = np.asarray(npz[_MANIFEST])
-            if manifest_array.shape != () or manifest_array.dtype.kind != "U":
-                raise NPZFormatError("manifest must be a scalar Unicode array")
-            try:
-                manifest = json.loads(
-                    str(manifest_array.item()),
-                    object_pairs_hook=_strict_json_object,
-                    parse_constant=_reject_json_constant,
-                )
-            except (json.JSONDecodeError, TypeError) as exc:
-                raise NPZFormatError(f"invalid manifest JSON: {exc}") from exc
-            # Members by their PHYSICAL names, each exactly once.  A ZIP may
-            # carry two entries of one name, and NpzFile's logical lookup
-            # answers with whichever it finds first -- an ambiguous archive
-            # is refused, never guessed.  (See figure_archive.read_archive
-            # for the same boundary on figures.)
-            zip_names = npz.zip.namelist()
-            if any(not name.endswith(".npy") for name in zip_names):
-                raise NPZFormatError("dataset NPZ may contain only NPY members")
-            names = [name[:-4] for name in zip_names]
-            duplicates = sorted({name for name in names if names.count(name) > 1})
-            if duplicates:
-                raise NPZFormatError(
-                    f"dataset NPZ contains duplicate members {duplicates!r}"
-                )
-            members = {name: npz[f"{name}.npy"] for name in names}
-            snapshot = snapshot_from_manifest(manifest, members)
-            expected_keys = {_MANIFEST, *manifest_array_keys(manifest)}
-            if set(names) != expected_keys:
-                raise NPZFormatError(
-                    f"NPZ members mismatch; missing={sorted(expected_keys - set(names))}, "
-                    f"extra={sorted(set(names) - expected_keys)}"
-                )
-            return snapshot
-    except NPZFormatError:
-        raise
-    except (OSError, ValueError, TypeError, KeyError, zipfile.BadZipFile) as exc:
-        raise NPZFormatError(f"invalid NPZ dataset: {exc}") from exc
-
-
 __all__ = [
     "NPZFormatError",
-    "load_npz",
+    "exact_keys",
     "manifest_array_keys",
-    "save_npz",
     "snapshot_from_manifest",
     "snapshot_manifest",
 ]

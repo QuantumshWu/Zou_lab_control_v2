@@ -16,7 +16,13 @@ import zlib
 import numpy as np
 from numpy.lib.format import write_array
 
-from .io import NPZFormatError, manifest_array_keys, snapshot_from_manifest, snapshot_manifest
+from .io import (
+    NPZFormatError,
+    exact_keys,
+    manifest_array_keys,
+    snapshot_from_manifest,
+    snapshot_manifest,
+)
 from .validity import CellValidity, DatasetComponentValidity
 from .value import OwnedSnapshot
 
@@ -262,15 +268,6 @@ def _finite_float(value: str) -> float:
     return result
 
 
-def _exact_keys(mapping: Mapping[str, Any], expected: set[str], path: str) -> None:
-    actual = set(mapping)
-    if actual != expected:
-        raise ValueError(
-            f"{path} keys mismatch; "
-            f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
-        )
-
-
 def _parse_info(array: np.ndarray) -> dict[str, Any]:
     if array.shape != () or array.dtype.kind != "U":
         raise ValueError("figure info must be one scalar Unicode JSON document")
@@ -289,7 +286,7 @@ def _parse_info(array: np.ndarray) -> dict[str, Any]:
 
 
 def _validate_current_info(info: dict[str, Any]) -> dict[str, Any]:
-    _exact_keys(info, _ROOT_KEYS, "figure metadata")
+    exact_keys(info, _ROOT_KEYS, "figure metadata")
     if info["schema"] != FIGURE_SCHEMA:
         raise ValueError(f"unsupported figure format {info['schema']!r}")
     if (
@@ -310,7 +307,7 @@ def _validate_current_info(info: dict[str, Any]) -> dict[str, Any]:
             )
         if not isinstance(descriptor, dict):
             raise ValueError(f"figure member {key!r} descriptor must be an object")
-        _exact_keys(descriptor, {"dtype", "shape"}, f"figure member {key!r}")
+        exact_keys(descriptor, {"dtype", "shape"}, f"figure member {key!r}")
         dtype = descriptor["dtype"]
         shape = descriptor["shape"]
         if not isinstance(dtype, str):

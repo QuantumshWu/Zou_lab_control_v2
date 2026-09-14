@@ -34,9 +34,8 @@ from zlc_data import (
     StreamGenerationId,
     SCALAR_DOMAIN,
     ValueSchema,
-    load_npz,
-    save_npz,
 )
+from zlc_data.figure_archive import read_archive, write_figure_archive
 from zlc_data.selection import IndexRangeSelection, Selection
 from zlc_data.snapshot_projection import restrict_snapshot
 
@@ -132,13 +131,19 @@ def test_a_cut_of_something_that_states_nothing_states_nothing() -> None:
     assert cut.block.sigma is None
 
 
+def _round_trip(snapshot: OwnedSnapshot) -> OwnedSnapshot:
+    """Out through the writer the product saves with, and back in."""
+
+    stream = io.BytesIO()
+    write_figure_archive(stream, "planes.png", arrays={"data": snapshot}, sections={})
+    stream.seek(0)
+    return read_archive(stream)[2]["data"]
+
+
 def test_a_saved_dataset_comes_back_with_its_error() -> None:
     """An archived run that loses its uncertainty is an archived lie."""
 
-    stream = io.BytesIO()
-    save_npz(stream, _snapshot())
-    stream.seek(0)
-    loaded = load_npz(stream)
+    loaded = _round_trip(_snapshot())
     assert loaded.block.sigma is not None
     np.testing.assert_array_equal(loaded.block.sigma, SIGMA)
     assert loaded.exactly_equals(_snapshot())
@@ -147,10 +152,7 @@ def test_a_saved_dataset_comes_back_with_its_error() -> None:
 def test_a_saved_dataset_that_stated_nothing_still_states_nothing() -> None:
     """Absent must not come back as zero, which would claim certainty."""
 
-    stream = io.BytesIO()
-    save_npz(stream, _snapshot(with_sigma=False))
-    stream.seek(0)
-    assert load_npz(stream).block.sigma is None
+    assert _round_trip(_snapshot(with_sigma=False)).block.sigma is None
 
 
 def test_two_blocks_that_differ_only_in_their_error_are_different() -> None:

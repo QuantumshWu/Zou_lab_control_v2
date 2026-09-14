@@ -27,7 +27,7 @@ what is displayed is what is held, digit for digit.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
@@ -577,9 +577,6 @@ class UnitRegistry:
             except KeyError as exc:
                 raise UnitError(f"dimension {dimension!r} has no base unit") from exc
 
-    def compatible(self, left: UnitLike, right: UnitLike) -> bool:
-        return self.resolve(left).compatible_with(self.resolve(right))
-
     def family_of(self, unit: UnitLike) -> Unit:
         """The registered unit this spelling is a prefixed form of, or itself.
 
@@ -640,16 +637,6 @@ class UnitRegistry:
             return None
         candidate = _prefixed(base, prefix)
         return candidate if math.isclose(candidate.scale, wanted, rel_tol=1e-12) else None
-
-    def symbols(self) -> tuple[str, ...]:
-        """Every registered spelling, aliases included.
-
-        An input surface only.  A choice list must use :meth:`display_choices`,
-        which knows the dimension being offered and never repeats an alias.
-        """
-
-        with self._lock:
-            return tuple(sorted(self._units))
 
     def distinct_symbols(self) -> tuple[str, ...]:
         """One symbol per registered unit -- its own, never an alias."""
@@ -859,30 +846,6 @@ def format_quantity(
     return f"{_plain_digits(shifted)} {symbol}".strip()
 
 
-def format_quantities(
-    values: Sequence[object],
-    unit: UnitLike = "1",
-    *,
-    registry: UnitRegistry | None = None,
-) -> tuple[tuple[str, ...], str]:
-    """Every value in one shared prefix, and the unit symbol they share.
-
-    Returns bare numbers and the symbol separately, because a table puts the
-    unit in the header once rather than on every row.
-    """
-
-    resolved = resolve_unit(unit, registry)
-    step = prefix_for(values, resolved, registry)
-    symbol = f"{step.symbol}{resolved.symbol}" if resolved.symbol != "1" else step.symbol
-    texts = []
-    for value in values:
-        decimal = decimal_of(value)
-        texts.append(
-            str(value) if decimal is None else format(decimal.scaleb(-step.exponent), "f")
-        )
-    return tuple(texts), symbol
-
-
 # ------------------------------------------------------------ reading it back
 
 
@@ -969,7 +932,6 @@ __all__ = [
     "UnitError",
     "UnitLike",
     "UnitRegistry",
-    "format_quantities",
     "format_quantity",
     "parse_quantity",
     "prefix_for",

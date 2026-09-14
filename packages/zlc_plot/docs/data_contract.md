@@ -79,16 +79,8 @@ transaction. `PulseTimelineData` remains an immutable presentation payload;
 
 ## Persistence and application ownership
 
-`zlc_data` owns scientific NPZ encoding and decoding; `zlc_durable` owns
-atomic path publication:
-
-```python
-from zlc_data import load_npz, save_npz
-from zlc_durable import atomic_write_file
-
-atomic_write_file("run.npz", lambda stream: save_npz(stream, snapshot))
-restored = load_npz("run.npz")
-```
+`zlc_data` owns Figure NPZ encoding and decoding; `zlc_durable` owns atomic
+path publication.
 
 Project files, device calls, Logic routes, causal shot joins and archive
 manifests remain application responsibilities.  `zlc_plot` owns the exact Plot

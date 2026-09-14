@@ -44,7 +44,6 @@ from .validation import (
     nonnegative_integer,
     positive_integer,
 )
-from ._arrays import is_intrinsically_immutable_array
 from .validity import (
     INVALID,
     VALID,
@@ -75,8 +74,6 @@ from .value import (
 # who depended on it.
 from .io import (
     NPZFormatError,
-    load_npz,
-    save_npz,
     snapshot_from_manifest,
     snapshot_manifest,
 )
@@ -86,7 +83,6 @@ from .snapshot_projection import (
 
 __all__ = [
     "IndexSelection",
-    "is_intrinsically_immutable_array",
     "EmptySelection",
     "SelectionChange",
     "resolve_selection_indices",
@@ -139,9 +135,7 @@ __all__ = [
     "compact_dataset_validity",
     "expand_dataset_validity",
     "expand_snapshot_validity",
-    "load_npz",
     "materialize_derived_dataset",
     "owned_snapshot_from_arrays",
     "repeat_coordinate_counts",
-    "save_npz",
 ]

@@ -13,9 +13,9 @@ from zlc_data.units import (
     Unit,
     UnitError,
     UnitRegistry,
-    format_quantities,
     format_quantity,
     parse_quantity,
+    prefix_for,
     resolve_unit,
 )
 
@@ -111,10 +111,6 @@ def test_a_numpy_integer_keeps_every_digit_of_the_integer_it_is() -> None:
         format_quantity(np.uint64(18446744073709551615), "count")
         == "18446744073709551615 count"
     )
-    texts, symbol = format_quantities(
-        np.array([9007199254740993, 1], dtype=np.int64), "count"
-    )
-    assert (texts, symbol) == (("9007199254740993", "1"), "count")
 
 
 def test_the_leading_digits_stay_between_one_and_a_thousand() -> None:
@@ -213,10 +209,14 @@ def test_a_column_is_shown_in_one_shared_prefix() -> None:
     largest member so nothing in it needs a leading zero it did not earn.
     """
 
-    texts, symbol = format_quantities([1_200_000.0, 900_000.0, 15_000.0], "Hz")
-    assert symbol == "MHz"
-    assert texts == ("1.2000000", "0.9000000", "0.0150000")
-    assert [float(text) for text in texts] == [1.2, 0.9, 0.015]
+    values = (1_200_000.0, 900_000.0, 15_000.0)
+    step = prefix_for(values, "Hz")
+    assert step.symbol == "M"
+    assert [format_quantity(value, "Hz", prefix=step) for value in values] == [
+        "1.2 MHz",
+        "0.9 MHz",
+        "0.015 MHz",
+    ]
 
 
 def test_a_choice_list_never_leaves_the_dimension() -> None:
@@ -326,9 +326,9 @@ def test_a_prefix_belongs_to_the_reference_of_a_family() -> None:
     # Derive arithmetic writes a flat product of numeric powers. Resolution
     # must combine equal dimensions without changing the authored values.
     assert parse_quantity("-2 count*s^-1", "count*ms^-1") == pytest.approx(-.002)
-    assert DEFAULT_UNITS.compatible("count*count^-1", "1")
-    assert DEFAULT_UNITS.compatible("count*count", "count^2")
-    assert DEFAULT_UNITS.compatible("s^0.5*s^0.5", "s")
+    assert resolve_unit("count*count^-1").compatible_with(resolve_unit("1"))
+    assert resolve_unit("count*count").compatible_with(resolve_unit("count^2"))
+    assert resolve_unit("s^0.5*s^0.5").compatible_with(resolve_unit("s"))
     assert parse_quantity("4 s^0.5", "ms^0.5") == pytest.approx(4 * np.sqrt(1000))
     assert parse_quantity("-3 count*mVpp^-1", "count*Vpp^-1") == pytest.approx(-3000)
     assert float(DEFAULT_UNITS.convert(-2.0, "count^2*mVpp^-1", "count*count*Vrms^-1")) == pytest.approx(-2000 * np.sqrt(8))

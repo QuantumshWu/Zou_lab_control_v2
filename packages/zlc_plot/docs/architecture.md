@@ -15,7 +15,7 @@
 | `(R, P, *cell_shape)` geometry, dtype, validity | `zlc-data` domain schema and `OwnedSnapshot` |
 | Repeat/Point row codes and dense Cell axes | data producer + `zlc-data` validation |
 | Unit definitions, prefixes and conversion | `zlc_data.units`; the display unit chosen per axis is `PlotSession` state |
-| NPZ save/load | `zlc_data.save_npz` / `zlc_data.load_npz` |
+| Figure NPZ save/load | `zlc_data.figure_archive.write_figure_archive` / `read_archive` |
 | Plot kind, axes roles, reduction, facet choice | `zlc_plot` specifications |
 | Runtime viewport, display parameters, selectors, fixed size | `PlotSession` |
 | Parameter names/types/defaults/ranges/choices/render impact | core `ParameterSchema` + `RenderEffect` |

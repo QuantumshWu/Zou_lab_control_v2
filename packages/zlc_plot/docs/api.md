@@ -833,16 +833,8 @@ remains the separate high-resolution rerendering route.
 
 ## Persistence boundary
 
-`zlc_data` owns Dataset NPZ encoding and decoding. Atomic path publication
-belongs to `zlc_durable`:
-
-```python
-from zlc_data import load_npz, save_npz
-from zlc_durable import atomic_write_file
-
-atomic_write_file("run.npz", lambda stream: save_npz(stream, snapshot))
-restored_snapshot = load_npz("run.npz")
-```
+`zlc_data.figure_archive` owns Figure NPZ encoding and decoding. Atomic path
+publication belongs to `zlc_durable`.
 
 The already-presented Edit-tab snapshot is the immutable raster front:
 
@@ -878,7 +870,7 @@ backend code.
 | Pulse preview | `PulseTimelineData`, `PulseTimelinePlot`, interaction gate, fixed size and save APIs | Pulse document/compiler semantics, visible-row policy and conversion into immutable timeline records |
 | Edit-tab snapshot | `widget.presented_front` for exact pixels, or a new host over a frozen snapshot/spec for independent interaction and fit | Which source revision and authored settings the Edit tab freezes; archive identity |
 | Selector and Fit outputs | selector geometry/data methods, `SelectionEvent`, compatible `fit_models()`, `FitResult` and `FitEvent` | Wiring a result into another logic node, naming routes and deciding what is persisted |
-| Data/project/device persistence | no plot API; `zlc_data.save_npz/load_npz` encodes and decodes scientific snapshots | Project files, device calls, Logic routes, causal IDs, paths and atomic publication through `zlc_durable` |
+| Data/project/device persistence | no plot API; `zlc_data.figure_archive` encodes and decodes the typed Figure archive | Project files, device calls, Logic routes, causal IDs, paths and atomic publication through `zlc_durable` |
 
 Coordinate/status maps use the ordinary Image boundary: the application performs
 its exact same-shot image/occupancy join, then supplies one

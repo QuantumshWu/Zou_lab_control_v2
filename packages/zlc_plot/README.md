@@ -350,7 +350,6 @@ renderer 直接写进 frontend 要映射的共享段，`publish_front` 只交接
 
 ## 持久化与应用边界
 
-- `zlc_data.save_npz/load_npz` 持有科学数据 snapshot 的 NPZ 格式。
 - 当前已经显示的 Edit-tab snapshot 直接使用 immutable `widget.presented_front`；它包含准确的 RGBA、surface identity 与 interaction transform，不触发重绘。需要独立交互或 local fit 的 Edit surface，则由应用用冻结的`zlc_data.OwnedSnapshot`和Live host已接受的`DisplayDescription.spec`、normalized parameters创建另一个`RasterPlotHost`；不得从未接受的authored target重猜。这与live panel隔离，且不需要复制运行中session或恢复异步句柄。
 - `zlc_data`拥有Figure NPZ grammar，`zlc_durable`拥有原子路径发布；`zlc_plot`拥有
   exact Plot recipe与archive-first/render-second公共流程。设备配置、Logic route、

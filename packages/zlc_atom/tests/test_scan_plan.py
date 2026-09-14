@@ -303,7 +303,7 @@ def test_a_region_lands_on_the_axis_the_picture_drew_when_two_ports_share_a_name
     snapshot = owned_snapshot_from_arrays(schema, np.zeros(schema.physical_shape), 0)
     spec = CurvePlot(AxisRef.point(power_id))
     for shown_unit, shown_bounds in (("mVpp", (150.0, 220.0)), ("Vpp", (0.15, 0.22))):
-        assert DEFAULT_UNITS.compatible("mVpp", shown_unit)
+        assert DEFAULT_UNITS.resolve("mVpp").compatible_with(DEFAULT_UNITS.resolve(shown_unit))
         display = DisplayStateStore(parameter_schema_for(spec, style=DEFAULTS.style), {"x_display_unit": shown_unit}).state
         projection = FitProjection(data=snapshot, revision=0, spec=spec,
             context=ProjectionContext(display, SelectorSnapshot(())), unit_registry=None,
