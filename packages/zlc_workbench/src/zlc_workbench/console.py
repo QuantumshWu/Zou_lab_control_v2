@@ -89,7 +89,6 @@ from .panel_catalog import (
     task_console_fitting_spec,
     task_console_panel_identity,
     task_console_panel_identity_for_spec,
-    task_console_panel_kind,
 )
 from .panel_state import (
     FACET_FIT_PARAMETER,
@@ -745,7 +744,7 @@ class ConsolePresenter:
         *,
         signal: str = "",
         title: str = "",
-        size: str = "2x2",
+        size: str = "",
         interval_ms: int | None = None,
         semantic: Mapping[str, Any] | None = None,
         display: Mapping[str, Any] | None = None,
@@ -793,7 +792,7 @@ class ConsolePresenter:
             # Empty cell kind: the DATA decides.  The panel's settings offer
             # the explicit choice; the Add menu never composes one.
             cell_kind="",
-            size=str(size or "2x2"),
+            size=str(size) or DEFAULTS.layout.default_preset,
             interval_ms=selected_interval,
             title=str(title).strip() or generated_title,
             semantic=dict(semantic or {}),
@@ -3534,10 +3533,7 @@ class ConsolePresenter:
                 binding.state,
                 description,
             )
-            try:
-                self._publish_panel_state(binding)
-            except Exception:
-                pass
+            self._publish_panel_state(binding)
             return
         schema = self._panel_schema(binding)
         if schema is None:
@@ -3548,10 +3544,7 @@ class ConsolePresenter:
         if projected is None:
             return
         binding.parameter_surface = projected
-        try:
-            self._publish_panel_state(binding)
-        except Exception:
-            pass
+        self._publish_panel_state(binding)
 
     @staticmethod
     def _configure_baseline(predecessor: object, current: PanelState) -> object:
@@ -5080,7 +5073,7 @@ class ConsolePresenter:
                     suffix += 1
                 state = replace(
                     saved,
-                    size=saved.size or "2x2",
+                    size=saved.size or DEFAULTS.layout.default_preset,
                     title=saved.title.strip() or generated_title,
                     interval_ms=self._panel_interval(saved.interval_ms),
                 )
@@ -5526,19 +5519,19 @@ class ConsolePresenter:
         values = getattr(state, "values", None)
         if values is None:
             return
+        # Keyed by the host's durable identity (``_display_host_key``):
+        # ``id()`` recycles the moment a replaced host is collected, so a
+        # fresh editor host inherited the dead host's high-water revision
+        # and its callbacks were dropped forever -- Refresh appeared to stop
+        # refreshing, and half-dropped mirrors flip-flopped the zoom.
+        source_key = self._display_host_key(source)
         revision = getattr(state, "revision", None)
         if revision is not None:
-            # Keyed by the host's durable identity: ``id()`` recycles the
-            # moment a replaced host is collected, so a fresh editor host
-            # inherited the dead host's high-water revision and its
-            # callbacks were dropped forever -- Refresh appeared to stop
-            # refreshing, and half-dropped mirrors flip-flopped the zoom.
-            source_key = getattr(source, "host_id", None) or id(source)
+            # ``id()`` recycles the
             seen = binding.display_sync_revisions.get(source_key)
             if seen is not None and revision <= seen:
                 return
             binding.display_sync_revisions[source_key] = revision
-        source_key = getattr(source, "host_id", None) or id(source)
         expected = binding.display_sync_targets.get(source_key, {})
         reported_names = getattr(state, "changed_names", None)
         if reported_names is None:
@@ -5597,8 +5590,9 @@ class ConsolePresenter:
                 )
             ):
                 continue
-            target_key = getattr(host, "host_id", None) or id(host)
-            pending = binding.display_sync_targets.setdefault(target_key, {})
+            pending = binding.display_sync_targets.setdefault(
+                self._display_host_key(host), {}
+            )
             pending.update(changed)
             host.set_parameters(changed)
 
@@ -6571,13 +6565,12 @@ class ConsolePresenter:
         )
         return True
 
-    def _task_command_blocked(self, action: str, *, node_id: str = "") -> bool:
+    def _task_command_blocked(self, action: str) -> bool:
         """Reject Logic/hardware identity changes while one Task is active."""
 
         active = self._active_task()
         if active is None:
             return False
-        del node_id
         _state, status = self._logic_state(active)
         self._report(
             f"{active.node_id}: {status}; use Stop task before {action}",
@@ -7223,9 +7216,7 @@ class ConsolePresenter:
     ) -> bool:
         """Patch the row draft without mutating its current run."""
 
-        if self._task_command_blocked(
-            "changing a logic draft", node_id=str(node_id)
-        ):
+        if self._task_command_blocked("changing a logic draft"):
             return False
 
         binding = self.logic.get(str(node_id))
@@ -7477,9 +7468,7 @@ class ConsolePresenter:
         waits, because what would be waiting is the window.
         """
 
-        if self._task_command_blocked(
-            "removing a logic node", node_id=str(node_id)
-        ):
+        if self._task_command_blocked("removing a logic node"):
             return False
 
         binding = self.logic.get(str(node_id))
