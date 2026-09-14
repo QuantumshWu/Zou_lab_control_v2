@@ -974,12 +974,6 @@ DEFAULT_RENDER_SPARES = 4
 #: having arrived -- more than this many drawing is no longer an opening.
 DEFAULT_RENDER_SETTLED_SPARES = 2
 
-#: The most children one pool will ever hold at once.  A child is about two
-#: hundred megabytes of renderer, so a twelve-panel board with four spares
-#: would be three gigabytes of them; at this ceiling panels share a child
-#: again, exactly as they did when there was only ever one.
-DEFAULT_RENDER_LIMIT = 10
-
 
 def _retire_member(member: "RenderProcess") -> None:
     """Tell one child to go, and do not wait for it to finish going.
@@ -1018,13 +1012,21 @@ class RenderProcessPool:
     touched, and starts a replacement the moment one is taken.
 
     WHAT IT COSTS is memory, and only memory: about two hundred megabytes per
-    child, whether or not a panel ever lands on it.  Two things bound that.
-    ``limit`` is the ceiling on children altogether; past it, panels share a
-    child again.  And the warm count itself steps down: a board arrives all
-    at once, which is what ``spares`` is sized for, and then grows one panel
-    at a time -- so once more than ``settled_spares`` children are drawing,
-    the opening count has answered its question and ``settled_spares`` stand
-    warm instead.
+    child, whether or not a panel ever lands on it.  The warm count steps
+    down to bound that: a board arrives all at once, which is what
+    ``spares`` is sized for, and then grows one panel at a time -- so once
+    more than ``settled_spares`` children are drawing, the opening count has
+    answered its question and ``settled_spares`` stand warm instead.
+
+    ONE PANEL, ONE CHILD, WITHOUT EXCEPTION.  Two panels in one child put
+    their Python -- artist updates, chrome, the pickle of every front --
+    back on one interpreter, which is the ceiling this pool exists to lift,
+    and a fit on one of them then takes frames from the other.  So a panel
+    that finds no warm child never joins a busy one: a fresh child is
+    started for it and the panel waits.  The wait is a boot, not a warm-up:
+    the child answers the create as soon as its imports are in, cutting its
+    own warming short.  And it happens only when panels arrive faster than
+    replacements come up.
 
     FOUR RULES hold this together, and each of them is a way it would
     otherwise go wrong:
@@ -1052,12 +1054,11 @@ class RenderProcessPool:
         *,
         spares: int = DEFAULT_RENDER_SPARES,
         settled_spares: int | None = None,
-        limit: int = DEFAULT_RENDER_LIMIT,
     ) -> None:
         selected = str(name).strip()
         if not selected:
             raise ValueError("render pool name must be non-empty")
-        wanted, ceiling = int(spares), int(limit)
+        wanted = int(spares)
         # A pool that opens with fewer than the standing count has already
         # said what it wants; the default follows it down rather than
         # refusing a perfectly sensible small pool.
@@ -1070,17 +1071,20 @@ class RenderProcessPool:
             raise ValueError("a pool keeps at least one child warm")
         if settled > wanted:
             raise ValueError("a settled pool cannot keep more warm than an opening one")
-        if ceiling < wanted:
-            raise ValueError("a pool cannot hold fewer children than it keeps warm")
         self.name = selected
         self._spares = wanted
         self._settled_spares = settled
-        self._limit = ceiling
         self._lock = RLock()
         self._settled = Condition(self._lock)
         self._members: list[RenderProcess] = []
+        #: Handed to a panel whose Host is not registered on them yet: idle
+        #: by the child's own count, and not free.
+        self._claimed: set[RenderProcess] = set()
         self._retiring: set[RenderProcess] = set()
         self._starting: set[Thread] = set()
+        #: Panels waiting for a fresh child, each with a start of its own on
+        #: the way.  Those starts are theirs, not the warm count's.
+        self._waiting = 0
         self._failures: list[BaseException] = []
         self._serial = 0
         self._owners = 1
@@ -1119,34 +1123,32 @@ class RenderProcessPool:
                     member for member in self._members
                     if member not in self._retiring
                 ]
-                pending = len(self._starting)
-            idle = self._idle(members)
+            unused = self._idle(members)
             with self._lock:
                 if self._closing:
                     return
+                idle = [member for member in unused if member not in self._claimed]
+                pending = len(self._starting)
                 warm = self._warm_count(len(members) - len(idle))
-                short = warm - len(idle) - pending
-                room = self._limit - len(members) - pending
-                begin = max(0, min(short, room))
+                # Every waiting panel holds one of the starts in flight; the
+                # rest are the warm count's.
+                reserved = min(pending, self._waiting)
+                begin = max(0, warm - len(idle) - (pending - reserved))
                 # A child is spare only beyond the warm count AND unused, and
                 # only ever one at a time: between deciding and acting a panel
-                # may have taken it, and the next turn sees that.
-                spare = idle[-1] if len(idle) > warm and not begin else None
+                # may have taken it, and the next turn sees that.  Never while
+                # a panel is waiting for one: the child it is waiting for
+                # arrives idle, and would be the one let go.
+                spare = (
+                    idle[-1]
+                    if len(idle) > warm and not begin and not self._waiting
+                    else None
+                )
                 # The picture was read without the lock, so the child chosen
                 # may already have been taken, retired, or replaced.  Only one
                 # this pool still holds may be let go.
                 surplus = spare if spare in self._members else None
-                threads = []
-                for _ in range(begin):
-                    self._serial += 1
-                    thread = Thread(
-                        target=self._start_member,
-                        args=(self._serial,),
-                        name=f"zlc-render-{self.name}-start-{self._serial}",
-                        daemon=True,
-                    )
-                    self._starting.add(thread)
-                    threads.append(thread)
+                threads = self._launch(begin)
                 if surplus is not None:
                     self._retiring.add(surplus)
                     self._members.remove(surplus)
@@ -1157,6 +1159,22 @@ class RenderProcessPool:
             _retire_member(surplus)
             with self._lock:
                 self._retiring.discard(surplus)
+
+    def _launch(self, count: int) -> list[Thread]:
+        """Threads that each start one child: made under the lock, started outside it."""
+
+        threads = []
+        for _ in range(count):
+            self._serial += 1
+            thread = Thread(
+                target=self._start_member,
+                args=(self._serial,),
+                name=f"zlc-render-{self.name}-start-{self._serial}",
+                daemon=True,
+            )
+            self._starting.add(thread)
+            threads.append(thread)
+        return threads
 
     def _start_member(self, serial: int) -> None:
         member: RenderProcess | None = None
@@ -1199,40 +1217,70 @@ class RenderProcessPool:
 
     # ------------------------------------------------------------- serving
     def _claim(self) -> "RenderProcess":
-        """The child a new Host belongs to: a warm one, or the least busy.
+        """The child a new Host belongs to: a warm one, else a fresh one.
 
-        Never a wait, except at the very start before the first child is up:
-        making a panel wait out a boot is the staircase this pool exists to
-        remove, so once the pool is running a panel shares a busy child
-        rather than waiting for a warm one.
+        Never a busy one.  A panel that finds no idle child starts one and
+        waits for it to exist -- a boot, not a warm-up, since the child
+        takes the create as soon as its imports are in.  Each waiting panel
+        holds one start of its own, so two panels arriving together get two
+        children and neither is handed the other's.  A child that fails to
+        start fails the panel that was waiting for it.
         """
 
-        while True:
-            with self._lock:
-                if self._closing:
-                    raise RuntimeError("render pool is closing")
-                members = [
-                    member for member in self._members
-                    if member not in self._retiring
-                ]
-                pending = bool(self._starting)
-                failure = self._failures[0] if self._failures else None
-            if members:
-                idle = self._idle(members)
-                if idle:
-                    return idle[0]
-                return min(members, key=lambda member: member.host_count)
-            if not pending:
-                raise failure or RuntimeError("render pool has no child")
-            with self._lock:
-                if not self._members and self._starting and not self._closing:
-                    self._settled.wait(30.0)
+        failures_seen = len(self._failures)
+        waiting = False
+        try:
+            while True:
+                with self._lock:
+                    if self._closing:
+                        raise RuntimeError("render pool is closing")
+                    members = [
+                        member for member in self._members
+                        if member not in self._retiring
+                    ]
+                unused = self._idle(members)
+                with self._lock:
+                    if self._closing:
+                        raise RuntimeError("render pool is closing")
+                    for member in unused:
+                        if (
+                            member in self._members
+                            and member not in self._retiring
+                            and member not in self._claimed
+                        ):
+                            self._claimed.add(member)
+                            return member
+                    if len(self._failures) > failures_seen:
+                        raise self._failures[-1]
+                    if not waiting:
+                        self._waiting += 1
+                        waiting = True
+                    threads = self._launch(
+                        max(0, self._waiting - len(self._starting))
+                    )
+                    seen = len(self._members) + len(self._failures)
+                for thread in threads:
+                    thread.start()
+                with self._lock:
+                    self._settled.wait_for(
+                        lambda: (
+                            self._closing
+                            or len(self._members) + len(self._failures) != seen
+                        ),
+                        30.0,
+                    )
+        finally:
+            if waiting:
+                with self._lock:
+                    self._waiting -= 1
 
     def build_host(self, *args: object, **kwargs: object) -> "_RemoteRasterPlotHost":
         member = self._claim()
         try:
             return member.build_host(*args, **kwargs)
         finally:
+            with self._lock:
+                self._claimed.discard(member)
             # Whether or not that Host was built, the warm count may now be
             # short by one; topping up here is what keeps the next panel from
             # waiting.
