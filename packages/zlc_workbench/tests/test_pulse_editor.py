@@ -2772,7 +2772,7 @@ def test_the_table_is_uploaded_with_the_pulse(presenter, sequence) -> None:
         "scan_table = np.array([0.50000002, 1.0, 1.49999998]).reshape(-1, 1)\n"
     )
 
-    assert presenter.load_into_sequencer() is True
+    assert presenter.fire() is True
     assert board._applied.program.slot_tick_scales == (2,)
     assert uploaded == [((-12_500_000,), (0,), (12_500_000,))]
     assert presenter.sync_from_sequencer() is True
@@ -3132,10 +3132,9 @@ def test_a_bracket_repeats_at_least_twice_or_it_is_not_a_bracket(sequence, tmp_p
             baseline, path = presenter._saved_state, presenter.path
             assert presenter.fire() is False
             view.fire_requested.emit()
-            assert presenter.load_into_sequencer() is False
             assert presenter.save_pulse() == ""
             presenter.save_preview_image()
-            assert view.warnings == [message] * 5
+            assert view.warnings == [message] * 4
             assert board.events == [] and asked == [] and not target.exists()
             assert presenter.sequence is current and presenter._saved_state is baseline and presenter.path == path
             with pytest.raises(ValueError, match="bracket is empty"):
@@ -3406,7 +3405,7 @@ def test_sync_brings_the_board_s_pulse_back_into_the_editor(sequence) -> None:
         assert any("nothing to sync" in text for text in view.warnings)
 
         presenter._accept_state(PulseEditorState(sequence=sequence))
-        presenter.load_into_sequencer()
+        presenter.fire()
         held = len(sequence.periods)
 
         presenter.insert_period(None)
@@ -3707,7 +3706,7 @@ def test_hold_and_step_play_the_point_they_hold(presenter, sequence) -> None:
         "import numpy as np\n"
         "scan_table = np.array([0.50000002, 1.0, 1.49999998]).reshape(-1, 1)\n"
     )
-    assert presenter.load_into_sequencer() is True
+    assert presenter.fire() is True
     assert board._applied.program.slot_tick_scales == (2,)
 
     board.events.clear()

@@ -172,16 +172,13 @@ class StreamerParams:
 
     @property
     def ctrl_scratch_base(self) -> int:
-        """First CTRL word above the command and clock-enable fields."""
-        base = max(int(CtrlWords.CLK_ENABLE) + self.clk_enable_words,
+        """First CTRL word above the command and clock-enable fields.
+
+        A plain address: whether there is any room left above it is a
+        question about the whole geometry, and check_rtl_assumptions asks it.
+        """
+        return max(int(CtrlWords.CLK_ENABLE) + self.clk_enable_words,
                    int(CtrlWords.ACK_CURSOR) + 1)
-        if base + 2 > int(CtrlWords.LAYOUT_ID):
-            raise ValueError(
-                f"CTRL register file has no scratch room: defined words reach {base} "
-                f"but word {int(CtrlWords.LAYOUT_ID)} holds the layout fingerprint; grow "
-                "CTRL_WORDS / the RTL ctrl_reg file in lock-step."
-            )
-        return base
 
     @property
     def ctrl_scratch_words(self) -> int:
@@ -339,6 +336,14 @@ def check_rtl_assumptions(p: StreamerParams) -> None:
             f"num_slots*coeff_width must be 64 for the shipped RTL (got {p.num_slots}*{p.coeff_width}="
             f"{p.num_slots * p.coeff_width}); the top's 2-word coeff assembly would truncate. "
             "Fix zlc_pulse_streamer_top.v L_EMIT before changing this geometry.")
+    if p.ctrl_scratch_words < 2:
+        raise ValueError(
+            f"CTRL register file has no scratch room: defined words reach "
+            f"{p.ctrl_scratch_base} but word {int(CtrlWords.LAYOUT_ID)} holds the "
+            f"layout fingerprint; grow CTRL_WORDS / the RTL ctrl_reg file in "
+            f"lock-step.  channel_count={p.channel_count} needs "
+            f"{p.clk_enable_words} clock-enable word(s)."
+        )
     flags_bits = 2 * p.bus_width + 2 + 2 * p.bus_sel_width
     if flags_bits > 32:
         raise ValueError(

@@ -2419,41 +2419,6 @@ class PulseEditorPresenter:
         )
         return True
 
-    def load_into_sequencer(self) -> bool:
-        """Put what is on screen onto the board, without firing it."""
-
-        if not self._check_bracket():
-            return False
-        if self.sequence is None:
-            self._warn("no pulse is open")
-            return False
-        if self.sequencer is None:
-            self._warn("this editor is not connected to a sequencer")
-            return False
-        try:
-            prepared = self._prepare_execution()
-        except Exception as error:
-            self._warn(f"cannot load this pulse: {error}")
-            return False
-        already_driving = self._drive_lease is not None
-        if not self._acquire_command():
-            return False
-        try:
-            self._load_prepared(prepared)
-            self._digest_revision = -1
-            self._poll_board()
-            source, program, rows, _sweeps = prepared
-            self._remember_applied_scan(program, source, rows, digest=self._board_state.applied_digest)
-            self.refresh_preview()
-            return True
-        except Exception as error:
-            self._warn(f"cannot load this pulse: {error}")
-            self._poll_board()
-            return False
-        finally:
-            if not already_driving:
-                self._release_drive()
-
     def _prepare_execution(self) -> tuple[PulseSequence, Any, tuple[tuple[int, ...], ...], int]:
         """Compile every local fact before attempting to acquire the device."""
 
@@ -3905,7 +3870,7 @@ class PulseEditorPresenter:
         self._refresh_scan_page()
         return str(target)
 
-    def hold_scan_point(self) -> bool:
+    def hold_scan_point(self, *, worker: object = None) -> bool:
         """Stop advancing and PLAY the point the board is on, over and over.
 
         Holding is how a scan is inspected: the outputs stay at one row so a
@@ -3927,23 +3892,30 @@ class PulseEditorPresenter:
         if not self._scan_armed():
             self._warn("there is no scan to hold a point of")
             return False
-        return self._hold(None, worker=None)
+        return self._hold(None, worker=worker)
 
-    def step_scan_point(self, delta: int) -> bool:
+    def step_scan_point(self, delta: int, *, worker: object = None) -> bool:
         """Move the held point by one, and keep playing the new one."""
 
         if self.sequencer is None or not self._scan_armed():
             self._warn("nothing is held to step")
             return False
         held = 0 if self._held_point is None else self._held_point
-        return self._hold(held + int(delta), worker=None)
+        return self._hold(held + int(delta), worker=worker)
 
+    # A hand asked, so the board command runs on the device worker and its
+    # outcome is shown when it is delivered.  That is the ONLY thing that
+    # differs from the same action asked for in a script -- these used to be
+    # second copies of it, and the copies had quietly lost the guards, so
+    # Step with nothing held went straight at the board.  ``_guarded``
+    # resolves its handler by NAME, which is what keeps the connection from
+    # holding this presenter alive, so the adapter is a method rather than a
+    # lambda at the wiring.
     def _hold_from_view(self) -> None:
-        self._hold(None, worker=self._run_device_work)
+        self.hold_scan_point(worker=self._run_device_work)
 
     def _step_from_view(self, delta: int) -> None:
-        held = 0 if self._held_point is None else self._held_point
-        self._hold(held + int(delta), worker=self._run_device_work)
+        self.step_scan_point(delta, worker=self._run_device_work)
 
     def _hold(self, point: int | None, *, worker: object) -> bool:
         """Play one scan row, held, until something else is asked for.
