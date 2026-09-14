@@ -9532,6 +9532,14 @@ class MatplotlibRenderer:
         titles_plan: list[tuple[Any, str, float]] = []
         labels: list[Any] = []
         shape: list[Any] = []
+        # A spine's path is in axes coordinates, so every cell's left edge
+        # is the same two vertices, and one frozen copy serves the grid:
+        # the patch holds the cell's own transform, the path only the
+        # shape.  Frozen, because the spine's own path is LIVE -- its
+        # vertices are rewritten in place by every ``_adjust_location`` --
+        # and a patch that shared it drew the frame wherever the spine had
+        # last been adjusted to.
+        frozen: dict[tuple[str, bytes, bytes | None], Any] = {}
         for index, axes in visible:
             sides = 0
             for name in ("left", "right", "bottom", "top"):
@@ -9541,16 +9549,18 @@ class MatplotlibRenderer:
                 spine._adjust_location()
                 source = spine.get_path()
                 codes = source.codes
-                frames_plan.append(
-                    (
-                        axes,
-                        Path(
-                            np.array(source.vertices, copy=True),
-                            None if codes is None else np.array(codes, copy=True),
-                        ),
-                        spine,
-                    )
+                key = (
+                    name,
+                    np.ascontiguousarray(source.vertices).tobytes(),
+                    None if codes is None else np.ascontiguousarray(codes).tobytes(),
                 )
+                path = frozen.get(key)
+                if path is None:
+                    path = frozen[key] = Path(
+                        np.array(source.vertices, copy=True),
+                        None if codes is None else np.array(codes, copy=True),
+                    )
+                frames_plan.append((axes, path, spine))
                 sides += 1
             lanes_seen = 0
             for axis in (axes.xaxis, axes.yaxis):
