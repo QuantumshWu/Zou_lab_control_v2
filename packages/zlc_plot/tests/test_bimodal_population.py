@@ -291,3 +291,59 @@ def test_the_threshold_is_a_fit_setting_of_the_model_that_asks() -> None:
             )
     finally:
         session.close()
+
+
+def test_the_classifier_threshold_is_the_exact_crossing_not_a_search() -> None:
+    """The cut between two populations is where their weighted densities
+    cross, a quadratic's root; it used to be found by a bounded numerical
+    search that cost the render child scipy.optimize.  Against that search
+    on a thousand random population pairs, the exact answer is never worse
+    and never more than the search's own tolerance away from it.
+    """
+
+    from scipy.optimize import minimize_scalar
+
+    from zlc_plot.fit import _classifier_threshold
+
+    rng = np.random.default_rng(7)
+
+    def cdf(value: float, mean: float, sigma: float) -> float:
+        return 0.5 * (1.0 + math.erf((value - mean) / (sigma * math.sqrt(2.0))))
+
+    for _ in range(1000):
+        left_mean = rng.uniform(-100.0, 100.0)
+        right_mean = left_mean + rng.uniform(1.0, 300.0)
+        left_sigma, right_sigma = rng.uniform(0.5, 60.0, 2)
+        if rng.random() < 0.2:
+            right_sigma = left_sigma
+        right_weight = rng.uniform(0.02, 0.98)
+        left_weight = 1.0 - right_weight
+
+        def error(value: float) -> float:
+            return (
+                left_weight * (1.0 - cdf(value, left_mean, left_sigma))
+                + right_weight * cdf(value, right_mean, right_sigma)
+            )
+
+        exact = _classifier_threshold(
+            error,
+            (left_mean, left_sigma, left_weight),
+            (right_mean, right_sigma, right_weight),
+            left_mean,
+            right_mean,
+        )
+        searched = minimize_scalar(
+            error, bounds=(left_mean, right_mean), method="bounded"
+        )
+        assert left_mean <= exact <= right_mean
+        assert error(exact) <= error(float(searched.x)) + 1e-12
+        # A bounded search stops within xatol of a local minimum; the exact
+        # crossing is the global one, so it can only differ where the
+        # search stopped short, settled on the lesser of two dips, or where
+        # populations so far apart flatten the error to nothing over a
+        # whole stretch and any point of it is right.
+        assert (
+            abs(exact - float(searched.x)) < 1e-3 * (right_mean - left_mean)
+            or error(exact) < error(float(searched.x)) - 1e-9
+            or error(float(searched.x)) < 1e-9
+        )

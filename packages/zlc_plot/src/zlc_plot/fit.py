@@ -1338,6 +1338,55 @@ def _fit_result_from_validated_batch_row(
 _CLASSIFIER_MINIMUM_COMPONENT_SHOTS = 4.0
 
 
+def _classifier_threshold(
+    error: Callable[[float], float],
+    left: tuple[float, float, float],
+    right: tuple[float, float, float],
+    lower: float,
+    upper: float,
+) -> float:
+    """The cut between two Gaussian populations that misclassifies least.
+
+    The misclassified fraction ``w_L (1 - Φ_L(v)) + w_R Φ_R(v)`` is
+    stationary where the weighted densities cross, ``w_L φ_L(v) / σ_L =
+    w_R φ_R(v) / σ_R``, and the logarithm of that is a quadratic in ``v``.
+    Its real roots inside the interval and the interval's ends are the
+    only places the minimum can be, and the least error among them is it
+    -- exactly, where a bounded numerical search converged to within its
+    tolerance and cost the render child scipy.optimize to answer.
+    """
+
+    left_mean, left_sigma, left_weight = left
+    right_mean, right_sigma, right_weight = right
+    quadratic = 0.5 / right_sigma**2 - 0.5 / left_sigma**2
+    linear = left_mean / left_sigma**2 - right_mean / right_sigma**2
+    constant = (
+        0.5 * right_mean**2 / right_sigma**2
+        - 0.5 * left_mean**2 / left_sigma**2
+        + math.log(left_weight * right_sigma / (right_weight * left_sigma))
+    )
+    candidates = [lower, upper]
+    if quadratic == 0.0:
+        if linear != 0.0:
+            candidates.append(-constant / linear)
+    else:
+        discriminant = linear * linear - 4.0 * quadratic * constant
+        if discriminant >= 0.0:
+            # The numerically stable pair: the larger-magnitude root from
+            # the formula, the other from the product of the roots.
+            root = math.sqrt(discriminant)
+            shifted = -0.5 * (linear + math.copysign(root, linear))
+            candidates.append(shifted / quadratic)
+            if shifted != 0.0:
+                candidates.append(constant / shifted)
+    return float(
+        min(
+            (value for value in candidates if lower <= value <= upper),
+            key=error,
+        )
+    )
+
+
 def _bimodal_classifier_metrics(
     result: FitResult,
     threshold: float | None = None,
@@ -1350,8 +1399,6 @@ def _bimodal_classifier_metrics(
     missing threshold as "no classifier", so the line, the label and the
     fidelity all disappear together until the shots arrive.
     """
-
-    from scipy.optimize import minimize_scalar  # noqa: PLC0415
 
     if result.model.model_id != "bimodal_gaussian" or not result.success:
         raise ValueError("threshold classification requires a successful bimodal fit")
@@ -1394,9 +1441,12 @@ def _bimodal_classifier_metrics(
         if upper <= lower:
             threshold = lower
         else:
-            optimum = minimize_scalar(error, bounds=(lower, upper), method="bounded")
-            threshold = float(
-                optimum.x if optimum.success else 0.5 * (lower + upper)
+            threshold = _classifier_threshold(
+                error,
+                (left_mean, left_sigma, left_weight),
+                (right_mean, right_sigma, right_weight),
+                lower,
+                upper,
             )
     else:
         threshold = float(threshold)
