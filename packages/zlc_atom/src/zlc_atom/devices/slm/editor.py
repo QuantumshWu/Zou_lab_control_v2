@@ -1427,11 +1427,21 @@ class SlmEditorControl(QtCore.QObject):
             or self._device_state_in_flight
             or not all(hosts_stopped)
         ):
+            if self._window is None:
+                return False
             if time.monotonic() >= self._close_deadline:
+                # Past the deadline the retry SLOWS; it does not stop.
+                # Whatever is still in flight -- a solver mid-iteration,
+                # a device command, a plot host winding down -- ends on
+                # its own schedule, and something has to come back and
+                # finish the close when it does.  Stopping altogether
+                # left the operator a window that said it was waiting
+                # for active work to finish and then never closed.
                 self._status.setText(
                     "SLM Editor close timed out; waiting for active work to finish"
                 )
-            elif self._window is not None:
+                QtCore.QTimer.singleShot(500, self._window.close)
+            else:
                 QtCore.QTimer.singleShot(50, self._window.close)
             return False
         self._executor.shutdown(wait=True, cancel_futures=True)

@@ -5564,9 +5564,10 @@ def test_a_panel_says_what_kind_of_data_it_is_drawing(presenter, session) -> Non
     pinned_text = (
         str(int(number)) if number.is_integer() else f"{number:g}"
     )
-    # The strip lists every scope-fated axis, the default "Latest" ones
-    # included -- a singleton axis is pinnable like any other -- so settling
-    # on any scope proves nothing: wait for the PINNED one to appear.
+    # The strip lists every scope-fated axis, this panel's own default pin
+    # included -- an image over (repeat, frame, y, x) is pinned to a frame
+    # before the operator touches anything -- so settling on any scope proves
+    # nothing: wait for the one just PINNED to appear.
     _settle_panel_hosts(
         presenter,
         lambda: (str(fate["label"]), pinned_text)
@@ -5574,7 +5575,14 @@ def test_a_panel_says_what_kind_of_data_it_is_drawing(presenter, session) -> Non
     )
     scope = dict(binding.parameter_surface["data_scope"])
     assert scope[str(fate["label"])] == pinned_text
-    assert all(text == "Latest" for label, text in scope.items() if label != str(fate["label"]))
+    # Exactly the scope-fated axes, and nothing else: the strip states what
+    # the drawn picture is pinned to, so an axis this panel reduces or plots
+    # has no place on it.
+    assert set(scope) == {
+        str(field["label"])
+        for field in binding.parameter_surface["semantic"]
+        if str(field["key"]).startswith("fate:") and is_scope_fate(field["value"])
+    }, scope
 
 
 def test_restored_live_selector_answers_displayed_shot_before_plane_latest(

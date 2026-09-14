@@ -167,7 +167,15 @@ def test_semantic_choices_are_labeled_once_and_kind_domain_is_registry_filtered(
         "reduce" in description.field(name).choice_values
         for _axis, name in description.fate_rows
     )
-    assert description.field("reduction").choices[-1][1] == "first"
+    # Every reduction the vocabulary declares is offered, in its order and
+    # under its own spelling -- read off the vocabulary, so a new one cannot
+    # be added without appearing here.
+    assert description.field("reduction").choice_values == tuple(
+        member.value for member in Reduction
+    )
+    assert tuple(
+        label for _value, label in description.field("reduction").choices
+    ) == tuple(member.value for member in Reduction)
 
 def test_a_choice_composes_typed_or_as_a_record_holds_it() -> None:
     """One vocabulary, two forms, and composition reads both.

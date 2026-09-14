@@ -434,6 +434,7 @@
   "api_parameters": [
     {
       "parameter_id": "da_bias_x",
+      "number": 1,
       "unit": "value",
       "field_ref": {
         "kind": "dac",
@@ -443,6 +444,7 @@
     },
     {
       "parameter_id": "da_bias_y",
+      "number": 2,
       "unit": "value",
       "field_ref": {
         "kind": "dac",
@@ -452,6 +454,7 @@
     },
     {
       "parameter_id": "da_bias_z",
+      "number": 3,
       "unit": "value",
       "field_ref": {
         "kind": "dac",

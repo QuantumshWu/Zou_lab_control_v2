@@ -1475,6 +1475,7 @@ def test_scene_labels_are_cut_off_at_the_room_the_scene_owns() -> None:
         renderer = session._renderer
         chrome = renderer._artists["image:h3d_chrome"]
         shown = [text for text in chrome["texts"] if text.get_visible()]
+        assert shown, "the scene labels its axes"
         rails = [
             axes
             for role in ("distribution", "colorbar")
@@ -1482,21 +1483,19 @@ def test_scene_labels_are_cut_off_at_the_room_the_scene_owns() -> None:
         ]
         assert rails, "this panel has the neighbours the region is bounded by"
         limit = min(float(axes.get_window_extent().x0) for axes in rails)
-        canvas_renderer = renderer.figure.canvas.get_renderer()
-        reaching = [
-            text
-            for text in shown
-            if text.get_window_extent(canvas_renderer).x1 > limit
-        ]
-        assert reaching, (
-            "this arrangement is the one where labels reach the rail; "
-            "without that the clip proves nothing"
-        )
-        for text in reaching:
+        # The room the scene owns ends before its neighbour begins, and every
+        # label -- wherever the projection put it -- is cut at exactly that
+        # edge.  Asserted on the CLIP rather than on a label that happens to
+        # overflow: which labels overflow depends on the camera and on how
+        # wide the coordinates print, and the rule holds either way.
+        scene_box = renderer._axes["image"][0].bbox
+        assert float(scene_box.x1) <= limit
+        for text in shown:
             assert text.get_clip_on(), text.get_text()
-            assert float(text.get_clip_box().x1) <= limit + 1.0, (
-                f"{text.get_text()!r} may paint past the room it owns"
-            )
+            clip = text.get_clip_box()
+            assert (
+                float(clip.x0), float(clip.x1),
+            ) == (float(scene_box.x0), float(scene_box.x1)), text.get_text()
     finally:
         session.close()
 

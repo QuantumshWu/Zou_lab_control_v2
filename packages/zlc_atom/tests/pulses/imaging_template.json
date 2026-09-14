@@ -454,6 +454,7 @@
   "api_parameters": [
     {
       "parameter_id": "reference_probe_duration_before",
+      "number": 1,
       "unit": "s",
       "field_ref": {
         "kind": "duration",
@@ -463,6 +464,7 @@
     },
     {
       "parameter_id": "readout_probe_duration",
+      "number": 2,
       "unit": "s",
       "field_ref": {
         "kind": "duration",
@@ -472,6 +474,7 @@
     },
     {
       "parameter_id": "reference_probe_duration_after",
+      "number": 3,
       "unit": "s",
       "field_ref": {
         "kind": "duration",

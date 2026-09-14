@@ -231,12 +231,20 @@ def test_the_threshold_follows_the_pointer_and_commits_on_release() -> None:
         host.close(timeout=20)
 
 
-def test_a_pointer_runs_before_data_frames_already_queued_behind_it() -> None:
-    """Interaction is a person's hand; a frame is worth serving whenever.
+def test_a_move_coalesces_against_the_newest_of_its_kind_and_stays_behind() -> None:
+    """A move supersedes the newest move; it does not overtake what is queued.
 
-    Also: a task coalesces against the newest one with its key ANYWHERE in
-    the queue.  Checking only the tail meant one interleaved task of any
-    other kind made every following pointer move its own frame.
+    Coalescing looks for the newest task with this key ANYWHERE in the queue:
+    checking only the tail meant one interleaved task of any other kind made
+    every following pointer move its own frame to compose.
+
+    What it may not do is take the superseded task's PLACE.  A hover move
+    queued before a press sits before it, so the first move of a drag
+    overtook the press that was supposed to create the gesture -- it ran with
+    no gesture, answered with no active pan, and its answer cleared the
+    button latch, so every later move was routed as a hover and the drag
+    never reached the gesture at all.  The newest move therefore joins at the
+    tail, behind the frame that was already waiting.
     """
 
     from zlc_plot.raster import _DispatchMode
@@ -274,7 +282,7 @@ def test_a_pointer_runs_before_data_frames_already_queued_behind_it() -> None:
         frame.result(timeout=20)
 
         assert first_move.cancelled(), "a queued move must coalesce, not pile up"
-        assert order == ["move", "frame"], order
+        assert order == ["frame", "move"], order
     finally:
         gate.set()
         host.close(timeout=20)

@@ -110,12 +110,13 @@ def test_unsuccessful_exact_retry_does_not_invalidate_public_fit_event() -> None
     snapshot = make_snapshot(schema, image.T[None, None], revision=175)
     spec = ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y"))
     fit_input = RegularImageFitInput(x, y, image)
-    expected = np.asarray(
-        (2704.0, 226.6475384850741, 0.9993684055038514, 55.15224030304722,
-         57.128628322987566)
-    )
+    # The engine, on the same input, with nothing said about where to start:
+    # the session's answer must BE this one, byte for byte, because it is the
+    # same solve.  Seeded from a tuple recorded here instead, the reference
+    # was a second solve from a stale answer, and the two converged to points
+    # a micro-relative apart -- which says nothing about either.
     reference = FitEngine().fit(
-        "radial_gaussian_center", fit_input, initial=expected, data_revision=175
+        "radial_gaussian_center", fit_input, data_revision=175
     )
     session = PlotSession(snapshot, spec)
     events = []

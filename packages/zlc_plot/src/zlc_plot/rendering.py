@@ -1429,6 +1429,27 @@ _ENVELOPE_MIN_COLUMNS = 64
 _ENVELOPE_MAX_COLUMNS = 4096
 
 
+def _scene_axis_labels(values: list[float]) -> tuple[list[str], str]:
+    """One axis's tick labels and the scale they share, as a 2D axis says them.
+
+    The 3D scene draws its own chrome, but "how a coordinate reads" is not a
+    3D question: it is the same ScalarFormatter every flat panel runs, asked
+    without an axis to hang on.  It answers with the short labels and,
+    separately, whatever every tick on the axis has in common -- an empty
+    string for an ordinary range, so nothing changes for one.
+    """
+
+    from matplotlib.ticker import ScalarFormatter
+
+    formatter = ScalarFormatter(useOffset=True)
+    formatter.create_dummy_axis()
+    low, high = float(min(values)), float(max(values))
+    formatter.axis.set_view_interval(low, high)
+    formatter.axis.set_data_interval(low, high)
+    formatter.set_locs(list(values))
+    return [formatter(value) for value in values], formatter.get_offset()
+
+
 def _pixel_columns(axes: Any) -> tuple[tuple[float, float], int]:
     """The x window an axes shows, and the columns a dense trace is read at.
 
@@ -8427,12 +8448,21 @@ class MatplotlibRenderer:
         left, right, bottom, top = extent
         ny, nx = heights.shape
         coordinate_ticks = []
+        coordinate_offsets = []
         for count, start, end in ((nx, left, right), (ny, top, bottom)):
             indices = sorted({int(round(v)) for v in np.linspace(0, count - 1, min(count, 6))})
-            coordinate_ticks.append(tuple(
-                (index, f"{start + (index + 0.5) * (end - start) / count:g}")
-                for index in indices
-            ))
+            values = [
+                start + (index + 0.5) * (end - start) / count for index in indices
+            ]
+            # The SAME formatter a flat panel runs: it factors out what every
+            # tick on this axis shares and states it once.  Formatted with
+            # ``:g`` instead, a scan over an optical frequency printed
+            # "3.84228e+11" at all ten ticks -- ten identical labels, each
+            # wide enough that the collision thinning then kept exactly one,
+            # so the axis said nothing at all.
+            labels, offset = _scene_axis_labels(values)
+            coordinate_ticks.append(tuple(zip(indices, labels)))
+            coordinate_offsets.append(offset)
         font = FontProperties(family=self.style.fonts.sans_serif, size=self.style.fonts.tick_pt)
         text_renderer = axes.figure.canvas.get_renderer()
         metrics = [text_renderer.get_text_width_height_descent(label, font, False)
@@ -8445,7 +8475,10 @@ class MatplotlibRenderer:
             max(metric[0] for metric in metrics) + label_gap_px,
             max(line_height, *(metric[1] for metric in metrics)) + label_gap_px,
         )
-        tick_layout = (z_ticks, *coordinate_ticks, font, tick_length_px, label_gap_px)
+        tick_layout = (
+            z_ticks, *coordinate_ticks, tuple(coordinate_offsets),
+            font, tick_length_px, label_gap_px,
+        )
         # One resolution.  A drag used to render at half and the release
         # repaint at full, so the picture changed character under the hand
         # -- and it bought 11 ms of a 93 ms move once the rims became
@@ -8629,7 +8662,10 @@ class MatplotlibRenderer:
             self._artists[chrome_key] = artists
 
         import matplotlib as _matplotlib
-        z_ticks, x_ticks, y_ticks, font, tick_length_px, label_gap_px = tick_layout
+        (
+            z_ticks, x_ticks, y_ticks, (x_offset, y_offset),
+            font, tick_length_px, label_gap_px,
+        ) = tick_layout
 
         segments_x: list[float] = []
         segments_y: list[float] = []
@@ -8643,6 +8679,16 @@ class MatplotlibRenderer:
                                tuple[float, float, float]]] = []
 
         wanted_texts: list[tuple[float, float, str, str, str]] = []
+        # What every tick on an axis shares, said once per axis in the corner
+        # a flat panel says it in -- x at the bottom right, y at the top left.
+        # It sits in the scene's own box rather than out on the projected
+        # axis: outside the ticks there is nothing but the clip edge, and on
+        # the axis it turns with the camera and is occluded with it.
+        corner_texts = [
+            (1.0, 0.0, x_offset, "right", "bottom"),
+            (0.0, 1.0, y_offset, "left", "top"),
+        ]
+        corner_texts = [item for item in corner_texts if item[2]]
         # The SAME chrome metrics every 2D panel runs under: tick length,
         # tick pad and line width come from the style's rc context, in
         # points, converted at this figure's dpi.
@@ -8882,6 +8928,8 @@ class MatplotlibRenderer:
         line.set_visible(True)
 
         texts = artists["texts"]
+        projected_texts = wanted_texts
+        wanted_texts = [*wanted_texts, *corner_texts]
         for index, (fx, fy, content, ha, va) in enumerate(wanted_texts):
             if index < len(texts):
                 text = texts[index]
@@ -8907,7 +8955,10 @@ class MatplotlibRenderer:
             text.set_clip_on(True)
         for text in texts[len(wanted_texts):]:
             text.set_visible(False)
-        self._thin_overlapping_chrome(texts[: len(wanted_texts)])
+        # Only the PROJECTED labels are thinned against one another: the
+        # corner scales below are not on the scene, do not move with the
+        # camera, and are what make the ticks short enough to fit.
+        self._thin_overlapping_chrome(texts[: len(projected_texts)])
 
     def _thin_overlapping_chrome(self, texts: list) -> None:
         """Drop 3D labels that would print across one already kept.
