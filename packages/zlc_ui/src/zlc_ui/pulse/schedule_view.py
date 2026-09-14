@@ -91,6 +91,7 @@ class PeriodCard(FluentGroupBox):
         self.bus_value_edits: dict[str, FluentScanLineEdit] = {}
         self.port_rows: dict[str, QtWidgets.QWidget] = {}
         self._last_duration: tuple[float, str] = (0.0, "")
+        self._last_analog: dict[str, tuple[str, int]] = {}
         self._last_name = ""
 
         width = period_card_width()
@@ -322,6 +323,13 @@ class PeriodCard(FluentGroupBox):
             value = int(float(edit.text()))
         except ValueError:
             return
+        # Leaving a box is not editing it: the duration beside this one has
+        # said so since it was written, and without the same guard merely
+        # tabbing past a DAC value ran the whole edit pipeline for a number
+        # nobody touched.
+        if self._last_analog.get(port) == (mode, value):
+            return
+        self._last_analog[port] = (mode, value)
         self.analog_committed.emit(self.period_id, port, mode, value)
 
     def set_port_label(self, port: str, label: str) -> None:

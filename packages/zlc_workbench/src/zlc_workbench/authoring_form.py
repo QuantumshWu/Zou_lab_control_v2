@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
+from functools import lru_cache
 from pathlib import Path
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
@@ -49,17 +50,29 @@ _FIELD_KINDS = {
 }
 
 
+@lru_cache(maxsize=None)
+def _projected_schema(schema: AuthoringSchema) -> FormSpec:
+    return FormSpec(tuple(_project_field(field) for field in schema.fields))
+
+
 def project_schema(schema: AuthoringSchema) -> FormSpec:
     """One declaration, as the form that edits it.
 
     Bounds come across as bounds rather than as advice: the schema already knows
     that a seed cannot be negative, and a form that lets one be typed only to
     have the save refused has taught the operator nothing.
+
+    Computed ONCE per schema.  An AuthoringSchema is frozen and belongs to a
+    device descriptor, so the form it projects to cannot change; asking again
+    rebuilt every FormFieldProps and re-ran its whole validation chain,
+    including a unit resolution under the registry lock.  The Device Manager
+    re-projects every card on every keystroke in any card, so with the virtual
+    template's four devices that was tens of field projections per character.
     """
 
     if not isinstance(schema, AuthoringSchema):
         raise TypeError("project_schema needs an AuthoringSchema")
-    return FormSpec(tuple(_project_field(field) for field in schema.fields))
+    return _projected_schema(schema)
 
 
 def project_logic_schema(

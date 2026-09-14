@@ -1055,7 +1055,14 @@ def _reconfigure_widget(
             widget.setPlaceholderText(field.description[:48])
         else:
             widget.setPlaceholderText(_blank_placeholder(field))
-            _install_validator(field, widget)
+            # The validator HOLDS the bounds, so it is replaced when they
+            # move and not otherwise: rebuilt on every reconcile it was a
+            # fresh QValidator per numeric field per projection, and the
+            # one it replaced was never destroyed.
+            if (old_field.kind, old_field.minimum, old_field.maximum, old_field.unit) != (
+                field.kind, field.minimum, field.maximum, field.unit
+            ):
+                _install_validator(field, widget)
     elif isinstance(widget, FluentDoubleSpinBox):
         handler = _IntHandler if field.kind == "int" else _FloatHandler
         handler._configure_spin(field, widget)

@@ -198,6 +198,8 @@ class LogicEditorView(QtWidgets.QWidget):
         }
         if structure != self._applied_structure:
             self._applied_structure = structure
+            for widget in self._contributions.values():
+                widget.update_projection(incoming)
             self.artifact_form.reconcile(artifact_spec, dict(artifact_values))
             self.artifact_form.setVisible(bool(artifact_spec.keys))
             self.form.reconcile(
@@ -252,6 +254,17 @@ class LogicEditorView(QtWidgets.QWidget):
         self,
         projection: Mapping[str, object],
     ) -> frozenset[str]:
+        """Create, retire and enable this projection's contribution widgets.
+
+        LIFECYCLE ONLY.  Which fields a contribution manages decides what the
+        form below may show, so this has to run before the structure guard --
+        but handing each widget the projection does not, and doing it here put
+        the contribution's own work (a scan plan re-parsed, its template ports
+        walked, a tunable-device range read dispatched) outside the guard that
+        exists to stop exactly that on a projection that did not change.
+        Projecting happens with the rest of the structure, below.
+        """
+
         factories = tuple(projection.get("ui_contributions", ()) or ())
         for factory in factories:
             if factory in self._contributions:
@@ -285,7 +298,6 @@ class LogicEditorView(QtWidgets.QWidget):
             if any(not isinstance(name, str) or not name for name in fields):
                 raise TypeError("logic UI contribution managed_fields must be names")
             managed.update(fields)
-            widget.update_projection(projection)
             setter = getattr(widget, "set_mutation_enabled", None)
             if callable(setter):
                 setter(self._mutation_enabled)
