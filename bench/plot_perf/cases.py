@@ -347,6 +347,40 @@ def catalog() -> tuple[Case, ...]:
             notes="live gaussian fit re-solved per revision",
         ),
         Case(
+            "curve_partial_2M",
+            lattice_partial_2m,
+            lambda: CurvePlot(AxisRef.point("ax")),
+            ("hover_series", "drag_main"),
+            notes="a run still filling: a quarter landed, holes inside it. "
+            "curve_2M is the same measurement wholly valid",
+        ),
+        Case(
+            "image_partial_2M",
+            lattice_partial_2m,
+            lambda: ImagePlot(AxisRef.point("ax"), AxisRef.point("ay")),
+            ("click_main", "wheel_main"),
+            notes="the raster's masked path and its counts array, against "
+            "image_heatmap_2M",
+        ),
+        Case(
+            "facet64_histogram_partial_2M",
+            lattice_partial_2m,
+            lambda: FacetGridPlot(
+                AxisRef.cell_data("site"), HistogramPlot()
+            ),
+            (),
+            notes="masked reductions on sixty-four cells, against "
+            "facet64_histogram_2M",
+        ),
+        Case(
+            "curve_partial_small",
+            lattice_partial_small,
+            lambda: CurvePlot(AxisRef.point("ax")),
+            ("hover_series",),
+            notes="few shots and holes: the curve's isolated-point channel "
+            "is only reached by a series with gaps",
+        ),
+        Case(
             "fit_facet10_2M",
             lattice_2m,
             lambda: FacetGridPlot(
