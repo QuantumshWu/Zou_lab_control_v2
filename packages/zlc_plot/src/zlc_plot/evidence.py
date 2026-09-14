@@ -7,8 +7,9 @@ owner, and the owner cannot be either of them -- it is this module, whose
 whole content is the constant.
 
 WHY A MODULE OF ITS OWN.  :mod:`zlc_plot.fit` is the solver: importing it
-brings scipy, numba and llvmlite, 1.3 s and a couple of hundred megabytes,
-into whatever process asks.  The readout's classification is deliberately
+brings numba and llvmlite and the compiled engine's forty dispatchers,
+half a second and a couple of hundred megabytes, into whatever process
+asks.  The readout's classification is deliberately
 dependency-light -- it is the normal CDF and a threshold -- and it reached
 this number through the solver.  Nothing noticed until the task console,
 which discovers its logic nodes at startup and never renders a raster in
