@@ -765,7 +765,7 @@ def test_native_curve_refusal_materializes_the_complete_public_scene(
     try:
         renderer = session._renderer
         assert isinstance(renderer._artists.get("curve:prepared"), dict)
-        monkeypatch.setattr(renderer, "_raster_facet_curve_command", lambda _canvas: False)
+        monkeypatch.setattr(renderer, "_raster_facet_curve_command", lambda _canvas, underlay=None: False)
         renderer._composed_generation = -1
         frame = renderer.rgba()
         assert frame.size > 0 and "curve:prepared" not in renderer._artists

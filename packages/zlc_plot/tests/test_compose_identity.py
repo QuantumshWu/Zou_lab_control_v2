@@ -893,11 +893,11 @@ def test_a_facet_grids_live_frames_carry_no_past_after_a_materialization(
             native = MatplotlibRenderer._raster_facet_curve_command
             declined: list[bool] = []
 
-            def decline_once(self, canvas):
+            def decline_once(self, canvas, underlay=None):
                 if not declined:
                     declined.append(True)
                     return False
-                return native(self, canvas)
+                return native(self, canvas, underlay=underlay)
 
             monkeypatch.setattr(
                 MatplotlibRenderer, "_raster_facet_curve_command", decline_once

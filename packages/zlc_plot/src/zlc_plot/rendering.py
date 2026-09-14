@@ -1550,6 +1550,214 @@ def _tick_stroke(line: Any) -> tuple[object, ...]:
     )
 
 
+def _spine_stroke(spine: Any) -> tuple[object, ...]:
+    """What makes two frame sides the same stroke."""
+
+    return (
+        tuple(float(v) for v in np.asarray(spine.get_edgecolor(), dtype=float).reshape(-1)),
+        float(spine.get_linewidth()),
+        str(spine.get_linestyle()),
+        str(spine.get_capstyle()),
+        str(spine.get_joinstyle()),
+        bool(spine.get_antialiased()),
+        spine.get_alpha(),
+    )
+
+
+def _placed_mask(
+    mask: np.ndarray, top: int, left: int, colour: Any, height: int, width: int
+) -> tuple[np.ndarray, int, int, Any] | None:
+    """A mask at a canvas position, cut to the canvas; None if none is left."""
+
+    rows, columns = mask.shape
+    y0, x0 = max(0, -top), max(0, -left)
+    y1, x1 = min(rows, height - top), min(columns, width - left)
+    if y1 <= y0 or x1 <= x0:
+        return None
+    if (y0, x0, y1, x1) != (0, 0, rows, columns):
+        mask = np.ascontiguousarray(mask[y0:y1, x0:x1])
+    return (mask, top + y0, left + x0, colour)
+
+
+def _stamped_row(
+    stamp: Sequence[tuple[np.ndarray, int, int, Any]],
+    rows: np.ndarray,
+    columns: np.ndarray,
+    height: int,
+    width: int,
+) -> list[tuple[np.ndarray, int, int, Any]]:
+    """One mask of a marker stamp laid at every (row, column).
+
+    ``draw_markers`` rasterizes a marker once and lays that stamp at each
+    position's integer pixel; where two stamps overlap the second blends
+    over the first, and the union here is that blend -- Agg's own alpha
+    arithmetic on the coverage -- which is also what a scratch draw of a
+    whole row used to leave in its alpha channel.
+    """
+
+    masks: list[tuple[np.ndarray, int, int, Any]] = []
+    if rows.size == 0:
+        return masks
+    for mask, relative_top, relative_left, colour in stamp:
+        tops = rows + int(relative_top)
+        lefts = columns + int(relative_left)
+        top, left = int(tops.min()), int(lefts.min())
+        bottom = int(tops.max()) + mask.shape[0]
+        right = int(lefts.max()) + mask.shape[1]
+        union = np.zeros((bottom - top, right - left), dtype=np.int32)
+        source = mask.astype(np.int32)
+        for y, x in zip(tops - top, lefts - left):
+            region = union[y : y + mask.shape[0], x : x + mask.shape[1]]
+            region[...] = ((source + region) * 256 - source * region) >> 8
+        placed = _placed_mask(union.astype(np.uint8), top, left, colour, height, width)
+        if placed is not None:
+            masks.append(placed)
+    return masks
+
+
+class _FacetChromeStroke:
+    """One stroke of a grid's chrome -- a cell's frame side, one axis' row
+    of tick marks, or one gridline -- as geometry, not as an artist.
+
+    The grid's marks and frames are four hundred and forty-eight artists on
+    a sixty-four cell grid, and on every first frame, resize and focus they
+    were built (a ``Line2D`` or ``PathPatch`` is a hundred microseconds of
+    validation to construct), drawn once through a recording renderer to
+    learn the Agg calls they make, and drawn again on a scratch to lower
+    those calls to coverage masks: a hundred and thirty milliseconds, for
+    pixels the compose could already place.  A stroke keeps what those
+    pixels are a function of -- its kind, the artist it copies its style
+    from, and its geometry in display space through the cell's own
+    transforms -- and its masks come from a memo the renderer keeps
+    (``_facet_chrome_masks``): Agg draws each distinct stamp and side
+    ONCE, and every cell's copy is that drawing at its own integer
+    offset.  Agg's own placement is what makes the copy exact: it snaps a
+    rectilinear path, and a marker's position, to the pixel grid before it
+    rasterizes, so a stroke's coverage is a function of its snapped shape
+    alone, and the same shape at another integer offset is the same bytes.
+
+    What a full draw needs -- an export, a compose with no kernels -- is
+    the artist itself, and a stroke builds that on demand
+    (``materialize``): exactly the artist the group used to hold, a child
+    of its cell, withdrawn again when the full draw is over.
+    """
+
+    __slots__ = (
+        "axes", "kind", "source", "placement", "geometry", "zorder",
+        "clipped", "visible", "masks", "delegate",
+    )
+
+    def __init__(
+        self,
+        axes: Any,
+        kind: str,
+        source: Any,
+        placement: tuple[Any, ...],
+        geometry: Any,
+        zorder: float,
+        clipped: bool,
+    ) -> None:
+        self.axes = axes
+        self.visible = True
+        self.masks: Any = None
+        self.delegate: Any = None
+        self.place(kind, source, placement, geometry, zorder, clipped)
+
+    def place(
+        self,
+        kind: str,
+        source: Any,
+        placement: tuple[Any, ...],
+        geometry: Any,
+        zorder: float,
+        clipped: bool,
+    ) -> None:
+        """Say again what this stroke is; its masks and its artist go."""
+
+        self.kind = kind
+        self.source = source
+        self.placement = placement
+        self.geometry = np.asarray(geometry, dtype=np.float64)
+        self.zorder = float(zorder)
+        self.clipped = bool(clipped)
+        self.masks = None
+        self.withdraw()
+
+    def get_visible(self) -> bool:
+        return self.visible
+
+    def set_visible(self, visible: bool) -> None:
+        self.visible = bool(visible)
+
+    def get_zorder(self) -> float:
+        return self.zorder
+
+    def get_alpha(self) -> None:
+        return None
+
+    def remove(self) -> None:
+        self.withdraw()
+
+    def materialize(self) -> Any:
+        """The artist this stroke stands for, as a child of its cell."""
+
+        if self.delegate is not None:
+            return self.delegate
+        from matplotlib.lines import Line2D
+        from matplotlib.patches import PathPatch
+
+        axes = self.axes
+        if self.kind == "frame":
+            transform, path = self.placement
+            spine = self.source
+            patch = PathPatch(
+                path,
+                edgecolor=spine.get_edgecolor(),
+                facecolor="none",
+                linewidth=spine.get_linewidth(),
+                linestyle=spine.get_linestyle(),
+                capstyle=spine.get_capstyle(),
+                joinstyle=spine.get_joinstyle(),
+                antialiased=spine.get_antialiased(),
+                alpha=spine.get_alpha(),
+                zorder=self.zorder,
+            )
+            axes.add_artist(patch)
+            patch.set_clip_path(None)
+            patch.set_clip_box(None)
+            patch.set_transform(transform)
+            patch.set_path(path)
+            self.delegate = patch
+        else:
+            transform, xs, ys = self.placement
+            line = Line2D([], [])
+            line.update_from(self.source)
+            # A tick mark is painted when its Axis draws, at the AXIS'
+            # zorder -- not at the tick line's own.
+            line.set_zorder(self.zorder)
+            axes.add_artist(line)
+            # ``add_artist`` clips to the cell patch, which is what a
+            # GRIDLINE carries and a tick mark does not: a tick stands ON
+            # the box edge, half outside it.  ``set_clip_path(None)`` alone
+            # does not undo the clip: a Rectangle clip path is stored as
+            # the clip BOX, which that call leaves standing.
+            if not self.clipped:
+                line.set_clip_path(None)
+                line.set_clip_box(None)
+            line.set_transform(transform)
+            line.set_data(xs, ys)
+            self.delegate = line
+        return self.delegate
+
+    def withdraw(self) -> None:
+        delegate, self.delegate = self.delegate, None
+        if delegate is not None:
+            try:
+                delegate.remove()
+            except ValueError:
+                pass
+
+
 class _FacetChromeLabels(Artist):
     """One figure artist that paints a grid's boundary tick labels.
 
@@ -2161,7 +2369,13 @@ class MatplotlibRenderer:
         self._boundary_chrome_commands: dict[
             int, tuple[tuple[str, Any, tuple[Any, ...], dict[str, Any]], ...]
         ] = {}
-        self._foreground_batches: dict[bool, tuple[tuple[Any, ...], list[Any]]] = {}
+        self._foreground_batches: dict[str, tuple[tuple[Any, ...], list[Any]]] = {}
+        #: Agg's masks of each distinct chrome stamp and frame side, keyed
+        #: by snapped shape (``_facet_chrome_masks``); the exemplar artists
+        #: they are drawn with, keyed by style; and the recorder they draw on.
+        self._facet_chrome_memo: dict[tuple[object, ...], Any] = {}
+        self._facet_chrome_exemplars: dict[tuple[object, ...], Any] = {}
+        self._facet_chrome_recorder: tuple[float, Any] | None = None
         self._foreground_scratch: Any = None
         #: The DYNAMIC axes -- a colour scale's, a distribution rail's, whose
         #: ticks move with the data -- keyed by the facts their draw is a
@@ -3009,7 +3223,7 @@ class MatplotlibRenderer:
         return any(
             isinstance(self._artists.get(key), dict)
             for key in self._PREPARED_SCENE_KEYS
-        )
+        ) or "facet:chrome_spines" in self._artists
 
     def draw(self) -> None:
         """Compose one complete Agg frame from the current artist state."""
@@ -3084,7 +3298,7 @@ class MatplotlibRenderer:
                 # Mirror full draw: hidden/removed axes do not contribute
                 # artists, even when their children still report visible.
                 elif (
-                    isinstance(value, Artist)
+                    isinstance(value, (Artist, _FacetChromeStroke))
                     and getattr(value, "axes", None) is not None
                     and id(value.axes) in axes_order
                     and value.axes.get_visible()
@@ -3249,17 +3463,16 @@ class MatplotlibRenderer:
                 if id(artist) not in self._boundary_chrome_commands:
                     commands_to_record.append(artist)
                 keyed(artist, owner, zorder)
-        # A cell's chrome is composed beside the data on exactly the
-        # condition its per-cell predecessor was: THAT CELL owns a VISIBLE
-        # artist that could overpaint it.  Asked of the grid instead -- any
-        # cell at all -- one cell holding a withdrawn line after a focus
-        # round trip moved all sixty-four cells' chrome to the other side of
-        # the kernel-stroked curve under it.  A cell whose picture is a
-        # kernel command owns no painting artist, so its chrome stays
-        # captured and the command paints over it, which is the shipped
-        # picture of a natively stroked grid -- and, since a withdrawn
-        # artist is no owner, the picture of every cell of it whatever was
-        # focused before.
+        # THE GRID'S CHROME IS ALWAYS COMPOSED, never captured.  A cell's
+        # marks, frame and title are the grid's -- strokes and one text per
+        # cell -- and the reason a cell's own chrome was captured while
+        # nothing could cover it (the per-frame cost of re-stroking it) is
+        # gone: the strokes replay from masks in the one kernel call that
+        # paints everything else.  Nothing in the captured background lies
+        # over them: the boundary labels stand outside every cell's box,
+        # and the titles come with the group.  Always composed, the group
+        # also stands on the same side of the split whatever a cell owns,
+        # so a fit landing or a scene taking a cell back moves no chrome.
         #
         # A cell's marks and frame stand ON that cell and key themselves from
         # it, like any other of its artists, which is what keeps the order
@@ -3271,9 +3484,7 @@ class MatplotlibRenderer:
         live_cells = {
             id(axes)
             for index, axes in enumerate(self._axes.get("facet_cell", ()))
-            if index < self._visible_facet_count
-            and axes.get_visible()
-            and axes in chrome_owners
+            if index < self._visible_facet_count and axes.get_visible()
         }
         if live_cells:
             for key in self._FACET_CHROME_KEYS:
@@ -3288,15 +3499,14 @@ class MatplotlibRenderer:
                         add(artist)
                     elif artist.get_visible():
                         keyed(artist, None, artist.get_zorder())
-                    # Recorded like the per-cell chrome it replaces, and on
-                    # the same terms: a recording is trusted only between
-                    # frames that reused the background, and a tick that
-                    # moved took that background with it.  Without this a
-                    # composed frame re-transformed a hundred and twenty-eight
-                    # mark lines and two hundred and fifty-six frame paths
-                    # through Matplotlib every time, and the steady frame
-                    # paid what the first frame saved.
-                    if id(artist) not in self._boundary_chrome_commands:
+                    # A title is recorded like the per-cell chrome it
+                    # replaces, and on the same terms: a recording is
+                    # trusted only between frames that reused the
+                    # background.  A stroke carries its own masks.
+                    if (
+                        not isinstance(artist, _FacetChromeStroke)
+                        and id(artist) not in self._boundary_chrome_commands
+                    ):
                         commands_to_record.append(artist)
         if commands_to_record:
             self._record_boundary_chrome_commands(commands_to_record)
@@ -3314,6 +3524,7 @@ class MatplotlibRenderer:
         self._dynamic_axis_commands.clear()
         self._foreground_batches.clear()
         self._foreground_scratch = None
+        self._facet_chrome_memo.clear()
 
     def _record_boundary_chrome_commands(self, artists: Sequence[Any]) -> None:
         """Freeze Agg path commands for stable tick marks and spines."""
@@ -3327,6 +3538,204 @@ class MatplotlibRenderer:
             commands = _record_artist_draw(artist, recorder)
             if commands:
                 self._boundary_chrome_commands[id(artist)] = commands
+
+    def _chrome_recorder(self) -> Any:
+        """A one-pixel Agg renderer at the figure's dpi: what an exemplar
+        draws on to be recorded.  Nothing of the size reaches a recording
+        but the dpi, and a canvas-sized renderer was a third of a
+        millisecond to make."""
+
+        dpi = float(self._figure.dpi)
+        recorder = self._facet_chrome_recorder
+        if recorder is None or recorder[0] != dpi:
+            from matplotlib.backends.backend_agg import RendererAgg
+
+            recorder = self._facet_chrome_recorder = (dpi, RendererAgg(1, 1, dpi))
+        return recorder[1]
+
+    def _facet_chrome_exemplar(self, style: tuple[object, ...], source: Any) -> Any:
+        """The artist that draws one style of chrome stroke, in display
+        coordinates, unclipped: a ``PathPatch`` in the spine's style for a
+        frame side, a ``Line2D`` copied from the tick line for a stamp."""
+
+        exemplar = self._facet_chrome_exemplars.get(style)
+        if exemplar is None:
+            from matplotlib.lines import Line2D
+            from matplotlib.patches import PathPatch
+            from matplotlib.path import Path
+            from matplotlib.transforms import IdentityTransform
+
+            if style[0] == "side":
+                exemplar = PathPatch(
+                    Path(np.array([[0.0, 0.0], [1.0, 0.0]])),
+                    edgecolor=source.get_edgecolor(),
+                    facecolor="none",
+                    linewidth=source.get_linewidth(),
+                    linestyle=source.get_linestyle(),
+                    capstyle=source.get_capstyle(),
+                    joinstyle=source.get_joinstyle(),
+                    antialiased=source.get_antialiased(),
+                    alpha=source.get_alpha(),
+                )
+            else:
+                exemplar = Line2D([], [])
+                exemplar.update_from(source)
+            exemplar.set_figure(self._figure)
+            exemplar.set_transform(IdentityTransform())
+            exemplar.set_clip_on(False)
+            self._facet_chrome_exemplars[style] = exemplar
+        return exemplar
+
+    def _facet_chrome_relative(
+        self, exemplar: Any, renderer: Any, anchor_row: int, anchor_column: int
+    ) -> list[tuple[np.ndarray, int, int, Any]] | None:
+        """Agg's masks of the exemplar as it stands, relative to an anchor
+        pixel; None when they cannot be taken, or when the drawing touched
+        the canvas edge, where a copy elsewhere would be cut differently."""
+
+        commands = _record_artist_draw(exemplar, self._chrome_recorder())
+        if not commands:
+            return None
+        masks = self._foreground_strokes(commands, renderer)
+        if masks is None:
+            return None
+        height, width = np.asarray(renderer.buffer_rgba()).shape[:2]
+        relative = []
+        for mask, top, left, colour in masks:
+            if (
+                top <= 0
+                or left <= 0
+                or top + mask.shape[0] >= height
+                or left + mask.shape[1] >= width
+            ):
+                return None
+            relative.append((mask, top - anchor_row, left - anchor_column, colour))
+        return relative
+
+    def _facet_chrome_absolute(self, stroke: Any, renderer: Any) -> Any:
+        """A stroke's masks drawn where it stands: a gridline, which is
+        clipped to its cell, or a stroke the memo could not serve."""
+
+        from matplotlib.path import Path
+
+        geometry = stroke.geometry
+        if stroke.kind == "frame":
+            exemplar = self._facet_chrome_exemplar(
+                ("side", _spine_stroke(stroke.source)), stroke.source
+            )
+            exemplar.set_path(Path(np.array(geometry, dtype=float)))
+        else:
+            exemplar = self._facet_chrome_exemplar(
+                ("stamp", _tick_stroke(stroke.source)), stroke.source
+            )
+            exemplar.set_data(geometry[:, 0], geometry[:, 1])
+        if stroke.clipped:
+            # What ``add_artist`` gave the artist: the cell patch as its
+            # clip, which Matplotlib keeps as the clip box.
+            exemplar.set_clip_on(True)
+            exemplar.set_clip_box(stroke.axes.bbox)
+        try:
+            commands = _record_artist_draw(exemplar, self._chrome_recorder())
+        finally:
+            if stroke.clipped:
+                exemplar.set_clip_box(None)
+                exemplar.set_clip_on(False)
+        if not commands:
+            return None
+        return self._foreground_strokes(commands, renderer)
+
+    def _facet_chrome_masks(self, stroke: Any, renderer: Any) -> Any:
+        """The Agg coverage masks of one chrome stroke, through the memo.
+
+        A stamp is memoized by its style alone and laid at every mark's
+        integer pixel; a frame side by its style and snapped length, and
+        laid at its snapped origin.  ``None`` says the stroke has to be
+        drawn as its artist, which is exact and what it used to be.
+        """
+
+        if stroke.masks is not None:
+            return stroke.masks
+        height, width = np.asarray(renderer.buffer_rgba()).shape[:2]
+        geometry = stroke.geometry
+        masks: Any = [] if geometry.shape[0] == 0 else None
+        if stroke.kind == "marks" and geometry.shape[0]:
+            style = ("stamp", _tick_stroke(stroke.source))
+            stamp = self._facet_chrome_memo.get(style)
+            if stamp is None:
+                exemplar = self._facet_chrome_exemplar(style, stroke.source)
+                column = float(math.floor(geometry[0, 0] + 0.5))
+                row = float(math.floor(geometry[0, 1] + 0.5))
+                exemplar.set_data([column], [row])
+                stamp = self._facet_chrome_relative(
+                    exemplar, renderer, int(height - row), int(column)
+                )
+                if stamp is not None:
+                    self._facet_chrome_memo[style] = stamp
+            if stamp is not None:
+                # Where ``draw_markers`` puts a marker: the pixel its
+                # position rounds to, in canvas rows.
+                rows = np.floor(float(height) + 0.5 - geometry[:, 1]).astype(np.int64)
+                columns = np.floor(geometry[:, 0] + 0.5).astype(np.int64)
+                masks = _stamped_row(stamp, rows, columns, height, width)
+        elif stroke.kind == "frame":
+            (x0, y0), (x1, y1) = geometry
+            column = int(math.floor(x0 + 0.5))
+            row = int(math.floor(y0 + 0.5))
+            across = int(math.floor(x1 + 0.5)) - column
+            along = int(math.floor(y1 + 0.5)) - row
+            style = ("side", _spine_stroke(stroke.source))
+            key = (*style, across, along)
+            side = self._facet_chrome_memo.get(key)
+            if side is None:
+                from matplotlib.path import Path
+
+                exemplar = self._facet_chrome_exemplar(style, stroke.source)
+                exemplar.set_path(
+                    Path(np.array([[column, row], [column + across, row + along]], dtype=float))
+                )
+                side = self._facet_chrome_relative(exemplar, renderer, height - row, column)
+                if side is not None:
+                    self._facet_chrome_memo[key] = side
+            if side is not None:
+                masks = []
+                for mask, top, left, colour in side:
+                    placed = _placed_mask(
+                        mask, top + height - row, left + column, colour, height, width
+                    )
+                    if placed is not None:
+                        masks.append(placed)
+        if masks is None:
+            masks = self._facet_chrome_absolute(stroke, renderer)
+        stroke.masks = masks
+        return masks
+
+    def _paint_masks(self, masks: Sequence[Any], canvas: Any) -> None:
+        """Replay coverage masks onto the canvas, in order, in one call."""
+
+        static_data, static_rows, static_colors = self._pack_foreground(masks)
+        text_data, text_rows, text_colors = self._pack_foreground(())
+        order = np.column_stack(
+            (np.zeros(len(masks), dtype=np.int64), np.arange(len(masks), dtype=np.int64))
+        )
+        kernels.replay_foreground_masks(
+            static_data, static_rows, static_colors,
+            text_data, text_rows, text_colors,
+            kernels.readable(np.zeros(1, dtype=np.int64)),
+            kernels.readable(order),
+            np.asarray(canvas.buffer_rgba()),
+        )
+
+    def _materialize_facet_chrome(self) -> None:
+        """Give every chrome stroke its artist, for a draw through Matplotlib."""
+
+        for key in ("facet:chrome_marks", "facet:chrome_spines"):
+            for stroke in self._artists.get(key, ()):
+                stroke.materialize()
+
+    def _withdraw_facet_chrome(self) -> None:
+        for key in ("facet:chrome_marks", "facet:chrome_spines"):
+            for stroke in self._artists.get(key, ()):
+                stroke.withdraw()
 
     def _foreground_text(self, artist: Any, renderer: Any, commands: Any = None) -> Any:
         """Capture the original Text/MathText glyph masks, without a scratch draw."""
@@ -3459,7 +3868,7 @@ class MatplotlibRenderer:
                 kernels.readable(np.asarray(rows, dtype=np.int64).reshape(-1, 5)),
                 kernels.readable(np.asarray(colors, dtype=np.uint8).reshape(-1, 4)))
 
-    def _paint_foreground(self, entries: Sequence[Any], renderer: Any, canvas: Any, phase: bool) -> None:
+    def _paint_foreground(self, entries: Sequence[Any], renderer: Any, canvas: Any, phase: str) -> None:
         """Execute flat paint ranges, refreshing only their Text slots per frame."""
         from matplotlib.text import Text
 
@@ -3476,7 +3885,13 @@ class MatplotlibRenderer:
 
             for artist in artists:
                 commands = self._boundary_chrome_commands.get(id(artist))
-                if isinstance(artist, Text) and commands is None:
+                if isinstance(artist, _FacetChromeStroke):
+                    layers = (
+                        self._facet_chrome_masks(artist, renderer)
+                        if artist.get_visible()
+                        else []
+                    )
+                elif isinstance(artist, Text) and commands is None:
                     if artist.get_rotation() == 0.0 and not artist.get_usetex() and not artist.get_path_effects():
                         order.append((1, len(texts)))
                         texts.append([artist, None, ()])
@@ -3540,6 +3955,17 @@ class MatplotlibRenderer:
         renderer: Any,
         canvas: Any,
     ) -> None:
+        if isinstance(artist, _FacetChromeStroke):
+            masks = (
+                self._facet_chrome_masks(artist, renderer)
+                if kernels.engaged()
+                else None
+            )
+            if masks is None:
+                artist.materialize().draw(renderer)
+            else:
+                self._paint_masks(masks, canvas)
+            return
         commands = self._boundary_chrome_commands.get(id(artist))
         if commands is not None:
             _replay_draw(commands, renderer)
@@ -3565,6 +3991,23 @@ class MatplotlibRenderer:
             return
         if not self._blit_exact_rgba_image(artist, canvas):
             artist.draw(renderer)
+
+    def _series_stacking_floor(self) -> float:
+        """The lowest zorder of the series' own artists -- the lines and
+        their error bars -- below which a full draw paints a cell's marks."""
+
+        zorders = [
+            float(line.get_zorder())
+            for records in self._series_lines.values()
+            for line, _identity, _label in records
+        ]
+        zorders.extend(
+            float(artist.get_zorder())
+            for axis_bars in self._series_bars.values()
+            for artists in axis_bars.values()
+            for artist in artists
+        )
+        return min(zorders, default=2.0)
 
     def _native_curve_lines(
         self,
@@ -3993,18 +4436,35 @@ class MatplotlibRenderer:
                 set_num_threads(previous_threads)
         return True
 
-    def _raster_facet_curve_command(self, canvas: Any) -> bool:
-        """Paint projected Facet Curve data without maintaining cell artists."""
+    def _raster_facet_curve_command(
+        self, canvas: Any, underlay: Any = None
+    ) -> bool:
+        """Paint projected Facet Curve data without maintaining cell artists.
+
+        ``underlay`` is called once, after every refusal and before the first
+        pixel: what a full draw stacks BELOW the cells' data -- their tick
+        marks -- goes down there, so that the bars and lines lie over it.
+        """
 
         command = self._artists.get("curve:prepared")
         if not isinstance(command, dict):
             return False
         canvas_rgba = np.asarray(canvas.buffer_rgba())
+        if (
+            canvas_rgba.dtype != np.uint8
+            or canvas_rgba.ndim != 3
+            or canvas_rgba.shape[2] != 4
+            or not canvas_rgba.flags.c_contiguous
+            or not canvas_rgba.flags.writeable
+        ):
+            return False
         height, width = canvas_rgba.shape[:2]
         surfaces = self.painted_surfaces
         series_by_cell = tuple(command.get("series", ()))
-        if len(surfaces) != len(series_by_cell):
+        if len(surfaces) != len(series_by_cell) or not any(series_by_cell):
             return False
+        if underlay is not None:
+            underlay()
         if not self._raster_prepared_error_bars(surfaces, series_by_cell, canvas):
             return False
         if len(surfaces) == 1 and self._raster_grouped_curve_command(
@@ -4113,22 +4573,24 @@ class MatplotlibRenderer:
         )
         return True
 
-    def _raster_error_bars(
+    def _error_bar_plan(
         self,
         groups: Sequence[Sequence[Any]],
         canvas: Any,
-    ) -> bool:
-        """Paint the public error-bar topology through one native kernel.
+    ) -> tuple[Any, ...] | None:
+        """What one kernel call paints the public error-bar topology with.
 
         Matplotlib remains the style/topology owner: the reused artists carry
         the exact segments, alpha, linewidth, capsize, z-order and focus state.
         This consumer only transforms those facts to physical pixels and
         rasterises every independent stem/cap without rebuilding artists or
         collapsing neighbouring measurements into a display-column envelope.
+        ``None`` refuses -- the artists draw -- with the canvas untouched;
+        an empty plan has nothing to paint.
         """
 
         if not groups:
-            return True
+            return ()
         canvas_rgba = np.asarray(canvas.buffer_rgba())
         if (
             canvas_rgba.dtype != np.uint8
@@ -4137,7 +4599,7 @@ class MatplotlibRenderer:
             or not canvas_rgba.flags.c_contiguous
             or not canvas_rgba.flags.writeable
         ):
-            return False
+            return None
         height, width = canvas_rgba.shape[:2]
         xs: list[np.ndarray] = []
         lows: list[np.ndarray] = []
@@ -4157,7 +4619,7 @@ class MatplotlibRenderer:
                 artist for artist in group if not hasattr(artist, "set_segments")
             ]
             if len(collections) != 1 or len(caps) not in {0, 2}:
-                return False
+                return None
             collection = collections[0]
             if not collection.get_visible():
                 continue
@@ -4170,7 +4632,7 @@ class MatplotlibRenderer:
                 or segments.shape[1:] != (2, 2)
                 or not segments.size
             ):
-                return False
+                return None
             if lane_axis is None:
                 lane_axis = axes
             elif axes is not lane_axis:
@@ -4192,9 +4654,9 @@ class MatplotlibRenderer:
             edge = np.asarray(collection.get_edgecolors(), dtype=float)
             line_width = np.asarray(collection.get_linewidths(), dtype=float)
             if edge.ndim != 2 or edge.shape[1] != 4 or not edge.shape[0]:
-                return False
+                return None
             if line_width.size == 0:
-                return False
+                return None
             colours.append(
                 np.clip(np.rint(edge[0] * 255.0), 0, 255).astype(np.uint8)
             )
@@ -4224,9 +4686,9 @@ class MatplotlibRenderer:
                 )
             )
         if not xs:
-            return True
+            return ()
         lane_offsets.append(len(xs))
-        kernels.raster_error_bars(
+        return (
             kernels.readable(np.concatenate(xs)),
             kernels.readable(np.concatenate(lows)),
             kernels.readable(np.concatenate(highs)),
@@ -4237,15 +4699,36 @@ class MatplotlibRenderer:
             kernels.readable(np.asarray(clips, dtype=np.int32)),
             kernels.readable(np.asarray(lane_offsets, dtype=np.int64)),
             kernels.stroke_bands(len(lane_offsets) - 1),
-            canvas_rgba,
         )
+
+    @staticmethod
+    def _stroke_error_bar_plan(plan: tuple[Any, ...], canvas: Any) -> None:
+        if plan:
+            kernels.raster_error_bars(*plan, np.asarray(canvas.buffer_rgba()))
+
+    def _raster_error_bars(
+        self,
+        groups: Sequence[Sequence[Any]],
+        canvas: Any,
+    ) -> bool:
+        """Paint error bars through the kernel, or refuse with nothing painted."""
+
+        plan = self._error_bar_plan(groups, canvas)
+        if plan is None:
+            return False
+        self._stroke_error_bar_plan(plan, canvas)
         return True
 
-    def _raster_curve_lines(self, lines: Sequence[Any], canvas: Any) -> bool:
-        """Stroke current Line2D geometry into the live Agg buffer in one kernel."""
+    def _curve_stroke_plan(
+        self, lines: Sequence[Any], canvas: Any
+    ) -> tuple[Any, ...] | None:
+        """What one kernel call strokes ``lines`` with: their current Line2D
+        geometry in canvas pixels, colours, widths and clips.  ``None``
+        refuses -- the artists draw -- with the canvas untouched; an empty
+        plan strokes nothing."""
 
         if not lines:
-            return True
+            return ()
         from matplotlib.colors import to_rgba
 
         canvas_rgba = np.asarray(canvas.buffer_rgba())
@@ -4256,7 +4739,7 @@ class MatplotlibRenderer:
             or not canvas_rgba.flags.c_contiguous
             or not canvas_rgba.flags.writeable
         ):
-            return False
+            return None
         height, width = canvas_rgba.shape[:2]
         # ONE TRANSFORM FOR THE BATCH.  A line's transform is its axes'
         # data transform -- six numbers on a linear axes -- read once per
@@ -4280,10 +4763,10 @@ class MatplotlibRenderer:
         for index, line in enumerate(lines):
             path = line.get_path()
             if path.codes is not None:
-                return False
+                return None
             points = np.asarray(path.vertices, dtype=np.float64)
             if points.ndim != 2 or points.shape[1] != 2:
-                return False
+                return None
             transform = line.get_transform()
             if transform.is_affine:
                 matrices[index] = transform.get_matrix()[:2].reshape(-1)
@@ -4316,10 +4799,10 @@ class MatplotlibRenderer:
         if not bool(np.all(np.isfinite(packed))):
             # The native overview envelope deliberately handles only one
             # continuous run; invalid gaps retain the exact Line2D path.
-            return False
+            return None
         colours = np.clip(np.rint(rgba * 255.0), 0, 255).astype(np.uint8)
         lane_offsets = self._polyline_lane_offsets(clips)
-        kernels.raster_polylines(
+        return (
             kernels.readable(packed),
             kernels.readable(offsets),
             kernels.readable(colours),
@@ -4327,8 +4810,21 @@ class MatplotlibRenderer:
             kernels.readable(clips),
             kernels.readable(lane_offsets),
             kernels.stroke_bands(lane_offsets.size - 1),
-            canvas_rgba,
         )
+
+    @staticmethod
+    def _stroke_curve_plan(plan: tuple[Any, ...], canvas: Any) -> None:
+        if plan:
+            kernels.raster_polylines(*plan, np.asarray(canvas.buffer_rgba()))
+
+    def _raster_curve_lines(self, lines: Sequence[Any], canvas: Any) -> bool:
+        """Stroke current Line2D geometry into the live Agg buffer in one
+        kernel, or refuse with nothing painted."""
+
+        plan = self._curve_stroke_plan(lines, canvas)
+        if plan is None:
+            return False
+        self._stroke_curve_plan(plan, canvas)
         return True
 
     def _raster_prepared_images(self, canvas: Any) -> tuple[bool, frozenset[int]]:
@@ -4858,6 +5354,18 @@ class MatplotlibRenderer:
                     withheld.append(
                         (patch, False, patch.get_visible(), patch.get_alpha())
                     )
+                # A stroke draws nothing here; the artist it may have built
+                # for a full draw is a child of its cell, and is withheld
+                # as the stroke's masks will paint it.
+                delegate = (
+                    artist.delegate
+                    if isinstance(artist, _FacetChromeStroke)
+                    else None
+                )
+                if delegate is not None:
+                    withheld.append(
+                        (delegate, False, delegate.get_visible(), delegate.get_alpha())
+                    )
             try:
                 for artist, is_text, _visible, _alpha in withheld:
                     if is_text:
@@ -4928,26 +5436,6 @@ class MatplotlibRenderer:
         native_bars, native_bar_ids = self._raster_prepared_histograms(canvas)
         if prepared_histogram_command and not native_bars:
             self._materialize_prepared_histograms()
-        prepared_curve_command = isinstance(
-            self._artists.get("curve:prepared"), dict
-        )
-        native_curve_command = (
-            self._raster_facet_curve_command(canvas)
-            if not native_image and not native_bars
-            else False
-        )
-        curve_fallback = bool(
-            prepared_curve_command and not native_curve_command
-        )
-        if curve_fallback:
-            self._materialize_prepared_curve()
-            dynamics = self._dynamic_artists()
-            ordered, split = ordered_with_split(dynamics)
-        native_lines = (
-            self._native_curve_lines()
-            if not native_image and not curve_fallback
-            else None
-        )
         facet_ellipse_ids = {
             id(artist)
             for _axis, family, _model, slots, _artists in self._facet_fit_topologies.values()
@@ -4991,7 +5479,7 @@ class MatplotlibRenderer:
         captured = False
         blocked = False
 
-        def paint(entries: Any, *, at_split: bool) -> None:
+        def paint(entries: Any, *, at_split: bool, phase: str) -> None:
             """Paint one ordered subsequence, capturing at the gesture split.
 
             ``at_split`` marks the LAST subsequence a branch paints: only
@@ -4999,11 +5487,13 @@ class MatplotlibRenderer:
             earlier subsequence that already reaches above the split blocks
             the capture outright, so the move path composes instead of
             restoring a frame that is missing what came after it.
+            ``phase`` names the pass, which is what its memoized foreground
+            is filed under from frame to frame.
             """
 
             nonlocal captured, blocked
             if kernels.engaged() and self._selector_gesture_kind is None and self._confined_gesture_axes is None:
-                self._paint_foreground(entries, renderer, canvas, at_split)
+                self._paint_foreground(entries, renderer, canvas, phase)
                 return
             capturing = (
                 at_split and split is not None and not captured and not blocked
@@ -5030,6 +5520,53 @@ class MatplotlibRenderer:
                 if keep(entry[1])
             ]
 
+        def band(low: float | None, high: float | None, excluded: Any = frozenset()) -> list[Any]:
+            """The ordered entries whose stacking zorder lies in [low, high)."""
+
+            return [
+                (index, entry)
+                for index, entry in enumerate(ordered)
+                if (low is None or entry[0][1] >= low)
+                and (high is None or entry[0][1] < high)
+                and id(entry[1]) not in excluded
+            ]
+
+        # WHAT THE KERNEL STROKES, IT STROKES AT ITS PLACE IN THE STACKING.
+        # A full draw paints a cell's marks, then its data, then its frame,
+        # then the fit over the frame; a kernel that painted the data
+        # first put every mark on top of the curve it should lie under, and
+        # one that stroked the fit last put the frame over it.  Each stroke
+        # is preceded by the entries a full draw paints below it and
+        # followed by the rest, cut by zorder -- which is the cut within
+        # each cell, since a stroke is clipped to its cell and a neighbour's
+        # unclipped mark reaches only the gutter.
+        series_floor = self._series_stacking_floor()
+        prepared_curve_command = isinstance(
+            self._artists.get("curve:prepared"), dict
+        )
+        native_curve_command = (
+            self._raster_facet_curve_command(
+                canvas,
+                underlay=lambda: paint(
+                    band(None, series_floor), at_split=False, phase="under"
+                ),
+            )
+            if not native_image and not native_bars
+            else False
+        )
+        curve_fallback = bool(
+            prepared_curve_command and not native_curve_command
+        )
+        if curve_fallback:
+            self._materialize_prepared_curve()
+            dynamics = self._dynamic_artists()
+            ordered, split = ordered_with_split(dynamics)
+        native_lines = (
+            self._native_curve_lines()
+            if not native_image and not curve_fallback
+            else None
+        )
+
         used_native = False
         if native_bars and not native_image:
             # The bars stand at the bottom of their cells' stacking, and
@@ -5045,35 +5582,18 @@ class MatplotlibRenderer:
             # neighbour's unclipped mark reaches only the gutter -- so the
             # cut by zorder across the grid is the cut within each cell.
             fit_lines = () if native_lines is None else native_lines[2]
-            stroked: frozenset[int] = frozenset()
-            if fit_lines:
-                stroked = frozenset(id(line) for line in fit_lines)
+            fit_plan = self._curve_stroke_plan(fit_lines, canvas) if fit_lines else None
+            if fit_plan is not None:
                 fit_zorder = min(float(line.get_zorder()) for line in fit_lines)
-                paint(
-                    [
-                        (index, entry)
-                        for index, entry in enumerate(ordered)
-                        if entry[0][1] < fit_zorder
-                        and id(entry[1]) not in native_bar_ids
-                    ],
-                    at_split=False,
-                )
-                if not self._raster_curve_lines(fit_lines, canvas):
-                    stroked = frozenset()
-                paint(
-                    [
-                        (index, entry)
-                        for index, entry in enumerate(ordered)
-                        if entry[0][1] >= fit_zorder
-                        and id(entry[1]) not in native_bar_ids
-                        and id(entry[1]) not in stroked
-                    ],
-                    at_split=True,
-                )
+                excluded = native_bar_ids | {id(line) for line in fit_lines}
+                paint(band(None, fit_zorder, excluded), at_split=False, phase="under_fit")
+                self._stroke_curve_plan(fit_plan, canvas)
+                paint(band(fit_zorder, None, excluded), at_split=True, phase="over_fit")
             else:
                 paint(
                     subsequence(lambda artist: id(artist) not in native_bar_ids),
                     at_split=True,
+                    phase="all",
                 )
             used_native = True
         if native_image:
@@ -5111,6 +5631,7 @@ class MatplotlibRenderer:
                     and id(artist) not in color_overlay_ids
                 ),
                 at_split=False,
+                phase="forward",
             )
             ellipses_drawn, _ellipse_ids = self._raster_facet_fit_ellipses(canvas)
             paint(
@@ -5124,45 +5645,57 @@ class MatplotlibRenderer:
                     )
                 ),
                 at_split=not color_overlay,
+                phase="rest",
             )
             used_native = True
-        if native_curve_command and native_lines is None:
-            paint(list(enumerate(ordered)), at_split=True)
-            used_native = True
-        if native_lines is not None and not native_bars:
-            bar_groups, data_lines, fit_lines = native_lines
+        if (native_curve_command or native_lines is not None) and not native_bars:
+            bar_groups, data_lines, fit_lines = (
+                ((), (), ()) if native_lines is None else native_lines
+            )
+            if native_curve_command:
+                # The command painted every cell's bars and lines over the
+                # underlay; the withdrawn artists behind them are not
+                # stroked again, and the rest of the stacking starts at the
+                # series floor.
+                bar_groups, data_lines = (), ()
+                floor: float | None = series_floor
+            else:
+                floor = None
             bar_artists = tuple(
                 artist for group in bar_groups for artist in group
             )
-            bar_ids = {id(artist) for artist in bar_artists}
-            native_ids = {
-                id(artist)
-                for artist in bar_artists + data_lines + fit_lines
-            }
-            boundary_ids = set(self._boundary_chrome_commands)
-            for entries in self._boundary_chrome_cache.values():
-                boundary_ids.update(id(artist) for artist, _owner, _zorder in entries)
-            draw_boundary_ids = boundary_ids
-            bars_native = self._raster_error_bars(bar_groups, canvas)
-            if not bars_native:
-                paint(
-                    subsequence(lambda artist: id(artist) in bar_ids),
-                    at_split=False,
-                )
-            if self._raster_curve_lines(data_lines, canvas):
-                paint(
-                    subsequence(lambda artist: id(artist) in draw_boundary_ids),
-                    at_split=False,
-                )
-                if self._raster_curve_lines(fit_lines, canvas):
-                    paint(
-                        subsequence(
-                            lambda artist: id(artist) not in native_ids
-                            and id(artist) not in boundary_ids
-                        ),
-                        at_split=True,
+            strokes: list[tuple[float, Any, tuple[Any, ...]]] = []
+            for artists, plan, painter in (
+                (
+                    bar_artists,
+                    self._error_bar_plan(bar_groups, canvas) if bar_artists else None,
+                    self._stroke_error_bar_plan,
+                ),
+                (
+                    data_lines,
+                    self._curve_stroke_plan(data_lines, canvas) if data_lines else None,
+                    self._stroke_curve_plan,
+                ),
+                (
+                    fit_lines,
+                    self._curve_stroke_plan(fit_lines, canvas) if fit_lines else None,
+                    self._stroke_curve_plan,
+                ),
+            ):
+                # A group the kernel refuses stays in the bands, drawn as
+                # its artists where the stacking puts them.
+                if artists and plan is not None:
+                    strokes.append(
+                        (min(float(artist.get_zorder()) for artist in artists), (painter, plan), artists)
                     )
-                    used_native = True
+            strokes.sort(key=lambda item: item[0])
+            native_ids = {id(artist) for _zorder, _stroke, artists in strokes for artist in artists}
+            for position, (zorder, (painter, plan), _artists) in enumerate(strokes):
+                paint(band(floor, zorder, native_ids), at_split=False, phase=f"stroke{position}")
+                painter(plan, canvas)
+                floor = zorder
+            paint(band(floor, None, native_ids), at_split=True, phase="over")
+            used_native = True
         if used_native and color_overlay:
             self._gesture_region = capture(self._figure.bbox)
             self._gesture_overlay = color_overlay
@@ -5172,7 +5705,7 @@ class MatplotlibRenderer:
                 if artist.get_visible():
                     self._draw_dynamic_artist(artist, renderer, canvas)
         if not used_native:
-            paint(list(enumerate(ordered)), at_split=True)
+            paint(list(enumerate(ordered)), at_split=True, phase="all")
         if not captured:
             self._forget_gesture_region()
         self._raster_generation += 1
@@ -9847,14 +10380,16 @@ class MatplotlibRenderer:
         labels the boundary shows -- and draws none of it.  What that policy
         decided is read back here and painted by artists the renderer owns:
 
-        * one ``Line2D`` per axis per cell carrying that cell's tick marks,
-          at the Axis' own zorder;
-        * one ``PathPatch`` per side per cell, carrying the spine's own path
-          and transform -- the frame stands where Matplotlib would have
-          stroked it, not where arithmetic over the box says it should.  One
-          patch per cell for all four sides would be cheaper still and is
-          WRONG: Agg blends a corner pixel once per rasterization pass, so
-          four sides in one path differ from four strokes at every corner;
+        * one stroke per axis per cell carrying that cell's tick marks, at
+          the Axis' own zorder;
+        * one stroke per side per cell, on the spine's own path and
+          transform -- the frame stands where Matplotlib would have stroked
+          it, not where arithmetic over the box says it should.  One stroke
+          per cell for all four sides would be cheaper still and is WRONG:
+          Agg blends a corner pixel once per rasterization pass, so four
+          sides in one path differ from four strokes at every corner.  A
+          stroke is geometry, not an artist; its pixels come from a memo of
+          what Agg draws for each distinct shape (``_FacetChromeStroke``);
         * one ``Text`` per cell title, at the cell's own pinned title
           transform;
         * one carrier for the boundary tick labels, which are the cells' own
@@ -10095,55 +10630,33 @@ class MatplotlibRenderer:
         marks = self._artists.get("facet:chrome_marks", [])
         frames = self._artists.get("facet:chrome_spines", [])
         title_artists = self._artists.get("facet:chrome_titles", [])
+        # A MARK ROW AND A FRAME SIDE ARE STROKES, NOT ARTISTS: what the
+        # artist would have handed Agg -- the artist it copies its style
+        # from, and its geometry through the cell's own transforms -- and
+        # the compose turns that into Agg's own pixels through the memo
+        # (see ``_FacetChromeStroke``).  A grid moved keeps its strokes and
+        # places them again.
         for position, (axes, source, transform, xs, ys, zorder, clipped) in enumerate(marks_plan):
+            placement = (transform, xs, ys)
+            geometry = transform.transform(np.column_stack((xs, ys)))
+            kind = "grid" if clipped else "marks"
             if reuse:
-                line = marks[position]
+                marks[position].place(kind, source, placement, geometry, zorder, clipped)
             else:
-                line = Line2D([], [])
-                line.update_from(source)
-                # A tick mark is painted when its Axis draws, at the AXIS'
-                # zorder -- not at the tick line's own.
-                line.set_zorder(zorder)
-                axes.add_artist(line)
-                # ``add_artist`` clips to the cell patch, which is what a
-                # GRIDLINE carries and a tick mark does not.  A tick stands
-                # ON the box edge, half outside it: clipped, every cell lost
-                # the twelve pixels of the mark at its bottom-left corner.  A
-                # gridline unclipped is the opposite error -- its projecting
-                # cap then reaches a pixel past the frame, all the way round.
-                # ``set_clip_path(None)`` alone does not undo the clip: a
-                # Rectangle clip path is stored as the clip BOX, which that
-                # call leaves standing.
-                if not clipped:
-                    line.set_clip_path(None)
-                    line.set_clip_box(None)
-                marks.append(line)
-            # The cell's own blended transform, so the marks stay in data
-            # coordinates along the axis and in the box across it.
-            line.set_transform(transform)
-            line.set_data(xs, ys)
-        for position, (axes, path, spine) in enumerate(frames_plan):
-            if reuse:
-                patch = frames[position]
-            else:
-                patch = PathPatch(
-                    path,
-                    edgecolor=spine.get_edgecolor(),
-                    facecolor="none",
-                    linewidth=spine.get_linewidth(),
-                    linestyle=spine.get_linestyle(),
-                    capstyle=spine.get_capstyle(),
-                    joinstyle=spine.get_joinstyle(),
-                    antialiased=spine.get_antialiased(),
-                    alpha=spine.get_alpha(),
-                    zorder=float(spine.get_zorder()),
+                marks.append(
+                    _FacetChromeStroke(axes, kind, source, placement, geometry, zorder, clipped)
                 )
-                axes.add_artist(patch)
-                patch.set_clip_path(None)
-                patch.set_clip_box(None)
-                frames.append(patch)
-            patch.set_transform(spine.get_transform())
-            patch.set_path(path)
+        for position, (axes, path, spine) in enumerate(frames_plan):
+            transform = spine.get_transform()
+            placement = (transform, path)
+            geometry = transform.transform(path.vertices)
+            zorder = float(spine.get_zorder())
+            if reuse:
+                frames[position].place("frame", spine, placement, geometry, zorder, False)
+            else:
+                frames.append(
+                    _FacetChromeStroke(axes, "frame", spine, placement, geometry, zorder, False)
+                )
         for position, (axes, text_value, size_pt) in enumerate(titles_plan):
             if reuse:
                 title = title_artists[position]
@@ -10177,10 +10690,11 @@ class MatplotlibRenderer:
             )
             for artist, (axes, *_rest) in zip(artists, plan, strict=True)
         }
-        # A moved artist invalidates what was recorded and memoized of it, and
-        # the boundary labels are part of the composed BACKGROUND, so a
-        # refreshed group is a background that is no longer current.
-        for artist in (*marks, *frames, *title_artists):
+        # A moved title invalidates what was recorded and memoized of it (a
+        # moved stroke forgot its masks as it was placed), and the boundary
+        # labels are part of the composed BACKGROUND, so a refreshed group
+        # is a background that is no longer current.
+        for artist in title_artists:
             self._boundary_chrome_commands.pop(id(artist), None)
         self._foreground_batches.clear()
         self._mark_axes_chrome_dirty(*(axes for _index, axes in visible))
@@ -12195,6 +12709,9 @@ class MatplotlibRenderer:
                 # the next data update reinstalls the native scene.
                 self._materialize_prepared_curve()
                 self._materialize_prepared_images()
+                # A grid's chrome strokes exist for the compose; the export
+                # draws the artists they stand for, and withdraws them after.
+                self._materialize_facet_chrome()
                 # ``savefig`` creates a private renderer internally, so the
                 # live-draw hook cannot wrap that renderer's mathtext parser.
                 # It must join the same process-global parser lane here or a
@@ -12205,6 +12722,7 @@ class MatplotlibRenderer:
                 with _MATHTEXT_DRAW_LOCK:
                     self._figure.savefig(path, dpi=dpi or self.plan.dpi, **kwargs)
         finally:
+            self._withdraw_facet_chrome()
             self._series_locked, self._series_hover = locked, hover
             self._apply_series_focus()
             if restore_display:
