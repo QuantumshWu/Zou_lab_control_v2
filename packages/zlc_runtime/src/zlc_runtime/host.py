@@ -23,6 +23,16 @@ from .plane import (
     RetainedPublicationExpired,
 )
 from .streams import FollowTap, SourceFailed, SourceGenerationEnded, StreamEndedEarly
+
+#: What the SOURCE's lifecycle looks like from a node hosted on it, and never
+#: this node's failure.  A source that ended or itself failed leaves its
+#: follower with nothing more to read; ``GenerationSchemaAdvanced`` says an
+#: output changed shape and so needs a NEW generation -- landing any of them
+#: as failed cleared ``following`` for good, so the restart that would have
+#: granted that generation never came, and a pulse restart that changed the
+#: frame shape killed its occupancy overlay permanently.  CANCELLED is the
+#: phase a standing re-follow restarts from.
+_SOURCE_LIFECYCLE = (SourceGenerationEnded, SourceFailed, GenerationSchemaAdvanced)
 from .task_run import TaskArtifact, TaskRun
 
 
@@ -1222,10 +1232,7 @@ class NodeHost:
         """
 
         self._mark_terminal()
-        if isinstance(
-            error,
-            (SourceGenerationEnded, SourceFailed, GenerationSchemaAdvanced),
-        ):
+        if isinstance(error, _SOURCE_LIFECYCLE):
             self._phase = "cancelled"
             self._error = None
         else:
@@ -1417,21 +1424,7 @@ class NodeHost:
 
     def _finish_frozen_processor_failure(self, error: BaseException) -> None:
         if (
-            isinstance(
-                error,
-                (
-                    _StartSuppressed,
-                    SourceGenerationEnded,
-                    SourceFailed,
-                    # Its own docstring: an output changed shape, so it
-                    # needs a NEW GENERATION -- not a fault.  Landing it
-                    # as failed cleared ``following`` for good, so the
-                    # restart that would have granted that generation
-                    # never came: a pulse restart that changed the frame
-                    # shape killed its occupancy overlay permanently.
-                    GenerationSchemaAdvanced,
-                ),
-            )
+            isinstance(error, (_StartSuppressed, *_SOURCE_LIFECYCLE))
             or self.cancel_requested
         ):
             self._finish_frozen_processor_cancelled()
@@ -1566,10 +1559,6 @@ class NodeHost:
             owner.mark_owner_reaped()
 
     def _finish_follow_processor_cancelled(self) -> None:
-        tap = self._follow_tap
-        if tap is not None:
-            tap.close()
-            self._follow_tap = None
         self._retire_plane_state()
         self._result = _UNRESOLVED
         self._active = False
@@ -1580,21 +1569,7 @@ class NodeHost:
 
     def _finish_follow_processor_failure(self, error: BaseException) -> None:
         if (
-            isinstance(
-                error,
-                (
-                    _StartSuppressed,
-                    SourceGenerationEnded,
-                    SourceFailed,
-                    # Its own docstring: an output changed shape, so it
-                    # needs a NEW GENERATION -- not a fault.  Landing it
-                    # as failed cleared ``following`` for good, so the
-                    # restart that would have granted that generation
-                    # never came: a pulse restart that changed the frame
-                    # shape killed its occupancy overlay permanently.
-                    GenerationSchemaAdvanced,
-                ),
-            )
+            isinstance(error, (_StartSuppressed, *_SOURCE_LIFECYCLE))
             or self.cancel_requested
         ):
             # A source that ended, moved on, or itself failed under a
@@ -1604,10 +1579,6 @@ class NodeHost:
             # restarts from.
             self._finish_follow_processor_cancelled()
             return
-        tap = self._follow_tap
-        if tap is not None:
-            tap.close()
-            self._follow_tap = None
         self._retire_plane_state()
         self._result = _UNRESOLVED
         self._active = False
@@ -1675,17 +1646,10 @@ class NodeHost:
         if not self._active:
             return
         self._release_input_history()
-        if isinstance(
-            error,
-            (SourceGenerationEnded, SourceFailed, GenerationSchemaAdvanced),
-        ):
-            # Same law as the follow finish: the source's lifecycle is not
-            # this node's failure, and CANCELLED is the phase a standing
-            # re-follow restarts from.  A commit that lands in the window
-            # between the new generation's retirement closure and the
-            # lane's own cancellation arrives here as
-            # SourceGenerationEnded -- ending it "failed" cleared
-            # ``following`` for good.
+        if isinstance(error, _SOURCE_LIFECYCLE):
+            # A commit that lands in the window between the new generation's
+            # retirement closure and the lane's own cancellation arrives
+            # here as SourceGenerationEnded.
             self.accept_processor_cancelled()
             return
         self._data_plane.withdraw_processor(self)

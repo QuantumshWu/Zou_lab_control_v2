@@ -80,25 +80,25 @@ def _clock(intervals):
     return HarmonicClock(intervals, now_ns=count(0, min(intervals) * 1_000_000).__next__)
 
 
-def test_harmonic_clock_uses_the_global_smallest_tick_and_group_maximum() -> None:
+def test_harmonic_clock_uses_the_global_smallest_tick() -> None:
     now = [0]
     clock = HarmonicClock((100, 200, 800), now_ns=lambda: now[0])
     assert clock.base_ms == 100
     now[0] = 100_000_000
     assert clock.elapsed_ms() == 100
-    # A group that has shown nothing shows its first picture at once; after
-    # that the group's LONGEST interval is the cap, measured from it.
-    assert clock.group_due(100, (100, 800), None)
-    assert not clock.group_due(100, (100, 800), 0)
-    assert clock.group_due(800, (100, 800), 0)
+    # A panel that has shown nothing shows its first picture at once; after
+    # that its own interval is the cap, measured from it.
+    assert clock.group_due(100, 800, None)
+    assert not clock.group_due(100, 800, 0)
+    assert clock.group_due(800, 800, 0)
     with pytest.raises(ValueError):
         HarmonicClock((100, 250))
     # One delayed callback crossed two slow deadlines. It is due now, not
     # after seven more callbacks, and does not replay either missed frame.
     now[0] = 1_650_000_000
-    assert clock.group_due(clock.elapsed_ms(), (100, 800), 800)
+    assert clock.group_due(clock.elapsed_ms(), 800, 800)
     now[0] += 1_000_000
-    assert not clock.group_due(clock.elapsed_ms(), (100, 800), 1650)
+    assert not clock.group_due(clock.elapsed_ms(), 800, 1650)
 
 
 def test_an_interval_is_measured_from_the_last_picture_not_from_a_grid() -> None:
@@ -112,13 +112,13 @@ def test_an_interval_is_measured_from_the_last_picture_not_from_a_grid() -> None
 
     now = [0]
     clock = HarmonicClock((100,), now_ns=lambda: now[0])
-    assert clock.group_due(0, (100,), None)
+    assert clock.group_due(0, 100, None)
     # 99 ms after its picture the panel is inside its interval, whatever
     # the wall clock is a multiple of.
-    assert not clock.group_due(99, (100,), 0)
-    assert clock.group_due(100, (100,), 0)
-    assert clock.group_due(1_000, (100,), 900)
-    assert not clock.group_due(1_000, (100,), 901)
+    assert not clock.group_due(99, 100, 0)
+    assert clock.group_due(100, 100, 0)
+    assert clock.group_due(1_000, 100, 900)
+    assert not clock.group_due(1_000, 100, 901)
 
 
 class _Port:

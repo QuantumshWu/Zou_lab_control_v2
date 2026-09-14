@@ -325,13 +325,6 @@ class SignalDescription:
     def shape(self) -> tuple[int, ...] | None:
         return None if self.schema is None else self.schema.physical_shape
 
-    @property
-    def derived(self) -> bool:
-        """Whether this signal is cut from another rather than acquired."""
-
-        return self.source_name is not None
-
-
 class IndexedHistoryLease:
     """One consumer's explicit demand for bounded source-index history.
 
@@ -1492,6 +1485,25 @@ class _LatestOnlyProcessorLane:
         self._executor.shutdown(wait=False, cancel_futures=True)
 
 
+class ObsoleteParentResult(RuntimeError):
+    """A processor's result is for a parent the plane has already moved past.
+
+    Ordinary flow control, not a fault: a processor that was still solving
+    when its source published again arrives with an answer to the previous
+    question, and the answer is dropped.  Named, because the consumer that
+    has to tell this apart from a real refusal was reading the English of
+    the message to do it.
+    """
+
+
+class GenerationRetired(RuntimeError):
+    """The generation being published to is no longer the live one.
+
+    Ordinary flow control for the same reason: a publication in flight when
+    a generation retires has nowhere to land.
+    """
+
+
 class GenerationSchemaAdvanced(ValueError):
     """An output changed shape, so it needs a new generation -- not a fault.
 
@@ -2233,7 +2245,7 @@ class SignalDataPlane:
                     source_sequence == state.last_parent_sequence
                     and (trigger is None or trigger == state.last_parent_trigger)
                 ):
-                    raise RuntimeError(
+                    raise ObsoleteParentResult(
                         "Processor result belongs to an obsolete parent"
                     )
             worker_parent = None
@@ -3407,7 +3419,7 @@ class SignalDataPlane:
         parents: tuple[SignalPublication, ...] = (),
     ) -> SignalPublication:
         if state.retired or self._states.get(state.owner_id) is not state:
-            raise RuntimeError("signal generation is no longer active")
+            raise GenerationRetired("signal generation is no longer active")
         if state.terminal:
             raise RuntimeError("signal generation has already published terminal")
         if len({id(parent) for parent in parents}) != len(parents):

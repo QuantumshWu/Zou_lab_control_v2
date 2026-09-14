@@ -5,30 +5,12 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import CancelledError, Future
 from dataclasses import dataclass
-from numbers import Integral
 from time import monotonic_ns
 from typing import Protocol, runtime_checkable
 
+from zlc_data import nonnegative_integer, positive_integer
 from .plane import SignalDataPlane, SignalFront, SignalPublication, SignalValue
 from .streams import EventRef
-
-
-def _positive_int(value: object, field: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, Integral):
-        raise TypeError(f"{field} must be an integer")
-    normalized = int(value)
-    if normalized <= 0:
-        raise ValueError(f"{field} must be positive")
-    return normalized
-
-
-def _nonnegative_int(value: object, field: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, Integral):
-        raise TypeError(f"{field} must be an integer")
-    normalized = int(value)
-    if normalized < 0:
-        raise ValueError(f"{field} must be non-negative")
-    return normalized
 
 
 @runtime_checkable
@@ -58,7 +40,7 @@ class HarmonicClock:
     __slots__ = ("_allowed", "_base_ms", "_now_ns", "_origin_ns")
 
     def __init__(self, intervals: Sequence[int], *, now_ns: Callable[[], int] | None = None) -> None:
-        normalized = tuple(sorted({_positive_int(value, "display interval") for value in intervals}))
+        normalized = tuple(sorted({positive_integer(value, "display interval") for value in intervals}))
         if not normalized:
             raise ValueError("display interval set must not be empty")
         base = normalized[0]
@@ -78,7 +60,7 @@ class HarmonicClock:
         return tuple(sorted(self._allowed))
 
     def _interval(self, value: object) -> int:
-        normalized = _positive_int(value, "display interval")
+        normalized = positive_integer(value, "display interval")
         if normalized not in self._allowed:
             raise ValueError(
                 f"display interval {normalized} is not in {self.intervals}"
@@ -93,23 +75,21 @@ class HarmonicClock:
     def group_due(
         self,
         elapsed_ms: int,
-        member_intervals: Iterable[int],
+        interval_ms: int,
         staged_ms: int | None,
     ) -> bool:
-        """Whether a group last staged at ``staged_ms`` may stage now.
+        """Whether a panel last staged at ``staged_ms`` may stage now.
 
-        A group that has never staged is due at once; a late or coalesced
+        A panel that has never staged is due at once; a late or coalesced
         wake owes one current picture and never replays the shots it missed,
         because the deadline is relative to what was actually shown.
         """
 
-        elapsed = _nonnegative_int(elapsed_ms, "elapsed_ms")
-        members = tuple(self._interval(value) for value in member_intervals)
-        if not members:
-            raise ValueError("a presentation group must have at least one interval")
+        elapsed = nonnegative_integer(elapsed_ms, "elapsed_ms")
+        interval = self._interval(interval_ms)
         if staged_ms is None:
             return True
-        return elapsed - _nonnegative_int(staged_ms, "staged_ms") >= max(members)
+        return elapsed - nonnegative_integer(staged_ms, "staged_ms") >= interval
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,7 +109,7 @@ class SurfaceUpdate:
             raise ValueError("surface update panel_id must be non-empty text")
         if self.panel_id.strip() != self.panel_id:
             raise ValueError("surface update panel_id must be canonical text")
-        object.__setattr__(self, "serial", _positive_int(self.serial, "surface update serial"))
+        object.__setattr__(self, "serial", positive_integer(self.serial, "surface update serial"))
         if not isinstance(self.publication, SignalPublication):
             raise TypeError("surface update requires SignalPublication")
         if not isinstance(self.value, SignalValue):
@@ -864,7 +844,7 @@ class BoardScheduler:
         due = {
             SurfaceBatchArbiter._panel_id(port): self._clock.group_due(
                 elapsed,
-                (getattr(port, "display_interval_ms"),),
+                getattr(port, "display_interval_ms"),
                 self._staged_ms.get(SurfaceBatchArbiter._panel_id(port)),
             )
             for port in ports
@@ -1187,7 +1167,7 @@ class BoardScheduler:
                 continue
             if not self._clock.group_due(
                 elapsed_ms,
-                (getattr(port, "display_interval_ms"),),
+                getattr(port, "display_interval_ms"),
                 self._staged_ms.get(panel_id),
             ):
                 continue

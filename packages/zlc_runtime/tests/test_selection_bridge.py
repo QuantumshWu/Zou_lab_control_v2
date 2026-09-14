@@ -1956,7 +1956,7 @@ def test_the_plane_can_say_who_is_producing_what() -> None:
         frame = described["camera/frame"]
         assert frame.owner_id == "camera"
         assert frame.kind == "producer"
-        assert frame.live and not frame.derived
+        assert frame.live and frame.source_name is None
         assert frame.shape == (1, 1, 4, 3)
 
         events.emit_selection(
@@ -1978,7 +1978,7 @@ def test_the_plane_can_say_who_is_producing_what() -> None:
         }
         assert derived, "a derived signal is invisible to anything offering a choice"
         for item in derived.values():
-            assert item.derived and item.source_name == "camera/frame"
+            assert item.source_name == "camera/frame"
 
         # Copies, not windows.  A description already handed out must keep
         # describing the moment it was taken, and must not be writable by the

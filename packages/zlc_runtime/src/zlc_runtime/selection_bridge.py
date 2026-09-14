@@ -19,6 +19,7 @@ import numpy as np
 
 from zlc_data import (
     AxisId,
+    nonnegative_integer,
     AxisSpec,
     BlockId,
     CoordinateFrameId,
@@ -52,7 +53,7 @@ from .dataset_output import (
     DatasetOutputDeclaration,
     LiveDatasetOutput,
 )
-from .plane import GenerationSchemaAdvanced
+from .plane import GenerationRetired, GenerationSchemaAdvanced, ObsoleteParentResult
 from .plane import SignalDataPlane, SignalPublication, SignalValue
 
 FIT_PARAMETER_CONTRACT = "zlc.selection.fit.parameter"
@@ -434,14 +435,6 @@ def _finite(value: object, field: str) -> float:
     return normalized
 
 
-def _nonnegative_integer(value: object, field: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise TypeError(f"{field} must be a non-negative integer")
-    if value < 0:
-        raise ValueError(f"{field} must be a non-negative integer")
-    return value
-
-
 @dataclass(frozen=True, slots=True)
 class SelectionRange:
     """One canonical closed coordinate range over an upstream axis.
@@ -613,7 +606,7 @@ class SelectionState:
         object.__setattr__(
             self,
             "revision",
-            _nonnegative_integer(self.revision, "selection revision"),
+            nonnegative_integer(self.revision, "selection revision"),
         )
 
 
@@ -819,12 +812,12 @@ class FitEventValue:
         object.__setattr__(
             self,
             "source_revision",
-            _nonnegative_integer(self.source_revision, "fit source_revision"),
+            nonnegative_integer(self.source_revision, "fit source_revision"),
         )
         object.__setattr__(
             self,
             "batch_revision",
-            _nonnegative_integer(self.batch_revision, "fit batch_revision"),
+            nonnegative_integer(self.batch_revision, "fit batch_revision"),
         )
 
 
@@ -1384,9 +1377,9 @@ class SelectionBridge:
                     publication,
                     trigger=("fit", trigger_revision),
                 )
+            except ObsoleteParentResult:
+                return
             except RuntimeError as error:
-                if "obsolete parent" in str(error):
-                    return
                 with self._lock:
                     stale = (
                         self._closed
@@ -1590,9 +1583,9 @@ class SelectionBridge:
                 # describe a newer shot.
                 self._plane.catch_up_latest_only_processor(processor)
                 self._processor_wake()
+            except ObsoleteParentResult:
+                return
             except RuntimeError as error:
-                if "obsolete parent" in str(error):
-                    return
                 with self._lock:
                     stale = self._closed or self._selection is not state
                     if self._selection_processor is processor:
@@ -1811,9 +1804,9 @@ class SelectionBridge:
                 with self._lock:
                     if self._selection_processor is processor:
                         self._selection_publication = source_publication
+        except (ObsoleteParentResult, GenerationRetired):
+            return
         except RuntimeError as error:
-            if "obsolete parent" in str(error) or "generation is no longer active" in str(error):
-                return
             self._accept_processor_failure(processor, error)
 
     def _accept_processor_failure(
