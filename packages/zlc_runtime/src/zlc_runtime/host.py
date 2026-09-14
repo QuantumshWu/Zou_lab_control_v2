@@ -15,7 +15,6 @@ from .dataset_output import (
     LiveDatasetOutput,
 )
 from .owner_mailbox import RunOwnerMailbox
-from .recording import RunRecorder
 from .plane import (
     GenerationSchemaAdvanced,
     SignalDataPlane,
@@ -290,7 +289,6 @@ class NodeHost:
         required_artifacts: Mapping[str, str] | None = None,
         task_name: str | None = None,
         signal_namer: Callable[[str, str], str] | None = None,
-        recorder: RunRecorder | None = None,
     ) -> None:
         if not callable(getattr(data_plane, "freeze", None)):
             raise TypeError("data_plane must provide the SignalDataPlane surface")
@@ -302,13 +300,6 @@ class NodeHost:
             signal_namer = lambda owner, name: f"@logic/{owner}/{name}"
         if not callable(signal_namer):
             raise TypeError("signal_namer must be callable")
-        if recorder is not None and not isinstance(recorder, RunRecorder):
-            raise TypeError("recorder must be RunRecorder")
-        # Whether a run is recorded, and where, is decided by whoever knows
-        # the workspace -- not here.  None means what it has always meant:
-        # the events exist while the plane retains them and nowhere else.
-        self._recorder = recorder
-
         identity = canonical_text(instance_id, "node instance_id")
         normalized_kind = canonical_text(
             str(getattr(kind, "value", kind)),
@@ -489,12 +480,6 @@ class NodeHost:
     def run_directory(self) -> Path | None:
         run = self._task_run
         return None if run is None else run.directory
-
-    @property
-    def recorder(self) -> RunRecorder | None:
-        """Where this run's events are being written, if they are."""
-
-        return self._recorder
 
     @property
     def artifacts(self) -> tuple[TaskArtifact, ...]:
@@ -678,10 +663,6 @@ class NodeHost:
         # every retry re-run the whole thing and raise again -- and a console
         # that retries once per beat could never finish closing over it.
         self._closed = True
-        if self._recorder is not None:
-            # The host is retired, so the recording is over -- every
-            # generation of it.
-            self._recorder.close()
         self._ready_event.set()
         if self._owner is not None:
             self._owner.shutdown()
@@ -1026,52 +1007,15 @@ class NodeHost:
         )
         with self._start_lock:
             self._live_commit_count += 1
-        self._record(published)
         self._request_owner_wake()
         return published
-
-    def _record(self, published: Mapping[str, SignalValue]) -> None:
-        """Hand the recorder what this commit published and is asked to keep.
-
-        ONE owner for "what goes in the record", because there are four
-        places a commit happens -- the worker's and the three a processor
-        uses -- and a rule spelled at each of them is a rule three of them
-        can drift from.
-
-        Named by the DECLARATION -- "counts", "occupied" -- and not by the
-        signal key the plane addresses it with, so what lands on disk is
-        readable without knowing how a run names its signals.
-        """
-
-        if self._recorder is None:
-            return
-        keep = {
-            declaration.name: self.signal_key(declaration.name)
-            for declaration in self._dataset_outputs
-            if declaration.recorded
-        }
-        wanted = {
-            name: published[key]
-            for name, key in keep.items()
-            if key in published
-        }
-        if wanted:
-            self._recorder.record(wanted)
 
     def _commit_processor(
         self, outputs: Mapping[str, LiveDatasetOutput], **placement: object
     ) -> Mapping[str, SignalValue]:
-        """Commit a derived bundle, and put what is recorded in the record.
+        """Commit a derived bundle through the plane."""
 
-        A processor's outputs never pass through ``_commit_live`` -- that
-        path refuses processor mode outright -- so recording only there left
-        occupancy, survival and every other derived quantity out of the
-        record entirely, which is most of what a run is.
-        """
-
-        published = self._data_plane.commit_processor(self, outputs, **placement)
-        self._record(published)
-        return published
+        return self._data_plane.commit_processor(self, outputs, **placement)
 
     def _validate_worker_terminal_contract(self, result: object) -> None:
         declared = {value.name for value in self._dataset_outputs}
@@ -1171,22 +1115,14 @@ class NodeHost:
     def _mark_terminal(self) -> None:
         """This generation will produce no further event.
 
-        Fourteen places used to say so by assigning the flag, which left the
-        one thing that has to happen exactly once when it becomes true -- the
-        recording's buffered tail reaching the disk -- with no owner.  The
-        seal is not that place: a finite run that seals retains nothing and
-        never reaches the retire, and a cancelled one may not seal at all.
-
-        FLUSHED, not closed.  A host has as many generations as its source
-        has: a processor refused into CANCELLED is restarted by a standing
-        re-follow, and a recorder closed here would record nothing from the
-        second generation on, without saying so.  The recording ends with
-        the host, in :meth:`shutdown`.
+        Fourteen places used to say so by assigning the flag; saying it in
+        one place is what lets anything that must happen exactly once when
+        it becomes true hang from it.  The seal is not that place: a finite
+        run that seals retains nothing and never reaches the retire, and a
+        cancelled one may not seal at all.
         """
 
         self._terminal = True
-        if self._recorder is not None:
-            self._recorder.flush()
 
     def _retire_plane_state(self) -> None:
         self._release_input_history()

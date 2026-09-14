@@ -10,18 +10,13 @@
 
 ## 1. 当前实施范围
 
-- 渲染发布改为零拷贝并按面板分进程；run 的已发布事件改为只追加落盘。测量在操作者真实密度（1470×1071、DPR 3）下取，分三层：console（display beat 100 ms 的真实窗口、py-spy 采样稳态 CPU）、capacity（去掉 beat、每个 host 前一帧到就喂下一帧，测管线自己的天花板）、store 微基准（百站、一天一百万 shot）。**run_host 那层是 DPR 1**（Qt5PlotWidget 在 ratio 3 的屏上报 1.0，前端 490×357），不能拿来读任何像素相关的数，本轮未用。
+- 渲染发布改为零拷贝并按面板分进程。测量在操作者真实密度（1470×1071、DPR 3）下取，分两层：console（display beat 100 ms 的真实窗口、py-spy 采样稳态 CPU）、capacity（去掉 beat、每个 host 前一帧到就喂下一帧，测管线自己的天花板）。**run_host 那层是 DPR 1**（Qt5PlotWidget 在 ratio 3 的屏上报 1.0，前端 490×357），不能拿来读任何像素相关的数，本轮未用。
   - **零拷贝**：raster worker 自时间里 `publish` 12.5→0 ms/s、合计 108→85 ms/s（−21%）；console 的渲染线程 4 面板 0.331→0.224 核、8 面板 0.396→0.237 核。满速下每帧渲染 CPU heatmap 4×4 进程 32.0→27.7 ms（−13%）、8 面板 32.1→28.2、curve 21.6→20.2（−7%）、camera 28.2→26.8（−5%）、facet64 36.1→34.7（−4%），单次 10 s 的运行间抖动约 ±3%。**零拷贝不省投影**：一帧的渲染 CPU 是 20–36 ms，被省掉的整帧搬运约 0.6 ms/帧/面板，所以它是 worker 自时间的 20%、整帧的 2–13%。
   - **分进程**：4 面板满速 camera 4M 54.5→156.6 fps（2.87×）、facet64 image 35.1→104.6（2.98×）、heatmap 44.3→102.1（2.30×）、curve 65.8→108.2（1.64×）。**100 ms 的 beat 下不改任何帧率**（四面板 1.13 核，从没有人在等），代价是进程数与内存：4 面板 console 峰值 RSS 1037→1557 MB（3→6 进程），总 CPU 1.126→1.232 核。
-  - **落盘**：百站一天（1e6 shot）`occupied` 40 MB、float32 `counts` 410 MB、float64 791 MB；每事件写入 25–27 µs（10 shot/s 即 0.00025 核），读最近 1000 个事件 10–17 ms。接进 console 后 4 面板 1.232→1.208 核、9.1 fps 不变、无 stall。中途发现记录相机 monitor 会把 console 卡 6.9 秒、RSS 冲到 1.6 GB，已按「monitor 无历史可记」排除。
   - **合并前的对抗式审查（6 个维度并行提出、每条 3 个独立视角试图驳倒；21 条提出、5 条三视角未驳倒）改了下列判断**，其中几条被投票驳回但我按代码独立核实为真，以代码为准：
-    - 相机的有限输出用 `DatasetCoverage` 发布的就是原始帧，「monitor 不记录」在真机上不挡（一个 chunk 4.3 GB）→ 改为 `DatasetOutputDeclaration.recorded` 默认关，由产出节点声明；occupancy 三个输出、frame_survival、Derive 打开，scan 不打开（日志要求事件自足，而扫描事件的 `cell_origin` 在输出上）。
-    - `_commit_live` 拒绝 processor 模式，所以 occupancy 这类**派生量一个都没被记录**——正是用户问的那个场景 → 三处 `commit_processor` 与 `_commit_live` 统一经 `NodeHost._record`。
-    - 终态的 flush 落在轮询 host 的线程（console 上即 Qt 线程），实测一次 flush 约 17 ms 且与 chunk 大小无关（50 与 1000 个事件同为 17 ms，几乎全是 fsync）→ recorder 改为自带一条有界队列的写线程，终态只请求冲刷、shutdown 才等。
     - 池的懒起使首块面板出图 12.5→19.4 s。进一步测得 size=1 是 12.46 s，**这 7 秒是子进程的数量而非起法**（四份 matplotlib import 与预热），提前并发起省不掉 → 默认 `size=1`，把数量交给工作点决定。
-    - `PublicationWriter` 开在已有 store 上会把 manifest 截空（孤儿 chunk）；`flush()` 先清缓冲再写，失败即丢事件；`values()` 跨 schema 变化会炸、空窗口秩/dtype 不对、可变性随窗口位置变；`recorder.failure` 无人读；`_by_store` 按陈旧 store id 盲 pop 会顶掉**活着的**块的 claim（后果是那一帧静默退回整帧拷贝）；`_recycle_locked` 后 `durable_events` 一度领先 manifest 文件 —— 均已修，各有测试。
     - 池上 `pids`/`size`/`members`/`alive` 无读者，已删；console 验收测试断言「两块面板在两个子进程」在逻辑核 <8 的机器上不成立，已改成与池大小无关的性质。
-  - 未做：display interval 仍是固定 beat（「不画没人看的帧」是产品判断，待用户拍板）；每事件仍有约 30 字节 JSON（占 occupancy 盘上开销的四分之三，把 revision 改成平面可再降一半）；store 不携带 placement，所以带 `cell_origin` 的输出（scan）还不能记；`snapshot(i)` 每次重开并整块解码所在 chunk（读路径目前无产品调用者）；压缩/远端对象存储未做。真机未验收。
+  - 未做：display interval 仍是固定 beat（「不画没人看的帧」是产品判断，待用户拍板）。真机未验收。
 
 - Pulse完成通知已改为独立、不claim的等待旁路，复用owner token、FIRE command_id与每run DONE Event；等待不占控制连接，Stop/超时/新Fire/接管/断线不会交付下一run的报告。Local/Remote/Virtual及installed forwarder使用同一wait_done接口，保留Virtual世界线程错误。Pulse Editor在后台Fire返回后开始等待，通过原Qt投递接收，删除有限run的100ms状态轮询依赖；保留其它状态显示定时器。直接并发及真实Qt按钮验证通过，运行中单次关闭可退出；无RTL/Config时序更改，客户端与server需同步更新。测试窗口已关闭，基准和探针不入Git。
 - 用户确认实验机使用板载USB_UART；board.xdc标明CH340C，但原Host/RTL均固定3M，超过WCH手册2Mbps范围及无流控连续应用建议。部署manifest现在统一uart_baud=460800，原header生成链投影给top/bridge，Host默认与CLI同源；Pulse执行时钟/geometry/fingerprint不变。实际RTL在该速率通过完整命令握手与14word/65byte含CRC回复，相关Host默认/strict manifest/NODELAY直接用例通过。用户必须在实验机build/program后才可真机验收，本机未执行build/synthesis/program；不能用仿真宣布现场丢字节已解决。厂商依据：WCH CH340 Datasheet §5.4（https://datasheet.lcsc.com/datasheet/pdf/e2f14e51aaa60c793f1f0cbc8a5d5faa.pdf），及WCH产品表的CH340C continuous 460800项。

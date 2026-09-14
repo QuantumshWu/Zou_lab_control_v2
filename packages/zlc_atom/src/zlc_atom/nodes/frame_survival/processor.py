@@ -63,11 +63,8 @@ SURVIVAL_OUTPUTS = (
     # it -- that history is what lets a scope or reduction change replay
     # every retained shot under the new projection instead of freezing old
     # points in their old meaning.
-    # Recorded: a survival curve is what the run was for, and it is one
-    # number per site per shot.
     DatasetOutputDeclaration(
-        "survival", "frame_survival.survival", index_by_source=True,
-        recorded=True,
+        "survival", "frame_survival.survival", index_by_source=True
     ),
 )
 

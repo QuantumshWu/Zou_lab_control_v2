@@ -654,7 +654,6 @@ def make_host(
     source_signal: str | None,
     values: Mapping[str, Any],
     request_owner_wake: Callable[[], None] | None = None,
-    recorder: Any = None,
 ) -> NodeHost:
     """One node under the runtime's own lifecycle, named for its instance.
 
@@ -702,5 +701,4 @@ def make_host(
             for output in descriptor.artifact_outputs
         },
         task_name=str(descriptor.api_name),
-        recorder=recorder,
     )

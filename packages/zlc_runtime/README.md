@@ -73,27 +73,6 @@ cancels the wait. Runtime owns only this toolkit-neutral lifecycle—the
 Workbench chooses the UI for each request kind and plugin science remains in
 the Task.
 
-Every event a run publishes can also be recorded as it is published.
-`commit_live` is the one place every event of every node passes through, so a
-`RunRecorder` given to `NodeHost` writes each committed output there, into one
-append-only store per declared output under a directory the caller allocates.
-The recording is the run's scratch and lives as long as the run does in this
-process: the recorder deletes its directory when the host is retired, and at
-interpreter exit if it never was.  A process manages its own; nothing sweeps
-what another process left.
-`zlc_runtime.publication_store` owns those files -- chunk planes as plain
-`.npy`, fsynced before the manifest that names them is atomically replaced, so
-a chunk the manifest does not name never happened and an interruption costs
-only the events still buffered.  `zlc_data.store` owns what a chunk means; this
-layer owns where it lands, which is why the format layer may not import the
-durable one.
-
-A MONITOR is not recorded: it retains only its latest event, so there is no
-history of it to write.  That is also what makes recording affordable -- the
-monitor in a real run is the camera.  Recording never fails a run: the first
-failure stops the recording and is kept in `recorder.failure`, and the
-experiment goes on.
-
 The installed product is the repository-root ZLC distribution; this directory
 is an internal dependency layer. Target invariants and current implementation
 status are recorded in the root Architecture and Implementation Plan.

@@ -31,28 +31,13 @@ from zlc_atom.devices.camera.photoelectrons import PHOTOELECTRONS
 from zlc_atom.nodes.calibration import ReadoutModelKind, TrapCalibration
 from zlc_atom.nodes.calibration.calibration import classify_threshold
 
-# Exact delivery means every camera cycle is classified; it does not change a
-# live Monitor's public geometry into history.  The site-sized verdicts and
-# counts DECLARE source-index history -- a rolling occupation-rate panel
-# needs one cell per parent cycle, and the plane retains that bounded
-# history only while a panel leases it -- while the judged frames stay
-# latest-only like their camera parent: retaining full frames per shot is a
-# memory decision no panel has asked for.
-# RECORDED, all three: what this node accumulates over a run IS the science,
-# and it is the size that makes keeping it affordable -- a site's occupancy is
-# one bit and its counts four bytes, so a hundred sites for a day is forty
-# megabytes, against four and a half megabytes for one of the frames it read.
+
 OCCUPANCY_OUTPUTS = (
+    DatasetOutputDeclaration("counts", "occupancy.counts", index_by_source=True),
     DatasetOutputDeclaration(
-        "counts", "occupancy.counts", index_by_source=True, recorded=True
+        "occupied", IMAGE_POINT_OVERLAY_CONTRACT, index_by_source=True
     ),
-    DatasetOutputDeclaration(
-        "occupied", IMAGE_POINT_OVERLAY_CONTRACT, index_by_source=True,
-        recorded=True,
-    ),
-    DatasetOutputDeclaration(
-        "frame_judged", "occupancy.frame_judged", recorded=True
-    ),
+    DatasetOutputDeclaration("frame_judged", "occupancy.frame_judged"),
 )
 
 
