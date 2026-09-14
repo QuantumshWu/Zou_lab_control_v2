@@ -97,10 +97,6 @@ class SelectorScene:
     def selector_kinds(self) -> tuple[SceneKind, ...]:
         return tuple(kind for kind, _ in self.groups)
 
-    def primitives_for(self, kind: SceneKind) -> tuple[SelectorPrimitive, ...]:
-        return next((items for key, items in self.groups if key is kind), ())
-
-
 @dataclass(frozen=True, slots=True)
 class SelectorSceneStyle:
     line_width_pt: float

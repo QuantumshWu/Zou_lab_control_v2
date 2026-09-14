@@ -111,7 +111,7 @@ class HeightBarScene:
     """Everything an interaction needs to read one rendered scene.
 
     ``project`` speaks FOLDED ground coordinates (the render's own
-    frame); ``pick`` and ``cell_corners`` speak the caller's original
+    frame); ``pick`` speaks the caller's original
     grid indices and undo the azimuth fold and the LOD pooling.
     """
 
@@ -211,18 +211,6 @@ class HeightBarScene:
         cell = (face - 4) // 4
         a, b = cell % self.nx, cell // self.nx
         return self.unfold_cell(a, b)
-
-    def cell_corners(
-        self, row: int, column: int
-    ) -> tuple[tuple[float, float], ...]:
-        """The four ground corners of one original cell, in pixels."""
-
-        a, b = self.fold_cell(row, column)
-        return tuple(
-            self.project(float(a + da), float(b + db), 0.0)
-            for da, db in ((0, 0), (1, 0), (1, 1), (0, 1))
-        )
-
 
 def _zero_colour_plane(
     zero_rgb: tuple[float, float, float],

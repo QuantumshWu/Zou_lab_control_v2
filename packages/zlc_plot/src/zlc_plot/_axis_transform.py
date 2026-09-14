@@ -104,12 +104,6 @@ class AxisTransform:
             _interpolate(y1, y0, ty, self.y_scale),
         )
 
-    def screen_span(self, low: float, high: float, *, axis: str) -> float:
-        """How far apart two values are ON SCREEN, in axis space."""
-
-        scale = self.x_scale if axis == "x" else self.y_scale
-        return abs(axis_space(high, scale) - axis_space(low, scale))
-
     @staticmethod
     def _event_normalized(event: Any, canvas: Any) -> tuple[float, float] | None:
         pixel_x = getattr(event, "x", None)

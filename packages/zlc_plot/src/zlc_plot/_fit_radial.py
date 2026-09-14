@@ -92,21 +92,6 @@ class _SeparableKernel:
             float(parameters[self.y_radius_index]),
         )
 
-    def axis_vectors(
-        self,
-        parameters: np.ndarray,
-        x_coordinates: np.ndarray,
-        y_coordinates: np.ndarray,
-    ) -> tuple[
-        tuple[np.ndarray, np.ndarray, np.ndarray],
-        tuple[np.ndarray, np.ndarray, np.ndarray],
-    ]:
-        return (
-            self.x_vectors(parameters, x_coordinates),
-            self.y_vectors(parameters, y_coordinates),
-        )
-
-
 _RADIAL_KERNEL = _SeparableKernel(
     capability="regular_image_radial",
     parameter_count=5,

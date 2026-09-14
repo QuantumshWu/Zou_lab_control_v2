@@ -807,14 +807,6 @@ class PulseSequence:
     def period_by_id(self) -> Mapping[str, PulsePeriod]:
         return self._period_by_id
 
-    @property
-    def slot_by_id(self) -> Mapping[str, PulseSlot]:
-        return self._slot_by_id
-
-    @property
-    def api_parameter_by_id(self) -> Mapping[str, PulseApiParameter]:
-        return self._api_parameter_by_id
-
     def field_unit(self, reference: PulseFieldRef) -> str:
         """The authored unit of one physical field."""
 

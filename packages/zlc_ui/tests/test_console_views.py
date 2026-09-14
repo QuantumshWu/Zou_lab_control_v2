@@ -1126,7 +1126,7 @@ app.processEvents()
 assert view.tabs.indexOf(editor) < 0
 assert view.tabs.indexOf(publisher_editor) >= 0
 assert 'camera-1' not in handle._logic_editors
-assert handle.logic_row_ids() == ('camera-1',)
+assert tuple(handle._rows) == ('camera-1',)
 view.editor_close_requested.emit(publisher_editor)
 app.processEvents()
 assert 'panel-1' not in handle._panel_publisher_editors

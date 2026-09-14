@@ -3181,14 +3181,6 @@ class FluentCycleComboBox(FluentComboBox):
             )
         return choice[0], choice[1]
 
-    def setCycleValue(self, value: object) -> None:  # noqa: N802 - Qt API name
-        """Select one lazy sub-domain value, asking the selected position first."""
-
-        selected = self._position_of(value, first=self._cycle_position)
-        if selected < 0:
-            raise ValueError("value is not in the cycle choices")
-        self.setCyclePosition(selected)
-
     def setCyclePosition(self, position: int) -> None:  # noqa: N802 - Qt API name
         """Select one lazy sub-domain position without scanning its values."""
 

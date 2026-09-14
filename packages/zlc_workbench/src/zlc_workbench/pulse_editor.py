@@ -4103,14 +4103,6 @@ class PulseEditorPresenter:
             self.sequence is not None and self.sequence.slots
         )
 
-    def refresh_scan_progress(self) -> None:
-        """Where the board is in the table, asked and shown before returning."""
-
-        if self.sequencer is None:
-            return
-        self._poll_board()
-        self._render_scan_progress()
-
     def _scan_progress_from_view(self) -> None:
         """The Scan page asking where the board is, answered when the board does."""
 

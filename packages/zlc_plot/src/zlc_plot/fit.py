@@ -1135,10 +1135,6 @@ class FitResult:
     def sample_labels(self) -> None:
         return None
 
-    @property
-    def success_mask(self) -> np.ndarray:
-        return _readonly(np.asarray((self.success,), dtype=np.bool_))
-
     #: Fields that carry no array and decide nothing about one: a result
     #: already validated stays validated when one of these is attached.
     #: Re-validating for them cost a sixty-four cell histogram frame 3.5 ms

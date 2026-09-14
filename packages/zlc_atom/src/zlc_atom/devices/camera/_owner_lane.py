@@ -38,10 +38,6 @@ class CameraSdkOwnerLane:
         self._thread = threading.Thread(target=self._run, name=name, daemon=False)
         self._thread.start()
 
-    @property
-    def owner_ident(self) -> int | None:
-        return self._owner_ident
-
     def _run(self) -> None:
         self._owner_ident = threading.get_ident()
         while True:

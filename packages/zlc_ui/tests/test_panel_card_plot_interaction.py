@@ -482,7 +482,7 @@ card.geometry_changed.connect(lambda: packed.append(card.size()))
 for size in ('4x4', '2x2'):
     packed.clear()
     before = card.size()
-    card.set_panel_size(size)
+    card.set_panel_projection({**card._state_projection, 'size': size}, {})
     app.processEvents()
     # Not yet: the picture on the card is still the old size.
     assert card.size() == before, (size, card.size(), before)
@@ -507,7 +507,7 @@ for size in ('4x4', '2x2'):
 # package alone it is zlc_ui's own cell.  The empty card asks, at once.
 bare = PanelCardView('panel-2', 'Plot')
 bare.set_size_choices(('1x2', '2x2', '4x4'), '2x2')
-bare.set_panel_size('4x4')
+bare.set_panel_projection({**bare._state_projection, 'size': '4x4'}, {})
 planned = panel_display_size('4x4')
 assert bare.width() == planned[0] + 2 * tested_module.CARD_PAD, (bare.width(), planned)
 assert bare.height() == planned[1] + bare._title_band.height() + pad, (bare.height(), planned)

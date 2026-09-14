@@ -538,11 +538,6 @@ class PanelCardView(FluentGroupBox):
         self._cell_kind_choices = values
         self._rebuild_settings_form()
 
-    def set_panel_state(self, state: object) -> None:
-        """Project the one Workbench-owned state into this Setting view."""
-
-        self._apply_panel_state(self._validated_panel_state(state))
-
     def _validated_panel_state(self, state: object) -> dict[str, object]:
         incoming = panel_state_document(state)
         if not self._size_choices:
@@ -580,16 +575,6 @@ class PanelCardView(FluentGroupBox):
     @property
     def panel_size(self) -> str:
         return str(self._state_projection["size"])
-
-    def set_title(self, title: str) -> None:
-        incoming = dict(self._state_projection)
-        incoming["title"] = str(title)
-        self.set_panel_state(incoming)
-
-    def set_panel_size(self, size: str) -> None:
-        incoming = dict(self._state_projection)
-        incoming["size"] = str(size)
-        self.set_panel_state(incoming)
 
     def set_panel_projection(self, state: object, surface: object) -> None:
         """Replace state and plot metadata before reconciling the form once."""

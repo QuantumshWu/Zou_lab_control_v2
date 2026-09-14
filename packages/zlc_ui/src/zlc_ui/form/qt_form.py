@@ -1545,11 +1545,6 @@ class FluentParameterForm(QtWidgets.QWidget):
                     self._set_automatic_label(field.key)
         self._project_enabled_all()
 
-    def validate_population(self, values: Mapping[str, object]) -> None:
-        """Validate one exact owner projection without mutating any widget."""
-
-        self._prepare_population(values)
-
     def adopt_projection(
         self,
         spec: FormSpec,

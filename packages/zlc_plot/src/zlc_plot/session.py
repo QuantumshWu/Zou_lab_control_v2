@@ -820,20 +820,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             return axes[index]
         return self._renderer.primary_axes
 
-    def _raster_capture_rgba(
-        self,
-        *,
-        redraw: bool = False,
-    ) -> np.ndarray:
-        """Capture the worker-owned, already-composed canvas."""
-
-        with self._render_lock:
-            with self._lock:
-                self._assert_open()
-            assert self._renderer is not None
-            with self._renderer.raster_transaction():
-                return self._renderer.capture_rgba(redraw=redraw)
-
     def _raster_capture_rgba_bytes(self) -> tuple[bytes, int, int]:
         """The composed canvas as raw bytes, for a caller that wants bytes."""
 
@@ -4583,18 +4569,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             self._projected._display_selector_state(state)
             if self._view is not None
             else self._special_display_selector_state(state)
-        )
-
-    def _display_selector_snapshot(self) -> SelectorSnapshot:
-        snapshot = self._resolved_selector_snapshot()
-        return SelectorSnapshot(
-            tuple(
-                self._selector_state_in_display(state)
-                for state in snapshot.committed
-            ),
-            None
-            if snapshot.candidate is None
-            else self._selector_state_in_display(snapshot.candidate),
         )
 
     def _raster_pointer_state(

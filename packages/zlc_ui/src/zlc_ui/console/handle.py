@@ -617,9 +617,6 @@ class TaskConsoleHandle(QtCore.QObject):
             retire_widget(row)
         self._show_logic_rows()
 
-    def logic_row_ids(self) -> tuple[str, ...]:
-        return tuple(self._rows)
-
     def set_logic_state(self, node_id: str, state: str, status_text: str = "") -> None:
         self._rows[str(node_id)].set_state(state, status_text)
 

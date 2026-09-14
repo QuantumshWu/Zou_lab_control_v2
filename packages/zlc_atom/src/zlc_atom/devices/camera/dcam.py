@@ -834,17 +834,6 @@ class DcamCameraAdapter:
         with self._state_lock:
             return self._armed
 
-    def observed_produced_count(self) -> int:
-        """Read the DCAM transfer counter without consuming a frame."""
-
-        def observe() -> int:
-            if not self._armed:
-                raise RuntimeError("qCMOS produced count requires an armed capture")
-            count, _newest = self._observe_transfer_on_owner()
-            return count
-
-        return self._lane.call(observe)
-
     def _close_on_owner(self) -> None:
         """Release the handle; only a release the SDK confirmed lets go of it.
 

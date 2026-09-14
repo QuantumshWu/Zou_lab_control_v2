@@ -169,18 +169,6 @@ class DeviceUseCoordinator:
         with self._lock:
             return self._device_owner_revisions.get(str(device_key), 0)
 
-    def logic_owners(self, device_key: str) -> tuple[str, ...]:
-        key = str(device_key).strip()
-        if not key:
-            raise ValueError("logic owners require a device key")
-        with self._lock:
-            return tuple(
-                lease.label
-                for lease in self._leases.values()
-                if lease.kind == "logic"
-                and any(claim.device_key == key for claim in lease.claims)
-            )
-
     def field_policy(
         self,
         device_key: str,

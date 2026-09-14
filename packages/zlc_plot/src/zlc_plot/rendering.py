@@ -4754,19 +4754,6 @@ class MatplotlibRenderer:
         if plan:
             kernels.raster_error_bars(*plan, np.asarray(canvas.buffer_rgba()))
 
-    def _raster_error_bars(
-        self,
-        groups: Sequence[Sequence[Any]],
-        canvas: Any,
-    ) -> bool:
-        """Paint error bars through the kernel, or refuse with nothing painted."""
-
-        plan = self._error_bar_plan(groups, canvas)
-        if plan is None:
-            return False
-        self._stroke_error_bar_plan(plan, canvas)
-        return True
-
     def _curve_stroke_plan(
         self, lines: Sequence[Any], canvas: Any
     ) -> tuple[Any, ...] | None:
