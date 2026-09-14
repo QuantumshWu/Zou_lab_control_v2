@@ -3911,13 +3911,13 @@ class ConsolePresenter:
                         target=normalized_target,
                         description=description,
                     )
-                    selections = self._subscribe_editor_gestures(
-                        binding,
-                        editor_host,
-                        accepted_frozen,
-                    )
                     old_host = binding.editor_host
                     old_selections = binding.editor_selections
+                    selections = (
+                        old_selections
+                        if old_host is editor_host and old_selections is not None
+                        else self._subscribe_editor_gestures(binding, editor_host)
+                    )
                     try:
                         mount(binding.panel_id, editor_host)
                     except BaseException:
@@ -3955,7 +3955,7 @@ class ConsolePresenter:
                             or interaction_changed
                         ):
                             self._publish_panel_state(binding)
-                    if old_selections is not None:
+                    if old_selections is not None and old_selections is not selections:
                         old_selections.close()
                     # An advanced host is the one just mounted: it took the
                     # newer freeze in place.  Only a replaced one retires.
@@ -4324,30 +4324,30 @@ class ConsolePresenter:
         binding.editor_configuration = (host, pending, True, binding.state, frozen)
 
     def _refresh_panel_editor_selection(self, binding: PanelBinding) -> None:
-        """Rebind one unchanged editor host to a replaced frozen record."""
+        """See that an unchanged editor host listens; the replaced frozen
+        record is read where its gestures are accepted, not bound here."""
 
         host = binding.editor_host
-        frozen = binding.frozen_data
-        if host is None or frozen is None:
+        if host is None or binding.frozen_data is None:
             return
-        selections = self._subscribe_editor_gestures(binding, host, frozen)
-        previous = binding.editor_selections
-        binding.editor_selections = selections
-        if previous is not None:
-            previous.close()
+        if binding.editor_selections is None:
+            binding.editor_selections = self._subscribe_editor_gestures(binding, host)
 
     def _subscribe_editor_gestures(
         self,
         binding: PanelBinding,
         host: object,
-        frozen: PanelFrozenData,
     ) -> object:
         """Listen to everything the operator can do on Edit's frozen surface.
 
-        Mounting the surface and re-binding an unchanged one to a newer freeze
-        both need exactly this, and they were written out twice: the second
-        copy silently lacked the threshold channel, so a level set before a
-        Refresh reached the panel and one set after it did not.
+        The source is bound to the HOST and lives as long as it.  It used to
+        be bound to the freeze: every re-acceptance of the same host closed
+        the old source and opened a new one, and a gesture the child was
+        already answering came back addressed to the subscription just
+        released -- a wheel turned while Edit re-accepted its picture zoomed
+        the surface and the panel never heard of it.  Which freeze a gesture
+        was made on is the gesture's own data identity, checked where it is
+        accepted; the freeze Edit shows is the binding's record, read there.
         """
 
         panel_id = binding.panel_id
@@ -4355,10 +4355,10 @@ class ConsolePresenter:
         source = PlotSelectionSource(
             host,
             on_threshold=lambda event: self._enqueue_panel_threshold(
-                panel_id, host, event, frozen=frozen
+                panel_id, host, event
             ),
             on_crosshair=lambda event: self._enqueue_panel_crosshair(
-                panel_id, host, event, frozen=frozen
+                panel_id, host, event
             ),
         )
         source.subscribe_display_observation(
@@ -4366,12 +4366,12 @@ class ConsolePresenter:
         )
         source.subscribe_observation(
             lambda observation: self._enqueue_panel_editor_observation(
-                panel_id, host, frozen, observation
+                panel_id, host, observation
             )
         )
         source.subscribe_viewport_observation(
             lambda observation: self._enqueue_panel_editor_viewport(
-                panel_id, host, frozen, observation
+                panel_id, host, observation
             )
         )
         source.subscribe_focus_observation(
@@ -4383,7 +4383,6 @@ class ConsolePresenter:
                     subject,
                     generation,
                     revision,
-                    frozen=frozen,
                 )
             )
         )
@@ -5478,13 +5477,9 @@ class ConsolePresenter:
         panel_id: str,
         host: object,
         observation: object,
-        *,
-        frozen: PanelFrozenData | None = None,
     ) -> None:
         self._enqueue_panel_interaction(
-            lambda: self._settle_panel_threshold(
-                panel_id, host, observation, frozen=frozen
-            )
+            lambda: self._settle_panel_threshold(panel_id, host, observation)
         )
 
     def _enqueue_panel_display(
@@ -5614,13 +5609,9 @@ class ConsolePresenter:
         panel_id: str,
         host: object,
         event: object,
-        *,
-        frozen: PanelFrozenData | None = None,
     ) -> None:
         self._enqueue_panel_interaction(
-            lambda: self._settle_panel_crosshair(
-                panel_id, host, event, frozen=frozen
-            )
+            lambda: self._settle_panel_crosshair(panel_id, host, event)
         )
 
     def _settle_panel_crosshair(
@@ -5628,8 +5619,6 @@ class ConsolePresenter:
         panel_id: str,
         source: object,
         event: object,
-        *,
-        frozen: PanelFrozenData | None = None,
     ) -> None:
         """A crosshair placed on either surface is the panel's marker.
 
@@ -5647,7 +5636,6 @@ class ConsolePresenter:
             binding,
             source,
             event,
-            frozen=frozen,
             exact_subject=False,
         )
         if accepted is None:
@@ -5703,7 +5691,6 @@ class ConsolePresenter:
         source: object,
         observation: object | None,
         *,
-        frozen: PanelFrozenData | None = None,
         exact_subject: bool = True,
         subject: object | None = None,
         data_generation: object = None,
@@ -5720,14 +5707,14 @@ class ConsolePresenter:
                 plot_input = surface.plot_input
         elif (
             source is binding.editor_host
-            and frozen is not None
             and binding.frozen_data is not None
-            and binding.frozen_data.publication is frozen.publication
-            and binding.frozen_data.snapshot.ref == frozen.snapshot.ref
             and not binding.frozen_configuration_incompatible
         ):
-            publication = frozen.publication
-            plot_input = frozen.plot_input
+            # The freeze Edit shows is the binding's record; a gesture made
+            # on an earlier picture carries that picture's data identity and
+            # is refused below, so the record need not travel with it.
+            publication = binding.frozen_data.publication
+            plot_input = binding.frozen_data.plot_input
         if observation is None:
             identity_matches = plot_identity_matches_plot_input(
                 plot_input,
@@ -5765,8 +5752,6 @@ class ConsolePresenter:
         panel_id: str,
         source: object,
         observation: object,
-        *,
-        frozen: PanelFrozenData | None = None,
     ) -> None:
         """A threshold set on either surface is the panel's answer.
 
@@ -5785,7 +5770,6 @@ class ConsolePresenter:
             binding,
             source,
             observation,
-            frozen=frozen,
             exact_subject=False,
         )
         if accepted is None:
@@ -5844,12 +5828,11 @@ class ConsolePresenter:
         self,
         panel_id: str,
         host: object,
-        frozen: PanelFrozenData,
         observation: object,
     ) -> None:
         self._enqueue_panel_interaction(
             lambda: self._route_panel_editor_observation(
-                panel_id, host, frozen, observation
+                panel_id, host, observation
             )
         )
 
@@ -5869,12 +5852,11 @@ class ConsolePresenter:
         self,
         panel_id: str,
         host: object,
-        frozen: PanelFrozenData,
         observation: object,
     ) -> None:
         self._enqueue_panel_interaction(
             lambda: self._route_panel_editor_viewport(
-                panel_id, host, frozen, observation
+                panel_id, host, observation
             )
         )
 
@@ -5886,8 +5868,6 @@ class ConsolePresenter:
         subject: object,
         data_generation: object,
         data_revision: object,
-        *,
-        frozen: PanelFrozenData | None = None,
     ) -> None:
         self._enqueue_panel_interaction(
             lambda: self._route_panel_focus(
@@ -5897,7 +5877,6 @@ class ConsolePresenter:
                 subject,
                 data_generation,
                 data_revision,
-                frozen=frozen,
             )
         )
 
@@ -5996,8 +5975,6 @@ class ConsolePresenter:
         subject: object,
         data_generation: object,
         data_revision: object,
-        *,
-        frozen: PanelFrozenData | None = None,
     ) -> None:
         binding = self.panels.get(str(panel_id))
         if binding is None:
@@ -6006,7 +5983,6 @@ class ConsolePresenter:
             binding,
             source,
             None,
-            frozen=frozen,
             exact_subject=False,
             subject=subject,
             data_generation=data_generation,
@@ -6174,7 +6150,6 @@ class ConsolePresenter:
         self,
         panel_id: str,
         host: object,
-        frozen: PanelFrozenData,
         observation: object,
     ) -> None:
         binding = self.panels.get(str(panel_id))
@@ -6182,7 +6157,6 @@ class ConsolePresenter:
             binding,
             host,
             observation,
-            frozen=frozen,
         ) is None:
             return
         self._synchronize_panel_interaction(
@@ -6201,10 +6175,9 @@ class ConsolePresenter:
         self,
         panel_id: str,
         host: object,
-        frozen: PanelFrozenData,
         observation: object,
     ) -> None:
-        """Accept a region only from this exact still-current Frozen input."""
+        """Accept a region only from the still-current Frozen input."""
 
         binding = self.panels.get(str(panel_id))
         if binding is None:
@@ -6213,7 +6186,6 @@ class ConsolePresenter:
             binding,
             host,
             observation,
-            frozen=frozen,
         )
         if accepted is None or not panel_selection_matches_subject(
             observation.state, observation.subject
@@ -6225,7 +6197,7 @@ class ConsolePresenter:
             observation,
             publication,
             other_host=binding.host,
-            expected_snapshot=frozen.snapshot,
+            expected_snapshot=binding.frozen_data.snapshot,
         )
         self._track_panel_configuration(
             binding,
