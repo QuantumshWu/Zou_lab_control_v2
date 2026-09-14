@@ -102,14 +102,25 @@ def scan_repeat_domain(
 
 
 def _unique_domain(values: Sequence[float]) -> tuple[tuple[float, ...], tuple[int, ...]]:
+    """The distinct coordinates in the order they first appear, and where each
+    row lands in them.
+
+    Looked up, not searched: asking a list where a value already is costs one
+    comparison per coordinate already seen, so building the domain of an
+    N-point scan with N distinct coordinates cost N-squared comparisons at the
+    moment the scan's first value arrives.  A dict answers the same question --
+    equality, with the same identity shortcut -- in one step.
+    """
+
+    seen: dict[float, int] = {}
     domain: list[float] = []
     indices: list[int] = []
     for value in values:
-        try:
-            index = domain.index(value)
-        except ValueError:
+        index = seen.get(value)
+        if index is None:
             domain.append(value)
             index = len(domain) - 1
+            seen[value] = index
         indices.append(index)
     return tuple(domain), tuple(indices)
 
