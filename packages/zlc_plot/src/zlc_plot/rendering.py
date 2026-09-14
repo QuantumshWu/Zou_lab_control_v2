@@ -4258,37 +4258,45 @@ class MatplotlibRenderer:
         ):
             return False
         height, width = canvas_rgba.shape[:2]
-        vertices: list[np.ndarray] = []
-        offsets = [0]
-        colours = np.empty((len(lines), 4), dtype=np.uint8)
-        widths = np.empty(len(lines), dtype=np.float64)
-        clips = np.empty((len(lines), 4), dtype=np.int32)
+        # ONE TRANSFORM FOR THE BATCH.  A line's transform is its axes'
+        # data transform -- six numbers on a linear axes -- read once per
+        # line and applied to every vertex of the batch by one kernel.
+        # Transforming each line's path on its own (a Path built, a
+        # composite transform walked, the copy flipped into rows, four
+        # small arrays made for its colour) was three quarters of what a
+        # fitted grid paid to stroke its hundred and ninety-two fit lines.
+        # A line on a transform that is not affine (a log axis) is
+        # transformed on its own and joins the batch already in pixels.
+        count = len(lines)
+        raw: list[np.ndarray] = []
+        offsets = np.empty(count + 1, dtype=np.int64)
+        offsets[0] = 0
+        matrices = np.empty((count, 6), dtype=np.float64)
+        affine = np.ones(count, dtype=np.bool_)
+        rgba = np.empty((count, 4), dtype=np.float64)
+        widths = np.empty(count, dtype=np.float64)
+        clips = np.empty((count, 4), dtype=np.int32)
+        dots_per_point = float(self._figure.dpi) / 72.0
         for index, line in enumerate(lines):
-            path = line.get_transform().transform_path(line.get_path())
+            path = line.get_path()
             if path.codes is not None:
                 return False
             points = np.asarray(path.vertices, dtype=np.float64)
             if points.ndim != 2 or points.shape[1] != 2:
                 return False
-            if not bool(np.all(np.isfinite(points))):
-                # The native overview envelope deliberately handles only one
-                # continuous run; invalid gaps retain the exact Line2D path.
-                return False
-            display = np.array(points, dtype=np.float64, order="C", copy=True)
-            display[:, 1] = float(height) - display[:, 1]
-            vertices.append(display)
-            offsets.append(offsets[-1] + display.shape[0])
-            rgba = np.asarray(to_rgba(line.get_color()), dtype=float)
+            transform = line.get_transform()
+            if transform.is_affine:
+                matrices[index] = transform.get_matrix()[:2].reshape(-1)
+            else:
+                affine[index] = False
+                points = np.asarray(transform.transform(points), dtype=np.float64)
+            raw.append(points)
+            offsets[index + 1] = offsets[index] + points.shape[0]
+            rgba[index] = to_rgba(line.get_color())
             alpha = line.get_alpha()
             if alpha is not None:
-                rgba[3] *= float(alpha)
-            colours[index] = np.clip(np.rint(rgba * 255.0), 0, 255).astype(
-                np.uint8
-            )
-            widths[index] = max(
-                1.0,
-                float(line.get_linewidth()) * float(self._figure.dpi) / 72.0,
-            )
+                rgba[index, 3] *= float(alpha)
+            widths[index] = max(1.0, float(line.get_linewidth()) * dots_per_point)
             box = line.axes.bbox
             clips[index] = (
                 max(0, int(math.floor(float(box.x0)))),
@@ -4296,11 +4304,24 @@ class MatplotlibRenderer:
                 min(width, int(math.ceil(float(box.x1)))),
                 min(height, int(math.ceil(float(height) - float(box.y0)))),
             )
-        packed = np.concatenate(vertices, axis=0)
+        packed = np.empty((int(offsets[-1]), 2), dtype=np.float64)
+        kernels.transform_polylines(
+            kernels.readable(np.concatenate(raw, axis=0)),
+            kernels.readable(offsets),
+            kernels.readable(matrices),
+            kernels.readable(affine),
+            np.float64(height),
+            packed,
+        )
+        if not bool(np.all(np.isfinite(packed))):
+            # The native overview envelope deliberately handles only one
+            # continuous run; invalid gaps retain the exact Line2D path.
+            return False
+        colours = np.clip(np.rint(rgba * 255.0), 0, 255).astype(np.uint8)
         lane_offsets = self._polyline_lane_offsets(clips)
         kernels.raster_polylines(
             kernels.readable(packed),
-            kernels.readable(np.asarray(offsets, dtype=np.int64)),
+            kernels.readable(offsets),
             kernels.readable(colours),
             kernels.readable(widths),
             kernels.readable(clips),

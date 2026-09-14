@@ -1824,6 +1824,38 @@ def replay_foreground_masks(static_masks, static_rows, static_colors,
 
 
 @njit(cache=True, parallel=True, nogil=True)
+def transform_polylines(vertices, offsets, matrices, affine, canvas_height, out):
+    """Every polyline's vertices through its own affine, into canvas rows.
+
+    ``matrices`` holds the two rows of each line's 3x3 display affine,
+    flattened -- ``(a, c, e, b, d, f)`` in Matplotlib's Affine2D order --
+    so a vertex lands where ``transform_affine`` would put it.  A line
+    whose ``affine`` flag is off arrives already in display coordinates
+    and is only turned into canvas rows.
+    """
+
+    for line in prange(offsets.size - 1):
+        start = offsets[line]
+        stop = offsets[line + 1]
+        if affine[line]:
+            a = matrices[line, 0]
+            c = matrices[line, 1]
+            e = matrices[line, 2]
+            b = matrices[line, 3]
+            d = matrices[line, 4]
+            f = matrices[line, 5]
+            for point in range(start, stop):
+                x = vertices[point, 0]
+                y = vertices[point, 1]
+                out[point, 0] = a * x + c * y + e
+                out[point, 1] = canvas_height - (b * x + d * y + f)
+        else:
+            for point in range(start, stop):
+                out[point, 0] = vertices[point, 0]
+                out[point, 1] = canvas_height - vertices[point, 1]
+
+
+@njit(cache=True, parallel=True, nogil=True)
 def transform_curve_batch(
     x,
     y,

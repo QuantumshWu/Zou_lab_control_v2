@@ -470,6 +470,15 @@ class FitProjection:
             )
         self._histogram_projection = histogram_projection
         self._view = None
+        #: What a fit parameter's number is on screen, resolved once per
+        #: view: the answer is a function of the parameter's spec and the
+        #: view's quantities, and a sixty-four cell grid asked it a
+        #: thousand times a frame, every cell walking the unit relations
+        #: again for the same twelve parameters of the same model.
+        self._fit_conversion_memo: dict[
+            tuple[Any, bool, UnitRelation | None], _FitParameterConversion
+        ] = {}
+        self._histogram_plot = isinstance(semantic_spec(spec), HistogramPlot)
         #: The previous revision's built DataView, handed across the fork so
         #: coordinate-domain work (an np.unique over a million-point axis)
         #: carries over when the coordinate plane did not change.  Consumed
@@ -654,7 +663,7 @@ class FitProjection:
 
     def _build_view_and_payload(self) -> None:
         if not isinstance(self._data, OwnedSnapshot):
-            self._view = None
+            self._install_view(None)
             self._payload = self._data
             return
         self._build_view()
@@ -716,6 +725,13 @@ class FitProjection:
         self._scoped_cache = (key, scoped)
         return scoped
 
+    def _install_view(self, view: "DataView | None") -> None:
+        """The view every quantity is read from -- and the end of whatever
+        was resolved against the one before it."""
+
+        self._view = view
+        self._fit_conversion_memo.clear()
+
     def _build_view(self) -> None:
         """Construct the unit-aware DataView without projecting a payload."""
 
@@ -735,7 +751,7 @@ class FitProjection:
         if y_ref is not None and values.get("y_display_unit") is not None:
             overrides[y_ref] = values.get("y_display_unit")
         value_unit = values.get("value_display_unit")
-        self._view = DataView(
+        self._install_view(DataView(
             self._scoped_data(),
             axis_display_units=overrides,
             value_display_unit=value_unit,
@@ -743,7 +759,7 @@ class FitProjection:
             inherit_domains_from=(
                 self._view if self._view is not None else self._inherit_view
             ),
-        )
+        ))
         self._inherit_view = None
 
     def _build_payload_from_view(self) -> None:
@@ -2156,6 +2172,25 @@ class FitProjection:
         difference: bool = False,
         display_relation: UnitRelation | None = None,
     ) -> _FitParameterConversion:
+        """Where one fit parameter's number lives on screen, resolved once
+        per view (see ``_fit_conversion_memo``)."""
+
+        key = (spec, difference, display_relation)
+        conversion = self._fit_conversion_memo.get(key)
+        if conversion is None:
+            conversion = self._resolve_fit_parameter_conversion(
+                spec, difference=difference, display_relation=display_relation
+            )
+            self._fit_conversion_memo[key] = conversion
+        return conversion
+
+    def _resolve_fit_parameter_conversion(
+        self,
+        spec: Any,
+        *,
+        difference: bool,
+        display_relation: UnitRelation | None,
+    ) -> _FitParameterConversion:
         """Resolve where one fit parameter's number lives on screen.
 
         ``difference`` reads a value as a span even for a point parameter --
@@ -2359,7 +2394,7 @@ class FitProjection:
         return semantic_spec(self._spec)
 
     def _is_histogram_plot(self) -> bool:
-        return isinstance(self._semantic_spec(), HistogramPlot)
+        return self._histogram_plot
 
     def _x_ref(self) -> AxisRef:
         semantic = self._semantic_spec()
