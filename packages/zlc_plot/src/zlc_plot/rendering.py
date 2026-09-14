@@ -1430,6 +1430,44 @@ _ENVELOPE_MIN_COLUMNS = 64
 _ENVELOPE_MAX_COLUMNS = 4096
 
 
+def _pixel_columns(axes: Any) -> tuple[tuple[float, float], int]:
+    """The x window an axes shows, and the columns a dense trace is read at.
+
+    Two columns per pixel of the axes box, between a floor and a ceiling.
+    """
+
+    columns = int(
+        min(
+            _ENVELOPE_MAX_COLUMNS,
+            max(_ENVELOPE_MIN_COLUMNS, float(axes.bbox.width) * 2.0),
+        )
+    )
+    return tuple(map(float, axes.get_xlim())), columns
+
+
+def _thinned_to_columns(
+    x: np.ndarray,
+    y: np.ndarray,
+    window: tuple[float, float],
+    columns: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """The polyline as it is drawn: each column's extremes when the trace is
+    denser than the columns, the samples themselves when it is not.
+
+    THE ONE PLACE this is decided.  What a dense trace looks like at pixel
+    resolution is a property of the picture, not of the renderer: the
+    Line2D that Agg draws for an export and the stroke kernel that draws
+    the live frame are both handed what this returns, so they stroke the
+    same polyline, and neither reduces a line on its own.
+    """
+
+    if x.size >= columns * _ENVELOPE_MIN_POINTS_PER_COLUMN:
+        enveloped = _envelope_decimated(x, y, window, columns)
+        if enveloped is not None:
+            return enveloped
+    return x, y
+
+
 def _envelope_decimated(
     x: np.ndarray,
     y: np.ndarray,
@@ -3213,19 +3251,8 @@ class MatplotlibRenderer:
         *,
         isolated_glyphs: bool,
     ) -> None:
-        columns = int(
-            min(
-                _ENVELOPE_MAX_COLUMNS,
-                max(_ENVELOPE_MIN_COLUMNS, float(axes.bbox.width) * 2.0),
-            )
-        )
-        window = tuple(map(float, axes.get_xlim()))
-        enveloped = (
-            _envelope_decimated(x, y, window, columns)
-            if x.size >= columns * _ENVELOPE_MIN_POINTS_PER_COLUMN
-            else None
-        )
-        drawn_x, drawn_y = (x, y) if enveloped is None else enveloped
+        window, columns = _pixel_columns(axes)
+        drawn_x, drawn_y = _thinned_to_columns(x, y, window, columns)
         if isolated_glyphs:
             point_x, point_y = _bounded_isolated_curve_points(
                 x, y, window, columns
@@ -4267,97 +4294,6 @@ class MatplotlibRenderer:
         boundaries.append(total)
         return np.asarray(boundaries, dtype=np.int64)
 
-    def _raster_grouped_curve_command(
-        self,
-        series: Sequence[_PreparedSeries],
-        axes: Any,
-        canvas: Any,
-    ) -> bool:
-        """Transform and paint one grouped Curve in batched native passes."""
-
-        if not self._grouped_curve_command_supported(series):
-            return False
-        points = int(series[0].x.size)
-        canvas_rgba = np.asarray(canvas.buffer_rgba())
-        height, width = canvas_rgba.shape[:2]
-        y = np.stack([item.y for item in series])
-        valid = np.stack([item.valid for item in series])
-        shape = (len(series), points)
-        geometry = self._artists.get("curve:grouped_geometry")
-        if (
-            not isinstance(geometry, np.ndarray)
-            or geometry.shape != shape + (2,)
-        ):
-            geometry = np.empty(shape + (2,), dtype=np.float64)
-            self._artists["curve:grouped_geometry"] = geometry
-        affine = np.asarray(axes.transData.get_affine().to_values(), dtype=np.float64)
-        kernels.transform_curve_batch(
-            kernels.readable(np.asarray(series[0].x, dtype=np.float64)),
-            kernels.readable(y),
-            kernels.readable(valid),
-            kernels.readable(affine),
-            np.float64(height),
-            geometry,
-        )
-        from matplotlib.colors import to_rgba
-
-        cycle = self.style.palette.line_cycle
-        line_policy = self.style.artists.curve
-        line_colours = []
-        for item in series:
-            colour = cycle[_series_slot(item.identity, len(cycle))]
-            rgba = np.asarray(to_rgba(colour), dtype=float)
-            line_rgba = rgba.copy()
-            line_rgba[3] *= float(line_policy.alpha)
-            line_colours.append(
-                np.clip(np.rint(line_rgba * 255.0), 0, 255).astype(np.uint8)
-            )
-        offsets = np.arange(
-            0, (len(series) + 1) * points, points, dtype=np.int64
-        )
-        box = axes.bbox
-        clip = np.asarray(
-            (
-                max(0, int(math.floor(float(box.x0)))),
-                max(0, int(math.floor(float(height) - float(box.y1)))),
-                min(width, int(math.ceil(float(box.x1)))),
-                min(height, int(math.ceil(float(height) - float(box.y0)))),
-            ),
-            dtype=np.int32,
-        )
-        clips = np.broadcast_to(clip, (len(series), 4)).copy()
-        line_widths = np.full(
-            len(series),
-            max(1.0, line_policy.linewidth * float(self._figure.dpi) / 72.0),
-            dtype=np.float64,
-        )
-        kernels.raster_polylines(
-            kernels.readable(geometry.reshape(-1, 2)),
-            kernels.readable(offsets),
-            kernels.readable(np.asarray(line_colours, dtype=np.uint8)),
-            kernels.readable(line_widths),
-            kernels.readable(clips),
-            # One axes: every line may overlap, one sequential lane.
-            kernels.readable(np.asarray([0, len(series)], dtype=np.int64)),
-            kernels.stroke_bands(1),
-            canvas_rgba,
-        )
-        return True
-
-    @staticmethod
-    def _grouped_curve_command_supported(
-        series: Sequence[_PreparedSeries],
-    ) -> bool:
-        if not series:
-            return False
-        points = int(series[0].x.size)
-        return points >= 2 and all(
-            item.x.shape == (points,)
-            and item.y.shape == (points,)
-            and np.array_equal(item.x, series[0].x)
-            for item in series
-        )
-
     def _raster_prepared_error_bars(
         self,
         surfaces: Sequence[tuple[str, Any, int | None]],
@@ -4597,10 +4533,6 @@ class MatplotlibRenderer:
             underlay()
         if not self._raster_prepared_error_bars(surfaces, series_by_cell, canvas):
             return False
-        if len(surfaces) == 1 and self._raster_grouped_curve_command(
-            tuple(series_by_cell[0]), surfaces[0][1], canvas
-        ):
-            return True
         from matplotlib.colors import to_rgba
 
         vertices: list[np.ndarray] = []
@@ -4636,30 +4568,16 @@ class MatplotlibRenderer:
                 if transform.is_affine
                 else None
             )
-            # A dense series is thinned to each pixel column's extremes
-            # before it is stroked, exactly as the standalone panel thins
-            # the polyline it hands its Line2D: the stroke is exact, segment
-            # by segment, and owes nothing to how many samples share a
-            # column.  Sparse series pass through untouched.
-            columns = int(
-                min(
-                    _ENVELOPE_MAX_COLUMNS,
-                    max(_ENVELOPE_MIN_COLUMNS, float(box.width) * 2.0),
-                )
-            )
-            window = tuple(map(float, axes.get_xlim()))
+            # Each series is handed to the kernel as the standalone panel
+            # hands it to its Line2D (``_thinned_to_columns``).
+            window, columns = _pixel_columns(axes)
             for item in cell_series:
-                plotted_y = np.where(item.valid, item.y, np.nan)
-                thinned = (
-                    _envelope_decimated(
-                        np.asarray(item.x, dtype=np.float64), plotted_y, window, columns
-                    )
-                    if item.x.size >= columns * _ENVELOPE_MIN_POINTS_PER_COLUMN
-                    else None
+                item_x, plotted_y = _thinned_to_columns(
+                    np.asarray(item.x, dtype=np.float64),
+                    np.where(item.valid, item.y, np.nan),
+                    window,
+                    columns,
                 )
-                item_x = item.x if thinned is None else thinned[0]
-                if thinned is not None:
-                    plotted_y = thinned[1]
                 if affine is not None:
                     a, b, c, d, e, f = affine
                     display = np.empty((item_x.shape[0], 2), dtype=np.float64)

@@ -947,12 +947,10 @@ def _segment_cover(
 
 
 @njit(cache=True, nogil=True)
-def _fold_pieces(
+def _cut_pieces(
     vertices,
     start,
     stop,
-    first,
-    last,
     snap,
     snap_offset,
     piece_x0,
@@ -964,125 +962,50 @@ def _fold_pieces(
     base,
     write,
 ):
-    """Cut the vertices [first, last) of the line [start, stop) into pieces.
+    """Cut the line [start, stop) into pieces, one per finite segment.
 
-    Every segment that crosses from one pixel column to another is a piece
-    of its own; a run of three or more consecutive samples inside ONE
-    column is folded into the vertical traversal from its lowest sample
-    to its highest, standing at the run's mean x, its ends round joins
-    (the path turned there).  A run of one or two samples has nothing to
-    fold and is kept as it is.  The vertex ``last`` -- the next chunk's
-    first -- ends the walk as the vertex the last run connects to, and is
-    not owned here; the sub-pixel segment into it, when it shares the
-    run's column, is inside that column's traversal already.
-
-    With ``write`` false only the count is taken, which is how the store
+    A piece runs from one finite vertex to the next.  A non-finite vertex
+    breaks the path, and the pieces at a break carry the caps: ``cap0`` on
+    the first piece of a subpath, ``cap1`` on its last.  A rectilinear
+    line's vertices are moved onto the pixel grid first (``snap``).  With
+    ``write`` false only the count is taken, which is how the piece store
     is sized exactly before the second walk fills it from ``base``.
     """
 
     count = 0
-    run_column = -1
-    run_samples = 0
-    run_low = np.float64(0.0)
-    run_high = np.float64(0.0)
-    run_sum = np.float64(0.0)
-    run_last_x = np.float64(0.0)
-    run_last_y = np.float64(0.0)
-    run_cap = True
-    subpath_pieces = 0
-    for point in range(first, last + 1):
-        finite = False
-        x = np.float64(0.0)
-        y = np.float64(0.0)
-        if point < stop:
-            x = vertices[point, 0]
-            y = vertices[point, 1]
-            finite = np.isfinite(x) and np.isfinite(y)
-            if finite and snap:
-                x = np.floor(x + np.float64(0.5)) + snap_offset
-                y = np.floor(y + np.float64(0.5)) + snap_offset
-        owned = point < last
-        column = int(np.floor(x)) if finite else -1
-        if finite and owned and column == run_column:
-            if run_samples == 2:
-                # Two samples were kept as their own segment; a third
-                # folds the run into its traversal instead.
-                count -= 1
-                subpath_pieces -= 1
-            run_samples += 1
-            run_low = min(run_low, y)
-            run_high = max(run_high, y)
-            run_sum += x
-            if run_samples == 2:
-                if write:
-                    piece_x0[base + count] = run_last_x
-                    piece_y0[base + count] = run_last_y
-                    piece_x1[base + count] = x
-                    piece_y1[base + count] = y
-                    piece_cap0[base + count] = run_cap
-                    piece_cap1[base + count] = False
-                count += 1
-                subpath_pieces += 1
-            run_last_x = x
-            run_last_y = y
+    for point in range(start, stop - 1):
+        x0 = vertices[point, 0]
+        y0 = vertices[point, 1]
+        x1 = vertices[point + 1, 0]
+        y1 = vertices[point + 1, 1]
+        if not (
+            np.isfinite(x0)
+            and np.isfinite(y0)
+            and np.isfinite(x1)
+            and np.isfinite(y1)
+        ):
             continue
-        # The run ends here.
-        if run_samples >= 3:
-            if write:
-                mean_x = run_sum / np.float64(run_samples)
-                piece_x0[base + count] = mean_x
-                piece_y0[base + count] = run_low
-                piece_x1[base + count] = mean_x
-                piece_y1[base + count] = run_high
-                piece_cap0[base + count] = False
-                piece_cap1[base + count] = False
-            count += 1
-            subpath_pieces += 1
-        elif not finite and run_samples == 2:
-            if write:
-                piece_cap1[base + count - 1] = True
-        elif not finite and run_samples == 1 and subpath_pieces > 0:
-            # The path ends on a lone sample: the connector into it is
-            # its last piece, and takes the cap.
-            if write:
-                piece_cap1[base + count - 1] = True
-        if finite and run_samples >= 1 and column != run_column:
-            # The connector from the run's last sample to this one.
-            if write:
-                piece_x0[base + count] = run_last_x
-                piece_y0[base + count] = run_last_y
-                piece_x1[base + count] = x
-                piece_y1[base + count] = y
-                piece_cap0[base + count] = run_cap and run_samples == 1
-                piece_cap1[base + count] = point + 1 >= stop or not (
-                    np.isfinite(vertices[point + 1, 0])
-                    and np.isfinite(vertices[point + 1, 1])
-                )
-            count += 1
-            subpath_pieces += 1
-        if not owned:
-            break
-        if finite:
-            run_column = column
-            run_samples = 1
-            run_low = y
-            run_high = y
-            run_sum = x
-            run_last_x = x
-            run_last_y = y
-            run_cap = point == start or not (
+        if write:
+            if snap:
+                x0 = np.floor(x0 + np.float64(0.5)) + snap_offset
+                y0 = np.floor(y0 + np.float64(0.5)) + snap_offset
+                x1 = np.floor(x1 + np.float64(0.5)) + snap_offset
+                y1 = np.floor(y1 + np.float64(0.5)) + snap_offset
+            piece_x0[base + count] = x0
+            piece_y0[base + count] = y0
+            piece_x1[base + count] = x1
+            piece_y1[base + count] = y1
+            piece_cap0[base + count] = point == start or not (
                 np.isfinite(vertices[point - 1, 0])
                 and np.isfinite(vertices[point - 1, 1])
             )
-        else:
-            run_column = -1
-            run_samples = 0
-            run_cap = True
-            subpath_pieces = 0
+            piece_cap1[base + count] = point + 2 >= stop or not (
+                np.isfinite(vertices[point + 2, 0])
+                and np.isfinite(vertices[point + 2, 1])
+            )
+        count += 1
     return count
 
-
-_FOLD_CHUNK = 65536
 
 
 @njit(cache=True, parallel=True, nogil=True)
@@ -1099,15 +1022,12 @@ def raster_polylines(
     prove disjointness (``_polyline_lane_offsets``); anything they cannot
     prove arrives as one lane, which is the serial behaviour.
 
-    THE STROKE IS READ AT PIXEL RESOLUTION.  Each line is first cut into
-    pieces (``_fold_pieces``): the segments that cross between pixel
-    columns, and the vertical traversal of every run of samples that
-    shares one column -- inside a column the samples are less than a
-    pixel apart, and the union of their strokes is that traversal to
-    within the pixel's own width.  Reading a sub-pixel zigzag segment by
-    segment cost seconds on a two-million-sample trace and painted the
-    same pixels.  The cut is made in vertex chunks across the pool, a
-    counting walk sizing the piece store exactly before a filling walk.
+    EVERY SEGMENT IS A PIECE (``_cut_pieces``).  The kernel strokes the
+    line it is given; what a trace denser than the pixel grid looks like
+    is not decided here.  The caller decides it once, thinning such a
+    trace to each column's extremes before handing it to this kernel and
+    to the Line2D Agg draws alike (``rendering._thinned_to_columns``), so
+    the two stroke the same polyline.
 
     AGG SNAPS A RECTILINEAR PATH.  A line whose every segment is level or
     vertical, with fewer than 1024 vertices, has its vertices moved onto
@@ -1162,36 +1082,16 @@ def raster_polylines(
             else np.float64(0.0)
         )
 
-    # Cut every line into pieces, in vertex chunks across the pool.
-    chunk_starts = np.zeros(line_count + 1, dtype=np.int64)
-    for line in range(line_count):
-        points = offsets[line + 1] - offsets[line]
-        chunk_starts[line + 1] = chunk_starts[line] + max(
-            1, (points + _FOLD_CHUNK - 1) // _FOLD_CHUNK
-        )
-    chunk_count = chunk_starts[line_count]
-    chunk_line = np.empty(chunk_count, dtype=np.int64)
-    chunk_first = np.empty(chunk_count, dtype=np.int64)
-    chunk_last = np.empty(chunk_count, dtype=np.int64)
-    for line in range(line_count):
-        start = offsets[line]
-        stop = offsets[line + 1]
-        for chunk in range(chunk_starts[line], chunk_starts[line + 1]):
-            index = chunk - chunk_starts[line]
-            chunk_line[chunk] = line
-            chunk_first[chunk] = min(stop, start + index * _FOLD_CHUNK)
-            chunk_last[chunk] = min(stop, start + (index + 1) * _FOLD_CHUNK)
-    counted = np.zeros(chunk_count + 1, dtype=np.int64)
+    # Cut every line into its pieces: a counting walk sizes the store, a
+    # filling walk fills it, each line on its own thread.
+    piece_offsets = np.zeros(line_count + 1, dtype=np.int64)
     scratch_f = np.empty(1, dtype=np.float64)
     scratch_b = np.empty(1, dtype=np.bool_)
-    for chunk in prange(chunk_count):
-        line = chunk_line[chunk]
-        counted[chunk + 1] = _fold_pieces(
+    for line in prange(line_count):
+        piece_offsets[line + 1] = _cut_pieces(
             vertices,
             offsets[line],
             offsets[line + 1],
-            chunk_first[chunk],
-            chunk_last[chunk],
             snaps[line],
             snap_offsets[line],
             scratch_f,
@@ -1203,23 +1103,20 @@ def raster_polylines(
             0,
             False,
         )
-    for chunk in range(chunk_count):
-        counted[chunk + 1] += counted[chunk]
-    total_pieces = counted[chunk_count]
+    for line in range(line_count):
+        piece_offsets[line + 1] += piece_offsets[line]
+    total_pieces = piece_offsets[line_count]
     piece_x0 = np.empty(max(total_pieces, 1), dtype=np.float64)
     piece_y0 = np.empty(max(total_pieces, 1), dtype=np.float64)
     piece_x1 = np.empty(max(total_pieces, 1), dtype=np.float64)
     piece_y1 = np.empty(max(total_pieces, 1), dtype=np.float64)
     piece_cap0 = np.empty(max(total_pieces, 1), dtype=np.bool_)
     piece_cap1 = np.empty(max(total_pieces, 1), dtype=np.bool_)
-    for chunk in prange(chunk_count):
-        line = chunk_line[chunk]
-        _fold_pieces(
+    for line in prange(line_count):
+        _cut_pieces(
             vertices,
             offsets[line],
             offsets[line + 1],
-            chunk_first[chunk],
-            chunk_last[chunk],
             snaps[line],
             snap_offsets[line],
             piece_x0,
@@ -1228,7 +1125,7 @@ def raster_polylines(
             piece_y1,
             piece_cap0,
             piece_cap1,
-            counted[chunk],
+            piece_offsets[line],
             True,
         )
 
@@ -1251,8 +1148,8 @@ def raster_polylines(
         amount = np.zeros(height, dtype=np.float64)
         counts = np.zeros(width + 1, dtype=np.int64)
         for line in range(lane_offsets[lane], lane_offsets[lane + 1]):
-            piece_first = counted[chunk_starts[line]]
-            piece_last = counted[chunk_starts[line + 1]]
+            piece_first = piece_offsets[line]
+            piece_last = piece_offsets[line + 1]
             if piece_last <= piece_first:
                 continue
             clip_left = max(0, clips[line, 0])

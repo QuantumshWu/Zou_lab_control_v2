@@ -78,10 +78,16 @@ def _shapes(dpr: float) -> dict[str, tuple[np.ndarray, np.ndarray]]:
     dense_x, dense = _envelope_decimated(
         raw_x, raw_y, (float(raw_x[0]), float(raw_x[-1])), int(WIDTH * dpr)
     )
+    # A smooth curve sampled many times per pixel column reaches both
+    # renderers AS SAMPLED: a fit line in a small grid cell is exactly
+    # this, and nothing thins it.
+    smooth_x = np.linspace(12, WIDTH - 12, 3000) * dpr
+    smooth = (HEIGHT / 2 + 40 * np.sin(np.linspace(0, 3 * np.pi, 3000))) * dpr
     level = np.array([12, WIDTH - 12]) * dpr
     return {
         "steep noise": (xs, steep),
         "gentle": (xs, gentle),
+        "dense smooth": (smooth_x, smooth),
         "dense band": (dense_x, dense),
         "level": (level, np.array([HEIGHT / 2 + 0.3, HEIGHT / 2 + 0.3]) * dpr),
         "vertical": (np.array([WIDTH / 2 + 0.3, WIDTH / 2 + 0.3]) * dpr, np.array([12, HEIGHT - 12]) * dpr),
