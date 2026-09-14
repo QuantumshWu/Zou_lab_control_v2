@@ -68,7 +68,7 @@ def test_the_warmer_finds_every_kernel_it_looks_for() -> None:
                 for line in pathlib.Path(module.__file__)
                 .read_text(encoding="utf-8")
                 .splitlines()
-                if line.startswith("@njit")
+                if line.startswith("@njit") and 'inline="always"' not in line
             )
         )
     assert declared > 0
@@ -487,3 +487,22 @@ def test_the_warming_stops_before_its_next_picture_once_a_panel_asks(monkeypatch
     _kernel_warm.warm_process(proceed=lambda: False)
     assert rendered == []
     assert constructed == []
+
+
+def test_an_inlined_helper_is_not_a_kernel_to_warm() -> None:
+    """A function compiled inline is copied into its callers and never has a
+    signature of its own, so the warmer must not look for one: the stroke
+    kernel's edge-coverage helpers are inlined, and every kernel found is
+    one that can actually be warm."""
+
+    from zlc_plot import _raster_kernels
+
+    found = _kernel_warm.kernel_dispatchers()
+    assert "_raster_kernels._slanted_cover" not in found
+    assert "_raster_kernels._clamped_line_integral" not in found
+    assert "_raster_kernels.raster_polylines" in found
+    assert all(
+        getattr(kernel, "targetoptions", {}).get("inline") != "always"
+        for kernel in found.values()
+    )
+    assert _raster_kernels._slanted_cover.targetoptions.get("inline") == "always"

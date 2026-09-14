@@ -39,11 +39,13 @@ def _reference_polylines(vertices, offsets, colours, widths, clips, out):
         high = np.full(width, -np.inf)
         left = np.full(width, np.inf)
         right = np.full(width, -np.inf)
+        slope = np.zeros(width)
         steep = np.zeros(width, dtype=bool)
         # A column's envelope: every vertex of a finite segment that falls
         # in the column, and the height where the segment crosses the
-        # column's centre; how far left and right those reach; and whether
-        # a steep segment (more rise than run) put anything in it.
+        # column's centre; how far left and right those reach; the rise per
+        # column of the steepest shallow segment in it; and whether a steep
+        # segment (more rise than run) put anything in it.
         for point in range(start, stop - 1):
             x0, y0 = float(vertices[point, 0]), float(vertices[point, 1])
             x1, y1 = float(vertices[point + 1, 0]), float(vertices[point + 1, 1])
@@ -51,6 +53,7 @@ def _reference_polylines(vertices, offsets, colours, widths, clips, out):
                 continue
             dx = x1 - x0
             rising = abs(y1 - y0) > abs(dx)
+            grade = 0.0 if rising else abs(y1 - y0) / abs(dx)
             for vertex_x, vertex_y in ((x0, y0), (x1, y1)):
                 column = int(np.floor(vertex_x))
                 if clip_left <= column < clip_right:
@@ -58,6 +61,7 @@ def _reference_polylines(vertices, offsets, colours, widths, clips, out):
                     high[column] = max(high[column], vertex_y)
                     left[column] = min(left[column], vertex_x)
                     right[column] = max(right[column], vertex_x)
+                    slope[column] = max(slope[column], grade)
                     steep[column] |= rising
             if abs(dx) < 1.0e-12:
                 continue
@@ -72,17 +76,33 @@ def _reference_polylines(vertices, offsets, colours, widths, clips, out):
                 high[column] = max(high[column], y)
                 left[column] = min(left[column], column + 0.5)
                 right[column] = max(right[column], column + 0.5)
+                slope[column] = max(slope[column], grade)
                 steep[column] |= rising
         # The stroke around a column's span: a disc of the half-width
         # reaches a target column, whose centre is ``gap`` from the nearest
-        # thing the source holds, past the span's ends by sqrt(r² - gap²).
-        # A shallow span covers every column within the disc in full; a
-        # steep span covers a column by the capsule's own overlap with it,
-        # clamp(r - gap + 1/2).  A pixel takes the most any source gives it,
-        # that weight times the one-pixel vertical ramp.
+        # thing the source holds, past the span's ends by sqrt(r² - gap²);
+        # in its own column a shallow span reaches r * sqrt(1 + slope²), the
+        # perpendicular half-width seen vertically.  A shallow span covers
+        # every column within the disc in full; a steep span covers a column
+        # by the capsule's own overlap with it, clamp(r - gap + 1/2).  A
+        # pixel takes the most any source gives it: that weight times the
+        # coverage of a slanted edge, the average over the pixel's width of
+        # the one-pixel ramp along an edge rising ``slope`` across it.
         radius = max(0.5, float(widths[line]) * 0.5)
         reach = int(np.ceil(radius))
         alpha_code = float(colours[line, 3]) / 255.0
+
+        def integral(value):
+            if value <= 0.0:
+                return 0.0
+            if value <= 1.0:
+                return 0.5 * value * value
+            return value - 0.5
+
+        def cover(depth, grade):
+            if grade <= 1.0e-9:
+                return min(1.0, max(0.0, depth))
+            return (integral(depth + 0.5 * grade) - integral(depth - 0.5 * grade)) / grade
 
         def reach_of(source, column):
             centre = column + 0.5
@@ -94,12 +114,17 @@ def _reference_polylines(vertices, offsets, colours, widths, clips, out):
                 gap = 0.0
             gap = max(gap, 0.0)
             squared = radius * radius - gap * gap
-            vertical = np.sqrt(squared) if squared > 0.0 else 0.0
             if steep[source]:
                 weight = min(1.0, max(0.0, radius - gap + 0.5))
+                grade = 0.0
             else:
                 weight = 1.0 if squared > 0.0 else 0.0
-            return weight, vertical
+                grade = slope[source]
+            if source == column and not steep[source]:
+                vertical = radius * np.sqrt(1.0 + grade * grade)
+            else:
+                vertical = np.sqrt(squared) if squared > 0.0 else 0.0
+            return weight, vertical, grade
 
         for column in range(clip_left, clip_right):
             sources = [
@@ -112,19 +137,22 @@ def _reference_polylines(vertices, offsets, colours, widths, clips, out):
             ]
             if not sources:
                 continue
-            envelope_low = min(low[s] - reach_of(s, column)[1] for s in sources)
-            envelope_high = max(high[s] + reach_of(s, column)[1] for s in sources)
+            envelope_low = min(
+                low[s] - reach_of(s, column)[1] - 0.5 * reach_of(s, column)[2] for s in sources
+            )
+            envelope_high = max(
+                high[s] + reach_of(s, column)[1] + 0.5 * reach_of(s, column)[2] for s in sources
+            )
             first_row = max(clip_top, int(np.floor(envelope_low - 0.5)))
             last_row = min(clip_bottom, int(np.ceil(envelope_high + 0.5)))
             for row in range(first_row, last_row):
                 py = row + 0.5
                 amount = 0.0
                 for source in sources:
-                    weight, vertical = reach_of(source, column)
+                    weight, vertical, grade = reach_of(source, column)
                     covered = min(
-                        1.0,
-                        py - (low[source] - vertical) + 0.5,
-                        (high[source] + vertical) - py + 0.5,
+                        cover(py - (low[source] - vertical) + 0.5, grade),
+                        cover((high[source] + vertical) - py + 0.5, grade),
                     )
                     if covered > 0.0:
                         amount = max(amount, weight * covered)

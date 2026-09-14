@@ -82,8 +82,16 @@ def kernel_dispatchers() -> dict[str, Any]:
             else vars(module).items()
         )
         for name, value in values:
-            if isinstance(value, Dispatcher):
-                found[f"{short}.{name}"] = value
+            if not isinstance(value, Dispatcher):
+                continue
+            # A function compiled INLINE has no machine code of its own:
+            # it is copied into every kernel that calls it, and it never
+            # gets a signature to be warm or cold with.  A stroke's edge
+            # coverage is such a helper; listing it would make a warmer
+            # that reaches every kernel report one it can never reach.
+            if getattr(value, "targetoptions", {}).get("inline") == "always":
+                continue
+            found[f"{short}.{name}"] = value
     return found
 
 

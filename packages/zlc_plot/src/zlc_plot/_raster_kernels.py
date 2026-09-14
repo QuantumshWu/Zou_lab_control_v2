@@ -844,6 +844,35 @@ def raster_error_bars(
                             out[row, column, 3] = np.uint8(255)
 
 
+@njit(cache=True, inline="always")
+def _clamped_line_integral(value):
+    """The integral of clamp(v, 0, 1) from minus infinity to ``value``."""
+
+    if value <= 0.0:
+        return np.float64(0.0)
+    if value <= 1.0:
+        return np.float64(0.5) * value * value
+    return value - np.float64(0.5)
+
+
+@njit(cache=True, inline="always")
+def _slanted_cover(depth, grade):
+    """How much of a pixel row lies inside an edge ``depth`` below its top
+    at the pixel's centre, when the edge rises ``grade`` across the pixel.
+
+    A level edge is the one-pixel ramp, clamp(depth); a slanted one is the
+    average of that ramp along the pixel's width, which is the integral of
+    the clamped line between the edge's height at either side.
+    """
+
+    if grade <= np.float64(1.0e-9):
+        return min(np.float64(1.0), max(np.float64(0.0), depth))
+    half = np.float64(0.5) * grade
+    return (
+        _clamped_line_integral(depth + half) - _clamped_line_integral(depth - half)
+    ) / grade
+
+
 @njit(cache=True, parallel=True, nogil=True)
 def raster_polylines(
     vertices, offsets, colours, widths, clips, lane_offsets, band_count, out
@@ -892,6 +921,7 @@ def raster_polylines(
         high = np.empty(width, dtype=np.float64)
         left = np.empty(width, dtype=np.float64)
         right = np.empty(width, dtype=np.float64)
+        slope = np.empty(width, dtype=np.float64)
         steep = np.empty(width, dtype=np.bool_)
         for line in range(lane_offsets[lane], lane_offsets[lane + 1]):
             start = offsets[line]
@@ -921,6 +951,7 @@ def raster_polylines(
                 high[column] = -np.inf
                 left[column] = np.inf
                 right[column] = -np.inf
+                slope[column] = np.float64(0.0)
                 steep[column] = False
 
             # A column's envelope is everything the line does inside that
@@ -949,12 +980,16 @@ def raster_polylines(
                     continue
                 dx = x1 - x0
                 rising = abs(y1 - y0) > abs(dx)
+                # A shallow segment's rise per column, kept per column: it
+                # is what slants the stroke's edge across a pixel row.
+                grade = np.float64(0.0) if rising else abs(y1 - y0) / abs(dx)
                 column = int(np.floor(x0))
                 if fill_left <= column < fill_right:
                     low[column] = min(low[column], y0)
                     high[column] = max(high[column], y0)
                     left[column] = min(left[column], x0)
                     right[column] = max(right[column], x0)
+                    slope[column] = max(slope[column], grade)
                     steep[column] |= rising
                 column = int(np.floor(x1))
                 if fill_left <= column < fill_right:
@@ -962,6 +997,7 @@ def raster_polylines(
                     high[column] = max(high[column], y1)
                     left[column] = min(left[column], x1)
                     right[column] = max(right[column], x1)
+                    slope[column] = max(slope[column], grade)
                     steep[column] |= rising
                 if abs(dx) < np.float64(1.0e-12):
                     continue
@@ -977,6 +1013,7 @@ def raster_polylines(
                     high[column] = max(high[column], y)
                     left[column] = min(left[column], px)
                     right[column] = max(right[column], px)
+                    slope[column] = max(slope[column], grade)
                     steep[column] |= rising
 
             # THE STROKE AROUND A COLUMN'S SPAN, as it reaches the columns
@@ -1003,10 +1040,22 @@ def raster_polylines(
             # the inside of every slanted stroke came out 4 per cent light.
             # A pixel takes the most any source gives it: that weight times
             # the one-pixel vertical ramp.
+            # THE EDGE OF A SLANTED STROKE IS SLANTED.  Across one pixel row
+            # a shallow stroke's edge rises by its slope, so the pixel's
+            # coverage is not a one-pixel ramp but the area under a line
+            # that climbs through it: the average over the pixel's width of
+            # the clamped distance below the edge, which is the difference
+            # of the integral of a clamped line, G, over the edge's rise.
+            # In the column the line passes through, its stroke reaches
+            # r * sqrt(1 + slope²) above and below the sample -- the
+            # perpendicular half-width seen vertically -- where the disc
+            # alone reached r; the neighbouring discs reached the rest and
+            # left the two edge rows one to two levels light against Agg.
             span = 2 * reach + 3
             source_weight = np.empty(span, dtype=np.float64)
             source_low = np.empty(span, dtype=np.float64)
             source_high = np.empty(span, dtype=np.float64)
+            source_slope = np.empty(span, dtype=np.float64)
             alpha_code = np.float64(colours[line, 3]) / np.float64(255.0)
             for column in range(paint_left, paint_right):
                 envelope_low = np.inf
@@ -1031,16 +1080,22 @@ def raster_polylines(
                             np.float64(1.0),
                             max(np.float64(0.0), radius - gap + np.float64(0.5)),
                         )
+                        grade = np.float64(0.0)
                     else:
                         weight = np.float64(1.0) if squared > 0.0 else np.float64(0.0)
+                        grade = slope[source_column]
                     if weight <= 0.0:
                         continue
-                    vertical = np.sqrt(squared) if squared > 0.0 else np.float64(0.0)
+                    if source_column == column and not steep[source_column]:
+                        vertical = radius * np.sqrt(np.float64(1.0) + grade * grade)
+                    else:
+                        vertical = np.sqrt(squared) if squared > 0.0 else np.float64(0.0)
                     source_weight[count] = weight
                     source_low[count] = low[source_column] - vertical
                     source_high[count] = high[source_column] + vertical
-                    envelope_low = min(envelope_low, source_low[count])
-                    envelope_high = max(envelope_high, source_high[count])
+                    source_slope[count] = grade
+                    envelope_low = min(envelope_low, source_low[count] - 0.5 * grade)
+                    envelope_high = max(envelope_high, source_high[count] + 0.5 * grade)
                     count += 1
                 if count == 0:
                     continue
@@ -1053,10 +1108,10 @@ def raster_polylines(
                         weight = source_weight[index]
                         if weight <= amount:
                             continue
+                        grade = source_slope[index]
                         covered = min(
-                            np.float64(1.0),
-                            py - source_low[index] + np.float64(0.5),
-                            source_high[index] - py + np.float64(0.5),
+                            _slanted_cover(py - source_low[index] + np.float64(0.5), grade),
+                            _slanted_cover(source_high[index] - py + np.float64(0.5), grade),
                         )
                         if covered > 0.0:
                             amount = max(amount, weight * covered)
