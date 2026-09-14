@@ -37,20 +37,28 @@ def _reference_polylines(vertices, offsets, colours, widths, clips, out):
             continue
         low = np.full(width, np.inf)
         high = np.full(width, -np.inf)
+        left = np.full(width, np.inf)
+        right = np.full(width, -np.inf)
+        steep = np.zeros(width, dtype=bool)
         # A column's envelope: every vertex of a finite segment that falls
         # in the column, and the height where the segment crosses the
-        # column's centre.
+        # column's centre; how far left and right those reach; and whether
+        # a steep segment (more rise than run) put anything in it.
         for point in range(start, stop - 1):
             x0, y0 = float(vertices[point, 0]), float(vertices[point, 1])
             x1, y1 = float(vertices[point + 1, 0]), float(vertices[point + 1, 1])
             if not all(map(np.isfinite, (x0, y0, x1, y1))):
                 continue
+            dx = x1 - x0
+            rising = abs(y1 - y0) > abs(dx)
             for vertex_x, vertex_y in ((x0, y0), (x1, y1)):
                 column = int(np.floor(vertex_x))
                 if clip_left <= column < clip_right:
                     low[column] = min(low[column], vertex_y)
                     high[column] = max(high[column], vertex_y)
-            dx = x1 - x0
+                    left[column] = min(left[column], vertex_x)
+                    right[column] = max(right[column], vertex_x)
+                    steep[column] |= rising
             if abs(dx) < 1.0e-12:
                 continue
             first = max(clip_left, int(np.floor(min(x0, x1))))
@@ -62,32 +70,64 @@ def _reference_polylines(vertices, offsets, colours, widths, clips, out):
                 y = y0 + along * (y1 - y0)
                 low[column] = min(low[column], y)
                 high[column] = max(high[column], y)
-        # The stroke is the envelope swept by a disc of the half-width; the
-        # half-pixel of antialiasing is the ramp's, not the disc's.
+                left[column] = min(left[column], column + 0.5)
+                right[column] = max(right[column], column + 0.5)
+                steep[column] |= rising
+        # The stroke around a column's span: a disc of the half-width
+        # reaches a target column, whose centre is ``gap`` from the nearest
+        # thing the source holds, past the span's ends by sqrt(r² - gap²).
+        # A shallow span covers every column within the disc in full; a
+        # steep span covers a column by the capsule's own overlap with it,
+        # clamp(r - gap + 1/2).  A pixel takes the most any source gives it,
+        # that weight times the one-pixel vertical ramp.
         radius = max(0.5, float(widths[line]) * 0.5)
         reach = int(np.ceil(radius))
         alpha_code = float(colours[line, 3]) / 255.0
+
+        def reach_of(source, column):
+            centre = column + 0.5
+            if source < column:
+                gap = centre - right[source]
+            elif source > column:
+                gap = left[source] - centre
+            else:
+                gap = 0.0
+            gap = max(gap, 0.0)
+            squared = radius * radius - gap * gap
+            vertical = np.sqrt(squared) if squared > 0.0 else 0.0
+            if steep[source]:
+                weight = min(1.0, max(0.0, radius - gap + 0.5))
+            else:
+                weight = 1.0 if squared > 0.0 else 0.0
+            return weight, vertical
+
         for column in range(clip_left, clip_right):
-            envelope_low, envelope_high = np.inf, -np.inf
-            for source in range(
-                max(clip_left, column - reach), min(clip_right, column + reach + 1)
-            ):
-                if not np.isfinite(low[source]):
-                    continue
-                distance = abs(source - column)
-                squared = radius * radius - float(distance * distance)
-                if squared <= 0.0:
-                    continue
-                vertical = np.sqrt(squared)
-                envelope_low = min(envelope_low, low[source] - vertical)
-                envelope_high = max(envelope_high, high[source] + vertical)
-            if not np.isfinite(envelope_low):
+            sources = [
+                source
+                for source in range(
+                    max(clip_left, column - reach - 1),
+                    min(clip_right, column + reach + 2),
+                )
+                if np.isfinite(low[source]) and reach_of(source, column)[0] > 0.0
+            ]
+            if not sources:
                 continue
+            envelope_low = min(low[s] - reach_of(s, column)[1] for s in sources)
+            envelope_high = max(high[s] + reach_of(s, column)[1] for s in sources)
             first_row = max(clip_top, int(np.floor(envelope_low - 0.5)))
             last_row = min(clip_bottom, int(np.ceil(envelope_high + 0.5)))
             for row in range(first_row, last_row):
                 py = row + 0.5
-                amount = min(1.0, py - envelope_low + 0.5, envelope_high - py + 0.5)
+                amount = 0.0
+                for source in sources:
+                    weight, vertical = reach_of(source, column)
+                    covered = min(
+                        1.0,
+                        py - (low[source] - vertical) + 0.5,
+                        (high[source] + vertical) - py + 0.5,
+                    )
+                    if covered > 0.0:
+                        amount = max(amount, weight * covered)
                 if amount <= 0.0:
                     continue
                 _blend(out, row, column, colours[line], alpha_code * amount)

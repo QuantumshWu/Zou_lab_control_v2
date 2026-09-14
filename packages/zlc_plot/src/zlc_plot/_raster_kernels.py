@@ -890,6 +890,9 @@ def raster_polylines(
             continue
         low = np.empty(width, dtype=np.float64)
         high = np.empty(width, dtype=np.float64)
+        left = np.empty(width, dtype=np.float64)
+        right = np.empty(width, dtype=np.float64)
+        steep = np.empty(width, dtype=np.bool_)
         for line in range(lane_offsets[lane], lane_offsets[lane + 1]):
             start = offsets[line]
             stop = offsets[line + 1]
@@ -907,11 +910,18 @@ def raster_polylines(
                 continue
             radius = max(np.float64(0.5), np.float64(widths[line]) * 0.5)
             reach = int(np.ceil(radius))
-            fill_left = max(clip_left, paint_left - reach)
-            fill_right = min(clip_right, paint_right + reach + 1)
+            # A source one column past the disc's reach can still touch a
+            # target column: what it holds may sit at its near edge, a
+            # whole column closer than its centre.  So the band samples one
+            # more column of margin than the reach on each side.
+            fill_left = max(clip_left, paint_left - reach - 1)
+            fill_right = min(clip_right, paint_right + reach + 2)
             for column in range(fill_left, fill_right):
                 low[column] = np.inf
                 high[column] = -np.inf
+                left[column] = np.inf
+                right[column] = -np.inf
+                steep[column] = False
 
             # A column's envelope is everything the line does inside that
             # column: the height where it crosses the column's centre, and
@@ -920,7 +930,11 @@ def raster_polylines(
             # them, and a live noise trace was a thin wandering line where
             # its export -- Agg over the per-column extremes -- was the
             # band it is.  A vertex counts only with a segment on it: an
-            # isolated vertex is no stroke, as Agg draws none for it.
+            # isolated vertex is no stroke, as Agg draws none for it.  The
+            # column also keeps how far LEFT and RIGHT what it holds
+            # reaches, and whether a STEEP segment -- more rise than run --
+            # put anything in it: both decide how its stroke reaches the
+            # columns beside it.
             for point in range(start, stop - 1):
                 x0 = vertices[point, 0]
                 y0 = vertices[point, 1]
@@ -933,15 +947,22 @@ def raster_polylines(
                     and np.isfinite(y1)
                 ):
                     continue
+                dx = x1 - x0
+                rising = abs(y1 - y0) > abs(dx)
                 column = int(np.floor(x0))
                 if fill_left <= column < fill_right:
                     low[column] = min(low[column], y0)
                     high[column] = max(high[column], y0)
+                    left[column] = min(left[column], x0)
+                    right[column] = max(right[column], x0)
+                    steep[column] |= rising
                 column = int(np.floor(x1))
                 if fill_left <= column < fill_right:
                     low[column] = min(low[column], y1)
                     high[column] = max(high[column], y1)
-                dx = x1 - x0
+                    left[column] = min(left[column], x1)
+                    right[column] = max(right[column], x1)
+                    steep[column] |= rising
                 if abs(dx) < np.float64(1.0e-12):
                     continue
                 first = max(fill_left, int(np.floor(min(x0, x1))))
@@ -954,51 +975,91 @@ def raster_polylines(
                     y = y0 + along * (y1 - y0)
                     low[column] = min(low[column], y)
                     high[column] = max(high[column], y)
+                    left[column] = min(left[column], px)
+                    right[column] = max(right[column], px)
+                    steep[column] |= rising
 
-            # The stroke is the envelope swept by a disc of the line's own
-            # half-width, and the pixel ramp below is the half-pixel of
-            # antialiasing on top of it -- so the disc carries no half-pixel
-            # of its own.  It used to, and every line came out a pixel
-            # thicker than Agg's with its edges twice as dark: measured
-            # against Line2D on the same geometry, the flat-column integral
-            # went 4.01 to 2.94 against Agg's 3.07 when the half-pixel came
-            # out of the disc.
-            verticals = np.empty(reach + 1, dtype=np.float64)
-            for distance in range(reach + 1):
-                squared = radius * radius - np.float64(distance * distance)
-                verticals[distance] = (
-                    np.sqrt(squared) if squared > 0.0 else np.float64(-1.0)
-                )
+            # THE STROKE AROUND A COLUMN'S SPAN, as it reaches the columns
+            # beside it.  A disc of the line's own half-width swept along
+            # the span reaches a target column whose centre is ``gap`` from
+            # the nearest thing the source column holds over the rows
+            # [low - sqrt(r² - gap²), high + sqrt(r² - gap²)], and the ramp
+            # below adds the half-pixel of antialiasing at those ends -- so
+            # the disc carries no half-pixel of its own.  It did, and every
+            # line was a pixel thicker than Agg's with edges twice as dark:
+            # flat columns held 4.01 px of coverage against Agg's 3.07.
+            #
+            # Across columns the two kinds of span differ.  A SHALLOW span
+            # is one sample of a line that runs on into its neighbours, and
+            # the stroke between two neighbouring samples is solid: every
+            # column within the disc's reach is covered in full, the way
+            # Agg fills the inside of a stroke.  A STEEP span is the line
+            # itself crossing the column, and the stroke beside it is the
+            # capsule's own edge: a target column is covered by the overlap
+            # of [x - r, x + r] with its pixel, clamp(r - gap + 1/2).
+            # Without that weight a steep segment had no antialiasing
+            # across columns at all -- its edge columns went 0 to full where
+            # Agg gives 0.02 and 0.69; with it applied to shallow spans too,
+            # the inside of every slanted stroke came out 4 per cent light.
+            # A pixel takes the most any source gives it: that weight times
+            # the one-pixel vertical ramp.
+            span = 2 * reach + 3
+            source_weight = np.empty(span, dtype=np.float64)
+            source_low = np.empty(span, dtype=np.float64)
+            source_high = np.empty(span, dtype=np.float64)
             alpha_code = np.float64(colours[line, 3]) / np.float64(255.0)
             for column in range(paint_left, paint_right):
                 envelope_low = np.inf
                 envelope_high = -np.inf
-                for source_column in range(
-                    max(clip_left, column - reach),
-                    min(clip_right, column + reach + 1),
-                ):
+                centre = np.float64(column) + np.float64(0.5)
+                source_first = max(clip_left, column - reach - 1)
+                source_last = min(clip_right, column + reach + 2)
+                count = 0
+                for source_column in range(source_first, source_last):
                     if not np.isfinite(low[source_column]):
                         continue
-                    vertical = verticals[abs(source_column - column)]
-                    if vertical < 0.0:
+                    if source_column < column:
+                        gap = centre - right[source_column]
+                    elif source_column > column:
+                        gap = left[source_column] - centre
+                    else:
+                        gap = np.float64(0.0)
+                    gap = max(gap, np.float64(0.0))
+                    squared = radius * radius - gap * gap
+                    if steep[source_column]:
+                        weight = min(
+                            np.float64(1.0),
+                            max(np.float64(0.0), radius - gap + np.float64(0.5)),
+                        )
+                    else:
+                        weight = np.float64(1.0) if squared > 0.0 else np.float64(0.0)
+                    if weight <= 0.0:
                         continue
-                    envelope_low = min(
-                        envelope_low, low[source_column] - vertical
-                    )
-                    envelope_high = max(
-                        envelope_high, high[source_column] + vertical
-                    )
-                if not np.isfinite(envelope_low):
+                    vertical = np.sqrt(squared) if squared > 0.0 else np.float64(0.0)
+                    source_weight[count] = weight
+                    source_low[count] = low[source_column] - vertical
+                    source_high[count] = high[source_column] + vertical
+                    envelope_low = min(envelope_low, source_low[count])
+                    envelope_high = max(envelope_high, source_high[count])
+                    count += 1
+                if count == 0:
                     continue
                 first_row = max(clip_top, int(np.floor(envelope_low - 0.5)))
                 last_row = min(clip_bottom, int(np.ceil(envelope_high + 0.5)))
                 for row in range(first_row, last_row):
                     py = np.float64(row) + np.float64(0.5)
-                    amount = min(
-                        np.float64(1.0),
-                        py - envelope_low + np.float64(0.5),
-                        envelope_high - py + np.float64(0.5),
-                    )
+                    amount = np.float64(0.0)
+                    for index in range(count):
+                        weight = source_weight[index]
+                        if weight <= amount:
+                            continue
+                        covered = min(
+                            np.float64(1.0),
+                            py - source_low[index] + np.float64(0.5),
+                            source_high[index] - py + np.float64(0.5),
+                        )
+                        if covered > 0.0:
+                            amount = max(amount, weight * covered)
                     if amount <= 0.0:
                         continue
                     alpha = alpha_code * amount
