@@ -845,6 +845,102 @@ def raster_error_bars(
 
 
 @njit(cache=True, inline="always")
+def _agg_fill_channel(dst, src, alpha):
+    """One channel of Agg's plain-RGBA fill over an opaque pixel.
+
+    An opaque source is copied; a translucent one is blended the way
+    ``blender_rgba_plain::blend_pix`` blends it, in integer arithmetic with
+    the same truncating division, so a bar the kernel paints is the bar Agg
+    paints, byte for byte.
+    """
+
+    if alpha >= 255:
+        return src
+    held = dst * 255
+    scale = ((alpha + 255) << 8) - alpha * 255
+    return (((src << 8) - held) * alpha + (held << 8)) // scale
+
+
+@njit(cache=True, parallel=True, nogil=True)
+def raster_histogram_bars(
+    edges, tops, bases, offsets, colours, clips, out
+):
+    """Paint histogram bars the way Agg paints an unstroked PolyCollection.
+
+    Agg snaps a rectilinear path to the pixel grid before it fills it, and
+    rounds the clip box to whole pixels too, so a bar has no antialiased
+    edge at all: each bar is the pixel rectangle from ``floor(x + 1/2)`` to
+    ``floor(x' + 1/2)`` across and from the snapped top to the snapped base
+    down, cut to the snapped clip box, and every pixel in it takes the fill
+    colour through Agg's own blend.  ``edges`` holds each surface's bin
+    edges in canvas pixels (one more than its bars), ``tops`` the bar tops
+    in canvas rows, one per EDGE so the two index alike (the last of a
+    surface is padding), and ``bases`` the baseline row per surface;
+    ``offsets`` cut the edge array per surface, ``colours`` is one RGBA per
+    surface with the fill alpha folded in, and ``clips`` the surfaces'
+    boxes already snapped.
+    Surfaces are disjoint boxes, so they paint in parallel.
+    """
+
+    height, width = out.shape[:2]
+    surface_count = offsets.size - 1
+    for surface in prange(surface_count):
+        start = offsets[surface]
+        stop = offsets[surface + 1]
+        if stop - start < 2:
+            continue
+        clip_left = max(0, clips[surface, 0])
+        clip_top = max(0, clips[surface, 1])
+        clip_right = min(width, clips[surface, 2])
+        clip_bottom = min(height, clips[surface, 3])
+        if clip_right <= clip_left or clip_bottom <= clip_top:
+            continue
+        red = int(colours[surface, 0])
+        green = int(colours[surface, 1])
+        blue = int(colours[surface, 2])
+        alpha = int(colours[surface, 3])
+        if alpha <= 0:
+            continue
+        base = bases[surface]
+        if not np.isfinite(base):
+            continue
+        base_row = int(np.floor(base + np.float64(0.5)))
+        for bar in range(start, stop - 1):
+            left_edge = edges[bar]
+            right_edge = edges[bar + 1]
+            top = tops[bar]
+            if not (
+                np.isfinite(left_edge) and np.isfinite(right_edge) and np.isfinite(top)
+            ):
+                continue
+            x0 = int(np.floor(left_edge + np.float64(0.5)))
+            x1 = int(np.floor(right_edge + np.float64(0.5)))
+            if x1 < x0:
+                x0, x1 = x1, x0
+            top_row = int(np.floor(top + np.float64(0.5)))
+            y0 = min(top_row, base_row)
+            y1 = max(top_row, base_row)
+            x0 = max(x0, clip_left)
+            x1 = min(x1, clip_right)
+            y0 = max(y0, clip_top)
+            y1 = min(y1, clip_bottom)
+            if x1 <= x0 or y1 <= y0:
+                continue
+            for row in range(y0, y1):
+                for column in range(x0, x1):
+                    out[row, column, 0] = np.uint8(
+                        _agg_fill_channel(int(out[row, column, 0]), red, alpha)
+                    )
+                    out[row, column, 1] = np.uint8(
+                        _agg_fill_channel(int(out[row, column, 1]), green, alpha)
+                    )
+                    out[row, column, 2] = np.uint8(
+                        _agg_fill_channel(int(out[row, column, 2]), blue, alpha)
+                    )
+                    out[row, column, 3] = np.uint8(255)
+
+
+@njit(cache=True, inline="always")
 def _clamped_line_integral(value):
     """The integral of clamp(v, 0, 1) from minus infinity to ``value``."""
 

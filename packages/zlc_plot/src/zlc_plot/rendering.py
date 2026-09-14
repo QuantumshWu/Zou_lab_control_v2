@@ -2970,7 +2970,12 @@ class MatplotlibRenderer:
     #: by artists.  Matplotlib's own draw sees none of them, so anything that
     #: wants a complete picture asks :meth:`_has_prepared_scene` and composes
     #: -- the one place the question is answered.
-    _PREPARED_SCENE_KEYS = ("image:prepared", "curve:prepared", "facet:fit_native")
+    _PREPARED_SCENE_KEYS = (
+        "image:prepared",
+        "curve:prepared",
+        "histogram:prepared",
+        "facet:fit_native",
+    )
 
     def _has_prepared_scene(self) -> bool:
         """Whether any part of the picture exists only as a kernel command."""
@@ -4328,6 +4333,97 @@ class MatplotlibRenderer:
         )
         return True, frozenset(image_ids)
 
+    def _raster_prepared_histograms(self, canvas: Any) -> tuple[bool, frozenset[int]]:
+        """Paint every histogram surface's bars straight into the canvas.
+
+        Returns whether the scene painted and the collections it painted
+        for, which the compose then leaves undrawn.  Anything the command
+        cannot serve -- a surface without a collection, a canvas of the
+        wrong shape -- refuses the whole scene, and the collections draw.
+        """
+
+        command = self._artists.get("histogram:prepared")
+        if not isinstance(command, dict):
+            return False, frozenset()
+        canvas_rgba = np.asarray(canvas.buffer_rgba())
+        if (
+            canvas_rgba.dtype != np.uint8
+            or canvas_rgba.ndim != 3
+            or canvas_rgba.shape[2] != 4
+            or not canvas_rgba.flags.c_contiguous
+            or not canvas_rgba.flags.writeable
+        ):
+            return False, frozenset()
+        height, width = canvas_rgba.shape[:2]
+        bars = command.get("bars", {})
+        surfaces = self.painted_surfaces
+        edges_px: list[np.ndarray] = []
+        tops_px: list[np.ndarray] = []
+        bases_px: list[float] = []
+        offsets = [0]
+        colours = np.empty((len(surfaces), 4), dtype=np.uint8)
+        clips = np.empty((len(surfaces), 4), dtype=np.int32)
+        painted: set[int] = set()
+        for row, (key, axes, _index) in enumerate(surfaces):
+            entry = bars.get(key)
+            collection = self._artists.get(key)
+            if entry is None or collection is None or not hasattr(collection, "get_facecolor"):
+                return False, frozenset()
+            edges, counts = entry
+            face = np.asarray(collection.get_facecolor(), dtype=float)
+            if face.ndim != 2 or face.shape[0] < 1 or face.shape[1] != 4:
+                return False, frozenset()
+            # The collection's own colour, its alpha folded in the way the
+            # collection folds it, rounded the way Agg rounds it.
+            colours[row] = np.floor(face[0] * 255.0 + 0.5).astype(np.uint8)
+            # Edges along x and bar tops along y through the cell's data
+            # transform -- a log axis included -- to canvas pixels.
+            transform = axes.transData
+            along = transform.transform(
+                np.column_stack((edges, np.zeros(edges.size)))
+            )
+            heights = transform.transform(
+                np.column_stack((np.full(counts.size, float(edges[0])), counts))
+            )
+            base = transform.transform((float(edges[0]), 0.0))
+            edges_px.append(np.asarray(along[:, 0], dtype=np.float64))
+            # One top per bar, padded to one per edge so that the kernel
+            # indexes tops and edges alike across surfaces.
+            tops_px.append(
+                np.append(
+                    float(height) - np.asarray(heights[:, 1], dtype=np.float64),
+                    np.nan,
+                )
+            )
+            bases_px.append(float(height) - float(base[1]))
+            offsets.append(offsets[-1] + edges.size)
+            # Agg rounds the clip box to whole pixels before it clips.
+            box = axes.bbox
+            clips[row] = (
+                max(0, int(math.floor(float(box.x0) + 0.5))),
+                max(0, int(math.floor(float(height) - float(box.y1) + 0.5))),
+                min(width, int(math.floor(float(box.x1) + 0.5))),
+                min(height, int(math.floor(float(height) - float(box.y0) + 0.5))),
+            )
+            painted.add(id(collection))
+        if not surfaces:
+            return False, frozenset()
+        kernels.raster_histogram_bars(
+            kernels.readable(np.concatenate(edges_px)),
+            kernels.readable(np.concatenate(tops_px)),
+            kernels.readable(np.asarray(bases_px, dtype=np.float64)),
+            kernels.readable(np.asarray(offsets, dtype=np.int64)),
+            kernels.readable(colours),
+            kernels.readable(clips),
+            canvas_rgba,
+        )
+        return True, frozenset(painted)
+
+    def _materialize_prepared_histograms(self) -> None:
+        """Hand the picture back to the collections, which are current."""
+
+        self._artists.pop("histogram:prepared", None)
+
     def _raster_facet_fit_ellipses(
         self, canvas: Any
     ) -> tuple[bool, frozenset[int]]:
@@ -4761,12 +4857,21 @@ class MatplotlibRenderer:
             self._materialize_prepared_images()
             dynamics = self._dynamic_artists()
             ordered, split = ordered_with_split(dynamics)
+        # Histogram bars are a prepared scene on the same terms as an image:
+        # painted first, under the chrome the raster may have covered, with
+        # the collections that own them left undrawn.
+        prepared_histogram_command = isinstance(
+            self._artists.get("histogram:prepared"), dict
+        )
+        native_bars, native_bar_ids = self._raster_prepared_histograms(canvas)
+        if prepared_histogram_command and not native_bars:
+            self._materialize_prepared_histograms()
         prepared_curve_command = isinstance(
             self._artists.get("curve:prepared"), dict
         )
         native_curve_command = (
             self._raster_facet_curve_command(canvas)
-            if not native_image
+            if not native_image and not native_bars
             else False
         )
         curve_fallback = bool(
@@ -4864,6 +4969,18 @@ class MatplotlibRenderer:
             ]
 
         used_native = False
+        if native_bars and not native_image:
+            # The bars stand at the bottom of their cells' stacking, and
+            # the kernel has just painted them there; everything else the
+            # cells own follows in its own order, the collections that own
+            # the bars left undrawn.  Nothing comes forward: a histogram's
+            # fit line lies between the marks and the frame, as it does in
+            # a full draw, and forwarding the frame put it under the line.
+            paint(
+                subsequence(lambda artist: id(artist) not in native_bar_ids),
+                at_split=True,
+            )
+            used_native = True
         if native_image:
             # Only the chrome the image raster may have OVERWRITTEN comes
             # forward: the image axes' own frames, and the overview's
@@ -6529,6 +6646,25 @@ class MatplotlibRenderer:
         ):
             collection.set_verts(_histogram_vertices(edges, counts))
         self._artists[f"{key}:projection"] = (edges, counts)
+        # THE BARS ARE PAINTED BY THE KERNEL, not by the collection's own
+        # draw: sixty-four PolyCollections were fifteen milliseconds of
+        # every frame of a histogram grid, drawn through Agg one by one to
+        # put snapped rectangles on the canvas.  The collection stays -- it
+        # is what an export draws, what owns the cell's chrome and what the
+        # projection moves -- but the compose skips it and lays the same
+        # pixels from its edges and counts (``_raster_prepared_histograms``),
+        # byte for byte what Agg lays.  The scene is one command per frame
+        # over every painted surface; a surface the kernel cannot serve
+        # leaves the command unset and the collection draws.
+        if kernels.engaged():
+            command = self._artists.get("histogram:prepared")
+            if not isinstance(command, dict):
+                command = {"bars": {}}
+                self._artists["histogram:prepared"] = command
+            command["bars"][key] = (
+                np.asarray(edges, dtype=np.float64),
+                np.asarray(counts, dtype=np.float64),
+            )
         if limits is not None:
             selected_x = limits[0]
             selected_y = limits[1]
