@@ -719,13 +719,10 @@ def _selected_plan(
             bounds = DEFAULT_UNITS.convert(bounds, source_unit or "1", unit or "1")
         row["values"] = [float(value) for value in np.linspace(
             float(bounds[0]), float(bounds[1]), len(row["values"]))]
-        # The narrowed axis IS a range -- from, to, and the same count --
-        # and the row has to say so.  A row authored as an explicit list
-        # is READ from its text (see ScanPlan.from_tree), so leaving the
-        # mode alone wrote values nothing ever read: the region was
-        # drawn, the document changed, and the scan played the old points.
-        row["mode"] = "range"
-        row["value_text"] = ""
+        # Only the row's RANGE half.  A row authored as an explicit list is
+        # read from that list (see ScanPlan.from_tree), and a region drawn on
+        # a picture does not get to replace an exact statement: it fills the
+        # from/to/points the operator would switch to.
         changed = True
     return {"plan": json.dumps({"axes": rows})} if changed else None
 

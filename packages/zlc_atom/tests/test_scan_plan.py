@@ -335,18 +335,9 @@ def test_a_region_lands_on_the_axis_the_picture_drew_when_two_ports_share_a_name
             patch = SEAMLESS_NODE.selection_patch(selected, draft={"plan": json.dumps(raw)}, context=context)
             banks = plan_input_rows(patch["plan"])
             assert banks[0]["values"] == list(np.linspace(150.0, 220.0, 10))
-            # Narrowed, so the row IS a range now.  A values row is read
-            # from its text, so keeping the authored one made the drawn
-            # region a no-op -- and, with no text at all, unloadable.
-            assert banks[0]["mode"] == "range" and banks[0]["value_text"] == ""
-            played = next(
-                axis
-                for axis in ScanPlan.from_tree(json.loads(patch["plan"])).axes
-                if axis.port == power.port
-            )
-            assert played.values == tuple(np.linspace(150.0, 220.0, 10)), (
-                "the scan must play what the region asked for"
-            )
+            # The range half only: an explicitly authored list is what that
+            # row plays until its author switches it.
+            assert banks[0]["mode"] == "values" and banks[0]["value_text"] == value_text
             assert banks[1] == raw["axes"][1]
             assert raw["axes"][0]["values"] == list(power.values)
             roi = SelectionState("image", "area", (SelectionRange("camera.x", 1.0, 2.0, domain="cell_data"),))

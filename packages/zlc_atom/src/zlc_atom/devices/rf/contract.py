@@ -109,6 +109,17 @@ class RfSource(Protocol):
     def close(self) -> None: ...
 
 
+class TuneRefused(ValueError):
+    """The instrument would not take this value, and nothing was written.
+
+    A grid step it does not land on, a number that is not finite: the knob is
+    still where it was, so the reading this session holds is still true.  That
+    is what tells this apart from a write that REACHED the instrument and then
+    lost its readback, where the value really is unknown and the honest answer
+    is to have none.
+    """
+
+
 def snap_to_grid(value: float, step: float, *, name: str, unit: str) -> float:
     """The value itself, or a refusal naming the instrument's grid.
 
@@ -120,12 +131,12 @@ def snap_to_grid(value: float, step: float, *, name: str, unit: str) -> float:
     """
 
     if not math.isfinite(value):
-        raise ValueError(f"{name} must be finite")
+        raise TuneRefused(f"{name} must be finite")
     quantized = round(value / step) * step
     # Compare in grid units, where representable values are exact integers;
     # comparing the floats re-manufactures the rounding noise being judged.
     if abs(value / step - round(value / step)) > 1e-9:
-        raise ValueError(
+        raise TuneRefused(
             f"{name}={value!r} {unit} is not on this instrument's "
             f"{step!r} {unit} grid; nearest is {quantized!r}"
         )
@@ -607,12 +618,16 @@ class RfSourceBase:
         channel, kind = routed
         with self._condition:
             # Compare the actual result with this session's latest reading;
-            # no extra before-query merely to count an epoch.  The reading is
-            # replaced by a write that COMPLETED and never cleared ahead of
-            # one: dropping it first left a refused command -- an off-grid
-            # frequency, an out-of-range power -- with a blank current value
-            # that no reader would fill until the next explicit Refresh.
+            # no extra before-query merely to count an epoch.
+            #
+            # The reading is dropped for the duration of the write, because a
+            # write that reaches the instrument and then loses its readback
+            # leaves the knob somewhere this session cannot name -- and a
+            # stale number is worse than none.  A refusal that never wrote
+            # puts it back: see TuneRefused.
             before = self._current_values.get(selected)
+            held = selected in self._current_values
+            self._current_values.pop(selected, None)
             if kind == FREQUENCY_FIELD:
                 requested = float(value)
                 low, high = self._frequency_range(channel)
@@ -620,7 +635,12 @@ class RfSourceBase:
                     raise ValueError(
                         f"{selected} must lie in [{low!r}, {high!r}] Hz"
                     )
-                effective: Any = float(self._write_frequency(channel, requested))
+                try:
+                    effective: Any = float(self._write_frequency(channel, requested))
+                except TuneRefused:
+                    if held:
+                        self._current_values[selected] = before
+                    raise
             elif kind == POWER_FIELD:
                 requested = float(value)
                 reader = getattr(self, "read_tunable_in_unit", None)
@@ -633,14 +653,24 @@ class RfSourceBase:
                     raise ValueError(
                         f"{selected} must lie in [{low!r}, {high!r}] {unit or 'dBm'}"
                     )
-                effective = float(
-                    self._write_power_in_unit(channel, requested, unit)
-                    if unit else self._write_power(channel, requested)
-                )
+                try:
+                    effective = float(
+                        self._write_power_in_unit(channel, requested, unit)
+                        if unit else self._write_power(channel, requested)
+                    )
+                except TuneRefused:
+                    if held:
+                        self._current_values[selected] = before
+                    raise
             else:
                 if type(value) is not bool:
                     raise TypeError(f"{selected} takes a bool")
-                effective = bool(self._write_output(channel, value))
+                try:
+                    effective = bool(self._write_output(channel, value))
+                except TuneRefused:
+                    if held:
+                        self._current_values[selected] = before
+                    raise
             canonical = (
                 self.convert_tunable_value(selected, effective, unit, "dBm")
                 if kind == POWER_FIELD and unit else effective
@@ -654,6 +684,7 @@ class RfSourceBase:
 
 __all__ = [
     "FREQUENCY_FIELD",
+    "TuneRefused",
     "OUTPUT_FIELD",
     "POWER_FIELD",
     "WINDOW_FIELDS",
