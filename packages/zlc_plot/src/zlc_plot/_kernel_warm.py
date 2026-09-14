@@ -633,10 +633,10 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
     * the grid of camera frames, 0.5 s: Matplotlib's own import, the first
       text measured loading the font, and the raster kernels' first
       dispatch.  It is what a console opens on.
-    * the grid of histograms, 0.15 s, and then A GRID'S WORTH OF EMPTY
-      CELLS, 0.16 s, kept in :data:`CELL_RESERVE`.  The reserve is
-      single-shot and any grid takes it, so it must follow every grid drawn
-      here; and it must follow nothing else, because sixty-four cells were
+    * the other grids -- histograms, curves over a data axis -- and then
+      A GRID'S WORTH OF EMPTY CELLS, 0.16 s, kept in :data:`CELL_RESERVE`.
+      The reserve is single-shot and any grid takes it, so it must follow
+      every grid drawn here; and nothing else, because sixty-four cells were
       the larger half of a grid's mount and a child taken at two seconds
       used to be taken before this ran -- it sat behind the fits and the
       picture variety.  Measured, a sixty-four cell mount on a child warmed
@@ -829,9 +829,29 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
     _render(camera, FacetGridPlot(None, image), size="4x4")
     if not proceed():
         return
+    # The same grid over a floating frame: a grid's cells colour a small
+    # frame straight from the table, one kernel per dtype, and a grid of
+    # small float images still loaded the float one on its first frame.
+    _render(
+        _image_snapshot(96, 128, np.float32), FacetGridPlot(None, image), size="4x4"
+    )
+    if not proceed():
+        return
     _render(
         _image_snapshot(24, 32, np.float64),
         FacetGridPlot(AxisRef.cell_data("y"), HistogramPlot()),
+        size="2x2",
+    )
+    if not proceed():
+        return
+    # A grid of curves over a data axis: each cell reads its y through a
+    # strided view, which is the summary scan's A-layout signature -- and
+    # a frame grid still loaded it on its first frame after everything
+    # else here had run.
+    mixed = _mixed_snapshot(holes=True)
+    _render(
+        mixed,
+        FacetGridPlot(AxisRef.cell_data("site"), CurvePlot(AxisRef.point("x"))),
         size="2x2",
     )
     if not proceed():
@@ -866,10 +886,35 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
     if not proceed():
         return
     _render(camera, image, size="4x4", fit=True)
-    for dtype in (np.uint16, np.float32):
+    for dtype in (np.uint16, np.float32, np.float64):
         if not proceed():
             return
         _render(_image_snapshot(600, 800, dtype), image, size="2x2")
+    # THE SIGNATURES A PANEL'S SHAPE SELECTS, not its kind.  A curve over
+    # dense cell data reads its y through a strided view; a tensor group
+    # strides its validity too; an image over a point axis and a data axis
+    # aggregates axis codes.  Measured after everything above, a
+    # tensor-group panel and a mixed-axes image each still loaded one
+    # kernel on their first frame -- 10 to 20 ms from a cache that has
+    # been read before, and a Windows first read of a fresh one: 270 ms
+    # against 34 on the frame grid that led to this list.
+    if not proceed():
+        return
+    _render(
+        _image_snapshot(8, 16, np.float64),
+        CurvePlot(AxisRef.cell_data("x"), group=AxisRef.cell_data("y")),
+        size="2x2",
+    )
+    if not proceed():
+        return
+    _render(
+        mixed,
+        CurvePlot(AxisRef.cell_data("site"), group=AxisRef.point("group")),
+        size="2x2",
+    )
+    if not proceed():
+        return
+    _render(mixed, ImagePlot(AxisRef.point("x"), AxisRef.cell_data("site")), size="2x2")
     load_batch_solvers(proceed)
     if proceed():
         # And the 3D scene, which was left out of the list above because it

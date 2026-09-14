@@ -368,22 +368,23 @@ def test_the_cells_follow_the_last_grid_and_the_scene_comes_last(monkeypatch) ->
 
     _kernel_warm.warm_process()
     fill = events.index(("fill", str(int(DEFAULTS.layout.facet_max_cells))))
-    assert events[:fill] == [("FacetGridPlot", None), ("FacetGridPlot", None)]
+    grids = [("FacetGridPlot", None)] * 4
+    assert events[:fill] == grids
     assert all(kind != "FacetGridPlot" for kind, _ in events[fill:])
     assert events[-1] == ("ImagePlot", "height_bars"), events
     assert [entry for entry in events[:-1] if entry[1] == "height_bars"] == []
 
     # Cut short after the grids and the cells are reached, the scene not.
     events.clear()
-    answers = iter((True, True, True, False))
+    answers = iter((True,) * 5 + (False,))
     _kernel_warm.warm_process(proceed=lambda: next(answers, False))
-    assert [kind for kind, _ in events] == ["FacetGridPlot", "FacetGridPlot", "fill"]
+    assert events == grids + [("fill", str(int(DEFAULTS.layout.facet_max_cells)))]
 
     # Cut short before them and nothing speculative ran at all.
     events.clear()
-    answers = iter((True, True, False))
+    answers = iter((True,) * 4 + (False,))
     _kernel_warm.warm_process(proceed=lambda: next(answers, False))
-    assert [kind for kind, _ in events] == ["FacetGridPlot", "FacetGridPlot"]
+    assert events == grids
 
 
 def test_a_fresh_process_is_warmed_before_its_first_request() -> None:
