@@ -77,6 +77,10 @@ Every event a run publishes can also be recorded as it is published.
 `commit_live` is the one place every event of every node passes through, so a
 `RunRecorder` given to `NodeHost` writes each committed output there, into one
 append-only store per declared output under a directory the caller allocates.
+The recording is the run's scratch and lives as long as the run does in this
+process: the recorder deletes its directory when the host is retired, and at
+interpreter exit if it never was.  A process manages its own; nothing sweeps
+what another process left.
 `zlc_runtime.publication_store` owns those files -- chunk planes as plain
 `.npy`, fsynced before the manifest that names them is atomically replaced, so
 a chunk the manifest does not name never happened and an interruption costs

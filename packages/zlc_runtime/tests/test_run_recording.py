@@ -19,7 +19,7 @@ from zlc_runtime.publication_store import PublicationReader
 from zlc_runtime.dataset_output import DatasetOutputDeclaration
 from zlc_runtime.host import NodeHost
 from zlc_runtime.plane import SignalDataPlane
-from zlc_runtime.recording import RECORDING_DIRECTORY, RunRecorder
+from zlc_runtime.recording import RunRecorder
 
 from test_host import _finite_output, _wait
 
@@ -62,7 +62,9 @@ def _host(node, plane, wake, *, instance_id, recorder, outputs=()):
     )
 
 
-def _recorded_run(tmp_path: Path, recorder: RunRecorder, shots: int = 5):
+def _recorded_run(tmp_path: Path, recorder: RunRecorder, shots: int = 5, *, alive=None):
+    """``alive`` is asked with the host while the run is still standing."""
+
     declaration = DatasetOutputDeclaration("frame", "test.frame", recorded=True)
     wake = Event()
     plane = SignalDataPlane()
@@ -96,29 +98,38 @@ def _recorded_run(tmp_path: Path, recorder: RunRecorder, shots: int = 5):
         host.start()
         observation = _wait(host, wake)
         assert observation.phase == "done", observation
+        if alive is not None:
+            alive(host)
     finally:
         host.shutdown()
         plane.close()
     return recorder
 
 
-def test_every_committed_event_is_on_disk_when_the_run_ends(tmp_path) -> None:
+def test_a_run_s_events_are_on_disk_while_it_lives_and_gone_when_it_is_retired(tmp_path) -> None:
+    """The recording is the run's scratch: complete while the run stands,
+    deleted with the run.  A retired run has no further use for it, and a
+    folder per restart that nobody opens is what this used to leave."""
+
     root = tmp_path / "run"
     root.mkdir()
-    recorder = _recorded_run(tmp_path, RunRecorder(lambda: root, events_per_chunk=2))
+    recorder = RunRecorder(lambda: root, events_per_chunk=2)
 
+    def while_alive(host) -> None:
+        _settled(recorder)
+        assert recorder.events == 5
+        assert recorder.outputs == ("frame",)
+        store = PublicationReader(root / "frame")
+        assert store.events == 5
+        values = store.values()
+        assert [float(value) for value in values.reshape(5, -1)[:, 0]] == [
+            0.0, 1.0, 2.0, 3.0, 4.0
+        ]
+        assert np.array_equal(store.snapshot(3).block.values, values[3])
+
+    _recorded_run(tmp_path, recorder, alive=while_alive)
     assert recorder.failure is None
-    assert recorder.events == 5
-    assert recorder.outputs == ("frame",)
-
-    store = PublicationReader(root / RECORDING_DIRECTORY / "frame")
-    assert store.events == 5
-    values = store.values()
-    assert [float(value) for value in values.reshape(5, -1)[:, 0]] == [
-        0.0, 1.0, 2.0, 3.0, 4.0
-    ]
-    assert np.array_equal(store.snapshot(3).block.values,
-                          values[3])
+    assert not root.exists(), "a retired run's recording is deleted with it"
 
 
 def test_a_run_that_publishes_nothing_leaves_nothing_behind(tmp_path) -> None:
@@ -269,16 +280,14 @@ def test_a_second_generation_of_one_host_is_recorded_too(tmp_path) -> None:
             # Every terminal leaves what it committed on disk, not just the
             # last one: this is what a flush buys over a close.
             _settled(recorder)
-            assert PublicationReader(
-                root / RECORDING_DIRECTORY / "frame"
-            ).events == recorder.events
+            assert PublicationReader(root / "frame").events == recorder.events
+        assert recorder.events == 3
     finally:
         host.shutdown()
         plane.close()
 
-    assert recorder.events == 3
     assert recorder.failure is None
-    assert PublicationReader(root / RECORDING_DIRECTORY / "frame").events == 3
+    assert not root.exists(), "the recording ends with the host, and goes with it"
 
 
 def test_a_recorder_needs_a_way_to_open_its_directory() -> None:

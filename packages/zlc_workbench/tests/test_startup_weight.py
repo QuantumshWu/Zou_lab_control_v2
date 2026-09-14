@@ -106,6 +106,7 @@ def test_opening_the_console_leaves_the_engines_to_the_render_children() -> None
     """
 
     script = f'''
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -117,16 +118,19 @@ from zlc_workbench.apps.task_console import create_window
 from zlc_workbench.session import Workspace
 
 root = Path(tempfile.mkdtemp(prefix="zlc-weight-"))
-Workspace(root).prepare()
-write_ordinary_pulse(root)
-window = create_window(workspace=root, template="virtual", window_ratio=0.25)
-carried = [
-    name for name in {FOREIGN_TO_A_CONSOLE!r}
-    if name in sys.modules
-    or any(item.startswith(name + ".") for item in list(sys.modules))
-]
-window.close()
-assert not carried, carried
+try:
+    Workspace(root).prepare()
+    write_ordinary_pulse(root)
+    window = create_window(workspace=root, template="virtual", window_ratio=0.25)
+    carried = [
+        name for name in {FOREIGN_TO_A_CONSOLE!r}
+        if name in sys.modules
+        or any(item.startswith(name + ".") for item in list(sys.modules))
+    ]
+    window.close()
+    assert not carried, carried
+finally:
+    shutil.rmtree(root, ignore_errors=True)
 '''
     environment = dict(__import__("os").environ)
     environment["QT_QPA_PLATFORM"] = "offscreen"

@@ -46,6 +46,7 @@ from zlc_plot.specs import semantic_spec, validate_authored_display
 from zlc_plot.ui import parameter_controls_for_kind
 from zlc_plot.specs import GRID_CELL_KINDS, non_portable_display_names
 from zlc_runtime import (
+    RECORDING_DIRECTORY,
     RunRecorder,
     IndexedHistoryLease,
     OperatorInputRequest,
@@ -7866,18 +7867,15 @@ class ConsolePresenter:
         return options, labels, groups
 
     def _open_recording(self, binding: LogicBinding) -> RunRecorder:
-        """Where this run's published events land, once it publishes any.
+        """Where this run's published events land while the run lives.
 
-        A Task has ALREADY allocated a numbered directory for this run, and
-        its artifacts are in it: a recording beside that one would split one
-        run's evidence into two folders a day apart in the listing.  So a
-        Task records inside its own run, and everything else gets a numbered
-        folder of its own under the same calendar day -- the workspace's own
-        routing, so a physicist finds either by date.
-
-        The allocation is deferred to the recorder because it is durable: a
-        node configured, started and stopped without publishing has not made
-        a run, and a numbered folder saying it did is worse than none.
+        The recording is the run's scratch, and the directory is the
+        recorder's own: it is made at the first event and deleted when the
+        run is retired (see :class:`RunRecorder`).  A Task has ALREADY
+        allocated a numbered directory for this run and keeps its artifacts
+        in it, so its recording goes in a folder of its own inside that one
+        and only that folder goes; everything else gets a numbered folder
+        under today's calendar folder, the workspace's own routing.
         """
 
         node_id = binding.node_id
@@ -7886,7 +7884,7 @@ class ConsolePresenter:
             host = binding.host
             owned = None if host is None else host.run_directory
             if owned is not None:
-                return Path(owned)
+                return Path(owned) / RECORDING_DIRECTORY
             return unique_path(self.session.day_folder(), node_id, "")
 
         return RunRecorder(allocate)

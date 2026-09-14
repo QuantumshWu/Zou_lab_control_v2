@@ -22,6 +22,7 @@ import argparse
 import os
 import pathlib
 import sys
+import shutil
 import tempfile
 import time
 
@@ -1641,7 +1642,7 @@ class ConsoleBench:
             except Exception:
                 pass
         self.presenter = None
-
+        shutil.rmtree(self._tmp, ignore_errors=True)
     def problems(self) -> tuple[tuple[str, str], ...]:
         """Operator-visible warnings and errors seen during the run."""
 

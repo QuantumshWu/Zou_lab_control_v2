@@ -29,13 +29,24 @@ working.  The first failure stops the recording and is kept until somebody
 is told (:meth:`take_failure`); the run goes on.  Losing the recording is
 bad and losing the experiment is worse, and that order is a decision, not an
 accident, so it is written here rather than left to a bare ``except``.
+
+A RECORDING LIVES AS LONG AS ITS RUN DOES IN THIS PROCESS.  It is the run's
+own scratch -- what the run has published, on disk instead of only in
+memory -- and a run that has been retired (stopped and let go, restarted,
+removed, the console closed) has no further use for it.  So the recorder
+that made the directory deletes it when it is closed, and at interpreter
+exit if the run was never retired.  A process manages its own: nothing
+sweeps another process's leftovers, and a process that was killed leaves
+what it had.
 """
 
 from __future__ import annotations
 
+import atexit
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from queue import Queue
+import shutil
 from threading import Thread
 from typing import Any
 
@@ -43,7 +54,8 @@ from .plane import SignalValue
 from .publication_store import DEFAULT_EVENTS_PER_CHUNK, PublicationWriter
 
 
-#: Where a run's stores live inside its own directory.
+#: Where a Task's recording lives inside the run directory the Task owns:
+#: the Task's artifacts stay when the recording goes.
 RECORDING_DIRECTORY = "published"
 
 #: How many events may wait to be written before a producer is made to wait.
@@ -76,10 +88,9 @@ class RunRecorder:
     ) -> None:
         if not callable(open_directory):
             raise TypeError("a recorder is given a way to open its directory")
-        # Called ONCE, on the writing thread at the first event, because
-        # allocating a numbered run directory is itself a durable act: a node
-        # that is configured and never publishes must not leave a folder
-        # behind saying it did.
+        # Called ONCE, on the writing thread at the first event: a node that
+        # is configured and never publishes has nothing to write, so it
+        # makes no directory.  What it opens is the recorder's to delete.
         self._open_directory = open_directory
         self._events_per_chunk = int(events_per_chunk)
         self._root: Path | None = None
@@ -174,10 +185,13 @@ class RunRecorder:
         self._queue.put(_FLUSH)
 
     def close(self, timeout: float = 30.0) -> None:
-        """Finish: everything handed over reaches disk, then the thread ends.
+        """Finish, then let the recording go: the run it served is retired.
 
         This one WAITS.  It runs when the host is retired, which is allowed
-        to take as long as finishing honestly takes.
+        to take as long as finishing honestly takes.  Once the writer has
+        finished, the directory is deleted: a retired run's recording is
+        scratch nobody will open.  A writer that did not finish in time
+        keeps its files open, so the directory is left to interpreter exit.
         """
 
         if self._closed:
@@ -188,6 +202,29 @@ class RunRecorder:
             return
         self._queue.put(_STOP)
         thread.join(timeout=float(timeout))
+        if thread.is_alive():
+            return
+        try:
+            self._discard()
+        except OSError as error:
+            if self._failure is None:
+                self._failure = error
+                self._unreported = error
+
+    def _discard(self) -> None:
+        """Delete the recording's directory, if it was ever made."""
+
+        root = self._root
+        if root is not None and root.exists():
+            shutil.rmtree(root)
+
+    def _discard_at_exit(self) -> None:
+        # Best effort at interpreter exit: the writer is a daemon thread and
+        # may still hold a file open; what cannot be removed now stays.
+        try:
+            self._discard()
+        except OSError:
+            pass
 
     # -------------------------------------------------------- the writer
     def _ensure_thread(self) -> None:
@@ -222,7 +259,8 @@ class RunRecorder:
         found = self._writers.get(name)
         if found is None:
             if self._root is None:
-                self._root = Path(self._open_directory()) / RECORDING_DIRECTORY
+                self._root = Path(self._open_directory())
+                atexit.register(self._discard_at_exit)
             found = PublicationWriter(
                 self._root / name,
                 events_per_chunk=self._events_per_chunk,
