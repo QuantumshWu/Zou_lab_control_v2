@@ -934,6 +934,45 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                 dropped += 1
         _server_log("PEERS REFUSED", detail=_log_fields(dropped=dropped))
 
+    def _safe_beside_the_lane(self) -> None:
+        """Put the pins down beside whatever the command lane is doing.
+
+        The first half of taking the board away from a client, and the only
+        operation allowed beside the active command lane: its stop event
+        interrupts a pending transport action, so the outputs are down
+        before the lane has finished noticing.  Best effort by design --
+        the readback that decides the outcome is the second half, on the
+        lane itself.
+        """
+
+        try:
+            result = self.streamer.safe()
+            if not result.stable:
+                raise RuntimeError("SAFE readback was not stable")
+        except Exception:
+            pass
+
+    def _safe_on_the_lane(self) -> tuple[Any, Exception | None]:
+        """The SAFE that decides it, taken on the command lane.
+
+        Returns the readback and the failure, if any.  A board that is no
+        longer open is not a failure: nothing it drives can be unsafe, and
+        a closed session answering "closed" would otherwise leave the
+        server faulted for good.
+        """
+
+        try:
+            result = self.streamer.safe()
+            if not result.stable:
+                raise RuntimeError("SAFE readback was not stable")
+            return result, None
+        except Exception as exc:
+            try:
+                opened = bool(self.streamer.snapshot().get("opened"))
+            except Exception:
+                opened = True
+            return None, exc if opened else None
+
     def claim_client(self, client: str, connection: socket.socket) -> None:
         """Transfer ownership only after the previous physical state is SAFE."""
 
@@ -962,29 +1001,11 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         if connection_to_drop is not None:
             _drop_connection(connection_to_drop)
 
-        # This first SAFE is the only operation allowed beside the active
-        # command lane: its stop event interrupts a pending transport action.
-        try:
-            result = self.streamer.safe()
-            if not result.stable:
-                raise RuntimeError("SAFE readback was not stable")
-        except Exception:
-            pass
+        self._safe_beside_the_lane()
 
         failure_message: str | None = None
         with self._command_lock:
-            safe_failure: Exception | None = None
-            try:
-                result = self.streamer.safe()
-                if not result.stable:
-                    raise RuntimeError("SAFE readback was not stable")
-            except Exception as exc:
-                try:
-                    opened = bool(self.streamer.snapshot().get("opened"))
-                except Exception:
-                    opened = True
-                if opened:
-                    safe_failure = exc
+            _result, safe_failure = self._safe_on_the_lane()
             with self._client_lock:
                 if self._owner_epoch != transition_epoch:
                     raise RuntimeError("client takeover was superseded")
@@ -1360,28 +1381,11 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
         # Cancel first; the command lane remains owned by the old handler until
         # it observes the revocation and retires.
-        try:
-            result = self.streamer.safe()
-            if not result.stable:
-                raise RuntimeError("SAFE readback was not stable")
-        except Exception:
-            pass
+        self._safe_beside_the_lane()
 
         failure_message: str | None = None
         with self._command_lock:
-            result = None
-            safe_failure: Exception | None = None
-            try:
-                result = self.streamer.safe()
-                if not result.stable:
-                    raise RuntimeError("SAFE readback was not stable")
-            except Exception as exc:
-                try:
-                    opened = bool(self.streamer.snapshot().get("opened"))
-                except Exception:
-                    opened = True
-                if opened:
-                    safe_failure = exc
+            result, safe_failure = self._safe_on_the_lane()
             with self._client_lock:
                 if self._owner_epoch != transition_epoch:
                     return None

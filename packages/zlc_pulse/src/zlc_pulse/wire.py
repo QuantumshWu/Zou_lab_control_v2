@@ -21,7 +21,7 @@ __all__ = [
     "STATUS_LOADED", "STATUS_RUNNING", "STATUS_DONE", "STATUS_ERROR", "STATUS_UNDERFLOW", "STATUS_LINK_ERROR",
     "REGISTER_LAYOUT_ID", "LAYOUT_STRUCT_VERSION", "build_fingerprint",
     "DEFAULT_CONFIG_PATH", "load_streamer_config", "params_from_config", "default_params",
-    "FROZEN_CLOCK_HZ", "FROZEN_SLOT_MUL_WIDTH", "default_clock_hz",
+    "FROZEN_CLOCK_HZ", "FROZEN_SLOT_MUL_WIDTH",
     "DEFAULT_UART_BAUD", "default_uart_baud",
 ]
 
@@ -1149,27 +1149,12 @@ def default_params(path: str | Path | None = None) -> StreamerParams:
 # against ITS OWN geometry, not the default.
 REGISTER_LAYOUT_ID = build_fingerprint(StreamerParams())
 
-def default_clock_hz(path: str | Path | None = None) -> float:
-    return load_streamer_config(path)["clock_hz"]
-
 def default_uart_baud(path: str | Path | None = None) -> int:
     return load_streamer_config(path)["uart_baud"]
 
 
 DEFAULT_UART_BAUD = default_uart_baud()
 
-
-def default_coeff_frac_bits(path: str | Path | None = None) -> int:
-    """The affine-scan fixed-point fraction the RTL synthesizes with (``tick = base + (sum coeff*slot)
-    >> coeff_frac_bits``).  A StreamerParams geometry field folded into the fingerprint, so the SCAN
-    COMPILER must scale coefficients by exactly this many bits or the emitted ticks disagree with the
-    bitstream -- the single source the timing/sequencer compilers read via ``default_params()``
-    instead of a bare literal 8."""
-    return int(default_params(path).coeff_frac_bits)
-
-def default_slot_mul_width(path: str | Path | None = None) -> int:
-    """The scan slot-operand width shared by the compiler and generated RTL."""
-    return int(load_streamer_config(path)["slot_mul_width"])
 
 def check_config_capacity(path: str | Path | None = None) -> dict:
     """Estimate whether the configured part has enough resources for the configured

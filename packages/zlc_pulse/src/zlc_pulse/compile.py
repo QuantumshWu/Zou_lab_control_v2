@@ -217,20 +217,20 @@ class CompiledProgram:
 
         return canonical_digest(self)
 
-def _resolve_slot_operand_width() -> int:
-    from .wire import load_streamer_config  # noqa: PLC0415 -- config, not a cycle
+def _frozen_slot_operand_width() -> int:
+    from .wire import FROZEN_SLOT_MUL_WIDTH  # noqa: PLC0415 -- config, not a cycle
 
-    return int(load_streamer_config().get("slot_mul_width", 25))
+    return int(FROZEN_SLOT_MUL_WIDTH)
 
 
 #: How many signed bits the board's affine multiplier takes of a slot value.
 #:
-#: Resolved once, at import, exactly as the RTL cycle model resolves it -- and
-#: for two reasons.  It is read once per slot term of every affine tick, so a
-#: disk read there put a stat and a JSON parse inside the compiler's inner
-#: loop.  And the config search consults the working directory, so resolving it
-#: per call would let a `cd` change the arithmetic mid-session.
-SLOT_OPERAND_WIDTH = _resolve_slot_operand_width()
+#: The RTL's, said once: ``load_streamer_config`` refuses any config whose
+#: ``slot_mul_width`` differs from the frozen width the bitstream synthesises
+#: with, so reading the config for it -- a directory search and a JSON parse
+#: in every process that imports this package, at import, before anything has
+#: asked to compile -- could only ever return that same number.
+SLOT_OPERAND_WIDTH = _frozen_slot_operand_width()
 
 
 def slot_operand_width() -> int:

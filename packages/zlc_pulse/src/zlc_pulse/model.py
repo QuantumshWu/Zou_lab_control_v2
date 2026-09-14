@@ -128,8 +128,6 @@ def cycle_binding_kind(
 def _text(value: Any, field_name: str, *, empty: bool = False) -> str:
     if not isinstance(value, str) or (not empty and not value.strip()):
         raise TypeError(f"{field_name} must be non-empty text")
-    if not empty and not value.strip():
-        raise ValueError(f"{field_name} must be non-empty text")
     return value
 
 
