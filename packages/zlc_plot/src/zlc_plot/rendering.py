@@ -1710,13 +1710,14 @@ def _pooled_store(block: bytearray) -> object:
     return (ctypes.c_ubyte * len(block)).from_buffer(block)
 
 
-def _grid_cell_prototype_path(style: PlotStyleConfig, cells: int) -> Any:
-    """Where the bytes that revive into ``cells`` bare grid cells are kept.
+def _axes_prototype_path(style: PlotStyleConfig, cells: int, plain: int) -> Any:
+    """Where the bytes that revive into ``cells`` bare grid cells and
+    ``plain`` ordinary axes are kept.
 
     Keyed on everything the bytes depend on: this Python and this
-    Matplotlib build the objects, the STYLE is baked into a cell at
+    Matplotlib build the objects, the STYLE is baked into an axes at
     construction (which is why the reserve answers for one style only),
-    and the tick floor decides how many tick artists ride along.
+    and the tick floor decides how many tick artists ride along on a cell.
     """
 
     import matplotlib  # noqa: PLC0415
@@ -1727,6 +1728,7 @@ def _grid_cell_prototype_path(style: PlotStyleConfig, cells: int) -> Any:
         sys.version.split()[0],
         matplotlib.__version__,
         str(int(cells)),
+        str(int(plain)),
         str(int(TICKS_FLOOR)),
         repr(style),
     )
@@ -1734,8 +1736,11 @@ def _grid_cell_prototype_path(style: PlotStyleConfig, cells: int) -> Any:
     return _kernel_cache.kernel_cache_dir() / "grid_cells" / f"{digest}.pickle"
 
 
-def _build_grid_cells(style: PlotStyleConfig, cells: int) -> tuple[Any, list[Any]]:
-    """One figure carrying ``cells`` bare grid cells, ticks and all."""
+def _build_axes(
+    style: PlotStyleConfig, cells: int, plain: int
+) -> tuple[Any, list[Any], list[Any]]:
+    """One figure carrying ``cells`` bare grid cells, ticks and all, and
+    ``plain`` ordinary axes exactly as ``add_axes`` makes them."""
 
     from matplotlib.backends.backend_agg import FigureCanvasAgg  # noqa: PLC0415
     from matplotlib.figure import Figure  # noqa: PLC0415
@@ -1746,28 +1751,36 @@ def _build_grid_cells(style: PlotStyleConfig, cells: int) -> tuple[Any, list[Any
         figure = Figure(figsize=(1.0, 1.0), dpi=100.0, layout=None)
         FigureCanvasAgg(figure)
         made = [figure.add_axes((0.0, 0.0, 1.0, 1.0)) for _ in range(cells)]
+        others = [figure.add_axes((0.0, 0.0, 1.0, 1.0)) for _ in range(plain)]
     for axis in made:
         # A tick is made when someone first asks, and the grouped chrome
-        # asks every cell; every axis shows at least this many.
+        # asks every cell; every axis shows at least this many.  An
+        # ordinary axes decides its own ticks when it is first drawn, as a
+        # fresh one would, so it is handed over as made.
         axis.xaxis.get_major_ticks(TICKS_FLOOR)
         axis.yaxis.get_major_ticks(TICKS_FLOOR)
-    return figure, made
+    return figure, made, others
 
 
-def revive_grid_cells(
+def revive_axes(
     style: PlotStyleConfig,
     cells: int,
-) -> tuple[Any, list[Any]] | None:
-    """``cells`` bare grid cells, built once for a machine and not again.
+    plain: int,
+) -> tuple[Any, list[Any], list[Any]] | None:
+    """``cells`` bare grid cells and ``plain`` ordinary axes, built once for
+    a machine and not again.
 
-    A grid cell is fifteen thousand Matplotlib objects, and a cell draws
-    none of them: the grouped chrome paints the marks, the frames and the
-    labels, and the cell is turned off.  Building sixty-four of them and
-    making their ticks is 207 ms, and it was paid by every panel on every
-    mount -- nothing in it depends on the data, the size, or even the
-    session.  The same sixty-four revive from bytes in 61 ms, ticks
-    included, and the bytes are written once for a given Matplotlib,
-    style and count instead of once per panel.
+    An Axes is fifteen thousand Matplotlib objects and about seven
+    milliseconds to build, and nothing in it depends on the data, the size
+    or the session.  A grid cell draws none of its own chrome -- the
+    grouped chrome paints the marks, the frames and the labels, and the
+    cell is turned off -- and building sixty-four of them with their ticks
+    was 207 ms on every mount; the same sixty-four revive from bytes in
+    61 ms.  A single panel's axes -- its primary, its colorbar, its rail --
+    draw their own chrome and were 9 to 19 per cent of that panel's first
+    frame; they revive the same way, in about a millisecond each.  The
+    bytes are written once for a given Matplotlib, style and counts
+    instead of once per panel.
 
     This is not a warm-up: it is available the moment a panel asks, on a
     child that has done nothing else.  ``None`` says the bytes could not
@@ -1775,7 +1788,7 @@ def revive_grid_cells(
     never wrong.
     """
 
-    path = _grid_cell_prototype_path(style, cells)
+    path = _axes_prototype_path(style, cells, plain)
     try:
         blob = path.read_bytes()
     except OSError:
@@ -1786,7 +1799,7 @@ def revive_grid_cells(
             spare = list(figure.axes)
         except Exception:  # noqa: BLE001 -- a cache that will not read missed
             figure, spare = None, []
-        if figure is not None and len(spare) == cells:
+        if figure is not None and len(spare) == cells + plain:
             from matplotlib.backends.backend_agg import (  # noqa: PLC0415
                 FigureCanvasAgg,
             )
@@ -1794,17 +1807,30 @@ def revive_grid_cells(
             FigureCanvasAgg(figure)
             for axis in spare:
                 figure.delaxes(axis)
-            return figure, spare
+            return figure, spare[:cells], spare[cells:]
 
-    figure, spare = _build_grid_cells(style, cells)
+    figure, made, others = _build_axes(style, cells, plain)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(pickle.dumps(figure, protocol=pickle.HIGHEST_PROTOCOL))
     except (OSError, Exception):  # noqa: BLE001 -- writing is an optimisation
         pass
-    for axis in spare:
+    for axis in made + others:
         figure.delaxes(axis)
-    return figure, spare
+    return figure, made, others
+
+
+def revive_grid_cells(
+    style: PlotStyleConfig,
+    cells: int,
+) -> tuple[Any, list[Any]] | None:
+    """``cells`` bare grid cells on their figure: see :func:`revive_axes`."""
+
+    revived = revive_axes(style, cells, 0)
+    if revived is None:
+        return None
+    figure, made, _others = revived
+    return figure, made
 
 
 class CellReserve:
@@ -2329,6 +2355,7 @@ class MatplotlibRenderer:
         from matplotlib.figure import Figure
 
         reserved = CELL_RESERVE.take(self.style, self.plan)
+        plain: Sequence[Any] = ()
         if reserved is None:
             # Nothing was held -- a child taken before its warming reached
             # the reserve, or a second panel in the same child.  The cells
@@ -2337,11 +2364,19 @@ class MatplotlibRenderer:
             wanted = sum(
                 1 for entry in self.plan.axes if entry.role == "facet_cell"
             )
+            others = len(self.plan.axes) - wanted
             if wanted:
                 # Exactly what this plan asks for: the bytes are keyed by
                 # the count, so a ten-cell grid keeps its own small file
                 # rather than reviving sixty-four and dropping fifty-four.
                 reserved = revive_grid_cells(self.style, wanted)
+            elif others:
+                # A single panel: its own axes revive the same way, a
+                # millisecond each where building one is seven.
+                revived = revive_axes(self.style, 0, others)
+                if revived is not None:
+                    reserved = (revived[0], ())
+                    plain = revived[2]
         with style_context(
             self.style,
             {
@@ -2368,24 +2403,26 @@ class MatplotlibRenderer:
             figure._original_dpi = self.plan.logical_dpi
             figure._set_dpi(self.plan.dpi, forward=False)
             self._figure = figure
-            self._axes = self._create_axes(figure, self.plan, cells)
+            self._axes = self._create_axes(figure, self.plan, cells, plain)
 
     @staticmethod
     def _create_axes(
         figure: Any,
         plan: SurfacePlan,
         reserved: Sequence[Any] = (),
+        plain: Sequence[Any] = (),
     ) -> dict[str, list[Any]]:
         axes: dict[str, list[Any]] = {}
         waiting = iter(reserved)
+        waiting_plain = iter(plain)
         for axes_plan in plan.axes:
             bounds = axes_plan.box.matplotlib_bounds()
-            # A reserved cell is already this figure's, so it goes back on in
+            # A revived axes is already this figure's, so it goes back on in
             # the plan's own order and only its position is new.
             axis = (
                 next(waiting, None)
                 if axes_plan.role == "facet_cell"
-                else None
+                else next(waiting_plain, None)
             )
             if axis is None:
                 axis = figure.add_axes(bounds)

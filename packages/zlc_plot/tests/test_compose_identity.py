@@ -1507,3 +1507,44 @@ def test_a_closed_reserve_holds_nothing_and_takes_nothing_more() -> None:
     assert reserve._held is None
     reserve.fill(DEFAULTS.style, 4)
     assert reserve._held is None
+
+
+def test_a_single_panel_built_from_revived_axes_paints_the_same_picture(monkeypatch) -> None:
+    """A single panel's axes -- primary, colorbar, rail -- revive from bytes
+    the way a grid's cells do, and the picture must be the one a panel
+    that built its own axes paints, to the byte.  The bytes are keyed by
+    the count, so an image panel and a curve panel keep their own files."""
+
+    from zlc_plot import rendering
+    from zlc_plot.config import DEFAULTS
+
+    size = 96
+    schema = _image_contract(size)
+
+    def painted() -> np.ndarray:
+        session = PlotSession(
+            _snapshot(schema, size, 300.0, 1, seed=21),
+            ImagePlot(
+                AxisRef.cell_data("camera_x"),
+                AxisRef.cell_data("camera_y"),
+                labels=PlotLabels("revived", "x", "y", value="Counts"),
+            ),
+        )
+        try:
+            frames = [np.array(session.rgba(), copy=True)]
+            session.update_data(_snapshot(schema, size, 200.0, 2, seed=22))
+            frames.append(np.array(session.rgba(), copy=True))
+            count = len(session.surface_plan.axes)
+            return np.stack(frames), count
+        finally:
+            session.close()
+
+    revived, count = painted()
+    assert count >= 2, "an image panel has more than one axes to revive"
+    assert rendering._axes_prototype_path(DEFAULTS.style, 0, count).is_file()
+    monkeypatch.setattr(rendering, "revive_axes", lambda *args, **kwargs: None)
+    built, _count = painted()
+    assert np.array_equal(revived, built), (
+        f"{int(np.count_nonzero((revived != built).any(axis=-1)))} pixels differ "
+        "between a panel built from revived axes and one that built its own"
+    )
