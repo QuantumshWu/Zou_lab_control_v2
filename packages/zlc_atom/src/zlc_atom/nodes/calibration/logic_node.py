@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
+from zlc_atom.devices.camera import CAMERA_PROTECTED_FIELDS
 from zlc_atom.devices.camera.photoelectrons import (
     PHOTOELECTRONS,
     photoelectron_switch,
@@ -285,21 +286,7 @@ LOGIC_NODE = LogicNodeDescriptor(
         ArtifactOutputSpec("artifact_path", CALIBRATION_ARTIFACT_CODEC.contract_id),
     ),
     device_requirements=(
-        DeviceRequirement(
-            "camera.adapter",
-            "camera",
-            (
-                "exposure",
-                "roi_x",
-                "roi_y",
-                "roi_width",
-                "roi_height",
-                "trigger_source",
-                "readout_speed",
-                "offset_counts",
-                "electrons_per_count",
-            ),
-        ),
+        DeviceRequirement("camera.adapter", "camera", CAMERA_PROTECTED_FIELDS),
         DeviceRequirement("sequencer.streamer", "sequencer", ("program",)),
     ),
     build=_build,

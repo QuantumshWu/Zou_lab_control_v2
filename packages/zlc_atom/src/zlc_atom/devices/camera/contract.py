@@ -214,7 +214,25 @@ class CameraAdapter(Protocol):
     def capture_state(self) -> bool: ...
 
 
+#: The camera settings a node takes over for the length of its run: while it
+#: owns them, the device form may not drive them.  Said once, because every
+#: node that points a camera points the SAME camera -- four copies of this
+#: list is four chances for one of them to drift.
+CAMERA_PROTECTED_FIELDS = (
+    "exposure",
+    "roi_x",
+    "roi_y",
+    "roi_width",
+    "roi_height",
+    "trigger_source",
+    "readout_speed",
+    "offset_counts",
+    "electrons_per_count",
+)
+
+
 __all__ = [
+    "CAMERA_PROTECTED_FIELDS",
     "CameraAcquisitionMode",
     "CameraAdapter",
     "CameraCaptureTerminalRecord",

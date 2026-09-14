@@ -348,10 +348,6 @@ def compiled_rows(rows):
     return tuple(programs)
 
 
-def published_names(rows):
-    return tuple(row["name"] for row in signal_rows(rows))
-
-
 def input_members(rows, available):
     """Plan ordinary direct bundle reads; dynamic Python may access all members.
 
@@ -371,10 +367,6 @@ def input_members(rows, available):
     if missing:
         raise ExpressionError(f"input bundle has no signals {sorted(missing)!r}")
     return tuple(name for name in available if name in requested)
-
-
-def evaluate(rows, outputs):
-    return execute(compiled_rows(rows), outputs)
 
 
 def execute(programs, outputs):
@@ -399,4 +391,4 @@ HELP_TEXT = '''Select: isel / sel. Mask: where. Reduce: mean / sum / count / any
 Math: + - * / **, comparisons, abs, & | ^ ~. NumPy: x.values / x.valid / x.schema; same-shape results: x.with_values(...).
 Example: result = a.counts.isel(frame=1).mean("repeat")  (Use the input's case-sensitive axis names.)'''
 
-__all__ = ["ExpressionError", "Operand", "evaluate", "execute", "compiled_rows", "published_names", "signal_rows", "HELP_TEXT"]
+__all__ = ["ExpressionError", "Operand", "execute", "compiled_rows", "signal_rows", "HELP_TEXT"]

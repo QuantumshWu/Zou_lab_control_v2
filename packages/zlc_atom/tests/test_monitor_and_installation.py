@@ -285,7 +285,7 @@ def test_finite_measurement_collects_only_external_triggers() -> None:
         )
         result_box: list[object] = []
         worker = Thread(
-            target=lambda: result_box.append(measurement.measure()),
+            target=lambda: result_box.append(measurement.prepare().collect()),
             daemon=True,
         )
         worker.start()

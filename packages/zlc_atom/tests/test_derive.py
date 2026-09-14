@@ -13,8 +13,9 @@ from zlc_data import (
 from zlc_runtime import DatasetCoverage, MonitorCoverage, SignalValue
 
 from zlc_atom.nodes.derive import (
-    LOGIC_NODE, DeriveProcessor, ExpressionError, Operand, evaluate, published_names,
+    LOGIC_NODE, DeriveProcessor, ExpressionError, Operand,
 )
+from zlc_atom.nodes.derive.expression import compiled_rows, execute
 
 COUNTS = "@logic/occupancy/counts"
 OCCUPIED = "@logic/occupancy/occupied"
@@ -50,7 +51,7 @@ def _rows(*signals):
 
 
 def _one(code, outputs):
-    return evaluate(_rows(("answer", code)), outputs)["answer"]
+    return execute(compiled_rows(_rows(("answer", code))), outputs)["answer"]
 
 
 def test_conditional_repeat_means_publish_one_35_site_vector() -> None:
@@ -212,9 +213,14 @@ def test_python_locals_numpy_and_previous_outputs_do_not_create_a_second_schema(
         ("difference", "scaled.isel(frame=1) - scaled.isel(frame=0)"),
         ("condition", "result = (difference > 0) & (difference < 5)"),
     )
-    assert published_names(rows) == ("scaled", "difference", "condition")
-    results = evaluate(rows, {"counts": source})
-    assert tuple(results) == published_names(rows)
+    programs = compiled_rows(rows)
+    assert tuple(name for name, _, _ in programs) == (
+        "scaled",
+        "difference",
+        "condition",
+    )
+    results = execute(programs, {"counts": source})
+    assert tuple(results) == tuple(name for name, _, _ in programs)
     assert results["scaled"].schema == source.schema
     np.testing.assert_array_equal(results["scaled"].values, np.clip(source.values, 1, 4))
     np.testing.assert_array_equal(results["difference"].values, [[[2., 3., 2.]]])
@@ -243,7 +249,7 @@ def test_code_errors_are_named_without_escaping_the_worker() -> None:
         _rows(("result", "a.counts")), _rows(("same", "a.counts"), ("same", "a.counts")),
     ):
         with pytest.raises(ExpressionError):
-            evaluate(rows, outputs)
+            execute(compiled_rows(rows), outputs)
 
 
 def test_processor_publishes_current_estimates_and_the_exact_program_provenance() -> None:

@@ -10,6 +10,7 @@ from zlc_data import SPATIAL_X, SPATIAL_Y
 from zlc_runtime import SelectionRange, SelectionState
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
+from zlc_atom.devices.camera import CAMERA_PROTECTED_FIELDS
 from zlc_atom.devices.camera.photoelectrons import (
     PHOTOELECTRONS,
     photoelectron_switch,
@@ -245,21 +246,7 @@ LOGIC_NODE = LogicNodeDescriptor(
     outputs=(CAMERA_FRAMES_OUTPUT,),
     node_previews=(NodePreviewSpec(CAMERA_FRAMES_OUTPUT, "facet_grid"),),
     device_requirements=(
-        DeviceRequirement(
-            "camera.adapter",
-            "camera",
-            (
-                "exposure",
-                "roi_x",
-                "roi_y",
-                "roi_width",
-                "roi_height",
-                "trigger_source",
-                "readout_speed",
-                "offset_counts",
-                "electrons_per_count",
-            ),
-        ),
+        DeviceRequirement("camera.adapter", "camera", CAMERA_PROTECTED_FIELDS),
     ),
     build=_build,
     selection_mappings=(_IMAGE_AREA_TO_ROI,),

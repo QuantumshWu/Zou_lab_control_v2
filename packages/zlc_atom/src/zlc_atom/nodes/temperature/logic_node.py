@@ -19,7 +19,8 @@ from zlc_pulse import PulseSequence
 from zlc_plot import AxisRef, Reduction
 from zlc_plot.semantics import fate_field_name
 
-from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
+from zlc_atom.authoring import AuthoringField, AuthoringSchema
+from zlc_atom.devices.camera import CAMERA_PROTECTED_FIELDS
 from zlc_atom.nodes._framework.descriptor import (
     ArtifactInputSpec,
     ArtifactOutputSpec,
@@ -33,6 +34,7 @@ from zlc_atom.nodes._framework.descriptor import (
 from zlc_atom.nodes.calibration import (
     CALIBRATION_ARTIFACT_CODEC,
     DEFAULT_READOUT_MODEL_CHOICE,
+    READOUT_MODEL_CHOICES,
     TrapCalibration,
     readout_model_kind_from_choice,
 )
@@ -116,12 +118,7 @@ TEMPERATURE_SCHEMA = AuthoringSchema(
             "choice",
             "Readout model",
             DEFAULT_READOUT_MODEL_CHOICE,
-            choices=(
-                AuthoringChoice("default", "Calibration default"),
-                AuthoringChoice("box", "Box"),
-                AuthoringChoice("psf", "Per-site PSF"),
-                AuthoringChoice("uniform_psf", "Uniform PSF"),
-            ),
+            choices=READOUT_MODEL_CHOICES,
         ),
     )
 )
@@ -223,21 +220,7 @@ LOGIC_NODE = LogicNodeDescriptor(
         ArtifactOutputSpec("artifact_path", TEMPERATURE_ARTIFACT_CONTRACT),
     ),
     device_requirements=(
-        DeviceRequirement(
-            "camera.adapter",
-            "camera",
-            (
-                "exposure",
-                "roi_x",
-                "roi_y",
-                "roi_width",
-                "roi_height",
-                "trigger_source",
-                "readout_speed",
-                "offset_counts",
-                "electrons_per_count",
-            ),
-        ),
+        DeviceRequirement("camera.adapter", "camera", CAMERA_PROTECTED_FIELDS),
         DeviceRequirement("sequencer.streamer", "sequencer", ("program",)),
     ),
     build=_build,

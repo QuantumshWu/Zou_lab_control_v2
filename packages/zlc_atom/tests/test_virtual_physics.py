@@ -179,24 +179,22 @@ def test_qcmos_parameters_and_derived_poisson_signal_are_single_world_physics() 
     dark = np.asarray(
         [
             world.render_frame(
-                index,
                 exposure_seconds=exposure,
                 probe_seconds=0.0,
                 occupancy=empty,
             )
-            for index in range(24)
+            for _ in range(24)
         ]
     )
     loaded = np.ones(site_count, dtype=bool)
     bright = np.asarray(
         [
             world.render_frame(
-                index,
                 exposure_seconds=exposure,
                 probe_seconds=exposure,
                 occupancy=loaded,
             )
-            for index in range(24)
+            for _ in range(24)
         ]
     )
     assert dark.dtype == np.dtype("<u2")
@@ -314,13 +312,11 @@ def test_qcmos_reuses_byte_exact_fixed_site_psfs(monkeypatch) -> None:
     )
     for ordinal, occupancy in enumerate(occupancies):
         actual = world.render_frame(
-            ordinal,
             exposure_seconds=0.02,
             probe_seconds=0.005,
             occupancy=occupancy,
         )
         expected = reference.render_frame(
-            ordinal,
             exposure_seconds=0.02,
             probe_seconds=0.005,
             occupancy=occupancy,
@@ -334,7 +330,6 @@ def test_qcmos_reuses_byte_exact_fixed_site_psfs(monkeypatch) -> None:
     monkeypatch.setattr(simulation_world.np, "exp", rebuilt_psf)
     for ordinal in (3, 4):
         world.render_frame(
-            ordinal,
             exposure_seconds=0.02,
             probe_seconds=0.005,
             occupancy=occupancies[ordinal % len(occupancies)],
@@ -360,7 +355,7 @@ def test_mot_frame_is_uint8_with_a_windowed_separable_spot() -> None:
         world,
         _world_pulse(cooling=True, trap=True, da_x=opt_x, da_y=opt_y, da_z=opt_z),
     )
-    frame = world.render_mot_frame(0, frame_shape_yx=(400, 640))
+    frame = world.render_mot_frame(frame_shape_yx=(400, 640))
     assert frame.dtype == np.dtype("|u1")
     assert frame.shape == (400, 640)
 
@@ -377,7 +372,7 @@ def test_mot_frame_is_uint8_with_a_windowed_separable_spot() -> None:
         assert int(np.max(margin)) < 20
 
     world.safe()
-    empty = world.render_mot_frame(0, frame_shape_yx=(400, 640))
+    empty = world.render_mot_frame(frame_shape_yx=(400, 640))
     assert float(np.mean(empty.astype(float))) == pytest.approx(6.5, abs=0.3)
     assert int(np.max(empty)) < 20
 
@@ -396,7 +391,7 @@ def test_mot_follows_the_net_field_and_is_best_at_the_planted_optimum() -> None:
             world,
             _world_pulse(cooling=True, trap=True, da_x=da_x, da_y=da_y, da_z=da_z),
         )
-        return world.render_mot_frame(0, frame_shape_yx=(200, 320))
+        return world.render_mot_frame(frame_shape_yx=(200, 320))
 
     at_optimum = frames(5, da_x=opt_x, da_y=opt_y, da_z=opt_z)
     again = frames(5, da_x=opt_x, da_y=opt_y, da_z=opt_z)
@@ -485,12 +480,8 @@ def test_slm_coherent_plant_owns_the_twofold_site_error_and_caches_propagation()
         # Camera noise and occupancy draws never re-run the coherent FFT for
         # the same explicit SLM command.
         loaded = np.ones(len(sites), dtype=bool)
-        first = world.render_frame(
-            0, exposure_seconds=0.005, occupancy=loaded
-        )
-        second = world.render_frame(
-            1, exposure_seconds=0.005, occupancy=loaded
-        )
+        first = world.render_frame(exposure_seconds=0.005, occupancy=loaded)
+        second = world.render_frame(exposure_seconds=0.005, occupancy=loaded)
         assert not np.array_equal(first, second)
         assert world._propagation_count == 1
 
@@ -738,7 +729,6 @@ def test_a_removed_trap_cannot_resurrect_its_atom(monkeypatch) -> None:
         original_render = world.render_frame
 
         def record_render(
-            ordinal: int,
             *,
             exposure_seconds: float,
             probe_seconds: float,
@@ -746,7 +736,6 @@ def test_a_removed_trap_cannot_resurrect_its_atom(monkeypatch) -> None:
         ) -> np.ndarray:
             snapshots.append(np.asarray(occupancy, dtype=bool).copy())
             return original_render(
-                ordinal,
                 exposure_seconds=exposure_seconds,
                 probe_seconds=probe_seconds,
                 occupancy=occupancy,
@@ -813,12 +802,11 @@ def test_occupied_qcmos_box_brightness_tracks_physical_trap_depth() -> None:
     frame = np.mean(
         [
             world.render_frame(
-                ordinal,
                 exposure_seconds=0.02,
                 probe_seconds=0.005,
                 occupancy=np.ones(len(sites), dtype=bool),
             )
-            for ordinal in range(32)
+            for _ in range(32)
         ],
         axis=0,
     )
@@ -969,13 +957,11 @@ def test_atom_qcmos_and_mot_draws_are_independent() -> None:
     empty = np.zeros(35, dtype=bool)
     for ordinal in range(4):
         after_qcmos.render_frame(
-            ordinal,
             exposure_seconds=0.005,
             occupancy=empty,
         )
         after_mot._mot_population = 1.0
         after_mot.render_mot_frame(
-            ordinal,
             exposure_seconds=0.01,
             frame_shape_yx=(96, 128),
         )
@@ -986,9 +972,8 @@ def test_atom_qcmos_and_mot_draws_are_independent() -> None:
 
     for world in (reference, after_qcmos, after_mot):
         world._occupancy[:] = True
-    after_qcmos.render_frame(5, exposure_seconds=0.005)
+    after_qcmos.render_frame(exposure_seconds=0.005)
     after_mot.render_mot_frame(
-        5,
         exposure_seconds=0.01,
         frame_shape_yx=(96, 128),
     )
@@ -1001,19 +986,16 @@ def test_atom_qcmos_and_mot_draws_are_independent() -> None:
     qcmos_after_mot = _world(seed=37)
     loaded = np.ones(35, dtype=bool)
     qcmos_after_mot.render_mot_frame(
-        0,
         exposure_seconds=0.01,
         occupancy=loaded,
         frame_shape_yx=(48, 64),
     )
     np.testing.assert_array_equal(
         qcmos_reference.render_frame(
-            0,
             exposure_seconds=0.005,
             occupancy=loaded,
         ),
         qcmos_after_mot.render_frame(
-            0,
             exposure_seconds=0.005,
             occupancy=loaded,
         ),
@@ -1022,19 +1004,16 @@ def test_atom_qcmos_and_mot_draws_are_independent() -> None:
     mot_reference = _world(seed=43)
     mot_after_qcmos = _world(seed=43)
     mot_after_qcmos.render_frame(
-        0,
         exposure_seconds=0.005,
         occupancy=loaded,
     )
     np.testing.assert_array_equal(
         mot_reference.render_mot_frame(
-            0,
             exposure_seconds=0.01,
             occupancy=loaded,
             frame_shape_yx=(48, 64),
         ),
         mot_after_qcmos.render_mot_frame(
-            0,
             exposure_seconds=0.01,
             occupancy=loaded,
             frame_shape_yx=(48, 64),
@@ -1059,7 +1038,6 @@ def test_fire_processes_every_cooling_rise_and_whole_trap_off_episode(
             events.append(("loss", float(seconds)))
 
     def record_camera(
-        _ordinal: int,
         *,
         exposure_seconds: float,
         probe_seconds: float,
@@ -1124,7 +1102,6 @@ def test_fire_extends_release_to_the_delayed_physical_horizon(
         events.append(("loss", float(seconds)))
 
     def record_camera(
-        _ordinal: int,
         *,
         exposure_seconds: float,
         probe_seconds: float,
@@ -1345,7 +1322,6 @@ def test_unslotted_cycles_are_independent_three_frame_shots(monkeypatch) -> None
         return occupancy
 
     def record_render(
-        ordinal: int,
         *,
         exposure_seconds: float,
         probe_seconds: float | None = None,
@@ -1353,7 +1329,6 @@ def test_unslotted_cycles_are_independent_three_frame_shots(monkeypatch) -> None
     ) -> np.ndarray:
         rendered.append(np.array(occupancy, dtype=bool, copy=True))
         return original_render(
-            ordinal,
             exposure_seconds=exposure_seconds,
             probe_seconds=probe_seconds,
             occupancy=occupancy,

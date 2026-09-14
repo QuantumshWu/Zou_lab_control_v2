@@ -48,8 +48,7 @@ def test_camera_binding_rejects_an_object_outside_the_camera_contract() -> None:
 def test_virtual_camera_preserves_trigger_to_frame_causality_and_drops_monitor_history() -> None:
     world = SimulationWorld()
     camera = VirtualCamera(
-        frame_source=lambda ordinal, exposure: world.render_frame(
-            ordinal,
+        frame_source=lambda exposure: world.render_frame(
             exposure_seconds=exposure,
         )
     )
@@ -82,7 +81,7 @@ def test_a_close_that_could_not_join_the_producer_waits_for_it_again() -> None:
     release = threading.Event()
     shape = VirtualCameraConfig().frame_shape_yx
 
-    def slow_frame(_ordinal: int, _exposure: float) -> np.ndarray:
+    def slow_frame(_exposure: float) -> np.ndarray:
         entered.set()
         release.wait(10.0)
         return np.ones(shape, dtype=np.uint16)
@@ -108,7 +107,7 @@ def test_virtual_measurement_configuration_returns_actual_crop_and_is_idle_only(
     full = np.arange(80, dtype=np.uint16).reshape(8, 10)
     exposures: list[float] = []
 
-    def source(_ordinal: int, exposure: float) -> np.ndarray:
+    def source(exposure: float) -> np.ndarray:
         exposures.append(exposure)
         return full
 
@@ -139,7 +138,7 @@ def test_virtual_camera_tunable_reports_current_effective_value_and_epoch() -> N
     exposures: list[float] = []
     camera = VirtualCamera(
         VirtualCameraConfig(frame_shape_yx=(4, 5), exposure_seconds=0.02),
-        frame_source=lambda _ordinal, exposure: (
+        frame_source=lambda exposure: (
             exposures.append(exposure) or np.zeros((4, 5), dtype=np.uint16)
         ),
     )
@@ -177,7 +176,7 @@ def test_virtual_camera_tunable_reports_current_effective_value_and_epoch() -> N
 
     other = VirtualCamera(
         VirtualCameraConfig(frame_shape_yx=(4, 5)),
-        frame_source=lambda _ordinal, _exposure: np.zeros((4, 5), dtype=np.uint16),
+        frame_source=lambda _exposure: np.zeros((4, 5), dtype=np.uint16),
     )
     assert (
         other.settings_provenance()["device_session_id"]
@@ -199,8 +198,7 @@ def test_an_external_gate_shortens_the_light_not_the_integration() -> None:
     world = SimulationWorld(SimulationWorldConfig(seed=3))
     camera = VirtualCamera(
         VirtualCameraConfig(frame_shape_yx=world.geometry.image_shape_yx),
-        frame_source=lambda ordinal, exposure: world.render_frame(
-            ordinal,
+        frame_source=lambda exposure: world.render_frame(
             exposure_seconds=exposure,
         ),
     )
@@ -211,7 +209,6 @@ def test_an_external_gate_shortens_the_light_not_the_integration() -> None:
     render = world.render_frame
 
     def record_render(
-        ordinal: int,
         *,
         exposure_seconds: float,
         probe_seconds: float | None = None,
@@ -221,7 +218,6 @@ def test_an_external_gate_shortens_the_light_not_the_integration() -> None:
             (float(exposure_seconds), float(probe_seconds or 0.0), np.asarray(occupancy, dtype=bool))
         )
         return render(
-            ordinal,
             exposure_seconds=exposure_seconds,
             probe_seconds=probe_seconds,
             occupancy=occupancy,
@@ -277,7 +273,7 @@ def test_virtual_camera_clips_into_its_declared_dtype() -> None:
     source = np.array([[300, -5], [7, 260]], dtype=np.int64)
     camera = VirtualCamera(
         VirtualCameraConfig(frame_shape_yx=(2, 2), frame_dtype="|u1"),
-        frame_source=lambda _ordinal, _exposure: source,
+        frame_source=lambda _exposure: source,
     )
     assert camera.frame_dtype == np.dtype("|u1")
     camera.arm(2, source_group_sizes=(2,), buffer_frame_count=2, timeout=1.0)
@@ -299,7 +295,7 @@ def test_virtual_camera_clips_into_its_declared_dtype() -> None:
     with pytest.raises(ValueError, match="unsigned integer"):
         VirtualCamera(
             VirtualCameraConfig(frame_shape_yx=(2, 2), frame_dtype="<f8"),
-            frame_source=lambda _ordinal, _exposure: source,
+            frame_source=lambda _exposure: source,
         )
 
 

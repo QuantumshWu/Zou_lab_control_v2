@@ -45,6 +45,7 @@ from tests.pulse_fixture import pulse_sequence
 from zlc_atom.nodes.scan import (
     DEVICE_PARAM_FAMILY,
     MANUAL_AXIS_REQUEST,
+    MANUAL_PARAM_FAMILY,
     PULSE_PARAM_FAMILY,
     SCAN_PULSE_CONTRACT,
     SCAN_OUTPUT,
@@ -54,7 +55,6 @@ from zlc_atom.nodes.scan import (
     SeamlessScanMeasurement,
     check_cancelled,
     hardware_scan_ports_for,
-    manual_axis,
     scan_ports_for,
     slots_from_plan,
     split_outer_axes,
@@ -837,7 +837,10 @@ def _manual_run(
         )
         bench.publish(SCRIPTED_SEED_VALUE)
         plan = ScanPlan(
-            tuple(manual_axis(name, points) for name, points in manual)
+            tuple(
+                ScanAxis(MANUAL_PARAM_FAMILY + name, points)
+                for name, points in manual
+            )
             + (() if values is None else (ScanAxis(BIAS_X_PORT, values),))
         )
         node = descriptors["seamless_scan"].instantiate(
@@ -1012,7 +1015,10 @@ def test_stopping_at_the_question_stops_the_run() -> None:
     try:
         bench.publish(SCRIPTED_SEED_VALUE)
         plan = ScanPlan(
-            (manual_axis("power", (1.0, 2.0)), ScanAxis(BIAS_X_PORT, (-256.0,)))
+            (
+                ScanAxis(MANUAL_PARAM_FAMILY + "power", (1.0, 2.0)),
+                ScanAxis(BIAS_X_PORT, (-256.0,)),
+            )
         )
         node = descriptors["seamless_scan"].instantiate(
             sequencer=bench,

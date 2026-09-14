@@ -772,7 +772,6 @@ class SimulationWorld:
 
     def render_frame(
         self,
-        ordinal: int,
         *,
         exposure_seconds: float = 0.005,
         probe_seconds: float | None = None,
@@ -842,7 +841,6 @@ class SimulationWorld:
 
     def render_mot_frame(
         self,
-        ordinal: int,
         *,
         exposure_seconds: float = 0.1,
         occupancy: object | None = None,
@@ -975,7 +973,6 @@ class SimulationWorld:
 
         with self._lock:
             self._ensure_slm_propagation()
-            ordinal = self._fire_count
             self._fire_count += 1
             for tick in event_ticks:
                 self._dac_values.update(
@@ -1014,7 +1011,6 @@ class SimulationWorld:
                             _overlap_ticks(start, integration_end, probe) / clock
                         )
                         frame = self.render_frame(
-                            ordinal,
                             exposure_seconds=exposure,
                             probe_seconds=probe_seconds,
                             occupancy=shot_occupancy,

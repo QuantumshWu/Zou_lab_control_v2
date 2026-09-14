@@ -127,6 +127,17 @@ class DeviceBroker:
             raise TypeError("bind requires a ResourceKey and IdentityProof")
         if not callable(capability_probe):
             raise TypeError("capability_probe must be callable")
+        # One proof, one attempt: the nonce is spent as the bind BEGINS, so a
+        # refusal -- a capability the contract will not take, a physical
+        # identity already bound -- cannot leave its minted proof behind in a
+        # broker that lives as long as the session.
+        with self._lock:
+            if self._verified_identities.get(identity._nonce) is not identity:
+                raise RuntimeError(
+                    "verified device identity was already consumed or belongs "
+                    "to another broker"
+                )
+            self._verified_identities.pop(identity._nonce)
         # Checked before anything is registered: a capability the contract
         # refuses must not leave the physical identity bound behind an
         # exception, out of reach of the caller who could have released it.
@@ -135,15 +146,9 @@ class DeviceBroker:
         stamp = DeviceBindingStamp(identity.identity, uuid.uuid4().hex)
         binding = BoundDevice(key, stamp, snapshot, token, weakref.ref(self))
         with self._lock:
-            if self._verified_identities.get(identity._nonce) is not identity:
-                raise RuntimeError(
-                    "verified device identity was already consumed or belongs "
-                    "to another broker"
-                )
             stable_id = stamp.physical_identity.stable_device_identity
             if stable_id in self._physical_ids:
                 raise RuntimeError(f"physical device {stable_id!r} is already bound")
-            self._verified_identities.pop(identity._nonce)
             self._physical_ids[stable_id] = token
             self._active_bindings[token] = binding
 

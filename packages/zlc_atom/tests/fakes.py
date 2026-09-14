@@ -150,7 +150,7 @@ class ScriptedScanBench:
                 frame_shape_yx=SCRIPTED_FRAME_SHAPE_YX,
                 exposure_seconds=exposure_seconds,
             ),
-            frame_source=lambda ordinal, exposure: np.zeros(
+            frame_source=lambda exposure: np.zeros(
                 SCRIPTED_FRAME_SHAPE_YX, dtype="<u2"
             ),
         )

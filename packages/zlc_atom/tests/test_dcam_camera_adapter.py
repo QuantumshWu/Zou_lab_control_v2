@@ -525,25 +525,36 @@ def test_a_refused_handle_release_keeps_the_handle_for_the_next_close() -> None:
     assert closes() == 2
 
 
-def test_the_factory_identity_is_the_device_index_not_the_logical_key() -> None:
+def test_the_binding_identity_is_the_device_index_not_the_logical_key() -> None:
     """Two keys opening one DCAM index are one camera, and the broker must know.
 
     The identity used to be the logical key, so the same physical device
     under a second name was accepted as a second device.
     """
 
-    from zlc_atom.devices.camera.device_types import DEVICE_TYPES
+    from zlc_atom.devices.camera.binding import bind_camera
     from zlc_atom.execution import DeviceBroker
     from zlc_atom.install import InstallationFactoryContext
 
-    factory = next(item for item in DEVICE_TYPES if item.type_id == "camera.dcam").factory
     broker = DeviceBroker()
     context = InstallationFactoryContext(None, broker, {})
-    first = factory(context, "first-name", {"driver": _FakeDcamDriver(), "device_index": 0})
+    first = bind_camera(
+        context,
+        "first-name",
+        DcamCameraAdapter(_config(), driver=_FakeDcamDriver()),
+        "dcam-camera:index=0",
+        "camera.dcam",
+    )
     try:
         assert first.physical_identity.stable_device_identity == "dcam-camera:index=0"
         with pytest.raises(RuntimeError, match="already bound"):
-            factory(context, "second-name", {"driver": _FakeDcamDriver(), "device_index": 0})
+            bind_camera(
+                context,
+                "second-name",
+                DcamCameraAdapter(_config(), driver=_FakeDcamDriver()),
+                "dcam-camera:index=0",
+                "camera.dcam",
+            )
     finally:
         first.close()
         broker.unbind(first.binding)

@@ -555,15 +555,7 @@ def test_every_discovered_node_can_actually_be_driven_by_its_host() -> None:
             f"{descriptor.api_name}'s build must annotate the node class it returns"
         )
         wanted = (
-            "evaluate_inputs"
-            if descriptor.kind is NodeKind.PROCESSOR
-            and any(
-                getattr(spec, "sibling_outputs", ())
-                for spec in descriptor.input_specs
-            )
-            else "evaluate"
-            if descriptor.kind is NodeKind.PROCESSOR
-            else "execute"
+            "evaluate" if descriptor.kind is NodeKind.PROCESSOR else "execute"
         )
         checked.append(descriptor.api_name)
         if not callable(getattr(produced, wanted, None)):

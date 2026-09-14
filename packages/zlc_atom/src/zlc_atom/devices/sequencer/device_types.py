@@ -28,37 +28,29 @@ HARDWARE_SEQUENCER_SCHEMA = AuthoringSchema(
 
 
 def _hardware_factory(context, key: str, values: dict) -> InstalledLeaf:
-    """Reach the real board, from a written-down endpoint or an injected one.
+    """Reach the real board at the endpoint the configuration writes down.
 
-    An already-open streamer may be supplied (a test, or a session that opened
-    the connection itself).  Otherwise the endpoint in the configuration is
-    dialled -- which is the whole point of writing it down.
-
-    Whichever way it arrived, the streamer is this factory's to own from
-    here: on success the leaf's closer closes it, and a failure between
-    open and bind -- the broker refusing a physical identity that is
-    already bound, say -- closes it here, because a device that never
-    became a leaf has nobody else to close it.
+    The streamer is this factory's to own from here: on success the leaf's
+    closer closes it, and a failure between open and bind -- the broker
+    refusing a physical identity that is already bound, say -- closes it
+    here, because a device that never became a leaf has nobody else to
+    close it.
     """
 
-    streamer = values.get("streamer")
-    if streamer is None:
-        authored = HARDWARE_SEQUENCER_SCHEMA.project_values(
-            {name: value for name, value in values.items() if name != "streamer"}
+    authored = HARDWARE_SEQUENCER_SCHEMA.project_values(values)
+    dial = getattr(context, "connect_pulse", None)
+    if not callable(dial):
+        raise TypeError(
+            "sequencer.hardware needs a way to reach its board: pass "
+            "connect_pulse to create_installation (the composition root owns "
+            "the client; this package owns only the "
+            f"endpoint {authored['host']}:{authored['port']})"
         )
-        dial = getattr(context, "connect_pulse", None)
-        if not callable(dial):
-            raise TypeError(
-                "sequencer.hardware needs either an open streamer or a way to "
-                "reach one: pass connect_pulse to create_installation (the "
-                "composition root owns the client; this package owns only the "
-                f"endpoint {authored['host']}:{authored['port']})"
-            )
-        streamer = dial(
-            str(authored["host"]),
-            int(authored["port"]),
-            request_timeout=DEFAULT_REQUEST_TIMEOUT,
-        )
+    streamer = dial(
+        str(authored["host"]),
+        int(authored["port"]),
+        request_timeout=DEFAULT_REQUEST_TIMEOUT,
+    )
     if not isinstance(streamer, (PulseStreamer, RemotePulseStreamer)):
         raise TypeError("sequencer.hardware needs a zlc_pulse device")
     device = SequencerDevice(streamer)
@@ -111,9 +103,7 @@ def _local_factory(context, key: str, values: dict) -> InstalledLeaf:
 
     from zlc_pulse import LocalPulseService
 
-    authored = LOCAL_SEQUENCER_SCHEMA.project_values(
-        {name: value for name, value in values.items() if name != "streamer"}
-    )
+    authored = LOCAL_SEQUENCER_SCHEMA.project_values(values)
     dial = getattr(context, "connect_pulse", None)
     if not callable(dial):
         raise TypeError(
@@ -122,7 +112,6 @@ def _local_factory(context, key: str, values: dict) -> InstalledLeaf:
             "the client; this package owns the board and the server)"
         )
     service = LocalPulseService(
-        values.get("streamer"),
         backend=str(authored["backend"]),
         uart_port=str(authored["uart_port"]).strip() or None,
         port=int(authored["port"]),

@@ -19,12 +19,12 @@ from zlc_atom.install import create_installation, tunable_devices
 from tests.pulse_fixture import pulse_document, pulse_sequence
 from zlc_atom.nodes.scan import (
     DEVICE_PARAM_FAMILY,
+    MANUAL_PARAM_FAMILY,
     PULSE_PARAM_FAMILY,
     ScanAxis,
     ScanPlan,
     bind_plan,
     load_stepped_template,
-    manual_axis,
     scan_dataset_schema,
     scan_ports_for,
     scan_ports_for_devices,
@@ -250,7 +250,10 @@ def test_a_region_lands_on_the_axis_the_picture_drew_when_two_ports_share_a_name
     from zlc_runtime import SelectionRange, SelectionState
 
     plan = ScanPlan(
-        (manual_axis("bias", (1.0, 2.0)), ScanAxis(PULSE_PARAM_FAMILY + "bias", (10.0, 20.0)))
+        (
+            ScanAxis(MANUAL_PARAM_FAMILY + "bias", (1.0, 2.0)),
+            ScanAxis(PULSE_PARAM_FAMILY + "bias", (10.0, 20.0)),
+        )
     )
     labels = ("bias", "bias")
     assert scan_axis_ids(labels) == ("scan.bias", "scan.bias.2")

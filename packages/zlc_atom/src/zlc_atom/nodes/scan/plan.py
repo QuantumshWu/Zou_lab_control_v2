@@ -415,23 +415,6 @@ def manual_axis_name(port: str) -> str:
     return name
 
 
-def manual_axis(name: str, values: Sequence[float], unit: str = "") -> ScanAxis:
-    """One manual axis: a name, and the values a HAND will set.
-
-    Authored exactly like every other axis, values and all.  A coordinate
-    is known before its data whichever knob carries it -- the dataset's
-    schema is fixed the moment the first point lands, and a number typed
-    later can no longer become an axis.  What makes this axis manual is
-    only WHO advances it: the run stops and asks, where a board axis
-    advances a slot.
-    """
-
-    label = str(name).strip()
-    if not label:
-        raise ValueError("a manual axis carries a name")
-    return ScanAxis(MANUAL_PARAM_FAMILY + label, tuple(values), unit)
-
-
 def split_outer_axes(plan: ScanPlan) -> tuple[tuple[ScanAxis, ...], tuple[ScanAxis, ...]]:
     """The host-advanced axes, and the plan the board plays underneath.
 

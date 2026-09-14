@@ -18,6 +18,7 @@ from zlc_atom.devices.camera.contract import (
     CameraWorkingPoint,
 )
 from zlc_atom.devices.camera.photoelectrons import stated_conversion
+from zlc_atom.devices.camera.roi_grid import snap_roi_axis
 from .world import DEFAULT_SIMULATION_IMAGE_SHAPE_YX
 
 
@@ -47,7 +48,7 @@ class VirtualCamera:
         self,
         config: VirtualCameraConfig | None = None,
         *,
-        frame_source: Callable[[int, float], np.ndarray] | None = None,
+        frame_source: Callable[[float], np.ndarray] | None = None,
         free_running: bool = False,
     ) -> None:
         if frame_source is None or not callable(frame_source):
@@ -173,10 +174,23 @@ class VirtualCamera:
             if len(values) != 4:
                 raise ValueError("roi_xywh must contain four integers or be None")
             x, y, width, height = values
-            x = max(0, min(x, sensor_width - 1))
-            y = max(0, min(y, sensor_height - 1))
-            width = max(1, min(width, sensor_width - x))
-            height = max(1, min(height, sensor_height - y))
+            # Which way a requested region meets a sensor's grid is one rule
+            # for every sensor; this one's grid is single pixels, and the rule
+            # is not said a third time here.
+            x, width = snap_roi_axis(
+                x,
+                width,
+                origin_step=1,
+                extent_step=1,
+                sensor_extent=sensor_width,
+            )
+            y, height = snap_roi_axis(
+                y,
+                height,
+                origin_step=1,
+                extent_step=1,
+                sensor_extent=sensor_height,
+            )
             roi = (x, y, width, height)
         with self._condition:
             if self._armed:
@@ -352,7 +366,7 @@ class VirtualCamera:
                 source = (
                     provided
                     if provided is not None
-                    else self._frame_source(ordinal, exposure)
+                    else self._frame_source(exposure)
                 )
                 image = np.asarray(source)
                 if image.shape != self._sensor_shape_yx:

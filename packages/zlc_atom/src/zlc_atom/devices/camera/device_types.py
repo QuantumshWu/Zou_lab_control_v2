@@ -141,16 +141,13 @@ def _discover_pylon() -> tuple[DeviceInstanceConfig, ...]:
 def _pylon_factory(context, key: str, values: dict) -> InstalledLeaf:
     """Open a Basler from a written-down configuration.
 
-    An already-attached camera object may be injected for tests; otherwise the
-    serial in the configuration selects exactly one camera.  That serial is
-    also the physical identity the broker guards: the logical key is what an
-    apparatus calls the device, and two keys naming one serial are one camera,
-    which the broker can only refuse if it is told the serial.
+    The serial in the configuration selects exactly one camera.  That serial
+    is also the physical identity the broker guards: the logical key is what
+    an apparatus calls the device, and two keys naming one serial are one
+    camera, which the broker can only refuse if it is told the serial.
     """
 
-    authored = PYLON_CAMERA_SCHEMA.project_values(
-        {name: value for name, value in values.items() if name != "camera"}
-    )
+    authored = PYLON_CAMERA_SCHEMA.project_values(values)
     camera = PylonCameraAdapter(
         PylonCameraConfig(
             serial=str(authored["serial"]),
@@ -161,7 +158,6 @@ def _pylon_factory(context, key: str, values: dict) -> InstalledLeaf:
             offset_counts=authored["offset_counts"],
             electrons_per_count=authored["electrons_per_count"],
         ),
-        camera=values.get("camera"),
     )
     camera.open()
     return bind_camera(
@@ -176,21 +172,16 @@ def _pylon_factory(context, key: str, values: dict) -> InstalledLeaf:
 def _dcam_factory(context, key: str, values: dict) -> InstalledLeaf:
     """Open a Hamamatsu qCMOS from a written-down configuration.
 
-    A live driver object may be passed in for tests, but it is NOT required:
-    demanding one meant a saved apparatus configuration could never be reopened,
-    because a driver is not something a JSON file can hold.  With no driver the
-    adapter opens the SDK itself from the authored device index, which is what a
-    configuration is for.
+    The adapter opens the SDK itself from the authored device index, which is
+    what a configuration is for: a saved apparatus has to be reopenable
+    tomorrow, and a driver is not something a JSON file can hold.
 
     DCAM addresses a camera by its index in the runtime's enumeration, so that
     index -- scoped to this process's DCAM runtime -- is the physical identity
     the broker guards; two keys opening one index are one camera.
     """
 
-    driver = values.get("driver")
-    authored = DCAM_CAMERA_SCHEMA.project_values(
-        {name: value for name, value in values.items() if name != "driver"}
-    )
+    authored = DCAM_CAMERA_SCHEMA.project_values(values)
     device_index = int(authored["device_index"])
     camera = DcamCameraAdapter(
         DcamCameraConfig(
@@ -202,7 +193,6 @@ def _dcam_factory(context, key: str, values: dict) -> InstalledLeaf:
             offset_counts=authored["offset_counts"],
             electrons_per_count=authored["electrons_per_count"],
         ),
-        driver=driver,
     )
     return bind_camera(
         context,

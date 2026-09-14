@@ -113,8 +113,7 @@ def _camera_factory(context, key: str, values: dict) -> InstalledLeaf:
     )
     camera = VirtualCamera(
         config,
-        frame_source=lambda ordinal, exposure: world.render_frame(
-            ordinal,
+        frame_source=lambda exposure: world.render_frame(
             exposure_seconds=exposure,
         ),
     )
@@ -160,9 +159,8 @@ def _mot_camera_factory(context, key: str, values: dict) -> InstalledLeaf:
         frame_dtype="|u1",
     )
 
-    def render(ordinal: int, *, exposure_seconds: float, occupancy=None):
+    def render(*, exposure_seconds: float, occupancy=None):
         return world.render_mot_frame(
-            ordinal,
             exposure_seconds=exposure_seconds,
             occupancy=occupancy,
             frame_shape_yx=config.frame_shape_yx,
@@ -170,10 +168,7 @@ def _mot_camera_factory(context, key: str, values: dict) -> InstalledLeaf:
 
     camera = VirtualCamera(
         config,
-        frame_source=lambda ordinal, exposure: render(
-            ordinal,
-            exposure_seconds=exposure,
-        ),
+        frame_source=lambda exposure: render(exposure_seconds=exposure),
         free_running=True,
     )
     return bind_camera(

@@ -1132,14 +1132,6 @@ class CameraMeasurementNode:
                 self.signal_plane.retire(self)
             raise
 
-    def measure(self) -> MeasurementResult:
-        """Collect externally triggered frames into one final publication."""
-
-        result = self.prepare().collect()
-        if result is None:
-            raise RuntimeError("finite camera measurement ended without a cycle")
-        return result
-
     def execute(self, context: object) -> dict[str, object]:
         """Hosted entry point: the same acquisition, published through the host.
 

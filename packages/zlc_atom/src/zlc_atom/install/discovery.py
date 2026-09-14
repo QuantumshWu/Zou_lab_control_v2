@@ -71,9 +71,7 @@ def _walk() -> tuple[tuple[DeviceTypeDescriptor, ...], tuple[UnavailableDeviceTy
                 UnavailableDeviceTypes(module_name, f"{type(error).__name__}: {error}")
             )
             continue
-        descriptor = getattr(module, "DEVICE_TYPE", None)
-        descriptors = getattr(module, "DEVICE_TYPES", None)
-        candidates = tuple(descriptors) if descriptors is not None else (descriptor,)
+        candidates = tuple(getattr(module, "DEVICE_TYPES", ()))
         if any(not isinstance(value, DeviceTypeDescriptor) for value in candidates):
             raise TypeError(f"{module_name} must export DeviceTypeDescriptor values")
         values.extend(candidates)

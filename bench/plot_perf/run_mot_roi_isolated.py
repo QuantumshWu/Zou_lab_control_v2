@@ -31,8 +31,7 @@ def _simulation_feeds(*, updates: int) -> dict:
     roi_x = (width - roi_width) // 2
     total = 40 + updates + 2
     world = SimulationWorld()
-    frame_source = lambda ordinal, exposure: world.render_mot_frame(
-        ordinal,
+    frame_source = lambda exposure: world.render_mot_frame(
         exposure_seconds=exposure,
         frame_shape_yx=(height, width),
     )
@@ -56,7 +55,6 @@ def _simulation_feeds(*, updates: int) -> dict:
     roi_events = []
     for ordinal in range(total):
         frame = world.render_mot_frame(
-            ordinal,
             exposure_seconds=0.1,
             frame_shape_yx=(height, width),
         )

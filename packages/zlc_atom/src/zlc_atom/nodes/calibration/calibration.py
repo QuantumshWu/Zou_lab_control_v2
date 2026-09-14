@@ -18,6 +18,10 @@ import numpy as np
 from zlc_data import SITE, AxisId, AxisSpec
 from zlc_durable import write_readable_json
 
+from zlc_atom.authoring import AuthoringChoice
+
+from zlc_atom.authoring import AuthoringChoice
+
 from .bimodal import fit_bimodal, finite_mean, gaussian_fidelity, optimal_gaussian_threshold, per_site_fidelity
 from .psf import extract_psf_window, gaussian_psf_kernel
 
@@ -31,6 +35,28 @@ class ReadoutModelKind(str, Enum):
 
 
 DEFAULT_READOUT_MODEL_CHOICE = "default"
+
+#: What a node may ask a calibration for, as a form offers it: the artifact's
+#: own default, then each model by name.  Said here, beside the kinds and the
+#: resolver, because a form offering a choice this mapping cannot resolve is a
+#: form that fails at build time.
+READOUT_MODEL_CHOICES = (
+    AuthoringChoice(DEFAULT_READOUT_MODEL_CHOICE, "Calibration default"),
+    AuthoringChoice(ReadoutModelKind.BOX.value, "Box"),
+    AuthoringChoice(ReadoutModelKind.PER_SITE_PSF.value, "Per-site PSF"),
+    AuthoringChoice(ReadoutModelKind.UNIFORM_PSF.value, "Uniform PSF"),
+)
+
+#: What a node may ask a calibration for, as a form offers it: the artifact's
+#: own default, then each model by name.  Said here, beside the kinds and the
+#: resolver, because a form offering a choice this mapping cannot resolve is a
+#: form that fails at build time.
+READOUT_MODEL_CHOICES = (
+    AuthoringChoice(DEFAULT_READOUT_MODEL_CHOICE, "Calibration default"),
+    AuthoringChoice(ReadoutModelKind.BOX.value, "Box"),
+    AuthoringChoice(ReadoutModelKind.PER_SITE_PSF.value, "Per-site PSF"),
+    AuthoringChoice(ReadoutModelKind.UNIFORM_PSF.value, "Uniform PSF"),
+)
 
 
 def _exact_fields(
@@ -2502,6 +2528,7 @@ __all__ = [
     "classify_threshold",
     "detect_sites",
     "FrameContract",
+    "READOUT_MODEL_CHOICES",
     "ReadoutModel",
     "ReadoutModelKind",
     "SiteMap",

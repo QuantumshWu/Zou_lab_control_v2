@@ -27,10 +27,6 @@ class DatasetInputSpec:
     name: str
     contract_id: str | None
     delivery: str
-    #: Additional outputs from the SAME atomic producer publication.  They
-    #: are not independently selected or joined: choosing the primary signal
-    #: uniquely selects these siblings from that exact event.
-    sibling_outputs: tuple[str, ...] = ()
     #: The operator selects a producer's atomic output bundle; one member
     #: remains the existing Runtime subscription anchor, not a second input.
     select_bundle: bool = False
@@ -41,11 +37,7 @@ class DatasetInputSpec:
         delivery = str(self.delivery).strip()
         if delivery not in {"exact", "latest"}:
             raise ValueError("dataset input delivery must be 'exact' or 'latest'")
-        siblings = tuple(str(value).strip() for value in self.sibling_outputs)
-        if any(not value for value in siblings) or len(set(siblings)) != len(siblings):
-            raise ValueError("dataset input sibling outputs must be unique non-empty names")
         object.__setattr__(self, "delivery", delivery)
-        object.__setattr__(self, "sibling_outputs", siblings)
 
     def accepts(self, contract_id: str | None) -> bool:
         return contract_id is not None and (

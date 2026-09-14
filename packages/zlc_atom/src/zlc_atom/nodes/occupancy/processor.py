@@ -219,12 +219,6 @@ class OccupancyProcessor:
     def dataset_output_declarations(self) -> tuple[DatasetOutputDeclaration, ...]:
         return OCCUPANCY_OUTPUTS
 
-    def signal_key(self, output_name: str) -> str:
-        names = {declaration.name for declaration in OCCUPANCY_OUTPUTS}
-        if str(output_name) not in names:
-            raise KeyError(f"unknown occupancy output {output_name!r}")
-        return f"@logic/{self.instance_id}/{output_name}"
-
     def _output_schemas(
         self,
         source: DatasetSchema,

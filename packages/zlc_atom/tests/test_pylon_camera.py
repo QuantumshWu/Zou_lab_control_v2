@@ -333,22 +333,32 @@ def test_a_refused_setting_is_not_the_config_and_does_not_block_the_next_one(
     assert adapter.config.roi_xywh == (0, 0, 16, 16)
 
 
-def test_the_factory_identity_is_the_serial_not_the_logical_key() -> None:
+def test_the_binding_identity_is_the_serial_not_the_logical_key() -> None:
     """Two keys naming one serial are one camera, and the broker must know.
 
     The identity used to be the logical key, so the same physical camera
     under a second name was accepted as a second device.
     """
 
-    from zlc_atom.devices.camera.device_types import DEVICE_TYPES
+    from zlc_atom.devices.camera.binding import bind_camera
     from zlc_atom.execution import DeviceBroker
     from zlc_atom.install import InstallationFactoryContext
 
-    factory = next(item for item in DEVICE_TYPES if item.type_id == "camera.pylon").factory
+    def attached() -> PylonCameraAdapter:
+        adapter = PylonCameraAdapter(
+            PylonCameraConfig(serial="SAME-SERIAL-001"), camera=_FakeCamera()
+        )
+        adapter.open()
+        return adapter
+
     broker = DeviceBroker()
     context = InstallationFactoryContext(None, broker, {})
-    first = factory(
-        context, "first-name", {"serial": "SAME-SERIAL-001", "camera": _FakeCamera()}
+    first = bind_camera(
+        context,
+        "first-name",
+        attached(),
+        "pylon-camera:serial=SAME-SERIAL-001",
+        "camera.pylon",
     )
     try:
         assert (
@@ -356,10 +366,12 @@ def test_the_factory_identity_is_the_serial_not_the_logical_key() -> None:
             == "pylon-camera:serial=SAME-SERIAL-001"
         )
         with pytest.raises(RuntimeError, match="already bound"):
-            factory(
+            bind_camera(
                 context,
                 "second-name",
-                {"serial": "SAME-SERIAL-001", "camera": _FakeCamera()},
+                attached(),
+                "pylon-camera:serial=SAME-SERIAL-001",
+                "camera.pylon",
             )
     finally:
         first.close()

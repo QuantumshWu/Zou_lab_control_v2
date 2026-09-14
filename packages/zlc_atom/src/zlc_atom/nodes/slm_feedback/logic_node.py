@@ -7,6 +7,7 @@ from zlc_plot import AxisRef, Reduction
 from zlc_plot.semantics import fate_field_name
 
 from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
+from zlc_atom.devices.camera import CAMERA_PROTECTED_FIELDS
 from zlc_atom.devices.slm.solver import load_science_context
 from zlc_atom.nodes._framework.descriptor import (
     ArtifactCodec,
@@ -224,21 +225,7 @@ LOGIC_NODE = LogicNodeDescriptor(
         ArtifactOutputSpec("artifact_path", SLM_PHASE_ARTIFACT_CONTRACT),
     ),
     device_requirements=(
-        DeviceRequirement(
-            "camera.adapter",
-            "camera",
-            (
-                "exposure",
-                "roi_x",
-                "roi_y",
-                "roi_width",
-                "roi_height",
-                "trigger_source",
-                "readout_speed",
-                "offset_counts",
-                "electrons_per_count",
-            ),
-        ),
+        DeviceRequirement("camera.adapter", "camera", CAMERA_PROTECTED_FIELDS),
         DeviceRequirement("sequencer.streamer", "sequencer", ("program",)),
         DeviceRequirement(
             "slm.phase",

@@ -2176,8 +2176,8 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
 ) -> None:
     fluorescence = np.arange(1, 6, dtype=np.uint16).repeat(7)
 
-    def frame_source(ordinal: int, exposure: float) -> np.ndarray:
-        del ordinal, exposure
+    def frame_source(exposure: float) -> np.ndarray:
+        del exposure
         return fluorescence.reshape(5, 7)
 
     camera = VirtualCamera(
@@ -2409,8 +2409,8 @@ def test_electron_measurement_uses_current_conversion_and_saturation(
         installation.close()
 
     def run(offset, scale, effective_photoelectrons):
-        def frame_source(ordinal, exposure):
-            del ordinal, exposure
+        def frame_source(exposure):
+            del exposure
             image = np.zeros((5, 7), dtype="<u2")
             image[2, 3] = np.iinfo("<u2").max
             return image
@@ -2453,8 +2453,8 @@ def test_measure_refuses_faults_without_repeating_the_authored_batch(
 ) -> None:
     """A board/observer failure must not add shots or masquerade as completion."""
 
-    def frame_source(ordinal: int, exposure: float) -> np.ndarray:
-        del ordinal, exposure
+    def frame_source(exposure: float) -> np.ndarray:
+        del exposure
         return np.full((5, 7), 3, dtype=np.uint16)
 
     camera = VirtualCamera(

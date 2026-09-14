@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
+from zlc_atom.authoring import AuthoringField, AuthoringSchema
 from zlc_atom.nodes._framework.descriptor import (
     ArtifactInputSpec,
     DatasetInputSpec,
@@ -13,6 +13,7 @@ from zlc_atom.nodes._framework.descriptor import (
 from zlc_atom.nodes.calibration import (
     CALIBRATION_ARTIFACT_CODEC,
     DEFAULT_READOUT_MODEL_CHOICE,
+    READOUT_MODEL_CHOICES,
     TrapCalibration,
     readout_model_kind_from_choice,
 )
@@ -27,12 +28,7 @@ OCCUPANCY_SCHEMA = AuthoringSchema(
             "choice",
             "Readout model",
             DEFAULT_READOUT_MODEL_CHOICE,
-            choices=(
-                AuthoringChoice("default", "Calibration default"),
-                AuthoringChoice("box", "Box"),
-                AuthoringChoice("psf", "Per-site PSF"),
-                AuthoringChoice("uniform_psf", "Uniform PSF"),
-            ),
+            choices=READOUT_MODEL_CHOICES,
         ),
     )
 )
