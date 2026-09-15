@@ -899,6 +899,8 @@ assert catalog == (
     ('Plot: histogram', ('plot', 'histogram')),
     ('Plot: facet_grid', ('plot', 'facet_grid')),
     ('Measurement: Camera Measurement', ('logic', 'camera_measurement')),
+    ('Measurement: Imu Measurement', ('logic', 'imu_measurement')),
+    ('Measurement: Scope Measurement', ('logic', 'scope_measurement')),
     ('Measurement: Seamless Scan', ('logic', 'seamless_scan')),
     ('Measurement: Stepped Scan', ('logic', 'stepped_scan')),
     ('Processor: Derive', ('logic', 'derive')),
