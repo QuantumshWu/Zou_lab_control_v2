@@ -449,3 +449,35 @@ def test_large_ungrouped_rolling_reuses_its_exact_valid_pool(
         assert bool(sample.valid[0])
         np.testing.assert_allclose(sample.values[0], reducer(expected_pool))
         assert peak < 32 << 20
+
+
+def test_a_rendered_panel_retains_one_canvas_sized_agg_renderer() -> None:
+    """The canvas is the only Agg renderer of its size a panel keeps.
+
+    Lowering a grid's ticks and spines to masks drew each one, in white, on
+    a scratch Agg renderer -- and that scratch was the whole figure, kept
+    for the panel's life: seventeen megabytes at the operator's density to
+    read back a strip a few pixels tall.  A stroke is rasterised on a
+    scratch the size of its own box now, and nothing of it is kept.
+    """
+
+    import gc
+
+    from matplotlib.backends.backend_agg import RendererAgg
+    from test_compose_identity import _site_grid_session
+
+    session, _landed = _site_grid_session()
+    try:
+        session.rgba()
+        canvas = session._renderer._figure.canvas.get_renderer()
+        canvas_size = (int(canvas.width), int(canvas.height))
+        gc.collect()
+        kept = [
+            (int(renderer.width), int(renderer.height))
+            for renderer in gc.get_objects()
+            if isinstance(renderer, RendererAgg)
+            and (int(renderer.width), int(renderer.height)) == canvas_size
+        ]
+        assert kept == [canvas_size], f"canvas-sized Agg renderers alive: {kept}"
+    finally:
+        session.close()

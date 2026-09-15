@@ -2411,6 +2411,11 @@ class RasterPlotHost:
             if self._closing:
                 return False
             self._front = front
+            # The first front's future served ``wait_for_front`` until there
+            # was a front; kept past that, it pinned the first front's block
+            # for the host's whole life -- in a render child, one shared
+            # segment per panel that never went back to the pool.
+            self._initial_front = None
             callbacks = tuple(self._front_callbacks)
         for callback in callbacks:
             try:

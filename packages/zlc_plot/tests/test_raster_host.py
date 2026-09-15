@@ -2628,3 +2628,28 @@ def test_a_message_that_cannot_cross_the_pipe_fails_its_sender_not_the_service()
         if remote is not None:
             remote.close(timeout=30)
         assert service.close(timeout=30)
+
+
+def test_a_promoted_front_does_not_pin_the_first_one() -> None:
+    """Once there is a front, the first one is nobody's to keep.
+
+    The host held the future of its first front for its whole life, and
+    the future held the front: one publish block per panel that never
+    returned to the pool -- in a render child, a shared segment the size
+    of the picture, for as long as the panel stood.
+    """
+
+    import weakref
+
+    host = RasterPlotHost.from_plot(_snapshot(), CurvePlot(AxisRef.point("x")))
+    try:
+        first = host.wait_for_front(timeout=10)
+        block = weakref.ref(first.buffer.pixels.obj)
+        second = host.set_parameter("title", "second").result(timeout=10).front
+        assert second.identity.sequence > first.identity.sequence
+        del first
+        gc.collect()
+        assert block() is None, "the first front's block is still held"
+        assert host.wait_for_front(timeout=10) is second
+    finally:
+        host.close(timeout=10)

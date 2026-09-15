@@ -2557,7 +2557,6 @@ class MatplotlibRenderer:
         #: makes it is matplotlib's own objects, sixty microseconds a cell,
         #: and a steady frame changes none of the facts.
         self._image_scene_memo: dict[str, tuple[tuple[object, ...], Any]] = {}
-        self._foreground_scratch: Any = None
         #: The DYNAMIC axes -- a colour scale's, a distribution rail's, whose
         #: ticks move with the data -- keyed by the facts their draw is a
         #: function of.  A key seen once is drawn plainly; seen twice
@@ -3680,34 +3679,40 @@ class MatplotlibRenderer:
         self._boundary_chrome_commands.clear()
         self._dynamic_axis_commands.clear()
         self._foreground_batches.clear()
-        self._foreground_scratch = None
         self._facet_chrome_memo.clear()
 
     def _record_boundary_chrome_commands(self, artists: Sequence[Any]) -> None:
         """Freeze Agg path commands for stable tick marks and spines."""
 
-        from matplotlib.backends.backend_agg import RendererAgg
-
-        width = int(round(float(self._figure.bbox.width)))
-        height = int(round(float(self._figure.bbox.height)))
-        recorder = RendererAgg(width, height, self._figure.dpi)
+        recorder = self._chrome_recorder()
         for artist in artists:
             commands = _record_artist_draw(artist, recorder)
             if commands:
                 self._boundary_chrome_commands[id(artist)] = commands
 
     def _chrome_recorder(self) -> Any:
-        """A one-pixel Agg renderer at the figure's dpi: what an exemplar
-        draws on to be recorded.  Nothing of the size reaches a recording
-        but the dpi, and a canvas-sized renderer was a third of a
-        millisecond to make."""
+        """The Agg renderer an artist draws on to be recorded: one pixel
+        wide, the canvas tall, at the figure's dpi.
+
+        Two things of a renderer reach a recording.  Its dpi, through every
+        point-to-pixel conversion; and its HEIGHT, because ``Text.draw``
+        bakes the vertical flip into the coordinates it hands
+        ``draw_text`` -- recorded on a renderer of another height, a title
+        replayed somewhere else and a focused cell lost its own.  Its width
+        reaches nothing, so the recorder is a column: the boundary chrome
+        used to record on a canvas-sized renderer made afresh on every
+        chrome rebuild, seventeen megabytes at the operator's density.
+        """
 
         dpi = float(self._figure.dpi)
+        height = max(1, int(round(float(self._figure.bbox.height))))
         recorder = self._facet_chrome_recorder
-        if recorder is None or recorder[0] != dpi:
+        if recorder is None or recorder[0] != (dpi, height):
             from matplotlib.backends.backend_agg import RendererAgg
 
-            recorder = self._facet_chrome_recorder = (dpi, RendererAgg(1, 1, dpi))
+            recorder = self._facet_chrome_recorder = (
+                (dpi, height), RendererAgg(1, height, dpi)
+            )
         return recorder[1]
 
     def _facet_chrome_exemplar(self, style: tuple[object, ...], source: Any) -> Any:
@@ -3940,17 +3945,20 @@ class MatplotlibRenderer:
         return masks if supported else None
 
     def _foreground_strokes(self, commands: _RecordedDraw, renderer: Any) -> Any:
-        """Lower independent Agg strokes/ticks once; compound paints stay public."""
+        """Lower independent Agg strokes/ticks once; compound paints stay public.
+
+        Each stroke is rasterised on a scratch renderer the size of ITS OWN
+        box, translated onto it by a whole number of pixels.  Agg snaps and
+        covers from the fractional part of a coordinate, which a whole-pixel
+        shift leaves alone, so the mask read back is the one the stroke
+        would leave on the canvas.  The scratch used to be the whole figure,
+        kept for the panel's life: seventeen megabytes at the operator's
+        density, to read back a strip a few pixels tall.
+        """
         from matplotlib.backends.backend_agg import RendererAgg
-        from matplotlib.transforms import Bbox
+        from matplotlib.transforms import Affine2D, Bbox
 
         height, width = np.asarray(renderer.buffer_rgba()).shape[:2]
-        if self._foreground_scratch is None:
-            scratch = RendererAgg(width, height, self._figure.dpi)
-            pixels = np.asarray(scratch.buffer_rgba())
-            pixels.fill(0)
-            self._foreground_scratch = [scratch, pixels, None]
-        scratch, pixels, dirty = self._foreground_scratch
         masks = []
         for name, gc, args, kwargs in commands:
             if (kwargs or gc.get_hatch() is not None or gc.get_clip_path()[0] is not None
@@ -3979,28 +3987,35 @@ class MatplotlibRenderer:
                     points[:, 0].min() + marker.x0, points[:, 1].min() + marker.y0,
                     points[:, 0].max() + marker.x1, points[:, 1].max() + marker.y1,
                 )
-            if dirty is not None:
-                top, bottom, left, right = dirty
-                pixels[top:bottom, left:right] = 0
             pad = int(math.ceil(gc.get_linewidth() * self._figure.dpi / 72.0)) + 4
             left, right = max(0, int(math.floor(box.x0)) - pad), min(width, int(math.ceil(box.x1)) + pad)
             top, bottom = max(0, height - int(math.ceil(box.y1)) - pad), min(height, height - int(math.floor(box.y0)) + pad)
-            # A mask must be read from a region THIS command alone drew
-            # into.  Clearing the previous command's region is not that: a
-            # grid cell's row of tick marks now arrives as one marker call
-            # whose region is a strip along the cell's edge, and any earlier
-            # stroke under that strip -- the frame it stands on -- would be
-            # read as part of it.
-            pixels[top:bottom, left:right] = 0
-            dirty = top, bottom, left, right
+            if right <= left or bottom <= top:
+                continue
+            # The box, as the scratch: canvas column ``left`` is scratch
+            # column 0, and canvas row ``top`` (counted from the top, as
+            # Agg stores rows) is scratch row 0.  Agg flips display y by its
+            # own height, so the display-y shift that puts the box's bottom
+            # edge on the scratch's bottom edge is ``height - bottom``.
+            scratch = RendererAgg(right - left, bottom - top, self._figure.dpi)
+            scratch.clear()
+            shift = Affine2D().translate(-left, -(height - bottom))
             white = scratch.new_gc()
             white.copy_properties(gc)
             white.set_alpha(1.0)
             white.set_foreground((1.0, 1.0, 1.0, 1.0), isRGBA=True)
-            draw_args = (*args[:4], (1.0, 1.0, 1.0, 1.0)) if name == "draw_markers" and args[4] is not None else args
+            clip = gc.get_clip_rectangle()
+            if clip is not None:
+                white.set_clip_rectangle(Bbox(shift.transform(clip.get_points())))
+            if name == "draw_path":
+                draw_args = (args[0], args[1] + shift, args[2])
+            else:
+                draw_args = (
+                    args[0], args[1], args[2], args[3] + shift,
+                    (1.0, 1.0, 1.0, 1.0) if args[4] is not None else None,
+                )
             getattr(scratch, name)(white, *draw_args)
-            self._foreground_scratch[2] = dirty
-            alpha = pixels[top:bottom, left:right, 3]
+            alpha = np.asarray(scratch.buffer_rgba())[..., 3]
             ys, xs = np.flatnonzero(alpha.any(axis=1)), np.flatnonzero(alpha.any(axis=0))
             if not ys.size or not xs.size:
                 continue
