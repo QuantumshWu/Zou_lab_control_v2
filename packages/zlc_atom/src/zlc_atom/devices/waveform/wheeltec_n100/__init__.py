@@ -3,7 +3,6 @@
 from .console import FdiConfigConsole
 from .source import (
     IMU_RATE_PARAMETER,
-    OFFERED_PARAMETERS,
     PACKET_RATE_LADDER_HZ,
     DEFAULT_BAUD,
     FRAME_HEAD,
@@ -11,7 +10,6 @@ from .source import (
     IMU_PACKET,
     MAX_PACKET_RATE_HZ,
     N100_OUTPUTS,
-    OPERATOR_PARAMETER_PREFIXES,
     WheeltecN100Config,
     WheeltecN100WaveformSource,
     discover_n100,
@@ -24,7 +22,6 @@ from .source import (
 
 __all__ = [
     "IMU_RATE_PARAMETER",
-    "OFFERED_PARAMETERS",
     "PACKET_RATE_LADDER_HZ",
     "DEFAULT_BAUD",
     "FdiConfigConsole",
@@ -33,7 +30,6 @@ __all__ = [
     "IMU_PACKET",
     "MAX_PACKET_RATE_HZ",
     "N100_OUTPUTS",
-    "OPERATOR_PARAMETER_PREFIXES",
     "WheeltecN100Config",
     "WheeltecN100WaveformSource",
     "discover_n100",

@@ -263,8 +263,8 @@ def _console_windows_for_a_fake(monkeypatch):
     nothing else. The product default is untouched.
     """
 
-    monkeypatch.setattr(console_module, "LISTEN_SECONDS", 0.05)
-    monkeypatch.setattr(console_module, "LISTING_LISTEN_SECONDS", 0.15)
+    monkeypatch.setattr(console_module, "SPACING_SECONDS", 0.05)
+    monkeypatch.setattr(console_module, "REPLY_QUIET_SECONDS", 0.02)
     monkeypatch.setattr(console_module, "STILL_NAVIGATING_SECONDS", 0.05)
     monkeypatch.setitem(globals(), "_CONFIG_SETTLE", 0.005)
 
@@ -389,49 +389,6 @@ def test_the_rate_is_a_ladder_rung_written_as_its_index() -> None:
         source.close()
 
 
-def test_the_operator_s_parameters_are_asked_for_by_name() -> None:
-    """A bare #fparam lists nothing, so each name is tried and kept if answered.
-
-    Factory calibration sits in the same namespace and is deliberately not
-    offered; a name the module does not have simply does not appear.
-    """
-
-    module = _FakeModule()
-    source = _source(module)
-    try:
-        # Ten names is ten commands, and every command on this console
-        # costs a listening window -- so opening the device reads the
-        # rates only, and this is the trip Device Control makes when its
-        # page opens.
-        source.refresh_tunable_fields()
-        values = source.tunable_values()
-        assert IMU_RATE_PARAMETER in values
-        assert "AID_MAG_V_MAGNETIC" in values
-        assert "FILT_NOTCH_CENTER_FREQUENCY" in values
-        assert "IMU_ACC_SCALE_X" not in values, "calibration is not an operator knob"
-        assert "FILT_NOTCH2_ENABLED" not in values, "this firmware does not have it"
-        assert "MSG_AHRS" in values, "the module enumerates all of its packets"
-
-        fields = {f.metadata.name: f.metadata for f in source.tunable_fields()}
-        assert fields["FILT_NOTCH_CENTER_FREQUENCY"].unit == "Hz"
-        assert [c.value for c in fields["AID_MAG_V_MAGNETIC"].choices] == ["0", "1"]
-
-        assert source.tune("FILT_NOTCH_CENTER_FREQUENCY", 50.0) == 50.0
-        assert module.parameters["FILT_NOTCH_CENTER_FREQUENCY"] == "50"
-        assert module.saved["FILT_NOTCH_CENTER_FREQUENCY"] == "50"
-        assert source.tune("AID_MAG_V_MAGNETIC", "0") == "0"
-
-        before = source.settings_provenance()["settings_epoch"]
-        source.save_settings()
-        assert "#fsave" in module.commands
-        assert source.settings_provenance()["settings_epoch"] == before
-
-        with pytest.raises(ValueError, match="no setting"):
-            source.tune("NOT_A_SETTING", 1.0)
-    finally:
-        source.close()
-
-
 def test_settings_cannot_move_under_a_running_capture() -> None:
     """Config mode stops the stream, so an armed capture refuses the write."""
 
@@ -513,17 +470,12 @@ def test_every_way_out_of_the_console_is_checked_by_whole_packets() -> None:
     module = _StaysQuiet()
     source = _source(module)
     try:
-        # Ten names is ten commands, and every command on this console
-        # costs a listening window -- so opening the device reads the
-        # rates only, and this is the trip Device Control makes when its
-        # page opens.
-        source.refresh_tunable_fields()
         module.armed = True
         # The write reaches the module; what fails is that it never comes
         # back on the air, and the driver says so rather than reporting the
         # write as done.
         with pytest.raises(RuntimeError, match="stopped it sending"):
-            source.tune("FILT_NOTCH_ENABLED", "1")
+            source.tune(IMU_RATE_PARAMETER, 50.0)
     finally:
         source.close()
 
@@ -548,17 +500,12 @@ def test_a_heartbeat_is_not_a_navigating_module() -> None:
     module = _HeartbeatOnly()
     source = _source(module)
     try:
-        # Ten names is ten commands, and every command on this console
-        # costs a listening window -- so opening the device reads the
-        # rates only, and this is the trip Device Control makes when its
-        # page opens.
-        source.refresh_tunable_fields()
         module.armed = True
         # The write reaches the module; what fails is that it never comes
         # back on the air, and the driver says so rather than reporting the
         # write as done.
         with pytest.raises(RuntimeError, match="stopped it sending"):
-            source.tune("FILT_NOTCH_ENABLED", "1")
+            source.tune(IMU_RATE_PARAMETER, 50.0)
     finally:
         source.close()
 
@@ -655,19 +602,12 @@ def test_a_module_that_takes_its_time_is_still_answering() -> None:
     module.reply_delay = 0.6          # a long pause before it starts
     # The window has to outlast what the module takes to start talking:
     # that is the rule on the real one too, where it is two seconds.
-    console_module.LISTEN_SECONDS = 1.5
-    console_module.LISTING_LISTEN_SECONDS = 1.5
+    console_module.REPLY_QUIET_SECONDS = 0.3
+    console_module.REPLY_TIMEOUT_SECONDS = 4.0
     source = _source(module)
     try:
-        # Ten names is ten commands, and every command on this console
-        # costs a listening window -- so opening the device reads the
-        # rates only, and this is the trip Device Control makes when its
-        # page opens.
-        source.refresh_tunable_fields()
         values = source.tunable_values()
         assert values[IMU_RATE_PARAMETER] == "10"
-        assert "AID_MAG_V_MAGNETIC" in values
-        assert "MSG_AHRS" in values
     finally:
         source.close()
 
@@ -687,52 +627,12 @@ def test_a_slow_console_never_reads_the_previous_reply() -> None:
     module.reply_delay = 0.9          # far longer than the quiet window
     # The window has to outlast what the module takes to start talking:
     # that is the rule on the real one too, where it is two seconds.
-    console_module.LISTEN_SECONDS = 1.5
-    console_module.LISTING_LISTEN_SECONDS = 1.5
+    console_module.REPLY_QUIET_SECONDS = 0.3
+    console_module.REPLY_TIMEOUT_SECONDS = 4.0
     source = _source(module)
     try:
-        # Ten names is ten commands, and every command on this console
-        # costs a listening window -- so opening the device reads the
-        # rates only, and this is the trip Device Control makes when its
-        # page opens.
-        source.refresh_tunable_fields()
         values = source.tunable_values()
         assert values[IMU_RATE_PARAMETER] == "10"
-        assert values["AID_MAG_V_MAGNETIC"] == "1"
-        assert values["FILT_NOTCH_CENTER_FREQUENCY"] == 0.0
-    finally:
-        source.close()
-
-
-def test_a_packet_that_is_off_reads_as_off_and_can_be_switched() -> None:
-    """Only the packet this bench reads is protected from being turned off.
-
-    Turning off a packet nobody reads frees line rate for the one that is
-    read, which at 400 Hz is worth having. Turning off the IMU packet would
-    make the module invisible to discovery, which recognises it by exactly
-    those frames -- so rung 0 is offered for every packet but that one.
-    """
-
-    module = _FakeModule(rate_hz=10.0)
-    source = _source(module)
-    try:
-        fields = {f.metadata.name: f for f in source.tunable_fields()}
-
-        imu = fields[IMU_RATE_PARAMETER]
-        assert "0" not in [c.value for c in imu.metadata.choices], (
-            "the packet this bench finds the module by cannot be turned off"
-        )
-
-        ahrs = fields["MSG_AHRS"]
-        assert ahrs.current == "0", "a packet that is off must not read as a slow one"
-        assert [c.value for c in ahrs.metadata.choices][:3] == ["0", "1", "2"]
-
-        # And it really switches, in hertz both ways.
-        assert source.tune("MSG_AHRS", "10") == "10"
-        assert module.parameters["MSG_AHRS"] == "4", "written as its rung"
-        assert module.saved["MSG_AHRS"] == "4"
-        assert source.tunable_values()["MSG_AHRS"] == "10", "read back as hertz"
-        assert source.tune("MSG_AHRS", "0") == "0"
     finally:
         source.close()
 
@@ -775,14 +675,9 @@ def test_a_refused_save_is_not_a_save() -> None:
     module = _RefusesSave()
     source = _source(module)
     try:
-        # Ten names is ten commands, and every command on this console
-        # costs a listening window -- so opening the device reads the
-        # rates only, and this is the trip Device Control makes when its
-        # page opens.
-        source.refresh_tunable_fields()
         with pytest.raises((TuneRefused, RuntimeError)):
-            source.tune("AID_MAG_V_MAGNETIC", "0")
-        assert source.tunable_values()["AID_MAG_V_MAGNETIC"] == "1", (
+            source.tune(IMU_RATE_PARAMETER, 50.0)
+        assert source.tunable_values()[IMU_RATE_PARAMETER] == "10", (
             "the settings must not claim a value the module would not keep"
         )
     finally:

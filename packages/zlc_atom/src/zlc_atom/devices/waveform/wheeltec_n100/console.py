@@ -6,25 +6,34 @@ also carries an ASCII command console, documented in chapter 5 of FDI's
 emitting frames, every ``#f`` command is answered in plain text, and
 ``#fdeconfig`` puts it back on the air.
 
-THIS FILE DOES EXACTLY WHAT THE PROBE THAT WORKS ON THE BENCH DOES.
+THE WIRE HERE LOOKS EXACTLY LIKE THE PROBE THAT WORKS ON THE BENCH.
 
-    write one command, listen for a fixed window, then read the whole
-    window and move on.
+    write one command, read the line continuously, and do not write the
+    next one until SPACING_SECONDS after the last write.
 
-Nothing here stops reading early because it thinks it has seen enough, and
-nothing sends a command before the window of the one before it has run out.
-That is the entire protocol, and it is not a style: every version of this
-file that tried to be quicker than that broke on the real module, and this
-is the shape that has never broken on it.
+The spacing is not waiting for a reply.  A reply is eleven bytes and
+arrives in a fraction of a millisecond; what takes the time is the module,
+which refuses a command that arrives while it is still busy with the one
+before.  The bench measured exactly that: the same command answers
+perfectly when it is given room, and ``*#ERROR`` when it is sent 0.05 s
+behind another -- and a later sweep refused it at every gap up to 0.8 s.
+
+So the gap is charged to the NEXT command rather than to this one.  A reply
+is read until the module goes quiet and handed straight back; the waiting
+happens before the next line goes out, and it is spent reading, which is
+what the probe does too.  The last command of a session then pays nothing,
+and a caller that asks one question is not held for a gap nobody will use.
+
+What is NOT done here is stopping a read at the first thing that looks like
+an answer.  Half a reply taken for a whole one is how this console used to
+lose step: the other half turned up in the next command's window, and from
+there every command read the one before it.
 
 The bench settled it.  Sent one at a time, each followed by a two-second
 listen, every command answers::
 
     > #fconfig                      (frames drain, then) *#OK
     > #fparam get MSG_IMU           MSG_IMU=7
-    > #fmsg                         MSG_IMU[40]  100.0Hz
-                                    MSG_AHRS[41]   0.0Hz
-                                    ... 1904 bytes, forty packets
     > #fparam get FILT_LPF_ENABLED  FILT_LPF_ENABLED=0.000000
     > #fparam                       *#ERROR       (the bare form; no arguments)
     > #fparam set MSG_IMU 7         *#OK          (written, NOT yet live)
@@ -32,12 +41,14 @@ listen, every command answers::
     > #freboot                      (y/n)  then y -> back in 2.5 s
     > #fdeconfig                    (the binary stream resumes)
 
-And the same ``#fmsg``, sent 0.05 s behind the command before it, with the
-host not reading in between::
+And the same command, sent 0.05 s behind the one before it with the host
+not reading in between, is refused::
 
     > #fmsg                         *#ERROR
 
-A later sweep refused it at every gap up to 0.8 s as well.  Whatever the
+A later sweep refused it at every gap up to 0.8 s as well.  (``#fmsg``
+lists every packet the module has; this driver turns one of them, and reads
+that one by name, but the pacing it proved applies to every command here.)  Whatever the
 module wants -- time, or its reply taken off the line, or both -- the
 listen gives it, because the listen IS the gap and it is spent reading.
 
@@ -46,12 +57,11 @@ end and then parsed in one go.  ``NAME=value`` is a parameter echo,
 ``MSG_x[id] nHz`` a listing line, ``*#OK`` and ``*#ERROR`` the module's yes
 and no.  With one command per window, nothing else can have printed them.
 
-``MSG_IMU=4`` standing beside ``MSG_IMU[40] 10.0Hz`` is what says a rate is
-stored as a LADDER INDEX -- rung 4 is 10 Hz -- which is why the manual's
-``#fmsg 40 100`` is answered ``*#OK`` and changes nothing.  A bare
-``#fparam`` is an error, so parameters cannot be enumerated: the rates come
-from ``#fmsg``, which is the module listing itself, and named parameters
-have to be asked for one at a time.
+``MSG_IMU=4`` standing beside ``#fmsg``'s ``MSG_IMU[40] 10.0Hz`` is what
+says a rate is stored as a LADDER INDEX -- rung 4 is 10 Hz -- which is why
+the manual's ``#fmsg 40 100`` is answered ``*#OK`` and changes nothing.  A
+bare ``#fparam`` is an error, so parameters cannot be enumerated: every one
+is asked for by name, one command at a time.
 
 Entering is judged by the module CEASING TO NAVIGATE, which is the state
 change itself -- not by a banner, which the manual and the module disagree
@@ -85,15 +95,20 @@ CONFIRM_PROMPT = "(y/n)"
 #: The packet every N100 sends, and the one this bench reads.
 IMU_PACKET_NAME = "MSG_IMU"
 
-#: How long to listen after a command before sending another.  This is the
-#: number the working probe uses, and the thing this driver kept trying to
-#: beat: 0.05 s is answered ``*#ERROR``, and so is every gap up to 0.8 s.
-#: It is not a timeout -- the window always runs out, and the whole of it
-#: is read.
-LISTEN_SECONDS = 2.0
+#: How far apart two commands must go out.  Measured on the bench, not
+#: chosen: 0.05 s is answered ``*#ERROR`` and so is every gap up to 0.8 s,
+#: while the probe that works leaves two seconds.  It is a spacing and
+#: never a timeout -- it is spent reading the line, and it is charged to
+#: the command that comes next rather than to the one that just answered.
+SPACING_SECONDS = 2.0
 
-#: And for ``#fmsg``, which prints some 1904 bytes in batches.
-LISTING_LISTEN_SECONDS = 5.0
+#: A reply is over when the module has said nothing for this long.  There
+#: is no end marker on this console, so this is what says the whole of it
+#: is in hand before anybody parses it.
+REPLY_QUIET_SECONDS = 0.25
+
+#: And a module that says nothing at all within this is not answering.
+REPLY_TIMEOUT_SECONDS = 3.0
 
 #: A frame header followed by a NAVIGATION packet type -- what "it is still
 #: navigating" looks like.  0xF0 is the 1 Hz heartbeat, which the module
@@ -114,16 +129,6 @@ _PARAM_ECHO = re.compile(
     r"(?P<name>[A-Za-z_][A-Za-z0-9_]*) *= *(?P<value>[-+]?[0-9]+(?:\.[0-9]+)?)"
 )
 
-#: ``MSG_IMU[40]   10.0Hz`` from ``#fmsg``: the module enumerating itself,
-#: one line per packet, with the rate in hertz.  No ``=`` in it, so a
-#: listing and a parameter echo cannot be mistaken for one another.
-_PACKET_LINE = re.compile(
-    r"(?P<name>MSG_[A-Z0-9_]+)\[(?P<id>[0-9A-Fa-f]{1,2})\] *"
-    r"(?P<hz>[0-9]+(?:\.[0-9]+)?)Hz",
-    re.IGNORECASE,
-)
-
-
 def _as_text(data: bytes) -> str:
     """The window as words.  A frame's bytes are not ASCII and stay noise."""
 
@@ -139,15 +144,6 @@ def parameters_in(transcript: str) -> dict[str, str]:
     }
 
 
-def packets_in(transcript: str) -> tuple[tuple[str, int, float], ...]:
-    """Every ``MSG_x[id] nHz`` the module printed, as ``(name, id, hertz)``."""
-
-    return tuple(
-        (match["name"], int(match["id"], 16), float(match["hz"]))
-        for match in _PACKET_LINE.finditer(transcript)
-    )
-
-
 class FdiConfigConsole:
     """The module's text-command link, open while its stream is stopped.
 
@@ -161,27 +157,22 @@ class FdiConfigConsole:
     reads it; this class only talks.  Use it as a context manager so the
     module always gets its ``#fdeconfig`` even when a command raises.
 
-    Every command costs ``listen_seconds``, and that is deliberate -- see
-    the module docstring.  Tests that do not need the real pacing pass
-    their own.
+    Commands are spaced ``SPACING_SECONDS`` apart, which is the module's
+    requirement rather than a preference -- see the module docstring.
+    Tests that do not need the real pacing pass their own.
     """
 
     def __init__(
         self,
         port,
         *,
-        listen_seconds: float | None = None,
-        listing_listen_seconds: float | None = None,
+        spacing: float | None = None,
     ) -> None:
         self._port = port
-        self._listen_seconds = float(
-            LISTEN_SECONDS if listen_seconds is None else listen_seconds
-        )
-        self._listing_listen = (
-            float(listing_listen_seconds)
-            if listing_listen_seconds is not None
-            else max(LISTING_LISTEN_SECONDS, self._listen_seconds)
-        )
+        self._spacing = float(SPACING_SECONDS if spacing is None else spacing)
+        #: When the last command went out.  The next one is held back until
+        #: the spacing has passed from here.
+        self._wrote_at = 0.0
         self._entered = False
         #: The last command and the whole window that followed it, verbatim.
         #: Kept because every wrong turn in this driver has been an
@@ -211,9 +202,9 @@ class FdiConfigConsole:
             return
         self._port.reset_input_buffer()
         self._write("#fconfig")
-        opening = self._listen(self._listen_seconds)
+        opening = self._listen_until_quiet()
         self.last_exchange = ("#fconfig", _as_text(opening))
-        still = self._listen(STILL_NAVIGATING_SECONDS)  # noqa: E501 -- read live
+        still = self._listen(STILL_NAVIGATING_SECONDS)
         if any(mark in still for mark in _STREAM_MARKS):
             raise RuntimeError(
                 "the module on this port kept streaming through #fconfig, so "
@@ -229,27 +220,25 @@ class FdiConfigConsole:
         try:
             self._port.reset_input_buffer()
             self._write("#fdeconfig")
-            self._listen(self._listen_seconds)
+            self._listen(STILL_NAVIGATING_SECONDS)
         finally:
             self._entered = False
 
     # --------------------------------------------------------------- link
-    def say(self, command: str, *, listen: float | None = None) -> str:
-        """Send ONE command and return the whole window that follows it.
+    def say(self, command: str) -> str:
+        """Send ONE command and return its whole reply.
 
-        The window always runs to its end.  Stopping it early on something
-        that looks like the answer is what every broken version of this
-        file did: the rest of the reply then arrives inside the next
-        command's window, and the next command arrives before this module
-        will take it.
+        The reply is read until the module goes quiet, so what comes back
+        is all of it.  What is NOT waited for here is the gap the module
+        wants before the next command: that is charged to the next command,
+        which is where it belongs and where it costs nobody anything if no
+        next command comes.
         """
 
         self._require_console(command)
         self._port.reset_input_buffer()
         self._write(command)
-        transcript = _as_text(
-            self._listen(self._listen_seconds if listen is None else listen)
-        )
+        transcript = _as_text(self._listen_until_quiet())
         self.last_exchange = (command, transcript)
         return transcript
 
@@ -298,23 +287,6 @@ class FdiConfigConsole:
             f"{transcript.strip()[:120]!r}, which is neither the value nor "
             "its refusal"
         )
-
-    def packet_rates(self) -> tuple[tuple[str, int, float], ...]:
-        """Every packet this module has, as ``(name, id, hertz)``.
-
-        The module enumerating itself, and the only readback there is for a
-        rate -- the parameter holding one reads back as the ladder index
-        that was written to it, not as hertz.
-        """
-
-        transcript = self.say("#fmsg", listen=self._listing_listen)
-        listed = packets_in(transcript)
-        if not any(name.upper() == IMU_PACKET_NAME for name, _id, _hz in listed):
-            raise RuntimeError(
-                "the module did not list its packets; it said "
-                f"{transcript.strip()[:160]!r}"
-            )
-        return listed
 
     def set_parameter(self, name: str, value: str) -> str:
         """Write one named parameter and answer with what it reads back as.
@@ -377,18 +349,48 @@ class FdiConfigConsole:
 
     # -------------------------------------------------------------- lines
     def _write(self, text: str) -> None:
+        """Put one line on the wire, no sooner than the module will take it.
+
+        The wait is spent READING, which is what the probe that works does
+        between its commands, and it is measured from the last line to go
+        OUT rather than from the last byte to come back: the module is busy
+        from the moment it is spoken to.
+        """
+
+        owed = self._spacing - (time.monotonic() - self._wrote_at)
+        if owed > 0.0:
+            self._listen(owed)
         self._port.write((text + LINE_END).encode("ascii"))
+        self._wrote_at = time.monotonic()
         flush = getattr(self._port, "flush", None)
         if callable(flush):
             flush()
 
-    def _listen(self, seconds: float) -> bytes:
-        """Read the line for this long, and read all of it.
+    def _listen_until_quiet(self) -> bytes:
+        """Read until the module has finished saying whatever it is saying.
 
-        No early exit.  The window is the reply AND the gap before the next
-        command, which is what the module wants and what this driver spent
-        three rewrites trying to shorten.
+        There is no end marker on this console, so the end of a reply is
+        the module going quiet.  Nothing is judged here -- the caller parses
+        what comes back -- and nothing stops at the first thing that looks
+        like an answer.
         """
+
+        got = bytearray()
+        deadline = time.monotonic() + REPLY_TIMEOUT_SECONDS
+        last = time.monotonic()
+        while time.monotonic() < deadline:
+            waiting = getattr(self._port, "in_waiting", 0)
+            chunk = self._port.read(waiting if waiting else 1)
+            now = time.monotonic()
+            if chunk:
+                got += chunk
+                last = now
+            elif got and now - last >= REPLY_QUIET_SECONDS:
+                break
+        return bytes(got)
+
+    def _listen(self, seconds: float) -> bytes:
+        """Read the line for this long, and read all of it."""
 
         got = bytearray()
         until = time.monotonic() + seconds
@@ -407,10 +409,10 @@ __all__ = [
     "FdiConfigConsole",
     "IMU_PACKET_NAME",
     "LINE_END",
-    "LISTEN_SECONDS",
-    "LISTING_LISTEN_SECONDS",
     "OK",
+    "REPLY_QUIET_SECONDS",
+    "REPLY_TIMEOUT_SECONDS",
+    "SPACING_SECONDS",
     "STILL_NAVIGATING_SECONDS",
-    "packets_in",
     "parameters_in",
 ]

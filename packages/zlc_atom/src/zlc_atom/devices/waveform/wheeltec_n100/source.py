@@ -128,14 +128,6 @@ DEFAULT_BAUD = 921600
 #: this only keeps a typo from asking for something no firmware has.
 MAX_PACKET_RATE_HZ = 400.0
 
-#: Which KINDS of named parameter belong to an operator rather than to the
-#: factory.  Filters shape what the sensors report -- a notch on the mains
-#: frequency is the reason this matters for a magnetic measurement -- and
-#: the AID switches decide which sensors the attitude solution fuses.  The
-#: scale factors, cross-axis terms and biases beside them are calibration,
-#: and are deliberately not offered.
-OPERATOR_PARAMETER_PREFIXES = ("FILT_", "AID_")
-
 #: How this firmware spells a packet's rate: an INDEX into this ladder,
 #: written to a named parameter, never a number of hertz.  The manual's
 #: ``#fmsg 40 100`` is answered ``*#OK`` and changes nothing; the vendor's
@@ -156,29 +148,6 @@ IMU_RATE_PARAMETER = "MSG_IMU"
 #: invisible from then on, power cycle included.  Rung 0 is excluded for
 #: the same reason; these are the same hazard at different speeds.
 SLOWEST_DISCOVERABLE_HZ = 5.0
-
-#: The NON-RATE settings offered to an operator, tried by name because a
-#: bare ``#fparam`` answers ``*#ERROR`` on this firmware: parameters cannot
-#: be enumerated, so this is a menu to try rather than a claim about what
-#: any firmware has, and a name the module does not answer to is not
-#: offered.  The filters shape what the sensors report, which is why a
-#: mains notch matters for a magnetic measurement; the AID switches decide
-#: which sensors the attitude solution fuses.  Factory calibration lives in
-#: the same namespace and is deliberately absent.  The RATES are not in
-#: this list: the module enumerates those itself, through ``#fmsg``.
-OFFERED_PARAMETERS = (
-    "FILT_LPF_ENABLED",
-    "FILT_LPF_CUTOFF_FREQUENCY",
-    "FILT_NOTCH_ENABLED",
-    "FILT_NOTCH_CENTER_FREQUENCY",
-    "FILT_NOTCH_CUTOFF_FREQUENCY",
-    "FILT_NOTCH2_ENABLED",
-    "FILT_NOTCH2_CENTER_FREQUENCY",
-    "FILT_NOTCH2_CUTOFF_FREQUENCY",
-    "AID_MAG_V_MAGNETIC",
-    "AID_INIT_YAW_USE_MAG",
-)
-
 
 def offered_rungs(
     *, may_turn_off: bool, standing_at: float | None = None
@@ -234,32 +203,6 @@ def rate_ladder_index(
     )
 
 
-#: A parameter's NAME says what kind of value it holds.  The module gives
-#: every one of them as a bare decimal, which would put a frequency and a
-#: switch in the same nondescript number box; the vendor's naming is
-#: consistent enough to do better, and unlike a list of parameter names a
-#: suffix convention survives a firmware revision.  A name ending in
-#: ``_FREQUENCY`` is hertz, and a switch is a switch -- the fusion
-#: parameters are called switches in the vendor's own manual, and the
-#: filter ones say ``_ENABLED``.
-_FREQUENCY_SUFFIX = "_FREQUENCY"
-_SWITCH_SUFFIX = "_ENABLED"
-_SWITCH_PREFIX = "AID_"
-
-
-def parameter_shape(name: str) -> tuple[str, str | None]:
-    """The ``(kind, unit)`` a named parameter should be offered as."""
-
-    upper = str(name).upper()
-    if upper.startswith("MSG_"):
-        return "rate", "Hz"
-    if upper.endswith(_SWITCH_SUFFIX) or upper.startswith(_SWITCH_PREFIX):
-        return "switch", None
-    if upper.endswith(_FREQUENCY_SUFFIX):
-        return "float", "Hz"
-    return "float", None
-
-
 def _as_number(value: object) -> float | None:
     """The module's answer as a number, or None when it is not one."""
 
@@ -284,26 +227,39 @@ def _hertz_of_rung(reading: object) -> float | None:
 
 
 def _spelling_of(name: str, value: object, *, standing_at: object = None) -> str:
-    """How one setting's value is written on the wire.
+    """How the rate is written on the wire: its rung's index, never hertz.
 
-    A rate goes as its rung's index; everything else goes as its number.
-    The settings map holds a rate in hertz, so this is the one place the
-    two spellings meet, and it is used by the write and by the undo alike
-    -- which is why ``standing_at`` matters: an undo puts back a rate the
-    module was demonstrably running, and refusing it there would leave the
-    module on the value that silenced it while reporting that the undo was
-    tried.
+    The settings map holds it in hertz, because that is what an operator
+    means by a sample rate, so this is the one place the two spellings
+    meet.  It is used by the write and by the undo alike, which is why
+    ``standing_at`` matters: an undo puts back a rate the module was
+    demonstrably running, and refusing it there would leave the module on
+    the value that silenced it while reporting that the undo was tried.
     """
 
-    if parameter_shape(name)[0] == "rate":
-        return str(
-            rate_ladder_index(
-                float(value),
-                may_turn_off=name.upper() != IMU_RATE_PARAMETER,
-                standing_at=_as_number(standing_at),
-            )
+    return str(
+        rate_ladder_index(
+            float(value),
+            may_turn_off=name.upper() != IMU_RATE_PARAMETER,
+            standing_at=_as_number(standing_at),
         )
-    return _as_text(value)
+    )
+
+
+def _rung_the_stream_is_on(measured_hz: float) -> float | None:
+    """Which rung a measured stream rate is standing on, or None.
+
+    The rungs are a factor of two or more apart, so a measurement anywhere
+    near one names it and no other.  That is what lets the STREAM answer
+    for the rate after a restart: the packets arriving are what this bench
+    stamps its records with, and asking the console instead would cost
+    another trip through it to be told something less true.
+    """
+
+    for rung in PACKET_RATE_LADDER_HZ:
+        if rung and abs(measured_hz - rung) <= max(1.0, rung * 0.25):
+            return rung
+    return None
 
 
 def _apply(console, name: str, spelling: str) -> str | None:
@@ -617,8 +573,7 @@ class WheeltecN100WaveformSource:
 
         try:
             self._settings = self._in_console(
-                lambda console: self._read_settings(console, named=False),
-                stream_back=False,
+                self._read_settings, stream_back=False
             )
         except Exception as refusal:  # noqa: BLE001 -- reported, not raised
             self._settings = {}
@@ -977,123 +932,52 @@ class WheeltecN100WaveformSource:
         self._first_bytes.clear()
         self._hear_the_module()
 
-    def _read_settings(self, console, *, named: bool = True) -> dict[str, object]:
-        """The rates the module enumerates, and the parameters it answers to.
+    def _read_settings(self, console) -> dict[str, object]:
+        """The one setting this bench turns: how often the packet arrives.
 
-        Two mechanisms, because the module has two.  ``#fmsg`` prints every
-        packet it has with its rate in hertz, so the rates are the module's
-        own list, and one command buys all forty of them.  Parameters
-        cannot be enumerated -- a bare ``#fparam`` is an error on this
-        firmware -- so those are asked for one command at a time, and what
-        the module will not answer to, it does not have.
-
-        ``named`` is off where the cost would be paid for nothing.  Every
-        command on this console costs a full listening window, so the ten
-        named parameters are ten windows: worth it when an operator opens
-        the settings page, not when a device is merely being opened or a
-        rate has just been written.
+        It is stored as a rung INDEX in a named parameter -- that is the
+        value the module takes -- so one command reads it and the ladder
+        says what it means in hertz.  ``#fmsg`` would list every packet the
+        module has, forty of them, and this bench reads exactly one.
         """
 
-        settings: dict[str, object] = {}
-        for name, _packet_id, rate_hz in console.packet_rates():
-            settings[name] = rate_hz
-        self._packets_listed = IMU_RATE_PARAMETER in settings
-        for name in OFFERED_PARAMETERS if named else ():
-            try:
-                reading = _as_number(console.get_parameter(name))
-            except RuntimeError:
-                # The console went quiet on a name this firmware may simply
-                # not have.  Nothing more can be asked -- a reply that has
-                # not come cannot be told from one that never will, and
-                # asking anyway is what loses step -- but the rates the
-                # module already listed are its own words and they stand.
-                break
-            if reading is not None:
-                settings[name] = reading
-        return settings
+        hertz = _hertz_of_rung(console.get_parameter(IMU_RATE_PARAMETER))
+        self._packets_listed = hertz is not None
+        return {} if hertz is None else {IMU_RATE_PARAMETER: hertz}
 
     def _field_for(self, name: str, value: object) -> TunableField:
-        kind, unit = parameter_shape(name)
-        if kind == "rate":
-            # Held in hertz, because that is how #fmsg reports it; WRITTEN
-            # as the rung's index, which is the module's own spelling.
-            current = float(_as_number(value) or 0.0)
-            # Every packet but the one this bench reads may be turned off,
-            # which frees line rate for the one it does.  Turning THAT one
-            # off would make the module invisible to discovery.
-            may_turn_off = name.upper() != IMU_RATE_PARAMETER
-            # Always including the rung the module is standing on: a rate
-            # this driver would not have chosen is still the rate it found,
-            # and a choice list that cannot express it fails the whole
-            # Device Control window rather than one row.
-            rungs = offered_rungs(may_turn_off=may_turn_off, standing_at=current)
-            return TunableField(
-                metadata=AuthoringField(
-                    name,
-                    "choice",
-                    # The module lists about thirty packets and every one of
-                    # them lands here, so the row has to say WHICH.
-                    f"{name} rate",
-                    None,
-                    unit="Hz",
-                    choices=tuple(
-                        AuthoringChoice(
-                            f"{rung:g}", "Off" if rung == 0 else f"{rung:g} Hz"
-                        )
-                        for rung in rungs
-                    ),
-                    description=(
-                        (
-                            "how often the module sends the packet this bench "
-                            "reads, and therefore this bench's sample rate. It "
-                            "cannot be turned off or set below "
-                            f"{SLOWEST_DISCOVERABLE_HZ:g} Hz: a scan finds this "
-                            "module by these frames"
-                        )
-                        if not may_turn_off
-                        else (
-                            f"how often the module sends {name}. This bench "
-                            "does not read it, so turning it off frees line "
-                            "rate for the packet that does"
-                        )
-                    )
-                    + ". The module takes a rung of its own ladder, not a "
-                    "number of hertz, so only the rungs are offered",
-                ),
-                # Shown exactly as the module reports it, 0 Hz included:
-                # a packet that is switched off must not read as a slow one.
-                current=f"{current:g}",
-                live_write=True,
-                dependency_group=(name,),
-            )
-        if kind == "switch":
-            return TunableField(
-                metadata=AuthoringField(
-                    name,
-                    "choice",
-                    name,
-                    None,
-                    choices=(
-                        AuthoringChoice("0", "Off"),
-                        AuthoringChoice("1", "On"),
-                    ),
-                    description="a module switch, read and written with #fparam",
-                ),
-                current=str(int(float(_as_number(value) or 0))),
-                live_write=True,
-                dependency_group=(name,),
-            )
+        """The rate, as a choice of the rungs its module actually offers."""
+
+        # Held in hertz, because that is what a sample rate means to an
+        # operator; WRITTEN as the rung's index, which is what the module
+        # takes.
+        current = float(_as_number(value) or 0.0)
+        # Always including the rung the module is standing on: a rate this
+        # driver would not have chosen is still the rate it found, and a
+        # choice list that cannot express it fails the whole Device Control
+        # window rather than one row.
+        rungs = offered_rungs(may_turn_off=False, standing_at=current)
         return TunableField(
             metadata=AuthoringField(
                 name,
-                "float",
-                name,
+                "choice",
+                "Acquisition rate",
                 None,
-                minimum=0.0,
-                unit=unit,
-                description="a module parameter, read and written with #fparam",
+                unit="Hz",
+                choices=tuple(
+                    AuthoringChoice(f"{rung:g}", f"{rung:g} Hz") for rung in rungs
+                ),
+                description=(
+                    "how often the module sends the packet this bench reads, "
+                    "and therefore this bench's sample rate. It cannot be "
+                    f"turned off or set below {SLOWEST_DISCOVERABLE_HZ:g} Hz: "
+                    "a scan finds this module by those frames. The module "
+                    "takes a rung of its own ladder, not a number of hertz, "
+                    "so only the rungs are offered, and a change costs a "
+                    "save and a restart"
+                ),
             ),
-            current=float(_as_number(value) or 0.0),
+            current=f"{current:g}",
             live_write=True,
             dependency_group=(name,),
         )
@@ -1148,7 +1032,6 @@ class WheeltecN100WaveformSource:
                     f"this module has no setting {selected!r}; it offers "
                     f"{offered or 'none -- its configuration console did not answer'}"
                 )
-            is_rate = parameter_shape(selected)[0] == "rate"
             previous = self._settings.get(selected)
             spelling = _spelling_of(selected, value, standing_at=previous)
 
@@ -1161,55 +1044,28 @@ class WheeltecN100WaveformSource:
                 self._require_stream_back(_RESTART_SECONDS)
             except BaseException as silenced:
                 self._put_back(selected, previous, silenced, value)
-            # What the module came up ON, asked after the restart -- and
-            # ALL of it, not the one name that was written.  The readback
-            # inside the write comes from the PARAMETER TABLE, before the
-            # save and before the restart, so it says what was asked for
-            # rather than what is running; and the restart reloads the
-            # module's WHOLE configuration from flash, so any setting can
-            # have moved, including one an earlier aborted write left
-            # dirty.  This trip is being paid for either way.
-            # The rates, which a restart can move whatever knob turned,
-            # plus the one name that was written.  Not all ten named
-            # parameters: each is a command, and each command is a window.
-            def read_back(console):
-                got = self._read_settings(console, named=False)
-                if not is_rate:
-                    value = _as_number(console.get_parameter(selected))
-                    if value is not None:
-                        got[selected] = value
-                return got
-
-            self._settings = {
-                **self._settings,
-                **self._in_console(read_back, stream_back=True),
-            }
-            taken = self._settings.get(selected)
-            # The interval stamps every record, so it is re-timed after any
-            # restart, whatever knob caused it.
+            # The stream is the answer, and it costs nothing: the interval
+            # has to be re-timed anyway, because it stamps every record.
+            # Going back into the console to ask would cost another trip --
+            # entering, a command, leaving, ten seconds of an operator's
+            # time -- to be told what the module MEANS to send rather than
+            # what it is sending.
             self._remeasure_rate()
-            if is_rate and selected.upper() == IMU_RATE_PARAMETER:
-                # The module's own rung stays the value -- it is one of the
-                # nine the panel offers, and a free-running measurement is
-                # not: at 400 Hz one microsecond of clock error reads as
-                # 399.84, which no choice list contains.  The measurement is
-                # the CHECK, not the answer.
-                measured = (
-                    1.0 / self._sample_interval if self._sample_interval else 0.0
-                )
-                wanted = _as_number(taken) or 0.0
-                if wanted and abs(measured - wanted) > max(1.0, wanted * 0.25):
-                    raise TuneRefused(
-                        f"the module says it is sending {wanted:g} Hz and the "
-                        f"stream measures {measured:.1f} Hz; the rate this "
-                        "bench would stamp its records with is not the rate "
-                        "the module reports, so neither is recorded"
-                    )
+            measured = 1.0 / self._sample_interval if self._sample_interval else 0.0
+            taken = _rung_the_stream_is_on(measured)
             if taken is None:
                 raise TuneRefused(
-                    f"the module acknowledged {selected} but would not read it "
-                    "back, so this bench will not record a value it did not read"
+                    f"the module came back sending {measured:.1f} Hz, which is "
+                    "not one of its rates; this bench will not stamp records "
+                    "with a rate it cannot name"
                 )
+            wanted = _as_number(value)
+            if wanted is not None and abs(taken - wanted) > 1e-6:
+                raise TuneRefused(
+                    f"asked this module for {wanted:g} Hz and it came back "
+                    f"sending {taken:g} Hz"
+                )
+            self._settings[selected] = taken
             return self._field_for(selected, taken).current
 
     def _apply_note(self) -> str:
@@ -1415,15 +1271,12 @@ def discover_n100(*, baud: int = DEFAULT_BAUD, listen_seconds: float = 0.5) -> t
 __all__ = [
     "DEFAULT_BAUD",
     "IMU_RATE_PARAMETER",
-    "OFFERED_PARAMETERS",
-    "PACKET_RATE_LADDER_HZ",
     "SLOWEST_DISCOVERABLE_HZ",
     "offered_rungs",
-    "parameter_shape",
+    "PACKET_RATE_LADDER_HZ",
     "rate_ladder_index",
     "MAX_PACKET_RATE_HZ",
     "N100_OUTPUTS",
-    "OPERATOR_PARAMETER_PREFIXES",
     "WheeltecN100Config",
     "WheeltecN100WaveformSource",
     "discover_n100",
