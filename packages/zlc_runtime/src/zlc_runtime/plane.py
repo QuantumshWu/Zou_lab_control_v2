@@ -25,7 +25,8 @@ from dataclasses import dataclass, field, replace
 import math
 import threading
 from types import MappingProxyType
-from typing import Callable, Iterable, Mapping, Protocol, TypeAlias, runtime_checkable
+from collections.abc import Callable, Iterable, Mapping
+from typing import Protocol, TypeAlias, runtime_checkable
 import uuid
 from weakref import WeakKeyDictionary
 
@@ -1170,6 +1171,9 @@ class _GenerationState:
     output_names: tuple[str, ...]
     bare_names: Mapping[str, str]
     declarations: Mapping[str, DatasetOutputDeclaration]
+    #: The declarations by bare output name: what a live commit must
+    #: cover, made once with the generation instead of once per commit.
+    bare_declarations: Mapping[str, DatasetOutputDeclaration] = field(init=False)
     node: object | None = None
     source_name: str | None = None
     #: Whether this route participates in same-shot front coherence.  False
@@ -1208,6 +1212,14 @@ class _GenerationState:
     committed_run_record: Mapping[str, object] | None = None
     processor_cleanup_complete: bool = False
     publication_stream_cleaned: bool = False
+
+    def __post_init__(self) -> None:
+        self.bare_declarations = MappingProxyType(
+            {
+                self.bare_names[qualified]: declaration
+                for qualified, declaration in self.declarations.items()
+            }
+        )
 
 
 @dataclass(slots=True)
@@ -2015,15 +2027,6 @@ class SignalDataPlane:
             ).generation
 
     @staticmethod
-    def _declarations_by_bare(
-        state: _GenerationState,
-    ) -> dict[str, DatasetOutputDeclaration]:
-        return {
-            state.bare_names[qualified]: declaration
-            for qualified, declaration in state.declarations.items()
-        }
-
-    @staticmethod
     def _materialization_input_locked(
         state: _GenerationState,
         signal_name: str,
@@ -2195,7 +2198,14 @@ class SignalDataPlane:
 
         if not isinstance(outputs, Mapping) or not outputs:
             raise TypeError("live commit outputs must be a non-empty mapping")
-        owner_id = _node_instance_id(node)
+        # The producer's contract was checked when its generation began;
+        # a commit needs only its identity, and ``state.node is not node``
+        # below is what refuses a stranger.  The Protocol check walks every
+        # member of the object statically, which is most of what a commit
+        # of a small event used to cost.
+        owner_id = canonical_text(
+            getattr(node, "instance_id", ""), "signal producer instance_id"
+        )
         if source_publication is not None and worker_source is not None:
             raise ValueError("one commit cannot have processor and worker sources")
         kind = "producer" if source_publication is None else "processor"
@@ -2260,8 +2270,8 @@ class SignalDataPlane:
                     )
                 selected_sources = (worker_signal,)
 
-            declared = self._declarations_by_bare(state)
-            if set(outputs) != set(declared):
+            declared = state.bare_declarations
+            if outputs.keys() != declared.keys():
                 raise ValueError(
                     "live commit must cover the complete frozen output vocabulary"
                 )
@@ -2426,6 +2436,8 @@ class SignalDataPlane:
             publication = self._publish_locked(
                 state,
                 values,
+                run_record=run_record,
+                event_record=event_record,
                 parents=parents,
             )
             if parent is not None:
@@ -3400,9 +3412,15 @@ class SignalDataPlane:
         }
         if any(not isinstance(schema, DatasetSchema) for schema in schemas.values()):
             raise TypeError("signal publication block must own a DatasetSchema")
-        prior = {} if state.published_schemas is None else dict(
-            state.published_schemas
-        )
+        pinned = state.published_schemas
+        if pinned is not None and all(name in pinned for name in schemas):
+            for name, schema in schemas.items():
+                if pinned[name] != schema:
+                    raise GenerationSchemaAdvanced(
+                        "signal publication schema changed inside one generation"
+                    )
+            return
+        prior = {} if pinned is None else dict(pinned)
         for name, schema in schemas.items():
             if name in prior and prior[name] != schema:
                 raise GenerationSchemaAdvanced(
@@ -3416,6 +3434,8 @@ class SignalDataPlane:
         state: _GenerationState,
         values: Mapping[str, SignalValue],
         *,
+        run_record: Mapping[str, object] | None,
+        event_record: Mapping[str, object],
         parents: tuple[SignalPublication, ...] = (),
     ) -> SignalPublication:
         if state.retired or self._states.get(state.owner_id) is not state:
@@ -3433,8 +3453,6 @@ class SignalDataPlane:
                 if name in values
             }
         )
-        run_record = _shared_run_record(frozen)
-        event_record = _shared_event_record(frozen)
         # ALWAYS non-terminal, and the emit is always the caller's.  Both
         # were parameters; the one call site passed notify=False and never
         # passed terminal, so a second "publish and finish" path sat beside

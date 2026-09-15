@@ -50,6 +50,9 @@ class DomainSpec:
     axes: tuple[AxisSpec, ...] = ()
     axis_codes: tuple[tuple[int, ...], ...] | None = None
     _codes: Any = field(init=False, repr=False, compare=False, default=None)
+    #: Filled on first request, per row asked: the live commit asks the
+    #: same domain the same question for every event it publishes.
+    _coordinate_counts: Any = field(init=False, repr=False, compare=False, default=None)
 
     def __post_init__(self) -> None:
         shape = tuple(
@@ -120,6 +123,7 @@ class DomainSpec:
         object.__setattr__(self, "axes", axes)
         object.__setattr__(self, "axis_codes", normalized_codes)
         object.__setattr__(self, "_codes", tuple(cached_codes))
+        object.__setattr__(self, "_coordinate_counts", {})
 
     @property
     def size(self) -> int:
@@ -142,6 +146,30 @@ class DomainSpec:
 
         axis = self.axis(axis_id)
         return self._codes[self.axes.index(axis)]
+
+    def coordinate_counts(self, current_row: int = -1) -> tuple[int, ...]:
+        """Distinct coordinates along each axis, the other axes held at ``current_row``.
+
+        With every carrier row present this is a property of the domain and
+        the row, so it is computed once per row and kept: a monitor asks it
+        of one domain at its last row for every event it ever publishes.
+        """
+
+        if not self.axes:
+            return ()
+        row = int(current_row) % self.size
+        counts = self._coordinate_counts.get(row)
+        if counts is None:
+            result: list[int] = []
+            for target, target_codes in enumerate(self._codes):
+                rows = np.ones(self.size, dtype=bool)
+                for index, other_codes in enumerate(self._codes):
+                    if index != target:
+                        rows &= other_codes == other_codes[row]
+                result.append(int(np.unique(target_codes[rows]).size))
+            counts = tuple(result)
+            self._coordinate_counts[row] = counts
+        return counts
 
     def physical_dimension(self, axis_id: AxisId) -> int:
         """The domain-local physical dimension carrying one logical axis."""

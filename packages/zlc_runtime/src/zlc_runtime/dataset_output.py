@@ -7,8 +7,8 @@ reconstruct arrays, axes, coverage, or lineage.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Mapping
 
 from zlc_data import DatasetSchema, OwnedSnapshot
 from .dataset import (

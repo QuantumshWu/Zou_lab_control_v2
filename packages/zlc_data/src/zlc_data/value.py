@@ -420,14 +420,14 @@ def repeat_coordinate_counts(
     """
     if not domain.axes:
         return ()
-    if present is not None and (
-        present.dtype != np.dtype(bool) or present.shape != (domain.size,)
-    ):
+    if present is None:
+        return domain.coordinate_counts(current_row)
+    if present.dtype != np.dtype(bool) or present.shape != (domain.size,):
         raise ValueError("present rows must be a bool vector matching the Repeat carrier")
     codes = tuple(domain.codes(axis.axis_id) for axis in domain.axes)
     result: list[int] = []
     for target in range(len(codes)):
-        rows = np.ones(domain.size, dtype=bool) if present is None else present.copy()
+        rows = present.copy()
         for index, other_codes in enumerate(codes):
             if index == target:
                 continue
