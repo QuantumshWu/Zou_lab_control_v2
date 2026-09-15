@@ -107,6 +107,17 @@ def _server_log_buffer() -> _ServerLogBuffer:
 _FAMILY_SCAN_DEADLINE_SECONDS = 20.0
 
 
+def _one_line(error: BaseException) -> str:
+    """One exception's message with its newlines flattened.
+
+    A driver's refusal is often several lines -- the vendor SDK to install,
+    the port another program holds -- and the status strip is one line, so
+    the breaks are folded rather than the message cut.
+    """
+
+    return " ".join(str(error).split())
+
+
 def _run_inline(work, deliver, failed) -> None:
     """Run the work right here: the headless behaviour every test drives."""
 
@@ -1139,11 +1150,31 @@ class DeviceManagerPresenter:
         roles = ", ".join(
             item.role for item in candidate.devices if item.instance_id in loaded_keys
         )
-        failed_count = len(session.installation.failures)
+        # A COUNT IS NOT A REASON.  The installation hands over the
+        # exception that stopped each leaf, and reporting only how many
+        # there were threw away the one thing an operator needs: a bench
+        # that says "2 failed" and nothing else leaves them to guess which
+        # two, and why.  Each reason is put on the status line, and the
+        # whole traceback goes to the log, where a long one can be read
+        # without fighting a single-line strip.
+        failures = dict(session.installation.failures)
+        for key, error in sorted(failures.items()):
+            _LOG.error(
+                "device %s did not start: %s: %s",
+                key,
+                type(error).__name__,
+                error,
+                exc_info=error,
+            )
+        reasons = "; ".join(
+            f"{key}: {type(error).__name__}: {_one_line(error)}"
+            for key, error in sorted(failures.items())
+        )
         self._report(
             f"{len(loaded_keys)} device(s) initialized"
             + (f": {roles}" if roles else "")
-            + (f" · {failed_count} failed" if failed_count else "")
+            + (f" · {len(failures)} failed -- {reasons}" if failures else ""),
+            severity="warning" if failures else "task",
         )
         return True
 

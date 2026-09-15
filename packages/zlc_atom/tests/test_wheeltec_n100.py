@@ -351,3 +351,27 @@ def test_the_module_says_how_fast_its_magnetic_field_actually_moves() -> None:
         assert point.settings["magnetic_update_hz"] == pytest.approx(200.0, rel=0.05)
     finally:
         source.close()
+
+
+def test_a_module_that_never_comes_back_says_so_in_those_words() -> None:
+    """Opening the console is the one step that can leave a module silent.
+
+    Reading the settings when the port opens costs a trip through config
+    mode, and config mode stops the stream. A module that does not start
+    again is genuinely unusable, and the device must fail saying THAT --
+    naming the console as what silenced it -- rather than with the generic
+    "no packets arrived", which would send its operator to check a cable
+    that is fine.
+    """
+
+    class _NeverReturns(_FakeModule):
+        def _answer(self, line: str) -> None:
+            super()._answer(line)
+            if line == "#fdeconfig":
+                self.streaming = False  # it acknowledged, and stayed quiet
+
+    module = _NeverReturns()
+    with pytest.raises(RuntimeError, match="configuration console") as refusal:
+        _source(module)
+    assert "did not resume" in str(refusal.value)
+    assert module.closed is True, "a module that failed to open still lets the port go"

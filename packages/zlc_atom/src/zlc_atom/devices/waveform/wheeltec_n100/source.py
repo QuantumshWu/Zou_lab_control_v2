@@ -372,10 +372,26 @@ class WheeltecN100WaveformSource:
         except Exception as refusal:  # noqa: BLE001 -- reported, not raised
             self._settings = {}
             self._settings_refusal = f"{type(refusal).__name__}: {refusal}"
-        finally:
-            # Config mode stopped the stream either way, so the interval
-            # that stamps the records is timed again before anyone reads.
+        # Config mode stopped the stream either way, so the interval that
+        # stamps the records is timed again before anyone reads.  This is
+        # the one part that may NOT be shrugged off: a module that went
+        # quiet and did not come back is unusable, and saying so with the
+        # console's own refusal attached is the difference between a device
+        # that fails for a stated reason and one that fails for none.  It
+        # is deliberately not a ``finally``, which would have replaced a
+        # console refusal with this one and lost the first.
+        try:
             self._remeasure_rate()
+        except BaseException as silent:
+            raise RuntimeError(
+                f"{self.config.port} stopped streaming when its configuration "
+                "console was opened and did not resume"
+                + (
+                    f" (the console said: {self._settings_refusal})"
+                    if self._settings_refusal
+                    else ""
+                )
+            ) from silent
 
     # ------------------------------------------------------------- reading
     def _read_loop(self) -> None:

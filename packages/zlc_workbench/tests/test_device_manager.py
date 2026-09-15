@@ -932,7 +932,12 @@ def test_a_loaded_card_forwards_control_to_the_session_window_owner(tmp_path) ->
     assert manager.toggle_lifecycle() is True
     assert manager._active_session is session
     assert view.loaded_devices == (("camera", "camera", "camera.virtual"),)
-    assert "1 device(s) initialized: camera · 1 failed" in view.status[-1][1]
+    # A count is not a reason: the line must name WHICH device and WHY, or
+    # an operator is left to guess at a bench that only says how many.
+    severity, line = view.status[-1][0], view.status[-1][1]
+    assert "1 device(s) initialized: camera · 1 failed" in line
+    assert "sequencer" in line and "not connected" in line and "RuntimeError" in line
+    assert severity == "warning", "a device that did not start is not routine"
 
     view.device_open_requested.emit("camera")
     assert opened == ["camera"]
