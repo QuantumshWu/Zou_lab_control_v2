@@ -475,14 +475,21 @@ def _prefixed(base: Unit, prefix: Prefix) -> Unit:
     if prefix.exponent == 0:
         return base
     factor = 10.0**prefix.exponent
+    # A rung of a decade family is an exact decade itself: 1e-4 * 1e-3 is
+    # not 1e-7 in binary, and a milligauss that missed its decade would
+    # lose the exact decimal shift its family is read with.
+    if base.is_linear:
+        conversion: Conversion = Scaled(
+            10.0 ** (base.decade + prefix.exponent)
+            if base.decade is not None
+            else base.scale * factor
+        )
+    else:
+        conversion = Prefixed(base.conversion, factor)
     return Unit(
         symbol=f"{prefix.symbol}{base.symbol}",
         dimension=base.dimension,
-        conversion=(
-            Scaled(base.scale * factor)
-            if base.is_linear
-            else Prefixed(base.conversion, factor)
-        ),
+        conversion=conversion,
         aliases=tuple(
             f"{spelling}{name}"
             for spelling in prefix.spellings
@@ -973,15 +980,19 @@ def parse_quantity(
         return float(number)
     units = registry or DEFAULT_UNITS
     family, carried = units.family_and_prefix(resolved)
-    # A bare prefix is read as a rung of the field's OWN family before it
-    # is read as a unit of its own: ``5m`` in a seconds box is five
-    # milliseconds although ``m`` is also the metre, and ``2G`` in a hertz
-    # box is two gigahertz although ``G`` is also the gauss.  Only a prefix
-    # the family does not take falls through to the whole-unit reading.
+    # What is written is read in the field's OWN family first: its own
+    # symbol or one of its rungs (``m`` in a metre box is the metre, ``mm``
+    # a millimetre), then a bare prefix as a rung of that family (``5m`` in
+    # a seconds box is five milliseconds although ``m`` is also the metre,
+    # ``2G`` in a hertz box two gigahertz although ``G`` is also the gauss),
+    # and only then a whole unit of another family, converted.
+    known = _is_known(written, registry)
     prefix = _PREFIX_BY_SPELLING.get(written)
-    if prefix is not None and prefix in family.ladder:
+    if known and units.family_of(written) == family:
+        spelled = resolve_unit(written, registry)
+    elif prefix is not None and prefix in family.ladder:
         spelled = _prefixed(family, prefix)
-    elif _is_known(written, registry):
+    elif known:
         spelled = resolve_unit(written, registry)
     elif prefix is None:
         raise UnitError(f"unknown unit or prefix {written!r}")

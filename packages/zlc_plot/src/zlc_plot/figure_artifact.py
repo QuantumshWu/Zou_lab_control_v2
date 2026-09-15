@@ -122,7 +122,7 @@ def _encode_plot_spec(spec: object) -> dict[str, object]:
     common["reduction"] = spec.reduction.value
     if isinstance(spec, (CurvePlot, RollingPlot)):
         common["group"] = _axis_document(spec.group)
-    if isinstance(spec, (CurvePlot, ImagePlot)):
+    if isinstance(spec, (CurvePlot, ImagePlot, RollingPlot)):
         common["x"] = _axis_document(spec.x)
     if isinstance(spec, ImagePlot):
         common["y"] = _axis_document(spec.y)
@@ -163,7 +163,7 @@ def _decode_plot_spec(value: object) -> object:
     if kind in {PlotKind.CURVE, PlotKind.ROLLING}:
         expected.add("group")
         arguments["group"] = _axis(value.get("group"), "plot group")
-    if kind in {PlotKind.CURVE, PlotKind.IMAGE}:
+    if kind in {PlotKind.CURVE, PlotKind.IMAGE, PlotKind.ROLLING}:
         expected.add("x")
         arguments["x"] = _axis(value.get("x"), "plot x")
     if kind is PlotKind.IMAGE:

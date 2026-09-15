@@ -405,8 +405,10 @@ class TekScopeWaveformSource:
                             * np.float32(multiplier)
                             + np.float32(zero)
                         )
+                # The host's high-resolution clock: two records read within
+                # one coarse tick must still be two distinct times.
                 self._records.push(
-                    np.stack(columns, axis=1), time.monotonic(), time.time_ns()
+                    np.stack(columns, axis=1), time.perf_counter(), time.time_ns()
                 )
         except BaseException as error:  # noqa: BLE001 -- surfaced to the reader of records
             self._records.fail(error)

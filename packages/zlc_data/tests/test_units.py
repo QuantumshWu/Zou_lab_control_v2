@@ -320,6 +320,13 @@ def test_a_unit_is_offered_in_the_rungs_it_declares_and_shown_by_its_sign() -> N
     assert parse_quantity("2G", "Hz") == 2e9
     assert parse_quantity("5m", "s") == 0.005
     assert parse_quantity("2 G", "uT") == pytest.approx(200.0)
+    # And the field's own symbol is itself before it is anything else: a
+    # metre box reads "m" as the metre, not as a milli-something.
+    assert parse_quantity("1 m", "m") == 1.0
+    assert parse_quantity(format_quantity(2.5, "m"), "m") == 2.5
+    assert parse_quantity("3 mm", "m") == 0.003
+    # A rung of a decade family is an exact decade, in binary too.
+    assert resolve_unit("mG").decade == -7 and resolve_unit("mG").scale == 1e-7
 
 
 def test_a_reciprocal_unit_is_the_exact_reciprocal_or_nothing() -> None:

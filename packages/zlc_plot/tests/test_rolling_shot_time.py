@@ -7,8 +7,9 @@ import numpy as np
 from data_factory import make_dataset_schema, make_snapshot, mapped_domain_from_columns, repeat_domain
 from zlc_data import PRIMARY_INDEX, SHOT_TIME
 from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID, SHOT_TIME_AXIS_ID
-from zlc_plot import AxisRef, PlotSession, RollingPlot
-from zlc_plot.semantics import describe_semantics, fate_field_name, updated_spec
+from zlc_plot import AxisRef, CurvePlot, PlotSession, Reduction, RollingPlot
+from zlc_plot.figure_artifact import decode_plot_recipe, encode_plot_recipe
+from zlc_plot.semantics import describe_semantics, fate_field_name, projection_scope, updated_spec
 
 
 def _stamped_history():
@@ -45,6 +46,19 @@ def test_the_shot_time_axis_is_an_x_fate_of_a_rolling_plot() -> None:
     along_time = updated_spec(schema, RollingPlot(), fate_field_name(time_ref), "x")
     assert along_time == RollingPlot(x=time_ref)
     assert updated_spec(schema, along_time, fate_field_name(time_ref), "reduce") == RollingPlot()
+    # The shot index may be named as x as well: that is the default, spelled out.
+    index_ref = AxisRef.point(PRIMARY_INDEX_AXIS_ID.value)
+    along_index = updated_spec(schema, along_time, fate_field_name(index_ref), "x")
+    assert along_index == RollingPlot(x=index_ref)
+    # A saved figure keeps which axis the shots roll along.
+    recipe = encode_plot_recipe(
+        along_time, parameters={}, size="2x2", viewport=None, classifier_thresholds=()
+    )
+    assert decode_plot_recipe(recipe)["spec"] == along_time
+    # A curve walking the shot index keeps every shot: the twin axis is not
+    # pinned to its latest coordinate behind the index's back.
+    walking = CurvePlot(index_ref, reduction=Reduction.LAST)
+    assert time_ref not in dict(projection_scope(schema, walking))
 
     session = PlotSession(snapshot, along_time, parameters={"window": 3})
     try:
@@ -56,10 +70,11 @@ def test_the_shot_time_axis_is_an_x_fate_of_a_rolling_plot() -> None:
     finally:
         session.close()
 
-    session = PlotSession(snapshot, RollingPlot(), parameters={"window": 3})
-    try:
-        (series,) = session._payload.series
-        assert series.x.label == "Shots from latest"
-        assert np.asarray(series.x.canonical).tolist() == [-2.0, -1.0, 0.0]
-    finally:
-        session.close()
+    for spec in (RollingPlot(), along_index):
+        session = PlotSession(snapshot, spec, parameters={"window": 3})
+        try:
+            (series,) = session._payload.series
+            assert series.x.label == "Shots from latest"
+            assert np.asarray(series.x.canonical).tolist() == [-2.0, -1.0, 0.0]
+        finally:
+            session.close()

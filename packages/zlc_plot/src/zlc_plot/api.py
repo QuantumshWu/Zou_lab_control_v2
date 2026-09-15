@@ -159,8 +159,8 @@ def rolling(
     return PlotSession(
         data,
         RollingPlot(
-            None if group is None else _axis(group),
-            reduction,
+            group=None if group is None else _axis(group),
+            reduction=reduction,
             labels=labels or PlotLabels(),
         ),
         size=size,

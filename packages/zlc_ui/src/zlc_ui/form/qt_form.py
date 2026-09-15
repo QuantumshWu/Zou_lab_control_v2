@@ -1590,12 +1590,18 @@ class FluentParameterForm(QtWidgets.QWidget):
             if current.cycle_choices != incoming.cycle_choices:
                 _ChoiceHandler._fill_cycle(incoming, self._widgets[incoming.key])
         exact = self._require_exact_values(values, spec)
-        for field in spec.fields:
+        for current, field in zip(self._spec.fields, spec.fields, strict=True):
             automatic = self._auto_switches.get(field.key)
             selected = automatic is not None and exact[field.key] is None
             if automatic is not None and automatic.isChecked() != selected:
                 return False
             if selected:
+                # On Auto the control shows what Auto resolves to, and a
+                # new resolution is adopted like any other metadata.
+                if current.default != field.default:
+                    FORM_WIDGET_HANDLERS[field.kind].write(
+                        field, self._widgets[field.key], _seed(field, None)
+                    )
                 continue
             handler = FORM_WIDGET_HANDLERS[field.kind]
             widget = self._widgets[field.key]
@@ -1799,14 +1805,15 @@ class FluentParameterForm(QtWidgets.QWidget):
                     editing = (
                         field.kind != "choice" and being_edited(widget)
                     )
-                    if (
-                        not editing
-                        and not selected
-                        and not _widget_has_value(
-                            handler, field, widget, prepared[field.key]
-                        )
+                    # A control on Auto shows what Auto resolves to, so a
+                    # refill (a new unit ladder, a new default) puts that
+                    # back rather than leaving the control empty to take
+                    # its list's first entry the moment Auto goes off.
+                    shown = _seed(field, None) if selected else prepared[field.key]
+                    if not editing and not _widget_has_value(
+                        handler, field, widget, shown
                     ):
-                        handler.write(field, widget, prepared[field.key])
+                        handler.write(field, widget, shown)
                     automatic = self._auto_switches.get(field.key)
                     if automatic is not None and not editing:
                         automatic.setChecked(selected)

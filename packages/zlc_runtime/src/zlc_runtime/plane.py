@@ -1026,6 +1026,12 @@ def _validate_indexed_event(
         )
     if (shot_time is None) != (first[3] is None):
         raise ValueError("an indexed history stamps every shot with its time, or none")
+    if first[3] is not None and primary_index != next(reversed(events)) + 1:
+        # A stamped history is one shot after another: its time axis is a
+        # coordinate per row, and a row nobody published has no time.
+        raise ValueError(
+            "a history that stamps its shots publishes them one after another"
+        )
 
 
 def _update_indexed_history(
@@ -1132,14 +1138,12 @@ def _indexed_materialization_input(
     selected_events = []
     appended_records = []
     window_records = []
-    # The time of each retained shot, oldest first.  A shot the history
-    # never received holds no time: its row takes the time of the shot
-    # before it (or, at the front, the one after), so the axis stays
-    # ordered and the hole shows as an invalid row where it is rather than
-    # as a gap that moves its neighbours.
+    # The time of each retained shot, oldest first.  A stamped history is
+    # one shot after another (the update refuses a gap), so every row of
+    # its window has its time; a missing row here is a broken invariant,
+    # not a hole to paper over.
     stamped = next(iter(events.values()))[3] is not None
     times: list[float] = []
-    unstamped_rows = 0
     append_from = start if basis is None else basis.latest + 1
     for index in range(start, primary_index + 1):
         held = events.get(index)
@@ -1152,10 +1156,7 @@ def _indexed_materialization_input(
             window_records.append(record)
         elif held is None or held[0] > sequence:
             if stamped:
-                if times:
-                    times.append(times[-1])
-                else:
-                    unstamped_rows += 1
+                raise RuntimeError("a stamped indexed history lost a shot inside its window")
             continue
         else:
             record = held[2]
@@ -1165,8 +1166,6 @@ def _indexed_materialization_input(
                 selected_events.append((index, held[1]))
                 appended_records.append(record)
         if stamped:
-            times.extend([shot_time] * unstamped_rows)
-            unstamped_rows = 0
             times.append(shot_time)
     if basis is not None and start == basis.start:
         # Pure growth: every row the basis described is still here, so

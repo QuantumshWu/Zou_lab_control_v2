@@ -13,7 +13,7 @@ import math
 import numpy as np
 
 from zlc_data import BlockId, DatasetRevisionRef, OwnedSnapshot
-from zlc_data.snapshot_projection import SHOT_TIME_AXIS_ID, restrict_snapshot, value_selection
+from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID, SHOT_TIME_AXIS_ID, restrict_snapshot, value_selection
 
 from .data_contract import (
     DEFAULT_UNITS,
@@ -825,7 +825,7 @@ class FitProjection:
         # composed frame keep its cached chrome instead of re-laying the
         # tick labels on each shot.
         along = self._spec.x
-        if along is None:
+        if along is None or along == AxisRef.point(PRIMARY_INDEX_AXIS_ID.value):
             if history.source_indices is not None:
                 source_coordinates = np.asarray(
                     history.source_indices[start:], dtype=float
@@ -2226,10 +2226,10 @@ class FitProjection:
             if solver_relation is not relation:
                 raise ValueError("rolling fit parameters cannot cross unit relations")
             # The rolling shot axis is a plain ordinal (canonical == display
-            # == absolute shot index), so fit parameters cross unchanged.
-            symbol = (
-                "1/point" if relation is UnitRelation.INVERSE_AXIS_0 else "point"
-            )
+            # == shots from the latest) or, along the shot time, seconds
+            # from the latest; either way fit parameters cross unchanged.
+            along = "s" if self._spec.x == AxisRef.point(SHOT_TIME_AXIS_ID.value) else "point"
+            symbol = f"1/{along}" if relation is UnitRelation.INVERSE_AXIS_0 else along
             return _FitParameterConversion(
                 name, None, None, symbol, _Crossing.POINT, symbol,
             )
