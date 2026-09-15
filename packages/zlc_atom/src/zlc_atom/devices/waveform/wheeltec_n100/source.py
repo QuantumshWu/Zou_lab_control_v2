@@ -989,11 +989,19 @@ class WheeltecN100WaveformSource:
         settings: dict[str, object] = {}
         for name, _packet_id, rate_hz in console.packet_rates():
             settings[name] = rate_hz
+        self._packets_listed = IMU_RATE_PARAMETER in settings
         for name in OFFERED_PARAMETERS:
-            reading = _as_number(console.get_parameter(name))
+            try:
+                reading = _as_number(console.get_parameter(name))
+            except RuntimeError:
+                # The console went quiet on a name this firmware may simply
+                # not have.  Nothing more can be asked -- a reply that has
+                # not come cannot be told from one that never will, and
+                # asking anyway is what loses step -- but the rates the
+                # module already listed are its own words and they stand.
+                break
             if reading is not None:
                 settings[name] = reading
-        self._packets_listed = IMU_RATE_PARAMETER in settings
         return settings
 
     def _field_for(self, name: str, value: object) -> TunableField:

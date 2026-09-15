@@ -229,10 +229,11 @@ class _FakeModule:
             if name in self.parameters:
                 # NAME=value -- no spaces, and no *#OK after it.
                 self._say(f"{name}={self.parameters[name]}")
-            # A name it has not got draws NOTHING -- not *#ERROR, nothing.
-            # That silence is what the console is built around: it cannot be
-            # told from a reply still on its way, so every exchange ends
-            # with a question this module is certain to answer.
+            else:
+                # Its own word for no, recorded off the bench -- and said
+                # twice over by a module that answered a pair of #fparam
+                # gets sent back to back with two of them.
+                self._say("*#ERROR")
         elif line.startswith("#fparam set "):
             _, _, name, value = line.split()
             if name in self.parameters:
@@ -752,5 +753,5 @@ def test_somebody_else_s_reply_is_not_a_missing_parameter() -> None:
 
         for stray in ("*#OK", "(y/n)", "MSG_ODOMETER[6f]   0.0Hz", "Config Mode"):
             module.stray = stray
-            with pytest.raises(RuntimeError, match="matched to what was asked"):
+            with pytest.raises(RuntimeError, match="settings session is over"):
                 console.get_parameter(IMU_RATE_PARAMETER)
