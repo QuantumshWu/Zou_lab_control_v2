@@ -479,3 +479,42 @@ def test_a_module_that_lists_nothing_still_offers_the_knob_that_matters() -> Non
         assert module.rates[IMU_PACKET] == 200.0
     finally:
         source.close()
+
+
+def test_a_rate_that_was_set_is_never_reported_as_refused() -> None:
+    """The module may acknowledge a write without echoing it back.
+
+    This firmware answers a bare #fmsg with nothing but *#OK, so requiring
+    an echo would have turned a rate that WAS set into a refusal, and the
+    operator would have been told the knob did not move while the records
+    quietly arrived at the new rate. The stream is what settles it.
+    """
+
+    class _Silent(_FakeModule):
+        """Sets the rate, says only *#OK, and never lists anything."""
+
+        def _answer(self, line: str) -> None:
+            if line.startswith("#fmsg"):
+                self.commands.append(line)
+                parts = line.split()
+                if len(parts) == 3:
+                    took = min(self.LADDER, key=lambda r: abs(r - float(parts[2])))
+                    self.rates[int(parts[1], 16)] = took
+                self._say(OK)
+                return
+            super()._answer(line)
+
+    module = _Silent(rate_hz=50.0)
+    source = _source(module)
+    try:
+        rate_field = packet_rate_field(IMU_PACKET)
+        taken = source.tune(rate_field, 200.0)
+        assert module.rates[IMU_PACKET] == 200.0, "the module really did take it"
+        assert taken == pytest.approx(200.0, rel=0.05), (
+            "and the bench reports the rate it measured, not a refusal"
+        )
+        assert source.working_point().sample_interval_seconds == pytest.approx(
+            0.005, rel=0.05
+        )
+    finally:
+        source.close()

@@ -236,12 +236,16 @@ class FdiConfigConsole:
             for found in _RATE_ENTRY.finditer(answer)
         )
 
-    def set_packet_rate(self, packet_id: int, rate_hz: float) -> float:
-        """Ask for a rate; answer with the rate the module says it took.
+    def set_packet_rate(self, packet_id: int, rate_hz: float) -> float | None:
+        """Ask for a rate; answer with the rate the module ended up at.
 
-        The module echoes what it actually set, which is how a rate the
-        firmware does not offer is caught -- the ladder is per packet and
-        per firmware, so asking is the only honest way to know it.
+        The module may echo the new setting, or it may simply acknowledge --
+        this firmware answers a bare ``#fmsg`` with nothing but ``*#OK``, so
+        an echo cannot be required.  A write whose success was judged by a
+        reply string would report a rate that WAS set as a refusal.  So the
+        echo is read if it comes, the module is asked again if it does not,
+        and ``None`` means neither told us -- which the caller answers by
+        measuring the stream, the only reading that was never in doubt.
         """
 
         wanted = float(rate_hz)
@@ -249,10 +253,10 @@ class FdiConfigConsole:
         for found in _RATE_ENTRY.finditer(answer):
             if int(found["id"], 16) == int(packet_id):
                 return float(found["hz"])
-        raise TuneRefused(
-            f"the module did not confirm packet 0x{packet_id:02x} at {wanted:g} Hz; "
-            f"it answered {answer.strip()[:200]!r}"
-        )
+        for packet in self.packet_rates():
+            if packet.packet_id == int(packet_id):
+                return packet.rate_hz
+        return None
 
     def get_parameter(self, name: str) -> str | None:
         """One named parameter's value, or None when this firmware lacks it.

@@ -43,7 +43,12 @@ from uuid import uuid4
 
 import numpy as np
 
-from zlc_atom.authoring import AuthoringChoice, AuthoringField, TunableField
+from zlc_atom.authoring import (
+    AuthoringChoice,
+    AuthoringField,
+    TunableField,
+    TuneRefused,
+)
 from zlc_atom.devices.waveform.contract import (
     WaveformAcquisitionMode,
     WaveformCaptureTerminalRecord,
@@ -830,16 +835,23 @@ class WheeltecN100WaveformSource:
                 return _as_number(console.set_parameter(selected, _as_text(value)))
 
             taken = self._in_console(write)
-            if taken is None:
-                raise RuntimeError(
-                    f"the module took {selected} but would not say what to"
-                )
-            self._settings[selected] = taken
             self._settings_epoch += 1
             if packet == IMU_PACKET:
                 # This is the rate the records are stamped at, so it is
-                # measured off the stream again rather than believed.
+                # measured off the stream again rather than believed -- and
+                # the measurement is what stands when the module would not
+                # say what it took.  Nothing about this knob depends on the
+                # module describing itself.
                 self._remeasure_rate()
+                if taken is None and self._sample_interval:
+                    taken = round(1.0 / self._sample_interval, 1)
+            if taken is None:
+                raise TuneRefused(
+                    f"the module acknowledged {selected} but would not say what "
+                    "it set, and nothing about it can be measured, so this bench "
+                    "will not record a value it did not read"
+                )
+            self._settings[selected] = taken
             # Answer in the field's own spelling: a switch reads back as one
             # of its choices, not as the number the console printed.
             return self._field_for(selected, taken).current
