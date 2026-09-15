@@ -339,7 +339,7 @@ def test_the_tek_scope_driver_scales_curves_and_snaps_its_knobs() -> None:
         assert fields[TIME_PER_DIV_FIELD].current == pytest.approx(2e-3)
         assert set(fields) == {TIME_PER_DIV_FIELD, "ch1_volts_per_div", "ch2_volts_per_div"}
 
-        scope.arm(2, buffer_record_count=2, timeout=1.0)
+        scope.arm(2, buffer_record_count=2)
         with pytest.raises(RuntimeError):
             scope.tune(TIME_PER_DIV_FIELD, 1e-3)
         records = scope.read_records(2, timeout=2.0, exact=True)

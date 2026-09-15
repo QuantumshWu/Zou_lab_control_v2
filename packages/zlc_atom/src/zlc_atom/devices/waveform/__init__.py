@@ -5,6 +5,7 @@ from .contract import (
     WaveformCaptureTerminalRecord,
     WaveformOutput,
     WaveformRecord,
+    WaveformRecordQueue,
     WaveformSource,
     WaveformWorkingPoint,
 )
@@ -14,6 +15,7 @@ __all__ = [
     "WaveformCaptureTerminalRecord",
     "WaveformOutput",
     "WaveformRecord",
+    "WaveformRecordQueue",
     "WaveformSource",
     "WaveformWorkingPoint",
 ]

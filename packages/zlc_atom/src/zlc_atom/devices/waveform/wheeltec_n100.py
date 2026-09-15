@@ -33,6 +33,7 @@ from zlc_atom.devices.waveform.contract import (
     WaveformCaptureTerminalRecord,
     WaveformOutput,
     WaveformRecord,
+    WaveformRecordQueue,
     WaveformWorkingPoint,
 )
 
@@ -170,18 +171,13 @@ class WheeltecN100WaveformSource:
     def __init__(self, config: WheeltecN100Config, *, serial_port=None) -> None:
         self.config = config
         self._serial = _open_serial(config.port, config.baud) if serial_port is None else serial_port
-        self._condition = threading.Condition()
         self._stop = threading.Event()
         self._stamps: deque[float] = deque(maxlen=_RATE_SAMPLE_PACKETS)
+        self._stamps_ready = threading.Event()
         self._sample_interval: float | None = None
-        self._queue: deque[WaveformRecord] = deque()
-        self._armed = False
-        self._accepting = False
-        self._expected: int | None = None
-        self._buffer_record_count = 1
-        self._next_ordinal = 0
-        self._produced_count = 0
-        self._reader_error: BaseException | None = None
+        self._records = WaveformRecordQueue(
+            "the N100", join_timeout_seconds=config.timeout_seconds
+        )
         self._reader = threading.Thread(
             target=self._read_loop,
             name=f"zlc-n100-{config.port}",
@@ -189,7 +185,7 @@ class WheeltecN100WaveformSource:
         )
         try:
             self._reader.start()
-            self._measure_rate()
+            self._await_rate()
         except BaseException:
             self.close()
             raise
@@ -208,62 +204,53 @@ class WheeltecN100WaveformSource:
                 if samples:
                     self._accept(samples)
         except BaseException as error:  # noqa: BLE001 -- surfaced to the reader of records
-            with self._condition:
-                self._reader_error = error
-                self._accepting = False
-                self._condition.notify_all()
+            self._records.fail(error)
+            self._stamps_ready.set()
 
     def _accept(self, samples: list[tuple[float, tuple[float, ...]]]) -> None:
         received = time.time_ns()
-        with self._condition:
-            for stamp, values in samples:
-                self._stamps.append(stamp)
-                if not self._accepting:
-                    continue
-                record = WaveformRecord(
-                    np.asarray(values, dtype=np.float32).reshape(1, _COLUMNS),
-                    self._next_ordinal,
-                    received,
-                )
-                self._next_ordinal += 1
-                self._produced_count += 1
-                while len(self._queue) >= self._buffer_record_count:
-                    self._queue.popleft()
-                self._queue.append(record)
-                if self._expected is not None and self._produced_count >= self._expected:
-                    self._accepting = False
-            self._condition.notify_all()
+        for stamp, values in samples:
+            self._stamp(stamp)
+            self._records.push(
+                np.asarray(values, dtype=np.float32).reshape(1, _COLUMNS), received
+            )
 
-    def _measure_rate(self) -> None:
-        """The packet interval off the module's own clock, once, at open."""
+    def _stamp(self, stamp: float) -> None:
+        """The packet interval off the module's own clock, measured on the reader.
 
-        deadline = time.monotonic() + _RATE_SAMPLE_SECONDS
-        with self._condition:
-            while len(self._stamps) < _RATE_SAMPLE_PACKETS:
-                if self._reader_error is not None:
-                    raise RuntimeError(
-                        f"reading {self.config.port} failed"
-                    ) from self._reader_error
-                remaining = deadline - time.monotonic()
-                if remaining <= 0.0:
-                    break
-                self._condition.wait(remaining)
-            stamps = np.asarray(self._stamps, dtype=np.float64)
-        if stamps.size < 2:
+        The first packets after open are timed against each other and the
+        median of their intervals is the rate; once enough have been seen
+        the rate is settled and the stamps are no longer kept.
+        """
+
+        if self._stamps_ready.is_set():
+            return
+        self._stamps.append(stamp)
+        if len(self._stamps) >= 2:
+            intervals = np.diff(np.asarray(self._stamps, dtype=np.float64))
+            advancing = intervals[intervals > 0.0]
+            if advancing.size:
+                self._sample_interval = float(np.median(advancing))
+        if len(self._stamps) >= _RATE_SAMPLE_PACKETS:
+            self._stamps_ready.set()
+
+    def _await_rate(self) -> None:
+        self._stamps_ready.wait(_RATE_SAMPLE_SECONDS)
+        failure = self._records.failure
+        if failure is not None:
+            raise RuntimeError(f"reading {self.config.port} failed") from failure
+        if len(self._stamps) < 2:
             raise RuntimeError(
                 f"no FDILink IMU packets arrived on {self.config.port} at "
                 f"{self.config.baud} baud within {_RATE_SAMPLE_SECONDS:g} s: check "
                 "the port, the module's power and that its line rate is "
                 f"{self.config.baud}"
             )
-        intervals = np.diff(stamps)
-        interval = float(np.median(intervals[intervals > 0.0]))
-        if not np.isfinite(interval) or interval <= 0.0:
+        if self._sample_interval is None:
             raise RuntimeError(
                 f"the module on {self.config.port} stamps its packets with a clock "
                 "that does not advance"
             )
-        self._sample_interval = interval
 
     # ------------------------------------------------------------ contract
     @property
@@ -290,79 +277,31 @@ class WheeltecN100WaveformSource:
             },
         )
 
-    def arm(
-        self, records: int | None, *, buffer_record_count: int, timeout: float
-    ) -> None:
-        del timeout
-        buffer_count = int(buffer_record_count)
-        if buffer_count <= 0:
-            raise ValueError("buffer_record_count must be positive")
-        expected = None if records is None else int(records)
-        if expected is not None and (expected <= 0 or buffer_count != expected):
-            raise ValueError("a finite arm buffers exactly the records it expects")
-        with self._condition:
-            if self._reader_error is not None:
-                raise RuntimeError("the N100 reader has failed") from self._reader_error
-            if self._armed:
-                raise RuntimeError("the N100 is already armed")
-            self._queue.clear()
-            self._armed = True
-            self._accepting = True
-            self._expected = expected
-            self._buffer_record_count = buffer_count
-            self._next_ordinal = 0
-            self._produced_count = 0
+    def arm(self, records: int | None, *, buffer_record_count: int) -> None:
+        self._records.arm(records, buffer_record_count=buffer_record_count)
 
     def read_records(
         self, n: int, *, timeout: float, exact: bool
     ) -> list[WaveformRecord]:
-        requested = int(n)
-        if requested <= 0:
-            raise ValueError("n must be positive")
-        deadline = time.monotonic() + max(0.0, float(timeout))
-        with self._condition:
-            while len(self._queue) < requested:
-                if self._reader_error is not None:
-                    raise RuntimeError("the N100 reader has failed") from self._reader_error
-                if not self._armed or not self._accepting:
-                    break
-                remaining = deadline - time.monotonic()
-                if remaining <= 0.0:
-                    break
-                self._condition.wait(remaining)
-            if exact and len(self._queue) < requested:
-                raise TimeoutError("the N100 did not deliver the requested exact records")
-            count = requested if exact else min(requested, len(self._queue))
-            return [self._queue.popleft() for _ in range(count)]
+        return self._records.read(n, timeout=timeout, exact=exact)
 
     def finish_record_capture(self) -> WaveformCaptureTerminalRecord:
-        with self._condition:
-            self._accepting = False
-            self._armed = False
-            self._expected = None
-            terminal = WaveformCaptureTerminalRecord(
-                self._produced_count, True, not self._queue, True
-            )
-            self._condition.notify_all()
-            if self._reader_error is not None:
-                raise RuntimeError("the N100 reader has failed") from self._reader_error
-            return terminal
+        return self._records.finish()
 
     def capture_state(self) -> bool:
-        with self._condition:
-            return self._armed
+        return self._records.armed
 
     def close(self) -> None:
         """Stop reading and release the port; the handle goes only once it has."""
 
         self._stop.set()
-        with self._condition:
-            self._accepting = False
-            self._armed = False
-            self._condition.notify_all()
-        if self._reader.is_alive() and self._reader is not threading.current_thread():
-            self._reader.join(timeout=2.0)
-        self._serial.close()
+        try:
+            if self._records.armed:
+                self._records.finish()
+        finally:
+            if self._reader.is_alive() and self._reader is not threading.current_thread():
+                self._reader.join(timeout=self.config.timeout_seconds)
+            self._serial.close()
 
 
 def discover_n100(*, baud: int = DEFAULT_BAUD, listen_seconds: float = 0.5) -> tuple[str, ...]:

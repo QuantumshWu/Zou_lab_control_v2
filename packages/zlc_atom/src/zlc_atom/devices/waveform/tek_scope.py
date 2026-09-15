@@ -22,7 +22,6 @@ its own 1-2-5 steps, and frozen for the length of any capture.
 
 from __future__ import annotations
 
-from collections import deque
 from dataclasses import dataclass
 import threading
 import time
@@ -43,6 +42,7 @@ from zlc_atom.devices.waveform.contract import (
     WaveformCaptureTerminalRecord,
     WaveformOutput,
     WaveformRecord,
+    WaveformRecordQueue,
     WaveformWorkingPoint,
 )
 
@@ -198,20 +198,12 @@ class TekScopeWaveformSource:
         except BaseException:
             self._link.close()
             raise
-        self._condition = threading.Condition()
+        self._link_lock = threading.Lock()
         self._device_session_id = uuid4().hex
         self._settings_epoch = 0
-        self._queue: deque[WaveformRecord] = deque()
-        self._armed = False
-        self._accepting = False
-        self._expected: int | None = None
-        self._buffer_record_count = 1
-        self._next_ordinal = 0
-        self._produced_count = 0
-        self._worker: threading.Thread | None = None
-        self._worker_stop: threading.Event | None = None
-        self._worker_error: BaseException | None = None
-        self._terminal: WaveformCaptureTerminalRecord | None = None
+        self._records = WaveformRecordQueue(
+            "the scope", join_timeout_seconds=config.timeout_seconds + 1.0
+        )
 
     # ------------------------------------------------------------- readback
     @property
@@ -231,7 +223,7 @@ class TekScopeWaveformSource:
         self._link.write(f":DATa:SOUrce CH{int(channel)}")
 
     def working_point(self) -> WaveformWorkingPoint:
-        with self._condition:
+        with self._link_lock:
             time_per_div = self._query_float(":HORizontal:SCAle?")
             self._select(self.config.channels[0])
             interval = self._query_float(":WFMOutpre:XINcr?")
@@ -263,7 +255,7 @@ class TekScopeWaveformSource:
 
     # -------------------------------------------------------------- knobs
     def tunable_fields(self) -> tuple[TunableField, ...]:
-        with self._condition:
+        with self._link_lock:
             fields = [
                 TunableField(
                     metadata=AuthoringField(
@@ -306,7 +298,7 @@ class TekScopeWaveformSource:
         }
 
     def settings_provenance(self) -> dict[str, object]:
-        with self._condition:
+        with self._link_lock:
             return {
                 "device_session_id": self._device_session_id,
                 "settings_epoch": self._settings_epoch,
@@ -337,8 +329,8 @@ class TekScopeWaveformSource:
                     + ", ".join(repr(volts_per_div_field(c)) for c in self.config.channels)
                 )
             command, readback = f":CH{channel}:SCAle", f":CH{channel}:SCAle?"
-        with self._condition:
-            if self._armed:
+        with self._link_lock:
+            if self._records.armed:
                 raise RuntimeError("scope settings cannot change while a capture is armed")
             self._link.write(f"{command} {requested:.9g}")
             actual = self._query_float(readback)
@@ -346,92 +338,52 @@ class TekScopeWaveformSource:
             return actual
 
     # ------------------------------------------------------------ capture
-    def arm(
-        self, records: int | None, *, buffer_record_count: int, timeout: float
-    ) -> None:
-        buffer_count = int(buffer_record_count)
-        if buffer_count <= 0:
-            raise ValueError("buffer_record_count must be positive")
-        expected = None if records is None else int(records)
-        if expected is not None and (expected <= 0 or buffer_count != expected):
-            raise ValueError("a finite arm buffers exactly the records it expects")
-        with self._condition:
-            if self._armed:
-                raise RuntimeError("the scope is already armed")
-            if self._worker is not None and self._worker.is_alive():
-                raise RuntimeError("the previous scope acquisition worker is still running")
+    def arm(self, records: int | None, *, buffer_record_count: int) -> None:
+        with self._link_lock:
+            self._records.arm(
+                records,
+                buffer_record_count=buffer_record_count,
+                worker=lambda stop: threading.Thread(
+                    target=self._acquire,
+                    args=(stop,),
+                    name="zlc-tek-scope-acquisition",
+                    daemon=True,
+                ),
+            )
+
+    def _acquire(self, stop: threading.Event) -> None:
+        try:
             # The vertical scaling of every channel, read once: the knobs
             # are frozen for the whole capture, so the preamble cannot
             # change under a record.
-            scaling: list[tuple[int, float, float, float]] = []
-            for channel in self.config.channels:
-                self._select(channel)
-                scaling.append(
-                    (
-                        channel,
-                        self._query_float(":WFMOutpre:YMUlt?"),
-                        self._query_float(":WFMOutpre:YOFf?"),
-                        self._query_float(":WFMOutpre:YZEro?"),
+            with self._link_lock:
+                scaling: list[tuple[int, float, float, float]] = []
+                for channel in self.config.channels:
+                    self._select(channel)
+                    scaling.append(
+                        (
+                            channel,
+                            self._query_float(":WFMOutpre:YMUlt?"),
+                            self._query_float(":WFMOutpre:YOFf?"),
+                            self._query_float(":WFMOutpre:YZEro?"),
+                        )
                     )
-                )
-            points = int(float(self._link.query(":WFMOutpre:NR_Pt?")))
-            self._queue.clear()
-            self._armed = True
-            self._accepting = True
-            self._expected = expected
-            self._buffer_record_count = buffer_count
-            self._next_ordinal = 0
-            self._produced_count = 0
-            self._worker_error = None
-            self._terminal = None
-            stop = threading.Event()
-            worker = threading.Thread(
-                target=self._acquire,
-                args=(stop, tuple(scaling), points, float(timeout)),
-                name="zlc-tek-scope-acquisition",
-                daemon=True,
-            )
-            self._worker_stop = stop
-            self._worker = worker
-            try:
-                worker.start()
-            except BaseException:
-                self._worker = None
-                self._worker_stop = None
-                self._armed = False
-                self._accepting = False
-                raise
-
-    def _acquire(
-        self,
-        stop: threading.Event,
-        scaling: tuple[tuple[int, float, float, float], ...],
-        points: int,
-        timeout: float,
-    ) -> None:
-        del timeout
-        try:
-            while not stop.is_set():
-                with self._condition:
-                    if not self._accepting:
-                        break
+                points = int(float(self._link.query(":WFMOutpre:NR_Pt?")))
+            while not stop.is_set() and self._records.accepting:
+                with self._link_lock:
                     self._link.write(":ACQuire:STOPAfter SEQuence")
                     self._link.write(":ACQuire:STATE RUN")
                 # The scope triggers when its trigger says so; until then
                 # only a Stop is worth waking for.
-                while not stop.is_set():
-                    with self._condition:
-                        if not self._accepting:
-                            break
+                while True:
+                    if stop.is_set() or not self._records.accepting:
+                        return
+                    with self._link_lock:
                         state = self._link.query(":ACQuire:STATE?").strip()
                     if state in ("0", "STOP"):
                         break
                     time.sleep(_ACQUISITION_POLL_SECONDS)
-                else:
-                    break
-                with self._condition:
-                    if stop.is_set() or not self._accepting:
-                        break
+                with self._link_lock:
                     columns = []
                     for channel, multiplier, offset, zero in scaling:
                         self._select(channel)
@@ -446,91 +398,27 @@ class TekScopeWaveformSource:
                             * np.float32(multiplier)
                             + np.float32(zero)
                         )
-                    record = WaveformRecord(
-                        np.stack(columns, axis=1),
-                        self._next_ordinal,
-                        time.time_ns(),
-                    )
-                    self._next_ordinal += 1
-                    self._produced_count += 1
-                    while len(self._queue) >= self._buffer_record_count:
-                        self._queue.popleft()
-                    self._queue.append(record)
-                    if self._expected is not None and self._produced_count >= self._expected:
-                        self._accepting = False
-                    self._condition.notify_all()
+                self._records.push(np.stack(columns, axis=1), time.time_ns())
         except BaseException as error:  # noqa: BLE001 -- surfaced to the reader of records
-            with self._condition:
-                self._worker_error = error
-                self._accepting = False
-                self._condition.notify_all()
-        finally:
-            with self._condition:
-                if self._worker is threading.current_thread():
-                    self._worker = None
-                    self._worker_stop = None
-                self._condition.notify_all()
+            self._records.fail(error)
 
     def read_records(
         self, n: int, *, timeout: float, exact: bool
     ) -> list[WaveformRecord]:
-        requested = int(n)
-        if requested <= 0:
-            raise ValueError("n must be positive")
-        deadline = time.monotonic() + max(0.0, float(timeout))
-        with self._condition:
-            while len(self._queue) < requested:
-                if self._worker_error is not None:
-                    raise RuntimeError("the scope acquisition worker failed") from self._worker_error
-                running = self._worker is not None and self._worker.is_alive()
-                if not self._armed or (not running and not self._accepting):
-                    break
-                remaining = deadline - time.monotonic()
-                if remaining <= 0.0:
-                    break
-                self._condition.wait(remaining)
-            if exact and len(self._queue) < requested:
-                raise TimeoutError("the scope did not deliver the requested exact records")
-            count = requested if exact else min(requested, len(self._queue))
-            return [self._queue.popleft() for _ in range(count)]
+        return self._records.read(n, timeout=timeout, exact=exact)
 
     def finish_record_capture(self) -> WaveformCaptureTerminalRecord:
-        with self._condition:
-            if self._terminal is not None:
-                return self._terminal
-            if not self._armed:
-                self._terminal = WaveformCaptureTerminalRecord(0, True, True, True)
-                return self._terminal
-            self._accepting = False
-            worker = self._worker
-            stop = self._worker_stop
-            if stop is not None:
-                stop.set()
-            self._condition.notify_all()
-        if worker is not None:
-            worker.join(timeout=self.config.timeout_seconds + 1.0)
-        with self._condition:
-            if worker is not None and worker.is_alive():
-                raise RuntimeError("the scope acquisition worker did not join")
-            self._armed = False
-            self._terminal = WaveformCaptureTerminalRecord(
-                self._produced_count, True, not self._queue, True
-            )
-            self._condition.notify_all()
-            if self._worker_error is not None:
-                raise RuntimeError("the scope acquisition worker failed") from self._worker_error
-            return self._terminal
+        return self._records.finish()
 
     def capture_state(self) -> bool:
-        with self._condition:
-            return self._armed
+        return self._records.armed
 
     def close(self) -> None:
-        if self.capture_state():
-            self.finish_record_capture()
-        with self._condition:
-            self._queue.clear()
-        self._link.close()
+        try:
+            if self._records.armed:
+                self._records.finish()
+        finally:
+            self._link.close()
 
 
 __all__ = [

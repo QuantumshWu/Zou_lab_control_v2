@@ -619,11 +619,10 @@ class WaveformMeasurementNode:
         let go anyway.
         """
 
-        timeout = float(self.sampler.timeout)
         if records is not None:
-            self.sampler.arm(records, buffer_record_count=records, timeout=timeout)
+            self.sampler.arm(records, buffer_record_count=records)
             return
-        self.sampler.arm(None, buffer_record_count=4 * self.read_batch, timeout=timeout)
+        self.sampler.arm(None, buffer_record_count=4 * self.read_batch)
 
     # ------------------------------------------------------------- capture
     def prepare(
