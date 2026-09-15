@@ -364,6 +364,11 @@ class WheeltecN100WaveformSource:
         #: perfectly well and simply has nothing an operator can turn.
         self._settings: dict[str, object] = {}
         self._settings_refusal: str | None = None
+        #: Whether the module enumerated its own packets, or the IMU rate
+        #: below was measured off the stream because it would not.
+        self._packets_listed = False
+        #: The last console command and its verbatim reply, for the record.
+        self._last_exchange: tuple[str, str] = ("", "")
         self._records = WaveformRecordQueue(
             "the N100", join_timeout_seconds=config.timeout_seconds
         )
@@ -599,6 +604,8 @@ class WheeltecN100WaveformSource:
                 ),
                 "settings": dict(self._settings),
                 "settings_refusal": self._settings_refusal,
+                "packets_listed": self._packets_listed,
+                "last_console_exchange": self._last_exchange,
             },
         )
 
@@ -636,7 +643,10 @@ class WheeltecN100WaveformSource:
             self._park_reader()
             try:
                 with FdiConfigConsole(self._serial) as console:
-                    return work(console)
+                    try:
+                        return work(console)
+                    finally:
+                        self._last_exchange = console.last_exchange
             finally:
                 self._release_reader()
 
@@ -658,11 +668,26 @@ class WheeltecN100WaveformSource:
         self._await_rate()
 
     def _read_settings(self, console) -> dict[str, object]:
-        """Everything this module says it has: packet rates and parameters."""
+        """Everything this module has: packet rates and parameters.
+
+        Asked for first, measured where the answer does not come.  A module
+        whose ``#fmsg`` lists nothing still has an IMU packet -- this driver
+        is reading it -- and its rate is the one already timed off the
+        stream, so the knob that matters is offered either way.
+        """
 
         settings: dict[str, object] = {}
-        for packet in console.packet_rates():
+        listed = console.packet_rates()
+        for packet in listed:
             settings[packet_rate_field(packet.packet_id)] = packet.rate_hz
+        imu = packet_rate_field(IMU_PACKET)
+        if imu not in settings:
+            interval = self._sample_interval
+            if interval:
+                settings[imu] = round(1.0 / interval, 1)
+            self._packets_listed = False
+        else:
+            self._packets_listed = True
         for name in self._parameter_names(console):
             reading = console.get_parameter(name)
             number = _as_number(reading)

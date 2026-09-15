@@ -66,22 +66,27 @@ CONFIG_BANNER = "Config Mode"
 #: Commands the module refuses to run until it is answered ``y``.
 CONFIRM_PROMPT = "(y/n)"
 
-#: How long one command may take to answer.  A property round trip is a few
-#: milliseconds; a reboot is seconds, and is waited for separately.
-REPLY_TIMEOUT_SECONDS = 2.0
+#: How long one command may take to answer.  Generous on purpose:
+#: configuring is something an operator does now and then, never a hot
+#: path, and the cost of being wrong in the two directions is not
+#: symmetric -- waiting too long makes a settings page slow, cutting a
+#: reply short makes the driver believe the module said something it did
+#: not finish saying.
+REPLY_TIMEOUT_SECONDS = 4.0
 
-#: The module keeps sending for a moment after ``#fconfig`` -- frames already
-#: in flight -- so entering waits this long for the line to go quiet.  Even
-#: at the top of the rate ladder frames are milliseconds apart and the
-#: driver's buffer holds only a few, so this is generous.
-ENTER_QUIET_SECONDS = 0.15
+#: The module keeps sending for a moment after ``#fconfig`` -- frames
+#: already in flight -- so entering waits this long for the line to go
+#: quiet.  This one is a judgement about the STREAM, which is dense, so it
+#: does not need the margin a printed reply does.
+ENTER_QUIET_SECONDS = 0.25
 
-#: A reply has no end marker, so it ends when the module has said nothing for
-#: this long.  One command is then about this much wall clock, which is what
-#: sets how long a whole settings apply takes.  The module answers one
-#: command in a single USB frame's worth of time, and prints multi-line
-#: replies back to back, so a gap this long is the end of the reply.
-REPLY_QUIET_SECONDS = 0.08
+#: A reply has no end marker, so it ends when the module has said nothing
+#: for this long.  It was 0.08 s, tuned down to make the tests quick, and
+#: that is the wrong thing to trade: a module that prints an
+#: acknowledgement and then takes a breath before the rest would have been
+#: read as having answered with only the acknowledgement.  Tests that need
+#: to be fast pass their own timeout to the console instead.
+REPLY_QUIET_SECONDS = 0.35
 
 #: ``IMU        [40]  100.0Hz`` -- one packet the module can emit, with its
 #: id and its current rate.  Searched for across the whole reply rather than
@@ -122,13 +127,25 @@ class FdiConfigConsole:
     module always gets its ``#fdeconfig`` even when a command raises.
     """
 
-    def __init__(self, port, *, reply_timeout: float = REPLY_TIMEOUT_SECONDS) -> None:
+    def __init__(
+        self,
+        port,
+        *,
+        reply_timeout: float = REPLY_TIMEOUT_SECONDS,
+        reply_quiet: float = REPLY_QUIET_SECONDS,
+    ) -> None:
         self._port = port
         self._reply_timeout = float(reply_timeout)
+        self._reply_quiet = float(reply_quiet)
         self._entered = False
         #: Whatever the module printed on the way in, for the record.  Not
         #: a judgement: see the module docstring.
         self.greeting = ""
+        #: The last command sent and what came back, verbatim.  Kept because
+        #: every wrong turn in this driver so far has been an assumption
+        #: about what the module would say, and the fastest way to settle
+        #: the next one is to have its actual words to hand.
+        self.last_exchange: tuple[str, str] = ("", "")
 
     # ------------------------------------------------------------ session
     def __enter__(self) -> "FdiConfigConsole":
@@ -191,7 +208,9 @@ class FdiConfigConsole:
 
         self._require_console(command)
         self._write(command)
-        return self._read_until_quiet(REPLY_QUIET_SECONDS)
+        answer = self._read_until_quiet(self._reply_quiet)
+        self.last_exchange = (command, answer)
+        return answer
 
     def _require_console(self, command: str) -> None:
         if not self._entered:
@@ -201,23 +220,21 @@ class FdiConfigConsole:
             )
 
     def packet_rates(self) -> tuple[PacketRate, ...]:
-        """Every packet this module can emit, with its current rate.
+        """Every packet this module says it emits, which may be none.
 
-        This is the module describing itself: which packets its firmware
-        has, and what each is set to.  Nothing here is assumed.
+        The manual says the bare ``#fmsg`` prints every supported packet
+        with its id and rate.  A real module answers ``*#OK`` and lists
+        nothing.  An empty list is therefore a fact about this firmware and
+        not a fault: the caller falls back to what it can MEASURE, which
+        for the one packet this driver reads is the stream itself.  What
+        the module actually said is on ``last_exchange`` either way.
         """
 
         answer = self.query("#fmsg")
-        rates = [
+        return tuple(
             PacketRate(found["name"], int(found["id"], 16), float(found["hz"]))
             for found in _RATE_ENTRY.finditer(answer)
-        ]
-        if not rates:
-            raise RuntimeError(
-                "the module listed no packets; it answered "
-                f"{answer.strip()[:200]!r}"
-            )
-        return tuple(rates)
+        )
 
     def set_packet_rate(self, packet_id: int, rate_hz: float) -> float:
         """Ask for a rate; answer with the rate the module says it took.

@@ -442,3 +442,40 @@ def test_entry_is_the_stream_stopping_not_a_banner() -> None:
 
     with pytest.raises(RuntimeError, match="kept streaming through #fconfig"):
         FdiConfigConsole(_Deaf()).enter()
+
+
+def test_a_module_that_lists_nothing_still_offers_the_knob_that_matters() -> None:
+    """#fmsg is documented to print every packet. A real module prints *#OK.
+
+    That is a fact about the firmware, not a fault, and it must not cost the
+    operator the one setting they came for: this driver reads the IMU
+    packet, so it already knows that packet's rate -- it timed it off the
+    stream. Asked first, measured where the answer does not come.
+    """
+
+    class _Terse(_FakeModule):
+        def _answer(self, line: str) -> None:
+            if line == "#fmsg":
+                self.commands.append(line)
+                self._say(OK)          # acknowledges, lists nothing
+                return
+            super()._answer(line)
+
+    module = _Terse(rate_hz=50.0)
+    source = _source(module)
+    try:
+        rate_field = packet_rate_field(IMU_PACKET)
+        values = source.tunable_values()
+        assert values[rate_field] == pytest.approx(50.0, rel=0.05), (
+            "the rate came off the stream, since the module would not say it"
+        )
+        point = source.working_point()
+        assert point.settings["packets_listed"] is False
+        assert point.settings["last_console_exchange"][1].strip() != "", (
+            "the module's own words are kept, so the next surprise is one lookup away"
+        )
+        # And the knob still writes.
+        assert source.tune(rate_field, 200.0) == 200.0
+        assert module.rates[IMU_PACKET] == 200.0
+    finally:
+        source.close()
