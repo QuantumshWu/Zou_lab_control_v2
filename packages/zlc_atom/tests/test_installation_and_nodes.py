@@ -65,6 +65,10 @@ def test_device_discovery_is_the_leaf_manifest() -> None:
         "slm.hamamatsu_x15213",
         "slm.hamamatsu_x15213_local",
         "slm.virtual",
+        "waveform.tek_scope",
+        "waveform.virtual_imu",
+        "waveform.virtual_scope",
+        "waveform.wheeltec_n100",
     )
     # "rf" left this tombstone in 2026-08: the OLD rf family was purged and
     # must not resurrect by accident.  The rf.* types above are the NEW
@@ -132,6 +136,7 @@ def test_capability_tokens_have_machine_visible_types() -> None:
         "rf.source",
         "sequencer.streamer",
         "slm.phase",
+        "waveform.source",
     }
     assert all(isinstance(value, type) for value in CAPABILITY_TYPES.values())
 
@@ -215,7 +220,9 @@ def test_logic_discovery_is_derived_from_leaf_modules() -> None:
         "camera_measurement",
         "derive",
         "frame_survival",
+        "imu_measurement",
         "occupancy",
+        "scope_measurement",
         "seamless_scan",
         "slm_feedback",
         "stepped_scan",

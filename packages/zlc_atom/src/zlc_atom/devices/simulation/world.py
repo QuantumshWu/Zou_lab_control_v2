@@ -24,6 +24,13 @@ DEFAULT_SIMULATION_IMAGE_SHAPE_YX = (96, 128)
 DEFAULT_SIMULATION_MOT_IMAGE_SHAPE_YX = (1200, 1920)
 #: Zero authored bias is the one compensated MOT operating point.
 DEFAULT_MOT_FIELD_OPTIMUM_DAC = (0, 0, 0)
+#: The NET bias field, per DAC code away from the optimum, as a fraction
+#: of the bus's full scale -- what moves and dims the MOT, and what a
+#: magnetometer in this world reads.
+_NET_FIELD_PER_DAC_CODE = 1.0 / 512.0
+#: The full-scale net field in microtesla: a bus swung to its rail is a
+#: few gauss, which is what a bias coil pair on a bench does.
+_NET_FIELD_FULL_SCALE_MICROTESLA = 256.0
 DEFAULT_SIMULATION_SITE_SPACING_PIXELS = 9.0
 DEFAULT_SIMULATION_SLM_SHAPE_YX = (128, 128)
 # Every physical trap is one dominant local maximum of the propagated field.
@@ -675,6 +682,17 @@ class SimulationWorld:
         self._ensure_slm_propagation()
         return self._loading_probabilities(self._trap_intensities)
 
+    def magnetic_field_microtesla(self) -> tuple[float, float, float]:
+        """The net bias field right now, as a magnetometer in this world reads it."""
+
+        scale = _NET_FIELD_PER_DAC_CODE * _NET_FIELD_FULL_SCALE_MICROTESLA
+        with self._lock:
+            optimum = self._mot_field_optimum
+            return tuple(
+                (self._dac_values[name] - optimum[name]) * scale
+                for name in ("da_bias_x", "da_bias_y", "da_bias_z")
+            )
+
     def register_camera(self, camera: Any) -> None:
         """Drive this camera from the program's own camera edges.
 
@@ -871,7 +889,7 @@ class SimulationWorld:
             # to cancel.  Position and brightness both follow it -- at the
             # optimum the spot is centred AND brightest, which is what a
             # compensated MOT looks like on the monitor.
-            scale = 1.0 / 512.0
+            scale = _NET_FIELD_PER_DAC_CODE
             optimum = self._mot_field_optimum
             field_x = (self._dac_values["da_bias_x"] - optimum["da_bias_x"]) * scale
             field_y = (self._dac_values["da_bias_y"] - optimum["da_bias_y"]) * scale

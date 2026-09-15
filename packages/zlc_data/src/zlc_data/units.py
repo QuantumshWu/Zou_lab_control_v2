@@ -706,6 +706,7 @@ def _builtin_units() -> tuple[Unit, ...]:
         Unit("A", "current", prefixable=True),
         Unit("W", "power", prefixable=True),
         Unit("K", "temperature", prefixable=True),
+        Unit("T", "magnetic_flux_density", prefixable=True),
         Unit("rad", "angle", prefixable=True),
         Unit("deg", "angle", Scaled(np.pi / 180.0), aliases=("°",)),
         Unit("dBm", "power", Decibel(1.0e-3)),
