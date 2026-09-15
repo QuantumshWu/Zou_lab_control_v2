@@ -13,7 +13,8 @@ import math
 import pytest
 
 from zlc_atom.devices.sequencer import sequencer_archive_snapshot
-from zlc_atom.devices.simulation import SimulationWorld, VirtualSequencer
+from zlc_atom.devices.simulation import SimulationWorld
+from zlc_atom.devices.simulation.sequencer import VirtualSequencer
 from zlc_pulse import CURRENT_CONFIG_VALUES, read_config_values, write_config_values
 
 

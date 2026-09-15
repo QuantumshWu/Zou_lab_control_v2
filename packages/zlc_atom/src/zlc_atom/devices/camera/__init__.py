@@ -1,4 +1,4 @@
-"""Camera adapter contract and physical camera implementations."""
+"""The camera adapter contract; each camera is a folder beside this one."""
 
 from .contract import (
     CAMERA_PROTECTED_FIELDS,
@@ -8,8 +8,6 @@ from .contract import (
     CameraFrameRecord,
     CameraWorkingPoint,
 )
-from .dcam import DcamCameraAdapter, DcamCameraConfig
-from .pylon import PylonCameraAdapter, PylonCameraConfig
 
 __all__ = [
     "CAMERA_PROTECTED_FIELDS",
@@ -18,8 +16,4 @@ __all__ = [
     "CameraCaptureTerminalRecord",
     "CameraFrameRecord",
     "CameraWorkingPoint",
-    "DcamCameraAdapter",
-    "DcamCameraConfig",
-    "PylonCameraAdapter",
-    "PylonCameraConfig",
 ]

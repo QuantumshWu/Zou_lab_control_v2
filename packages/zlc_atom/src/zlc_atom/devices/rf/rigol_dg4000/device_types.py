@@ -1,4 +1,4 @@
-"""Automatically discovered RF source device types."""
+"""The Rigol DG4000 this bench can install, and how to find one."""
 
 from __future__ import annotations
 
@@ -8,14 +8,11 @@ from zlc_atom.devices.rf.contract import (
     WINDOW_AUTHORING_FIELDS,
     validate_window_values,
 )
-from zlc_atom.devices.rf.rigol_dg4000 import RigolDg4000Config, RigolDg4000RfSource
-from zlc_atom.devices.rf.vaunix_lms import (
-    CtypesLmsLibrary,
-    VaunixLmsConfig,
-    VaunixLmsRfSource,
-)
 from zlc_atom.install.configuration import DeviceInstanceConfig
 from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
+
+from .source import RigolDg4000Config, RigolDg4000RfSource
+
 
 #: Bounds are optional bench policy, not instrument facts.  Omitting an edge
 #: means no policy limit on that side; it can still be set or cleared later in
@@ -36,18 +33,6 @@ RIGOL_DG4000_SCHEMA = AuthoringSchema(
             5.0,
             minimum=0.1,
             unit="s",
-        ),
-        *WINDOW_AUTHORING_FIELDS,
-    ),
-    validator=validate_window_values,
-)
-
-VAUNIX_LMS_SCHEMA = AuthoringSchema(
-    (
-        # No serial yet is a VACANCY, not the number zero: a default that
-        # violates its own minimum poisons every draft projection.
-        AuthoringField(
-            "serial", "int", "Serial number", None, required=True, minimum=1
         ),
         *WINDOW_AUTHORING_FIELDS,
     ),
@@ -75,25 +60,6 @@ def _rigol_factory(context, key: str, values: dict) -> InstalledLeaf:
     )
 
 
-def _vaunix_factory(context, key: str, values: dict) -> InstalledLeaf:
-    authored = VAUNIX_LMS_SCHEMA.project_values(values)
-    config = VaunixLmsConfig(
-        serial=int(authored["serial"]),
-        frequency_low_hz=authored["frequency_low_hz"],
-        frequency_high_hz=authored["frequency_high_hz"],
-        power_low_dbm=authored["power_low_dbm"],
-        power_high_dbm=authored["power_high_dbm"],
-    )
-    source = VaunixLmsRfSource(config)
-    return bind_rf_source(
-        context,
-        key,
-        source,
-        f"vaunix-lms:{config.serial}",
-        "rf.vaunix_lms",
-    )
-
-
 def _discover_rigol() -> tuple[DeviceInstanceConfig, ...]:
     """Every DG4000 that answers on this machine, named by what it answered.
 
@@ -103,12 +69,10 @@ def _discover_rigol() -> tuple[DeviceInstanceConfig, ...]:
     at is the name -- still stable, still that instrument, just longer.
     """
 
-    from zlc_atom.devices.rf.rigol_dg4000 import (
-        PROBED_RESOURCE_PREFIXES,
-        discover_dg4000,
-        probeable_resources,
-        visa_resources,
-    )
+    from zlc_atom.devices import visa
+    from zlc_atom.devices.visa import PROBED_RESOURCE_PREFIXES
+
+    from .source import discover_dg4000
 
     # "Found nothing" is only an answer if something was asked.  VISA's own
     # list is far blinder than an operator expects: a LAN instrument appears
@@ -116,9 +80,9 @@ def _discover_rigol() -> tuple[DeviceInstanceConfig, ...]:
     # USB-TMC driver is bound -- so a Rigol sitting there, plugged in and
     # working, can simply not be in the list.  Saying nothing then reports
     # "no Rigol here" about a bench that has one.
-    manager = visa_resources()
+    manager = visa.visa_resources()
     listed = tuple(str(name) for name in manager.list_resources())
-    probeable = probeable_resources(listed)
+    probeable = visa.probeable_resources(listed)
     if not probeable:
         raise RuntimeError(
             "VISA lists nothing to ask: no "
@@ -151,32 +115,6 @@ def _discover_rigol() -> tuple[DeviceInstanceConfig, ...]:
     )
 
 
-def _discover_vaunix() -> tuple[DeviceInstanceConfig, ...]:
-    """Every attached Lab Brick, by serial -- a count read, no opens.
-
-    A missing vendor DLL raises the INSTRUCTION (which file, into which
-    folder) rather than an empty result: the scan strip is exactly where
-    an operator wondering "why no bricks?" is looking.
-    """
-
-    from zlc_atom.devices.vendor import resolve_vendor_file
-
-    library = CtypesLmsLibrary(
-        resolve_vendor_file(
-            __file__, "vnx_fmsynth.dll", what="the Vaunix LMS SDK (64-bit)"
-        )
-    )
-    return tuple(
-        DeviceInstanceConfig(
-            instance_id=f"lms_{serial}",
-            role=f"lms_{serial}",
-            type_id="rf.vaunix_lms",
-            parameters=VAUNIX_LMS_SCHEMA.project_values({"serial": int(serial)}),
-        )
-        for serial in library.device_serials()
-    )
-
-
 DEVICE_TYPES = (
     DeviceTypeDescriptor(
         "rf.rigol_dg4000",
@@ -186,18 +124,6 @@ DEVICE_TYPES = (
         factory=_rigol_factory,
         discover=_discover_rigol,
     ),
-    DeviceTypeDescriptor(
-        "rf.vaunix_lms",
-        "rf",
-        VAUNIX_LMS_SCHEMA,
-        ("rf.source",),
-        factory=_vaunix_factory,
-        discover=_discover_vaunix,
-    ),
 )
 
-__all__ = [
-    "DEVICE_TYPES",
-    "RIGOL_DG4000_SCHEMA",
-    "VAUNIX_LMS_SCHEMA",
-]
+__all__ = ["DEVICE_TYPES", "RIGOL_DG4000_SCHEMA"]

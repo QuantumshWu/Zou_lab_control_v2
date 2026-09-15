@@ -32,7 +32,7 @@ They constrain implementation method; product and architecture truth remain in
   合并进现有直接用例，禁止堆砌重复用例、庞大fixture和只会增加维护、调试时间的
   测试。若不满足上述条件，直接完成最小实现，不写新测试。
 - **设备的 vendor 依赖住在设备自己的文件夹（2026-08-31 用户裁决）。** 需要
-  厂商文件（DLL、SDK 等）的 device family 在自己的目录下设 `vendor/` 文件夹
+  厂商文件（DLL、SDK 等）的设备在自己的设备文件夹下设 `vendor/` 文件夹
   （附 README 与 .gitignore）：驱动只在该文件夹及其 `vendor.json` 指出的绝对
   路径查找（单一实现 `zlc_atom/devices/vendor.py`）；找不到时报错必须原话写明
   「把什么文件放进哪个文件夹、或在 vendor.json 里写什么」。禁止裸靠 PATH 搜索

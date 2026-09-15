@@ -23,15 +23,16 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from zlc_atom.devices.camera.device_types import DCAM_CAMERA_SCHEMA, PYLON_CAMERA_SCHEMA
-from zlc_atom.devices.sequencer.device_types import HARDWARE_SEQUENCER_SCHEMA
-from zlc_atom.devices.simulation.device_types import (
-    SIMULATION_WORLD_SCHEMA,
+from zlc_atom.devices.camera.dcam.device_types import DCAM_CAMERA_SCHEMA
+from zlc_atom.devices.camera.pylon.device_types import PYLON_CAMERA_SCHEMA
+from zlc_atom.devices.sequencer.hardware.device_types import HARDWARE_SEQUENCER_SCHEMA
+from zlc_atom.devices.simulation.authoring import SIMULATION_WORLD_SCHEMA
+from zlc_atom.devices.simulation.camera.device_types import (
     VIRTUAL_CAMERA_SCHEMA,
     VIRTUAL_MOT_CAMERA_SCHEMA,
-    VIRTUAL_SEQUENCER_SCHEMA,
-    VIRTUAL_SLM_SCHEMA,
 )
+from zlc_atom.devices.simulation.sequencer.device_types import VIRTUAL_SEQUENCER_SCHEMA
+from zlc_atom.devices.simulation.slm.device_types import VIRTUAL_SLM_SCHEMA
 from zlc_atom.install import create_installation, discover_device_catalog
 
 
@@ -337,7 +338,7 @@ def test_a_draft_projects_without_completeness_and_init_still_refuses() -> None:
 
     import pytest
 
-    from zlc_atom.devices.rf.device_types import RIGOL_DG4000_SCHEMA
+    from zlc_atom.devices.rf.rigol_dg4000.device_types import RIGOL_DG4000_SCHEMA
 
     draft = RIGOL_DG4000_SCHEMA.draft_values({})
     assert draft["resource"] == ""

@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import pytest
 
-from zlc_atom.devices.camera import dcam, pylon, roi_grid
+from zlc_atom.devices.camera import roi_grid
+from zlc_atom.devices.camera.dcam import adapter as dcam
+from zlc_atom.devices.camera.pylon import adapter as pylon
 from zlc_atom.devices.camera.roi_grid import snap_roi_axis
 
 

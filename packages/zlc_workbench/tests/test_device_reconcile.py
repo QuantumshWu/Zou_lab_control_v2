@@ -195,7 +195,7 @@ def test_failed_close_remains_reachable_for_retry(tmp_path):
 
 
 def test_virtual_world_boundary_preserves_independent_physical_leaf(tmp_path):
-    from zlc_atom.devices.simulation.device_types import DEVICE_TYPES
+    from zlc_atom.devices.simulation.camera.device_types import DEVICE_TYPES
 
     events: list[str] = []
 
@@ -265,7 +265,7 @@ def test_invalid_target_is_rejected_before_any_live_device_closes(tmp_path):
 
 
 def test_world_and_physical_change_rebuilds_physical_dependants(tmp_path):
-    from zlc_atom.devices.simulation.device_types import DEVICE_TYPES
+    from zlc_atom.devices.simulation.camera.device_types import DEVICE_TYPES
 
     events: list[str] = []
     base_catalog = _catalog(events)
@@ -294,7 +294,7 @@ def test_world_and_physical_change_rebuilds_physical_dependants(tmp_path):
 
 
 def test_operational_close_can_continue_after_last_virtual_leaf(tmp_path):
-    from zlc_atom.devices.simulation.device_types import DEVICE_TYPES
+    from zlc_atom.devices.simulation.camera.device_types import DEVICE_TYPES
 
     events: list[str] = []
 

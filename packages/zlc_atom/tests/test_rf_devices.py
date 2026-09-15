@@ -752,7 +752,7 @@ def test_what_a_constructor_acquired_the_constructor_releases(monkeypatch) -> No
     before either transport is opened at all.
     """
 
-    import zlc_atom.devices.rf.rigol_dg4000 as module
+    import zlc_atom.devices.visa as module
 
     opened: list[str] = []
     instrument = _ScpiInstrument()
@@ -1008,7 +1008,7 @@ def test_vendor_files_live_with_the_family_and_missing_means_instructions(
 
     # The Lab Brick scan surfaces that instruction rather than shrugging.
     import zlc_atom.devices.vendor as vendor_module
-    import zlc_atom.devices.rf.device_types as module
+    import zlc_atom.devices.rf.vaunix_lms.device_types as module
 
     def _missing(_anchor, filename, *, what):
         raise FileNotFoundError(f"{what} is not installed: copy {filename} into ...")
@@ -1155,7 +1155,8 @@ def test_no_visa_at_all_is_an_instruction_not_an_empty_bench(monkeypatch) -> Non
     and it is a lie with no next step in it.
     """
 
-    import zlc_atom.devices.rf.rigol_dg4000 as module
+    import zlc_atom.devices.visa as module
+    from zlc_atom.devices.rf.rigol_dg4000 import discover_dg4000
 
     def _no_backend():
         raise RuntimeError(
@@ -1165,7 +1166,7 @@ def test_no_visa_at_all_is_an_instruction_not_an_empty_bench(monkeypatch) -> Non
 
     monkeypatch.setattr(module, "visa_resources", _no_backend)
     with pytest.raises(RuntimeError, match="install NI-VISA"):
-        module.discover_dg4000()
+        discover_dg4000()
 
 
 def test_a_missing_library_is_not_reported_as_a_missing_backend(monkeypatch) -> None:
@@ -1181,7 +1182,7 @@ def test_a_missing_library_is_not_reported_as_a_missing_backend(monkeypatch) -> 
     import builtins
     import sys
 
-    import zlc_atom.devices.rf.rigol_dg4000 as module
+    import zlc_atom.devices.visa as module
 
     real_import = builtins.__import__
 
@@ -1204,8 +1205,8 @@ def test_a_missing_library_is_not_reported_as_a_missing_backend(monkeypatch) -> 
 def test_a_found_instrument_is_offered_as_an_installable_card(monkeypatch) -> None:
     """What the scan finds must be addable without retyping the address."""
 
-    import zlc_atom.devices.rf.device_types as module
-    import zlc_atom.devices.rf.rigol_dg4000 as driver
+    import zlc_atom.devices.rf.rigol_dg4000.device_types as module
+    import zlc_atom.devices.visa as driver
     from zlc_atom.install import discover_device_catalog
 
     bus = _VisaBus(
@@ -1245,8 +1246,8 @@ def test_nothing_to_ask_is_said_out_loud(monkeypatch) -> None:
     operator cannot see through, because the scan looks identical either way.
     """
 
-    import zlc_atom.devices.rf.device_types as module
-    import zlc_atom.devices.rf.rigol_dg4000 as driver
+    import zlc_atom.devices.rf.rigol_dg4000.device_types as module
+    import zlc_atom.devices.visa as driver
 
     serial_only = _VisaBus({"ASRL3::INSTR": "", "ASRL4::INSTR": ""})
     monkeypatch.setattr(driver, "visa_resources", lambda: serial_only)

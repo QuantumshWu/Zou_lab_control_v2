@@ -190,9 +190,10 @@ files, so the composition framework and UI do not need edits. A device type is
 similarly declared in a discovered `device_types.py` module with a factory and
 authoring schema.
 
-The current device set is deliberately closed to the four capabilities the
+The current device set is deliberately closed to the five capabilities the
 nodes consume: camera (`camera.adapter`), sequencer (`sequencer.streamer`), SLM
-(`slm.phase`) and RF source (`rf.source`). Virtual, DCAM, and Pylon camera
+(`slm.phase`), RF source (`rf.source`) and waveform source
+(`waveform.source`). Virtual, DCAM, and Pylon camera
 adapters implement the same `CameraAdapter` contract; the Rigol DG4000
 (`rf.rigol_dg4000`), the Vaunix Lab Brick (`rf.vaunix_lms`) and the virtual
 brick (`rf.virtual`) implement the same RF source contract. Workbench resolves
@@ -216,9 +217,14 @@ DEVICE_TYPE = DeviceTypeDescriptor(
 )
 ```
 
-Place that descriptor in a `device_types.py` below `src/zlc_atom/devices/` and
-the rglob discovery test will collect it without editing the graph. Logic
-leaves follow the same pattern with a `logic_node.py` exporting `LOGIC_NODE`.
+Place that descriptor in a `device_types.py` of its own folder,
+`src/zlc_atom/devices/<family>/<device>/`, and the rglob discovery test will
+collect it without editing the graph. One folder is one device: the driver,
+its `vendor/` folder, and the manifest that declares it, with nothing outside
+the folder importing in -- so a device this bench does not own is removed by
+deleting the folder, and the family around it keeps only what its devices
+share. Logic leaves follow the same pattern with a `logic_node.py` exporting
+`LOGIC_NODE`.
 Factories must return declared capability instances; startup failures are
 reported per leaf in `Installation.failures`, while independent leaves remain
 usable and close in reverse order.
@@ -487,9 +493,10 @@ the virtual sequencer has no alternate analysis path or `if virtual` branch.
 
 ## Current package boundary
 
-Real camera adapters remain under `devices/camera/`; all virtual camera,
-sequencer, shared-world geometry, and virtual descriptors remain under
-`devices/simulation/`. Installation descriptors expose only operator-owned
+Each real camera is a folder under `devices/camera/`; the virtual apparatus
+is a family of its own, `devices/simulation/`, holding the shared world and a
+folder per virtual device. A real device package never imports the
+simulation, and a family package never imports its own devices. Installation descriptors expose only operator-owned
 settings. Logic descriptors own their authoring schema, typed artifact/resource
 inputs, dataset outputs, artifact outputs, and task preview declaration;
 Workbench and Qt consume those contracts rather than rebuilding them.

@@ -1,8 +1,11 @@
-"""Public API for the installation-owned virtual apparatus."""
+"""The simulated world every virtual device stands in.
 
-from .camera import VirtualCamera, VirtualCameraConfig
-from .sequencer import CAMERA_TRIGGER_CHANNEL, VirtualPulseStreamer, VirtualSequencer
-from .slm import VirtualSLM
+Each virtual device is a folder beside this module, discovered like any
+other device; what they SHARE is the world and the one schema that builds
+it.  Nothing here imports those folders: deleting one deletes its devices
+and leaves the world, and the bench, intact.
+"""
+
 from .world import (
     DEFAULT_MOT_FIELD_OPTIMUM_DAC,
     DEFAULT_SIMULATION_GRID_SHAPE_YX,
@@ -15,7 +18,6 @@ from .world import (
 )
 
 __all__ = [
-    "CAMERA_TRIGGER_CHANNEL",
     "DEFAULT_MOT_FIELD_OPTIMUM_DAC",
     "DEFAULT_SIMULATION_GRID_SHAPE_YX",
     "DEFAULT_SIMULATION_IMAGE_SHAPE_YX",
@@ -24,9 +26,4 @@ __all__ = [
     "SimulationGeometry",
     "SimulationWorld",
     "SimulationWorldConfig",
-    "VirtualCamera",
-    "VirtualCameraConfig",
-    "VirtualPulseStreamer",
-    "VirtualSequencer",
-    "VirtualSLM",
 ]

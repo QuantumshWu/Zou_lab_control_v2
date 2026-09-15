@@ -30,7 +30,24 @@ class UnavailableDeviceTypes:
 
     @property
     def family(self) -> str:
-        """The part a person recognises: 'camera', 'sequencer'."""
+        """The part a person recognises: 'camera', 'sequencer'.
+
+        The folder under ``devices/``, not the module's own parent: a device
+        lives in its own folder inside its family (``camera/dcam/``), so the
+        parent names the DEVICE and the grandparent the family.  Reported by
+        family because that is the word on the Device Manager's greyed note,
+        and because one missing SDK usually takes a whole family with it.
+        """
+
+        parts = self.module.split(".")
+        try:
+            return parts[parts.index("devices") + 1]
+        except (ValueError, IndexError):
+            return parts[-2] if len(parts) > 1 else self.module
+
+    @property
+    def device(self) -> str:
+        """The folder that declares it: 'dcam', 'pylon', 'tek_scope'."""
 
         parts = self.module.split(".")
         return parts[-2] if len(parts) > 1 else self.module

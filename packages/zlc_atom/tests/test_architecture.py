@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import pathlib
 import importlib
 import json
 from pathlib import Path
@@ -19,7 +20,7 @@ from zlc_pulse.device import BoardDescription
 from zlc_runtime import NodeHost, SignalDataPlane
 
 import zlc_atom.nodes.calibration.pulse as calibration_pulse_module
-from zlc_atom.devices.simulation import VirtualPulseStreamer
+from zlc_atom.devices.simulation.sequencer import VirtualPulseStreamer
 from zlc_atom.install import create_installation
 from zlc_atom.nodes import (
     ArtifactInputSpec,
@@ -304,6 +305,90 @@ def test_node_cross_imports_have_only_owner_edges() -> None:
         ("stepped_scan", "scan"),
         ("temperature", "scan"),
     }
+
+
+def test_a_device_folder_is_the_whole_device() -> None:
+    """Deleting one folder deletes one device, and nothing else notices.
+
+    A device is a folder under its family: the driver, the vendor folder it
+    resolves its DLL from, and the ``device_types.py`` discovery finds it
+    by.  The family folder around it keeps what its devices SHARE -- the
+    capability contract, the binding, the ROI arithmetic two cameras round
+    the same way -- and nothing else may reach inside a device folder, so
+    removing a device this bench does not own is `rm -r` and no edit.
+
+    The exception is a virtual twin, and it is listed one by one: this
+    bench's rule is that a simulation fakes the LOWEST layer only, so the
+    virtual RF source IS the Vaunix driver over an in-memory library and
+    the virtual IMU publishes the N100's own output table.  Those edges say
+    that deleting the real device deletes its rehearsal too, which is the
+    truth about them.
+    """
+
+    devices_root = ROOT / "src" / "zlc_atom" / "devices"
+    manifests = tuple(devices_root.rglob("device_types.py"))
+    assert manifests
+    folders = {path.parent for path in manifests}
+    for folder in folders:
+        parts = folder.relative_to(devices_root).parts
+        assert len(parts) == 2, (
+            "a device_types.py belongs to a device folder inside its family "
+            f"(<family>/<device>/), not to {'/'.join(parts) or 'devices'}"
+        )
+        assert not any(
+            child.is_dir() and any(child.rglob("device_types.py"))
+            for child in folder.iterdir()
+        ), f"{'/'.join(parts)} holds another device"
+        assert (folder / "__init__.py").is_file(), (
+            f"{'/'.join(parts)} needs an __init__.py or the wheel drops it"
+        )
+
+    def module_of(path: pathlib.Path) -> str:
+        parts = path.relative_to(devices_root).with_suffix("").parts
+        return "zlc_atom.devices." + ".".join(parts)
+
+    owners = {module_of(folder / "x.py").rsplit(".", 1)[0]: folder for folder in folders}
+    edges: set[tuple[str, str]] = set()
+    for path in devices_root.rglob("*.py"):
+        source = next(
+            (
+                name
+                for name, folder in owners.items()
+                if path.is_relative_to(folder)
+            ),
+            None,
+        )
+        text = path.read_text(encoding="utf-8")
+        tree = ast.parse(text)
+        for node in ast.walk(tree):
+            targets: list[str] = []
+            if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                targets.append(node.module)
+            elif isinstance(node, ast.Import):
+                targets.extend(alias.name for alias in node.names)
+            for target in targets:
+                for name in owners:
+                    if (target == name or target.startswith(name + ".")) and name != source:
+                        edges.add((str(path.relative_to(devices_root)).replace("\\", "/"), name))
+    # Every edge INTO a device folder, named by the file that makes it.
+    assert edges == {
+        ("simulation/rf/device_types.py", "zlc_atom.devices.rf.vaunix_lms"),
+        ("simulation/rf/source.py", "zlc_atom.devices.rf.vaunix_lms"),
+        ("simulation/waveform/device_types.py", "zlc_atom.devices.waveform.wheeltec_n100"),
+    }, sorted(edges)
+
+    # And a family's own package must not import its devices: everything that
+    # asks a family for its contract would break with the first deletion.
+    for family in {folder.parent for folder in folders}:
+        init = family / "__init__.py"
+        if not init.is_file():
+            continue
+        imported = ast.parse(init.read_text(encoding="utf-8"))
+        for node in ast.walk(imported):
+            if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module:
+                assert not (family / node.module.split(".")[0]).is_dir(), (
+                    f"{family.name}/__init__.py imports the {node.module} device"
+                )
 
 
 def test_pulse_resolver_uses_the_project_json_document(

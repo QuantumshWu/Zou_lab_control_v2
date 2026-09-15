@@ -1936,7 +1936,7 @@ def test_the_status_poll_never_waits_behind_a_remote_apply(
     that follows the delivery is still on its way back.
     """
 
-    import zlc_atom.devices.slm.device as device_module
+    import zlc_atom.devices.slm.hamamatsu_x15213.remote as device_module
     import zlc_atom.devices.slm.editor as editor
 
     app = ensure_qt_app()

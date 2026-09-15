@@ -49,27 +49,35 @@ def _calibration_request(*, repeats: int = 30) -> CalibrationRequest:
 
 
 def test_device_discovery_is_the_leaf_manifest() -> None:
+    """What this bench offers IS its device folders, not a list beside them.
+
+    The catalog used to be pinned as a tuple of type ids, so adding or
+    removing a device meant editing this file to agree -- exactly the
+    bookkeeping a folder-per-device layout exists to remove.  What is worth
+    asserting is that the two agree: every folder's manifest is discovered,
+    every id it declares belongs to the family folder it sits in, and no id
+    is declared twice.
+    """
+
     descriptors = discover_device_catalog().available
-    assert tuple(item.type_id for item in descriptors) == (
-        "camera.dcam",
-        "camera.pylon",
-        "camera.virtual",
-        "camera.virtual_mot",
-        "remote.tunable",
-        "rf.rigol_dg4000",
-        "rf.vaunix_lms",
-        "rf.virtual",
-        "sequencer.hardware",
-        "sequencer.local",
-        "sequencer.virtual",
-        "slm.hamamatsu_x15213",
-        "slm.hamamatsu_x15213_local",
-        "slm.virtual",
-        "waveform.tek_scope",
-        "waveform.virtual_imu",
-        "waveform.virtual_scope",
-        "waveform.wheeltec_n100",
-    )
+    devices_root = Path(__file__).parents[1] / "src" / "zlc_atom" / "devices"
+    folders = {
+        path.parent.relative_to(devices_root).parts
+        for path in devices_root.rglob("device_types.py")
+    }
+    assert folders, "the bench declares its devices in device_types.py files"
+    declared = {
+        family: sorted(
+            item.type_id for item in descriptors if item.type_id.startswith(f"{family}.")
+        )
+        for family, _device in folders
+    }
+    assert set(declared) == {family for family, _device in folders}
+    assert sorted(item.type_id for item in descriptors) == sorted(
+        value for ids in declared.values() for value in ids
+    ), "every discovered id belongs to the family folder that declares it"
+    assert len({item.type_id for item in descriptors}) == len(descriptors)
+    assert all(item.domain for item in descriptors)
     # "rf" left this tombstone in 2026-08: the OLD rf family was purged and
     # must not resurrect by accident.  The rf.* types above are the NEW
     # family, added deliberately (Rigol DG4000 / Vaunix LMS / virtual), so

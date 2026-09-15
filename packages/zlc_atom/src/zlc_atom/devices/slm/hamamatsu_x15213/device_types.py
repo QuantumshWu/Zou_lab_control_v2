@@ -23,8 +23,9 @@ from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
 from zlc_atom.devices.vendor import resolve_vendor_file
 from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
 
-from . import open_slm_control
-from .device import _RemoteSlmAdapter, _open_slm_server, bind_slm, canonical_phase
+from .. import open_slm_control
+from ..device import bind_slm, canonical_phase
+from .remote import _RemoteSlmAdapter, _open_slm_server
 
 
 _SHAPE_YX = (1024, 1272)

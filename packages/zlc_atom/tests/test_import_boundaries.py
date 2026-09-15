@@ -162,21 +162,28 @@ def test_virtual_runtime_branch_scan_is_non_vacuous_and_clean() -> None:
 
 
 def test_simulation_devices_are_a_separate_device_family() -> None:
-    """Real-device packages must not own or re-export virtual apparatus code."""
+    """Real-device packages must not own or re-export virtual apparatus code.
+
+    The virtual apparatus is a family of its own: one world, and beside it a
+    folder per virtual device, exactly as a real family carries a folder per
+    real device.  What a real family must never carry is the world or a
+    stand-in for its own instrument -- a driver that can see the simulation
+    is a driver that can be written to please it.
+    """
 
     devices = SRC / "devices"
     simulation = devices / "simulation"
-    assert {
-        "camera.py",
-        "device_types.py",
-        "sequencer.py",
-        "slm.py",
-        "world.py",
-    } <= {path.name for path in simulation.glob("*.py")}
-    assert not (devices / "camera" / "virtual.py").exists()
-    assert not (devices / "camera" / "world.py").exists()
-    assert not (devices / "sequencer" / "virtual.py").exists()
+    assert {"__init__.py", "authoring.py", "world.py"} == {
+        path.name for path in simulation.glob("*.py")
+    }, "the simulation family owns the world and nothing else at its top level"
+    for device in ("camera", "rf", "sequencer", "slm", "waveform"):
+        assert (simulation / device / "device_types.py").is_file(), device
 
     for package in (devices / "camera", devices / "sequencer", devices / "slm"):
         for path in package.rglob("*.py"):
             assert "zlc_atom.devices.simulation" not in path.read_text(encoding="utf-8"), path
+        assert not any(
+            "virtual" in part or "world" in part
+            for path in package.rglob("*.py")
+            for part in path.relative_to(package).parts
+        ), f"{package.name} must not carry a stand-in for its own instrument"

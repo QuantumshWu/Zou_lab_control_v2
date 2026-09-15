@@ -74,7 +74,7 @@ figure_viewer = "zlc_workbench.apps.figure_viewer:main"
 fpga = "zlc_pulse.fpga:_main"
 pulse_editor = "zlc_workbench.apps.pulse_editor:main"
 pulse_server = "zlc_pulse.remote:_main"
-slm_server = "zlc_atom.devices.slm.device_types:main"
+slm_server = "zlc_atom.devices.slm.hamamatsu_x15213.device_types:main"
 task_console = "zlc_workbench.apps.task_console:main"
 warm_numba = "zlc_plot._kernel_warm:main"
 
@@ -117,7 +117,7 @@ include = ["zou_lab_control", "zlc_*"]
 namespaces = false
 
 [tool.setuptools.package-data]
-"zlc_atom.devices.slm" = ["profiles/*.json"]
+"zlc_atom.devices.slm.hamamatsu_x15213" = ["profiles/*.json"]
 zlc_plot = ["assets/*.ttf", "py.typed"]
 zlc_ui = ["assets/*.ico"]
 zlc_pulse = ["py.typed"]

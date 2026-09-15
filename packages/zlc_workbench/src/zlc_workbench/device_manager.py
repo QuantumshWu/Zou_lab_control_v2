@@ -771,7 +771,7 @@ class DeviceManagerPresenter:
         if config is None:
             self._report(f"{key}: no accepted configuration to announce", severity="warning")
             return False
-        from zlc_atom.devices.remote.device_types import FABRIC_TUNABLE_TYPE
+        from zlc_atom.devices.remote.tunable.device_types import FABRIC_TUNABLE_TYPE
 
         if config.type_id == FABRIC_TUNABLE_TYPE:
             # Publishing is for hardware THIS machine serves; a device that

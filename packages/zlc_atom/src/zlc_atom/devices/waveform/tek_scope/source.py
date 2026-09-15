@@ -31,11 +31,11 @@ from uuid import uuid4
 import numpy as np
 
 from zlc_atom.authoring import AuthoringField, TunableField
-from zlc_atom.devices.rf.rigol_dg4000 import (
+from zlc_atom.devices import visa
+from zlc_atom.devices.visa import (
+    PROBE_TIMEOUT_SECONDS,
     VisaResources,
     identity_fields,
-    probeable_resources,
-    visa_resources,
 )
 from zlc_atom.devices.waveform.contract import (
     WaveformAcquisitionMode,
@@ -65,7 +65,7 @@ class VisaScopeLink:
     def __init__(self, resource: str, *, timeout_seconds: float = 5.0) -> None:
         if not isinstance(resource, str) or not resource.strip():
             raise ValueError("VISA resource name is required")
-        self._resource = visa_resources().open_resource(resource.strip())
+        self._resource = visa.visa_resources().open_resource(resource.strip())
         self._resource.timeout = int(float(timeout_seconds) * 1000.0)
         self._resource.read_termination = "\n"
         self._resource.write_termination = "\n"
@@ -89,7 +89,6 @@ class VisaScopeLink:
 
 
 _IDENTITY_VENDOR = "TEKTRONIX"
-PROBE_TIMEOUT_SECONDS = 1.0
 
 
 def is_tektronix(identity: str) -> bool:
@@ -111,10 +110,10 @@ def discover_tek_scopes(
     passed over.
     """
 
-    manager = visa_resources() if resources is None else resources
+    manager = visa.visa_resources() if resources is None else resources
     milliseconds = max(1, int(float(timeout_seconds) * 1000.0))
     found: list[tuple[str, str]] = []
-    for name in probeable_resources(manager.list_resources()):
+    for name in visa.probeable_resources(manager.list_resources()):
         try:
             session = manager.open_resource(name, open_timeout=milliseconds)
         except Exception:

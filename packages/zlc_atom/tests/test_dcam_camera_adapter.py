@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from zlc_atom.devices.camera import CameraAdapter
-from zlc_atom.devices.camera._dcam_driver import DcamProperty, DcamValue
+from zlc_atom.devices.camera.dcam._dcam_driver import DcamProperty, DcamValue
 from zlc_atom.devices.camera.dcam import (
     DcamCameraAdapter,
     DcamCameraConfig,
@@ -573,8 +573,8 @@ def test_the_default_driver_takes_the_dll_from_the_camera_vendor_folder_only(
     family, whose error says which file goes into which folder.
     """
 
-    import zlc_atom.devices.camera._dcam_driver as driver_module
-    from zlc_atom.devices.camera.device_types import DEVICE_TYPES
+    import zlc_atom.devices.camera.dcam._dcam_driver as driver_module
+    from zlc_atom.devices.camera.dcam.device_types import DEVICE_TYPES
 
     asked: list[tuple[str, str, str]] = []
 

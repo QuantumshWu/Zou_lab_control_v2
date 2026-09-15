@@ -10,8 +10,8 @@ import pytest
 from PIL import Image
 
 from zlc_atom.devices.slm import SlmAdapter
-from zlc_atom.devices.slm.device import _RemoteSlmAdapter, _open_slm_server
-from zlc_atom.devices.slm.device_types import (
+from zlc_atom.devices.slm.hamamatsu_x15213.remote import _RemoteSlmAdapter, _open_slm_server
+from zlc_atom.devices.slm.hamamatsu_x15213.device_types import (
     DEVICE_TYPES,
     HAMAMATSU_X15213_SCHEMA,
     X15213_SERVER_SCHEMA,
@@ -111,7 +111,7 @@ def _config(**changes: object) -> dict[str, object]:
 
 
 def _patch_usb(monkeypatch, sdk: _UsbSdk, handle: _Handle | None = None) -> _Handle:
-    import zlc_atom.devices.slm.device_types as module
+    import zlc_atom.devices.slm.hamamatsu_x15213.device_types as module
 
     result = handle or _Handle()
     monkeypatch.setattr(module, "_load_sdk", lambda: (sdk, result))
@@ -149,7 +149,7 @@ def test_real_slm_descriptor_matches_the_pulse_server_endpoint_model() -> None:
 def test_profile_is_strict_and_records_physical_provenance_boundaries(
     monkeypatch, tmp_path: Path
 ) -> None:
-    import zlc_atom.devices.slm.device_types as module
+    import zlc_atom.devices.slm.hamamatsu_x15213.device_types as module
 
     profile = _load_profile("LSH0804382")
     assert profile["model"] == "X15213 (exact type suffix not recorded)"
@@ -339,7 +339,7 @@ def test_usb_failure_outcomes_preserve_old_or_become_unknown(
 
 
 def test_settle_failure_clears_command_knowledge(monkeypatch) -> None:
-    import zlc_atom.devices.slm.device_types as module
+    import zlc_atom.devices.slm.hamamatsu_x15213.device_types as module
 
     sdk = _UsbSdk()
     _patch_usb(monkeypatch, sdk)
@@ -479,7 +479,7 @@ def test_the_sdk_is_found_through_the_vendor_folder_and_nowhere_else(
 
     import json
 
-    import zlc_atom.devices.slm.device_types as module
+    import zlc_atom.devices.slm.hamamatsu_x15213.device_types as module
     import zlc_atom.devices.vendor as vendor_module
 
     vendor = tmp_path / "vendor"
@@ -522,7 +522,7 @@ def test_the_sdk_is_found_through_the_vendor_folder_and_nowhere_else(
 def test_dvi_server_transport_needs_no_vendor_dll_and_preserves_the_raster_path(
     monkeypatch,
 ) -> None:
-    import zlc_atom.devices.slm.device_types as module
+    import zlc_atom.devices.slm.hamamatsu_x15213.device_types as module
 
     endpoint = {
         "name": r"\\.\DISPLAY2",
@@ -599,7 +599,7 @@ def test_dvi_server_transport_needs_no_vendor_dll_and_preserves_the_raster_path(
 def test_broken_or_missing_usb_sdk_cannot_block_the_default_dvi_transport(
     monkeypatch,
 ) -> None:
-    import zlc_atom.devices.slm.device_types as module
+    import zlc_atom.devices.slm.hamamatsu_x15213.device_types as module
 
     for absent in (
         FileNotFoundError("the Hamamatsu SLM SDK is not installed"),
@@ -651,7 +651,7 @@ def test_usb_close_failure_is_visible_and_retryable(monkeypatch) -> None:
 def test_remote_slm_caches_reads_and_only_calls_the_server_to_send_phase(
     monkeypatch,
 ) -> None:
-    import zlc_atom.devices.slm.device as device_module
+    import zlc_atom.devices.slm.hamamatsu_x15213.remote as device_module
 
     sdk = _UsbSdk()
     _patch_usb(monkeypatch, sdk)
@@ -831,7 +831,7 @@ def test_remote_slm_rejects_a_stale_writer_and_refreshes_physical_truth(
 def test_remote_slm_preserves_declared_failures_and_marks_bad_replies_unknown(
     monkeypatch,
 ) -> None:
-    import zlc_atom.devices.slm.device as device_module
+    import zlc_atom.devices.slm.hamamatsu_x15213.remote as device_module
 
     sdk = _UsbSdk()
     _patch_usb(monkeypatch, sdk)
@@ -921,7 +921,7 @@ def test_remote_slm_preserves_declared_failures_and_marks_bad_replies_unknown(
 def test_remote_packet_grammar_rejects_partial_duplicate_and_nonfinite_input(
     monkeypatch,
 ) -> None:
-    import zlc_atom.devices.slm.device as device_module
+    import zlc_atom.devices.slm.hamamatsu_x15213.remote as device_module
     # These grammar-only replies bypass the wire; the proxy still owns and
     # closes the socket supplied to that request seam.
     monkeypatch.setattr(device_module.socket, "create_connection", lambda *args, **kwargs: socket.socket())
@@ -1034,14 +1034,14 @@ def test_slm_server_command_is_the_product_entry() -> None:
     from zou_lab_control import entry_specs
 
     assert entry_specs("zou_lab_control.commands")["slm_server"] == (
-        "zlc_atom.devices.slm.device_types:main"
+        "zlc_atom.devices.slm.hamamatsu_x15213.device_types:main"
     )
 
 
 def test_slm_server_prints_copyable_same_machine_and_lan_device_addresses(
     monkeypatch, capsys
 ) -> None:
-    import zlc_atom.devices.slm.device_types as module
+    import zlc_atom.devices.slm.hamamatsu_x15213.device_types as module
 
     monkeypatch.setattr(
         module,
@@ -1060,7 +1060,7 @@ def test_slm_server_prints_copyable_same_machine_and_lan_device_addresses(
 def test_slm_server_check_names_the_vendor_library_it_loaded(
     monkeypatch, capsys
 ) -> None:
-    import zlc_atom.devices.slm.device_types as module
+    import zlc_atom.devices.slm.hamamatsu_x15213.device_types as module
 
     calls: list[str] = []
     monkeypatch.setattr(module, "_sdk_library", lambda: Path("C:/vendor/hpkSLMdaLV.dll"))
@@ -1080,7 +1080,7 @@ def test_slm_server_check_names_the_vendor_library_it_loaded(
 def test_slm_server_check_defaults_to_dvi_without_loading_the_sdk(
     monkeypatch, capsys
 ) -> None:
-    import zlc_atom.devices.slm.device_types as module
+    import zlc_atom.devices.slm.hamamatsu_x15213.device_types as module
 
     endpoint = {
         "name": r"\\.\DISPLAY2",
@@ -1106,7 +1106,7 @@ def test_slm_server_check_defaults_to_dvi_without_loading_the_sdk(
 def test_slm_server_cli_validates_before_hardware_and_closes_after_bind_failure(
     monkeypatch,
 ) -> None:
-    import zlc_atom.devices.slm.device_types as module
+    import zlc_atom.devices.slm.hamamatsu_x15213.device_types as module
 
     profile_calls = 0
     original_profile = module._load_profile
@@ -1152,7 +1152,7 @@ def test_the_local_slm_type_authors_the_server_knobs_plus_a_port() -> None:
     server, with nothing retyped.
     """
 
-    from zlc_atom.devices.slm.device_types import (
+    from zlc_atom.devices.slm.hamamatsu_x15213.device_types import (
         X15213_LOCAL_SCHEMA,
         X15213_SERVER_SCHEMA,
     )
@@ -1179,7 +1179,7 @@ def test_a_local_server_whose_thread_cannot_start_releases_what_it_opened(
 
     import socket
 
-    import zlc_atom.devices.slm.device_types as module
+    import zlc_atom.devices.slm.hamamatsu_x15213.device_types as module
 
     sdk = _UsbSdk()
     handle = _patch_usb(monkeypatch, sdk)

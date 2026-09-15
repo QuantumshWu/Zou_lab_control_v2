@@ -4,20 +4,13 @@ import numpy as np
 import pytest
 import time
 
-from zlc_atom.devices.camera import (
-    CameraAdapter,
-    CameraFrameRecord,
-    DcamCameraAdapter,
-    PylonCameraAdapter,
-)
+from zlc_atom.devices.camera import CameraAdapter, CameraFrameRecord
+from zlc_atom.devices.camera.dcam import DcamCameraAdapter
+from zlc_atom.devices.camera.pylon import PylonCameraAdapter
 from zlc_atom.devices.camera.binding import bind_camera
-from zlc_atom.devices.simulation import (
-    SimulationWorld,
-    SimulationWorldConfig,
-    VirtualCamera,
-    VirtualCameraConfig,
-    VirtualPulseStreamer,
-)
+from zlc_atom.devices.simulation import SimulationWorld, SimulationWorldConfig
+from zlc_atom.devices.simulation.camera import VirtualCamera, VirtualCameraConfig
+from zlc_atom.devices.simulation.sequencer import VirtualPulseStreamer
 from zlc_atom.nodes.calibration.pulse import resolve_pulse
 from zlc_atom.execution import (
     DeviceIdentityEvidenceKind,

@@ -19,7 +19,7 @@ from zlc_atom.devices.camera.contract import (
 )
 from zlc_atom.devices.camera.photoelectrons import stated_conversion
 from zlc_atom.devices.camera.roi_grid import snap_roi_axis
-from .world import DEFAULT_SIMULATION_IMAGE_SHAPE_YX
+from ..world import DEFAULT_SIMULATION_IMAGE_SHAPE_YX
 
 
 @dataclass(frozen=True)

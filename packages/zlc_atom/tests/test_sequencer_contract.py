@@ -22,12 +22,8 @@ import numpy as np
 import pytest
 
 from zlc_atom.devices.sequencer import SequencerDevice
-from zlc_atom.devices.simulation import (
-    SimulationWorld,
-    SimulationWorldConfig,
-    VirtualPulseStreamer,
-    VirtualSequencer,
-)
+from zlc_atom.devices.simulation import SimulationWorld, SimulationWorldConfig
+from zlc_atom.devices.simulation.sequencer import VirtualPulseStreamer, VirtualSequencer
 
 
 def test_virtual_sequencer_is_the_canonical_sequencer_device() -> None:
@@ -238,7 +234,7 @@ def test_a_streamer_the_broker_refuses_is_closed_by_the_factory() -> None:
     """
 
     from zlc_atom.devices.sequencer.binding import bind_sequencer
-    from zlc_atom.devices.sequencer.device_types import DEVICE_TYPES
+    from zlc_atom.devices.sequencer.hardware.device_types import DEVICE_TYPES
     from zlc_atom.execution import DeviceBroker
     from zlc_atom.install import (
         DeviceCatalogSnapshot,

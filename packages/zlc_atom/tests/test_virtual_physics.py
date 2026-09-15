@@ -13,13 +13,9 @@ from scipy.ndimage import maximum_filter
 
 import zlc_atom.devices.simulation.world as simulation_world
 import zlc_atom.devices.slm.solver as slm_solver
-from zlc_atom.devices.simulation import (
-    SimulationWorld,
-    SimulationWorldConfig,
-    VirtualCamera,
-    VirtualCameraConfig,
-    VirtualPulseStreamer,
-)
+from zlc_atom.devices.simulation import SimulationWorld, SimulationWorldConfig
+from zlc_atom.devices.simulation.camera import VirtualCamera, VirtualCameraConfig
+from zlc_atom.devices.simulation.sequencer import VirtualPulseStreamer
 from zlc_atom.devices.slm import canonical_phase
 from zlc_atom.devices.slm.solver import (
     compose_science_phase,
@@ -689,17 +685,17 @@ def test_a_grid_with_no_span_in_an_axis_is_refused_before_any_world_is_built() -
     device-type configuration refuses it before any world or WGS solve.
     """
 
-    from zlc_atom.devices.simulation.device_types import _simulation_world_config
+    from zlc_atom.devices.simulation.authoring import simulation_world_config
     from zlc_atom.devices.simulation.world import SimulationGeometry
 
     for grid in ((1, 3), (3, 1), (1, 1)):
         with pytest.raises(ValueError, match="at least two rows and two columns"):
             SimulationGeometry(grid_shape_yx=grid, image_shape_yx=(32, 32))
         with pytest.raises(ValueError, match="at least two rows and two columns"):
-            _simulation_world_config(
+            simulation_world_config(
                 {"image_shape_yx": (32, 32), "grid_shape_yx": grid}
             )
-    accepted = _simulation_world_config(
+    accepted = simulation_world_config(
         {"image_shape_yx": (32, 32), "grid_shape_yx": (2, 3)}
     )
     assert accepted.geometry.grid_shape_yx == (2, 3)

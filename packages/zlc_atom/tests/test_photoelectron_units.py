@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 
 from zlc_atom.devices.camera.dcam import DcamCameraConfig
-from zlc_atom.devices.camera.device_types import DCAM_CAMERA_SCHEMA
+from zlc_atom.devices.camera.dcam.device_types import DCAM_CAMERA_SCHEMA
 from zlc_atom.devices.camera.photoelectrons import (
     PHOTOELECTRONS,
     resolve_photoelectron_availability,

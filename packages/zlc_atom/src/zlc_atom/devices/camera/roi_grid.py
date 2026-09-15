@@ -19,6 +19,25 @@ meaning with the camera behind it.
 from __future__ import annotations
 
 
+def authored_roi_xywh(authored: dict) -> tuple[int, int, int, int] | None:
+    """The ROI the operator asked for, or None meaning the full sensor."""
+
+    corners = (
+        authored.get("roi_x"),
+        authored.get("roi_y"),
+        authored.get("roi_width"),
+        authored.get("roi_height"),
+    )
+    if all(value is None for value in corners):
+        return None
+    if any(value is None for value in corners):
+        raise ValueError(
+            "an ROI needs all four of roi_x, roi_y, roi_width and roi_height, "
+            "or none of them for the full sensor"
+        )
+    return tuple(int(value) for value in corners)
+
+
 def snap_roi_axis(
     origin: int,
     extent: int,

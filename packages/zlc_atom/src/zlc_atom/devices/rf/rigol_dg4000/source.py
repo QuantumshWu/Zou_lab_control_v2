@@ -26,89 +26,18 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, replace
-from typing import Protocol
 
 from zlc_atom.devices.rf.contract import POWER_FIELD, WINDOW_FIELDS, RfSourceBase, channel_field
+from zlc_atom.devices import visa
+from zlc_atom.devices.visa import (
+    PROBE_TIMEOUT_SECONDS,
+    ScpiLink,
+    VisaResources,
+    VisaScpiLink,
+    identity_fields,
+)
 from zlc_atom.authoring import AuthoringField, TunableField
 from zlc_data.units import DEFAULT_UNITS
-
-
-class ScpiLink(Protocol):
-    """The whole transport surface a SCPI instrument needs."""
-
-    def write(self, command: str) -> None: ...
-
-    def query(self, command: str) -> str: ...
-
-    def close(self) -> None: ...
-
-
-class VisaResources(Protocol):
-    """The whole VISA surface: what is attached, and a session on one of them."""
-
-    def list_resources(self) -> tuple[str, ...]: ...
-
-    def open_resource(self, resource: str, **kwargs: object) -> ScpiLink: ...
-
-
-def visa_resources() -> VisaResources:
-    """This machine's VISA, or why this interpreter has none.
-
-    One entry point, because "there is no VISA here" is the same fact for
-    the driver opening one named instrument and for the probe asking what is
-    attached.  What it must NOT be is one sentence for every way of failing:
-    this said "no VISA backend is available: install pyvisa-py" whether the
-    backend was missing or PyVISA itself had never been installed, so an
-    operator who had just installed both read an instruction to install what
-    they had.  Which interpreter is asking is part of the answer, because
-    "installed" is only ever true of one of them.
-    """
-
-    import sys
-
-    try:
-        import pyvisa
-    except Exception as error:
-        raise RuntimeError(
-            f"PyVISA is not installed for {sys.executable}: run "
-            "bin\\install_requirements.bat with THIS interpreter, or "
-            f"`pip install PyVISA PyVISA-py` into it ({type(error).__name__}: {error})"
-        ) from error
-    try:
-        return pyvisa.ResourceManager()
-    except Exception as error:
-        from pyvisa.highlevel import list_backends
-
-        try:
-            backends = ", ".join(list_backends()) or "none"
-        except Exception:  # noqa: BLE001 - the first failure is the one to report
-            backends = "unknown"
-        raise RuntimeError(
-            f"PyVISA {pyvisa.__version__} is installed for {sys.executable} "
-            f"but no backend answered (it offers: {backends}); 'ivi' means a "
-            "system NI-VISA whose visa32/visa64 DLL was not found, so install "
-            "NI-VISA, or `pip install PyVISA-py` into that same interpreter "
-            f"({type(error).__name__}: {error})"
-        ) from error
-
-
-class VisaScpiLink:
-    """A pyvisa resource behind the three-verb link."""
-
-    def __init__(self, resource: str, *, timeout_seconds: float = 5.0) -> None:
-        if not isinstance(resource, str) or not resource.strip():
-            raise ValueError("VISA resource name is required")
-        self._resource = visa_resources().open_resource(resource.strip())
-        self._resource.timeout = int(float(timeout_seconds) * 1000.0)
-
-    def write(self, command: str) -> None:
-        self._resource.write(command)
-
-    def query(self, command: str) -> str:
-        return str(self._resource.query(command))
-
-    def close(self) -> None:
-        self._resource.close()
 
 
 @dataclass(frozen=True)
@@ -147,28 +76,11 @@ _SINE_VPP_PER_VRMS = 2.0 * math.sqrt(2.0)
 #: The instrument spells high-Z as this out-of-range ohm count.
 _HIGH_Z_OHMS = 1e6
 
-#: Resource classes the probe will open.  VISA also lists ASRL serial ports,
-#: and on this bench one of them is the pulse streamer's UART: opening
-#: it to ask *IDN? would take the board's port from the server that owns it
-#: and get nothing back, so a scan for a signal generator must never touch
-#: one.  GPIB/PXI/VXI are absent for the plainer reason that nothing here has
-#: ever been on one; add the prefix when something is.
-PROBED_RESOURCE_PREFIXES = ("USB", "TCPIP")
-
-#: How long one instrument may take to open and answer.  Short on purpose:
-#: the probe walks every candidate in turn, and the whole family shares one
-#: scan deadline, so a dead address must cost about a second, not five.
-PROBE_TIMEOUT_SECONDS = 1.0
-
 #: ``*IDN?`` answers ``manufacturer,model,serial,firmware``.  The driver is
 #: written for the DG4000 series -- two channels, this SCPI vocabulary -- so
 #: that is what it may claim to have found.
 _IDENTITY_VENDOR = "RIGOL"
 _IDENTITY_MODEL_PREFIX = "DG4"
-
-
-def identity_fields(identity: str) -> tuple[str, ...]:
-    return tuple(part.strip() for part in str(identity).split(","))
 
 
 def is_dg4000(identity: str) -> bool:
@@ -205,16 +117,6 @@ class Dg4000Sighting:
         return fields[1] if len(fields) > 1 else ""
 
 
-def probeable_resources(listed: object) -> tuple[str, ...]:
-    """The listed resources worth opening, in the order VISA gave them."""
-
-    return tuple(
-        name
-        for name in (str(item).strip() for item in listed)
-        if name.upper().startswith(PROBED_RESOURCE_PREFIXES)
-    )
-
-
 def discover_dg4000(
     resources: VisaResources | None = None,
     *,
@@ -237,10 +139,10 @@ def discover_dg4000(
     VISA at all, which ``visa_resources`` raises as an instruction.
     """
 
-    manager = visa_resources() if resources is None else resources
+    manager = visa.visa_resources() if resources is None else resources
     milliseconds = max(1, int(float(timeout_seconds) * 1000.0))
     found: list[Dg4000Sighting] = []
-    for name in probeable_resources(manager.list_resources()):
+    for name in visa.probeable_resources(manager.list_resources()):
         try:
             session = manager.open_resource(name, open_timeout=milliseconds)
         except Exception:
@@ -639,15 +541,9 @@ class RigolDg4000RfSource(RfSourceBase):
 
 __all__ = [
     "Dg4000Sighting",
-    "PROBED_RESOURCE_PREFIXES",
     "PROBE_TIMEOUT_SECONDS",
     "RigolDg4000Config",
     "RigolDg4000RfSource",
-    "ScpiLink",
-    "VisaResources",
-    "VisaScpiLink",
     "discover_dg4000",
     "is_dg4000",
-    "probeable_resources",
-    "visa_resources",
 ]
