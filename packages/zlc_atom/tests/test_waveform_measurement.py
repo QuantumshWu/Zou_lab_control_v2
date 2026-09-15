@@ -39,7 +39,7 @@ from zlc_atom.nodes.waveform_measurement import (
     WaveformMeasurementNode,
     WaveformMeasurementRequest,
 )
-from zlc_data import PRIMARY_INDEX, AxisId
+from zlc_data import PRIMARY_INDEX, SHOT_TIME, AxisId
 from zlc_runtime.host import NodeHost
 from zlc_runtime.plane import SignalDataPlane
 
@@ -241,6 +241,14 @@ def test_every_packet_is_a_shot_and_a_rolling_window_keeps_the_last_ones() -> No
         # packet numbers, eight of them in a row.
         packets = np.asarray(snapshot.block.values)[0, :, 0]
         assert np.all(np.diff(packets) == 1.0)
+        # And when each was taken, on the source's own clock, seconds from
+        # the run's first shot: 2 ms apart at 500 Hz, beside the index.
+        shot_time = snapshot.block.schema.point_domain.axis(AxisId("zlc_data.shot-time"))
+        assert shot_time.role == SHOT_TIME and shot_time.unit == "s"
+        times = np.asarray(shot_time.coordinates, dtype=float)
+        assert np.allclose(np.diff(times), 0.002, atol=1e-6)
+        assert times[0] == pytest.approx(0.002 * (packets[0] - 0.0), abs=1e-6)
+        assert value.run_record["started_at_ns"] > 0
 
         host.cancel("test completed")
         assert _drive(host, lambda: True if host.observation.terminal else None)

@@ -335,21 +335,28 @@ class Unit:
         names = (self.symbol, *aliases)
         if len(set(names)) != len(names):
             raise UnitError(f"unit {self.symbol!r} contains duplicate names")
+        object.__setattr__(self, "aliases", aliases)
+        object.__setattr__(self, "decade", _exact_decade(self.conversion))
         if self.prefixes and (
             isinstance(self.conversion, (Offset, Decibel, Prefixed))
-            or (self.is_linear and not self.is_base)
+            or (
+                self.decade is not None
+                and self.decade != 0
+                and self.decade % _PREFIX_STEP == 0
+            )
         ):
             # A prefix multiplies the number written in the unit, so it
             # belongs on the reference of a spelling family and nowhere else:
-            # on a linear unit only if it is the base -- allowing it on "ms"
-            # is how "ms" and "millis" both become resolvable and stop
-            # meaning exactly one thing -- never on a level (there is no
-            # milli-dBm), and never on a spelling that already carries one.
-            # An amplitude such as Vpp is the reference of its own family
-            # although its dimension's base is the watt.
+            # never on a spelling that IS a prefix step of its base --
+            # allowing it on "ms" is how "ms" and "millis" both become
+            # resolvable and stop meaning exactly one thing -- never on a
+            # level (there is no milli-dBm), and never on a spelling that
+            # already carries one.  A family of its own may be linear and
+            # not the base: the gauss is a ten-thousandth of a tesla, no
+            # prefix step, and is read in gauss and milligauss; an amplitude
+            # such as Vpp is its own family although its dimension's base
+            # is the watt.
             raise UnitError(f"this unit cannot take a prefix: {self.symbol!r}")
-        object.__setattr__(self, "aliases", aliases)
-        object.__setattr__(self, "decade", _exact_decade(self.conversion))
         inverse = self.inverse_dimension
         if inverse is not None and (
             not isinstance(inverse, str) or not inverse or inverse.strip() != inverse
@@ -773,6 +780,7 @@ def _builtin_units() -> tuple[Unit, ...]:
         Unit("K", "temperature", prefixes=("m", "µ", "n")),
         Unit("°C", "temperature", Offset(273.15), aliases=("degC",)),
         Unit("T", "magnetic_flux_density", prefixes=("m", "µ", "n")),
+        Unit("G", "magnetic_flux_density", Scaled(1e-4), prefixes=("m",)),
         Unit("rad", "angle", prefixes=("m",)),
         Unit("°", "angle", Scaled(np.pi / 180.0), aliases=("deg",)),
         Unit("dBm", "power", Decibel(1.0e-3)),
@@ -965,14 +973,20 @@ def parse_quantity(
         return float(number)
     units = registry or DEFAULT_UNITS
     family, carried = units.family_and_prefix(resolved)
-    spelled = resolve_unit(written, registry) if _is_known(written, registry) else None
-    if spelled is None:
-        prefix = _PREFIX_BY_SPELLING.get(written)
-        if prefix is None:
-            raise UnitError(f"unknown unit or prefix {written!r}")
-        if prefix not in family.ladder:
-            raise UnitError(f"{resolved.symbol!r} cannot take the prefix {written!r}")
+    # A bare prefix is read as a rung of the field's OWN family before it
+    # is read as a unit of its own: ``5m`` in a seconds box is five
+    # milliseconds although ``m`` is also the metre, and ``2G`` in a hertz
+    # box is two gigahertz although ``G`` is also the gauss.  Only a prefix
+    # the family does not take falls through to the whole-unit reading.
+    prefix = _PREFIX_BY_SPELLING.get(written)
+    if prefix is not None and prefix in family.ladder:
         spelled = _prefixed(family, prefix)
+    elif _is_known(written, registry):
+        spelled = resolve_unit(written, registry)
+    elif prefix is None:
+        raise UnitError(f"unknown unit or prefix {written!r}")
+    else:
+        raise UnitError(f"{resolved.symbol!r} cannot take the prefix {written!r}")
     if not spelled.compatible_with(resolved):
         raise UnitError(
             f"{written!r} is {spelled.dimension}, and this value is "

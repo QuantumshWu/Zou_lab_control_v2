@@ -206,6 +206,7 @@ def _qt5_parameter_panel_class() -> type[Any]:
                 description.parameter_schema,
                 description.display_state.values,
                 choice_overrides=description.parameter_choices,
+                automatic_values=description.automatic_values,
             )
             semantic = semantic_controls(description.semantics)
             signature = tuple(

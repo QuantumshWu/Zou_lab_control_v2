@@ -29,7 +29,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from math import ceil
-from time import monotonic, sleep
+from time import monotonic, sleep, time_ns
 
 import numpy as np
 from zlc_data import COMPONENT, READOUT_EVENT, AxisSpec, DomainSpec, OwnedSnapshot
@@ -464,6 +464,7 @@ class WaveformMeasurementNode:
         self._generation: object | None = None
         self._working_point: WaveformWorkingPoint | None = None
         self._run_record: dict[str, object] | None = None
+        self._time_origin: float | None = None
 
     @property
     def request(self) -> WaveformMeasurementRequest:
@@ -528,6 +529,7 @@ class WaveformMeasurementNode:
         if not isinstance(point, WaveformWorkingPoint):
             raise TypeError("waveform source working_point must return WaveformWorkingPoint")
         self._working_point = point
+        self._time_origin = None
         self._run_record = {
             "node": self.instance_id,
             "parameters": {
@@ -536,8 +538,18 @@ class WaveformMeasurementNode:
             },
             "named_devices": {"sampler": self.sampler_key},
             "device_snapshots": {"sampler": _working_point_snapshot(self.sampler, point)},
+            # Host epoch time at arm: the shots' times are seconds from the
+            # first shot, and this is what puts that first shot on a clock.
+            "started_at_ns": time_ns(),
         }
         return point
+
+    def _shot_time(self, record: WaveformRecord) -> float:
+        """Seconds from the run's first shot, on the source's own clock."""
+
+        if self._time_origin is None:
+            self._time_origin = record.time_seconds
+        return record.time_seconds - self._time_origin
 
     def _shot_outputs(
         self,
@@ -548,6 +560,7 @@ class WaveformMeasurementNode:
     ) -> dict[str, LiveDatasetOutput]:
         point = self.working_point
         outputs: dict[str, LiveDatasetOutput] = {}
+        shot_time = self._shot_time(record)
         for declaration in self._outputs:
             snapshot = shot_snapshot(
                 record,
@@ -563,6 +576,7 @@ class WaveformMeasurementNode:
                     snapshot,
                     MonitorCoverage(1, 1),
                     self.run_record,
+                    shot_time_seconds=shot_time,
                 )
                 continue
             schema = snapshot.block.schema

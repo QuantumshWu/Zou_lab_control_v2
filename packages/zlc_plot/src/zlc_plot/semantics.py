@@ -8,7 +8,7 @@ other frontends can render without knowing individual plot classes.
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import fields, dataclass, field, replace
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, TypeAlias
 
@@ -23,7 +23,11 @@ from zlc_data import (
     canonical_coordinate_scalar,
 )
 from zlc_data.axis import SCALAR
-from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID, indexed_history_layout
+from zlc_data.snapshot_projection import (
+    PRIMARY_INDEX_AXIS_ID,
+    SHOT_TIME_AXIS_ID,
+    indexed_history_layout,
+)
 from .kinds import AxisDomain, AxisRef, PlotKind
 from .layout import DEFAULT_LAYOUT, PlotLayoutConfig
 from .session_policy import merge_labels
@@ -387,7 +391,24 @@ ROLE_FATES = ("x", "y", "group", "facet")
 #: Roles a plot can do without.  No group means one series; no FacetGrid facet
 #: means one cell.  X/Y remain required because their cell would otherwise
 #: have no coordinate surface to draw.
-OPTIONAL_ROLES = frozenset({"group", "facet"})
+def _optional_roles(spec: PlotSpec) -> frozenset[str]:
+    """The roles this kind may leave empty: those its declaration defaults to None.
+
+    A curve's x is required because a curve has no default x; a rolling
+    plot's x defaults to the shot index and group to none, so both may be
+    vacated.  Read off the kind's own declaration, so a new optional role
+    is optional the day it is declared.
+    """
+
+    semantic = semantic_spec(spec)
+    optional = {
+        field.name
+        for field in fields(semantic)
+        if field.name in ROLE_FATES and field.default is None
+    }
+    if isinstance(spec, FacetGridPlot):
+        optional.add("facet")
+    return frozenset(optional)
 
 
 class SemanticVacancy(ValueError):
@@ -563,7 +584,7 @@ def projection_scope(
             if _fate_of(spec, ref) != FATE_REDUCE:
                 continue
             if spec.kind is PlotKind.ROLLING and (
-                ref == AxisRef.point(PRIMARY_INDEX_AXIS_ID.value) if indexed is not None
+                _is_shot_axis(ref) if indexed is not None
                 else ref.domain is AxisDomain.REPEAT
             ):
                 continue
@@ -577,10 +598,17 @@ def _role_holder(spec: PlotSpec, role: str) -> AxisRef | None:
     return getattr(semantic_spec(spec), role, None)
 
 
-def _is_primary_index_axis(ref: AxisRef) -> bool:
-    """Whether this fate row is the Runtime's materialized shot index."""
+def _is_shot_axis(ref: AxisRef) -> bool:
+    """Whether this fate row is a per-shot axis of a Runtime indexed history.
 
-    return ref == AxisRef.point(PRIMARY_INDEX_AXIS_ID.value)
+    The shot index and the shot time are the same shots read two ways: a
+    rolling plot rolls along them and never reduces either away.
+    """
+
+    return ref in (
+        AxisRef.point(PRIMARY_INDEX_AXIS_ID.value),
+        AxisRef.point(SHOT_TIME_AXIS_ID.value),
+    )
 
 
 def _fate_row_axes(
@@ -912,8 +940,9 @@ def composed_spec(
         # into a different plot, and refusing the edit outright made the
         # fates unassignable.  The vacancy is a STATE: the caller keeps
         # the authored table, draws nothing, and says why.
+        optional_roles = _optional_roles(candidate)
         for role in declared_roles:
-            if desired_roles[role] is None and role not in OPTIONAL_ROLES:
+            if desired_roles[role] is None and role not in optional_roles:
                 raise SemanticVacancy(role, candidate.kind)
 
         for role in declared_roles:
@@ -1141,11 +1170,11 @@ def describe_semantics(
             # Pooling is the default, not the only choice: an axis may be
             # collapsed under the reduction before the values are binned.
             offered.append((FATE_REDUCE, "reduced"))
-        if spec.kind is PlotKind.ROLLING and _is_primary_index_axis(ref):
-            # Rolling does not reduce the Runtime's shot index away -- it
-            # ROLLS along it.  Its ordinary relative-coordinate pins genuinely
-            # narrow the window; only the default's label stops lying about
-            # the axis's fate.
+        if spec.kind is PlotKind.ROLLING and _is_shot_axis(ref):
+            # Rolling does not reduce the Runtime's shot index or shot time
+            # away -- it ROLLS along them.  Their ordinary relative-coordinate
+            # pins genuinely narrow the window; only the default's label
+            # stops lying about the axis's fate.
             offered[0] = (default_fate, "(shot axis)")
         for role in roles:
             # Fate rows are the plot kind's vocabulary, not a preview of

@@ -13,7 +13,7 @@ import math
 import numpy as np
 
 from zlc_data import BlockId, DatasetRevisionRef, OwnedSnapshot
-from zlc_data.snapshot_projection import restrict_snapshot, value_selection
+from zlc_data.snapshot_projection import SHOT_TIME_AXIS_ID, restrict_snapshot, value_selection
 
 from .data_contract import (
     DEFAULT_UNITS,
@@ -814,33 +814,48 @@ class FitProjection:
             sem_plane = np.where(
                 valid_plane, np.asarray(history.sem, dtype=float)[start:], np.nan
             )
-        # x is how many shots ago each point is: 0 is the newest, and the
-        # ones behind it count back.  A rolling window shows the last N
-        # shots, so what a point MEANS is its distance from now -- the
-        # absolute shot number is a fact about the run, not about the
-        # picture, and using it slid every label forward on every single
-        # revision.  Once the window is full the axis stops moving, which
-        # is also what lets a composed frame keep its cached chrome
-        # instead of re-laying the tick labels on each shot.
-        if history.source_indices is not None:
-            source_coordinates = np.asarray(
-                history.source_indices[start:], dtype=float
-            )
+        # x is how far back each point is from the newest: 0 is the newest,
+        # and the ones behind it count back -- in shots, or, when the spec
+        # places the shots along the history's shot-time axis, in seconds.
+        # A rolling window shows the last N shots, so what a point MEANS is
+        # its distance from now -- the absolute shot number or run time is
+        # a fact about the run, not about the picture, and using it slid
+        # every label forward on every single revision.  Once the window is
+        # full the shot axis stops moving, which is also what lets a
+        # composed frame keep its cached chrome instead of re-laying the
+        # tick labels on each shot.
+        along = self._spec.x
+        if along is None:
+            if history.source_indices is not None:
+                source_coordinates = np.asarray(
+                    history.source_indices[start:], dtype=float
+                )
+            else:
+                source_coordinates = np.arange(start, total, dtype=float)
+            x_unit = resolve_unit("1", DEFAULT_UNITS)
+            x_label = "Shots from latest"
+        elif along == AxisRef.point(SHOT_TIME_AXIS_ID.value) and history.source_times is not None:
+            source_coordinates = np.asarray(history.source_times[start:], dtype=float)
+            x_unit = resolve_unit("s", DEFAULT_UNITS)
+            x_label = "Seconds from latest"
         else:
-            source_coordinates = np.arange(start, total, dtype=float)
+            raise ValueError(
+                "a rolling plot places its shots along the shot index or, for a "
+                f"history that stamps its shots, the shot-time axis; not {along!r}"
+            )
         x_values = source_coordinates - source_coordinates[-1]
         unit = self._view.samples.value.display_unit
         canonical_unit = self._view.samples.value.canonical_unit
-        x_unit = resolve_unit("1", DEFAULT_UNITS)
         display_plane = canonical_unit.convert_value_to(masked_plane, unit)
         x = QuantityArray(
             x_values,
             x_values,
             x_unit,
             x_unit,
-            # Not a shot NUMBER: the axis says how far back a point is
-            # from the newest one, which is what a rolling window shows.
-            "Shots from latest",
+            # Not a shot NUMBER or a run time: the axis says how far back
+            # a point is from the newest one, which is what a rolling
+            # window shows.
+            x_label,
         )
         series: list[CurveSeries] = []
         for column, key in enumerate(keys):

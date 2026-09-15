@@ -274,6 +274,9 @@ class RollingHistory:
     #: The authored primary index of each shot, oldest first, or None when
     #: the shots are arrival-ordered repeats.
     source_indices: NDArray[np.int64] | ArrayLike | None = None
+    #: When each shot was taken, seconds from the run's first shot, oldest
+    #: first, or None when the history is not stamped.
+    source_times: NDArray[np.float64] | ArrayLike | None = None
     #: Standard error of each MEAN entry over what its shot pooled, or
     #: None when uncertainty was not requested.  Canonical-only, like the
     #: curve companion.
@@ -304,6 +307,11 @@ class RollingHistory:
             raise ValueError(
                 "rolling history group keys must match the group count"
             )
+        if self.source_times is not None:
+            source_times = _readonly(self.source_times, dtype=np.float64)
+            if source_times.shape != (values.shape[0],):
+                raise ValueError("rolling history source_times must be one per shot")
+            object.__setattr__(self, "source_times", source_times)
         if self.source_indices is not None:
             source_indices = _readonly(self.source_indices, dtype=np.int64)
             if source_indices.shape != (values.shape[0],):
@@ -3464,10 +3472,18 @@ class DataView:
 
         if aggregation is Reduction.LAST:
             from .semantics import axis_choices_for_schema
-            from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
+            from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID, SHOT_TIME_AXIS_ID
 
             retained = (
-                (AxisRef.point(PRIMARY_INDEX_AXIS_ID.value),) if self.has_primary_index
+                tuple(
+                    ref
+                    for ref in axis_choices_for_schema(self._schema)
+                    if ref in (
+                        AxisRef.point(PRIMARY_INDEX_AXIS_ID.value),
+                        AxisRef.point(SHOT_TIME_AXIS_ID.value),
+                    )
+                )
+                if self.has_primary_index
                 else tuple(ref for ref in axis_choices_for_schema(self._schema)
                            if ref.domain.value == "repeat")
             )
@@ -3737,6 +3753,7 @@ class DataView:
             counts=counts,
             group_keys=keys,
             source_indices=layout.cells,
+            source_times=layout.times,
             sem=sem,
         )
 

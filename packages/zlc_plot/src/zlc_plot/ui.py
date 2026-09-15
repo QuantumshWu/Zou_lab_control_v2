@@ -40,6 +40,12 @@ class ParameterControl:
     rebuild: bool = False
     semantic: bool = False
     automatic: bool = False
+    #: What Auto resolves to right now, for an automatic parameter the
+    #: session can answer for: the unit an axis is read in unless one is
+    #: chosen.  A control on Auto shows this and, switched off Auto, keeps
+    #: it -- the operator's manual value starts from what they were seeing,
+    #: not from the first entry of a list.
+    automatic_value: object = None
     unavailable_reason: str = ""
 
 
@@ -48,6 +54,7 @@ def parameter_controls(
     values: Mapping[str, object],
     *,
     choice_overrides: Mapping[str, tuple[object, ...]] | None = None,
+    automatic_values: Mapping[str, object] | None = None,
 ) -> tuple[ParameterControl, ...]:
     """Project one canonical schema/state pair into ordered UI controls.
 
@@ -55,7 +62,9 @@ def parameter_controls(
     domains, such as compatible units and fit parameter names.  They are
     values, shown exactly as they are spelled -- a unit symbol is its own
     label -- and they change only the editor choices; the core schema still
-    validates every submitted value.
+    validates every submitted value.  ``automatic_values`` says what each
+    automatic parameter currently resolves to (see
+    :attr:`ParameterControl.automatic_value`).
     """
 
     if not isinstance(schema, ParameterSchema):
@@ -69,6 +78,13 @@ def parameter_controls(
     if unknown:
         joined = ", ".join(repr(name) for name in unknown)
         raise KeyError(f"choice override refers to unknown parameter(s): {joined}")
+    if automatic_values is not None and not isinstance(automatic_values, Mapping):
+        raise TypeError("automatic_values must be a mapping or None")
+    resolved = {} if automatic_values is None else dict(automatic_values)
+    unknown = tuple(name for name in resolved if name not in schema)
+    if unknown:
+        joined = ", ".join(repr(name) for name in unknown)
+        raise KeyError(f"automatic value refers to unknown parameter(s): {joined}")
     result = []
     for name, spec in schema.items():
         if name not in values:
@@ -99,6 +115,7 @@ def parameter_controls(
                 step=spec.step,
                 effects=spec.effects,
                 automatic=spec.allow_none and not limit_field,
+                automatic_value=resolved.get(name),
                 unavailable_reason=(
                     "Choose Fixed limits to edit."
                     if limit_field and not fixed_limits

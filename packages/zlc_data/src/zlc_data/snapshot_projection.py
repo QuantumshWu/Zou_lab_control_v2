@@ -10,6 +10,7 @@ import numpy as np
 from ._arrays import immutable_array
 from .axis import (
     PRIMARY_INDEX,
+    SHOT_TIME,
     AxisId,
     AxisSpec,
     LATEST_COORDINATE,
@@ -40,6 +41,7 @@ from .value import (
 
 __all__ = [
     "PRIMARY_INDEX_AXIS_ID",
+    "SHOT_TIME_AXIS_ID",
     "IndexedHistoryLayout",
     "axis_catalog",
     "indexed_history_layout",
@@ -58,6 +60,9 @@ __all__ = [
 #: point geometry; putting the outer stream index on either of those physical
 #: dimensions would erase producer-authored meaning.
 PRIMARY_INDEX_AXIS_ID = AxisId("zlc_data.primary-index")
+#: The shot-time coordinate an indexed window carries when its shots
+#: were stamped: one coordinate per shot on the primary index's rows.
+SHOT_TIME_AXIS_ID = AxisId("zlc_data.shot-time")
 
 
 _NOT_INDEXED = object()
@@ -88,6 +93,9 @@ class IndexedHistoryLayout:
     #: value contracts plus the event's own Point domain -- and so
     #: what two windows of one history must share.
     event: tuple[object, ...]
+    #: When each shot was taken, seconds from the run's first shot, oldest
+    #: first -- or None for a history whose shots were not stamped.
+    times: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         source = np.asarray(self.cells, dtype=np.int64)
@@ -97,6 +105,13 @@ class IndexedHistoryLayout:
             shape=source.shape,
         )
         object.__setattr__(self, "cells", cells)
+        if self.times is not None:
+            times = np.asarray(self.times, dtype=np.float64)
+            if times.shape != cells.shape:
+                raise ValueError("an indexed history stamps every shot or none")
+            object.__setattr__(
+                self, "times", immutable_array(times, dtype=np.dtype("<f8"), shape=times.shape)
+            )
 
     @property
     def shot_count(self) -> int:
@@ -183,7 +198,24 @@ def indexed_history_layout(schema: DatasetSchema) -> IndexedHistoryLayout | None
     if np.any(counts != inner_count):
         raise ValueError("every shot of an indexed history holds the same event rows")
     shots = int(cells.size)
-    event_axes = tuple(axis for axis in point_domain.axes if axis is not primary)
+    # The shot-time axis is the shot index's twin: one coordinate per
+    # shot, on the same rows, and no part of the event's own domain.
+    time_axis = next(
+        (axis for axis in point_domain.axes if axis.axis_id == SHOT_TIME_AXIS_ID), None
+    )
+    times = None
+    if time_axis is not None:
+        if time_axis.role != SHOT_TIME:
+            raise ValueError("the shot-time coordinate must carry the shot-time role")
+        if not np.array_equal(point_domain.codes(SHOT_TIME_AXIS_ID), primary_codes):
+            raise ValueError("shot time is one coordinate per shot, on the primary index's rows")
+        times = np.asarray(
+            tuple(time_axis.coordinate_at(index) for index in range(time_axis.size)),
+            dtype=np.float64,
+        )
+    event_axes = tuple(
+        axis for axis in point_domain.axes if axis is not primary and axis is not time_axis
+    )
     event_codes: list[tuple[int, ...]] = []
     for axis in event_axes:
         codes = point_domain.codes(axis.axis_id).reshape(shots, inner_count)
@@ -202,6 +234,7 @@ def indexed_history_layout(schema: DatasetSchema) -> IndexedHistoryLayout | None
             schema.value_schema,
             event_domain,
         ),
+        times,
     )
     object.__setattr__(schema, "_indexed_layout", layout)
     return layout

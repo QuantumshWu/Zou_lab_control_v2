@@ -94,6 +94,11 @@ def parameter_form_spec(fields: object) -> FormSpec:
         value = field.get("value")
         allow_none = bool(field.get("allow_none"))
         automatic = bool(field.get("automatic"))
+        # A control on Auto is built holding what Auto resolves to, so that
+        # switching Auto off keeps the value the operator was looking at
+        # instead of the first entry of the list.  The form's value stays
+        # None -- that is what "on Auto" is.
+        seed = field.get("automatic_value") if automatic and value is None else value
         choices: tuple[FormChoice, ...] = ()
         if kind == "choice":
             choice_rows = [
@@ -105,9 +110,9 @@ def parameter_form_spec(fields: object) -> FormSpec:
             ):
                 choice_rows.insert(0, FormChoice("(none)", _ParameterChoice.NONE))
             choices = tuple(choice_rows)
-            value = value if automatic else _parameter_choice(value)
-        elif kind == "text" and value is None and not automatic:
-            value = ""
+            seed = seed if automatic and seed is None else _parameter_choice(seed)
+        elif kind == "text" and seed is None and not automatic:
+            seed = ""
         minimum = field.get("minimum")
         maximum = field.get("maximum")
         if kind == "int":
@@ -118,7 +123,7 @@ def parameter_form_spec(fields: object) -> FormSpec:
                 key=key,
                 kind=kind,
                 label=str(field.get("label") or _pretty_key(key)),
-                default=value,
+                default=seed,
                 required=not allow_none,
                 unit=str(field.get("unit") or ""),
                 description=str(field.get("description") or ""),

@@ -34,6 +34,7 @@ import numpy as np
 from zlc_data import (
     INVALID,
     PRIMARY_INDEX,
+    SHOT_TIME,
     AxisSpec,
     BlockId,
     CellValidity,
@@ -49,7 +50,7 @@ from zlc_data import (
     owned_snapshot_from_arrays,
     repeat_coordinate_counts,
 )
-from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
+from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID, SHOT_TIME_AXIS_ID
 from zlc_data.value import dataset_validity_storage, compact_dataset_validity
 from .dataset_output import (
     DatasetOutputDeclaration,
@@ -201,6 +202,9 @@ class SignalValue:
     # Conditional written-coordinate counts belonging to this publication.
     # They remain usable by an accepted/frozen view after the run advances.
     repeat_counts: tuple[int, ...] = ()
+    #: When the shot was taken, seconds from the run's first shot, when the
+    #: producer stamped it; the indexed history carries it as an axis.
+    shot_time: float | None = None
 
     def __post_init__(self) -> None:
         self._validate_fields()
@@ -215,6 +219,7 @@ class SignalValue:
         canonical_schema: DatasetSchema | None = None,
         cell_origin: tuple[int, int] | None = None, primary_index: int | None = None,
         repeat_counts: tuple[int, ...] = (),
+        shot_time: float | None = None,
     ) -> "SignalValue":
         """Plane-only construction from its already frozen bundle records."""
 
@@ -224,6 +229,7 @@ class SignalValue:
             ("run_record", run_record), ("event_record", event_record),
             ("canonical_schema", canonical_schema), ("cell_origin", cell_origin),
             ("primary_index", primary_index),
+            ("shot_time", shot_time),
             ("repeat_counts", repeat_counts),
         ):
             object.__setattr__(result, key, value)
@@ -700,13 +706,14 @@ def _restamp_snapshot(
 def _indexed_schema(
     event_schema: DatasetSchema,
     indices: tuple[int, ...],
+    times: tuple[float, ...] | None,
 ) -> DatasetSchema:
     point_count = event_schema.point_domain.size
     if any(
-        axis.axis_id == PRIMARY_INDEX_AXIS_ID
+        axis.axis_id in (PRIMARY_INDEX_AXIS_ID, SHOT_TIME_AXIS_ID)
         for axis in event_schema.point_domain.axes
     ):
-        raise ValueError("processor event schema uses the reserved primary-index axis")
+        raise ValueError("processor event schema uses a reserved indexed-history axis")
     primary = AxisSpec(
         PRIMARY_INDEX_AXIS_ID,
         "source index",
@@ -720,6 +727,18 @@ def _indexed_schema(
         for index in range(retained_count)
         for _point in range(point_count)
     )
+    # The shot-time axis rides the primary index's rows: one coordinate per
+    # shot, the same codes object, so it costs the schema one axis and no
+    # second row mapping.
+    shot_axes: tuple[AxisSpec, ...] = ()
+    shot_codes: tuple[tuple[int, ...], ...] = ()
+    if times is not None:
+        if len(times) != retained_count:
+            raise ValueError("an indexed window stamps every retained shot or none")
+        shot_axes = (
+            AxisSpec(SHOT_TIME_AXIS_ID, "shot time", SHOT_TIME, retained_count, times, unit="s"),
+        )
+        shot_codes = (primary_codes,)
     event_codes = tuple(
         code * retained_count for code in event_schema.point_domain.axis_codes
     )
@@ -727,8 +746,8 @@ def _indexed_schema(
         event_schema.repeat_domain,
         DomainSpec(
             (point_count * retained_count,),
-            (primary, *event_schema.point_domain.axes),
-            (primary_codes, *event_codes),
+            (primary, *shot_axes, *event_schema.point_domain.axes),
+            (primary_codes, *shot_codes, *event_codes),
         ),
         event_schema.cell_domain,
         event_schema.value_schema,
@@ -744,7 +763,7 @@ def _materialize_indexed_dataset(
     schema = materialization.schema
     if schema is None:
         schema = _indexed_schema(
-            event_schema, tuple(range(start - latest_index, 1))
+            event_schema, tuple(range(start - latest_index, 1)), materialization.times
         )
     point_count = event_schema.point_domain.size
     trailing = (slice(None),) * len(event_schema.cell_domain.axes)
@@ -954,7 +973,7 @@ class _IndexedHistory:
     roll arithmetic simply does not copy rows that left the window.
     """
 
-    events: dict[int, tuple[int, OwnedSnapshot, Mapping[str, object]]]
+    events: dict[int, tuple[int, OwnedSnapshot, Mapping[str, object], float | None]]
     first_index: int
     materialized: _MaterializedIndexed | None = None
     replaced_at: int = -1
@@ -978,6 +997,10 @@ class _IndexedMaterialization:
     latest: int
     basis: _MaterializedIndexed | None
     record: Mapping[str, object]
+    #: When each retained shot was taken, for a history whose shots are
+    #: stamped; None for one that counts its shots only.  A window with
+    #: times is built afresh each time -- its schema is its coordinates.
+    times: tuple[float, ...] | None
     #: The history's ``replaced_at`` at this materialization: the last
     #: sequence at which a retained shot was overwritten.  Stamped on the
     #: block so a consumer carrying work from an earlier revision knows
@@ -989,10 +1012,11 @@ def _validate_indexed_event(
     history: _IndexedHistory,
     event: OwnedSnapshot,
     primary_index: int,
+    shot_time: float | None,
 ) -> None:
     events = history.events
-    current_schema = next(iter(events.values()))[1].block.schema
-    if event.block.schema != current_schema:
+    first = next(iter(events.values()))
+    if event.block.schema != first[1].block.schema:
         raise ValueError(
             "indexed Processor event schema changed inside one generation"
         )
@@ -1000,6 +1024,8 @@ def _validate_indexed_event(
         raise RuntimeError(
             "indexed Processor source primary index moved backwards"
         )
+    if (shot_time is None) != (first[3] is None):
+        raise ValueError("an indexed history stamps every shot with its time, or none")
 
 
 def _update_indexed_history(
@@ -1020,12 +1046,12 @@ def _update_indexed_history(
     if history is None:
         return (
             _IndexedHistory(
-                {primary_index: (sequence, event, selected_record)},
+                {primary_index: (sequence, event, selected_record, value.shot_time)},
                 primary_index,
             ),
             True,
         )
-    _validate_indexed_event(history, event, primary_index)
+    _validate_indexed_event(history, event, primary_index, value.shot_time)
     events = history.events
     current = events.get(primary_index)
     changed = current is None or current[0] != sequence
@@ -1040,6 +1066,7 @@ def _update_indexed_history(
             sequence,
             event,
             selected_record,
+            value.shot_time,
         )
     previous_first = history.first_index
     history.first_index = max(
@@ -1105,26 +1132,42 @@ def _indexed_materialization_input(
     selected_events = []
     appended_records = []
     window_records = []
+    # The time of each retained shot, oldest first.  A shot the history
+    # never received holds no time: its row takes the time of the shot
+    # before it (or, at the front, the one after), so the axis stays
+    # ordered and the hole shows as an invalid row where it is rather than
+    # as a gap that moves its neighbours.
+    stamped = next(iter(events.values()))[3] is not None
+    times: list[float] = []
+    unstamped_rows = 0
     append_from = start if basis is None else basis.latest + 1
     for index in range(start, primary_index + 1):
+        held = events.get(index)
         if index == primary_index:
-            held = events.get(index)
-            record = (
-                held[2]
-                if held is not None and held[0] == sequence
-                else value.event_record
-            )
+            current = held is not None and held[0] == sequence
+            record = held[2] if current else value.event_record
+            shot_time = held[3] if current else value.shot_time
             selected_events.append((index, value.snapshot))
             appended_records.append(record)
             window_records.append(record)
+        elif held is None or held[0] > sequence:
+            if stamped:
+                if times:
+                    times.append(times[-1])
+                else:
+                    unstamped_rows += 1
             continue
-        held = events.get(index)
-        if held is None or held[0] > sequence:
-            continue
-        window_records.append(held[2])
-        if index >= append_from:
-            selected_events.append((index, held[1]))
-            appended_records.append(held[2])
+        else:
+            record = held[2]
+            shot_time = held[3]
+            window_records.append(record)
+            if index >= append_from:
+                selected_events.append((index, held[1]))
+                appended_records.append(record)
+        if stamped:
+            times.extend([shot_time] * unstamped_rows)
+            unstamped_rows = 0
+            times.append(shot_time)
     if basis is not None and start == basis.start:
         # Pure growth: every row the basis described is still here, so
         # its record plus the appended ones is the window's record.
@@ -1138,13 +1181,15 @@ def _indexed_materialization_input(
         merged_record = _merge_event_records(window_records)
     schema = None
     if (
-        cached is not None
+        not stamped
+        and cached is not None
         and cached.latest - cached.start == primary_index - start
     ):
-        # The indexed schema depends on nothing but the retained COUNT
-        # (its indices are always the contiguous relative range ending at
-        # zero), so an unchanged count reuses the object -- and with it
-        # every fingerprint and equality answer cached downstream.
+        # An unstamped indexed schema depends on nothing but the retained
+        # COUNT (its indices are always the contiguous relative range
+        # ending at zero), so an unchanged count reuses the object -- and
+        # with it every fingerprint and equality answer cached downstream.
+        # A stamped window's schema IS its shot times and is built anew.
         schema = cached.snapshot.block.schema
     return _IndexedMaterialization(
         signal_name,
@@ -1157,6 +1202,7 @@ def _indexed_materialization_input(
         primary_index,
         basis,
         _freeze_run_record(merged_record),
+        tuple(times) if stamped else None,
         stable_since=history.replaced_at,
     )
 
@@ -2344,7 +2390,9 @@ class SignalDataPlane:
                 ):
                     history = state.indexed_history.get(qualified)
                     if history is not None:
-                        _validate_indexed_event(history, event, primary_index)
+                        _validate_indexed_event(
+                            history, event, primary_index, output.shot_time_seconds
+                        )
                     indexed_updates[qualified] = (event, history_demand)
                 if qualified in exact_qualified:
                     schema = output.canonical_schema
@@ -2432,6 +2480,7 @@ class SignalDataPlane:
                     primary_index=primary_index,
                     event_record=event_record,
                     repeat_counts=repeat_counts,
+                    shot_time=output.shot_time_seconds,
                 )
 
             parent = source_publication if worker_parent is None else worker_parent

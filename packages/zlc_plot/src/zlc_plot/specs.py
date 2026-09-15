@@ -332,6 +332,10 @@ class HistogramPlot:
 @dataclass(frozen=True, slots=True)
 class RollingPlot:
     group: AxisRef | None = None
+    #: The axis the shots are placed along: None counts them back from the
+    #: newest (the shot index); the history's shot-time axis places each
+    #: shot at the time it was taken.
+    x: AxisRef | None = None
     reduction: Reduction = Reduction.MEAN
     labels: PlotLabels = field(default_factory=PlotLabels)
     scope: tuple[ScopeTerm, ...] = ()
@@ -340,12 +344,14 @@ class RollingPlot:
     def __post_init__(self) -> None:
         if self.group is not None and not isinstance(self.group, AxisRef):
             raise TypeError("RollingPlot.group must be AxisRef or None")
+        if self.x is not None and not isinstance(self.x, AxisRef):
+            raise TypeError("RollingPlot.x must be AxisRef or None")
         if not isinstance(self.reduction, Reduction):
             raise TypeError("RollingPlot.reduction must be Reduction")
         if not isinstance(self.labels, PlotLabels):
             raise TypeError("RollingPlot.labels must be PlotLabels")
         scope = _validated_scope(self.scope)
-        _require_distinct_axes((("group", self.group),), scope)
+        _require_distinct_axes((("x", self.x), ("group", self.group)), scope)
         object.__setattr__(self, "scope", scope)
 
 

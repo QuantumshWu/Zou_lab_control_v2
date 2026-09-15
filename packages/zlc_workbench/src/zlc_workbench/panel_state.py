@@ -194,6 +194,7 @@ def control_document(control: object) -> dict[str, object]:
         "maximum": getattr(control, "maximum", None),
         "step": getattr(control, "step", None),
         "automatic": bool(getattr(control, "automatic", False)),
+        "automatic_value": getattr(control, "automatic_value", None),
         "unavailable_reason": str(
             getattr(control, "unavailable_reason", "")
         ),
@@ -213,6 +214,7 @@ def panel_surface_from_description(
         description.parameter_schema,
         description.display_state.values,
         choice_overrides=description.parameter_choices,
+        automatic_values=description.automatic_values,
     )
     facet_fit_control = next(
         (

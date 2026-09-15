@@ -211,8 +211,11 @@ class WheeltecN100WaveformSource:
         received = time.time_ns()
         for stamp, values in samples:
             self._stamp(stamp)
+            # The module's own packet clock is the record's time: it ticks
+            # with the sampling, where the host's clock ticks with the
+            # serial delivery.
             self._records.push(
-                np.asarray(values, dtype=np.float32).reshape(1, _COLUMNS), received
+                np.asarray(values, dtype=np.float32).reshape(1, _COLUMNS), stamp, received
             )
 
     def _stamp(self, stamp: float) -> None:

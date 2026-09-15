@@ -405,7 +405,9 @@ class TekScopeWaveformSource:
                             * np.float32(multiplier)
                             + np.float32(zero)
                         )
-                self._records.push(np.stack(columns, axis=1), time.time_ns())
+                self._records.push(
+                    np.stack(columns, axis=1), time.monotonic(), time.time_ns()
+                )
         except BaseException as error:  # noqa: BLE001 -- surfaced to the reader of records
             self._records.fail(error)
 

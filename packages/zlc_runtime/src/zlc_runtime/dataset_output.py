@@ -7,6 +7,8 @@ reconstruct arrays, axes, coverage, or lineage.
 
 from __future__ import annotations
 
+import math
+
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
@@ -77,10 +79,20 @@ class LiveDatasetOutput:
     canonical_schema: DatasetSchema | None = None
     cell_origin: tuple[int, int] | None = None
     event_record: Mapping[str, object] | None = None
+    #: When this shot was taken, in seconds from the run's first shot, for a
+    #: monitor whose history is kept by source index: the window then
+    #: carries a shot-time axis beside the index, so a panel can place the
+    #: shots along the time they happened rather than count them.
+    shot_time_seconds: float | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.declaration, DatasetOutputDeclaration):
             raise TypeError("declaration must be DatasetOutputDeclaration")
+        if self.shot_time_seconds is not None:
+            seconds = float(self.shot_time_seconds)
+            if not math.isfinite(seconds):
+                raise ValueError("shot_time_seconds must be finite")
+            object.__setattr__(self, "shot_time_seconds", seconds)
         if not isinstance(self.snapshot, OwnedSnapshot):
             raise TypeError("snapshot must be OwnedSnapshot")
         if not isinstance(self.coverage, (DatasetCoverage, MonitorCoverage)):

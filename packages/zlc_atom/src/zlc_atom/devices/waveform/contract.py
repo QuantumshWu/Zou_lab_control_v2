@@ -104,10 +104,18 @@ class WaveformWorkingPoint:
 
 @dataclass(frozen=True, eq=False)
 class WaveformRecord:
-    """Source-owned copy of one record: ``(record_samples, columns)`` float32."""
+    """Source-owned copy of one record: ``(record_samples, columns)`` float32.
+
+    ``time_seconds`` is when the record was taken, on the clock the source
+    keeps: the module's own packet timestamp for an IMU that has one, the
+    host's monotonic clock for a scope read over a link.  Only differences
+    between records of one capture mean anything; the measurement anchors
+    them at its first shot.
+    """
 
     samples: np.ndarray
     source_ordinal: int
+    time_seconds: float
     host_received_at_ns: int = 0
     __hash__ = None
 
@@ -116,6 +124,10 @@ class WaveformRecord:
         if ordinal < 0:
             raise ValueError("source_ordinal must be non-negative")
         object.__setattr__(self, "source_ordinal", ordinal)
+        seconds = float(self.time_seconds)
+        if not np.isfinite(seconds):
+            raise ValueError("time_seconds must be finite")
+        object.__setattr__(self, "time_seconds", seconds)
         host = int(self.host_received_at_ns or time.time_ns())
         if host <= 0:
             raise ValueError("host_received_at_ns must be positive")
@@ -246,13 +258,17 @@ class WaveformRecordQueue:
                 self._accepting = False
                 raise
 
-    def push(self, samples: np.ndarray, host_received_at_ns: int) -> bool:
+    def push(
+        self, samples: np.ndarray, time_seconds: float, host_received_at_ns: int
+    ) -> bool:
         """Number and keep one record; False when the ring is not accepting."""
 
         with self._condition:
             if not self._accepting:
                 return False
-            record = WaveformRecord(samples, self._next_ordinal, host_received_at_ns)
+            record = WaveformRecord(
+                samples, self._next_ordinal, time_seconds, host_received_at_ns
+            )
             self._next_ordinal += 1
             self._produced_count += 1
             while len(self._queue) >= self._buffer_record_count:

@@ -10067,7 +10067,20 @@ class MatplotlibRenderer:
         # resolved BEFORE the series painter runs and handed to it,
         # because an axis with two owners is an axis that moves twice.
         window = int(state["window"])
-        frame = _curve_x_limits(np.asarray([1.0 - window, 0.0]))
+        if self.spec.x is None:
+            frame = _curve_x_limits(np.asarray([1.0 - window, 0.0]))
+        else:
+            # Along the shot time the frame is what the window's shots span:
+            # the newest at 0, the oldest as many seconds back as it was.
+            oldest = min(
+                (
+                    float(np.min(np.asarray(item.x, dtype=float)[item.valid]))
+                    for item in sliced
+                    if bool(np.any(item.valid))
+                ),
+                default=0.0,
+            )
+            frame = _curve_x_limits(np.asarray([min(oldest, 0.0), 0.0]))
         x_text = payload_x if explicit_x is None else explicit_x
         native_direct = (
             kernels.engaged()

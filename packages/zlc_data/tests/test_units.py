@@ -285,7 +285,6 @@ def test_a_unit_is_offered_in_the_rungs_it_declares_and_shown_by_its_sign() -> N
     degrees are written with their sign.
     """
 
-    assert DEFAULT_UNITS.display_choices("uT") == ("T", "mT", "µT", "nT")
     assert DEFAULT_UNITS.display_choices("K") == ("K", "mK", "µK", "nK", "°C")
     assert DEFAULT_UNITS.display_choices("V") == ("V", "mV", "µV")
     assert DEFAULT_UNITS.display_choices("Hz") == ("GHz", "MHz", "kHz", "Hz")
@@ -307,6 +306,20 @@ def test_a_unit_is_offered_in_the_rungs_it_declares_and_shown_by_its_sign() -> N
         Unit("°X", "temperature", Offset(1.0), prefixes=("m",))
     assert resolve_unit("deg").symbol == "°"
     assert DEFAULT_UNITS.display_choices("deg") == ("rad", "°", "mrad")
+
+    # The gauss is a family of its own beside the tesla: a ten-thousandth,
+    # no prefix step, read in gauss and milligauss.
+    assert DEFAULT_UNITS.display_choices("uT") == ("T", "mT", "G", "µT", "mG", "nT")
+    assert float(DEFAULT_UNITS.convert(1.0, "G", "uT")) == pytest.approx(100.0)
+    assert float(DEFAULT_UNITS.convert(250.0, "mG", "uT")) == pytest.approx(25.0)
+    assert DEFAULT_UNITS.family_of("mG").symbol == "G"
+    assert format_quantity(0.0025, "G") == "2.5 mG"
+    # A bare prefix is a rung of the field's own family first: "G" in a
+    # hertz box is giga, "m" in a seconds box is milli, and only where the
+    # family has no such rung is it read as the unit it also spells.
+    assert parse_quantity("2G", "Hz") == 2e9
+    assert parse_quantity("5m", "s") == 0.005
+    assert parse_quantity("2 G", "uT") == pytest.approx(200.0)
 
 
 def test_a_reciprocal_unit_is_the_exact_reciprocal_or_nothing() -> None:

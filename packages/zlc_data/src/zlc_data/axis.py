@@ -89,6 +89,9 @@ class CoordinateFrameId:
 
 REPEAT = AxisRoleId("repeat")
 PRIMARY_INDEX = AxisRoleId("primary-index")
+#: When each shot of an indexed history was taken, in seconds from the
+#: run's first shot: one coordinate per shot, beside the primary index.
+SHOT_TIME = AxisRoleId("shot-time")
 SCAN_POINT = AxisRoleId("scan-point")
 READOUT_EVENT = AxisRoleId("readout-event")
 SPATIAL_X = AxisRoleId("spatial-x")

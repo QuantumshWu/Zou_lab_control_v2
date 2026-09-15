@@ -38,11 +38,11 @@ def admits(schema: Any) -> bool:
 
 
 def label_roles(spec: Any) -> tuple[tuple[str, tuple], ...]:
-    """A rolling plot's x is the shot counter; its y names the value."""
+    """A rolling plot's x is the shot axis it rolls along; its y names the value."""
 
     return (
         ("title", ("title",)),
-        ("x", ("repeat",)),
+        ("x", ("repeat",) if spec.x is None else ("x",)),
         ("y", ("value",)),
     )
 
@@ -65,7 +65,10 @@ HANDLER = KindHandler(
     "series",
     render,
     build_payload,
-    ("kind", "group", "reduction"),
+    # ``x`` is the shot axis the window rolls along: left empty the shots
+    # are counted back from the newest; a stamped history's shot-time
+    # axis places them at the seconds they were taken.
+    ("kind", "x", "group", "reduction"),
     admits,
     default_spec,
     label_roles,

@@ -195,6 +195,10 @@ class DisplayDescription:
     parameter_schema: ParameterSchema
     display_state: DisplayState
     parameter_choices: Mapping[str, tuple[object, ...]]
+    #: What each automatic parameter resolves to right now -- the unit an
+    #: axis is read in while no unit is chosen -- so a control on Auto can
+    #: show it and keep it when Auto is switched off.
+    automatic_values: Mapping[str, object]
     limits: RectangleRange
     viewport: RectangleRange | None
     semantics: SemanticDescription
@@ -882,6 +886,23 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
     def display_state(self) -> DisplayState:
         return self._display_store.state
 
+    def _automatic_parameter_values(self) -> Mapping[str, object]:
+        """What the automatic parameters resolve to now: the axes' own units.
+
+        A display unit left on Auto reads the axis in the unit the data
+        declares; that is the value a control on Auto shows, and the value
+        a manual choice starts from.  The picture's autoscaled limits are
+        already reported as ``limits``.
+        """
+
+        return MappingProxyType(
+            {
+                name: source.canonical_unit.symbol
+                for name, source in self._unit_parameter_sources().items()
+                if name in self._parameter_schema
+            }
+        )
+
     def _unit_parameter_sources(self) -> Mapping[str, Any]:
         if self._view is None:
             return MappingProxyType({})
@@ -1062,6 +1083,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 parameter_schema=self._parameter_schema,
                 display_state=self.display_state,
                 parameter_choices=self._parameter_choice_overrides(fit_models),
+                automatic_values=self._automatic_parameter_values(),
                 limits=self._current_display_limits(),
                 viewport=self._viewport,
                 semantics=semantics,

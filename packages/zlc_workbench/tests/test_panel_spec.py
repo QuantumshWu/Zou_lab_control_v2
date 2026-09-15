@@ -237,3 +237,40 @@ def test_a_choice_row_shows_the_label_its_declaration_gave_it() -> None:
         "Normal",
         "Fixed",
     ]
+
+
+def test_a_control_on_auto_is_built_holding_what_auto_resolves_to() -> None:
+    """Switching a unit off Auto keeps the unit the axis was being read in.
+
+    The control on Auto held nothing, so the moment Auto went off it took
+    the first entry of its list -- tesla for a microtesla axis.  What Auto
+    resolves to is the session's answer, travels on the row, and is what
+    the control is built holding.
+    """
+
+    from zlc_data.units import DEFAULT_UNITS
+    from zlc_plot.specs import parameter_schema_for_kind
+    from zlc_plot.style import build_plot_style
+    from zlc_plot.ui import parameter_controls
+    from zlc_ui.console._panel_projection import parameter_form_spec, parameter_form_values
+    from zlc_workbench.panel_state import control_document
+
+    schema = parameter_schema_for_kind("curve", style=build_plot_style())
+    values = {name: spec.default for name, spec in schema.items()}
+    unit_key = next(name for name in schema if name.endswith("_display_unit"))
+    units = DEFAULT_UNITS.display_choices("uT")
+    rows = tuple(
+        control_document(control)
+        for control in parameter_controls(
+            schema,
+            values,
+            choice_overrides={unit_key: units},
+            automatic_values={unit_key: "µT"},
+        )
+    )
+    row = next(entry for entry in rows if entry["key"] == unit_key)
+    assert row["automatic"] and row["value"] is None and row["automatic_value"] == "µT"
+    field = next(item for item in parameter_form_spec(rows).fields if item.key == unit_key)
+    assert field.automatic and field.default == "µT"
+    # The form's VALUE is still Auto: only the control's seed changed.
+    assert parameter_form_values(rows)[unit_key] is None

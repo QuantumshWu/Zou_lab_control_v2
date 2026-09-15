@@ -32,6 +32,7 @@ from zlc_data import (
     ValidityContract,
     ValueSchema,
 )
+from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
 from zlc_runtime.dataset import DatasetCoverage, MonitorCoverage
 from zlc_runtime.dataset_output import DatasetOutputDeclaration, LiveDatasetOutput
 from zlc_runtime.plane import SignalDataPlane
@@ -1832,3 +1833,59 @@ def test_indexed_history_stamps_its_window_and_the_last_replacement() -> None:
             history.close()
         plane.close()
 
+
+def test_a_stamped_history_window_carries_when_each_shot_was_taken() -> None:
+    """A monitor that stamps its shots gets a shot-time axis beside the index.
+
+    One coordinate per shot on the primary index's rows, in seconds from
+    the run's first shot, so a panel can place the shots along the time
+    they happened instead of counting them; a history that stamps none
+    carries no such axis, and one cannot start stamping halfway.
+    """
+
+    from zlc_data import SHOT_TIME
+    from zlc_data.snapshot_projection import SHOT_TIME_AXIS_ID, indexed_history_layout
+
+    declaration = DatasetOutputDeclaration("field", "test.field", index_by_source=True)
+    source = _node("stamped-source", declaration)
+    plane = SignalDataPlane()
+    lease = None
+    try:
+        plane.begin_generation(source)
+        lease = plane.acquire_indexed_history("stamped-source/field", 3)
+        for value, seconds in ((1.0, 0.0), (2.0, 0.1), (3.0, 0.25), (4.0, 0.4)):
+            plane.commit_live(
+                source,
+                {
+                    "field": LiveDatasetOutput(
+                        declaration,
+                        _event("field", value),
+                        MonitorCoverage(1, 1),
+                        shot_time_seconds=seconds,
+                    )
+                },
+            )
+        publication = plane.latest_publication("stamped-source/field")
+        assert publication is not None
+        snapshot, _record = plane.current_dataset_view("stamped-source/field", publication)
+        schema = snapshot.block.schema
+        times = schema.point_domain.axis(SHOT_TIME_AXIS_ID)
+        assert times.role == SHOT_TIME and times.unit == "s"
+        assert times.coordinates == (0.1, 0.25, 0.4)
+        assert np.array_equal(
+            schema.point_domain.codes(SHOT_TIME_AXIS_ID),
+            schema.point_domain.codes(PRIMARY_INDEX_AXIS_ID),
+        )
+        layout = indexed_history_layout(schema)
+        assert layout is not None and layout.times is not None
+        assert layout.times.tolist() == [0.1, 0.25, 0.4]
+        assert np.asarray(snapshot.block.values).reshape(-1).tolist() == [2.0, 3.0, 4.0]
+        with pytest.raises(ValueError, match="every shot"):
+            plane.commit_live(
+                source,
+                {"field": LiveDatasetOutput(declaration, _event("field", 5.0), MonitorCoverage(1, 1))},
+            )
+    finally:
+        if lease is not None:
+            lease.close()
+        plane.close()

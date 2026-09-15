@@ -130,7 +130,7 @@ class VirtualWaveformSource:
                         "virtual sample source returned the wrong shape: "
                         f"{values.shape} for {(samples, self._columns)}"
                     )
-                self._records.push(values, time.time_ns())
+                self._records.push(values, due, time.time_ns())
                 due += record_seconds
         except BaseException as error:  # noqa: BLE001 -- surfaced to the reader of records
             self._records.fail(error)

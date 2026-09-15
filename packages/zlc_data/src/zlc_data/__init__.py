@@ -3,6 +3,7 @@
 from .axis import (
     COMPONENT,
     PRIMARY_INDEX,
+    SHOT_TIME,
     READOUT_EVENT,
     REPEAT,
     SCAN_POINT,
@@ -117,6 +118,7 @@ __all__ = [
     "Invalid",
     "OwnedSnapshot",
     "PRIMARY_INDEX",
+    "SHOT_TIME",
     "READOUT_EVENT",
     "REPEAT",
     "SCAN_POINT",
