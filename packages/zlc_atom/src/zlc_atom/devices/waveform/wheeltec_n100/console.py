@@ -13,9 +13,25 @@ line it streams on.
 
 ONE RULE, and everything else here follows from it:
 
-    ONE COMMAND AT A TIME.  Write it, read until the module has answered
-    IT, and only then write the next.  A command that goes unanswered ends
-    the session; nothing is sent after it.
+    ONE COMMAND AT A TIME, AND LEAVE A GAP.  Write it, read until the
+    module has answered IT, wait, and only then write the next.  A command
+    that goes unanswered ends the session; nothing is sent after it.
+
+The gap is not politeness.  Measured on the bench, one command at a time,
+each with its reply read in full::
+
+    #fparam get MSG_IMU                  MSG_IMU=7
+    #fmsg                                MSG_IMU[40]  100.0Hz ... 1904 bytes
+    #fmsg            (again)             the same 1904 bytes
+    #fparam get MSG_IMU  then 0.05 s
+    #fmsg                                *#ERROR
+
+Same command, and the only difference is that the last one was sent 0.05 s
+behind the one before it.  ``#fmsg`` takes no argument and cannot be
+refused for any other reason, so this is the console refusing a command
+that arrived too soon -- and it is why a driver that reads a reply and
+fires the next command straight away gets nonsense out of a module that
+answers a human typing perfectly.
 
 That is the whole cure for the fault this file was rewritten over.  The
 console has no sequence numbers, so a reply that arrives after its command
@@ -109,6 +125,14 @@ CONFIRM_PROMPT = "(y/n)"
 
 #: The packet every N100 sends, and the one this bench reads.
 IMU_PACKET_NAME = "MSG_IMU"
+
+#: How long to leave the module alone between commands.  See the module
+#: docstring: 0.05 s is measurably too short and the bench answered every
+#: command correctly at two seconds, so this sits inside that bracket with
+#: the margin on the short side.  It is only ever the time SINCE THE LAST
+#: REPLY, so a command that follows a long read -- ``#fmsg``'s 1904 bytes,
+#: or a restart -- pays nothing for it.
+SETTLE_BETWEEN_COMMANDS = 0.5
 
 #: How long one command may take to answer.  Generous on purpose:
 #: configuring is something an operator does now and then, never a hot
@@ -237,6 +261,11 @@ class FdiConfigConsole:
         )
         self._enter_quiet = max(ENTER_QUIET_SECONDS, ENTER_QUIET_PERIODS * period)
         self._entered = False
+        #: When this console last finished listening.  The next command
+        #: waits out ``SETTLE_BETWEEN_COMMANDS`` from here, which is what
+        #: keeps it from arriving while the module is still busy with the
+        #: one before -- the state the bench answers ``*#ERROR`` from.
+        self._listened_until = 0.0
         #: The last command and its transcript, verbatim.  Kept because
         #: every wrong turn in this driver so far has been an assumption
         #: about what the module would say, and the fastest way to settle
@@ -327,7 +356,8 @@ class FdiConfigConsole:
             if chunk:
                 last = now
             elif now - last >= ENTER_QUIET_SECONDS:
-                return
+                break
+        self._listened_until = time.monotonic()
 
     def close(self) -> None:
         """Put the module back on the air, whatever happened in between."""
@@ -517,6 +547,11 @@ class FdiConfigConsole:
 
     # -------------------------------------------------------------- lines
     def _write(self, text: str) -> None:
+        """Put one line on the wire, no sooner than the module will take it."""
+
+        waited = time.monotonic() - self._listened_until
+        if waited < SETTLE_BETWEEN_COMMANDS:
+            time.sleep(SETTLE_BETWEEN_COMMANDS - waited)
         self._port.write((text + LINE_END).encode("ascii"))
         flush = getattr(self._port, "flush", None)
         if callable(flush):
@@ -546,6 +581,7 @@ class FdiConfigConsole:
             + (self._reply_timeout if timeout is None else timeout),
             silent_for=silent_for,
         )
+        self._listened_until = time.monotonic()
         self.last_exchange = (command, transcript)
         return transcript, answered
 
@@ -612,10 +648,12 @@ class FdiConfigConsole:
             # other, and the one reply this file used to leave unclaimed is
             # the one that goes on to end somebody else's.
             if _said_yes_or_no(_as_text(heard)):
+                self._listened_until = now
                 return True
         # It stopped navigating and never said so.  Entering is about what
         # the module DID, and it did stop -- so this goes on, and the
         # command that follows is what proves the console is listening.
+        self._listened_until = now
         return now - quiet_since >= self._enter_quiet
 
 
@@ -632,6 +670,7 @@ __all__ = [
     "LISTING_TIMEOUT_SECONDS",
     "OK",
     "REPLY_TIMEOUT_SECONDS",
+    "SETTLE_BETWEEN_COMMANDS",
     "SLOWEST_RUNG_SECONDS",
     "packets_in",
     "parameters_in",
