@@ -87,6 +87,14 @@ class _FakeModule:
         #: How long the module takes to START answering.  A real one
         #: takes its time over #fmsg, which prints some 1900 bytes.
         self.reply_delay = 0.0
+        #: How long after acknowledging #fconfig the module actually
+        #: starts obeying #f commands.  It prints *#OK first and changes
+        #: state afterwards, so anything sent in between is read by a
+        #: module that is still navigating, and dropped.  The probe that
+        #: worked on the bench hid this by listening a fixed 1.2 s after
+        #: every command.
+        self.config_settle = 0.15
+        self._listening_at = 0.0
         self._due: deque = deque()
         self.commands: list[str] = []
         self._out = bytearray()
@@ -177,13 +185,17 @@ class _FakeModule:
 
     def _answer(self, line: str) -> None:
         self.commands.append(line)
+        if line not in ("#fconfig", "#fdeconfig"):
+            if time.monotonic() < self._listening_at:
+                return                 # still switching: the line is lost
         if line == "#fconfig":
             self.streaming = False
             self._out.clear()
             # What a REAL module answers -- not the "Config Mode" the manual
             # prints. Judging entry by that banner is what broke on the
-            # bench; entry is the stream stopping.
+            # bench; entry is the module starting to ANSWER.
             self._say(OK)
+            self._listening_at = time.monotonic() + self.config_settle
         elif line == "#fdeconfig":
             self.streaming = True
             self._say(OK)
@@ -243,7 +255,7 @@ def test_the_console_is_this_bench_s_own_text_link() -> None:
     """Entering is the stream stopping; every value comes back read."""
 
     module = _FakeModule()
-    with FdiConfigConsole(module) as console:
+    with FdiConfigConsole(module, packet_interval=0.01) as console:
         assert module.streaming is False, "config mode stops the stream"
 
         assert console.get_parameter("AID_MAG_V_MAGNETIC") == "1"
@@ -283,7 +295,7 @@ def test_entry_is_the_stream_stopping_not_a_banner() -> None:
                 super()._answer(line)
 
     terse = _Terse()
-    with FdiConfigConsole(terse, reply_timeout=0.3) as console:
+    with FdiConfigConsole(terse, reply_timeout=1.0, packet_interval=0.01) as console:
         assert terse.streaming is False
         # It printed nothing at all, and it is in config mode: what says so
         # is that it answers the question every module answers.
@@ -293,8 +305,8 @@ def test_entry_is_the_stream_stopping_not_a_banner() -> None:
         def _answer(self, line: str) -> None:
             self.commands.append(line)     # prints nothing, keeps streaming
 
-    with pytest.raises(RuntimeError, match="not in config mode"):
-        FdiConfigConsole(_Deaf(), reply_timeout=0.3).enter()
+    with pytest.raises(RuntimeError, match="kept streaming through #fconfig"):
+        FdiConfigConsole(_Deaf(), reply_timeout=1.0, packet_interval=0.01).enter()
 
 
 # -------------------------------------------------------------- the knobs
@@ -685,7 +697,7 @@ def test_a_heartbeat_does_not_block_entering_config_mode() -> None:
                 self._out += bytes((FRAME_HEAD, 0xF0))
 
     module = _Ticks(rate_hz=10.0)
-    with FdiConfigConsole(module) as console:
+    with FdiConfigConsole(module, packet_interval=0.01) as console:
         assert module.streaming is False, "it entered, heartbeat and all"
         assert console.get_parameter(IMU_RATE_PARAMETER) == "4", "rung 4 is 10 Hz"
 
@@ -734,11 +746,11 @@ def test_somebody_else_s_reply_is_not_a_missing_parameter() -> None:
             super()._answer(line)
 
     module = _AnswersLate()
-    with FdiConfigConsole(module) as console:
+    with FdiConfigConsole(module, packet_interval=0.01) as console:
         # The module's own way of saying it has not got one.
         assert console.get_parameter("NO_SUCH_PARAMETER") is None
 
         for stray in ("*#OK", "(y/n)", "MSG_ODOMETER[6f]   0.0Hz", "Config Mode"):
             module.stray = stray
-            with pytest.raises(RuntimeError, match="lost step"):
+            with pytest.raises(RuntimeError, match="matched to what was asked"):
                 console.get_parameter(IMU_RATE_PARAMETER)

@@ -180,27 +180,51 @@ OFFERED_PARAMETERS = (
 )
 
 
-def rate_ladder_index(rate_hz: float, *, may_turn_off: bool = False) -> int:
+def offered_rungs(
+    *, may_turn_off: bool, standing_at: float | None = None
+) -> tuple[float, ...]:
+    """The rates a packet may be set to, and always the one it is ON.
+
+    Two rungs are withheld by policy, and both are ways of losing the
+    module: turning off the packet this bench recognises it by, or slowing
+    that packet below the rate a scan can hear -- either writes a module
+    into flash that no scan will ever find again.
+
+    But policy says where an operator may MOVE the module, never what the
+    module is DOING.  A module standing on a rung this driver would not
+    choose -- the vendor's ground station can set one, and rungs 1 and 2 Hz
+    are on the module's own ladder -- is still running that rate, and a
+    panel that cannot render it does not open AT ALL: the whole Device
+    Control window fails, taking every knob that answered with it.  So what
+    the module is on is always offerable, whatever policy thinks of it.
+    """
+
+    allowed = [
+        rung
+        for rung in PACKET_RATE_LADDER_HZ
+        if may_turn_off or rung >= SLOWEST_DISCOVERABLE_HZ
+    ]
+    if standing_at is not None and not any(
+        abs(rung - float(standing_at)) < 1e-6 for rung in allowed
+    ):
+        allowed.append(float(standing_at))
+    return tuple(sorted(allowed))
+
+
+def rate_ladder_index(
+    rate_hz: float, *, may_turn_off: bool = False, standing_at: float | None = None
+) -> int:
     """The ladder rung an asked-for rate belongs to, or a refusal.
 
     Only the rungs are offerable, so a value off the ladder is refused here
     -- before anything reaches the module -- rather than sent and silently
-    read as something else.
-
-    Rung 0 is "no output", and whether it may be asked for depends on the
-    packet: turning off one this bench does not read frees line rate, while
-    turning off the IMU packet makes the module invisible to discovery,
-    which recognises it by exactly those frames.
+    read as something else.  ``standing_at`` is the rate the module is on,
+    which is always allowed: putting a module back where it already was
+    cannot be a new way of losing it, and the undo path depends on that.
     """
 
     wanted = float(rate_hz)
-    allowed = (
-        PACKET_RATE_LADDER_HZ
-        if may_turn_off
-        else tuple(
-            rung for rung in PACKET_RATE_LADDER_HZ if rung >= SLOWEST_DISCOVERABLE_HZ
-        )
-    )
+    allowed = offered_rungs(may_turn_off=may_turn_off, standing_at=standing_at)
     for index, rung in enumerate(PACKET_RATE_LADDER_HZ):
         if abs(rung - wanted) < 1e-6 and rung in allowed:
             return index
@@ -259,34 +283,24 @@ def _hertz_of_rung(reading: object) -> float | None:
     return None
 
 
-def _read_one(console, name: str) -> object:
-    """One setting as the module is RUNNING it, not as its table holds it.
-
-    A rate comes from ``#fmsg``, which prints the hertz the module is
-    sending at; anything else from ``#fparam get``, read after the restart
-    that made it live.
-    """
-
-    if parameter_shape(name)[0] == "rate":
-        for listed, _packet_id, rate_hz in console.packet_rates():
-            if listed.upper() == name.upper():
-                return rate_hz
-        return None
-    return _as_number(console.get_parameter(name))
-
-
-def _spelling_of(name: str, value: object) -> str:
+def _spelling_of(name: str, value: object, *, standing_at: object = None) -> str:
     """How one setting's value is written on the wire.
 
     A rate goes as its rung's index; everything else goes as its number.
     The settings map holds a rate in hertz, so this is the one place the
-    two spellings meet, and it is used by the write and by the undo alike.
+    two spellings meet, and it is used by the write and by the undo alike
+    -- which is why ``standing_at`` matters: an undo puts back a rate the
+    module was demonstrably running, and refusing it there would leave the
+    module on the value that silenced it while reporting that the undo was
+    tried.
     """
 
     if parameter_shape(name)[0] == "rate":
         return str(
             rate_ladder_index(
-                float(value), may_turn_off=name.upper() != IMU_RATE_PARAMETER
+                float(value),
+                may_turn_off=name.upper() != IMU_RATE_PARAMETER,
+                standing_at=_as_number(standing_at),
             )
         )
     return _as_text(value)
@@ -313,7 +327,20 @@ def _apply(console, name: str, spelling: str) -> str | None:
     """
 
     reading = console.set_parameter(name, spelling)
-    console.save()
+    try:
+        console.save()
+    except BaseException:
+        # The table now holds a value that was never committed, and this
+        # module commits the WHOLE table: the next #fsave anybody runs --
+        # the operator's own Save button included -- would put it in flash
+        # and the restart after that would make it live, with nothing ever
+        # having shown it.  A restart WITHOUT a save is exactly how this
+        # firmware discards an uncommitted table, so that is the undo.
+        try:
+            console.reboot()
+        except BaseException:  # noqa: BLE001 -- the save's refusal is the news
+            pass
+        raise
     console.reboot()
     return reading
 
@@ -837,12 +864,28 @@ class WheeltecN100WaveformSource:
         """Take the port away from the reader, or say why it could not be."""
 
         self._park.set()
-        if not self._parked.wait(self.config.timeout_seconds):
-            self._park.clear()
+        if self._parked.wait(self.config.timeout_seconds):
+            return
+        self._park.clear()
+        # A reader that died never acknowledges the park, and saying it is
+        # holding the port sends the operator after a thread that holds
+        # nothing -- while the serial failure that actually stopped it sits
+        # unread on the queue.
+        failure = self._records.failure
+        if failure is not None:
             raise RuntimeError(
-                f"the reader on {self.config.port} did not release the port; "
-                "its settings cannot be read or written while it holds it"
+                f"reading {self.config.port} failed, so its settings cannot "
+                "be read or written"
+            ) from failure
+        if not self._reader.is_alive():
+            raise RuntimeError(
+                f"nothing is reading {self.config.port} any more, so this "
+                "source is closed and its settings cannot be reached"
             )
+        raise RuntimeError(
+            f"the reader on {self.config.port} did not release the port; "
+            "its settings cannot be read or written while it holds it"
+        )
 
     def _release_reader(self) -> None:
         self._park.clear()
@@ -871,7 +914,9 @@ class WheeltecN100WaveformSource:
                 )
             self._park_reader()
             try:
-                with FdiConfigConsole(self._serial) as console:
+                with FdiConfigConsole(
+                    self._serial, packet_interval=self._sample_interval
+                ) as console:
                     try:
                         answer = work(console)
                     finally:
@@ -961,20 +1006,18 @@ class WheeltecN100WaveformSource:
             # which frees line rate for the one it does.  Turning THAT one
             # off would make the module invisible to discovery.
             may_turn_off = name.upper() != IMU_RATE_PARAMETER
-            rungs = (
-                PACKET_RATE_LADDER_HZ
-                if may_turn_off
-                else tuple(
-                    rung
-                    for rung in PACKET_RATE_LADDER_HZ
-                    if rung >= SLOWEST_DISCOVERABLE_HZ
-                )
-            )
+            # Always including the rung the module is standing on: a rate
+            # this driver would not have chosen is still the rate it found,
+            # and a choice list that cannot express it fails the whole
+            # Device Control window rather than one row.
+            rungs = offered_rungs(may_turn_off=may_turn_off, standing_at=current)
             return TunableField(
                 metadata=AuthoringField(
                     name,
                     "choice",
-                    "Packet rate",
+                    # The module lists about thirty packets and every one of
+                    # them lands here, so the row has to say WHICH.
+                    f"{name} rate",
                     None,
                     unit="Hz",
                     choices=tuple(
@@ -984,14 +1027,26 @@ class WheeltecN100WaveformSource:
                         for rung in rungs
                     ),
                     description=(
-                        "how often the module sends the packet this bench "
-                        "reads. The module takes a rung of its own ladder, "
-                        "not a number of hertz, so only the rungs are offered"
-                    ),
+                        (
+                            "how often the module sends the packet this bench "
+                            "reads, and therefore this bench's sample rate. It "
+                            "cannot be turned off or set below "
+                            f"{SLOWEST_DISCOVERABLE_HZ:g} Hz: a scan finds this "
+                            "module by these frames"
+                        )
+                        if not may_turn_off
+                        else (
+                            f"how often the module sends {name}. This bench "
+                            "does not read it, so turning it off frees line "
+                            "rate for the packet that does"
+                        )
+                    )
+                    + ". The module takes a rung of its own ladder, not a "
+                    "number of hertz, so only the rungs are offered",
                 ),
                 # Shown exactly as the module reports it, 0 Hz included:
                 # a packet that is switched off must not read as a slow one.
-                current=f"{current:g}" if (current or may_turn_off) else f"{rungs[0]:g}",
+                current=f"{current:g}",
                 live_write=True,
                 dependency_group=(name,),
             )
@@ -1079,7 +1134,7 @@ class WheeltecN100WaveformSource:
                 )
             is_rate = parameter_shape(selected)[0] == "rate"
             previous = self._settings.get(selected)
-            spelling = _spelling_of(selected, value)
+            spelling = _spelling_of(selected, value, standing_at=previous)
 
             self._in_console(
                 lambda console: _apply(console, selected, spelling),
@@ -1090,18 +1145,18 @@ class WheeltecN100WaveformSource:
                 self._require_stream_back(_RESTART_SECONDS)
             except BaseException as silenced:
                 self._put_back(selected, previous, silenced, value)
-            # What the module came up ON, asked after the restart.  The
-            # readback inside the write is taken from the PARAMETER TABLE,
-            # before the save and before the restart, so it says what was
-            # asked for and not what is running -- a firmware that clamps a
-            # value on restart would have had this bench reporting, and
-            # recording, a setting the module is not using.
-            taken = self._in_console(
-                lambda console: _read_one(console, selected), stream_back=True
-            )
-            # Every restart reloads the module's WHOLE configuration from
-            # flash, so the rate can move even when the knob that turned was
-            # a filter.  Re-time the stream after any of them.
+            # What the module came up ON, asked after the restart -- and
+            # ALL of it, not the one name that was written.  The readback
+            # inside the write comes from the PARAMETER TABLE, before the
+            # save and before the restart, so it says what was asked for
+            # rather than what is running; and the restart reloads the
+            # module's WHOLE configuration from flash, so any setting can
+            # have moved, including one an earlier aborted write left
+            # dirty.  This trip is being paid for either way.
+            self._settings = self._in_console(self._read_settings, stream_back=True)
+            taken = self._settings.get(selected)
+            # The interval stamps every record, so it is re-timed after any
+            # restart, whatever knob caused it.
             self._remeasure_rate()
             if is_rate and selected.upper() == IMU_RATE_PARAMETER:
                 # The module's own rung stays the value -- it is one of the
@@ -1125,7 +1180,6 @@ class WheeltecN100WaveformSource:
                     f"the module acknowledged {selected} but would not read it "
                     "back, so this bench will not record a value it did not read"
                 )
-            self._settings[selected] = taken
             return self._field_for(selected, taken).current
 
     def _apply_note(self) -> str:
@@ -1159,7 +1213,9 @@ class WheeltecN100WaveformSource:
             # undo has to spell it the same way the write did, or it asks
             # for rung 10 when it means 10 Hz -- off the end of the ladder,
             # which is another way of saying "stop sending".
-            return _apply(console, name, _spelling_of(name, previous))
+            return _apply(
+                console, name, _spelling_of(name, previous, standing_at=previous)
+            )
 
         restored = False
         for _ in range(_UNDO_LISTEN_ROUNDS):
@@ -1201,7 +1257,17 @@ class WheeltecN100WaveformSource:
         return self._in_console(lambda console: console.save())
 
     def arm(self, records: int | None, *, buffer_record_count: int) -> None:
-        self._records.arm(records, buffer_record_count=buffer_record_count)
+        """Take the queue, under the lock a settings round trip holds.
+
+        Without the lock, "a capture must be finished first" is decided
+        against a queue that can arm a moment later: the console then stops
+        the stream under a capture that believes it owns it, or a write
+        that has already reached flash is reported as never having
+        happened.
+        """
+
+        with self._settings_lock:
+            self._records.arm(records, buffer_record_count=buffer_record_count)
 
     def read_records(
         self, n: int, *, timeout: float, exact: bool
@@ -1322,6 +1388,7 @@ __all__ = [
     "OFFERED_PARAMETERS",
     "PACKET_RATE_LADDER_HZ",
     "SLOWEST_DISCOVERABLE_HZ",
+    "offered_rungs",
     "parameter_shape",
     "rate_ladder_index",
     "MAX_PACKET_RATE_HZ",
