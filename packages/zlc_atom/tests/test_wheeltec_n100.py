@@ -534,7 +534,14 @@ def test_a_module_left_in_its_console_is_found_and_opened_again() -> None:
 
 
 def test_a_module_whose_console_stays_silent_still_streams() -> None:
-    """No console is a fact about the module, not a reason to refuse it."""
+    """No console is a fact about the module, not a reason to refuse it.
+
+    And the rate is still known: it is read off the STREAM, which is where
+    the sample interval that stamps every record comes from anyway. Opening
+    this device sends no console command at all, so a module whose console
+    never answers is fully usable and its one knob is shown -- which is
+    what this test always meant by the sentence above.
+    """
 
     class _Mute(_FakeModule):
         def _answer(self, line: str) -> None:
@@ -543,11 +550,11 @@ def test_a_module_whose_console_stays_silent_still_streams() -> None:
     module = _Mute()
     source = _source(module)
     try:
-        assert source.tunable_fields() == ()
-        assert source.tunable_values() == {}
+        assert source.tunable_values() == {IMU_RATE_PARAMETER: "100"}
         point = source.working_point()
-        assert point.settings["settings"] == {}
-        assert "never entered config mode" in point.settings["settings_refusal"]
+        assert point.settings["settings"] == {IMU_RATE_PARAMETER: 100.0}
+        assert not point.settings["settings_refusal"]
+        assert not module.commands, "opening it asked the console nothing"
         assert point.sample_interval_seconds == pytest.approx(0.01)
         source.arm(None, buffer_record_count=4)
         assert source.read_records(1, timeout=3.0, exact=True)
@@ -678,7 +685,7 @@ def test_a_refused_save_is_not_a_save() -> None:
     try:
         with pytest.raises((TuneRefused, RuntimeError)):
             source.tune(IMU_RATE_PARAMETER, 50.0)
-        assert source.tunable_values()[IMU_RATE_PARAMETER] == "10", (
+        assert source.tunable_values()[IMU_RATE_PARAMETER] == "100", (
             "the settings must not claim a value the module would not keep"
         )
     finally:
