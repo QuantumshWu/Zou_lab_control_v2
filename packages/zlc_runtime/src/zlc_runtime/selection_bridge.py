@@ -1298,6 +1298,7 @@ class SelectionBridge:
             source_snapshot,
             event,
             event_record=source_record,
+            shot_time=source.shot_time,
         )
         # From here the plane's output NAMES are claimed -- by the attach, or
         # by the terminal reserve -- and only afterwards can this event learn
@@ -1481,6 +1482,7 @@ class SelectionBridge:
                     source_snapshot,
                     state,
                     event_record=source_record,
+                    shot_time=source.shot_time,
                 )
             except EmptySelection as error:
                 # A real answer, not a failure: a box drawn in the band
@@ -1700,13 +1702,15 @@ class SelectionBridge:
                         "fit result is stale for the current source publication"
                     )
                 trigger = ("fit", trigger_revision)
+        source_value = source_publication.value(self._source_signal)
+        shot_time = None if source_value is None else source_value.shot_time
         outputs = (
             self._materialize_selection_outputs(
-                snapshot, state, event_record=record
+                snapshot, state, event_record=record, shot_time=shot_time
             )
             if state is not None
             else self._materialize_fit_outputs(
-                snapshot, event, event_record=record
+                snapshot, event, event_record=record, shot_time=shot_time
             )
         )
         return _TriggeredOutputs(outputs, trigger)
@@ -2194,6 +2198,7 @@ class SelectionBridge:
         state: SelectionState,
         *,
         event_record: Mapping[str, object],
+        shot_time: float | None,
     ) -> Mapping[str, LiveDatasetOutput]:
         """Cut one committed selection into signals that keep the parent's axes.
 
@@ -2322,6 +2327,7 @@ class SelectionBridge:
                 derived,
                 MonitorCoverage(total, total),
                 event_record=event_record,
+                shot_time_seconds=shot_time,
             )
         if not scalar_outputs:
             return output
@@ -2366,6 +2372,7 @@ class SelectionBridge:
                 derived,
                 MonitorCoverage(total, total),
                 event_record=event_record,
+                shot_time_seconds=shot_time,
             )
         return output
 
@@ -2375,6 +2382,7 @@ class SelectionBridge:
         event: FitEventValue,
         *,
         event_record: Mapping[str, object],
+        shot_time: float | None,
     ) -> Mapping[str, LiveDatasetOutput]:
         """One output per published parameter, over the source it fitted.
 
@@ -2477,6 +2485,7 @@ class SelectionBridge:
                 coverage,
                 event_record,
                 sigma=errors,
+                shot_time=shot_time,
             )
         return output
 
@@ -2492,6 +2501,7 @@ class SelectionBridge:
         coverage: MonitorCoverage,
         event_record: Mapping[str, object],
         sigma: np.ndarray | None = None,
+        shot_time: float | None = None,
     ) -> LiveDatasetOutput:
         derived = materialize_derived_dataset(
             fit_source_ref,
@@ -2517,4 +2527,7 @@ class SelectionBridge:
             derived,
             coverage,
             event_record=event_record,
+            # A derivation of a shot is taken when the shot was: it rolls
+            # along the same time its source does.
+            shot_time_seconds=shot_time,
         )

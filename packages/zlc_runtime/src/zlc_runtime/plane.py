@@ -1026,12 +1026,15 @@ def _validate_indexed_event(
         )
     if (shot_time is None) != (first[3] is None):
         raise ValueError("an indexed history stamps every shot with its time, or none")
-    if first[3] is not None and primary_index != next(reversed(events)) + 1:
-        # A stamped history is one shot after another: its time axis is a
-        # coordinate per row, and a row nobody published has no time.
-        raise ValueError(
-            "a history that stamps its shots publishes them one after another"
-        )
+    last_index = next(reversed(events))
+    if (
+        first[3] is not None
+        and primary_index > last_index
+        and shot_time <= events[last_index][3]
+    ):
+        # The time axis is a coordinate per shot: a later shot at an
+        # earlier or equal time is a source whose clock does not advance.
+        raise ValueError("a stamped history's shots advance in time")
 
 
 def _update_indexed_history(
@@ -1082,6 +1085,30 @@ def _update_indexed_history(
         events.pop(next(iter(events)))
     changed = changed or history.first_index != previous_first
     return history, changed
+
+
+def _row_times(times: list[float | None]) -> tuple[float, ...]:
+    """A distinct, ordered time for every row of a stamped window.
+
+    A held row has its own.  A hole between two held rows -- a shot the
+    source skipped, a publication a latest-only derivation never made --
+    lies on the line between them; a hole before the first held row lies a
+    nanosecond before it.  A hole's row is invalid and is never drawn, so
+    its time only has to be what an axis coordinate must be: unique and in
+    order.  The newest row is always held, so nothing trails.
+    """
+
+    held = [index for index, time in enumerate(times) if time is not None]
+    if not held:
+        raise RuntimeError("a stamped window holds at least its newest shot")
+    filled: list[float] = [0.0 if time is None else float(time) for time in times]
+    for index in range(held[0] - 1, -1, -1):
+        filled[index] = filled[index + 1] - 1e-9
+    for before, after in zip(held, held[1:]):
+        span = after - before
+        for step in range(1, span):
+            filled[before + step] = filled[before] + (filled[after] - filled[before]) * step / span
+    return tuple(filled)
 
 
 def _indexed_materialization_input(
@@ -1138,12 +1165,12 @@ def _indexed_materialization_input(
     selected_events = []
     appended_records = []
     window_records = []
-    # The time of each retained shot, oldest first.  A stamped history is
-    # one shot after another (the update refuses a gap), so every row of
-    # its window has its time; a missing row here is a broken invariant,
-    # not a hole to paper over.
+    # The time of each retained shot, oldest first; None for a row the
+    # history does not hold at this sequence (a source that skipped, a
+    # derivation that evaluated only the latest), which `_row_times` gives
+    # a time of its own so the axis stays a coordinate per row.
     stamped = next(iter(events.values()))[3] is not None
-    times: list[float] = []
+    row_times: list[float | None] = []
     append_from = start if basis is None else basis.latest + 1
     for index in range(start, primary_index + 1):
         held = events.get(index)
@@ -1155,8 +1182,7 @@ def _indexed_materialization_input(
             appended_records.append(record)
             window_records.append(record)
         elif held is None or held[0] > sequence:
-            if stamped:
-                raise RuntimeError("a stamped indexed history lost a shot inside its window")
+            row_times.append(None)
             continue
         else:
             record = held[2]
@@ -1165,8 +1191,7 @@ def _indexed_materialization_input(
             if index >= append_from:
                 selected_events.append((index, held[1]))
                 appended_records.append(record)
-        if stamped:
-            times.append(shot_time)
+        row_times.append(shot_time)
     if basis is not None and start == basis.start:
         # Pure growth: every row the basis described is still here, so
         # its record plus the appended ones is the window's record.
@@ -1201,7 +1226,7 @@ def _indexed_materialization_input(
         primary_index,
         basis,
         _freeze_run_record(merged_record),
-        tuple(times) if stamped else None,
+        _row_times(row_times) if stamped else None,
         stable_since=history.replaced_at,
     )
 

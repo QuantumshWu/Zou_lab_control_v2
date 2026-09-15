@@ -1885,7 +1885,37 @@ def test_a_stamped_history_window_carries_when_each_shot_was_taken() -> None:
                 source,
                 {"field": LiveDatasetOutput(declaration, _event("field", 5.0), MonitorCoverage(1, 1))},
             )
+        with pytest.raises(ValueError, match="advance in time"):
+            plane.commit_live(
+                source,
+                {
+                    "field": LiveDatasetOutput(
+                        declaration, _event("field", 5.0), MonitorCoverage(1, 1),
+                        shot_time_seconds=0.4,
+                    )
+                },
+            )
     finally:
         if lease is not None:
             lease.close()
         plane.close()
+
+
+def test_a_stamped_window_gives_every_row_a_distinct_ordered_time() -> None:
+    """Rows a history does not hold still get a coordinate on the time axis.
+
+    A derivation that evaluated only the latest shot, or a source that
+    skipped, leaves holes; their rows are invalid and never drawn, but an
+    axis is a coordinate per row, unique and in order.  A hole between two
+    held shots lies on the line between them; one before the first held
+    shot lies a nanosecond earlier.
+    """
+
+    from zlc_runtime.plane import _row_times
+
+    assert _row_times([0.1, 0.25, 0.4]) == (0.1, 0.25, 0.4)
+    assert _row_times([0.1, None, None, 0.4]) == pytest.approx((0.1, 0.2, 0.3, 0.4))
+    front = _row_times([None, None, 0.5, None, 0.9])
+    assert front[2:] == (0.5, 0.7, 0.9)
+    assert front[0] < front[1] < front[2] and front[2] - front[1] == pytest.approx(1e-9)
+    assert len(set(front)) == len(front)

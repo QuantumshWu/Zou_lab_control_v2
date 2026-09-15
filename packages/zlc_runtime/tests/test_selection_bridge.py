@@ -538,11 +538,13 @@ def test_close_does_not_wait_for_selection_materialization_or_publish_stale(
         events.emit_selection(SelectionChange.COMMITTED, selection)
     real_materialize = bridge._materialize_selection_outputs
 
-    def gated_materialize(snapshot, state, *, event_record):
+    def gated_materialize(snapshot, state, *, event_record, shot_time):
         entered.set()
         if not release.wait(2.0):
             raise TimeoutError("selection materialization gate did not open")
-        return real_materialize(snapshot, state, event_record=event_record)
+        return real_materialize(
+            snapshot, state, event_record=event_record, shot_time=shot_time
+        )
 
     monkeypatch.setattr(
         bridge,
