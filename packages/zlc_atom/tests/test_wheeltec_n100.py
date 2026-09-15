@@ -217,8 +217,10 @@ class _FakeModule:
             if name in self.parameters:
                 # NAME=value -- no spaces, and no *#OK after it.
                 self._say(f"{name}={self.parameters[name]}")
-            else:
-                self._say("*#ERROR")
+            # A name it has not got draws NOTHING -- not *#ERROR, nothing.
+            # That silence is what the console is built around: it cannot be
+            # told from a reply still on its way, so every exchange ends
+            # with a question this module is certain to answer.
         elif line.startswith("#fparam set "):
             _, _, name, value = line.split()
             if name in self.parameters:
@@ -281,16 +283,18 @@ def test_entry_is_the_stream_stopping_not_a_banner() -> None:
                 super()._answer(line)
 
     terse = _Terse()
-    with FdiConfigConsole(terse) as console:
+    with FdiConfigConsole(terse, reply_timeout=0.3) as console:
         assert terse.streaming is False
-        assert console.greeting == ""
+        # It printed nothing at all, and it is in config mode: what says so
+        # is that it answers the question every module answers.
+        assert console.get_parameter(IMU_RATE_PARAMETER) is not None
 
     class _Deaf(_FakeModule):
         def _answer(self, line: str) -> None:
             self.commands.append(line)     # prints nothing, keeps streaming
 
-    with pytest.raises(RuntimeError, match="kept streaming through #fconfig"):
-        FdiConfigConsole(_Deaf()).enter()
+    with pytest.raises(RuntimeError, match="not in config mode"):
+        FdiConfigConsole(_Deaf(), reply_timeout=0.3).enter()
 
 
 # -------------------------------------------------------------- the knobs
@@ -595,7 +599,7 @@ def test_a_module_that_takes_its_time_is_still_answering() -> None:
     """
 
     module = _FakeModule(rate_hz=10.0)
-    module.reply_delay = 0.6          # longer than REPLY_QUIET_SECONDS
+    module.reply_delay = 0.6          # a long pause before it starts
     source = _source(module)
     try:
         values = source.tunable_values()

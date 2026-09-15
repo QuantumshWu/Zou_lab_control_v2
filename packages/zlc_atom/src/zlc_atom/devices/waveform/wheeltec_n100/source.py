@@ -312,8 +312,7 @@ def _apply(console, name: str, spelling: str) -> str | None:
     still be had; what the module then DOES is the caller's to check.
     """
 
-    console.set_parameter(name, spelling)
-    reading = console.get_parameter(name)
+    reading = console.set_parameter(name, spelling)
     console.save()
     console.reboot()
     return reading
@@ -1082,12 +1081,7 @@ class WheeltecN100WaveformSource:
             previous = self._settings.get(selected)
             spelling = _spelling_of(selected, value)
 
-            def write(console):
-                return _as_number(console.set_parameter(selected, spelling))
-
-            # The rate's own re-timing is a stronger check than "packets came
-            # back", so for that one it is the check that runs.
-            reading = self._in_console(
+            self._in_console(
                 lambda console: _apply(console, selected, spelling),
                 stream_back=False,
             )
@@ -1126,7 +1120,6 @@ class WheeltecN100WaveformSource:
                         "bench would stamp its records with is not the rate "
                         "the module reports, so neither is recorded"
                     )
-            del reading
             if taken is None:
                 raise TuneRefused(
                     f"the module acknowledged {selected} but would not read it "
