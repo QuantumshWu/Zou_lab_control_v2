@@ -329,7 +329,9 @@ def test_the_rate_is_a_ladder_rung_written_as_its_index() -> None:
 
         assert source.tune(IMU_RATE_PARAMETER, "100") == "100"
         assert module.parameters[IMU_RATE_PARAMETER] == "7", "written as its index"
-        assert module.rate_hz == 100.0
+        assert module.saved[IMU_RATE_PARAMETER] == "7", "and committed to flash"
+        assert module.rate_hz == 100.0, "and live, which takes the restart"
+        assert "#fsave" in module.commands and "#freboot" in module.commands
         assert source.working_point().sample_interval_seconds == pytest.approx(
             0.01, rel=0.05
         )
@@ -362,6 +364,7 @@ def test_the_operator_s_parameters_are_asked_for_by_name() -> None:
 
         assert source.tune("FILT_NOTCH_CENTER_FREQUENCY", 50.0) == 50.0
         assert module.parameters["FILT_NOTCH_CENTER_FREQUENCY"] == "50"
+        assert module.saved["FILT_NOTCH_CENTER_FREQUENCY"] == "50"
         assert source.tune("AID_MAG_V_MAGNETIC", "0") == "0"
 
         before = source.settings_provenance()["settings_epoch"]
@@ -405,10 +408,16 @@ def test_a_write_that_silences_the_module_is_put_back() -> None:
     """
 
     class _MisreadsTheIndex(_FakeModule):
-        """Writes a rung this bench did not intend, and goes quiet."""
+        """One rung this firmware reads as "no output" instead.
+
+        A module that turned EVERY write into rung 0 could not be recovered
+        by anything, since its flash would hold the silence too; what is
+        modelled here is the recoverable case, where writing the previous
+        value back works.
+        """
 
         def _answer(self, line: str) -> None:
-            if line.startswith("#fparam set " + IMU_RATE_PARAMETER):
+            if line == "#fparam set %s 7" % IMU_RATE_PARAMETER:
                 self.commands.append(line)
                 self.parameters[IMU_RATE_PARAMETER] = "0"   # no output
                 self._say(OK)
@@ -434,18 +443,27 @@ def test_every_way_out_of_the_console_is_checked_by_whole_packets() -> None:
     """A parameter write that left the module silent used to report success."""
 
     class _StaysQuiet(_FakeModule):
+        """Acknowledges everything, and never comes back on the air.
+
+        Both ways out matter: a settings write leaves through the restart,
+        and a plain read leaves through #fdeconfig.
+        """
+
         armed = False
 
         def _answer(self, line: str) -> None:
             super()._answer(line)
-            if line == "#fdeconfig" and self.armed:
+            if line in ("#fdeconfig", "y") and self.armed:
                 self.streaming = False
 
     module = _StaysQuiet()
     source = _source(module)
     try:
         module.armed = True
-        with pytest.raises(RuntimeError, match="did not start sending again"):
+        # The write reaches the module; what fails is that it never comes
+        # back on the air, and the driver says so rather than reporting the
+        # write as done.
+        with pytest.raises(RuntimeError, match="stopped it sending"):
             source.tune("FILT_NOTCH_ENABLED", "1")
     finally:
         source.close()
@@ -464,7 +482,7 @@ def test_a_heartbeat_is_not_a_navigating_module() -> None:
 
         def _answer(self, line: str) -> None:
             super()._answer(line)
-            if line == "#fdeconfig" and self.armed:
+            if line in ("#fdeconfig", "y") and self.armed:
                 self.streaming = False
                 self._out += bytes((FRAME_HEAD, 0xF0))   # the documented heartbeat
 
@@ -472,7 +490,10 @@ def test_a_heartbeat_is_not_a_navigating_module() -> None:
     source = _source(module)
     try:
         module.armed = True
-        with pytest.raises(RuntimeError, match="did not start sending again"):
+        # The write reaches the module; what fails is that it never comes
+        # back on the air, and the driver says so rather than reporting the
+        # write as done.
+        with pytest.raises(RuntimeError, match="stopped it sending"):
             source.tune("FILT_NOTCH_ENABLED", "1")
     finally:
         source.close()
@@ -571,5 +592,61 @@ def test_a_module_that_takes_its_time_is_still_answering() -> None:
         assert values[IMU_RATE_PARAMETER] == "10"
         assert "AID_MAG_V_MAGNETIC" in values
         assert "MSG_AHRS" in values
+    finally:
+        source.close()
+
+
+def test_a_slow_console_never_reads_the_previous_reply() -> None:
+    """A reply that arrives late must not be read as the next one's answer.
+
+    The console has no sequence numbers. Returning from a command before
+    its answer arrives puts that answer inside the NEXT command's window,
+    and every command after it reads the previous one's reply -- so every
+    "#fparam get X" comes back about some other parameter and is scored as
+    "this firmware does not have X". That is how Device Control came up
+    empty against a module that was answering every question correctly.
+    """
+
+    module = _FakeModule(rate_hz=10.0)
+    module.reply_delay = 0.9          # far longer than the quiet window
+    source = _source(module)
+    try:
+        values = source.tunable_values()
+        assert values[IMU_RATE_PARAMETER] == "10"
+        assert values["AID_MAG_V_MAGNETIC"] == "1"
+        assert values["FILT_NOTCH_CENTER_FREQUENCY"] == 0.0
+    finally:
+        source.close()
+
+
+def test_a_packet_that_is_off_reads_as_off_and_can_be_switched() -> None:
+    """Only the packet this bench reads is protected from being turned off.
+
+    Turning off a packet nobody reads frees line rate for the one that is
+    read, which at 400 Hz is worth having. Turning off the IMU packet would
+    make the module invisible to discovery, which recognises it by exactly
+    those frames -- so rung 0 is offered for every packet but that one.
+    """
+
+    module = _FakeModule(rate_hz=10.0)
+    source = _source(module)
+    try:
+        fields = {f.metadata.name: f for f in source.tunable_fields()}
+
+        imu = fields[IMU_RATE_PARAMETER]
+        assert "0" not in [c.value for c in imu.metadata.choices], (
+            "the packet this bench finds the module by cannot be turned off"
+        )
+
+        ahrs = fields["MSG_AHRS"]
+        assert ahrs.current == "0", "a packet that is off must not read as a slow one"
+        assert [c.value for c in ahrs.metadata.choices][:3] == ["0", "1", "2"]
+
+        # And it really switches, in hertz both ways.
+        assert source.tune("MSG_AHRS", "10") == "10"
+        assert module.parameters["MSG_AHRS"] == "4", "written as its rung"
+        assert module.saved["MSG_AHRS"] == "4"
+        assert source.tunable_values()["MSG_AHRS"] == "10", "read back as hertz"
+        assert source.tune("MSG_AHRS", "0") == "0"
     finally:
         source.close()

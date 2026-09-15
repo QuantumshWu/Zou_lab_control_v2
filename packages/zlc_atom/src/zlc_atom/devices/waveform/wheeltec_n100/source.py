@@ -172,21 +172,29 @@ OFFERED_PARAMETERS = (
 )
 
 
-def rate_ladder_index(rate_hz: float) -> int:
+def rate_ladder_index(rate_hz: float, *, may_turn_off: bool = False) -> int:
     """The ladder rung an asked-for rate belongs to, or a refusal.
 
     Only the rungs are offerable, so a value off the ladder is refused here
     -- before anything reaches the module -- rather than sent and silently
     read as something else.
+
+    Rung 0 is "no output", and whether it may be asked for depends on the
+    packet: turning off one this bench does not read frees line rate, while
+    turning off the IMU packet makes the module invisible to discovery,
+    which recognises it by exactly those frames.
     """
 
     wanted = float(rate_hz)
     for index, rung in enumerate(PACKET_RATE_LADDER_HZ):
-        if index and abs(rung - wanted) < 1e-6:
+        if abs(rung - wanted) < 1e-6 and (index or may_turn_off):
             return index
-    offered = ", ".join(f"{rung:g}" for rung in PACKET_RATE_LADDER_HZ[1:])
+    offered = ", ".join(
+        "off" if rung == 0 else f"{rung:g}"
+        for rung in (PACKET_RATE_LADDER_HZ if may_turn_off else PACKET_RATE_LADDER_HZ[1:])
+    )
     raise TuneRefused(
-        f"{wanted:g} Hz is not one of this module's rates; it offers {offered} Hz"
+        f"{wanted:g} Hz is not one of this module's rates; it offers {offered}"
     )
 
 
@@ -225,6 +233,35 @@ def _as_number(value: object) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _hertz_of_rung(reading: object) -> float | None:
+    """A ladder index as read back, in hertz, or None if it is not one."""
+
+    index = _as_number(reading)
+    if index is None:
+        return None
+    rung = int(index)
+    if 0 <= rung < len(PACKET_RATE_LADDER_HZ):
+        return PACKET_RATE_LADDER_HZ[rung]
+    return None
+
+
+def _spelling_of(name: str, value: object) -> str:
+    """How one setting's value is written on the wire.
+
+    A rate goes as its rung's index; everything else goes as its number.
+    The settings map holds a rate in hertz, so this is the one place the
+    two spellings meet, and it is used by the write and by the undo alike.
+    """
+
+    if parameter_shape(name)[0] == "rate":
+        return str(
+            rate_ladder_index(
+                float(value), may_turn_off=name.upper() != IMU_RATE_PARAMETER
+            )
+        )
+    return _as_text(value)
 
 
 def _apply(console, name: str, spelling: str) -> str | None:
@@ -409,7 +446,7 @@ _EVIDENCE_BYTES = 96
 
 #: How many times to listen again while an undone module comes back.  A
 #: warm restart takes seconds, and each round is one rate-measuring window.
-_UNDO_LISTEN_ROUNDS = 4
+_UNDO_LISTEN_ROUNDS = 2
 
 #: How long to wait for whole packets after the console closes.  A module
 #: that is going to resume does it at once; this is the margin, not the
@@ -417,8 +454,10 @@ _UNDO_LISTEN_ROUNDS = 4
 _STREAM_BACK_SECONDS = 1.5
 
 #: And after a RESTART, which is what makes a setting take effect.  A real
-#: module came back in 2.5 s; this is that with room to spare.
-_RESTART_SECONDS = 15.0
+#: module came back in 2.5 s; this is that with room to spare, and no more
+#: -- every second here is a second an operator waits on a settings page,
+#: and a second the undo path waits again before it gives up.
+_RESTART_SECONDS = 8.0
 
 #: How many packets the rate is measured over when the port opens, and how
 #: long to wait for them: at the slowest configurable rate (1 Hz) this is
@@ -816,14 +855,15 @@ class WheeltecN100WaveformSource:
         would have read a silent module as a navigating one.
         """
 
-        for attempt in range(2):
+        attempts = 1 if window > _STREAM_BACK_SECONDS else 2
+        for attempt in range(attempts):
             mark = time.monotonic()
             deadline = mark + window
             while time.monotonic() < deadline:
                 if self._last_packet_at >= mark:
                     return
                 time.sleep(0.005)
-            if attempt == 0:
+            if attempt + 1 < attempts:
                 self._park_reader()
                 try:
                     wake_from_config_mode(self._serial)
@@ -879,7 +919,11 @@ class WheeltecN100WaveformSource:
             # Held in hertz, because that is how #fmsg reports it; WRITTEN
             # as the rung's index, which is the module's own spelling.
             current = float(_as_number(value) or 0.0)
-            rungs = PACKET_RATE_LADDER_HZ
+            # Every packet but the one this bench reads may be turned off,
+            # which frees line rate for the one it does.  Turning THAT one
+            # off would make the module invisible to discovery.
+            may_turn_off = name.upper() != IMU_RATE_PARAMETER
+            rungs = PACKET_RATE_LADDER_HZ if may_turn_off else PACKET_RATE_LADDER_HZ[1:]
             return TunableField(
                 metadata=AuthoringField(
                     name,
@@ -888,8 +932,10 @@ class WheeltecN100WaveformSource:
                     None,
                     unit="Hz",
                     choices=tuple(
-                        AuthoringChoice(f"{rung:g}", f"{rung:g} Hz")
-                        for rung in rungs[1:]
+                        AuthoringChoice(
+                            f"{rung:g}", "Off" if rung == 0 else f"{rung:g} Hz"
+                        )
+                        for rung in rungs
                     ),
                     description=(
                         "how often the module sends the packet this bench "
@@ -897,10 +943,9 @@ class WheeltecN100WaveformSource:
                         "not a number of hertz, so only the rungs are offered"
                     ),
                 ),
-                # A module sitting on rung 0 is sending nothing, which this
-                # bench cannot see; show the rung it is on rather than
-                # inventing one.
-                current=f"{current:g}" if current else f"{rungs[1]:g}",
+                # Shown exactly as the module reports it, 0 Hz included:
+                # a packet that is switched off must not read as a slow one.
+                current=f"{current:g}" if (current or may_turn_off) else f"{rungs[0]:g}",
                 live_write=True,
                 dependency_group=(name,),
             )
@@ -988,9 +1033,7 @@ class WheeltecN100WaveformSource:
                 )
             is_rate = parameter_shape(selected)[0] == "rate"
             previous = self._settings.get(selected)
-            spelling = (
-                str(rate_ladder_index(float(value))) if is_rate else _as_text(value)
-            )
+            spelling = _spelling_of(selected, value)
 
             def write(console):
                 return _as_number(console.set_parameter(selected, spelling))
@@ -1007,16 +1050,18 @@ class WheeltecN100WaveformSource:
             except BaseException as silenced:
                 self._put_back(selected, previous, silenced, value)
             if is_rate:
-                # The rate is what stamps the records, so it is measured off
-                # the restarted stream rather than taken from the readback:
-                # the parameter reads back as the rung that was written to
-                # it, which says what was asked for, not what is happening.
-                self._remeasure_rate()
-                taken = (
-                    round(1.0 / self._sample_interval, 1)
-                    if self._sample_interval
-                    else None
-                )
+                # A rate is HELD in hertz, because that is how #fmsg reports
+                # it, and the readback is the rung's index -- so it has to
+                # be turned back into a rate rather than stored as it came.
+                taken = _hertz_of_rung(reading)
+                if selected.upper() == IMU_RATE_PARAMETER:
+                    # And for the packet this bench actually reads, the
+                    # stream itself is the better answer: it says what is
+                    # happening, where the parameter says what was asked
+                    # for.
+                    self._remeasure_rate()
+                    if self._sample_interval:
+                        taken = round(1.0 / self._sample_interval, 1)
             else:
                 taken = reading
             if taken is None:
@@ -1051,7 +1096,12 @@ class WheeltecN100WaveformSource:
         def write_back(console):
             if previous is None:
                 raise RuntimeError("nothing to put back")
-            return _apply(console, name, _as_text(previous))
+            # In the settings a rate is held in HERTZ, because that is how
+            # the module reports it; on the wire it is a rung's index.  The
+            # undo has to spell it the same way the write did, or it asks
+            # for rung 10 when it means 10 Hz -- off the end of the ladder,
+            # which is another way of saying "stop sending".
+            return _apply(console, name, _spelling_of(name, previous))
 
         restored = False
         for undo in (write_back, lambda console: console.reboot()):

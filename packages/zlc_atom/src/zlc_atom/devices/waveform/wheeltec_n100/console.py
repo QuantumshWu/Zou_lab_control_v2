@@ -70,6 +70,11 @@ from zlc_atom.authoring import TuneRefused
 #: like, and therefore what "it is navigating again" looks like.
 FRAME_HEAD = 0xFC
 
+#: A frame header followed by a packet type this module actually sends.
+#: Used to tell the binary stream from a printed reply, which is safe
+#: because every console reply is ASCII and 0xFC is not.
+_STREAM_MARKS = (b"\xfc\x40", b"\xfc\x41", b"\xfc\xf0")
+
 
 #: What the console appends to every command, and what it answers with.
 #: These are the literal bytes the vendor's own FDILinkTool puts on the wire
@@ -170,29 +175,37 @@ class FdiConfigConsole:
     def enter(self) -> None:
         """Stop the stream and take the module into config mode.
 
-        The judgement is the LINE GOING QUIET, which is the manual's own
-        test and the only one that holds across firmwares: a module that
-        entered stops navigating and stops emitting, so whatever it printed
-        on the way in -- ``Config Mode``, ``*#OK``, nothing at all -- the
-        silence that follows is the answer.  A module still streaming after
-        the command never entered.
+        Two things have to be true when this returns, and both are about
+        what the module DID rather than what it printed.
+
+        First, it must have finished saying whatever it says.  Returning
+        while its acknowledgement is still on the way is not a harmless
+        early exit: the console has no sequence numbers, so that reply
+        arrives during the NEXT command and every command afterwards reads
+        the previous one's answer.  A whole settings page then comes back
+        as "this firmware has none of these parameters", which is exactly
+        the symptom that sent me looking here.
+
+        Second, it must have stopped navigating -- and that is read off the
+        line, by looking for frame headers rather than for a banner.  A
+        module still streaming never entered, whatever it printed.
         """
 
         if self._entered:
             return
         self._port.reset_input_buffer()
         self._write("#fconfig")
-        answer, went_quiet = self._read(
-            ENTER_QUIET_SECONDS, silence_ends_it=True
-        )
+        answer, _quiet = self._read(ENTER_QUIET_SECONDS)
         self._entered = True
         self.greeting = answer.decode("ascii", "replace").strip()
-        if not went_quiet:
+        # Whatever it said is said; now look at what it is doing.
+        self._port.reset_input_buffer()
+        listening, _ = self._read(ENTER_QUIET_SECONDS, silence_ends_it=True)
+        if any(mark in listening for mark in _STREAM_MARKS):
             self.close()
             raise RuntimeError(
-                f"the module on this port kept streaming through #fconfig, so "
-                f"it never entered config mode (it said "
-                f"{self.greeting[:120]!r})"
+                "the module on this port kept streaming through #fconfig, so "
+                f"it never entered config mode (it said {self.greeting[:120]!r})"
             )
 
     def close(self) -> None:
@@ -224,6 +237,16 @@ class FdiConfigConsole:
         self._write(command)
         answer = self._read_until_quiet(self._reply_quiet)
         self.last_exchange = (command, answer)
+        if not answer.strip():
+            # Nothing came back within the timeout.  It may still be on its
+            # way, and if it is it will arrive during the next command and
+            # be read as that command's answer -- so this session cannot be
+            # trusted with another question.
+            raise RuntimeError(
+                f"the module did not answer {command!r} within "
+                f"{self._reply_timeout:g} s; the console cannot stay in step "
+                "after that, so this settings session is abandoned"
+            )
         return answer
 
     def _require_console(self, command: str) -> None:
@@ -244,9 +267,20 @@ class FdiConfigConsole:
 
         answer = self.query(f"#fparam get {name}")
         wanted = str(name).upper()
+        others = []
         for found in _PARAM_LINE.finditer(answer):
             if found["name"].upper() == wanted:
                 return found["value"]
+            others.append(found["name"])
+        if others:
+            # It answered with a DIFFERENT parameter's name.  That is not
+            # "no such parameter", it is this conversation having lost its
+            # place, and carrying on would quietly attribute every later
+            # reply to the wrong name.
+            raise RuntimeError(
+                f"asked for {name} and the module answered about "
+                f"{others[0]}: the console has lost step with its replies"
+            )
         return None
 
     def packet_rates(self) -> tuple[tuple[str, int, float], ...]:
