@@ -870,11 +870,15 @@ def warm_fit(
     numba's compiler lock and a parallel entry's first dispatch saturates
     the machine, so run beside a mounting panel this was paid by that
     panel's picture -- six seconds, once, and a live fit past its
-    deadline.  And ON THE PANEL'S OWN WORKER THREAD, because what a batch
-    fit's first run commits is per OpenMP team and a team is per master
-    thread: the render child queues this onto its panel's worker.  A spare
-    child never gets here, which is the other half of the point: the
-    kernels a fit loads are private to the process that loads them.
+    deadline.  And on the child's warm thread, in the first gap of the
+    parent's requests, not queued on the panel's worker: the 170-200 ms
+    here is numba reading the family's kernels off the disk cache, and
+    they are the process's wherever they are read, so on the worker this
+    was a 200-250 ms wait for a frame that landed during it, where beside
+    the worker it is 5-45 ms of shared interpreter on a frame it overlaps
+    -- and in the gap after a panel's first frame it overlaps none.  A
+    spare child never gets here, which is the other half of the point:
+    the kernels a fit loads are private to the process that loads them.
     ``proceed`` is asked once, before the picture, so a child that is
     closing draws nothing.
     """

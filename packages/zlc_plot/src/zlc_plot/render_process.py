@@ -77,6 +77,18 @@ _STOP_WRITER = object()
 #: child whether it is still there.
 _POLL_SLICE_SECONDS = 1.0
 
+#: When a child warms its panel's fit: in the first gap this long in the
+#: parent's requests after the panel's first front, or at the deadline if
+#: the parent never leaves one.  The warm is 170-200 ms of reading kernels
+#: off the disk cache on the child's one interpreter, so a frame that
+#: overlaps it pays 5-45 ms of contention; a shot is half a second or more
+#: apart and the gap after the first frame holds the whole warm.  A
+#: producer at 25 Hz never leaves a gap this long, so the deadline starts
+#: it anyway -- late enough that the panel's own first frames are clean,
+#: soon enough that the operator's first fit finds it done.
+_FIT_WARM_QUIET_SECONDS = 0.1
+_FIT_WARM_DEADLINE_SECONDS = 1.0
+
 
 def _encode_message(message: object) -> bytes:
     """One owned pickle, made where the message is made.
@@ -3015,12 +3027,14 @@ def _render_process_main(connection: Connection, name: str) -> None:
     #: Set by the first create request: from then on the warming below
     #: stops before its next picture, so a panel never queues behind it.
     requested = Event()
-    #: The panel this child was given -- its host, its spec and its storage,
-    #: appended by the create that builds it -- and the moment its first
-    #: front went out.  What the warming goes on to after that is that
-    #: panel's own fit, on that panel's own worker.
-    panel: list[tuple[RasterPlotHost, object, object]] = []
+    #: The panel this child was given -- its spec and its storage, appended
+    #: by the create that builds it -- and the moment its first front went
+    #: out.  What the warming goes on to after that is that panel's own fit,
+    #: in the first gap of the parent's requests, whose last arrival the
+    #: service loop stamps here.
+    panel: list[tuple[object, object]] = []
     shown = Event()
+    last_request = [monotonic()]
 
     def warm() -> None:
         """Pay the process's first-render costs now, before a panel asks.
@@ -3029,17 +3043,22 @@ def _render_process_main(connection: Connection, name: str) -> None:
         panel pays, and runs only until a panel asks: a request shares
         this process's one interpreter with the warming, so a picture
         warmed while a panel waits is a picture the panel waited for.  The
-        second is that panel's own fit, once its first front is out, queued
-        onto the panel's own worker -- a spare child never reaches it,
-        which is what keeps a spare's memory to what every panel needs.  A
+        second is that panel's own fit, once its first front is out and
+        the parent has gone quiet -- a spare child never reaches it, which
+        is what keeps a spare's memory to what every panel needs.  A
         failure in either costs the panel what it would have cost anyway,
         and is written to the child's stderr, not allowed to end the child.
+
+        Masked to the worker team like every other ZLC worker: a panel
+        draws on four threads, so what warms for it warms on four, and a
+        spare warming beside a live board takes four cores, not sixteen.
         """
 
         import gc
 
         from ._kernel_warm import warm_fit, warm_process
 
+        kernels.configure_worker_threads()
         try:
             warm_process(proceed=lambda: not requested.is_set())
         except Exception:  # noqa: BLE001 -- reported, never fatal
@@ -3060,26 +3079,34 @@ def _render_process_main(connection: Connection, name: str) -> None:
         gc.collect()
         gc.freeze()
         gc.set_threshold(20000, 50, 50)
-        # THE PANEL'S OWN FIT, AFTER ITS FIRST FRONT, ON ITS OWN WORKER.
-        # After: loading a kernel holds numba's compiler lock and a parallel
-        # entry's first dispatch saturates the machine, so beside the first
-        # frame it would be paid by the first frame.  On the worker: what a
-        # batch fit's first run commits is per OpenMP team, and a team is
-        # per master thread -- warmed here, the panel's worker met its own
-        # team cold and committed the same again, 33 MB on a sixty-four
-        # cell grid.  Queued on the worker it is the worker's team that
-        # warms, serially with the panel's frames: a frame that lands
-        # during it waits the once, instead of sharing the interpreter.
+        # THE PANEL'S OWN FIT, IN THE FIRST QUIET MOMENT AFTER ITS FIRST
+        # FRONT, ON THIS THREAD.  After, because loading a kernel holds
+        # numba's compiler lock and a parallel entry's first dispatch
+        # saturates the machine: beside the first frame it was paid by the
+        # first frame.  On this thread, because the 170-200 ms it takes is
+        # numba reading the family's kernels off the disk cache and the
+        # kernels are the process's wherever they were read: queued on the
+        # panel's worker instead, a frame that landed during it waited the
+        # whole 200-250 ms.  In a quiet moment, because here it shares the
+        # interpreter with a frame it overlaps -- 5-45 ms on that frame,
+        # measured -- and the gap after a panel's first frame is long
+        # enough to hold it whole; the deadline is for a producer that
+        # never leaves a gap.
         shown.wait()
+        started = monotonic()
+        while not stopping.is_set():
+            quiet = monotonic() - last_request[0]
+            if (
+                quiet >= _FIT_WARM_QUIET_SECONDS
+                or monotonic() - started >= _FIT_WARM_DEADLINE_SECONDS
+            ):
+                break
+            stopping.wait(_FIT_WARM_QUIET_SECONDS - quiet)
         if stopping.is_set():
             return
-        host, spec, storage = panel[0]
+        spec, storage = panel[0]
         try:
-            host.dispatch_control(
-                lambda: warm_fit(
-                    spec, storage=storage, proceed=lambda: not stopping.is_set()
-                )
-            ).result()
+            warm_fit(spec, storage=storage, proceed=lambda: not stopping.is_set())
         except Exception:  # noqa: BLE001 -- reported, never fatal
             traceback.print_exc()
         # As permanent as the pictures' tables: frozen the same way, so the
@@ -3285,7 +3312,7 @@ def _render_process_main(connection: Connection, name: str) -> None:
         # The warming needs the panel's storage along with its spec: which
         # of a fit's kernels an image takes is decided by its dtype.
         snapshot = getattr(plot_input, "snapshot", plot_input)
-        panel.append((host, spec, snapshot_schema(snapshot).value_schema.dtype))
+        panel.append((spec, snapshot_schema(snapshot).value_schema.dtype))
         with state_lock:
             hosts[host_id] = host
             last_front_sequence[host_id] = -1
@@ -3495,6 +3522,7 @@ def _render_process_main(connection: Connection, name: str) -> None:
                     break
                 continue
             message = _receive_message(connection)
+            last_request[0] = monotonic()
             kind = message[0]
             if kind == "input":
                 token, payload, descriptors = message[1:]
