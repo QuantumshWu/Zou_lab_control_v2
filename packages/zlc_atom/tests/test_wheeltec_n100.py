@@ -14,6 +14,8 @@ from __future__ import annotations
 import struct
 import sys
 import threading
+import time
+from collections import deque
 from pathlib import Path
 
 import pytest
@@ -75,6 +77,10 @@ class _FakeModule:
             }
         )
         self.booted_parameters = dict(self.parameters)
+        #: How long the module takes to START answering.  A real one
+        #: takes its time over #fmsg, which prints some 1900 bytes.
+        self.reply_delay = 0.0
+        self._due: deque = deque()
         self.commands: list[str] = []
         self._out = bytearray()
         self._pending = bytearray()
@@ -91,11 +97,13 @@ class _FakeModule:
     @property
     def in_waiting(self) -> int:
         with self._lock:
+            self._release()
             self._fill()
             return len(self._out)
 
     def read(self, size: int = 1) -> bytes:
         with self._lock:
+            self._release()
             self._fill()
             taken = bytes(self._out[:size])
             del self._out[:size]
@@ -124,7 +132,7 @@ class _FakeModule:
     def _fill(self) -> None:
         # Rate zero is the ladder's "No Output": the module goes quiet, which
         # is what makes a wrong rate write dangerous rather than merely wrong.
-        if not self.streaming or self._out or self.rate_hz <= 0.0:
+        if self._due or not self.streaming or self._out or self.rate_hz <= 0.0:
             return
         interval = 1.0 / self.rate_hz
         self._packets += 1
@@ -140,7 +148,15 @@ class _FakeModule:
         self._out += _frame(IMU_PACKET, payload, self._packets & 0xFF)
 
     def _say(self, text: str) -> None:
-        self._out += (text + "\r\n").encode("ascii")
+        self._due.append(
+            (time.monotonic() + self.reply_delay, (text + "\r\n").encode("ascii"))
+        )
+        self._release()
+
+    def _release(self) -> None:
+        now = time.monotonic()
+        while self._due and self._due[0][0] <= now:
+            self._out += self._due.popleft()[1]
 
     def _answer(self, line: str) -> None:
         self.commands.append(line)
@@ -521,5 +537,27 @@ def test_the_module_says_how_fast_its_magnetic_field_actually_moves() -> None:
     try:
         point = source.working_point()
         assert point.settings["magnetic_update_hz"] == pytest.approx(200.0, rel=0.05)
+    finally:
+        source.close()
+
+
+def test_a_module_that_takes_its_time_is_still_answering() -> None:
+    """A pause before a reply is not a reply that will not come.
+
+    "#fmsg" prints some 1900 bytes and takes its time about starting. The
+    console used to give up after its quiet window even when NOTHING had
+    arrived yet, read that as "the module said nothing", and hand back an
+    empty settings list -- which is why Device Control opened empty against
+    a module that was answering perfectly well.
+    """
+
+    module = _FakeModule(rate_hz=10.0)
+    module.reply_delay = 0.6          # longer than REPLY_QUIET_SECONDS
+    source = _source(module)
+    try:
+        values = source.tunable_values()
+        assert values[IMU_RATE_PARAMETER] == "10"
+        assert "AID_MAG_V_MAGNETIC" in values
+        assert "MSG_AHRS" in values
     finally:
         source.close()

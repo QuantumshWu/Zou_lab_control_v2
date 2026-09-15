@@ -182,7 +182,9 @@ class FdiConfigConsole:
             return
         self._port.reset_input_buffer()
         self._write("#fconfig")
-        answer, went_quiet = self._read(ENTER_QUIET_SECONDS)
+        answer, went_quiet = self._read(
+            ENTER_QUIET_SECONDS, silence_ends_it=True
+        )
         self._entered = True
         self.greeting = answer.decode("ascii", "replace").strip()
         if not went_quiet:
@@ -325,7 +327,13 @@ class FdiConfigConsole:
 
         return self._read(quiet)[0].decode("ascii", "replace")
 
-    def _read(self, quiet: float, *, until: bytes | None = None) -> tuple[bytes, bool]:
+    def _read(
+        self,
+        quiet: float,
+        *,
+        until: bytes | None = None,
+        silence_ends_it: bool = False,
+    ) -> tuple[bytes, bool]:
         """What the module said, and whether the line then went quiet.
 
         The console has no general end-of-reply marker: ``#fmsg`` answers
@@ -339,6 +347,13 @@ class FdiConfigConsole:
         did.  ``until`` short-circuits the wait for the one command whose
         reply is followed by the stream starting again, where quiet never
         comes.
+
+        ``silence_ends_it`` is for entering config mode, and ONLY for it:
+        there, hearing nothing IS the answer.  Everywhere else a reply that
+        has not begun yet is not a reply that will not come -- ``#fmsg``
+        prints some 1900 bytes and takes its time about starting -- and
+        treating the pause before it as "the module said nothing" is what
+        emptied Device Control.
         """
 
         deadline = time.monotonic() + self._reply_timeout
@@ -355,9 +370,8 @@ class FdiConfigConsole:
                     return b"".join(chunks), False
             elif chunks and now - last >= quiet:
                 return b"".join(chunks), True
-            elif not chunks and now - last >= quiet:
-                # It never said anything at all, which for a module that
-                # was not streaming is itself quiet.
+            elif silence_ends_it and now - last >= quiet:
+                # Nothing at all, and nothing is what was being asked about.
                 return b"", True
         return b"".join(chunks), False
 
