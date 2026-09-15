@@ -64,6 +64,8 @@ from __future__ import annotations
 import re
 import time
 
+from typing import Callable
+
 from zlc_atom.authoring import TuneRefused
 
 #: The first byte of every FDILink frame -- what the module's stream looks
@@ -83,6 +85,10 @@ _STREAM_MARKS = (b"\xfc\x40", b"\xfc\x41", b"\xfc\x42")
 #: These are the literal bytes the vendor's own FDILinkTool puts on the wire
 #: (``#fconfig\r\n`` / ``#fdeconfig\r\n``), not a guess at the line ending.
 LINE_END = "\r\n"
+
+#: Stands for "the module says it has not got this one", so that a real
+#: absence can be told from "not heard yet" without either being None.
+_ABSENT = object()
 
 #: The module's own refusal token, seen in the ground truth: a bare
 #: ``#fparam`` answers ``*#ERROR``.  It is not a banner being judged -- it
@@ -129,6 +135,11 @@ REPLY_QUIET_SECONDS = 0.35
 #: off mid-line -- five packets read as the module's whole enumeration,
 #: with the remaining twenty-five spilling into the next command.
 LISTING_QUIET_SECONDS = 1.5
+
+#: And the whole listing may take this long to finish arriving.  On the
+#: bench all 1904 bytes were in hand within a second; this is that with
+#: room for a module having a slower day.
+LISTING_TIMEOUT_SECONDS = 12.0
 
 #: ``MSG_IMU=4`` from ``#fparam get``, and ``imu_algn_yaw = 0.000000``
 #: from ``#faxis``: the same shape with and without spaces, which is why
@@ -306,6 +317,11 @@ class FdiConfigConsole:
 
         ``quiet`` lengthens the window for a reply that arrives in batches
         rather than in one go.
+
+        Use this only for commands whose reply carries nothing to identify
+        it by.  Where the reply names itself -- and the two that matter
+        both do -- ``read_until_named`` is the one to use, because clearing
+        the line cannot help a reply that has not been sent yet.
         """
 
         self._require_console(command)
@@ -332,6 +348,60 @@ class FdiConfigConsole:
             )
         return answer
 
+    def read_until_named(
+        self,
+        command: str,
+        identifies: "Callable[[str], object]",
+        *,
+        quiet: float | None = None,
+        timeout: float | None = None,
+    ) -> object:
+        """Send one command and read until its OWN reply arrives.
+
+        This console has no sequence numbers, and clearing the line before a
+        command only discards what has already been delivered -- a reply the
+        module has not sent yet cannot be cleared, and lands in the next
+        command's window.  That is one step of desynchronisation, and from
+        there every command reads the one before it.
+
+        So the reply is not taken on timing at all.  ``identifies`` is
+        handed everything heard so far and returns the answer once it can
+        see it -- the parameter that was asked for, the packet list with the
+        packet every module has in it -- and until then the reading goes on.
+        A reply belonging to an earlier command is read, found not to name
+        this one, and simply kept waiting past.  Nothing is inferred from
+        how long anything took.
+        """
+
+        self._require_console(command)
+        self._port.reset_input_buffer()
+        self._write(command)
+        window = self._reply_quiet if quiet is None else quiet
+        deadline = time.monotonic() + (
+            self._reply_timeout if timeout is None else timeout
+        )
+        heard = ""
+        while time.monotonic() < deadline:
+            chunk, quiet_now = self._read(window)
+            if chunk:
+                heard += chunk.decode("ascii", "replace")
+                self.last_exchange = (command, heard)
+            if not quiet_now:
+                # Still mid-batch.  Asking now would take the first line of
+                # a listing for the whole of it -- the packet every module
+                # has is the FIRST one printed, so a check for its presence
+                # is satisfied before the other twenty-nine arrive, and they
+                # then spill into the next command.
+                continue
+            answer = identifies(heard)
+            if answer is not None:
+                return answer
+        self.last_exchange = (command, heard)
+        raise RuntimeError(
+            f"the module never answered {command!r} in time; it said "
+            f"{heard.strip()[:160]!r}"
+        )
+
     def _require_console(self, command: str) -> None:
         if not self._entered:
             raise RuntimeError(
@@ -342,68 +412,55 @@ class FdiConfigConsole:
     def get_parameter(self, name: str) -> str | None:
         """One named parameter's value, or None when this firmware lacks it.
 
-        Absence is something the module SAYS, not something a regex fails
-        to find.  Recorded: ``#fparam get MSG_IMU`` answers ``MSG_IMU=4``
-        -- the name echoed, no spaces, no ``*#OK`` -- and a name it has not
-        got draws ``*#ERROR``, the same word a bare ``#fparam`` draws.  So
-        there are three answers here and not two: the value, a refusal, or
-        somebody else's reply.
-
-        That third one is the important one.  Reading "no such parameter"
-        off "nothing matched" is what emptied Device Control: any stray
-        text satisfies it -- a leftover packet line, a stale ``*#OK``, a
-        ``(y/n)`` -- and a knob the panel was showing a moment ago vanishes
-        with no reason recorded, while a write that reached the module is
-        reported as refused.
+        Recorded: ``#fparam get MSG_IMU`` answers ``MSG_IMU=4`` -- the name
+        echoed, no spaces, no ``*#OK`` -- and a name it has not got draws
+        ``*#ERROR``.  Both of those identify themselves, which is what lets
+        this wait for its own reply rather than read whichever one turns up.
         """
 
-        answer = self.query(f"#fparam get {name}")
         wanted = str(name).upper()
-        others = []
-        for found in _PARAM_LINE.finditer(answer):
-            if found["name"].upper() == wanted:
-                return found["value"]
-            others.append(found["name"])
-        if not others and ERROR in answer:
+
+        def identifies(heard: str) -> object:
+            for found in _PARAM_LINE.finditer(heard):
+                if found["name"].upper() == wanted:
+                    return found["value"]
+            # The module's own word for "not present" -- but only once
+            # nothing else is still owed, since an earlier command's reply
+            # could carry it.
+            if ERROR in heard and not _PARAM_LINE.search(heard):
+                return _ABSENT
             return None
-        raise RuntimeError(
-            f"asked for {name} and the module answered "
-            f"{answer.strip()[:120]!r}: the console has lost step with its "
-            "replies"
-        )
+
+        answer = self.read_until_named(f"#fparam get {name}", identifies)
+        return None if answer is _ABSENT else str(answer)
 
     def packet_rates(self) -> tuple[tuple[str, int, float], ...]:
         """Every packet this module has, as ``(name, id, hertz)``.
 
         The module enumerating itself.  It is also the only readback there
-        is for a rate: the parameter holding one reads back as the ladder
-        index that was just written to it, which proves nothing, while this
-        prints the hertz the module will actually send at.
+        is for a rate, since the parameter holding one reads back as the
+        ladder index that was written to it.
 
-        Which is why the answer has to be shown to BE this command's.  An
-        N100 lists ``MSG_IMU`` -- that packet is what discovery finds it by,
-        so a module that is on this port has one.  Text that does not list
-        it therefore says nothing about the module's packets; it says this
-        console is reading the wrong command's reply, and an empty rate list
-        handed back from here is a settings page that quietly loses every
-        rate control and a write that is told it was refused after it
-        reached flash.  ``#fparam get`` has always been checked this way,
-        against the name it echoes.  This is the same check, against the
-        one name the module cannot fail to print.
+        The listing arrives in batches on a real module, so it is read until
+        the packet EVERY N100 has is in it -- which both identifies the
+        reply as this command's and proves the listing is not a fragment.
         """
 
-        answer = self.query("#fmsg", quiet=LISTING_QUIET_SECONDS)
-        found = tuple(
-            (match["name"], int(match["id"], 16), float(match["hz"]))
-            for match in _PACKET_LINE.finditer(answer)
-        )
-        if not any(name.upper() == IMU_PACKET_NAME for name, _id, _hz in found):
-            raise RuntimeError(
-                f"#fmsg did not list {IMU_PACKET_NAME}, which every N100 has, "
-                "so this is not #fmsg's answer and the console has lost step "
-                f"with its replies; it said {answer.strip()[:200]!r}"
+        def identifies(heard: str) -> object:
+            found = tuple(
+                (match["name"], int(match["id"], 16), float(match["hz"]))
+                for match in _PACKET_LINE.finditer(heard)
             )
-        return found
+            if any(name.upper() == IMU_PACKET_NAME for name, _id, _hz in found):
+                return found
+            return None
+
+        return self.read_until_named(
+            "#fmsg",
+            identifies,
+            quiet=LISTING_QUIET_SECONDS,
+            timeout=LISTING_TIMEOUT_SECONDS,
+        )
 
     def set_parameter(self, name: str, value: str) -> str:
         """Write one named parameter and answer with what it reads back as.
@@ -575,6 +632,7 @@ __all__ = [
     "FdiConfigConsole",
     "IMU_PACKET_NAME",
     "LISTING_QUIET_SECONDS",
+    "LISTING_TIMEOUT_SECONDS",
     "LINE_END",
     "OK",
     "printed_lines",
