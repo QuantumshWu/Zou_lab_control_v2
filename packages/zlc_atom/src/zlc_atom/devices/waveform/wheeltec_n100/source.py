@@ -136,6 +136,60 @@ MAX_PACKET_RATE_HZ = 400.0
 #: and are deliberately not offered.
 OPERATOR_PARAMETER_PREFIXES = ("FILT_", "AID_")
 
+#: How this firmware spells a packet's rate: an INDEX into this ladder,
+#: written to a named parameter, never a number of hertz.  The manual's
+#: ``#fmsg 40 100`` is answered ``*#OK`` and changes nothing; the vendor's
+#: own parameter cache gives ``MSG_IMU`` the values 0..9 against exactly
+#: these rungs, and its ground station writes that parameter.  Index 0 is
+#: "no output" and is deliberately not offered: this bench recognises the
+#: module by its packets, so a module told to stop sending them is a module
+#: it can no longer find.
+PACKET_RATE_LADDER_HZ = (0.0, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 400.0)
+
+#: The parameter that holds the rate of the one packet this driver reads.
+IMU_RATE_PARAMETER = "MSG_IMU"
+
+#: The settings offered to an operator, tried BY NAME because this
+#: firmware's bare ``#fparam`` lists nothing either.  A name the module does
+#: not answer to is simply not offered, so this is a menu to try rather than
+#: a claim about what any particular firmware has.  The rate is first; the
+#: filters shape what the sensors report, which is why a mains notch
+#: matters for a magnetic measurement; the AID switches decide which sensors
+#: the attitude solution fuses.  Factory calibration sits in the same
+#: namespace and is deliberately absent.
+OFFERED_PARAMETERS = (
+    IMU_RATE_PARAMETER,
+    "FILT_LPF_ENABLED",
+    "FILT_LPF_CUTOFF_FREQUENCY",
+    "FILT_NOTCH_ENABLED",
+    "FILT_NOTCH_CENTER_FREQUENCY",
+    "FILT_NOTCH_CUTOFF_FREQUENCY",
+    "FILT_NOTCH2_ENABLED",
+    "FILT_NOTCH2_CENTER_FREQUENCY",
+    "FILT_NOTCH2_CUTOFF_FREQUENCY",
+    "AID_MAG_V_MAGNETIC",
+    "AID_INIT_YAW_USE_MAG",
+)
+
+
+def rate_ladder_index(rate_hz: float) -> int:
+    """The ladder rung an asked-for rate belongs to, or a refusal.
+
+    Only the rungs are offerable, so a value off the ladder is refused here
+    -- before anything reaches the module -- rather than sent and silently
+    read as something else.
+    """
+
+    wanted = float(rate_hz)
+    for index, rung in enumerate(PACKET_RATE_LADDER_HZ):
+        if index and abs(rung - wanted) < 1e-6:
+            return index
+    offered = ", ".join(f"{rung:g}" for rung in PACKET_RATE_LADDER_HZ[1:])
+    raise TuneRefused(
+        f"{wanted:g} Hz is not one of this module's rates; it offers {offered} Hz"
+    )
+
+
 #: A parameter's NAME says what kind of value it holds.  The module gives
 #: every one of them as a bare decimal, which would put a frequency and a
 #: switch in the same nondescript number box; the vendor's naming is
@@ -153,37 +207,13 @@ def parameter_shape(name: str) -> tuple[str, str | None]:
     """The ``(kind, unit)`` a named parameter should be offered as."""
 
     upper = str(name).upper()
+    if upper == IMU_RATE_PARAMETER:
+        return "rate", "Hz"
     if upper.endswith(_SWITCH_SUFFIX) or upper.startswith(_SWITCH_PREFIX):
         return "switch", None
     if upper.endswith(_FREQUENCY_SUFFIX):
         return "float", "Hz"
     return "float", None
-
-
-#: How a packet's rate is named among the settings.  The module's own packet
-#: id is in the name, because the NAME differs between firmwares while the
-#: id is the protocol's.
-_PACKET_RATE_PREFIX = "packet_"
-_PACKET_RATE_SUFFIX = "_rate_hz"
-
-
-def packet_rate_field(packet_id: int) -> str:
-    """The settings name for one packet's transmit rate."""
-
-    return f"{_PACKET_RATE_PREFIX}{int(packet_id):02x}{_PACKET_RATE_SUFFIX}"
-
-
-def packet_id_of(name: str) -> int | None:
-    """The packet a settings name belongs to, or None for a named parameter."""
-
-    text = str(name)
-    if not (text.startswith(_PACKET_RATE_PREFIX) and text.endswith(_PACKET_RATE_SUFFIX)):
-        return None
-    digits = text[len(_PACKET_RATE_PREFIX):-len(_PACKET_RATE_SUFFIX)]
-    try:
-        return int(digits, 16)
-    except ValueError:
-        return None
 
 
 def _as_number(value: object) -> float | None:
@@ -793,78 +823,75 @@ class WheeltecN100WaveformSource:
         self._hear_the_module()
 
     def _read_settings(self, console) -> dict[str, object]:
-        """Everything this module has: packet rates and parameters.
+        """Every offered parameter this module actually answers to.
 
-        Asked for first, measured where the answer does not come.  A module
-        whose ``#fmsg`` lists nothing still has an IMU packet -- this driver
-        is reading it -- and its rate is the one already timed off the
-        stream, so the knob that matters is offered either way.
+        Asked by name: this firmware's bare ``#fparam`` lists nothing, just
+        as its bare ``#fmsg`` lists no packets, so the only way to find out
+        what it has is to ask for each one.  What it will not answer to, it
+        does not have, and is not offered.
         """
 
         settings: dict[str, object] = {}
-        listed = console.packet_rates()
-        for packet in listed:
-            settings[packet_rate_field(packet.packet_id)] = packet.rate_hz
-        imu = packet_rate_field(IMU_PACKET)
-        if imu not in settings:
-            interval = self._sample_interval
-            if interval:
-                settings[imu] = round(1.0 / interval, 1)
-            self._packets_listed = False
-        else:
-            self._packets_listed = True
         for name in self._parameter_names(console):
-            reading = console.get_parameter(name)
-            number = _as_number(reading)
-            if number is not None:
-                settings[name] = number
+            reading = _as_number(console.get_parameter(name))
+            if reading is not None:
+                settings[name] = reading
+        self._packets_listed = IMU_RATE_PARAMETER in settings
         return settings
 
     def _parameter_names(self, console) -> tuple[str, ...]:
-        """The parameters worth an operator's attention, as the module lists them.
+        """The parameters to try, plus any the module volunteers.
 
-        The module is asked to print its parameters and the answer is
-        filtered by PREFIX, not against a list of names: names differ
-        between firmwares -- the protocol manual's own worked example names
-        one that the shipped parameter tables do not have -- so a pinned
-        list would be a second source of truth that a firmware revision
-        falsifies.  The prefixes say which KINDS of setting belong to the
-        operator: the digital filters that shape what the sensors report,
-        and the fusion switches that decide which sensors the attitude
-        solution uses.
+        A firmware that DOES answer a bare ``#fparam`` gets its own list
+        read as well, filtered to the kinds that belong to an operator, so
+        a module with more than this bench knows about is not cut down to
+        it.
         """
 
-        answer = console.query("#fparam")
-        found: list[str] = []
+        found = list(OFFERED_PARAMETERS)
+        try:
+            answer = console.query("#fparam")
+        except Exception:  # noqa: BLE001 -- the tried names still stand
+            return tuple(found)
         for line in answer.splitlines():
             name = line.split("=")[0].strip()
-            if name.upper().startswith(OPERATOR_PARAMETER_PREFIXES) and name not in found:
+            if (
+                name.upper().startswith(OPERATOR_PARAMETER_PREFIXES)
+                and name not in found
+            ):
                 found.append(name)
         return tuple(found)
 
     def _field_for(self, name: str, value: object) -> TunableField:
-        packet = packet_id_of(name)
-        if packet is not None:
+        kind, unit = parameter_shape(name)
+        if kind == "rate":
+            index = int(_as_number(value) or 0)
+            rungs = PACKET_RATE_LADDER_HZ
+            current = rungs[index] if 0 <= index < len(rungs) else 0.0
             return TunableField(
                 metadata=AuthoringField(
                     name,
-                    "float",
-                    f"Packet 0x{packet:02X} rate",
+                    "choice",
+                    "Packet rate",
                     None,
-                    minimum=1.0,
-                    maximum=MAX_PACKET_RATE_HZ,
                     unit="Hz",
+                    choices=tuple(
+                        AuthoringChoice(f"{rung:g}", f"{rung:g} Hz")
+                        for rung in rungs[1:]
+                    ),
                     description=(
-                        "how often the module sends this packet.  The rate "
-                        "that takes effect is the module's own rung, measured "
-                        "off the stream rather than read from a table here"
+                        "how often the module sends the packet this bench "
+                        "reads. The module takes a rung of its own ladder, "
+                        "not a number of hertz, so only the rungs are offered"
                     ),
                 ),
-                current=float(value),
+                # A module sitting on rung 0 is sending nothing, which this
+                # bench cannot see; show the rung it is on rather than
+                # inventing one.
+                current=f"{current:g}" if current else f"{rungs[1]:g}",
                 live_write=True,
                 dependency_group=(name,),
             )
-        kind, unit = parameter_shape(name)
         if kind == "switch":
             return TunableField(
                 metadata=AuthoringField(
@@ -878,7 +905,7 @@ class WheeltecN100WaveformSource:
                     ),
                     description="a module switch, read and written with #fparam",
                 ),
-                current=str(int(float(value))),
+                current=str(int(float(_as_number(value) or 0))),
                 live_write=True,
                 dependency_group=(name,),
             )
@@ -892,7 +919,7 @@ class WheeltecN100WaveformSource:
                 unit=unit,
                 description="a module parameter, read and written with #fparam",
             ),
-            current=float(value),
+            current=float(_as_number(value) or 0.0),
             live_write=True,
             dependency_group=(name,),
         )
@@ -933,10 +960,10 @@ class WheeltecN100WaveformSource:
     def tune(self, name: str, value: object) -> object:
         """Write one setting and answer with what the module read back.
 
-        The module is the authority on what it took: a rate its firmware
-        does not offer comes back as the nearest rung it does offer, and
-        that returned number -- not the request -- is what the bench
-        records.
+        The rate is the one that has to be watched: it is written as a
+        ladder INDEX, and a module that took an index this driver did not
+        intend can stop sending altogether.  So it is written, re-timed off
+        the stream, and undone if the stream does not come back.
         """
 
         selected = str(name)
@@ -947,52 +974,36 @@ class WheeltecN100WaveformSource:
                     f"this module has no setting {selected!r}; it offers "
                     f"{offered or 'none -- its configuration console did not answer'}"
                 )
-            packet = packet_id_of(selected)
+            is_rate = selected.upper() == IMU_RATE_PARAMETER
+            previous = self._settings.get(selected)
+            spelling = (
+                str(rate_ladder_index(float(value))) if is_rate else _as_text(value)
+            )
 
             def write(console):
-                if packet is not None:
-                    return console.set_packet_rate(packet, float(value))
-                return _as_number(console.set_parameter(selected, _as_text(value)))
+                return _as_number(console.set_parameter(selected, spelling))
 
-            previous = self._settings.get(selected)
-            # The IMU rate's own re-measurement below is a STRONGER check than
-            # "packets came back" -- it has to time them too -- so it is the
-            # one that runs, and it is the one whose failure triggers the undo.
-            taken = self._in_console(write, stream_back=packet != IMU_PACKET)
+            # The rate's own re-timing is a stronger check than "packets came
+            # back", so for that one it is the check that runs.
+            taken = self._in_console(write, stream_back=not is_rate)
             self._settings_epoch += 1
-            if packet == IMU_PACKET:
-                # This is the rate the records are stamped at, so it is
-                # measured off the stream again rather than believed -- and
-                # the measurement is what stands when the module would not
-                # say what it took.  Nothing about this knob depends on the
-                # module describing itself.
-                #
-                # It is also the only check that a write did not SILENCE the
-                # module.  The archive does not settle what #fmsg's second
-                # argument is: the manual says literal hertz, while the
-                # vendor's own parameter tables spell rates as ladder
-                # indices where 0 means "no output".  A wrong spelling can
-                # therefore turn the packet off, and this bench must not
-                # leave an operator's module mute because it guessed.
+            if is_rate:
                 try:
                     self._remeasure_rate()
                 except BaseException as silenced:
-                    self._put_back(packet, previous, silenced, value)
-                if taken is None and self._sample_interval:
-                    taken = round(1.0 / self._sample_interval, 1)
+                    self._put_back(selected, previous, silenced, value)
+                if taken is None:
+                    taken = float(spelling)
             if taken is None:
                 raise TuneRefused(
-                    f"the module acknowledged {selected} but would not say what "
-                    "it set, and nothing about it can be measured, so this bench "
-                    "will not record a value it did not read"
+                    f"the module acknowledged {selected} but would not read it "
+                    "back, so this bench will not record a value it did not read"
                 )
             self._settings[selected] = taken
-            # Answer in the field's own spelling: a switch reads back as one
-            # of its choices, not as the number the console printed.
             return self._field_for(selected, taken).current
 
     def _put_back(
-        self, packet: int, previous: object, silenced: BaseException, wanted: object
+        self, name: str, previous: object, silenced: BaseException, wanted: object
     ) -> None:
         """Undo a write that stopped the module sending, and say what happened.
 
@@ -1007,7 +1018,7 @@ class WheeltecN100WaveformSource:
         def write_back(console):
             if previous is None:
                 raise RuntimeError("nothing to put back")
-            return console.set_packet_rate(packet, float(previous))
+            return console.set_parameter(name, _as_text(previous))
 
         restored = False
         for undo in (write_back, lambda console: console.reboot()):
@@ -1027,16 +1038,14 @@ class WheeltecN100WaveformSource:
         said = self._last_exchange[1].strip()
         if restored:
             raise TuneRefused(
-                f"asking this module for {wanted} stopped it sending packet "
-                f"0x{packet:02X}; it has been put back and is streaming again. "
-                f"The module answered {said[:120]!r}. This firmware's #fmsg may "
-                "take a ladder index rather than a rate in hertz, in which case "
-                "a number out of range reads as 'no output'."
+                f"asking this module for {wanted} stopped it sending; "
+                f"{name} has been put back and it is streaming again. The "
+                f"module answered {said[:120]!r}."
             )
         raise RuntimeError(
-            f"asking this module for {wanted} stopped it sending packet "
-            f"0x{packet:02X}, and neither writing the old value back nor "
-            f"restarting brought the stream back. The module answered "
+            f"asking this module for {wanted} stopped it sending, and "
+            f"neither writing {name} back nor restarting brought the stream "
+            f"back. The module answered "
             f"{said[:120]!r}. Power-cycle the module: nothing was written to "
             "its flash, so a cold start restores the configuration it had."
         ) from silenced
@@ -1146,7 +1155,11 @@ def discover_n100(*, baud: int = DEFAULT_BAUD, listen_seconds: float = 0.5) -> t
 
 __all__ = [
     "DEFAULT_BAUD",
+    "IMU_RATE_PARAMETER",
+    "OFFERED_PARAMETERS",
+    "PACKET_RATE_LADDER_HZ",
     "parameter_shape",
+    "rate_ladder_index",
     "MAX_PACKET_RATE_HZ",
     "N100_OUTPUTS",
     "OPERATOR_PARAMETER_PREFIXES",
@@ -1155,8 +1168,6 @@ __all__ = [
     "discover_n100",
     "drain_imu_samples",
     "header_crc8",
-    "packet_id_of",
-    "packet_rate_field",
     "payload_crc16",
     "wake_from_config_mode",
 ]

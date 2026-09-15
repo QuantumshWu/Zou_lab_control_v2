@@ -22,11 +22,13 @@ payload lengths, so neither can be written from documentation alone.  And
 entering the console silences the stream, so the reader that owns this port
 has to be parked first: a capture cannot be running while a knob moves.
 
-Nothing here decides what the module's legal values are.  ``#fmsg`` with no
-argument makes the module list its own packets and their current rates, and
-every write is read back, so the rate ladder, the packet set and the
-refusals are all the module's answers rather than a table in this file that
-a firmware revision would quietly falsify.
+Everything is a named parameter.  ``#fmsg``, which the manual documents as
+THE way to set a packet's rate, answers ``*#OK`` on this firmware and
+changes nothing -- a rate asked for in hertz simply does not arrive.  What
+does arrive is ``#fparam set MSG_IMU <n>``, where ``n`` indexes the rate
+ladder the vendor's own parameter tables spell out.  So there is one
+mechanism here, not two: read a parameter, write a parameter, and let the
+caller check the result against the stream.
 
 And nothing here judges the module by a BANNER.  The manual prints
 ``Config Mode`` as the reply to ``#fconfig``; a real one answers ``*#OK``.
@@ -39,7 +41,6 @@ with its serial line is.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
 import time
 
@@ -88,29 +89,8 @@ ENTER_QUIET_SECONDS = 0.25
 #: to be fast pass their own timeout to the console instead.
 REPLY_QUIET_SECONDS = 0.35
 
-#: ``IMU        [40]  100.0Hz`` -- one packet the module can emit, with its
-#: id and its current rate.  Searched for across the whole reply rather than
-#: matched per line: the manual's own transcript of this reply reaches us
-#: through a PDF table, so whether the module puts the three parts on one
-#: line or three is not something the archive can settle.  The three parts
-#: in that order are the reply either way.
-_RATE_ENTRY = re.compile(
-    r"(?P<name>[A-Za-z][A-Za-z0-9_]*)\s*\[\s*(?P<id>[0-9A-Fa-f]{1,2})\s*\]\s*"
-    r"(?P<hz>[0-9]+(?:\.[0-9]+)?)\s*Hz",
-    re.IGNORECASE,
-)
-
 #: ``imu_algn_yaw = 30.000000`` -- how the console prints one named value.
 _PARAM_LINE = re.compile(r"^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<value>\S+)")
-
-
-@dataclass(frozen=True)
-class PacketRate:
-    """One packet the module can emit, and how often it is emitting it."""
-
-    name: str
-    packet_id: int
-    rate_hz: float
 
 
 class FdiConfigConsole:
@@ -218,45 +198,6 @@ class FdiConfigConsole:
                 f"{command!r} is a config-mode command and this console is not "
                 "in config mode"
             )
-
-    def packet_rates(self) -> tuple[PacketRate, ...]:
-        """Every packet this module says it emits, which may be none.
-
-        The manual says the bare ``#fmsg`` prints every supported packet
-        with its id and rate.  A real module answers ``*#OK`` and lists
-        nothing.  An empty list is therefore a fact about this firmware and
-        not a fault: the caller falls back to what it can MEASURE, which
-        for the one packet this driver reads is the stream itself.  What
-        the module actually said is on ``last_exchange`` either way.
-        """
-
-        answer = self.query("#fmsg")
-        return tuple(
-            PacketRate(found["name"], int(found["id"], 16), float(found["hz"]))
-            for found in _RATE_ENTRY.finditer(answer)
-        )
-
-    def set_packet_rate(self, packet_id: int, rate_hz: float) -> float | None:
-        """Ask for a rate; answer with the rate the module ended up at.
-
-        The module may echo the new setting, or it may simply acknowledge --
-        this firmware answers a bare ``#fmsg`` with nothing but ``*#OK``, so
-        an echo cannot be required.  A write whose success was judged by a
-        reply string would report a rate that WAS set as a refusal.  So the
-        echo is read if it comes, the module is asked again if it does not,
-        and ``None`` means neither told us -- which the caller answers by
-        measuring the stream, the only reading that was never in doubt.
-        """
-
-        wanted = float(rate_hz)
-        answer = self.query(f"#fmsg {packet_id:02x} {wanted:g}")
-        for found in _RATE_ENTRY.finditer(answer):
-            if int(found["id"], 16) == int(packet_id):
-                return float(found["hz"])
-        for packet in self.packet_rates():
-            if packet.packet_id == int(packet_id):
-                return packet.rate_hz
-        return None
 
     def get_parameter(self, name: str) -> str | None:
         """One named parameter's value, or None when this firmware lacks it.
@@ -375,10 +316,10 @@ class FdiConfigConsole:
 
 __all__ = [
     "CONFIG_BANNER",
+    "CONFIRM_PROMPT",
     "ENTER_QUIET_SECONDS",
     "FdiConfigConsole",
     "LINE_END",
     "OK",
-    "PacketRate",
     "REPLY_QUIET_SECONDS",
 ]

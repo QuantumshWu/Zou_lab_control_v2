@@ -1,4 +1,13 @@
-"""The N100's settings: the module is asked, and the module's answer wins."""
+"""The N100's settings: what the module DOES is the only thing believed.
+
+Every fake here answers the way the real module was observed to on the
+bench, which is not the way its manual says.  It replies ``*#OK`` to
+``#fconfig`` rather than ``Config Mode``; it replies ``*#OK`` to ``#fmsg``
+in both forms and changes nothing; it replies ``*#OK`` to a bare
+``#fparam`` and lists nothing.  What it does answer is
+``#fparam get/set <NAME>``, and its packet rate lives in ``MSG_IMU`` as an
+index into a ladder rather than a number of hertz.
+"""
 
 from __future__ import annotations
 
@@ -14,20 +23,22 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from zlc_atom.authoring import TuneRefused
-from zlc_atom.devices.waveform.wheeltec_n100.console import CONFIRM_PROMPT, OK
-from zlc_atom.devices.waveform.wheeltec_n100.source import _listen_for_packets
 from zlc_atom.devices.waveform.wheeltec_n100 import (
     FRAME_HEAD,
-    wake_from_config_mode,
     FRAME_TAIL,
     IMU_PACKET,
+    IMU_RATE_PARAMETER,
+    PACKET_RATE_LADDER_HZ,
     FdiConfigConsole,
     WheeltecN100Config,
     WheeltecN100WaveformSource,
     header_crc8,
-    packet_rate_field,
     payload_crc16,
+    rate_ladder_index,
+    wake_from_config_mode,
 )
+from zlc_atom.devices.waveform.wheeltec_n100.console import CONFIRM_PROMPT, OK
+from zlc_atom.devices.waveform.wheeltec_n100.source import _listen_for_packets
 
 
 def _frame(kind: int, payload: bytes, serial: int = 0) -> bytes:
@@ -42,32 +53,19 @@ def _frame(kind: int, payload: bytes, serial: int = 0) -> bytes:
 
 
 class _FakeModule:
-    """An N100 as its serial port sees it: a stream, and a console.
-
-    It streams IMU frames until ``#fconfig`` arrives, answers the console in
-    the module's own formats, and starts streaming again on ``#fdeconfig``.
-    Rates are quantized to the ladder the real firmware offers, so a request
-    off the ladder comes back as the rung it actually took -- which is the
-    whole reason the driver reads its writes back.
-    """
-
-    LADDER = (0.0, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 400.0)
+    """An N100 as its serial port sees it: a stream, and a console."""
 
     def __init__(
         self, *, rate_hz: float = 100.0, parameters=None, magnetic_repeat: int = 1
     ) -> None:
         self._lock = threading.RLock()
         self.streaming = True
-        #: How many packets carry each magnetic reading -- a magnetometer
-        #: running slower than the packet rate repeats itself this many
-        #: times, which is exactly what the driver counts.
         self.magnetic_repeat = int(magnetic_repeat)
-        self.rates = {IMU_PACKET: rate_hz, 0x41: 100.0}
-        self.names = {IMU_PACKET: "IMU", 0x41: "AHRS"}
         self.parameters = dict(
             parameters
             if parameters is not None
             else {
+                IMU_RATE_PARAMETER: str(PACKET_RATE_LADDER_HZ.index(rate_hz)),
                 "FILT_LPF_ENABLED": "0",
                 "FILT_NOTCH_ENABLED": "0",
                 "FILT_NOTCH_CENTER_FREQUENCY": "0",
@@ -75,12 +73,23 @@ class _FakeModule:
                 "IMU_ACC_SCALE_X": "1.000000",
             }
         )
-        self.booted_rates = dict(self.rates)
+        self.booted_parameters = dict(self.parameters)
         self.commands: list[str] = []
         self._out = bytearray()
         self._pending = bytearray()
         self._packets = 0
         self.closed = False
+
+    @property
+    def rate_hz(self) -> float:
+        """The rate the ladder index names; index 0 is no output at all."""
+
+        try:
+            index = int(float(self.parameters.get(IMU_RATE_PARAMETER, 0)))
+        except ValueError:
+            return 0.0
+        rungs = PACKET_RATE_LADDER_HZ
+        return rungs[index] if 0 <= index < len(rungs) else 0.0
 
     # ------------------------------------------------------------- serial
     @property
@@ -119,9 +128,9 @@ class _FakeModule:
     def _fill(self) -> None:
         # Rate zero is the ladder's "No Output": the module goes quiet, which
         # is what makes a wrong rate write dangerous rather than merely wrong.
-        if not self.streaming or self._out or self.rates[IMU_PACKET] <= 0.0:
+        if not self.streaming or self._out or self.rate_hz <= 0.0:
             return
-        interval = 1.0 / self.rates[IMU_PACKET]
+        interval = 1.0 / self.rate_hz
         self._packets += 1
         step = float((self._packets - 1) // self.magnetic_repeat)
         payload = struct.pack(
@@ -143,34 +152,28 @@ class _FakeModule:
             self.streaming = False
             self._out.clear()
             # What a REAL module answers -- not the "Config Mode" the manual
-            # prints.  Judging entry by that banner is what broke on the
+            # prints. Judging entry by that banner is what broke on the
             # bench; entry is the stream stopping.
             self._say(OK)
         elif line == "#fdeconfig":
             self.streaming = True
-            self._say("*#OK")
+            self._say(OK)
         elif line == "#fsave":
-            self._say("*#OK")
+            self._say(OK)
         elif line == "#freboot":
             self._say(CONFIRM_PROMPT)
         elif line == "y":
             # A restart discards everything not written to flash, which is
             # what makes it the undo that needs no spelling.
-            self.rates = dict(self.booted_rates)
+            self.parameters = dict(self.booted_parameters)
             self.streaming = True
-        elif line == "#fmsg":
-            for packet, rate in self.rates.items():
-                self._say(f"{self.names[packet]}      [{packet:02X}]   {rate:.1f}Hz")
-        elif line.startswith("#fmsg "):
-            _, which, wanted = line.split()
-            packet = int(which, 16)
-            asked = float(wanted)
-            took = min(self.LADDER, key=lambda rung: abs(rung - asked))
-            self.rates[packet] = took
-            self._say(f"{self.names[packet]}      [{packet:02X}]   {took:.1f}Hz")
+        elif line.startswith("#fmsg"):
+            # The real module acknowledges this and changes NOTHING, in
+            # either form. The manual says otherwise; the bench does not.
+            self._say(OK)
         elif line == "#fparam":
-            for name, value in self.parameters.items():
-                self._say(f"{name} = {value}")
+            # And it does not enumerate its parameters either.
+            self._say(OK)
         elif line.startswith("#fparam get "):
             name = line.split()[-1]
             if name in self.parameters:
@@ -181,7 +184,7 @@ class _FakeModule:
             _, _, name, value = line.split()
             if name in self.parameters:
                 self.parameters[name] = value
-            self._say("*#OK")
+            self._say(OK)
         else:
             self._say("*#ERR")
 
@@ -193,22 +196,13 @@ def _source(module: _FakeModule) -> WheeltecN100WaveformSource:
     )
 
 
-def test_the_console_asks_the_module_what_it_can_do() -> None:
-    """The packet list and the rate ladder are the module's, not this code's."""
+# ------------------------------------------------------------------ console
+def test_the_console_is_this_bench_s_own_text_link() -> None:
+    """Entering is the stream stopping; every value comes back read."""
 
     module = _FakeModule()
     with FdiConfigConsole(module) as console:
         assert module.streaming is False, "config mode stops the stream"
-        listed = console.packet_rates()
-        assert {packet.packet_id: packet.rate_hz for packet in listed} == {
-            IMU_PACKET: 100.0,
-            0x41: 100.0,
-        }
-        assert [packet.name for packet in listed] == ["IMU", "AHRS"]
-
-        # A rate off the module's ladder comes back as the rung it took.
-        assert console.set_packet_rate(IMU_PACKET, 200.0) == 200.0
-        assert console.set_packet_rate(IMU_PACKET, 137.0) == 100.0
 
         assert console.get_parameter("AID_MAG_V_MAGNETIC") == "1"
         assert console.get_parameter("NO_SUCH_PARAMETER") is None
@@ -225,211 +219,16 @@ def test_the_console_asks_the_module_what_it_can_do() -> None:
             callable(getattr(console, name, None))
             for name in ScpiLink.__protocol_attrs__
         ), sorted(ScpiLink.__protocol_attrs__)
-    assert module.streaming is True, "leaving config mode puts it back on the air"
+    assert module.streaming is True, "leaving puts it back on the air"
     assert module.commands[0] == "#fconfig" and module.commands[-1] == "#fdeconfig"
 
 
-def test_device_control_moves_the_packet_rate_and_the_records_follow() -> None:
-    """Raising the IMU rate is one write, and the sample axis is re-measured.
-
-    The record's sample interval is what the dataset's time axis is built
-    from, so a rate change that left the old interval in place would date
-    every later shot by the rate it is no longer running at.
-    """
-
-    module = _FakeModule(rate_hz=10.0)
-    source = _source(module)
-    try:
-        rate_field = packet_rate_field(IMU_PACKET)
-        values = source.tunable_values()
-        assert values[rate_field] == 10.0
-        assert source.working_point().sample_interval_seconds == pytest.approx(0.1)
-
-        # Only the operator's kinds of parameter are offered; the factory's
-        # calibration coefficients sitting beside them are not.
-        assert "AID_MAG_V_MAGNETIC" in values
-        assert "FILT_NOTCH_CENTER_FREQUENCY" in values
-        assert "IMU_ACC_SCALE_X" not in values
-
-        assert source.tune(rate_field, 200.0) == 200.0
-        assert module.rates[IMU_PACKET] == 200.0
-        assert source.working_point().sample_interval_seconds == pytest.approx(0.005)
-        assert module.streaming is True, "the module is left streaming"
-
-        # A rate the firmware does not have is reported as what it took.
-        assert source.tune(rate_field, 137.0) == 100.0
-        assert source.tunable_values()[rate_field] == 100.0
-
-        # A parameter's NAME says what it is: a frequency is offered in
-        # hertz and a switch as a switch, though the module spells both as
-        # bare decimals.
-        fields = {field.metadata.name: field.metadata for field in source.tunable_fields()}
-        assert fields["FILT_NOTCH_CENTER_FREQUENCY"].unit == "Hz"
-        assert [choice.value for choice in fields["AID_MAG_V_MAGNETIC"].choices] == ["0", "1"]
-        assert fields[rate_field].unit == "Hz"
-
-        assert source.tune("FILT_NOTCH_CENTER_FREQUENCY", 50.0) == 50.0
-        assert module.parameters["FILT_NOTCH_CENTER_FREQUENCY"] == "50"
-        assert source.tune("AID_MAG_V_MAGNETIC", "0") == "0"
-        assert module.parameters["AID_MAG_V_MAGNETIC"] == "0"
-
-        before = source.settings_provenance()["settings_epoch"]
-        source.save_settings()
-        assert "#fsave" in module.commands
-        assert source.settings_provenance()["settings_epoch"] == before
-
-        with pytest.raises(ValueError, match="no setting"):
-            source.tune("NOT_A_SETTING", 1.0)
-    finally:
-        source.close()
-    assert module.closed is True
-
-
-def test_settings_cannot_move_under_a_running_capture() -> None:
-    """Config mode stops the stream, so an armed capture refuses the write.
-
-    A capture whose packets stopped mid-flight would publish a gap that no
-    reader could tell from the module having gone quiet.
-    """
-
-    module = _FakeModule()
-    source = _source(module)
-    try:
-        source.arm(None, buffer_record_count=4)
-        assert source.read_records(1, timeout=2.0, exact=True)
-        with pytest.raises(RuntimeError, match="capture must be finished"):
-            source.tune(packet_rate_field(IMU_PACKET), 200.0)
-        with pytest.raises(RuntimeError, match="capture must be finished"):
-            source.refresh_tunable_fields()
-        assert module.rates[IMU_PACKET] == 100.0, "nothing was written"
-        source.finish_record_capture()
-        assert source.tune(packet_rate_field(IMU_PACKET), 200.0) == 200.0
-    finally:
-        source.close()
-
-
-def test_a_module_whose_console_stays_silent_still_streams() -> None:
-    """No console is a fact about the module, not a reason to refuse it.
-
-    A firmware that does not answer ``#fconfig`` still emits perfectly good
-    packets; what it does not have is anything an operator can turn, and
-    the working point says why.
-    """
-
-    class _Mute(_FakeModule):
-        def _answer(self, line: str) -> None:
-            self.commands.append(line)
-
-    module = _Mute()
-    source = _source(module)
-    try:
-        assert source.tunable_fields() == ()
-        assert source.tunable_values() == {}
-        point = source.working_point()
-        assert point.settings["settings"] == {}
-        # It kept streaming through #fconfig, which is exactly how a module
-        # without the console announces itself.
-        assert "never entered config mode" in point.settings["settings_refusal"]
-        assert point.sample_interval_seconds == pytest.approx(0.01)
-        source.arm(None, buffer_record_count=4)
-        assert source.read_records(1, timeout=2.0, exact=True)
-    finally:
-        source.close()
-
-
-def test_the_module_says_how_fast_its_magnetic_field_actually_moves() -> None:
-    """A magnetometer slower than the packet rate is caught by counting repeats.
-
-    Nothing the vendor ships states the magnetometer's own output rate --
-    its specification table is a verbatim lift from another manufacturer's
-    part -- so raising the packet rate could buy nothing but duplicate
-    readings. The driver counts how many packets pass per genuinely new
-    field, which turns that unknown into a number off this module.
-    """
-
-    packets_per_reading = 4
-    module = _FakeModule(rate_hz=200.0, magnetic_repeat=packets_per_reading)
-    source = _source(module)
-    try:
-        point = source.working_point()
-        assert point.settings["packet_rate_hz"] == pytest.approx(200.0, rel=0.05)
-        assert point.settings["magnetic_update_hz"] == pytest.approx(
-            200.0 / packets_per_reading, rel=0.15
-        )
-    finally:
-        source.close()
-
-    # And a magnetometer that keeps up reports the packet rate itself.
-    quick = _FakeModule(rate_hz=200.0, magnetic_repeat=1)
-    source = _source(quick)
-    try:
-        point = source.working_point()
-        assert point.settings["magnetic_update_hz"] == pytest.approx(200.0, rel=0.05)
-    finally:
-        source.close()
-
-
-def test_a_module_that_never_comes_back_says_so_in_those_words() -> None:
-    """Opening the console is the one step that can leave a module silent.
-
-    Reading the settings when the port opens costs a trip through config
-    mode, and config mode stops the stream. A module that does not start
-    again is genuinely unusable, and the device must fail saying THAT --
-    naming the console as what silenced it -- rather than with the generic
-    "no packets arrived", which would send its operator to check a cable
-    that is fine.
-    """
-
-    class _NeverReturns(_FakeModule):
-        def _answer(self, line: str) -> None:
-            super()._answer(line)
-            if line == "#fdeconfig":
-                self.streaming = False  # it acknowledged, and stayed quiet
-
-    module = _NeverReturns()
-    with pytest.raises(RuntimeError, match="configuration console") as refusal:
-        _source(module)
-    assert "did not resume" in str(refusal.value)
-    assert module.closed is True, "a module that failed to open still lets the port go"
-
-
-def test_a_module_left_in_its_console_is_found_and_opened_again() -> None:
-    """Config mode outlives the process that opened it, so it must be undone.
-
-    A session that opened the console and died leaves the module silent,
-    and this bench recognises an N100 BY its stream -- so without a
-    #fdeconfig it would vanish from every scan and refuse every open until
-    somebody power-cycled it. One line on the wire is the difference.
-    """
-
-    module = _FakeModule()
-    module.streaming = False       # exactly where a dead session leaves it
-    module._answer("#fconfig")     # ...and the module thinks it is in config mode
-
-    assert _listen_for_packets(module, 0.05) == 0, "a stuck module says nothing"
-    wake_from_config_mode(module)
-    assert _listen_for_packets(module, 0.05) >= 2, "one #fdeconfig brings it back"
-
-    # And opening it works without the operator touching anything.
-    stuck = _FakeModule()
-    stuck.streaming = False
-    stuck._answer("#fconfig")
-    source = _source(stuck)
-    try:
-        assert source.working_point().settings["packet_rate_hz"] > 0
-        assert "#fdeconfig" in stuck.commands
-    finally:
-        source.close()
-
-
 def test_entry_is_the_stream_stopping_not_a_banner() -> None:
-    """A module that answers something else has still entered; one that
-    keeps streaming has not, whatever it printed.
+    """The manual prints "Config Mode"; a real module answers "*#OK".
 
-    The manual prints "Config Mode" as the reply to #fconfig and a real
-    module answers "*#OK". Reading entry off the banner failed on the first
-    real module it met. The manual's other sentence is the one that holds:
-    if the data stops, config mode was entered.
+    Reading entry off the banner failed on the first real module it met.
+    The manual's other sentence is the one that holds: if the data stops,
+    config mode was entered.
     """
 
     class _Terse(_FakeModule):
@@ -454,118 +253,134 @@ def test_entry_is_the_stream_stopping_not_a_banner() -> None:
         FdiConfigConsole(_Deaf()).enter()
 
 
-def test_a_module_that_lists_nothing_still_offers_the_knob_that_matters() -> None:
-    """#fmsg is documented to print every packet. A real module prints *#OK.
+# -------------------------------------------------------------- the knobs
+def test_the_rate_is_a_ladder_rung_written_as_its_index() -> None:
+    """The module takes an INDEX, not hertz, and only the rungs exist.
 
-    That is a fact about the firmware, not a fault, and it must not cost the
-    operator the one setting they came for: this driver reads the IMU
-    packet, so it already knows that packet's rate -- it timed it off the
-    stream. Asked first, measured where the answer does not come.
+    "#fmsg 40 100" is answered "*#OK" and changes nothing on this firmware,
+    which is how a module sitting at 10 Hz stayed at 10 Hz while the bench
+    reported the write as applied. The rate lives in MSG_IMU, and 100 Hz is
+    rung 7.
     """
 
-    class _Terse(_FakeModule):
-        def _answer(self, line: str) -> None:
-            if line == "#fmsg":
-                self.commands.append(line)
-                self._say(OK)          # acknowledges, lists nothing
-                return
-            super()._answer(line)
+    assert rate_ladder_index(100.0) == 7
+    assert rate_ladder_index(10.0) == 4
+    assert rate_ladder_index(400.0) == 9
+    with pytest.raises(TuneRefused, match="not one of this module's rates"):
+        rate_ladder_index(137.0)
+    with pytest.raises(TuneRefused):
+        # Rung 0 stops the packets this bench finds the module by.
+        rate_ladder_index(0.0)
 
-    module = _Terse(rate_hz=50.0)
+    module = _FakeModule(rate_hz=10.0)
     source = _source(module)
     try:
-        rate_field = packet_rate_field(IMU_PACKET)
         values = source.tunable_values()
-        assert values[rate_field] == pytest.approx(50.0, rel=0.05), (
-            "the rate came off the stream, since the module would not say it"
+        assert values[IMU_RATE_PARAMETER] == "10", "shown as hertz, held as a rung"
+        assert source.working_point().sample_interval_seconds == pytest.approx(0.1)
+
+        # Only the rungs are offered, so a wrong number cannot be typed.
+        offered = {
+            field.metadata.name: field.metadata for field in source.tunable_fields()
+        }[IMU_RATE_PARAMETER]
+        assert [choice.value for choice in offered.choices] == [
+            "1", "2", "5", "10", "20", "50", "100", "200", "400"
+        ]
+
+        assert source.tune(IMU_RATE_PARAMETER, "100") == "100"
+        assert module.parameters[IMU_RATE_PARAMETER] == "7", "written as its index"
+        assert module.rate_hz == 100.0
+        assert source.working_point().sample_interval_seconds == pytest.approx(
+            0.01, rel=0.05
         )
-        point = source.working_point()
-        assert point.settings["packets_listed"] is False
-        assert point.settings["last_console_exchange"][1].strip() != "", (
-            "the module's own words are kept, so the next surprise is one lookup away"
-        )
-        # And the knob still writes.
-        assert source.tune(rate_field, 200.0) == 200.0
-        assert module.rates[IMU_PACKET] == 200.0
+        assert module.streaming is True
     finally:
         source.close()
 
 
-def test_a_rate_that_was_set_is_never_reported_as_refused() -> None:
-    """The module may acknowledge a write without echoing it back.
+def test_the_operator_s_parameters_are_asked_for_by_name() -> None:
+    """A bare #fparam lists nothing, so each name is tried and kept if answered.
 
-    This firmware answers a bare #fmsg with nothing but *#OK, so requiring
-    an echo would have turned a rate that WAS set into a refusal, and the
-    operator would have been told the knob did not move while the records
-    quietly arrived at the new rate. The stream is what settles it.
+    Factory calibration sits in the same namespace and is deliberately not
+    offered; a name the module does not have simply does not appear.
     """
 
-    class _Silent(_FakeModule):
-        """Sets the rate, says only *#OK, and never lists anything."""
-
-        def _answer(self, line: str) -> None:
-            if line.startswith("#fmsg"):
-                self.commands.append(line)
-                parts = line.split()
-                if len(parts) == 3:
-                    took = min(self.LADDER, key=lambda r: abs(r - float(parts[2])))
-                    self.rates[int(parts[1], 16)] = took
-                self._say(OK)
-                return
-            super()._answer(line)
-
-    module = _Silent(rate_hz=50.0)
+    module = _FakeModule()
     source = _source(module)
     try:
-        rate_field = packet_rate_field(IMU_PACKET)
-        taken = source.tune(rate_field, 200.0)
-        assert module.rates[IMU_PACKET] == 200.0, "the module really did take it"
-        assert taken == pytest.approx(200.0, rel=0.05), (
-            "and the bench reports the rate it measured, not a refusal"
-        )
-        assert source.working_point().sample_interval_seconds == pytest.approx(
-            0.005, rel=0.05
-        )
+        values = source.tunable_values()
+        assert IMU_RATE_PARAMETER in values
+        assert "AID_MAG_V_MAGNETIC" in values
+        assert "FILT_NOTCH_CENTER_FREQUENCY" in values
+        assert "IMU_ACC_SCALE_X" not in values, "calibration is not an operator knob"
+        assert "FILT_NOTCH2_ENABLED" not in values, "this firmware does not have it"
+
+        fields = {f.metadata.name: f.metadata for f in source.tunable_fields()}
+        assert fields["FILT_NOTCH_CENTER_FREQUENCY"].unit == "Hz"
+        assert [c.value for c in fields["AID_MAG_V_MAGNETIC"].choices] == ["0", "1"]
+
+        assert source.tune("FILT_NOTCH_CENTER_FREQUENCY", 50.0) == 50.0
+        assert module.parameters["FILT_NOTCH_CENTER_FREQUENCY"] == "50"
+        assert source.tune("AID_MAG_V_MAGNETIC", "0") == "0"
+
+        before = source.settings_provenance()["settings_epoch"]
+        source.save_settings()
+        assert "#fsave" in module.commands
+        assert source.settings_provenance()["settings_epoch"] == before
+
+        with pytest.raises(ValueError, match="no setting"):
+            source.tune("NOT_A_SETTING", 1.0)
+    finally:
+        source.close()
+
+
+def test_settings_cannot_move_under_a_running_capture() -> None:
+    """Config mode stops the stream, so an armed capture refuses the write."""
+
+    module = _FakeModule()
+    source = _source(module)
+    try:
+        source.arm(None, buffer_record_count=4)
+        assert source.read_records(1, timeout=3.0, exact=True)
+        with pytest.raises(RuntimeError, match="capture must be finished"):
+            source.tune(IMU_RATE_PARAMETER, "200")
+        with pytest.raises(RuntimeError, match="capture must be finished"):
+            source.refresh_tunable_fields()
+        assert module.rate_hz == 100.0, "nothing was written"
+        source.finish_record_capture()
+        assert source.tune(IMU_RATE_PARAMETER, "200") == "200"
     finally:
         source.close()
 
 
 def test_a_write_that_silences_the_module_is_put_back() -> None:
-    """The archive does not settle what #fmsg's second argument is.
+    """Index 0 is "no output", and a module told to stop sending is lost.
 
-    The manual says literal hertz; the vendor's own parameter tables spell
-    rates as ladder indices where 0 means "no output". A wrong spelling can
-    therefore turn the packet off. This bench must never leave an
-    operator's module mute because it guessed: the stream is checked after
-    every rate write, and a write that stopped it is written back.
+    Discovery recognises this module only by its packets, so a write that
+    silenced it would make it invisible until power-cycled. The stream is
+    checked after every rate write, and a write that stopped it is undone
+    by restarting -- which needs no knowledge of how the module spelled it,
+    since nothing here was written to flash.
     """
 
-    class _TurnsOffOnOutOfRange(_FakeModule):
-        """Reads #fmsg's argument as a LADDER INDEX, as the GUI's tables do."""
-
-        LADDER = (0.0, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 400.0)
+    class _MisreadsTheIndex(_FakeModule):
+        """Writes a rung this bench did not intend, and goes quiet."""
 
         def _answer(self, line: str) -> None:
-            if line.startswith("#fmsg "):
+            if line.startswith("#fparam set " + IMU_RATE_PARAMETER):
                 self.commands.append(line)
-                _, which, value = line.split()
-                index = int(float(value))
-                rate = self.LADDER[index] if 0 <= index < len(self.LADDER) else 0.0
-                self.rates[int(which, 16)] = rate
+                self.parameters[IMU_RATE_PARAMETER] = "0"   # no output
                 self._say(OK)
                 return
             super()._answer(line)
 
-    module = _TurnsOffOnOutOfRange(rate_hz=50.0)
-    # It is at ladder index 6 == 50 Hz, which this driver knows as 50.0.
+    module = _MisreadsTheIndex(rate_hz=50.0)
     source = _source(module)
     try:
-        rate_field = packet_rate_field(IMU_PACKET)
         with pytest.raises(TuneRefused, match="stopped it sending"):
-            source.tune(rate_field, 100.0)   # read as index 100 -> out of range -> off
-        assert module.rates[IMU_PACKET] == 50.0, "the module was put back"
+            source.tune(IMU_RATE_PARAMETER, "100")
+        assert module.rate_hz == 50.0, "the restart put it back"
         assert module.streaming is True
-        # And the module is usable: the records keep coming.
         source.arm(None, buffer_record_count=4)
         assert source.read_records(1, timeout=3.0, exact=True)
         source.finish_record_capture()
@@ -573,19 +388,11 @@ def test_a_write_that_silences_the_module_is_put_back() -> None:
         source.close()
 
 
+# ------------------------------------------------------ leaving the console
 def test_every_way_out_of_the_console_is_checked_by_whole_packets() -> None:
-    """A parameter write that left the module silent used to report success.
-
-    Only an IMU-rate change re-checked the stream; a parameter write, a
-    save, a refresh all trusted #fdeconfig. Config mode is a state in the
-    module, so any of them could leave it exactly where a crashed session
-    does -- silent, invisible to discovery, unusable until power-cycled --
-    while telling the operator the write had worked.
-    """
+    """A parameter write that left the module silent used to report success."""
 
     class _StaysQuiet(_FakeModule):
-        """Acknowledges #fdeconfig and keeps its mouth shut, once armed."""
-
         armed = False
 
         def _answer(self, line: str) -> None:
@@ -596,7 +403,7 @@ def test_every_way_out_of_the_console_is_checked_by_whole_packets() -> None:
     module = _StaysQuiet()
     source = _source(module)
     try:
-        module.armed = True   # from here on, leaving does not resume
+        module.armed = True
         with pytest.raises(RuntimeError, match="did not start sending again"):
             source.tune("FILT_NOTCH_ENABLED", "1")
     finally:
@@ -626,5 +433,80 @@ def test_a_heartbeat_is_not_a_navigating_module() -> None:
         module.armed = True
         with pytest.raises(RuntimeError, match="did not start sending again"):
             source.tune("FILT_NOTCH_ENABLED", "1")
+    finally:
+        source.close()
+
+
+def test_a_module_left_in_its_console_is_found_and_opened_again() -> None:
+    """Config mode outlives the process that opened it, so it must be undone."""
+
+    module = _FakeModule()
+    module.streaming = False       # exactly where a dead session leaves it
+    module._answer("#fconfig")
+
+    assert _listen_for_packets(module, 0.05) == 0, "a stuck module says nothing"
+    wake_from_config_mode(module)
+    assert _listen_for_packets(module, 0.05) >= 2, "one #fdeconfig brings it back"
+
+    stuck = _FakeModule()
+    stuck.streaming = False
+    stuck._answer("#fconfig")
+    source = _source(stuck)
+    try:
+        assert source.working_point().settings["packet_rate_hz"] > 0
+        assert "#fdeconfig" in stuck.commands
+    finally:
+        source.close()
+
+
+def test_a_module_whose_console_stays_silent_still_streams() -> None:
+    """No console is a fact about the module, not a reason to refuse it."""
+
+    class _Mute(_FakeModule):
+        def _answer(self, line: str) -> None:
+            self.commands.append(line)
+
+    module = _Mute()
+    source = _source(module)
+    try:
+        assert source.tunable_fields() == ()
+        assert source.tunable_values() == {}
+        point = source.working_point()
+        assert point.settings["settings"] == {}
+        assert "never entered config mode" in point.settings["settings_refusal"]
+        assert point.sample_interval_seconds == pytest.approx(0.01)
+        source.arm(None, buffer_record_count=4)
+        assert source.read_records(1, timeout=3.0, exact=True)
+    finally:
+        source.close()
+
+
+# ------------------------------------------------------------- the magnetics
+def test_the_module_says_how_fast_its_magnetic_field_actually_moves() -> None:
+    """A magnetometer slower than the packet rate is caught by counting repeats.
+
+    Nothing the vendor ships states the magnetometer's own output rate --
+    its specification table is a verbatim lift from another manufacturer's
+    part -- so raising the packet rate could buy nothing but duplicate
+    readings.
+    """
+
+    packets_per_reading = 4
+    module = _FakeModule(rate_hz=200.0, magnetic_repeat=packets_per_reading)
+    source = _source(module)
+    try:
+        point = source.working_point()
+        assert point.settings["packet_rate_hz"] == pytest.approx(200.0, rel=0.05)
+        assert point.settings["magnetic_update_hz"] == pytest.approx(
+            200.0 / packets_per_reading, rel=0.15
+        )
+    finally:
+        source.close()
+
+    quick = _FakeModule(rate_hz=200.0, magnetic_repeat=1)
+    source = _source(quick)
+    try:
+        point = source.working_point()
+        assert point.settings["magnetic_update_hz"] == pytest.approx(200.0, rel=0.05)
     finally:
         source.close()

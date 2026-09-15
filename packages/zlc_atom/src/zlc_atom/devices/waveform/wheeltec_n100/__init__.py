@@ -1,7 +1,10 @@
 """The WHEELTEC N100 inertial module as a waveform source."""
 
-from .console import FdiConfigConsole, PacketRate
+from .console import FdiConfigConsole
 from .source import (
+    IMU_RATE_PARAMETER,
+    OFFERED_PARAMETERS,
+    PACKET_RATE_LADDER_HZ,
     DEFAULT_BAUD,
     FRAME_HEAD,
     FRAME_TAIL,
@@ -14,13 +17,15 @@ from .source import (
     discover_n100,
     drain_imu_samples,
     header_crc8,
-    packet_id_of,
-    packet_rate_field,
     payload_crc16,
+    rate_ladder_index,
     wake_from_config_mode,
 )
 
 __all__ = [
+    "IMU_RATE_PARAMETER",
+    "OFFERED_PARAMETERS",
+    "PACKET_RATE_LADDER_HZ",
     "DEFAULT_BAUD",
     "FdiConfigConsole",
     "FRAME_HEAD",
@@ -29,14 +34,12 @@ __all__ = [
     "MAX_PACKET_RATE_HZ",
     "N100_OUTPUTS",
     "OPERATOR_PARAMETER_PREFIXES",
-    "PacketRate",
     "WheeltecN100Config",
     "WheeltecN100WaveformSource",
     "discover_n100",
     "drain_imu_samples",
     "header_crc8",
-    "packet_id_of",
-    "packet_rate_field",
     "payload_crc16",
+    "rate_ladder_index",
     "wake_from_config_mode",
 ]
