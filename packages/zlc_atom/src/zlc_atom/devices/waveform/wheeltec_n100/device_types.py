@@ -16,7 +16,11 @@ from .source import (
 
 
 #: Which port, at the line rate the module was configured to.  The packet
-#: rate is not authored: it is measured off the stream when the port opens.
+#: rate is NOT authored: it is a setting that lives in the module's own
+#: flash, so authoring it here would be a second place it is written down
+#: and a bench that disagreed with its own hardware after a power cycle.
+#: It is measured off the stream when the port opens, and moved from Device
+#: Control, where the module answers with the rate it actually took.
 WHEELTEC_N100_SCHEMA = AuthoringSchema(
     (
         AuthoringField("port", "str", "Serial port", "", required=True),

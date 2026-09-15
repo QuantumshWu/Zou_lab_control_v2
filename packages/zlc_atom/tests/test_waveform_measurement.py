@@ -32,6 +32,8 @@ from zlc_atom.devices.waveform.wheeltec_n100 import (
     IMU_PACKET,
     N100_OUTPUTS,
     drain_imu_samples,
+    header_crc8,
+    payload_crc16,
 )
 from zlc_atom.nodes.waveform_measurement import (
     LOGIC_NODE,
@@ -42,6 +44,24 @@ from zlc_atom.nodes.waveform_measurement import (
 from zlc_data import PRIMARY_INDEX, SHOT_TIME, AxisId
 from zlc_runtime.host import NodeHost
 from zlc_runtime.plane import SignalDataPlane
+
+
+def _frame(kind: int, payload: bytes, serial: int = 0) -> bytes:
+    """One FDILink frame, checks and all, exactly as the module sends it.
+
+    The two checks are not decoration: the reader refuses a frame whose
+    header CRC8 or payload CRC16 disagrees, so a test that filled them with
+    zeroes would be testing a stream no module produces.
+    """
+
+    head = bytes((FRAME_HEAD, kind, len(payload), serial))
+    check = payload_crc16(payload)
+    return (
+        head
+        + bytes((header_crc8(head), check >> 8, check & 0xFF))
+        + payload
+        + bytes((FRAME_TAIL,))
+    )
 
 
 def _imu_packet(
@@ -56,8 +76,7 @@ def _imu_packet(
     payload = struct.pack(
         "<12fq", *gyro, *accel, *mag_milligauss, celsius, 1013.0, 24.5, microseconds
     )
-    header = bytes((FRAME_HEAD, IMU_PACKET, len(payload), serial, 0, 0, 0))
-    return header + payload + bytes((FRAME_TAIL,))
+    return _frame(IMU_PACKET, payload, serial)
 
 
 def test_the_fdilink_stream_parses_into_samples_in_published_units() -> None:
@@ -78,8 +97,13 @@ def test_the_fdilink_stream_parses_into_samples_in_published_units() -> None:
         celsius=26.85,
         microseconds=1_002_500,
     )
-    ahrs = bytes((FRAME_HEAD, 0x41, 48, 1, 0, 0, 0)) + bytes(48) + bytes((FRAME_TAIL,))
-    buffer = bytearray(b"\xfc\x99" + first + ahrs + second[:20])
+    # Two packets this driver does not publish: an AHRS frame whose length
+    # it does know, and a local-magnetic-field frame whose length it has
+    # never been told.  Both are stepped over by the length the module
+    # itself stated, so neither needs a table here.
+    ahrs = _frame(0x41, bytes(48), serial=1)
+    local_field = _frame(0x6E, struct.pack("<3f", 1.0, 2.0, 3.0), serial=2)
+    buffer = bytearray(b"\xfc\x99" + first + ahrs + local_field + second[:20])
     samples = drain_imu_samples(buffer)
 
     assert [stamp for stamp, _values in samples] == [1.0]
@@ -95,6 +119,32 @@ def test_the_fdilink_stream_parses_into_samples_in_published_units() -> None:
     assert stamp == pytest.approx(1.0025)
     assert values[0] == pytest.approx(20.1)
     assert not buffer
+
+
+def test_a_frame_that_does_not_check_out_is_not_a_magnetic_field() -> None:
+    """One flipped bit anywhere in a packet drops it, rather than publishing it.
+
+    A serial line at 100 Hz and up carries far more frames than anyone
+    inspects, and the one number this bench takes from them is a magnetic
+    field. A frame whose payload lost a bit would otherwise arrive as a
+    perfectly plausible reading, which is the worst kind of wrong.
+    """
+
+    good = _imu_packet(
+        gyro=(0.0, 0.0, 0.0),
+        accel=(0.0, 0.0, 9.8),
+        mag_milligauss=(200.0, -50.0, 450.0),
+        celsius=26.85,
+        microseconds=5_000_000,
+    )
+    assert len(drain_imu_samples(bytearray(good))) == 1
+
+    for position in (1, 3, 8, 30, len(good) - 2):
+        torn = bytearray(good)
+        torn[position] ^= 0x01
+        assert drain_imu_samples(bytearray(torn)) == [], (
+            f"a bit flipped at byte {position} was published as data"
+        )
 
 
 def _imu_like_source(rate_hz: float) -> VirtualWaveformSource:
