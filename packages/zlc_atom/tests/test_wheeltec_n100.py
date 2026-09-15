@@ -39,6 +39,7 @@ from zlc_atom.devices.waveform.wheeltec_n100 import (
     rate_ladder_index,
     wake_from_config_mode,
 )
+from zlc_atom.devices.waveform.wheeltec_n100 import console as console_module
 from zlc_atom.devices.waveform.wheeltec_n100.console import CONFIRM_PROMPT, OK
 from zlc_atom.devices.waveform.wheeltec_n100.source import _listen_for_packets
 
@@ -52,6 +53,14 @@ def _frame(kind: int, payload: bytes, serial: int = 0) -> bytes:
         + payload
         + bytes((FRAME_TAIL,))
     )
+
+
+#: How long this fake goes on ignoring commands after #fconfig. The real
+#: module's acknowledgement arrives after its frames have drained, and it
+#: refuses commands that crowd the one before, so a driver that fires the
+#: next line straight away must be caught here. The window the driver waits
+#: is scaled down for the suite, so this is too.
+_CONFIG_SETTLE = 0.15
 
 
 class _FakeModule:
@@ -93,7 +102,7 @@ class _FakeModule:
         #: module that is still navigating, and dropped.  The probe that
         #: worked on the bench hid this by listening a fixed 1.2 s after
         #: every command.
-        self.config_settle = 0.15
+        self.config_settle = _CONFIG_SETTLE
         self._listening_at = 0.0
         self._due: deque = deque()
         self.commands: list[str] = []
@@ -244,6 +253,22 @@ class _FakeModule:
 
 
 
+@pytest.fixture(autouse=True)
+def _console_windows_for_a_fake(monkeypatch):
+    """Shrink the listening windows, which a fake does not need.
+
+    The real ones are a hardware requirement -- the module answers *#ERROR
+    to a command that arrives inside them -- and the fake has nothing to
+    say about that, so paying them here would buy a slower suite and
+    nothing else. The product default is untouched.
+    """
+
+    monkeypatch.setattr(console_module, "LISTEN_SECONDS", 0.05)
+    monkeypatch.setattr(console_module, "LISTING_LISTEN_SECONDS", 0.15)
+    monkeypatch.setattr(console_module, "STILL_NAVIGATING_SECONDS", 0.05)
+    monkeypatch.setitem(globals(), "_CONFIG_SETTLE", 0.005)
+
+
 def _source(module: _FakeModule) -> WheeltecN100WaveformSource:
     return WheeltecN100WaveformSource(
         WheeltecN100Config(port="COM_TEST", baud=921600, timeout_seconds=2.0),
@@ -256,7 +281,7 @@ def test_the_console_is_this_bench_s_own_text_link() -> None:
     """Entering is the stream stopping; every value comes back read."""
 
     module = _FakeModule()
-    with FdiConfigConsole(module, packet_interval=0.01) as console:
+    with FdiConfigConsole(module) as console:
         assert module.streaming is False, "config mode stops the stream"
 
         assert console.get_parameter("AID_MAG_V_MAGNETIC") == "1"
@@ -296,7 +321,7 @@ def test_entry_is_the_stream_stopping_not_a_banner() -> None:
                 super()._answer(line)
 
     terse = _Terse()
-    with FdiConfigConsole(terse, reply_timeout=1.0, packet_interval=0.01) as console:
+    with FdiConfigConsole(terse) as console:
         assert terse.streaming is False
         # It printed nothing at all, and it is in config mode: what says so
         # is that it answers the question every module answers.
@@ -307,7 +332,7 @@ def test_entry_is_the_stream_stopping_not_a_banner() -> None:
             self.commands.append(line)     # prints nothing, keeps streaming
 
     with pytest.raises(RuntimeError, match="kept streaming through #fconfig"):
-        FdiConfigConsole(_Deaf(), reply_timeout=1.0, packet_interval=0.01).enter()
+        FdiConfigConsole(_Deaf()).enter()
 
 
 # -------------------------------------------------------------- the knobs
@@ -374,6 +399,11 @@ def test_the_operator_s_parameters_are_asked_for_by_name() -> None:
     module = _FakeModule()
     source = _source(module)
     try:
+        # Ten names is ten commands, and every command on this console
+        # costs a listening window -- so opening the device reads the
+        # rates only, and this is the trip Device Control makes when its
+        # page opens.
+        source.refresh_tunable_fields()
         values = source.tunable_values()
         assert IMU_RATE_PARAMETER in values
         assert "AID_MAG_V_MAGNETIC" in values
@@ -483,6 +513,11 @@ def test_every_way_out_of_the_console_is_checked_by_whole_packets() -> None:
     module = _StaysQuiet()
     source = _source(module)
     try:
+        # Ten names is ten commands, and every command on this console
+        # costs a listening window -- so opening the device reads the
+        # rates only, and this is the trip Device Control makes when its
+        # page opens.
+        source.refresh_tunable_fields()
         module.armed = True
         # The write reaches the module; what fails is that it never comes
         # back on the air, and the driver says so rather than reporting the
@@ -513,6 +548,11 @@ def test_a_heartbeat_is_not_a_navigating_module() -> None:
     module = _HeartbeatOnly()
     source = _source(module)
     try:
+        # Ten names is ten commands, and every command on this console
+        # costs a listening window -- so opening the device reads the
+        # rates only, and this is the trip Device Control makes when its
+        # page opens.
+        source.refresh_tunable_fields()
         module.armed = True
         # The write reaches the module; what fails is that it never comes
         # back on the air, and the driver says so rather than reporting the
@@ -613,8 +653,17 @@ def test_a_module_that_takes_its_time_is_still_answering() -> None:
 
     module = _FakeModule(rate_hz=10.0)
     module.reply_delay = 0.6          # a long pause before it starts
+    # The window has to outlast what the module takes to start talking:
+    # that is the rule on the real one too, where it is two seconds.
+    console_module.LISTEN_SECONDS = 1.5
+    console_module.LISTING_LISTEN_SECONDS = 1.5
     source = _source(module)
     try:
+        # Ten names is ten commands, and every command on this console
+        # costs a listening window -- so opening the device reads the
+        # rates only, and this is the trip Device Control makes when its
+        # page opens.
+        source.refresh_tunable_fields()
         values = source.tunable_values()
         assert values[IMU_RATE_PARAMETER] == "10"
         assert "AID_MAG_V_MAGNETIC" in values
@@ -636,8 +685,17 @@ def test_a_slow_console_never_reads_the_previous_reply() -> None:
 
     module = _FakeModule(rate_hz=10.0)
     module.reply_delay = 0.9          # far longer than the quiet window
+    # The window has to outlast what the module takes to start talking:
+    # that is the rule on the real one too, where it is two seconds.
+    console_module.LISTEN_SECONDS = 1.5
+    console_module.LISTING_LISTEN_SECONDS = 1.5
     source = _source(module)
     try:
+        # Ten names is ten commands, and every command on this console
+        # costs a listening window -- so opening the device reads the
+        # rates only, and this is the trip Device Control makes when its
+        # page opens.
+        source.refresh_tunable_fields()
         values = source.tunable_values()
         assert values[IMU_RATE_PARAMETER] == "10"
         assert values["AID_MAG_V_MAGNETIC"] == "1"
@@ -698,7 +756,7 @@ def test_a_heartbeat_does_not_block_entering_config_mode() -> None:
                 self._out += bytes((FRAME_HEAD, 0xF0))
 
     module = _Ticks(rate_hz=10.0)
-    with FdiConfigConsole(module, packet_interval=0.01) as console:
+    with FdiConfigConsole(module) as console:
         assert module.streaming is False, "it entered, heartbeat and all"
         assert console.get_parameter(IMU_RATE_PARAMETER) == "4", "rung 4 is 10 Hz"
 
@@ -717,6 +775,11 @@ def test_a_refused_save_is_not_a_save() -> None:
     module = _RefusesSave()
     source = _source(module)
     try:
+        # Ten names is ten commands, and every command on this console
+        # costs a listening window -- so opening the device reads the
+        # rates only, and this is the trip Device Control makes when its
+        # page opens.
+        source.refresh_tunable_fields()
         with pytest.raises((TuneRefused, RuntimeError)):
             source.tune("AID_MAG_V_MAGNETIC", "0")
         assert source.tunable_values()["AID_MAG_V_MAGNETIC"] == "1", (
@@ -747,11 +810,11 @@ def test_somebody_else_s_reply_is_not_a_missing_parameter() -> None:
             super()._answer(line)
 
     module = _AnswersLate()
-    with FdiConfigConsole(module, packet_interval=0.01) as console:
+    with FdiConfigConsole(module) as console:
         # The module's own way of saying it has not got one.
         assert console.get_parameter("NO_SUCH_PARAMETER") is None
 
         for stray in ("*#OK", "(y/n)", "MSG_ODOMETER[6f]   0.0Hz", "Config Mode"):
             module.stray = stray
-            with pytest.raises(RuntimeError, match="settings session is over"):
+            with pytest.raises(RuntimeError, match="neither the value nor"):
                 console.get_parameter(IMU_RATE_PARAMETER)

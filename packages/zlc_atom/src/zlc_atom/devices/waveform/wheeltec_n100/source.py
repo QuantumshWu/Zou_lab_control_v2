@@ -616,7 +616,10 @@ class WheeltecN100WaveformSource:
         """
 
         try:
-            self._settings = self._in_console(self._read_settings, stream_back=False)
+            self._settings = self._in_console(
+                lambda console: self._read_settings(console, named=False),
+                stream_back=False,
+            )
         except Exception as refusal:  # noqa: BLE001 -- reported, not raised
             self._settings = {}
             self._settings_refusal = f"{type(refusal).__name__}: {refusal}"
@@ -914,9 +917,7 @@ class WheeltecN100WaveformSource:
                 )
             self._park_reader()
             try:
-                with FdiConfigConsole(
-                    self._serial, packet_interval=self._sample_interval
-                ) as console:
+                with FdiConfigConsole(self._serial) as console:
                     try:
                         answer = work(console)
                     finally:
@@ -976,21 +977,28 @@ class WheeltecN100WaveformSource:
         self._first_bytes.clear()
         self._hear_the_module()
 
-    def _read_settings(self, console) -> dict[str, object]:
+    def _read_settings(self, console, *, named: bool = True) -> dict[str, object]:
         """The rates the module enumerates, and the parameters it answers to.
 
         Two mechanisms, because the module has two.  ``#fmsg`` prints every
         packet it has with its rate in hertz, so the rates are the module's
-        own list.  Parameters cannot be enumerated -- a bare ``#fparam`` is
-        an error on this firmware -- so those are asked for by name, and
-        what the module will not answer to, it does not have.
+        own list, and one command buys all forty of them.  Parameters
+        cannot be enumerated -- a bare ``#fparam`` is an error on this
+        firmware -- so those are asked for one command at a time, and what
+        the module will not answer to, it does not have.
+
+        ``named`` is off where the cost would be paid for nothing.  Every
+        command on this console costs a full listening window, so the ten
+        named parameters are ten windows: worth it when an operator opens
+        the settings page, not when a device is merely being opened or a
+        rate has just been written.
         """
 
         settings: dict[str, object] = {}
         for name, _packet_id, rate_hz in console.packet_rates():
             settings[name] = rate_hz
         self._packets_listed = IMU_RATE_PARAMETER in settings
-        for name in OFFERED_PARAMETERS:
+        for name in OFFERED_PARAMETERS if named else ():
             try:
                 reading = _as_number(console.get_parameter(name))
             except RuntimeError:
@@ -1161,7 +1169,21 @@ class WheeltecN100WaveformSource:
             # module's WHOLE configuration from flash, so any setting can
             # have moved, including one an earlier aborted write left
             # dirty.  This trip is being paid for either way.
-            self._settings = self._in_console(self._read_settings, stream_back=True)
+            # The rates, which a restart can move whatever knob turned,
+            # plus the one name that was written.  Not all ten named
+            # parameters: each is a command, and each command is a window.
+            def read_back(console):
+                got = self._read_settings(console, named=False)
+                if not is_rate:
+                    value = _as_number(console.get_parameter(selected))
+                    if value is not None:
+                        got[selected] = value
+                return got
+
+            self._settings = {
+                **self._settings,
+                **self._in_console(read_back, stream_back=True),
+            }
             taken = self._settings.get(selected)
             # The interval stamps every record, so it is re-timed after any
             # restart, whatever knob caused it.
