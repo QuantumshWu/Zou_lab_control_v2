@@ -155,14 +155,15 @@ def semantic_entries(description: object) -> tuple[dict[str, object], ...]:
 def control_document(control: object) -> dict[str, object]:
     """One frontend-neutral Plot control row for every Workbench view."""
 
-    semantic = bool(getattr(control, "semantic", False))
-    choices: list[tuple[str, object]] = []
-    for choice in tuple(getattr(control, "choices", ())):
-        if semantic:
-            value, label = choice
-        else:
-            value, label = choice, str(choice).replace("_", " ").title()
-        choices.append((str(label), value))
+    # (label, value), the label being the DECLARATION's: a unit symbol is
+    # shown as it is spelled, an enum member by the name its owner gave it.
+    # Title-casing the value here turned ``mT`` into ``Mt`` and ``µT`` into
+    # ``Μt``; a symbol is not a word, and this seam does not know which
+    # choices are words.
+    choices = [
+        (str(label), value)
+        for value, label in tuple(getattr(control, "choices", ()))
+    ]
     kind = getattr(getattr(control, "kind", ""), "value", None)
     name = str(getattr(control, "name"))
     # WHICH parameters have to be edited as ONE, joined here.

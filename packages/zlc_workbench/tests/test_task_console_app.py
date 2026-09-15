@@ -899,10 +899,9 @@ assert catalog == (
     ('Plot: histogram', ('plot', 'histogram')),
     ('Plot: facet_grid', ('plot', 'facet_grid')),
     ('Measurement: Camera Measurement', ('logic', 'camera_measurement')),
-    ('Measurement: Imu Measurement', ('logic', 'imu_measurement')),
-    ('Measurement: Scope Measurement', ('logic', 'scope_measurement')),
     ('Measurement: Seamless Scan', ('logic', 'seamless_scan')),
     ('Measurement: Stepped Scan', ('logic', 'stepped_scan')),
+    ('Measurement: Waveform Measurement', ('logic', 'waveform_measurement')),
     ('Processor: Derive', ('logic', 'derive')),
     ('Processor: Frame Survival', ('logic', 'frame_survival')),
     ('Processor: Occupancy', ('logic', 'occupancy')),
@@ -1517,7 +1516,7 @@ def test_control_apply_sends_the_authored_unit_and_keeps_canonical_provenance(wo
 
     state, calls, records, refreshes = {"volts": .1, "epoch": 0}, [], [], []
     registry = UnitRegistry(DEFAULT_UNITS.resolve(name) for name in DEFAULT_UNITS.distinct_symbols())
-    registry.register(Unit("Vpp", "power", VoltageIntoLoad(75.0), prefixable=True), replace=True)
+    registry.register(Unit("Vpp", "power", VoltageIntoLoad(75.0), prefixes=("m",)), replace=True)
     def fields():
         return (TunableField(AuthoringField("power", "float", "Power", unit="dBm",
                     minimum=-50.0, maximum=20.0),

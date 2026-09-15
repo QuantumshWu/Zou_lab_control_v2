@@ -292,7 +292,7 @@ def test_processor_publishes_current_estimates_and_the_exact_program_provenance(
 
 def test_descriptor_reads_only_names_and_syntax_without_evaluating_code() -> None:
     rows = _rows(("answer", "raise SystemExit('must not execute while editing')"))
-    declared = LOGIC_NODE.outputs_for({"expressions": rows})
+    declared = LOGIC_NODE.outputs_for({"expressions": rows}, {})
     assert [(item.name, item.contract_id) for item in declared] == [("answer", "derive.answer")]
     schema = LOGIC_NODE.authoring_schema
     authored = schema.project_values({"expressions": list(rows)})

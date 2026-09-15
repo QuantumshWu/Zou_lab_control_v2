@@ -252,23 +252,40 @@ class NodePreviewSpec:
 class DeviceRequirement:
     capability_token: str
     argument_name: str
-    protected_fields: tuple[str, ...] = ()
+    #: The device fields this node drives for the run, which nothing else may
+    #: move meanwhile.  Named, when the node knows them; ``None`` when the
+    #: run freezes every tunable field the bound device declares -- a waveform
+    #: capture takes the whole instrument as it stands, whatever knobs that
+    #: instrument happens to have.
+    protected_fields: tuple[str, ...] | None = ()
 
     def __post_init__(self) -> None:
         token = str(self.capability_token).strip()
         argument = str(self.argument_name).strip()
-        protected = tuple(str(value).strip() for value in self.protected_fields)
         if not token or not argument:
             raise ValueError(
                 "device requirement token and build argument name must be non-empty"
             )
+        object.__setattr__(self, "capability_token", token)
+        object.__setattr__(self, "argument_name", argument)
+        if self.protected_fields is None:
+            return
+        protected = tuple(str(value).strip() for value in self.protected_fields)
         if any(not value for value in protected):
             raise ValueError("protected device fields must be non-empty text")
         if len(set(protected)) != len(protected):
             raise ValueError("protected device fields must be unique")
-        object.__setattr__(self, "capability_token", token)
-        object.__setattr__(self, "argument_name", argument)
         object.__setattr__(self, "protected_fields", protected)
+
+    def fields_frozen_by(self, device: object) -> tuple[str, ...]:
+        """The fields a run on ``device`` freezes: the named ones, or all it declares."""
+
+        if self.protected_fields is not None:
+            return self.protected_fields
+        declare = getattr(device, "tunable_fields", None)
+        if not callable(declare):
+            return ()
+        return tuple(str(field.metadata.name) for field in declare())
 
 
 @dataclass(frozen=True)
@@ -340,16 +357,33 @@ class LogicNodeDescriptor:
     authoring_schema: AuthoringSchema
     input_specs: tuple[DatasetInputSpec | ArtifactInputSpec, ...] = ()
     outputs: tuple[DatasetOutputDeclaration, ...] = ()
-    #: For a node whose outputs are named by what it is asked to compute --
-    #: a derive publishes the lines of its program -- the declarations of
-    #: one authored draft.  ``outputs`` is then empty: a node declares its
-    #: outputs once, by name or by draft.
+    #: For a node whose outputs are named by what it is asked to compute or
+    #: by the instrument it is bound to -- a derive publishes the lines of
+    #: its program, a waveform measurement the quantities its source carries
+    #: -- the declarations of one authored draft, called with the draft's
+    #: values and its resolved devices by argument name (a device the draft
+    #: has not bound yet is absent).  ``outputs`` is then empty: a node
+    #: declares its outputs once, by name or by draft.
     declare_outputs: (
-        Callable[[Mapping[str, Any]], tuple[DatasetOutputDeclaration, ...]] | None
+        Callable[
+            [Mapping[str, Any], Mapping[str, object]],
+            tuple[DatasetOutputDeclaration, ...],
+        ]
+        | None
     ) = None
     device_requirements: tuple[DeviceRequirement, ...] = ()
     build: Callable[..., object] | None = None
     node_previews: tuple[NodePreviewSpec, ...] | None = None
+    #: The previews of one authored draft, for a node whose outputs are
+    #: declared by draft: which of them an operator came to watch, and how,
+    #: is then also the draft's answer.  Called like ``declare_outputs``.
+    declare_previews: (
+        Callable[
+            [Mapping[str, Any], Mapping[str, object]],
+            tuple[NodePreviewSpec, ...],
+        ]
+        | None
+    ) = None
     artifact_outputs: tuple[ArtifactOutputSpec, ...] = ()
     ui_contributions: tuple[object, ...] = ()
     selection_mappings: tuple[SelectionMapping, ...] = ()
@@ -376,21 +410,43 @@ class LogicNodeDescriptor:
     def offers_a_preview(self) -> bool:
         """Whether Start can put a declared output on screen."""
 
-        return bool(self.node_previews)
+        return bool(self.node_previews) or self.declare_previews is not None
 
     def outputs_for(
-        self, values: Mapping[str, Any]
+        self, values: Mapping[str, Any], devices: Mapping[str, object]
     ) -> tuple[DatasetOutputDeclaration, ...]:
-        """What one authored draft publishes."""
+        """What one authored draft publishes, on the devices it has bound."""
 
         if self.declare_outputs is None:
             return self.outputs
-        declared = tuple(self.declare_outputs(values))
+        declared = tuple(self.declare_outputs(values, devices))
         if any(not isinstance(value, DatasetOutputDeclaration) for value in declared):
             raise TypeError("declare_outputs must return DatasetOutputDeclaration values")
         if len({value.name for value in declared}) != len(declared):
             raise ValueError("output names must be unique")
         return declared
+
+    def previews_for(
+        self, values: Mapping[str, Any], devices: Mapping[str, object]
+    ) -> tuple[NodePreviewSpec, ...]:
+        """What one authored draft puts on screen when it starts."""
+
+        if self.declare_previews is None:
+            return tuple(self.node_previews or ())
+        previews = tuple(self.declare_previews(values, devices))
+        if any(not isinstance(value, NodePreviewSpec) for value in previews):
+            raise TypeError("declare_previews must return NodePreviewSpec values")
+        declared = {output.name for output in self.outputs_for(values, devices)}
+        unknown = {
+            declaration.name
+            for value in previews
+            if not value.producer
+            for declaration in (value.output, value.overlay)
+            if declaration is not None and declaration.name not in declared
+        }
+        if unknown:
+            raise ValueError(f"draft previews use undeclared outputs: {sorted(unknown)}")
+        return previews
 
     def __post_init__(self) -> None:
         if not self.api_name or not isinstance(self.kind, NodeKind):
@@ -456,6 +512,14 @@ class LogicNodeDescriptor:
                 raise ValueError(
                     "a node declares its outputs once: by name, or by what "
                     "its draft is asked to compute"
+                )
+        if self.declare_previews is not None:
+            if not callable(self.declare_previews):
+                raise TypeError("declare_previews must be callable or None")
+            if self.declare_outputs is None or node_previews:
+                raise ValueError(
+                    "a node declares its previews once, and by draft only "
+                    "when its outputs are"
                 )
         preview_keys = tuple(
             (value.producer, value.output.name) for value in node_previews

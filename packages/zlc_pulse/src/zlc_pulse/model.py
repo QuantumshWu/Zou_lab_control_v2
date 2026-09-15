@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
 
-from zlc_data.units import PREFIXES, UnitError, resolve_unit
+from zlc_data.units import UnitError, resolve_unit
 import math
 import re
 from types import MappingProxyType
@@ -44,11 +44,10 @@ FIELD_BINDING_CYCLES = MappingProxyType(
         FIELD_DELAY: (None, BINDING_API, BINDING_CONFIG),
     }
 )
-#: The coarsest and finest a pulse may be authored in.  Not a limit of the
-#: unit system -- which reaches Ts and, going the other way, would happily
-#: offer more -- but of this instrument: a period is never kiloseconds long,
-#: and the board's clock is tens of nanoseconds, so a finer unit would only
-#: ever be refused by the grid check below.  A tick is NOT a unit: it is
+#: The coarsest and finest a pulse may be authored in.  A limit of this
+#: instrument, stated beside the second's own ladder: the board's clock is
+#: tens of nanoseconds, so a finer unit would only ever be refused by the
+#: grid check below, and a period is never longer than seconds.  A tick is NOT a unit: it is
 #: however long this board's clock says, and listing it as 1 ns once made it
 #: a synonym for ns, so on a 20 ns clock the one duration that is on the grid
 #: by definition became the one most likely to be refused.
@@ -60,7 +59,7 @@ _FINEST_TIME_DECADE = -9
 #: one place, and a unit cannot exist for the editor and not for the compiler.
 TIME_UNIT_CHOICES = tuple(
     resolve_unit(f"{prefix.symbol}s").symbol
-    for prefix in sorted(PREFIXES, key=lambda item: item.exponent)
+    for prefix in sorted(resolve_unit("s").ladder, key=lambda item: item.exponent)
     if _FINEST_TIME_DECADE <= prefix.exponent <= _COARSEST_TIME_DECADE
 )
 

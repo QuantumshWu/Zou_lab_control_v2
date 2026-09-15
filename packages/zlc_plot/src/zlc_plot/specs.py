@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import partial
@@ -129,6 +129,20 @@ class RelimMode(str, Enum):
     TIGHT = "tight"
     NORMAL = "normal"
     FIXED = "fixed"
+
+
+def _enum_choices(members: Iterable[Enum]) -> tuple[tuple[str, str], ...]:
+    """Enum members as ``(value, label)``: the value's words, as its name."""
+
+    return tuple(
+        (str(item.value), str(item.value).replace("_", " ").title()) for item in members
+    )
+
+
+def _spelled_choices(values: Iterable[str]) -> tuple[tuple[str, str], ...]:
+    """Values shown exactly as they are spelled: a unit symbol, a colormap name."""
+
+    return tuple((str(value), str(value)) for value in values)
 
 
 def _text(value: object) -> str:
@@ -522,7 +536,7 @@ _PULSE_X_UNIT_PARAMETER = ParameterSpec(
     # never kiloseconds) and the model enforces it; what a drawing may be
     # SHOWN in is not the same question, and this layer cannot see that
     # model anyway.  Copying the range here is how the two drift.
-    choices=DEFAULT_UNITS.display_choices("s"),
+    choices=_spelled_choices(DEFAULT_UNITS.display_choices("s")),
 )
 
 
@@ -536,7 +550,7 @@ def _curve_parameters() -> tuple[ParameterSpec[object], ...]:
             normalizer=_relim_mode,
             label="Limits",
             portable=False,
-            choices=tuple(item.value for item in RelimMode),
+            choices=_enum_choices(RelimMode),
         ),
         ParameterSpec(
             "y_min",
@@ -632,7 +646,7 @@ def _histogram_parameters() -> tuple[ParameterSpec[object], ...]:
             normalizer=_relim_mode,
             label="Count limits",
             portable=False,
-            choices=tuple(item.value for item in RelimMode),
+            choices=_enum_choices(RelimMode),
         ),
         ParameterSpec(
             "y_min",
@@ -678,7 +692,7 @@ def _histogram_parameters() -> tuple[ParameterSpec[object], ...]:
             normalizer=_relim_mode,
             label="Value limits",
             portable=False,
-            choices=tuple(item.value for item in RelimMode),
+            choices=_enum_choices(RelimMode),
         ),
         ParameterSpec(
             "x_min",
@@ -755,7 +769,7 @@ def _image_parameters(style: PlotStyleConfig) -> tuple[ParameterSpec[object], ..
             normalizer=_relim_mode,
             label="Color limits",
             portable=False,
-            choices=tuple(item.value for item in RelimMode),
+            choices=_enum_choices(RelimMode),
         ),
         ParameterSpec(
             "colormap",
@@ -764,7 +778,7 @@ def _image_parameters(style: PlotStyleConfig) -> tuple[ParameterSpec[object], ..
             default=policy.image_default_colormap,
             normalizer=_normalize_nonempty_text,
             label="Colormap",
-            choices=policy.image_colormaps,
+            choices=_spelled_choices(policy.image_colormaps),
         ),
         ParameterSpec(
             "color_min",
@@ -811,7 +825,7 @@ def _image_parameters(style: PlotStyleConfig) -> tuple[ParameterSpec[object], ..
                 default=ImagePresentation.HEATMAP.value,
                 normalizer=_image_presentation,
                 label="Presentation",
-                choices=tuple(item.value for item in ImagePresentation),
+                choices=_enum_choices(ImagePresentation),
             ),
             ParameterSpec(
                 "camera_azimuth",

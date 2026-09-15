@@ -200,3 +200,40 @@ def test_a_publisher_switch_never_prints_latex() -> None:
         assert published == {
             str(parameter.name) for parameter in model.parameters
         }, (model.model_id, published)
+
+
+def test_a_choice_row_shows_the_label_its_declaration_gave_it() -> None:
+    """A unit symbol is shown as it is spelled; an enum member by its name.
+
+    The document used to title-case every plain choice value, which turned
+    ``mT`` into ``Mt`` and ``µT`` into ``Μt`` (a Greek capital mu): a symbol
+    is not a word, and the only thing that knows what a choice is called is
+    the declaration that offered it.
+    """
+
+    from zlc_data.units import DEFAULT_UNITS
+    from zlc_plot.specs import parameter_schema_for_kind
+    from zlc_plot.style import build_plot_style
+    from zlc_plot.ui import parameter_controls
+    from zlc_workbench.panel_state import control_document
+
+    schema = parameter_schema_for_kind("curve", style=build_plot_style())
+    values = {name: spec.default for name, spec in schema.items()}
+    units = DEFAULT_UNITS.display_choices("uT")
+    unit_key = next(name for name in schema if name.endswith("_display_unit"))
+    rows = {
+        row["key"]: row
+        for row in (
+            control_document(control)
+            for control in parameter_controls(
+                schema, values, choice_overrides={unit_key: units}
+            )
+        )
+    }
+    assert [label for label, _value in rows[unit_key]["choices"]] == list(units)
+    assert [value for _label, value in rows[unit_key]["choices"]] == list(units)
+    assert [label for label, _value in rows["relim_mode"]["choices"]] == [
+        "Tight",
+        "Normal",
+        "Fixed",
+    ]

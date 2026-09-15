@@ -58,14 +58,33 @@ class WaveformOutput:
         object.__setattr__(self, "columns", columns)
 
 
+def validate_waveform_outputs(outputs: Sequence[WaveformOutput]) -> tuple[WaveformOutput, ...]:
+    """The outputs a source publishes, checked once: named apart, columns apart."""
+
+    declared = tuple(outputs)
+    if not declared or any(not isinstance(output, WaveformOutput) for output in declared):
+        raise TypeError("waveform outputs must be WaveformOutput values")
+    names = [output.name for output in declared]
+    if len(set(names)) != len(names):
+        raise ValueError("waveform outputs must have distinct names")
+    columns = [column for output in declared for column in output.columns]
+    if len(set(columns)) != len(columns):
+        raise ValueError("one record column cannot belong to two outputs")
+    return declared
+
+
 @dataclass(frozen=True)
 class WaveformWorkingPoint:
-    """How the source samples right now, frozen by a measurement when it arms."""
+    """How the source samples right now, frozen by a measurement when it arms.
+
+    What the source publishes and how long its record is are facts about
+    the instrument, known from open (``WaveformSource.outputs`` and
+    ``record_samples``); this is the part that a knob can move between one
+    run and the next -- how fast it samples, and the settings that say so.
+    """
 
     acquisition_mode: str
     sample_interval_seconds: float
-    record_samples: int
-    outputs: tuple[WaveformOutput, ...]
     #: The instrument's own read-back of its settings, as archive-ready
     #: plain values: a scope's time per division, an IMU's packet rate.
     settings: Mapping[str, object]
@@ -76,35 +95,11 @@ class WaveformWorkingPoint:
         interval = float(self.sample_interval_seconds)
         if not np.isfinite(interval) or interval <= 0.0:
             raise ValueError("sample_interval_seconds must be finite and positive")
-        samples = int(self.record_samples)
-        if samples <= 0:
-            raise ValueError("record_samples must be positive")
-        outputs = tuple(self.outputs)
-        if not outputs or any(not isinstance(output, WaveformOutput) for output in outputs):
-            raise TypeError("working point outputs must be WaveformOutput values")
-        names = [output.name for output in outputs]
-        if len(set(names)) != len(names):
-            raise ValueError("waveform outputs must have distinct names")
-        columns = [column for output in outputs for column in output.columns]
-        if len(set(columns)) != len(columns):
-            raise ValueError("one record column cannot belong to two outputs")
         if not isinstance(self.settings, Mapping):
             raise TypeError("working point settings must be a mapping")
         object.__setattr__(self, "acquisition_mode", mode)
         object.__setattr__(self, "sample_interval_seconds", interval)
-        object.__setattr__(self, "record_samples", samples)
-        object.__setattr__(self, "outputs", outputs)
         object.__setattr__(self, "settings", dict(self.settings))
-
-    @property
-    def column_count(self) -> int:
-        return 1 + max(column for output in self.outputs for column in output.columns)
-
-    def output(self, name: str) -> WaveformOutput:
-        for output in self.outputs:
-            if output.name == name:
-                return output
-        raise KeyError(f"waveform source publishes no output {name!r}")
 
 
 @dataclass(frozen=True, eq=False)
@@ -339,6 +334,16 @@ class WaveformSource(Protocol):
     @property
     def timeout(self) -> float: ...
 
+    @property
+    def outputs(self) -> tuple[WaveformOutput, ...]:
+        """What one record carries: the quantities, their channels, their units."""
+        ...
+
+    @property
+    def record_samples(self) -> int:
+        """How many samples one record holds: one for a packet, a trace for a scope."""
+        ...
+
     def working_point(self) -> WaveformWorkingPoint: ...
 
     def arm(self, records: int | None, *, buffer_record_count: int) -> None: ...
@@ -360,4 +365,5 @@ __all__ = [
     "WaveformRecordQueue",
     "WaveformSource",
     "WaveformWorkingPoint",
+    "validate_waveform_outputs",
 ]

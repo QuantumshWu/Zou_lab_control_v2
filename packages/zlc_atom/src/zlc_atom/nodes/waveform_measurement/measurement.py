@@ -1,10 +1,11 @@
 """Finite exact and live-monitor capture of a waveform source: one record, one shot.
 
-This package is a LIBRARY, not a node: it carries no ``logic_node.py``.
-Two nodes stand on it -- the IMU measurement and the scope measurement --
-and what differs between them is only what they publish: an IMU packet is
-four quantities, a scope acquisition is one.  The capture, the read
-cadence and the commit are the same for both, and live here once.
+One measurement for every waveform source, as there is one camera
+measurement for every camera.  What the source carries is the source's
+own statement (``WaveformSource.outputs``): an IMU packet is four
+quantities, a scope acquisition is one, and the measurement publishes
+one signal per quantity, named by the instrument's vocabulary.  The
+capture, the read cadence and the commit are the same for all of them.
 
 Every record the measurement takes is one shot, published the moment it
 is read: an IMU packet becomes ``(1) x () x (channel)`` per quantity, a
@@ -15,11 +16,11 @@ history of shots is the Runtime's: every output declares
 keeps the last N shots by their own sequence.
 
 What the measurement is told, besides how many shots, is HOW OFTEN TO READ
-THE HARDWARE.  Zero means every record the source produces is a shot; an
-interval means that at each due time the newest record is the reading and
+THE HARDWARE: at each due time the newest record is the reading and
 whatever arrived in between is not published -- a magnetometer streaming
 at 400 Hz read every 100 ms is ten shots a second, each the field right
-then.
+then.  An interval shorter than the source's own record period reads
+every record, because each due time then waits for the next one.
 """
 
 from __future__ import annotations
@@ -48,30 +49,56 @@ from zlc_atom.devices.waveform.contract import (
     WaveformRecord,
     WaveformSource,
     WaveformWorkingPoint,
+    validate_waveform_outputs,
 )
+from zlc_atom.nodes._framework.descriptor import NodePreviewSpec
 
 
 #: How often a capture comes back to see whether it has been asked to stop;
 #: the read length is the cancel latency, and it belongs to the loop.
 _CANCEL_RESPONSE_SECONDS = 0.05
 
+#: The fastest the hardware may be read: a shot every millisecond.  A shot
+#: is a commit on the plane and a wake of every panel that follows it, and
+#: one process publishes a few thousand of them a second before it has no
+#: time left to read; the ceiling is the measurement's, stated where the
+#: operator sets the cadence, so the form refuses what the run could not
+#: keep up with instead of dropping records silently.
+MIN_READ_INTERVAL_SECONDS = 0.001
 
-def waveform_authoring_schema(*, read_interval_seconds: float) -> AuthoringSchema:
-    """What a waveform measurement is told: how many shots, how often to read."""
-
-    return AuthoringSchema(
-        (
-            AuthoringField("repeat", "int", "Repeat", 0, minimum=0),
-            AuthoringField(
-                "read_interval_seconds",
-                "float",
-                "Read interval",
-                float(read_interval_seconds),
-                minimum=0.0,
-                unit="s",
-            ),
-        )
+WAVEFORM_MEASUREMENT_SCHEMA = AuthoringSchema(
+    (
+        AuthoringField("repeat", "int", "Repeat", 0, minimum=0),
+        AuthoringField(
+            "read_interval_seconds",
+            "float",
+            "Read interval",
+            0.01,
+            minimum=MIN_READ_INTERVAL_SECONDS,
+            unit="s",
+        ),
     )
+)
+
+
+def waveform_outputs(
+    outputs: tuple[WaveformOutput, ...],
+) -> tuple[DatasetOutputDeclaration, ...]:
+    """One signal per quantity a source carries, each with a shot history."""
+
+    return tuple(
+        DatasetOutputDeclaration(
+            output.name, f"waveform.{output.name}", index_by_source=True
+        )
+        for output in validate_waveform_outputs(outputs)
+    )
+
+
+def waveform_preview(source: WaveformSource) -> NodePreviewSpec:
+    """The first quantity, as a rolling trace of shots or as the trace one shot is."""
+
+    (first, *_rest) = waveform_outputs(source.outputs)
+    return NodePreviewSpec(first, "rolling" if int(source.record_samples) == 1 else "curve")
 
 
 @lru_cache(maxsize=64)
@@ -179,53 +206,37 @@ def _due_after(due: float, interval: float) -> float:
     return now if due <= now - interval else due
 
 
-def _strict_terminal(
+def _stopped_terminal(
     terminal: WaveformCaptureTerminalRecord,
-    *,
-    expected_records: int | None,
-    stopped: bool = False,
 ) -> WaveformCaptureTerminalRecord:
-    """The device's terminal, checked against what the capture took.
+    """The device's terminal, proving the capture stopped and joined.
 
-    ``expected_records`` is None for a capture that read at its own
-    cadence: it took the newest record at each due time and let the rest
-    go, so the source's count says nothing about its shots.
+    The source's record count says nothing about the shots: a capture took
+    the newest record at each due time and let the rest go, and what the
+    source still holds unread is what the cadence let go.
     """
 
     if not (terminal.source_stopped and terminal.joined):
         raise RuntimeError(
             "waveform terminal evidence is incomplete: the capture did not stop and join"
         )
-    if expected_records is None:
-        # What the source still holds unread is what a sampling read let go.
-        return terminal
-    if not terminal.no_more_records:
-        raise RuntimeError(
-            "waveform terminal evidence is incomplete: the source still holds "
-            "records a contiguous capture never took"
-        )
-    produced = terminal.produced_count
-    if produced < expected_records or (produced != expected_records and not stopped):
-        raise RuntimeError(
-            "waveform terminal count differs from completed shots: "
-            f"{expected_records} shot(s) were published, the source produced "
-            f"{produced} record(s)"
-        )
     return terminal
 
 
-def _working_point_snapshot(point: WaveformWorkingPoint) -> dict[str, object]:
+def _working_point_snapshot(
+    source: WaveformSource, point: WaveformWorkingPoint
+) -> dict[str, object]:
     return {
         "acquisition_mode": str(point.acquisition_mode),
         "sample_interval_seconds": float(point.sample_interval_seconds),
-        "record_samples": int(point.record_samples),
+        "record_samples": int(source.record_samples),
         "outputs": [
             {
                 "name": output.name,
                 "unit": output.unit,
                 "channels": list(output.channel_labels),
             }
-            for output in point.outputs
+            for output in source.outputs
         ],
         "settings": dict(point.settings),
     }
@@ -246,8 +257,11 @@ class WaveformMeasurementRequest:
         if int(self.repeat) < 0:
             raise ValueError("repeat must be non-negative")
         interval = float(self.read_interval_seconds)
-        if not np.isfinite(interval) or interval < 0.0:
-            raise ValueError("read_interval_seconds must be finite and non-negative")
+        if not np.isfinite(interval) or interval < MIN_READ_INTERVAL_SECONDS:
+            raise ValueError(
+                "read_interval_seconds must be finite and at least "
+                f"{MIN_READ_INTERVAL_SECONDS:g} s"
+            )
         object.__setattr__(self, "sampler_key", key)
         object.__setattr__(self, "repeat", int(self.repeat))
         object.__setattr__(self, "read_interval_seconds", interval)
@@ -293,11 +307,16 @@ class FiniteCapture:
                 commit_shot(record, index)
             self.close()
         except BaseException:
-            if not self.closed:
-                self.node.sampler.finish_record_capture()
-                self.closed = True
-            if self.owns_generation:
-                self.node.signal_plane.retire(self.node)
+            # The source is stopped whatever happened, and a source that
+            # failed raises again from its terminal; the generation is let
+            # go either way, or the plane would hold a run nobody finishes.
+            try:
+                if not self.closed:
+                    self.closed = True
+                    self.node.sampler.finish_record_capture()
+            finally:
+                if self.owns_generation:
+                    self.node.signal_plane.retire(self.node)
             raise
         if self.owns_generation:
             if self.completed_shots:
@@ -311,44 +330,31 @@ class FiniteCapture:
     def next_shot(self) -> WaveformRecord | None:
         """The next shot, or None if asked to stop.
 
-        At zero interval it is the next record, and the records must be
-        contiguous from the arm: a record the source lost is a shot this
-        run cannot account for.  At an interval it is the newest record at
-        the due time; what arrived before it is let go.
+        The newest record at the due time; what arrived before it is let
+        go.  A source that has produced nothing by the due time is waited
+        for, up to its own timeout.
         """
 
         if self.closed:
             raise RuntimeError("finite capture is closed")
         node = self.node
-        interval = node.read_interval_seconds
         timeout = float(node.sampler.timeout)
-        deadline = monotonic() + timeout
+        # The source's timeout is how long it may take to deliver a record
+        # once one is due, so it counts from the due time: a cadence longer
+        # than the timeout is a slow reading, not a silent source.
+        deadline = max(monotonic(), self._next_due) + timeout
         while True:
             if self.should_stop is not None and self.should_stop():
                 self.stopped = True
                 return None
-            if interval > 0.0:
-                record = _newest_at_due(node, self._next_due)
-            else:
-                arrived = node.sampler.read_records(
-                    1,
-                    timeout=min(_CANCEL_RESPONSE_SECONDS, max(0.0, deadline - monotonic())),
-                    exact=False,
-                )
-                record = arrived[0] if arrived else None
+            record = _newest_at_due(node, self._next_due)
             if record is not None:
                 break
             if monotonic() >= deadline:
                 raise RuntimeError(
                     f"the waveform source delivered no record within its {timeout:g} s timeout"
                 )
-        if interval > 0.0:
-            self._next_due = _due_after(self._next_due, interval)
-        elif int(record.source_ordinal) != self.completed_shots:
-            raise RuntimeError(
-                "waveform records are not contiguous: expected ordinal "
-                f"{self.completed_shots}, received {int(record.source_ordinal)}"
-            )
+        self._next_due = _due_after(self._next_due, node.read_interval_seconds)
         self.completed_shots += 1
         return record
 
@@ -357,13 +363,7 @@ class FiniteCapture:
             return self.terminal
         if self.closed:
             raise RuntimeError("finite capture closed without terminal evidence")
-        terminal = _strict_terminal(
-            self.node.sampler.finish_record_capture(),
-            expected_records=(
-                None if self.node.read_interval_seconds > 0.0 else self.completed_shots
-            ),
-            stopped=self.stopped,
-        )
+        terminal = _stopped_terminal(self.node.sampler.finish_record_capture())
         self.closed = True
         self.terminal = terminal
         return terminal
@@ -404,19 +404,11 @@ class MonitorCapture:
         if self.closed:
             raise RuntimeError("monitor capture is closed")
         node = self.node
-        interval = node.read_interval_seconds
-        if interval <= 0.0:
-            records = node.sampler.read_records(
-                node.read_batch, timeout=_CANCEL_RESPONSE_SECONDS, exact=False
-            )
-            for record in records:
-                self._publish(record)
-            return len(records)
         newest = _newest_at_due(node, self._next_due)
         if newest is None:
             return 0
         self._publish(newest)
-        self._next_due = _due_after(self._next_due, interval)
+        self._next_due = _due_after(self._next_due, node.read_interval_seconds)
         return 1
 
     def _publish(self, record: WaveformRecord) -> None:
@@ -426,8 +418,15 @@ class MonitorCapture:
     def close(self) -> WaveformCaptureTerminalRecord:
         if self.terminal is not None:
             return self.terminal
-        terminal = self.node.sampler.finish_record_capture()
         self.closed = True
+        try:
+            terminal = self.node.sampler.finish_record_capture()
+        except BaseException:
+            # A source that failed raises from its terminal; the generation
+            # is let go, not left open on the plane.
+            if self.owns_generation:
+                self.node.signal_plane.retire(self.node)
+            raise
         self.terminal = terminal
         if self.owns_generation:
             if self._revision:
@@ -446,24 +445,19 @@ class WaveformMeasurementNode:
         sampler: WaveformSource,
         request: WaveformMeasurementRequest,
         signal_plane: object,
-        outputs: tuple[DatasetOutputDeclaration, ...],
         producer: str,
     ) -> None:
         if not isinstance(sampler, WaveformSource):
             raise TypeError("sampler must implement WaveformSource")
         if not isinstance(request, WaveformMeasurementRequest):
             raise TypeError("request must be WaveformMeasurementRequest")
-        declared = tuple(outputs)
-        if not declared or any(
-            not isinstance(output, DatasetOutputDeclaration) for output in declared
-        ):
-            raise TypeError("outputs must be DatasetOutputDeclaration values")
         if signal_plane is None:
             raise TypeError("signal_plane must be supplied by the runtime owner")
         self.sampler = sampler
         self._request = request
         self.signal_plane = signal_plane
-        self._outputs = declared
+        self._outputs = waveform_outputs(sampler.outputs)
+        self._quantities = {output.name: output for output in sampler.outputs}
         self.instance_id = str(producer).strip()
         if not self.instance_id:
             raise ValueError("producer must be non-empty")
@@ -504,9 +498,8 @@ class WaveformMeasurementNode:
     def read_batch(self) -> int:
         """Records one read may take: everything a cancel slice can bring."""
 
-        point = self.working_point
         per_slice = _CANCEL_RESPONSE_SECONDS / (
-            point.record_samples * point.sample_interval_seconds
+            int(self.sampler.record_samples) * self.working_point.sample_interval_seconds
         )
         return max(4, int(ceil(per_slice)) + 1)
 
@@ -529,19 +522,11 @@ class WaveformMeasurementNode:
 
     # ------------------------------------------------------------ freezing
     def _configure(self) -> WaveformWorkingPoint:
-        """Freeze what the source samples as what this run publishes."""
+        """Freeze how the source samples for this run."""
 
         point = self.sampler.working_point()
         if not isinstance(point, WaveformWorkingPoint):
             raise TypeError("waveform source working_point must return WaveformWorkingPoint")
-        published = {output.name for output in point.outputs}
-        declared = {output.name for output in self._outputs}
-        if published != declared:
-            raise RuntimeError(
-                f"the source {self.sampler_key!r} publishes {sorted(published)}, "
-                f"this measurement declares {sorted(declared)}: pick the node that "
-                "matches the device"
-            )
         self._working_point = point
         self._run_record = {
             "node": self.instance_id,
@@ -550,7 +535,7 @@ class WaveformMeasurementNode:
                 "read_interval_seconds": self.read_interval_seconds,
             },
             "named_devices": {"sampler": self.sampler_key},
-            "device_snapshots": {"sampler": _working_point_snapshot(point)},
+            "device_snapshots": {"sampler": _working_point_snapshot(self.sampler, point)},
         }
         return point
 
@@ -566,7 +551,7 @@ class WaveformMeasurementNode:
         for declaration in self._outputs:
             snapshot = shot_snapshot(
                 record,
-                output=point.output(declaration.name),
+                output=self._quantities[declaration.name],
                 producer=self.instance_id,
                 generation=self.generation,
                 revision=revision,
@@ -610,18 +595,15 @@ class WaveformMeasurementNode:
             self._shot_outputs(record, revision=index + 1, index=index)
         )
 
-    def _arm(self, records: int | None) -> None:
-        """Arm for exactly ``records`` contiguous records, or for sampling.
+    def _arm(self) -> None:
+        """Arm for sampling: the source runs until the capture stops it.
 
-        Sampling reads the newest record at each due time and drains the
+        A read takes the newest record at each due time and drains the
         rest, so the buffer only has to hold a few slices' worth; a source
-        that outruns it drops the oldest, which a sampling read would have
-        let go anyway.
+        that outruns it drops the oldest, which the read would have let go
+        anyway.
         """
 
-        if records is not None:
-            self.sampler.arm(records, buffer_record_count=records)
-            return
         self.sampler.arm(None, buffer_record_count=4 * self.read_batch)
 
     # ------------------------------------------------------------- capture
@@ -638,7 +620,7 @@ class WaveformMeasurementNode:
             self._generation = self.signal_plane.begin_generation(self)
         try:
             self._configure()
-            self._arm(None if self.read_interval_seconds > 0.0 else self.repeat)
+            self._arm()
             return FiniteCapture(
                 self, owns_generation=owns_generation, should_stop=should_stop
             )
@@ -665,7 +647,7 @@ class WaveformMeasurementNode:
             raise TypeError("a hosted monitor requires commit_live")
         try:
             self._configure()
-            self._arm(None)
+            self._arm()
             return MonitorCapture(
                 self, owns_generation=owns_generation, commit_live=commit_live
             )
@@ -706,10 +688,13 @@ class WaveformMeasurementNode:
 
 
 __all__ = [
+    "MIN_READ_INTERVAL_SECONDS",
+    "WAVEFORM_MEASUREMENT_SCHEMA",
     "FiniteCapture",
     "MonitorCapture",
     "WaveformMeasurementNode",
     "WaveformMeasurementRequest",
     "shot_snapshot",
-    "waveform_authoring_schema",
+    "waveform_outputs",
+    "waveform_preview",
 ]

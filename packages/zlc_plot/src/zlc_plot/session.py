@@ -922,8 +922,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             )
         if self._view is None:
             if "x_display_unit" in self._parameter_schema:
-                choices = self._parameter_schema["x_display_unit"].choices
-                result["x_display_unit"] = tuple(map(str, choices))
+                result["x_display_unit"] = tuple(
+                    map(str, self._parameter_schema["x_display_unit"].choice_values)
+                )
             return MappingProxyType(result)
         registry = self._unit_registry or DEFAULT_UNITS
         for name, source in self._unit_parameter_sources().items():

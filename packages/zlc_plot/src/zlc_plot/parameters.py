@@ -57,6 +57,12 @@ class ParameterSpec(Generic[T]):
 
     ``normalizer`` is useful at a UI boundary (for example converting a spin
     box value to an enum).  Its result is type-checked before storage.
+
+    ``choices`` are ``(value, label)`` pairs: what may be stored, and how it
+    reads on a control.  The label is this declaration's to give -- a unit
+    symbol is shown as it is spelled, an enum member by the name its owner
+    chose -- so no consumer has to guess one from the value.  Guessing by
+    title-casing turned ``mT`` into ``Mt`` and ``µT`` into ``Μt``.
     """
 
     name: str
@@ -66,7 +72,7 @@ class ParameterSpec(Generic[T]):
     normalizer: Normalizer[T] | None = None
     allow_none: bool = False
     label: str | None = None
-    choices: tuple[T, ...] = ()
+    choices: tuple[tuple[T, str], ...] = ()
     minimum: float | None = None
     maximum: float | None = None
     step: float | None = None
@@ -105,14 +111,32 @@ class ParameterSpec(Generic[T]):
         object.__setattr__(self, "step", step)
         if not isinstance(self.portable, bool):
             raise TypeError("portable must be bool")
-        prepared_choices = tuple(self._prepare_value(value) for value in self.choices)
-        if any(value is None for value in prepared_choices):
+        prepared_choices = []
+        for choice in self.choices:
+            if (
+                not isinstance(choice, tuple)
+                or len(choice) != 2
+                or not isinstance(choice[1], str)
+                or not choice[1].strip()
+            ):
+                raise ValueError(
+                    "parameter choices must be (value, label) pairs with a text label"
+                )
+            prepared_choices.append((self._prepare_value(choice[0]), choice[1]))
+        values = tuple(value for value, _label in prepared_choices)
+        if any(value is None for value in values):
             raise ValueError("parameter choices must not contain None")
-        if len(set(prepared_choices)) != len(prepared_choices):
+        if len(set(values)) != len(values):
             raise ValueError("parameter choices must be unique")
-        object.__setattr__(self, "choices", prepared_choices)
+        object.__setattr__(self, "choices", tuple(prepared_choices))
         normalized = self.prepare(self.default)
         object.__setattr__(self, "default", normalized)
+
+    @property
+    def choice_values(self) -> tuple[T, ...]:
+        """What may be stored, without the labels."""
+
+        return tuple(value for value, _label in self.choices)
 
     def prepare(self, value: object) -> T | None:
         """Normalize and validate a value for storage in a display state."""
@@ -120,8 +144,8 @@ class ParameterSpec(Generic[T]):
         prepared = self._prepare_value(value)
         if prepared is None:
             return None
-        if self.choices and prepared not in self.choices:
-            choices = ", ".join(repr(choice) for choice in self.choices)
+        if self.choices and prepared not in self.choice_values:
+            choices = ", ".join(repr(choice) for choice in self.choice_values)
             raise ValueError(f"parameter {self.name!r} must be one of {choices}")
         if isinstance(prepared, Real) and not isinstance(prepared, bool):
             numeric = float(prepared)

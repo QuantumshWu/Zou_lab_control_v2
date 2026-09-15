@@ -1151,7 +1151,7 @@ def test_a_node_that_computes_what_it_was_asked_names_the_siblings_it_reads() ->
         AuthoringSchema(),
         input_specs=(DatasetInputSpec("a", None, "exact"),),
         # What it publishes is named by its draft, not by its kind.
-        declare_outputs=lambda values: (
+        declare_outputs=lambda values, _devices: (
             DatasetOutputDeclaration(str(values["name"]), "derive.value"),
         ),
         build=lambda **_values: object(),
@@ -1164,6 +1164,7 @@ def test_a_node_that_computes_what_it_was_asked_names_the_siblings_it_reads() ->
         instance_id="derive-1",
         source_signal="@logic/occupancy/counts",
         values={"name": "bright"},
+        devices={},
     )
     try:
         assert host._input_name == "a"
@@ -1178,6 +1179,7 @@ def test_a_node_that_computes_what_it_was_asked_names_the_siblings_it_reads() ->
         instance_id="derive-2",
         source_signal="@logic/occupancy/counts",
         values={"name": "value"},
+        devices={},
     )
     try:
         assert silent._input_siblings == ()
@@ -1207,6 +1209,7 @@ def test_make_host_passes_descriptor_contract_without_reading_node_attributes() 
         instance_id="processor-7",
         source_signal="@logic/camera-2/frames",
         values={},
+        devices={},
     )
     try:
         assert host.instance_id == "processor-7"
@@ -1232,6 +1235,7 @@ def test_make_host_passes_descriptor_contract_without_reading_node_attributes() 
             instance_id="scan-3",
             source_signal="@logic/camera-2/frames",
             values={},
+            devices={},
         )
         try:
             assert scan_host._mode == "worker"

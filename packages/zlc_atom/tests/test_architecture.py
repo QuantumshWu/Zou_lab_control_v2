@@ -299,8 +299,6 @@ def test_node_cross_imports_have_only_owner_edges() -> None:
         f"needs one is asking for a library: {sorted(sideways)}"
     )
     assert {edge for edge in edges if edge[1] not in node_owners} == {
-        ("imu_measurement", "waveform"),
-        ("scope_measurement", "waveform"),
         ("seamless_scan", "scan"),
         ("slm_feedback", "scan"),
         ("stepped_scan", "scan"),

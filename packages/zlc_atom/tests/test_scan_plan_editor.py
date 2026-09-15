@@ -505,7 +505,7 @@ def test_axis_rows_follow_the_ports_without_being_rebuilt(caplog) -> None:
     power = ScanPort("device:rf:ch1_power", "rf.ch1_power", "dBm",
                      -30.0, 10.0, -20.0, 0.0)
     units = UnitRegistry((DEFAULT_UNITS.resolve("dBm"),
-                          Unit("Vpp", "power", VoltageIntoLoad(100.0), prefixable=True)))
+                          Unit("Vpp", "power", VoltageIntoLoad(100.0), prefixes=("m",))))
     owner_thread = get_ident()
     gate = Event()
     reads = []

@@ -42,10 +42,10 @@ def test_vpp_takes_a_prefix_and_round_trips() -> None:
 def test_the_three_spellings_are_three_families_of_one_dimension() -> None:
     families = {
         symbol: DEFAULT_UNITS.family_of(symbol).symbol
-        for symbol in ("W", "mW", "kW", "dBm", "Vpp", "mVpp")
+        for symbol in ("W", "mW", "µW", "dBm", "Vpp", "mVpp")
     }
     assert families == {
-        "W": "W", "mW": "W", "kW": "W", "dBm": "dBm", "Vpp": "Vpp", "mVpp": "Vpp",
+        "W": "W", "mW": "W", "µW": "W", "dBm": "dBm", "Vpp": "Vpp", "mVpp": "Vpp",
     }
     assert DEFAULT_UNITS.base_for("Vpp").symbol == "W", "one dimension, one base"
     choices = DEFAULT_UNITS.display_choices("dBm")

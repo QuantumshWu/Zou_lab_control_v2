@@ -52,8 +52,9 @@ def parameter_controls(
     """Project one canonical schema/state pair into ordered UI controls.
 
     ``choice_overrides`` supplies data- or environment-dependent editor
-    domains, such as compatible units and the package-defined colormap
-    catalogue. It changes only the editor choices; the core schema still
+    domains, such as compatible units and fit parameter names.  They are
+    values, shown exactly as they are spelled -- a unit symbol is its own
+    label -- and they change only the editor choices; the core schema still
     validates every submitted value.
     """
 
@@ -72,7 +73,12 @@ def parameter_controls(
     for name, spec in schema.items():
         if name not in values:
             raise KeyError(f"display state is missing parameter {name!r}")
-        choices = tuple(overrides.get(name, spec.choices))
+        overridden = overrides.get(name)
+        choices = (
+            spec.choices
+            if overridden is None
+            else tuple((value, str(value)) for value in overridden)
+        )
         kind = _control_kind(spec.value_type, choices)
         # Which mode governs THIS limit is a fact about the parameter
         # vocabulary, and the vocabulary owns it.  The editor kept its own

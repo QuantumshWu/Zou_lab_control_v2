@@ -39,20 +39,16 @@ def _qt5_parameter_panel_class() -> type[Any]:
             for blocker in blockers:
                 blocker.unblock()
 
-    def _choice_entry(choice: object, *, semantic: bool) -> tuple[object, str]:
-        """Resolve one control choice without inventing semantic labels."""
+    def _choice_entry(choice: object) -> tuple[object, str]:
+        """One control choice: the value, and the label its declaration gave it."""
 
-        if semantic:
-            if (
-                not isinstance(choice, tuple)
-                or len(choice) != 2
-                or not isinstance(choice[1], str)
-            ):
-                raise TypeError(
-                    "semantic controls must provide (value, label) choices"
-                )
-            return choice[0], choice[1]
-        return choice, "(none)" if choice is None else str(choice)
+        if (
+            not isinstance(choice, tuple)
+            or len(choice) != 2
+            or not isinstance(choice[1], str)
+        ):
+            raise TypeError("controls provide (value, label) choices")
+        return choice[0], choice[1]
 
     def _find_choice_index(editor: object, value: object) -> int:
         """Compare Python values directly; Qt QVariant identity is not stable."""
@@ -345,10 +341,7 @@ def _qt5_parameter_panel_class() -> type[Any]:
                 if control.allow_none:
                     editor.addItem("(none)", None)
                 for choice in control.choices:
-                    value, label = _choice_entry(
-                        choice,
-                        semantic=control.semantic,
-                    )
+                    value, label = _choice_entry(choice)
                     if value is None and control.allow_none:
                         continue
                     editor.addItem(label, value)
@@ -357,11 +350,7 @@ def _qt5_parameter_panel_class() -> type[Any]:
                         raise RuntimeError(
                             f"semantic value for {control.name!r} is absent from choices"
                         )
-                    value, label = _choice_entry(
-                        control.value,
-                        semantic=control.semantic,
-                    )
-                    editor.addItem(label, value)
+                    editor.addItem(str(control.value), control.value)
                 editor.currentIndexChanged.connect(
                     lambda _index, widget=editor, name=control.name: (
                         signal.emit(name, widget.currentData())

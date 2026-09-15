@@ -73,6 +73,7 @@ from .logic import (
     build_arguments,
     dataset_inputs,
     device_key_options,
+    draft_devices,
     finalize_logic_draft,
     make_host,
     stable_signal_key,
@@ -3951,13 +3952,19 @@ class ConsolePresenter:
                 return binding.node_id
         return None
 
-    @staticmethod
-    def _logic_outputs(binding: LogicBinding) -> tuple[object, ...]:
+    def _logic_outputs(self, binding: LogicBinding) -> tuple[object, ...]:
         """Outputs of the active run, or of the exact stopped draft."""
 
         if binding.host is not None:
             return tuple(binding.host.dataset_output_declarations)
-        return binding.descriptor.outputs_for(binding.draft.values)
+        return binding.descriptor.outputs_for(
+            binding.draft.values,
+            draft_devices(
+                binding.descriptor,
+                binding.draft,
+                installation=self.session.installation,
+            ),
+        )
 
     def _panel_snapshot_status(self, binding: PanelBinding) -> dict[str, object]:
         frozen = binding.frozen_data
@@ -7821,7 +7828,9 @@ class ConsolePresenter:
             extras=self._logic_extras(),
         )
         node = binding.descriptor.instantiate(**arguments)
-        previews = tuple(binding.descriptor.node_previews)
+        previews = tuple(
+            binding.descriptor.previews_for(finalization.values, finalization.devices)
+        )
         host = make_host(
             binding.descriptor,
             node,
@@ -7829,6 +7838,7 @@ class ConsolePresenter:
             instance_id=binding.node_id,
             source_signal=finalization.source_signal or None,
             values=finalization.values,
+            devices=finalization.devices,
             request_owner_wake=self.board.wake.request_owner_wake,
         )
         claims = tuple(
@@ -7836,7 +7846,7 @@ class ConsolePresenter:
                 requirement.argument_name,
                 finalization.device_keys[requirement.argument_name],
                 arguments[requirement.argument_name],
-                requirement.protected_fields,
+                requirement.fields_frozen_by(arguments[requirement.argument_name]),
             )
             for requirement in binding.descriptor.device_requirements
         )

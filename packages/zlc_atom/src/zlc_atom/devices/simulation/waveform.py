@@ -79,12 +79,18 @@ class VirtualWaveformSource:
     def timeout(self) -> float:
         return 2.0
 
+    @property
+    def outputs(self) -> tuple[WaveformOutput, ...]:
+        return self.config.outputs
+
+    @property
+    def record_samples(self) -> int:
+        return self.config.record_samples
+
     def working_point(self) -> WaveformWorkingPoint:
         return WaveformWorkingPoint(
             WaveformAcquisitionMode.FREE_RUNNING,
             1.0 / self.config.sample_rate_hz,
-            self.config.record_samples,
-            self.config.outputs,
             {
                 "sample_rate_hz": self.config.sample_rate_hz,
                 "record_samples": self.config.record_samples,

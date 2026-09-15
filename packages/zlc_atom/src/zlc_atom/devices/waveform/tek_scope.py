@@ -192,9 +192,13 @@ class TekScopeWaveformSource:
             self._link.write(":VERBose OFF")
             self._link.write(":DATa:ENCdg RIBinary")
             self._link.write(":DATa:WIDth 2")
-            record_length = int(float(self._link.query(":HORizontal:RECOrdlength?")))
+            # The whole record, as long as the scope holds it when opened: the
+            # data window is set once here, and the curve of every capture is
+            # checked against it, so a record length changed on the front
+            # panel under an open session is refused rather than read short.
+            self._record_samples = int(float(self._link.query(":HORizontal:RECOrdlength?")))
             self._link.write(":DATa:STARt 1")
-            self._link.write(f":DATa:STOP {record_length}")
+            self._link.write(f":DATa:STOP {self._record_samples}")
         except BaseException:
             self._link.close()
             raise
@@ -222,35 +226,38 @@ class TekScopeWaveformSource:
     def _select(self, channel: int) -> None:
         self._link.write(f":DATa:SOUrce CH{int(channel)}")
 
+    @property
+    def outputs(self) -> tuple[WaveformOutput, ...]:
+        return (
+            WaveformOutput(
+                "voltage",
+                "V",
+                tuple(f"CH{channel}" for channel in self.config.channels),
+                tuple(range(len(self.config.channels))),
+            ),
+        )
+
+    @property
+    def record_samples(self) -> int:
+        return self._record_samples
+
     def working_point(self) -> WaveformWorkingPoint:
         with self._link_lock:
             time_per_div = self._query_float(":HORizontal:SCAle?")
             self._select(self.config.channels[0])
             interval = self._query_float(":WFMOutpre:XINcr?")
-            points = int(float(self._link.query(":WFMOutpre:NR_Pt?")))
             settings: dict[str, object] = {
                 "resource": self.config.resource,
                 "identity": self._identity,
                 TIME_PER_DIV_FIELD: time_per_div,
-                "record_length": points,
+                "record_length": self._record_samples,
             }
             for channel in self.config.channels:
                 settings[volts_per_div_field(channel)] = self._query_float(
                     f":CH{channel}:SCAle?"
                 )
         return WaveformWorkingPoint(
-            WaveformAcquisitionMode.EXTERNAL_TRIGGERED,
-            interval,
-            points,
-            (
-                WaveformOutput(
-                    "voltage",
-                    "V",
-                    tuple(f"CH{channel}" for channel in self.config.channels),
-                    tuple(range(len(self.config.channels))),
-                ),
-            ),
-            settings,
+            WaveformAcquisitionMode.EXTERNAL_TRIGGERED, interval, settings
         )
 
     # -------------------------------------------------------------- knobs
@@ -368,7 +375,7 @@ class TekScopeWaveformSource:
                             self._query_float(":WFMOutpre:YZEro?"),
                         )
                     )
-                points = int(float(self._link.query(":WFMOutpre:NR_Pt?")))
+            points = self._record_samples
             while not stop.is_set() and self._records.accepting:
                 with self._link_lock:
                     self._link.write(":ACQuire:STOPAfter SEQuence")

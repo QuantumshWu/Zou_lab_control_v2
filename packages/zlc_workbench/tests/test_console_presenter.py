@@ -1169,7 +1169,7 @@ def test_a_limit_does_not_follow_a_panel_across_cell_kinds(
     # here is not what curve cells start from.
     foreign = next(
         value
-        for value in image_cells["relim_mode"].choices
+        for value in image_cells["relim_mode"].choice_values
         if value != curve_cells["relim_mode"].default
     )
     assert presenter.update_panel_state(

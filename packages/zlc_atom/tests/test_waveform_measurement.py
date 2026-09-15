@@ -1,4 +1,4 @@
-"""A waveform source is a camera for time: one record, one shot, the same host."""
+"""A waveform source is a camera for time: one record, one shot, one measurement."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from zlc_atom.devices.simulation.waveform import (
     VirtualWaveformConfig,
     VirtualWaveformSource,
 )
+from zlc_atom.devices.waveform.contract import WaveformOutput
 from zlc_atom.devices.waveform.tek_scope import (
     TIME_PER_DIV_FIELD,
     TekScopeConfig,
@@ -32,8 +33,9 @@ from zlc_atom.devices.waveform.wheeltec_n100 import (
     N100_OUTPUTS,
     drain_imu_samples,
 )
-from zlc_atom.nodes.imu_measurement import IMU_OUTPUTS, MAGNETIC_FIELD_OUTPUT
-from zlc_atom.nodes.waveform import (
+from zlc_atom.nodes.waveform_measurement import (
+    LOGIC_NODE,
+    MIN_READ_INTERVAL_SECONDS,
     WaveformMeasurementNode,
     WaveformMeasurementRequest,
 )
@@ -112,6 +114,14 @@ def _imu_like_source(rate_hz: float) -> VirtualWaveformSource:
     )
 
 
+def _scope_like_source() -> VirtualWaveformSource:
+    outputs = (WaveformOutput("voltage", "V", ("CH1", "CH2"), (0, 1)),)
+    return VirtualWaveformSource(
+        VirtualWaveformConfig(10000.0, 100, outputs),
+        sample_source=lambda times: np.zeros((times.size, 2), dtype=np.float32),
+    )
+
+
 def _host(node: WaveformMeasurementNode, plane: SignalDataPlane, wake: Event) -> NodeHost:
     return NodeHost(
         node,
@@ -134,18 +144,60 @@ def _drive(host: NodeHost, until, timeout: float = 5.0):
     return None
 
 
+def test_one_measurement_publishes_what_its_source_carries() -> None:
+    """The outputs and the preview are the bound instrument's, not a node's.
+
+    An IMU packet is four quantities and is watched as a rolling trace of
+    shots; a scope acquisition is one voltage and is watched as the trace
+    it is.  Until a draft binds a source it publishes nothing, and the
+    cadence it may be read at has a floor.
+    """
+
+    imu = _imu_like_source(500.0)
+    scope = _scope_like_source()
+    try:
+        assert LOGIC_NODE.outputs_for({}, {}) == ()
+        imu_outputs = LOGIC_NODE.outputs_for({}, {"sampler": imu})
+        assert [output.name for output in imu_outputs] == [
+            "magnetic_field",
+            "angular_rate",
+            "acceleration",
+            "temperature",
+        ]
+        assert all(output.index_by_source for output in imu_outputs)
+        (preview,) = LOGIC_NODE.previews_for({}, {"sampler": imu})
+        assert preview.output == imu_outputs[0] and preview.plot_kind == "rolling"
+        (voltage,) = LOGIC_NODE.outputs_for({}, {"sampler": scope})
+        assert voltage.name == "voltage" and voltage.contract_id == "waveform.voltage"
+        (preview,) = LOGIC_NODE.previews_for({}, {"sampler": scope})
+        assert preview.plot_kind == "curve"
+        (requirement,) = LOGIC_NODE.device_requirements
+        assert requirement.fields_frozen_by(imu) == ()
+        with pytest.raises(ValueError, match="at least"):
+            WaveformMeasurementRequest("imu", repeat=0, read_interval_seconds=0.0)
+        field = next(
+            field
+            for field in LOGIC_NODE.authoring_schema.fields
+            if field.name == "read_interval_seconds"
+        )
+        assert field.minimum == MIN_READ_INTERVAL_SECONDS
+    finally:
+        imu.close()
+        scope.close()
+
+
 def test_every_packet_is_a_shot_and_a_rolling_window_keeps_the_last_ones() -> None:
-    """Each record publishes at once as (1) x () x (channel) per quantity, in
-    its own unit; a history lease makes the plane keep the last N shots by
-    the measurement's own sequence, which is what a Rolling panel reads."""
+    """Read faster than the source produces, each record publishes at once
+    as (1) x () x (channel) per quantity, in its own unit; a history lease
+    makes the plane keep the last N shots by the measurement's own
+    sequence, which is what a Rolling panel reads."""
 
     plane = SignalDataPlane()
     source = _imu_like_source(500.0)
     node = WaveformMeasurementNode(
         sampler=source,
-        request=WaveformMeasurementRequest("imu", repeat=0, read_interval_seconds=0.0),
+        request=WaveformMeasurementRequest("imu", repeat=0, read_interval_seconds=0.001),
         signal_plane=plane,
-        outputs=IMU_OUTPUTS,
         producer="imu-live",
     )
     wake = Event()
@@ -155,7 +207,7 @@ def test_every_packet_is_a_shot_and_a_rolling_window_keeps_the_last_ones() -> No
         host.start()
         assert host.wait_ready(5), "the monitor did not report ready"
         assert source.capture_state()
-        key = host.signal_key(MAGNETIC_FIELD_OUTPUT.name)
+        key = host.signal_key("magnetic_field")
         value = _drive(host, lambda: plane.freeze().value(key))
         assert value is not None, "the hosted monitor published no shot"
         schema = value.snapshot.block.schema
@@ -165,7 +217,8 @@ def test_every_packet_is_a_shot_and_a_rolling_window_keeps_the_last_ones() -> No
         assert schema.value_schema.value_unit == "uT"
         assert np.asarray(value.snapshot.block.values)[0, 0, 1] == pytest.approx(-5.0)
         assert value.run_record["named_devices"] == {"sampler": "imu"}
-        assert value.run_record["parameters"]["read_interval_seconds"] == 0.0
+        assert value.run_record["parameters"]["read_interval_seconds"] == 0.001
+        assert value.run_record["device_snapshots"]["sampler"]["record_samples"] == 1
         temperature = plane.freeze().value(host.signal_key("temperature"))
         assert temperature is not None
         assert temperature.snapshot.block.schema.value_schema.value_unit == "K"
@@ -206,8 +259,8 @@ def test_every_packet_is_a_shot_and_a_rolling_window_keeps_the_last_ones() -> No
         plane.close()
 
 
-def test_a_finite_measurement_takes_its_shots_contiguously_or_at_its_own_cadence() -> None:
-    for interval, expect_contiguous in ((0.0, True), (0.004, False)):
+def test_a_finite_measurement_takes_its_shots_at_its_own_cadence() -> None:
+    for interval, expect_every_packet in ((0.001, True), (0.004, False)):
         plane = SignalDataPlane()
         source = _imu_like_source(500.0)
         node = WaveformMeasurementNode(
@@ -216,7 +269,6 @@ def test_a_finite_measurement_takes_its_shots_contiguously_or_at_its_own_cadence
                 "imu", repeat=4, read_interval_seconds=interval
             ),
             signal_plane=plane,
-            outputs=IMU_OUTPUTS,
             producer="imu-finite",
         )
         wake = Event()
@@ -225,7 +277,7 @@ def test_a_finite_measurement_takes_its_shots_contiguously_or_at_its_own_cadence
             host.start()
             assert host.wait_ready(5)
             assert _drive(host, lambda: True if host.observation.terminal else None)
-            key = host.signal_key(MAGNETIC_FIELD_OUTPUT.name)
+            key = host.signal_key("magnetic_field")
             publication = plane.latest_publication(key)
             assert publication is not None
             value = publication.value(key)
@@ -233,9 +285,10 @@ def test_a_finite_measurement_takes_its_shots_contiguously_or_at_its_own_cadence
             dataset = plane.current_dataset(key, publication)
             assert dataset.block.schema.physical_shape == (4, 1, 3)
             packets = np.asarray(dataset.block.values)[:, 0, 0]
-            if expect_contiguous:
+            if expect_every_packet:
+                # Read every 1 ms off a 500 Hz source: each due time waits
+                # for the next packet, so the shots are the packets.
                 assert packets.tolist() == [0.0, 1.0, 2.0, 3.0]
-                assert source.produced_count == 4
             else:
                 # Read every 4 ms off a 500 Hz source: the three intervals
                 # between four shots span about six packets, each shot a new
@@ -293,8 +346,6 @@ class _ScopeInstrument:
             return f"{self.volts_per_div[int(upper[3:4])]:.4E}"
         if upper == ":WFMOUTPRE:XINCR?":
             return f"{self.time_per_div * 10.0 / self.record_length:.6E}"
-        if upper == ":WFMOUTPRE:NR_PT?":
-            return str(self.record_length)
         if upper == ":WFMOUTPRE:YMULT?":
             return f"{self.volts_per_div[self.source] / 25.0:.6E}"
         if upper == ":WFMOUTPRE:YOFF?":
@@ -326,11 +377,11 @@ def test_the_tek_scope_driver_scales_curves_and_snaps_its_knobs() -> None:
     try:
         assert scope.identity == "tek-scope:C012345"
         assert ":DATA:ENCDG RIBINARY" in [entry.upper() for entry in instrument.log]
-        point = scope.working_point()
-        assert point.record_samples == 8
-        assert point.sample_interval_seconds == pytest.approx(1e-3 * 10.0 / 8)
-        (voltage,) = point.outputs
+        assert scope.record_samples == 8
+        (voltage,) = scope.outputs
         assert voltage.channel_labels == ("CH1", "CH2") and voltage.unit == "V"
+        point = scope.working_point()
+        assert point.sample_interval_seconds == pytest.approx(1e-3 * 10.0 / 8)
         assert point.settings[volts_per_div_field(2)] == 0.5
 
         # The knob answers with the scope's own step, not the request.
@@ -338,6 +389,9 @@ def test_the_tek_scope_driver_scales_curves_and_snaps_its_knobs() -> None:
         fields = {field.metadata.name: field for field in scope.tunable_fields()}
         assert fields[TIME_PER_DIV_FIELD].current == pytest.approx(2e-3)
         assert set(fields) == {TIME_PER_DIV_FIELD, "ch1_volts_per_div", "ch2_volts_per_div"}
+        # A capture takes the instrument as it stands: every knob is frozen.
+        (requirement,) = LOGIC_NODE.device_requirements
+        assert set(requirement.fields_frozen_by(scope)) == set(fields)
 
         scope.arm(2, buffer_record_count=2)
         with pytest.raises(RuntimeError):

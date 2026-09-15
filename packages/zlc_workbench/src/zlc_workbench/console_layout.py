@@ -32,6 +32,7 @@ from .logic import (
     artifact_input_specs,
     dataset_inputs,
     device_key_options,
+    draft_devices,
     split_signal_key,
     stable_signal_key,
 )
@@ -318,7 +319,11 @@ def resolve_layout(
 
     output_contracts = {str(signal): str(contract) for signal, contract in external_outputs}
     for binding in bindings:
-        for output in binding.descriptor.outputs_for(binding.draft.values):
+        outputs = binding.descriptor.outputs_for(
+            binding.draft.values,
+            draft_devices(binding.descriptor, binding.draft, installation=installation),
+        )
+        for output in outputs:
             signal = stable_signal_key(binding.node_id, output.name)
             contract = str(output.contract_id)
             previous = output_contracts.get(signal)

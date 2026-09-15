@@ -8,6 +8,7 @@ from .contract import (
     WaveformRecordQueue,
     WaveformSource,
     WaveformWorkingPoint,
+    validate_waveform_outputs,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "WaveformRecordQueue",
     "WaveformSource",
     "WaveformWorkingPoint",
+    "validate_waveform_outputs",
 ]

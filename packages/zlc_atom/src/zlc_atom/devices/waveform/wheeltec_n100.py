@@ -261,6 +261,14 @@ class WheeltecN100WaveformSource:
     def identity(self) -> str:
         return f"wheeltec-n100:{self.config.port}"
 
+    @property
+    def outputs(self) -> tuple[WaveformOutput, ...]:
+        return N100_OUTPUTS
+
+    @property
+    def record_samples(self) -> int:
+        return 1
+
     def working_point(self) -> WaveformWorkingPoint:
         interval = self._sample_interval
         if interval is None:
@@ -268,8 +276,6 @@ class WheeltecN100WaveformSource:
         return WaveformWorkingPoint(
             WaveformAcquisitionMode.FREE_RUNNING,
             interval,
-            1,
-            N100_OUTPUTS,
             {
                 "port": self.config.port,
                 "baud": self.config.baud,

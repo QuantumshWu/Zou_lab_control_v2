@@ -220,13 +220,12 @@ def test_logic_discovery_is_derived_from_leaf_modules() -> None:
         "camera_measurement",
         "derive",
         "frame_survival",
-        "imu_measurement",
         "occupancy",
-        "scope_measurement",
         "seamless_scan",
         "slm_feedback",
         "stepped_scan",
         "temperature",
+        "waveform_measurement",
     )
     assert all(
         isinstance(output, DatasetOutputDeclaration)
@@ -597,8 +596,12 @@ def test_every_discovered_measurement_declares_live_data_and_a_preview() -> None
     )
     assert measurements, "the product discovery found no Measurements"
     for descriptor in measurements:
-        assert descriptor.outputs, f"{descriptor.api_name} declares no live Dataset"
-        assert descriptor.node_previews, (
+        # By name, or by draft: a measurement whose outputs are the bound
+        # instrument's still declares that they exist and how they are watched.
+        assert descriptor.outputs or descriptor.declare_outputs is not None, (
+            f"{descriptor.api_name} declares no live Dataset"
+        )
+        assert descriptor.offers_a_preview, (
             f"{descriptor.api_name} declares no preview for its live Dataset"
         )
 

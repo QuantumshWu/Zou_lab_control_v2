@@ -65,13 +65,14 @@ class Prefix:
         return (self.symbol, *self.accepts)
 
 
-#: Every prefix this project uses, largest first.  Deliberately not all of SI:
-#: an instrument here is never read in petavolts or femtoseconds, and a table
-#: with rows nobody needs makes the choice list harder to use, not richer.
-#: The identity step is a member like any other so that "no prefix" needs no
-#: special case anywhere below.
+#: Every prefix some unit's ladder uses, largest first.  This table says how
+#: a prefix is spelled and what it multiplies by; WHICH of them a unit is
+#: read in is the unit's own declaration (``Unit.prefixes``), because that is
+#: a fact about the instrument and the quantity -- a frequency here goes up
+#: to gigahertz and a temperature down to nanokelvin, and neither is read in
+#: teraseconds.  The identity step is a member like any other so that "no
+#: prefix" needs no special case anywhere below.
 PREFIXES: tuple[Prefix, ...] = (
-    Prefix("T", 12),
     Prefix("G", 9),
     Prefix("M", 6),
     Prefix("k", 3),
@@ -93,8 +94,7 @@ _PREFIX_BY_EXPONENT = {prefix.exponent: prefix for prefix in PREFIXES}
 #: stays in hertz however large it is, because that row is the one place the
 #: operator said which scale they read.
 NO_PREFIX = _PREFIX_BY_EXPONENT[0]
-_SMALLEST_EXPONENT = min(prefix.exponent for prefix in PREFIXES)
-_LARGEST_EXPONENT = max(prefix.exponent for prefix in PREFIXES)
+_PREFIX_BY_SYMBOL = {prefix.symbol: prefix for prefix in PREFIXES if prefix.symbol}
 #: The step between neighbouring prefixes.  Read off the table rather than
 #: written down, because it is the table that decides it.
 _PREFIX_STEP = 3
@@ -120,6 +120,31 @@ class Scaled:
 
     def from_base(self, values: ArrayLike) -> NDArray[np.generic]:
         return np.asarray(values) / self.factor
+
+
+@dataclass(frozen=True, slots=True)
+class Offset:
+    """``base = value + offset`` -- a scale with its zero somewhere else.
+
+    A Celsius reading is a kelvin reading with 273.15 taken off, so it is
+    not ``value * factor`` and never was.  A unit read this way takes no
+    prefix: a thousandth of a degree Celsius is not a unit, and the
+    arithmetic that moves a decimal point would move the zero with it.
+    """
+
+    offset: float
+
+    def __post_init__(self) -> None:
+        offset = float(self.offset)
+        if not np.isfinite(offset):
+            raise UnitError("unit offset must be finite")
+        object.__setattr__(self, "offset", offset)
+
+    def to_base(self, values: ArrayLike) -> NDArray[np.generic]:
+        return np.asarray(values, dtype=float) + self.offset
+
+    def from_base(self, values: ArrayLike) -> NDArray[np.generic]:
+        return np.asarray(values, dtype=float) - self.offset
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,7 +243,7 @@ class Prefixed:
         return np.asarray(self.inner.from_base(values), dtype=float) / self.factor
 
 
-Conversion = Scaled | Decibel | VoltageIntoLoad | Prefixed
+Conversion = Scaled | Offset | Decibel | VoltageIntoLoad | Prefixed
 
 
 # ------------------------------------------------------------------- the unit
@@ -258,9 +283,12 @@ class Unit:
     symbol: str
     dimension: str
     conversion: Conversion = Scaled(1.0)
-    #: Whether a prefix may be written in front of this symbol.  True only for
-    #: a dimension's base: ``mms`` is not a unit, and neither is ``mdBm``.
-    prefixable: bool = False
+    #: The prefixes this unit is read in, besides its bare symbol: ``("m",
+    #: "µ", "n")`` for the second, nothing for a unit that takes none.  What
+    #: an instrument here is read in is a fact about the quantity, and only
+    #: the reference of a spelling family carries them -- ``mms`` is not a
+    #: unit, and neither is ``mdBm``.
+    prefixes: tuple[str, ...] = ()
     aliases: tuple[str, ...] = ()
     #: The dimension this one becomes when inverted, for the axes that can be
     #: read either way round (a time is a frequency and back).
@@ -281,8 +309,21 @@ class Unit:
         for text, field in ((self.symbol, "symbol"), (self.dimension, "dimension")):
             if not isinstance(text, str) or not text or text.strip() != text:
                 raise UnitError(f"unit {field} must be a non-empty, trimmed string")
-        if not isinstance(self.conversion, (Scaled, Decibel, VoltageIntoLoad, Prefixed)):
-            raise UnitError("unit conversion must be Scaled, Decibel, VoltageIntoLoad or Prefixed")
+        if not isinstance(
+            self.conversion, (Scaled, Offset, Decibel, VoltageIntoLoad, Prefixed)
+        ):
+            raise UnitError(
+                "unit conversion must be Scaled, Offset, Decibel, VoltageIntoLoad or Prefixed"
+            )
+        if isinstance(self.prefixes, str):
+            raise UnitError("unit prefixes must be an iterable of prefix symbols, not a string")
+        prefixes = tuple(self.prefixes)
+        unknown = [prefix for prefix in prefixes if prefix not in _PREFIX_BY_SYMBOL]
+        if unknown:
+            raise UnitError(f"unit {self.symbol!r} names prefixes the table lacks: {unknown!r}")
+        if len(set(prefixes)) != len(prefixes):
+            raise UnitError(f"unit {self.symbol!r} names a prefix twice")
+        object.__setattr__(self, "prefixes", prefixes)
         if isinstance(self.aliases, str):
             raise UnitError("unit aliases must be an iterable of strings, not a string")
         aliases = tuple(self.aliases)
@@ -294,8 +335,8 @@ class Unit:
         names = (self.symbol, *aliases)
         if len(set(names)) != len(names):
             raise UnitError(f"unit {self.symbol!r} contains duplicate names")
-        if self.prefixable and (
-            isinstance(self.conversion, (Decibel, Prefixed))
+        if self.prefixes and (
+            isinstance(self.conversion, (Offset, Decibel, Prefixed))
             or (self.is_linear and not self.is_base)
         ):
             # A prefix multiplies the number written in the unit, so it
@@ -318,6 +359,22 @@ class Unit:
             )
 
     @property
+    def ladder(self) -> tuple[Prefix, ...]:
+        """The rungs this unit is shown and read in, largest first.
+
+        The bare symbol is always one; the others are the prefixes the unit
+        declares.  A unit that declares none has a ladder of one rung, and
+        every ladder is read off the one prefix table so the rungs of every
+        unit are spelled and ordered the same way.
+        """
+
+        return tuple(
+            prefix
+            for prefix in PREFIXES
+            if prefix.exponent == 0 or prefix.symbol in self.prefixes
+        )
+
+    @property
     def is_linear(self) -> bool:
         return isinstance(self.conversion, Scaled)
 
@@ -336,6 +393,10 @@ class Unit:
             conversion = conversion.inner
         if isinstance(conversion, Scaled):
             return self.dimension, factor * conversion.factor
+        if isinstance(conversion, Offset):
+            # A span in Celsius is the same span in kelvin: the shifted zero
+            # cancels in every difference, so coordinates scale one to one.
+            return self.dimension, factor
         if isinstance(conversion, VoltageIntoLoad):
             return (
                 f"coordinate:{self.dimension}:voltage",
@@ -554,7 +615,7 @@ class UnitRegistry:
             if not text.startswith(spelling):
                 continue
             base = self._units.get(text[len(spelling):])
-            if base is not None and base.prefixable:
+            if base is not None and prefix in base.ladder:
                 return base, prefix
         return None, _PREFIX_BY_EXPONENT[0]
 
@@ -633,7 +694,7 @@ class UnitRegistry:
         wanted = 1.0 / source.scale
         exponent = round(np.log10(wanted / base.scale))
         prefix = _PREFIX_BY_EXPONENT.get(int(exponent))
-        if prefix is None or not base.prefixable and exponent != 0:
+        if prefix is None or prefix not in base.ladder:
             return None
         candidate = _prefixed(base, prefix)
         return candidate if math.isclose(candidate.scale, wanted, rel_tol=1e-12) else None
@@ -649,9 +710,11 @@ class UnitRegistry:
 
         A display-unit list belongs to one axis, so it holds that axis's
         dimension and nothing else: offering ``pixel`` as the display unit of a
-        time axis is not a choice, it is a way to make the plot raise.  For a
-        prefixable base that is the prefix table; for anything else it is
-        whatever shares the dimension.
+        time axis is not a choice, it is a way to make the plot raise.  Each
+        unit of the dimension contributes its own ladder -- the rungs it
+        declares it is read in, not every prefix the table can spell -- so a
+        temperature offers kelvin down to nanokelvin and Celsius beside it,
+        never terakelvin.
         """
 
         resolved = self.resolve(unit)
@@ -663,12 +726,9 @@ class UnitRegistry:
             )
         choices: list[str] = []
         for candidate in registered:
-            if candidate.prefixable:
-                choices.extend(
-                    _prefixed(candidate, prefix).symbol for prefix in PREFIXES
-                )
-            else:
-                choices.append(candidate.symbol)
+            choices.extend(
+                _prefixed(candidate, prefix).symbol for prefix in candidate.ladder
+            )
         if not choices:
             choices.append(resolved.symbol)
         ordered = sorted(
@@ -694,25 +754,31 @@ def _builtin_units() -> tuple[Unit, ...]:
 
     Everything a prefix can reach is absent on purpose: ``ms``, ``MHz``,
     ``nm`` and the rest are derived, so this table cannot develop the holes a
-    hand-written one always does.
+    hand-written one always does.  Each base names the rungs it is read in
+    on this bench: the pulse board's clock is tens of nanoseconds and a
+    period is never kiloseconds, an atom cloud is nanokelvin and nothing
+    here is megakelvin, a coil's field is microtesla.  A symbol is written
+    the way it is read -- the degree sign, not the letters that spell it --
+    and the letters are aliases for whoever must type it.
     """
 
     return (
         Unit("1", "dimensionless", aliases=("arb",)),
-        Unit("s", "time", prefixable=True, inverse_dimension="frequency"),
-        Unit("m", "length", prefixable=True),
-        Unit("Hz", "frequency", prefixable=True, inverse_dimension="time"),
-        Unit("V", "voltage", prefixable=True),
-        Unit("A", "current", prefixable=True),
-        Unit("W", "power", prefixable=True),
-        Unit("K", "temperature", prefixable=True),
-        Unit("T", "magnetic_flux_density", prefixable=True),
-        Unit("rad", "angle", prefixable=True),
-        Unit("deg", "angle", Scaled(np.pi / 180.0), aliases=("°",)),
+        Unit("s", "time", prefixes=("m", "µ", "n"), inverse_dimension="frequency"),
+        Unit("m", "length", prefixes=("k", "m", "µ", "n")),
+        Unit("Hz", "frequency", prefixes=("k", "M", "G"), inverse_dimension="time"),
+        Unit("V", "voltage", prefixes=("m", "µ")),
+        Unit("A", "current", prefixes=("m", "µ")),
+        Unit("W", "power", prefixes=("m", "µ", "n")),
+        Unit("K", "temperature", prefixes=("m", "µ", "n")),
+        Unit("°C", "temperature", Offset(273.15), aliases=("degC",)),
+        Unit("T", "magnetic_flux_density", prefixes=("m", "µ", "n")),
+        Unit("rad", "angle", prefixes=("m",)),
+        Unit("°", "angle", Scaled(np.pi / 180.0), aliases=("deg",)),
         Unit("dBm", "power", Decibel(1.0e-3)),
         Unit("dB", "log_gain"),
-        Unit("Vpp", "power", VoltageIntoLoad(RF_LOAD_OHMS), prefixable=True),
-        Unit("Vrms", "power", VoltageIntoLoad(RF_LOAD_OHMS, 1.0), prefixable=True),
+        Unit("Vpp", "power", VoltageIntoLoad(RF_LOAD_OHMS), prefixes=("m", "µ")),
+        Unit("Vrms", "power", VoltageIntoLoad(RF_LOAD_OHMS, 1.0), prefixes=("m", "µ")),
         Unit("count", "count"),
         Unit("point", "point"),
         # A DAC code is a signed integer the board takes, where 0 is 0 V.
@@ -773,16 +839,18 @@ def prefix_for(values: ArrayLike, unit: UnitLike, registry: UnitRegistry | None 
     hides that the second is smaller.  The group is sized by its largest
     member, so nothing in it is shown with a leading zero it did not need.
 
-    Only a spelling that may carry a prefix is ever given one, and the unit
-    itself says whether it may: ``ms`` already carries one, ``deg`` and
-    ``count`` have no ladder, and for all of them the answer is the identity
-    step.  Asking the dimension instead -- "seconds take prefixes, so this
-    time unit does" -- is how ``2 kms`` was written for two seconds, a
-    spelling no resolver accepts and so a number nobody could type back.
+    The step is a rung of the unit's own ladder, the largest that does not
+    show a leading zero, and the top or bottom rung when the number is past
+    them: ``ms`` already carries one, ``°`` and ``count`` have no ladder, and
+    for all of them the answer is the identity step.  Asking the dimension
+    instead -- "seconds take prefixes, so this time unit does" -- is how
+    ``2 kms`` was written for two seconds, a spelling no resolver accepts
+    and so a number nobody could type back.
     """
 
     resolved = resolve_unit(unit, registry)
-    if not resolved.prefixable:
+    ladder = resolved.ladder
+    if len(ladder) == 1:
         return NO_PREFIX
     magnitudes = [
         decimal.adjusted()
@@ -791,10 +859,11 @@ def prefix_for(values: ArrayLike, unit: UnitLike, registry: UnitRegistry | None 
     ]
     if not magnitudes:
         return NO_PREFIX
-    largest = max(magnitudes)
-    exponent = _PREFIX_STEP * (largest // _PREFIX_STEP)
-    exponent = max(_SMALLEST_EXPONENT, min(_LARGEST_EXPONENT, exponent))
-    return _PREFIX_BY_EXPONENT[int(exponent)]
+    exponent = _PREFIX_STEP * (max(magnitudes) // _PREFIX_STEP)
+    for rung in ladder:
+        if rung.exponent <= exponent:
+            return rung
+    return ladder[-1]
 
 
 def _plain_digits(value: Decimal) -> str:
@@ -840,7 +909,7 @@ def format_quantity(
     if decimal is None:
         return f"{value} {resolved.symbol}".strip()
     step = prefix if prefix is not None else prefix_for([decimal], resolved, registry)
-    if step.exponent and not resolved.prefixable:
+    if step not in resolved.ladder:
         raise UnitError(f"{resolved.symbol!r} cannot take the prefix {step.symbol!r}")
     shifted = decimal.scaleb(-step.exponent)
     symbol = f"{step.symbol}{resolved.symbol}" if resolved.symbol != "1" else step.symbol
@@ -901,8 +970,8 @@ def parse_quantity(
         prefix = _PREFIX_BY_SPELLING.get(written)
         if prefix is None:
             raise UnitError(f"unknown unit or prefix {written!r}")
-        if not family.prefixable:
-            raise UnitError(f"{resolved.symbol!r} cannot take a prefix")
+        if prefix not in family.ladder:
+            raise UnitError(f"{resolved.symbol!r} cannot take the prefix {written!r}")
         spelled = _prefixed(family, prefix)
     if not spelled.compatible_with(resolved):
         raise UnitError(
@@ -926,6 +995,7 @@ def _is_known(text: str, registry: UnitRegistry | None) -> bool:
 __all__ = [
     "DEFAULT_UNITS",
     "Decibel",
+    "Offset",
     "PREFIXES",
     "Prefix",
     "Scaled",

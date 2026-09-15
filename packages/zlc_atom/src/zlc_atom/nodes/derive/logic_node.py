@@ -70,6 +70,7 @@ DERIVE_SCHEMA = AuthoringSchema(
 
 def _draft_outputs(
     values: Mapping[str, object],
+    devices: Mapping[str, object],
 ) -> tuple[DatasetOutputDeclaration, ...]:
     """What one draft publishes: the names of its signals.
 
@@ -77,6 +78,7 @@ def _draft_outputs(
     validator is what says why, to the editor, in the draft's own words.
     """
 
+    del devices
     try:
         return declared_outputs(values.get("expressions") or ())
     except ExpressionError:

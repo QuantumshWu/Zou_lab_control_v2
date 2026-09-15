@@ -12,6 +12,7 @@ from zlc_data.units import (
     Scaled,
     Unit,
     UnitError,
+    Offset,
     UnitRegistry,
     format_quantity,
     parse_quantity,
@@ -54,10 +55,13 @@ def test_a_prefix_is_not_a_registry_entry() -> None:
 
     for spelling, factor in (("ms", 1e-3), ("ns", 1e-9), ("MHz", 1e6), ("nm", 1e-9)):
         assert resolve_unit(spelling).scale == pytest.approx(factor)
-    # Every base reaches every rung, which a hand-written table never did.
-    assert {resolve_unit(f"{prefix.symbol}K").symbol for prefix in PREFIXES} == {
-        "TK", "GK", "MK", "kK", "K", "mK", "µK", "nK"
+    # A base reaches the rungs it declares and no other: an atom cloud is
+    # read down to nanokelvin, and nothing on this bench is terakelvin.
+    assert {resolve_unit(f"{prefix.symbol}K").symbol for prefix in resolve_unit("K").ladder} == {
+        "K", "mK", "µK", "nK"
     }
+    with pytest.raises(UnitError, match="unknown unit"):
+        resolve_unit("TK")
 
 
 def test_one_prefix_never_stacks_on_another() -> None:
@@ -114,20 +118,29 @@ def test_a_numpy_integer_keeps_every_digit_of_the_integer_it_is() -> None:
 
 
 def test_the_leading_digits_stay_between_one_and_a_thousand() -> None:
-    for magnitude in range(-9, 13):
+    # Within the unit's ladder: hertz up to gigahertz, and down to nanoseconds.
+    for magnitude in range(0, 12):
         value = 1.5 * 10.0**magnitude
         text = format_quantity(value, "Hz")
         mantissa = float(text.split()[0])
         assert 1.0 <= abs(mantissa) < 1000.0, text
+    for magnitude in range(-9, 1):
+        text = format_quantity(1.5 * 10.0**magnitude, "s")
+        assert 1.0 <= abs(float(text.split()[0])) < 1000.0, text
 
 
 def test_beyond_the_ladder_a_value_simply_grows() -> None:
     """Past the largest rung there is nowhere to go, and pretending otherwise
     would invent a prefix nobody uses."""
 
-    assert format_quantity(1.5e15, "Hz").endswith(" THz")
-    assert float(format_quantity(1.5e15, "Hz").split()[0]) == pytest.approx(1500.0)
+    # Past the top rung the number simply grows: gigahertz is where the
+    # frequency ladder ends here, so 1.5 PHz is a lot of gigahertz.
+    assert format_quantity(1.5e15, "Hz").endswith(" GHz")
+    assert float(format_quantity(1.5e15, "Hz").split()[0]) == pytest.approx(1.5e6)
     assert format_quantity(1.5e-12, "s").endswith(" ns")
+    # And below the bottom rung it simply shrinks: nothing here is read in
+    # millihertz, so a nanohertz is a small number of hertz.
+    assert format_quantity(1.5e-9, "Hz") == "0.0000000015 Hz"
 
 
 @pytest.mark.parametrize(
@@ -224,7 +237,7 @@ def test_a_choice_list_never_leaves_the_dimension() -> None:
     it is a way to make the plot raise."""
 
     times = DEFAULT_UNITS.display_choices("us")
-    assert times == ("Ts", "Gs", "Ms", "ks", "s", "ms", "µs", "ns")
+    assert times == ("s", "ms", "µs", "ns")
     assert all(resolve_unit(symbol).dimension == "time" for symbol in times)
 
     powers = DEFAULT_UNITS.display_choices("dBm")
@@ -250,7 +263,7 @@ def test_a_unit_that_cannot_be_scaled_is_shown_plainly() -> None:
         (2000.0, "ms", "2000 ms"),
         (2000.0, "us", "2000 µs"),
         (0.001, "MHz", "0.001 MHz"),
-        (0.001, "deg", "0.001 deg"),
+        (0.001, "deg", "0.001 °"),
     ):
         text = format_quantity(value, unit)
         assert text == shown
@@ -259,6 +272,41 @@ def test_a_unit_that_cannot_be_scaled_is_shown_plainly() -> None:
     assert DEFAULT_UNITS.display_choices("dB") == ("dB",)
     with pytest.raises(UnitError, match="incompatible"):
         DEFAULT_UNITS.convert(6.0, "dB", "dBm")
+
+
+def test_a_unit_is_offered_in_the_rungs_it_declares_and_shown_by_its_sign() -> None:
+    """The choice list is the unit's own ladder, and a symbol is its sign.
+
+    The ladder used to be the whole prefix table for every base, so a
+    magnetic field was offered in teratesla and a temperature in
+    megakelvin; and Celsius was gone altogether while the degree was
+    spelled ``deg``.  What a quantity is read in on this bench is the
+    unit's declaration, Celsius is kelvin with its zero moved, and both
+    degrees are written with their sign.
+    """
+
+    assert DEFAULT_UNITS.display_choices("uT") == ("T", "mT", "µT", "nT")
+    assert DEFAULT_UNITS.display_choices("K") == ("K", "mK", "µK", "nK", "°C")
+    assert DEFAULT_UNITS.display_choices("V") == ("V", "mV", "µV")
+    assert DEFAULT_UNITS.display_choices("Hz") == ("GHz", "MHz", "kHz", "Hz")
+    with pytest.raises(UnitError, match="unknown unit"):
+        resolve_unit("TT")
+    with pytest.raises(UnitError, match="unknown unit"):
+        resolve_unit("kV")
+
+    celsius = resolve_unit("degC")
+    assert celsius.symbol == "°C" and celsius is resolve_unit("°C")
+    assert float(DEFAULT_UNITS.convert(20.0, "degC", "K")) == pytest.approx(293.15)
+    assert float(DEFAULT_UNITS.convert(0.0, "K", "°C")) == pytest.approx(-273.15)
+    # A span crosses between them unchanged: a fitted width on a kelvin
+    # axis shown in Celsius is the same number.
+    assert celsius.coordinate_scale == ("temperature", 1.0)
+    assert format_quantity(25.0, "degC") == "25 °C"
+    assert parse_quantity("25 °C", "K") == pytest.approx(298.15)
+    with pytest.raises(UnitError, match="cannot take"):
+        Unit("°X", "temperature", Offset(1.0), prefixes=("m",))
+    assert resolve_unit("deg").symbol == "°"
+    assert DEFAULT_UNITS.display_choices("deg") == ("rad", "°", "mrad")
 
 
 def test_a_reciprocal_unit_is_the_exact_reciprocal_or_nothing() -> None:
@@ -281,7 +329,7 @@ def test_a_reciprocal_unit_is_the_exact_reciprocal_or_nothing() -> None:
 def test_an_application_may_add_a_dimension_its_instruments_need() -> None:
     registry = UnitRegistry(
         (
-            Unit("g", "mass", prefixable=True),
+            Unit("g", "mass", prefixes=("m",)),
             Unit("dBg", "mass", Decibel(1.0)),
         )
     )
@@ -300,10 +348,10 @@ def test_a_prefix_belongs_to_the_reference_of_a_family() -> None:
     from zlc_data.units import Decibel, VoltageIntoLoad
 
     with pytest.raises(UnitError, match="cannot take a prefix"):
-        Unit("ms", "time", Scaled(1e-3), prefixable=True)
+        Unit("ms", "time", Scaled(1e-3), prefixes=("m",))
     with pytest.raises(UnitError, match="cannot take a prefix"):
-        Unit("dBx", "power", Decibel(1.0), prefixable=True)
-    assert Unit("Vpp", "power", VoltageIntoLoad(50.0), prefixable=True).prefixable
+        Unit("dBx", "power", Decibel(1.0), prefixes=("m",))
+    assert Unit("Vpp", "power", VoltageIntoLoad(50.0), prefixes=("m",)).prefixes == ("m",)
     assert float(DEFAULT_UNITS.convert(1.0, "Vrms", "W")) == 0.02
     assert float(DEFAULT_UNITS.convert(135.0, "mVrms", "Vrms")) == 0.135
 
