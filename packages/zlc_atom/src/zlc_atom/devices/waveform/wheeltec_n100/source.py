@@ -227,6 +227,33 @@ def _as_number(value: object) -> float | None:
         return None
 
 
+def _apply(console, name: str, spelling: str) -> str | None:
+    """Write one setting so that it actually takes effect.
+
+    Measured on a real module: writing the parameter alone changes nothing
+    -- ``#fparam get`` returns the new value and the module goes on sending
+    at the old rate, because the running configuration is not the parameter
+    table.  It takes hold when the table is committed to flash and the
+    module restarts, which is what the vendor's own ground station does
+    behind its Save and Restart buttons.
+
+        #fparam set MSG_IMU 7     ->  *#OK
+        #fparam get MSG_IMU       ->  MSG_IMU=7      (written, not yet live)
+        #fsave                    ->  *#OK
+        #freboot                  ->  (y/n)
+        y                         ->  back in about 2.5 s, now at 100 Hz
+
+    The readback is taken before the restart, because that is where it can
+    still be had; what the module then DOES is the caller's to check.
+    """
+
+    console.set_parameter(name, spelling)
+    reading = console.get_parameter(name)
+    console.save()
+    console.reboot()
+    return reading
+
+
 def _as_text(value: object) -> str:
     """One value as the console spells it: whole numbers without a point."""
 
@@ -388,6 +415,10 @@ _UNDO_LISTEN_ROUNDS = 4
 #: that is going to resume does it at once; this is the margin, not the
 #: expectation.
 _STREAM_BACK_SECONDS = 1.5
+
+#: And after a RESTART, which is what makes a setting take effect.  A real
+#: module came back in 2.5 s; this is that with room to spare.
+_RESTART_SECONDS = 15.0
 
 #: How many packets the rate is measured over when the port opens, and how
 #: long to wait for them: at the slowest configurable rate (1 Hz) this is
@@ -777,7 +808,7 @@ class WheeltecN100WaveformSource:
                 self._require_stream_back()
             return answer
 
-    def _require_stream_back(self) -> None:
+    def _require_stream_back(self, window: float = _STREAM_BACK_SECONDS) -> None:
         """Wait for whole packets again, asking once more if they do not come.
 
         Whole packets, not a frame header: this module emits a 1 Hz
@@ -787,7 +818,7 @@ class WheeltecN100WaveformSource:
 
         for attempt in range(2):
             mark = time.monotonic()
-            deadline = mark + _STREAM_BACK_SECONDS
+            deadline = mark + window
             while time.monotonic() < deadline:
                 if self._last_packet_at >= mark:
                     return
@@ -966,28 +997,28 @@ class WheeltecN100WaveformSource:
 
             # The rate's own re-timing is a stronger check than "packets came
             # back", so for that one it is the check that runs.
+            reading = self._in_console(
+                lambda console: _apply(console, selected, spelling),
+                stream_back=False,
+            )
+            self._settings_epoch += 1
+            try:
+                self._require_stream_back(_RESTART_SECONDS)
+            except BaseException as silenced:
+                self._put_back(selected, previous, silenced, value)
             if is_rate:
-                # Write the rung, then ask #fmsg what the module ended up
-                # at.  Reading the parameter back would only return the
-                # index just written; #fmsg prints the hertz it will
-                # actually send at, which is the answer worth having.
-                def write_and_read(console):
-                    console.set_parameter(selected, spelling)
-                    for name, _id, rate_hz in console.packet_rates():
-                        if name.upper() == selected.upper():
-                            return rate_hz
-                    return None
-
-                taken = self._in_console(write_and_read, stream_back=False)
-                self._settings_epoch += 1
-                if selected.upper() == IMU_RATE_PARAMETER:
-                    try:
-                        self._remeasure_rate()
-                    except BaseException as silenced:
-                        self._put_back(selected, previous, silenced, value)
+                # The rate is what stamps the records, so it is measured off
+                # the restarted stream rather than taken from the readback:
+                # the parameter reads back as the rung that was written to
+                # it, which says what was asked for, not what is happening.
+                self._remeasure_rate()
+                taken = (
+                    round(1.0 / self._sample_interval, 1)
+                    if self._sample_interval
+                    else None
+                )
             else:
-                taken = self._in_console(write)
-                self._settings_epoch += 1
+                taken = reading
             if taken is None:
                 raise TuneRefused(
                     f"the module acknowledged {selected} but would not read it "
@@ -996,23 +1027,31 @@ class WheeltecN100WaveformSource:
             self._settings[selected] = taken
             return self._field_for(selected, taken).current
 
+    def _apply_note(self) -> str:
+        """Why a settings change costs a restart, in one line for an error."""
+
+        return (
+            "a setting takes effect on this module only once it is saved and "
+            "the module restarts, which takes a few seconds and interrupts "
+            "the stream"
+        )
+
     def _put_back(
         self, name: str, previous: object, silenced: BaseException, wanted: object
     ) -> None:
         """Undo a write that stopped the module sending, and say what happened.
 
-        Writing the previous value back is tried first, but it cannot be
-        relied on: if the module read the new value in a spelling this
-        driver did not intend, it will read the old one the same way.  The
-        undo that does NOT depend on the spelling is a restart, because
-        nothing here has been saved to flash -- so the module comes back on
-        the configuration it booted with.
+        Writing the previous value back is tried first.  It cannot be
+        relied on -- a module that read the new value in a spelling this
+        driver did not intend reads the old one the same way -- so a bare
+        restart follows it, which at least returns the module to what is in
+        its flash.
         """
 
         def write_back(console):
             if previous is None:
                 raise RuntimeError("nothing to put back")
-            return console.set_parameter(name, _as_text(previous))
+            return _apply(console, name, _as_text(previous))
 
         restored = False
         for undo in (write_back, lambda console: console.reboot()):
@@ -1022,6 +1061,7 @@ class WheeltecN100WaveformSource:
                 pass
             for _ in range(_UNDO_LISTEN_ROUNDS):
                 try:
+                    self._require_stream_back(_RESTART_SECONDS)
                     self._remeasure_rate()
                     restored = True
                     break

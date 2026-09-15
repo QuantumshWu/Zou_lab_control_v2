@@ -76,7 +76,14 @@ class _FakeModule:
                 "IMU_ACC_SCALE_X": "1.000000",
             }
         )
-        self.booted_parameters = dict(self.parameters)
+        #: Three copies, because the module has three.  ``parameters`` is
+        #: the table #fparam writes; ``saved`` is what #fsave put in
+        #: flash; ``running`` is what the module is actually DOING, and
+        #: it is reloaded from flash only by a restart.  Measured on a
+        #: real module: after #fparam set the table holds the new value
+        #: and the stream keeps its old rate.
+        self.saved = dict(self.parameters)
+        self.running = dict(self.parameters)
         #: How long the module takes to START answering.  A real one
         #: takes its time over #fmsg, which prints some 1900 bytes.
         self.reply_delay = 0.0
@@ -92,6 +99,16 @@ class _FakeModule:
         """The rate the ladder index names; index 0 is no output at all."""
 
         return self._rate_of(IMU_RATE_PARAMETER)
+
+    def _rate_of(self, name: str) -> float:
+        """From what the module is RUNNING, not from the table."""
+
+        try:
+            index = int(float(self.running.get(name, 0)))
+        except ValueError:
+            return 0.0
+        rungs = PACKET_RATE_LADDER_HZ
+        return rungs[index] if 0 <= index < len(rungs) else 0.0
 
     # ------------------------------------------------------------- serial
     @property
@@ -171,13 +188,15 @@ class _FakeModule:
             self.streaming = True
             self._say(OK)
         elif line == "#fsave":
+            self.saved = dict(self.parameters)
             self._say(OK)
         elif line == "#freboot":
             self._say(CONFIRM_PROMPT)
         elif line == "y":
-            # A restart discards everything not written to flash, which is
-            # what makes it the undo that needs no spelling.
-            self.parameters = dict(self.booted_parameters)
+            # The restart is what makes a saved setting take effect, and
+            # what discards one that was never saved.
+            self.parameters = dict(self.saved)
+            self.running = dict(self.saved)
             self.streaming = True
         elif line == "#fmsg":
             # The module enumerating itself, verbatim in this layout:
@@ -208,13 +227,6 @@ class _FakeModule:
         else:
             self._say("*#ERROR")
 
-    def _rate_of(self, name: str) -> float:
-        try:
-            index = int(float(self.parameters.get(name, 0)))
-        except ValueError:
-            return 0.0
-        rungs = PACKET_RATE_LADDER_HZ
-        return rungs[index] if 0 <= index < len(rungs) else 0.0
 
 
 def _source(module: _FakeModule) -> WheeltecN100WaveformSource:
