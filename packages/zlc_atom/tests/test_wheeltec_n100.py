@@ -1,12 +1,12 @@
 """The N100's settings: what the module DOES is the only thing believed.
 
-Every fake here answers the way the real module was observed to on the
-bench, which is not the way its manual says.  It replies ``*#OK`` to
-``#fconfig`` rather than ``Config Mode``; it replies ``*#OK`` to ``#fmsg``
-in both forms and changes nothing; it replies ``*#OK`` to a bare
-``#fparam`` and lists nothing.  What it does answer is
-``#fparam get/set <NAME>``, and its packet rate lives in ``MSG_IMU`` as an
-index into a ladder rather than a number of hertz.
+Every fake here answers the way the real module was recorded answering,
+which is not the way its manual says.  ``#fconfig`` is answered ``*#OK``,
+not ``Config Mode``.  A bare ``#fmsg`` enumerates every packet as
+``MSG_IMU[40]   10.0Hz``, while ``#fmsg 40 100`` changes nothing at all.
+A bare ``#fparam`` is ``*#ERROR``.  ``#fparam get MSG_IMU`` answers
+``MSG_IMU=4`` -- no spaces, no ``*#OK`` -- and that 4 beside the 10.0Hz is
+what says a rate is stored as a ladder index.
 """
 
 from __future__ import annotations
@@ -66,6 +66,7 @@ class _FakeModule:
             if parameters is not None
             else {
                 IMU_RATE_PARAMETER: str(PACKET_RATE_LADDER_HZ.index(rate_hz)),
+                "MSG_AHRS": "0",
                 "FILT_LPF_ENABLED": "0",
                 "FILT_NOTCH_ENABLED": "0",
                 "FILT_NOTCH_CENTER_FREQUENCY": "0",
@@ -84,12 +85,7 @@ class _FakeModule:
     def rate_hz(self) -> float:
         """The rate the ladder index names; index 0 is no output at all."""
 
-        try:
-            index = int(float(self.parameters.get(IMU_RATE_PARAMETER, 0)))
-        except ValueError:
-            return 0.0
-        rungs = PACKET_RATE_LADDER_HZ
-        return rungs[index] if 0 <= index < len(rungs) else 0.0
+        return self._rate_of(IMU_RATE_PARAMETER)
 
     # ------------------------------------------------------------- serial
     @property
@@ -167,26 +163,42 @@ class _FakeModule:
             # what makes it the undo that needs no spelling.
             self.parameters = dict(self.booted_parameters)
             self.streaming = True
-        elif line.startswith("#fmsg"):
-            # The real module acknowledges this and changes NOTHING, in
-            # either form. The manual says otherwise; the bench does not.
+        elif line == "#fmsg":
+            # The module enumerating itself, verbatim in this layout:
+            #     MSG_IMU[40]   10.0Hz
+            for name, packet_id in (
+                (IMU_RATE_PARAMETER, IMU_PACKET), ("MSG_AHRS", 0x41)
+            ):
+                self._say(f"{name}[{packet_id:02x}]   {self._rate_of(name):.1f}Hz")
+        elif line.startswith("#fmsg "):
+            # The SET form changes nothing on this firmware: a rate never
+            # arrives as a number of hertz.
             self._say(OK)
         elif line == "#fparam":
-            # And it does not enumerate its parameters either.
-            self._say(OK)
+            # A bare #fparam is an error: parameters cannot be enumerated.
+            self._say("*#ERROR")
         elif line.startswith("#fparam get "):
             name = line.split()[-1]
             if name in self.parameters:
-                self._say(f"{name} = {self.parameters[name]}")
+                # NAME=value -- no spaces, and no *#OK after it.
+                self._say(f"{name}={self.parameters[name]}")
             else:
-                self._say("*#ERR unknown parameter")
+                self._say("*#ERROR")
         elif line.startswith("#fparam set "):
             _, _, name, value = line.split()
             if name in self.parameters:
                 self.parameters[name] = value
             self._say(OK)
         else:
-            self._say("*#ERR")
+            self._say("*#ERROR")
+
+    def _rate_of(self, name: str) -> float:
+        try:
+            index = int(float(self.parameters.get(name, 0)))
+        except ValueError:
+            return 0.0
+        rungs = PACKET_RATE_LADDER_HZ
+        return rungs[index] if 0 <= index < len(rungs) else 0.0
 
 
 def _source(module: _FakeModule) -> WheeltecN100WaveformSource:
@@ -276,7 +288,7 @@ def test_the_rate_is_a_ladder_rung_written_as_its_index() -> None:
     source = _source(module)
     try:
         values = source.tunable_values()
-        assert values[IMU_RATE_PARAMETER] == "10", "shown as hertz, held as a rung"
+        assert values[IMU_RATE_PARAMETER] == "10", "reported in hertz by #fmsg"
         assert source.working_point().sample_interval_seconds == pytest.approx(0.1)
 
         # Only the rungs are offered, so a wrong number cannot be typed.
@@ -314,6 +326,7 @@ def test_the_operator_s_parameters_are_asked_for_by_name() -> None:
         assert "FILT_NOTCH_CENTER_FREQUENCY" in values
         assert "IMU_ACC_SCALE_X" not in values, "calibration is not an operator knob"
         assert "FILT_NOTCH2_ENABLED" not in values, "this firmware does not have it"
+        assert "MSG_AHRS" in values, "the module enumerates all of its packets"
 
         fields = {f.metadata.name: f.metadata for f in source.tunable_fields()}
         assert fields["FILT_NOTCH_CENTER_FREQUENCY"].unit == "Hz"

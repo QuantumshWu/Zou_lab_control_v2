@@ -22,13 +22,33 @@ payload lengths, so neither can be written from documentation alone.  And
 entering the console silences the stream, so the reader that owns this port
 has to be parked first: a capture cannot be running while a knob moves.
 
-Everything is a named parameter.  ``#fmsg``, which the manual documents as
-THE way to set a packet's rate, answers ``*#OK`` on this firmware and
-changes nothing -- a rate asked for in hertz simply does not arrive.  What
-does arrive is ``#fparam set MSG_IMU <n>``, where ``n`` indexes the rate
-ladder the vendor's own parameter tables spell out.  So there is one
-mechanism here, not two: read a parameter, write a parameter, and let the
-caller check the result against the stream.
+What this module answers, recorded off its wire and not read out of a
+manual::
+
+    > #fconfig                      *#OK
+    > #faxis                        imu_algn_roll = 0.000000
+                                    imu_algn_pitch = 0.000000
+                                    imu_algn_yaw = 0.000000
+                                    *#OK
+    > #fparam get MSG_IMU           MSG_IMU=4
+    > #fparam                       *#ERROR
+    > #fmsg                         MSG_IMU[40]   10.0Hz
+                                    MSG_AHRS[41]    0.0Hz
+                                    ... one line per packet, about 1900 bytes
+    > #fparam get FILT_LPF_ENABLED  FILT_LPF_ENABLED=0.000000
+    > #fdeconfig                    (the binary stream resumes)
+
+Read off that.  ``#fmsg`` with no argument is how the module enumerates
+itself, and it gives each packet's rate in HERTZ -- so the packet list is
+the module's and nothing here decides what packets exist.  ``#fparam get``
+prints ``NAME=value`` with no spaces and no ``*#OK`` after it, while
+``#faxis`` prints ``name = value`` WITH spaces: no one reply layout covers
+this console, which is why nothing here is judged by one.  A bare
+``#fparam`` is an error, so parameters cannot be enumerated and have to be
+asked for by name.  And ``MSG_IMU=4`` standing beside ``MSG_IMU[40]
+10.0Hz`` is what says a rate is stored as a LADDER INDEX: rung 4 is 10 Hz.
+That is the whole reason ``#fmsg 40 100`` did nothing -- the rate never
+arrives as a number of hertz.
 
 And nothing here judges the module by a BANNER.  The manual prints
 ``Config Mode`` as the reply to ``#fconfig``; a real one answers ``*#OK``.
@@ -89,8 +109,20 @@ ENTER_QUIET_SECONDS = 0.25
 #: to be fast pass their own timeout to the console instead.
 REPLY_QUIET_SECONDS = 0.35
 
-#: ``imu_algn_yaw = 30.000000`` -- how the console prints one named value.
-_PARAM_LINE = re.compile(r"^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<value>\S+)")
+#: ``MSG_IMU=4`` from ``#fparam get``, and ``imu_algn_yaw = 0.000000``
+#: from ``#faxis``: the same shape with and without spaces, which is why
+#: the spaces are optional here rather than assumed to be there.
+_PARAM_LINE = re.compile(
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*) *= *(?P<value>[-+]?[0-9]+(?:\.[0-9]+)?)"
+)
+
+#: ``MSG_IMU[40]   10.0Hz`` from ``#fmsg``: the module enumerating itself,
+#: one line per packet, with the rate in hertz.
+_PACKET_LINE = re.compile(
+    r"(?P<name>MSG_[A-Z0-9_]+)\[(?P<id>[0-9A-Fa-f]{1,2})\] *"
+    r"(?P<hz>[0-9]+(?:\.[0-9]+)?)Hz",
+    re.IGNORECASE,
+)
 
 
 class FdiConfigConsole:
@@ -202,17 +234,33 @@ class FdiConfigConsole:
     def get_parameter(self, name: str) -> str | None:
         """One named parameter's value, or None when this firmware lacks it.
 
-        Parameter names differ between firmwares -- the manual's own example
-        names one that the shipped parameter tables do not have -- so a
-        missing name is a fact about this module, not an error.
+        Observed: ``#fparam get MSG_IMU`` answers ``MSG_IMU=4`` -- the name
+        echoed, no spaces, no ``*#OK``.  The name has to match, because a
+        firmware without it answers ``*#ERROR``, and an unmatched reply is
+        exactly what "not present" looks like.
         """
 
         answer = self.query(f"#fparam get {name}")
-        for line in answer.splitlines():
-            found = _PARAM_LINE.match(line)
-            if found and found["name"].upper() == name.upper():
+        wanted = str(name).upper()
+        for found in _PARAM_LINE.finditer(answer):
+            if found["name"].upper() == wanted:
                 return found["value"]
         return None
+
+    def packet_rates(self) -> tuple[tuple[str, int, float], ...]:
+        """Every packet this module has, as ``(name, id, hertz)``.
+
+        The module enumerating itself.  It is also the only readback there
+        is for a rate: the parameter holding one reads back as the ladder
+        index that was just written to it, which proves nothing, while this
+        prints the hertz the module will actually send at.
+        """
+
+        answer = self.query("#fmsg")
+        return tuple(
+            (found["name"], int(found["id"], 16), float(found["hz"]))
+            for found in _PACKET_LINE.finditer(answer)
+        )
 
     def set_parameter(self, name: str, value: str) -> str:
         """Write one named parameter and answer with what it reads back as.

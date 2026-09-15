@@ -149,16 +149,16 @@ PACKET_RATE_LADDER_HZ = (0.0, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 400
 #: The parameter that holds the rate of the one packet this driver reads.
 IMU_RATE_PARAMETER = "MSG_IMU"
 
-#: The settings offered to an operator, tried BY NAME because this
-#: firmware's bare ``#fparam`` lists nothing either.  A name the module does
-#: not answer to is simply not offered, so this is a menu to try rather than
-#: a claim about what any particular firmware has.  The rate is first; the
-#: filters shape what the sensors report, which is why a mains notch
-#: matters for a magnetic measurement; the AID switches decide which sensors
-#: the attitude solution fuses.  Factory calibration sits in the same
-#: namespace and is deliberately absent.
+#: The NON-RATE settings offered to an operator, tried by name because a
+#: bare ``#fparam`` answers ``*#ERROR`` on this firmware: parameters cannot
+#: be enumerated, so this is a menu to try rather than a claim about what
+#: any firmware has, and a name the module does not answer to is not
+#: offered.  The filters shape what the sensors report, which is why a
+#: mains notch matters for a magnetic measurement; the AID switches decide
+#: which sensors the attitude solution fuses.  Factory calibration lives in
+#: the same namespace and is deliberately absent.  The RATES are not in
+#: this list: the module enumerates those itself, through ``#fmsg``.
 OFFERED_PARAMETERS = (
-    IMU_RATE_PARAMETER,
     "FILT_LPF_ENABLED",
     "FILT_LPF_CUTOFF_FREQUENCY",
     "FILT_NOTCH_ENABLED",
@@ -207,7 +207,7 @@ def parameter_shape(name: str) -> tuple[str, str | None]:
     """The ``(kind, unit)`` a named parameter should be offered as."""
 
     upper = str(name).upper()
-    if upper == IMU_RATE_PARAMETER:
+    if upper.startswith("MSG_"):
         return "rate", "Hz"
     if upper.endswith(_SWITCH_SUFFIX) or upper.startswith(_SWITCH_PREFIX):
         return "switch", None
@@ -823,51 +823,32 @@ class WheeltecN100WaveformSource:
         self._hear_the_module()
 
     def _read_settings(self, console) -> dict[str, object]:
-        """Every offered parameter this module actually answers to.
+        """The rates the module enumerates, and the parameters it answers to.
 
-        Asked by name: this firmware's bare ``#fparam`` lists nothing, just
-        as its bare ``#fmsg`` lists no packets, so the only way to find out
-        what it has is to ask for each one.  What it will not answer to, it
-        does not have, and is not offered.
+        Two mechanisms, because the module has two.  ``#fmsg`` prints every
+        packet it has with its rate in hertz, so the rates are the module's
+        own list.  Parameters cannot be enumerated -- a bare ``#fparam`` is
+        an error on this firmware -- so those are asked for by name, and
+        what the module will not answer to, it does not have.
         """
 
         settings: dict[str, object] = {}
-        for name in self._parameter_names(console):
+        for name, _packet_id, rate_hz in console.packet_rates():
+            settings[name] = rate_hz
+        for name in OFFERED_PARAMETERS:
             reading = _as_number(console.get_parameter(name))
             if reading is not None:
                 settings[name] = reading
         self._packets_listed = IMU_RATE_PARAMETER in settings
         return settings
 
-    def _parameter_names(self, console) -> tuple[str, ...]:
-        """The parameters to try, plus any the module volunteers.
-
-        A firmware that DOES answer a bare ``#fparam`` gets its own list
-        read as well, filtered to the kinds that belong to an operator, so
-        a module with more than this bench knows about is not cut down to
-        it.
-        """
-
-        found = list(OFFERED_PARAMETERS)
-        try:
-            answer = console.query("#fparam")
-        except Exception:  # noqa: BLE001 -- the tried names still stand
-            return tuple(found)
-        for line in answer.splitlines():
-            name = line.split("=")[0].strip()
-            if (
-                name.upper().startswith(OPERATOR_PARAMETER_PREFIXES)
-                and name not in found
-            ):
-                found.append(name)
-        return tuple(found)
-
     def _field_for(self, name: str, value: object) -> TunableField:
         kind, unit = parameter_shape(name)
         if kind == "rate":
-            index = int(_as_number(value) or 0)
+            # Held in hertz, because that is how #fmsg reports it; WRITTEN
+            # as the rung's index, which is the module's own spelling.
+            current = float(_as_number(value) or 0.0)
             rungs = PACKET_RATE_LADDER_HZ
-            current = rungs[index] if 0 <= index < len(rungs) else 0.0
             return TunableField(
                 metadata=AuthoringField(
                     name,
@@ -974,7 +955,7 @@ class WheeltecN100WaveformSource:
                     f"this module has no setting {selected!r}; it offers "
                     f"{offered or 'none -- its configuration console did not answer'}"
                 )
-            is_rate = selected.upper() == IMU_RATE_PARAMETER
+            is_rate = parameter_shape(selected)[0] == "rate"
             previous = self._settings.get(selected)
             spelling = (
                 str(rate_ladder_index(float(value))) if is_rate else _as_text(value)
@@ -985,15 +966,28 @@ class WheeltecN100WaveformSource:
 
             # The rate's own re-timing is a stronger check than "packets came
             # back", so for that one it is the check that runs.
-            taken = self._in_console(write, stream_back=not is_rate)
-            self._settings_epoch += 1
             if is_rate:
-                try:
-                    self._remeasure_rate()
-                except BaseException as silenced:
-                    self._put_back(selected, previous, silenced, value)
-                if taken is None:
-                    taken = float(spelling)
+                # Write the rung, then ask #fmsg what the module ended up
+                # at.  Reading the parameter back would only return the
+                # index just written; #fmsg prints the hertz it will
+                # actually send at, which is the answer worth having.
+                def write_and_read(console):
+                    console.set_parameter(selected, spelling)
+                    for name, _id, rate_hz in console.packet_rates():
+                        if name.upper() == selected.upper():
+                            return rate_hz
+                    return None
+
+                taken = self._in_console(write_and_read, stream_back=False)
+                self._settings_epoch += 1
+                if selected.upper() == IMU_RATE_PARAMETER:
+                    try:
+                        self._remeasure_rate()
+                    except BaseException as silenced:
+                        self._put_back(selected, previous, silenced, value)
+            else:
+                taken = self._in_console(write)
+                self._settings_epoch += 1
             if taken is None:
                 raise TuneRefused(
                     f"the module acknowledged {selected} but would not read it "
