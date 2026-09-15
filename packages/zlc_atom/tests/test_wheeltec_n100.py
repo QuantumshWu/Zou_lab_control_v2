@@ -14,8 +14,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from zlc_atom.authoring import TuneRefused
+from zlc_atom.devices.waveform.wheeltec_n100.source import _listen_for_packets
 from zlc_atom.devices.waveform.wheeltec_n100 import (
     FRAME_HEAD,
+    wake_from_config_mode,
     FRAME_TAIL,
     IMU_PACKET,
     FdiConfigConsole,
@@ -375,3 +377,32 @@ def test_a_module_that_never_comes_back_says_so_in_those_words() -> None:
         _source(module)
     assert "did not resume" in str(refusal.value)
     assert module.closed is True, "a module that failed to open still lets the port go"
+
+
+def test_a_module_left_in_its_console_is_found_and_opened_again() -> None:
+    """Config mode outlives the process that opened it, so it must be undone.
+
+    A session that opened the console and died leaves the module silent,
+    and this bench recognises an N100 BY its stream -- so without a
+    #fdeconfig it would vanish from every scan and refuse every open until
+    somebody power-cycled it. One line on the wire is the difference.
+    """
+
+    module = _FakeModule()
+    module.streaming = False       # exactly where a dead session leaves it
+    module._answer("#fconfig")     # ...and the module thinks it is in config mode
+
+    assert _listen_for_packets(module, 0.05) == 0, "a stuck module says nothing"
+    wake_from_config_mode(module)
+    assert _listen_for_packets(module, 0.05) >= 2, "one #fdeconfig brings it back"
+
+    # And opening it works without the operator touching anything.
+    stuck = _FakeModule()
+    stuck.streaming = False
+    stuck._answer("#fconfig")
+    source = _source(stuck)
+    try:
+        assert source.working_point().settings["packet_rate_hz"] > 0
+        assert "#fdeconfig" in stuck.commands
+    finally:
+        source.close()

@@ -53,7 +53,7 @@ from zlc_atom.devices.waveform.contract import (
     WaveformWorkingPoint,
 )
 
-from .console import FdiConfigConsole
+from .console import LINE_END, FdiConfigConsole
 
 
 FRAME_HEAD = 0xFC
@@ -298,6 +298,28 @@ class WheeltecN100Config:
         object.__setattr__(self, "timeout_seconds", float(self.timeout_seconds))
 
 
+def wake_from_config_mode(port) -> None:
+    """Take a module that was left in its console back on the air.
+
+    Config mode is a state in the MODULE, not in this process.  A session
+    that opened the console and then died -- crashed, killed, unplugged
+    mid-command -- leaves the module silent, and a silent N100 is one that
+    discovery cannot see and that no amount of re-scanning will find,
+    because discovery recognises this module BY its stream.  The module
+    would sit like that until someone power-cycled it.
+
+    So anything that expects to hear an N100 and hears nothing says this
+    first and listens again.  It costs one line on the wire and it is
+    harmless to a module that is already streaming: ``#fdeconfig`` outside
+    config mode is a command the module does not act on.
+    """
+
+    port.write(b"#fdeconfig" + LINE_END.encode("ascii"))
+    flush = getattr(port, "flush", None)
+    if callable(flush):
+        flush()
+
+
 def _open_serial(port: str, baud: int):
     import serial
 
@@ -352,11 +374,35 @@ class WheeltecN100WaveformSource:
         )
         try:
             self._reader.start()
-            self._await_rate()
+            self._hear_the_module()
             self._read_settings_once()
         except BaseException:
             self.close()
             raise
+
+    def _hear_the_module(self) -> None:
+        """Time the stream, waking a module that was left in its console.
+
+        The first silence is not yet a fault: the module may be sitting in
+        a configuration console some earlier session never closed, where it
+        says nothing at all.  One ``#fdeconfig`` is what tells those two
+        silences apart, and the second listen is the one that decides.
+        """
+
+        try:
+            self._await_rate()
+            return
+        except RuntimeError:
+            pass
+        self._park_reader()
+        try:
+            wake_from_config_mode(self._serial)
+        finally:
+            self._release_reader()
+        self._stamps.clear()
+        self._stamps_ready.clear()
+        self._sample_interval = None
+        self._await_rate()
 
     def _read_settings_once(self) -> None:
         """Ask the module for its settings, and let a refusal be a fact.
@@ -383,6 +429,18 @@ class WheeltecN100WaveformSource:
         try:
             self._remeasure_rate()
         except BaseException as silent:
+            # One more #fdeconfig before giving up: the console's own exit
+            # may be what went missing.
+            try:
+                self._park_reader()
+                try:
+                    wake_from_config_mode(self._serial)
+                finally:
+                    self._release_reader()
+                self._remeasure_rate()
+                return
+            except BaseException:
+                pass
             raise RuntimeError(
                 f"{self.config.port} stopped streaming when its configuration "
                 "console was opened and did not resume"
@@ -803,6 +861,21 @@ class WheeltecN100WaveformSource:
                 self._serial.close()
 
 
+def _listen_for_packets(port, listen_seconds: float) -> int:
+    """How many whole IMU packets frame up on this port in a moment."""
+
+    buffer = bytearray()
+    packets = 0
+    deadline = time.monotonic() + float(listen_seconds)
+    while time.monotonic() < deadline and packets < 2:
+        waiting = port.in_waiting
+        chunk = port.read(waiting if waiting else 1)
+        if chunk:
+            buffer += chunk
+            packets += len(drain_imu_samples(buffer))
+    return packets
+
+
 def discover_n100(*, baud: int = DEFAULT_BAUD, listen_seconds: float = 0.5) -> tuple[str, ...]:
     """Every serial port with an FDILink IMU talking on it, found by listening.
 
@@ -811,6 +884,12 @@ def discover_n100(*, baud: int = DEFAULT_BAUD, listen_seconds: float = 0.5) -> t
     moment and kept if whole IMU packets frame up on it.  A port another
     program holds cannot be opened and is passed over, which is the ordinary
     case on a bench whose pulse board owns one.
+
+    A port that says nothing is asked once more, after ``#fdeconfig``: a
+    module left in its configuration console is silent, and silence is
+    exactly what this function reads as "not an N100".  Without that line a
+    module whose console was opened and never closed would disappear from
+    every scan until someone power-cycled it.
     """
 
     from serial.tools import list_ports
@@ -822,15 +901,10 @@ def discover_n100(*, baud: int = DEFAULT_BAUD, listen_seconds: float = 0.5) -> t
         except Exception:
             continue
         try:
-            buffer = bytearray()
-            packets = 0
-            deadline = time.monotonic() + float(listen_seconds)
-            while time.monotonic() < deadline and packets < 2:
-                waiting = port.in_waiting
-                chunk = port.read(waiting if waiting else 1)
-                if chunk:
-                    buffer += chunk
-                    packets += len(drain_imu_samples(buffer))
+            packets = _listen_for_packets(port, listen_seconds)
+            if packets < 2:
+                wake_from_config_mode(port)
+                packets = _listen_for_packets(port, listen_seconds)
         except Exception:
             continue
         finally:
@@ -857,4 +931,5 @@ __all__ = [
     "packet_id_of",
     "packet_rate_field",
     "payload_crc16",
+    "wake_from_config_mode",
 ]

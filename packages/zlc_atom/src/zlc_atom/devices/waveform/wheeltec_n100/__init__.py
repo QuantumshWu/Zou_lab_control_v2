@@ -17,6 +17,7 @@ from .source import (
     packet_id_of,
     packet_rate_field,
     payload_crc16,
+    wake_from_config_mode,
 )
 
 __all__ = [
@@ -37,4 +38,5 @@ __all__ = [
     "packet_id_of",
     "packet_rate_field",
     "payload_crc16",
+    "wake_from_config_mode",
 ]
