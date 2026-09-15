@@ -303,6 +303,21 @@ class WheeltecN100Config:
         object.__setattr__(self, "timeout_seconds", float(self.timeout_seconds))
 
 
+def _other_ports_on_this_machine() -> str:
+    """The rest of the serial ports, named, so the next guess is informed."""
+
+    try:
+        from serial.tools import list_ports
+
+        listed = [
+            f"{item.device} ({item.description})"
+            for item in sorted(list_ports.comports(), key=lambda item: item.device)
+        ]
+    except Exception:  # noqa: BLE001 -- this is already an error message
+        return ""
+    return ("This machine has: " + "; ".join(listed)) if listed else ""
+
+
 def wake_from_config_mode(port) -> None:
     """Take a module that was left in its console back on the air.
 
@@ -330,6 +345,14 @@ def _open_serial(port: str, baud: int):
 
     return serial.Serial(port, baud, timeout=0.05, write_timeout=1.0)
 
+
+#: How many of a silent port's bytes to keep as evidence: enough to show
+#: a frame header, a line of text, or the shape of a wrong baud rate.
+_EVIDENCE_BYTES = 96
+
+#: How many times to listen again while an undone module comes back.  A
+#: warm restart takes seconds, and each round is one rate-measuring window.
+_UNDO_LISTEN_ROUNDS = 4
 
 #: How many packets the rate is measured over when the port opens, and how
 #: long to wait for them: at the slowest configurable rate (1 Hz) this is
@@ -360,6 +383,12 @@ class WheeltecN100WaveformSource:
         # How many of the packets counted so far carried a magnetic field
         # that had actually moved since the packet before.  See
         # ``magnetic_update_interval``.
+        #: The first bytes this port produced, kept only to explain a
+        #: silence.  "No packets arrived" has at least four causes -- wrong
+        #: port, wrong baud, a module still in its console, a module with
+        #: no power -- and the bytes tell them apart, so they are reported
+        #: rather than left for the operator to guess between.
+        self._first_bytes = bytearray()
         self._magnetic_field: tuple[float, float, float] | None = None
         self._magnetic_changes = 0
         self._magnetic_packets = 0
@@ -480,6 +509,10 @@ class WheeltecN100WaveformSource:
                 if not chunk:
                     continue
                 buffer += chunk
+                if len(self._first_bytes) < _EVIDENCE_BYTES:
+                    self._first_bytes += chunk[
+                        : _EVIDENCE_BYTES - len(self._first_bytes)
+                    ]
                 samples = drain_imu_samples(buffer)
                 if samples:
                     self._accept(samples)
@@ -556,6 +589,46 @@ class WheeltecN100WaveformSource:
             return None
         return interval * self._magnetic_packets / self._magnetic_changes
 
+    def _what_the_port_said(self) -> str:
+        """Read the silence: what did arrive, and what that usually means.
+
+        Four different faults produce "no packets": the wrong port, the
+        wrong baud, a module left in its configuration console, and a module
+        with no power.  They look nothing alike on the wire, so the bytes
+        are reported and named instead of being replaced by a list of
+        things to go and check.
+        """
+
+        seen = bytes(self._first_bytes)
+        if not seen:
+            return (
+                "Not one byte arrived. The port opened, so it exists and nothing "
+                "else holds it, but nothing is talking on it: either this is not "
+                "the module's port, or the module has no power. "
+                + _other_ports_on_this_machine()
+            )
+        shown = seen[:48].hex(" ")
+        if all(32 <= byte < 127 or byte in (9, 10, 13) for byte in seen):
+            return (
+                f"{len(seen)} bytes arrived and every one of them is text: "
+                f"{seen[:96].decode('ascii', 'replace')!r}. An N100 in its "
+                "configuration console answers in text and streams nothing; so "
+                "does a different kind of device on this port."
+            )
+        if FRAME_HEAD in seen:
+            return (
+                f"{len(seen)} bytes arrived and they do contain FDILink frame "
+                f"headers, but no whole packet framed up, which means the frames "
+                f"are arriving damaged: {shown}"
+            )
+        return (
+            f"{len(seen)} bytes arrived and none of them framed up as FDILink: "
+            f"{shown}. Bytes with no frame header are what the wrong baud rate "
+            f"looks like -- this module ships at {DEFAULT_BAUD} but its rate can "
+            "be changed and is kept in its flash -- or what a different device "
+            "on this port looks like."
+        )
+
     def _await_rate(self) -> None:
         self._stamps_ready.wait(_RATE_SAMPLE_SECONDS)
         failure = self._records.failure
@@ -564,9 +637,8 @@ class WheeltecN100WaveformSource:
         if len(self._stamps) < 2:
             raise RuntimeError(
                 f"no FDILink IMU packets arrived on {self.config.port} at "
-                f"{self.config.baud} baud within {_RATE_SAMPLE_SECONDS:g} s: check "
-                "the port, the module's power and that its line rate is "
-                f"{self.config.baud}"
+                f"{self.config.baud} baud within {_RATE_SAMPLE_SECONDS:g} s. "
+                + self._what_the_port_said()
             )
         if self._sample_interval is None:
             raise RuntimeError(
@@ -670,7 +742,8 @@ class WheeltecN100WaveformSource:
         self._magnetic_field = None
         self._magnetic_changes = 0
         self._magnetic_packets = 0
-        self._await_rate()
+        self._first_bytes.clear()
+        self._hear_the_module()
 
     def _read_settings(self, console) -> dict[str, object]:
         """Everything this module has: packet rates and parameters.
@@ -834,6 +907,7 @@ class WheeltecN100WaveformSource:
                     return console.set_packet_rate(packet, float(value))
                 return _as_number(console.set_parameter(selected, _as_text(value)))
 
+            previous = self._settings.get(selected)
             taken = self._in_console(write)
             self._settings_epoch += 1
             if packet == IMU_PACKET:
@@ -842,7 +916,18 @@ class WheeltecN100WaveformSource:
                 # the measurement is what stands when the module would not
                 # say what it took.  Nothing about this knob depends on the
                 # module describing itself.
-                self._remeasure_rate()
+                #
+                # It is also the only check that a write did not SILENCE the
+                # module.  The archive does not settle what #fmsg's second
+                # argument is: the manual says literal hertz, while the
+                # vendor's own parameter tables spell rates as ladder
+                # indices where 0 means "no output".  A wrong spelling can
+                # therefore turn the packet off, and this bench must not
+                # leave an operator's module mute because it guessed.
+                try:
+                    self._remeasure_rate()
+                except BaseException as silenced:
+                    self._put_back(packet, previous, silenced, value)
                 if taken is None and self._sample_interval:
                     taken = round(1.0 / self._sample_interval, 1)
             if taken is None:
@@ -855,6 +940,56 @@ class WheeltecN100WaveformSource:
             # Answer in the field's own spelling: a switch reads back as one
             # of its choices, not as the number the console printed.
             return self._field_for(selected, taken).current
+
+    def _put_back(
+        self, packet: int, previous: object, silenced: BaseException, wanted: object
+    ) -> None:
+        """Undo a write that stopped the module sending, and say what happened.
+
+        Writing the previous value back is tried first, but it cannot be
+        relied on: if the module read the new value in a spelling this
+        driver did not intend, it will read the old one the same way.  The
+        undo that does NOT depend on the spelling is a restart, because
+        nothing here has been saved to flash -- so the module comes back on
+        the configuration it booted with.
+        """
+
+        def write_back(console):
+            if previous is None:
+                raise RuntimeError("nothing to put back")
+            return console.set_packet_rate(packet, float(previous))
+
+        restored = False
+        for undo in (write_back, lambda console: console.reboot()):
+            try:
+                self._in_console(undo)
+            except BaseException:  # noqa: BLE001 -- the next undo is the answer
+                pass
+            for _ in range(_UNDO_LISTEN_ROUNDS):
+                try:
+                    self._remeasure_rate()
+                    restored = True
+                    break
+                except BaseException:  # noqa: BLE001 -- keep listening
+                    continue
+            if restored:
+                break
+        said = self._last_exchange[1].strip()
+        if restored:
+            raise TuneRefused(
+                f"asking this module for {wanted} stopped it sending packet "
+                f"0x{packet:02X}; it has been put back and is streaming again. "
+                f"The module answered {said[:120]!r}. This firmware's #fmsg may "
+                "take a ladder index rather than a rate in hertz, in which case "
+                "a number out of range reads as 'no output'."
+            )
+        raise RuntimeError(
+            f"asking this module for {wanted} stopped it sending packet "
+            f"0x{packet:02X}, and neither writing the old value back nor "
+            f"restarting brought the stream back. The module answered "
+            f"{said[:120]!r}. Power-cycle the module: nothing was written to "
+            "its flash, so a cold start restores the configuration it had."
+        ) from silenced
 
     def save_settings(self) -> str:
         """Commit the module's settings to its flash, and say what it answered.

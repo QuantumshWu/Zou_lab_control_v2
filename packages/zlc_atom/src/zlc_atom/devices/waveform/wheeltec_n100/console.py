@@ -291,6 +291,26 @@ class FdiConfigConsole:
             )
         return reading
 
+    def reboot(self) -> None:
+        """Warm-restart the module, discarding anything not written to flash.
+
+        The manual is explicit: "on restart all unsaved settings will not be
+        saved and will not take effect."  That makes this the UNDO for a
+        session that never called ``save`` -- whatever it changed goes away
+        and the module comes back on the configuration it booted with.  It
+        is the only undo that does not depend on knowing how the module
+        spells the value it was given, which is exactly the thing this
+        driver has been wrong about.
+
+        The command needs confirming with ``y``.  The module is restarting
+        when this returns, so the console is over.
+        """
+
+        self._write("#freboot")
+        self._read(self._reply_quiet, until=CONFIRM_PROMPT.encode("ascii"))
+        self._write("y")
+        self._entered = False
+
     def save(self) -> str:
         """Commit to flash, and answer with whatever the module said.
 

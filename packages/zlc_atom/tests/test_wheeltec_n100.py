@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from zlc_atom.authoring import TuneRefused
-from zlc_atom.devices.waveform.wheeltec_n100.console import OK
+from zlc_atom.devices.waveform.wheeltec_n100.console import CONFIRM_PROMPT, OK
 from zlc_atom.devices.waveform.wheeltec_n100.source import _listen_for_packets
 from zlc_atom.devices.waveform.wheeltec_n100 import (
     FRAME_HEAD,
@@ -75,6 +75,7 @@ class _FakeModule:
                 "IMU_ACC_SCALE_X": "1.000000",
             }
         )
+        self.booted_rates = dict(self.rates)
         self.commands: list[str] = []
         self._out = bytearray()
         self._pending = bytearray()
@@ -116,9 +117,11 @@ class _FakeModule:
 
     # ------------------------------------------------------------- module
     def _fill(self) -> None:
-        if not self.streaming or self._out:
+        # Rate zero is the ladder's "No Output": the module goes quiet, which
+        # is what makes a wrong rate write dangerous rather than merely wrong.
+        if not self.streaming or self._out or self.rates[IMU_PACKET] <= 0.0:
             return
-        interval = 1.0 / max(self.rates[IMU_PACKET], 1.0)
+        interval = 1.0 / self.rates[IMU_PACKET]
         self._packets += 1
         step = float((self._packets - 1) // self.magnetic_repeat)
         payload = struct.pack(
@@ -148,6 +151,13 @@ class _FakeModule:
             self._say("*#OK")
         elif line == "#fsave":
             self._say("*#OK")
+        elif line == "#freboot":
+            self._say(CONFIRM_PROMPT)
+        elif line == "y":
+            # A restart discards everything not written to flash, which is
+            # what makes it the undo that needs no spelling.
+            self.rates = dict(self.booted_rates)
+            self.streaming = True
         elif line == "#fmsg":
             for packet, rate in self.rates.items():
                 self._say(f"{self.names[packet]}      [{packet:02X}]   {rate:.1f}Hz")
@@ -516,5 +526,48 @@ def test_a_rate_that_was_set_is_never_reported_as_refused() -> None:
         assert source.working_point().sample_interval_seconds == pytest.approx(
             0.005, rel=0.05
         )
+    finally:
+        source.close()
+
+
+def test_a_write_that_silences_the_module_is_put_back() -> None:
+    """The archive does not settle what #fmsg's second argument is.
+
+    The manual says literal hertz; the vendor's own parameter tables spell
+    rates as ladder indices where 0 means "no output". A wrong spelling can
+    therefore turn the packet off. This bench must never leave an
+    operator's module mute because it guessed: the stream is checked after
+    every rate write, and a write that stopped it is written back.
+    """
+
+    class _TurnsOffOnOutOfRange(_FakeModule):
+        """Reads #fmsg's argument as a LADDER INDEX, as the GUI's tables do."""
+
+        LADDER = (0.0, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 400.0)
+
+        def _answer(self, line: str) -> None:
+            if line.startswith("#fmsg "):
+                self.commands.append(line)
+                _, which, value = line.split()
+                index = int(float(value))
+                rate = self.LADDER[index] if 0 <= index < len(self.LADDER) else 0.0
+                self.rates[int(which, 16)] = rate
+                self._say(OK)
+                return
+            super()._answer(line)
+
+    module = _TurnsOffOnOutOfRange(rate_hz=50.0)
+    # It is at ladder index 6 == 50 Hz, which this driver knows as 50.0.
+    source = _source(module)
+    try:
+        rate_field = packet_rate_field(IMU_PACKET)
+        with pytest.raises(TuneRefused, match="stopped it sending"):
+            source.tune(rate_field, 100.0)   # read as index 100 -> out of range -> off
+        assert module.rates[IMU_PACKET] == 50.0, "the module was put back"
+        assert module.streaming is True
+        # And the module is usable: the records keep coming.
+        source.arm(None, buffer_record_count=4)
+        assert source.read_records(1, timeout=3.0, exact=True)
+        source.finish_record_capture()
     finally:
         source.close()
