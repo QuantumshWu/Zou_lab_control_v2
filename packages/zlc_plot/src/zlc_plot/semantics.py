@@ -580,8 +580,11 @@ def projection_scope(
     scope = _scope_terms(spec)
     if getattr(semantic_spec(spec), "reduction", None) is Reduction.LAST:
         indexed = indexed_history_layout(schema) if spec.kind is PlotKind.ROLLING else None
+        axes = axis_choices_for_schema(schema)
         primary = AxisRef.point(PRIMARY_INDEX_AXIS_ID.value)
-        for ref in axis_choices_for_schema(schema):
+        shot_time = AxisRef.point(SHOT_TIME_AXIS_ID.value)
+        twins = {primary: shot_time, shot_time: primary}
+        for ref in axes:
             if _fate_of(spec, ref) != FATE_REDUCE:
                 continue
             if spec.kind is PlotKind.ROLLING and (
@@ -589,14 +592,12 @@ def projection_scope(
                 else ref.domain is AxisDomain.REPEAT
             ):
                 continue
-            if (
-                ref == AxisRef.point(SHOT_TIME_AXIS_ID.value)
-                and _fate_of(spec, primary) != FATE_REDUCE
-            ):
-                # The shot time is the shot index's twin -- the same rows --
-                # so a kind walking the index (a curve along it) keeps every
-                # shot: pinning the twin to its latest coordinate would keep
-                # one.
+            twin = twins.get(ref)
+            if twin is not None and twin in axes and _fate_of(spec, twin) != FATE_REDUCE:
+                # The shot index and the shot time are twins -- the same
+                # rows read two ways -- so a kind walking, pinning or
+                # faceting one of them keeps every shot: pinning the other
+                # to its latest coordinate would keep one, or none.
                 continue
             scope[ref] = LATEST_COORDINATE
     return tuple(scope.items())

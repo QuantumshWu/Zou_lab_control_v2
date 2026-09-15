@@ -1917,5 +1917,8 @@ def test_a_stamped_window_gives_every_row_a_distinct_ordered_time() -> None:
     assert _row_times([0.1, None, None, 0.4]) == pytest.approx((0.1, 0.2, 0.3, 0.4))
     front = _row_times([None, None, 0.5, None, 0.9])
     assert front[2:] == (0.5, 0.7, 0.9)
-    assert front[0] < front[1] < front[2] and front[2] - front[1] == pytest.approx(1e-9)
+    assert front[0] < front[1] < front[2]
     assert len(set(front)) == len(front)
+    # Distinct at any magnitude: a run half a year in still tells its rows apart.
+    late = _row_times([None, None, 16777217.0])
+    assert late[0] < late[1] < late[2] and len(set(late)) == 3

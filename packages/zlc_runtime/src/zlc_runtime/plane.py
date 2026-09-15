@@ -1092,10 +1092,11 @@ def _row_times(times: list[float | None]) -> tuple[float, ...]:
 
     A held row has its own.  A hole between two held rows -- a shot the
     source skipped, a publication a latest-only derivation never made --
-    lies on the line between them; a hole before the first held row lies a
-    nanosecond before it.  A hole's row is invalid and is never drawn, so
-    its time only has to be what an axis coordinate must be: unique and in
-    order.  The newest row is always held, so nothing trails.
+    lies on the line between them; a hole before the first held row lies
+    one representable double before it, whatever the magnitude.  A hole's
+    row is invalid and is never drawn, so its time only has to be what an
+    axis coordinate must be: unique and in order.  The newest row is
+    always held, so nothing trails.
     """
 
     held = [index for index, time in enumerate(times) if time is not None]
@@ -1103,7 +1104,7 @@ def _row_times(times: list[float | None]) -> tuple[float, ...]:
         raise RuntimeError("a stamped window holds at least its newest shot")
     filled: list[float] = [0.0 if time is None else float(time) for time in times]
     for index in range(held[0] - 1, -1, -1):
-        filled[index] = filled[index + 1] - 1e-9
+        filled[index] = math.nextafter(filled[index + 1], -math.inf)
     for before, after in zip(held, held[1:]):
         span = after - before
         for step in range(1, span):

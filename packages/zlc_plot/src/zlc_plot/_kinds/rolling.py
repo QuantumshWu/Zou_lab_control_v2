@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..kinds import PlotKind
+from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
+
+from ..kinds import AxisRef, PlotKind
 from ..specs import Reduction, RollingPlot
 from .base import KindHandler
 from . import defaults
@@ -40,9 +42,10 @@ def admits(schema: Any) -> bool:
 def label_roles(spec: Any) -> tuple[tuple[str, tuple], ...]:
     """A rolling plot's x is the shot axis it rolls along; its y names the value."""
 
+    along_index = spec.x is None or spec.x == AxisRef.point(PRIMARY_INDEX_AXIS_ID.value)
     return (
         ("title", ("title",)),
-        ("x", ("repeat",) if spec.x is None else ("x",)),
+        ("x", ("repeat",) if along_index else ("x",)),
         ("y", ("value",)),
     )
 

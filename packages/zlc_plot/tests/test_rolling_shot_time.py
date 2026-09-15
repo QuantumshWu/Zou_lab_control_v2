@@ -59,6 +59,9 @@ def test_the_shot_time_axis_is_an_x_fate_of_a_rolling_plot() -> None:
     # pinned to its latest coordinate behind the index's back.
     walking = CurvePlot(index_ref, reduction=Reduction.LAST)
     assert time_ref not in dict(projection_scope(schema, walking))
+    # And the mirror: a curve walking the shot time keeps every shot too.
+    along = CurvePlot(time_ref, reduction=Reduction.LAST)
+    assert index_ref not in dict(projection_scope(schema, along))
 
     session = PlotSession(snapshot, along_time, parameters={"window": 3})
     try:

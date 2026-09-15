@@ -136,6 +136,7 @@ def image(
 def rolling(
     data: OwnedSnapshot,
     *,
+    x: AxisRef | str | None = None,
     group: AxisRef | None = None,
     reduction: Reduction = Reduction.MEAN,
     trailing: int | None = None,
@@ -160,6 +161,7 @@ def rolling(
         data,
         RollingPlot(
             group=None if group is None else _axis(group),
+            x=None if x is None else _axis(x),
             reduction=reduction,
             labels=labels or PlotLabels(),
         ),
