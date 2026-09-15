@@ -399,8 +399,9 @@ def test_settings_cannot_move_under_a_running_capture() -> None:
         assert source.read_records(1, timeout=3.0, exact=True)
         with pytest.raises(RuntimeError, match="capture must be finished"):
             source.tune(IMU_RATE_PARAMETER, "200")
-        with pytest.raises(RuntimeError, match="capture must be finished"):
-            source.refresh_tunable_fields()
+        # Reading the rate never touches the console -- the stream says it --
+        # so there is nothing here for a capture to refuse.
+        assert source.tunable_values()[IMU_RATE_PARAMETER] == "100"
         assert module.rate_hz == 100.0, "nothing was written"
         source.finish_record_capture()
         assert source.tune(IMU_RATE_PARAMETER, "200") == "200"

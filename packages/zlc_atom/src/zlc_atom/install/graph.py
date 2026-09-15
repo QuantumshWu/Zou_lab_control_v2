@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 import threading
 from typing import Any, Mapping
@@ -433,6 +434,87 @@ def _close_factory_leaf(leaf: InstalledLeaf) -> tuple[BaseException, ...]:
     return ()
 
 
+def _build_one(
+    descriptor: DeviceTypeDescriptor,
+    context: InstallationFactoryContext,
+    spec: DeviceSpec,
+) -> tuple[object, BaseException | None]:
+    """One factory call, answering with what it made OR what it raised.
+
+    It answers rather than raises so that a wave built together can be
+    ADMITTED one at a time, in the wave's own order, by exactly the serial
+    code that admitted them before.
+    """
+
+    try:
+        return descriptor.factory(context, spec.key, spec.config), None  # type: ignore[misc]
+    except BaseException as error:
+        return None, error
+
+
+def _build_wave(
+    wave: tuple[DeviceSpec, ...],
+    descriptors: Mapping[str, DeviceTypeDescriptor],
+    context: InstallationFactoryContext,
+) -> tuple[tuple[DeviceSpec, object, BaseException | None], ...]:
+    """Call one wave's factories AT ONCE, and answer in the wave's order.
+
+    Bringing a device up is almost entirely waiting: a port opening, an
+    instrument answering ``*IDN?``, a vendor library walking a bus, an IMU
+    being heard for long enough to time it.  None of that can be made
+    shorter without lying about what was verified -- but a wave is by
+    definition a set of devices that do not depend on one another, so
+    taking their waits one after another is this application's own
+    decision, and it cost the operator the SUM of them.  Concurrently it
+    costs the slowest one.
+
+    The same reason the hardware scan was made concurrent, and the same
+    shape: one pool, one submission per member, results gathered in order.
+    """
+
+    if len(wave) == 1:
+        spec = wave[0]
+        made, error = _build_one(descriptors[spec.type_id], context, spec)
+        return ((spec, made, error),)
+    with ThreadPoolExecutor(
+        max_workers=len(wave), thread_name_prefix="zlc-install"
+    ) as pool:
+        futures = [
+            pool.submit(_build_one, descriptors[spec.type_id], context, spec)
+            for spec in wave
+        ]
+        built = []
+        for spec, future in zip(wave, futures):
+            made, error = future.result()
+            built.append((spec, made, error))
+        return tuple(built)
+
+
+def _abandon_wave(
+    rest: tuple[tuple[DeviceSpec, object, BaseException | None], ...],
+) -> tuple[tuple[BaseException, ...], tuple[InstalledLeaf, ...]]:
+    """Close the members of a wave that will now never be admitted.
+
+    A wave is built before any of it is admitted, so an admission that
+    fails part way leaves the REST of the wave open -- devices holding
+    ports and bus handles that nothing is going to own.  Serially built,
+    they would never have been made at all; built together, closing them is
+    part of the same failure.  A leaf that will not close is handed back so
+    recovery can own it, exactly as a rolled-back one is.
+    """
+
+    errors: list[BaseException] = []
+    stranded: list[InstalledLeaf] = []
+    for _spec, made, error in rest:
+        if error is not None or not isinstance(made, InstalledLeaf):
+            continue
+        failed = _close_factory_leaf(made)
+        if failed:
+            errors.extend(failed)
+            stranded.append(made)
+    return tuple(errors), tuple(stranded)
+
+
 def _rollback_factory_leaves(
     installed: Mapping[str, InstalledLeaf],
 ) -> tuple[tuple[BaseException, ...], tuple[InstalledLeaf, ...]]:
@@ -767,73 +849,117 @@ def create_installation(
         failures: dict[str, BaseException] = {}
         successful_types = set(blueprint.borrowed_types)
         no_leaf = object()
-        for spec in blueprint.specs:
-            descriptor = by_type[spec.type_id]
-            unavailable = tuple(
-                dependency
-                for dependency in descriptor.dependencies
-                if dependency not in successful_types
+        # Specs arrive topologically ordered, so a WAVE is every spec whose
+        # dependencies are already standing: its members cannot need one
+        # another, which is what makes opening them together safe.  Today
+        # no device type in this repository declares a dependency, so every
+        # apparatus is one wave and Init costs its slowest device instead
+        # of the sum of all of them.
+        remaining = list(blueprint.specs)
+        while remaining:
+            wave = tuple(
+                spec
+                for spec in remaining
+                if all(
+                    dependency in successful_types
+                    for dependency in by_type[spec.type_id].dependencies
+                )
             )
-            if unavailable:
-                failures[spec.key] = RuntimeError(
-                    "device dependencies unavailable: " + ", ".join(unavailable)
-                )
-                continue
-            candidate: object = no_leaf
-            try:
-                context = InstallationFactoryContext(
-                    blueprint.world,
-                    broker,
-                    {**borrowed, **installed},
-                    connect_pulse,
-                )
-                candidate = descriptor.factory(  # type: ignore[misc]
-                    context, spec.key, spec.config
-                )
-                leaf = _admit_factory_leaf(candidate, spec, descriptor, broker)
-                if leaf.world_affinity is not None:
-                    raise ValueError("device factory must not assign world_affinity")
-                leaf = replace(
-                    leaf,
-                    world_affinity=(
-                        blueprint.world
-                        if descriptor.world_config is not None
-                        else None
-                    ),
-                )
-            except BaseException as original:
-                if candidate is no_leaf:
+            if not wave:
+                for spec in remaining:
+                    unavailable = tuple(
+                        dependency
+                        for dependency in by_type[spec.type_id].dependencies
+                        if dependency not in successful_types
+                    )
+                    failures[spec.key] = RuntimeError(
+                        "device dependencies unavailable: " + ", ".join(unavailable)
+                    )
+                break
+            # One context for the wave: it carries the leaves of every
+            # earlier wave, which is every leaf these factories are entitled
+            # to see -- a member of the same wave is by construction not a
+            # dependency of another.
+            wave_context = InstallationFactoryContext(
+                blueprint.world,
+                broker,
+                {**borrowed, **installed},
+                connect_pulse,
+            )
+            built = _build_wave(wave, by_type, wave_context)
+            remaining = [spec for spec in remaining if spec not in wave]
+            for position, (spec, made, build_error) in enumerate(built):
+                descriptor = by_type[spec.type_id]
+                candidate: object = no_leaf if build_error is not None else made
+                try:
+                    if build_error is not None:
+                        raise build_error
+                    leaf = _admit_factory_leaf(candidate, spec, descriptor, broker)
+                    if leaf.world_affinity is not None:
+                        raise ValueError(
+                            "device factory must not assign world_affinity"
+                        )
+                    leaf = replace(
+                        leaf,
+                        world_affinity=(
+                            blueprint.world
+                            if descriptor.world_config is not None
+                            else None
+                        ),
+                    )
+                except BaseException as original:
+                    if candidate is no_leaf:
+                        failures[spec.key] = original
+                        continue
+                    # Whatever happens below, the rest of this wave is
+                    # already open and nobody is going to own it.
+                    abandoned, stranded = _abandon_wave(built[position + 1 :])
+                    if not isinstance(candidate, InstalledLeaf):
+                        rollback, rollback_remaining = _rollback_factory_leaves(
+                            installed
+                        )
+                        installed.clear()
+                        _raise_composition_failure(
+                            f"device {spec.key!r} factory result was not ownable",
+                            original,
+                            abandoned,
+                            rollback,
+                            recovery_leaves=(*stranded, *rollback_remaining),
+                        )
+                    cleanup = _close_factory_leaf(candidate)
+                    if cleanup:
+                        # The candidate is still open, and its retry may need
+                        # every leaf built before it -- the same reason a
+                        # failed close keeps its earlier possible
+                        # dependencies.  Nothing is rolled back here: recovery
+                        # owns the intact prefix and the candidate, and closes
+                        # them in reverse order, candidate first.
+                        prefix = tuple(installed.values())
+                        installed.clear()
+                        _raise_composition_failure(
+                            f"device {spec.key!r} admission and cleanup failed",
+                            original,
+                            abandoned,
+                            cleanup,
+                            recovery_leaves=(*stranded, *prefix, candidate),
+                        )
+                    if stranded:
+                        # This one closed, but a device built beside it did
+                        # not, and an open leaf nobody owns is not something
+                        # to record as one device's failure and walk past.
+                        prefix = tuple(installed.values())
+                        installed.clear()
+                        _raise_composition_failure(
+                            f"device {spec.key!r} failed and a device opened "
+                            "beside it could not be closed",
+                            original,
+                            abandoned,
+                            recovery_leaves=(*stranded, *prefix),
+                        )
                     failures[spec.key] = original
                     continue
-                if not isinstance(candidate, InstalledLeaf):
-                    rollback, rollback_remaining = _rollback_factory_leaves(installed)
-                    installed.clear()
-                    _raise_composition_failure(
-                        f"device {spec.key!r} factory result was not ownable",
-                        original,
-                        rollback,
-                        recovery_leaves=rollback_remaining,
-                    )
-                cleanup = _close_factory_leaf(candidate)
-                if cleanup:
-                    # The candidate is still open, and its retry may need every
-                    # leaf built before it -- the same reason a failed close
-                    # keeps its earlier possible dependencies.  Nothing is
-                    # rolled back here: recovery owns the intact prefix and the
-                    # candidate, and closes them in reverse order, candidate
-                    # first.
-                    prefix = tuple(installed.values())
-                    installed.clear()
-                    _raise_composition_failure(
-                        f"device {spec.key!r} admission and cleanup failed",
-                        original,
-                        cleanup,
-                        recovery_leaves=(*prefix, candidate),
-                    )
-                failures[spec.key] = original
-                continue
-            installed[spec.key] = leaf
-            successful_types.add(spec.type_id)
+                installed[spec.key] = leaf
+                successful_types.add(spec.type_id)
         try:
             return Installation(
                 installed,

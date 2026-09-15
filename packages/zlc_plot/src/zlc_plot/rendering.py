@@ -6630,7 +6630,11 @@ class MatplotlibRenderer:
             self._apply_curve_ticks(axes, series, label_pt=self.style.fonts.tick_pt)
             self._artists["curve:prepared"] = {
                 "series": (series,),
-                "limits": (tuple(axes.get_xlim()), tuple(axes.get_ylim())),
+                # The range this scene was built AT HOME -- for a curve its
+                # data range.  Never the operator's view: this runs inside
+                # _update_plot, before _apply_requested_view, so a view
+                # recorded here is by construction the one a zoom replaced.
+                "home_limits": (tuple(axes.get_xlim()), tuple(axes.get_ylim())),
                 "state": state,
                 "key": key,
                 "x_label": x_label,
@@ -6972,7 +6976,25 @@ class MatplotlibRenderer:
         )
 
     def _materialize_prepared_curve(self) -> None:
-        """Build public Curve artists from the current prepared native scene."""
+        """Build public Curve artists from the current prepared native scene.
+
+        The view they are built with is THE ONE IN FORCE, never one baked
+        into the prepared scene.  A prepared scene is built inside
+        ``_update_plot``, which runs before ``_apply_requested_view``, so a
+        view recorded there is by construction the data range and not the
+        operator's: replaying it puts a zoomed axis back where it started.
+        That is what a hover did -- ``_series_hit`` materializes the
+        prepared scene to find the polyline under the pointer, and a
+        grouped curve is the case that has series to hit -- and the zoom
+        vanished the instant the pointer touched a line.
+
+        So the rule here is the one ``_apply_requested_view`` already
+        follows everywhere else: the REQUESTED view wins, and the scene's
+        own home range is only the fallback for when nothing is requested.
+        The home range is worth keeping -- a rolling panel owns its x axis
+        and its window is not the data range -- but it must never overrule
+        a zoom.
+        """
 
         command = self._artists.pop("curve:prepared", None)
         if not isinstance(command, dict):
@@ -7003,7 +7025,7 @@ class MatplotlibRenderer:
             str(command["key"]),
             x_label=str(command["x_label"]),
             y_label=str(command["y_label"]),
-            limits=command["limits"],
+            limits=self._requested_view_limits or command.get("home_limits"),
             paint_labels=True,
             isolated_glyphs=True,
         )
@@ -10139,7 +10161,11 @@ class MatplotlibRenderer:
             apply_smart_ticks(history, label_pt=self.style.fonts.tick_pt)
             self._artists["curve:prepared"] = {
                 "series": (tuple(sliced),),
-                "limits": (
+                # A rolling panel OWNS its x axis: this is its window, not a
+                # data range and not the operator's view, and a
+                # materialization that recomputed it from the data would
+                # put the history somewhere the pointer cannot find it.
+                "home_limits": (
                     tuple(history.get_xlim()),
                     tuple(history.get_ylim()),
                 ),

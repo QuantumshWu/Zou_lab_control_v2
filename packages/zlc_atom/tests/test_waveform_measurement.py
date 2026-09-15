@@ -341,19 +341,24 @@ def test_a_finite_measurement_takes_its_shots_at_its_own_cadence() -> None:
             value = publication.value(key)
             assert value.coverage.written_cells == 4 and value.coverage.total_cells == 4
             dataset = plane.current_dataset(key, publication)
-            assert dataset.block.schema.physical_shape == (4, 1, 3)
-            packets = np.asarray(dataset.block.values)[:, 0, 0]
             if expect_every_packet:
-                # Read every 1 ms off a 500 Hz source: each due time waits
-                # for the next packet, so the shots are the packets.
+                # Read every 1 ms off a 500 Hz source: the cadence is
+                # shorter than a packet, so a reading is one packet and the
+                # shots are the packets.
+                assert dataset.block.schema.physical_shape == (4, 1, 3)
+                packets = np.asarray(dataset.block.values)[:, 0, 0]
                 assert packets.tolist() == [0.0, 1.0, 2.0, 3.0]
             else:
-                # Read every 4 ms off a 500 Hz source: the three intervals
-                # between four shots span about six packets, each shot a new
-                # packet.  A cadence paced by a timed lock wait would sit on
-                # the 15 ms OS timer tick and span twenty.
-                assert np.all(np.diff(packets) >= 1)
-                assert 5 <= packets[-1] - packets[0] <= 10
+                # Read every 4 ms off a 500 Hz source: a reading is the
+                # interval's worth of packets, so each shot carries two and
+                # the four shots are eight CONSECUTIVE packets. The source
+                # is free-running, so its records are slices of one signal:
+                # a shot that took the newest and let the other go would
+                # drop half the signal, and a periodic one read that way
+                # stops looking periodic.
+                assert dataset.block.schema.physical_shape == (4, 1, 3, 2)
+                packets = np.asarray(dataset.block.values)[:, 0, 0, :].reshape(-1)
+                assert np.all(np.diff(packets) == 1.0), packets.tolist()
             assert source.capture_state() is False
         finally:
             host.shutdown()

@@ -519,7 +519,6 @@ class WheeltecN100WaveformSource:
         self._settings_refusal: str | None = None
         #: Whether the module enumerated its own packets, or the IMU rate
         #: below was measured off the stream because it would not.
-        self._packets_listed = False
         #: The last console command and its verbatim reply, for the record.
         self._last_exchange: tuple[str, str] = ("", "")
         self._records = WaveformRecordQueue(
@@ -533,7 +532,7 @@ class WheeltecN100WaveformSource:
         try:
             self._reader.start()
             self._hear_the_module()
-            self._read_settings_once()
+            self._note_the_rate()
         except BaseException:
             self.close()
             raise
@@ -562,54 +561,33 @@ class WheeltecN100WaveformSource:
         self._sample_interval = None
         self._await_rate()
 
-    def _read_settings_once(self) -> None:
-        """Ask the module for its settings, and let a refusal be a fact.
+    def _note_the_rate(self) -> None:
+        """Take the one setting off the STREAM, which is already timed.
 
-        A module that will not answer its configuration console still
-        streams; what it does not have is anything for an operator to turn.
-        Recording WHY is what turns a blank Device Control page into an
-        answer.
+        The rate is the only thing this bench turns, and the packets
+        arriving say what it is: ``_hear_the_module`` has just measured the
+        interval, because it stamps every record, and the ladder's rungs
+        are a factor of two apart so a measurement names one exactly.
+
+        Asking the console instead would cost what the console costs -- the
+        module refuses commands that crowd each other, so every one of them
+        is seconds apart -- and it would stop the stream to do it, and what
+        it would come back with is what the module MEANS to send.  The
+        packets are what this bench actually records.
         """
 
-        try:
-            self._settings = self._in_console(
-                self._read_settings, stream_back=False
-            )
-        except Exception as refusal:  # noqa: BLE001 -- reported, not raised
+        interval = self._sample_interval
+        measured = 1.0 / interval if interval else 0.0
+        rung = _rung_the_stream_is_on(measured)
+        if rung is None:
             self._settings = {}
-            self._settings_refusal = f"{type(refusal).__name__}: {refusal}"
-        # Config mode stopped the stream either way, so the interval that
-        # stamps the records is timed again before anyone reads.  This is
-        # the one part that may NOT be shrugged off: a module that went
-        # quiet and did not come back is unusable, and saying so with the
-        # console's own refusal attached is the difference between a device
-        # that fails for a stated reason and one that fails for none.  It
-        # is deliberately not a ``finally``, which would have replaced a
-        # console refusal with this one and lost the first.
-        try:
-            self._remeasure_rate()
-        except BaseException as silent:
-            # One more #fdeconfig before giving up: the console's own exit
-            # may be what went missing.
-            try:
-                self._park_reader()
-                try:
-                    wake_from_config_mode(self._serial)
-                finally:
-                    self._release_reader()
-                self._remeasure_rate()
-                return
-            except BaseException:
-                pass
-            raise RuntimeError(
-                f"{self.config.port} stopped streaming when its configuration "
-                "console was opened and did not resume"
-                + (
-                    f" (the console said: {self._settings_refusal})"
-                    if self._settings_refusal
-                    else ""
-                )
-            ) from silent
+            self._settings_refusal = (
+                f"the module on {self.config.port} is sending {measured:.1f} Hz, "
+                "which is not one of its rates, so there is nothing here to turn"
+            )
+            return
+        self._settings = {IMU_RATE_PARAMETER: rung}
+        self._settings_refusal = ""
 
     # ------------------------------------------------------------- reading
     def _read_loop(self) -> None:
@@ -811,7 +789,6 @@ class WheeltecN100WaveformSource:
                 ),
                 "settings": dict(self._settings),
                 "settings_refusal": self._settings_refusal,
-                "packets_listed": self._packets_listed,
                 "last_console_exchange": self._last_exchange,
             },
         )
@@ -932,19 +909,6 @@ class WheeltecN100WaveformSource:
         self._first_bytes.clear()
         self._hear_the_module()
 
-    def _read_settings(self, console) -> dict[str, object]:
-        """The one setting this bench turns: how often the packet arrives.
-
-        It is stored as a rung INDEX in a named parameter -- that is the
-        value the module takes -- so one command reads it and the ladder
-        says what it means in hertz.  ``#fmsg`` would list every packet the
-        module has, forty of them, and this bench reads exactly one.
-        """
-
-        hertz = _hertz_of_rung(console.get_parameter(IMU_RATE_PARAMETER))
-        self._packets_listed = hertz is not None
-        return {} if hertz is None else {IMU_RATE_PARAMETER: hertz}
-
     def _field_for(self, name: str, value: object) -> TunableField:
         """The rate, as a choice of the rungs its module actually offers."""
 
@@ -983,24 +947,27 @@ class WheeltecN100WaveformSource:
         )
 
     def tunable_fields(self) -> tuple[TunableField, ...]:
-        """What the module said it had, the last time it was asked.
+        """The rate, as the stream last showed it.
 
-        Reading these costs a round trip through the configuration console,
-        which stops the stream -- so this answers from the last reading and
-        ``refresh_tunable_fields`` is what goes back to the module.
+        There is deliberately no ``refresh_tunable_fields`` here, and that
+        is not an omission.  A refresh exists for an instrument whose front
+        panel somebody can turn by hand behind the software's back; this
+        module has no front panel, its settings move only through the
+        console, and nothing can reach that console while this driver holds
+        the port.  So this answer is already the current one, and a refresh
+        would stop the stream for seconds to be told what it already knows
+        -- which is exactly what made opening the settings page take ten of
+        them.
+
+        ``zlc_atom.authoring.refresh_tunable_fields`` falls back to this
+        when a device declares no refresh, so the panel gets its answer at
+        once.
         """
 
         with self._settings_lock:
             return tuple(
                 self._field_for(name, value) for name, value in self._settings.items()
             )
-
-    def refresh_tunable_fields(self) -> tuple[TunableField, ...]:
-        """Ask the module again, stopping its stream for the round trip."""
-
-        with self._settings_lock:
-            self._settings = self._in_console(self._read_settings)
-            return self.tunable_fields()
 
     def tunable_values(self) -> dict[str, object]:
         with self._settings_lock:
@@ -1131,16 +1098,6 @@ class WheeltecN100WaveformSource:
             f"boots into this same state. Put {name} back with the vendor's "
             "ground station, or over its serial console by hand."
         ) from silenced
-
-    def save_settings(self) -> str:
-        """Commit the module's settings to its flash, and say what it answered.
-
-        Nothing reports what is in flash, so this cannot be verified the way
-        a written setting is read back; the module's own reply is handed
-        on rather than judged here.
-        """
-
-        return self._in_console(lambda console: console.save())
 
     def arm(self, records: int | None, *, buffer_record_count: int) -> None:
         """Take the queue, under the lock a settings round trip holds.

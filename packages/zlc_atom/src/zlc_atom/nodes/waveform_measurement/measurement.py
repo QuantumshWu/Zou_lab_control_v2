@@ -44,6 +44,7 @@ from zlc_runtime import (
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
 from zlc_atom.data import cell_axis_id, snapshot_from_array
 from zlc_atom.devices.waveform.contract import (
+    WaveformAcquisitionMode,
     WaveformCaptureTerminalRecord,
     WaveformOutput,
     WaveformRecord,
@@ -163,17 +164,96 @@ def shot_snapshot(
     )
 
 
-def _newest_at_due(node: "WaveformMeasurementNode", due: float) -> WaveformRecord | None:
-    """The newest record once ``due`` has passed; before it, nothing.
+def _streaming(node: "WaveformMeasurementNode") -> bool:
+    """Whether this source's consecutive records are one continuous signal.
 
-    Until the due time the source is only drained -- those records are not
-    the reading -- and the time to the due is slept, a cancel slice at
-    most.  It is slept, not waited on the source: a timed lock wait has
-    the OS timer tick as its resolution (15 ms on Windows) while the sleep
-    keeps well under a millisecond, and the cadence is the reading.  At
-    the due time the first record is waited for (a source may not have
-    produced one since the last drain) and everything behind it is taken,
-    so the reading is the newest record there is, not the oldest.
+    The distinction is the source's own, declared in its working point.  A
+    FREE_RUNNING source -- an IMU, a sampling card -- never stops: each
+    record is the next slice of one signal, and the slices abut.  An
+    EXTERNAL_TRIGGERED source acquires on a trigger: each record is its own
+    acquisition, and two of them are no more adjacent than two photographs.
+    """
+
+    return (
+        node.working_point.acquisition_mode
+        == WaveformAcquisitionMode.FREE_RUNNING.value
+    )
+
+
+def _records_per_reading(node: "WaveformMeasurementNode") -> int:
+    """How many of this source's records make up one reading.
+
+    For a triggered source, one: the reading is an acquisition.
+
+    For a streaming source, every record the instrument produces during a
+    cadence interval.  Taking only the newest and letting the rest go --
+    which is what this module used to do for both -- DECIMATES a continuous
+    signal at whatever phase the cadence happens to land on.  That is not a
+    slower recording of the same signal: a periodic signal sampled at a
+    jittering phase stops looking periodic at all, which is exactly what an
+    IMU at 100 Hz read on a 10 Hz cadence showed.  Raising the instrument's
+    rate made it worse, because it raised the number of samples thrown away
+    per reading.
+    """
+
+    if not _streaming(node):
+        return 1
+    point = node.working_point
+    seconds_per_record = (
+        int(node.sampler.record_samples) * point.sample_interval_seconds
+    )
+    if seconds_per_record <= 0.0:
+        return 1
+    return max(1, int(round(node.read_interval_seconds / seconds_per_record)))
+
+
+def _joined(records: list[WaveformRecord]) -> WaveformRecord:
+    """Consecutive slices of one signal, as the single reading they are.
+
+    The samples abut, so the reading's time axis is the instrument's own
+    sample interval running across all of them, which is what the shot
+    snapshot builds from the sample count.
+
+    A GAP IN THE ORDINALS is refused rather than joined.  It means the
+    source's ring dropped records before the reading took them, and joining
+    across a gap would draw a signal that never happened -- a straight line
+    where a piece is missing, with everything after it shifted in time.
+    That is the one thing a bench must never do quietly.
+    """
+
+    if len(records) == 1:
+        return records[0]
+    first = records[0]
+    expected = first.source_ordinal
+    for record in records:
+        if record.source_ordinal != expected:
+            raise RuntimeError(
+                f"the source dropped {record.source_ordinal - expected} record(s) "
+                f"before ordinal {record.source_ordinal}: its buffer filled "
+                "before this reading took them, so the samples either side of "
+                "the gap are not next to each other and will not be joined"
+            )
+        expected += 1
+    return WaveformRecord(
+        np.concatenate([record.samples for record in records], axis=0),
+        first.source_ordinal,
+        first.time_seconds,
+        records[-1].host_received_at_ns,
+    )
+
+
+def _newest_at_due(node: "WaveformMeasurementNode", due: float) -> WaveformRecord | None:
+    """The newest acquisition once ``due`` has passed; before it, nothing.
+
+    Only a TRIGGERED source is read this way.  Until the due time the
+    source is drained -- those acquisitions are not this reading -- and the
+    time to the due is slept, a cancel slice at most.  It is slept, not
+    waited on the source: a timed lock wait has the OS timer tick as its
+    resolution (15 ms on Windows) while the sleep keeps well under a
+    millisecond, and the cadence is the reading.  At the due time the first
+    record is waited for (a source may not have produced one since the last
+    drain) and everything behind it is taken, so the reading is the newest
+    acquisition there is, not the oldest.
     """
 
     remaining = due - monotonic()
@@ -190,6 +270,34 @@ def _newest_at_due(node: "WaveformMeasurementNode", due: float) -> WaveformRecor
         if not behind:
             return newest
         newest = behind[-1]
+
+
+def _stream_reading(
+    node: "WaveformMeasurementNode", wanted: int, gathering: list[WaveformRecord]
+) -> WaveformRecord | None:
+    """The next reading of a streaming source, or None while it is filling.
+
+    Nothing is ever let go: every record the instrument produced belongs to
+    some reading, and ``gathering`` holds the part of this one that has
+    arrived.  There is no due-time grid here and there does not need to be
+    -- a reading is an interval's worth of samples, so the instrument's own
+    pace IS the cadence, and it keeps it better than a clock on this side
+    could.
+    """
+
+    if len(gathering) < wanted:
+        gathering.extend(
+            node.sampler.read_records(
+                wanted - len(gathering),
+                timeout=_CANCEL_RESPONSE_SECONDS,
+                exact=False,
+            )
+        )
+    if len(gathering) < wanted:
+        return None
+    reading = _joined(gathering[:wanted])
+    del gathering[:wanted]
+    return reading
 
 
 def _due_after(due: float, interval: float) -> float:
@@ -285,6 +393,8 @@ class FiniteCapture:
         self.stopped = False
         self.terminal: WaveformCaptureTerminalRecord | None = None
         self._next_due = monotonic()
+        self._per_reading = _records_per_reading(node)
+        self._gathering: list[WaveformRecord] = []
 
     def collect(
         self,
@@ -330,9 +440,11 @@ class FiniteCapture:
     def next_shot(self) -> WaveformRecord | None:
         """The next shot, or None if asked to stop.
 
-        The newest record at the due time; what arrived before it is let
-        go.  A source that has produced nothing by the due time is waited
-        for, up to its own timeout.
+        A streaming source's shot is every sample it produced over the
+        cadence interval, joined; a triggered source's is the newest
+        acquisition at the due time, and what arrived before it is let go.
+        A source that has produced nothing by the due time is waited for,
+        up to its own timeout.
         """
 
         if self.closed:
@@ -347,7 +459,11 @@ class FiniteCapture:
             if self.should_stop is not None and self.should_stop():
                 self.stopped = True
                 return None
-            record = _newest_at_due(node, self._next_due)
+            record = (
+                _stream_reading(node, self._per_reading, self._gathering)
+                if self._per_reading > 1
+                else _newest_at_due(node, self._next_due)
+            )
             if record is not None:
                 break
             if monotonic() >= deadline:
@@ -385,6 +501,8 @@ class MonitorCapture:
         self.terminal: WaveformCaptureTerminalRecord | None = None
         self._revision = 0
         self._next_due = monotonic()
+        self._per_reading = _records_per_reading(node)
+        self._gathering: list[WaveformRecord] = []
         if self.owns_generation:
             if commit_live is not None:
                 raise ValueError("a direct monitor cannot use a host commit function")
@@ -404,10 +522,14 @@ class MonitorCapture:
         if self.closed:
             raise RuntimeError("monitor capture is closed")
         node = self.node
-        newest = _newest_at_due(node, self._next_due)
-        if newest is None:
+        reading = (
+            _stream_reading(node, self._per_reading, self._gathering)
+            if self._per_reading > 1
+            else _newest_at_due(node, self._next_due)
+        )
+        if reading is None:
             return 0
-        self._publish(newest)
+        self._publish(reading)
         self._next_due = _due_after(self._next_due, node.read_interval_seconds)
         return 1
 
@@ -612,13 +734,21 @@ class WaveformMeasurementNode:
     def _arm(self) -> None:
         """Arm for sampling: the source runs until the capture stops it.
 
-        A read takes the newest record at each due time and drains the
-        rest, so the buffer only has to hold a few slices' worth; a source
-        that outruns it drops the oldest, which the read would have let go
-        anyway.
+        The ring drops its oldest record when it fills, so its size is how
+        far behind the reading may fall before samples are LOST.  For a
+        triggered source that is harmless -- the reading takes the newest
+        acquisition and would have let the older ones go -- but for a
+        streaming source every record is part of some reading, and a ring
+        counted in records shrinks in TIME as the instrument speeds up:
+        four records is four tenths of a second at 10 Hz and four
+        hundredths at 100 Hz, which is why raising an IMU's rate started
+        losing samples. So it is counted in readings, which are intervals.
         """
 
-        self.sampler.arm(None, buffer_record_count=4 * self.read_batch)
+        self.sampler.arm(
+            None,
+            buffer_record_count=4 * max(self.read_batch, _records_per_reading(self)),
+        )
 
     # ------------------------------------------------------------- capture
     def prepare(
