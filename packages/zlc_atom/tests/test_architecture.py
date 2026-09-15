@@ -348,6 +348,34 @@ def test_a_device_folder_is_the_whole_device() -> None:
         return "zlc_atom.devices." + ".".join(parts)
 
     owners = {module_of(folder / "x.py").rsplit(".", 1)[0]: folder for folder in folders}
+
+    def imported_modules(path: pathlib.Path) -> set[str]:
+        """Every module one file imports, relative spellings resolved.
+
+        A relative import reaches exactly as far as an absolute one -- a
+        sibling device is ``from ..other import x`` -- so a guard that reads
+        only absolute ones guards nothing.  ``from X import a`` may name a
+        module too, so both readings are collected and matched.
+        """
+
+        package = module_of(path).rsplit(".", 1)[0]
+        found: set[str] = set()
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Import):
+                found.update(alias.name for alias in node.names)
+                continue
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            if not node.level:
+                target = node.module
+            else:
+                parts = package.split(".")
+                base = ".".join(parts[: len(parts) - node.level + 1])
+                target = f"{base}.{node.module}" if node.module else base
+            found.add(target)
+            found.update(f"{target}.{alias.name}" for alias in node.names)
+        return found
+
     edges: set[tuple[str, str]] = set()
     for path in devices_root.rglob("*.py"):
         source = next(
@@ -358,18 +386,10 @@ def test_a_device_folder_is_the_whole_device() -> None:
             ),
             None,
         )
-        text = path.read_text(encoding="utf-8")
-        tree = ast.parse(text)
-        for node in ast.walk(tree):
-            targets: list[str] = []
-            if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-                targets.append(node.module)
-            elif isinstance(node, ast.Import):
-                targets.extend(alias.name for alias in node.names)
-            for target in targets:
-                for name in owners:
-                    if (target == name or target.startswith(name + ".")) and name != source:
-                        edges.add((str(path.relative_to(devices_root)).replace("\\", "/"), name))
+        for target in imported_modules(path):
+            for name in owners:
+                if (target == name or target.startswith(name + ".")) and name != source:
+                    edges.add((str(path.relative_to(devices_root)).replace("\\", "/"), name))
     # Every edge INTO a device folder, named by the file that makes it.
     assert edges == {
         ("simulation/rf/device_types.py", "zlc_atom.devices.rf.vaunix_lms"),
@@ -383,12 +403,14 @@ def test_a_device_folder_is_the_whole_device() -> None:
         init = family / "__init__.py"
         if not init.is_file():
             continue
-        imported = ast.parse(init.read_text(encoding="utf-8"))
-        for node in ast.walk(imported):
-            if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module:
-                assert not (family / node.module.split(".")[0]).is_dir(), (
-                    f"{family.name}/__init__.py imports the {node.module} device"
-                )
+        family_module = module_of(init).rsplit(".", 1)[0]
+        for target in imported_modules(init):
+            assert not any(
+                target == name or target.startswith(name + ".")
+                for name, folder in owners.items()
+                if folder.parent == family
+            ), f"{family.name}/__init__.py imports its own {target} device"
+        del family_module
 
 
 def test_pulse_resolver_uses_the_project_json_document(

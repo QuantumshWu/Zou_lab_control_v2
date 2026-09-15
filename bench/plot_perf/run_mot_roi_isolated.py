@@ -16,11 +16,8 @@ def _simulation_feeds(*, updates: int) -> dict:
 
     import zou_lab_control  # noqa: F401 - current checkout owns every package
     from zlc_atom.devices.camera.contract import CameraFrameRecord
-    from zlc_atom.devices.simulation import (
-        SimulationWorld,
-        VirtualCamera,
-        VirtualCameraConfig,
-    )
+    from zlc_atom.devices.simulation import SimulationWorld
+    from zlc_atom.devices.simulation.camera import VirtualCamera, VirtualCameraConfig
     from zlc_atom.nodes.camera_measurement.measurement import frames_snapshot
     from zlc_data import BlockId, StreamGenerationId, owned_snapshot_from_arrays
     from zlc_runtime.plane import _indexed_schema

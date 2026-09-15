@@ -29,6 +29,12 @@ The UDP responder answers the broadcast with the TCP port; everything else is TC
 
 from __future__ import annotations
 
+#: What an installation calls a device another machine published.  The type
+#: id is the FABRIC's word, not one device folder's: the workbench reads it
+#: to tell a remote row from a local one, and it has to keep meaning that
+#: whether or not this bench installs remote tunables at all.
+FABRIC_TUNABLE_TYPE = "remote.tunable"
+
 import json
 import logging
 import socket
@@ -564,6 +570,7 @@ class RemoteTunableDevice:
 
 __all__ = [
     "DEFAULT_FABRIC_PORT",
+    "FABRIC_TUNABLE_TYPE",
     "DeviceAnnouncer",
     "FABRIC_VERSION",
     "PROBE_MESSAGE",

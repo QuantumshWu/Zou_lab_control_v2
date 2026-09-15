@@ -59,23 +59,26 @@ def test_device_discovery_is_the_leaf_manifest() -> None:
     is declared twice.
     """
 
+    import importlib
+
     descriptors = discover_device_catalog().available
     devices_root = Path(__file__).parents[1] / "src" / "zlc_atom" / "devices"
-    folders = {
-        path.parent.relative_to(devices_root).parts
-        for path in devices_root.rglob("device_types.py")
-    }
-    assert folders, "the bench declares its devices in device_types.py files"
-    declared = {
-        family: sorted(
-            item.type_id for item in descriptors if item.type_id.startswith(f"{family}.")
-        )
-        for family, _device in folders
-    }
-    assert set(declared) == {family for family, _device in folders}
+    manifests = sorted(devices_root.rglob("device_types.py"))
+    assert manifests, "the bench declares its devices in device_types.py files"
+    declared: dict[str, tuple[str, ...]] = {}
+    for path in manifests:
+        parts = path.relative_to(devices_root).with_suffix("").parts
+        module = importlib.import_module("zlc_atom.devices." + ".".join(parts))
+        ids = tuple(item.type_id for item in module.DEVICE_TYPES)
+        assert ids, f"{'/'.join(parts)} declares no device"
+        declared["/".join(parts[:-1])] = ids
+    # The catalog IS the folders: every manifest's ids are offered, and every
+    # offered id came from a manifest.  A device whose module stops importing
+    # drops out of the catalog and fails here, which is what the pinned list
+    # of type ids used to catch.
     assert sorted(item.type_id for item in descriptors) == sorted(
         value for ids in declared.values() for value in ids
-    ), "every discovered id belongs to the family folder that declares it"
+    )
     assert len({item.type_id for item in descriptors}) == len(descriptors)
     assert all(item.domain for item in descriptors)
     # "rf" left this tombstone in 2026-08: the OLD rf family was purged and

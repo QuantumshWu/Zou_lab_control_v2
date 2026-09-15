@@ -19,6 +19,7 @@ import os
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
 from zlc_atom.devices.remote.fabric import (
     DEFAULT_FABRIC_PORT,
+    FABRIC_TUNABLE_TYPE,
     RemoteTunableDevice,
     discover_announcers,
     list_remote_devices,
@@ -28,7 +29,6 @@ from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
 
 #: Peers a broadcast cannot reach (a different subnet), named once here
 #: instead of per device: comma-separated hostnames or addresses.
-FABRIC_TUNABLE_TYPE = "remote.tunable"
 FABRIC_PEERS_ENVIRONMENT = "ZLC_FABRIC_PEERS"
 
 REMOTE_TUNABLE_SCHEMA = AuthoringSchema(

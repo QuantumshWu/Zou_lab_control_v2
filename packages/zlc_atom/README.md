@@ -99,7 +99,7 @@ Internet. With the default `0.0.0.0` listen bind, startup prints both the
 same-machine endpoint and every discovered LAN IPv4 address in the exact
 host/port form entered in the device configuration.
 
-Each supported head has a strict profile under `devices/slm/profiles/` with
+Each supported head has a strict profile under `devices/slm/hamamatsu_x15213/profiles/` with
 model, serial, working and phase-curve wavelengths, curve provenance, and
 settle provenance. Authored wavelength builds the nonlinear
 phase-code-to-drive LUT from that curve; `two_pi_gray` remains computed rather
@@ -223,8 +223,11 @@ collect it without editing the graph. One folder is one device: the driver,
 its `vendor/` folder, and the manifest that declares it, with nothing outside
 the folder importing in -- so a device this bench does not own is removed by
 deleting the folder, and the family around it keeps only what its devices
-share. Logic leaves follow the same pattern with a `logic_node.py` exporting
-`LOGIC_NODE`.
+share. The one thing that ever reaches into a device folder is that device's
+virtual twin, which is written against the real authoring schema it has to
+match: deleting a real device retires its twin with it, reported as an
+unavailable type rather than a broken bench. Logic leaves follow the same
+pattern with a `logic_node.py` exporting `LOGIC_NODE`.
 Factories must return declared capability instances; startup failures are
 reported per leaf in `Installation.failures`, while independent leaves remain
 usable and close in reverse order.

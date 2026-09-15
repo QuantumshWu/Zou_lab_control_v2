@@ -16,9 +16,10 @@ serial IS the identity the installation's broker guards.
 from __future__ import annotations
 
 import atexit
+import contextlib
 import ctypes
 import threading
-from typing import Any
+from typing import Any, Iterator
 
 import numpy as np
 
@@ -58,6 +59,10 @@ class LibDaq2:
         self._dll = dll
         self._lock = threading.RLock()
         self._path = library_path
+        # How many devices hold each open card.  The library has no handle:
+        # one serial IS one card to it, so who owns it is counted here, where
+        # the process-global library lives, and nowhere else.
+        self._claims: dict[str, int] = {}
         text, uint = ctypes.c_char_p, ctypes.c_uint
         declare = (
             ("libdaq2_init", (), ctypes.c_int),
@@ -111,6 +116,21 @@ class LibDaq2:
         if code != _SUCCESS:
             raise LibDaq2Error(f"{what} failed ({code}) {self._describe(code)}")
 
+    @contextlib.contextmanager
+    def _held(self) -> Iterator[None]:
+        """The library's lock, held only while the library is up.
+
+        ``libdaq2_exit`` releases every card at once, and a thread that was
+        waiting for the lock while it ran would otherwise walk into a library
+        that no longer has the board.  Refusing here turns that race into an
+        error the capture reports, not a fault inside the DLL.
+        """
+
+        with self._lock:
+            if not self._started:
+                raise LibDaq2Error("libdaq2 is not running in this process")
+            yield
+
     def start(self) -> None:
         """Initialise the library once for this process, and leave it up.
 
@@ -130,6 +150,7 @@ class LibDaq2:
         with self._lock:
             if self._started:
                 self._started = False
+                self._claims.clear()
                 self._dll.libdaq2_exit()
 
     # ------------------------------------------------------------ devices
@@ -137,7 +158,7 @@ class LibDaq2:
         """Every card attached to this machine, by its own serial number."""
 
         self.start()
-        with self._lock:
+        with self._held():
             count = int(self._dll.libdaq2_device_get_count())
             if count < 0:
                 raise LibDaq2Error(
@@ -155,7 +176,7 @@ class LibDaq2:
 
     def device_model(self, serial: str) -> str:
         self.start()
-        with self._lock:
+        with self._held():
             buffer = ctypes.create_string_buffer(_TEXT_SIZE)
             self._check(
                 self._dll.libdaq2_device_get_model(
@@ -166,15 +187,38 @@ class LibDaq2:
             return buffer.value.decode("ascii", "replace")
 
     def open(self, serial: str) -> None:
+        """Claim the card, opening it the first time this process asks.
+
+        A second device naming one serial is the SAME card, so the claim is
+        counted rather than the board opened twice.  That is what lets an
+        installation refuse a duplicate: the refused device releases its own
+        claim, and the card the incumbent is streaming from stays open.
+        """
+
         self.start()
-        with self._lock:
+        with self._held():
+            if self._claims.get(serial):
+                self._claims[serial] += 1
+                return
             self._check(
                 self._dll.libdaq2_device_open(serial.encode("ascii")),
                 f"opening {serial}",
             )
+            self._claims[serial] = 1
 
     def close(self, serial: str) -> None:
+        """Release one claim; the last one closes the card."""
+
         with self._lock:
+            claims = self._claims.get(serial, 0)
+            if claims > 1:
+                self._claims[serial] = claims - 1
+                return
+            self._claims.pop(serial, None)
+            if not claims or not self._started:
+                # Nobody holds the card: either nothing ever claimed it, or
+                # the library exited and released every card with it.
+                return
             self._check(
                 self._dll.libdaq2_device_close(serial.encode("ascii")),
                 f"closing {serial}",
@@ -182,7 +226,7 @@ class LibDaq2:
 
     # ------------------------------------------- properties and commands
     def command(self, serial: str, module: str, command: str) -> None:
-        with self._lock:
+        with self._held():
             self._check(
                 self._dll.libdaq2_send_command(
                     serial.encode("ascii"), module.encode("ascii"), command.encode("ascii")
@@ -191,7 +235,7 @@ class LibDaq2:
             )
 
     def set_int(self, serial: str, module: str, name: str, value: int) -> None:
-        with self._lock:
+        with self._held():
             self._check(
                 self._dll.libdaq2_set_propertyInt(
                     serial.encode("ascii"),
@@ -203,7 +247,7 @@ class LibDaq2:
             )
 
     def get_int(self, serial: str, module: str, name: str) -> int:
-        with self._lock:
+        with self._held():
             answer = ctypes.c_int(0)
             self._check(
                 self._dll.libdaq2_get_propertyInt(
@@ -217,7 +261,7 @@ class LibDaq2:
             return int(answer.value)
 
     def set_text(self, serial: str, module: str, name: str, value: str) -> None:
-        with self._lock:
+        with self._held():
             self._check(
                 self._dll.libdaq2_set_propertyString(
                     serial.encode("ascii"),
@@ -230,7 +274,7 @@ class LibDaq2:
 
     # --------------------------------------------------------------- ADC
     def sync_channel_setting(self, serial: str, module: str) -> None:
-        with self._lock:
+        with self._held():
             self._check(
                 self._dll.libdaq2_adc_sync_channelsetting(
                     serial.encode("ascii"), module.encode("ascii")
@@ -239,7 +283,7 @@ class LibDaq2:
             )
 
     def clear_buffer(self, serial: str, module: str) -> None:
-        with self._lock:
+        with self._held():
             self._check(
                 self._dll.libdaq2_adc_clear_buffer(
                     serial.encode("ascii"), module.encode("ascii")
@@ -259,7 +303,7 @@ class LibDaq2:
 
         buffer = (ctypes.c_double * int(samples))()
         actual = ctypes.c_uint(0)
-        with self._lock:
+        with self._held():
             code = self._dll.libdaq2_adc_read_analog_sync(
                 serial.encode("ascii"),
                 module.encode("ascii"),

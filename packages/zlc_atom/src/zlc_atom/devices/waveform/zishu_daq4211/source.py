@@ -210,12 +210,15 @@ class ZishuDaq4211WaveformSource:
         return self.config.record_samples
 
     def working_point(self) -> WaveformWorkingPoint:
-        """How the card is sampling, read back from the card itself."""
+        """The rate the card is clocking at, and what each column means.
 
-        rate = float(self._daq.get_int(self.config.serial, ADC_MODULE, "Frequency"))
-        if rate <= 0.0:
-            rate = self._sample_rate
-        self._sample_rate = rate
+        The rate is the one read back when the card was armed, which is the
+        same number that stamps the records: a working point that asked the
+        card again would describe a capture by a rate the capture was not
+        taken at, and would spend a USB round trip per capture saying so.
+        """
+
+        rate = self._sample_rate
         return WaveformWorkingPoint(
             WaveformAcquisitionMode.FREE_RUNNING,
             1.0 / rate,
@@ -253,6 +256,17 @@ class ZishuDaq4211WaveformSource:
         self._daq.set_int(serial, module, "Cycles", 0)
         self._daq.set_text(serial, module, "SampleMode", "Continuous")
         self._daq.sync_channel_setting(serial, module)
+        # What the card will actually clock at: it divides its own timebase,
+        # so the rate it reports back -- not the authored one -- is what the
+        # records are stamped with and what the working point publishes.
+        clocked = int(self._daq.get_int(serial, module, "Frequency"))
+        if clocked < 1:
+            raise RuntimeError(
+                f"the {SUPPORTED_MODEL} {serial} reports a sample rate of "
+                f"{clocked} Hz after being asked for "
+                f"{self.config.sample_rate_hz} Hz"
+            )
+        self._sample_rate = float(clocked)
         self._daq.clear_buffer(serial, module)
         self._records.arm(
             records,
